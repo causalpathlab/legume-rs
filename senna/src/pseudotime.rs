@@ -190,7 +190,8 @@ pub struct PseudotimeArgs {
                      {out}.principal_graph.edges.parquet — E × 3 (from, to, weight)\n\
                      \n\
                      The Reingold-Tilford tree layout is no longer written here.\n\
-                     Run `senna layout tree --from <manifest>` after this command to produce {out}.tree_layout.{cell_coords,nodes_2d}.parquet."
+                     Run `senna layout tree --from <manifest>` after this command,\n\
+                     to produce {out}.tree_layout.{cell_coords,nodes_2d}.parquet."
     )]
     out: Box<str>,
 }

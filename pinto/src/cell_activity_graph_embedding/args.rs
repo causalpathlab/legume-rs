@@ -163,7 +163,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      A precise fit here would answer the wrong question precisely.\n\
                      The refreshes against the live embedding do the real work.\n\
                      \n\
-                     Raise it if you set --selection-refresh-epochs 0. The cold rates are then the only ones the run ever uses."
+                     Raise it if you set --selection-refresh-epochs 0.\n\
+                     The cold rates are then the only ones the run ever uses."
     )]
     pub selection_sweeps: usize,
 
@@ -263,7 +264,8 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Disable NB-Fisher per-gene precision weighting of the loss",
         long_help = "Each gene's contribution to the loss is down-weighted.\n\
                      The weight is its NB Fisher-info w_g ∈ (0,1]. High-mean,\n\
-                     high-dispersion housekeeping genes go toward 0. Informative low-mean genes go toward 1. This matches `pinto lc` and `senna bge`.\n\
+                     high-dispersion housekeeping genes go toward 0,\n\
+                     and informative low-mean genes go toward 1. This matches `pinto lc` and `senna bge`.\n\
                      Set this flag to train every gene at equal weight."
     )]
     pub no_fisher_weights: bool,

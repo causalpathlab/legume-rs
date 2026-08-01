@@ -155,7 +155,9 @@ pub struct AnnotateArgs {
         long = "num-perm",
         default_value_t = 500,
         help = "Number of PB-level sample permutations for the correlation-preserving null",
-        long_help = "Number of PB-level sample permutations for the correlation-preserving null (shuffle pb_membership, recompute β̃ = pb_gene · shuffled, ES per permutation, pool across clusters).\n\
+        long_help = "Number of PB-level sample permutations for the correlation-preserving null:\n\
+                     shuffle pb_membership, recompute β̃ = pb_gene · shuffled,\n\
+                     take ES per permutation, then pool across clusters.\n\
                      Set 0 to fall back to row-randomization-based p-values (useful for small nClusters)."
     )]
     pub num_perm: usize,
@@ -212,7 +214,9 @@ pub struct AnnotateArgs {
 
     #[arg(
         long = "no-clean",
-        help = "Keep existing {out}.* annotation outputs (default: erase the explicit annotation set first — never the embedding/manifest — for a fresh re-run)"
+        help = "Keep existing {out}.* annotation outputs.\n\
+                By default the explicit annotation set is erased first,\n\
+                never the embedding or manifest, for a fresh re-run."
     )]
     pub no_clean: bool,
 
@@ -424,7 +428,9 @@ pub struct AnnotateProjectionArgs {
         required = true,
         help = "Run manifest from a co-embedding run (`senna bge|fne|resolve-embedding-space`)",
         long_help = "Run manifest with a co-embedded gene space — `senna bge`, `fne`,\n\
-                     or `resolve-embedding-space` (reads `outputs.feature_embedding` + `outputs.cell_embedding`, falling back to `outputs.latent` for the cell side on plain bge/fne).\n\
+                     or `resolve-embedding-space`.\n\
+                     Reads `outputs.feature_embedding` + `outputs.cell_embedding`,\n\
+                     falling back to `outputs.latent` for the cell side on plain bge/fne.\n\
                      topic/svd runs have no genes-on-the-cell-manifold embedding —\n\
                      use `annotate-by-enrichment` for those."
     )]
@@ -564,12 +570,14 @@ pub struct AnnotateProjectionArgs {
         long_help = "Marker-panel permutation null — the BIAS guard.\n\
                      \n\
                      Puts each type on trial:\n\
-                     replace ONLY its markers with the same number of random genes (same IDF weights, matched on gene norm, drawn from the live marker pool),\n\
+                     replace ONLY its markers with the same number of random genes:\n\
+                     same IDF weights, matched on gene norm, drawn from the live marker pool,\n\
                      leave every rival type real,\n\
                      and ask whether its own genes place its prototype any better than random ones would.\n\
                      \n\
                      The bootstrap only measures VARIANCE,\n\
-                     so a type whose markers are simply wrong comes back perfectly stable and looks like the most confident call in the run.\n\
+                     so a type whose markers are simply wrong comes back perfectly stable,\n\
+                     and looks like the most confident call in the run.\n\
                      This is what catches that.\n\
                      \n\
                      0 = off; try 200. Writes {out}.panel_null.tsv"
@@ -731,7 +739,9 @@ pub struct AnnotateOntologyArgs {
         long = "from",
         required = true,
         help = "Run manifest already annotated by `senna annotate-by-enrichment`",
-        long_help = "Run manifest already annotated by `senna annotate-by-enrichment` (reads `annotate.cluster_celltype_q` and its sibling `*_es_std` / `*_p` matrices)."
+        long_help = "Run manifest already annotated by `senna annotate-by-enrichment`.\n\
+                     Reads `annotate.cluster_celltype_q`,\n\
+                     and its sibling `*_es_std` / `*_p` matrices."
     )]
     pub from: Box<str>,
 

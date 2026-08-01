@@ -339,7 +339,9 @@ enum Commands {
                       Every cell is swept about once per epoch. The per-cell fit is separable,\n\
                       so it is embarrassingly parallel.\n\
                       \n\
-                      Writes {out}.{cell_embedding,dictionary,feature_embedding, feature_bias,cell_bias}.parquet and {out}.senna.json.\n\
+                      Writes {out}.senna.json,\n\
+                      plus {out}.{cell_embedding,dictionary,feature_embedding,\n  \
+                      feature_bias,cell_bias}.parquet.\n\
                       The H-space cell embedding Z is always {out}.cell_embedding.parquet.\n\
                       \n\
                       Unless --skip-etm, an ETM is resolved too.\n\
@@ -421,7 +423,8 @@ enum Commands {
                       A batch-level covered/novel verdict is emitted.\n\
                       \n\
                       Usage:\n\
-                      senna probe --model M --calibration ref.zarr query.zarr -o out Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json."
+                      senna probe --model M --calibration ref.zarr query.zarr -o out\n  \
+                      Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json."
     )]
     Probe(ProbeArgs),
 
@@ -538,7 +541,8 @@ enum Commands {
                       Those updates carry annotate-by-projection uncertainty.\n\
                       \n\
                       Usage:\n\
-                      senna deconvolve --from run.senna.json -m markers.tsv --bulk bulk.parquet Writes {out}.{fractions,fractions_ci,abundance,residual}.tsv,\n\
+                      senna deconvolve --from run.senna.json -m markers.tsv --bulk bulk.parquet\n  \
+                      Writes {out}.{fractions,fractions_ci,abundance,residual}.tsv,\n\
                       {out}.{sample_embedding,anchors}.parquet, {out}.expression/*.parquet."
     )]
     Deconvolve(DeconvolveArgs),

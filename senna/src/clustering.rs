@@ -76,7 +76,9 @@ pub struct ClusteringArgs {
                      Fast, works well for spherical clusters Requires specifying k\n\
                      \n\
                      - leiden: Leiden algorithm (graph-based)\n\
-                     Finds communities in cell similarity graph Automatically determines number of clusters Use --knn and --resolution to tune\n\
+                     Finds communities in the cell similarity graph,\n\
+                     determining the number of clusters automatically.\n\
+                     Use --knn and --resolution to tune.\n\
                      \n\
                      - hsblock: Hierarchical Stochastic Block Model (graph-based)\n\
                      Collapsed Gibbs sampling + greedy refinement Number of clusters = 2^(tree_depth-1) Use --knn,\n\
@@ -156,7 +158,9 @@ pub struct ClusteringArgs {
         value_delimiter = ',',
         help = "Raw count data files (.zarr or .h5) — enables BHC postprocess",
         long_help = "When provided,\n\
-                     a Bayesian hierarchical clustering pass runs over the fitted clusters using per-gene sufficient stats T_{k,g}=Σ_{n∈k} y_{n,g} and an empirical-Bayes Dirichlet prior centred on the pooled gene marginal bg.\n\
+                     a Bayesian hierarchical clustering pass runs over the fitted clusters,\n\
+                     using per-gene sufficient stats T_{k,g}=Σ_{n∈k} y_{n,g},\n\
+                     and an empirical-Bayes Dirichlet prior centred on the pooled gene marginal bg.\n\
                      Same recipe pinto uses for link communities.\n\
                      Must match the cell order of --latent. Omit to skip BHC."
     )]
@@ -191,8 +195,9 @@ pub struct ClusteringArgs {
     #[arg(
         long = "from",
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
-        long_help = "When given,\n\
-                     the manifest is updated in place with the cluster output path under `cluster.clusters` so that `senna annotate-by-enrichment` can pick the cluster parquet up automatically."
+        long_help = "When given, the manifest is updated in place with the cluster output path,\n\
+                     under `cluster.clusters`,\n\
+                     so `senna annotate-by-enrichment` picks the cluster parquet up automatically."
     )]
     from: Option<Box<str>>,
 }

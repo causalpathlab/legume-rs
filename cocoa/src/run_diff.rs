@@ -148,7 +148,8 @@ pub struct DiffArgs {
     #[arg(
         long,
         help = "Known covariate matrix file (tsv.gz, n_indv × n_covar)",
-        long_help = "Provide a known individual-level covariate matrix V. Confounders are then not discovered by random projection.\n\
+        long_help = "Provide a known individual-level covariate matrix V.\n\
+                     Confounders are then not discovered by random projection.\n\
                      \n\
                      The file is a tab-delimited matrix, n_indv x n_covar, in .tsv.gz format.\n\
                      Rows correspond to individuals 0, 1, 2, and so on, in order."

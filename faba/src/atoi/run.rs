@@ -47,7 +47,7 @@ pub struct AtoICountArgs {
         help = "Output directory",
         long_help = "Output directory for A-to-I detection results.\n\
                      Creates atoi_sites.parquet with the detected sites,\n\
-            and one sparse count matrix per input BAM, suffixed _atoi."
+                     and one sparse count matrix per input BAM, suffixed _atoi."
     )]
     pub output: Box<str>,
 

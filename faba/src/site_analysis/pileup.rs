@@ -75,8 +75,8 @@ pub struct PileupArgs {
         required = true,
         num_args = 1..,
         help = "Sparse matrix file(s) (zarr or h5) from faba output",
-        long_help = "Sparse matrix file(s) (zarr or h5) from faba output.\n\
-                     Multiple files, e.g. replicates via a shell glob,\n\
+        long_help = "Sparse matrix file(s) (zarr or h5) from faba output. Multiple files,\n\
+                     e.g. replicates via a shell glob,\n\
                      are aggregated per genomic position into a single track."
     )]
     pub data_files: Vec<Box<str>>,

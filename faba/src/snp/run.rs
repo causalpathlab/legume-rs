@@ -86,10 +86,9 @@ pub struct SnpArgs {
                      - {batch}_baf: per-cell ALLELE FREQUENCY matrix (10x mode),\n\
                      rows `{chr}:{pos}/baf/{alt|depth}`,\n\
                      keyed on the locus and carrying no genotype.\n\
-                     Matrices are `.zarr.zip` by default;\n\
-                     `.zarr` with --no-zip, `.h5` for the hdf5 backend.\n\
-                     BAF per cell = alt / depth;\n\
-                     the channels nest, so never sum them."
+                     Matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
+                     `.h5` for the hdf5 backend. BAF per cell = alt / depth; the channels nest,\n\
+                     so never sum them."
     )]
     pub output: Box<str>,
 
@@ -159,7 +158,7 @@ pub struct SnpArgs {
         long,
         default_value_t = 3,
         help = "Minimum alt allele reads for discovery",
-        long_help = "Minimum number of reads supporting the non-reference allele\n\
+        long_help = "Minimum number of reads supporting the non-reference allele,\n\
                      for a position to count as a candidate variant.\n\
                      Applied before genotype calling."
     )]

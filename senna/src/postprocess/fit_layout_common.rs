@@ -211,7 +211,8 @@ pub struct LayoutCommonArgs {
         long,
         default_value_t = 0.95,
         help = "Keep smallest PB set covering this fraction of cells",
-        long_help = "Drop PB samples in the long tail until the remaining set contains at least this fraction of the total cells.\n\
+        long_help = "Drop PB samples in the long tail,\n\
+                     until the remaining set holds at least this fraction of all cells.\n\
                      - 1.0: keep every PB (no filtering)\n\
                      - 0.95 (default): remove minor subpopulations"
     )]

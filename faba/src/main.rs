@@ -382,20 +382,19 @@ Example:\n  \
                       and the velocity increment δ → `{out}.velocity.parquet`.\n\
                       so θ is powered by both splice tracks rather than the spliced one alone.\n\
                       `--sequential-velocity` reverts to the older two-step fit:\n\
-                      θ from the spliced edges,\n\
-                      then δ from the unspliced with θ held fixed,\n\
+                      θ from the spliced edges, then δ from the unspliced with θ held fixed,\n\
                       which pins θ to the mature state for a cleaner δ readout.\n\
                       The nascent state is just θ+δ; ‖δ‖ is speed.\n\
                       Per-gene velocity is the in-model δ_g → `{out}.delta_feature_embedding.parquet`;\n\
-                      it is written whenever the input carries unspliced rows.\n\
-                      `--delta-l2 0`, the default, applies a mild ridge to keep it identified.\n\
+                      it is written whenever the input carries unspliced rows. `--delta-l2 0`,\n\
+                      the default, applies a mild ridge to keep it identified.\n\
                       The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
                       gene-keyed so a marker panel joins against it directly.\n\
                       \n\
                       `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
                       it is the raw per-cell Poisson increment δ_c,\n\
-                      which a shrinkage-toward-origin common mode dominates:\n\
-                      δ_c ≈ −0.5·θ, from fitting sparse unspliced counts absolutely.\n\
+                      which a shrinkage-toward-origin common mode dominates: δ_c ≈ −0.5·θ,\n\
+                      from fitting sparse unspliced counts absolutely.\n\
                       Use `{out}.velocity.parquet` for the velocity.\n\
                       \n\
                       With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
@@ -476,8 +475,8 @@ Example:\n  \
                       Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\
                       \n\
                       Pooling is a masked value-weighted sum per track, concatenated;\n\
-                      the attention-slot variant was removed after it measured 3.5x worse\n\
-                      on between-cell variance,\n\
+                      the attention-slot variant was removed after it measured\n\
+                      3.5x worse on between-cell variance,\n\
                       and went degenerate whenever a track was hidden.\n\
                       Ctrl-C stops training gracefully and still writes outputs,\n\
                       flagged as partial.",
@@ -499,8 +498,9 @@ Example:\n  \
                       Reads the run's parquet outputs by prefix (`-f/--from`),\n\
                       plus a marker TSV (`gene<TAB>celltype`, `-m/--markers`).\n\
                       Then runs the shared term-ORA core:\n\
-                      assign → distance-outlier QC → Leiden clustering →\n\
-                      cluster×term hypergeometric over-representation, permutation-calibrated.\n\
+                      assign → distance-outlier QC → Leiden clustering,\n\
+                      then cluster×term hypergeometric over-representation,\n\
+                      permutation-calibrated.\n\
                       \n\
                       TWO SCORERS (`--mode`), and they are not two flavours of one statistic:\n\
                       they read different files and rest on different assumptions about the geometry.\n\
@@ -510,13 +510,11 @@ Example:\n  \
                       a topic model (`faba gem-encoder` / `gem-topic`) → `enrichment`.\n\
                       A prefix that cannot say what produced it is reported, not guessed at.\n\
                       \n\
-                      `projection` builds each type's centroid from its markers'\n\
-                      CO-EMBEDDED feature vectors,\n\
+                      `projection` builds each type's centroid from its markers' CO-EMBEDDED feature vectors,\n\
                       then hands every cell to the nearest one.\n\
                       It reads `feature_embedding.parquet` plus `cell_embedding.parquet`.\n\
                       NOT the raw `beta_feature_embedding` or `delta_feature_embedding`,\n\
-                      which are model parameters off the cell manifold.\n\
-                      Its tracks:\n\
+                      which are model parameters off the cell manifold. Its tracks:\n\
                       spliced:  /count/spliced rows   vs cell θ         → {out}.spliced.*\n\
                       velocity: /count/unspliced rows vs cell velocity  → {out}.velocity.*\n\
                       \n\
@@ -527,9 +525,8 @@ Example:\n  \
                       It asks per factor whether a type's panel is over-represented at the top of that factor's gene ranking,\n\
                       then carries the surviving factor×type edges to cells through θ.\n\
                       It reads `dictionary.parquet`, `latent.parquet`,\n\
-                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.*\n\
-                      Its tracks are `spliced` and `nascent`, NOT velocity:\n\
-                      a displacement has no membership to carry a call through.\n\
+                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.* Its tracks are `spliced` and `nascent`,\n\
+                      NOT velocity: a displacement has no membership to carry a call through.\n\
                       `nascent` annotates the nascent PROGRAM — a state the cell is in,\n\
                       on the simplex —\n\
                       and reading it against `spliced` is the well-posed form of the question `velocity` asks.\n\
@@ -610,8 +607,7 @@ Example:\n  \
         aliases = ["plot-lineage", "trajectory-plot"],
         about = "Publication-style figure (PDF/PNG/SVG) of a `faba lineage` trajectory over its 2D embedding",
         long_about = "Render the outputs of `faba lineage --markers` into one annotated figure,\n\
-                      with the default --layout phate:\n\
-                      cells laid out on the PHATE embedding,\n\
+                      with the default --layout phate: cells laid out on the PHATE embedding,\n\
                       coloured by coarse cell type (default) or pseudotime,\n\
                       with a trajectory backbone, velocity arrows and MST nodes overlaid.\n\
                       \n\
@@ -623,8 +619,8 @@ Example:\n  \
                       and {from}.pseudotime.parquet (for --color-by pseudotime).\n\
                       \n\
                       The cells are drawn as transparent raster layers per cell type,\n\
-                      from a qualitative palette, with a legend —\n\
-                      confident calls solid, mixed ones faded —\n\
+                      from a qualitative palette, with a legend — confident calls solid,\n\
+                      mixed ones faded —\n\
                       or one continuous blue->red pseudotime layer (with a colourbar).\n\
                       \n\
                       The backbone is `--trajectory auto` by default:\n\

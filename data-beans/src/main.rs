@@ -273,7 +273,9 @@ enum Commands {
         long_about = "Export a backend to an AnnData h5ad file readable by scanpy / anndata.\n\
                       This is the inverse of `from-h5ad`.\n\
                       \n\
-                      The (features x cells) backend is transposed back to AnnData's (cells x features) layout and written as a gzip-compressed CSR `X` (gzip, not Blosc, so h5py needs no filter plugin).\n\
+                      The (features x cells) backend is transposed back to AnnData's (cells x features) layout,\n\
+                      and written as a gzip-compressed CSR `X`. Gzip, not Blosc,\n\
+                      so h5py needs no filter plugin.\n\
                       \n\
                       Row names map to var/_index; column names to obs/_index.\n\
                       Attach cell and feature annotations with --obs and --var.\n\
@@ -351,7 +353,9 @@ enum Commands {
     #[command(
         about = "Take columns and output dense matrix",
         visible_aliases = ["take-columns"],
-        long_about = "Take columns from the sparse matrix and save them to an `output` file as a dense matrix for quick examination.\n\
+        long_about = "Take columns from the sparse matrix,\n\
+                      and save them to an `output` file as a dense matrix,\n\
+                      for quick examination.\n\
                       Useful for extracting subsets for visualization or analysis."
     )]
     Columns(TakeColumnsArgs),
@@ -359,8 +363,9 @@ enum Commands {
     #[command(
         about = "Take rows and output dense matrix (transposed)",
         visible_aliases = ["take-rows"],
-        long_about = "Take rows from the sparse matrix and save them to an `output` file as a dense matrix for quick examination.\n\
-                      For convenience,\n\
+        long_about = "Take rows from the sparse matrix,\n\
+                      and save them to an `output` file as a dense matrix,\n\
+                      for quick examination. For convenience,\n\
                       it will output a transposed (`column x selected_row`) matrix."
     )]
     Rows(TakeRowsArgs),
@@ -477,7 +482,8 @@ enum Commands {
                       This is the summary `squeeze --show-histogram` shows,\n\
                       exposed as a standalone command.\n\
                       \n\
-                      Choose the statistic with --stat (default `nnz`; also `sum`, `mean`, `sd`) and the margin with --dim (default `both`).\n\
+                      Choose the statistic with --stat, default `nnz`, also `sum`, `mean`, `sd`;\n\
+                      and the margin with --dim, default `both`.\n\
                       Pass -o/--output to also dump the raw per-unit values.",
         visible_alias = "hist"
     )]

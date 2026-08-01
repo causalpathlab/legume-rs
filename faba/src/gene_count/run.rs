@@ -137,7 +137,7 @@ pub struct GeneCountArgs {
         long = "no-umi-dedup",
         default_value_t = false,
         help = "Disable UMI deduplication (count reads, not molecules)",
-        long_help = "By default faba collapses reads sharing a (cell, gene, UMI)\n\
+        long_help = "By default faba collapses reads that share a (cell, gene, UMI),\n\
                      into a single count: molecule counting, like Cell Ranger.\n\
                      Use this flag to count every non-duplicate read instead."
     )]

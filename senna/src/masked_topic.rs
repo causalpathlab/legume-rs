@@ -105,7 +105,8 @@ pub struct MaskedTopicArgs {
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
-        long_help = "Path prefix of a model saved by `senna masked-topic` (matching {prefix}.model.json + {prefix}.safetensors).\n\
+        long_help = "Path prefix of a model saved by `senna masked-topic`,\n\
+                     matching {prefix}.model.json + {prefix}.safetensors.\n\
                      Architecture must match: same K, encoder layers, embedding_dim,\n\
                      and n_features_full. Cross-gene-set warm-start is not supported —\n\
                      train on the same gene set."
@@ -480,7 +481,8 @@ pub struct MaskedTopicArgs {
         help = "Per-node degree cap on the feature network (0 = off)",
         long_help = "Per-node degree cap on the feature network (0 = off).\n\
                      After shared-neighbor QC, for each feature with degree > N,\n\
-                     rank its neighbors by shared-neighbor count and keep the top N (union-symmetric: an edge survives iff either endpoint kept it).\n\
+                     rank its neighbors by shared-neighbor count and keep the top N. Union-symmetric:\n\
+                     an edge survives iff either endpoint kept it.\n\
                      Caps PPI hubs whose degree would otherwise blow up per-cell sub-adjacency.",
         hide = true
     )]
@@ -522,10 +524,12 @@ pub struct MaskedTopicArgs {
                      sniff sampled row names and pick:\n\
                      locus-overlap if ≥50% parse as `chr:start-end`, gene if ≥50% contain `_`,\n\
                      exact otherwise (default). `exact` — strict string match. `gene` —\n\
-                     also register each `_`-split component as an alias (so `ENSG000_TGFB1` and `TGFB1` resolve to the same row).\n\
-                     `locus` — normalize `chr1:1000-2000`, `1:1000-2000`,\n\
-                     etc. to a canonical form. `locus-overlap` —\n\
-                     same as `locus` plus cluster any intervals that overlap on the same chromosome (useful for cross-dataset ATAC peak sets called independently)."
+                     also register each `_`-split component as an alias,\n\
+                     so `ENSG000_TGFB1` and `TGFB1` resolve to the same row. `locus` —\n\
+                     normalize `chr1:1000-2000`, `1:1000-2000`, etc. to a canonical form.\n\
+                     `locus-overlap` — same as `locus`,\n\
+                     plus cluster any intervals that overlap on the same chromosome.\n\
+                     Useful for cross-dataset ATAC peak sets called independently."
     )]
     feature_name_kind: FeatureNameKindArg,
 

@@ -108,7 +108,8 @@ pub struct MultiomeArgs {
         default_value_t = 0.0,
         help = "Cis propagation at gene level, in [0,1]",
         long_help = "Cis propagation, at gene level, in [0,1].\n\
-                     It is the share of a LINKED gene's log-expression variance that its causal peaks' regulatory signal explains.\n\
+                     It is a share of a LINKED gene's log-expression variance:\n\
+                     the part its causal peaks' regulatory signal explains.\n\
                      The rest is gene-intrinsic noise.\n\
                      \n\
                      0 decouples the gene from its enhancers.\n\
@@ -254,7 +255,8 @@ pub struct MultiomeArgs {
         long,
         help = "Real single-cell ATAC reference (.h5, .zarr, .zarr.zip)",
         long_help = "Real single-cell ATAC reference (`.h5`, `.zarr`, `.zarr.zip`). When set,\n\
-                     the ATAC sampler switches to two-stage GLM + NB+copula PIT (per-peak `r̂` + global Σ̂ from the reference).\n\
+                     the ATAC sampler switches to two-stage GLM + NB+copula PIT:\n\
+                     per-peak `r̂` plus a global Σ̂ from the reference.\n\
                      The reference's row count overrides `--n-peaks`."
     )]
     pub reference_atac: Option<Box<str>>,
