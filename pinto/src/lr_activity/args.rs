@@ -44,7 +44,8 @@ pub struct SrtLrActivityArgs {
                      The default of 10 gives ≈1024 bins per batch.\n\
                      Larger d buys finer resolution and more permutation power.\n\
                      It also leaves fewer cells per pseudobulk. At d=12, roughly 4096 bins,\n\
-                     Visium-scale data turns sparse."
+                     Visium-scale data turns sparse.",
+        hide = true
     )]
     pub propensity_dim: usize,
 
@@ -68,7 +69,8 @@ pub struct SrtLrActivityArgs {
                      The default of 4 gives 16 stratification buckets.\n\
                      Each holds 2^(d−4) samples, so about 64 at d=10.\n\
                      Pick s ≤ d − 3 to keep at least ~8 samples per bucket.\n\
-                     Pass 0 to disable stratification."
+                     Pass 0 to disable stratification.",
+        hide = true
     )]
     pub shuffle_stratify_dim: usize,
 
@@ -84,7 +86,8 @@ pub struct SrtLrActivityArgs {
         default_value_t = 100,
         help = "Skip communities with fewer than this many edges",
         long_help = "Skip communities holding fewer than this many edges.\n\
-                     A sparse community cannot calibrate the null reliably."
+                     A sparse community cannot calibrate the null reliably.",
+        hide = true
     )]
     pub min_edges_per_community: usize,
 
@@ -96,14 +99,16 @@ pub struct SrtLrActivityArgs {
                      The default `_` aliases `ENSG00000105329_TGFB1`.\n\
                      Either the Ensembl id or the symbol then matches it. Pass an empty string,\n\
                      or a character that never occurs,\n\
-                     to disable aliasing and demand exact full-name matches."
+                     to disable aliasing and demand exact full-name matches.",
+        hide = true
     )]
     pub gene_delimiter: Option<char>,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Allow prefix matching of gene names (forward/reverse) as a fallback"
+        help = "Allow prefix matching of gene names (forward/reverse) as a fallback",
+        hide = true
     )]
     pub gene_allow_prefix: bool,
 
@@ -121,7 +126,8 @@ pub struct SrtLrActivityArgs {
         default_value_t = 0.05,
         help = "Westfall-Young FWER cutoff for edge participation in the JSON sidecar",
         long_help = "Westfall-Young FWER cutoff for the JSON sidecar.\n\
-                     A pair's edge participation is included below it."
+                     A pair's edge participation is included below it.",
+        hide = true
     )]
     pub json_fwer_threshold: f32,
 }

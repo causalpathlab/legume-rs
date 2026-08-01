@@ -77,7 +77,8 @@ pub struct SrtInputArgs {
         help = "Header row index in coord files (0 = first line)",
         long_help = "0-based row index of the header in coord files. If omitted,\n\
                      it is auto-detected. Detection checks whether the first row looks numeric.\n\
-                     Set it to 0 when the first line holds column names."
+                     Set it to 0 when the first line holds column names.",
+        hide = true
     )]
     pub coord_header_row: Option<usize>,
 
@@ -110,7 +111,8 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
-        help = "Cells per parallel block (omit for auto-scaling by feature count)"
+        help = "Cells per parallel block (omit for auto-scaling by feature count)",
+        hide = true
     )]
     pub block_size: Option<usize>,
 
@@ -135,7 +137,8 @@ pub struct SrtInputArgs {
                      Each level merges cells by graph-constrained matching.\n\
                      That halves the number of groups per level.\n\
                      More levels initialize the finest level better. They also take longer.\n\
-                     Typical range: 2-10."
+                     Typical range: 2-10.",
+        hide = true
     )]
     pub num_levels: usize,
 
@@ -149,7 +152,8 @@ pub struct SrtInputArgs {
                      A move must improve cosine similarity to the centroid.\n\
                      Moves that would disconnect the source cluster are rejected.\n\
                      Sweeping stops early once no node moves. 5 is usually enough;\n\
-                     0 skips refinement."
+                     0 skips refinement.",
+        hide = true
     )]
     pub refine_iterations: usize,
 
@@ -161,7 +165,8 @@ pub struct SrtInputArgs {
         long_help = "Dimension of the random projection for cell embeddings.\n\
                      Cells are projected from G gene dimensions down to this one.\n\
                      That projection feeds KNN construction and coarsening.\n\
-                     Higher values preserve more signal. They also cost more memory."
+                     Higher values preserve more signal. They also cost more memory.",
+        hide = true
     )]
     pub proj_dim: usize,
 
@@ -175,7 +180,8 @@ pub struct SrtInputArgs {
                      The search is HNSW over centroids.\n\
                      Those matches give counterfactual expression estimates.\n\
                      Batch-effect decomposition needs them.\n\
-                     This is used only when multiple batches are present."
+                     This is used only when multiple batches are present.",
+        hide = true
     )]
     pub batch_knn: usize,
 
@@ -216,7 +222,8 @@ pub struct SrtInputArgs {
                      The default is union matching.\n\
                      There an edge (i,j) exists if i is in j's KNN list, or j is in i's.\n\
                      Reciprocal matching requires both.\n\
-                     That yields a sparser graph of higher-confidence edges."
+                     That yields a sparser graph of higher-confidence edges.",
+        hide = true
     )]
     pub reciprocal: bool,
 

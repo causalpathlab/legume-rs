@@ -31,7 +31,8 @@ pub struct SrtLinkCommunityArgs {
         long_help = "Gibbs iterations at the coarsest coarsening level.\n\
                      Later V-cycle levels use num_gibbs/5, at least 10. They can afford fewer:\n\
                      each warm-starts from the level above.\n\
-                     --num-em controls the full-resolution iterations."
+                     --num-em controls the full-resolution iterations.",
+        hide = true
     )]
     pub num_gibbs: usize,
 
@@ -42,7 +43,8 @@ pub struct SrtLinkCommunityArgs {
         long_help = "Maximum greedy (argmax) sweeps after Gibbs sampling.\n\
                      Each sweep moves every edge to its best community.\n\
                      Sweeping stops early once no edge moves.\n\
-                     This typically converges in 2-5 sweeps."
+                     This typically converges in 2-5 sweeps.",
+        hide = true
     )]
     pub num_greedy: usize,
 
@@ -51,7 +53,8 @@ pub struct SrtLinkCommunityArgs {
         help = "EM Gibbs sweeps on full edge set",
         long_help = "EM Gibbs sweeps over the full-resolution edges.\n\
                      Pass 0 to skip EM and refine greedily only. If omitted,\n\
-                     this defaults to num_gibbs/4, at least 5."
+                     this defaults to num_gibbs/4, at least 5.",
+        hide = true
     )]
     pub num_em: Option<usize>,
 
@@ -92,14 +95,16 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Allow prefix matching for gene names in external network"
+        help = "Allow prefix matching for gene names in external network",
+        hide = true
     )]
     pub gene_network_allow_prefix: bool,
 
     #[arg(
         long,
         default_value = "_",
-        help = "Delimiter for splitting compound gene names"
+        help = "Delimiter for splitting compound gene names",
+        hide = true
     )]
     pub gene_network_delimiter: Option<char>,
 
@@ -111,7 +116,8 @@ pub struct SrtLinkCommunityArgs {
                      A synthetic edge joins any unconnected pair (u, v).\n\
                      The pair must share at least N neighbours already.\n\
                      This densifies incomplete networks. It applies only with --gene-network;\n\
-                     0 disables it."
+                     0 disables it.",
+        hide = true
     )]
     pub snn_min_shared: usize,
 
@@ -122,7 +128,8 @@ pub struct SrtLinkCommunityArgs {
         long_help = "k-core trim applied before Leiden runs on the gene graph.\n\
                      Genes below this subgraph degree are dropped, iteratively.\n\
                      A gene trimmed in any round contributes to no module,\n\
-                     and to no module-pair basis entry. This applies only with --gene-network."
+                     and to no module-pair basis entry. This applies only with --gene-network.",
+        hide = true
     )]
     pub gene_trim_min_degree: usize,
 
@@ -133,7 +140,8 @@ pub struct SrtLinkCommunityArgs {
         long_help = "Modularity γ for Leiden on the gene graph.\n\
                      That graph is SNN-augmented and k-core-trimmed. Higher γ yields more,\n\
                      smaller modules. Lower γ yields fewer, larger ones.\n\
-                     This applies only with --gene-network."
+                     This applies only with --gene-network.",
+        hide = true
     )]
     pub gene_modules_resolution: f64,
 
@@ -146,7 +154,8 @@ pub struct SrtLinkCommunityArgs {
                      sim(i,j) < γ · deg(i) · deg(j) / (2W).\n\
                      That is the Louvain/Leiden modularity-gain criterion,\n\
                      adapted to cosine-weighted edges.\n\
-                     γ = 1.0 is the standard modularity resolution. Pass 0 to disable the veto."
+                     γ = 1.0 is the standard modularity resolution. Pass 0 to disable the veto.",
+        hide = true
     )]
     pub modularity_gamma: f32,
 
@@ -168,7 +177,8 @@ pub struct SrtLinkCommunityArgs {
                      \n\
                      The cut lands in <out>.dict_merges.cut.parquet.\n\
                      Its columns are (community, consensus).\n\
-                     Empty communities get consensus = −1."
+                     Empty communities get consensus = −1.",
+        hide = true
     )]
     pub merge_cut: f64,
 
@@ -203,7 +213,8 @@ pub struct SrtLinkCommunityArgs {
                      The factorised Poisson rate alone cannot see it.\n\
                      Our Xenium leukemia smoke test gained ~50% MI. It cost ~9% more wall time.\n\
                      \n\
-                     Pass --no-incidence to disable it."
+                     Pass --no-incidence to disable it.",
+        hide = true
     )]
     pub no_incidence: bool,
 
@@ -211,7 +222,8 @@ pub struct SrtLinkCommunityArgs {
         long,
         default_value_t = 1.0,
         value_name = "A",
-        help = "Gamma prior shape a for the incidence term (no effect with --no-incidence)"
+        help = "Gamma prior shape a for the incidence term (no effect with --no-incidence)",
+        hide = true
     )]
     pub incidence_a: f64,
 
@@ -219,7 +231,8 @@ pub struct SrtLinkCommunityArgs {
         long,
         default_value_t = 1.0,
         value_name = "B",
-        help = "Gamma prior rate b for the incidence term (no effect with --no-incidence)"
+        help = "Gamma prior rate b for the incidence term (no effect with --no-incidence)",
+        hide = true
     )]
     pub incidence_b: f64,
 }

@@ -87,7 +87,8 @@ pub struct SrtPlotArgs {
         default_value_t = 3.0,
         help = "Max aspect ratio (h/w clamp)",
         long_help = "Maximum aspect ratio, clamping height over width.\n\
-                     Bounds outside the clamp are inflated symmetrically."
+                     Bounds outside the clamp are inflated symmetrically.",
+        hide = true
     )]
     pub max_aspect: f32,
 
@@ -99,18 +100,24 @@ pub struct SrtPlotArgs {
         long,
         default_value_t = 3.0,
         help = "Max radius multiplier for propensity/expression size mapping",
-        long_help = "Max radius multiplier for propensity / expression size mapping (base_size * scale at p99)."
+        long_help = "Max radius multiplier for propensity / expression size mapping (base_size * scale at p99).",
+        hide = true
     )]
     pub size_scale: f32,
 
-    #[arg(long, value_enum, default_value_t = PointShape::Hexagon, help = "Marker shape")]
+    #[arg(long, value_enum, default_value_t = PointShape::Hexagon, help = "Marker shape", hide = true)]
     pub point_shape: PointShape,
 
     #[arg(long, value_enum, help = "Qualitative palette (default: auto by K)")]
     pub palette: Option<Palette>,
 
     // ─── Mesh plot ────────────────────────────────────────────────────────
-    #[arg(long, default_value_t = 0.5, help = "Mesh edge stroke width (pt)")]
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Mesh edge stroke width (pt)",
+        hide = true
+    )]
     pub mesh_stroke: f32,
 
     #[arg(long, help = "Skip the mesh (cell-cell edge) plot")]
@@ -127,7 +134,8 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 8,
-        help = "Log-scale color bins for the marker-gene heatmap plot"
+        help = "Log-scale color bins for the marker-gene heatmap plot",
+        hide = true
     )]
     pub heat_bins: usize,
 
@@ -135,7 +143,8 @@ pub struct SrtPlotArgs {
         long,
         default_value_t = 0.02,
         help = "Percentile clip for expression standardization (2 → p02/p98).\n\
-                Clamps outliers."
+                Clamps outliers.",
+        hide = true
     )]
     pub expr_clip: f32,
 
@@ -146,7 +155,8 @@ pub struct SrtPlotArgs {
         long_help = "Detection floor for rendering a marker plot.\n\
                      It is the fraction of core cells with non-zero expression.\n\
                      The default of 0.02 means 2%.\n\
-                     This skips sparse genes whose heatmap is mostly empty."
+                     This skips sparse genes whose heatmap is mostly empty.",
+        hide = true
     )]
     pub marker_min_frac: f32,
 
@@ -154,7 +164,8 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Skip cores (batches × data files) with fewer than N cells"
+        help = "Skip cores (batches × data files) with fewer than N cells",
+        hide = true
     )]
     pub min_core_cells: usize,
 
@@ -165,7 +176,8 @@ pub struct SrtPlotArgs {
         long_help = "Percentile clip for coordinate bounds.\n\
                      0.005 clips to p0.5 and p99.5.\n\
                      It stops outlier cells from stretching the view.\n\
-                     Pass 0 to use the raw min and max."
+                     Pass 0 to use the raw min and max.",
+        hide = true
     )]
     pub coord_clip: f32,
 
@@ -212,7 +224,8 @@ pub struct SrtPlotArgs {
         help = "Quantile threshold for high-entropy focal cells (0.95 → top 5%)",
         long_help = "Quantile threshold for picking high-entropy focal cells.\n\
                      It applies within each core.\n\
-                     0.95 keeps the top 5%."
+                     0.95 keeps the top 5%.",
+        hide = true
     )]
     pub entropy_quantile: f32,
 
@@ -221,14 +234,16 @@ pub struct SrtPlotArgs {
         default_value_t = 2,
         help = "Neighborhood depth from each focal cell (1 = direct; 2 = 2-hop)",
         long_help = "Neighborhood depth from each focal cell. 1 takes direct neighbours only.\n\
-                     2 takes two hops, and is the default."
+                     2 takes two hops, and is the default.",
+        hide = true
     )]
     pub neighborhood_hops: u8,
 
     #[arg(
         long,
         default_value_t = 5,
-        help = "Top-N marker genes per neighbor community in interface panel legends"
+        help = "Top-N marker genes per neighbor community in interface panel legends",
+        hide = true
     )]
     pub interface_top_genes: usize,
 
@@ -237,7 +252,8 @@ pub struct SrtPlotArgs {
         default_value_t = 200,
         help = "Cap on focal cells rendered per (level, core); top-N by entropy kept",
         long_help = "Cap on focal cells rendered per (level, core). When more qualify,\n\
-                     top-N by entropy are kept."
+                     top-N by entropy are kept.",
+        hide = true
     )]
     pub max_interface_cells: usize,
 
@@ -261,7 +277,8 @@ pub struct SrtPlotArgs {
         help = "Per-stratum cap on LR pairs rendered (top-N by |z|)",
         long_help = "Per-stratum cap on the significant LR pairs rendered.\n\
                      Pairs are ranked by |z| within each (batch, community).\n\
-                     Single-batch runs collapse that to per-community."
+                     Single-batch runs collapse that to per-community.",
+        hide = true
     )]
     pub lr_top_pairs: usize,
 
@@ -271,7 +288,8 @@ pub struct SrtPlotArgs {
         long_help = "Keep homotypic LR pairs, where L == R, such as CADM3-CADM3.\n\
                      They are dropped by default.\n\
                      Homotypic adhesion pairs tend to dominate the top of the list.\n\
-                     That crowds out heterotypic signalling."
+                     That crowds out heterotypic signalling.",
+        hide = true
     )]
     pub lr_keep_homotypic: bool,
 
@@ -286,7 +304,8 @@ pub struct SrtPlotArgs {
                      Cells at or above it count as tissue interior.\n\
                      They are dropped from the LR-overlay focal pool.\n\
                      Lower values widen the boundary belt.\n\
-                     Higher values keep only the most uncommitted cells."
+                     Higher values keep only the most uncommitted cells.",
+        hide = true
     )]
     pub lr_commit_threshold: f32,
 
@@ -296,14 +315,16 @@ pub struct SrtPlotArgs {
         help = "Belt width (hops) around uncommitted cells for LR overlay focal set",
         long_help = "Belt width in graph hops around uncommitted cells.\n\
                      It sets the LR-overlay focal set. 1 takes direct neighbours only;\n\
-                     2 takes two hops."
+                     2 takes two hops.",
+        hide = true
     )]
     pub lr_belt_hops: u8,
 
     #[arg(
         long,
         default_value_t = 100,
-        help = "Skip communities with fewer than this many edges (no markers or LR overlays)"
+        help = "Skip communities with fewer than this many edges (no markers or LR overlays)",
+        hide = true
     )]
     pub min_edges_per_community: usize,
 
@@ -315,7 +336,8 @@ pub struct SrtPlotArgs {
                      The count is taken within each batch, or core. Propensity,\n\
                      marker and LR plots are all skipped.\n\
                      This is independent of --min-edges-per-community,\n\
-                     which instead applies across all batches."
+                     which instead applies across all batches.",
+        hide = true
     )]
     pub min_cells_per_community: usize,
 
@@ -325,7 +347,8 @@ pub struct SrtPlotArgs {
         help = "Min drawable arrows required to render an LR overlay",
         long_help = "Minimum drawable arrows for an LR overlay to be rendered.\n\
                      An arrow is an edge with non-zero L+R signal either way.\n\
-                     This skips sparse pairs whose plot is a dust cloud."
+                     This skips sparse pairs whose plot is a dust cloud.",
+        hide = true
     )]
     pub lr_min_edges: usize,
 
@@ -337,7 +360,8 @@ pub struct SrtPlotArgs {
                      That summary is `lr/summary.pdf`.\n\
                      Pairs rank by max |z| across communities.\n\
                      Rows and columns keep only those in the top-N.\n\
-                     Per-community summaries are unaffected."
+                     Per-community summaries are unaffected.",
+        hide = true
     )]
     pub lr_summary_pairs: usize,
 
@@ -346,7 +370,8 @@ pub struct SrtPlotArgs {
         default_value_t = 8,
         help = "Bins for the diverging coexpression ramp (--lr-color-mode=coexpr only)",
         long_help = "Bins in the diverging blue↔red coexpression ramp on LR arrows.\n\
-                     This is used only with --lr-color-mode=coexpr."
+                     This is used only with --lr-color-mode=coexpr.",
+        hide = true
     )]
     pub lr_coexpr_bins: usize,
 
@@ -363,7 +388,8 @@ pub struct SrtPlotArgs {
                      so receptor-saturated and at plateau.\n\
                      \n\
                      `direction` colours by in, out and internal classes.\n\
-                     `coexpr` colours by pair-centred sqrt(L·R) deviation."
+                     `coexpr` colours by pair-centred sqrt(L·R) deviation.",
+        hide = true,
     )]
     pub lr_color_mode: LrColorMode,
 }

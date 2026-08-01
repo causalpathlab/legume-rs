@@ -635,7 +635,11 @@ pub struct QcArgs {
         help = "Feature/row QC: drop genes expressed in too few cells",
         long_help = "Feature/row QC; off by default.\n\
                      It DROPS gene rows expressed in fewer than this many cells.\n\
-                     `bge` does not apply it, since QC there is cell-only."
+                     \n\
+                     Not every consumer applies it.\n\
+                     `bge` does not, since QC there is cell-only.\n\
+                     `pinto` does not either: it reads only the cell verdict,\n\
+                     so setting this costs a stats pass and changes nothing."
     )]
     pub qc_feature_min_cells: usize,
 
