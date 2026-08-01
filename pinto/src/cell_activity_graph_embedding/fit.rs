@@ -874,12 +874,14 @@ pub fn fit_cell_activity_graph_embedding(
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
-    // k-means over pairs -> per-edge community -> cell propensity (incident-edge
+    // Cluster the pairs -> per-edge community -> cell propensity (incident-edge
     // fractions) + entropy + the Poisson-Gamma gene x community dictionary. One
     // routine, shared verbatim with `lc` and `dsvd`, so every subcommand's
     // propensity means the same thing.
-    // Under k-means the requested count IS the count; under Leiden it is only a
-    // target (or nothing, when the user left it unset) and the graph decides.
+    // Leiden by default: the pair latent has no reason to carry exactly
+    // `embedding_dim` interaction regimes, so the graph decides the count and
+    // `n_edge_clusters` is only a target (or nothing, when left unset). Under
+    // k-means the requested count IS the count.
     let clustering = match args.edge_cluster_method {
         EdgeClusterMethod::Kmeans => EdgeClustering::Kmeans {
             n_clusters: args.n_edge_clusters.unwrap_or(args.embedding_dim),

@@ -344,14 +344,20 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = EdgeClusterMethod::Kmeans,
+        default_value_t = EdgeClusterMethod::Leiden,
         value_enum,
         help = "How to cut the pair latent into link communities",
-        long_help = "kmeans fixes the community count at --n-edge-clusters.\n\
-                     leiden builds a cosine kNN graph over the pair latent.\n\
-                     --leiden-resolution then decides how many communities exist.\n\
-                     Under leiden, --n-edge-clusters is only a target.\n\
-                     The resolution is steered toward it, not fixed at it."
+        long_help = "leiden is the default.\n\
+                     It builds a cosine kNN graph over the pair latent,\n\
+                     and --leiden-resolution then decides how many communities exist.\n\
+                     Under leiden, --n-edge-clusters is only a target:\n\
+                     the resolution is steered toward it, not fixed at it.\n\
+                     \n\
+                     kmeans instead fixes the community count at --n-edge-clusters.\n\
+                     Pick it when you need a specific K, or a run comparable to an older one.\n\
+                     Nothing else about the run changes:\n\
+                     both consume the same pair latent,\n\
+                     and both write the same three propensity tables."
     )]
     pub edge_cluster_method: EdgeClusterMethod,
 
@@ -371,12 +377,17 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        help = "Link communities to cut from the pair latent [default: --embedding-dim]",
-        long_help = "Number of edge clusters k-means cuts from the pair latent.\n\
+        help = "Link communities to cut from the pair latent [default: let leiden decide]",
+        long_help = "How many edge clusters to cut from the pair latent.\n\
+                     Under the default --edge-cluster-method leiden this is a TARGET:\n\
+                     the resolution is steered toward it, and omitting it lets\n\
+                     --leiden-resolution alone decide.\n\
+                     Under kmeans it is the exact count, defaulting to --embedding-dim.\n\
+                     \n\
                      A cell's propensity is its incident-edge fraction, taken per community.\n\
                      This is the definition `pinto lc` and `pinto dsvd` use.\n\
-                     Omit to fall back to --embedding-dim. Writes {prefix}.propensity.parquet,\n\
-                     {prefix}.link_community.parquet, and {prefix}.gene_community.parquet."
+                     Writes {prefix}.propensity.parquet, {prefix}.link_community.parquet,\n\
+                     and {prefix}.gene_community.parquet."
     )]
     pub n_edge_clusters: Option<usize>,
 
