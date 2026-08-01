@@ -146,8 +146,8 @@ pub struct BgeArgs {
         default_value_t = false,
         help = "Do not shrink co-embedded features by posterior confidence",
         long_help = "This applies when --posterior has run.\n\
-                     By default each feature's co-embedded coordinate is scaled\n\
-                     by its `max_h PIP`.\n\
+                     Each feature's co-embedded coordinate is then scaled.\n\
+                     The scale factor is its `max_h PIP`.\n\
                      That is the posterior probability of loading ANY dim.\n\
                      \n\
                      Scaling is applied after the softmax.\n\
@@ -159,8 +159,8 @@ pub struct BgeArgs {
                      It is a confidence-weighted radial scaling.\n\
                      It corrects for nothing.\n\
                      An earlier version of this help was wrong about it.\n\
-                     It claimed the scaling rescued signal-free genes from\n\
-                     a pile-up on the cell centroid.\n\
+                     It claimed the scaling rescued signal-free genes.\n\
+                     Supposedly they piled up on the cell centroid.\n\
                      Measured, there is no such pile-up.\n\
                      0.0% of genes sit within 0.1 cell-radii of the centroid,\n\
                      and the median distance is 0.80.\n\
@@ -359,8 +359,8 @@ pub struct BgeArgs {
                      That is what an A/B across seeds needs.\n\
                      \n\
                      It does NOT make a run bit-reproducible.\n\
-                     The variational gate's reparameterization noise comes from\n\
-                     the device RNG, outside this stream.\n\
+                     The variational gate's noise comes from the device RNG.\n\
+                     That sits outside this stream.\n\
                      Two runs at the same seed still differ slightly."
     )]
     seed: u64,
@@ -384,10 +384,10 @@ pub struct BgeArgs {
         long_help = "Output prefix.\n\
                      It produces {out}.cell_embedding.parquet, which is Z,\n\
                      {out}.dictionary.parquet, {out}.feature_embedding.parquet,\n\
-                     {out}.feature_bias.parquet, {out}.cell_bias.parquet\n\
+                     {out}.feature_bias.parquet, {out}.cell_bias.parquet,\n\
                      and {out}.senna.json.\n\
-                     Unless --skip-etm, it adds {out}.latent.parquet\n\
-                     and {out}.topic_embedding.parquet."
+                     Unless --skip-etm, it adds two more:\n\
+                     {out}.latent.parquet and {out}.topic_embedding.parquet."
     )]
     out: Box<str>,
 }
