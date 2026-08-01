@@ -141,8 +141,8 @@ fn print_logo() {
     version,
     about = "SENNA — single-cell embedding (SVD / topic), annotation, trajectory, and plotting.",
     long_about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment.\n\n\
-                  Input: sparse backends in `.zarr` or `.h5` (convert from Matrix Market\n\
-                  with `data-beans from-mtx`).\n\n\
+                  Input: sparse backends in `.zarr` or `.h5`.\n\
+                  Convert from Matrix Market with `data-beans from-mtx`.\n\n\
                   Each step writes its outputs back to the run manifest\n\
                   `{prefix}.senna.json`.\n\
                   Downstream commands read data and batch files from it.\n\
@@ -186,18 +186,25 @@ enum Commands {
     #[command(
         name = "masked-topic",
         about = "Train a masked-imputation embedded topic model (foundation-style).",
-        long_about = "Embedded topic model trained by masked-gene imputation — no ELBO,\n\
-                      no posterior collapse. Encoder and decoder share a learned per-gene\n\
-                      symbol embedding ρ ∈ ℝ^{D×H} (Dieng et al. 2020, ETM); the encoder\n\
-                      pools a per-cell top-K feature window by single-query attention.\n\n\
-                      Training: each cell's top-K genes are split into visible / masked;\n\
-                      θ_n = softmax(encoder(visible)) (deterministic, no KL); the NB head\n\
-                      imputes the held-out genes with μ = residual · ℓ · (θ·β), where\n\
-                      β_kg = softmax_g(α_k · ρ_g) and φ_g is a per-gene dispersion. The\n\
-                      masked objective (not a KL bottleneck) is what prevents collapse,\n\
-                      so it scales with more data. Inference is encoder-only.\n\n\
-                      Writes the same artifacts as `topic`, plus\n\
-                      `{out}.feature_embedding.parquet` (ρ) and `{out}.dispersion.parquet`.",
+        long_about = "Embedded topic model trained by masked-gene imputation.\n\
+                      There is no ELBO, and no posterior collapse.\n\
+                      Encoder and decoder share a per-gene symbol embedding\n\
+                      ρ ∈ ℝ^{D×H}, after Dieng et al. 2020 (ETM).\n\
+                      The encoder pools a per-cell top-K feature window by\n\
+                      single-query attention.\n\n\
+                      Training splits each cell's top-K genes into visible and masked.\n\
+                      θ_n = softmax(encoder(visible)), deterministic and KL-free.\n\
+                      The NB head imputes the held-out genes with\n\
+                      μ = residual · ℓ · (θ·β).\n\
+                      There β_kg = softmax_g(α_k · ρ_g), and φ_g is a per-gene\n\
+                      dispersion.\n\
+                      \n\
+                      The masked objective prevents collapse, not a KL bottleneck.\n\
+                      So it scales with more data.\n\
+                      Inference is encoder-only.\n\n\
+                      Writes the same artifacts as `topic`.\n\
+                      It adds `{out}.feature_embedding.parquet` (ρ) and\n\
+                      `{out}.dispersion.parquet`.",
         visible_aliases = ["mtm"],
         aliases = ["itopic", "indexed-topic", "etm"]
     )]
@@ -206,16 +213,24 @@ enum Commands {
     #[command(
         name = "masked-vae",
         about = "Train a masked-imputation Gaussian VAE (BERT-style, continuous latent).",
-        long_about = "Masked-imputation VAE: the Gaussian-latent sibling of `masked-topic`.\n\
-                      Same pipeline (PB-collapse training, shared per-gene ρ embedding, NB\n\
-                      ETM head, encoder-only cell inference), but the encoder emits a\n\
-                      reparameterized Gaussian latent z (no simplex softmax) regularized by\n\
-                      a KL term — a true variational bottleneck. exp(z) drives the NB head's\n\
-                      per-topic intensities (μ_g = ℓ·Σ_t exp(z_t)·β_{t,g}), so the masked\n\
-                      objective + KL train an unconstrained continuous embedding while\n\
-                      reusing the masked decoder unchanged. Held-out genes are imputed; the\n\
-                      masked objective (not just the KL) keeps the latent from collapsing.\n\n\
-                      Writes the same artifacts as `masked-topic`. NB objective only.",
+        long_about = "Masked-imputation VAE.\n\
+                      It is the Gaussian-latent sibling of `masked-topic`.\n\
+                      The pipeline is the same: PB-collapse training, a shared\n\
+                      per-gene ρ embedding, an NB ETM head, encoder-only inference.\n\
+                      \n\
+                      The encoder differs: it emits a reparameterized Gaussian\n\
+                      latent z, with no simplex softmax, regularized by a KL term.\n\
+                      That is a true variational bottleneck.\n\
+                      exp(z) drives the NB head's per-topic intensities,\n\
+                      μ_g = ℓ·Σ_t exp(z_t)·β_{t,g}.\n\
+                      \n\
+                      So the masked objective and the KL together train an\n\
+                      unconstrained continuous embedding.\n\
+                      The masked decoder is reused unchanged.\n\
+                      Held-out genes are imputed, and the masked objective —\n\
+                      not the KL alone — keeps the latent from collapsing.\n\n\
+                      Writes the same artifacts as `masked-topic`.\n\
+                      The NB objective is the only one available.",
         visible_aliases = ["bert"]
     )]
     MaskedVae(MaskedTopicArgs),
@@ -223,28 +238,39 @@ enum Commands {
     #[command(
         name = "masked-sbp",
         about = "Train a masked-imputation topic model with a stick-breaking-process simplex.",
-        long_about = "Stick-breaking-process (SBP) sibling of `masked-topic`: same\n\
-                      masked-imputation pipeline (shared per-gene ρ embedding, NB ETM head,\n\
-                      deterministic no-KL objective, encoder-only inference), but the\n\
-                      encoder maps its logits through a stick-breaking simplex\n\
-                      θ_k = v_k·∏_{j<k}(1−v_j), v_k = σ(η_k), instead of softmax. Topics\n\
-                      are no longer exchangeable: early sticks carry more mass a priori,\n\
-                      giving an intrinsic ordering and a self-pruning tail (later topics\n\
-                      shrink toward 0 unless the data needs them) — a soft, differentiable\n\
-                      way to over-provision K and prune. Writes the same artifacts as\n\
-                      `masked-topic`.",
+        long_about = "Stick-breaking-process (SBP) sibling of `masked-topic`.\n\
+                      The masked-imputation pipeline is the same: a shared per-gene\n\
+                      ρ embedding, an NB ETM head, a deterministic KL-free\n\
+                      objective, encoder-only inference.\n\
+                      \n\
+                      The encoder differs: it maps its logits through a\n\
+                      stick-breaking simplex instead of a softmax,\n\
+                      θ_k = v_k·∏_{j<k}(1−v_j) with v_k = σ(η_k).\n\
+                      \n\
+                      Topics are therefore no longer exchangeable.\n\
+                      Early sticks carry more mass a priori.\n\
+                      That gives an intrinsic ordering and a self-pruning tail:\n\
+                      later topics shrink toward 0 unless the data needs them.\n\
+                      It is a soft, differentiable way to over-provision K and prune.\n\n\
+                      Writes the same artifacts as `masked-topic`.",
         visible_aliases = ["sbp"]
     )]
     MaskedSbp(MaskedTopicArgs),
 
     #[command(
         about = "Train an scVI-style Gaussian VAE (continuous factor model).",
-        long_about = "Gaussian (scVI-style) VAE — the continuous-latent sibling of\n\
-                      `topic`. Same pipeline (batch-aware pseudobulk collapse → dense VAE),\n\
-                      but the encoder emits an unconstrained Gaussian latent z (no simplex\n\
-                      projection) and the NB decoder maps z → π = softmax_d(z·W) → μ =\n\
-                      library·π. Outputs are continuous factors (cell × factor) and gene ×\n\
-                      factor loadings, not topic proportions + a topic-gene dictionary.\n\n\
+        long_about = "Gaussian (scVI-style) VAE.\n\
+                      It is the continuous-latent sibling of `topic`.\n\
+                      The pipeline is the same: batch-aware pseudobulk collapse,\n\
+                      then a dense VAE.\n\
+                      \n\
+                      The encoder emits an unconstrained Gaussian latent z,\n\
+                      with no simplex projection.\n\
+                      The NB decoder maps z → π = softmax_d(z·W) → μ = library·π.\n\
+                      \n\
+                      Outputs are continuous factors, cell × factor, plus\n\
+                      gene × factor loadings.\n\
+                      They are not topic proportions and a topic-gene dictionary.\n\n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
                       {out}.model.json, {out}.senna.json (run manifest)."
     )]
@@ -252,17 +278,19 @@ enum Commands {
 
     #[command(
         about = "Train Nyström SVD embedding.",
-        long_about = "Three stages: (1) batch-aware pseudobulk collapsing, (2) randomized SVD,\n\
-                      (3) per-cell Nyström projection.\n\n\
+        long_about = "Three stages:\n\
+                      \x20 1. batch-aware pseudobulk collapsing\n\
+                      \x20 2. randomized SVD\n\
+                      \x20 3. per-cell Nyström projection\n\n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.senna.json."
     )]
     Svd(SvdArgs),
 
     #[command(
         about = "Train joint topic model across modalities (independent or delta decoder).",
-        long_about = "Joint topic-model embedding over a stack of modalities sharing cells.\n\
-                      Data files are a row-major (modality × batch) table; -m sets the\n\
-                      modality-row count.\n\n\
+        long_about = "Joint topic-model embedding over modalities sharing cells.\n\
+                      Data files form a row-major (modality × batch) table.\n\
+                      -m sets the modality-row count.\n\n\
                       Decoder types:\n  \
                       independent — each modality keeps its own dictionary; features may differ.\n  \
                       delta       — shared base + cumulative chain deltas\n              \
@@ -274,8 +302,9 @@ enum Commands {
 
     #[command(
         about = "Train joint Nyström SVD across modalities.",
-        long_about = "Joint SVD over a stack of modalities sharing cells. Data files form\n\
-                      a row-major (modality × batch) table; -m sets the modality-row count.\n\
+        long_about = "Joint SVD over a stack of modalities sharing cells.\n\
+                      Data files form a row-major (modality × batch) table.\n\
+                      -m sets the modality-row count.\n\
                       Cells must be shared; features may differ.\n\n\
                       Writes {out}.latent.parquet, {out}.senna.json."
     )]
@@ -283,62 +312,85 @@ enum Commands {
 
     #[command(
         about = "Train graph-based embedding (count-NCE, modality-agnostic).",
-        long_about = "Joint embedding of features and cells in a single H-dim\n\
-                      space via discriminative count-NCE on a sketch-coarsened\n\
-                      pseudobulk (cell, feature) bipartite graph. Each input file\n\
-                      contributes its rows to a shared feature axis; cell barcodes\n\
-                      union across files. Modality-agnostic — works for any number\n\
-                      of count panels (RNA, ATAC, protein, …). Bilinear\n\
-                      `E_f · E_c + b_f + b_c` scoring with per-file rebalanced\n\
-                      sampling and same-file hard negatives.\n\n\
-                      Trains in two phases: (1) embed features + pseudobulks to\n\
-                      learn the gene side, then (2) freeze it and densely fit each\n\
-                      cell's embedding — every cell is swept ~once/epoch and the\n\
-                      per-cell fit is separable (embarrassingly parallel).\n\n\
+        long_about = "Joint embedding of features and cells in one H-dim space.\n\
+                      It uses discriminative count-NCE on a sketch-coarsened\n\
+                      pseudobulk (cell, feature) bipartite graph.\n\
+                      \n\
+                      Each input file contributes its rows to a shared feature axis.\n\
+                      Cell barcodes union across files.\n\
+                      The method is modality-agnostic, so any number of count\n\
+                      panels works: RNA, ATAC, protein and so on.\n\
+                      Scoring is bilinear: `E_f · E_c + b_f + b_c`.\n\
+                      \n\
+                      Positives are drawn by a two-stage stratified sampler.\n\
+                      Stage 1 picks a pseudobulk with q(p) ∝ pb_size(p)^alpha_pb.\n\
+                      Stage 2 picks a feature within it, weighted by μ_pf.\n\
+                      Negatives are drawn UNIFORMLY over the global pool of\n\
+                      expressed features, so they are abundance-independent.\n\n\
+                      Training runs in two phases.\n\
+                      Phase 1 embeds features and pseudobulks, learning the\n\
+                      gene side.\n\
+                      Phase 2 freezes that and densely fits each cell embedding.\n\
+                      Every cell is swept about once per epoch.\n\
+                      The per-cell fit is separable, so it is embarrassingly parallel.\n\n\
                       Writes {out}.{cell_embedding,dictionary,feature_embedding,\n\
-                      feature_bias,cell_bias}.parquet, {out}.senna.json. The H-space\n\
-                      cell embedding Z is always {out}.cell_embedding.parquet.\n\
-                      Unless --skip-etm, an ETM is also resolved, adding\n\
-                      {out}.{latent,topic_embedding}.parquet with latent = log θ.",
+                      feature_bias,cell_bias}.parquet and {out}.senna.json.\n\
+                      The H-space cell embedding Z is always\n\
+                      {out}.cell_embedding.parquet.\n\
+                      \n\
+                      Unless --skip-etm, an ETM is resolved too.\n\
+                      That adds {out}.{latent,topic_embedding}.parquet,\n\
+                      with latent = log θ.",
         alias = "embed-graph",
         alias = "gbe"
     )]
     Bge(BgeArgs),
 
     #[command(
-        about = "Train a continuous Miller-Griffiths-Jordan-style latent feature model \
-                 on an explicit feature-feature edge list (no expression data).",
-        long_about = "Consumes a TSV/CSV of feature-feature edges (BioGRID, STRING, \
-                      KEGG, synthetic-lethality, regulatory) and learns per-feature \
-                      latent embeddings E ∈ ℝ^{D×H} via a continuous Miller-Griffiths-\
-                      Jordan link-prediction model:\n  \n  \
+        about = "Latent feature model over a feature-feature edge list.",
+        long_about = "Learns per-feature latent embeddings from an edge list.\n\
+                      No expression data is involved.\n\
+                      \n\
+                      Input is a TSV/CSV of feature-feature edges.\n\
+                      BioGRID, STRING, KEGG, synthetic-lethality and regulatory\n\
+                      networks all fit.\n\
+                      \n\
+                      Embeddings E ∈ ℝ^{D×H} come from a continuous\n\
+                      Miller-Griffiths-Jordan link-prediction model:\n  \n  \
                       s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \n\
-                      Trains with binary cross-entropy + degree^α negative sampling \
-                      (node2vec convention). Symmetric by construction.\n\n\
-                      Writes {out}.feature_embedding.parquet (+ feature_bias, gamma, \
-                      log_likelihood, senna.json). The output shape matches the freeze \
-                      loader used by `senna masked-topic \
-                      --freeze-feature-embedding`, so an `fne` run is a direct gene-side \
-                      input to downstream cell-side training."
+                      Training is binary cross-entropy with degree^α negative\n\
+                      sampling, the node2vec convention.\n\
+                      The model is symmetric by construction.\n\n\
+                      Writes {out}.feature_embedding.parquet.\n\
+                      feature_bias, gamma, log_likelihood and senna.json ship too.\n\
+                      \n\
+                      The output shape matches the freeze loader behind\n\
+                      `senna masked-topic --freeze-feature-embedding`.\n\
+                      An `fne` run is therefore a direct gene-side input to\n\
+                      downstream cell-side training."
     )]
     Fne(FneArgs),
 
     #[command(
         name = "resolve-embedding-space",
         visible_alias = "rest",
-        about = "Freeze a topic run's cell proportions θ and learn a shared cell+gene \
-                 embedding from the counts (Resolve Embedding Space for Topic-models).",
-        long_about = "Mirror of bge with the roles flipped: takes a finished topic-family \
-                      run via --from, FREEZES its cell topic proportions θ, and trains a \
-                      gene embedding ρ ∈ ℝ^{D×H} + topic embedding α ∈ ℝ^{K×H} against the \
-                      raw counts (bipartite NCE). The cell embedding is derived, frozen-θ: \
-                      Z = θ·α. This recasts the topic result into a metric H-space where \
-                      genes, topics, and cells coexist:\n  \n  \
+        about = "Recast a topic run into a shared cell+gene embedding.",
+        long_about = "Mirror of bge with the roles flipped.\n\
+                      It takes a finished topic-family run via --from.\n\
+                      That run's cell topic proportions θ are FROZEN.\n\
+                      \n\
+                      It then trains a gene embedding ρ ∈ ℝ^{D×H} and a topic\n\
+                      embedding α ∈ ℝ^{K×H} against the raw counts, by\n\
+                      bipartite NCE.\n\
+                      The cell embedding is derived from frozen θ as Z = θ·α:\n  \n  \
                       score(cell c, gene g) = (θ_c·α)·ρ_g + b_g\n  \n\
                       Writes {out}.{feature_embedding,cell_embedding,topic_embedding}\
-                      .parquet + senna.json (kind=resolve-embedding-space), a metric H-space \
-                      where genes, topics and cells coexist (e.g. for downstream clustering / \
-                      `senna annotate-by-enrichment`). H defaults to K but may exceed it."
+                      .parquet, plus senna.json with kind=resolve-embedding-space.\n\
+                      \n\
+                      The result is a metric H-space where genes, topics and cells\n\
+                      coexist.\n\
+                      Downstream clustering and `senna annotate-by-enrichment` read it.\n\
+                      H defaults to K, but may exceed it."
     )]
     ResolveEmbeddingSpace(RestArgs),
 

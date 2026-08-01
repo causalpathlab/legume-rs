@@ -59,21 +59,23 @@ pub struct LayoutCommonArgs {
         long,
         short = 'f',
         help = "Run manifest JSON from a `senna` topic/svd command",
-        long_help = "If set, fills in data files, batch files, and (when --out is \
-                     absent) the output prefix from the manifest. The manifest is \
-                     then updated in place: its `layout.cell_coords`, `layout.pb_coords`, \
-                     and `layout.pb_gene_mean` fields are set to the paths just \
-                     written, and saved back. Explicit CLI flags still override \
-                     manifest values when passed."
+        long_help = "Fills in data files and batch files from the manifest.\n\
+                     It also supplies the output prefix when --out is absent.\n\
+                     \n\
+                     The manifest is then updated in place.\n\
+                     Its `layout.cell_coords`, `layout.pb_coords` and\n\
+                     `layout.pb_gene_mean` fields point at the paths just written.\n\
+                     \n\
+                     Explicit CLI flags still override manifest values."
     )]
     pub from: Option<Box<str>>,
 
     #[arg(
         value_delimiter = ',',
         help = "Data files (required unless --from supplies them)",
-        long_help = "Sparse backends in `.zarr` or `.h5`. Multiple paths allowed \
-                     (space- or comma-separated). Leave empty and pass --from to \
-                     inherit from the manifest."
+        long_help = "Sparse backends in `.zarr` or `.h5`.\n\
+                     Multiple paths are allowed, space- or comma-separated.\n\
+                     Leave this empty and pass --from to inherit from the manifest."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -168,13 +170,19 @@ pub struct LayoutCommonArgs {
     #[arg(
         long = "trim-cell-mads",
         default_value_t = 5.0,
-        help = "Robustly winsorize cell features to ±N MADs before the layout so outlier \
-                cells/genes don't distort it (per-dimension median ± N·MAD·1.4826). 0 = off.",
-        long_help = "ON by default (N=5). Each feature dimension is clipped to \
-                     `median ± N · MAD · 1.4826` across cells, so a few extreme-outlier cells \
-                     can't stretch the UMAP/t-SNE/PHATE layout or dominate the PB-PB similarity. \
-                     Robust (MAD-based, no Gaussian assumption); only the most extreme tails are \
-                     touched. Set to 0 to disable."
+        help = "Winsorize cell features to ±N MADs before the layout; 0 = off",
+        long_help = "Winsorize cell features before the layout.\n\
+                     This is ON by default, at N=5.\n\
+                     \n\
+                     Each feature dimension is clipped to\n\
+                     `median ± N · MAD · 1.4826` across cells.\n\
+                     A few extreme-outlier cells then cannot stretch the\n\
+                     UMAP/t-SNE/PHATE layout.\n\
+                     Nor can they dominate the PB-PB similarity.\n\
+                     \n\
+                     The rule is MAD-based, so it assumes no Gaussian shape.\n\
+                     Only the most extreme tails are touched.\n\
+                     Set it to 0 to disable."
     )]
     pub trim_cell_mads: f32,
 
@@ -231,11 +239,15 @@ pub struct LayoutCommonArgs {
         long,
         default_value_t = 1000,
         help = "Landmark count for latent-driven layout",
-        long_help = "Only used when a trained latent is available (topic/svd manifest). \
-                     Random subsample of cells used as PB landmarks; each cell is \
-                     assigned to its nearest landmark. Lower = fewer, denser PBs \
-                     (crisper clusters); higher = finer resolution but more blobby. \
-                     Ignored by the projection-space fallback path."
+        long_help = "Used only when a trained latent is available.\n\
+                     That means a topic or svd manifest.\n\
+                     \n\
+                     A random subsample of cells becomes the PB landmarks.\n\
+                     Each cell is assigned to its nearest landmark.\n\
+                     Lower values give fewer, denser PBs, so crisper clusters.\n\
+                     Higher values give finer resolution, but blobbier output.\n\
+                     \n\
+                     The projection-space fallback path ignores this."
     )]
     pub n_landmarks: usize,
 
@@ -243,13 +255,19 @@ pub struct LayoutCommonArgs {
         long,
         default_value_t = 1.0,
         help = "Temperature τ applied to topic θ before Hellinger transform",
-        long_help = "Re-softmax the trained log-θ at temperature τ before the \
-                     latent-path layout: feat ∝ sqrt(softmax(log_θ / τ)). \
-                     τ=1.0 (default) leaves θ unchanged. τ<1 sharpens \
-                     (cells with mixed topics get pulled toward their dominant \
-                     topic, tightening clusters at the cost of intermediate \
-                     positions). τ>1 softens. Only affects the latent path; \
-                     ignored by projection-space layouts."
+        long_help = "Re-softmax the trained log-θ at temperature τ.\n\
+                     This happens before the latent-path layout:\n\
+                     feat ∝ sqrt(softmax(log_θ / τ)).\n\
+                     \n\
+                     The default τ=1.0 leaves θ unchanged.\n\
+                     τ<1 sharpens it.\n\
+                     Cells with mixed topics are pulled toward their dominant\n\
+                     topic, which tightens clusters.\n\
+                     The cost is losing intermediate positions.\n\
+                     τ>1 softens instead.\n\
+                     \n\
+                     This affects the latent path only.\n\
+                     Projection-space layouts ignore it."
     )]
     pub theta_temperature: f32,
 
@@ -258,12 +276,12 @@ pub struct LayoutCommonArgs {
         value_enum,
         default_value = "per-topic",
         help = "Landmark sampling strategy for latent-driven layout",
-        long_help = "per-topic — equal landmark budget per active argmax \
-                     topic (default). Tightens cluster-level structure \
-                     when one topic dominates. Topic-only; falls back to \
-                     random for SVD.\n\
-                     random    — uniform random subsample. Largest topics \
-                     get the most landmarks."
+        long_help = "per-topic — the default.\n\
+                     \x20 Equal landmark budget per active argmax topic.\n\
+                     \x20 Tightens cluster-level structure when one topic dominates.\n\
+                     \x20 Topic-only; it falls back to random for SVD.\n\
+                     random    — uniform random subsample.\n\
+                     \x20 Largest topics get the most landmarks."
     )]
     pub landmark_strategy: LandmarkStrategy,
 }

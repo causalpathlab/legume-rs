@@ -58,15 +58,15 @@ pub struct RestArgs {
         long = "from",
         required = true,
         help = "Topic-family run manifest ({prefix}.senna.json) to freeze θ from",
-        long_help = "Path to the `senna.json` manifest of a finished topic-family run \
-                     (`senna topic` / `masked-topic` / `joint-topic`). Two things are read \
-                     from it:\n  \
-                     - outputs.latent — the frozen θ (stored as log θ, exp'd internally); \
-                     cells are matched to the counts by barcode.\n  \
-                     - data.input / data.batch — the count files ρ trains against (override \
-                     with --data-files / --batch-files).\n\
-                     Embedding-family runs (bge/fne) are rejected: their latent is already an \
-                     H-space embedding, not topic proportions."
+        long_help = "Manifest of a finished topic-family run.\n\
+                     That is `senna topic`, `masked-topic` or `joint-topic`.\n\
+                     Two things are read from it:\n  \
+                     - outputs.latent — the frozen θ, stored as log θ and exp'd\n  \
+                     \x20 internally; cells match the counts by barcode.\n  \
+                     - data.input / data.batch — the count files ρ trains against,\n  \
+                     \x20 overridden by --data-files / --batch-files.\n\
+                     Embedding-family runs (bge/fne) are rejected.\n\
+                     Their latent is already an H-space embedding, not proportions."
     )]
     from: Box<str>,
 
@@ -74,8 +74,10 @@ pub struct RestArgs {
         short = 'o',
         long = "out",
         help = "Output prefix (default: --from with .senna.json stripped)",
-        long_help = "Output prefix for every artifact. Defaults to `--from` with a trailing \
-                     `.senna.json` (or `.json`) removed. Writes:\n  \
+        long_help = "Output prefix for every artifact.\n\
+                     It defaults to `--from` with a trailing `.senna.json`\n\
+                     (or `.json`) removed.\n\
+                     Writes:\n  \
                      {out}.feature_embedding.parquet  co-embed  gene × H (ρ re-embedded onto the cell manifold; annotate reads this)\n  \
                      {out}.cell_embedding.parquet     Z=θ·α  cell × H (the cell side annotate-by-projection reads)\n  \
                      {out}.topic_embedding.parquet    α      topic × H\n  \
@@ -89,12 +91,15 @@ pub struct RestArgs {
         long,
         default_value_t = 0,
         help = "Embedding dimension H (0 = K, the topic count)",
-        long_help = "Dimensionality H of the shared cell+gene space. 0 (default) uses K, the \
-                     number of topics in θ. Because training is against the counts (not a \
-                     closed-form SVD of β), H may be set LARGER than K — the extra dimensions \
-                     let ρ capture per-gene structure beyond the K topic axes. H < K \
-                     compresses; at H = K the geometry is close to a metric recast of the \
-                     topic dictionary."
+        long_help = "Dimensionality H of the shared cell+gene space.\n\
+                     The default of 0 uses K, the number of topics in θ.\n\
+                     \n\
+                     Training runs against the counts, not a closed-form SVD of β.\n\
+                     So H may be set LARGER than K.\n\
+                     The extra dimensions let ρ capture per-gene structure.\n\
+                     That structure lies beyond the K topic axes.\n\
+                     H < K compresses instead.\n\
+                     At H = K the geometry nearly recasts the topic dictionary."
     )]
     embedding_dim: usize,
 
@@ -103,8 +108,10 @@ pub struct RestArgs {
         long,
         default_value_t = 200,
         help = "Training epochs",
-        long_help = "Number of epochs, each running --batches-per-epoch minibatches. Ctrl-C \
-                     stops early and finalizes outputs from the current parameters."
+        long_help = "Number of epochs.\n\
+                     Each runs --batches-per-epoch minibatches.\n\
+                     Ctrl-C stops early.\n\
+                     Outputs are finalized from the current parameters."
     )]
     epochs: usize,
 
@@ -112,9 +119,10 @@ pub struct RestArgs {
         long,
         default_value_t = 100,
         help = "Minibatches per epoch",
-        long_help = "Minibatches drawn per epoch. Each is --batch-size positive (cell,gene) \
-                     edges, so one epoch visits ≈ batches_per_epoch × batch_size edges sampled \
-                     with replacement ∝ count.",
+        long_help = "Minibatches drawn per epoch.\n\
+                     Each holds --batch-size positive (cell, gene) edges.\n\
+                     One epoch visits batches_per_epoch × batch_size edges.\n\
+                     They are sampled with replacement ∝ count.",
         hide = true
     )]
     batches_per_epoch: usize,
@@ -123,9 +131,11 @@ pub struct RestArgs {
         long,
         default_value_t = 1024,
         help = "Positive (cell,gene) edges per minibatch",
-        long_help = "Positive edges per minibatch. Each is an observed (cell, gene) count, \
-                     sampled ∝ count; the cell contributes Z_c = θ_c·α and the gene its ρ_g. \
-                     Larger batches give smoother gradients at higher per-step cost."
+        long_help = "Positive edges per minibatch.\n\
+                     Each is an observed (cell, gene) count, sampled ∝ count.\n\
+                     The cell contributes Z_c = θ_c·α; the gene contributes ρ_g.\n\
+                     Larger batches give smoother gradients.\n\
+                     They also cost more per step."
     )]
     batch_size: usize,
 
@@ -133,9 +143,11 @@ pub struct RestArgs {
         long,
         default_value_t = 5,
         help = "Negative genes per positive",
-        long_help = "Negatives drawn per positive edge. For each positive (cell, gene), this \
-                     many genes are sampled ∝ marginal^(--neg-alpha) and pushed down for that \
-                     cell. More negatives sharpen the embedding at higher per-step cost."
+        long_help = "Negatives drawn per positive edge.\n\
+                     For each positive (cell, gene), this many genes are sampled\n\
+                     ∝ marginal^(--neg-alpha), then pushed down for that cell.\n\
+                     More negatives sharpen the embedding.\n\
+                     They also cost more per step."
     )]
     num_negatives: usize,
 
@@ -151,8 +163,9 @@ pub struct RestArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW weight decay (0 = off)",
-        long_help = "Decoupled AdamW weight decay applied uniformly to α, ρ, and b. 0 \
-                     (default) = plain Adam; mild values (1e-4..1e-2) shrink the embedding."
+        long_help = "Decoupled AdamW weight decay, applied uniformly to α, ρ and b.\n\
+                     The default of 0 gives plain Adam.\n\
+                     Mild values, 1e-4 to 1e-2, shrink the embedding."
     )]
     weight_decay: f64,
 
@@ -160,10 +173,12 @@ pub struct RestArgs {
         long,
         default_value_t = 0.75,
         help = "Negative-sampling exponent α: q(g) ∝ marginal(g)^α",
-        long_help = "Exponent on the per-gene count marginal in the negative-gene sampler: \
-                     q(g) ∝ marginal(g)^α. The node2vec/word2vec default 0.75 down-weights \
-                     ubiquitous genes relative to proportional sampling (α=1); α=0 samples \
-                     genes uniformly."
+        long_help = "Exponent on the per-gene marginal in the negative sampler:\n\
+                     q(g) ∝ marginal(g)^α.\n\
+                     The node2vec/word2vec default is 0.75.\n\
+                     It down-weights ubiquitous genes,\n\
+                     relative to proportional sampling at α=1.\n\
+                     α=0 samples genes uniformly."
     )]
     neg_alpha: f32,
 
@@ -171,11 +186,14 @@ pub struct RestArgs {
         long,
         value_delimiter = ',',
         help = "Override count files (default: inherit from --from)",
-        long_help = "Comma-separated count matrices (zarr/h5) to train ρ against. When \
-                     omitted, the files in the --from manifest's data.input are used (resolved \
-                     against the manifest directory). Override when those paths have moved or \
-                     you want a different cell set; cells are still matched to θ by barcode, \
-                     and any count cell absent from θ is dropped."
+        long_help = "Comma-separated count matrices, zarr or h5, to train ρ against.\n\
+                     When omitted, the --from manifest's data.input files are used,\n\
+                     resolved against the manifest directory.\n\
+                     \n\
+                     Override when those paths have moved.\n\
+                     Override too for a different cell set.\n\
+                     Cells are still matched to θ by barcode.\n\
+                     Any count cell absent from θ is dropped."
     )]
     data_files: Option<Vec<Box<str>>>,
 
@@ -184,20 +202,22 @@ pub struct RestArgs {
         long,
         value_delimiter = ',',
         help = "Override batch files (default: inherit from --from)",
-        long_help = "Per-cell batch label files, one per count file; inherited from the \
-                     --from manifest when omitted. Batch labels drive no correction here (θ \
-                     already encodes the batch-aware topic structure) — they are carried \
-                     through for manifest provenance only."
+        long_help = "Per-cell batch label files, one per count file.\n\
+                     They are inherited from the --from manifest when omitted.\n\
+                     Batch labels drive no correction here.\n\
+                     θ already encodes the batch-aware topic structure.\n\
+                     They are carried through for manifest provenance only."
     )]
     batch_files: Option<Vec<Box<str>>>,
 
     #[arg(
         long,
         help = "Cells per block for the streaming edge pass (default 1024)",
-        long_help = "Block size for the single streaming pass that extracts positive edges \
-                     from the counts: cells are read (read_columns_csc) in chunks of this \
-                     many, so larger blocks raise peak RAM per read. With --preload-data the \
-                     whole matrix is already resident, so this only bounds the per-block CSC.",
+        long_help = "Block size for the streaming pass that extracts positive edges.\n\
+                     Cells are read in chunks of this many, via read_columns_csc.\n\
+                     Larger blocks therefore raise peak RAM per read.\n\
+                     With --preload-data the whole matrix is already resident,\n\
+                     so this only bounds the per-block CSC.",
         hide = true
     )]
     block_size: Option<usize>,
@@ -206,9 +226,10 @@ pub struct RestArgs {
         long,
         default_value_t = false,
         help = "Preload all sparse columns into memory first",
-        long_help = "Load every backend column into memory before the edge-extraction pass. \
-                     Strongly recommended on rotational/slow disks, where the streaming reads \
-                     are otherwise I/O-bound.",
+        long_help = "Load every backend column into memory first.\n\
+                     This runs before the edge-extraction pass.\n\
+                     Strongly recommended on rotational or otherwise slow disks,\n\
+                     where the streaming reads are I/O-bound.",
         hide = true
     )]
     preload_data: bool,
