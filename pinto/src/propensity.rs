@@ -9,20 +9,18 @@ use matrix_util::common_io::mkdir_parent;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtPropensityArgs {
-    #[arg(
-        long,
-        help = "Number of edge clusters for K-means",
-        long_help = "Number of edge clusters for K-means.\n\
-                     Defaults to the number of latent dimensions if not specified."
-    )]
-    n_edge_clusters: Option<usize>,
+    /// How the pair latent becomes link communities. Shared verbatim with
+    /// `cage` and `dsvd` — the k-means fallback width is the latent dimension
+    /// here. The old `--maxiter-clustering` survives as an alias.
+    #[command(flatten)]
+    edge_clustering: crate::util::edge_clustering::EdgeClusterArgs,
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Maximum K-means iterations for edge clustering"
+        default_value_t = 42,
+        help = "Random seed for Leiden edge clustering"
     )]
-    maxiter_clustering: usize,
+    seed: u64,
 
     #[arg(
         short = 'z',
@@ -116,13 +114,20 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
 
     let proj_km = proj_mk.transpose();
 
-    info!("clustering edges");
-    let num_clusters = args.n_edge_clusters.unwrap_or(proj_km.nrows());
-
-    let edge_membership = proj_km.kmeans_columns(KmeansArgs {
+    // Same cut `cage` and `dsvd` make, through the same enum. Under leiden the
+    // realized count is whatever the graph found, so read it back off the
+    // labels rather than trusting what was asked for.
+    let edge_membership = args
+        .edge_clustering
+        .resolve(proj_km.nrows(), args.seed)
+        .cluster(&proj_km)?;
+    let num_clusters = edge_membership.iter().copied().max().map_or(0, |m| m + 1);
+    anyhow::ensure!(num_clusters >= 1, "edge clustering produced no communities");
+    info!(
+        "{} link communities over {} edges",
         num_clusters,
-        max_iter: args.maxiter_clustering,
-    });
+        rows.len()
+    );
 
     info!("calibrating propensity");
 

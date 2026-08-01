@@ -459,7 +459,7 @@ pub fn write_gene_community_param(
 #[derive(Debug, Clone, Copy)]
 pub enum EdgeClustering {
     /// Lloyd's algorithm on the pair columns, `k` fixed.
-    Kmeans { n_clusters: usize },
+    Kmeans { n_clusters: usize, max_iter: usize },
     /// Leiden over a cosine kNN graph on the pairs. `target` steers the
     /// resolution toward a community count when the caller has one in mind;
     /// `None` lets `resolution` alone decide.
@@ -469,6 +469,48 @@ pub enum EdgeClustering {
         target: Option<usize>,
         seed: u64,
     },
+}
+
+impl EdgeClustering {
+    /// Cut `proj_kn` (`[K_latent × N_pairs]`, pairs as COLUMNS) into one
+    /// community label per pair. Every pinto subcommand that turns a pair
+    /// latent into link communities goes through here, so `cage`, `dsvd` and
+    /// `prop` cannot disagree about what a community is.
+    pub fn cluster(&self, proj_kn: &Mat) -> anyhow::Result<Vec<usize>> {
+        Ok(match *self {
+            Self::Kmeans {
+                n_clusters,
+                max_iter,
+            } => {
+                info!("K-means clustering edges (k={n_clusters})...");
+                proj_kn.kmeans_columns(KmeansArgs {
+                    num_clusters: n_clusters,
+                    max_iter,
+                })
+            }
+            Self::Leiden {
+                knn,
+                resolution,
+                target,
+                seed,
+            } => {
+                info!(
+                    "Leiden clustering edges (knn={knn}, resolution={resolution}, target={target:?})..."
+                );
+                // `leiden_clustering` takes points as ROWS; `proj_kn` is
+                // pairs-as-columns. Cosine, because the pair latent is a
+                // direction (it was L2-normalized before it got here).
+                matrix_util::clustering::leiden_clustering(
+                    &proj_kn.transpose(),
+                    knn,
+                    resolution,
+                    target,
+                    Some(seed),
+                    true,
+                )?
+            }
+        })
+    }
 }
 
 /// Config for `compute_propensity_and_gene_community_stat`.
@@ -502,36 +544,7 @@ pub fn compute_propensity_and_gene_community_stat(
     } = *cfg;
 
     // 1. Cluster the latent edge vectors
-    let edge_membership = match clustering {
-        EdgeClustering::Kmeans { n_clusters } => {
-            info!("K-means clustering edges (k={n_clusters})...");
-            proj_kn.kmeans_columns(KmeansArgs {
-                num_clusters: n_clusters,
-                max_iter: 100,
-            })
-        }
-        EdgeClustering::Leiden {
-            knn,
-            resolution,
-            target,
-            seed,
-        } => {
-            info!(
-                "Leiden clustering edges (knn={knn}, resolution={resolution}, target={target:?})..."
-            );
-            // `leiden_clustering` takes points as ROWS; `proj_kn` is
-            // pairs-as-columns. Cosine, because the pair latent is a direction
-            // (it was L2-normalized before it got here).
-            matrix_util::clustering::leiden_clustering(
-                &proj_kn.transpose(),
-                knn,
-                resolution,
-                target,
-                Some(seed),
-                true,
-            )?
-        }
-    };
+    let edge_membership = clustering.cluster(proj_kn)?;
 
     // The realized count, not the requested one: Leiden decides it, and k-means
     // can leave a cluster empty. Everything downstream — propensity width, the
