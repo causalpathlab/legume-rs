@@ -54,12 +54,15 @@ impl NceObjectiveArg {
 pub struct BgeArgs {
     #[arg(
         value_delimiter = ',',
-        help = "Sparse count matrices (zarr/h5), comma-separated. Use --multiome\n\
-                for multi-modality input.",
-        long_help = "Single-modality input: one or more files sharing a feature axis,\n\
-                     cells unified by barcode. For multiome (distinct feature spaces\n\
-                     per modality, glued by barcode) pass the files to --multiome\n\
-                     instead. Exactly one of [positional files | --multiome] is required."
+        help = "Sparse count matrices (zarr/h5), comma-separated",
+        long_help = "Single-modality input.\n\
+                     One or more files share a feature axis.\n\
+                     Cells are unified by barcode.\n\
+                     \n\
+                     Multiome input goes to --multiome instead.\n\
+                     There the modalities have distinct feature spaces,\n\
+                     glued by barcode.\n\
+                     Exactly one of the positional files or --multiome is required."
     )]
     data_files: Vec<Box<str>>,
 
@@ -125,40 +128,54 @@ pub struct BgeArgs {
         long = "skip-etm",
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
-        long_help = "Skip the default ETM resolution and emit only the raw bge embeddings\n\
-                     (cell_embedding = Z, dictionary = ρ, no latent).\n\
-                     By default bge resolves ETM topics from the cell embedding\n\
-                     via anchor analysis and ALSO writes the topic-model tables\n\
-                     (latent = log θ, dictionary = β, topic_embedding = α).\n\
-                     Either way Z lands in {out}.cell_embedding.parquet."
+        long_help = "Skip the default ETM resolution.\n\
+                     Only the raw bge embeddings are then emitted:\n\
+                     cell_embedding = Z, dictionary = ρ, and no latent.\n\
+                     \n\
+                     By default bge resolves ETM topics from the cell embedding,\n\
+                     by anchor analysis.\n\
+                     It then ALSO writes the topic-model tables:\n\
+                     latent = log θ, dictionary = β, topic_embedding = α.\n\
+                     \n\
+                     Either way, Z lands in {out}.cell_embedding.parquet."
     )]
     skip_etm: bool,
 
     #[arg(
         long = "no-pip-shrinkage",
         default_value_t = false,
-        help = "Do not shrink co-embedded features by their selection-posterior\n\
-                confidence (--posterior runs only).",
-        long_help = "By default, when --posterior has run, each feature's co-embedded\n\
-                     coordinate is scaled by its `max_h PIP` — the posterior probability\n\
-                     that it loads ANY embedding dim. It is applied after the softmax, so\n\
-                     the attention weights and the calibrated temperature are untouched;\n\
-                     what it does is compress low-confidence features radially toward the\n\
-                     origin.\n\
+        help = "Do not shrink co-embedded features by posterior confidence",
+        long_help = "This applies when --posterior has run.\n\
+                     By default each feature's co-embedded coordinate is scaled\n\
+                     by its `max_h PIP`.\n\
+                     That is the posterior probability of loading ANY dim.\n\
                      \n\
-                     READ THAT LITERALLY: it is a confidence-weighted radial scaling, not a\n\
-                     correction for anything. An earlier version of this help claimed it\n\
-                     rescued signal-free genes from a pile-up on the global cell centroid.\n\
-                     Measured, there is no such pile-up — 0.0% of genes sit within 0.1\n\
-                     cell-radii of the centroid and the median distance is 0.80 — so the\n\
-                     shrinkage does not undo a concentration, it CREATES one, at the origin.\n\
-                     Whether that is what you want depends on how you plan to read the plot.\n\
+                     Scaling is applied after the softmax.\n\
+                     Attention weights and the calibrated temperature are untouched.\n\
+                     What it does is compress low-confidence features radially,\n\
+                     toward the origin.\n\
                      \n\
-                     The scaling is also only as informative as the posterior behind it. When\n\
-                     the embedding dimension far exceeds the embedding's effective rank,\n\
-                     nearly every gene loads something, `max_h PIP` saturates near 1, and\n\
-                     the weights degenerate into one constant — the run reports the weight\n\
-                     spread so that case is visible rather than silent.\n\
+                     READ THAT LITERALLY.\n\
+                     It is a confidence-weighted radial scaling.\n\
+                     It corrects for nothing.\n\
+                     An earlier version of this help was wrong about it.\n\
+                     It claimed the scaling rescued signal-free genes from\n\
+                     a pile-up on the cell centroid.\n\
+                     Measured, there is no such pile-up.\n\
+                     0.0% of genes sit within 0.1 cell-radii of the centroid,\n\
+                     and the median distance is 0.80.\n\
+                     So the shrinkage does not undo a concentration.\n\
+                     It CREATES one, at the origin.\n\
+                     Whether you want that depends on how you read the plot.\n\
+                     \n\
+                     The scaling is only as informative as its posterior.\n\
+                     When the embedding dimension far exceeds the effective rank,\n\
+                     nearly every gene loads something.\n\
+                     `max_h PIP` then saturates near 1.\n\
+                     The weights degenerate into one constant.\n\
+                     The run reports the weight spread.\n\
+                     That case is therefore visible rather than silent.\n\
+                     \n\
                      Pass this flag to keep the raw co-embedding."
     )]
     no_pip_shrinkage: bool,
@@ -172,11 +189,10 @@ pub struct BgeArgs {
     #[arg(
         long = "bridge-weight",
         default_value_t = 1.0,
-        help = "Up-weight matched cells in the cell-axis sampler (--multiome only;\n\
-                1.0 = off).",
-        long_help = "Up-weight matched (multi-modality) cells in the cell-axis sampler by this factor\n\
-                     so they anchor cross-modal alignment\n\
-                     (--multiome only; 1.0 = off)."
+        help = "Up-weight matched cells in the cell-axis sampler; 1.0 = off",
+        long_help = "Up-weight matched multi-modality cells in the cell-axis sampler.\n\
+                     They then anchor the cross-modal alignment.\n\
+                     This applies to --multiome only; 1.0 turns it off."
     )]
     bridge_weight: f32,
 
@@ -273,38 +289,48 @@ pub struct BgeArgs {
         long,
         value_name = "FILE[,FILE...]",
         help = "Multiome modality files (comma-separated); repeat for multiple samples.",
-        long_help = "Multiome load: pass files for one sample (group) per flag,\n\
-                     comma-separated, e.g. `--multiome rna.zarr,atac.zarr`. Cells\n\
-                     are the shared axis; each modality keeps its own features.\n\
-                     Repeat the flag for each additional sample/group:\n\
+        long_help = "Multiome load.\n\
+                     Pass one sample (group) per flag, comma-separated,\n\
+                     as in `--multiome rna.zarr,atac.zarr`.\n\
+                     Cells are the shared axis.\n\
+                     Each modality keeps its own features.\n\
+                     Repeat the flag for each additional sample or group:\n\
                      \n\
                        --multiome rna1.zarr,atac1.zarr \\\n\
                        --multiome rna2.zarr,atac2.zarr\n\
                      \n\
-                     Cell (barcode) identity: within a group, equal barcodes are\n\
-                     the same cell (Union merge across modalities; a cell present\n\
-                     in only some files is fine — patchy multiome). ACROSS groups\n\
-                     barcodes must be disjoint — a shared barcode would merge\n\
-                     cells from different samples (validated; error on collision).\n\
+                     Cell (barcode) identity.\n\
+                     Within a group, equal barcodes are the same cell.\n\
+                     Modalities Union-merge.\n\
+                     A cell present in only some files is fine.\n\
+                     Patchy multiome therefore works.\n\
+                     ACROSS groups, barcodes must be disjoint.\n\
+                     A shared barcode would merge cells from different samples.\n\
+                     This is validated, and a collision is an error.\n\
                      \n\
-                     Feature (modality) identity: features are namespaced `{name}/{modality}`\n\
-                     so the SAME modality across samples merges (shared gene panel)\n\
-                     while DIFFERENT modalities stay on separate rows —\n\
-                     even when names collide (e.g. spliced vs unspliced `TSPAN6`).\n\
-                     The modality tag defaults to the within-group file position (m0, m1, …);\n\
-                     override it with a `label=` prefix, e.g.\n\
+                     Feature (modality) identity.\n\
+                     Features are namespaced `{name}/{modality}`.\n\
+                     The SAME modality across samples therefore merges,\n\
+                     sharing one gene panel.\n\
+                     DIFFERENT modalities stay on separate rows.\n\
+                     That holds even when names collide.\n\
+                     Spliced versus unspliced `TSPAN6` is the usual case.\n\
+                     \n\
+                     The modality tag defaults to file position: m0, m1, and so on.\n\
+                     Override it with a `label=` prefix:\n\
                        --multiome spliced=spliced.zarr,unspliced=unspliced.zarr\n\
                      File ORDER within a group defines modality order,\n\
                      so the positional default lines up across groups.\n\
                      \n\
-                     Batch identity: each group becomes its own batch when\n\
-                     --batch-files is omitted (modality-presence auto-batch).\n\
-                     Pass a single --batch-files (one label per unified cell) to\n\
-                     set batches explicitly. Replaces the positional data files.\n\
+                     Batch identity.\n\
+                     Each group becomes its own batch when --batch-files is omitted.\n\
+                     That is modality-presence auto-batching.\n\
+                     Pass a single --batch-files, one label per unified cell,\n\
+                     to set batches explicitly.\n\
+                     This flag replaces the positional data files.\n\
                      \n\
-                     Note: comma-separate files within one group with no spaces\n\
-                     (e.g. rna.zarr,atac.zarr); use a separate --multiome flag\n\
-                     for each additional group."
+                     Note: comma-separate files within one group, with no spaces.\n\
+                     Use a separate --multiome flag for each additional group."
     )]
     multiome: Vec<Box<str>>,
 
@@ -312,8 +338,11 @@ pub struct BgeArgs {
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,
-        help = "NCE objective: softmax (InfoNCE — negatives compete; sharper on\n\
-                dense pseudobulk data; default) or logistic (per-pair SGNS)"
+        help = "NCE objective: softmax or logistic",
+        long_help = "NCE objective.\n\
+                     softmax is InfoNCE, where negatives compete.\n\
+                     It is sharper on dense pseudobulk data, and is the default.\n\
+                     logistic is per-pair SGNS."
     )]
     nce_objective: NceObjectiveArg,
 
@@ -325,12 +354,14 @@ pub struct BgeArgs {
         long_help = "Seed for the fit's sampling RNG and parameter initialization,\n\
                      and for the posterior samplers when --mcmc/--posterior is given.\n\
                      \n\
-                     Changing it gives an INDEPENDENT fit — different initialization\n\
-                     and different minibatch order — which is what an A/B across seeds needs.\n\
+                     Changing it gives an INDEPENDENT fit.\n\
+                     Initialization and minibatch order both differ.\n\
+                     That is what an A/B across seeds needs.\n\
                      \n\
-                     It does NOT make a run bit-reproducible: the variational gate's\n\
-                     reparameterization noise is drawn from the device RNG, outside this stream,\n\
-                     so two runs at the same seed still differ slightly."
+                     It does NOT make a run bit-reproducible.\n\
+                     The variational gate's reparameterization noise comes from\n\
+                     the device RNG, outside this stream.\n\
+                     Two runs at the same seed still differ slightly."
     )]
     seed: u64,
 
@@ -350,11 +381,13 @@ pub struct BgeArgs {
         short,
         required = true,
         help = "Output prefix",
-        long_help = "Output prefix; produces {out}.cell_embedding.parquet (Z),\n\
+        long_help = "Output prefix.\n\
+                     It produces {out}.cell_embedding.parquet, which is Z,\n\
                      {out}.dictionary.parquet, {out}.feature_embedding.parquet,\n\
-                     {out}.feature_bias.parquet, {out}.cell_bias.parquet,\n\
-                     {out}.senna.json — plus {out}.{latent,topic_embedding}.parquet\n\
-                     unless --skip-etm"
+                     {out}.feature_bias.parquet, {out}.cell_bias.parquet\n\
+                     and {out}.senna.json.\n\
+                     Unless --skip-etm, it adds {out}.latent.parquet\n\
+                     and {out}.topic_embedding.parquet."
     )]
     out: Box<str>,
 }
