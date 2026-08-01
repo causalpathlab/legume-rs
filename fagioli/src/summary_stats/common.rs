@@ -123,8 +123,9 @@ pub struct CommonSumstatArgs {
         help = "Keep only these individuals in the reference panel",
         long_help = "Keep only these individuals in the LD reference panel (like plink --keep).\n\n\
             Accepts a file path or a comma-separated list of IIDs.\n\
-            File format: one individual per line, either \"FID IID\" (two columns)\n\
-            or just \"IID\" (one column). Lines starting with # are skipped.\n\
+            File format: one individual per line.\n\
+            Each line is either \"FID IID\", two columns, or just \"IID\".\n\
+            Lines starting with # are skipped.\n\
             Gzipped files (.gz) are supported.\n\n\
             Examples:\n  \
               --keep samples.txt\n  \
@@ -139,8 +140,9 @@ pub struct CommonSumstatArgs {
         help = "Remove these individuals from the reference panel",
         long_help = "Remove these individuals from the LD reference panel (like plink --remove).\n\n\
             Accepts a file path or a comma-separated list of IIDs.\n\
-            File format: one individual per line, either \"FID IID\" (two columns)\n\
-            or just \"IID\" (one column). Lines starting with # are skipped.\n\
+            File format: one individual per line.\n\
+            Each line is either \"FID IID\", two columns, or just \"IID\".\n\
+            Lines starting with # are skipped.\n\
             Gzipped files (.gz) are supported.\n\n\
             Examples:\n  \
               --remove samples.txt\n  \
@@ -155,8 +157,9 @@ pub struct CommonSumstatArgs {
         help = "External LD block boundary file (BED: chr, start, end)",
         long_help = "External LD block file in BED format (chr, start, end).\n\
             Each block defines an independent fine-mapping region.\n\
-            If omitted, LD blocks are automatically estimated from the\n\
-            reference genotypes using Nystrom + rSVD embedding distances."
+            If omitted, LD blocks are estimated automatically.\n\
+            Estimation uses the reference genotypes,\n\
+            via Nystrom and rSVD embedding distances."
     )]
     pub ld_block_file: Option<Box<str>>,
 
@@ -206,8 +209,9 @@ pub struct CommonSumstatArgs {
         default_value = "10",
         help = "Number of sparse components L (max causal SNPs per block)",
         long_help = "Number of sparse components (L) in the model.\n\
-            Each component can select one causal SNP, so L is the maximum number\n\
-            of causal variants the model can identify per LD block.\n\
+            Each component can select one causal SNP.\n\
+            L is therefore the maximum number of causal variants,\n\
+            per LD block.\n\
             Used by both SGVB (SuSiE) and MCMC. Default: 10."
     )]
     pub num_components: usize,
@@ -221,8 +225,8 @@ pub struct CommonSumstatArgs {
             If empty (default), an adaptive grid is built from LDSC h² estimation.\n\
             - SGVB: fits each grid value and selects the best by ELBO.\n\
             - MCMC: uses the median of the grid as a single prior variance\n\
-              (or a fixed value if only one is given). Use --estimate-prior-var\n\
-              to let the MCMC chain learn the prior variance from the data."
+              A single given value is used as-is.\n\
+              Pass --estimate-prior-var to let the chain learn it from data."
     )]
     pub prior_var: Box<str>,
 
