@@ -38,9 +38,10 @@ pub struct CnvArgs {
     #[arg(
         long,
         help = "GFF/GTF annotation for CNV detection.",
-        long_help = "GFF/GTF file with gene coordinates. When provided, runs the\n\
-                     per-sample HMM CNV model on the cocoa-adjusted (indv × topic)\n\
-                     log-ratio matrix."
+        long_help = "GFF/GTF file with gene coordinates.\n\
+                     When provided, it runs the per-sample HMM CNV model.\n\
+                     Its input is the cocoa-adjusted log-ratio matrix,\n\
+                     over (indv × topic)."
     )]
     pub gff: Option<Box<str>>,
 
@@ -64,9 +65,10 @@ pub struct CnvArgs {
         long,
         default_value_t = 3,
         help = "Iterative reference refinement passes (1 = no refinement).",
-        long_help = "After the first HMM call, cluster samples within each topic on\n\
-                     their per-gene cn_score (kmeans K=2). The lower-burden cluster\n\
-                     becomes the new reference; signal is rebuilt and HMM re-run."
+        long_help = "After the first HMM call, samples are clustered per topic.\n\
+                     Clustering runs on their per-gene cn_score, by kmeans at K=2.\n\
+                     The lower-burden cluster becomes the new reference.\n\
+                     Signal is then rebuilt, and the HMM re-run."
     )]
     pub cnv_iter_ref: usize,
 

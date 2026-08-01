@@ -20,17 +20,21 @@ use clap::{Parser, Subcommand};
 #[command(
     version,
     about = "CoCoA — Counterfactual Confounder Adjustment for single-cell DE",
-    long_about = "CoCoA implements counterfactual confounder adjustment for single-cell\n\
-                  pseudobulk differential expression (Park & Kellis, 2021). It pairs an\n\
-                  individual-level matching procedure with topic-aware pseudobulk\n\
-                  collapsing to break collider bias when cell type is a downstream\n\
-                  effect of both exposure and an unmeasured confounder.\n\
+    long_about = "CoCoA implements counterfactual confounder adjustment.\n\
+                  It targets single-cell pseudobulk differential expression,\n\
+                  after Park & Kellis, 2021.\n\
+                  \n\
+                  It pairs individual-level matching with topic-aware\n\
+                  pseudobulk collapsing.\n\
+                  That breaks collider bias.\n\
+                  The bias arises when cell type is a downstream effect of\n\
+                  both exposure and an unmeasured confounder.\n\
                   \n\
                   Subcommands:\n  \
-                    collapse          : pseudobulk SC counts per (individual, topic)\n  \
-                    diff              : differential expression with confounder adjustment\n  \
-                    simulate-one      : simulate a single cell-type with W → X → Y\n  \
-                    simulate-collider : simulate multi cell-type with X → A ← U collider"
+                  \x20 collapse          — pseudobulk SC counts per (individual, topic)\n  \
+                  \x20 diff              — differential expression, confounder-adjusted\n  \
+                  \x20 simulate-one      — one cell type, with W → X → Y\n  \
+                  \x20 simulate-collider — many cell types, with an X → A ← U collider"
 )]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Increase output verbosity")]
@@ -54,13 +58,16 @@ enum Commands {
     #[command(
         about = "Differential expression analysis with pseudobulk",
         long_about = "\
-Differential expression on pseudobulk data with confounder adjustment via\n\
-cross-condition / cross-exposure matching (Park & Kellis, 2021).\n\
+Differential expression on pseudobulk data, confounder-adjusted.\n\
+Adjustment is by cross-condition and cross-exposure matching,\n\
+after Park & Kellis, 2021.\n\
 \n\
-By default, topic proportions are residualized to remove the\n\
-exposure-driven shift before analysis. This breaks collider bias\n\
-when cell type A is a common effect of exposure X and cell-level\n\
-confounder U (X → A ← U). Use --no-residualize-topics to disable.\n\
+By default, topic proportions are residualized.\n\
+That removes the exposure-driven shift before analysis.\n\
+It breaks collider bias.\n\
+The bias arises when cell type A is a common effect of exposure X\n\
+and cell-level confounder U, so X → A ← U.\n\
+Use --no-residualize-topics to disable it.\n\
 \n\
 References:\n  \
   Park & Kellis (2021) Genome Biol — CoCoA-diff framework\n  \
@@ -87,9 +94,9 @@ Causal DAG:\n\
 \n  \
   Edges: W→X, W→Y, X→Y (causal, causal genes only)\n\
 \n  \
-  W is a confounder: it affects both exposure assignment X and\n  \
-  gene expression Y, creating a spurious X–Y association even\n  \
-  for non-causal genes.\n\
+  W is a confounder.\n  \
+  It affects both exposure assignment X and gene expression Y.\n  \
+  That creates a spurious X–Y association, even for non-causal genes.\n\
 \n\
 Generative model:\n\
 \n  \
@@ -127,9 +134,9 @@ Causal DAG:\n\
 \n  \
   Edges: V→X, V→Y, X→Y (causal), X→A, U→A, U→Y\n\
 \n  \
-  A is a collider (X → A ← U). Conditioning on cell type A\n  \
-  opens the spurious path X → A ← U → Y, inducing a non-causal\n  \
-  association between exposure X and expression Y through U.\n\
+  A is a collider: X → A ← U.\n  \
+  Conditioning on cell type A opens the path X → A ← U → Y.\n  \
+  That induces a non-causal X–Y association, through U.\n\
 \n\
 Generative model:\n\
 \n  \

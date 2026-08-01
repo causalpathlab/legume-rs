@@ -93,11 +93,14 @@ pub struct CollapseArgs {
         long,
         default_value_t = false,
         help = "Disable NB-Fisher housekeeping gene adjustment",
-        long_help = "By default, per-(individual, cell_type) count sums are row-scaled by\n\
-                     NB-Fisher weights w_g = 1 / (1 + π_g · s̄ · φ(μ_g)) before the\n\
-                     Gamma posterior update. High-mean / high-dispersion housekeeping\n\
-                     genes get attenuated, matching pinto's gene-topic adjustment.\n\
-                     Use this flag to disable for raw rates."
+        long_help = "By default, per-(individual, cell_type) count sums are scaled.\n\
+                     The row scale is the NB-Fisher weight\n\
+                     w_g = 1 / (1 + π_g · s̄ · φ(μ_g)).\n\
+                     It is applied before the Gamma posterior update.\n\
+                     \n\
+                     High-mean, high-dispersion housekeeping genes are attenuated.\n\
+                     That matches pinto's gene-topic adjustment.\n\
+                     Use this flag to disable it and get raw rates."
     )]
     no_adjust_housekeeping: bool,
 

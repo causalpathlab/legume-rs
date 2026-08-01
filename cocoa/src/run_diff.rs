@@ -148,10 +148,12 @@ pub struct DiffArgs {
     #[arg(
         long,
         help = "Known covariate matrix file (tsv.gz, n_indv × n_covar)",
-        long_help = "Provide a known individual-level covariate matrix V instead of\n\
-                     discovering confounders by random projection. The file should be\n\
-                     a tab-delimited matrix (n_indv x n_covar) in .tsv.gz format.\n\
-                     Rows correspond to individuals 0, 1, 2, ... in order."
+        long_help = "Provide a known individual-level covariate matrix V.\n\
+                     Confounders are then not discovered by random projection.\n\
+                     \n\
+                     The file is a tab-delimited matrix, n_indv x n_covar,\n\
+                     in .tsv.gz format.\n\
+                     Rows correspond to individuals 0, 1, 2, and so on, in order."
     )]
     #[arg(conflicts_with = "adjustment_data_files")]
     covariate_file: Option<Box<str>>,
@@ -160,10 +162,11 @@ pub struct DiffArgs {
         long,
         value_delimiter = ',',
         help = "Separate SC data files (.zarr/.h5) for confounder adjustment",
-        long_help = "Provide separate single-cell data (e.g., scRNA-seq) for computing\n\
-                     the confounder-adjustment projection. KNN matching will be based on\n\
-                     these data, while y1/y0 counts come from the primary data files.\n\
-                     Both datasets must have the same cells in the same column order."
+        long_help = "Provide separate single-cell data, such as scRNA-seq.\n\
+                     It computes the confounder-adjustment projection.\n\
+                     KNN matching is then based on these data.\n\
+                     The y1/y0 counts still come from the primary data files.\n\
+                     Both datasets must hold the same cells, in the same order."
     )]
     adjustment_data_files: Option<Vec<Box<str>>>,
 
@@ -171,10 +174,13 @@ pub struct DiffArgs {
         long,
         default_value_t = false,
         help = "Disable residual collider adjustment of topic proportions",
-        long_help = "By default, the exposure-driven shift is removed from topic logits\n\
-                     before analysis to break collider bias (X -> A <- U). Use this flag\n\
-                     to disable this adjustment, e.g. when cell type is known not to be\n\
-                     a collider or for comparison experiments.\n\
+        long_help = "By default, the exposure-driven shift is removed.\n\
+                     It is removed from the topic logits, before analysis.\n\
+                     That breaks collider bias, X -> A <- U.\n\
+                     \n\
+                     Use this flag to disable the adjustment.\n\
+                     That suits a cell type known not to be a collider,\n\
+                     and comparison experiments.\n\
                      \n\
                      Reference: adapted from residual collider stratification,\n\
                      Hartwig et al. (2023) Eur J Epidemiol."
@@ -185,10 +191,15 @@ pub struct DiffArgs {
         long,
         default_value_t = false,
         help = "Disable NB-Fisher housekeeping gene adjustment",
-        long_help = "By default, y1/y0 sufficient statistics are row-scaled by NB-Fisher\n\
-                     weights w_g = 1 / (1 + π_g · s̄ · φ(μ_g)) after accumulation, so\n\
-                     τ, μ, γ posteriors contract toward the prior for housekeeping\n\
-                     (high-mean / high-dispersion) genes. Matches pinto's adjustment."
+        long_help = "By default, y1/y0 sufficient statistics are row-scaled.\n\
+                     The row scale is the NB-Fisher weight, applied after\n\
+                     accumulation:\n\
+                     \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g))\n\
+                     \n\
+                     So the τ, μ and γ posteriors contract toward the prior.\n\
+                     That happens for housekeeping genes, which run high-mean\n\
+                     and high-dispersion.\n\
+                     This matches pinto's adjustment."
     )]
     no_adjust_housekeeping: bool,
 
@@ -196,13 +207,17 @@ pub struct DiffArgs {
         long,
         default_value_t = false,
         help = "Refine cell → pseudobulk membership via senna's multilevel DC-Poisson pass",
-        long_help = "When set, cocoa routes pseudobulk assignment through the same\n\
-                     multilevel path senna uses (collapse_columns_multilevel_vec with\n\
-                     BBKNN + DC-Poisson refinement). Cells are reassigned across\n\
-                     sibling pseudobulks by Poisson likelihood under NB-Fisher gene\n\
-                     weighting, so each pseudobulk is more internally coherent.\n\
-                     Only applies when using the default pseudobulk path\n\
-                     (no --covariate-file and no --adjustment-data-files)."
+        long_help = "Route pseudobulk assignment through senna's multilevel path.\n\
+                     That is collapse_columns_multilevel_vec, with BBKNN and\n\
+                     DC-Poisson refinement.\n\
+                     \n\
+                     Cells are reassigned across sibling pseudobulks.\n\
+                     The criterion is Poisson likelihood, under NB-Fisher\n\
+                     gene weighting.\n\
+                     Each pseudobulk therefore becomes more internally coherent.\n\
+                     \n\
+                     This applies only on the default pseudobulk path,\n\
+                     so with neither --covariate-file nor --adjustment-data-files."
     )]
     refine: bool,
 

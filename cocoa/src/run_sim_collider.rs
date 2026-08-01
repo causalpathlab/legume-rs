@@ -148,8 +148,9 @@ pub struct SimColliderArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a plain `.zarr` directory instead of `.zarr.zip` archive",
-        long_help = "Disable `.zarr.zip` archiving (the default) and keep a plain `.zarr`\n\
-                     directory instead. Matches the `--no-zip` convention used by faba."
+        long_help = "Disable `.zarr.zip` archiving, which is the default.\n\
+                     A plain `.zarr` directory is written instead.\n\
+                     This matches the `--no-zip` convention faba uses."
     )]
     zip: bool,
 

@@ -103,8 +103,7 @@ pub struct HvgCliArgs {
         // The one-line help has to say what selection actually DOES, because it
         // differs by command and "keep top N genes" reads as a hard subset
         // everywhere — which is wrong for senna, where every gene is still trained.
-        help = "Top N variable genes, 0 = all (senna: weights phase-1 sketching, still trains \
-                every gene; pinto / faba gem: hard-subsets the trained gene axis)",
+        help = "Top N variable genes; 0 = all",
         long_help = "Select top N genes via binned residual-variance\n\
                      (scanpy/Seurat-style). Collapsing and batch-effect\n\
                      estimation still see all genes. 0 disables HVG.\n\
