@@ -866,7 +866,10 @@ pub fn fit_cell_activity_graph_embedding(
     let mut proj_kn = pair_latent.transpose();
     proj_kn.normalize_columns_inplace();
 
-    proj_kn.transpose().to_parquet_with_names(
+    // One `[E × D]` copy, written out and then clustered — the shared routine
+    // takes pairs as rows, so this is the same buffer both times.
+    let proj_ne = proj_kn.transpose();
+    proj_ne.to_parquet_with_names(
         &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
         Some(&embedding_col_names(args.embedding_dim)),
@@ -880,9 +883,9 @@ pub fn fit_cell_activity_graph_embedding(
     // `embedding_dim` interaction regimes, so the graph decides the count and
     // `n_edge_clusters` is only a target (or nothing, when left unset). Under
     // k-means the requested count IS the count.
-    let clustering = args.edge_clustering.resolve(args.embedding_dim, c.seed);
+    let clustering = args.edge_clustering.resolve(c.seed);
     let n_edge_clusters = compute_propensity_and_gene_community_stat(
-        &proj_kn,
+        &proj_ne,
         &edges_usize,
         &data_vec,
         n_cells,

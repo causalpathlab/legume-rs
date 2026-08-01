@@ -458,8 +458,12 @@ pub fn write_gene_community_param(
 /// `[K_latent × N_pairs]` projection, so every caller can offer either.
 #[derive(Debug, Clone, Copy)]
 pub enum EdgeClustering {
-    /// Lloyd's algorithm on the pair columns, `k` fixed.
-    Kmeans { n_clusters: usize, max_iter: usize },
+    /// Lloyd's algorithm on the pairs, `k` fixed. `None` falls back to the
+    /// latent width, read off the matrix rather than passed in beside it.
+    Kmeans {
+        n_clusters: Option<usize>,
+        max_iter: usize,
+    },
     /// Leiden over a cosine kNN graph on the pairs. `target` steers the
     /// resolution toward a community count when the caller has one in mind;
     /// `None` lets `resolution` alone decide.
@@ -472,19 +476,25 @@ pub enum EdgeClustering {
 }
 
 impl EdgeClustering {
-    /// Cut `proj_kn` (`[K_latent × N_pairs]`, pairs as COLUMNS) into one
-    /// community label per pair. Every pinto subcommand that turns a pair
-    /// latent into link communities goes through here, so `cage`, `dsvd` and
-    /// `prop` cannot disagree about what a community is.
-    pub fn cluster(&self, proj_kn: &Mat) -> anyhow::Result<Vec<usize>> {
+    /// Cut `proj_ne` (`[N_pairs × K_latent]`, pairs as ROWS) into one community
+    /// label per pair. Every pinto subcommand that turns a pair latent into
+    /// link communities goes through here, so `cage`, `dsvd` and `prop` cannot
+    /// disagree about what a community is.
+    ///
+    /// Pairs as rows because that is the orientation everything else already
+    /// has: it is how the latent is written to parquet, how `prop` reads it
+    /// back, and what Leiden wants. Only k-means needs the transpose, and it is
+    /// no longer the default.
+    pub fn cluster(&self, proj_ne: &Mat) -> anyhow::Result<Vec<usize>> {
         Ok(match *self {
             Self::Kmeans {
                 n_clusters,
                 max_iter,
             } => {
-                info!("K-means clustering edges (k={n_clusters})...");
-                proj_kn.kmeans_columns(KmeansArgs {
-                    num_clusters: n_clusters,
+                let num_clusters = n_clusters.unwrap_or(proj_ne.ncols());
+                info!("K-means clustering edges (k={num_clusters})...");
+                proj_ne.transpose().kmeans_columns(KmeansArgs {
+                    num_clusters,
                     max_iter,
                 })
             }
@@ -497,11 +507,10 @@ impl EdgeClustering {
                 info!(
                     "Leiden clustering edges (knn={knn}, resolution={resolution}, target={target:?})..."
                 );
-                // `leiden_clustering` takes points as ROWS; `proj_kn` is
-                // pairs-as-columns. Cosine, because the pair latent is a
-                // direction (it was L2-normalized before it got here).
+                // Cosine, because the pair latent is a direction (it was
+                // L2-normalized before it got here).
                 matrix_util::clustering::leiden_clustering(
-                    &proj_kn.transpose(),
+                    proj_ne,
                     knn,
                     resolution,
                     target,
@@ -511,6 +520,16 @@ impl EdgeClustering {
             }
         })
     }
+}
+
+/// How many communities the labels actually realize — what Leiden discovered,
+/// or what k-means gave after leaving a cluster empty. Callers report THIS in
+/// their manifest, not the count they asked for.
+pub fn realized_communities(edge_membership: &[usize], n_edges: usize) -> anyhow::Result<usize> {
+    let n = edge_membership.iter().copied().max().map_or(0, |m| m + 1);
+    anyhow::ensure!(n >= 1, "edge clustering produced no communities");
+    info!("{} link communities over {} edges", n, n_edges);
+    Ok(n)
 }
 
 /// Config for `compute_propensity_and_gene_community_stat`.
@@ -531,7 +550,7 @@ pub struct PropensityReportConfig {
 /// when it leaves a cluster empty. Callers should report THAT in their manifest
 /// rather than the count they asked for.
 pub fn compute_propensity_and_gene_community_stat(
-    proj_kn: &Mat,
+    proj_ne: &Mat,
     edges: &[(usize, usize)],
     data_vec: &SparseIoVec,
     n_cells: usize,
@@ -544,14 +563,11 @@ pub fn compute_propensity_and_gene_community_stat(
     } = *cfg;
 
     // 1. Cluster the latent edge vectors
-    let edge_membership = clustering.cluster(proj_kn)?;
+    let edge_membership = clustering.cluster(proj_ne)?;
 
-    // The realized count, not the requested one: Leiden decides it, and k-means
-    // can leave a cluster empty. Everything downstream — propensity width, the
-    // gene × community stat, the manifest — keys on this.
-    let n_clusters = edge_membership.iter().copied().max().map_or(0, |m| m + 1);
-    anyhow::ensure!(n_clusters >= 1, "edge clustering produced no communities");
-    info!("{} link communities over {} edges", n_clusters, edges.len());
+    // Everything downstream — propensity width, the gene × community stat, the
+    // manifest — keys on the realized count.
+    let n_clusters = realized_communities(&edge_membership, edges.len())?;
 
     // 2. Propensity [N_cells × K]
     info!("Computing cell propensity...");

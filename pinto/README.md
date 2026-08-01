@@ -64,9 +64,11 @@ pinto dsvd data.h5 -c coords.csv -o out
 column), `{out}.link_community.parquet`, `{out}.gene_topic.parquet`,
 `{out}.delta.parquet` (multi-batch only), and `{out}.metadata.json`.
 
-### `prop` (propensity) — re-cluster dsvd edges at a different K
+### `prop` (propensity) — re-cluster a cage/dsvd edge latent
 
-Given dsvd's edge latent codes, runs K-means and derives per-cell propensity.
+Given an edge latent, cuts it into link communities and derives per-cell
+propensity. Leiden by default; pass `--edge-cluster-method kmeans
+--n-edge-clusters K` for a fixed K.
 
 ```sh
 pinto prop -z out.latent.parquet -e out.coord_pairs.parquet -o prop
