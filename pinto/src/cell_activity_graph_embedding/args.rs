@@ -48,6 +48,24 @@ impl GeneNameMode {
     }
 }
 
+/// Clusterer for the per-pair latent. `kmeans` fixes the count;
+/// `leiden` discovers it from the graph.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum EdgeClusterMethod {
+    Kmeans,
+    Leiden,
+}
+
+impl std::fmt::Display for EdgeClusterMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Kmeans => write!(f, "kmeans"),
+            Self::Leiden => write!(f, "leiden"),
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 pub struct CellActivityGraphEmbeddingArgs {
     #[command(flatten)]
@@ -79,35 +97,35 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Re-estimate pip every N epochs against the current embedding; 0 = never",
         long_help = "How often to re-estimate the gate's keep-probabilities.\n\
                      \n\
-                     The per-epoch z draw is dropout-style regularization: a hard \
-                     0/1 mask per (gene, dim) that zeroes the gradient for \
-                     excluded coordinates, so each epoch trains a different \
-                     sub-network. This flag controls how often the DROP RATES \
-                     behind it are refreshed.\n\
+                     The per-epoch z draw is dropout-style regularization.\n\
+                     It is a hard 0/1 mask per (gene, dim).\n\
+                     The mask zeroes the gradient for excluded coordinates,\n\
+                     so each epoch trains a different sub-network.\n\
+                     This flag sets how often the DROP RATES behind it refresh.\n\
                      \n\
-                     They need refreshing because the initial fit runs against an \
-                     SVD of pseudobulk log-counts, which is not the embedding the \
-                     model ships. Every N epochs the live cell embedding is \
-                     folded up into the pseudobulks and the sampler re-runs, \
-                     warm-started from the previous round.\n\
+                     They need refreshing.\n\
+                     The initial fit sees an SVD of pseudobulk log-counts.\n\
+                     That is not the embedding the model ships.\n\
+                     So every N epochs the sampler re-runs.\n\
+                     It sees the live cell embedding, folded into pseudobulks.\n\
+                     Each round warm-starts from the previous one.\n\
                      \n\
-                     This is NOT EM: the refresh is a Poisson fit on counts while \
-                     training is edge NCE, so there is no single objective being \
-                     improved and no convergence guarantee.\n\
+                     This is NOT EM.\n\
+                     The refresh is a Poisson fit on counts.\n\
+                     Training is edge NCE.\n\
+                     No single objective improves, so nothing converges.\n\
                      \n\
-                     Note what does NOT depend on this flag: the per-epoch z draw \
-                     is free (one Bernoulli per (gene, dim) on device), so every \
-                     epoch still trains its own sub-network no matter how rarely \
-                     the rates behind it are re-estimated. This flag prices only \
-                     the sampler.\n\
+                     The per-epoch z draw does NOT depend on this flag.\n\
+                     It costs one Bernoulli per (gene, dim) on device.\n\
+                     Every epoch trains its own sub-network regardless.\n\
+                     This flag prices only the sampler.\n\
                      \n\
-                     5 (default) is a budget choice, not a statistical one. \
-                     Measured on GBM the rates settle by epoch 6 and hold, so \
-                     with epochs in the hundreds refreshing every epoch spends \
-                     most of its sweeps re-deriving a converged answer. 1 \
-                     refreshes every epoch; 0 disables the refresh entirely and \
-                     keeps the cold rates for the whole run, which is what \
-                     `senna bge` does."
+                     The default of 5 is a budget choice, not a statistical one.\n\
+                     Measured on GBM, the rates settle by epoch 6 and hold.\n\
+                     Refreshing every epoch then re-derives a settled answer.\n\
+                     Pass 1 to refresh every epoch anyway.\n\
+                     Pass 0 to keep the cold rates for the whole run.\n\
+                     That is what `senna bge` does."
     )]
     pub selection_refresh_epochs: usize,
 
@@ -117,19 +135,20 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Sweeps per pip refresh (half are burn-in)",
         long_help = "Gibbs sweeps for each --selection-refresh-epochs round.\n\
                      \n\
-                     Deliberately too few to converge a posterior on its own. A \
-                     refresh is one cheap step in a long sequence, not a \
-                     stand-alone fit: the chain is warm-started from the previous \
-                     round's inclusion state, and what makes the selection good \
-                     is running many rounds against an embedding that keeps \
-                     moving, not running any single round to convergence.\n\
+                     Deliberately too few to converge a posterior on its own.\n\
+                     A refresh is one cheap step in a long sequence.\n\
+                     The chain warm-starts from the previous round's state.\n\
+                     What makes the selection good is many rounds against an\n\
+                     embedding that keeps moving.\n\
+                     Running any single round to convergence does not.\n\
                      \n\
-                     10 sweeps means 5 kept. That is only sane because the PIP is \
-                     Rao-Blackwellized: each kept sweep contributes the ANALYTIC \
-                     inclusion probability rather than one 0/1 draw, so 5 sweeps \
-                     no longer pins the estimate to a 1/5 grid the way averaging \
-                     indicators would. Raising this buys precision per round; \
-                     spending the same budget on more epochs is usually better."
+                     10 sweeps means 5 kept.\n\
+                     That is only sane because the PIP is Rao-Blackwellized.\n\
+                     Each kept sweep contributes the ANALYTIC inclusion\n\
+                     probability rather than one 0/1 draw.\n\
+                     So 5 sweeps do not pin the estimate to a 1/5 grid.\n\
+                     Raising this buys precision per round.\n\
+                     Spending the same budget on more epochs is usually better."
     )]
     pub selection_refresh_sweeps: usize,
 
@@ -137,33 +156,34 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 10,
         help = "Gibbs sweeps for the COLD initial pip (half are burn-in)",
-        long_help = "Sweeps for the one-off fit that runs before training, against \
-                     an SVD of the pseudobulk log-counts.\n\
+        long_help = "Sweeps for the one-off fit that runs before training.\n\
+                     It conditions on an SVD of the pseudobulk log-counts.\n\
                      \n\
-                     This round only has to BREAK IN — get the chain off its \
-                     initialization and somewhere sane. It is not asked to \
-                     converge, which is why it carries no more sweeps than a \
-                     refresh does: the SVD basis it conditions on is not the \
-                     embedding the model ships, so a precise fit here would be a \
-                     precise answer to the wrong question. The refreshes against \
-                     the live embedding do the real work.\n\
+                     This round only has to BREAK IN.\n\
+                     It gets the chain off its initialization and somewhere sane.\n\
+                     It is not asked to converge, so it carries no more sweeps\n\
+                     than a refresh does.\n\
+                     The SVD basis it sees is not the embedding the model ships.\n\
+                     A precise fit here would answer the wrong question precisely.\n\
+                     The refreshes against the live embedding do the real work.\n\
                      \n\
-                     Raise it if you set --selection-refresh-epochs 0, since the \
-                     cold rates are then the only ones the run ever uses."
+                     Raise it if you set --selection-refresh-epochs 0.\n\
+                     The cold rates are then the only ones the run ever uses."
     )]
     pub selection_sweeps: usize,
 
     #[arg(
         long,
         help = "Skip the degree-corrected Poisson refinement of the coarsening levels",
-        long_help = "By default each coarsening level gets a second-opinion \
-                     refinement on RAW counts (degree-corrected Poisson), the same \
-                     pass `pinto lc` runs. Without it the levels are cut on \
-                     cosine-of-projection alone, which ignores depth and \
-                     over-disperion in the counts.\n\
+        long_help = "By default each coarsening level gets a second-opinion\n\
+                     refinement on RAW counts (degree-corrected Poisson).\n\
+                     It is the same pass `pinto lc` runs.\n\
+                     Without it, levels are cut on cosine-of-projection alone,\n\
+                     which ignores depth and over-dispersion in the counts.\n\
                      \n\
-                     Set this to skip it: the context build reads the count matrix \
-                     once more up front, so this is the lever if that I/O matters."
+                     Set this to skip that pass.\n\
+                     The context build reads the count matrix once more up front,\n\
+                     so this is the lever if that I/O matters."
     )]
     pub no_dc_poisson: bool,
 
@@ -176,16 +196,16 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Training epochs over the gene axis (early-stops on --convergence-tol)",
         long_help = "Passes over the gene axis.\n\
                      \n\
-                     Each epoch draws its own z ~ Bern(pip), so epochs are how \
-                     the gate's dropout actually averages out — a handful of them \
-                     samples the sub-network space too thinly to do that. The \
-                     run early-stops once the loss flattens (--convergence-tol \
-                     over --convergence-window), so a high value here is a \
-                     ceiling rather than a fixed cost.\n\
+                     Each epoch draws its own z ~ Bern(pip).\n\
+                     Epochs are therefore how the gate's dropout averages out.\n\
+                     A handful of them samples the sub-network space too thinly.\n\
+                     The run early-stops once the loss flattens, per\n\
+                     --convergence-tol over --convergence-window.\n\
+                     A high value here is a ceiling, not a fixed cost.\n\
                      \n\
-                     Pair with --genes-per-epoch to cap per-epoch cost, and with \
-                     --selection-refresh-epochs to keep the sampler off the \
-                     critical path."
+                     Pair with --genes-per-epoch to cap per-epoch cost.\n\
+                     Pair with --selection-refresh-epochs to keep the sampler\n\
+                     off the critical path."
     )]
     pub epochs: usize,
 
@@ -193,10 +213,11 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 64,
         help = "Genes per outer parallel sampling chunk",
-        long_help = "Outer training loop samples this many genes in parallel \
-                     via rayon, then runs forward / backward serially \
-                     (candle Var is not parallel-safe). Default is sized for \
-                     a laptop; raise if you have many cores."
+        long_help = "The outer loop samples this many genes in parallel via rayon.\n\
+                     Forward and backward then run serially, because candle Var\n\
+                     is not parallel-safe.\n\
+                     The default is sized for a laptop.\n\
+                     Raise it if you have many cores."
     )]
     pub gene_batch_size: usize,
 
@@ -236,23 +257,24 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 1.0,
         help = "Exponent on within-gene positive-edge weights a_g[u]·a_g[v]",
-        long_help = "Stage-2 coverage exponent (bge's alpha_pb analog, one axis \
-                     down): positive edges within a gene are drawn with \
-                     probability ∝ (a_g[u]·a_g[v])^activity-alpha. 1.0 (default) \
-                     keeps the activity-proportional draw; 0.0 makes every active \
-                     edge of a gene equally likely, so one high-activity hub pair \
-                     can't dominate that gene's training."
+        long_help = "Stage-2 coverage exponent, one axis down from bge's alpha_pb.\n\
+                     Positive edges within a gene are drawn with probability\n\
+                     proportional to (a_g[u]·a_g[v])^activity-alpha.\n\
+                     The default of 1.0 keeps the activity-proportional draw.\n\
+                     0.0 makes every active edge of a gene equally likely,\n\
+                     so no high-activity hub pair dominates that gene."
     )]
     pub activity_alpha: f32,
 
     #[arg(
         long,
         help = "Disable NB-Fisher per-gene precision weighting of the loss",
-        long_help = "By default cage down-weights each gene's contribution to the \
-                     contrastive loss by its NB Fisher-info weight w_g ∈ (0,1] \
-                     (high-mean / high-dispersion housekeeping genes → 0, \
-                     informative low-mean genes → 1), matching `pinto lc` and \
-                     `senna bge`. Set this to train every gene at equal weight."
+        long_help = "By default each gene's contribution to the contrastive loss\n\
+                     is down-weighted by its NB Fisher-info weight w_g ∈ (0,1].\n\
+                     High-mean, high-dispersion housekeeping genes go toward 0.\n\
+                     Informative low-mean genes go toward 1.\n\
+                     This matches `pinto lc` and `senna bge`.\n\
+                     Set this flag to train every gene at equal weight."
     )]
     pub no_fisher_weights: bool,
 
@@ -260,25 +282,30 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 0,
         help = "Genes visited per epoch; 0 = the whole axis",
-        long_help = "Cost lever. cage walks the gene axis once per epoch, so runtime is \
-                     linear in the number of genes. This caps how many are VISITED per \
-                     epoch, drawing a fresh random subset each time.\n\
+        long_help = "Cost lever.\n\
+                     cage walks the gene axis once per epoch, so runtime is\n\
+                     linear in the number of genes.\n\
+                     This caps how many are VISITED per epoch.\n\
+                     A fresh random subset is drawn each time.\n\
                      \n\
-                     Stochastic coverage, NOT feature selection: every gene stays on the \
-                     trained axis, keeps its sampled loading, and appears in every output \
-                     table — it simply waits for a later epoch. Contrast --n-hvg, which \
-                     weights the projection and likewise drops nobody."
+                     That is stochastic coverage, NOT feature selection.\n\
+                     Every gene stays on the trained axis, keeps its sampled\n\
+                     loading, and appears in every output table.\n\
+                     A gene left out simply waits for a later epoch.\n\
+                     Contrast --n-hvg, which weights the projection and\n\
+                     likewise drops nobody."
     )]
     pub genes_per_epoch: usize,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "L2 penalty λ on the shared embeddings E_cell ∈ ℝ^{N×D} and \
-                E_gene ∈ ℝ^{G×D}: adds λ · (mean(E_cell²) + mean(E_gene²)) \
-                to the per-step composite loss (mean-normalized, so λ stays \
-                scale-invariant across N, G, D). Default 1.0 (mild shrinkage). \
-                Set 0.0 to disable. Typical: 0.1–10.0."
+        help = "L2 penalty λ on the shared cell and gene embeddings; 0 = off",
+        long_help = "L2 penalty λ on E_cell ∈ ℝ^{N×D} and E_gene ∈ ℝ^{G×D}.\n\
+                     It adds λ · (mean(E_cell²) + mean(E_gene²)) to the loss.\n\
+                     The means keep λ scale-invariant across N, G and D.\n\
+                     The default of 1.0 is mild shrinkage; 0.0 disables it.\n\
+                     Typical values run from 0.1 to 10.0."
     )]
     pub embedding_l2: f32,
 
@@ -310,10 +337,11 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 0,
         help = "Window (epochs) for convergence check; 0 disables",
-        long_help = "After each epoch, look at the last `convergence-window` \
-                     mean losses; if their (max − min) / |mean| is below \
-                     --convergence-tol, stop training. 0 runs all --epochs \
-                     unconditionally."
+        long_help = "After each epoch, look at the last `convergence-window`\n\
+                     mean losses.\n\
+                     Stop training when their (max − min) / |mean| falls below\n\
+                     --convergence-tol.\n\
+                     Pass 0 to run all --epochs unconditionally."
     )]
     pub convergence_window: usize,
 
@@ -326,28 +354,92 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "K-means clusters on cell embedding; 0 disables clustering",
-        long_help = "After training, run k-means++ (Lloyd's algorithm, via \
-                     `matrix-util::clustering`) on the L2-normalized cell \
-                     embedding. Writes {prefix}.clusters.parquet, \
-                     {prefix}.cluster_propensity.parquet, \
-                     {prefix}.feature_dictionary.parquet, and \
-                     {prefix}.link_community.parquet."
+        default_value_t = EdgeClusterMethod::Kmeans,
+        value_enum,
+        help = "How to cut the pair latent into link communities",
+        long_help = "kmeans fixes the community count at --n-edge-clusters.\n\
+                     leiden builds a cosine kNN graph over the pair latent and\n\
+                     lets --leiden-resolution decide how many communities exist.\n\
+                     Under leiden, --n-edge-clusters becomes a target the\n\
+                     resolution is steered toward rather than a hard count."
     )]
-    pub n_clusters: usize,
+    pub edge_cluster_method: EdgeClusterMethod,
+
+    #[arg(
+        long,
+        default_value_t = 30,
+        help = "Neighbours per pair in the Leiden kNN graph over the pair latent"
+    )]
+    pub leiden_knn: usize,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Softmax temperature τ for cell + gene propensity (higher = sharper)"
+        help = "Leiden modularity resolution; higher gives more, finer communities"
     )]
-    pub propensity_temp: f32,
+    pub leiden_resolution: f64,
 
     #[arg(
         long,
-        default_value_t = 100,
-        help = "Lloyd's algorithm iteration cap for k-means"
+        help = "Link communities to cut from the pair latent [default: --embedding-dim]",
+        long_help = "Number of edge clusters k-means cuts from the pair latent.\n\
+                     A cell's propensity is the fraction of its incident edges\n\
+                     in each community.\n\
+                     This is the definition `pinto lc` and `pinto dsvd` use.\n\
+                     Omit to fall back to --embedding-dim.\n\
+                     Writes {prefix}.propensity.parquet,\n\
+                     {prefix}.link_community.parquet, and\n\
+                     {prefix}.gene_community.parquet."
     )]
-    pub kmeans_max_iter: usize,
+    pub n_edge_clusters: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Clip the global gradient norm to this before each step; 0 = off",
+        long_help = "Global-L2-norm gradient clipping for the training loop.\n\
+                     Gradients are scaled to this norm when they exceed it,\n\
+                     which bounds the update without turning it.\n\
+                     A step whose global norm is not finite is skipped.\n\
+                     Pass 0 to disable clipping."
+    )]
+    pub grad_clip: f32,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Ridge λ on the per-pair latent in the projection",
+        long_help = "Gaussian prior strength on `e_uv` in the pair projection.\n\
+                     The log-partition is summed over every gene, so this is a\n\
+                     mild prior rather than the only bound on the fit.\n\
+                     The per-pair intercept is never penalized."
+    )]
+    pub pair_ridge: f32,
+
+    #[arg(
+        long,
+        default_value_t = 300,
+        help = "Adam steps per cell pair in the projection"
+    )]
+    pub pair_steps: usize,
+
+    #[arg(
+        long,
+        default_value_t = 512,
+        help = "Genes sampled per step for the projection log-partition; 0 = all",
+        long_help = "The projection's log-partition runs over every gene.\n\
+                     That sum is the dominant cost, so each Adam step draws\n\
+                     this many genes ∝ their empirical abundance.\n\
+                     The importance weights cancel under that proposal.\n\
+                     The estimate is therefore unbiased, and exact at e_uv = 0.\n\
+                     Pass 0 to sum every gene instead."
+    )]
+    pub pair_gene_sample: usize,
+
+    #[arg(
+        long,
+        default_value_t = 8192,
+        help = "Cell pairs per projection read block (bounds the count slab held at once)"
+    )]
+    pub pair_block: usize,
 }

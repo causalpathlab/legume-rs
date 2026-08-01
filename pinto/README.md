@@ -61,8 +61,8 @@ pinto dsvd data.h5 -c coords.csv -o out
 
 **Outputs:** `{out}.coord_pairs.parquet`, `{out}.dictionary.parquet`,
 `{out}.latent.parquet`, `{out}.propensity.parquet` (with `entropy`
-column), `{out}.gene_topic.parquet`, `{out}.delta.parquet` (multi-batch
-only), and `{out}.metadata.json`.
+column), `{out}.link_community.parquet`, `{out}.gene_topic.parquet`,
+`{out}.delta.parquet` (multi-batch only), and `{out}.metadata.json`.
 
 ### `prop` (propensity) — re-cluster dsvd edges at a different K
 

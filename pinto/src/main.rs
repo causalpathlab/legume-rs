@@ -269,25 +269,40 @@ enum Commands {
     #[command(
         alias = "cge",
         about = "Activity-gated cell-graph embedding (cage)",
-        long_about = "Learn per-cell embeddings on the spatial cell-cell graph by\n\
-                      visiting each gene: every gene defines a per-cell activity\n\
-                      vector that gates a shared multi-scale cell-cell hierarchy.\n\
+        long_about = "Learn per-cell embeddings on the spatial cell-cell graph.\n\
+                      cage visits one gene at a time.\n\
+                      Each gene defines a per-cell activity vector.\n\
+                      That vector gates a shared multi-scale cell-cell hierarchy.\n\n\
                       A per-gene per-dim selection is SAMPLED by block Gibbs\n\
-                      against a pseudobulk Poisson. The resulting inclusion\n\
-                      probabilities become DROP RATES: a fresh z ~ Bern(pip) is\n\
-                      drawn each epoch, so every epoch trains a different\n\
-                      sub-network. They are re-estimated periodically against\n\
-                      the embedding being learned (--selection-refresh-epochs).\n\
-                      --embedding-dim is an UPPER BOUND: the stick-breaking\n\
-                      (IBP) prior orders dims by decreasing admittance.\n\
-                      How many are really used is decided by the data.\n\
+                      against a pseudobulk Poisson.\n\
+                      The resulting inclusion probabilities become DROP RATES.\n\
+                      A fresh z ~ Bern(pip) is drawn each epoch.\n\
+                      Every epoch therefore trains a different sub-network.\n\
+                      The rates re-estimate against the live embedding.\n\
+                      See --selection-refresh-epochs.\n\n\
+                      --embedding-dim is an UPPER BOUND.\n\
+                      The stick-breaking (IBP) prior orders dims by admittance.\n\
+                      The data decides how many are really used.\n\
                       Chain levels differ only in their negative pools.\n\
-                      Embedding-only — no count decoder.\n\n\
-                      NOTE --n-hvg no longer subsets the trained gene axis. It\n\
-                      weights the random projection that builds the coarsening\n\
-                      hierarchy (as in senna bge / faba gem); every gene is\n\
-                      trained and present in every output table. Use\n\
-                      --genes-per-epoch to cap per-epoch cost instead.\n\n\
+                      This is embedding-only — there is no count decoder.\n\n\
+                      NOTE --n-hvg no longer subsets the trained gene axis.\n\
+                      It weights the random projection instead.\n\
+                      That projection builds the coarsening hierarchy.\n\
+                      senna bge and faba gem do the same.\n\
+                      Every gene is trained and present in every output table.\n\
+                      Use --genes-per-epoch to cap per-epoch cost instead.\n\n\
+                      After training, every CELL PAIR is projected onto the\n\
+                      frozen gene embedding.\n\
+                      Its pooled counts x_gu + x_gv are fit by Poisson MAP.\n\
+                      That gives a per-pair latent e_uv.\n\
+                      The solve is rayon-parallel, one D+1 problem per pair,\n\
+                      with a sampled log-partition.\n\n\
+                      Clustering those pairs gives link communities.\n\
+                      A cell's propensity is its incident-edge fraction.\n\
+                      That is the same definition `lc` and `dsvd` use.\n\
+                      --edge-cluster-method picks the cut.\n\
+                      kmeans uses a fixed --n-edge-clusters.\n\
+                      leiden decides the count from --leiden-resolution.\n\n\
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
@@ -296,14 +311,13 @@ enum Commands {
                       \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\
                       \x20 {out}.coord_pairs.parquet     spatial edge list\n\
+                      \x20 {out}.latent.parquet          cell pair × embedding_dim\n\
+                      \x20 {out}.propensity.parquet      cell × K, + cluster, entropy\n\
+                      \x20 {out}.link_community.parquet  per-edge community\n\
+                      \x20 {out}.gene_community.parquet  gene × K Poisson-Gamma rates\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
-                      \x20 {out}.pinto.json           manifest\n\n\
-                      With --n-clusters > 0 (k-means++ on the cell embedding):\n\
-                      \x20 {out}.clusters.parquet           hard cell labels\n\
-                      \x20 {out}.cluster_propensity.parquet cell × K soft assignment\n\
-                      \x20 {out}.feature_dictionary.parquet feature × K dictionary\n\
-                      \x20 {out}.link_community.parquet     per-edge community"
+                      \x20 {out}.pinto.json           manifest"
     )]
     Cage(CellActivityGraphEmbeddingArgs),
 
