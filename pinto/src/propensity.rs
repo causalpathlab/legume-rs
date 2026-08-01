@@ -6,10 +6,6 @@ use matrix_param::dmatrix_gamma;
 use matrix_param::io::ParamIo;
 use matrix_param::traits::TwoStatParam;
 use matrix_util::common_io::mkdir_parent;
-use matrix_util::parquet::{
-    parquet_add_bytearray, parquet_add_numeric_column, parquet_add_string_column, ParquetWriter,
-};
-use parquet::basic::Type as ParquetType;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtPropensityArgs {
@@ -91,7 +87,7 @@ pub struct SrtPropensityArgs {
         required = true,
         help = "Output file prefix",
         long_help = "Output file prefix.\n\
-                       Generates: {out}.propensity.parquet, {out}.edge_cluster.parquet"
+                       Generates: {out}.propensity.parquet, {out}.link_community.parquet"
     )]
     out: Box<str>,
 }
@@ -232,35 +228,35 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // Edge cluster assignments
+    // Per-edge community labels, in the ONE edge-table schema pinto reads
+    // (`left_cell` / `right_cell` / `community`). This used to be a local
+    // writer emitting `.edge_cluster.parquet` with the label column named
+    // `cluster` — which `plot::load::read_link_community` cannot parse, so a
+    // `prop` run silently lost its mesh overlay.
     {
-        info!("Writing edge cluster assignments");
-        let n_edges = pair_names.len();
-        let left_cells: Vec<Box<str>> = pair_names.iter().map(|p| p[0].clone()).collect();
-        let right_cells: Vec<Box<str>> = pair_names.iter().map(|p| p[1].clone()).collect();
-        let cluster_f32: Vec<f32> = edge_membership.iter().map(|&k| k as f32).collect();
+        info!("Writing link communities");
+        // Map name pairs back to vertex indices. Strict rather than filtered:
+        // dropping an edge here would silently misalign the edge list from
+        // `edge_membership`, which is zipped with it positionally.
+        let edges: Vec<(usize, usize)> = pair_names
+            .iter()
+            .map(|p| -> anyhow::Result<(usize, usize)> {
+                let l = *vertex_index
+                    .get(&p[0])
+                    .ok_or_else(|| anyhow::anyhow!("unknown left cell {}", p[0]))?;
+                let r = *vertex_index
+                    .get(&p[1])
+                    .ok_or_else(|| anyhow::anyhow!("unknown right cell {}", p[1]))?;
+                Ok((l, r))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let ec_col_names: Vec<Box<str>> = vec!["right_cell".into(), "cluster".into()];
-        let ec_col_types = vec![ParquetType::BYTE_ARRAY, ParquetType::FLOAT];
-
-        let writer = ParquetWriter::new(
-            &(args.out.to_string() + ".edge_cluster.parquet"),
-            (n_edges, 2),
-            (Some(&left_cells), Some(&ec_col_names)),
-            Some(&ec_col_types),
-            Some("left_cell"),
+        crate::link_community::outputs::write_link_communities(
+            &(args.out.to_string() + ".link_community.parquet"),
+            &edges,
+            &edge_membership,
+            &vertices,
         )?;
-
-        let row_names = writer.row_names_vec();
-        let mut writer = writer.get_writer()?;
-        let mut row_group = writer.next_row_group()?;
-
-        parquet_add_bytearray(&mut row_group, row_names)?;
-        parquet_add_string_column(&mut row_group, &right_cells)?;
-        parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
-
-        row_group.close()?;
-        writer.close()?;
     }
 
     if let Some(data_files) = args.expr_data_files.as_ref() {
