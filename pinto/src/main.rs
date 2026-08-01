@@ -292,8 +292,6 @@ enum Commands {
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
-                      \x20 {out}.feature_pip.parquet      feature × dim (sampled PIP;\n\
-                      \x20                                the gate's drop rates)\n\
                       \x20 {out}.feature_posterior_mean.parquet  feature × dim (E[z*beta])\n\
                       \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\

@@ -75,7 +75,7 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 1,
+        default_value_t = 5,
         help = "Re-estimate pip every N epochs against the current embedding; 0 = never",
         long_help = "How often to re-estimate the gate's keep-probabilities.\n\
                      \n\
@@ -95,21 +95,63 @@ pub struct CellActivityGraphEmbeddingArgs {
                      training is edge NCE, so there is no single objective being \
                      improved and no convergence guarantee.\n\
                      \n\
-                     1 (default) refreshes every epoch. Raise it if the sampler \
-                     dominates wall-clock; 0 disables the refresh and keeps the \
-                     initial rates for the whole run."
+                     Note what does NOT depend on this flag: the per-epoch z draw \
+                     is free (one Bernoulli per (gene, dim) on device), so every \
+                     epoch still trains its own sub-network no matter how rarely \
+                     the rates behind it are re-estimated. This flag prices only \
+                     the sampler.\n\
+                     \n\
+                     5 (default) is a budget choice, not a statistical one. \
+                     Measured on GBM the rates settle by epoch 6 and hold, so \
+                     with epochs in the hundreds refreshing every epoch spends \
+                     most of its sweeps re-deriving a converged answer. 1 \
+                     refreshes every epoch; 0 disables the refresh entirely and \
+                     keeps the cold rates for the whole run, which is what \
+                     `senna bge` does."
     )]
     pub selection_refresh_epochs: usize,
 
     #[arg(
         long,
-        default_value_t = 20,
+        default_value_t = 10,
         help = "Sweeps per pip refresh (half are burn-in)",
-        long_help = "Gibbs sweeps for each --selection-refresh-epochs round. Far \
-                     fewer than the cold initial run because the chain is \
-                     warm-started from the previous round's inclusion state."
+        long_help = "Gibbs sweeps for each --selection-refresh-epochs round.\n\
+                     \n\
+                     Deliberately too few to converge a posterior on its own. A \
+                     refresh is one cheap step in a long sequence, not a \
+                     stand-alone fit: the chain is warm-started from the previous \
+                     round's inclusion state, and what makes the selection good \
+                     is running many rounds against an embedding that keeps \
+                     moving, not running any single round to convergence.\n\
+                     \n\
+                     10 sweeps means 5 kept. That is only sane because the PIP is \
+                     Rao-Blackwellized: each kept sweep contributes the ANALYTIC \
+                     inclusion probability rather than one 0/1 draw, so 5 sweeps \
+                     no longer pins the estimate to a 1/5 grid the way averaging \
+                     indicators would. Raising this buys precision per round; \
+                     spending the same budget on more epochs is usually better."
     )]
     pub selection_refresh_sweeps: usize,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Gibbs sweeps for the COLD initial pip (half are burn-in)",
+        long_help = "Sweeps for the one-off fit that runs before training, against \
+                     an SVD of the pseudobulk log-counts.\n\
+                     \n\
+                     This round only has to BREAK IN — get the chain off its \
+                     initialization and somewhere sane. It is not asked to \
+                     converge, which is why it carries no more sweeps than a \
+                     refresh does: the SVD basis it conditions on is not the \
+                     embedding the model ships, so a precise fit here would be a \
+                     precise answer to the wrong question. The refreshes against \
+                     the live embedding do the real work.\n\
+                     \n\
+                     Raise it if you set --selection-refresh-epochs 0, since the \
+                     cold rates are then the only ones the run ever uses."
+    )]
+    pub selection_sweeps: usize,
 
     #[arg(
         long,
@@ -128,7 +170,23 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(long, default_value_t = 16, help = "Cell embedding dimensionality")]
     pub embedding_dim: usize,
 
-    #[arg(long, default_value_t = 5, help = "Training epochs over the gene axis")]
+    #[arg(
+        long,
+        default_value_t = 100,
+        help = "Training epochs over the gene axis (early-stops on --convergence-tol)",
+        long_help = "Passes over the gene axis.\n\
+                     \n\
+                     Each epoch draws its own z ~ Bern(pip), so epochs are how \
+                     the gate's dropout actually averages out — a handful of them \
+                     samples the sub-network space too thinly to do that. The \
+                     run early-stops once the loss flattens (--convergence-tol \
+                     over --convergence-window), so a high value here is a \
+                     ceiling rather than a fixed cost.\n\
+                     \n\
+                     Pair with --genes-per-epoch to cap per-epoch cost, and with \
+                     --selection-refresh-epochs to keep the sampler off the \
+                     critical path."
+    )]
     pub epochs: usize,
 
     #[arg(
