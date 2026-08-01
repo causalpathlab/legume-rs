@@ -1,14 +1,52 @@
 //! `pinto cage` entrypoint: activity-gated cell-graph embedding.
 //!
-//! Pipeline:
-//!   1. preprocess_srt → data + spatial KNN + batch effects
-//!   2. SrtCellPairs::with_graph + coord_pairs.parquet
-//!   3. graph_coarsen_multilevel (no DC-Poisson — embedding-only)
-//!   4. build_per_batch_cell_samplers with PbChainFilter
-//!   5. build_cell_activities (per-gene cell activity + active edges)
-//!   6. allocate JointEmbedModel + GeneGating in one VarMap, AdamW
-//!   7. training loop — rayon sample, serial fwd/bwd
-//!   8. parquet outputs + .pinto.json
+//! Learns a per-CELL embedding `e_cell [n_cells x D]` by contrastive (NCE)
+//! prediction of spatial adjacency, one gene at a time, with a Gibbs-sampled
+//! selection over `(gene, dim)` pairs.
+//!
+//! ```text
+//! load -> spatial KNN -> batch effects                  util::srt_pipeline
+//! HVG-weighted projection -> graph_coarsen_multilevel   nested super-cell levels
+//! build_cell_activities                                 per-gene activity, active edges
+//! collapse + SVD + block Gibbs                          selection::select_features -> pip
+//! training loop                                         the only SGD
+//! parquet outputs + .pinto.json
+//! ```
+//!
+//! # What the training loop optimizes
+//!
+//! Positives are REAL cell-cell edges from the spatial KNN. Negatives are cells
+//! drawn per chain level: at level `l` a negative sits in a different super-cell
+//! at `l` but the SAME parent at `l-1`, so the contrast sharpens with depth.
+//! The coarsening hierarchy is therefore live in every step — as the negative
+//! sampling structure, not as a separately trained entity. There is one
+//! embedding, over cells; `e_pb` from the collapse is a frozen SVD the loss
+//! never touches.
+//!
+//! ```text
+//! s(u,v) = theta_g . (e_u (*) e_v) + b_u + b_v
+//! theta_g = z_g (*) e_feat[g]        z ~ Bern(pip), redrawn once per EPOCH
+//! ```
+//!
+//! `e_u (*) e_v` is the EDGE embedding: the pair's joint participation in each
+//! latent community, high only when both endpoints load on it.
+//!
+//! # Two cadences, and they are different things
+//!
+//! - `pip` — the PROBABILITY. Estimated by block Gibbs, then RE-estimated every
+//!   `--selection-refresh-epochs` against the live `e_cell` folded up into the
+//!   pseudobulks, warm-started from the previous round. Without that refresh it
+//!   would stay fixed at what a cold chain saw against an SVD basis the shipped
+//!   model never uses.
+//! - `z` — the SAMPLE. Drawn once per epoch from the current `pip`
+//!   (`resample_gate_mask`), so each epoch trains a different sub-network and
+//!   SGD optimizes `E_z[loss]` rather than `loss` at `E[z]`.
+//!
+//! `e_feat` is randomly initialized and the selection enters as this gate.
+//! Deliberately NOT initialized to `E[z*beta]`: that already carries the
+//! sampler's shrinkage, so gating it would apply the same selection twice. The
+//! two are alternatives, not complements — `feature_posterior_mean.parquet`
+//! ships `E[z*beta]` for downstream use.
 
 use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
 use crate::cell_activity_graph_embedding::cluster::{
@@ -18,13 +56,14 @@ use crate::cell_activity_graph_embedding::cluster::{
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
-use crate::cell_activity_graph_embedding::gene_gating::{
-    build_cell_activities, softplus_floored, LevelDimGate,
-};
+use crate::cell_activity_graph_embedding::gene_gating::build_cell_activities;
+use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_level, CageLossOut};
 use crate::link_community::outputs::write_link_communities;
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
-use crate::util::graph_coarsen::{graph_coarsen_multilevel, CoarsenConfig, SeedingParams};
+use crate::util::graph_coarsen::{
+    graph_coarsen_multilevel, CoarsenConfig, DcPoissonConfig, SeedingParams,
+};
 use crate::util::metadata::{create_cage_metadata, CageClusterInfo, RunInputs};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
@@ -35,10 +74,8 @@ use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
-use graph_embedding_util::loss::{
-    build_per_batch_cell_samplers, cell_cell_nce_loss_per_level_batched_gated, PbChainFilter,
-};
-use graph_embedding_util::model::{JointEmbedModel, ModelArgs, ModelInit};
+use graph_embedding_util::loss::{build_per_batch_cell_samplers, PbChainFilter};
+use graph_embedding_util::model::{GateKind, JointEmbedModel, ModelArgs, ModelInit};
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
@@ -116,16 +153,51 @@ pub fn fit_cell_activity_graph_embedding(
     let n_edges = edges_owned.len();
     info!("{} cells, {} genes, {} edges", n_cells, n_genes, n_edges);
 
-    ////////////////////////////////////////////////////
-    // 4. Coarsening (no DC-Poisson — embedding-only) //
-    ////////////////////////////////////////////////////
+    /////////////////////////////////////////
+    // 4. HVG-weighted proj -> coarsening //
+    /////////////////////////////////////////
     let batch_arg: Option<&[Box<str>]> = if batch_db.is_some() {
         Some(&batch_membership)
     } else {
         None
     };
-    let cell_proj =
-        data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?;
+    // HVG selection WEIGHTS this projection; it does not subset the trained
+    // gene axis. Non-selected genes get projection weight 0, so they sit out
+    // the basis the coarsening hierarchy is built from, but they stay on the
+    // feature axis: still trained, still sampled, still in the PIP table. The
+    // selection shapes WHERE the pseudobulks land rather than which genes the
+    // model may use — matching `senna bge` and `faba gem`.
+    //
+    // cage used to hard-subset here, which would now mean running a
+    // variance-based selector in front of the spike-and-slab gate, with the
+    // cruder one first and irreversible.
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+    let must_train =
+        data_beans_alg::hvg::load_must_train(args.hvg.must_train_features.as_deref(), hvg_enabled)?;
+    let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
+        let hvg = select_hvg_streaming(
+            &data_vec,
+            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
+            args.hvg.feature_list_file.as_deref(),
+            must_train.as_ref(),
+            c.block_size,
+        )?;
+        info!(
+            "HVG-weighted projection: {} of {} genes weighted; all stay on the trained axis",
+            hvg.selected_indices.len(),
+            n_genes
+        );
+        Some(hvg.row_weights(n_genes))
+    } else {
+        None
+    };
+
+    let cell_proj = match hvg_weights.as_deref() {
+        Some(w) => data_vec.project_columns_weighted(c.proj_dim, c.block_size, batch_arg, w)?,
+        None => {
+            data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?
+        }
+    };
     let ml = graph_coarsen_multilevel(
         &graph,
         &mut cell_proj.proj.clone(),
@@ -139,9 +211,108 @@ pub fn fit_cell_activity_graph_embedding(
                 batch_membership: Some(&batch_membership),
             }),
             modularity_veto: None,
-            dc_poisson: None,
+            // Second-opinion refinement on RAW counts, matching `pinto lc`.
+            // cage was the only caller passing `None` here, so its levels were
+            // cut on cosine-of-projection alone while `lc` got a degree-corrected
+            // Poisson pass over the actual counts.
+            //
+            // This is also the path that consumes the parent labels for its
+            // sibling constraint, and those were fed the WRONG level until the
+            // coarsening loop was split into cut-then-refine passes — so
+            // enabling it before that fix would have constrained moves against
+            // the finer level rather than the coarser one.
+            //
+            // Opt out with `--no-dc-poisson`; the context build reads the count
+            // matrix once, then every level reuses it.
+            dc_poisson: (!args.no_dc_poisson).then(|| DcPoissonConfig {
+                params: data_beans_alg::dc_poisson::RefineParams {
+                    num_gibbs: 10,
+                    num_greedy: 5,
+                    feature_weighting: data_beans_alg::dc_poisson::FeatureWeighting::FisherInfoNb,
+                    seed: c.seed,
+                    gibbs_stagnation: 0.005,
+                    profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,
+                    ..Default::default()
+                },
+                data: &data_vec,
+                num_genes: n_genes,
+            }),
         },
     );
+
+    // Collapse cells into super-cells, then sample the gene selection.
+    let (selection, sel_state, mut sel_z) = {
+        let pb = crate::cell_activity_graph_embedding::selection::build_pseudobulks(
+            crate::cell_activity_graph_embedding::selection::PseudobulkArgs {
+                data: &data_vec,
+                all_cell_labels: &ml.all_cell_labels,
+                graph: &graph,
+                cell_features: &cell_proj.proj,
+                embedding_dim: args.embedding_dim,
+                block_size: c.block_size,
+            },
+        )?;
+        // Diagnostic export: per CELL, its spatial coords, its finest-level
+        // super-cell id, and that super-cell's embedding. Lets the basis be
+        // inspected as a UMAP and as a spatial map before anything is built on it.
+        if let Some(fine) = pb.levels.last() {
+            let d = fine.e_pb.ncols();
+            let mut out = Mat::zeros(n_cells, 3 + d);
+            for i in 0..n_cells {
+                let p = fine.cell_labels[i];
+                out[(i, 0)] = coordinates[(i, 0)];
+                out[(i, 1)] = coordinates[(i, 1)];
+                out[(i, 2)] = p as f32;
+                for h in 0..d {
+                    out[(i, 3 + h)] = fine.e_pb[(p, h)];
+                }
+            }
+            let mut cols: Vec<Box<str>> = vec![Box::from("x"), Box::from("y"), Box::from("pb")];
+            cols.extend(embedding_col_names(d));
+            out.to_parquet_with_names(
+                &(c.out.to_string() + ".pseudobulk_cells.parquet"),
+                (Some(&cell_names), Some("cell")),
+                Some(&cols),
+            )?;
+            info!("Wrote {}.pseudobulk_cells.parquet", c.out);
+        }
+
+        // Sample which (gene, community) pairs are included.
+        let (sel, sel_state, sel_z) =
+            crate::cell_activity_graph_embedding::selection::select_features(
+                &pb,
+                args.embedding_dim,
+                &crate::cell_activity_graph_embedding::selection::SelectArgs {
+                    sweeps: 100,
+                    burnin: 50,
+                    seed: c.seed,
+                },
+            )?;
+        sel.log_summary();
+        sel.pip_matrix().to_parquet_with_names(
+            &(c.out.to_string() + ".feature_pip.parquet"),
+            (Some(&gene_names), Some("gene")),
+            Some(&embedding_col_names(args.embedding_dim)),
+        )?;
+        info!("Wrote {}.feature_pip.parquet", c.out);
+        // The posterior mean EFFECTIVE loading `E[z·β]`, the companion half of
+        // the pip table — `geu::eval::write_pb_posterior_tables` emits both for
+        // `senna bge` and cage was shipping only the first.
+        //
+        // Not consumed by training under this arm: `e_feat` is randomly
+        // initialized and the selection enters as a gate instead, because
+        // `E[z·β]` already carries the shrinkage and gating it would apply the
+        // same selection twice. It ships because it is the quantity downstream
+        // wants when asking "how much does gene g load on dim h", and because
+        // it is what an init-from-posterior arm would consume.
+        sel.mean_beta_matrix().to_parquet_with_names(
+            &(c.out.to_string() + ".feature_posterior_mean.parquet"),
+            (Some(&gene_names), Some("gene")),
+            Some(&embedding_col_names(args.embedding_dim)),
+        )?;
+        info!("Wrote {}.feature_posterior_mean.parquet", c.out);
+        (sel, sel_state, sel_z)
+    };
 
     // Chain levels must be valid indices into all_cell_labels.
     for &lvl in &args.chain_levels {
@@ -154,9 +325,23 @@ pub fn fit_cell_activity_graph_embedding(
     }
     let n_chain_levels = args.chain_levels.len();
 
-    /////////////////////////////////
-    // 5. Per-batch chain samplers //
-    /////////////////////////////////
+    ////////////////////////////////////////////
+    // 5. Restrict pairs to the coarsened data //
+    ////////////////////////////////////////////
+    //
+    // Despite the callee's name this step is about the PAIR DATA, not about
+    // sampling. It decides which cell pairs cage is allowed to train on:
+    //
+    //   - cross-batch pairs are dropped outright;
+    //   - a pair survives only if BOTH endpoints share a super-cell at EVERY
+    //     `--chain-levels` entry, so the positives are within-super-cell pairs
+    //     of the coarsened data rather than raw spatial edges;
+    //   - per-cell degree over the retained pairs becomes the `--alpha-neg`
+    //     negative weight, and per-level sibling pools are precomputed for the
+    //     hard-negative draw.
+    //
+    // All of it is a deterministic function of the coarsening labels and the
+    // edge list — no RNG here; randomness enters only at draw time.
     let batch_id_of: HashMap<Box<str>, u32> = {
         let mut uniq: Vec<Box<str>> = batch_membership.to_vec();
         uniq.sort();
@@ -185,7 +370,7 @@ pub fn fit_cell_activity_graph_embedding(
         Some(pb_filter),
     );
     info!(
-        "Per-batch samplers: {} batches; cross_batch_dropped={}, pb_mismatch_dropped={}",
+        "Coarsened pair data: {} batches; dropped {} cross-batch, {} not within one super-cell at all chain levels",
         n_batches, sampler_stats.cross_batch_dropped, sampler_stats.pb_mismatch_dropped
     );
 
@@ -217,7 +402,7 @@ pub fn fit_cell_activity_graph_embedding(
     // List of genes with at least one cached (gene, batch) entry — used
     // to skip empty genes in every epoch's permutation. Computed now so
     // we can free `activities` afterwards.
-    let mut trainable_genes: Vec<usize> = (0..n_genes)
+    let trainable_genes: Vec<usize> = (0..n_genes)
         .filter(|&g| cache.entries[g].iter().any(|e| e.is_some()))
         .collect();
     info!(
@@ -228,42 +413,14 @@ pub fn fit_cell_activity_graph_embedding(
     // sampler needs for v1.
     drop(activities);
 
-    // HVG subset: senna-style top-K via `select_hvg_streaming` (or a
-    // user-provided `--feature-list-file`), applied as a subset of the
-    // training gene axis. Non-HVG genes keep their randn-init e_gene
-    // rows untouched and are dropped from the parquet output below.
-    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
-    let must_train =
-        data_beans_alg::hvg::load_must_train(args.hvg.must_train_features.as_deref(), hvg_enabled)?;
-    let hvg_selected: Option<Vec<usize>> = if hvg_enabled {
-        let hvg = select_hvg_streaming(
-            &data_vec,
-            (args.hvg.n_hvg > 0).then_some(args.hvg.n_hvg),
-            args.hvg.feature_list_file.as_deref(),
-            must_train.as_ref(),
-            c.block_size,
-        )?;
-        let kept: std::collections::HashSet<usize> = hvg.selected_indices.iter().copied().collect();
-        let before = trainable_genes.len();
-        trainable_genes.retain(|g| kept.contains(g));
-        info!(
-                "HVG subset: kept {} / {} genes after intersection with trainable set ({} HVGs selected)",
-                trainable_genes.len(),
-                before,
-                hvg.selected_indices.len()
-            );
-        Some(hvg.selected_indices)
-    } else {
-        None
-    };
     anyhow::ensure!(
         !trainable_genes.is_empty(),
-        "no trainable genes after HVG / active-edge filter"
+        "no genes have an active edge in any batch — nothing to train"
     );
 
-    //////////////////////////////////
-    // 7. Model + gates + optimizer //
-    //////////////////////////////////
+    //////////////////////////
+    // 7. Model + optimizer //
+    //////////////////////////
     let dev = args.device.to_device(args.device_no)?;
     info!("Using device: {:?}", dev);
     let varmap = VarMap::new();
@@ -271,7 +428,16 @@ pub fn fit_cell_activity_graph_embedding(
     // (cells and genes share the same D-dim space). `n_features =
     // n_genes` and `b_feat` is zero-init per gene; both are learned
     // alongside the cell side via AdamW over `varmap.all_vars()`.
-    let model = JointEmbedModel::new_with_init(
+    //
+    // `e_feat` is randomly initialized and the SELECTION enters as a gate:
+    // The sampled `pip` is installed as drop rates, and a fresh `z ~ Bern(pip)` is drawn
+    // once per epoch (see the training loop). This is `senna bge`'s arm, using
+    // the same `JointEmbedModel` methods rather than a local re-derivation.
+    //
+    // Deliberately NOT initialized to `E[z·β]`: that already carries the
+    // sampler's shrinkage, so gating it would apply the same selection twice.
+    // The two are alternatives, not complements.
+    let mut model = JointEmbedModel::new_with_init(
         ModelArgs {
             n_features: n_genes,
             n_cells,
@@ -287,7 +453,13 @@ pub fn fit_cell_activity_graph_embedding(
         &varmap,
         &dev,
     )?;
-    let gate = LevelDimGate::new(n_chain_levels, args.embedding_dim, &varmap, &dev)?;
+    // The cold sampler's `pip`. `resample_gate_mask` is a no-op without it, so
+    // this install is what turns per-epoch spike sampling on at all.
+    {
+        let pip_t = Tensor::from_vec(selection.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
+        model.install_gate_pip(GateKind::Identity, &pip_t)?;
+    }
+
     let mut opt = AdamW::new(
         varmap.all_vars(),
         ParamsAdamW {
@@ -323,7 +495,70 @@ pub fn fit_cell_activity_graph_embedding(
 
     'epochs: for epoch in 0..args.epochs {
         let mut perm: Vec<usize> = trainable_genes.clone();
+        // ONE `z ~ Bern(pip)` draw for the whole epoch. Per-EPOCH, not
+        // per-chunk: `z` is a latent for the DATASET, so a per-chunk draw would
+        // model each chunk as having its own inclusion state and add gradient
+        // variance for nothing. Same call, same cadence as `senna bge`
+        // (`geu::training::train_composite`).
+        //
+        // The initial draw is NOT the informative one — a single sample of a
+        // 36591x16 Bernoulli table says little. What the model sees is the
+        // AVERAGE over epochs: SGD optimizes `E_z[loss]`, marginalized over the
+        // selection posterior, rather than `loss` at `E[z]`. Those differ by
+        // Jensen, and the first is what the generative model implies.
+        // RE-ESTIMATE `pip` against what SGD has learned so far, then draw
+        // this epoch's `z` from it. Skipped at epoch 0, whose `pip` is the
+        // cold chain's `pip`, already installed above.
+        //
+        // This is NOT MCEM, and should not be read as one. EM needs both steps
+        // on the SAME objective; here the refresh is a Poisson fit on
+        // super-cell counts while the SGD is edge NCE, so there is no joint
+        // likelihood being monotonically improved and none of EM's convergence
+        // guarantees apply.
+        //
+        // What it actually is: DROPOUT-style stochastic gating whose per-(gene,
+        // dim) keep-probability is refreshed from a companion count model. The
+        // hard 0/1 `z` below zeroes the gradient for excluded coordinates, so
+        // each epoch trains a different sub-network — the regularizer. The
+        // refresh exists only to stop those keep-probabilities going stale:
+        // the cold `pip` was fit against `e_pb` from an SVD of pseudobulk
+        // log-counts, which is NOT the embedding the model ships, so without it
+        // the gate would keep dropping genes on the strength of a cell side
+        // nothing uses.
+        //
+        // The chain is WARM-STARTED from the previous round's `final_z`, so a
+        // refresh needs far fewer sweeps than the cold run — that is exactly
+        // what `DimBlockResult::final_z` exists for.
+        if epoch > 0
+            && args.selection_refresh_epochs > 0
+            && epoch % args.selection_refresh_epochs == 0
+        {
+            let e_cell_now = tensor_to_mat(&model.e_cell)?;
+            let e_flat = sel_state.frozen_e_from_cells(&e_cell_now);
+            let (sel_new, z_new) = sel_state.sample(
+                &e_flat,
+                &crate::cell_activity_graph_embedding::selection::SelectArgs {
+                    sweeps: args.selection_refresh_sweeps,
+                    burnin: args.selection_refresh_sweeps / 2,
+                    seed: c.seed.wrapping_add(epoch as u64),
+                },
+                Some(sel_z.clone()),
+            );
+            sel_z = z_new;
+            let pip_t = Tensor::from_vec(sel_new.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
+            model.install_gate_pip(GateKind::Identity, &pip_t)?;
+            let m: f32 = sel_new.pip.iter().sum::<f32>() / sel_new.pip.len() as f32;
+            info!("epoch {epoch}: pip refreshed against e_cell, mean = {m:.4}");
+        }
+        model.resample_gate_mask()?;
         perm.shuffle(&mut rng_master);
+        // Optional cost lever: visit a random subset of the gene axis this
+        // epoch. Stochastic coverage, NOT axis selection — every gene stays
+        // in the model, keeps its gate, and appears in the output tables; it
+        // just waits for a later epoch.
+        if args.genes_per_epoch > 0 && args.genes_per_epoch < perm.len() {
+            perm.truncate(args.genes_per_epoch);
+        }
 
         let mut skip_count: usize = 0;
         let mut sample_count: usize = 0;
@@ -334,6 +569,7 @@ pub fn fit_cell_activity_graph_embedding(
         // without retaining the backward graph across chunks.
         let mut epoch_loss_acc: Option<Tensor> = None;
         let mut per_level_acc: Option<Tensor> = None;
+        let mut pair_acc: Option<Tensor> = None;
         let mut chunk_count: usize = 0;
         for chunk in perm.chunks(args.gene_batch_size) {
             if stop.load(Ordering::Relaxed) {
@@ -370,25 +606,17 @@ pub fn fit_cell_activity_graph_embedding(
             // with the [G*B] cell-side gathers.
             let gene_ids_u32: Vec<u32> = gene_ids.iter().map(|&g| g as u32).collect();
 
-            // Per-level per-dim gate γ enters the score: rebuilt once
-            // per chunk; the loss applies it per chain level via
-            // `dim_gates`.
-            let dim_gates = softplus_floored(&gate.gamma)?; // [L, D]
-
             // (b) ONE forward / backward over the whole chunk.
-            let per_level_gl = cell_cell_nce_loss_per_level_batched_gated(
-                &model,
-                cb_batches,
-                &gene_ids_u32,
-                Some(&dim_gates),
-                &dev,
-            )?; // [G, L]
-                // NB-Fisher per-gene precision: scale each gene's row of the
-                // per-level loss by w_g ∈ (0,1] before summing, so high-mean /
-                // high-dispersion housekeeping genes contribute less gradient
-                // (the loss-side analog of bge's count·fisher positive draw and
-                // lc's `apply_gene_weights` on the gene basis). Coverage stays
-                // uniform — every gene is still visited once per epoch.
+            let CageLossOut {
+                per_level: per_level_gl,
+                mean_abs_pair,
+            } = cage_nce_loss_per_level(&model, cb_batches, &gene_ids_u32, &dev)?; // [G, L]
+                                                                                   // NB-Fisher per-gene precision: scale each gene's row of the
+                                                                                   // per-level loss by w_g ∈ (0,1] before summing, so high-mean /
+                                                                                   // high-dispersion housekeeping genes contribute less gradient
+                                                                                   // (the loss-side analog of bge's count·fisher positive draw and
+                                                                                   // lc's `apply_gene_weights` on the gene basis). Coverage stays
+                                                                                   // uniform — every gene is still visited once per epoch.
             let per_level_gl = match fisher_weights.as_ref() {
                 Some(w) => {
                     let w_chunk: Vec<f32> = gene_ids.iter().map(|&g| w[g]).collect();
@@ -399,10 +627,7 @@ pub fn fit_cell_activity_graph_embedding(
             };
             let loss = per_level_gl.sum_all()?;
             let mut total = loss.clone();
-            if args.gate_l2 > 0.0 {
-                let reg = (dim_gates.sqr()?.sum_all()? * (args.gate_l2 as f64))?;
-                total = (total + reg)?;
-            }
+
             if args.embedding_l2 > 0.0 {
                 let lam = args.embedding_l2 as f64;
                 let cell_l2 = (model.e_cell.sqr()?.mean_all()? * lam)?;
@@ -416,6 +641,10 @@ pub fn fit_cell_activity_graph_embedding(
             // Per-gene mean of per_level → [L] for this chunk; running sum.
             let per_level_chunk_mean = per_level_gl.mean(0)?.detach();
             let loss_chunk = loss.detach();
+            pair_acc = Some(match pair_acc {
+                Some(prev) => (prev + &mean_abs_pair)?,
+                None => mean_abs_pair,
+            });
             epoch_loss_acc = Some(match epoch_loss_acc {
                 Some(prev) => (prev + loss_chunk)?,
                 None => loss_chunk,
@@ -451,6 +680,17 @@ pub fn fit_cell_activity_graph_embedding(
             "epoch {}: mean loss = {:.4e} (per-level: {:?}), samples = {}, skipped pairs = {}",
             epoch, mean_loss, mean_per_level, sample_count, skip_count
         );
+
+        // Pair-term magnitude: the collapse detector. If this decays toward
+        // zero while the loss still falls, the ungated cell biases have taken
+        // over the objective and the gene direction is doing nothing.
+        if chunk_count > 0 {
+            let pair_mean = pair_acc
+                .as_ref()
+                .and_then(|t| t.to_scalar::<f32>().ok())
+                .map_or(f64::NAN, |v| v as f64 / chunk_count as f64);
+            info!("epoch {}: mean |pair| = {:.4e}", epoch, pair_mean);
+        }
 
         // Push one summary row per epoch. `level = epoch`, `sweep = 0`.
         // `total_mass = #samples`, `mutual_information` = mean of per-level loss
@@ -504,6 +744,10 @@ pub fn fit_cell_activity_graph_embedding(
     ////////////////
     // 9. Outputs //
     ////////////////
+    // Drop the epoch's spike draw so every emitted table reports the MEAN
+    // `E[z] = pip`, not whichever sub-network the last epoch happened to run.
+    model.clear_gate_mask();
+
     info!("Writing cage outputs...");
 
     // Cell embedding [N × D]
@@ -522,50 +766,26 @@ pub fn fit_cell_activity_graph_embedding(
         Some(&[Box::from("b_cell")]),
     )?;
 
-    // Gene embedding [G × D] — same shared D-dim space as cells. When
-    // HVG selection was active, restrict the parquet to the K selected
-    // rows so downstream tools don't see untrained randn rows for
-    // dropped genes.
-    let e_gene_mat = tensor_to_mat(&model.e_feat)?;
-    let b_gene_mat = tensor_to_mat_1d(&model.b_feat)?;
-
-    let (e_gene_out, b_gene_out, gene_names_out): (Mat, Mat, Vec<Box<str>>) =
-        if let Some(sel) = hvg_selected.as_ref() {
-            let kept: Vec<usize> = sel.to_vec();
-            (
-                subset_rows(&e_gene_mat, kept.iter().copied())?,
-                subset_rows(&b_gene_mat, kept.iter().copied())?,
-                kept.iter().map(|&i| gene_names[i].clone()).collect(),
-            )
-        } else {
-            (e_gene_mat, b_gene_mat, gene_names.clone())
-        };
+    // Gene embedding [G × D] — same shared D-dim space as cells, over the FULL
+    // gene axis. There is no HVG row subset to mirror any more: HVG weights the
+    // projection, so every gene is trained and every gene gets a row here and
+    // in the PIP table below.
+    //
+    // RAW, UNGATED effects. The selection ships beside them in
+    // `feature_pip.parquet`, so downstream decides whether to multiply.
+    let e_gene_out = tensor_to_mat(&model.e_feat)?;
+    let b_gene_out = tensor_to_mat_1d(&model.b_feat)?;
 
     e_gene_out.to_parquet_with_names(
         &(c.out.to_string() + ".feature_embedding.parquet"),
-        (Some(&gene_names_out), Some("feature")),
+        (Some(&gene_names), Some("feature")),
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
     b_gene_out.to_parquet_with_names(
         &(c.out.to_string() + ".gene_bias.parquet"),
-        (Some(&gene_names_out), Some("gene")),
+        (Some(&gene_names), Some("gene")),
         Some(&[Box::from("b_gene")]),
-    )?;
-
-    // Per-level per-dim gate γ [L × D] post-softplus_floored, the
-    // learned "which embedding dim matters at this chain level" map.
-    let gates_t = gate.snapshot_gates()?;
-    let gates_mat = tensor_to_mat(&gates_t)?;
-    let level_names: Vec<Box<str>> = args
-        .chain_levels
-        .iter()
-        .map(|&lvl| format!("level_{lvl}").into_boxed_str())
-        .collect();
-    gates_mat.to_parquet_with_names(
-        &(c.out.to_string() + ".level_dim_gates.parquet"),
-        (Some(&level_names), Some("level")),
-        Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
@@ -617,15 +837,13 @@ pub fn fit_cell_activity_graph_embedding(
             Some(&cluster_col_names),
         )?;
 
-        // Feature dictionary [G × K] — same softmax-over-centroids
-        // recipe on the gene side. Uses the HVG-subset gene matrix
-        // when HVG was active, so the row axis matches
-        // feature_embedding.parquet.
+        // Feature dictionary [G × K] — same softmax-over-centroids recipe on
+        // the gene side, over the full gene axis.
         let feature_dict =
             propensity_against_centroids(&e_gene_out, &centroids, args.propensity_temp);
         feature_dict.to_parquet_with_names(
             &(c.out.to_string() + ".feature_dictionary.parquet"),
-            (Some(&gene_names_out), Some("feature")),
+            (Some(&gene_names), Some("feature")),
             Some(&cluster_col_names),
         )?;
 
@@ -650,7 +868,7 @@ pub fn fit_cell_activity_graph_embedding(
             n_clusters,
             n_cells,
             n_clusters,
-            gene_names_out.len(),
+            gene_names.len(),
             n_clusters,
             edges_usize.len(),
         );

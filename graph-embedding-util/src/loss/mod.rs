@@ -36,8 +36,8 @@ pub use cell::{
     build_per_batch_cell_samplers, CellCellSamplerStats, PbChainFilter, PerBatchCellSampler,
 };
 pub use chain::{
-    cell_cell_nce_loss_per_level_batched_gated, sample_cell_chain_batch,
-    sample_cell_chain_batch_with_pos, CellChainBatch, CellChainBatchArgs, CellChainBatchStats,
+    sample_cell_chain_batch, sample_cell_chain_batch_with_pos, CellChainBatch, CellChainBatchArgs,
+    CellChainBatchStats,
 };
 pub use feat::{
     build_stratified_sampler, nce_loss, nce_loss_identity, sample_per_batch_stratified_edge_batch,

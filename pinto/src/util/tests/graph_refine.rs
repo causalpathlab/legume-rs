@@ -49,7 +49,7 @@ fn test_refine_labels_basic_move() {
     // Initial wrong labels: 2 is mis-assigned to cluster 0.
     let mut labels = vec![0, 0, 0, 1];
 
-    let moves = refine_labels(&features, &graph, &mut labels, 10, 42);
+    let moves = refine_labels(&features, &graph, &mut labels, 10, 42, None);
     assert!(moves > 0, "should move at least one node");
     // Node 2 should join cluster 1 (where its feature lives).
     assert_eq!(labels[2], labels[3]);
@@ -74,7 +74,7 @@ fn test_refine_labels_respects_connectivity() {
     features[(1, 5)] = 1.0;
 
     let mut labels = vec![0, 0, 0, 0, 0, 1];
-    let _moves = refine_labels(&features, &graph, &mut labels, 10, 7);
+    let _moves = refine_labels(&features, &graph, &mut labels, 10, 7, None);
 
     // Node 2 must remain in cluster 0 because moving it disconnects {0,1} from {3,4}.
     assert_eq!(
@@ -98,7 +98,7 @@ fn test_refine_labels_converges_idempotent() {
     }
     let mut labels = vec![0, 0, 0, 1, 1, 1];
 
-    let moves = refine_labels(&features, &graph, &mut labels, 10, 11);
+    let moves = refine_labels(&features, &graph, &mut labels, 10, 11, None);
     assert_eq!(moves, 0, "already-optimal labels should produce no moves");
     assert_eq!(labels, vec![0, 0, 0, 1, 1, 1]);
 }

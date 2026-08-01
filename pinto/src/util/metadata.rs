@@ -89,13 +89,23 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_bias: Option<String>,
 
-    /// `pinto cage` per-gene per-level softplus(α) gates `[G × L]`.
+    /// `pinto cage` per-gene per-dim posterior inclusion probabilities
+    /// `[G × D]`, SAMPLED by block Gibbs against a pseudobulk Poisson.
+    /// These are the training-time gate's DROP RATES: a fresh `z ~ Bern(pip)`
+    /// is drawn each epoch. `feature_embedding` is NOT pre-multiplied by them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub level_dim_gates: Option<String>,
+    pub feature_pip: Option<String>,
+
+    /// `pinto cage` per-gene per-dim posterior mean EFFECTIVE loading
+    /// `E[z·β]` `[G × D]` — `pip` multiplied in already, so do NOT gate it
+    /// again. Not consumed by training; shipped for downstream use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feature_posterior_mean: Option<String>,
 
     /// `pinto cage` feature (gene) embedding `[G × D]` — same shared
     /// D-dim space as `cell_embedding`. Cosine similarity between
-    /// feature rows is directly interpretable.
+    /// feature rows is directly interpretable. Raw, ungated effects: pair
+    /// with `feature_pip` for the selection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
 
@@ -247,7 +257,8 @@ pub fn create_lc_metadata(
             lr_activity: None,
             cell_embedding: None,
             cell_bias: None,
-            level_dim_gates: None,
+            feature_pip: None,
+            feature_posterior_mean: None,
             feature_embedding: None,
             gene_bias: None,
             clusters: None,
@@ -300,7 +311,8 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             lr_activity: None,
             cell_embedding: None,
             cell_bias: None,
-            level_dim_gates: None,
+            feature_pip: None,
+            feature_posterior_mean: None,
             feature_embedding: None,
             gene_bias: None,
             clusters: None,
@@ -386,7 +398,8 @@ pub fn create_cage_metadata(
             lr_activity: None,
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
             cell_bias: Some(format!("{prefix}.cell_bias.parquet")),
-            level_dim_gates: Some(format!("{prefix}.level_dim_gates.parquet")),
+            feature_pip: Some(format!("{prefix}.feature_pip.parquet")),
+            feature_posterior_mean: Some(format!("{prefix}.feature_posterior_mean.parquet")),
             feature_embedding: Some(format!("{prefix}.feature_embedding.parquet")),
             gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
             clusters: outputs_clusters,
@@ -437,7 +450,8 @@ pub fn create_prop_metadata(
             lr_activity: None,
             cell_embedding: None,
             cell_bias: None,
-            level_dim_gates: None,
+            feature_pip: None,
+            feature_posterior_mean: None,
             feature_embedding: None,
             gene_bias: None,
             clusters: None,
@@ -524,7 +538,10 @@ mod tests {
         assert_eq!(back.n_communities, None);
         assert!(back.outputs.cell_embedding.is_some());
         assert!(back.outputs.cell_bias.is_some());
-        assert!(back.outputs.level_dim_gates.is_some());
+        assert_eq!(
+            back.outputs.feature_pip,
+            Some(format!("{prefix}.feature_pip.parquet"))
+        );
         assert!(back.outputs.feature_embedding.is_some());
         assert!(back.outputs.gene_bias.is_some());
         assert!(back.outputs.scores.is_some());

@@ -203,7 +203,7 @@ fn test_spatial_seeding() {
     // Build super-graph
     let dim = 4;
     let mut features = Mat::from_fn(dim, n, |r, c| if r == c % dim { 1.0 } else { 0.0 });
-    let (super_graph, super_features) = build_super_graph(&labels, num_super, &graph, &features);
+    let (super_graph, super_features, _) = build_super_graph(&labels, num_super, &graph, &features);
     assert_eq!(super_features.nrows(), dim);
     assert_eq!(super_features.ncols(), num_super);
     assert!(!super_graph.edges.is_empty());
@@ -365,5 +365,114 @@ fn test_modularity_veto_rejects_bridge() {
         result_with_veto.merges.len(),
         4,
         "with veto, each triangle produces 2 merges (6 nodes → 2 clusters)"
+    );
+}
+
+/// Coarsening levels MUST nest: each finer cluster lies inside exactly one
+/// coarser cluster. Before the two-pass fix they did not, and this test
+/// measured the breakage; it now pins the guarantee.
+///
+/// `selection::build_pseudobulks` depends on this: it reads the sparse matrix
+/// once at the finest level and sums columns upward via the parent map. That is
+/// only correct while the levels nest.
+///
+/// Measured as a paired contrast on one graph, refinement off vs on. Sized so
+/// the levels are genuinely DIFFERENT partitions: `compute_level_n_clusters`
+/// floors the coarsest level at `min(16, n_clusters)`, so a small `n_clusters`
+/// collapses every level onto the same 16 groups and makes nesting hold
+/// trivially.
+#[test]
+fn levels_stay_nested_under_refinement() {
+    const N: usize = 240;
+    // Ring plus chords, so clusters are not forced and refinement has real
+    // choices to make.
+    let mut edges: Vec<(usize, usize)> = (0..N).map(|i| (i, (i + 1) % N)).collect();
+    for i in (0..N).step_by(3) {
+        edges.push((i, (i + 7) % N));
+    }
+
+    let features = || {
+        let mut f = Mat::zeros(4, N);
+        let mut lcg: u64 = 0x2545F491_4F6CDD1D;
+        for i in 0..N {
+            let th = (i as f32) * std::f32::consts::TAU / (N as f32);
+            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let jitter = ((lcg >> 33) as f32 / (1u64 << 31) as f32) - 0.5;
+            f[(0, i)] = th.cos() + 0.6 * jitter;
+            f[(1, i)] = th.sin() - 0.6 * jitter;
+            f[(2, i)] = 0.8 * jitter;
+            f[(3, i)] = 0.8 * (1.0 - jitter);
+        }
+        f
+    };
+
+    // Fraction of finer-level clusters whose members all share ONE coarser
+    // label. 1.0 == perfectly nested.
+    let nested_frac = |coarse: &[usize], fine: &[usize]| -> f32 {
+        let n_fine = fine.iter().max().copied().map_or(0, |m| m + 1);
+        let mut parents: Vec<HashSet<usize>> = vec![Default::default(); n_fine];
+        for (cell, &f) in fine.iter().enumerate() {
+            parents[f].insert(coarse[cell]);
+        }
+        let pure = parents.iter().filter(|p| p.len() == 1).count();
+        pure as f32 / n_fine as f32
+    };
+
+    let run = |refine: usize| {
+        graph_coarsen_multilevel(
+            &make_test_graph(N, edges.clone()),
+            &mut features(),
+            &edges,
+            CoarsenConfig {
+                n_clusters: 64,
+                num_levels: 3,
+                refine_iterations: refine,
+                seeding: None,
+                modularity_veto: None,
+                dc_poisson: None,
+            },
+        )
+    };
+
+    let off = run(0);
+    let on = run(5);
+
+    // The contrast is only meaningful if the levels really are different
+    // partitions and refinement really did move nodes.
+    let sizes: Vec<usize> = off
+        .all_cell_labels
+        .iter()
+        .map(|l| l.iter().max().copied().map_or(0, |m| m + 1))
+        .collect();
+    assert!(
+        sizes.windows(2).any(|w| w[0] != w[1]),
+        "levels collapsed onto one partition ({sizes:?}); raise n_clusters or \
+         the nesting question is vacuous"
+    );
+    let moved: usize = off
+        .all_cell_labels
+        .iter()
+        .zip(on.all_cell_labels.iter())
+        .map(|(a, b)| a.iter().zip(b.iter()).filter(|(x, y)| x != y).count())
+        .sum();
+    assert!(moved > 0, "refinement moved nothing; nesting is untested");
+
+    // Positive control: the bare UF cut nests perfectly.
+    for l in 1..off.all_cell_labels.len() {
+        let frac = nested_frac(&off.all_cell_labels[l - 1], &off.all_cell_labels[l]);
+        assert!(
+            (frac - 1.0).abs() < 1e-6,
+            "refine=0 level {l} should nest perfectly, got {frac}"
+        );
+    }
+
+    let worst = (1..on.all_cell_labels.len())
+        .map(|l| nested_frac(&on.all_cell_labels[l - 1], &on.all_cell_labels[l]))
+        .fold(f32::MAX, f32::min);
+    println!("level sizes {sizes:?}, {moved} labels moved, worst nesting purity {worst}");
+    assert!(
+        (worst - 1.0).abs() < 1e-6,
+        "refine=5 broke nesting (worst purity {worst}) — the parent constraint \
+         in refine_labels is not holding"
     );
 }

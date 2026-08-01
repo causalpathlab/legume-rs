@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.5.8"
+version = "0.5.9"
 
 [[bin]]
 name = "pinto"

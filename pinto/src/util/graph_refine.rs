@@ -87,6 +87,26 @@ pub(super) fn would_disconnect_cluster(
 /// * `labels` – cluster labels, mutated in place
 /// * `max_iter` – safety cap on sweeps; converges earlier when no node moves
 /// * `rng_seed` – seed for the random node ordering
+/// * `parent_labels` – OPTIONAL coarser-level labels to nest inside. `None`
+///   refines freely (correct only for the coarsest level, which has no parent).
+///
+/// # Nesting
+///
+/// With `parent_labels = Some(p)`, a node may only move to a cluster lying in
+/// its OWN parent, so every refined cluster stays inside one parent and the
+/// levels form a real hierarchy. Callers must pass labels that are ALREADY
+/// nested in `p` — the union-find cut is, by construction — because the
+/// invariant is maintained inductively, not repaired.
+///
+/// Without it the levels are not a hierarchy. Measured on a 240-node ring with
+/// the default 5 sweeps: worst-level nesting purity was **0.925** before this
+/// parameter existed (7.5% of finer clusters straddled two parents) and is
+/// **1.000** with it. See `levels_stay_nested_under_refinement`.
+///
+/// Callers pass `None` ONLY for the coarsest level. Passing `None` everywhere
+/// restores the old non-nested behaviour, which no caller wants — it silently
+/// makes "coarsest → finest" a set of independent clusterings rather than a
+/// hierarchy.
 ///
 /// Returns total number of moves accepted.
 pub fn refine_labels(
@@ -95,6 +115,7 @@ pub fn refine_labels(
     labels: &mut [usize],
     max_iter: usize,
     rng_seed: u64,
+    parent_labels: Option<&[usize]>,
 ) -> usize {
     use rand::rngs::SmallRng;
     use rand::seq::SliceRandom;
@@ -113,6 +134,22 @@ pub fn refine_labels(
     if n_clusters <= 1 {
         return 0;
     }
+
+    // Which parent each cluster sits in. Well defined because the incoming
+    // labels are nested in `parent_labels`; a cluster's parent is therefore the
+    // parent of any one member. `usize::MAX` marks an empty cluster.
+    let cluster_parent: Option<Vec<usize>> = parent_labels.map(|parents| {
+        debug_assert_eq!(parents.len(), n);
+        let mut cp = vec![usize::MAX; n_clusters];
+        for (i, &c) in labels.iter().enumerate() {
+            debug_assert!(
+                cp[c] == usize::MAX || cp[c] == parents[i],
+                "refine_labels: incoming labels are not nested in parent_labels"
+            );
+            cp[c] = parents[i];
+        }
+        cp
+    });
 
     // Unnormalised centroid sums and sizes; cosine denominator = ||sum||.
     let mut centroid_sum = Mat::zeros(dim, n_clusters);
@@ -156,9 +193,19 @@ pub fn refine_labels(
             nbr_set.clear();
             for &nb in graph.neighbors(i) {
                 let nbc = labels[nb];
-                if nbc != current {
-                    nbr_set.insert(nbc);
+                if nbc == current {
+                    continue;
                 }
+                // Stay inside our own parent, so the level nests. A move across
+                // parents is what breaks the hierarchy. `cp[current]` IS this
+                // node's parent — that is the invariant asserted when `cp` was
+                // built — so `parent_labels` is not needed again here.
+                if let Some(cp) = &cluster_parent {
+                    if cp[nbc] != cp[current] {
+                        continue;
+                    }
+                }
+                nbr_set.insert(nbc);
             }
             if nbr_set.is_empty() {
                 continue;
