@@ -106,30 +106,43 @@ pub struct MultiomeArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "Cis propagation (gene-level, in [0,1]): proportion of a LINKED gene's \
-                log-expression variance inherited from its causal peaks' regulatory \
-                signal (the rest is gene-intrinsic noise). 0 ⇒ gene decoupled from its \
-                enhancers; 1 ⇒ fully enhancer-explained. A gene has no topic path of its \
-                own — cell-type specificity propagates through its peaks."
+        help = "Cis propagation at gene level, in [0,1]",
+        long_help = "Cis propagation, at gene level, in [0,1].\n\
+                     It is the share of a LINKED gene's log-expression variance\n\
+                     that its causal peaks' regulatory signal explains.\n\
+                     The rest is gene-intrinsic noise.\n\
+                     \n\
+                     0 decouples the gene from its enhancers.\n\
+                     1 makes it fully enhancer-explained.\n\
+                     A gene has no topic path of its own.\n\
+                     Cell-type specificity propagates through its peaks."
     )]
     pub pve_cis: f32,
 
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "Fraction of causal peaks made topic-INVARIANT (pure-private accessibility): \
-                their cis links are cleanly recoverable (no topic confounding). A clean \
-                positive-control set alongside the harder topic-driven links."
+        help = "Fraction of causal peaks made topic-INVARIANT",
+        long_help = "Fraction of causal peaks made topic-INVARIANT.\n\
+                     Their accessibility is purely private.\n\
+                     Their cis links are cleanly recoverable.\n\
+                     No topic confounding applies.\n\
+                     They form a clean positive-control set.\n\
+                     The topic-driven links are the harder case."
     )]
     pub invariant_causal_fraction: f32,
 
     #[arg(
         long,
         default_value_t = 5000,
-        help = "Expected RNA library size per cell. Synthetic mode: enters as the per-cell \
-                depth multiplier ρ_j (with `--cell-sd-log-depth-rna` log-normal noise). \
-                Reference mode: rescales the reference's per-gene mean μ̂_g so the simulated \
-                cells' average RNA library size matches this value."
+        help = "Expected RNA library size per cell",
+        long_help = "Expected RNA library size per cell.\n\
+                     \n\
+                     In synthetic mode it is the per-cell depth multiplier ρ_j.\n\
+                     `--cell-sd-log-depth-rna` adds log-normal noise.\n\
+                     \n\
+                     In reference mode it rescales the per-gene mean μ̂_g.\n\
+                     Simulated cells then average this library size."
     )]
     pub depth_rna: usize,
 
@@ -157,45 +170,61 @@ pub struct MultiomeArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Peak topic weight: (unnormalized) share of a PEAK's log-accessibility \
-                variance from the shared cell-state program (cell-type on/off). The peak \
-                budget {topic, private, noise, batch} is normalized to sum to 1."
+        help = "Peak topic weight: share from the shared cell-state program",
+        long_help = "Peak topic weight, unnormalized.\n\
+                     It is the share of a PEAK's log-accessibility variance\n\
+                     due to the shared cell-state program.\n\
+                     That program is cell-type on/off.\n\
+                     The peak budget is {topic, private, noise, batch}.\n\
+                     That budget is normalized to sum to 1."
     )]
     pub pve_topic: f32,
 
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "Peak-private weight: (unnormalized) share of a peak's log-accessibility \
-                from a peak-PRIVATE fluctuation (independent of cell type). This is the \
-                identifiability dial — only a true enhancer's private signal reaches its \
-                gene; co-active bystanders share only the topic part. 0 ⇒ peaks collinear \
-                within a cell type ⇒ cis links unidentifiable."
+        help = "Peak-private weight: share from a peak-PRIVATE fluctuation",
+        long_help = "Peak-private weight, unnormalized.\n\
+                     It is the share of a peak's log-accessibility due to a\n\
+                     peak-PRIVATE fluctuation.\n\
+                     That fluctuation is independent of cell type.\n\
+                     \n\
+                     This is the identifiability dial.\n\
+                     Only a true enhancer's private signal reaches its gene.\n\
+                     Co-active bystanders share only the topic part.\n\
+                     At 0, peaks are collinear within a cell type,\n\
+                     and cis links become unidentifiable."
     )]
     pub pve_private: f32,
 
     #[arg(
         long,
         default_value_t = 0.8,
-        help = "θ geometry: coarse-topic concentration per cell (1 = one-hot cell \
-                states, 0 = uniform). Sets how distinct cell states are; separate \
-                from the topic budget weight."
+        help = "θ geometry: coarse-topic concentration per cell",
+        long_help = "θ geometry: coarse-topic concentration per cell.\n\
+                     1 gives one-hot cell states; 0 gives uniform ones.\n\
+                     It sets how distinct the cell states are.\n\
+                     It is separate from the topic budget weight."
     )]
     pub topic_concentration: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "θ geometry: subtype concentration within the dominant coarse topic \
-                (only used when --n-sub-topics > 1)."
+        help = "θ geometry: subtype concentration in the dominant topic",
+        long_help = "θ geometry: subtype concentration.\n\
+                     It applies within the dominant coarse topic.\n\
+                     It is used only when --n-sub-topics > 1."
     )]
     pub subtopic_concentration: f32,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Total systematic log-rate SD σ (overall dynamic range), orthogonal \
-                to the variance-budget shares."
+        help = "Total systematic log-rate SD σ, the overall dynamic range",
+        long_help = "Total systematic log-rate SD σ.\n\
+                     It sets the overall dynamic range.\n\
+                     It is orthogonal to the variance-budget shares."
     )]
     pub log_signal_sd: f32,
 
@@ -240,8 +269,9 @@ pub struct MultiomeArgs {
     #[arg(
         long,
         help = "Real single-cell RNA reference. Symmetric to `--reference-atac`",
-        long_help = "Real single-cell RNA reference. Symmetric to `--reference-atac`. The\n\
-                     reference's row count overrides `--n-genes`."
+        long_help = "Real single-cell RNA reference.\n\
+                     It is symmetric to `--reference-atac`.\n\
+                     The reference's row count overrides `--n-genes`."
     )]
     pub reference_rna: Option<Box<str>>,
 
@@ -281,8 +311,9 @@ pub struct MultiomeArgs {
         long,
         default_value_t = 1,
         help = "Number of batches (per-cell membership is uniform)",
-        long_help = "Number of batches (per-cell membership is uniform). Stage-2 batch\n\
-                     perturbation is fitted per modality; same membership across modalities."
+        long_help = "Number of batches; per-cell membership is uniform.\n\
+                     Stage-2 batch perturbation is fitted per modality.\n\
+                     Membership is the same across modalities."
     )]
     pub batches: usize,
 
@@ -307,8 +338,10 @@ pub struct MultiomeArgs {
         long,
         default_value_t = 0.0,
         help = "Peak-noise weight: (unnormalized) share of a peak's log-accessibility from a per-cell residual noise term",
-        long_help = "Peak-noise weight: (unnormalized) share of a peak's log-accessibility from a\n\
-                     per-cell residual noise term. Normalized with the other peak-budget weights."
+        long_help = "Peak-noise weight, unnormalized.\n\
+                     It is the share of a peak's log-accessibility due to a\n\
+                     per-cell residual noise term.\n\
+                     It is normalized with the other peak-budget weights."
     )]
     pub pve_noise: f32,
 
@@ -325,19 +358,27 @@ pub struct MultiomeArgs {
         long,
         default_value_t = 1.0,
         help = "Fraction of cells observed in BOTH modalities (1.0 = fully paired, 0.0 = fully disjoint)",
-        long_help = "Fraction of cells observed in BOTH modalities. `1.0` (default)\n\
-                     keeps the historical paired-multiome behavior — ATAC and RNA\n\
-                     share `--n-cells` barcodes one-to-one. `0.0` makes the two\n\
-                     modalities fully disjoint (each gets `--n-cells` unique\n\
-                     barcodes; no cell is in both files). In-between gives **patchy\n\
-                     multiome**: `floor(n_cells * fraction)` shared cells plus\n\
-                     `n_cells - floor(...)` modality-only cells per modality.\n\
+        long_help = "Fraction of cells observed in BOTH modalities.\n\
                      \n\
-                     Shared cells are named `cell_<i>` and appear identically in\n\
-                     both files. Modality-only cells are named `atac_cell_<i>` or\n\
-                     `rna_cell_<i>` and appear only in their file. Use to drive\n\
-                     `senna gbe --multiome` / `senna itopic --multiome` integration\n\
-                     tests at known overlap fractions."
+                     `1.0`, the default, keeps paired-multiome behaviour.\n\
+                     ATAC and RNA then share `--n-cells` barcodes one-to-one.\n\
+                     \n\
+                     `0.0` makes the two modalities fully disjoint.\n\
+                     Each gets `--n-cells` unique barcodes.\n\
+                     No cell appears in both files.\n\
+                     \n\
+                     In between gives patchy multiome.\n\
+                     There are `floor(n_cells * fraction)` shared cells.\n\
+                     Each modality adds `n_cells - floor(...)` of its own.\n\
+                     \n\
+                     Shared cells are named `cell_<i>`.\n\
+                     They appear identically in both files.\n\
+                     Modality-only cells are named `atac_cell_<i>` or\n\
+                     `rna_cell_<i>`, and appear only in their own file.\n\
+                     \n\
+                     Use this to drive `senna gbe --multiome` and\n\
+                     `senna itopic --multiome` integration tests,\n\
+                     at known overlap fractions."
     )]
     pub cell_overlap_fraction: f32,
 }
