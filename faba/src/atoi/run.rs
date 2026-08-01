@@ -46,7 +46,8 @@ pub struct AtoICountArgs {
         required = true,
         help = "Output directory",
         long_help = "Output directory for A-to-I detection results.\n\
-                     Creates atoi_sites.parquet (detected sites) and one sparse count matrix per input BAM (with _atoi suffix)."
+                     Creates atoi_sites.parquet with the detected sites,\n\
+            and one sparse count matrix per input BAM, suffixed _atoi."
     )]
     pub output: Box<str>,
 
@@ -126,7 +127,8 @@ pub struct AtoICountArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive.\n\
+                     Zarr backend only; no effect on hdf5."
     )]
     pub zip: bool,
 

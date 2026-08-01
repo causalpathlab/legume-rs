@@ -76,7 +76,8 @@ pub struct PileupArgs {
         num_args = 1..,
         help = "Sparse matrix file(s) (zarr or h5) from faba output",
         long_help = "Sparse matrix file(s) (zarr or h5) from faba output.\n\
-                     Multiple files (e.g. replicates via a shell glob) are aggregated per genomic position into a single track."
+                     Multiple files, e.g. replicates via a shell glob,\n\
+                     are aggregated per genomic position into a single track."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -281,7 +282,8 @@ pub struct PileupArgs {
         long = "raster-threshold",
         default_value_t = 300,
         help = "Rasterize the per-site dot layer once a panel exceeds this many sites",
-        long_help = "Rasterize the per-site dot layer once a panel exceeds this many sites (keeps SVG/PDF size bounded; axes/areas stay vector)"
+        long_help = "Rasterize the per-site dot layer once a panel exceeds this many sites.\n\
+                     That keeps SVG/PDF size bounded; axes and areas stay vector."
     )]
     raster_threshold: usize,
 }

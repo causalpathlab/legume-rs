@@ -184,7 +184,8 @@ pub struct PlotArgs {
         long = "pseudotime-scale",
         value_enum,
         default_value_t = PseudotimeScale::Sqrt,
-        help = "Non-linear remap of the --color-by pseudotime ramp (default sqrt) so late-time outliers don't dominate the spectrum"
+        help = "Non-linear remap of the --color-by pseudotime ramp, default sqrt,\n\
+                so late-time outliers don't dominate the spectrum"
     )]
     pub pseudotime_scale: PseudotimeScale,
 
@@ -259,7 +260,8 @@ pub struct PlotArgs {
         help = "Which trajectory nodes get a cell-type label (default: one per type)",
         long_help = "Which trajectory nodes carry a cell_type label.\n\
                      `faba lineage` emits one MST node per --n-centroids (200 by default),\n\
-                     so labeling every node repeats each type name dozens of times and the labels collide into an unreadable mat.\n\
+                     so labeling every node repeats each type name dozens of times,\n\
+                     and the labels collide into an unreadable mat.\n\
                      \n\
                      per-type (default) → one label per called type,\n\
                      placed on its most-differentiated node (terminal preferred).\n\
@@ -300,7 +302,9 @@ pub struct PlotArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Do not print a cell-type name at each type's centroid (default: label centroids, so the plot reads without decoding many leading/second colours)"
+        help = "Do not print a cell-type name at each type's centroid.\n\
+                Centroids are labelled by default,\n\
+                so the plot reads without decoding many leading/second colours."
     )]
     pub no_celltype_labels: bool,
 

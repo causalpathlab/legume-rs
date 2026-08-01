@@ -795,7 +795,8 @@ pub struct MitoQcArgs {
         long = "keep-mito",
         default_value_t = false,
         help = "Keep mitochondrial genes in the quantified gene set",
-        long_help = "By default mitochondrial genes are dropped from what is quantified (their per-cell MT fraction is still reported as QC).\n\
+        long_help = "By default mitochondrial genes are dropped from what is quantified.\n\
+                     Their per-cell MT fraction is still reported as QC.\n\
                      Use this flag to retain them."
     )]
     pub keep_mito: bool,

@@ -119,7 +119,8 @@ pub struct AnnotateArgs {
                      Overriding to `projection` on a topic model warns, then proceeds.\n\
                      \n\
                      `projection` is for a `faba gem` EMBEDDING run.\n\
-                     It builds each type's centroid from its markers' co-embedded feature vectors and hands every cell to the nearest one.\n\
+                     It builds each type's centroid from its markers' co-embedded feature vectors,\n\
+            then hands every cell to the nearest one.\n\
                      Reads {from}.feature_embedding.parquet + {from}.cell_embedding.parquet;\n\
                      writes {out}.{track}.*\n\
                      \n\
@@ -136,7 +137,8 @@ pub struct AnnotateArgs {
                      Nearest-centroid forms the cell-gene inner product <z_c, rho_g>,\n\
                      and for a topic model that is not a metric:\n\
                      beta = softmax_g(b_g + <alpha_t, rho_g>) depends only on gene-to-gene DIFFERENCES,\n\
-                     so the per-gene bias b_g absorbs the level and the absolute cell-gene direction is a gauge freedom the likelihood never pins.\n\
+                     so the per-gene bias b_g absorbs the level,\n\
+            and the absolute cell-gene direction is a gauge the likelihood never pins.\n\
                      `enrichment` routes the call through beta and theta.\n\
                      Those are the two things a topic model actually estimates.\n\
                      It never forms that inner product.\n\
@@ -265,12 +267,14 @@ pub struct AnnotateArgs {
         long_help = "Marker-panel permutation null — the BIAS guard.\n\
                      \n\
                      Puts each type on trial:\n\
-                     replace ONLY its markers with the same number of random genes (same IDF weights, matched on gene norm, drawn from the live marker pool),\n\
+                     replace ONLY its markers with the same number of random genes:\n\
+            same IDF weights, matched on gene norm, drawn from the live marker pool,\n\
                      leave every rival type real,\n\
                      and ask whether its own genes place its prototype any better than random ones would.\n\
                      \n\
                      The bootstrap only measures VARIANCE,\n\
-                     so a type whose markers are simply wrong comes back perfectly stable and looks like the most confident call in the run.\n\
+                     so a type whose markers are simply wrong comes back perfectly stable,\n\
+            and looks like the most confident call in the run.\n\
                      This is what catches that.\n\
                      \n\
                      0 = off; try 200. Writes {out}.panel_null.tsv"
@@ -283,7 +287,9 @@ pub struct AnnotateArgs {
         help = "Support permutation null: turns label_support into a p-value/FDR. 0 = off",
         long_help = "Support permutation null — calibrates `label_support`.\n\
                      \n\
-                     Shuffles which type each marker gene belongs to (within gene-norm strata, so no type's norm profile changes) and re-runs the whole bootstrap,\n\
+                     Shuffles which type each marker gene belongs to,\n\
+            within gene-norm strata, so no type's norm profile changes,\n\
+            then re-runs the whole bootstrap,\n\
                      to learn what a cell's support looks like when the panel carries no type information.\n\
                      \n\
                      This replaces an arbitrary bar with a calibrated one.\n\
@@ -336,7 +342,8 @@ pub struct AnnotateArgs {
                      \n\
                      WARNING: with the partition held fixed the bootstrap has little to say —\n\
                      measured,\n\
-                     NOTHING abstains (0% unassigned) and support's ability to separate spurious calls falls from AUC 0.93 to 0.69"
+                     NOTHING abstains, 0% unassigned,\n\
+            and support's ability to separate spurious calls falls from AUC 0.93 to 0.69."
     )]
     pub no_recluster: bool,
 

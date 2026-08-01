@@ -377,19 +377,25 @@ Example:\n  \
                       Per-gene β-sharing:\n\
                       each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
                       A gene's spliced and unspliced tracks thus share one identity.\n\
-                      Cell identity θ → `{out}.cell_embedding.parquet` (raw) and the velocity increment δ → `{out}.velocity.parquet` are solved JOINTLY by default,\n\
+                      Two things are solved JOINTLY by default:\n\
+                      cell identity θ → `{out}.cell_embedding.parquet` (raw),\n\
+                      and the velocity increment δ → `{out}.velocity.parquet`.\n\
                       so θ is powered by both splice tracks rather than the spliced one alone.\n\
-                      `--sequential-velocity` reverts to the older two-step fit (θ from the spliced edges, then δ from the unspliced with θ held fixed),\n\
+                      `--sequential-velocity` reverts to the older two-step fit:\n\
+                      θ from the spliced edges,\n\
+                      then δ from the unspliced with θ held fixed,\n\
                       which pins θ to the mature state for a cleaner δ readout.\n\
                       The nascent state is just θ+δ; ‖δ‖ is speed.\n\
                       Per-gene velocity is the in-model δ_g → `{out}.delta_feature_embedding.parquet`;\n\
-                      it is written whenever the input carries unspliced rows (`--delta-l2 0`, the default, auto-applies a mild ridge to keep it identified).\n\
+                      it is written whenever the input carries unspliced rows.\n\
+                      `--delta-l2 0`, the default, applies a mild ridge to keep it identified.\n\
                       The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
                       gene-keyed so a marker panel joins against it directly.\n\
                       \n\
                       `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
                       it is the raw per-cell Poisson increment δ_c,\n\
-                      which is dominated by a shrinkage-toward-origin common mode (δ_c ≈ −0.5·θ, from fitting sparse unspliced counts absolutely).\n\
+                      which a shrinkage-toward-origin common mode dominates:\n\
+                      δ_c ≈ −0.5·θ, from fitting sparse unspliced counts absolutely.\n\
                       Use `{out}.velocity.parquet` for the velocity.\n\
                       \n\
                       With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
@@ -447,11 +453,14 @@ Example:\n  \
                       and delta degenerates.\n\
                       \n\
                       VELOCITY is the cell-level delta = theta_nascent - theta_mature,\n\
-                      each fitted POST HOC to its own track against the frozen dictionaries (elliptical slice sampling warm-started from the encoder, which also closes the amortization gap).\n\
+                      each fitted POST HOC to its own track against the frozen dictionaries.\n\
+                      Elliptical slice sampling, warm-started from the encoder,\n\
+                      which also closes the amortization gap.\n\
                       The model has one latent by design,\n\
                       so it cannot express that difference while training;\n\
                       estimating delta first and reading the movement out of it keeps the two from competing.\n\
-                      The per-axis population mean is removed before writing and recorded in `{out}.gem.json` as `velocity_common_mode`.\n\
+                      The per-axis population mean is removed before writing,\n\
+                      and recorded in `{out}.gem.json` as `velocity_common_mode`.\n\
                       \n\
                       The latent is a softmax simplex — hence the `gem-topic` alias —\n\
                       and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
@@ -462,11 +471,14 @@ Example:\n  \
                       and you should check what your batches are:\n\
                       with several inputs and no `--batch-files`,\n\
                       each file's cells are tagged `@<sample>` and that tag becomes the batch —\n\
-                      so on rep{1,2,3}_{wt,mut} the batches are the SIX samples and the wt-vs-mut contrast is removed along with the donor effects.\n\
+                      so on rep{1,2,3}_{wt,mut} the batches are the SIX samples,\n\
+                      and the wt-vs-mut contrast goes out with the donor effects.\n\
                       Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\
                       \n\
                       Pooling is a masked value-weighted sum per track, concatenated;\n\
-                      the attention-slot variant was removed after it measured 3.5x worse on between-cell variance and went degenerate whenever a track was hidden.\n\
+                      the attention-slot variant was removed after it measured 3.5x worse\n\
+                      on between-cell variance,\n\
+                      and went degenerate whenever a track was hidden.\n\
                       Ctrl-C stops training gracefully and still writes outputs,\n\
                       flagged as partial.",
         after_long_help = "\
@@ -484,8 +496,11 @@ Example:\n  \
         about = "Marker-set cell-type annotation of a `faba gem` or `gem-encoder` run",
         long_about = "Annotate a gem-family run against a marker set.\n\
                       \n\
-                      Reads the run's parquet outputs by prefix (`-f/--from`) and a marker TSV (`gene<TAB>celltype`, `-m/--markers`),\n\
-                      then runs the shared term-ORA core (assign → distance-outlier QC → Leiden clustering → cluster×term hypergeometric over-representation, permutation-calibrated).\n\
+                      Reads the run's parquet outputs by prefix (`-f/--from`),\n\
+                      plus a marker TSV (`gene<TAB>celltype`, `-m/--markers`).\n\
+                      Then runs the shared term-ORA core:\n\
+                      assign → distance-outlier QC → Leiden clustering →\n\
+                      cluster×term hypergeometric over-representation, permutation-calibrated.\n\
                       \n\
                       TWO SCORERS (`--mode`), and they are not two flavours of one statistic:\n\
                       they read different files and rest on different assumptions about the geometry.\n\
@@ -495,19 +510,26 @@ Example:\n  \
                       a topic model (`faba gem-encoder` / `gem-topic`) → `enrichment`.\n\
                       A prefix that cannot say what produced it is reported, not guessed at.\n\
                       \n\
-                      `projection` builds each type's centroid from its markers' CO-EMBEDDED feature vectors and hands every cell to the nearest one.\n\
-                      It reads `feature_embedding.parquet` (NOT the raw `beta_feature_embedding` or `delta_feature_embedding`, which are model parameters off the cell manifold) plus `cell_embedding.parquet`.\n\
+                      `projection` builds each type's centroid from its markers'\n\
+                      CO-EMBEDDED feature vectors,\n\
+                      then hands every cell to the nearest one.\n\
+                      It reads `feature_embedding.parquet` plus `cell_embedding.parquet`.\n\
+                      NOT the raw `beta_feature_embedding` or `delta_feature_embedding`,\n\
+                      which are model parameters off the cell manifold.\n\
                       Its tracks:\n\
                       spliced:  /count/spliced rows   vs cell θ         → {out}.spliced.*\n\
                       velocity: /count/unspliced rows vs cell velocity  → {out}.velocity.*\n\
                       \n\
                       `enrichment` never forms a cell-gene inner product —\n\
                       on a topic model that is not a metric,\n\
-                      since β depends only on gene-to-gene differences and the absolute direction is a gauge the likelihood never pins.\n\
+                      since β depends only on gene-to-gene differences,\n\
+                      and the absolute direction is a gauge the likelihood never pins.\n\
                       It asks per factor whether a type's panel is over-represented at the top of that factor's gene ranking,\n\
                       then carries the surviving factor×type edges to cells through θ.\n\
                       It reads `dictionary.parquet`, `latent.parquet`,\n\
-                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.* Its tracks are `spliced` and `nascent` (NOT velocity: a displacement has no membership to carry a call through).\n\
+                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.*\n\
+                      Its tracks are `spliced` and `nascent`, NOT velocity:\n\
+                      a displacement has no membership to carry a call through.\n\
                       `nascent` annotates the nascent PROGRAM — a state the cell is in,\n\
                       on the simplex —\n\
                       and reading it against `spliced` is the well-posed form of the question `velocity` asks.\n\
@@ -587,7 +609,8 @@ Example:\n  \
         name = "plot",
         aliases = ["plot-lineage", "trajectory-plot"],
         about = "Publication-style figure (PDF/PNG/SVG) of a `faba lineage` trajectory over its 2D embedding",
-        long_about = "Render the outputs of `faba lineage --markers` (with the default --layout phate) into a single annotated figure:\n\
+        long_about = "Render the outputs of `faba lineage --markers` into one annotated figure,\n\
+                      with the default --layout phate:\n\
                       cells laid out on the PHATE embedding,\n\
                       coloured by coarse cell type (default) or pseudotime,\n\
                       with a trajectory backbone, velocity arrows and MST nodes overlaid.\n\
@@ -599,13 +622,16 @@ Example:\n  \
                       {from}.trajectory_annotation.parquet (node role/cell_type),\n\
                       and {from}.pseudotime.parquet (for --color-by pseudotime).\n\
                       \n\
-                      The cells are drawn as transparent raster layers per cell type from a qualitative palette (with a legend) —\n\
+                      The cells are drawn as transparent raster layers per cell type,\n\
+                      from a qualitative palette, with a legend —\n\
                       confident calls solid, mixed ones faded —\n\
                       or one continuous blue->red pseudotime layer (with a colourbar).\n\
                       \n\
                       The backbone is `--trajectory auto` by default:\n\
                       the Slingshot principal curves when the run has few lineages,\n\
-                      otherwise the MST drawn ONCE with stroke weight by traversal count (the curves all share the trunk, so past ~24 lineages they overplot into an opaque mat).\n\
+                      otherwise the MST drawn ONCE, with stroke weight by traversal count.\n\
+                      The curves all share the trunk,\n\
+                      so past ~24 lineages they overplot into an opaque mat.\n\
                       Force it with `tree`, `curves` or `none`.\n\
                       Direction is ALWAYS shown as velocity arrows read off `velocity_flux`,\n\
                       independent of that choice, and only on edges whose velocity earned one.\n\

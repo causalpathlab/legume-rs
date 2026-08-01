@@ -597,7 +597,8 @@ pub struct CellScanArgs {
                      cells are dropped up to the point where the discarded pool's conversion rate EQUALS the control's,\n\
                      so nothing demonstrably real is thrown away. Nothing is tuned.\n\
                      \n\
-                     Set it to cut deeper and concentrate the kept pool -- e.g. `1.5` permits the discarded pool to edit 50% above the control.\n\
+                     Set it to cut deeper and concentrate the kept pool.\n\
+                     e.g. `1.5` permits the discarded pool to edit 50% above the control.\n\
                      Every run logs `dropped/control` and the equivalent control percentile,\n\
                      so the cost of raising it is visible. Measured on rep1,\n\
                      ACTB recovery was still climbing at 2.0 (8 -> 13 sites, GAPDH still rejected),\n\
