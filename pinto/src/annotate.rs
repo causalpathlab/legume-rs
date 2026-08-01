@@ -36,9 +36,10 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Embedding-run prefix (cage / lc-etm `-o` value), or its `{prefix}.pinto.json`",
-        long_help = "Shared output prefix of a pinto embedding run. Reads\n\
-                     `{prefix}.feature_embedding.parquet` + `{prefix}.cell_embedding.parquet`.\n\
+        help = "Embedding-run prefix (cage / lc-etm `-o` value),\n\
+                or its `{prefix}.pinto.json`",
+        long_help = "Shared output prefix of a pinto embedding run.\n\
+                     Reads `{prefix}.feature_embedding.parquet` + `{prefix}.cell_embedding.parquet`.\n\
                      A `{prefix}.pinto.json` path is also accepted (suffix stripped).\n\
                      Override either side explicitly with --feature-embedding /\n\
                      --cell-embedding (both required together when --from is omitted)."

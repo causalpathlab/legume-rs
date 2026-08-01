@@ -51,8 +51,7 @@ pub struct ReadDepthArgs {
         long,
         default_value_t = 10,
         help = "Minimum non-zeros per row (bin)",
-        long_help = "Bins with fewer than this many non-zero cells are removed\n\
-                     from the output matrix."
+        long_help = "Bins with fewer than this many non-zero cells are removed from the output matrix."
     )]
     pub(crate) row_nnz_cutoff: usize,
 
@@ -61,8 +60,7 @@ pub struct ReadDepthArgs {
         long,
         default_value_t = 10,
         help = "Minimum non-zeros per column (cell)",
-        long_help = "Cells with fewer than this many non-zero bins are removed\n\
-                     from the output matrix."
+        long_help = "Cells with fewer than this many non-zero bins are removed from the output matrix."
     )]
     pub(crate) column_nnz_cutoff: usize,
 
@@ -72,8 +70,7 @@ pub struct ReadDepthArgs {
         value_enum,
         default_value = "zarr",
         help = "Sparse matrix output backend",
-        long_help = "File format for the output sparse matrix.\n\
-                     Supported: zarr, hdf5."
+        long_help = "File format for the output sparse matrix. Supported: zarr, hdf5."
     )]
     pub(crate) backend: SparseIoBackend,
 
@@ -82,8 +79,7 @@ pub struct ReadDepthArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub(crate) zip: bool,
 
@@ -92,7 +88,8 @@ pub struct ReadDepthArgs {
         long = "valid-cells",
         help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse",
         long_help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse.\n\
-                     Without it every observed barcode gets a column, ambient droplets included.\n\
+                     Without it every observed barcode gets a column,\n\
+                     ambient droplets included.\n\
                      Reads with no cell barcode tag are dropped whenever this is given."
     )]
     pub(crate) valid_cells_file: Option<Box<str>>,

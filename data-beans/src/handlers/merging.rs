@@ -34,8 +34,8 @@ pub struct MergeBackendArgs {
     #[arg(
         value_delimiter = ',',
         help = "Input data files",
-        long_help = "Data files to be merged into a single backend. \n\
-		     Provide one or more files in supported formats."
+        long_help = "Data files to be merged into a single backend.\n\
+                     Provide one or more files in supported formats."
     )]
     pub data_files: Vec<Box<str>>,
 
@@ -44,8 +44,8 @@ pub struct MergeBackendArgs {
         value_enum,
         default_value = "zarr",
         help = "Backend format",
-        long_help = "Specify the backend format to use for the merged data. \n\
-		     Supported formats include 'zarr', 'h5', etc."
+        long_help = "Specify the backend format to use for the merged data.\n\
+                     Supported formats include 'zarr', 'h5', etc."
     )]
     pub backend: SparseIoBackend,
 
@@ -54,12 +54,12 @@ pub struct MergeBackendArgs {
         long,
         required = true,
         help = "Output file header",
-        long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
-		     The zarr backend produces {output}.zarr.zip by default;\n\
-		     pass --no-zip to keep a {output}.zarr directory instead.\n\
-		     The backend will contain everything.\n\
-		     Batch assignment information goes to a separate file.\n\
-		     Later embedding steps need it."
+        long_help = "Output file header: {output}.{backend} and {output}.batch.gz.\n\
+                     The zarr backend produces {output}.zarr.zip by default;\n\
+                     pass --no-zip to keep a {output}.zarr directory instead.\n\
+                     The backend will contain everything.\n\
+                     Batch assignment information goes to a separate file.\n\
+                     Later embedding steps need it."
     )]
     pub output: Box<str>,
 
@@ -71,8 +71,8 @@ pub struct MergeBackendArgs {
         long,
         default_value_t = false,
         help = "Squeeze sparse rows/columns",
-        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
-		     This can help reduce file size and improve performance."
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros.\n\
+                     This can help reduce file size and improve performance."
     )]
     pub do_squeeze: bool,
 
@@ -80,8 +80,8 @@ pub struct MergeBackendArgs {
         long,
         default_value_t = 1,
         help = "Row non-zero cutoff",
-        long_help = "Minimum number of non-zero elements required for rows. \n\
-		     Rows with fewer non-zeros will be removed if squeezing is enabled."
+        long_help = "Minimum number of non-zero elements required for rows.\n\
+                     Rows with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub row_nnz_cutoff: usize,
 
@@ -89,8 +89,8 @@ pub struct MergeBackendArgs {
         long,
         default_value_t = 1,
         help = "Column non-zero cutoff",
-        long_help = "Minimum number of non-zero elements required for columns. \n\
-		     Columns with fewer non-zeros will be removed if squeezing is enabled."
+        long_help = "Minimum number of non-zero elements required for columns.\n\
+                     Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub column_nnz_cutoff: usize,
 
@@ -108,11 +108,9 @@ pub struct MergeMtxArgs {
         required = true,
         help = "Input data directories",
         long_help = "Each directory and its sub-directories are searched.\n\
-		     The program looks for files named by:\n\
-                     (1) `mtx_file_name`,\n\
-		     (2) `feature_file_name`,\n\
-		     (3) `barcode_file_name`.\n\
-		     Those are merged into one backend file."
+                     The program looks for files named by: (1) `mtx_file_name`,\n\
+                     (2) `feature_file_name`, (3) `barcode_file_name`.\n\
+                     Those are merged into one backend file."
     )]
     pub data_directories: Vec<Box<str>>,
 
@@ -121,7 +119,7 @@ pub struct MergeMtxArgs {
         value_enum,
         default_value = "zarr",
         help = "Backend format",
-        long_help = "Specify the backend format for the merged data. \n\
+        long_help = "Specify the backend format for the merged data.\n\
                      Supported formats include 'zarr', 'h5', etc."
     )]
     pub backend: SparseIoBackend,
@@ -131,12 +129,12 @@ pub struct MergeMtxArgs {
         long,
         required = true,
         help = "Output file header",
-        long_help = "Output file header: {output}.{backend} and {output}.batch.gz. \n\
+        long_help = "Output file header: {output}.{backend} and {output}.batch.gz.\n\
                      The zarr backend produces {output}.zarr.zip by default;\n\
                      pass --no-zip to keep a {output}.zarr directory instead.\n\
                      The backend will contain all merged data.\n\
                      Batch assignment information goes to a separate file.\n\
-		     Later embedding steps need it."
+                     Later embedding steps need it."
     )]
     pub output: Box<str>,
 
@@ -149,7 +147,7 @@ pub struct MergeMtxArgs {
         long,
         default_value = "matrix.mtx",
         help = "Matrix file name",
-        long_help = "Name of the matrix file to search for in each directory. \n\
+        long_help = "Name of the matrix file to search for in each directory.\n\
                      The default for 10x data is 'matrix.mtx'."
     )]
     pub mtx_file_name: Box<str>,
@@ -159,7 +157,7 @@ pub struct MergeMtxArgs {
         long,
         default_value = "genes.tsv.gz",
         help = "Feature/row file name",
-        long_help = "Name of the feature (row) file to search for in each directory. \n\
+        long_help = "Name of the feature (row) file to search for in each directory.\n\
                      The default is 'genes.tsv.gz'."
     )]
     pub feature_file_name: Box<str>,
@@ -168,7 +166,7 @@ pub struct MergeMtxArgs {
         long,
         default_value_t = 2,
         help = "Number of words for feature names",
-        long_help = "Number of words to use when parsing feature names from the feature file. \n\
+        long_help = "Number of words to use when parsing feature names from the feature file.\n\
                      Adjust this to match your data format."
     )]
     pub num_feature_name_words: usize,
@@ -178,7 +176,7 @@ pub struct MergeMtxArgs {
         long,
         default_value = "barcodes.tsv.gz",
         help = "Barcode/column file name",
-        long_help = "Name of the barcode (column) file to search for in each directory. \n\
+        long_help = "Name of the barcode (column) file to search for in each directory.\n\
                      The default is 'barcodes.tsv.gz'."
     )]
     pub barcode_file_name: Box<str>,
@@ -187,7 +185,7 @@ pub struct MergeMtxArgs {
         long,
         default_value_t = 5,
         help = "Number of words for barcode names",
-        long_help = "Number of words to use when parsing barcode names from the barcode file. \n\
+        long_help = "Number of words to use when parsing barcode names from the barcode file.\n\
                      Adjust this to match your data format."
     )]
     pub num_barcode_name_words: usize,
@@ -196,7 +194,7 @@ pub struct MergeMtxArgs {
         long,
         default_value_t = false,
         help = "Squeeze sparse rows/columns",
-        long_help = "Enable squeezing to remove rows and columns with too few non-zeros. \n\
+        long_help = "Enable squeezing to remove rows and columns with too few non-zeros.\n\
                      This can help reduce file size and improve performance."
     )]
     pub do_squeeze: bool,
@@ -205,7 +203,7 @@ pub struct MergeMtxArgs {
         long,
         default_value_t = 1,
         help = "Row non-zero cutoff",
-        long_help = "Minimum number of non-zero elements required for rows. \n\
+        long_help = "Minimum number of non-zero elements required for rows.\n\
                      Rows with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub row_nnz_cutoff: usize,
@@ -214,7 +212,7 @@ pub struct MergeMtxArgs {
         long,
         default_value_t = 1,
         help = "Column non-zero cutoff",
-        long_help = "Minimum number of non-zero elements required for columns. \n\
+        long_help = "Minimum number of non-zero elements required for columns.\n\
                      Columns with fewer non-zeros will be removed if squeezing is enabled."
     )]
     pub column_nnz_cutoff: usize,

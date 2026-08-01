@@ -38,18 +38,17 @@ pub struct CnvArgs {
     #[arg(
         long,
         help = "GFF/GTF annotation for CNV detection.",
-        long_help = "GFF/GTF file with gene coordinates.\n\
-                     When provided, it runs the per-sample HMM CNV model.\n\
-                     Its input is the cocoa-adjusted log-ratio matrix,\n\
-                     over (indv × topic)."
+        long_help = "GFF/GTF file with gene coordinates. When provided,\n\
+                     it runs the per-sample HMM CNV model.\n\
+                     Its input is the cocoa-adjusted log-ratio matrix, over (indv × topic)."
     )]
     pub gff: Option<Box<str>>,
 
     #[arg(
         long,
         help = "CNV ground-truth TSV (alternative to --gff).",
-        long_help = "Alternative to --gff: reads gene coordinates from a\n\
-                     `.cnv_ground_truth.tsv.gz` file (gene_idx, chr, pos, state).\n\
+        long_help = "Alternative to --gff:\n\
+                     reads gene coordinates from a `.cnv_ground_truth.tsv.gz` file (gene_idx, chr, pos, state).\n\
                      Useful for simulation studies."
     )]
     pub cnv_ground_truth: Option<Box<str>>,

@@ -62,8 +62,8 @@ pub struct PlotStrandArgs {
         help = "Override the gene × group activity matrix",
         long_help = "Override the gene × group activity matrix.\n\
                      It is a parquet with gene-name rows.\n\
-                     By default it is derived from the manifest's annotate\n\
-                     outputs, as a gene × cell-type matrix."
+                     By default it is derived from the manifest's annotate outputs,\n\
+                     as a gene × cell-type matrix."
     )]
     pub activity: Option<Box<str>>,
 
@@ -81,9 +81,8 @@ pub struct PlotStrandArgs {
         value_delimiter = ',',
         help = "Restrict to these chromosomes, comma-separated",
         long_help = "Restrict to these chromosomes, comma-separated.\n\
-                     The 'chr' prefix is optional.\n\
-                     The default is every autosome plus X, Y and M in the GTF,\n\
-                     in karyotype order."
+                     The 'chr' prefix is optional. The default is every autosome plus X,\n\
+                     Y and M in the GTF, in karyotype order."
     )]
     pub chromosomes: Option<Vec<Box<str>>>,
 
@@ -136,7 +135,8 @@ pub struct PlotStrandArgs {
     #[arg(
         long,
         default_value = "#7A7A7A",
-        help = "Consensus fill colour (both strands), matching the Strand-seq consensus track"
+        help = "Consensus fill colour (both strands),\n\
+                matching the Strand-seq consensus track"
     )]
     pub consensus_color: Box<str>,
 

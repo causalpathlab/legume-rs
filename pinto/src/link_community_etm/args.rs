@@ -59,19 +59,19 @@ pub struct SrtLinkCommunityEtmArgs {
         long,
         value_enum,
         default_value_t = TrainMode::Masked,
-        help = "Training objective: masked (BERT-like imputation, default) or elbo (generative VAE)",
+        help = "Training objective:\n\
+                masked (BERT-like imputation, default) or elbo (generative VAE)",
         long_help = "Training objective for the edge-document ETM.\n\
-                       \n\
-                       masked is the default, and carries no KL term.\n\
-                       It holds out a fraction of each edge's genes,\n\
-                       then predicts them from the rest.\n\
-                       That is structurally collapse-proof.\n\
-                       Strongly preferred on real data.\n\
-                       \n\
-                       elbo is a generative VAE with a KL'd per-edge posterior.\n\
-                       On real data it posterior-collapses.\n\
-                       One community then swallows most edges.\n\
-                       Use it only when you need calibrated posterior entropy."
+                     \n\
+                     masked is the default, and carries no KL term.\n\
+                     It holds out a fraction of each edge's genes,\n\
+                     then predicts them from the rest. That is structurally collapse-proof.\n\
+                     Strongly preferred on real data.\n\
+                     \n\
+                     elbo is a generative VAE with a KL'd per-edge posterior.\n\
+                     On real data it posterior-collapses.\n\
+                     One community then swallows most edges.\n\
+                     Use it only when you need calibrated posterior entropy."
     )]
     pub train_mode: TrainMode,
 
@@ -79,7 +79,8 @@ pub struct SrtLinkCommunityEtmArgs {
         long,
         value_enum,
         default_value_t = MaskedLikelihood::Nb,
-        help = "Masked mode: per-gene likelihood (nb = over-dispersed counts; multinomial = compositional)"
+        help = "Masked mode:\n\
+                per-gene likelihood (nb = over-dispersed counts; multinomial = compositional)"
     )]
     pub masked_likelihood: MaskedLikelihood,
 
@@ -88,11 +89,11 @@ pub struct SrtLinkCommunityEtmArgs {
         default_value_t = 0.5,
         help = "Masked mode: fraction of each edge's genes held out as prediction targets",
         long_help = "Used only with --train-mode masked.\n\
-                       Each minibatch holds out this share of an edge's genes.\n\
-                       They become the NB imputation targets.\n\
-                       The encoder sees only the visible remainder.\n\
-                       Typical values run 0.3 to 0.6.\n\
-                       --train-mode elbo ignores this flag."
+                     Each minibatch holds out this share of an edge's genes.\n\
+                     They become the NB imputation targets.\n\
+                     The encoder sees only the visible remainder.\n\
+                     Typical values run 0.3 to 0.6.\n\
+                     --train-mode elbo ignores this flag."
     )]
     pub mask_fraction: f64,
 
@@ -101,9 +102,9 @@ pub struct SrtLinkCommunityEtmArgs {
         default_value_t = 50,
         help = "Number of spatial link communities (topics K)",
         long_help = "Number of link communities, or topics (K).\n\
-                       The encoder soft-assigns every cell-cell edge.\n\
-                       Each gets a categorical over the K communities.\n\
-                       β = softmax(α · ρᵀ) then gives the per-community gene rates."
+                     The encoder soft-assigns every cell-cell edge.\n\
+                     Each gets a categorical over the K communities.\n\
+                     β = softmax(α · ρᵀ) then gives the per-community gene rates."
     )]
     pub n_communities: usize,
 
@@ -112,9 +113,9 @@ pub struct SrtLinkCommunityEtmArgs {
         default_value_t = 256,
         help = "Top-K genes per edge for encoder context window",
         long_help = "Top-K genes, by count, taken per edge as encoder input.\n\
-                       The encoder looks up ρ at those genes.\n\
-                       It aggregates them into the per-edge hidden state.\n\
-                       A larger context buys capacity and costs training time."
+                     The encoder looks up ρ at those genes.\n\
+                     It aggregates them into the per-edge hidden state.\n\
+                     A larger context buys capacity and costs training time."
     )]
     pub context_size: usize,
 
@@ -122,11 +123,9 @@ pub struct SrtLinkCommunityEtmArgs {
         long,
         default_value_t = 64,
         help = "Embedding dimension H (ρ, α, encoder hidden)",
-        long_help = "Embedding dimension H.\n\
-                       ρ ∈ ℝ^{G×H} is the gene embedding.\n\
-                       Encoder and decoder share it.\n\
-                       α ∈ ℝ^{K×H} is the community embedding.\n\
-                       The encoder hidden state is ℝ^H per edge."
+        long_help = "Embedding dimension H. ρ ∈ ℝ^{G×H} is the gene embedding.\n\
+                     Encoder and decoder share it. α ∈ ℝ^{K×H} is the community embedding.\n\
+                     The encoder hidden state is ℝ^H per edge."
     )]
     pub embedding_dim: usize,
 
@@ -137,11 +136,9 @@ pub struct SrtLinkCommunityEtmArgs {
         long,
         default_value_t = 4096,
         help = "Edge minibatch size",
-        long_help = "Edges per minibatch.\n\
-                       Smaller batches add noise per step and save memory.\n\
-                       Larger ones steady the gradient and cost memory.\n\
-                       At E ≈ 2M edges, 4096 gives ~500 steps per epoch,\n\
-                       measured at the finest V-cycle level."
+        long_help = "Edges per minibatch. Smaller batches add noise per step and save memory.\n\
+                     Larger ones steady the gradient and cost memory. At E ≈ 2M edges,\n\
+                     4096 gives ~500 steps per epoch, measured at the finest V-cycle level."
     )]
     pub batch_edges: usize,
 
@@ -153,9 +150,9 @@ pub struct SrtLinkCommunityEtmArgs {
         default_value_t = 0.0,
         help = "Topic smoothing strength α ∈ [0, 1) (0 disables)",
         long_help = "Per-edge topic smoothing strength.\n\
-                       It mixes encoder output with the uniform, in log space:\n\
-                         log_z ← log((1-α)·exp(log_z) + α/K).\n\
-                       This stabilises early training; 0 disables it."
+                     It mixes encoder output with the uniform, in log space:\n\
+                     log_z ← log((1-α)·exp(log_z) + α/K). This stabilises early training;\n\
+                     0 disables it."
     )]
     pub topic_smoothing: f64,
 
@@ -185,8 +182,8 @@ pub struct SrtLinkCommunityEtmArgs {
         default_value_t = 1.0,
         help = "Min total count to include a gene in shortlist weighting",
         long_help = "Floor that per-gene shortlist weights are clamped to.\n\
-                       Clamping happens before top-K candidates are scored.\n\
-                       Genes under this total count never enter it."
+                     Clamping happens before top-K candidates are scored.\n\
+                     Genes under this total count never enter it."
     )]
     pub min_gene_count: f32,
 }

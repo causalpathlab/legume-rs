@@ -92,23 +92,25 @@ pub struct ProbeArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Estimate benefit / forgetting by SGD refit; value = #permutations (0 = off)",
+        help = "Estimate benefit / forgetting by SGD refit;\n\
+                value = #permutations (0 = off)",
         long_help = "The fit score above is the potential outcome Y(0).\n\
                      This instead estimates the effect of updating:\n\
                      refit the topic embeddings α, with the encoder frozen,\n\
-                     and measure the result on held-out cells.\n\n\
+                     and measure the result on held-out cells.\n\
+                     \n\
                      Treatment refits α on (reference base + query);\n\
                      control refits on (reference base + an equally-sized reference batch),\n\
                      so the effect is that of adding *this* batch rather than ordinary data.\n\
                      `benefit` is the fit gained on held-out query cells;\n\
                      `forgetting` is the fit lost on held-out reference cells.\n\
                      Both are signed so larger is more extreme.\n\
-                     Permuting the treatment/control label of the pooled fit cells gives an exact finite-sample null\n\
-                     — no χ², no Fisher, no EIF.\n\n\
+                     Permuting the treatment/control label of the pooled fit cells gives an exact finite-sample null —\n\
+                     no χ², no Fisher, no EIF.\n\
+                     \n\
                      Cost is 2 refits per permutation, and p bottoms out at 1/(N+1).\n\
                      Reaches `forgetting`, which the fit score cannot:\n\
-                     an in-distribution but contaminated batch reconstructs well\n\
-                     and still degrades the dictionary."
+                     an in-distribution but contaminated batch reconstructs well and still degrades the dictionary."
     )]
     counterfactual: usize,
 

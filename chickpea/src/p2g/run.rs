@@ -55,7 +55,8 @@ pub struct PeakToGeneArgs {
 
     #[arg(
         long,
-        help = "Gene coordinates TSV (gene<TAB>chr<TAB>tss). From sim-link gene_coords.tsv.gz"
+        help = "Gene coordinates TSV (gene<TAB>chr<TAB>tss).\n\
+                From sim-link gene_coords.tsv.gz"
     )]
     gene_coords: Option<Box<str>>,
 
@@ -97,7 +98,8 @@ pub struct PeakToGeneArgs {
     #[arg(
         long,
         default_value_t = 1,
-        help = "Hierarchical refinement levels; refined finest level is used (1 = single level)"
+        help = "Hierarchical refinement levels;\n\
+                refined finest level is used (1 = single level)"
     )]
     num_levels: usize,
 
@@ -120,8 +122,7 @@ pub struct PeakToGeneArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Deconfound peak→gene z by LOCO topic adjustment\n\
-                (residual-on-residual DML/TMLE)"
+        help = "Deconfound peak→gene z by LOCO topic adjustment (residual-on-residual DML/TMLE)"
     )]
     tmle: bool,
 
@@ -137,8 +138,8 @@ pub struct PeakToGeneArgs {
         default_value_t = false,
         help = "Use an ATAC-only --tmle confounder",
         long_help = "Use an ATAC-only --tmle confounder.\n\
-                     The default is a joint RNA+ATAC co-embedding.\n\
-                     ATAC-only tightens FDP, and lowers power."
+                     The default is a joint RNA+ATAC co-embedding. ATAC-only tightens FDP,\n\
+                     and lowers power."
     )]
     tmle_atac_only: bool,
 
@@ -177,10 +178,8 @@ pub struct PeakToGeneArgs {
         value_enum,
         default_value = "equi",
         help = "Knockoff diagonal s: equi (default), mvr, or me",
-        long_help = "Knockoff diagonal s method.\n\
-                     equi is equicorrelated, and the default.\n\
-                     mvr is min-variance reconstructability.\n\
-                     me is max entropy.\n\
+        long_help = "Knockoff diagonal s method. equi is equicorrelated, and the default.\n\
+                     mvr is min-variance reconstructability. me is max entropy.\n\
                      \n\
                      For dense cis sets, reduce --max-cis or raise --ko-ridge.\n\
                      The s-method does not rescue a rank-deficient LD matrix."

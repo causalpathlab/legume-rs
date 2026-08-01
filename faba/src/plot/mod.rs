@@ -158,17 +158,16 @@ pub struct PlotArgs {
         long,
         short = 'f',
         help = "lineage output prefix",
-        long_help = "lineage output prefix.\n\
-                     It reads {from}.cells_2d.parquet, .curves_2d, .nodes_2d,\n\
-                     .lineage_annot.annot, .trajectory_annotation\n\
-                     and .pseudotime."
+        long_help = "lineage output prefix. It reads {from}.cells_2d.parquet, .curves_2d,\n\
+                     .nodes_2d, .lineage_annot.annot, .trajectory_annotation and .pseudotime."
     )]
     pub from: Box<str>,
 
     #[arg(
         long,
         short = 'o',
-        help = "Output prefix (default: the --from prefix); writes {out}.plot.pdf (+ .png / .svg with --png / --svg)"
+        help = "Output prefix (default: the --from prefix);\n\
+                writes {out}.plot.pdf (+ .png / .svg with --png / --svg)"
     )]
     pub out: Option<Box<str>>,
 
@@ -231,21 +230,17 @@ pub struct PlotArgs {
                      Direction is ALWAYS shown as velocity arrows (from `velocity_flux`),\n\
                      independent of this choice.\n\
                      \n\
-                       auto (default) → the Slingshot curves\n\
-                         when the run has ≤ 24 lineages, otherwise the tree.\n\
-                         Lineage count grows with --n-centroids\n\
-                         (K=40 → 16 lineages, K=200 → 97).\n\
-                       tree → the MST drawn ONCE,\n\
-                         stroke width proportional to how many root→leaf paths traverse each edge.\n\
-                         `curves_2d` holds one principal curve per lineage\n\
-                         and they all share the trunk,\n\
-                         so on a 97-lineage run the trunk is drawn 97 times\n\
-                         and saturates into an opaque mat;\n\
-                         the tree carries the same information without it.\n\
-                       curves → the smooth per-lineage principal curves\n\
-                         (legible for a handful of lineages).\n\
-                       none   → no backbone at all: cells + the velocity field only,\n\
-                         no MST edges, node dots, root star or labels."
+                     auto (default) → the Slingshot curves when the run has ≤ 24 lineages,\n\
+                     otherwise the tree.\n\
+                     Lineage count grows with --n-centroids (K=40 → 16 lineages, K=200 → 97).\n\
+                     tree → the MST drawn ONCE,\n\
+                     stroke width proportional to how many root→leaf paths traverse each edge.\n\
+                     `curves_2d` holds one principal curve per lineage and they all share the trunk,\n\
+                     so on a 97-lineage run the trunk is drawn 97 times and saturates into an opaque mat;\n\
+                     the tree carries the same information without it.\n\
+                     curves → the smooth per-lineage principal curves (legible for a handful of lineages).\n\
+                     none   → no backbone at all: cells + the velocity field only,\n\
+                     no MST edges, node dots, root star or labels."
     )]
     pub trajectory: Trajectory,
 
@@ -264,25 +259,23 @@ pub struct PlotArgs {
         help = "Which trajectory nodes get a cell-type label (default: one per type)",
         long_help = "Which trajectory nodes carry a cell_type label.\n\
                      `faba lineage` emits one MST node per --n-centroids (200 by default),\n\
-                     so labeling every node repeats each type name dozens of times\n\
-                     and the labels collide into an unreadable mat.\n\
+                     so labeling every node repeats each type name dozens of times and the labels collide into an unreadable mat.\n\
                      \n\
-                       per-type (default) → one label per called type,\n\
-                         placed on its most-differentiated node (terminal preferred).\n\
-                         Root always labeled.\n\
-                       terminal → label every terminal node, plus the root.\n\
-                       root     → the root only.\n\
-                       none     → no node labels; the cell legend still names the types."
+                     per-type (default) → one label per called type,\n\
+                     placed on its most-differentiated node (terminal preferred).\n\
+                     Root always labeled. terminal → label every terminal node, plus the root.\n\
+                     root     → the root only.\n\
+                     none     → no node labels; the cell legend still names the types."
     )]
     pub label_nodes: NodeLabels,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Colour every cell solid by its argmax `coarse_label`, ignoring the soft-set confidence fade",
+        help = "Colour every cell solid by its argmax `coarse_label`,\n\
+                ignoring the soft-set confidence fade",
         long_help = "By default cells are coloured by their LEADING fate.\n\
-                     That is the argmax `coarse_label`.\n\
-                     The soft `label_set` then sets opacity.\n\
+                     That is the argmax `coarse_label`. The soft `label_set` then sets opacity.\n\
                      \n\
                      A size-1 set is a confident single call, and draws SOLID.\n\
                      A size-2-or-more set is an uncommitted cell between fates,\n\
@@ -290,8 +283,7 @@ pub struct PlotArgs {
                      An empty set is `unassigned`.\n\
                      \n\
                      So the differentiation lean still shows in colour.\n\
-                     A transcriptionally-central progenitor is not given a\n\
-                     false-confident solid call.\n\
+                     A transcriptionally-central progenitor is not given a false-confident solid call.\n\
                      \n\
                      Pass this flag to draw every cell solid by the argmax.\n\
                      That is the old winner-take-all view, with no fade."
@@ -330,12 +322,10 @@ pub struct PlotArgs {
         long,
         default_value_t = false,
         help = "Also emit a flattened PNG; PDF only by default",
-        long_help = "Also emit a flattened PNG.\n\
-                     PDF only is the default.\n\
+        long_help = "Also emit a flattened PNG. PDF only is the default.\n\
                      \n\
-                     The scatter, curves and nodes are raster layers.\n\
-                     So the PDF is a hybrid: vector text, legend and star,\n\
-                     over a raster point cloud rendered at --dpi.\n\
+                     The scatter, curves and nodes are raster layers. So the PDF is a hybrid:\n\
+                     vector text, legend and star, over a raster point cloud rendered at --dpi.\n\
                      Raise --dpi to 300-600 for print."
     )]
     pub png: bool,

@@ -84,7 +84,8 @@ pub struct SimColliderArgs {
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE on X → A: exposure influence on cell-type assignment (creates collider)"
+        help = "PVE on X → A:\n\
+                exposure influence on cell-type assignment (creates collider)"
     )]
     pve_exposure_celltype: f32,
 

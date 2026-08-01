@@ -290,7 +290,8 @@ pub struct SimOneTypeArgs {
     #[arg(
         long,
         default_value_t = 0.3,
-        help = "PVE on X → Y: causal effect of exposure on gene expression (causal genes only)"
+        help = "PVE on X → Y:\n\
+                causal effect of exposure on gene expression (causal genes only)"
     )]
     pve_exposure_gene: f32,
 

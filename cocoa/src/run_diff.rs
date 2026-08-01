@@ -63,8 +63,8 @@ pub struct DiffArgs {
         long,
         value_delimiter = ',',
         help = "Latent topic proportion files (comma-separated)",
-        long_help = "Latent topic proportion files (comma-separated). Each file is a full\n\
-                     `cell × topic` matrix."
+        long_help = "Latent topic proportion files (comma-separated).\n\
+                     Each file is a full `cell × topic` matrix."
     )]
     topic_proportion_files: Option<Vec<Box<str>>>,
 
@@ -148,11 +148,9 @@ pub struct DiffArgs {
     #[arg(
         long,
         help = "Known covariate matrix file (tsv.gz, n_indv × n_covar)",
-        long_help = "Provide a known individual-level covariate matrix V.\n\
-                     Confounders are then not discovered by random projection.\n\
+        long_help = "Provide a known individual-level covariate matrix V. Confounders are then not discovered by random projection.\n\
                      \n\
-                     The file is a tab-delimited matrix, n_indv x n_covar,\n\
-                     in .tsv.gz format.\n\
+                     The file is a tab-delimited matrix, n_indv x n_covar, in .tsv.gz format.\n\
                      Rows correspond to individuals 0, 1, 2, and so on, in order."
     )]
     #[arg(conflicts_with = "adjustment_data_files")]
@@ -192,13 +190,11 @@ pub struct DiffArgs {
         default_value_t = false,
         help = "Disable NB-Fisher housekeeping gene adjustment",
         long_help = "By default, y1/y0 sufficient statistics are row-scaled.\n\
-                     The row scale is the NB-Fisher weight, applied after\n\
-                     accumulation:\n\
+                     The row scale is the NB-Fisher weight, applied after accumulation:\n\
                      \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g))\n\
                      \n\
                      So the τ, μ and γ posteriors contract toward the prior.\n\
-                     That happens for housekeeping genes, which run high-mean\n\
-                     and high-dispersion.\n\
+                     That happens for housekeeping genes, which run high-mean and high-dispersion.\n\
                      This matches pinto's adjustment."
     )]
     no_adjust_housekeeping: bool,
@@ -208,12 +204,11 @@ pub struct DiffArgs {
         default_value_t = false,
         help = "Refine cell → pseudobulk membership via senna's multilevel DC-Poisson pass",
         long_help = "Route pseudobulk assignment through senna's multilevel path.\n\
-                     That is collapse_columns_multilevel_vec, with BBKNN and\n\
-                     DC-Poisson refinement.\n\
+                     That is collapse_columns_multilevel_vec,\n\
+                     with BBKNN and DC-Poisson refinement.\n\
                      \n\
                      Cells are reassigned across sibling pseudobulks.\n\
-                     The criterion is Poisson likelihood, under NB-Fisher\n\
-                     gene weighting.\n\
+                     The criterion is Poisson likelihood, under NB-Fisher gene weighting.\n\
                      Each pseudobulk therefore becomes more internally coherent.\n\
                      \n\
                      This applies only on the default pseudobulk path,\n\

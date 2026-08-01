@@ -75,8 +75,7 @@ pub struct RestArgs {
         long = "out",
         help = "Output prefix (default: --from with .senna.json stripped)",
         long_help = "Output prefix for every artifact.\n\
-                     It defaults to `--from` with a trailing `.senna.json`\n\
-                     (or `.json`) removed.\n\
+                     It defaults to `--from` with a trailing `.senna.json` (or `.json`) removed.\n\
                      Writes:\n  \
                      {out}.feature_embedding.parquet  co-embed  gene × H (ρ re-embedded onto the cell manifold; annotate reads this)\n  \
                      {out}.cell_embedding.parquet     Z=θ·α  cell × H (the cell side annotate-by-projection reads)\n  \
@@ -91,14 +90,12 @@ pub struct RestArgs {
         long,
         default_value_t = 0,
         help = "Embedding dimension H (0 = K, the topic count)",
-        long_help = "Dimensionality H of the shared cell+gene space.\n\
-                     The default of 0 uses K, the number of topics in θ.\n\
+        long_help = "Dimensionality H of the shared cell+gene space. The default of 0 uses K,\n\
+                     the number of topics in θ.\n\
                      \n\
                      Training runs against the counts, not a closed-form SVD of β.\n\
-                     So H may be set LARGER than K.\n\
-                     The extra dimensions let ρ capture per-gene structure.\n\
-                     That structure lies beyond the K topic axes.\n\
-                     H < K compresses instead.\n\
+                     So H may be set LARGER than K. The extra dimensions let ρ capture per-gene structure.\n\
+                     That structure lies beyond the K topic axes. H < K compresses instead.\n\
                      At H = K the geometry nearly recasts the topic dictionary."
     )]
     embedding_dim: usize,
@@ -108,10 +105,8 @@ pub struct RestArgs {
         long,
         default_value_t = 200,
         help = "Training epochs",
-        long_help = "Number of epochs.\n\
-                     Each runs --batches-per-epoch minibatches.\n\
-                     Ctrl-C stops early.\n\
-                     Outputs are finalized from the current parameters."
+        long_help = "Number of epochs. Each runs --batches-per-epoch minibatches.\n\
+                     Ctrl-C stops early. Outputs are finalized from the current parameters."
     )]
     epochs: usize,
 
@@ -131,10 +126,9 @@ pub struct RestArgs {
         long,
         default_value_t = 1024,
         help = "Positive (cell,gene) edges per minibatch",
-        long_help = "Positive edges per minibatch.\n\
-                     Each is an observed (cell, gene) count, sampled ∝ count.\n\
-                     The cell contributes Z_c = θ_c·α; the gene contributes ρ_g.\n\
-                     Larger batches give smoother gradients.\n\
+        long_help = "Positive edges per minibatch. Each is an observed (cell, gene) count,\n\
+                     sampled ∝ count. The cell contributes Z_c = θ_c·α;\n\
+                     the gene contributes ρ_g. Larger batches give smoother gradients.\n\
                      They also cost more per step."
     )]
     batch_size: usize,
@@ -143,10 +137,9 @@ pub struct RestArgs {
         long,
         default_value_t = 5,
         help = "Negative genes per positive",
-        long_help = "Negatives drawn per positive edge.\n\
-                     For each positive (cell, gene), this many genes are sampled\n\
-                     ∝ marginal^(--neg-alpha), then pushed down for that cell.\n\
-                     More negatives sharpen the embedding.\n\
+        long_help = "Negatives drawn per positive edge. For each positive (cell, gene),\n\
+                     this many genes are sampled ∝ marginal^(--neg-alpha),\n\
+                     then pushed down for that cell. More negatives sharpen the embedding.\n\
                      They also cost more per step."
     )]
     num_negatives: usize,
@@ -163,9 +156,9 @@ pub struct RestArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW weight decay (0 = off)",
-        long_help = "Decoupled AdamW weight decay, applied uniformly to α, ρ and b.\n\
-                     The default of 0 gives plain Adam.\n\
-                     Mild values, 1e-4 to 1e-2, shrink the embedding."
+        long_help = "Decoupled AdamW weight decay, applied uniformly to α,\n\
+                     ρ and b. The default of 0 gives plain Adam. Mild values, 1e-4 to 1e-2,\n\
+                     shrink the embedding."
     )]
     weight_decay: f64,
 
@@ -174,11 +167,9 @@ pub struct RestArgs {
         default_value_t = 0.75,
         help = "Negative-sampling exponent α: q(g) ∝ marginal(g)^α",
         long_help = "Exponent on the per-gene marginal in the negative sampler:\n\
-                     q(g) ∝ marginal(g)^α.\n\
-                     The node2vec/word2vec default is 0.75.\n\
+                     q(g) ∝ marginal(g)^α. The node2vec/word2vec default is 0.75.\n\
                      It down-weights ubiquitous genes,\n\
-                     relative to proportional sampling at α=1.\n\
-                     α=0 samples genes uniformly."
+                     relative to proportional sampling at α=1. α=0 samples genes uniformly."
     )]
     neg_alpha: f32,
 

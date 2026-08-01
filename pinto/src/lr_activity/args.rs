@@ -12,12 +12,10 @@ pub struct SrtLrActivityArgs {
         required = true,
         help = "Prefix of a prior `pinto lc` run",
         long_help = "Prefix of a prior `pinto lc` run.\n\
-                     Edge-to-community assignments are read from\n\
-                     {prefix}.link_community.parquet.\n\
+                     Edge-to-community assignments are read from {prefix}.link_community.parquet.\n\
                      Cell-pair metadata comes from {prefix}.coord_pairs.parquet,\n\
                      including per-edge batch labels when present.\n\
-                     Row order must match across both files.\n\
-                     They are joined by position."
+                     Row order must match across both files. They are joined by position."
     )]
     pub lc_prefix: Box<str>,
 
@@ -45,8 +43,8 @@ pub struct SrtLrActivityArgs {
                      \n\
                      The default of 10 gives ≈1024 bins per batch.\n\
                      Larger d buys finer resolution and more permutation power.\n\
-                     It also leaves fewer cells per pseudobulk.\n\
-                     At d=12, roughly 4096 bins, Visium-scale data turns sparse."
+                     It also leaves fewer cells per pseudobulk. At d=12, roughly 4096 bins,\n\
+                     Visium-scale data turns sparse."
     )]
     pub propensity_dim: usize,
 
@@ -96,8 +94,8 @@ pub struct SrtLrActivityArgs {
         help = "Delimiter used to split compound gene row names (e.g. `_` for ENSG..._SYMBOL)",
         long_help = "Delimiter used to alias compound gene row names.\n\
                      The default `_` aliases `ENSG00000105329_TGFB1`.\n\
-                     Either the Ensembl id or the symbol then matches it.\n\
-                     Pass an empty string, or a character that never occurs,\n\
+                     Either the Ensembl id or the symbol then matches it. Pass an empty string,\n\
+                     or a character that never occurs,\n\
                      to disable aliasing and demand exact full-name matches."
     )]
     pub gene_delimiter: Option<char>,

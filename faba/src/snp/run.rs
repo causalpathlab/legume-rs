@@ -31,10 +31,9 @@ pub struct SnpArgs {
         long = "genome",
         required = true,
         help = "Reference genome FASTA (.fa, indexed with .fai)",
-        long_help = "Path to the reference genome in FASTA format.\n\
-                     Must be indexed (.fai); if missing, the index is created automatically.\n\
-                     Used for de novo discovery (compare reads to reference)\n\
-                     and to validate ref alleles at known sites."
+        long_help = "Path to the reference genome in FASTA format. Must be indexed (.fai);\n\
+                     if missing, the index is created automatically.\n\
+                     Used for de novo discovery (compare reads to reference) and to validate ref alleles at known sites."
     )]
     pub genome_file: Box<str>,
 
@@ -48,9 +47,10 @@ pub struct SnpArgs {
                      - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
                      - Parquet (.parquet): output from a previous `faba snp` run\n\
                      Only biallelic SNPs are used; indels and multi-allelic sites are skipped.\n\
-                     When provided, genotypes are force-called at these positions\n\
-                     regardless of alt allele evidence. Can be combined with de novo discovery.\n\
-                     When omitted, only de novo discovery from the reference genome is used."
+                     When provided,\n\
+                     genotypes are force-called at these positions regardless of alt allele evidence.\n\
+                     Can be combined with de novo discovery. When omitted,\n\
+                     only de novo discovery from the reference genome is used."
     )]
     pub known_snps: Option<Box<str>>,
 
@@ -61,12 +61,12 @@ pub struct SnpArgs {
         short = 'g',
         long = "gff",
         help = "Gene annotation GFF file (optional, enables gene-centric mode)",
-        long_help = "Gene annotation in GFF/GTF format.\n\
-                     When provided: processes SNPs within gene boundaries,\n\
+        long_help = "Gene annotation in GFF/GTF format. When provided:\n\
+                     processes SNPs within gene boundaries,\n\
                      and enables the per-cell allele frequency matrix.\n\
                      Genes give each locus a region to fetch reads from;\n\
-                     they do not appear in its row name.\n\
-                     When omitted: processes SNPs by chromosome region (bulk WGS mode),\n\
+                     they do not appear in its row name. When omitted:\n\
+                     processes SNPs by chromosome region (bulk WGS mode),\n\
                      no per-cell sparse matrix output."
     )]
     pub gff_file: Option<Box<str>>,
@@ -80,16 +80,13 @@ pub struct SnpArgs {
         long,
         required = true,
         help = "Output directory",
-        long_help = "Output directory for SNP genotyping results. Created if needed.\n\
-                     Outputs:\n\
+        long_help = "Output directory for SNP genotyping results. Created if needed. Outputs:\n\
                      - snp_sites.parquet: the CALL SET —\n\
-                       every genotyped site with allele counts, genotype and GQ\n\
+                     every genotyped site with allele counts, genotype and GQ\n\
                      - {batch}_baf: per-cell ALLELE FREQUENCY matrix (10x mode),\n\
-                       rows `{chr}:{pos}/baf/{alt|depth}`, keyed on the locus\n\
-                       and carrying no genotype\n\
-                     (matrices are `.zarr.zip` by default; `.zarr` with --no-zip,\n\
-                     `.h5` for the hdf5 backend.)\n\
-                     BAF per cell = alt / depth; the channels nest, so never sum them."
+                     rows `{chr}:{pos}/baf/{alt|depth}`,\n\
+                     keyed on the locus and carrying no genotype (matrices are `.zarr.zip` by default; `.zarr` with --no-zip, `.h5` for the hdf5 backend.) BAF per cell = alt / depth;\n\
+                     the channels nest, so never sum them."
     )]
     pub output: Box<str>,
 
@@ -123,8 +120,8 @@ pub struct SnpArgs {
         help = "Bulk mode (genotype calls only, no per-cell output)",
         long_help = "When set, only snp_sites.parquet is produced.\n\
                      No per-cell allele count or depth matrices are written.\n\
-                     Use for bulk WGS/RNA-seq, or when you only need the SNP mask\n\
-                     for --snp-mask in faba atoi/dartseq/apa."
+                     Use for bulk WGS/RNA-seq,\n\
+                     or when you only need the SNP mask for --snp-mask in faba atoi/dartseq/apa."
     )]
     pub bulk: bool,
 
@@ -159,8 +156,7 @@ pub struct SnpArgs {
         long,
         default_value_t = 3,
         help = "Minimum alt allele reads for discovery",
-        long_help = "Minimum number of reads supporting the non-reference allele\n\
-                     to consider a position as a candidate variant.\n\
+        long_help = "Minimum number of reads supporting the non-reference allele to consider a position as a candidate variant.\n\
                      Applied before genotype calling."
     )]
     pub min_alt_count: usize,
@@ -170,8 +166,7 @@ pub struct SnpArgs {
         long,
         default_value_t = 0.1,
         help = "Minimum alt allele frequency for discovery",
-        long_help = "Minimum fraction of reads supporting the non-reference allele\n\
-                     (alt_count / total_depth) to consider a position as a candidate.\n\
+        long_help = "Minimum fraction of reads supporting the non-reference allele (alt_count / total_depth) to consider a position as a candidate.\n\
                      Default 0.1 (10%) balances sensitivity with false positive rate."
     )]
     pub min_alt_freq: f64,
@@ -185,8 +180,8 @@ pub struct SnpArgs {
         default_value_t = 5,
         help = "Minimum depth for genotype calling",
         long_help = "Minimum total read depth to attempt genotype calling at a known variant site.\n\
-                     Sites below this threshold get NoCall (./.).\n\
-                     For de novo discovery, --min-coverage is used instead."
+                     Sites below this threshold get NoCall (./.). For de novo discovery,\n\
+                     --min-coverage is used instead."
     )]
     pub min_depth: usize,
 
@@ -233,7 +228,8 @@ pub struct SnpArgs {
         default_value_t = 20,
         help = "Minimum mapping quality (MAPQ)",
         long_help = "Reads with MAPQ below this threshold are excluded from pileup.\n\
-                     Default 20. Also filters duplicates, secondary, and supplementary alignments."
+                     Default 20. Also filters duplicates, secondary,\n\
+                     and supplementary alignments."
     )]
     pub min_mapping_quality: u8,
 
@@ -247,8 +243,7 @@ pub struct SnpArgs {
         default_value = "UB",
         help = "UMI barcode BAM tag for deduplication",
         long_help = "BAM auxiliary tag for UMI barcodes (e.g., \"UB\" for 10x).\n\
-                     Reads with the same UMI at the same genomic position\n\
-                     are deduplicated to a single observation.\n\
+                     Reads sharing a UMI at the same position collapse to one observation.\n\
                      Disable with --no-umi-dedup."
     )]
     pub umi_tag: Box<str>,
@@ -272,8 +267,8 @@ pub struct SnpArgs {
         long = "use-base-quality",
         default_value_t = true,
         help = "Use per-base quality in genotype model",
-        long_help = "When enabled, genotype likelihoods use per-read Phred quality scores (Li 2011 model)\n\
-                     instead of a constant error rate.\n\
+        long_help = "When enabled,\n\
+                     genotype likelihoods use per-read Phred quality scores (Li 2011 model) instead of a constant error rate.\n\
                      More accurate but slightly slower."
     )]
     pub use_base_quality: bool,
@@ -287,9 +282,8 @@ pub struct SnpArgs {
         value_enum,
         default_value = "zarr",
         help = "Sparse matrix backend (zarr or hdf5)",
-        long_help = "Format for per-cell sparse matrices.\n\
-                     zarr: Zarr v2 store (default, faster for large datasets)\n\
-                     hdf5: HDF5 file (.h5)"
+        long_help = "Format for per-cell sparse matrices. zarr:\n\
+                     Zarr v2 store (default, faster for large datasets) hdf5: HDF5 file (.h5)"
     )]
     pub backend: SparseIoBackend,
 
@@ -298,8 +292,7 @@ pub struct SnpArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub zip: bool,
 

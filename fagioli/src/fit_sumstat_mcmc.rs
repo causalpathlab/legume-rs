@@ -21,12 +21,14 @@ pub struct FitSumstatMcmcArgs {
         help_heading = "MCMC Sampler",
         default_value = "susie",
         help = "MCMC prior: 'susie' or 'spike-slab'",
-        long_help = "Sparse prior for MCMC fine-mapping:\n\n\
-            - susie: SoftmaxNormal prior — ESS samples logits with softmax\n\
-              transformation, enforcing single-effect per component.\n\
-            - spike-slab: BernoulliNormal prior — ESS samples logits with\n\
-              sigmoid transformation, allowing independent per-SNP selection.\n\n\
-            Default: susie."
+        long_help = "Sparse prior for MCMC fine-mapping:\n\
+                     \n\
+                     - susie: SoftmaxNormal prior — ESS samples logits with softmax\n\
+                     transformation, enforcing single-effect per component.\n\
+                     - spike-slab: BernoulliNormal prior — ESS samples logits with\n\
+                     sigmoid transformation, allowing independent per-SNP selection.\n\
+                     \n\
+                     Default: susie."
     )]
     pub prior: McmcPriorType,
 
@@ -36,8 +38,9 @@ pub struct FitSumstatMcmcArgs {
         default_value = "2000",
         help = "Number of posterior samples to collect",
         long_help = "Number of posterior samples to collect after warmup.\n\
-            Total sweeps = warmup + n_samples × thin. More samples reduce\n\
-            Monte Carlo noise in PIP estimates but increase runtime. Default: 2000."
+                     Total sweeps = warmup + n_samples × thin.\n\
+                     More samples reduce Monte Carlo noise in PIP estimates but increase runtime.\n\
+                     Default: 2000."
     )]
     pub n_samples: usize,
 
@@ -47,7 +50,7 @@ pub struct FitSumstatMcmcArgs {
         default_value = "1000",
         help = "Warmup (burn-in) iterations before collecting samples",
         long_help = "Number of burn-in sweeps discarded before sample collection.\n\
-            Allows the chain to reach the stationary distribution. Default: 1000."
+                     Allows the chain to reach the stationary distribution. Default: 1000."
     )]
     pub warmup: usize,
 
@@ -57,8 +60,7 @@ pub struct FitSumstatMcmcArgs {
         default_value = "2",
         help = "Thinning interval (collect every N-th sweep)",
         long_help = "Collect a sample every N-th sweep, after warmup.\n\
-            That reduces autocorrelation between posterior samples.\n\
-            The default is 2."
+                     That reduces autocorrelation between posterior samples. The default is 2."
     )]
     pub thin: usize,
 
@@ -68,9 +70,9 @@ pub struct FitSumstatMcmcArgs {
         default_value = "1.0",
         help = "Prior variance on inclusion logits",
         long_help = "Prior variance for the Gaussian prior on raw inclusion logits.\n\
-            It controls the ESS step size.\n\
-            Larger values allow bigger jumps in inclusion-probability space.\n\
-            The default is 1.0."
+                     It controls the ESS step size.\n\
+                     Larger values allow bigger jumps in inclusion-probability space.\n\
+                     The default is 1.0."
     )]
     pub logit_var: f32,
 
@@ -80,13 +82,13 @@ pub struct FitSumstatMcmcArgs {
         default_value_t = false,
         help = "Estimate the effect size prior variance via Gibbs",
         long_help = "When enabled, the effect-size prior variance is sampled.\n\
-            The update is a conjugate inverse-gamma Gibbs step.\n\
-            Otherwise that variance stays fixed.\n\
-            \n\
-            Sampling adapts the prior to the data.\n\
-            It improves calibration when the initial prior_var, from LDSC h²,\n\
-            is misspecified.\n\
-            The prior is InvGamma(0.01, 0.01), and this is disabled by default."
+                     The update is a conjugate inverse-gamma Gibbs step.\n\
+                     Otherwise that variance stays fixed.\n\
+                     \n\
+                     Sampling adapts the prior to the data.\n\
+                     It improves calibration when the initial prior_var, from LDSC h²,\n\
+                     is misspecified. The prior is InvGamma(0.01, 0.01),\n\
+                     and this is disabled by default."
     )]
     pub estimate_prior_var: bool,
 }

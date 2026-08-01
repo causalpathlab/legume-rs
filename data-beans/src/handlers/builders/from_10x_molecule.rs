@@ -15,7 +15,8 @@ pub struct From10xMoleculeArgs {
     #[arg(
         help = "Input 10X molecule_info.h5 file",
         long_help = "Specify the molecule_info.h5 file from Cell Ranger count/multi.\n\
-		     Contains per-molecule data: barcode_idx, feature_idx, count, gem_group, etc."
+                     Contains per-molecule data: barcode_idx, feature_idx, count, gem_group,\n\
+                     etc."
     )]
     pub h5_file: Box<str>,
 
@@ -33,8 +34,8 @@ pub struct From10xMoleculeArgs {
         long,
         help = "Output file header or name",
         long_help = "Specify the output file header.\n\
-		     The zarr backend produces {output}.zarr.zip by default;\n\
-		     pass --no-zip to keep a {output}.zarr directory instead."
+                     The zarr backend produces {output}.zarr.zip by default;\n\
+                     pass --no-zip to keep a {output}.zarr directory instead."
     )]
     pub output: Box<str>,
 
@@ -46,9 +47,9 @@ pub struct From10xMoleculeArgs {
         long,
         default_value = "Gene Expression",
         help = "Library type to include",
-        long_help = "Filter molecules to only those from libraries of this type.\n\
-		     Common types: 'Gene Expression', 'Antibody Capture', 'CRISPR Guide Capture'.\n\
-		     Reads library_info JSON to determine which library indices match."
+        long_help = "Filter molecules to only those from libraries of this type. Common types:\n\
+                     'Gene Expression', 'Antibody Capture', 'CRISPR Guide Capture'.\n\
+                     Reads library_info JSON to determine which library indices match."
     )]
     pub library_type: Box<str>,
 
@@ -56,8 +57,10 @@ pub struct From10xMoleculeArgs {
         long,
         default_value = "",
         help = "Select row type (feature_type)",
-        long_help = "Filter features by type. Rows are included if their type contains this value.\n\
-		     Empty (default) keeps all features. 10X uses 'Gene Expression', 'Antibody Capture', etc."
+        long_help = "Filter features by type.\n\
+                     Rows are included if their type contains this value.\n\
+                     Empty (default) keeps all features. 10X uses 'Gene Expression',\n\
+                     'Antibody Capture', etc."
     )]
     pub select_row_type: Box<str>,
 
@@ -65,7 +68,8 @@ pub struct From10xMoleculeArgs {
         long,
         default_value = "",
         help = "Remove row type",
-        long_help = "Remove rows if their type contains this value. Empty (default) removes nothing."
+        long_help = "Remove rows if their type contains this value.\n\
+                     Empty (default) removes nothing."
     )]
     pub remove_row_type: Box<str>,
 
@@ -73,8 +77,9 @@ pub struct From10xMoleculeArgs {
         long,
         default_value_t = false,
         help = "Skip pass_filter and include all barcodes",
-        long_help = "By default, only barcodes that passed Cell Ranger cell calling are included.\n\
-		     Set this flag to include ALL barcodes with at least one molecule."
+        long_help = "By default,\n\
+                     only barcodes that passed Cell Ranger cell calling are included.\n\
+                     Set this flag to include ALL barcodes with at least one molecule."
     )]
     pub no_pass_filter: bool,
 

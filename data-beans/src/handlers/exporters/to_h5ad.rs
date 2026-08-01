@@ -36,11 +36,10 @@ pub struct ToH5adArgs {
                      Keys match against the backend column names.\n\
                      A `barcode@donor` -> `barcode` fallback applies.\n\
                      \n\
-                     Remaining columns become `obs` columns.\n\
-                     Unmatched cells get `NA`.\n\
+                     Remaining columns become `obs` columns. Unmatched cells get `NA`.\n\
                      \n\
-                     Pair this with the `*.cell_metadata.tsv.gz` that `from-h5ad`\n\
-                     wrote, to round-trip cell annotations."
+                     Pair this with the `*.cell_metadata.tsv.gz` that `from-h5ad` wrote,\n\
+                     to round-trip cell annotations."
     )]
     pub obs: Option<Box<str>>,
 
@@ -49,8 +48,7 @@ pub struct ToH5adArgs {
         help = "Feature-metadata TSV to attach as `var` columns",
         long_help = "Optional TSV whose first column is the feature key; gzip is fine.\n\
                      Keys match against the backend row names.\n\
-                     Remaining columns become `var` columns.\n\
-                     Unmatched features get `NA`."
+                     Remaining columns become `var` columns. Unmatched features get `NA`."
     )]
     pub var: Option<Box<str>>,
 }

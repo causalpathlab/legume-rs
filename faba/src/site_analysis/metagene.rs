@@ -59,13 +59,12 @@ pub struct MetageneArgs {
         long_help = "Total number of bins across the 5'UTR, CDS and 3'UTR.\n\
                      \n\
                      MetaPlotR plots its metagene with 200 breaks, hence the default.\n\
-                     Bins are split between the three regions in proportion to each\n\
-                     region's MEDIAN spliced length over the assigned sites.\n\
+                     Bins are split between the three regions in proportion to each region's MEDIAN spliced length over the assigned sites.\n\
                      The median rather than the maximum, which one gene would set:\n\
                      titin's merged CDS is 114,586 nt against a median of 1,347.\n\
                      A region that has sites always keeps at least one bin.\n\
-                     The split depends on the annotation and on the sites, so compare\n\
-                     the shape of two profiles rather than their bar widths."
+                     The split depends on the annotation and on the sites,\n\
+                     so compare the shape of two profiles rather than their bar widths."
     )]
     num_bins: u32,
 
@@ -77,8 +76,7 @@ pub struct MetageneArgs {
         long_help = "Which isoforms sites are placed on.\n\
                      \n\
                      `longest` keeps one transcript per gene, the longest spliced one.\n\
-                     That is MetaPlotR's stated procedure.\n\
-                     `all` keeps every coding transcript.\n\
+                     That is MetaPlotR's stated procedure. `all` keeps every coding transcript.\n\
                      A site inside several isoforms is then counted once per isoform,\n\
                      which is what MetaPlotR's own distance table does."
     )]
@@ -89,8 +87,8 @@ pub struct MetageneArgs {
         help = "Also profile non-coding genes, as a separate ncRNA track",
         long_help = "Also profile non-coding genes, as a separate ncRNA track.\n\
                      \n\
-                     This has no counterpart in MetaPlotR, which profiles coding\n\
-                     transcripts only.\n\
+                     This has no counterpart in MetaPlotR,\n\
+                     which profiles coding transcripts only.\n\
                      A non-coding gene has no start or stop codon to split on.\n\
                      Its whole body becomes one undivided track on its own [0,1] axis,\n\
                      and its density is normalized within that track alone."
@@ -103,13 +101,12 @@ pub struct MetageneArgs {
     #[arg(
         long = "dist-measures",
         help = "Also write MetaPlotR's per-site distance table to this path",
-        long_help = "Also write the per-site distance table, one row per site and\n\
-                     transcript it was placed on.\n\
+        long_help = "Also write the per-site distance table,\n\
+                     one row per site and transcript it was placed on.\n\
                      \n\
                      Column names match MetaPlotR's own `dist_measures` output, so its\n\
                      `visualize_metagenes.R` runs on this file unmodified.\n\
-                     That turns \"our profile looks like theirs\" into \"their script,\n\
-                     our data\"."
+                     That turns \"our profile looks like theirs\" into \"their script, our data\"."
     )]
     dist_measures: Option<Box<str>>,
 

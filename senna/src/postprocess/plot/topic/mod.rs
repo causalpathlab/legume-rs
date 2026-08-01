@@ -108,7 +108,8 @@ pub struct PlotTopicArgs {
 
     #[arg(
         long,
-        help = "Dictionary parquet (gene × K). Defaults to manifest's dictionary_empirical else dictionary"
+        help = "Dictionary parquet (gene × K).\n\
+                Defaults to manifest's dictionary_empirical else dictionary"
     )]
     pub dictionary: Option<Box<str>>,
 

@@ -327,24 +327,22 @@ enum Commands {
         visible_alias = "cage-annotate",
         about = "Marker-set cell-type annotation by projection (any embedding run)",
         long_about = "Firm cell-type annotation via the shared term-ORA core.\n\
-                      This is the embedding-grounded twin of\n\
-                      `senna annotate-by-projection` and `faba annotate`.\n\n\
+                      This is the embedding-grounded twin of `senna annotate-by-projection` and `faba annotate`.\n\
+                      \n\
                       Each marker-defined type is embedded as a centroid.\n\
                       That centroid is an IDF-weighted mean.\n\
                       It averages the type's marker feature embeddings.\n\
                       Every cell is hard-assigned to its nearest centroid.\n\
-                      Distance outliers are then pruned.\n\
-                      The cells are Leiden-clustered.\n\
+                      Distance outliers are then pruned. The cells are Leiden-clustered.\n\
                       Each cluster × term is then tested.\n\
-                      The test is hypergeometric over-representation,\n\
-                      permutation-calibrated.\n\
-                      --obo adds optional TreeBH Cell-Ontology calling.\n\n\
-                      Inputs are `{prefix}.feature_embedding.parquet` and\n\
-                      `{prefix}.cell_embedding.parquet`.\n\
+                      The test is hypergeometric over-representation, permutation-calibrated.\n\
+                      --obo adds optional TreeBH Cell-Ontology calling.\n\
+                      \n\
+                      Inputs are `{prefix}.feature_embedding.parquet` and `{prefix}.cell_embedding.parquet`.\n\
                       Any pinto embedding run supplies them: `cage`,\n\
-                      or `lc-etm` via its SIMBA co-embedding.\n\
-                      To annotate anything else, point\n\
-                      --feature-embedding and --cell-embedding at explicit paths.\n\n\
+                      or `lc-etm` via its SIMBA co-embedding. To annotate anything else, point\n\
+                      --feature-embedding and --cell-embedding at explicit paths.\n\
+                      \n\
                       Outputs follow the shared per-cell contract:\n\
                       {out}.annot.{parquet,membership.tsv,argmax.tsv}.\n\
                       The cluster × term p/q/Q matrices ship alongside."

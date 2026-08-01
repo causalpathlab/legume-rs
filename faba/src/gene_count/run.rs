@@ -61,8 +61,7 @@ pub struct GeneCountArgs {
         long,
         default_value_t = 10,
         help = "Minimum non-zeros per row (gene)",
-        long_help = "Genes with fewer than this many non-zero cells are removed\n\
-                     from the output matrix."
+        long_help = "Genes with fewer than this many non-zero cells are removed from the output matrix."
     )]
     pub(crate) row_nnz_cutoff: usize,
 
@@ -72,8 +71,7 @@ pub struct GeneCountArgs {
         long,
         default_value_t = 10,
         help = "Minimum non-zeros per column (cell)",
-        long_help = "Cells with fewer than this many non-zero genes are removed\n\
-                     from the output matrix."
+        long_help = "Cells with fewer than this many non-zero genes are removed from the output matrix."
     )]
     pub(crate) column_nnz_cutoff: usize,
 
@@ -86,8 +84,7 @@ pub struct GeneCountArgs {
         value_enum,
         default_value = "zarr",
         help = "Sparse matrix output backend",
-        long_help = "File format for the output sparse matrix.\n\
-                     Supported: zarr, hdf5."
+        long_help = "File format for the output sparse matrix. Supported: zarr, hdf5."
     )]
     pub(crate) backend: SparseIoBackend,
 
@@ -96,8 +93,7 @@ pub struct GeneCountArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub(crate) zip: bool,
 
@@ -140,8 +136,7 @@ pub struct GeneCountArgs {
         long = "no-umi-dedup",
         default_value_t = false,
         help = "Disable UMI deduplication (count reads, not molecules)",
-        long_help = "By default faba collapses reads sharing a (cell, gene, UMI)\n\
-                     into a single count (molecule counting, like Cell Ranger).\n\
+        long_help = "By default faba collapses reads sharing a (cell, gene, UMI) into a single count (molecule counting, like Cell Ranger).\n\
                      Use this flag to count every non-duplicate read instead."
     )]
     pub(crate) no_umi_dedup: bool,

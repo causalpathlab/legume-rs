@@ -42,9 +42,8 @@ pub struct FromFragmentsArgs {
         long,
         help = "BED file of peaks (chr<TAB>start<TAB>end[...])",
         long_help = "When provided, fragments aggregate into these regions.\n\
-                     Fixed-width genome tiles are then not used.\n\
-                     Lines starting with '#', 'track' or 'browser' are skipped.\n\
-                     Row names are formatted `chr:start-end`.\n\
+                     Fixed-width genome tiles are then not used. Lines starting with '#',\n\
+                     'track' or 'browser' are skipped. Row names are formatted `chr:start-end`.\n\
                      Peaks may overlap."
     )]
     pub peaks: Option<Box<str>>,
@@ -74,8 +73,8 @@ pub struct FromFragmentsArgs {
         default_value_t = false,
         help = "Use the count column (col 5) instead of contributing 1 per fragment",
         long_help = "By default each fragment adds 1 to the (feature, cell) entry.\n\
-                     With this flag, the Tn5 insertion count in column 5 is used\n\
-                     (missing/unparsable counts fall back to 1)."
+                     With this flag,\n\
+                     the Tn5 insertion count in column 5 is used (missing/unparsable counts fall back to 1)."
     )]
     pub use_count: bool,
 

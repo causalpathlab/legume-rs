@@ -45,9 +45,9 @@ pub struct CountApaArgs {
         required_unless_present = "utr_bed",
         help = "Gene annotation file (GFF/GTF)",
         long_help = "Path to gene annotation file in GFF/GTF format.\n\
-                     Required unless --utr-bed is provided.\n\
-                     In simple mode, defines gene boundaries for counting.\n\
-                     In mixture mode, used to extract 3'-UTR regions."
+                     Required unless --utr-bed is provided. In simple mode,\n\
+                     defines gene boundaries for counting. In mixture mode,\n\
+                     used to extract 3'-UTR regions."
     )]
     pub(crate) gff_file: Option<Box<str>>,
 
@@ -66,8 +66,7 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Minimum poly(A) tail length (bp)",
-        long_help = "Minimum number of soft-clipped A/T bases\n\
-                     required to call a read as a poly(A) junction read."
+        long_help = "Minimum number of soft-clipped A/T bases required to call a read as a poly(A) junction read."
     )]
     pub(crate) polya_min_tail_length: usize,
 
@@ -76,8 +75,7 @@ pub struct CountApaArgs {
         long,
         default_value_t = 3,
         help = "Max non-A/T bases in poly(A) tail",
-        long_help = "Maximum number of non-A (forward) or non-T (reverse) bases\n\
-                     allowed in the soft-clipped tail."
+        long_help = "Maximum number of non-A (forward) or non-T (reverse) bases allowed in the soft-clipped tail."
     )]
     pub(crate) polya_max_non_a_or_t: usize,
 
@@ -86,8 +84,7 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Internal priming check window (bp)",
-        long_help = "Window size in base pairs around the cleavage site\n\
-                     to check for genomic A/T-rich stretches (internal priming)."
+        long_help = "Window size in base pairs around the cleavage site to check for genomic A/T-rich stretches (internal priming)."
     )]
     pub(crate) polya_internal_prime_window: usize,
 
@@ -155,10 +152,9 @@ pub struct CountApaArgs {
         long,
         required = true,
         help = "Output directory",
-        long_help = "Directory for output files.\n\
-                     In simple mode, one sparse matrix per input BAM is created.\n\
-                     In mixture mode, a single sparse matrix\n\
-                     and a site annotation parquet are created for all inputs."
+        long_help = "Directory for output files. In simple mode,\n\
+                     one sparse matrix per input BAM is created. In mixture mode,\n\
+                     a single sparse matrix and a site annotation parquet are created for all inputs."
     )]
     pub(crate) output: Box<str>,
 
@@ -168,8 +164,7 @@ pub struct CountApaArgs {
         value_enum,
         default_value = "zarr",
         help = "Sparse matrix output backend",
-        long_help = "File format for the output sparse matrix.\n\
-                     Supported: zarr, hdf5."
+        long_help = "File format for the output sparse matrix. Supported: zarr, hdf5."
     )]
     pub(crate) backend: SparseIoBackend,
 
@@ -178,8 +173,7 @@ pub struct CountApaArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive",
-        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive\n\
-                     (zarr backend only; no effect on hdf5)"
+        long_help = "Keep a `.zarr` directory instead of producing a `.zarr.zip` archive (zarr backend only; no effect on hdf5)"
     )]
     pub(crate) zip: bool,
 
@@ -205,9 +199,8 @@ pub struct CountApaArgs {
     #[arg(
         long = "atoi-mask",
         help = "A-to-I mask parquet (from `faba atoi` or `faba dartseq --detect-atoi`)",
-        long_help = "Path to a pre-computed A-to-I sites parquet file.\n\
-                     When provided, poly(A) sites that overlap A-to-I editing positions\n\
-                     are removed before quantification."
+        long_help = "Path to a pre-computed A-to-I sites parquet file. When provided,\n\
+                     poly(A) sites that overlap A-to-I editing positions are removed before quantification."
     )]
     pub(crate) atoi_mask_file: Option<Box<str>>,
 
@@ -237,8 +230,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 10,
         help = "Bin resolution in bp (simple mode)",
-        long_help = "Nearby poly(A) sites within this distance in base pairs\n\
-                     are grouped into a single bin. Only used in simple mode."
+        long_help = "Nearby poly(A) sites within this distance in base pairs are grouped into a single bin.\n\
+                     Only used in simple mode."
     )]
     pub(crate) resolution_bp: usize,
 
@@ -246,7 +239,8 @@ pub struct CountApaArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Include reads with no cell barcode, and reads the gene tag cannot place (simple mode)",
+        help = "Include reads with no cell barcode,\n\
+                and reads the gene tag cannot place (simple mode)",
         long_help = "This relaxes TWO filters, not just the cell one.\n\
                      Reads missing a cell barcode tag are included in the count.\n\
                      Reads without a gene tag (--gene-barcode-tag, `GX` by default) are kept too.\n\
@@ -261,10 +255,10 @@ pub struct CountApaArgs {
         long,
         value_enum,
         help = "Gene biotype filter",
-        long_help = "Filter genes by biotype. Honored in BOTH modes: simple mode\n\
-                     subsets the GffRecordMap, mixture mode filters the GFF records\n\
-                     while building UTRs.\n\
-                     Common values: protein_coding, pseudogene, lncRNA."
+        long_help = "Filter genes by biotype. Honored in BOTH modes:\n\
+                     simple mode subsets the GffRecordMap,\n\
+                     mixture mode filters the GFF records while building UTRs. Common values:\n\
+                     protein_coding, pseudogene, lncRNA."
     )]
     pub(crate) gene_type: Option<GffGeneType>,
 
@@ -276,13 +270,12 @@ pub struct CountApaArgs {
         short = 'u',
         long = "utr-bed",
         help = "3'-UTR regions BED file (mixture mode)",
-        long_help = "BED file defining 3'-UTR regions.\n\
-                     Alternative to --gff for mixture mode.\n\
+        long_help = "BED file defining 3'-UTR regions. Alternative to --gff for mixture mode.\n\
                      Each row should be a UTR interval.\n\
                      \n\
                      A BED row carries no exon structure.\n\
-                     So each interval is taken as one contiguous block.\n\
-                     With --gff, 3'UTRs are merged exons and coordinates are spliced.\n\
+                     So each interval is taken as one contiguous block. With --gff,\n\
+                     3'UTRs are merged exons and coordinates are spliced.\n\
                      Prefer --gff when your genes have multi-exon 3'UTRs."
     )]
     pub(crate) utr_bed: Option<Box<str>>,
@@ -296,8 +289,7 @@ pub struct CountApaArgs {
                      \n\
                      The length is SPLICED: the merged annotated exons summed.\n\
                      A first-base-to-last-base span is not the same thing.\n\
-                     It runs a mean 6.4x longer (p90 12.4x).\n\
-                     Such a span swallows introns.\n\
+                     It runs a mean 6.4x longer (p90 12.4x). Such a span swallows introns.\n\
                      In 46% of genes it also reaches back into the CDS.\n\
                      APA measures WHERE in the 3'UTR a poly(A) site sits.\n\
                      So that span is the wrong coordinate, not just a wrong length.\n\
@@ -313,9 +305,8 @@ pub struct CountApaArgs {
     #[arg(
         long,
         help = "Pre-identified pA sites BED (mixture mode)",
-        long_help = "BED file of known poly(A) sites.\n\
-                     When provided, skips de novo site discovery.\n\
-                     Only used in mixture mode."
+        long_help = "BED file of known poly(A) sites. When provided,\n\
+                     skips de novo site discovery. Only used in mixture mode."
     )]
     pub(crate) pre_sites: Option<Box<str>>,
 
@@ -336,8 +327,7 @@ pub struct CountApaArgs {
         default_value_t = false,
         help = "Disable UMI deduplication (mixture mode)",
         long_help = "When set, each fragment counts once instead of being deduplicated by UMI.\n\
-                     Use for bulk or non-UMI data.\n\
-                     Only used in mixture mode."
+                     Use for bulk or non-UMI data. Only used in mixture mode."
     )]
     pub(crate) no_umi_dedup: bool,
 
@@ -396,8 +386,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 0.01,
         help = "Min component weight (mixture mode)",
-        long_help = "Components with weight below this threshold are pruned\n\
-                     during EM iterations. Only used in mixture mode."
+        long_help = "Components with weight below this threshold are pruned during EM iterations.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) min_ws: f32,
 
@@ -426,10 +416,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 0.05,
         help = "Per-site skirt eta (heavy-tail robustness, mixture mode)",
-        long_help = "Each site's emission is (1 - eta) * Gaussian(alpha, beta^2)\n\
-                     + eta * Uniform(alpha - W, alpha + W).\n\
-                     The local uniform skirt absorbs near-site outliers\n\
-                     so the BIC does not pick up extra spurious sites in broad cleavage clusters.\n\
+        long_help = "Each site's emission is (1 - eta) * Gaussian(alpha, beta^2) + eta * Uniform(alpha - W, alpha + W).\n\
+                     The local uniform skirt absorbs near-site outliers so the BIC does not pick up extra spurious sites in broad cleavage clusters.\n\
                      Set to 0 to disable. Only used in mixture mode."
     )]
     pub(crate) skirt_eta: f32,
@@ -439,8 +427,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 3.0,
         help = "Skirt half-width in beta units (mixture mode)",
-        long_help = "Half-width of the per-site uniform skirt:\n\
-                     W = skirt_mult * beta_k. Only used in mixture mode."
+        long_help = "Half-width of the per-site uniform skirt: W = skirt_mult * beta_k.\n\
+                     Only used in mixture mode."
     )]
     pub(crate) skirt_mult: f32,
 
@@ -449,9 +437,8 @@ pub struct CountApaArgs {
         long,
         default_value_t = 2.0,
         help = "Post-EM merge tolerance in beta units (mixture mode)",
-        long_help = "After BIC site selection, selected sites with\n\
-                     |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j)\n\
-                     are collapsed (higher-pi site kept) and weights re-fit.\n\
+        long_help = "After BIC site selection,\n\
+                     selected sites with |alpha_i - alpha_j| < merge_beta_mult * max(beta_i, beta_j) are collapsed (higher-pi site kept) and weights re-fit.\n\
                      Set to 0 to disable. Only used in mixture mode."
     )]
     pub(crate) merge_beta_mult: f32,
@@ -464,8 +451,8 @@ pub struct CountApaArgs {
         help = "Cap candidate poly-A sites per UTR (top-N by coverage; 0 = unlimited)",
         long_help = "Upper bound on how many candidate poly-A sites a UTR's BIC site-selection considers,\n\
                      ranked by coverage. Long 3'UTRs can yield hundreds of coverage peaks;\n\
-                     capping bounds the per-UTR EM cost with negligible accuracy loss\n\
-                     (real UTRs have a handful of sites). 0 = unlimited. Only used in mixture mode."
+                     capping bounds the per-UTR EM cost with negligible accuracy loss (real UTRs have a handful of sites).\n\
+                     0 = unlimited. Only used in mixture mode."
     )]
     pub(crate) apa_max_sites: usize,
 
@@ -484,11 +471,11 @@ pub struct CountApaArgs {
         default_value_t = true,
         action = clap::ArgAction::SetFalse,
         help = "Skip the per-cell APA PDUI matrix ({batch}_apa); written by default",
-        long_help = "The per-cell `{batch}_apa` matrix — two count channels per 2-site\n\
-                     gene (`{gene}/apa/proximal`, `{gene}/apa/distal`); PDUI =\n\
-                     distal/(distal+proximal) is derived downstream — is written BY\n\
-                     DEFAULT (matching `faba all`). Pass `--no-pdui` to skip it (the\n\
-                     poly-A EM still runs if `--mixture` needs it)."
+        long_help = "The per-cell `{batch}_apa` matrix —\n\
+                     two count channels per 2-site gene (`{gene}/apa/proximal`, `{gene}/apa/distal`);\n\
+                     PDUI = distal/(distal+proximal) is derived downstream —\n\
+                     is written BY DEFAULT (matching `faba all`).\n\
+                     Pass `--no-pdui` to skip it (the poly-A EM still runs if `--mixture` needs it)."
     )]
     pub(crate) compute_pdui: bool,
 

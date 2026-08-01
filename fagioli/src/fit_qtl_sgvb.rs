@@ -29,10 +29,9 @@ pub struct FitQtlSgvbArgs {
         long, num_args = 1..,
         help = "Single-cell count matrix files (Zarr, HDF5, or mtx)",
         long_help = "One or more single-cell count matrix files. Supported formats:\n\
-            Zarr (.zarr), HDF5 (.h5), or Matrix Market (.mtx).\n\
-            Multiple files are merged by cell ID.\n\
-            Gene rows must match across files.\n\
-            Cell columns are the union of all files."
+                     Zarr (.zarr), HDF5 (.h5), or Matrix Market (.mtx).\n\
+                     Multiple files are merged by cell ID. Gene rows must match across files.\n\
+                     Cell columns are the union of all files."
     )]
     pub sc_backend_files: Vec<Box<str>>,
 
@@ -40,11 +39,14 @@ pub struct FitQtlSgvbArgs {
         long,
         help = "Cell annotations file mapping cells to individuals",
         long_help = "Cell annotations file (TSV or TSV.GZ) with columns:\n\
-            - cell_id: must match column names in --sc-backend-files\n\
-            - individual_id: donor/sample ID, must match IIDs in --bed-prefix .fam\n\
-            - cell_type (optional): hard cell-type label for stratified pseudobulk\n\n\
-            If cell_type column is present, pseudobulk is computed per (individual, cell_type).\n\
-            For soft/probabilistic cell-type assignments, use --membership-parquet instead."
+                     - cell_id: must match column names in --sc-backend-files\n\
+                     - individual_id: donor/sample ID, must match IIDs in --bed-prefix .fam\n\
+                     - cell_type (optional): hard cell-type label for stratified pseudobulk\n\
+                     \n\
+                     If cell_type column is present,\n\
+                     pseudobulk is computed per (individual, cell_type).\n\
+                     For soft/probabilistic cell-type assignments,\n\
+                     use --membership-parquet instead."
     )]
     pub cell_annotations: Option<Box<str>>,
 
@@ -52,9 +54,9 @@ pub struct FitQtlSgvbArgs {
         long,
         help = "Soft cell-type membership proportions (parquet)",
         long_help = "Parquet file with soft/probabilistic cell-type membership proportions.\n\
-            Rows = cells (indexed by cell_id), columns = cell types.\n\
-            Each row sums to 1.0. Alternative to hard cell_type column in\n\
-            --cell-annotations. Enables fractional pseudobulk aggregation."
+                     Rows = cells (indexed by cell_id), columns = cell types.\n\
+                     Each row sums to 1.0. Alternative to hard cell_type column in\n\
+                     --cell-annotations. Enables fractional pseudobulk aggregation."
     )]
     pub membership_parquet: Option<Box<str>>,
 
@@ -62,10 +64,10 @@ pub struct FitQtlSgvbArgs {
     #[arg(
         long,
         help = "PLINK BED file prefix (without .bed/.bim/.fam)",
-        long_help = "Path prefix for PLINK binary genotype files.\n\
-            The tool reads {prefix}.bed, {prefix}.bim and {prefix}.fam.\n\
-            Individual IDs come from the IID column of .fam.\n\
-            They are matched against individual_id in the cell annotations."
+        long_help = "Path prefix for PLINK binary genotype files. The tool reads {prefix}.bed,\n\
+                     {prefix}.bim and {prefix}.fam.\n\
+                     Individual IDs come from the IID column of .fam.\n\
+                     They are matched against individual_id in the cell annotations."
     )]
     pub bed_prefix: Box<str>,
 
@@ -94,22 +96,21 @@ pub struct FitQtlSgvbArgs {
     #[arg(
         long,
         help = "GTF/GFF gene annotation file for defining cis-eQTL windows",
-        long_help = "GTF or GFF3 gene annotation file.\n\
-            Each gene's TSS, its transcription start site, is extracted.\n\
-            A cis-window of --cis-window bp is placed around it.\n\
-            Only SNPs inside that window are tested for the gene.\n\
-            Provide either --gtf-file or --gene-bed-file, not both."
+        long_help = "GTF or GFF3 gene annotation file. Each gene's TSS,\n\
+                     its transcription start site, is extracted.\n\
+                     A cis-window of --cis-window bp is placed around it.\n\
+                     Only SNPs inside that window are tested for the gene.\n\
+                     Provide either --gtf-file or --gene-bed-file, not both."
     )]
     pub gtf_file: Option<Box<str>>,
 
     #[arg(
         long,
         help = "BED gene annotation file (chr, start, end, gene_id[, name[, strand]])",
-        long_help = "BED-format gene annotation file with columns:\n\
-            chr, start, end, gene_id, [name], [strand].\n\
-            The --cis-window is placed around the gene start.\n\
-            With a strand column it is placed around the TSS instead.\n\
-            This is an alternative to --gtf-file."
+        long_help = "BED-format gene annotation file with columns: chr, start, end, gene_id,\n\
+                     [name], [strand]. The --cis-window is placed around the gene start.\n\
+                     With a strand column it is placed around the TSS instead.\n\
+                     This is an alternative to --gtf-file."
     )]
     pub gene_bed_file: Option<Box<str>>,
 
@@ -118,10 +119,10 @@ pub struct FitQtlSgvbArgs {
         default_value = "1000000",
         help = "Cis-window size in bp around each gene TSS",
         long_help = "Size of the cis-window in base pairs.\n\
-            It is placed symmetrically around each gene's TSS.\n\
-            Only SNPs within [TSS - window, TSS + window] are used.\n\
-            They enter the per-gene fine-mapping model.\n\
-            The default is 1000000, so 1 Mb."
+                     It is placed symmetrically around each gene's TSS.\n\
+                     Only SNPs within [TSS - window, TSS + window] are used.\n\
+                     They enter the per-gene fine-mapping model. The default is 1000000,\n\
+                     so 1 Mb."
     )]
     pub cis_window: u64,
 
@@ -131,10 +132,9 @@ pub struct FitQtlSgvbArgs {
         default_value = "1.0",
         help = "Gamma prior shape parameter (a0) for Poisson-Gamma pseudobulk",
         long_help = "Shape parameter a0 of the Gamma prior.\n\
-            The prior sits on per-individual expression rates,\n\
-            in the Poisson-Gamma pseudobulk model.\n\
-            Larger values shrink harder toward the prior mean.\n\
-            The default is 1.0."
+                     The prior sits on per-individual expression rates,\n\
+                     in the Poisson-Gamma pseudobulk model.\n\
+                     Larger values shrink harder toward the prior mean. The default is 1.0."
     )]
     pub gamma_a0: f32,
 
@@ -143,8 +143,8 @@ pub struct FitQtlSgvbArgs {
         default_value = "1.0",
         help = "Gamma prior rate parameter (b0) for Poisson-Gamma pseudobulk",
         long_help = "Rate parameter b0 of the Gamma prior.\n\
-            The prior sits on per-individual expression rates.\n\
-            The prior mean is a0/b0, and the default is 1.0."
+                     The prior sits on per-individual expression rates.\n\
+                     The prior mean is a0/b0, and the default is 1.0."
     )]
     pub gamma_b0: f32,
 
@@ -153,12 +153,11 @@ pub struct FitQtlSgvbArgs {
         default_value = "1.0",
         help = "Min effective cells per individual-celltype pair to include",
         long_help = "Minimum effective cell weight per pair.\n\
-            It is the sum of membership proportions for an\n\
-            (individual, cell_type) pair.\n\
-            Pairs below this threshold are excluded from the pseudobulk.\n\
-            That prevents noisy estimates.\n\
-            They come from individuals with very few cells of a type.\n\
-            The default is 1.0."
+                     It is the sum of membership proportions for an (individual, cell_type) pair.\n\
+                     Pairs below this threshold are excluded from the pseudobulk.\n\
+                     That prevents noisy estimates.\n\
+                     They come from individuals with very few cells of a type.\n\
+                     The default is 1.0."
     )]
     pub min_cell_weight: f32,
 
@@ -167,15 +166,19 @@ pub struct FitQtlSgvbArgs {
         long,
         default_value = "susie",
         help = "Fine-mapping model: 'susie', 'bisusie', or 'spike-slab'",
-        long_help = "Fine-mapping model to use:\n\n\
-            - susie: Sum of Single Effects, with a null absorber.\n\
-              Each of the L components selects one causal SNP.\n\
-              Selection is a softmax over p+1 positions: p real SNPs,\n\
-              plus a null that absorbs mass when there is no signal.\n\n\
-            - bisusie: Bivariate SuSiE with separate predictor/outcome softmaxes.\n\n\
-            - spike-slab: Independent per-SNP Bernoulli inclusion gates with\n\
-              Gaussian slab. No component structure.\n\n\
-            Default: susie."
+        long_help = "Fine-mapping model to use:\n\
+                     \n\
+                     - susie: Sum of Single Effects, with a null absorber.\n\
+                     Each of the L components selects one causal SNP.\n\
+                     Selection is a softmax over p+1 positions: p real SNPs,\n\
+                     plus a null that absorbs mass when there is no signal.\n\
+                     \n\
+                     - bisusie: Bivariate SuSiE with separate predictor/outcome softmaxes.\n\
+                     \n\
+                     - spike-slab: Independent per-SNP Bernoulli inclusion gates with\n\
+                     Gaussian slab. No component structure.\n\
+                     \n\
+                     Default: susie."
     )]
     pub model: Box<str>,
 
@@ -183,14 +186,16 @@ pub struct FitQtlSgvbArgs {
         long,
         default_value = "single",
         help = "Prior type: 'single' (grid search) or 'ash' (mixture-of-Gaussians)",
-        long_help = "Prior type for effect sizes:\n\n\
-            - single: a fixed single-Gaussian prior.\n\
-              The model is fit once per value in --prior-var.\n\
-              The best is selected by ELBO. This is the default.\n\n\
-            - ash: mixture-of-Gaussians, an adaptive-shrinkage prior.\n\
-              The --prior-var grid becomes mixture components.\n\
-              Their weights are learnable, plus a near-zero spike.\n\
-              It is a single fit, with no grid search."
+        long_help = "Prior type for effect sizes:\n\
+                     \n\
+                     - single: a fixed single-Gaussian prior.\n\
+                     The model is fit once per value in --prior-var.\n\
+                     The best is selected by ELBO. This is the default.\n\
+                     \n\
+                     - ash: mixture-of-Gaussians, an adaptive-shrinkage prior.\n\
+                     The --prior-var grid becomes mixture components.\n\
+                     Their weights are learnable, plus a near-zero spike. It is a single fit,\n\
+                     with no grid search."
     )]
     pub prior_type: Box<str>,
 
@@ -199,11 +204,10 @@ pub struct FitQtlSgvbArgs {
         default_value = "10",
         help = "Number of SuSiE components L (max causal SNPs per gene)",
         long_help = "Number of single-effect components L, in SuSiE and BiSuSiE.\n\
-            Each component can select one causal SNP.\n\
-            L is therefore the maximum number of causal variants.\n\
-            That is the per-gene ceiling.\n\
-            Higher L increases capacity, and slows optimization.\n\
-            Ignored for spike-slab. Default: 10."
+                     Each component can select one causal SNP.\n\
+                     L is therefore the maximum number of causal variants.\n\
+                     That is the per-gene ceiling. Higher L increases capacity,\n\
+                     and slows optimization. Ignored for spike-slab. Default: 10."
     )]
     pub num_components: usize,
 
@@ -212,11 +216,11 @@ pub struct FitQtlSgvbArgs {
         default_value = "0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5",
         help = "Prior variance grid for effect sizes (comma-separated)",
         long_help = "Comma-separated list of prior variances for the effect size distribution.\n\
-            The model is fit once for each value, and the best is selected by ELBO.\n\
-            Prior variance controls expected effect size magnitude:\n\
-            - smaller values (0.01-0.05): small effects, conservative\n\
-            - larger values (0.3-1.0): large effects, liberal\n\
-            Default: 0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5"
+                     The model is fit once for each value, and the best is selected by ELBO.\n\
+                     Prior variance controls expected effect size magnitude:\n\
+                     - smaller values (0.01-0.05): small effects, conservative\n\
+                     - larger values (0.3-1.0): large effects, liberal\n\
+                     Default: 0.05,0.1,0.12,0.15,0.18,0.2,0.25,0.3,0.5"
     )]
     pub prior_var: Box<str>,
 
@@ -226,10 +230,9 @@ pub struct FitQtlSgvbArgs {
         default_value = "20",
         help = "Monte Carlo samples per SGVB gradient step",
         long_help = "Monte Carlo samples S drawn per gradient step.\n\
-            They serve Stochastic Gradient Variational Bayes.\n\
-            More samples reduce gradient variance.\n\
-            They also raise per-step cost.\n\
-            The default is 20."
+                     They serve Stochastic Gradient Variational Bayes.\n\
+                     More samples reduce gradient variance. They also raise per-step cost.\n\
+                     The default is 20."
     )]
     pub num_sgvb_samples: usize,
 
@@ -247,12 +250,11 @@ pub struct FitQtlSgvbArgs {
         long,
         help = "Row minibatch size; omit to auto-scale by variant count",
         long_help = "Individuals sampled per gradient step.\n\
-            When the total N exceeds this value, minibatches are drawn.\n\
-            They are random, of this size, one per iteration.\n\
-            When N is at or below it, the full batch is used.\n\
-            \n\
-            Multilevel models disable this.\n\
-            Omit it for auto-scaling by variant count."
+                     When the total N exceeds this value, minibatches are drawn.\n\
+                     They are random, of this size, one per iteration.\n\
+                     When N is at or below it, the full batch is used.\n\
+                     \n\
+                     Multilevel models disable this. Omit it for auto-scaling by variant count."
     )]
     pub batch_size: Option<usize>,
 
@@ -260,13 +262,11 @@ pub struct FitQtlSgvbArgs {
         long,
         default_value = "50",
         help = "Trailing window size for averaging ELBO (convergence diagnostic)",
-        long_help = "How many recent ELBO values to average.\n\
-            ELBO is the evidence lower bound.\n\
-            The average feeds the reported convergence diagnostic.\n\
-            It is reported per gene, over the last elbo_window iterations.\n\
-            \n\
-            Prior-variance selection uses it too; best ELBO wins.\n\
-            The default is 50."
+        long_help = "How many recent ELBO values to average. ELBO is the evidence lower bound.\n\
+                     The average feeds the reported convergence diagnostic.\n\
+                     It is reported per gene, over the last elbo_window iterations.\n\
+                     \n\
+                     Prior-variance selection uses it too; best ELBO wins. The default is 50."
     )]
     pub elbo_window: usize,
 
@@ -275,13 +275,12 @@ pub struct FitQtlSgvbArgs {
         long,
         help = "Re-weight prior variances across genes via empirical Bayes",
         long_help = "Enable cross-gene empirical Bayes for prior-variance selection.\n\
-            Without it, the best prior variance is chosen per gene,\n\
-            independently.\n\
-            \n\
-            With it, one shared prior-variance distribution is learned.\n\
-            It spans all genes, and per-gene results are re-weighted.\n\
-            This helps when many genes are tested,\n\
-            and effect sizes are expected to be similar."
+                     Without it, the best prior variance is chosen per gene, independently.\n\
+                     \n\
+                     With it, one shared prior-variance distribution is learned.\n\
+                     It spans all genes, and per-gene results are re-weighted.\n\
+                     This helps when many genes are tested,\n\
+                     and effect sizes are expected to be similar."
     )]
     pub empirical_bayes: bool,
 
@@ -291,11 +290,10 @@ pub struct FitQtlSgvbArgs {
         default_value = "true",
         help = "Include cell-type composition fractions as covariates",
         long_help = "When true, composition fractions become covariates.\n\
-            They are per-individual cell-type fractions.\n\
-            They enter the linear model directly.\n\
-            That adjusts for compositional confounding,\n\
-            where individuals differ in cell-type proportions.\n\
-            The default is true."
+                     They are per-individual cell-type fractions.\n\
+                     They enter the linear model directly.\n\
+                     That adjusts for compositional confounding,\n\
+                     where individuals differ in cell-type proportions. The default is true."
     )]
     pub composition_covariates: bool,
 
@@ -303,11 +301,11 @@ pub struct FitQtlSgvbArgs {
         long,
         help = "Additional covariate files (TSV/CSV: individual_id + values)",
         long_help = "Additional covariate file(s) in TSV or CSV format.\n\
-            First column = individual ID (must match .fam IIDs),\n\
-            remaining columns = numeric covariate values.\n\
-            Multiple files can be specified (repeated --covariate-files).\n\
-            All covariates are concatenated with the composition ones.\n\
-            They are column-centered before fitting."
+                     First column = individual ID (must match .fam IIDs),\n\
+                     remaining columns = numeric covariate values.\n\
+                     Multiple files can be specified (repeated --covariate-files).\n\
+                     All covariates are concatenated with the composition ones.\n\
+                     They are column-centered before fitting."
     )]
     pub covariate_files: Vec<Box<str>>,
 
@@ -331,9 +329,9 @@ pub struct FitQtlSgvbArgs {
         long,
         default_value_t = 0,
         help = "Number of parallel gene-fitting jobs (0 = auto)",
-        long_help = "Number of genes to fit in parallel.\n\
-            0 = automatic: uses all CPU cores for --device cpu, or 1 for GPU.\n\
-            Set to 1 for sequential execution (useful for debugging)."
+        long_help = "Number of genes to fit in parallel. 0 = automatic:\n\
+                     uses all CPU cores for --device cpu, or 1 for GPU.\n\
+                     Set to 1 for sequential execution (useful for debugging)."
     )]
     pub jobs: usize,
 

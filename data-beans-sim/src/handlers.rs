@@ -53,8 +53,8 @@ pub struct RunSimulateArgs {
     #[arg(
         long,
         help = "Real single-cell reference (.h5, .zarr, .zarr.zip)",
-        long_help = "Real single-cell reference: `.h5`, `.zarr` or `.zarr.zip`.\n\
-                     When set, the GLM pipeline is unchanged.\n\
+        long_help = "Real single-cell reference: `.h5`, `.zarr` or `.zarr.zip`. When set,\n\
+                     the GLM pipeline is unchanged.\n\
                      Only the final count generation step differs.\n\
                      It swaps `Poisson(λ)` for a copula-coupled NB draw.\n\
                      That draw uses the per-gene dispersion `r̂_g`,\n\
@@ -67,9 +67,8 @@ pub struct RunSimulateArgs {
         default_value_t = 2000,
         help = "HVG count for the gene-gene copula",
         long_help = "HVG count for the gene-gene copula.\n\
-                     Genes outside the HVG set are sampled independently,\n\
-                     from `NB(λ_{g,j}, r̂_g)`.\n\
-                     This is used only with `--reference`."
+                     Genes outside the HVG set are sampled independently, from `NB(λ_{g,j},\n\
+                     r̂_g)`. This is used only with `--reference`."
     )]
     pub n_hvg: usize,
 
@@ -87,9 +86,8 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 1e-3,
         help = "Per-gene isotropic ridge variance added at sample time on top of Σ̂",
-        long_help = "Per-gene isotropic ridge variance.\n\
-                     It is added at sample time, on top of `Σ̂`.\n\
-                     This is used only with `--reference`."
+        long_help = "Per-gene isotropic ridge variance. It is added at sample time,\n\
+                     on top of `Σ̂`. This is used only with `--reference`."
     )]
     pub regularization: f32,
 
@@ -97,8 +95,7 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 1e-2,
         help = "Lower bound on the NB size parameter r̂_g",
-        long_help = "Lower bound on the NB size parameter `r̂_g`.\n\
-                     It tames runaway dispersion.\n\
+        long_help = "Lower bound on the NB size parameter `r̂_g`. It tames runaway dispersion.\n\
                      MoM can yield a near-zero `r` for noisy genes.\n\
                      This is used only with `--reference`."
     )]
@@ -108,8 +105,8 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 1000,
         help = "Expected library size E[Σ_g Y(g,j)] per cell",
-        long_help = "Expected library size E[Σ_g Y(g,j)] per cell.\n\
-                     It is emergent; nothing is rescaled per cell.\n\
+        long_help = "Expected library size E[Σ_g Y(g,j)] per cell. It is emergent;\n\
+                     nothing is rescaled per cell.\n\
                      In synthetic mode it enters as λ_scale = depth/G.\n\
                      In reference mode it scales the per-gene mean μ̂_g."
     )]
@@ -164,16 +161,14 @@ pub struct RunSimulateArgs {
         default_value_t = 0.0,
         help = "PVE-style magnitude for the per-cell residual log-mean noise term",
         long_help = "PVE-style magnitude for the per-cell residual noise term.\n\
-                     It applies to the log-mean, in stage 1 of the reference-mode\n\
-                     two-stage simulator.\n\
+                     It applies to the log-mean,\n\
+                     in stage 1 of the reference-mode two-stage simulator.\n\
                      \n\
                      Above 0 it adds `√pve_noise · ε_{g,j}`.\n\
                      `ε ~ N(0,1)` is iid per gene per cell.\n\
-                     The term sits on top of the topic perturbation,\n\
-                     and applies before batch.\n\
+                     The term sits on top of the topic perturbation, and applies before batch.\n\
                      \n\
-                     The default of 0 keeps stage 1 driven by topics and the\n\
-                     reference baseline alone."
+                     The default of 0 keeps stage 1 driven by topics and the reference baseline alone."
     )]
     pub pve_noise: f32,
 
@@ -198,13 +193,12 @@ pub struct RunSimulateArgs {
         long_help = "Where the batch-program subspace comes from.\n\
                      This applies when `--batch-rank > 0`.\n\
                      \n\
-                     `random` draws a fresh low-dim random factor.\n\
-                     It is the default, and an arbitrary subspace.\n\
+                     `random` draws a fresh low-dim random factor. It is the default,\n\
+                     and an arbitrary subspace.\n\
                      \n\
-                     `empirical` takes the top columns of the reference's fitted\n\
-                     gene-gene copula factor.\n\
-                     That is the worst case: batch shifts then ride the\n\
-                     reference's real co-expression PCs."
+                     `empirical` takes the top columns of the reference's fitted gene-gene copula factor.\n\
+                     That is the worst case:\n\
+                     batch shifts then ride the reference's real co-expression PCs."
     )]
     pub batch_program: BatchProgram,
 
@@ -216,18 +210,15 @@ pub struct RunSimulateArgs {
         value_delimiter = ',',
         help = "Route cells whose dominant topic is in this list to a second `<out>.holdout` backend",
         long_help = "Comma-separated 0-indexed topic ids.\n\
-                     A cell whose dominant topic (argmax θ) is in this set goes to\n\
-                     `<out>.holdout.<backend>`.\n\
+                     A cell whose dominant topic (argmax θ) is in this set goes to `<out>.holdout.<backend>`.\n\
                      It is kept out of the primary `<out>.<backend>`.\n\
-                     So a model trained on the primary file provably never sees\n\
-                     these topics.\n\
+                     So a model trained on the primary file provably never sees these topics.\n\
                      \n\
                      The β and θ ground-truth parquets stay full.\n\
                      Column names in both backends are the original cell indices.\n\
                      Cross-reference them against `<out>.prop.parquet`.\n\
                      \n\
-                     Unset by default, giving a single output file.\n\
-                     Synthetic mode only."
+                     Unset by default, giving a single output file. Synthetic mode only."
     )]
     pub holdout_topics: Option<Vec<usize>>,
 
@@ -235,11 +226,9 @@ pub struct RunSimulateArgs {
         long,
         default_value_t = 1.0,
         help = "Log-normal scale σ_β",
-        long_help = "Log-normal scale σ_β.\n\
-                     Total log-variance per gene-topic entry is σ_β².\n\
+        long_help = "Log-normal scale σ_β. Total log-variance per gene-topic entry is σ_β².\n\
                      That is independent of pve_topic.\n\
-                     Centering gives E[β(g,k)] = 1.\n\
-                     Higher values vary expression more across genes and topics."
+                     Centering gives E[β(g,k)] = 1. Higher values vary expression more across genes and topics."
     )]
     pub beta_scale: f32,
 
@@ -287,9 +276,8 @@ pub struct RunSimulateMultimodalArgs {
         value_delimiter = ',',
         help = "Expected library size per modality, comma-separated",
         long_help = "Expected library size per modality, comma-separated.\n\
-                     An example is 1000,500.\n\
-                     There is one entry per modality, and the length defines M.\n\
-                     Each modality's β columns are softmax-normalized over genes.\n\
+                     An example is 1000,500. There is one entry per modality,\n\
+                     and the length defines M. Each modality's β columns are softmax-normalized over genes.\n\
                      So depth_m directly sets E[lib(j)|m]."
     )]
     pub depth: Vec<usize>,

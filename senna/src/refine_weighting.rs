@@ -129,8 +129,7 @@ pub(crate) struct CollapseArgs {
         short = 'p',
         default_value_t = 50,
         help = "Random projection dimension",
-        long_help = "Target rank of the initial random sketch\n\
-                     used to seed batch correction and multi-level pseudobulk collapsing."
+        long_help = "Target rank of the initial random sketch used to seed batch correction and multi-level pseudobulk collapsing."
     )]
     pub(crate) proj_dim: usize,
 
@@ -148,7 +147,8 @@ pub(crate) struct CollapseArgs {
         long,
         help = "Skip per-batch correction; treat all cells as a single batch",
         long_help = "Collapses batch membership to a single label so the random projection,\n\
-                     multilevel collapsing, and δ estimation all run as if there were no batch structure.\n\
+                     multilevel collapsing,\n\
+                     and δ estimation all run as if there were no batch structure.\n\
                      Useful for homogeneous datasets or as a reference baseline."
     )]
     pub(crate) ignore_batch: bool,
@@ -157,8 +157,7 @@ pub(crate) struct CollapseArgs {
         long,
         default_value_t = 10,
         help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours\n\
-                     used when aggregating cells into pseudobulk pb-samples."
+        long_help = "Number of within-batch nearest neighbours used when aggregating cells into pseudobulk pb-samples."
     )]
     pub(crate) knn_cells: usize,
 
@@ -167,7 +166,8 @@ pub(crate) struct CollapseArgs {
         default_value_t = 3,
         help = "Multi-level coarsening levels",
         long_help = "Hierarchical pseudobulk refinement passes.\n\
-                     Level sort dims are linearly spaced from 4 to --sort-dim. Set to 1 to disable."
+                     Level sort dims are linearly spaced from 4 to --sort-dim.\n\
+                     Set to 1 to disable."
     )]
     pub(crate) num_levels: usize,
 

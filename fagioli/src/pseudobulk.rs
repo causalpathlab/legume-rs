@@ -23,10 +23,10 @@ pub struct PseudobulkArgs {
     #[arg(
         long,
         help = "Cell annotations TSV: cell_id, individual_id[, cell_type]",
-        long_help = "Cell annotations file (TSV or TSV.GZ).\n\
-            Columns: cell_id, individual_id, and optionally cell_type.\n\
-            If cell_type column is present, hard cell-type assignments are used.\n\
-            Use --membership-parquet for soft assignments instead."
+        long_help = "Cell annotations file (TSV or TSV.GZ). Columns: cell_id, individual_id,\n\
+                     and optionally cell_type. If cell_type column is present,\n\
+                     hard cell-type assignments are used.\n\
+                     Use --membership-parquet for soft assignments instead."
     )]
     pub cell_annotations: Option<Box<str>>,
 

@@ -50,7 +50,8 @@ pub struct JointTopicArgs {
                      {out}.log_likelihood.parquet   training loss trace\n  \
                      {out}_{d}.delta.parquet        per-batch effects for modality d\n  \
                      {out}.cell_proj.parquet        cached random projection (consumed by `senna layout`)\n  \
-                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\n\
+                     {out}.senna.json               run manifest for `senna layout/plot --from`\n\
+                     \n\
                      With --decoder-type delta, additionally:\n  \
                      {out}.base_dictionary.parquet  shared base dictionary\n  \
                      {out}_{m}.delta_logits.parquet delta logits for modality m"
@@ -153,11 +154,10 @@ pub struct JointTopicArgs {
         long,
         default_value_t = 5000,
         help = "Cap feature dim by meta-feature coarsening (0 to disable)",
-        long_help = "Groups co-expressed features into ≤N meta-features\n\
-                     so the model trains at reduced resolution.\n\
+        long_help = "Groups co-expressed features into ≤N meta-features so the model trains at reduced resolution.\n\
                      The dictionary is expanded back to full resolution on output.\n\
-                     Independent mode: computed per modality.\n\
-                     Delta mode: computed on the reference modality and shared."
+                     Independent mode: computed per modality. Delta mode:\n\
+                     computed on the reference modality and shared."
     )]
     pub(crate) max_coarse_features: usize,
 
@@ -175,12 +175,10 @@ pub struct JointTopicArgs {
         default_value = "independent",
         help = "Joint decoder (independent|delta)",
         long_help = "independent — each modality has its own topic dictionary;\n\
-                                   features may differ across modalities.\n\
+                     features may differ across modalities.\n\
                      delta       — shared base dictionary + cumulative chain deltas.\n\
-                                   Modality 0 = softmax(z @ W_base)\n\
-                                   Modality m = softmax(z @ (W_base + Σ δ_1..m))\n\
-                                   Requires shared features; reference is modality 0.\n\
-                                   Delta logits start at zero and diverge during training."
+                     Modality 0 = softmax(z @ W_base) Modality m = softmax(z @ (W_base + Σ δ_1..m)) Requires shared features;\n\
+                     reference is modality 0. Delta logits start at zero and diverge during training."
     )]
     pub(crate) decoder_type: JointDecoderType,
 }

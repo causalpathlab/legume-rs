@@ -62,9 +62,8 @@ pub struct LayoutCommonArgs {
         long_help = "Fills in data files and batch files from the manifest.\n\
                      It also supplies the output prefix when --out is absent.\n\
                      \n\
-                     The manifest is then updated in place.\n\
-                     Its `layout.cell_coords`, `layout.pb_coords` and\n\
-                     `layout.pb_gene_mean` fields point at the paths just written.\n\
+                     The manifest is then updated in place. Its `layout.cell_coords`,\n\
+                     `layout.pb_coords` and `layout.pb_gene_mean` fields point at the paths just written.\n\
                      \n\
                      Explicit CLI flags still override manifest values."
     )]
@@ -73,8 +72,8 @@ pub struct LayoutCommonArgs {
     #[arg(
         value_delimiter = ',',
         help = "Data files (required unless --from supplies them)",
-        long_help = "Sparse backends in `.zarr` or `.h5`.\n\
-                     Multiple paths are allowed, space- or comma-separated.\n\
+        long_help = "Sparse backends in `.zarr` or `.h5`. Multiple paths are allowed,\n\
+                     space- or comma-separated.\n\
                      Leave this empty and pass --from to inherit from the manifest."
     )]
     pub data_files: Vec<Box<str>>,
@@ -83,14 +82,16 @@ pub struct LayoutCommonArgs {
         long,
         short,
         help = "Output prefix (defaults to the manifest's `prefix` when --from is used)",
-        long_help = "Output header for results.\n\n\
-		     {out}.pb_coords.parquet:\n\
-		       Pseudobulk sample coordinates (n_pb × 2)\n\n\
-		     {out}.cell_coords.parquet:\n\
-		       Cell coordinates (n_cells × 2 or 3) with optional pb_id / cluster columns\n\n\
-		     {out}.pb_gene_mean.parquet:\n\
-		       Batch-corrected log1p-CPM per PB (n_pb × n_genes),\n\
-		       used as the diagnostic feature matrix for the PB-PB similarity step."
+        long_help = "Output header for results.\n\
+                     \n\
+                     {out}.pb_coords.parquet: Pseudobulk sample coordinates (n_pb × 2)\n\
+                     \n\
+                     {out}.cell_coords.parquet:\n\
+                     Cell coordinates (n_cells × 2 or 3) with optional pb_id / cluster columns\n\
+                     \n\
+                     {out}.pb_gene_mean.parquet:\n\
+                     Batch-corrected log1p-CPM per PB (n_pb × n_genes),\n\
+                     used as the diagnostic feature matrix for the PB-PB similarity step."
     )]
     pub out: Option<Box<str>>,
 
@@ -100,7 +101,7 @@ pub struct LayoutCommonArgs {
         value_delimiter(','),
         help = "Batch membership files",
         long_help = "Batch membership files (comma-separated names).\n\
-		     Each batch file should correspond to each data file."
+                     Each batch file should correspond to each data file."
     )]
     pub batch_files: Option<Vec<Box<str>>>,
 
@@ -171,18 +172,14 @@ pub struct LayoutCommonArgs {
         long = "trim-cell-mads",
         default_value_t = 5.0,
         help = "Winsorize cell features to ±N MADs before the layout; 0 = off",
-        long_help = "Winsorize cell features before the layout.\n\
-                     This is ON by default, at N=5.\n\
+        long_help = "Winsorize cell features before the layout. This is ON by default, at N=5.\n\
                      \n\
-                     Each feature dimension is clipped to\n\
-                     `median ± N · MAD · 1.4826` across cells.\n\
-                     A few extreme-outlier cells then cannot stretch the\n\
-                     UMAP/t-SNE/PHATE layout.\n\
+                     Each feature dimension is clipped to `median ± N · MAD · 1.4826` across cells.\n\
+                     A few extreme-outlier cells then cannot stretch the UMAP/t-SNE/PHATE layout.\n\
                      Nor can they dominate the PB-PB similarity.\n\
                      \n\
                      The rule is MAD-based, so it assumes no Gaussian shape.\n\
-                     Only the most extreme tails are touched.\n\
-                     Set it to 0 to disable."
+                     Only the most extreme tails are touched. Set it to 0 to disable."
     )]
     pub trim_cell_mads: f32,
 
@@ -190,7 +187,8 @@ pub struct LayoutCommonArgs {
         long,
         help = "Local scaling using k-th neighbor distance",
         long_help = "Zelnik-Manor & Perona local scaling.\n\
-		     σ_i = distance to k-th nearest neighbour; S_scaled(i,j) = S(i,j) / sqrt(σ_i σ_j)."
+                     σ_i = distance to k-th nearest neighbour;\n\
+                     S_scaled(i,j) = S(i,j) / sqrt(σ_i σ_j)."
     )]
     pub local_scale_k: Option<usize>,
 
@@ -213,10 +211,9 @@ pub struct LayoutCommonArgs {
         long,
         default_value_t = 0.95,
         help = "Keep smallest PB set covering this fraction of cells",
-        long_help = "Drop PB samples in the long tail\n\
-		     until the remaining set contains at least this fraction of the total cells.\n\
-		     - 1.0: keep every PB (no filtering)\n\
-		     - 0.95 (default): remove minor subpopulations"
+        long_help = "Drop PB samples in the long tail until the remaining set contains at least this fraction of the total cells.\n\
+                     - 1.0: keep every PB (no filtering)\n\
+                     - 0.95 (default): remove minor subpopulations"
     )]
     pub pb_coverage: f32,
 
@@ -224,7 +221,7 @@ pub struct LayoutCommonArgs {
         long,
         help = "Cluster assignments file (from `senna clustering`)",
         long_help = "Optional cluster assignments parquet file (cell × 1 matrix of IDs).\n\
-		     If provided, cluster labels are added to cell_coords."
+                     If provided, cluster labels are added to cell_coords."
     )]
     pub clusters: Option<Box<str>>,
 
@@ -243,9 +240,9 @@ pub struct LayoutCommonArgs {
                      That means a topic or svd manifest.\n\
                      \n\
                      A random subsample of cells becomes the PB landmarks.\n\
-                     Each cell is assigned to its nearest landmark.\n\
-                     Lower values give fewer, denser PBs, so crisper clusters.\n\
-                     Higher values give finer resolution, but blobbier output.\n\
+                     Each cell is assigned to its nearest landmark. Lower values give fewer,\n\
+                     denser PBs, so crisper clusters. Higher values give finer resolution,\n\
+                     but blobbier output.\n\
                      \n\
                      The projection-space fallback path ignores this."
     )]
@@ -259,15 +256,12 @@ pub struct LayoutCommonArgs {
                      This happens before the latent-path layout:\n\
                      feat ∝ sqrt(softmax(log_θ / τ)).\n\
                      \n\
-                     The default τ=1.0 leaves θ unchanged.\n\
-                     τ<1 sharpens it.\n\
-                     Cells with mixed topics are pulled toward their dominant\n\
-                     topic, which tightens clusters.\n\
-                     The cost is losing intermediate positions.\n\
+                     The default τ=1.0 leaves θ unchanged. τ<1 sharpens it.\n\
+                     Cells with mixed topics are pulled toward their dominant topic,\n\
+                     which tightens clusters. The cost is losing intermediate positions.\n\
                      τ>1 softens instead.\n\
                      \n\
-                     This affects the latent path only.\n\
-                     Projection-space layouts ignore it."
+                     This affects the latent path only. Projection-space layouts ignore it."
     )]
     pub theta_temperature: f32,
 

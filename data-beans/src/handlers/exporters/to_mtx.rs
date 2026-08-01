@@ -20,8 +20,7 @@ pub struct ToMtxArgs {
         short,
         long,
         help = "Output directory for the 10x-style triplet",
-        long_help = "Output directory.\n\
-                     The 10x Cell Ranger MEX triplet is written inside it:\n\
+        long_help = "Output directory. The 10x Cell Ranger MEX triplet is written inside it:\n\
                      matrix.mtx.gz, features.tsv.gz and barcodes.tsv.gz.\n\
                      `scanpy.read_10x_mtx(dir)` and Seurat `Read10X(dir)` load it.\n\
                      The directory is created if missing."

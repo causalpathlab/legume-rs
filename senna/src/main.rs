@@ -139,23 +139,27 @@ fn print_logo() {
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "SENNA — single-cell embedding (SVD / topic), annotation, trajectory, and plotting.",
-    long_about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment.\n\n\
+    about = "SENNA — single-cell embedding (SVD / topic), annotation, trajectory,\n\
+             and plotting.",
+    long_about = "SENNA — Stochastic data Embedding with Nearest Neighbourhood Adjustment.\n\
+                  \n\
                   Input: sparse backends in `.zarr` or `.h5`.\n\
-                  Convert from Matrix Market with `data-beans from-mtx`.\n\n\
-                  Each step writes its outputs back to the run manifest\n\
-                  `{prefix}.senna.json`.\n\
+                  Convert from Matrix Market with `data-beans from-mtx`.\n\
+                  \n\
+                  Each step writes its outputs back to the run manifest `{prefix}.senna.json`.\n\
                   Downstream commands read data and batch files from it.\n\
-                  Steps 3 and 5 still need their own --latent / --out.\n\n  \
+                  Steps 3 and 5 still need their own --latent / --out.\n\
+                  \n  \
                   1. Train embedding   senna topic | masked-topic | svd\n                       \
-                                       senna joint-topic | joint-svd       (multi-modality)\n  \
+                  senna joint-topic | joint-svd       (multi-modality)\n  \
                   2. Held-out inference senna predict                       (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
                   4. Annotate cells    senna annotate-by-enrichment --from run.senna.json -m markers.tsv\n  \
                   5. Trajectory        senna pseudotime --from run.senna.json --out O\n  \
                   6. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n  \
                   7. Scatter plot      senna plot       --from run.senna.json\n  \
-                  8. Topic diagnostics senna plot-topic --from run.senna.json\n\n\
+                  8. Topic diagnostics senna plot-topic --from run.senna.json\n\
+                  \n\
                   `senna plot` auto-runs steps 3 + 6 on demand."
 )]
 struct Cli {
@@ -186,23 +190,22 @@ enum Commands {
     #[command(
         name = "masked-topic",
         about = "Train a masked-imputation embedded topic model (foundation-style).",
-        long_about = "Embedded topic model trained by masked-gene imputation.\n\
-                      There is no ELBO, and no posterior collapse.\n\
+        long_about = "Embedded topic model trained by masked-gene imputation. There is no ELBO,\n\
+                      and no posterior collapse.\n\
                       Encoder and decoder share a per-gene embedding ρ ∈ ℝ^{D×H}.\n\
                       That follows Dieng et al. 2020 (ETM).\n\
-                      The encoder pools a per-cell top-K window by attention.\n\n\
+                      The encoder pools a per-cell top-K window by attention.\n\
+                      \n\
                       Training splits each cell's top-K genes into visible and masked.\n\
                       θ_n = softmax(encoder(visible)), deterministic and KL-free.\n\
                       The NB head imputes held-out genes with μ = residual · ℓ · (θ·β).\n\
-                      There β_kg = softmax_g(α_k · ρ_g).\n\
-                      φ_g is a per-gene dispersion.\n\
+                      There β_kg = softmax_g(α_k · ρ_g). φ_g is a per-gene dispersion.\n\
                       \n\
                       The masked objective prevents collapse, not a KL bottleneck.\n\
-                      So it scales with more data.\n\
-                      Inference is encoder-only.\n\n\
+                      So it scales with more data. Inference is encoder-only.\n\
+                      \n\
                       Writes the same artifacts as `topic`.\n\
-                      It adds `{out}.feature_embedding.parquet` (ρ) and\n\
-                      `{out}.dispersion.parquet`.",
+                      It adds `{out}.feature_embedding.parquet` (ρ) and `{out}.dispersion.parquet`.",
         visible_aliases = ["mtm"],
         aliases = ["itopic", "indexed-topic", "etm"]
     )]
@@ -213,22 +216,21 @@ enum Commands {
         about = "Train a masked-imputation Gaussian VAE (BERT-style, continuous latent).",
         long_about = "Masked-imputation VAE.\n\
                       It is the Gaussian-latent sibling of `masked-topic`.\n\
-                      The pipeline is the same.\n\
-                      PB-collapse training, a shared ρ embedding, an NB ETM head,\n\
-                      encoder-only inference.\n\
+                      The pipeline is the same. PB-collapse training, a shared ρ embedding,\n\
+                      an NB ETM head, encoder-only inference.\n\
                       \n\
                       The encoder differs.\n\
-                      It emits a reparameterized Gaussian latent z.\n\
-                      There is no simplex softmax; a KL term regularizes it.\n\
-                      That is a true variational bottleneck.\n\
+                      It emits a reparameterized Gaussian latent z. There is no simplex softmax;\n\
+                      a KL term regularizes it. That is a true variational bottleneck.\n\
                       exp(z) drives the NB head's per-topic intensities,\n\
                       μ_g = ℓ·Σ_t exp(z_t)·β_{t,g}.\n\
                       \n\
                       Masked objective and KL together train that embedding,\n\
                       which stays unconstrained and continuous.\n\
-                      The masked decoder is reused unchanged.\n\
-                      Held-out genes are imputed, and the masked objective —\n\
-                      not the KL alone — keeps the latent from collapsing.\n\n\
+                      The masked decoder is reused unchanged. Held-out genes are imputed,\n\
+                      and the masked objective — not the KL alone —\n\
+                      keeps the latent from collapsing.\n\
+                      \n\
                       Writes the same artifacts as `masked-topic`.\n\
                       The NB objective is the only one available.",
         visible_aliases = ["bert"]
@@ -239,19 +241,18 @@ enum Commands {
         name = "masked-sbp",
         about = "Train a masked-imputation topic model with a stick-breaking-process simplex.",
         long_about = "Stick-breaking-process (SBP) sibling of `masked-topic`.\n\
-                      The masked-imputation pipeline is the same.\n\
-                      A shared ρ embedding, an NB ETM head, a deterministic\n\
-                      KL-free objective, encoder-only inference.\n\
+                      The masked-imputation pipeline is the same. A shared ρ embedding,\n\
+                      an NB ETM head, a deterministic KL-free objective, encoder-only inference.\n\
                       \n\
-                      The encoder differs.\n\
-                      It maps logits through a stick-breaking simplex, not a softmax:\n\
-                      θ_k = v_k·∏_{j<k}(1−v_j) with v_k = σ(η_k).\n\
+                      The encoder differs. It maps logits through a stick-breaking simplex,\n\
+                      not a softmax: θ_k = v_k·∏_{j<k}(1−v_j) with v_k = σ(η_k).\n\
                       \n\
                       Topics are therefore no longer exchangeable.\n\
                       Early sticks carry more mass a priori.\n\
                       That gives an intrinsic ordering and a self-pruning tail:\n\
-                      later topics shrink toward 0 unless the data needs them.\n\
-                      It is a soft, differentiable way to over-provision K and prune.\n\n\
+                      later topics shrink toward 0 unless the data needs them. It is a soft,\n\
+                      differentiable way to over-provision K and prune.\n\
+                      \n\
                       Writes the same artifacts as `masked-topic`.",
         visible_aliases = ["sbp"]
     )]
@@ -259,8 +260,7 @@ enum Commands {
 
     #[command(
         about = "Train an scVI-style Gaussian VAE (continuous factor model).",
-        long_about = "Gaussian (scVI-style) VAE.\n\
-                      It is the continuous-latent sibling of `topic`.\n\
+        long_about = "Gaussian (scVI-style) VAE. It is the continuous-latent sibling of `topic`.\n\
                       The pipeline is the same: batch-aware pseudobulk collapse,\n\
                       then a dense VAE.\n\
                       \n\
@@ -270,7 +270,8 @@ enum Commands {
                       \n\
                       Outputs are continuous factors and loadings.\n\
                       They are cell × factor and gene × factor.\n\
-                      They are not topic proportions and a topic-gene dictionary.\n\n\
+                      They are not topic proportions and a topic-gene dictionary.\n\
+                      \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
                       {out}.model.json, {out}.senna.json (run manifest)."
     )]
@@ -290,12 +291,14 @@ enum Commands {
         about = "Train joint topic model across modalities (independent or delta decoder).",
         long_about = "Joint topic-model embedding over modalities sharing cells.\n\
                       Data files form a row-major (modality × batch) table.\n\
-                      -m sets the modality-row count.\n\n\
+                      -m sets the modality-row count.\n\
+                      \n\
                       Decoder types:\n  \
                       independent — each modality keeps its own dictionary; features may differ.\n  \
                       delta       — shared base + cumulative chain deltas\n              \
-                                    (modality m = softmax(z @ (W_base + Σ δ_1..m));\n              \
-                                    requires shared features across modalities).\n\n\
+                      (modality m = softmax(z @ (W_base + Σ δ_1..m));\n              \
+                      requires shared features across modalities).\n\
+                      \n\
                       Writes {out}.latent.parquet, {out}.senna.json."
     )]
     JointTopic(JointTopicArgs),
@@ -305,7 +308,8 @@ enum Commands {
         long_about = "Joint SVD over a stack of modalities sharing cells.\n\
                       Data files form a row-major (modality × batch) table.\n\
                       -m sets the modality-row count.\n\
-                      Cells must be shared; features may differ.\n\n\
+                      Cells must be shared; features may differ.\n\
+                      \n\
                       Writes {out}.latent.parquet, {out}.senna.json."
     )]
     JointSvd(JointSvdArgs),
@@ -318,31 +322,28 @@ enum Commands {
                       over (cell, feature) pairs.\n\
                       \n\
                       Each input file contributes its rows to a shared feature axis.\n\
-                      Cell barcodes union across files.\n\
-                      The method is modality-agnostic.\n\
-                      Any number of count panels works: RNA, ATAC, protein.\n\
-                      Scoring is bilinear: `E_f · E_c + b_f + b_c`.\n\
+                      Cell barcodes union across files. The method is modality-agnostic.\n\
+                      Any number of count panels works: RNA, ATAC, protein. Scoring is bilinear:\n\
+                      `E_f · E_c + b_f + b_c`.\n\
                       \n\
                       Positives are drawn by a two-stage stratified sampler.\n\
                       Stage 1 picks a pseudobulk with q(p) ∝ pb_size(p)^alpha_pb.\n\
                       Stage 2 picks a feature within it, weighted by μ_pf.\n\
                       Negatives are drawn UNIFORMLY over the global pool.\n\
                       That pool holds every expressed feature.\n\
-                      They are therefore abundance-independent.\n\n\
-                      Training runs in two phases.\n\
-                      Phase 1 embeds features and pseudobulks.\n\
+                      They are therefore abundance-independent.\n\
+                      \n\
+                      Training runs in two phases. Phase 1 embeds features and pseudobulks.\n\
                       That learns the gene side.\n\
                       Phase 2 freezes that and densely fits each cell embedding.\n\
-                      Every cell is swept about once per epoch.\n\
-                      The per-cell fit is separable, so it is embarrassingly parallel.\n\n\
-                      Writes {out}.{cell_embedding,dictionary,feature_embedding,\n\
-                      feature_bias,cell_bias}.parquet and {out}.senna.json.\n\
-                      The H-space cell embedding Z is always\n\
-                      {out}.cell_embedding.parquet.\n\
+                      Every cell is swept about once per epoch. The per-cell fit is separable,\n\
+                      so it is embarrassingly parallel.\n\
+                      \n\
+                      Writes {out}.{cell_embedding,dictionary,feature_embedding, feature_bias,cell_bias}.parquet and {out}.senna.json.\n\
+                      The H-space cell embedding Z is always {out}.cell_embedding.parquet.\n\
                       \n\
                       Unless --skip-etm, an ETM is resolved too.\n\
-                      That adds {out}.{latent,topic_embedding}.parquet,\n\
-                      with latent = log θ.",
+                      That adds {out}.{latent,topic_embedding}.parquet, with latent = log θ.",
         alias = "embed-graph",
         alias = "gbe"
     )]
@@ -353,20 +354,20 @@ enum Commands {
         long_about = "Learns per-feature latent embeddings from an edge list.\n\
                       No expression data is involved.\n\
                       \n\
-                      Input is a TSV/CSV of feature-feature edges.\n\
-                      BioGRID, STRING, KEGG and regulatory networks all fit.\n\
+                      Input is a TSV/CSV of feature-feature edges. BioGRID, STRING,\n\
+                      KEGG and regulatory networks all fit.\n\
                       \n\
-                      Embeddings E ∈ ℝ^{D×H} come from a continuous\n\
-                      Miller-Griffiths-Jordan link-prediction model.\n  \n  \
-                      s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \n\
-                      Training is binary cross-entropy.\n\
-                      Negative sampling is degree^α, the node2vec convention.\n\
-                      The model is symmetric by construction.\n\n\
-                      Writes {out}.feature_embedding.parquet.\n\
-                      feature_bias, gamma, log_likelihood and senna.json ship too.\n\
+                      Embeddings E ∈ ℝ^{D×H} come from a continuous Miller-Griffiths-Jordan link-prediction model.\n  \
+                      \n  \
+                      s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \
                       \n\
-                      The output shape matches the freeze loader behind\n\
-                      `senna masked-topic --freeze-feature-embedding`.\n\
+                      Training is binary cross-entropy. Negative sampling is degree^α,\n\
+                      the node2vec convention. The model is symmetric by construction.\n\
+                      \n\
+                      Writes {out}.feature_embedding.parquet. feature_bias, gamma,\n\
+                      log_likelihood and senna.json ship too.\n\
+                      \n\
+                      The output shape matches the freeze loader behind `senna masked-topic --freeze-feature-embedding`.\n\
                       An `fne` run is a direct gene-side input downstream."
     )]
     Fne(FneArgs),
@@ -381,14 +382,15 @@ enum Commands {
                       \n\
                       It then trains ρ ∈ ℝ^{D×H} and α ∈ ℝ^{K×H}.\n\
                       Both fit the raw counts by bipartite NCE.\n\
-                      The cell embedding is derived from frozen θ, as Z = θ·α.\n  \n  \
-                      score(cell c, gene g) = (θ_c·α)·ρ_g + b_g\n  \n\
+                      The cell embedding is derived from frozen θ, as Z = θ·α.\n  \
+                      \n  \
+                      score(cell c, gene g) = (θ_c·α)·ρ_g + b_g\n  \
+                      \n\
                       Writes senna.json with kind=resolve-embedding-space.\n\
                       It also writes {out}.feature_embedding.parquet,\n\
                       {out}.cell_embedding.parquet and {out}.topic_embedding.parquet.\n\
                       \n\
-                      The result is a metric H-space.\n\
-                      Genes, topics and cells coexist in it.\n\
+                      The result is a metric H-space. Genes, topics and cells coexist in it.\n\
                       Downstream clustering and `senna annotate-by-enrichment` read it.\n\
                       H defaults to K, but may exceed it."
     )]
@@ -402,9 +404,10 @@ enum Commands {
                       \n\
                       Dense and indexed models are auto-dispatched via model.json.\n\
                       Gene-set misalignment is handled by flexible name matching.\n\
-                      Per-batch delta is re-estimated from the frozen dictionary.\n\n\
-                      Latent modes are encoder-only (the default),\n\
-                      encoder+refine, and decoder-only."
+                      Per-batch delta is re-estimated from the frozen dictionary.\n\
+                      \n\
+                      Latent modes are encoder-only (the default), encoder+refine,\n\
+                      and decoder-only."
     )]
     Predict(PredictArgs),
 
@@ -412,13 +415,13 @@ enum Commands {
         about = "Drift probe: novelty verdict for held-out data vs a trained masked model.",
         long_about = "Read-only drift probe — the covered-vs-new gate.\n\
                       \n\
-                      It scores each query cell's predictive fit.\n\
-                      The model may be masked-topic, masked-vae or masked-sbp.\n\
-                      A null is calibrated from --calibration, in-distribution.\n\
-                      Query cells below the null tail are flagged.\n\
-                      A batch-level covered/novel verdict is emitted.\n\n\
-                      Usage: senna probe --model M --calibration ref.zarr query.zarr -o out\n\
-                      Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json."
+                      It scores each query cell's predictive fit. The model may be masked-topic,\n\
+                      masked-vae or masked-sbp. A null is calibrated from --calibration,\n\
+                      in-distribution. Query cells below the null tail are flagged.\n\
+                      A batch-level covered/novel verdict is emitted.\n\
+                      \n\
+                      Usage:\n\
+                      senna probe --model M --calibration ref.zarr query.zarr -o out Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json."
     )]
     Probe(ProbeArgs),
 
@@ -442,11 +445,13 @@ enum Commands {
     // ─────────── 3. Cluster / annotate / trajectory (run on a manifest) ───────────
     #[command(
         about = "Cluster cells on the manifest's latent (kmeans / leiden / hsblock).",
-        long_about = "Cluster cells using `manifest.outputs.latent`.\n\n\
+        long_about = "Cluster cells using `manifest.outputs.latent`.\n\
+                      \n\
                       Algorithms:\n  \
                       kmeans  — requires -k.\n  \
                       leiden  — graph-based, auto-k.\n  \
-                      hsblock — hierarchical SBM (2^(depth-1) clusters).\n\n\
+                      hsblock — hierarchical SBM (2^(depth-1) clusters).\n\
+                      \n\
                       Writes {out}.clusters.parquet and updates `manifest.cluster.clusters`."
     )]
     Clustering(ClusteringArgs),
@@ -467,8 +472,7 @@ enum Commands {
                       Usage: senna annotate-by-enrichment --from run.senna.json -m markers.tsv -o out\n\n\
                       Updates `manifest.annotate.{argmax,annotation,...}`.\n\
                       Later `senna plot` runs then colour by predicted cell type.\n\
-                      Writes {out}.argmax.tsv, {out}.annotation.parquet\n\
-                      and {out}.cluster_*.parquet."
+                      Writes {out}.argmax.tsv, {out}.annotation.parquet and {out}.cluster_*.parquet."
     )]
     Annotate(AnnotateArgs),
 
@@ -478,20 +482,19 @@ enum Commands {
         about = "Hierarchical multi-resolution cell-type calling on the Cell Ontology (TreeBH).",
         long_about = "Post-processes an `annotate-by-enrichment` run.\n\
                       Each cluster is placed on the Cell Ontology is_a tree,\n\
-                      at the deepest resolution the data supports.\n\
-                      Sibling ties abstain.\n\
-                      Clusters that no marker explains are flagged.\n\
-                      The method is TreeBH, after Bogomolov, Peterson,\n\
-                      Benjamini & Sabatti, Biometrika 2021.\n\
+                      at the deepest resolution the data supports. Sibling ties abstain.\n\
+                      Clusters that no marker explains are flagged. The method is TreeBH,\n\
+                      after Bogomolov, Peterson, Benjamini & Sabatti, Biometrika 2021.\n\
                       \n\
-                      Scores are Φ(−z) on the permutation z, or the restandardized\n\
-                      ES when that is unavailable, Simes-combined up the tree.\n\
-                      Writes {out}.ontology_assignment.tsv and\n\
-                      {out}.ontology_node_mass.parquet.\n\
+                      Scores are Φ(−z) on the permutation z,\n\
+                      or the restandardized ES when that is unavailable,\n\
+                      Simes-combined up the tree.\n\
+                      Writes {out}.ontology_assignment.tsv and {out}.ontology_node_mass.parquet.\n\
                       `annotate-by-enrichment --obo --label-cl` does the same inline,\n\
-                      with no re-run needed.\n\n\
+                      with no re-run needed.\n\
+                      \n\
                       Usage: senna annotate-ontology --from run.senna.json \\\n\
-                        --label-cl label_cl.tsv --obo cl-basic.obo"
+                      --label-cl label_cl.tsv --obo cl-basic.obo"
     )]
     AnnotateOntology(AnnotateOntologyArgs),
 
@@ -525,27 +528,31 @@ enum Commands {
         visible_aliases = ["deconv", "deconvolution"],
         about = "Deconvolve bulk samples into cell-type fractions + per-type expression.",
         long_about = "Projection-based hierarchical-Bayes bulk deconvolution.\n\
-                      It is built on a feature embedding.\n\
-                      `senna bge --skip-etm` is exact; `masked-topic` approximates.\n\n\
+                      It is built on a feature embedding. `senna bge --skip-etm` is exact;\n\
+                      `masked-topic` approximates.\n\
+                      \n\
                       Each cell type's gene profile comes from the embedding.\n\
                       Bulk samples are projected into the shared latent.\n\
                       A full Gibbs sampler then runs: Gamma-Poisson fractions,\n\
                       a multinomial gene split, and elliptical-slice anchor updates.\n\
-                      Those updates carry annotate-by-projection uncertainty.\n\n\
-                      Usage: senna deconvolve --from run.senna.json -m markers.tsv --bulk bulk.parquet\n\
-                      Writes {out}.{fractions,fractions_ci,abundance,residual}.tsv,\n\
+                      Those updates carry annotate-by-projection uncertainty.\n\
+                      \n\
+                      Usage:\n\
+                      senna deconvolve --from run.senna.json -m markers.tsv --bulk bulk.parquet Writes {out}.{fractions,fractions_ci,abundance,residual}.tsv,\n\
                       {out}.{sample_embedding,anchors}.parquet, {out}.expression/*.parquet."
     )]
     Deconvolve(DeconvolveArgs),
 
     #[command(
         about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
-        long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\n\
-                      (1) k-means init K centroids,\n\
-                      (2) iterate: soft-assign cells → MST over centroids → solve\n    \
-                          (D_R + γL) Y = R^T Z for centroid coords,\n\
+        long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\
+                      \n\
+                      (1) k-means init K centroids, (2) iterate:\n\
+                      soft-assign cells → MST over centroids → solve\n    \
+                      (D_R + γL) Y = R^T Z for centroid coords,\n\
                       (3) project each cell onto its nearest tree edge,\n\
-                      (4) Dijkstra geodesic from a chosen root → pseudotime.\n\n\
+                      (4) Dijkstra geodesic from a chosen root → pseudotime.\n\
+                      \n\
                       Outputs {out}.pseudotime.parquet and {out}.principal_graph.{nodes,edges}.parquet."
     )]
     Pseudotime(PseudotimeArgs),
@@ -556,9 +563,11 @@ enum Commands {
         long_about = "Builds PBs by batch-corrected multi-level collapsing.\n\
                       PB-PB cosine similarity is computed on log1p-CPM gene vectors.\n\
                       The chosen method lays those out.\n\
-                      Every cell is then projected via Nyström.\n\n\
+                      Every cell is then projected via Nyström.\n\
+                      \n\
                       Updates `manifest.layout.{cell_coords, pb_coords, pb_gene_mean}`.\n\
-                      `senna plot --from ...` then picks the layout up automatically.\n\n\
+                      `senna plot --from ...` then picks the layout up automatically.\n\
+                      \n\
                       Pick a method: `senna layout {phate|tsne|umap} --from run.senna.json`.",
         visible_alias = "lay",
         subcommand_required = true,
@@ -572,28 +581,32 @@ enum Commands {
     #[command(
         about = "Publication scatter plot from a run manifest (SVG/PNG/PDF).",
         long_about = "`senna plot --from run.senna.json` reads the manifest.\n\
-                      It takes cell_coords, topics, annotation, clusters, labels\n\
-                      and palette from there.\n\
-                      It renders a 300-dpi rasterized scatter, with vector labels.\n\n\
+                      It takes cell_coords, topics, annotation, clusters,\n\
+                      labels and palette from there. It renders a 300-dpi rasterized scatter,\n\
+                      with vector labels.\n\
+                      \n\
                       Auto-fills missing pieces:\n  \
                       • no `layout.cell_coords` → runs `senna layout umap` first.\n  \
-                      • `--colour-by cluster` but no clusters → runs Leiden on the latent.\n\n\
+                      • `--colour-by cluster` but no clusters → runs Leiden on the latent.\n\
+                      \n\
                       --colour-by cluster (default) | annotation | topic | pb-id | pseudotime.\n\
-                      The default flips to `annotation` once\n\
-                      `senna annotate-by-enrichment` populates the manifest.\n\
-                      Cells are then coloured and labelled by predicted cell type.\n\n\
-                      Outputs {out}.plot.{svg,png,pdf}.\n\
-                      PDF is the default; pass --svg or --png for those."
+                      The default flips to `annotation` once `senna annotate-by-enrichment` populates the manifest.\n\
+                      Cells are then coloured and labelled by predicted cell type.\n\
+                      \n\
+                      Outputs {out}.plot.{svg,png,pdf}. PDF is the default;\n\
+                      pass --svg or --png for those."
     )]
     Plot(PlotArgs),
 
     #[command(
-        about = "Topic-model diagnostics: per-batch structure bars + gene × topic dictionary.",
+        about = "Topic-model diagnostics:\n\
+                 per-batch structure bars + gene × topic dictionary.",
         long_about = "Admixture-style stacked-bar structure plots, one per batch.\n\
-                      Panel width is ∝ #cells.\n\
-                      A gene × topic dictionary summary follows.\n\
-                      It is a Hinton plot at ≤ 100 genes, with a heatmap above.\n\n\
-                      Usage: senna plot-topic --from run.senna.json\n\n\
+                      Panel width is ∝ #cells. A gene × topic dictionary summary follows.\n\
+                      It is a Hinton plot at ≤ 100 genes, with a heatmap above.\n\
+                      \n\
+                      Usage: senna plot-topic --from run.senna.json\n\
+                      \n\
                       PDF only by default; pass --svg / --png to also emit those.\n\
                       Outputs land under {out}.plots/{struct,dict}/.",
         visible_alias = "pt"
@@ -604,12 +617,14 @@ enum Commands {
         about = "Watson/Crick mirrored genomic-activity ideograms (Strand-seq style).",
         long_about = "Per-chromosome gene activity, split by strand, per cell type.\n\
                       Forward/Watson genes form a filled pileup rising upward.\n\
-                      Reverse/Crick genes mirror downward.\n\
-                      Both share one chromosome axis.\n\n\
-                      Usage: senna plot-strand --from run.senna.json --gtf gencode.gtf\n\n\
+                      Reverse/Crick genes mirror downward. Both share one chromosome axis.\n\
+                      \n\
+                      Usage: senna plot-strand --from run.senna.json --gtf gencode.gtf\n\
+                      \n\
                       Activity defaults to a gene × cell-type matrix.\n\
                       It is derived from `senna annotate-by-enrichment` outputs.\n\
-                      Override it with --activity.\n\n\
+                      Override it with --activity.\n\
+                      \n\
                       One figure is written per cell type, chromosomes stacked.\n\
                       An optional consensus figure joins them, under {out}.strand/.\n\
                       PDF only by default; pass --svg or --png.",
@@ -624,7 +639,8 @@ enum LayoutCmd {
     Phate(LayoutPhateArgs),
     #[command(
         about = "t-SNE of pseudobulks on raw-gene similarity (random init).",
-        long_about = "t-SNE layout of pseudobulks.\n\n\
+        long_about = "t-SNE layout of pseudobulks.\n\
+                      \n\
                       Similarity is computed on raw genes.\n\
                       The embedding starts from a random initialization.\n\
                       Cells are then placed from their pseudobulk coordinates."
@@ -632,7 +648,8 @@ enum LayoutCmd {
     Tsne(LayoutTsneArgs),
     #[command(
         about = "UMAP-style SGD of pseudobulks over the fuzzy kNN graph.",
-        long_about = "UMAP-style layout of pseudobulks.\n\n\
+        long_about = "UMAP-style layout of pseudobulks.\n\
+                      \n\
                       A fuzzy kNN graph is built over the pseudobulks.\n\
                       Attractive and repulsive forces are then optimized by SGD.\n\
                       Cells are placed from their pseudobulk coordinates."
@@ -640,10 +657,10 @@ enum LayoutCmd {
     Umap(LayoutUmapArgs),
     #[command(
         about = "Reingold-Tilford tree layout from a pseudotime run.",
-        long_about = "Reads the principal graph and root node from\n\
-                      `manifest.pseudotime`, written by `senna pseudotime`.\n\
-                      It then produces a top-down tree layout.\n\
-                      y is geodesic pseudotime; x is sibling order.\n\n\
+        long_about = "Reads the principal graph and root node from `manifest.pseudotime`,\n\
+                      written by `senna pseudotime`. It then produces a top-down tree layout.\n\
+                      y is geodesic pseudotime; x is sibling order.\n\
+                      \n\
                       Writes manifest.pseudotime.tree_{cell_coords,nodes_2d}."
     )]
     Tree(LayoutTreeArgs),

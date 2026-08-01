@@ -141,7 +141,8 @@ pub struct AssocArgs {
         long,
         alias = "trend-samples",
         default_value_t = 1000,
-        help = "bayes: posterior samples per (site, group) — drives the contrast AND the trend"
+        help = "bayes: posterior samples per (site, group) —\n\
+                drives the contrast AND the trend"
     )]
     pub posterior_samples: usize,
 
@@ -157,15 +158,17 @@ pub struct AssocArgs {
         long,
         default_value_t = 0.1,
         help = "reporting threshold: lfsr (bayes) or BH q (quasi/binomial)",
-        long_help = "Reporting threshold — the count in the log, not a filter on the output.\n\n\
-            On the Bayesian paths (the default) this is compared against `lfsr`,\n\
-            which is a Monte-Carlo tail proportion:\n\
-            a site whose lfsr sits near this cutoff can cross it from one --seed to the next.\n\
-            The `mcse_lfsr` column is that error, per site —\n\
-            when |lfsr − alpha| is not comfortably larger than mcse_lfsr,\n\
-            the row is under-sampled rather than borderline,\n\
-            and the answer is more --posterior-samples.\n\n\
-            On the frequentist trend paths (--trend-method quasi|binomial) it is a BH q cutoff."
+        long_help = "Reporting threshold — the count in the log, not a filter on the output.\n\
+                     \n\
+                     On the Bayesian paths (the default) this is compared against `lfsr`,\n\
+                     which is a Monte-Carlo tail proportion:\n\
+                     a site whose lfsr sits near this cutoff can cross it from one --seed to the next.\n\
+                     The `mcse_lfsr` column is that error, per site —\n\
+                     when |lfsr − alpha| is not comfortably larger than mcse_lfsr,\n\
+                     the row is under-sampled rather than borderline,\n\
+                     and the answer is more --posterior-samples.\n\
+                     \n\
+                     On the frequentist trend paths (--trend-method quasi|binomial) it is a BH q cutoff."
     )]
     pub fdr_alpha: f32,
 
@@ -177,8 +180,7 @@ pub struct AssocArgs {
                      It defaults to {from}.lineage_annot.membership.tsv,\n\
                      written by `faba lineage --markers`.\n\
                      \n\
-                     Unassigned and unmatched cells stay in the contrast 'rest',\n\
-                     as background.\n\
+                     Unassigned and unmatched cells stay in the contrast 'rest', as background.\n\
                      They are not reported as a cell type.\n\
                      An explicit path that is missing is an error."
     )]

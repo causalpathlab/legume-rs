@@ -55,13 +55,11 @@ pub struct BgeArgs {
     #[arg(
         value_delimiter = ',',
         help = "Sparse count matrices (zarr/h5), comma-separated",
-        long_help = "Single-modality input.\n\
-                     One or more files share a feature axis.\n\
+        long_help = "Single-modality input. One or more files share a feature axis.\n\
                      Cells are unified by barcode.\n\
                      \n\
                      Multiome input goes to --multiome instead.\n\
-                     There the modalities have distinct feature spaces,\n\
-                     glued by barcode.\n\
+                     There the modalities have distinct feature spaces, glued by barcode.\n\
                      Exactly one of the positional files or --multiome is required."
     )]
     data_files: Vec<Box<str>>,
@@ -112,11 +110,11 @@ pub struct BgeArgs {
         default_value_t = 0,
         help = "Phase-1 cell-axis mode (k); 0 = pure-pb (fastest),\n\
                 phase 2 always projects every cell.",
-        long_help = "Phase-1 cell-axis mode (k). Controls what shapes the feature dictionary in phase 1;\n\
+        long_help = "Phase-1 cell-axis mode (k).\n\
+                     Controls what shapes the feature dictionary in phase 1;\n\
                      phase 2 ALWAYS analytically projects every cell,\n\
                      so the per-cell embedding output is unaffected.\n\
-                     k=0 (default) → suppress the cell axis entirely\n\
-                     (pure-pb: E_feat from pb aggregates only — fastest).\n\
+                     k=0 (default) → suppress the cell axis entirely (pure-pb: E_feat from pb aggregates only — fastest).\n\
                      1≤k<n_cells → keep ≤k cells per pb-sample at each collapse level (union),\n\
                      cutting the phase-1 step budget while preserving rare-cell coverage.\n\
                      k≥n_cells → all cells (legacy; slowest).",
@@ -129,12 +127,11 @@ pub struct BgeArgs {
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
         long_help = "Skip the default ETM resolution.\n\
-                     Only the raw bge embeddings are then emitted:\n\
-                     cell_embedding = Z, dictionary = ρ, and no latent.\n\
+                     Only the raw bge embeddings are then emitted: cell_embedding = Z,\n\
+                     dictionary = ρ, and no latent.\n\
                      \n\
                      By default bge resolves ETM topics from the cell embedding,\n\
-                     by anchor analysis.\n\
-                     It then ALSO writes the topic-model tables:\n\
+                     by anchor analysis. It then ALSO writes the topic-model tables:\n\
                      latent = log θ, dictionary = β, topic_embedding = α.\n\
                      \n\
                      Either way, Z lands in {out}.cell_embedding.parquet."
@@ -155,24 +152,21 @@ pub struct BgeArgs {
                      What it does is compress low-confidence features radially,\n\
                      toward the origin.\n\
                      \n\
-                     READ THAT LITERALLY.\n\
-                     It is a confidence-weighted radial scaling.\n\
+                     READ THAT LITERALLY. It is a confidence-weighted radial scaling.\n\
                      It corrects for nothing.\n\
                      An earlier version of this help was wrong about it.\n\
                      It claimed the scaling rescued signal-free genes.\n\
-                     Supposedly they piled up on the cell centroid.\n\
-                     Measured, there is no such pile-up.\n\
+                     Supposedly they piled up on the cell centroid. Measured,\n\
+                     there is no such pile-up.\n\
                      0.0% of genes sit within 0.1 cell-radii of the centroid,\n\
                      and the median distance is 0.80.\n\
-                     So the shrinkage does not undo a concentration.\n\
-                     It CREATES one, at the origin.\n\
-                     Whether you want that depends on how you read the plot.\n\
+                     So the shrinkage does not undo a concentration. It CREATES one,\n\
+                     at the origin. Whether you want that depends on how you read the plot.\n\
                      \n\
                      The scaling is only as informative as its posterior.\n\
                      When the embedding dimension far exceeds the effective rank,\n\
                      nearly every gene loads something.\n\
-                     `max_h PIP` then saturates near 1.\n\
-                     The weights degenerate into one constant.\n\
+                     `max_h PIP` then saturates near 1. The weights degenerate into one constant.\n\
                      The run reports the weight spread.\n\
                      That case is therefore visible rather than silent.\n\
                      \n\
@@ -237,9 +231,9 @@ pub struct BgeArgs {
         default_value_t = 0.0,
         help = "L2 penalty λ on E_feat (mean-normalized). Default 0 (off).",
         long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}:\n\
-                     adds λ · mean(E_feat²) to the per-step composite loss\n\
-                     (mean-normalized, so λ stays scale-invariant across D·H).\n\
-                     Default 0 (off): mean-normalization makes the per-element gradient tiny (÷ D·H),\n\
+                     adds λ · mean(E_feat²) to the per-step composite loss (mean-normalized, so λ stays scale-invariant across D·H).\n\
+                     Default 0 (off):\n\
+                     mean-normalization makes the per-element gradient tiny (÷ D·H),\n\
                      so E_feat — self-bounded under the NCE + analytical-projection setup —\n\
                      barely moves with it (toggling it shifts cell-type purity within run-to-run noise).\n\
                      Set > 0 only if E_feat drifts on long/deep runs."
@@ -250,8 +244,7 @@ pub struct BgeArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay (all params). Default 0.0 = off.",
-        long_help = "AdamW decoupled weight decay applied uniformly to every parameter\n\
-                     (E_feat, b_feat, per-axis heads).\n\
+        long_help = "AdamW decoupled weight decay applied uniformly to every parameter (E_feat, b_feat, per-axis heads).\n\
                      Per-step post-update shrinkage; doesn't enter the backward graph.\n\
                      Default 0.0 (off — plain Adam despite the optimizer name)."
     )]
@@ -260,8 +253,8 @@ pub struct BgeArgs {
     #[arg(
         long = "max-grad-norm",
         default_value_t = 1.0,
-        help = "Global-norm gradient clip per AdamW step (0 = off). When > 0, \n\
-                gradients are scaled down if their global L2 norm exceeds this, \n\
+        help = "Global-norm gradient clip per AdamW step (0 = off). When > 0,\n\
+                gradients are scaled down if their global L2 norm exceeds this,\n\
                 bounding embedding inflation on NCE loss spikes."
     )]
     max_grad_norm: f32,
@@ -279,8 +272,8 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Preload all sparse column data into memory.\n\
-                Faster when data fits in RAM; required on slow disks.",
+        help = "Preload all sparse column data into memory. Faster when data fits in RAM;\n\
+                required on slow disks.",
         hide = true
     )]
     preload_data: bool,
@@ -289,44 +282,36 @@ pub struct BgeArgs {
         long,
         value_name = "FILE[,FILE...]",
         help = "Multiome modality files (comma-separated); repeat for multiple samples.",
-        long_help = "Multiome load.\n\
-                     Pass one sample (group) per flag, comma-separated,\n\
-                     as in `--multiome rna.zarr,atac.zarr`.\n\
-                     Cells are the shared axis.\n\
+        long_help = "Multiome load. Pass one sample (group) per flag, comma-separated,\n\
+                     as in `--multiome rna.zarr,atac.zarr`. Cells are the shared axis.\n\
                      Each modality keeps its own features.\n\
                      Repeat the flag for each additional sample or group:\n\
                      \n\
-                       --multiome rna1.zarr,atac1.zarr \\\n\
-                       --multiome rna2.zarr,atac2.zarr\n\
+                     --multiome rna1.zarr,atac1.zarr \\\n\
+                     --multiome rna2.zarr,atac2.zarr\n\
                      \n\
-                     Cell (barcode) identity.\n\
-                     Within a group, equal barcodes are the same cell.\n\
-                     Modalities Union-merge.\n\
-                     A cell present in only some files is fine.\n\
-                     Patchy multiome therefore works.\n\
-                     ACROSS groups, barcodes must be disjoint.\n\
+                     Cell (barcode) identity. Within a group, equal barcodes are the same cell.\n\
+                     Modalities Union-merge. A cell present in only some files is fine.\n\
+                     Patchy multiome therefore works. ACROSS groups, barcodes must be disjoint.\n\
                      A shared barcode would merge cells from different samples.\n\
                      This is validated, and a collision is an error.\n\
                      \n\
-                     Feature (modality) identity.\n\
-                     Features are namespaced `{name}/{modality}`.\n\
-                     The SAME modality across samples therefore merges,\n\
-                     sharing one gene panel.\n\
+                     Feature (modality) identity. Features are namespaced `{name}/{modality}`.\n\
+                     The SAME modality across samples therefore merges, sharing one gene panel.\n\
                      DIFFERENT modalities stay on separate rows.\n\
                      That holds even when names collide.\n\
                      Spliced versus unspliced `TSPAN6` is the usual case.\n\
                      \n\
                      The modality tag defaults to file position: m0, m1, and so on.\n\
                      Override it with a `label=` prefix:\n\
-                       --multiome spliced=spliced.zarr,unspliced=unspliced.zarr\n\
+                     --multiome spliced=spliced.zarr,unspliced=unspliced.zarr\n\
                      File ORDER within a group defines modality order,\n\
                      so the positional default lines up across groups.\n\
                      \n\
                      Batch identity.\n\
                      Each group becomes its own batch when --batch-files is omitted.\n\
-                     That is modality-presence auto-batching.\n\
-                     Pass a single --batch-files, one label per unified cell,\n\
-                     to set batches explicitly.\n\
+                     That is modality-presence auto-batching. Pass a single --batch-files,\n\
+                     one label per unified cell, to set batches explicitly.\n\
                      This flag replaces the positional data files.\n\
                      \n\
                      Note: comma-separate files within one group, with no spaces.\n\
@@ -339,8 +324,7 @@ pub struct BgeArgs {
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,
         help = "NCE objective: softmax or logistic",
-        long_help = "NCE objective.\n\
-                     softmax is InfoNCE, where negatives compete.\n\
+        long_help = "NCE objective. softmax is InfoNCE, where negatives compete.\n\
                      It is sharper on dense pseudobulk data, and is the default.\n\
                      logistic is per-pair SGNS."
     )]
@@ -381,11 +365,9 @@ pub struct BgeArgs {
         short,
         required = true,
         help = "Output prefix",
-        long_help = "Output prefix.\n\
-                     It produces {out}.cell_embedding.parquet, which is Z,\n\
+        long_help = "Output prefix. It produces {out}.cell_embedding.parquet, which is Z,\n\
                      {out}.dictionary.parquet, {out}.feature_embedding.parquet,\n\
-                     {out}.feature_bias.parquet, {out}.cell_bias.parquet,\n\
-                     and {out}.senna.json.\n\
+                     {out}.feature_bias.parquet, {out}.cell_bias.parquet, and {out}.senna.json.\n\
                      Unless --skip-etm, it adds two more:\n\
                      {out}.latent.parquet and {out}.topic_embedding.parquet."
     )]

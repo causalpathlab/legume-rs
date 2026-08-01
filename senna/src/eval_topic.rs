@@ -22,8 +22,8 @@ pub struct EvalTopicArgs {
         value_delimiter = ',',
         help = "Input data files (.zarr or .h5)",
         long_help = "Sparse backends to embed with the pre-trained model.\n\
-                     Gene sets may differ from training; missing genes are padded\n\
-                     and batch delta is re-estimated from the frozen dictionary."
+                     Gene sets may differ from training;\n\
+                     missing genes are padded and batch delta is re-estimated from the frozen dictionary."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 

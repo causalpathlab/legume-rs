@@ -54,12 +54,13 @@ pub struct FneArgs {
         value_delimiter = ',',
         help = "Feature-feature edge list(s) (TSV/CSV; two columns per line)",
         long_help = "One or more positional paths, comma-separated or space-separated.\n\
-                     Each file is whitespace/comma/tab-delimited; every line is a pair of feature names.\n\
-                     Lines starting with `#` are skipped; self-loops and duplicates are dropped silently.\n\
-                     With multiple files, the node set unions canonical names.\n\
+                     Each file is whitespace/comma/tab-delimited;\n\
+                     every line is a pair of feature names.\n\
+                     Lines starting with `#` are skipped;\n\
+                     self-loops and duplicates are dropped silently. With multiple files,\n\
+                     the node set unions canonical names.\n\
                      The edge set is the deduplicated union of pair-edges.\n\
-                     That is handy for combining BioGRID, STRING and KEGG\n\
-                     into a single graph."
+                     That is handy for combining BioGRID, STRING and KEGG into a single graph."
     )]
     networks: Vec<Box<str>>,
 

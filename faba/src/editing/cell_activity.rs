@@ -593,18 +593,16 @@ pub struct CellScanArgs {
         help = "Override the data-driven cut (multiple of the control rate the discarded pool may reach)",
         long_help = "Override the data-driven cut.\n\
                      \n\
-                     Unset (the default), the cut is decided from the data: cells are\n\
-                     dropped up to the point where the discarded pool's conversion rate\n\
-                     EQUALS the control's, so nothing demonstrably real is thrown away.\n\
-                     Nothing is tuned.\n\
+                     Unset (the default), the cut is decided from the data:\n\
+                     cells are dropped up to the point where the discarded pool's conversion rate EQUALS the control's,\n\
+                     so nothing demonstrably real is thrown away. Nothing is tuned.\n\
                      \n\
-                     Set it to cut deeper and concentrate the kept pool -- e.g. `1.5`\n\
-                     permits the discarded pool to edit 50% above the control. Every run\n\
-                     logs `dropped/control` and the equivalent control percentile, so the\n\
-                     cost of raising it is visible. Measured on rep1, ACTB recovery was\n\
-                     still climbing at 2.0 (8 -> 13 sites, GAPDH still rejected), so a\n\
-                     recall-oriented user has reason to; the default is the defensible\n\
-                     choice, not the maximal one.\n\
+                     Set it to cut deeper and concentrate the kept pool -- e.g. `1.5` permits the discarded pool to edit 50% above the control.\n\
+                     Every run logs `dropped/control` and the equivalent control percentile,\n\
+                     so the cost of raising it is visible. Measured on rep1,\n\
+                     ACTB recovery was still climbing at 2.0 (8 -> 13 sites, GAPDH still rejected),\n\
+                     so a recall-oriented user has reason to;\n\
+                     the default is the defensible choice, not the maximal one.\n\
                      \n\
                      `--cell-scan-control-tail` takes precedence over this if both are set."
     )]
