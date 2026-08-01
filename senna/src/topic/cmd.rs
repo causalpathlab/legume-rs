@@ -39,8 +39,8 @@ pub struct TopicArgs {
         value_delimiter = ',',
         help = "Input data files (.zarr or .h5; optional when --from is given)",
         long_help = "Sparse backends produced by `data-beans from-mtx`.\n\
-                     Multiple files may be passed (comma- or space-separated)\n\
-                     and are concatenated column-wise on a shared feature set.\n\
+                     Multiple files may be passed, comma- or space-separated.\n\
+                     They are concatenated column-wise on a shared feature set.\n\
                      When `--from <run.senna.json>` is provided and this list is empty,\n\
                      the data paths come from the source manifest."
     )]
@@ -48,8 +48,7 @@ pub struct TopicArgs {
 
     #[arg(
         long,
-        help = "Chain data + batch + cell→pb partition from a prior \
-                `senna {topic, masked-topic}` run's manifest",
+        help = "Chain data, batch and cell→pb partition from a prior run",
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
                      `--batch-files`, and (when present) the cell→pb partition from the source run.\n\
                      Inheriting the partition skips the expensive BBKNN + Poisson DC-SBM refinement step.\n\
@@ -184,7 +183,7 @@ pub struct TopicArgs {
         long,
         default_value_t = 1000,
         help = "Cap feature dim by meta-feature coarsening (0 to disable)",
-        long_help = "Groups co-expressed features into ≤N meta-features\n\
+        long_help = "Groups co-expressed features into at most N meta-features.\n\
                      so the model trains at reduced resolution.\n\
                      The dictionary is expanded back to full resolution on output."
     )]
@@ -215,7 +214,8 @@ pub struct TopicArgs {
         long,
         default_value_t = 1e-4,
         help = "Uniform smoothing α for topic proportions (0 = off)",
-        long_help = "θ = (1-α) softmax(z) + α/K. Prevents dead topics\n\
+        long_help = "θ = (1-α) softmax(z) + α/K.\n\
+                     It prevents dead topics,\n\
                      by keeping every topic on the gradient path. Set 0 to disable."
     )]
     pub(crate) topic_smoothing: f64,
@@ -227,8 +227,9 @@ pub struct TopicArgs {
         long,
         default_value_t = 1.0,
         help = "Cross-entropy penalty λ on β toward anchor prior (0 = off)",
-        long_help = "Pulls the decoder dictionary toward anchor PB expression profiles\n\
-                     during training. β starts from random init; the penalty guides it."
+        long_help = "Pulls the decoder dictionary toward anchor PB profiles.\n\
+                     This happens during training.\n\
+                     β starts from a random init, and the penalty guides it."
     )]
     pub(crate) anchor_penalty: f32,
 

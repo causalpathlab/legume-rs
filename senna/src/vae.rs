@@ -34,8 +34,7 @@ pub struct VaeArgs {
 
     #[arg(
         long,
-        help = "Chain data + batch + cell→pb partition from a prior \
-                `senna {topic, vae, masked-topic}` run's manifest"
+        help = "Chain data, batch and cell→pb partition from a prior run"
     )]
     pub(crate) from: Option<Box<str>>,
 

@@ -40,12 +40,14 @@ pub struct LayoutUmapArgs {
         long,
         default_value_t = 100,
         help = "Cell-level UMAP fine-tune epochs after Nyström (0 = disabled)",
-        long_help = "After the PB-level UMAP and Nyström cell placement, run\n\
-                     additional UMAP SGD on a cell-cell fuzzy kNN graph in\n\
-                     latent space, warm-started from Nyström. Resolves\n\
-                     intra-PB structure the Nyström interpolation collapses.\n\
-                     Cost scales ~linearly in #cells; 50–100 epochs is usually\n\
-                     enough since the init is already close."
+        long_help = "Run an extra UMAP SGD after the PB-level pass.\n\
+                     The PB-level UMAP and Nyström placement come first.\n\
+                     The extra pass uses a cell-cell fuzzy kNN graph,\n\
+                     in latent space, warm-started from Nyström.\n\
+                     \n\
+                     It resolves intra-PB structure that Nyström collapses.\n\
+                     Cost scales about linearly in cell count.\n\
+                     50 to 100 epochs usually suffices, since the init is close."
     )]
     umap_finetune_epochs: usize,
 

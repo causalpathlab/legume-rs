@@ -36,10 +36,11 @@ pub struct LayoutTreeArgs {
         long,
         default_value_t = 0.08,
         help = "Tree-layout jitter (fraction of edge length, 0 = no jitter)",
-        long_help = "Per-cell perpendicular Gaussian jitter applied when placing\n\
-                     cells along principal-graph edges. Scaled by edge length so\n\
-                     dense branches don't collapse to a thin line. 0 disables\n\
-                     jitter (cells stack on the line)."
+        long_help = "Per-cell perpendicular Gaussian jitter.\n\
+                     It applies when placing cells along principal-graph edges.\n\
+                     Jitter scales by edge length, so dense branches do not\n\
+                     collapse to a thin line.\n\
+                     0 disables it, and cells then stack on the line."
     )]
     tree_jitter: f32,
 
