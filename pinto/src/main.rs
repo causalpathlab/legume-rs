@@ -127,7 +127,14 @@ enum Commands {
                       \x20 9. Randomized SVD: M = U S V^T, keep top T cols\n\
                       \x20 10. Nystrom: for each pair e=(i,j):\n\
                       \x20     z_e = basis_shared^T * sigma_e + basis_diff^T * delta_e\n\
-                      \x20     z_e <- z_e / ||z_e||   (L2 normalize)\n\n\
+                      \x20     z_e <- z_e / ||z_e||   (L2 normalize)\n\
+                      \x20 11. Cut z into link communities, then take each\n\
+                      \x20     cell's propensity as its incident-edge fraction\n\n\
+                      --edge-cluster-method picks the cut.\n\
+                      leiden is the default,\n\
+                      deciding the count from --leiden-resolution.\n\
+                      kmeans instead uses a fixed --n-edge-clusters.\n\
+                      `pinto prop` re-cuts the same latent at a fixed K.\n\n\
                       Outputs:\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)\n\
                       - {out}.coord_pairs.parquet: cell pair coordinates\n\
@@ -303,8 +310,8 @@ enum Commands {
                       A cell's propensity is its incident-edge fraction.\n\
                       That is the same definition `lc` and `dsvd` use.\n\
                       --edge-cluster-method picks the cut.\n\
-                      leiden is the default, deciding the count\n\
-                      from --leiden-resolution.\n\
+                      leiden is the default,\n\
+                      deciding the count from --leiden-resolution.\n\
                       kmeans instead uses a fixed --n-edge-clusters.\n\n\
                       Outputs:\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\

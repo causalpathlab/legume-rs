@@ -1,5 +1,5 @@
 use crate::link_community::profiles::{
-    compute_propensity_and_gene_community_stat, EdgeClustering, PropensityReportConfig,
+    compute_propensity_and_gene_community_stat, PropensityReportConfig,
 };
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
@@ -33,11 +33,10 @@ pub struct SrtDeltaSvdArgs {
     )]
     n_latent_topics: usize,
 
-    #[arg(
-        long,
-        help = "Number of edge clusters for K-means (defaults to n_latent_topics)"
-    )]
-    n_edge_clusters: Option<usize>,
+    /// How the pair latent becomes link communities. Shared verbatim with
+    /// `cage` — the k-means fallback width is `--n-latent-topics` here.
+    #[command(flatten)]
+    edge_clustering: crate::util::edge_clustering::EdgeClusterArgs,
 }
 
 /// Input for fused multi-level pair delta visitor.
@@ -263,18 +262,17 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // 10. Propensity + dictionary
     let edges = srt_cell_pairs.inner.pairs();
 
-    // dsvd stays on k-means: its `--n-edge-clusters` is documented as the exact
-    // community count, and `pinto prop` exists precisely to re-cut the same
-    // latent at a different K.
+    // Leiden by default, same as `cage`: the SVD width is chosen for how much
+    // variance to keep, which is no reason for the pairs to fall into exactly
+    // that many interaction regimes. `pinto prop` still re-cuts the same latent
+    // at a fixed K when you want one.
     let n_clusters = compute_propensity_and_gene_community_stat(
         &proj_kn,
         edges,
         &data_vec,
         n_cells,
         &PropensityReportConfig {
-            clustering: EdgeClustering::Kmeans {
-                n_clusters: args.n_edge_clusters.unwrap_or(args.n_latent_topics),
-            },
+            clustering: args.edge_clustering.resolve(args.n_latent_topics, c.seed),
             block_size: c.block_size,
         },
         &c.out,

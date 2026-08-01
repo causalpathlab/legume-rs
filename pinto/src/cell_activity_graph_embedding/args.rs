@@ -48,24 +48,6 @@ impl GeneNameMode {
     }
 }
 
-/// Clusterer for the per-pair latent. `kmeans` fixes the count;
-/// `leiden` discovers it from the graph.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[clap(rename_all = "lowercase")]
-pub enum EdgeClusterMethod {
-    Kmeans,
-    Leiden,
-}
-
-impl std::fmt::Display for EdgeClusterMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Kmeans => write!(f, "kmeans"),
-            Self::Leiden => write!(f, "leiden"),
-        }
-    }
-}
-
 #[derive(Parser, Debug, Clone)]
 pub struct CellActivityGraphEmbeddingArgs {
     #[command(flatten)]
@@ -342,54 +324,10 @@ pub struct CellActivityGraphEmbeddingArgs {
     )]
     pub convergence_tol: f32,
 
-    #[arg(
-        long,
-        default_value_t = EdgeClusterMethod::Leiden,
-        value_enum,
-        help = "How to cut the pair latent into link communities",
-        long_help = "leiden is the default.\n\
-                     It builds a cosine kNN graph over the pair latent,\n\
-                     and --leiden-resolution then decides how many communities exist.\n\
-                     Under leiden, --n-edge-clusters is only a target:\n\
-                     the resolution is steered toward it, not fixed at it.\n\
-                     \n\
-                     kmeans instead fixes the community count at --n-edge-clusters.\n\
-                     Pick it when you need a specific K, or a run comparable to an older one.\n\
-                     Nothing else about the run changes:\n\
-                     both consume the same pair latent,\n\
-                     and both write the same three propensity tables."
-    )]
-    pub edge_cluster_method: EdgeClusterMethod,
-
-    #[arg(
-        long,
-        default_value_t = 30,
-        help = "Neighbours per pair in the Leiden kNN graph over the pair latent"
-    )]
-    pub leiden_knn: usize,
-
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Leiden modularity resolution; higher gives more, finer communities"
-    )]
-    pub leiden_resolution: f64,
-
-    #[arg(
-        long,
-        help = "Link communities to cut from the pair latent [default: let leiden decide]",
-        long_help = "How many edge clusters to cut from the pair latent.\n\
-                     Under the default --edge-cluster-method leiden this is a TARGET:\n\
-                     the resolution is steered toward it, and omitting it lets\n\
-                     --leiden-resolution alone decide.\n\
-                     Under kmeans it is the exact count, defaulting to --embedding-dim.\n\
-                     \n\
-                     A cell's propensity is its incident-edge fraction, taken per community.\n\
-                     This is the definition `pinto lc` and `pinto dsvd` use.\n\
-                     Writes {prefix}.propensity.parquet, {prefix}.link_community.parquet,\n\
-                     and {prefix}.gene_community.parquet."
-    )]
-    pub n_edge_clusters: Option<usize>,
+    /// How the pair latent becomes link communities. Shared verbatim with
+    /// `dsvd` — the k-means fallback width is `--embedding-dim` here.
+    #[command(flatten)]
+    pub edge_clustering: crate::util::edge_clustering::EdgeClusterArgs,
 
     #[arg(
         long,
