@@ -29,81 +29,114 @@ pub struct PosteriorArgs {
         value_name = "N",
         num_args = 0..=1,
         default_missing_value = "200",
-        help = "SAMPLE the phase-1 feature SELECTION, then fit the loading by SGD\n\
-                under it — N retained sweeps (bare --posterior uses 200).",
-        long_help = "The sampler chooses WHICH features load each dim; SGD then fits HOW MUCH.\n\
-                     N is the number of RETAINED sweeps (warmup is N/2 more). Bare\n\
-                     `--posterior` uses 200.\n\
+        help = "SAMPLE the phase-1 feature SELECTION; SGD then fits the loading",
+        long_help = "The sampler chooses WHICH features load each dim.\n\
+                     SGD then fits HOW MUCH.\n\
+                     N is the number of RETAINED sweeps; warmup adds N/2 more.\n\
+                     A bare `--posterior` uses 200.\n\
                      \n\
-                     WHY BOTH, rather than one or the other. A learned gate does not train:\n\
-                     the KL that would drive selection sits far below the true ELBO, the\n\
-                     sigmoid passes a fraction of the gradient wherever the gate is inert,\n\
-                     and — decisively — a large share of features are never drawn as NCE\n\
-                     positives at all, so their gate receives EXACTLY zero gradient and\n\
-                     reports its initialization forever. The sampler has no such blind spot:\n\
-                     its column pass touches every anchor on every sweep. So selection comes\n\
-                     from sampling, where it works, and the loading from SGD, which is far\n\
-                     faster and moves to the GPU.\n\
+                     WHY BOTH, rather than one or the other.\n\
+                     A learned gate does not train.\n\
+                     The KL that would drive selection sits far below the true ELBO.\n\
+                     The sigmoid passes only a fraction of the gradient\n\
+                     wherever the gate is inert.\n\
+                     Decisively, many features are never drawn as NCE positives.\n\
+                     Their gate receives EXACTLY zero gradient.\n\
+                     It reports its initialization forever.\n\
                      \n\
-                     The inclusion probabilities are applied as a per-(feature, dim) mask:\n\
-                     `z ~ Bern(pip)`, redrawn once per EPOCH (not per minibatch — z is a\n\
-                     latent for the dataset), with the mean `pip` used at output so the\n\
-                     written dictionary matches what training averaged over. Features with\n\
-                     pip 0 are masked permanently: their loading never trains and the\n\
-                     dictionary carries exact zeros.\n\
+                     The sampler has no such blind spot.\n\
+                     Its column pass touches every anchor on every sweep.\n\
+                     So selection comes from sampling, where it works.\n\
+                     The loading comes from SGD, which is far faster,\n\
+                     and moves to the GPU.\n\
                      \n\
-                     This is a two-sided blocked Gibbs over the PSEUDOBULK model, run before\n\
-                     phase 2. It alternates the gene side given the pseudobulks and the\n\
-                     pseudobulks given the genes, over every collapse level at once, and writes\n\
-                     its posterior means back into the model — so the dictionary, phase 2 and\n\
-                     the co-embedding all read the sampled fit rather than a second set of\n\
-                     tables. Phase 2 still runs: it is an analytical Poisson-MAP projection, not\n\
-                     SGD.\n\
+                     Inclusion probabilities apply as a per-(feature, dim) mask.\n\
+                     `z ~ Bern(pip)` is redrawn once per EPOCH, not per minibatch,\n\
+                     because z is a latent for the dataset.\n\
+                     The mean `pip` is used at output.\n\
+                     So the written dictionary matches what training averaged over.\n\
                      \n\
-                     Requires the pure-pseudobulk phase 1 (--phase1-cells-per-pb 0, the\n\
-                     default): a cell axis is trained only by SGD, so there is no cell block to\n\
-                     sample and one would be left at its initialization. Cannot be combined\n\
-                     with --lineage-dag, which refines a trained fit. Requires\n\
-                     --nce-objective softmax: the sampled likelihood is the profiled Poisson,\n\
-                     which is the same estimand as sampled-softmax but not as logistic, so\n\
-                     sampling a logistic fit would report a posterior for a different model.\n\
-                     All three are hard errors rather than silent degradations.\n\
+                     Features with pip 0 are masked permanently.\n\
+                     Their loading never trains.\n\
+                     The dictionary carries exact zeros for them.\n\
                      \n\
-                     Selection lives on the feature side: each (gene, dim) gets a posterior\n\
-                     inclusion probability, alongside the per-dim slab variance σ₀h². Inclusion\n\
-                     is INDEPENDENT per dim, so a gene may load several and its row does NOT sum\n\
-                     to 1. A pseudobulk is a location, not a selection, so that side is sampled\n\
-                     without a spike-and-slab. The per-dim inclusion RATES come from the\n\
-                     truncated IBP by default — see --stick-alpha.\n\
+                     This is a two-sided blocked Gibbs over the PSEUDOBULK model.\n\
+                     It runs before phase 2.\n\
+                     It alternates two conditionals, over every collapse level\n\
+                     at once: the gene side given the pseudobulks, and the\n\
+                     pseudobulks given the genes.\n\
+                     It writes its posterior means back into the model.\n\
+                     So the dictionary, phase 2 and the co-embedding all read\n\
+                     the sampled fit.\n\
+                     None of them reads a second set of tables.\n\
+                     Phase 2 still runs afterwards, as a block Poisson-MAP SGD.\n\
                      \n\
-                     A model carrying more than one feature-side gate has every one of them\n\
-                     sampled, each with its own σ₀h² and π₀h. They are different objects — a\n\
-                     loading and a deviation from it are not on one scale — so a single shared\n\
-                     sparsity prior would force them to agree.\n\
+                     This requires the pure-pseudobulk phase 1.\n\
+                     That is --phase1-cells-per-pb 0, the default.\n\
+                     A cell axis is trained only by SGD.\n\
+                     There is no cell block to sample.\n\
+                     One would sit at its initialization.\n\
                      \n\
-                     READ THE OUTPUT AGAINST THE EFFECTIVE RANK. When the embedding dimension\n\
-                     far exceeds the rank the embedding actually uses, the likelihood carries no\n\
-                     information about the surplus dims and their inclusion indicators fall back\n\
-                     on the prior. Under the default IBP that prior DECAYS with the dim index, so\n\
-                     surplus dims are pushed toward zero rather than toward a shared rate; under\n\
-                     --no-stick-breaking they instead all reproduce the same flat rate and stop\n\
-                     discriminating. The run reports effective rank, per-dim hypers and their ESS\n\
-                     so the case is visible either way.\n\
+                     It cannot combine with --lineage-dag.\n\
+                     That flag refines a trained fit.\n\
                      \n\
-                     Cost is one column pass per dim per sweep over the whole anchor axis, so a\n\
-                     full dictionary runs for a long time — Ctrl+C returns partial results, and\n\
-                     a smaller N is the way to shorten an exploratory run. The run reports its\n\
-                     own bracket-fallback count; a large fraction there means coordinates are\n\
-                     stalling rather than moving, and the numbers should not be read as a\n\
-                     converged posterior.\n\
+                     It requires --nce-objective softmax.\n\
+                     The sampled likelihood is the profiled Poisson.\n\
+                     That matches sampled-softmax as an estimand.\n\
+                     It does not match logistic.\n\
+                     Sampling a logistic fit would report the wrong posterior.\n\
                      \n\
-                     Writes one PIP table and one posterior-mean table PER GATE, keyed by the\n\
-                     feature the gate is over. A single-gate model gets\n\
-                     {out}.feature_pip.parquet and {out}.feature_posterior_mean.parquet; a model\n\
-                     with two gates (gem's identity β_g and velocity δ_g) gets\n\
+                     All three are hard errors, not silent degradations.\n\
+                     \n\
+                     Selection lives on the feature side.\n\
+                     Each (gene, dim) gets a posterior inclusion probability,\n\
+                     alongside the per-dim slab variance σ₀h².\n\
+                     Inclusion is INDEPENDENT per dim.\n\
+                     A gene may load several, and its row does NOT sum to 1.\n\
+                     \n\
+                     A pseudobulk is a location, not a selection.\n\
+                     That side is therefore sampled without a spike-and-slab.\n\
+                     The per-dim inclusion RATES come from the truncated IBP.\n\
+                     That is the default; see --stick-alpha.\n\
+                     \n\
+                     A model may carry more than one feature-side gate.\n\
+                     Every one is sampled, each with its own σ₀h² and π₀h.\n\
+                     They are different objects.\n\
+                     A loading and a deviation from it are not on one scale.\n\
+                     A single shared sparsity prior would force them to agree.\n\
+                     \n\
+                     READ THE OUTPUT AGAINST THE EFFECTIVE RANK.\n\
+                     The embedding dimension may far exceed the rank actually used.\n\
+                     The likelihood then carries no information about surplus dims.\n\
+                     Their inclusion indicators fall back on the prior.\n\
+                     \n\
+                     Under the default IBP, that prior DECAYS with the dim index.\n\
+                     Surplus dims are pushed toward zero, not toward a shared rate.\n\
+                     Under --no-stick-breaking they instead reproduce one flat rate,\n\
+                     and stop discriminating.\n\
+                     \n\
+                     The run reports effective rank, per-dim hypers and their ESS.\n\
+                     The case is visible either way.\n\
+                     \n\
+                     Cost is one column pass per dim per sweep.\n\
+                     It covers the whole anchor axis, so a full dictionary runs long.\n\
+                     Ctrl+C returns partial results.\n\
+                     A smaller N is the way to shorten an exploratory run.\n\
+                     \n\
+                     The run reports its own bracket-fallback count.\n\
+                     A large fraction there means coordinates are stalling,\n\
+                     rather than moving.\n\
+                     Those numbers should not be read as a converged posterior.\n\
+                     \n\
+                     Writes one PIP table and one posterior-mean table PER GATE.\n\
+                     They are keyed by the feature the gate is over.\n\
+                     \n\
+                     A single-gate model gets {out}.feature_pip.parquet and\n\
+                     {out}.feature_posterior_mean.parquet.\n\
+                     A two-gate model — gem's identity β_g and velocity δ_g — gets\n\
                      {out}.beta_pip.parquet, {out}.beta_posterior_mean.parquet,\n\
-                     {out}.delta_pip.parquet and {out}.delta_posterior_mean.parquet, keyed by\n\
-                     gene rather than by feature row.\n\
+                     {out}.delta_pip.parquet and {out}.delta_posterior_mean.parquet.\n\
+                     Those are keyed by gene rather than by feature row.\n\
                      \n\
                      `--mcmc` and `--jitter` are accepted aliases."
     )]
@@ -115,42 +148,62 @@ pub struct PosteriorArgs {
         conflicts_with = "no_stick_breaking",
         default_value_t = crate::posterior::dim_block::DEFAULT_STICK_ALPHA,
         requires = "posterior",
-        help = "Truncated-IBP concentration α — the expected number of dims a feature\n\
-                loads. Independent of --embedding-dim.",
-        long_help = "Concentration α for the TRUNCATED INDIAN BUFFET PROCESS on the per-dim\n\
-                     inclusion rates, which is the DEFAULT selection prior.\n\
+        help = "Truncated-IBP concentration α: expected dims a feature loads",
+        long_help = "Concentration α for the TRUNCATED INDIAN BUFFET PROCESS.\n\
+                     It sits on the per-dim inclusion rates.\n\
+                     That process is the DEFAULT selection prior.\n\
                      \n\
-                     Stick-breaking (Teh, Görür & Ghahramani 2007) puts each dim's inclusion\n\
-                     rate at the running product ∏_{j≤h} v_j of sticks v_j ~ Beta(α, 1), held\n\
-                     at their prior mean — so the rate at dim h is (α/(α+1))^(h+1), decreasing\n\
-                     with the dim index, and surplus dims are squeezed off by construction. α is the expected number of dims a feature loads, and it is\n\
-                     independent of --embedding-dim: measured on BM1, doubling H from 16 to 32\n\
-                     moved the active-dim count only 10 -> 12, against 16 -> 32 under the\n\
-                     unordered alternative. So H is a TRUNCATION, not a tuning knob.\n\
+                     Stick-breaking follows Teh, Görür & Ghahramani 2007.\n\
+                     Each dim's inclusion rate is the running product ∏_{j≤h} v_j.\n\
+                     The sticks are v_j ~ Beta(α, 1), held at their prior mean.\n\
+                     So the rate at dim h is (α/(α+1))^(h+1).\n\
+                     It decreases with the dim index.\n\
+                     Surplus dims are squeezed off by construction.\n\
                      \n\
-                     WHY IT IS THE DEFAULT. With tens of thousands of features on every dim, an\n\
-                     independent Beta prior carries O(1) pseudo-counts against O(10^4)\n\
-                     observations and is swamped, so every unused dim settles on the SAME rate\n\
-                     rather than collapsing — measured flat at 0.787-0.930 across 16 dims while\n\
-                     the likelihood supported ~3.4 of them. The ladder is a structural\n\
-                     constraint, which data cannot outvote.\n\
+                     α is the expected number of dims a feature loads.\n\
+                     It is independent of --embedding-dim.\n\
+                     Measured on BM1, doubling H from 16 to 32 barely moved it.\n\
+                     The active-dim count went 10 -> 12.\n\
+                     The unordered alternative moved 16 -> 32 instead.\n\
+                     So H is a TRUNCATION, not a tuning knob.\n\
                      \n\
-                     ALPHA IS CHOSEN, NOT FITTED. The rates are held at the stick-breaking\n\
-                     prior mean and nothing resamples them, so there is no chain to converge\n\
-                     and no per-dim R-hat to read. Letting them adapt was measured on BM1 and\n\
-                     moved the dictionary's effective rank under 5% (9.05 -> 8.64) while making\n\
-                     the fit LESS sparse, so it was not worth the machinery.\n\
+                     WHY IT IS THE DEFAULT.\n\
+                     Every dim carries tens of thousands of features.\n\
+                     An independent Beta prior brings O(1) pseudo-counts against\n\
+                     O(10^4) observations, so it is swamped.\n\
+                     Every unused dim then settles on the SAME rate.\n\
+                     None of them collapses.\n\
+                     Measured, that was flat at 0.787-0.930 across 16 dims,\n\
+                     while the likelihood supported about 3.4 of them.\n\
+                     The ladder is a structural constraint.\n\
+                     Data cannot outvote it.\n\
                      \n\
-                     H MUST BE LARGE RELATIVE TO ALPHA. The ladder is geometric with ratio\n\
-                     alpha/(alpha+1), so at alpha = 1 sixteen dims already carry all of the\n\
-                     mass, but at alpha = 5 they carry only ~95% and --embedding-dim is still\n\
-                     truncating the prior. Keep H well above alpha.\n\
+                     ALPHA IS CHOSEN, NOT FITTED.\n\
+                     The rates are held at the stick-breaking prior mean.\n\
+                     Nothing resamples them.\n\
+                     So there is no chain to converge, and no per-dim R-hat to read.\n\
                      \n\
-                     A SIDE EFFECT WORTH KNOWING: the dims become ordered, which removes the\n\
-                     dim-permutation gauge and makes them comparable across runs the way PCA\n\
-                     components are. And a feature with NO counts now reverts to each dim's\n\
-                     population rate rather than to a flat null — on the leading dim that is\n\
-                     about a coin flip at α = 1. Lower α if that matters for your read.\n\
+                     Letting them adapt was measured on BM1.\n\
+                     It moved the dictionary's effective rank under 5%,\n\
+                     from 9.05 to 8.64, while making the fit LESS sparse.\n\
+                     It was not worth the machinery.\n\
+                     \n\
+                     H MUST BE LARGE RELATIVE TO ALPHA.\n\
+                     The ladder is geometric, with ratio alpha/(alpha+1).\n\
+                     At alpha = 1, sixteen dims already carry all the mass.\n\
+                     At alpha = 5 they carry only about 95%.\n\
+                     --embedding-dim is then still truncating the prior.\n\
+                     Keep H well above alpha.\n\
+                     \n\
+                     A SIDE EFFECT WORTH KNOWING.\n\
+                     The dims become ordered.\n\
+                     That removes the dim-permutation gauge.\n\
+                     It makes them comparable across runs, as PCA components are.\n\
+                     \n\
+                     A feature with NO counts reverts to each dim's population rate.\n\
+                     It does not revert to a flat null.\n\
+                     On the leading dim that is about a coin flip at α = 1.\n\
+                     Lower α if that matters for your read.\n\
                      \n\
                      Pass --no-stick-breaking for the previous independent-Beta-per-dim prior."
     )]
@@ -160,11 +213,14 @@ pub struct PosteriorArgs {
         long = "no-stick-breaking",
         requires = "posterior",
         help = "Use an independent Beta prior per dim instead of the truncated IBP.",
-        long_help = "Revert the selection prior to an independent Beta(a,b) on every dim — no\n\
-                     ordering, no coupling between dims. This is what shipped before the IBP\n\
-                     became the default, and it is kept for A/B: with many features per dim it\n\
-                     is swamped by the data, so it neither imposes sparsity nor collapses\n\
-                     unused dims. See --stick-alpha."
+        long_help = "Revert the selection prior to an independent Beta(a,b) per dim.\n\
+                     There is then no ordering, and no coupling between dims.\n\
+                     \n\
+                     This shipped before the IBP became the default.\n\
+                     It is kept for A/B comparison.\n\
+                     With many features per dim it is swamped by the data.\n\
+                     So it neither imposes sparsity nor collapses unused dims.\n\
+                     See --stick-alpha."
     )]
     pub no_stick_breaking: bool,
 }
