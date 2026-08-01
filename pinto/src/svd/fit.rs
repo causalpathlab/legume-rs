@@ -19,13 +19,6 @@ pub struct SrtDeltaSvdArgs {
     pub common: crate::util::input::SrtInputArgs,
 
     #[arg(
-        long,
-        short = 's',
-        help = "Max cells per pseudobulk sample (cap group size)"
-    )]
-    down_sample: Option<usize>,
-
-    #[arg(
         short = 't',
         long,
         default_value_t = 10,

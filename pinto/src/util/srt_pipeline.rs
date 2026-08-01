@@ -90,6 +90,12 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     // not applied to pinto's per-cell outputs.)
     if let Some(qc_cfg) = c.qc.to_config() {
         let report = data_beans::qc_lib::compute_qc(&data_vec, &qc_cfg, c.block_size)?;
+        // Before masking: the report is indexed by the ORIGINAL cell order, so
+        // the names have to be read while they still line up.
+        if let Some(path) = c.qc.qc_report.as_deref() {
+            data_beans::qc_lib::write_qc_report(path, &data_vec.column_names()?, &report)?;
+            info!("Wrote QC report to {}", path);
+        }
         let n_near_empty = report.near_empty.iter().filter(|&&e| e).count();
         info!(
             "QC: dropped {}/{} cells from the spatial graph ({} near-empty kept)",
