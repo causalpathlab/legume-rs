@@ -7,6 +7,45 @@ use data_beans_alg::hvg::HvgCliArgs;
 
 use crate::util::device::ComputeDevice;
 
+/// CLI mirror of [`graph_embedding_util::loss::NceObjective`] (that crate keeps
+/// its model enums clap-free, so every consumer carries its own wrapper — see
+/// `senna/src/bge/mod.rs` and `faba/src/gem/common.rs`).
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum NceObjectiveArg {
+    /// Per-pair logistic (SGNS): each (positive, negative) pair decided
+    /// independently — cage's historical loss.
+    Logistic,
+    /// Sampled-softmax / InfoNCE: the negatives compete with the positive in one
+    /// softmax. The default here and in `senna bge` / `faba gem`.
+    Softmax,
+}
+
+impl NceObjectiveArg {
+    pub fn to_ge(self) -> graph_embedding_util::loss::NceObjective {
+        match self {
+            Self::Logistic => graph_embedding_util::loss::NceObjective::Logistic,
+            Self::Softmax => graph_embedding_util::loss::NceObjective::Softmax,
+        }
+    }
+}
+
+/// Which selector supplies the per-(gene, dim) inclusion weights.
+///
+/// Both arms land on the same `GateKind::Identity` slot in geu's model, but by
+/// different routes: `learned` installs the variational gate and lets SGD fit
+/// `σ(S/τ)`, while `sampled` installs a `pip` from cage's Gibbs Poisson sampler,
+/// which then takes over the slot entirely (`model/gate.rs:503-511`).
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+#[clap(rename_all = "lowercase")]
+pub enum GateMode {
+    /// Variational spike-and-slab gate trained by SGD alongside the embedding.
+    Learned,
+    /// Gibbs profiled-Poisson sampler over super-cell counts, installed as a
+    /// per-epoch Bernoulli mask.
+    Sampled,
+}
+
 /// Row-name canonicalization strategy for matching the data's gene
 /// names against external resources (PPI networks, marker lists,
 /// pretrained gene embeddings). `Auto` sniffs the first data file's
@@ -396,4 +435,68 @@ pub struct CellActivityGraphEmbeddingArgs {
         hide = true
     )]
     pub pair_block: usize,
+
+    #[arg(
+        long = "nce-objective",
+        default_value_t = NceObjectiveArg::Softmax,
+        value_enum,
+        help = "NCE objective: softmax or logistic",
+        long_help = "NCE objective. softmax is InfoNCE, where negatives compete.\n\
+                     It is sharper on dense data, and is the default.\n\
+                     logistic is per-pair SGNS, cage's historical loss.\n\
+                     \n\
+                     Under --gate-mode sampled, prefer softmax.\n\
+                     The mask is drawn from a profiled Poisson whose normalizer\n\
+                     IS the sampled-softmax estimand, so softmax puts the gate\n\
+                     and the loss on one estimand.\n\
+                     Against logistic that identity does not hold:\n\
+                     SGNS is a sum of per-pair decisions, with no logsumexp.\n\
+                     geu makes the same pairing a hard error under --posterior.\n\
+                     cage permits it, because its pip is a dropout rate rather\n\
+                     than a reported posterior, but it is the off-label choice."
+    )]
+    pub nce_objective: NceObjectiveArg,
+
+    #[arg(
+        long = "gate-mode",
+        default_value_t = GateMode::Sampled,
+        value_enum,
+        help = "How the per-(gene, dim) selection is estimated",
+        long_help = "Which selector supplies the feature gate.\n\
+                     \n\
+                     sampled is the default, and the one that actually selects.\n\
+                     cage's Gibbs profiled-Poisson sampler runs over super-cell\n\
+                     counts and installs the result as a per-epoch Bernoulli mask.\n\
+                     Measured on GBM Visium it switches off about a quarter of\n\
+                     the (gene, dim) table.\n\
+                     Tune it with the --selection-* flags.\n\
+                     \n\
+                     learned fits a variational spike-and-slab gate by SGD\n\
+                     alongside the embedding, the gate `senna bge` uses.\n\
+                     Its sharpness knob is --feature-gate-temp.\n\
+                     It scans no counts, so it should have been the scalable arm.\n\
+                     It is not, yet, and it is NOT a drop-in replacement:\n\
+                     the KL that drives selection is a global table evaluated on\n\
+                     every step, which costs more than the sampler it replaces\n\
+                     (+17s per 5 epochs at --gene-batch-size 64, +6s at 256),\n\
+                     and on GBM it selected nothing at all — every inclusion\n\
+                     probability stayed above 0.95.\n\
+                     Raise --gene-batch-size to cut the overhead.\n\
+                     \n\
+                     The two arms also ship different tables.\n\
+                     learned bakes the gate into feature_embedding.parquet,\n\
+                     because the gate multiplied the loading during training,\n\
+                     and reports the inclusion table as feature_selection.parquet.\n\
+                     sampled ships the raw embedding plus\n\
+                     feature_posterior_mean.parquet, since there the mask was\n\
+                     regularization rather than a coefficient."
+    )]
+    pub gate_mode: GateMode,
+
+    #[arg(
+        long = "feature-gate-temp",
+        default_value_t = 1.0,
+        help = "Learned-gate temperature τ; < 1 sharpens toward 0/1 (--gate-mode learned only)"
+    )]
+    pub feature_gate_temp: f32,
 }

@@ -489,7 +489,7 @@ pub fn nce_loss_identity(
 /// with no normalizer and no null column. Gradients reach both the base and, on the
 /// learned path, the logits. Ungated with no `pip` it is the plain gather. This is the
 /// single feature-gather point for the bge + gem trainers.
-fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
+pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
     match &model.factor {
         Some(f) => {
             let genes = f.row_to_gene.index_select(idx, 0)?;

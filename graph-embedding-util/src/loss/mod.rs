@@ -40,10 +40,10 @@ pub use chain::{
     CellChainBatchStats,
 };
 pub use feat::{
-    build_stratified_sampler, nce_loss, nce_loss_identity, sample_per_batch_stratified_edge_batch,
-    sample_stratified_edge_batch, CellFeatureSampler, EdgeBatch, FeatPairing, PbFeatureSampler,
-    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
-    StratifiedSampler,
+    build_stratified_sampler, gather_feature_rows, nce_loss, nce_loss_identity,
+    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
+    EdgeBatch, FeatPairing, PbFeatureSampler, PerBatchStratifiedCellSampler,
+    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 
 /// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;
