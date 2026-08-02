@@ -1,7 +1,7 @@
 use super::loss::cage_nce_loss_per_level;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
-use graph_embedding_util::loss::CellChainBatch;
+use graph_embedding_util::loss::{CellChainBatch, NceObjective};
 use graph_embedding_util::model::{JointEmbedModel, ModelArgs, ModelInit};
 use nalgebra::DMatrix;
 
@@ -78,7 +78,7 @@ fn returns_one_loss_per_gene_and_level() {
     let m = model(&varmap, &dev);
     let (bs, ids) = batches();
 
-    let out = cage_nce_loss_per_level(&m, bs, &ids, &dev).unwrap();
+    let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     assert_eq!(out.per_level.dims(), &[N_GENES, L]);
     assert_eq!(
         out.mean_abs_pair.dims().len(),
@@ -99,7 +99,7 @@ fn pair_magnitude_reports_a_dead_gene_embedding() {
     let vm_live = VarMap::new();
     let live_m = model(&vm_live, &dev);
     let (bs, ids) = batches();
-    let live = cage_nce_loss_per_level(&live_m, bs, &ids, &dev).unwrap();
+    let live = cage_nce_loss_per_level(&live_m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let live_pair: f32 = live.mean_abs_pair.to_scalar().unwrap();
     assert!(
         live_pair > 0.0,
@@ -110,7 +110,7 @@ fn pair_magnitude_reports_a_dead_gene_embedding() {
     let zeros = DMatrix::<f32>::zeros(N_GENES, DIM);
     let dead_m = model_with_e_feat(&vm_dead, &dev, Some(&zeros));
     let (bs2, ids2) = batches();
-    let dead = cage_nce_loss_per_level(&dead_m, bs2, &ids2, &dev).unwrap();
+    let dead = cage_nce_loss_per_level(&dead_m, bs2, &ids2, NceObjective::Logistic, &dev).unwrap();
     let dead_pair: f32 = dead.mean_abs_pair.to_scalar().unwrap();
     assert_eq!(dead_pair, 0.0, "a zeroed e_feat must kill the pair term");
     assert!(live_pair > dead_pair);
@@ -154,7 +154,7 @@ fn score_is_exactly_the_raw_gene_embedding() {
     }
     let expected = (acc / n as f64) as f32;
 
-    let out = cage_nce_loss_per_level(&m, bs, &ids, &dev).unwrap();
+    let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let got: f32 = out.mean_abs_pair.to_scalar().unwrap();
     assert!(
         (got - expected).abs() <= 1e-5 * expected.abs().max(1e-6),
@@ -171,7 +171,7 @@ fn backward_reaches_the_gene_embedding() {
     let m = model(&varmap, &dev);
     let (bs, ids) = batches();
 
-    let out = cage_nce_loss_per_level(&m, bs, &ids, &dev).unwrap();
+    let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let grads = out.per_level.sum_all().unwrap().backward().unwrap();
 
     let g = grads
@@ -194,7 +194,7 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     let mut m = model(&varmap, &dev);
 
     let (bs, ids) = batches();
-    let ungated: f32 = cage_nce_loss_per_level(&m, bs, &ids, &dev)
+    let ungated: f32 = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev)
         .unwrap()
         .mean_abs_pair
         .to_scalar()
@@ -211,7 +211,7 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     m.install_gate_pip(GateKind::Identity, &pip).unwrap();
 
     let (bs2, ids2) = batches();
-    let gated: f32 = cage_nce_loss_per_level(&m, bs2, &ids2, &dev)
+    let gated: f32 = cage_nce_loss_per_level(&m, bs2, &ids2, NceObjective::Logistic, &dev)
         .unwrap()
         .mean_abs_pair
         .to_scalar()
@@ -225,7 +225,7 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     // score must match the frozen-pip score rather than drift.
     m.resample_gate_mask().unwrap();
     let (bs3, ids3) = batches();
-    let drawn: f32 = cage_nce_loss_per_level(&m, bs3, &ids3, &dev)
+    let drawn: f32 = cage_nce_loss_per_level(&m, bs3, &ids3, NceObjective::Logistic, &dev)
         .unwrap()
         .mean_abs_pair
         .to_scalar()
@@ -236,4 +236,43 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     );
 
     m.clear_gate_mask();
+}
+
+/// `--nce-objective` must actually reach the loss. The two objectives differ in
+/// how they normalize (`softmax` puts the positive and its negatives in one
+/// distribution; `logistic` decides each pair alone), so on identical batches
+/// they cannot agree — if they do, the argument is being dropped somewhere
+/// between the flag and `loss.rs`.
+#[test]
+fn objective_selects_a_different_loss() {
+    let dev = Device::Cpu;
+    let varmap = VarMap::new();
+    let m = model(&varmap, &dev);
+
+    let mean_per_level = |obj| {
+        let (bs, ids) = batches();
+        cage_nce_loss_per_level(&m, bs, &ids, obj, &dev)
+            .unwrap()
+            .per_level
+            .mean_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    };
+
+    let logistic = mean_per_level(NceObjective::Logistic);
+    let softmax = mean_per_level(NceObjective::Softmax);
+
+    assert!(
+        logistic.is_finite() && softmax.is_finite(),
+        "both objectives must be finite: logistic {logistic}, softmax {softmax}"
+    );
+    assert!(
+        (logistic - softmax).abs() > 1e-6,
+        "objective did not reach the loss: logistic {logistic} == softmax {softmax}"
+    );
+
+    // Same objective twice is deterministic on a fixed model, so the difference
+    // above is the objective and not batch noise.
+    assert!((mean_per_level(NceObjective::Softmax) - softmax).abs() < 1e-6);
 }

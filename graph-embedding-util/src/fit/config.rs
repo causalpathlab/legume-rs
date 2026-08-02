@@ -163,8 +163,9 @@ pub struct FitConfig {
     /// `β + δ` is identified. Ignored without `feat_factor`.
     pub pb_posterior_nested_delta: bool,
     /// NCE objective for the feature side ([`crate::loss::NceObjective`]). Defaults to
-    /// `Softmax` (InfoNCE), which `faba gem` uses for its dense count data; `senna bge`
-    /// / `pinto cage` set `Logistic` explicitly (byte-identical to before).
+    /// `Softmax` (InfoNCE). Every CLI that exposes it — `faba gem`, `senna bge` and
+    /// `pinto cage`, all as `--nce-objective` — also defaults to `Softmax`; `Logistic`
+    /// is opt-in and is the historical bge loss, kept byte-identical when chosen.
     pub nce_objective: crate::loss::NceObjective,
     /// Optional per-gene spike-and-slab gate over the embedding dimensions (Bernoulli
     /// inclusion + Gaussian effect prior = graceful feature selection). `Some` enables

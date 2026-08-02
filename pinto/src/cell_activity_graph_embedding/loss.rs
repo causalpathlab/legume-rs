@@ -18,11 +18,14 @@
 //! along `θ_g`, adjacent or not.
 //!
 //! cage's own loss: geu's chain module scores a rank-1 quadratic form and
-//! has no gene-modulated variant left.
+//! has no gene-modulated variant left. The per-edge NCE itself is geu's, and
+//! selectable — see [`NceObjective`] and `--nce-objective`.
 
 use candle_util::candle_core::{Device, Result as CResult, Tensor};
-use graph_embedding_util::loss::{logistic_nce, CellChainBatch};
-use graph_embedding_util::model::{GateKind, JointEmbedModel};
+use graph_embedding_util::loss::{
+    gather_feature_rows, logistic_nce, softmax_nce, CellChainBatch, NceObjective,
+};
+use graph_embedding_util::model::JointEmbedModel;
 
 pub struct CageLossOut {
     /// Per-(gene, level) NCE loss, `[G, L]`.
@@ -40,10 +43,16 @@ pub struct CageLossOut {
 /// Levels differ only in their negative pools — the gene direction is the same
 /// at every scale. The only modulation is the epoch's spike draw `z`, applied
 /// through geu's `gathered_gate_weights`; there is no per-level gate.
+///
+/// `objective` picks the per-edge NCE, exactly as geu's feature-side loss does
+/// (`graph_embedding_util::loss::feat`). Prefer `Softmax` under a sampled mask:
+/// the sampler's profiled-Poisson normalizer is the sampled-softmax estimand,
+/// so the gate and the loss then optimize the same thing.
 pub fn cage_nce_loss_per_level(
     model: &JointEmbedModel,
     batches: Vec<CellChainBatch>,
     gene_ids: &[u32],
+    objective: NceObjective,
     dev: &Device,
 ) -> CResult<CageLossOut> {
     let g = batches.len();
@@ -100,29 +109,25 @@ pub fn cage_nce_loss_per_level(
     let e_right = model.e_cell.index_select(&right_idx, 0)?;
     let b_right = model.b_cell.index_select(&right_idx, 0)?;
 
-    // Gene rows, gated by the epoch's spike draw. `gathered_gate_weights`
-    // returns this epoch's `z` rows when a mask is live (see
-    // `resample_gate_mask`), the frozen `pip` rows when it is not, and `None`
-    // when no `gate_pip` is installed — in which case the gather is plain and
-    // cage runs ungated. Gathering BEFORE gating is exact here because the gate
-    // is elementwise.
+    // Gene rows with whatever gates them applied — geu's own helper, so cage,
+    // `senna bge` and `faba gem` share ONE definition of what multiplies a
+    // feature loading. It dispatches on what the model actually carries:
     //
-    // This is geu's own helper rather than a local re-derivation, so cage and
-    // `senna bge` share one definition of what the gate multiplies.
+    //   - sampled mask installed: this epoch's `z` rows (or the frozen `pip`
+    //     between draws), applied to the raw effect;
+    //   - learned gate: `σ(S/τ)` from `s_feat`, plus the reparameterization
+    //     draw off `e_feat_logstd`, which is what makes the gate variational;
+    //   - neither: a plain gather, ungated.
     //
-    // `e_feat` is randomly initialized under this arm, NOT set to `E[z·β]` —
-    // that quantity already carries the sampler's shrinkage, and masking it
-    // would apply the same selection twice.
+    // It also reads `e_feat_raw` once a gate is on, so a post-training
+    // `materialize_e_feat` cannot gate an already-gated table.
     //
-    // No reparameterization noise: the two ε draws that used to live here went
-    // with the variational gate. They existed because a shared draw put `E[z²]`
-    // on the diagonal of the pair term and inflated every positive by the
-    // gate's own variance.
-    let mu = model.e_feat.index_select(&gene_idx, 0)?; // [G*B, D]
-    let e_gene_l = match model.gathered_gate_weights(GateKind::Identity, None, &gene_idx)? {
-        Some(w) => (mu * w)?,
-        None => mu,
-    };
+    // Re-deriving this locally is what silently broke the learned arm: passing
+    // `logits: None` to `gathered_gate_weights` makes it return `None` unless a
+    // pip is installed, so the gate Vars never entered the graph, never got a
+    // gradient, and `α` stayed pinned at its init (sd = 0.0000 across 18k
+    // genes) while the KL alone nudged the mean.
+    let e_gene_l = gather_feature_rows(model, &gene_idx)?; // [G*B, D]
 
     let mut per_gene_per_level: Vec<Tensor> = Vec::with_capacity(l);
     // Left factor is shared across levels and negatives: the anchor's
@@ -165,7 +170,11 @@ pub fn cage_nce_loss_per_level(
         let pair_neg = (&e_neg * &tl_3d)?.sum(2)?; // [G*B, K]
         let b_left_2d = b_left.unsqueeze(1)?.broadcast_as((total_b, k))?;
         let neg_score = ((pair_neg + b_left_2d)? + &b_neg)?;
-        let per_edge = logistic_nce(&pos_score, std::slice::from_ref(&neg_score))?;
+        let negs = std::slice::from_ref(&neg_score);
+        let per_edge = match objective {
+            NceObjective::Logistic => logistic_nce(&pos_score, negs)?,
+            NceObjective::Softmax => softmax_nce(&pos_score, negs)?,
+        };
         let per_edge_gb = per_edge.reshape((g, b))?;
         per_gene_per_level.push(per_edge_gb.mean(1)?); // [G]
     }

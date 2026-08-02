@@ -98,8 +98,8 @@ pub struct TrainingParams {
     pub num_negatives: usize,
     pub seed: u64,
     /// Which NCE objective the feature side trains with ([`crate::loss::NceObjective`]).
-    /// Defaults to `Softmax` (InfoNCE, `faba gem`); `senna bge` / `pinto cage` set
-    /// `Logistic`.
+    /// Defaults to `Softmax` (InfoNCE). `faba gem`, `senna bge` and `pinto cage` all
+    /// expose it as `--nce-objective` and all default to `Softmax`; `Logistic` is opt-in.
     pub objective: crate::loss::NceObjective,
     /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
     /// embedding, added to the per-step composite loss before backward.

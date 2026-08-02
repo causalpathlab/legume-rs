@@ -31,7 +31,31 @@
 //! `e_u (*) e_v` is the EDGE embedding: the pair's joint participation in each
 //! latent community, high only when both endpoints load on it.
 //!
-//! # Two cadences, and they are different things
+//! # Two gate arms (`--gate-mode`)
+//!
+//! Both fill geu's one `GateKind::Identity` slot, and an installed `pip` takes
+//! that slot over completely (`model/gate.rs:503-511`), so they are mutually
+//! exclusive by construction.
+//!
+//! `sampled` (default) is the arm that actually selects: on GBM Visium it
+//! zeroes about a quarter of the (gene, dim) table. It is also the reason cage
+//! is slow, since every sample scans each nonzero gene-pseudobulk pair.
+//!
+//! `learned` is the one `senna bge` uses: a
+//! variational spike-and-slab gate `σ(S/τ)` fit by SGD alongside the embedding,
+//! regularized by the KL added to the training loss. Nothing scans the count
+//! matrix. The forward carries the differentiable expectation `E[z·β] = α·E`,
+//! so there is no per-epoch draw and no sub-network sampling. Because `σ(S/τ)`
+//! multiplied the loading on every step it IS part of the fitted coefficient,
+//! so `materialize_e_feat` bakes it into the shipped dictionary and `α` ships
+//! as `feature_selection.parquet`.
+//!
+//! It scans no counts, so it ought to be the cheaper arm. Measured, it is not:
+//! its KL is a global `[G x H]` table evaluated on EVERY step, which costs more
+//! than the sampler it replaces, and on GBM it selected nothing at all (every
+//! inclusion probability stayed above 0.95). A row-subset KL would fix both.
+//!
+//! Under `sampled` there are two cadences, and they are different things:
 //!
 //! - `pip` — the PROBABILITY. Estimated by block Gibbs, then RE-estimated every
 //!   `--selection-refresh-epochs` against the live `e_cell` folded up into the
@@ -42,13 +66,14 @@
 //!   (`resample_gate_mask`), so each epoch trains a different sub-network and
 //!   SGD optimizes `E_z[loss]` rather than `loss` at `E[z]`.
 //!
-//! `e_feat` is randomly initialized and the selection enters as this gate.
-//! Deliberately NOT initialized to `E[z*beta]`: that already carries the
+//! On that arm `e_feat` is randomly initialized and the selection enters as the
+//! gate. Deliberately NOT initialized to `E[z*beta]`: that already carries the
 //! sampler's shrinkage, so gating it would apply the same selection twice. The
 //! two are alternatives, not complements — `feature_posterior_mean.parquet`
-//! ships `E[z*beta]` for downstream use.
+//! ships `E[z*beta]` for downstream use, and the raw embedding ships as-is
+//! because a dropout keep-rate is not a coefficient.
 
-use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
+use crate::cell_activity_graph_embedding::args::{CellActivityGraphEmbeddingArgs, GateMode};
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -79,7 +104,9 @@ use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{build_per_batch_cell_samplers, PbChainFilter};
-use graph_embedding_util::model::{GateKind, JointEmbedModel, ModelArgs, ModelInit};
+use graph_embedding_util::model::{
+    FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit, GATE_KL_WEIGHT,
+};
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
@@ -99,6 +126,26 @@ pub fn fit_cell_activity_graph_embedding(
         !args.chain_levels.is_empty(),
         "chain-levels must be non-empty"
     );
+    // Each gate arm has knobs the other one cannot act on. Setting one for the
+    // wrong arm is a mistake worth reporting, not silently absorbing — a flag
+    // that is read and ignored is indistinguishable from one that did not work.
+    // Keyed on "differs from the default" so an explicit default still passes.
+    match args.gate_mode {
+        GateMode::Learned => anyhow::ensure!(
+            args.selection_sweeps == 10
+                && args.selection_refresh_sweeps == 10
+                && args.selection_refresh_epochs == 5,
+            "--selection-sweeps / --selection-refresh-sweeps / --selection-refresh-epochs \
+             configure the Gibbs sampler, which --gate-mode learned does not run. \
+             Pass --gate-mode sampled to use them."
+        ),
+        GateMode::Sampled => anyhow::ensure!(
+            args.feature_gate_temp == 1.0,
+            "--feature-gate-temp sharpens the LEARNED gate's sigmoid, and \
+             --gate-mode sampled installs a Gibbs-sampled mask instead, which \
+             takes the gate slot over entirely. Pass --gate-mode learned to use it."
+        ),
+    }
 
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
@@ -244,8 +291,13 @@ pub fn fit_cell_activity_graph_embedding(
         },
     );
 
-    // Collapse cells into super-cells, then sample the gene selection.
-    let (selection, sel_state, mut sel_z) = {
+    // Collapse cells into super-cells, then — on the sampled arm only — fit the
+    // gene selection against them. The pseudobulks themselves are built either
+    // way: they are cheap next to the sampler, and `pseudobulk_cells.parquet`
+    // is the diagnostic that lets the coarsening be inspected before anything
+    // is built on it. `None` under `--gate-mode learned`, where the variational
+    // gate is fit by SGD instead and no count scan happens at all.
+    let mut sampled_selection = {
         let pb = crate::cell_activity_graph_embedding::selection::build_pseudobulks(
             crate::cell_activity_graph_embedding::selection::PseudobulkArgs {
                 data: &data_vec,
@@ -281,42 +333,46 @@ pub fn fit_cell_activity_graph_embedding(
             info!("Wrote {}.pseudobulk_cells.parquet", c.out);
         }
 
-        // Sample which (gene, community) pairs are included.
-        let (sel, sel_state, sel_z) =
-            crate::cell_activity_graph_embedding::selection::select_features(
-                &pb,
-                args.embedding_dim,
-                &crate::cell_activity_graph_embedding::selection::SelectArgs {
-                    sweeps: args.selection_sweeps,
-                    burnin: args.selection_sweeps / 2,
-                    seed: c.seed,
-                },
+        if args.gate_mode == GateMode::Learned {
+            None
+        } else {
+            // Sample which (gene, community) pairs are included.
+            let (sel, sel_state, sel_z) =
+                crate::cell_activity_graph_embedding::selection::select_features(
+                    &pb,
+                    args.embedding_dim,
+                    &crate::cell_activity_graph_embedding::selection::SelectArgs {
+                        sweeps: args.selection_sweeps,
+                        burnin: args.selection_sweeps / 2,
+                        seed: c.seed,
+                    },
+                )?;
+            sel.log_summary();
+            // The PIP table itself is NOT written. Under this arm `pip` is a set of
+            // dropout keep-rates, not a reported estimand: it gates the gradient
+            // during training and nothing downstream reads it, the same way a
+            // dropout mask is never shipped. `senna bge` writes one because there
+            // the gate is baked into the dictionary (`materialize_e_feat`) and the
+            // table documents what was applied; cage ships the raw embedding, so a
+            // table would only invite someone to re-apply a selection that was
+            // regularization rather than a coefficient.
+            //
+            // The posterior mean EFFECTIVE loading `E[z·β]`.
+            //
+            // Not consumed by training under this arm: `e_feat` is randomly
+            // initialized and the selection enters as a gate instead, because
+            // `E[z·β]` already carries the shrinkage and gating it would apply the
+            // same selection twice. It ships because it is the quantity downstream
+            // wants when asking "how much does gene g load on dim h", and because
+            // it is what an init-from-posterior arm would consume.
+            sel.mean_beta_matrix().to_parquet_with_names(
+                &(c.out.to_string() + ".feature_posterior_mean.parquet"),
+                (Some(&gene_names), Some("gene")),
+                Some(&embedding_col_names(args.embedding_dim)),
             )?;
-        sel.log_summary();
-        // The PIP table itself is NOT written. Under this arm `pip` is a set of
-        // dropout keep-rates, not a reported estimand: it gates the gradient
-        // during training and nothing downstream reads it, the same way a
-        // dropout mask is never shipped. `senna bge` writes one because there
-        // the gate is baked into the dictionary (`materialize_e_feat`) and the
-        // table documents what was applied; cage ships the raw embedding, so a
-        // table would only invite someone to re-apply a selection that was
-        // regularization rather than a coefficient.
-        //
-        // The posterior mean EFFECTIVE loading `E[z·β]`.
-        //
-        // Not consumed by training under this arm: `e_feat` is randomly
-        // initialized and the selection enters as a gate instead, because
-        // `E[z·β]` already carries the shrinkage and gating it would apply the
-        // same selection twice. It ships because it is the quantity downstream
-        // wants when asking "how much does gene g load on dim h", and because
-        // it is what an init-from-posterior arm would consume.
-        sel.mean_beta_matrix().to_parquet_with_names(
-            &(c.out.to_string() + ".feature_posterior_mean.parquet"),
-            (Some(&gene_names), Some("gene")),
-            Some(&embedding_col_names(args.embedding_dim)),
-        )?;
-        info!("Wrote {}.feature_posterior_mean.parquet", c.out);
-        (sel, sel_state, sel_z)
+            info!("Wrote {}.feature_posterior_mean.parquet", c.out);
+            Some((sel, sel_state, sel_z))
+        }
     };
 
     // Chain levels must be valid indices into all_cell_labels.
@@ -458,11 +514,32 @@ pub fn fit_cell_activity_graph_embedding(
         &varmap,
         &dev,
     )?;
-    // The cold sampler's `pip`. `resample_gate_mask` is a no-op without it, so
-    // this install is what turns per-epoch spike sampling on at all.
-    {
-        let pip_t = Tensor::from_vec(selection.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
-        model.install_gate_pip(GateKind::Identity, &pip_t)?;
+    // Install the feature gate. Both arms fill geu's one `GateKind::Identity`
+    // slot, and an installed `pip` takes the slot over completely
+    // (`model/gate.rs:503-511`), so they are mutually exclusive by construction.
+    match &sampled_selection {
+        // The cold sampler's `pip`. `resample_gate_mask` is a no-op without it,
+        // so this install is what turns per-epoch spike sampling on at all.
+        Some((selection, _, _)) => {
+            let pip_t =
+                Tensor::from_vec(selection.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
+            model.install_gate_pip(GateKind::Identity, &pip_t)?;
+        }
+        // Variational spike-and-slab: SGD fits `σ(S/τ)` alongside the
+        // embedding, regularized by the KL added to the training loss below.
+        None => {
+            model.enable_feature_gate(
+                FeatureGateSpec {
+                    temperature: args.feature_gate_temp,
+                },
+                &varmap,
+                &dev,
+            )?;
+            info!(
+                "Learned feature gate enabled (temperature = {:.3}); no count-scan sampler runs",
+                args.feature_gate_temp
+            );
+        }
     }
 
     let mut opt = AdamW::new(
@@ -534,28 +611,34 @@ pub fn fit_cell_activity_graph_embedding(
         // The chain is WARM-STARTED from the previous round's `final_z`, so a
         // refresh needs far fewer sweeps than the cold run — that is exactly
         // what `DimBlockResult::final_z` exists for.
-        if epoch > 0
-            && args.selection_refresh_epochs > 0
-            && epoch % args.selection_refresh_epochs == 0
-        {
-            let e_cell_now = tensor_to_mat(&model.e_cell)?;
-            let e_flat = sel_state.frozen_e_from_cells(&e_cell_now);
-            let (sel_new, z_new) = sel_state.sample(
-                &e_flat,
-                &crate::cell_activity_graph_embedding::selection::SelectArgs {
-                    sweeps: args.selection_refresh_sweeps,
-                    burnin: args.selection_refresh_sweeps / 2,
-                    seed: c.seed.wrapping_add(epoch as u64),
-                },
-                Some(sel_z.clone()),
-            );
-            sel_z = z_new;
-            let pip_t = Tensor::from_vec(sel_new.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
-            model.install_gate_pip(GateKind::Identity, &pip_t)?;
-            let m: f32 = sel_new.pip.iter().sum::<f32>() / sel_new.pip.len() as f32;
-            info!("epoch {epoch}: pip refreshed against e_cell, mean = {m:.4}");
+        if let Some((_, sel_state, sel_z)) = sampled_selection.as_mut() {
+            if epoch > 0
+                && args.selection_refresh_epochs > 0
+                && epoch % args.selection_refresh_epochs == 0
+            {
+                let e_cell_now = tensor_to_mat(&model.e_cell)?;
+                let e_flat = sel_state.frozen_e_from_cells(&e_cell_now);
+                let (sel_new, z_new) = sel_state.sample(
+                    &e_flat,
+                    &crate::cell_activity_graph_embedding::selection::SelectArgs {
+                        sweeps: args.selection_refresh_sweeps,
+                        burnin: args.selection_refresh_sweeps / 2,
+                        seed: c.seed.wrapping_add(epoch as u64),
+                    },
+                    Some(sel_z.clone()),
+                );
+                *sel_z = z_new;
+                let pip_t =
+                    Tensor::from_vec(sel_new.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
+                model.install_gate_pip(GateKind::Identity, &pip_t)?;
+                let m: f32 = sel_new.pip.iter().sum::<f32>() / sel_new.pip.len() as f32;
+                info!("epoch {epoch}: pip refreshed against e_cell, mean = {m:.4}");
+            }
+            // Draws this epoch's hard `z ~ Bern(pip)`. A no-op without a pip,
+            // and meaningless under the learned gate, which carries the
+            // differentiable expectation `E[z·β] = α·E` instead of a draw.
+            model.resample_gate_mask()?;
         }
-        model.resample_gate_mask()?;
         perm.shuffle(&mut rng_master);
         // Optional cost lever: visit a random subset of the gene axis this
         // epoch. Stochastic coverage, NOT axis selection — every gene stays
@@ -576,6 +659,10 @@ pub fn fit_cell_activity_graph_embedding(
         let mut per_level_acc: Option<Tensor> = None;
         let mut pair_acc: Option<Tensor> = None;
         let mut chunk_count: usize = 0;
+        // Genes this epoch will actually visit — the KL amortization divides by
+        // it (see the `gate_kl` block), so `--genes-per-epoch` shortens the
+        // epoch without changing how hard the prior pulls per gene seen.
+        let epoch_genes = perm.len().max(1);
         for chunk in perm.chunks(args.gene_batch_size) {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -615,13 +702,19 @@ pub fn fit_cell_activity_graph_embedding(
             let CageLossOut {
                 per_level: per_level_gl,
                 mean_abs_pair,
-            } = cage_nce_loss_per_level(&model, cb_batches, &gene_ids_u32, &dev)?; // [G, L]
-                                                                                   // NB-Fisher per-gene precision: scale each gene's row of the
-                                                                                   // per-level loss by w_g ∈ (0,1] before summing, so high-mean /
-                                                                                   // high-dispersion housekeeping genes contribute less gradient
-                                                                                   // (the loss-side analog of bge's count·fisher positive draw and
-                                                                                   // lc's `apply_gene_weights` on the gene basis). Coverage stays
-                                                                                   // uniform — every gene is still visited once per epoch.
+            } = cage_nce_loss_per_level(
+                &model,
+                cb_batches,
+                &gene_ids_u32,
+                args.nce_objective.to_ge(),
+                &dev,
+            )?; // [G, L]
+                // NB-Fisher per-gene precision: scale each gene's row of the
+                // per-level loss by w_g ∈ (0,1] before summing, so high-mean /
+                // high-dispersion housekeeping genes contribute less gradient
+                // (the loss-side analog of bge's count·fisher positive draw and
+                // lc's `apply_gene_weights` on the gene basis). Coverage stays
+                // uniform — every gene is still visited once per epoch.
             let per_level_gl = match fisher_weights.as_ref() {
                 Some(w) => {
                     let w_chunk: Vec<f32> = gene_ids.iter().map(|&g| w[g]).collect();
@@ -639,6 +732,29 @@ pub fn fit_cell_activity_graph_embedding(
                 let gene_l2 = (model.e_feat.sqr()?.mean_all()? * lam)?;
                 total = (total + cell_l2)?;
                 total = (total + gene_l2)?;
+            }
+            // The learned gate is variational, so its spike-and-slab KL is part
+            // of the objective — without it the gate has nothing pulling it
+            // toward the prior and simply never selects. `gate_kl` returns
+            // `None` under a sampled mask (no learned Vars to regularize), so
+            // this is a no-op on that arm.
+            //
+            // Weight is `λ · chunk / genes_this_epoch`, so the per-epoch total
+            // is exactly `λ · KL` however the epoch is chunked. geu divides by
+            // its minibatch size instead (`training.rs:288-296`), which works
+            // there because a step is a fraction of one pass; cage takes
+            // ~G/chunk steps per epoch, so dividing by the chunk would make the
+            // prior's strength scale with `1/chunk²` — i.e. `--gene-batch-size`,
+            // a performance knob, would silently retune the regularization.
+            //
+            // NOTE this is a global O(G·H) KL evaluated per STEP, which is what
+            // makes `--gate-mode learned` slower than the sampler it replaces
+            // (measured: +17s/5 epochs at chunk 64, +6s at chunk 256). A
+            // row-subset KL over just this chunk's genes would be both cheaper
+            // and identically scaled; not done yet.
+            if let Some(kl) = model.gate_kl()? {
+                let w = GATE_KL_WEIGHT * gene_ids.len() as f64 / epoch_genes as f64;
+                total = (total + (kl * w)?)?;
             }
             // Global-norm clip before the step. The NCE loss spikes when a
             // chunk draws a gene whose active edges are nearly all positives,
@@ -780,11 +896,25 @@ pub fn fit_cell_activity_graph_embedding(
     // gene axis. There is no HVG row subset to mirror any more: HVG weights the
     // projection, so every gene is trained and every gene gets a row here.
     //
-    // These are the trained effects as-is. The selection is NOT re-applied on
-    // top and no `pip` ships to let anyone re-apply it: the gate was dropout
-    // over the gradient, so what it did is already expressed in the values
-    // below. Multiplying them by a keep-rate would shrink a second time for a
-    // selection that was never a coefficient.
+    // What ships depends on which gate ran, because the two mean different
+    // things and `e_gene_out` is ALSO the frozen dictionary `project_pairs`
+    // scores every cell pair against. Shipping the wrong one would put the pair
+    // latent — and so every link community — on a feature side the fit never
+    // trained under, which is the defect commit 91c50a65 fixed in geu.
+    //
+    //   sampled: the trained effects as-is. The mask is NOT re-applied and no
+    //   `pip` ships to let anyone re-apply it — it was dropout over the
+    //   gradient, so its effect is already in these values, and multiplying by
+    //   a keep-rate would shrink twice for something that was never a
+    //   coefficient.
+    //
+    //   learned: `σ(S/τ)` multiplied the loading on every step, so it IS part
+    //   of the fitted coefficient. `materialize_e_feat` bakes it in, reading
+    //   the raw Var so a second call cannot gate twice.
+    if sampled_selection.is_none() {
+        model.materialize_e_feat()?;
+        info!("Baked the learned gate into the shipped feature embedding");
+    }
     let e_gene_out = tensor_to_mat(&model.e_feat)?;
     let b_gene_out = tensor_to_mat_1d(&model.b_feat)?;
 
@@ -793,6 +923,19 @@ pub fn fit_cell_activity_graph_embedding(
         (Some(&gene_names), Some("feature")),
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
+
+    // The learned gate's inclusion table `α = σ(S/τ)`. Reported here — unlike
+    // the sampled arm's `pip`, which stays unwritten — because α is a fitted
+    // coefficient the run stands behind, not a dropout rate. `feature_selection`
+    // returns `None` under an installed pip, so this is empty on that arm.
+    if let Some(alpha) = model.feature_selection()? {
+        tensor_to_mat(&alpha)?.to_parquet_with_names(
+            &(c.out.to_string() + ".feature_selection.parquet"),
+            (Some(&gene_names), Some("feature")),
+            Some(&embedding_col_names(args.embedding_dim)),
+        )?;
+        info!("Wrote {}.feature_selection.parquet", c.out);
+    }
 
     b_gene_out.to_parquet_with_names(
         &(c.out.to_string() + ".gene_bias.parquet"),
