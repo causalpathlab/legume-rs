@@ -104,7 +104,7 @@ use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
-use graph_embedding_util::loss::{build_per_batch_cell_samplers, PbChainFilter};
+use graph_embedding_util::loss::{build_per_batch_cell_samplers, embedding_ridge, PbChainFilter};
 use graph_embedding_util::model::{
     FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit,
 };
@@ -797,11 +797,11 @@ pub fn fit_cell_activity_graph_embedding(
             let mut total = loss.clone();
 
             if args.embedding_l2 > 0.0 {
+                // geu's ridge, not a local copy: the reduction is the whole
+                // content of this penalty and it was wrong here in the same way.
                 let lam = args.embedding_l2 as f64;
-                let cell_l2 = (model.e_cell.sqr()?.mean_all()? * lam)?;
-                let gene_l2 = (model.e_feat.sqr()?.mean_all()? * lam)?;
-                total = (total + cell_l2)?;
-                total = (total + gene_l2)?;
+                total = (total + embedding_ridge(&model.e_cell, lam)?)?;
+                total = (total + embedding_ridge(&model.e_feat, lam)?)?;
             }
             // The learned gate is variational, so its spike-and-slab KL is part
             // of the objective — without it the gate has nothing pulling it
