@@ -805,30 +805,34 @@ pub fn fit_cell_activity_graph_embedding(
             }
             // The learned gate is variational, so its spike-and-slab KL is part
             // of the objective — without it the gate has nothing pulling it
-            // toward the prior and simply never selects. `gate_kl` returns
+            // toward the prior and simply never selects. Both KL calls return
             // `None` under a sampled mask (no learned Vars to regularize), so
             // this is a no-op on that arm.
             //
+            // Over the WHOLE table, deliberately, even though
+            // `JointEmbedModel::gate_kl_rows` offers an unbiased chunk-sized
+            // estimate that is ~12s/5ep cheaper here.
+            //
+            // The per-epoch gradient SUMS are equal — full table gives each gene
+            // `G/chunk` gradients of `w/(G·H)`, the subset gives one of
+            // `w/(chunk·H)` — but the optimizer is AdamW, not SGD. A parameter
+            // touched once per 283 steps has its second moment decay and its
+            // momentum fill with zeros between visits, so the same gradient mass
+            // delivered sparsely moves it far less. Measured at λ=1000: the
+            // full-table KL leaves 32% of α below 0.5, the row subset leaves 0%
+            // and the gate stops selecting. Switching would need λ re-tuned.
+            //
             // Weight is `λ · chunk_mass / epoch_mass`, both Fisher-weighted to
-            // match the data term. What this buys is that the prior's SHARE of
-            // the objective, `w/u`, does not move with `--gene-batch-size`, with
-            // the experimental-batch count, or with the dataset's mean gene
-            // weight: `u` is the mass `per_level_gl.sum_all()` collapses, and
-            // `chunk_mass` is the same quantity, so it cancels.
+            // match the data term, so the prior's SHARE does not move with
+            // `--gene-batch-size`, the experimental-batch count, or the
+            // dataset's mean gene weight.
             //
             // Two sensitivities remain, both deferred as behavioural: the weight
-            // omits the `n_chain_levels` factor the data term carries, so
-            // `--chain-levels` retunes the prior; and it references
-            // the epoch's gene count rather than a fixed constant, so
-            // `--genes-per-epoch`
-            // does too. geu is calibrated against `GATE_KL_REF_UNITS` instead,
-            // which is why its gate is ~36x stronger than cage's here.
-            //
-            // NOTE this is a global O(G·H) KL evaluated per STEP, which is what
-            // makes `--gate-mode learned` slower than the sampler it replaces
-            // (measured: +17s/5 epochs at chunk 64, +6s at chunk 256). A
-            // row-subset KL over just this chunk's genes would be both cheaper
-            // and identically scaled; not done yet.
+            // omits the `n_chain_levels` factor the data term carries, and it
+            // references the epoch's gene count rather than a fixed constant, so
+            // `--chain-levels` and `--genes-per-epoch` still retune it. geu
+            // calibrates against `GATE_KL_REF_UNITS` instead, which is why the
+            // two tools' λ are not on one scale.
             if let Some(kl) = model.gate_kl()? {
                 let w = args.gate_kl_weight * chunk_mass / epoch_mass;
                 total = (total + (kl * w)?)?;
