@@ -22,7 +22,7 @@ use crate::loss::{
     sample_stratified_edge_batch, EdgeBatch, PerBatchStratifiedCellSampler,
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
-use crate::model::{JointEmbedModel, GATE_KL_WEIGHT};
+use crate::model::{gate_kl_step_weight, JointEmbedModel, GATE_KL_WEIGHT};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
@@ -247,10 +247,22 @@ pub fn train_composite(
         .map(|a| a.sampler.n_units())
         .max()
         .unwrap_or(0);
-    let batches_per_epoch = params.batches_per_epoch.unwrap_or_else(|| {
-        let bs = params.batch_size.max(1);
-        max_axis_units.div_ceil(bs).max(1)
-    });
+    let batches_per_epoch = resolve_batches_per_epoch(params, max_axis_units);
+    // The gate KL used to be `λ/batch_size`; it is now pinned to the reference
+    // so a throughput knob stops retuning feature sparsity. At the default that
+    // is the same number, but a non-default `--batch-size` DOES change results
+    // versus older builds, so say so rather than let it look like seed noise.
+    if params.batch_size as f64 != crate::model::GATE_KL_REF_UNITS
+        && ctx.axes.iter().any(|a| a.model.gate.is_some())
+    {
+        info!(
+            "gate KL is pinned at 1/{:.0} (was 1/batch_size); with --batch-size {} \
+             the gate is {:.2}x the strength older builds applied",
+            crate::model::GATE_KL_REF_UNITS,
+            params.batch_size,
+            params.batch_size as f64 / crate::model::GATE_KL_REF_UNITS
+        );
+    }
     log::info!(
         "train_composite: {} epochs × {} batches (auto={}, max_axis_units={})",
         params.epochs,
@@ -285,14 +297,25 @@ pub fn train_composite(
                 loss = (loss + l2)?;
             }
             // SuSiE single-effect KL on the gate (identity + velocity): the fixed
-            // `GATE_KL_WEIGHT · (categorical + Gaussian) KL`, AMORTIZED by the minibatch
-            // size — the likelihood term is a per-edge MEAN over `batch_size` edges, so
-            // scaling the (per-gene mean) KL by `1/B` puts the two on the same per-example
-            // footing (weight `1` ⇒ the `1/B` scale). `None` when the gate is off. The
-            // shared gate lives on every axis identically; axes[0] is the representative
-            // (counted once, not once per axis).
+            // `GATE_KL_WEIGHT · (categorical + Gaussian) KL`. `None` when the gate is
+            // off. The shared gate lives on every axis identically; axes[0] is the
+            // representative (counted once, not once per axis).
+            //
+            // Weighted by `gate_kl_step_weight`. `data_units = 1` is deliberate: it
+            // reproduces the historical level `λ/1024` EXACTLY at the default
+            // `--batch-size`, which is what makes this a correctness fix. The share
+            // `w/u` therefore still carries a `1/axis_count` factor, so
+            // `--phase1-cells-per-pb` and `--num-levels` continue to retune the prior.
+            // Normalizing that away is a real behavioural change and is deferred.
+            //
+            // This replaced `GATE_KL_WEIGHT / batch_size`, which made that share
+            // `∝ 1/B`: `--batch-size 4096` quartered the prior and `64` raised it 16×,
+            // so a throughput flag retuned feature sparsity. At the default
+            // `--batch-size 1024` — which both `senna bge` and `faba gem` carry — the
+            // new weight is numerically identical to the old one, so default runs are
+            // unchanged.
             if let Some(kl) = ctx.axes[0].model.gate_kl()? {
-                let w = GATE_KL_WEIGHT / params.batch_size.max(1) as f64;
+                let w = gate_kl_weight_for(params);
                 loss = (loss + kl.affine(w, 0.0)?)?;
             }
             // L2 (ridge) shrinkage on the per-gene splice offset δ_g (factored
@@ -376,8 +399,36 @@ pub fn train_composite(
     Ok(last_avg)
 }
 
+/// The gate-KL weight this trainer applies to a step, given its resolved
+/// params. Extracted so the invariance test exercises THIS expression rather
+/// than re-deriving one beside it — a test that recomputes the formula it is
+/// checking cannot fail when the formula changes.
+///
+/// `data_units = 1` is deliberate and is NOT the axis count the helper's
+/// general contract describes: it reproduces the historical level `λ/1024`
+/// exactly at the default `--batch-size`, which is what keeps this a
+/// correctness fix. The consequence is that the prior's share still carries a
+/// `1/axis_count` factor, so `--phase1-cells-per-pb` and `--num-levels` retune
+/// it; normalizing that away changes default results and is deferred.
+pub fn gate_kl_weight_for(_params: &TrainingParams) -> f64 {
+    gate_kl_step_weight(GATE_KL_WEIGHT, 1)
+}
+
+/// Resolve the per-epoch step budget: an explicit override, or auto = one
+/// weighted pass over the largest axis.
+///
+/// Lifted out of `train_composite` so the gate-KL invariance test can call it
+/// without standing up a training context.
+pub fn resolve_batches_per_epoch(params: &TrainingParams, max_axis_units: usize) -> usize {
+    params.batches_per_epoch.unwrap_or_else(|| {
+        let bs = params.batch_size.max(1);
+        max_axis_units.div_ceil(bs).max(1)
+    })
+}
+
 /// One training step — sample a minibatch from every
 /// axis, compute each axis's NCE loss, return the λ-weighted sum.
+///
 fn sum_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,

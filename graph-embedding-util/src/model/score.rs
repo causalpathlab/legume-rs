@@ -132,9 +132,18 @@ impl JointEmbedModel {
     ) -> Result<Tensor> {
         let b = e_f_neg.dim(0)?;
         let k = e_f_neg.dim(1)?;
-        let h = e_f_neg.dim(2)?;
-        let e_c_expanded = e_c.unsqueeze(1)?.broadcast_as((b, k, h))?;
-        let dot = (e_f_neg * e_c_expanded)?.sum(2)?;
+        // Batched mat-vec, not broadcast-multiply-then-sum. Both compute
+        // `Σ_h e_f_neg[i,k,h] · e_c[i,h]`, but the broadcast form materializes a
+        // `[B, K, H]` product that backward turns into several more of the same,
+        // and the expanded `e_c` has its stride-0 dim BETWEEN two non-zero
+        // strides — the one layout candle's `offsets_b()` rejects, so it fell
+        // through to a scalar `StridedIndex` loop with no SIMD and no threading.
+        //
+        // Measured in `pinto cage`, which had re-derived this same expression:
+        // forward 18.1s → 7.4s and backward 39.4s → 16.3s over 5 epochs, taking
+        // the whole run from 122s to 86s. `senna bge` and `faba gem` reach this
+        // through `nce_loss`, so they inherit it.
+        let dot = e_f_neg.matmul(&e_c.unsqueeze(2)?)?.squeeze(2)?; // [B, K]
         let b_c_b = b_c.unsqueeze(1)?.broadcast_as((b, k))?;
         (dot + b_f_neg)? + b_c_b
     }
