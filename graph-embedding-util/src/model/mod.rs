@@ -23,8 +23,9 @@ mod score;
 mod vars;
 
 pub use gate::{
-    gate_kl_step_weight, FeatureGateSpec, GateKind, GATE_EFFECT_PRIOR_VAR, GATE_KL_REF_UNITS,
-    GATE_KL_STEP_WEIGHT, GATE_KL_WEIGHT, GATE_PI_BETA_A, GATE_PI_BETA_B,
+    gate_kl_step_weight, ibp_alpha_for_drop, ibp_gate_logit_bias, FeatureGateSpec, GateKind,
+    GATE_EFFECT_PRIOR_VAR, GATE_IBP_LOGIT_DROP, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT,
+    GATE_KL_WEIGHT,
 };
 use vars::{
     build_feat_factor, register_randn_seeded, register_var_from_mat, register_var_from_slice,
@@ -90,7 +91,7 @@ pub struct ShareFeaturesArgs<'a> {
     /// is a pb head — not the cell model — whenever `--phase1-cells-per-pb` is 0 (the
     /// default in both CLIs). Leaving it `None` makes `gate_kl` return `None` and the
     /// gate regularisation disappear from the loss with the build green.
-    pub shared_gate_pi_logit: Option<Tensor>,
+    pub shared_gate_ibp_bias: Option<Tensor>,
     /// Gate configuration shared across heads. `None` when the gate is off.
     pub gate: Option<FeatureGateSpec>,
 }
@@ -172,10 +173,6 @@ pub struct FeatFactor {
     /// This epoch's `z ~ Bern(delta_gate_pip)`, shared across axes like the identity
     /// mask. `None` ⇒ use the mean.
     pub delta_gate_mask: Option<Arc<Mutex<Option<Tensor>>>>,
-    /// Per-dim inclusion rate logits `[H]` for the VELOCITY gate — `π_h = σ(·)`.
-    /// Separate from the identity gate's, because a loading and a deviation from it
-    /// are not on one scale. `Some` iff `s_delta` is.
-    pub delta_pi_logit: Option<Tensor>,
 }
 
 impl FeatFactor {
@@ -269,7 +266,17 @@ pub struct JointEmbedModel {
     /// `--phase1-cells-per-pb` is 0 — the default in both CLIs. A head without it makes
     /// `gate_kl` return `None`, and the entire gate regularisation leaves the loss with
     /// the build green. Do not un-share it.
-    pub gate_pi_logit: Option<Tensor>,
+    ///
+    /// The IBP ladder inherits that hazard in a nastier form: a head with
+    /// `gate_ibp_bias: None` still gates and still trains, it just silently drops
+    /// the per-dim prior — no `None`, no error, just a fit with no ordering on its
+    /// dims. `every_shared_head_carries_the_ibp_ladder` pins it.
+    ///
+    /// A constant, not a `Var`: `α` is chosen, so this has no gradient and is not
+    /// a checkpointed parameter. Both gates share ONE ladder — it is a function of
+    /// `α` and `H` alone, so the identity and velocity gates cannot disagree about
+    /// it the way they legitimately disagree about a learned rate.
+    pub gate_ibp_bias: Option<Tensor>,
     /// Gate configuration (`None` = ungated). Presence is the single "is gated" flag
     /// for both free (`s_feat`) and factored (`factor.s_beta`) models.
     pub gate: Option<FeatureGateSpec>,
@@ -323,7 +330,7 @@ impl JointEmbedModel {
             e_feat_logstd: None,
             gate_pip: None,
             gate_mask: Arc::new(Mutex::new(None)),
-            gate_pi_logit: None,
+            gate_ibp_bias: None,
             gate: None,
         })
     }
@@ -352,7 +359,7 @@ impl JointEmbedModel {
             shared_s_feat,
             shared_e_feat_raw,
             shared_e_feat_logstd,
-            shared_gate_pi_logit,
+            shared_gate_ibp_bias,
             gate,
         } = args;
         let e_name = format!("{var_prefix}_e_cell");
@@ -375,7 +382,7 @@ impl JointEmbedModel {
             e_feat_logstd: shared_e_feat_logstd,
             gate_pip: None,
             gate_mask: Arc::new(Mutex::new(None)),
-            gate_pi_logit: shared_gate_pi_logit,
+            gate_ibp_bias: shared_gate_ibp_bias,
             gate,
         })
     }
@@ -434,7 +441,7 @@ impl JointEmbedModel {
             e_feat_logstd: None,
             gate_pip: None,
             gate_mask: Arc::new(Mutex::new(None)),
-            gate_pi_logit: None,
+            gate_ibp_bias: None,
             gate: None,
         })
     }
@@ -473,7 +480,7 @@ impl JointEmbedModel {
                 shared_s_feat: None,
                 shared_e_feat_raw: None,
                 shared_e_feat_logstd: None,
-                shared_gate_pi_logit: self.gate_pi_logit.clone(),
+                shared_gate_ibp_bias: self.gate_ibp_bias.clone(),
                 gate: self.gate,
             },
             varmap,

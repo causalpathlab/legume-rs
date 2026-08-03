@@ -1,9 +1,26 @@
 //! The feature gate: the spike-and-slab selection that multiplies every feature
-//! loading, plus the constants it is calibrated by and the KL it pays for.
+//! loading, plus the fixed IBP ladder that orders its dims and the effect ridge
+//! it pays for.
 //!
-//! One closed system, so one module. The logit / effect-log-std / `π_h` tables,
-//! the `α = σ(S/τ)` lookup, the frozen-`pip` jitter path and the KL all read each
-//! other's private helpers, and nothing outside the gate reads any of them.
+//! One closed system, so one module. The logit / effect-log-std tables, the
+//! ladder, the `α = σ((S + b)/τ)` lookup, the frozen-`pip` jitter path and the
+//! prior term all read each other's private helpers, and nothing outside the
+//! gate reads any of them.
+//!
+//! # The selection prior is structural, not a penalty
+//!
+//! Sparsity pressure comes from [`ibp_gate_logit_bias`] — a fixed per-dim logit
+//! offset with no weight to choose — and NOT from a KL. Every consumer here
+//! (`senna bge`, `faba gem` phase-1, `pinto cage`) optimizes a noise-contrastive
+//! objective, which bounds no marginal likelihood, so a KL added to it would be a
+//! penalty with a free coefficient rather than a term of a bound. That is not a
+//! stylistic objection: the coefficient it replaced needed `λ ≈ 1000` in cage
+//! against `1/1024` in geu and moved with Fisher mass, chain levels and
+//! genes-per-epoch besides.
+//!
+//! What survives is the Gaussian effect term, which is honestly an `α`-weighted
+//! ridge on the loading. It stays because `faba gem` pins `feature_embedding_l2 = 0`
+//! under β-sharing and has no other shrinkage on `β`.
 
 use candle_util::candle_core::{DType, Device, Result, Tensor};
 use candle_util::candle_nn::{self, VarMap};
@@ -60,36 +77,49 @@ pub enum GateKind {
 /// Bernoullis (`D`), so no rescaling connects them: measured on one fit that both
 /// trained and sampled, `Spearman(normalized gate, PIP) = 0.021`.
 ///
-/// # Per-dim mass is now SOFT, via a learned `π_h`
+/// # Per-dim mass is ordered by a fixed IBP ladder
 ///
 /// The softmax pinned each dim's mass at exactly 1.000 by construction. A sigmoid
-/// constrains nothing, so mass control moves into the prior: `KL(Bern(α) ‖ Bern(π_h))`
-/// pulls each dim's expected mass `Σ_g α_{g,h}` toward `D·π_h`, with `π_h` learned
-/// per dim exactly as `posterior::hyper::sample_pi0` learns it for the sampler.
+/// constrains nothing, so mass control moves into the prior — but as STRUCTURE, not
+/// as a penalty. Dim `h` carries a fixed logit offset `h · ln(α/(α+1))`
+/// ([`ibp_gate_logit_bias`]), so inclusion decays geometrically with the dim index
+/// and the fit must spend dim 0 before dim 7.
 ///
-/// This is a real weakening and the failure mode is on record: when per-dim mass last
-/// went unconstrained, column sums on a 12k BMMC fit ran 167–536, a 3.2× spread, with
-/// the top two dims taking 25.7% of all selected mass against 12.5% uniform. Report
-/// the spread on any new fit rather than assuming `π_h` handles it.
+/// This replaced a `KL(Bern(α) ‖ Bern(π_h))` against a learned `π_h` under a
+/// `Beta(1,9)` hyperprior. That form could not express an ordering at all: with
+/// ~18k features on every dim an `O(1)` Beta is outvoted, so each unused dim
+/// re-estimated the same rate instead of collapsing. The ladder squeezes the tail
+/// by construction, which no amount of data can outvote — and, unlike a KL, it has
+/// no coefficient to calibrate.
 ///
-/// # KL loss
+/// Per-dim mass is still only SOFTLY controlled, and the failure mode is on record:
+/// when it last went unconstrained, column sums on a 12k BMMC fit ran 167–536, a
+/// 3.2× spread, with the top two dims taking 25.7% of all selected mass against
+/// 12.5% uniform. Report the spread on any new fit rather than assuming the ladder
+/// handles it.
 ///
-/// Always added, at the fixed [`GATE_KL_WEIGHT`], scaled by
-/// [`gate_kl_step_weight`] so the share of the objective it occupies does not
-/// move when a throughput knob does:
+/// # What the loss still carries
 ///
-///   `loss += mean_{g,h}[ KL(Bern(α_{g,h}) ‖ Bern(π_h)) + α_{g,h}·KL(N(E,σ²) ‖ N(0,σ₀²)) ]`
-///          `+ Σ_h −log Beta(π_h; a, b)`
+/// Only the inclusion-weighted Gaussian effect term, at the fixed
+/// [`GATE_KL_WEIGHT`] scaled by [`gate_kl_step_weight`]:
 ///
-/// with `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`] and `(a,b) =`
-/// [`GATE_PI_BETA_A`]/[`GATE_PI_BETA_B`]. Both mean-reduced terms are `O(1)` per
-/// entry, so unlike the softmax form neither needs a `ln D` or `D` correction to
-/// stay commensurate with the other — see [`JointEmbedModel::single_gate_kl`] for
-/// why that matters and what it cost last time.
+///   `loss += mean_{g,h}[ α_{g,h} · KL(N(E,σ²) ‖ N(0,σ₀²)) ]`
+///
+/// with `σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]. Read it as an `α`-weighted ridge on the
+/// loading rather than as a variational term — see
+/// [`JointEmbedModel::single_gate_kl`] for why it survives and the two others did
+/// not. Weighting by `α` is load-bearing: a coordinate the gate switched off must
+/// not still pay a prior for a loading nothing reads.
 #[derive(Clone, Copy, Debug)]
 pub struct FeatureGateSpec {
     /// Gate temperature `τ` (`1.0` = plain sigmoid; `< 1` sharpens toward 0/1).
     pub temperature: f32,
+    /// Truncated-IBP concentration `α` for the per-dim inclusion ladder, or `None`
+    /// to derive it from [`GATE_IBP_LOGIT_DROP`] and the embedding dim — see
+    /// [`ibp_alpha_for_drop`]. `α` is CHOSEN, never fitted: it is the one
+    /// interpretable sparsity knob, and it replaced a `KL(Bern(α)‖Bern(π))` whose
+    /// weight had no natural scale under a non-variational (NCE) objective.
+    pub ibp_alpha: Option<f64>,
 }
 
 /// Effect-prior variance `σ₀²` for the Gaussian KL `KL(N(μ,σ²) ‖ N(0,σ₀²))`.
@@ -144,20 +174,75 @@ pub fn gate_kl_step_weight(kl_weight: f64, data_units: usize) -> f64 {
 /// general form above exists for callers whose `data_units` varies, and geu's
 /// does not.
 pub const GATE_KL_STEP_WEIGHT: f64 = GATE_KL_WEIGHT / GATE_KL_REF_UNITS;
-/// `Beta(a, b)` hyperprior on each dim's inclusion rate `π_h`.
-///
-/// **Mind the convention.** `posterior::hyper::sample_pi0` draws `π₀ = P(OFF)` under
-/// `Beta(9, 1)`, centred on 0.9 OFF. `π_h` here is `P(ON)`, so the matching prior is
-/// the mirror image, `Beta(1, 9)`, centred on 0.1 — the same 10% inclusion the
-/// sampler assumes. With `a = 1` the `(a−1)·ln π` term vanishes and only
-/// `(b−1)·ln(1−π)` survives, which is bounded as `π → 0`; that is deliberate, since
-/// the `Dirichlet(α<1)` analogue the softmax gate rejected ran away at the boundary.
-pub const GATE_PI_BETA_A: f64 = 1.0;
-/// See [`GATE_PI_BETA_A`] — `b = 9` centres `π_h` on `a/(a+b) = 0.1`.
-pub const GATE_PI_BETA_B: f64 = 9.0;
-/// Keeps `π_h` and `α` off the 0/1 boundary so `ln π`, `ln(1−π)` stay finite.
+/// Keeps `α` off the 0/1 boundary so the logs downstream stay finite.
 /// Mirrors `posterior::hyper::PI0_EPS`, which does the same job for the sampler.
 const GATE_PI_EPS: f64 = 1e-6;
+
+/// Total logit drop the DEFAULT IBP ladder spans from dim `0` to dim `H−1`.
+///
+/// Set equal to [`GATE_LOGIT_INIT`] on purpose: dim 0 starts at `σ(4) ≈ 0.98` and
+/// the last dim at `σ(4 − 4) = σ(0) = 0.5`, the sigmoid's most responsive point.
+/// So the ladder biases the tail without freezing it, and it is the DATA that
+/// decides whether a late dim lives.
+///
+/// # Why the gate cannot use the sampler's `α`
+///
+/// `posterior::hyper::ibp_pi0` runs at `α = 1`, whose inclusion rates are
+/// `0.5, 0.25, 0.125, …` — a ~11-logit drop by dim 16. Handing that to a
+/// GRADIENT-trained gate does not make it sparse, it makes it small: at
+/// `σ(4 − 11) ≈ 0.001` the multiplier is ~0 **and** `dα/dS ≈ 0`, so the dim is
+/// frozen at init before a single gradient arrives. That is the exact failure
+/// [`GATE_LOGIT_INIT`] warns about — "Gibbs can turn a coordinate back on from a
+/// likelihood ratio; gradient descent cannot recover from a zeroed multiplier".
+/// Gibbs tolerates a steep ladder because a resurrection is one likelihood ratio
+/// away. SGD does not, so the gate's `α` is a genuinely different quantity from
+/// the sampler's and is chosen against a different constraint: keep the tail
+/// RESPONSIVE, and let selection be earned rather than imposed by construction.
+pub const GATE_IBP_LOGIT_DROP: f64 = GATE_LOGIT_INIT as f64;
+
+/// The IBP concentration whose ladder falls exactly `drop` logits across `h` dims.
+///
+/// Inverts [`ibp_gate_logit_bias`]: that bias is `h · ln v` with `v = α/(α+1)`, so
+/// a target drop of `(h−1)·ln(1/v)` gives `v = exp(−drop/(h−1))`. `h < 2` has no
+/// ladder to speak of and returns a large `α` (a flat, effectively absent prior).
+#[must_use]
+pub fn ibp_alpha_for_drop(h: usize, drop: f64) -> f64 {
+    if h < 2 || drop <= 0.0 {
+        return f64::MAX.sqrt(); // v → 1: no tilt
+    }
+    let v = (-drop / (h - 1) as f64).exp();
+    v / (1.0 - v)
+}
+
+/// Per-dim gate logit bias from a truncated IBP ladder: `b_h = h · ln v`,
+/// `v = α/(α+1)`.
+///
+/// # This is the IBP's SHAPE, anchored at dim 0
+///
+/// The IBP's inclusion rates are `π_h = v^{h+1}` (`posterior::hyper::ibp_pi0`
+/// returns their complement, the EXCLUSION rates). Their geometric decay — a
+/// constant factor `v` per dim, so a constant `ln v` per dim in log-odds — is the
+/// whole content of the prior: it breaks the exchangeability of the latent dims
+/// so the fit must spend dim 0 before dim 7, which an independent `Beta(a,b)` per
+/// dim cannot express at all. With ~18k features on every dim an `O(1)` Beta is
+/// simply outvoted, and each unused dim re-estimates the same rate instead of
+/// collapsing.
+///
+/// What is dropped is the ABSOLUTE level: `b_0 = 0` rather than `logit(v)`,
+/// because the gate's overall level is already set by [`GATE_LOGIT_INIT`], chosen
+/// so an untrained gate is ~the identity. Re-adding an absolute offset would
+/// fight that init for no modelling gain — the ordering is what the IBP buys, and
+/// the ordering is scale-free.
+///
+/// Side benefit worth naming: a decreasing ladder is also the cheapest fix for
+/// the `O(D)` rotation invariance that makes a free edge embedding average to
+/// zero. Ranked dims are not interchangeable, so there is no rotation to average
+/// over.
+#[must_use]
+pub fn ibp_gate_logit_bias(alpha: f64, h: usize) -> Vec<f64> {
+    let ln_v = (alpha / (alpha + 1.0)).ln();
+    (0..h).map(|j| j as f64 * ln_v).collect()
+}
 /// Initial gate logit. `σ(4) ≈ 0.982`, so an untrained gate is ~the identity and a
 /// fresh model's `Ẽ ≈ β` — the same "inert rather than biased" property the softmax
 /// gate got from a zero init (`softmax(0)·D = 1` exactly).
@@ -226,7 +311,7 @@ impl JointEmbedModel {
     ///
     /// The two cases must both be here, and in this order. `gate_weights` ignores its
     /// logits argument once a `pip` is installed, but it panics on an ungated model —
-    /// `apply_temperature` reads `self.gate` — so the learned branch may only be
+    /// `gate_logit_field` reads `self.gate` — so the learned branch may only be
     /// reached when `s_feat` exists.
     fn free_feature_multiplier(&self) -> Result<Option<Tensor>> {
         if self.gate_pip.is_some() {
@@ -279,11 +364,17 @@ impl JointEmbedModel {
         };
         // Per-dim inclusion rate `[H]`, init at the Beta prior's mean so an untrained
         // `π_h` states the prior rather than an arbitrary one.
-        let init_pi = |name: &str| -> Result<Tensor> {
-            let mean = GATE_PI_BETA_A / (GATE_PI_BETA_A + GATE_PI_BETA_B);
-            let logit = (mean / (1.0 - mean)).ln() as f32;
-            register(name, Tensor::from_vec(vec![logit; h], (h,), dev)?)
-        };
+        // The IBP ladder `[1, H]`. NOT registered in the varmap and NOT a `Var`:
+        // `α` is chosen, not fitted, so this carries no gradient and is not
+        // checkpointed as a parameter — it is reconstructible from `α` and `H`.
+        let alpha = spec
+            .ibp_alpha
+            .unwrap_or_else(|| ibp_alpha_for_drop(h, GATE_IBP_LOGIT_DROP));
+        let bias: Vec<f32> = ibp_gate_logit_bias(alpha, h)
+            .into_iter()
+            .map(|b| b as f32)
+            .collect();
+        self.gate_ibp_bias = Some(Tensor::from_vec(bias, (1, h), dev)?);
         // Effect log-std `[rows, H]`, init `GATE_LOGSTD_INIT` (near-deterministic start).
         let init_logstd = |name: &str, rows: usize| -> Result<Tensor> {
             register(
@@ -291,7 +382,6 @@ impl JointEmbedModel {
                 Tensor::from_vec(vec![GATE_LOGSTD_INIT; rows * h], (rows, h), dev)?,
             )
         };
-        self.gate_pi_logit = Some(init_pi("gate_pi_logit")?);
         match &mut self.factor {
             Some(f) => {
                 let n_genes = f.beta.dim(0)?;
@@ -301,7 +391,6 @@ impl JointEmbedModel {
                 if f.splice_delta.is_some() {
                     f.s_delta = Some(init_gate("s_delta", n_genes)?);
                     f.delta_logstd = Some(init_logstd("delta_logstd", n_genes)?);
-                    f.delta_pi_logit = Some(init_pi("delta_pi_logit")?);
                 }
             }
             None => {
@@ -326,18 +415,29 @@ impl JointEmbedModel {
         }
     }
 
-    /// Scale gate logits by the gate temperature `τ` (`1/τ` on the logits); an
-    /// Arc-cheap clone at `τ = 1`, which is what both CLIs pass. Shared by the gather
-    /// and the KL.
-    fn apply_temperature(&self, logits: &Tensor) -> Result<Tensor> {
+    /// The gate's effective logit field: the learned logits tilted by the fixed
+    /// IBP ladder, then scaled by the temperature `τ` — `(S + b)/τ`.
+    ///
+    /// The ladder is added BEFORE `τ` so sharpening cannot outrun the prior: at
+    /// small `τ` a tie between dims is still broken by their rank, which is the
+    /// point of having a ladder. `b` is a constant `[1, H]` with no gradient — the
+    /// prior is a fixed structure here, not something the fit negotiates with.
+    ///
+    /// Shared by the gather and the selection readout so a dim's rank affects what
+    /// the likelihood sees and what gets reported, identically.
+    fn gate_logit_field(&self, logits: &Tensor) -> Result<Tensor> {
         let tau = self
             .gate
-            .expect("apply_temperature called on an ungated model")
+            .expect("gate_logit_field called on an ungated model")
             .temperature;
+        let tilted = match &self.gate_ibp_bias {
+            Some(b) => logits.broadcast_add(b)?,
+            None => logits.clone(),
+        };
         if (tau - 1.0).abs() > f32::EPSILON {
-            logits.affine(1.0 / tau as f64, 0.0)
+            tilted.affine(1.0 / tau as f64, 0.0)
         } else {
-            Ok(logits.clone())
+            Ok(tilted)
         }
     }
 
@@ -367,7 +467,7 @@ impl JointEmbedModel {
         if let Some(p) = pip {
             return Ok(p.clone());
         }
-        candle_nn::ops::sigmoid(&self.apply_temperature(full_logits)?)
+        candle_nn::ops::sigmoid(&self.gate_logit_field(full_logits)?)
     }
 
     /// Install a frozen posterior inclusion table and switch the model to jitter mode.
@@ -540,7 +640,7 @@ impl JointEmbedModel {
         logits
             .map(|x| {
                 let g = x.index_select(rows, 0)?;
-                candle_nn::ops::sigmoid(&self.apply_temperature(&g)?)
+                candle_nn::ops::sigmoid(&self.gate_logit_field(&g)?)
             })
             .transpose()
     }
@@ -643,104 +743,72 @@ impl JointEmbedModel {
         w.mul(&per_entry)?.mean_all()
     }
 
-    /// One gate's spike-and-slab KL: the Bernoulli inclusion KL against the dim's
-    /// learned rate `π_h`, plus the inclusion-weighted Gaussian effect KL
-    /// (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]), plus `π_h`'s own Beta hyperprior. Shared
-    /// by the identity (`β`/`e_feat`) and velocity (`δ`) gates. In the autograd graph.
+    /// One learned gate's remaining prior term: the inclusion-weighted Gaussian
+    /// effect KL alone (`σ₀² =` [`GATE_EFFECT_PRIOR_VAR`]). Shared by the identity
+    /// (`β`/`e_feat`) and velocity (`δ`) gates. In the autograd graph.
     ///
-    /// # The three terms must stay commensurate
+    /// # What used to be here, and why it is gone
     ///
-    /// They are summed under one [`GATE_KL_WEIGHT`], so if their scales diverge the
-    /// largest silently sets the loss and the others stop existing. That is not
-    /// hypothetical — it is what happened when the gate's softmax moved from the dim
-    /// axis to the gene axis: `α` went from `≈1/(H+1)` to `≈1/D`, the forward pass
-    /// compensated via a `D` rescale and this function did not, and at
-    /// `D = 20287, H = 16` the effect prior came out **~49,000×** smaller than the
-    /// concentration term — numerically switched off.
+    /// This summed three terms: `KL(Bern(α) ‖ Bern(π_h))` against a learned per-dim
+    /// rate, this effect KL, and a `Beta(1,9)` hyperprior on `π_h`. The first and
+    /// third are gone, replaced by the fixed IBP ladder in
+    /// [`ibp_gate_logit_bias`], for a reason that is structural rather than
+    /// cosmetic: **these models do not optimize an ELBO.** `senna bge`, `faba gem`
+    /// phase-1 and `pinto cage` all optimize a noise-contrastive objective, which
+    /// bounds no marginal likelihood, so a "KL" added to it is not a term of
+    /// anything — it is a penalty whose weight is free. And a free weight is
+    /// exactly what refused to calibrate: it needed `λ ≈ 1000` in cage against
+    /// `1/1024` in geu, an ~89× gap, and moved with Fisher mass, chain-level count
+    /// and genes-per-epoch besides. A prior that has to be re-tuned per caller was
+    /// not encoding a belief, it was absorbing a scale error.
     ///
-    /// The Bernoulli form is better behaved: `α = σ(·)` is `O(1)` per entry with no
-    /// `D` in it, so the first two terms are commensurate by construction once both
-    /// are meaned over entries — no `ln D` normalization needed. The surviving rule
-    /// is the one that fixed it last time, and it is unchanged in spirit:
+    /// The IBP ladder has no weight to choose. It enters as a fixed logit offset,
+    /// so the ordering it imposes is worth exactly what it is worth to the
+    /// likelihood, and `α` stays what the sampler always treated it as: chosen.
     ///
-    /// * the Gaussian KL is weighted by the weight the LIKELIHOOD actually applies —
-    ///   now plain `α`, since that is what [`Self::gate_weights`] returns — and meaned
-    ///   over every entry;
-    /// * the Beta hyperprior is `O(H)` against the others' `O(D·H)`, so it is divided
-    ///   by `D·H` to preserve the ratio the true (summed) ELBO would have. With
-    ///   `D ≈ 20k` that makes it a genuinely weak prior which the data dominates —
-    ///   the same regime `posterior::hyper::sample_pi0`'s `Beta(9,1)` sits in.
+    /// # Why the effect KL stays
     ///
-    /// `gate_terms_are_commensurate` pins the ratio so a future reduction change
-    /// cannot re-open this quietly.
-    /// `beta_rows` is the FULL feature-row count, which is not always
-    /// `logits.dim(0)`: under [`Self::gate_kl_rows`] the tensors are a chunk
-    /// subset. The two mean-reduced terms estimate the full-table mean from any
-    /// subset, but the Beta hyperprior is a per-DIM quantity divided by the
-    /// entry count to sit on the same footing — normalize that by the subset and
-    /// it inflates by `rows_total / rows_subset` (≈280x at 64 of 18k).
-    fn single_gate_kl(
-        &self,
-        logits: &Tensor,
-        pi_logit: &Tensor,
-        logstd: &Tensor,
-        mu: &Tensor,
-        beta_rows: f64,
-    ) -> Result<Tensor> {
-        let logits = self.apply_temperature(logits)?;
+    /// It is not really a KL here either — read it as an `α`-weighted ridge on the
+    /// loading, plus the entropy term that keeps `σ` from collapsing. It survives
+    /// because it is load-bearing: `faba gem` pins `feature_embedding_l2 = 0` (a
+    /// free-`E_feat` ridge is wrong under β-sharing), so this is the ONLY shrinkage
+    /// on `β` for that whole fit. Dropping it once already "silently removed the
+    /// ONLY shrinkage on the loading" — see [`Self::gate_kl`].
+    ///
+    /// Weighting it by `α` is the load-bearing detail: a coordinate the gate has
+    /// turned off must not still pay a prior for a loading nothing reads.
+    fn single_gate_kl(&self, logits: &Tensor, logstd: &Tensor, mu: &Tensor) -> Result<Tensor> {
         // `α = q(z=1)` per (gene, dim) — the same table `gate_weights` feeds the
-        // likelihood. Clamped off 0/1 so the logs below stay finite.
-        let alpha = candle_nn::ops::sigmoid(&logits)?.clamp(GATE_PI_EPS, 1.0 - GATE_PI_EPS)?;
-        let n_genes = beta_rows;
-        let n_dims = alpha.dim(1)? as f64;
-
-        // Per-dim inclusion rate `π_h`, broadcast over genes.
-        let pi = candle_nn::ops::sigmoid(pi_logit)?.clamp(GATE_PI_EPS, 1.0 - GATE_PI_EPS)?;
-        let pi_row = pi.reshape((1, alpha.dim(1)?))?;
-
-        // KL(Bern(α) ‖ Bern(π)) = α·[ln α − ln π] + (1−α)·[ln(1−α) − ln(1−π)]
-        let one_m_alpha = alpha.affine(-1.0, 1.0)?;
-        let one_m_pi = pi_row.affine(-1.0, 1.0)?;
-        let kl_bern = (alpha.mul(&alpha.log()?.broadcast_sub(&pi_row.log()?)?)?
-            + one_m_alpha.mul(&one_m_alpha.log()?.broadcast_sub(&one_m_pi.log()?)?)?)?
-        .mean_all()?;
-
-        let kl_gauss = Self::effect_kl(&alpha, logstd, mu)?;
-
-        // −log Beta(π_h; a, b) up to a constant = −[(a−1)·ln π + (b−1)·ln(1−π)],
-        // summed over dims and put on the same per-entry footing as the two above.
-        let beta_nlp = (pi.log()?.affine(-(GATE_PI_BETA_A - 1.0), 0.0)?.sub(
-            &pi.affine(-1.0, 1.0)?
-                .log()?
-                .affine(GATE_PI_BETA_B - 1.0, 0.0)?,
-        )?)
-        .sum_all()?
-        .affine(1.0 / (n_genes * n_dims), 0.0)?;
-
-        kl_bern + kl_gauss + beta_nlp
+        // likelihood, ladder included, so the weight here matches the weight there.
+        let alpha = candle_nn::ops::sigmoid(&self.gate_logit_field(logits)?)?
+            .clamp(GATE_PI_EPS, 1.0 - GATE_PI_EPS)?;
+        Self::effect_kl(&alpha, logstd, mu)
     }
 
     /// The gate's total KL: the identity gate's plus, for a factored model with
     /// velocity, the INDEPENDENT δ gate's. `None` for an ungated model. Kept in the
     /// autograd graph.
     ///
-    /// Each gate carries its OWN `π_h` table. They are different objects — an identity
-    /// loading and a deviation from it are not on one scale — so a shared inclusion
-    /// rate would force them to agree, which is the same reason
-    /// `posterior::pb_gibbs` gives every gate its own `σ₀h²` and `π₀h`.
+    /// # One term, two ways of weighting it
     ///
-    /// # Two regimes
+    /// **Learned gate** — weighted by `α = σ((S + ladder)/τ)`.
     ///
-    /// **Learned gate** — the full spike-and-slab KL ([`Self::single_gate_kl`]).
+    /// **Jitter** (a `pip` is installed) — weighted by the frozen `pip`, since
+    /// training averages over `z ~ Bern(pip)` and `E[z] = pip`. The SELECTION is
+    /// an input here, not a parameter: `gate_weights` never consults the logits,
+    /// and the inclusion prior already lives in the sampler that produced the
+    /// `pip`.
     ///
-    /// **Jitter** (a `pip` is installed) — the SELECTION is an input, not a parameter:
-    /// `gate_weights` never consults the logits, so the Bernoulli and Beta terms would
-    /// only move Vars nothing reads, and the inclusion prior already lives in the
-    /// sampler that produced the `pip`. The Gaussian effect KL is a different matter —
-    /// `β` is very much still a trained parameter under the mask — so that term stays,
-    /// weighted by the `pip` (what the likelihood applies in expectation). Dropping it
-    /// too, as an earlier version did, silently removed the ONLY shrinkage on the
-    /// loading for the whole jitter fit.
+    /// Both arms now draw their selection prior from the SAME truncated IBP —
+    /// the sampler through `posterior::hyper::ibp_pi0`, the learned gate through
+    /// [`ibp_gate_logit_bias`]. Before, `--gate-mode sampled` drew its mask from
+    /// an IBP while `--gate-mode learned` was regularized toward an independent
+    /// `Beta(1,9)`: two different beliefs about the same slot, which is why the
+    /// two arms' sparsity never sat on a comparable scale.
+    ///
+    /// Do not drop the surviving term on the jitter path. An earlier version did,
+    /// and it silently removed the ONLY shrinkage on the loading for the whole
+    /// jitter fit — `faba gem` has no `E_feat` ridge to fall back on.
     pub fn gate_kl(&self) -> Result<Option<Tensor>> {
         if self.gate.is_none() {
             return Ok(None);
@@ -749,19 +817,11 @@ impl JointEmbedModel {
             Some(f) => &f.beta,
             None => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
         };
-        let beta_rows = mu.dim(0)? as f64;
-        let mut kl =
-            self.one_gate_kl(GateKind::Identity, self.gate_logits(), mu, None, beta_rows)?;
+        let mut kl = self.one_gate_kl(GateKind::Identity, self.gate_logits(), mu)?;
         // Independent velocity gate on δ_g (factored + velocity present).
         if let Some(f) = &self.factor {
             if let Some((delta, _)) = &f.splice_delta {
-                let dkl = self.one_gate_kl(
-                    GateKind::Velocity,
-                    f.s_delta.as_ref(),
-                    delta,
-                    None,
-                    beta_rows,
-                )?;
+                let dkl = self.one_gate_kl(GateKind::Velocity, f.s_delta.as_ref(), delta)?;
                 kl = match (kl, dkl) {
                     (Some(a), Some(b)) => Some((a + b)?),
                     (a, b) => a.or(b),
@@ -771,93 +831,34 @@ impl JointEmbedModel {
         Ok(kl)
     }
 
-    /// [`Self::gate_kl`] over a SUBSET of feature rows — the same estimand, at
-    /// `O(rows · H)` instead of `O(D · H)` per call.
-    ///
-    /// Both mean-reduced terms are per-entry means, so a subset is an unbiased
-    /// estimate of the full-table value; the Beta hyperprior is normalized by the
-    /// full row count regardless (see [`Self::single_gate_kl`]).
-    ///
-    /// # Why this is gradient-equivalent, not just cheaper
-    ///
-    /// A trainer that visits every row once per epoch in chunks of `C` takes
-    /// `D/C` steps. Under the full-table KL each row collects `D/C` gradients of
-    /// size `w/(D·H)`; under the subset it collects ONE of size `w/(C·H)`. Those
-    /// are equal, so per-epoch pressure on each gate entry is unchanged and the
-    /// caller's weight needs no recalibration — only the variance goes up.
-    ///
-    /// Identity gate only, and NOT for factored models: there the gate axis is
-    /// genes while training rows are feature rows via `row_to_gene`, so a row
-    /// subset can repeat a gene and double-count it. Returns `None` in that case
-    /// so callers fall back to [`Self::gate_kl`] rather than get a wrong number.
-    pub fn gate_kl_rows(&self, rows: &Tensor) -> Result<Option<Tensor>> {
-        if self.gate.is_none() || self.factor.is_some() {
-            return Ok(None);
-        }
-        let mu_full = self.e_feat_raw.as_ref().unwrap_or(&self.e_feat);
-        let beta_rows = mu_full.dim(0)? as f64;
-        let mu = mu_full.index_select(rows, 0)?;
-        self.one_gate_kl(
-            GateKind::Identity,
-            self.gate_logits(),
-            &mu,
-            Some(rows),
-            beta_rows,
-        )
-    }
-
     /// One gate's contribution to [`Self::gate_kl`], picking the regime off whether a
     /// `pip` is installed for that [`GateKind`]. `None` when the gate has no effect
     /// log-std (a deterministic effect has no Gaussian KL to pay) or, on the learned
-    /// path, no logits / no `π_h`.
+    /// path, no logits.
     fn one_gate_kl(
         &self,
         kind: GateKind,
         logits: Option<&Tensor>,
         mu: &Tensor,
-        rows: Option<&Tensor>,
-        beta_rows: f64,
     ) -> Result<Option<Tensor>> {
         // ONE walk of `GateKind`. Splitting the pip out into a second `gate_tables`
         // call meant dispatching twice and discarding the mask half of the result.
-        let (logstd, pi_logit, pip) = match kind {
-            GateKind::Identity => (
-                self.effect_logstd(),
-                self.gate_pi_logit.as_ref(),
-                self.gate_pip.as_ref(),
-            ),
+        let (logstd, pip) = match kind {
+            GateKind::Identity => (self.effect_logstd(), self.gate_pip.as_ref()),
             GateKind::Velocity => match &self.factor {
-                Some(f) => (
-                    f.delta_logstd.as_ref(),
-                    f.delta_pi_logit.as_ref(),
-                    f.delta_gate_pip.as_ref(),
-                ),
-                None => (None, None, None),
+                Some(f) => (f.delta_logstd.as_ref(), f.delta_gate_pip.as_ref()),
+                None => (None, None),
             },
         };
         let Some(logstd) = logstd else {
             return Ok(None);
         };
-        // Gather every per-row table with the SAME index, or the entries stop
-        // lining up (`α`, `σ`, `μ` are all `[rows, H]`).
-        let take = |t: &Tensor| -> Result<Tensor> {
-            match rows {
-                Some(idx) => t.index_select(idx, 0),
-                None => Ok(t.clone()),
-            }
-        };
         if let Some(pip) = pip {
-            return Ok(Some(Self::effect_kl(&take(pip)?, &take(logstd)?, mu)?));
+            return Ok(Some(Self::effect_kl(pip, logstd, mu)?));
         }
-        let (Some(logits), Some(pi)) = (logits, pi_logit) else {
+        let Some(logits) = logits else {
             return Ok(None);
         };
-        Ok(Some(self.single_gate_kl(
-            &take(logits)?,
-            pi,
-            &take(logstd)?,
-            mu,
-            beta_rows,
-        )?))
+        Ok(Some(self.single_gate_kl(logits, logstd, mu)?))
     }
 }

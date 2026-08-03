@@ -42,7 +42,6 @@ pub(super) fn build_feat_factor(
         delta_logstd: None,
         delta_gate_pip: None,
         delta_gate_mask: None,
-        delta_pi_logit: None,
     })
 }
 

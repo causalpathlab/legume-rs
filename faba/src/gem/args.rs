@@ -106,6 +106,25 @@ pub struct ModelArgs {
         hide = true
     )]
     pub feature_gate_temp: f32,
+
+    #[arg(
+        long = "gate-ibp-alpha",
+        help = "Truncated-IBP concentration for the gate's per-dim inclusion ladder;\n\
+                unset = auto",
+        long_help = "Concentration alpha of the truncated Indian Buffet Process whose\n\
+                     ladder tilts the feature gate: dim h carries a fixed logit\n\
+                     offset h * ln(alpha/(alpha+1)), so later dims must earn their\n\
+                     inclusion against a steeper prior. Chosen, never fitted.\n\
+                     \n\
+                     Unset (the default) derives alpha from the embedding dimension\n\
+                     so the ladder spans 4 logits end to end, leaving the last dim\n\
+                     at the sigmoid's most responsive point rather than frozen.\n\
+                     \n\
+                     SMALLER alpha means a steeper ladder and more sparsity. This\n\
+                     replaced a KL toward a Beta(1,9) inclusion prior, which had no\n\
+                     natural weight under gem's noise-contrastive phase-1 objective."
+    )]
+    pub gate_ibp_alpha: Option<f64>,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and

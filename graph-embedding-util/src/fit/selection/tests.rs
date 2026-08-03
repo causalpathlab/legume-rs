@@ -64,7 +64,7 @@ fn free_with_heads(
                     shared_s_feat: None,
                     shared_e_feat_raw: None,
                     shared_e_feat_logstd: None,
-                    shared_gate_pi_logit: None,
+                    shared_gate_ibp_bias: None,
                     gate: None,
                 },
                 vm,
@@ -450,7 +450,10 @@ fn a_pip_suppresses_the_learned_selection_table() {
     let vm = VarMap::new();
     let (mut m, mut heads) = factored_with_head(n_genes, h, &vm);
     m.enable_feature_gate(
-        crate::model::FeatureGateSpec { temperature: 1.0 },
+        crate::model::FeatureGateSpec {
+            temperature: 1.0,
+            ibp_alpha: None,
+        },
         &vm,
         &dev(),
     )

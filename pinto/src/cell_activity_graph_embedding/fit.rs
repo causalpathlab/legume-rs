@@ -147,26 +147,30 @@ pub fn fit_cell_activity_graph_embedding(
                  --gate-mode sampled installs a Gibbs-sampled mask instead, which \
                  takes the gate slot over entirely. Pass --gate-mode learned to use it."
             );
-            // Same rule for the KL weight: under `sampled` no learned gate is
-            // installed, so `gate_kl()` returns `None` and this flag reaches
+            // Same rule for the IBP ladder: under `sampled` no learned gate is
+            // installed, so the ladder has no logits to tilt and this flag reaches
             // nothing at all. Without this the run completes and produces output
             // byte-identical to the default, which reads as "the gate cannot be
-            // made to select" rather than "the flag did nothing".
+            // made to select" rather than "the flag did nothing". (The sampler has
+            // its own IBP — `posterior::hyper::ibp_pi0` — driven by the
+            // --selection-* flags.)
             anyhow::ensure!(
-                args.gate_kl_weight == 1.0,
-                "--gate-kl-weight scales the LEARNED gate's spike-and-slab KL, and \
-                 --gate-mode sampled installs a Gibbs-sampled mask instead, whose \
-                 strength comes from the --selection-* flags. Pass --gate-mode \
-                 learned to use it."
+                args.gate_ibp_alpha.is_none(),
+                "--gate-ibp-alpha tilts the LEARNED gate's inclusion ladder, and \
+                 --gate-mode sampled installs a Gibbs-sampled mask instead, which \
+                 draws from its own IBP under the --selection-* flags. Pass \
+                 --gate-mode learned to use it."
             );
         }
     }
-    anyhow::ensure!(
-        args.gate_kl_weight.is_finite() && args.gate_kl_weight >= 0.0,
-        "--gate-kl-weight must be finite and >= 0 (got {}); a negative weight \
-         would flip the KL's sign and train the gate AWAY from its prior.",
-        args.gate_kl_weight
-    );
+    if let Some(a) = args.gate_ibp_alpha {
+        anyhow::ensure!(
+            a.is_finite() && a > 0.0,
+            "--gate-ibp-alpha must be finite and > 0 (got {a}); alpha sets \
+             v = alpha/(alpha+1), the ladder's per-dim inclusion ratio, which is \
+             only a probability for positive alpha."
+        );
+    }
 
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
@@ -546,12 +550,14 @@ pub fn fit_cell_activity_graph_embedding(
                 Tensor::from_vec(selection.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
             model.install_gate_pip(GateKind::Identity, &pip_t)?;
         }
-        // Variational spike-and-slab: SGD fits `σ(S/τ)` alongside the
-        // embedding, regularized by the KL added to the training loss below.
+        // Variational spike-and-slab: SGD fits `σ((S + IBP ladder)/τ)` alongside
+        // the embedding. Sparsity comes from the ladder's structure, not from a
+        // weighted penalty — see `geu::model::ibp_gate_logit_bias`.
         None => {
             model.enable_feature_gate(
                 FeatureGateSpec {
                     temperature: args.feature_gate_temp,
+                    ibp_alpha: args.gate_ibp_alpha,
                 },
                 &varmap,
                 &dev,
@@ -822,20 +828,18 @@ pub fn fit_cell_activity_graph_embedding(
             // full-table KL leaves 32% of α below 0.5, the row subset leaves 0%
             // and the gate stops selecting. Switching would need λ re-tuned.
             //
-            // Weight is `λ · chunk_mass / epoch_mass`, both Fisher-weighted to
-            // match the data term, so the prior's SHARE does not move with
-            // `--gene-batch-size`, the experimental-batch count, or the
-            // dataset's mean gene weight.
+            // Weight is `chunk_mass / epoch_mass`, Fisher-weighted to match the
+            // data term, so the term's SHARE does not move with
+            // `--gene-batch-size`, the experimental-batch count, or the dataset's
+            // mean gene weight.
             //
-            // Two sensitivities remain, both deferred as behavioural: the weight
-            // omits the `n_chain_levels` factor the data term carries, and it
-            // references the epoch's gene count rather than a fixed constant, so
-            // `--chain-levels` and `--genes-per-epoch` still retune it. geu
-            // calibrates against `GATE_KL_REF_UNITS` instead, which is why the
-            // two tools' λ are not on one scale.
+            // There is no λ here any more, and no per-caller reference to
+            // calibrate against. What survives `gate_kl()` is the α-weighted ridge
+            // on the loading — see `geu::model::gate`'s `single_gate_kl` — and the
+            // SELECTION prior it used to carry is now structural, a fixed IBP
+            // ladder on the gate logits with no weight to choose.
             if let Some(kl) = model.gate_kl()? {
-                let w = args.gate_kl_weight * chunk_mass / epoch_mass;
-                total = (total + (kl * w)?)?;
+                total = (total + (kl * (chunk_mass / epoch_mass))?)?;
             }
             // Global-norm clip before the step. The NCE loss spikes when a
             // chunk draws a gene whose active edges are nearly all positives,

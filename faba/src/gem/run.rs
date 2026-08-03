@@ -430,6 +430,7 @@ fn run_gem_genes_bge(
             // effect KL at the fixed internal weight. Temperature is the one knob.
             feature_gate: Some(ge::FeatureGateConfig {
                 temperature: args.model.feature_gate_temp,
+                ibp_alpha: args.model.gate_ibp_alpha,
             }),
         };
         Ok((cfg, gene_names, delta_l2, row_to_gene, unspliced_rows))

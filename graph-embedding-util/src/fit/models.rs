@@ -5,7 +5,7 @@
 //! The primary head registers the canonical feature Vars, the gate is enabled on it
 //! BEFORE any head exists, and each head then clones handles to those same Vars — so a
 //! head built too early, or one that misses a handle, trains against a feature side
-//! nothing else sees. That last failure mode already shipped once: `gate_pi_logit` was
+//! nothing else sees. That last failure mode already shipped once: `gate_ibp_bias` was
 //! not among the cloned handles, and the gate's whole KL silently left the loss.
 
 use super::config::FitConfig;
@@ -147,14 +147,14 @@ pub(super) fn build_heads(
                     var_prefix: &prefix,
                     seed: config.seed,
                     // EVERY gate handle, so each head reweights the SAME feature side and
-                    // AdamW updates one `s_feat`. `shared_gate_pi_logit` is the one that
+                    // AdamW updates one `s_feat`. `shared_gate_ibp_bias` is the one that
                     // was missing: `train_composite` evaluates the gate KL on `axes[0]`,
                     // which is a pb head whenever `--phase1-cells-per-pb` is 0 (the
                     // default), so without it the KL returns `None` on every ordinary run.
                     shared_s_feat: cell_model.s_feat.clone(),
                     shared_e_feat_raw: cell_model.e_feat_raw.clone(),
                     shared_e_feat_logstd: cell_model.e_feat_logstd.clone(),
-                    shared_gate_pi_logit: cell_model.gate_pi_logit.clone(),
+                    shared_gate_ibp_bias: cell_model.gate_ibp_bias.clone(),
                     gate: cell_model.gate,
                 },
                 varmap,
