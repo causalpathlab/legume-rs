@@ -126,8 +126,15 @@ fn gated_model(n_features: usize, h: usize, vm: &VarMap) -> JointEmbedModel {
     // The gate is always the variational spike-and-slab single-effect. The
     // selection/materialize tests read effect MEANS (no sampling), so they are
     // unaffected by the variational log-std this allocates.
-    m.enable_feature_gate(FeatureGateSpec { temperature: 1.0 }, vm, &dev())
-        .unwrap();
+    m.enable_feature_gate(
+        FeatureGateSpec {
+            temperature: 1.0,
+            ibp_alpha: None,
+        },
+        vm,
+        &dev(),
+    )
+    .unwrap();
     m
 }
 
@@ -352,30 +359,45 @@ fn ungated_model_is_inert() {
     assert!(m.feature_selection().unwrap().is_none());
 }
 
-/// An UNTRAINED gate must be ~inert: `σ(GATE_LOGIT_INIT) ≈ 0.98`, so a fresh model's
-/// `Ẽ ≈ β` and nothing is shrunk or tilted before a single step.
+/// An untrained gate is inert **on dim 0 only** — and that is a deliberate change.
 ///
-/// This is why the init is NOT zero. `σ(0) = 0.5` would halve the whole dictionary —
-/// propagating into the NCE scale and the phase-2 projection — and would also scale
-/// down the gradient reaching `β` through `α·β`. (The softmax predecessor got the
-/// same property FROM a zero init, since `softmax(0)·D = 1` exactly; the arithmetic
-/// changed, the requirement did not.)
+/// Before the IBP ladder every entry started at `σ(4) ≈ 0.98`, so a fresh model's
+/// `Ẽ ≈ β` everywhere. The ladder tilts from the very first step, by construction:
+/// that ordering IS the prior, and a prior that only switched on after some warmup
+/// would just be a schedule. So the invariant weakens to a graded one.
+///
+/// What must NOT weaken is the reason the init is not zero: no coordinate may start
+/// at a multiplier so small that `β`'s gradient through `α·β` dies, because SGD
+/// cannot bring a zeroed coordinate back. The floor is the last dim's `σ(0) = 0.5`
+/// — a halving, matching the old worst case, not an extinction.
 #[test]
-fn untrained_gate_is_inert() {
+fn untrained_gate_is_inert_on_dim_zero_and_graded_after() {
     let (n_features, h) = (6usize, 4usize);
     let vm = VarMap::new();
     let m = gated_model(n_features, h, &vm);
     let sel = m.feature_selection().unwrap().unwrap();
     assert_eq!(sel.dims(), &[n_features, h], "no null column");
-    for x in sel.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
+
+    for row in sel.to_vec2::<f32>().unwrap() {
         assert!(
-            x > 0.97 && x < 1.0,
-            "an untrained gate must pass the loading through nearly unchanged, got {x}"
+            row[0] > 0.97 && row[0] < 1.0,
+            "dim 0 must still pass the loading through nearly unchanged, got {}",
+            row[0]
+        );
+        for w in row.windows(2) {
+            assert!(
+                w[1] <= w[0],
+                "the ladder must be monotone across dims: {row:?}"
+            );
+        }
+        assert!(
+            row[h - 1] >= 0.5 - 1e-5,
+            "no dim may start below the sigmoid's midpoint — a smaller multiplier \
+             kills beta's gradient and SGD cannot recover it: {row:?}"
         );
     }
 
-    // Applying it to an all-ones base leaves the base nearly untouched — and in
-    // particular does NOT halve it, which a zero init would.
+    // Applying it to an all-ones base shrinks the tail but never zeroes it.
     let base = Tensor::ones((n_features, h), DType::F32, &dev()).unwrap();
     let w = m
         .gate_weights(GateKind::Identity, m.s_feat.as_ref().unwrap())
@@ -383,34 +405,33 @@ fn untrained_gate_is_inert() {
     let gated = base.mul(&w).unwrap();
     for x in gated.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
         assert!(
-            (x - 1.0).abs() < 0.03,
-            "untrained gate must not rescale the base, got {x}"
+            (0.5 - 1e-5..=1.0).contains(&x),
+            "gated base out of range: {x}"
         );
     }
 }
 
-/// `π_h` starts at the `Beta(a,b)` prior mean, and it is a SEPARATE table per gate.
-///
-/// Both matter. An untrained `π_h` should state the prior rather than an arbitrary
-/// rate, and a shared `π` across the identity and velocity gates would force a
-/// loading and a deviation from it onto one sparsity — the same reason
-/// `posterior::pb_gibbs` gives every gate its own `σ₀h²` and `π₀h`.
+/// The ladder is stored per DIM and broadcast over rows, and it carries no
+/// gradient — `α` is chosen, not fitted, so a `Var` here would let the fit
+/// negotiate its own prior away.
 #[test]
-fn pi_starts_at_the_prior_mean_and_is_per_gate() {
-    use crate::model::{GATE_PI_BETA_A, GATE_PI_BETA_B};
+fn ibp_ladder_is_a_per_dim_constant() {
     let (n_features, h) = (6usize, 4usize);
     let vm = VarMap::new();
     let m = gated_model(n_features, h, &vm);
-    let pi_logit = m.gate_pi_logit.as_ref().expect("gate on");
-    assert_eq!(pi_logit.dims(), &[h], "pi is indexed by DIM, one per h");
-    let want = (GATE_PI_BETA_A / (GATE_PI_BETA_A + GATE_PI_BETA_B)) as f32;
-    for x in pi_logit.to_vec1::<f32>().unwrap() {
-        let pi = 1.0 / (1.0 + (-x).exp());
-        assert!(
-            (pi - want).abs() < 1e-5,
-            "pi must start at the Beta prior mean {want}, got {pi}"
-        );
-    }
+    let bias = m.gate_ibp_bias.as_ref().expect("gate on");
+    assert_eq!(
+        bias.dims(),
+        &[1, h],
+        "the ladder is indexed by DIM and broadcast over rows"
+    );
+    assert!(
+        !vm.data().lock().unwrap().values().any(|v| {
+            v.as_tensor().dims() == [1, h]
+                && v.as_tensor().to_vec2::<f32>().ok() == bias.to_vec2::<f32>().ok()
+        }),
+        "the ladder must NOT be registered as a trainable Var"
+    );
 }
 
 /// `materialize_e_feat` bakes the gate into `e_feat` for a free model — the frozen
@@ -562,8 +583,15 @@ fn delta_gate_independent_and_beta_shared() {
         &dev(),
     )
     .unwrap();
-    m.enable_feature_gate(FeatureGateSpec { temperature: 1.0 }, &vm, &dev())
-        .unwrap();
+    m.enable_feature_gate(
+        FeatureGateSpec {
+            temperature: 1.0,
+            ibp_alpha: None,
+        },
+        &vm,
+        &dev(),
+    )
+    .unwrap();
 
     // Independent velocity gate allocated (velocity present).
     let f = m.factor.as_ref().unwrap();
@@ -653,7 +681,7 @@ fn a_sharing_head_still_has_a_gate_kl() {
             shared_s_feat: m.s_feat.clone(),
             shared_e_feat_raw: m.e_feat_raw.clone(),
             shared_e_feat_logstd: m.e_feat_logstd.clone(),
-            shared_gate_pi_logit: m.gate_pi_logit.clone(),
+            shared_gate_ibp_bias: m.gate_ibp_bias.clone(),
             gate: m.gate,
         },
         &vm,
@@ -678,19 +706,27 @@ fn a_sharing_head_still_has_a_gate_kl() {
 /// Returning `None` for the whole thing (as an earlier version did) removes the only
 /// shrinkage on the loading for the entire jitter fit.
 #[test]
-fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
+fn jitter_and_learned_agree_when_pip_equals_alpha() {
     let (n_features, h) = (6usize, 4usize);
     let vm = VarMap::new();
     let mut m = gated_model(n_features, h, &vm);
     let learned: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
 
-    // All-ones pip: the effect KL is then weighted exactly as the learned gate's
-    // `α ≈ σ(4) = 0.982` weights it, so the two differ only by the terms jitter drops.
-    m.install_gate_pip(
-        GateKind::Identity,
-        &pip_tensor(&vec![1.0; n_features * h], n_features, h),
-    )
-    .unwrap();
+    // Both arms now compute the SAME term and differ only in the weight the
+    // likelihood applies: `α` on the learned path, the frozen `pip` on jitter. So
+    // handing jitter the learned gate's own `α` must reproduce its value exactly.
+    // (This equality is what the selection terms used to break; their removal is
+    // precisely what makes it hold.)
+    let alpha = m
+        .feature_selection()
+        .unwrap()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    m.install_gate_pip(GateKind::Identity, &pip_tensor(&alpha, n_features, h))
+        .unwrap();
     let jittered: f32 = m
         .gate_kl()
         .unwrap()
@@ -699,9 +735,8 @@ fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
         .unwrap();
     assert!(jittered.is_finite() && jittered > 0.0);
     assert!(
-        jittered < learned,
-        "jitter drops the Bernoulli + Beta terms, so it must be the smaller of the \
-         two: {jittered} vs {learned}"
+        (jittered - learned).abs() <= 1e-6 * learned.abs().max(1.0),
+        "with pip = alpha the two arms must agree exactly: {jittered} vs {learned}"
     );
 
     // A zero pip switches every coordinate off, and a coordinate the likelihood never
@@ -718,57 +753,90 @@ fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
     );
 }
 
-/// `gate_kl_rows` must be an unbiased estimate of `gate_kl` — the whole point is
-/// that a chunk-sized KL can stand in for the full-table one, so that claim is
-/// asserted rather than argued.
+/// The default ladder must leave the LAST dim trainable.
 ///
-/// The trap it guards: the Beta hyperprior is a per-DIM sum divided by the entry
-/// count. Normalize it by the SUBSET and the term inflates by
-/// `rows_total / rows_subset` — ~280x at cage's 64-of-18k — which would swamp
-/// the two mean-reduced terms and silently retune the gate.
+/// This is the property the whole `α` choice turns on. The sampler runs the same
+/// IBP at `α = 1`, which on 16 dims is an ~11-logit drop; under a gradient that
+/// does not produce sparsity, it produces a frozen tail — `α ≈ 0` with
+/// `dα/dS ≈ 0`, unrecoverable, because SGD cannot resurrect a zeroed multiplier
+/// the way Gibbs can. So: dim 0 near the ungated init, the last dim near the
+/// sigmoid's most responsive point, and the gradient there NOT vanishing.
 #[test]
-fn gate_kl_rows_averages_to_the_full_table_kl() {
-    use candle_util::candle_core::{Device, Tensor};
+fn default_ibp_ladder_keeps_the_tail_trainable() {
+    for h in [8usize, 16, 64] {
+        let alpha = crate::model::ibp_alpha_for_drop(h, crate::model::GATE_IBP_LOGIT_DROP);
+        let bias = crate::model::ibp_gate_logit_bias(alpha, h);
 
-    let (n_features, h) = (24usize, 4usize);
+        assert!(bias[0].abs() < 1e-12, "h={h}: dim 0 must be unbiased");
+        let drop = -bias[h - 1];
+        assert!(
+            (drop - crate::model::GATE_IBP_LOGIT_DROP).abs() < 1e-9,
+            "h={h}: ladder must span exactly the target drop, got {drop}"
+        );
+
+        // What the gate actually sees, at the untrained logit.
+        let init = f64::from(4.0f32); // GATE_LOGIT_INIT
+        let a_first = 1.0 / (1.0 + (-(init + bias[0])).exp());
+        let a_last = 1.0 / (1.0 + (-(init + bias[h - 1])).exp());
+        assert!(
+            a_first > 0.97,
+            "h={h}: dim 0 starts ~ungated, got {a_first}"
+        );
+        assert!(
+            (a_last - 0.5).abs() < 1e-6,
+            "h={h}: last dim must start at the sigmoid's most responsive point, got {a_last}"
+        );
+        // σ'(x) = α(1−α): the tail must still have gradient to move on.
+        let slope = a_last * (1.0 - a_last);
+        assert!(slope > 0.2, "h={h}: tail gradient is dead ({slope})");
+    }
+}
+
+/// The ladder must be monotone decreasing and strictly so — that ORDERING is the
+/// entire content of the prior. A flat ladder would leave the dims exchangeable,
+/// which is the condition an independent `Beta(a,b)` per dim could not escape.
+#[test]
+fn ibp_ladder_is_strictly_decreasing() {
+    let bias = crate::model::ibp_gate_logit_bias(3.0, 12);
+    for w in bias.windows(2) {
+        assert!(w[1] < w[0], "ladder must decrease: {:?}", bias);
+    }
+    // Geometric in log-odds ⇒ EQUAL steps. Anything else is not this prior.
+    let step = bias[1] - bias[0];
+    for w in bias.windows(2) {
+        assert!(
+            ((w[1] - w[0]) - step).abs() < 1e-12,
+            "ladder must be geometric (equal log-odds steps): {:?}",
+            bias
+        );
+    }
+    // Smaller α ⇒ steeper ladder ⇒ more pressure toward sparsity.
+    let steep = crate::model::ibp_gate_logit_bias(0.5, 12);
+    assert!(
+        steep[11] < bias[11],
+        "smaller alpha must give a steeper ladder"
+    );
+}
+
+/// The ladder has to reach the LIKELIHOOD, not just sit in a field. If the gate's
+/// multiplier ignored it, every claim above would be vacuous — and this is exactly
+/// the shape of the bug where cage passed `logits: None` and the gate silently
+/// never entered the graph.
+#[test]
+fn ibp_ladder_tilts_the_gate_weights() {
+    let (n_features, h) = (8usize, 8usize);
     let vm = VarMap::new();
     let m = gated_model(n_features, h, &vm);
-    let dev = Device::Cpu;
-
-    let full: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
-
-    // Partition every row into disjoint chunks; the mean over chunks must land
-    // on the full-table value.
-    let chunk = 6usize;
-    let mut acc = 0.0f64;
-    let mut n_chunks = 0usize;
-    for start in (0..n_features).step_by(chunk) {
-        let idx: Vec<u32> = (start..(start + chunk).min(n_features))
-            .map(|i| i as u32)
-            .collect();
-        let rows = Tensor::from_vec(idx.clone(), idx.len(), &dev).unwrap();
-        let part: f32 = m
-            .gate_kl_rows(&rows)
-            .unwrap()
-            .expect("non-factored gated model has a row-subset KL")
-            .to_scalar()
-            .unwrap();
-        acc += f64::from(part);
-        n_chunks += 1;
+    let w = m
+        .feature_selection()
+        .unwrap()
+        .expect("gated model reports a selection")
+        .to_vec2::<f32>()
+        .unwrap();
+    for row in &w {
+        assert!(
+            row[h - 1] < row[0] - 0.4,
+            "the gate's own weights must carry the ladder: {row:?}"
+        );
     }
-    let mean_of_chunks = (acc / n_chunks as f64) as f32;
-
-    assert!(
-        (mean_of_chunks - full).abs() / full.abs().max(1e-6) < 1e-4,
-        "row-subset KL is biased: chunk mean {mean_of_chunks} vs full {full}"
-    );
-
-    // A subset must NOT simply equal the full value — that would mean the
-    // gather did nothing and the "subset" was the whole table.
-    let one = Tensor::from_vec(vec![0u32, 1, 2], 3, &dev).unwrap();
-    let single: f32 = m.gate_kl_rows(&one).unwrap().unwrap().to_scalar().unwrap();
-    assert!(
-        single.is_finite(),
-        "a small row subset must still produce a finite KL"
-    );
 }

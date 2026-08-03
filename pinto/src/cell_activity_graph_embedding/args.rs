@@ -505,30 +505,30 @@ pub struct CellActivityGraphEmbeddingArgs {
     pub gate_mode: GateMode,
 
     #[arg(
-        long = "gate-kl-weight",
-        default_value_t = 1.0,
-        hide = true,
-        help = "Multiplier on the learned gate's spike-and-slab KL (--gate-mode learned only)",
-        long_help = "Scales the KL that pulls the learned gate toward its Beta(1,9)\n\
-                     inclusion prior, i.e. how hard the model is pushed to switch\n\
-                     features OFF.\n\
+        long = "gate-ibp-alpha",
+        help = "Truncated-IBP concentration for the learned gate's per-dim inclusion\n\
+                ladder (--gate-mode learned only); unset = auto",
+        long_help = "Concentration alpha of the truncated Indian Buffet Process whose\n\
+                     ladder tilts the learned gate: dim h carries a fixed logit\n\
+                     offset h * ln(alpha/(alpha+1)), so later dims must earn their\n\
+                     inclusion against a steeper prior. This is the model's sparsity\n\
+                     knob, and it is CHOSEN, never fitted.\n\
                      \n\
-                     Must be finite and >= 0; a negative weight would train the\n\
-                     gate AWAY from its prior. Rejected under --gate-mode sampled,\n\
-                     where no learned gate exists for it to act on.\n\
+                     Unset (the default) derives alpha from --embedding-dim so the\n\
+                     ladder spans 4 logits end to end: dim 0 starts at sigma(4)=0.98\n\
+                     and the last dim at sigma(0)=0.5, the most responsive point of\n\
+                     the sigmoid. That keeps the tail trainable at any dimension.\n\
                      \n\
-                     1.0 is cage's own reference, NOT geu's — the two are not\n\
-                     calibrated to a common scale. On GBM that level left\n\
-                     every inclusion probability above 0.95 — no selection at all —\n\
-                     because cage's data term is a SUM over genes x levels where\n\
-                     bge's is a mean, leaving the prior ~36x weaker here.\n\
+                     SMALLER alpha means a steeper ladder and more pressure toward\n\
+                     sparsity. Do not copy the sampler's alpha=1 here: on 16 dims it\n\
+                     is an ~11-logit drop, which does not make the gate sparse but\n\
+                     freezes the tail at init — a gradient cannot recover a zeroed\n\
+                     multiplier, where Gibbs resurrects one from a likelihood ratio.\n\
                      \n\
-                     Hidden and experimental: raising it is how you find out\n\
-                     whether this gate can select on your data. Watch the run's\n\
-                     mean |pair| — if it decays toward zero while the loss falls,\n\
-                     the prior is winning and the embedding is collapsing."
+                     Rejected under --gate-mode sampled, where the sampler draws the\n\
+                     mask from its own IBP and no learned gate exists to tilt."
     )]
-    pub gate_kl_weight: f64,
+    pub gate_ibp_alpha: Option<f64>,
 
     #[arg(
         long = "feature-gate-temp",
