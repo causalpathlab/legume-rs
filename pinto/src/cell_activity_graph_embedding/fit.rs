@@ -95,10 +95,11 @@ use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 
 use candle_util::candle_core::Tensor;
-// `Optimizer` is what puts `AdamW::new` in scope; the step itself goes through
-// `clip_grads_and_step`.
+// `Optimizer` is what puts `AdamW::new` in scope; backward and the step run
+// separately (`loss.backward()` then `clip_and_step_dense`) so the phase timers
+// can attribute them apart.
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
-use candle_util::vae::clip_grads_and_step;
+use candle_util::vae::{clip_and_step_dense, PhaseTimers};
 use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
@@ -107,6 +108,7 @@ use graph_embedding_util::loss::{build_per_batch_cell_samplers, PbChainFilter};
 use graph_embedding_util::model::{
     FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit, GATE_KL_WEIGHT,
 };
+use graph_embedding_util::progress::new_progress_bar;
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
@@ -139,13 +141,35 @@ pub fn fit_cell_activity_graph_embedding(
              configure the Gibbs sampler, which --gate-mode learned does not run. \
              Pass --gate-mode sampled to use them."
         ),
-        GateMode::Sampled => anyhow::ensure!(
-            args.feature_gate_temp == 1.0,
-            "--feature-gate-temp sharpens the LEARNED gate's sigmoid, and \
-             --gate-mode sampled installs a Gibbs-sampled mask instead, which \
-             takes the gate slot over entirely. Pass --gate-mode learned to use it."
-        ),
+        GateMode::Sampled => {
+            anyhow::ensure!(
+                args.feature_gate_temp == 1.0,
+                "--feature-gate-temp sharpens the LEARNED gate's sigmoid, and \
+                 --gate-mode sampled installs a Gibbs-sampled mask instead, which \
+                 takes the gate slot over entirely. Pass --gate-mode learned to use it."
+            );
+            // Same rule for the KL weight: under `sampled` no learned gate is
+            // installed, so `gate_kl()` returns `None` and this flag reaches
+            // nothing at all. Without this the run completes and produces output
+            // byte-identical to the default, which reads as "the gate cannot be
+            // made to select" rather than "the flag did nothing".
+            anyhow::ensure!(
+                args.gate_kl_weight == 1.0,
+                "--gate-kl-weight scales the LEARNED gate's spike-and-slab KL, and \
+                 --gate-mode sampled installs a Gibbs-sampled mask instead, whose \
+                 strength comes from the --selection-* flags. Pass --gate-mode \
+                 learned to use it."
+            );
+        }
     }
+    anyhow::ensure!(
+        args.gate_kl_weight.is_finite() && args.gate_kl_weight >= 0.0,
+        "--gate-kl-weight must be finite and >= 0 (got {}); a negative weight \
+         would flip the KL's sign and train the gate AWAY from its prior.",
+        args.gate_kl_weight
+    );
+    // `perm.chunks(0)` panics inside std, after all the preprocessing work.
+    anyhow::ensure!(args.gene_batch_size > 0, "--gene-batch-size must be > 0");
 
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
@@ -570,6 +594,28 @@ pub fn fit_cell_activity_graph_embedding(
 
     let mut score_trace: Vec<ScoreEntry> = Vec::new();
     let mut rng_master = SmallRng::seed_from_u64(c.seed);
+    // Wall-clock split of the SGD loop, to rank optimization work by evidence
+    // rather than guess. Accumulated across all epochs; logged once at the end.
+    let mut timers = PhaseTimers::default();
+    // Steps the optimizer refused because the global gradient norm was not
+    // finite. Reported at the end: a high count means the fit did not train.
+    let mut skipped_steps: usize = 0;
+
+    // One bar across the WHOLE training phase, not one per epoch: the useful
+    // question while waiting is "how long until training is done", and a bar
+    // that restarts five times cannot answer it. The total is the real step
+    // count — chunks per epoch is `ceil(genes_visited / --gene-batch-size)` —
+    // so the ETA is derived from observed step rate rather than guessed.
+    // `--genes-per-epoch` shortens every epoch equally, so this stays exact.
+    // Early exit (convergence or Ctrl-C) simply finishes the bar short.
+    let genes_per_epoch_actual = if args.genes_per_epoch > 0 {
+        args.genes_per_epoch.min(trainable_genes.len())
+    } else {
+        trainable_genes.len()
+    };
+    let steps_per_epoch = genes_per_epoch_actual.div_ceil(args.gene_batch_size.max(1));
+    let train_bar = new_progress_bar((args.epochs * steps_per_epoch.max(1)) as u64)
+        .with_message("training steps");
 
     // First ^C = graceful stop after current chunk, finalize outputs;
     // second ^C = hard abort. See graph_embedding_util::stop.
@@ -660,14 +706,32 @@ pub fn fit_cell_activity_graph_embedding(
         let mut pair_acc: Option<Tensor> = None;
         let mut chunk_count: usize = 0;
         // Genes this epoch will actually visit — the KL amortization divides by
-        // it (see the `gate_kl` block), so `--genes-per-epoch` shortens the
-        // epoch without changing how hard the prior pulls per gene seen.
+        // it (see the `gate_kl` block). NOTE this does NOT leave the prior's
+        // strength alone: shortening the epoch shrinks the data total while the
+        // per-epoch KL total stays put, so `--genes-per-epoch 5000` on a 36k
+        // axis pulls ~7x harder. Deferred, with the `--chain-levels` gap.
         let epoch_genes = perm.len().max(1);
+        // The KL weight has to divide by the units the DATA TERM actually
+        // carries. That term is Fisher-weighted (`per_level_gl.broadcast_mul`
+        // below) before `sum_all()`, so its mass is `Σ_g w_g`, not the gene
+        // count — dividing by the count would inflate the prior's share by
+        // `1/mean(w_g)`, which varies with the dataset's dispersion profile and
+        // would make the same `--gate-kl-weight` mean different things on
+        // different panels. Falls back to the plain count when weighting is off.
+        let epoch_mass: f64 = match fisher_weights.as_ref() {
+            Some(w) => perm
+                .iter()
+                .map(|&g| f64::from(w[g]))
+                .sum::<f64>()
+                .max(1e-12),
+            None => epoch_genes as f64,
+        };
         for chunk in perm.chunks(args.gene_batch_size) {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
             // (a) Parallel sampling — pure CPU, no candle.
+            let t_sample = std::time::Instant::now();
             let mini: Vec<(usize, _)> = chunk
                 .par_iter()
                 .flat_map_iter(|&g| {
@@ -690,8 +754,10 @@ pub fn fit_cell_activity_graph_embedding(
                 continue;
             }
 
+            timers.precompute += t_sample.elapsed();
             let (gene_ids, cb_batches): (Vec<usize>, Vec<_>) = mini.into_iter().unzip();
             sample_count += gene_ids.len();
+            let t_fwd = std::time::Instant::now();
 
             // Gene identity enters the score function via the gated
             // loss. The chunk's gene ids parallel-replicate to align
@@ -715,13 +781,14 @@ pub fn fit_cell_activity_graph_embedding(
                 // (the loss-side analog of bge's count·fisher positive draw and
                 // lc's `apply_gene_weights` on the gene basis). Coverage stays
                 // uniform — every gene is still visited once per epoch.
-            let per_level_gl = match fisher_weights.as_ref() {
+            let (per_level_gl, chunk_mass) = match fisher_weights.as_ref() {
                 Some(w) => {
                     let w_chunk: Vec<f32> = gene_ids.iter().map(|&g| w[g]).collect();
+                    let mass: f64 = w_chunk.iter().map(|&x| f64::from(x)).sum();
                     let w_g1 = Tensor::from_vec(w_chunk, (gene_ids.len(), 1), &dev)?;
-                    per_level_gl.broadcast_mul(&w_g1)?
+                    (per_level_gl.broadcast_mul(&w_g1)?, mass)
                 }
-                None => per_level_gl,
+                None => (per_level_gl, gene_ids.len() as f64),
             };
             let loss = per_level_gl.sum_all()?;
             let mut total = loss.clone();
@@ -739,13 +806,19 @@ pub fn fit_cell_activity_graph_embedding(
             // `None` under a sampled mask (no learned Vars to regularize), so
             // this is a no-op on that arm.
             //
-            // Weight is `λ · chunk / genes_this_epoch`, so the per-epoch total
-            // is exactly `λ · KL` however the epoch is chunked. geu divides by
-            // its minibatch size instead (`training.rs:288-296`), which works
-            // there because a step is a fraction of one pass; cage takes
-            // ~G/chunk steps per epoch, so dividing by the chunk would make the
-            // prior's strength scale with `1/chunk²` — i.e. `--gene-batch-size`,
-            // a performance knob, would silently retune the regularization.
+            // Weight is `λ · chunk_mass / epoch_mass`, both Fisher-weighted to
+            // match the data term. What this buys is that the prior's SHARE of
+            // the objective, `w/u`, does not move with `--gene-batch-size`, with
+            // the experimental-batch count, or with the dataset's mean gene
+            // weight: `u` is the mass `per_level_gl.sum_all()` collapses, and
+            // `chunk_mass` is the same quantity, so it cancels.
+            //
+            // Two sensitivities remain, both deferred as behavioural: the weight
+            // omits the `n_chain_levels` factor the data term carries, so
+            // `--chain-levels` retunes the prior; and it references
+            // `epoch_genes` rather than a fixed constant, so `--genes-per-epoch`
+            // does too. geu is calibrated against `GATE_KL_REF_UNITS` instead,
+            // which is why its gate is ~36x stronger than cage's here.
             //
             // NOTE this is a global O(G·H) KL evaluated per STEP, which is what
             // makes `--gate-mode learned` slower than the sampler it replaces
@@ -753,7 +826,7 @@ pub fn fit_cell_activity_graph_embedding(
             // row-subset KL over just this chunk's genes would be both cheaper
             // and identically scaled; not done yet.
             if let Some(kl) = model.gate_kl()? {
-                let w = GATE_KL_WEIGHT * gene_ids.len() as f64 / epoch_genes as f64;
+                let w = args.gate_kl_weight * GATE_KL_WEIGHT * chunk_mass / epoch_mass;
                 total = (total + (kl * w)?)?;
             }
             // Global-norm clip before the step. The NCE loss spikes when a
@@ -761,7 +834,22 @@ pub fn fit_cell_activity_graph_embedding(
             // and an unbounded step there inflates the embedding norms every
             // later epoch has to work against. A step whose global norm is
             // non-finite is skipped rather than laundered into the parameters.
-            clip_grads_and_step(&mut opt, &total, f64::from(args.grad_clip))?;
+            timers.decoder_fwd += t_fwd.elapsed();
+            let t_bwd = std::time::Instant::now();
+            let grads = total.backward()?;
+            timers.backward += t_bwd.elapsed();
+            let t_opt = std::time::Instant::now();
+            // A step is SKIPPED when the global gradient norm is not finite.
+            // Count those: a run where every step is skipped moves no parameter
+            // at all, and without this the bar would still reach 100% and the
+            // phase timings would still look normal — the instrumentation would
+            // make the failure less visible rather than more.
+            let stepped = clip_and_step_dense(&mut opt, grads, f64::from(args.grad_clip))?;
+            if !stepped {
+                skipped_steps += 1;
+            }
+            timers.optimize += t_opt.elapsed();
+            train_bar.inc(1);
 
             // Diagnostics (no host sync) — accumulate detached tensors.
             // Per-gene mean of per_level → [L] for this chunk; running sum.
@@ -816,6 +904,12 @@ pub fn fit_cell_activity_graph_embedding(
                 .and_then(|t| t.to_scalar::<f32>().ok())
                 .map_or(f64::NAN, |v| v as f64 / chunk_count as f64);
             info!("epoch {}: mean |pair| = {:.4e}", epoch, pair_mean);
+            train_bar.set_message(format!(
+                "training — epoch {}/{}, mean |pair| {:.2e}",
+                epoch + 1,
+                args.epochs,
+                pair_mean
+            ));
         }
 
         // Push one summary row per epoch. `level = epoch`, `sweep = 0`.
@@ -866,6 +960,28 @@ pub fn fit_cell_activity_graph_embedding(
             break 'epochs;
         }
     }
+
+    train_bar.finish_and_clear();
+    if skipped_steps > 0 {
+        let total_steps = args.epochs * steps_per_epoch.max(1);
+        warn!(
+            "{}/{} optimizer steps were SKIPPED for non-finite gradients — those \
+             steps moved no parameters. Lower --lr or --grad-clip if this is a \
+             large fraction.",
+            skipped_steps, total_steps
+        );
+    }
+
+    // Where the SGD loop's PER-STEP work went: `precompute` is the rayon
+    // gene/edge sampling, `decoder_fwd` the loss forward, then backward and the
+    // AdamW step. Reported so optimization work is ranked on measurement.
+    //
+    // These four do NOT sum to the training wall clock. Per-EPOCH work sits
+    // outside them: the `--selection-refresh-epochs` Gibbs refresh (which on the
+    // default sampled arm fires every 5th epoch and copies `e_cell` to the host),
+    // the per-epoch diagnostic syncs, and the permutation shuffle. Read the
+    // percentages as a split of per-step cost, not of the whole phase.
+    timers.log_summary();
 
     ////////////////
     // 9. Outputs //
