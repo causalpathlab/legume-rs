@@ -106,9 +106,8 @@ use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{build_per_batch_cell_samplers, PbChainFilter};
 use graph_embedding_util::model::{
-    FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit, GATE_KL_WEIGHT,
+    FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit,
 };
-use graph_embedding_util::progress::new_progress_bar;
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
@@ -168,8 +167,6 @@ pub fn fit_cell_activity_graph_embedding(
          would flip the KL's sign and train the gate AWAY from its prior.",
         args.gate_kl_weight
     );
-    // `perm.chunks(0)` panics inside std, after all the preprocessing work.
-    anyhow::ensure!(args.gene_batch_size > 0, "--gene-batch-size must be > 0");
 
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
@@ -613,9 +610,9 @@ pub fn fit_cell_activity_graph_embedding(
     } else {
         trainable_genes.len()
     };
-    let steps_per_epoch = genes_per_epoch_actual.div_ceil(args.gene_batch_size.max(1));
-    let train_bar = new_progress_bar((args.epochs * steps_per_epoch.max(1)) as u64)
-        .with_message("training steps");
+    let steps_per_epoch = genes_per_epoch_actual.div_ceil(args.gene_batch_size);
+    let total_steps = args.epochs * steps_per_epoch.max(1);
+    let train_bar = new_progress_bar(total_steps as u64).with_message("training steps");
 
     // First ^C = graceful stop after current chunk, finalize outputs;
     // second ^C = hard abort. See graph_embedding_util::stop.
@@ -710,7 +707,7 @@ pub fn fit_cell_activity_graph_embedding(
         // strength alone: shortening the epoch shrinks the data total while the
         // per-epoch KL total stays put, so `--genes-per-epoch 5000` on a 36k
         // axis pulls ~7x harder. Deferred, with the `--chain-levels` gap.
-        let epoch_genes = perm.len().max(1);
+        debug_assert_eq!(perm.len(), genes_per_epoch_actual);
         // The KL weight has to divide by the units the DATA TERM actually
         // carries. That term is Fisher-weighted (`per_level_gl.broadcast_mul`
         // below) before `sum_all()`, so its mass is `Σ_g w_g`, not the gene
@@ -724,7 +721,7 @@ pub fn fit_cell_activity_graph_embedding(
                 .map(|&g| f64::from(w[g]))
                 .sum::<f64>()
                 .max(1e-12),
-            None => epoch_genes as f64,
+            None => genes_per_epoch_actual as f64,
         };
         for chunk in perm.chunks(args.gene_batch_size) {
             if stop.load(Ordering::Relaxed) {
@@ -749,12 +746,18 @@ pub fn fit_cell_activity_graph_embedding(
                 })
                 .collect();
 
+            // Attribute sampling BEFORE the early-out: a chunk whose genes all
+            // failed to sample still paid for the rayon draw, and dropping it
+            // under-reports the sampler exactly where it did the most futile
+            // work. Advance the bar too, or its total (which assumes every
+            // chunk steps) leaves it short and the ETA running long.
+            timers.precompute += t_sample.elapsed();
             if mini.is_empty() {
                 skip_count += chunk.len() * n_batches;
+                train_bar.inc(1);
                 continue;
             }
 
-            timers.precompute += t_sample.elapsed();
             let (gene_ids, cb_batches): (Vec<usize>, Vec<_>) = mini.into_iter().unzip();
             sample_count += gene_ids.len();
             let t_fwd = std::time::Instant::now();
@@ -816,7 +819,8 @@ pub fn fit_cell_activity_graph_embedding(
             // Two sensitivities remain, both deferred as behavioural: the weight
             // omits the `n_chain_levels` factor the data term carries, so
             // `--chain-levels` retunes the prior; and it references
-            // `epoch_genes` rather than a fixed constant, so `--genes-per-epoch`
+            // the epoch's gene count rather than a fixed constant, so
+            // `--genes-per-epoch`
             // does too. geu is calibrated against `GATE_KL_REF_UNITS` instead,
             // which is why its gate is ~36x stronger than cage's here.
             //
@@ -826,7 +830,7 @@ pub fn fit_cell_activity_graph_embedding(
             // row-subset KL over just this chunk's genes would be both cheaper
             // and identically scaled; not done yet.
             if let Some(kl) = model.gate_kl()? {
-                let w = args.gate_kl_weight * GATE_KL_WEIGHT * chunk_mass / epoch_mass;
+                let w = args.gate_kl_weight * chunk_mass / epoch_mass;
                 total = (total + (kl * w)?)?;
             }
             // Global-norm clip before the step. The NCE loss spikes when a
@@ -963,7 +967,6 @@ pub fn fit_cell_activity_graph_embedding(
 
     train_bar.finish_and_clear();
     if skipped_steps > 0 {
-        let total_steps = args.epochs * steps_per_epoch.max(1);
         warn!(
             "{}/{} optimizer steps were SKIPPED for non-finite gradients — those \
              steps moved no parameters. Lower --lr or --grad-clip if this is a \

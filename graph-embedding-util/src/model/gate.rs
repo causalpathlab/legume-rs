@@ -138,6 +138,12 @@ pub const GATE_KL_REF_UNITS: f64 = 1024.0;
 pub fn gate_kl_step_weight(kl_weight: f64, data_units: usize) -> f64 {
     kl_weight * data_units.max(1) as f64 / GATE_KL_REF_UNITS
 }
+
+/// The weight `train_composite` actually applies: [`GATE_KL_WEIGHT`] against one
+/// intensive data term. Named as a constant because that is what it is — the
+/// general form above exists for callers whose `data_units` varies, and geu's
+/// does not.
+pub const GATE_KL_STEP_WEIGHT: f64 = GATE_KL_WEIGHT / GATE_KL_REF_UNITS;
 /// `Beta(a, b)` hyperprior on each dim's inclusion rate `π_h`.
 ///
 /// **Mind the convention.** `posterior::hyper::sample_pi0` draws `π₀ = P(OFF)` under

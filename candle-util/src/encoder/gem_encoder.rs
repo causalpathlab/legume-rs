@@ -51,6 +51,7 @@
 //! Repairing it (adding `+ s_slots`) would have made it a sum with extra steps
 //! plus `M·H` slot parameters, so the flag and the machinery went instead.
 
+use crate::batched_dot::batched_weighted_sum;
 use crate::nn::batch_norm;
 use crate::nn::layers::*;
 use crate::nn::soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP as LOGIT_CLAMP};
@@ -237,14 +238,11 @@ impl GemIndexedEncoder {
         // exact here: there is no softmax to renormalize, so a hidden gene
         // contributes literally nothing and the visible ones keep their
         // magnitudes.
-        let p_u = t_u
-            .broadcast_mul(&input.nascent_visible.unsqueeze(2)?)?
-            .sum(1)?; // [N, H]
-        let p_s = t_s
-            .broadcast_mul(&input.mature_visible.unsqueeze(2)?)?
-            .sum(1)?; // [N, H]
-                      // Mature first: it is the better-measured track, so the trunk's
-                      // leading H inputs are the ones carrying the stronger signal.
+        // Masked sums as gemms — see `candle_util::batched_dot`.
+        let p_u = batched_weighted_sum(input.nascent_visible, &t_u)?; // [N, H]
+        let p_s = batched_weighted_sum(input.mature_visible, &t_s)?; // [N, H]
+                                                                     // Mature first: it is the better-measured track, so the trunk's
+                                                                     // leading H inputs are the ones carrying the stronger signal.
         Tensor::cat(&[&p_s, &p_u], 1) // [N, 2H]
     }
 

@@ -5,6 +5,7 @@
 //! pool, and the four score kernels (feature-cell and cell-cell, positives and
 //! negatives). Split from the gate because these consume `α`, never define it.
 
+use candle_util::batched_dot::batched_matvec;
 use candle_util::candle_core::{Device, Result, Tensor};
 
 use super::gate::{GateKind, GATE_LOGSTD_CLAMP};
@@ -132,18 +133,11 @@ impl JointEmbedModel {
     ) -> Result<Tensor> {
         let b = e_f_neg.dim(0)?;
         let k = e_f_neg.dim(1)?;
-        // Batched mat-vec, not broadcast-multiply-then-sum. Both compute
-        // `Σ_h e_f_neg[i,k,h] · e_c[i,h]`, but the broadcast form materializes a
-        // `[B, K, H]` product that backward turns into several more of the same,
-        // and the expanded `e_c` has its stride-0 dim BETWEEN two non-zero
-        // strides — the one layout candle's `offsets_b()` rejects, so it fell
-        // through to a scalar `StridedIndex` loop with no SIMD and no threading.
-        //
-        // Measured in `pinto cage`, which had re-derived this same expression:
-        // forward 18.1s → 7.4s and backward 39.4s → 16.3s over 5 epochs, taking
-        // the whole run from 122s to 86s. `senna bge` and `faba gem` reach this
-        // through `nce_loss`, so they inherit it.
-        let dot = e_f_neg.matmul(&e_c.unsqueeze(2)?)?.squeeze(2)?; // [B, K]
+        // Gemm, not broadcast-multiply-then-sum — see `candle_util::batched_dot`
+        // for why. Measured in `pinto cage`, which had re-derived this same
+        // expression: forward 18.1s → 7.4s, backward 39.4s → 16.3s over 5
+        // epochs, taking the run from 122s to 86s.
+        let dot = batched_matvec(e_f_neg, e_c)?; // [B, K]
         let b_c_b = b_c.unsqueeze(1)?.broadcast_as((b, k))?;
         (dot + b_f_neg)? + b_c_b
     }

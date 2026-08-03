@@ -24,7 +24,7 @@ mod vars;
 
 pub use gate::{
     gate_kl_step_weight, FeatureGateSpec, GateKind, GATE_EFFECT_PRIOR_VAR, GATE_KL_REF_UNITS,
-    GATE_KL_WEIGHT, GATE_PI_BETA_A, GATE_PI_BETA_B,
+    GATE_KL_STEP_WEIGHT, GATE_KL_WEIGHT, GATE_PI_BETA_A, GATE_PI_BETA_B,
 };
 use vars::{
     build_feat_factor, register_randn_seeded, register_var_from_mat, register_var_from_slice,

@@ -304,7 +304,6 @@ fn per_level_shape_tracks_genes_and_levels() {
             &[ids.len(), n_levels],
             "per-level loss must be [genes, levels] so the KL weight can track it"
         );
-        assert_eq!(out.per_level.elem_count(), ids.len() * n_levels);
     }
 }
 

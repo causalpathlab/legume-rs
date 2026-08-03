@@ -130,6 +130,7 @@
 //! one point in opposite directions and must not be compared without accounting
 //! for it.
 
+use crate::batched_dot::batched_matvec;
 use crate::loss::nb_log_likelihood_elem;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, VarBuilder};
@@ -364,15 +365,8 @@ impl GemEtmDecoder {
             .reshape((n, k, t))?; // [N, K, T]
         let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
 
-        // Batched mat-vec, not `broadcast_mul(...).sum(2)`. Both compute
-        // `Σ_t β[n,k,t]·θ[n,t]`, but broadcasting `[N,1,T]` against `[N,K,T]`
-        // puts a stride-0 dim BETWEEN two non-zero strides, and candle's
-        // `Layout::offsets_b` strips only LEADING and TRAILING zero strides
-        // before requiring the rest to be contiguous — so that layout returns
-        // `None` and the multiply falls to a scalar `StridedIndex` loop with no
-        // SIMD, materializing an `[N,K,T]` product that backward multiplies
-        // again. `matmul` keeps the product implicit and hits gemm.
-        beta_nkt.matmul(&theta_nt.reshape((n, t, 1))?)?.squeeze(2) // [N, K]
+        // Mixture rate `Σ_t β·θ` as a gemm — see `candle_util::batched_dot`.
+        batched_matvec(&beta_nkt, &theta_nt) // [N, K]
     }
 
     /// Masked **negative-binomial** imputation log-likelihood for one track,

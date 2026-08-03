@@ -233,6 +233,7 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 64,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
         help = "Genes per outer parallel sampling chunk",
         long_help = "The outer loop samples this many genes in parallel via rayon.\n\
                      Forward and backward then run serially. candle Var is not parallel-safe.\n\

@@ -8,10 +8,12 @@
 //! `StridedIndex` loop with no SIMD, materializing an `[N,K,T]` product that
 //! backward multiplies again.
 //!
-//! The replacements are `matmul`. These tests assert the two agree, so the
-//! speedup cannot silently change the math.
+//! These call the real `candle_util::batched_dot` helpers — NOT a locally
+//! re-implemented matmul, which would only prove candle agrees with candle and
+//! would keep passing if a helper's shape handling broke.
 
 use candle_core::{DType, Device, Tensor};
+use candle_util::batched_dot::{batched_matvec, batched_matvec_shared, batched_weighted_sum};
 
 fn deterministic(n: usize, seed: u64) -> Vec<f32> {
     (0..n)
@@ -43,11 +45,7 @@ fn etm_expected_counts_matmul_matches_broadcast() {
     let beta = Tensor::from_vec(deterministic(n * k * t, 3), (n, k, t), &dev).unwrap();
     let theta = Tensor::from_vec(deterministic(n * t, 11), (n, t), &dev).unwrap();
 
-    let via_matmul = beta
-        .matmul(&theta.reshape((n, t, 1)).unwrap())
-        .unwrap()
-        .squeeze(2)
-        .unwrap();
+    let via_matmul = batched_matvec(&beta, &theta).unwrap();
     let via_broadcast = beta
         .broadcast_mul(&theta.reshape((n, 1, t)).unwrap())
         .unwrap()
@@ -67,13 +65,7 @@ fn attention_pool_matmul_matches_broadcast() {
     let content = Tensor::from_vec(deterministic(n * k * h, 5), (n, k, h), &dev).unwrap();
     let attn = Tensor::from_vec(deterministic(n * k, 13), (n, k), &dev).unwrap();
 
-    let via_matmul = attn
-        .unsqueeze(1)
-        .unwrap()
-        .matmul(&content)
-        .unwrap()
-        .squeeze(1)
-        .unwrap();
+    let via_matmul = batched_weighted_sum(&attn, &content).unwrap();
     let via_broadcast = content
         .broadcast_mul(&attn.unsqueeze(2).unwrap())
         .unwrap()
@@ -96,10 +88,7 @@ fn matmul_rewrite_preserves_gradients() {
         let beta = Tensor::from_vec(deterministic(n * k * t, 19), (n, k, t), &dev).unwrap();
         let theta = candle_core::Var::from_vec(theta_data.clone(), (n, t), &dev).unwrap();
         let out = if use_matmul {
-            beta.matmul(&theta.reshape((n, t, 1)).unwrap())
-                .unwrap()
-                .squeeze(2)
-                .unwrap()
+            batched_matvec(&beta, &theta).unwrap()
         } else {
             beta.broadcast_mul(&theta.reshape((n, 1, t)).unwrap())
                 .unwrap()
@@ -111,4 +100,24 @@ fn matmul_rewrite_preserves_gradients() {
     };
 
     assert!(max_abs_diff(&grad_of(true), &grad_of(false)) < 1e-3);
+}
+
+/// `batched_matvec_shared` folds the batch into the row axis, so cover it too —
+/// it is the one helper whose shape handling differs from a plain per-batch gemm.
+#[test]
+fn shared_matvec_matches_broadcast() {
+    let dev = Device::Cpu;
+    let (n, k, h) = (32usize, 7usize, 12usize);
+    let a = Tensor::from_vec(deterministic(n * k * h, 23), (n, k, h), &dev).unwrap();
+    let v = Tensor::from_vec(deterministic(h, 29), h, &dev).unwrap();
+
+    let via_helper = batched_matvec_shared(&a, &v).unwrap();
+    let via_broadcast = a
+        .broadcast_mul(&v.reshape((1, 1, h)).unwrap())
+        .unwrap()
+        .sum(2)
+        .unwrap();
+
+    assert_eq!(via_helper.dims(), &[n, k]);
+    assert!(max_abs_diff(&via_helper, &via_broadcast) < 1e-4);
 }
