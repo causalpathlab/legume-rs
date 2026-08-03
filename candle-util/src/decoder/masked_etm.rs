@@ -149,8 +149,15 @@ impl EmbeddedNbTopicDecoder {
             .reshape((n, k, t))?; // [N, K, T]
         let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
 
-        let theta_n1t = theta_nt.reshape((n, 1, t))?;
-        beta_nkt.broadcast_mul(&theta_n1t)?.sum(2) // [N, K]
+        // Batched mat-vec, not `broadcast_mul(...).sum(2)`. Both compute
+        // `Σ_t β[n,k,t]·θ[n,t]`, but broadcasting `[N,1,T]` against `[N,K,T]`
+        // puts a stride-0 dim BETWEEN two non-zero strides, and candle's
+        // `Layout::offsets_b` strips only LEADING and TRAILING zero strides
+        // before requiring the rest to be contiguous — so that layout returns
+        // `None` and the multiply falls to a scalar `StridedIndex` loop with no
+        // SIMD, materializing an `[N,K,T]` product that backward multiplies
+        // again. `matmul` keeps the product implicit and hits gemm.
+        beta_nkt.matmul(&theta_nt.reshape((n, t, 1))?)?.squeeze(2) // [N, K]
     }
 
     /// Masked NB imputation log-likelihood, summed over masked positions →

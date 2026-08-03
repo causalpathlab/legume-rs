@@ -247,7 +247,11 @@ impl IndexedEmbeddingEncoder {
             .affine(1.0 / scale, 0.0)?; // [N, K]
         let neg_inf = visible_mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?; // (1−vis)·(−1e9)
         let attn_nk = ops::softmax(&(scores_nk + neg_inf)?, 1)?; // [N, K]
-        let pooled_nh = content_nkh.broadcast_mul(&attn_nk.unsqueeze(2)?)?.sum(1)?; // [N, H]
+                                                                 // Attention pooling IS a matmul: `[N,1,K] × [N,K,H] → [N,1,H]`. The
+                                                                 // broadcast form is already SIMD-friendly here (its stride-0 dim is
+                                                                 // trailing, which `offsets_b` strips), but it still materializes an
+                                                                 // `[N,K,H]` product and reduces over a strided axis; gemm does neither.
+        let pooled_nh = attn_nk.unsqueeze(1)?.matmul(&content_nkh)?.squeeze(1)?; // [N, H]
 
         // A row with no visible slot (empty cell, or all real genes masked at
         // high mask_fraction) has an all-−∞ score row, so softmax degenerates to
