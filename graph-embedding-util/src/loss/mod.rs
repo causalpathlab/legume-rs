@@ -51,6 +51,39 @@ pub use feat::{
 /// and [`logistic_nce`] all share a single implementation.
 pub(super) use candle_util::loss::log_sigmoid;
 
+/// Ridge penalty on an embedding table: `λ · mean_g ‖e_g‖²`.
+///
+/// Sum over the latent axis, mean over rows — the textbook ridge. Which way
+/// round is not cosmetic, and getting it wrong is why this helper exists:
+///
+/// - `mean_all()`, what this replaced, divides by `rows · H`, making the
+///   per-element gradient `2λ·e/(rows·H)`. On an 18k × 32 table that is a pull
+///   of order `1e-6·e` — indistinguishable from `λ = 0`. `senna bge` measured
+///   exactly that and wrote it into its own `--feature-embedding-l2` help:
+///   toggling it moved cell-type purity within run-to-run noise. A knob that
+///   looks like regularization and isn't is worse than an honest `0.0`.
+/// - `sum(1).mean_all()`, this, divides by `rows` alone. Still invariant to how
+///   many genes or cells the table holds, so λ does not move with data size;
+///   no longer divided by the latent dim, so λ also survives a change of `-d`.
+///
+/// **λ is not comparable to the loss it is added to.** This penalty touches
+/// EVERY row on EVERY step, while the data gradient reaches a given row only on
+/// the steps that sample it. Adam normalizes per parameter, so a small but
+/// perfectly consistent gradient gets near-unit steps while a larger sporadic
+/// one is damped — the ridge wins on duty cycle, not magnitude. Measured in
+/// `pinto cage` (10.9k cells, 18k genes): λ = 0.0625 shrinks the gene-embedding
+/// norm ~40%, and λ = 1.0 — which is ~1% of the loss by value — drives both
+/// embeddings to exactly zero. Calibrate λ by its effect on `mean ‖e‖²`
+/// against a λ = 0 control, never by its share of the objective.
+///
+/// One definition because three callers want it — geu's composite trainer,
+/// `pinto cage`, and (once the gate's Gaussian effect KL goes) `faba gem`,
+/// whose β-sharing means the ridge must point at `f.beta` rather than a free
+/// `E_feat`. `table` is `[rows, H]`; the result is a scalar.
+pub fn embedding_ridge(table: &Tensor, lambda: f64) -> Result<Tensor> {
+    table.sqr()?.sum(1)?.mean_all()?.affine(lambda, 0.0)
+}
+
 /// Per-positive logistic (SGNS) NCE loss, shared by the geu embedders gbe
 /// (`feat`, bipartite NCE) and cage (`chain`, cell-cell chain NCE):
 ///

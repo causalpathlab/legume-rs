@@ -289,11 +289,12 @@ pub fn train_composite(
             let loss = sum_step(ctx, &mut rng, params)?;
             let Some(mut loss) = loss else { continue };
             if params.feature_embedding_l2 > 0.0 {
-                // `mean_all` keeps λ scale-invariant across `D · H`.
-                let l2 = shared_e_feat
-                    .sqr()?
-                    .mean_all()?
-                    .affine(f64::from(params.feature_embedding_l2), 0.0)?;
+                // `λ · mean_g ‖e_g‖²` — see `loss::embedding_ridge` for why the
+                // reduction sums over the latent axis instead of averaging over it.
+                let l2 = crate::loss::embedding_ridge(
+                    &shared_e_feat,
+                    f64::from(params.feature_embedding_l2),
+                )?;
                 loss = (loss + l2)?;
             }
             // SuSiE single-effect KL on the gate (identity + velocity): the fixed

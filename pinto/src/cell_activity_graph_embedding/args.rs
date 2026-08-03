@@ -322,13 +322,23 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
+        default_value_t = 0.0625,
         help = "L2 penalty λ on the shared cell and gene embeddings; 0 = off",
         long_help = "L2 penalty λ on E_cell ∈ ℝ^{N×D} and E_gene ∈ ℝ^{G×D}.\n\
-                     It adds λ · (mean(E_cell²) + mean(E_gene²)) to the loss.\n\
-                     The means keep λ scale-invariant across N,\n\
-                     G and D. The default of 1.0 is mild shrinkage; 0.0 disables it.\n\
-                     Typical values run from 0.1 to 10.0.",
+                     It adds λ · (mean_n ‖e_n‖² + mean_g ‖e_g‖²) to the loss:\n\
+                     a sum over the D latent dims, averaged over rows.\n\
+                     The row-mean keeps λ scale-invariant across N and G, and\n\
+                     summing over D rather than averaging keeps it invariant to\n\
+                     --embedding-dim too — see loss::embedding_ridge.\n\
+                     The default 0.0625 is the shrinkage cage was tuned at\n\
+                     (~40% off the free gene-embedding norm); it is 1/16 only\n\
+                     because the penalty used to be divided by D and D defaulted\n\
+                     to 16. It now means the same thing at every D.\n\
+                     Useful range 0.01-0.25. Do NOT reach for 1.0: measured on\n\
+                     a 10.9k-cell 18k-gene sample it drives both embeddings to\n\
+                     zero. A dense every-row penalty competes with a SPARSE data\n\
+                     gradient under Adam's per-parameter normalization, so it\n\
+                     bites far harder than its size against the loss suggests.",
         hide = true
     )]
     pub embedding_l2: f32,
