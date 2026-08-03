@@ -673,18 +673,25 @@ impl JointEmbedModel {
     ///
     /// `gate_terms_are_commensurate` pins the ratio so a future reduction change
     /// cannot re-open this quietly.
+    /// `beta_rows` is the FULL feature-row count, which is not always
+    /// `logits.dim(0)`: under [`Self::gate_kl_rows`] the tensors are a chunk
+    /// subset. The two mean-reduced terms estimate the full-table mean from any
+    /// subset, but the Beta hyperprior is a per-DIM quantity divided by the
+    /// entry count to sit on the same footing — normalize that by the subset and
+    /// it inflates by `rows_total / rows_subset` (≈280x at 64 of 18k).
     fn single_gate_kl(
         &self,
         logits: &Tensor,
         pi_logit: &Tensor,
         logstd: &Tensor,
         mu: &Tensor,
+        beta_rows: f64,
     ) -> Result<Tensor> {
         let logits = self.apply_temperature(logits)?;
         // `α = q(z=1)` per (gene, dim) — the same table `gate_weights` feeds the
         // likelihood. Clamped off 0/1 so the logs below stay finite.
         let alpha = candle_nn::ops::sigmoid(&logits)?.clamp(GATE_PI_EPS, 1.0 - GATE_PI_EPS)?;
-        let n_genes = alpha.dim(0)? as f64;
+        let n_genes = beta_rows;
         let n_dims = alpha.dim(1)? as f64;
 
         // Per-dim inclusion rate `π_h`, broadcast over genes.
@@ -742,11 +749,19 @@ impl JointEmbedModel {
             Some(f) => &f.beta,
             None => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
         };
-        let mut kl = self.one_gate_kl(GateKind::Identity, self.gate_logits(), mu)?;
+        let beta_rows = mu.dim(0)? as f64;
+        let mut kl =
+            self.one_gate_kl(GateKind::Identity, self.gate_logits(), mu, None, beta_rows)?;
         // Independent velocity gate on δ_g (factored + velocity present).
         if let Some(f) = &self.factor {
             if let Some((delta, _)) = &f.splice_delta {
-                let dkl = self.one_gate_kl(GateKind::Velocity, f.s_delta.as_ref(), delta)?;
+                let dkl = self.one_gate_kl(
+                    GateKind::Velocity,
+                    f.s_delta.as_ref(),
+                    delta,
+                    None,
+                    beta_rows,
+                )?;
                 kl = match (kl, dkl) {
                     (Some(a), Some(b)) => Some((a + b)?),
                     (a, b) => a.or(b),
@@ -754,6 +769,41 @@ impl JointEmbedModel {
             }
         }
         Ok(kl)
+    }
+
+    /// [`Self::gate_kl`] over a SUBSET of feature rows — the same estimand, at
+    /// `O(rows · H)` instead of `O(D · H)` per call.
+    ///
+    /// Both mean-reduced terms are per-entry means, so a subset is an unbiased
+    /// estimate of the full-table value; the Beta hyperprior is normalized by the
+    /// full row count regardless (see [`Self::single_gate_kl`]).
+    ///
+    /// # Why this is gradient-equivalent, not just cheaper
+    ///
+    /// A trainer that visits every row once per epoch in chunks of `C` takes
+    /// `D/C` steps. Under the full-table KL each row collects `D/C` gradients of
+    /// size `w/(D·H)`; under the subset it collects ONE of size `w/(C·H)`. Those
+    /// are equal, so per-epoch pressure on each gate entry is unchanged and the
+    /// caller's weight needs no recalibration — only the variance goes up.
+    ///
+    /// Identity gate only, and NOT for factored models: there the gate axis is
+    /// genes while training rows are feature rows via `row_to_gene`, so a row
+    /// subset can repeat a gene and double-count it. Returns `None` in that case
+    /// so callers fall back to [`Self::gate_kl`] rather than get a wrong number.
+    pub fn gate_kl_rows(&self, rows: &Tensor) -> Result<Option<Tensor>> {
+        if self.gate.is_none() || self.factor.is_some() {
+            return Ok(None);
+        }
+        let mu_full = self.e_feat_raw.as_ref().unwrap_or(&self.e_feat);
+        let beta_rows = mu_full.dim(0)? as f64;
+        let mu = mu_full.index_select(rows, 0)?;
+        self.one_gate_kl(
+            GateKind::Identity,
+            self.gate_logits(),
+            &mu,
+            Some(rows),
+            beta_rows,
+        )
     }
 
     /// One gate's contribution to [`Self::gate_kl`], picking the regime off whether a
@@ -765,6 +815,8 @@ impl JointEmbedModel {
         kind: GateKind,
         logits: Option<&Tensor>,
         mu: &Tensor,
+        rows: Option<&Tensor>,
+        beta_rows: f64,
     ) -> Result<Option<Tensor>> {
         // ONE walk of `GateKind`. Splitting the pip out into a second `gate_tables`
         // call meant dispatching twice and discarding the mask half of the result.
@@ -786,12 +838,26 @@ impl JointEmbedModel {
         let Some(logstd) = logstd else {
             return Ok(None);
         };
+        // Gather every per-row table with the SAME index, or the entries stop
+        // lining up (`α`, `σ`, `μ` are all `[rows, H]`).
+        let take = |t: &Tensor| -> Result<Tensor> {
+            match rows {
+                Some(idx) => t.index_select(idx, 0),
+                None => Ok(t.clone()),
+            }
+        };
         if let Some(pip) = pip {
-            return Ok(Some(Self::effect_kl(pip, logstd, mu)?));
+            return Ok(Some(Self::effect_kl(&take(pip)?, &take(logstd)?, mu)?));
         }
         let (Some(logits), Some(pi)) = (logits, pi_logit) else {
             return Ok(None);
         };
-        Ok(Some(self.single_gate_kl(logits, pi, logstd, mu)?))
+        Ok(Some(self.single_gate_kl(
+            &take(logits)?,
+            pi,
+            &take(logstd)?,
+            mu,
+            beta_rows,
+        )?))
     }
 }

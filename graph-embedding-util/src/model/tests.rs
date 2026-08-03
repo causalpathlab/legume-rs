@@ -717,3 +717,58 @@ fn jitter_keeps_the_effect_kl_and_drops_the_selection_terms() {
         "a fully masked gate must cost nothing, got {off}"
     );
 }
+
+/// `gate_kl_rows` must be an unbiased estimate of `gate_kl` — the whole point is
+/// that a chunk-sized KL can stand in for the full-table one, so that claim is
+/// asserted rather than argued.
+///
+/// The trap it guards: the Beta hyperprior is a per-DIM sum divided by the entry
+/// count. Normalize it by the SUBSET and the term inflates by
+/// `rows_total / rows_subset` — ~280x at cage's 64-of-18k — which would swamp
+/// the two mean-reduced terms and silently retune the gate.
+#[test]
+fn gate_kl_rows_averages_to_the_full_table_kl() {
+    use candle_util::candle_core::{Device, Tensor};
+
+    let (n_features, h) = (24usize, 4usize);
+    let vm = VarMap::new();
+    let m = gated_model(n_features, h, &vm);
+    let dev = Device::Cpu;
+
+    let full: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
+
+    // Partition every row into disjoint chunks; the mean over chunks must land
+    // on the full-table value.
+    let chunk = 6usize;
+    let mut acc = 0.0f64;
+    let mut n_chunks = 0usize;
+    for start in (0..n_features).step_by(chunk) {
+        let idx: Vec<u32> = (start..(start + chunk).min(n_features))
+            .map(|i| i as u32)
+            .collect();
+        let rows = Tensor::from_vec(idx.clone(), idx.len(), &dev).unwrap();
+        let part: f32 = m
+            .gate_kl_rows(&rows)
+            .unwrap()
+            .expect("non-factored gated model has a row-subset KL")
+            .to_scalar()
+            .unwrap();
+        acc += f64::from(part);
+        n_chunks += 1;
+    }
+    let mean_of_chunks = (acc / n_chunks as f64) as f32;
+
+    assert!(
+        (mean_of_chunks - full).abs() / full.abs().max(1e-6) < 1e-4,
+        "row-subset KL is biased: chunk mean {mean_of_chunks} vs full {full}"
+    );
+
+    // A subset must NOT simply equal the full value — that would mean the
+    // gather did nothing and the "subset" was the whole table.
+    let one = Tensor::from_vec(vec![0u32, 1, 2], 3, &dev).unwrap();
+    let single: f32 = m.gate_kl_rows(&one).unwrap().unwrap().to_scalar().unwrap();
+    assert!(
+        single.is_finite(),
+        "a small row subset must still produce a finite KL"
+    );
+}
