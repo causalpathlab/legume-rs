@@ -46,6 +46,7 @@
 //! `faba gem-encoder` hands over the θ and counts from the run that just
 //! finished, with no round-trip.
 
+use candle_util::batched_dot::batched_matvec;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use log::info;
@@ -299,12 +300,9 @@ fn step(
     // Negatives reuse z_b: score_neg[i,j] = z_b[i] · ρ_{neg[i,j]} + b_{neg[i,j]}.
     let rho_neg = rho.index_select(&gn_t, 0)?.reshape((b, k, h))?; // [B, K, H]
     let b_neg = b_gene.index_select(&gn_t, 0)?.reshape((b, k))?; // [B, K]
-                                                                 // Batched mat-vec, not `broadcast_mul(...).sum(2)`: the broadcast form's
-                                                                 // stride-0 dim lands BETWEEN two non-zero strides, which candle's
-                                                                 // `offsets_b()` rejects, so it runs a scalar `StridedIndex` loop with no
-                                                                 // SIMD and materializes a `[B, K, H]` product that backward multiplies.
-                                                                 // Same rewrite as `JointEmbedModel::score_negatives`.
-    let neg_dot = rho_neg.matmul(&z_b.unsqueeze(2)?)?.squeeze(2)?; // [B, K]
+                                                                 // Gemm — see `candle_util::batched_dot`. Same shape and semantics as
+                                                                 // `JointEmbedModel::score_negatives`, which calls the same helper.
+    let neg_dot = batched_matvec(&rho_neg, &z_b)?; // [B, K]
     let neg_score = (neg_dot + b_neg)?; // [B, K]
 
     // The crate's own bipartite NCE loss, one module over — same

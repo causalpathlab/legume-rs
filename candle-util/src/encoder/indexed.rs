@@ -1,3 +1,4 @@
+use crate::batched_dot::{batched_matvec_shared, batched_weighted_sum};
 use crate::data::indexed::SparseEdgeBatch;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
@@ -241,17 +242,13 @@ impl IndexedEmbeddingEncoder {
             .as_ref()
             .expect("forward_indexed_masked requires an attn_pool encoder");
         let scale = (h as f64).sqrt();
-        let scores_nk = content_nkh
-            .broadcast_mul(&attn_query.reshape((1, 1, h))?)?
-            .sum(2)?
-            .affine(1.0 / scale, 0.0)?; // [N, K]
+        // Both of these are gemms — see `candle_util::batched_dot`. The scores
+        // share one query across the batch; the pool is the transposed case.
+        let scores_nk =
+            batched_matvec_shared(&content_nkh, attn_query)?.affine(1.0 / scale, 0.0)?; // [N, K]
         let neg_inf = visible_mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?; // (1−vis)·(−1e9)
         let attn_nk = ops::softmax(&(scores_nk + neg_inf)?, 1)?; // [N, K]
-                                                                 // Attention pooling IS a matmul: `[N,1,K] × [N,K,H] → [N,1,H]`. The
-                                                                 // broadcast form is already SIMD-friendly here (its stride-0 dim is
-                                                                 // trailing, which `offsets_b` strips), but it still materializes an
-                                                                 // `[N,K,H]` product and reduces over a strided axis; gemm does neither.
-        let pooled_nh = attn_nk.unsqueeze(1)?.matmul(&content_nkh)?.squeeze(1)?; // [N, H]
+        let pooled_nh = batched_weighted_sum(&attn_nk, &content_nkh)?; // [N, H]
 
         // A row with no visible slot (empty cell, or all real genes masked at
         // high mask_fraction) has an all-−∞ score row, so softmax degenerates to

@@ -22,7 +22,7 @@ use crate::loss::{
     sample_stratified_edge_batch, EdgeBatch, PerBatchStratifiedCellSampler,
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
-use crate::model::{gate_kl_step_weight, JointEmbedModel, GATE_KL_WEIGHT};
+use crate::model::{JointEmbedModel, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
@@ -252,15 +252,15 @@ pub fn train_composite(
     // so a throughput knob stops retuning feature sparsity. At the default that
     // is the same number, but a non-default `--batch-size` DOES change results
     // versus older builds, so say so rather than let it look like seed noise.
-    if params.batch_size as f64 != crate::model::GATE_KL_REF_UNITS
+    if params.batch_size != GATE_KL_REF_UNITS as usize
         && ctx.axes.iter().any(|a| a.model.gate.is_some())
     {
         info!(
             "gate KL is pinned at 1/{:.0} (was 1/batch_size); with --batch-size {} \
              the gate is {:.2}x the strength older builds applied",
-            crate::model::GATE_KL_REF_UNITS,
+            GATE_KL_REF_UNITS,
             params.batch_size,
-            params.batch_size as f64 / crate::model::GATE_KL_REF_UNITS
+            params.batch_size as f64 / GATE_KL_REF_UNITS
         );
     }
     log::info!(
@@ -315,7 +315,7 @@ pub fn train_composite(
             // new weight is numerically identical to the old one, so default runs are
             // unchanged.
             if let Some(kl) = ctx.axes[0].model.gate_kl()? {
-                let w = gate_kl_weight_for(params);
+                let w = GATE_KL_STEP_WEIGHT;
                 loss = (loss + kl.affine(w, 0.0)?)?;
             }
             // L2 (ridge) shrinkage on the per-gene splice offset δ_g (factored
@@ -399,21 +399,6 @@ pub fn train_composite(
     Ok(last_avg)
 }
 
-/// The gate-KL weight this trainer applies to a step, given its resolved
-/// params. Extracted so the invariance test exercises THIS expression rather
-/// than re-deriving one beside it — a test that recomputes the formula it is
-/// checking cannot fail when the formula changes.
-///
-/// `data_units = 1` is deliberate and is NOT the axis count the helper's
-/// general contract describes: it reproduces the historical level `λ/1024`
-/// exactly at the default `--batch-size`, which is what keeps this a
-/// correctness fix. The consequence is that the prior's share still carries a
-/// `1/axis_count` factor, so `--phase1-cells-per-pb` and `--num-levels` retune
-/// it; normalizing that away changes default results and is deferred.
-pub fn gate_kl_weight_for(_params: &TrainingParams) -> f64 {
-    gate_kl_step_weight(GATE_KL_WEIGHT, 1)
-}
-
 /// Resolve the per-epoch step budget: an explicit override, or auto = one
 /// weighted pass over the largest axis.
 ///
@@ -428,7 +413,6 @@ pub fn resolve_batches_per_epoch(params: &TrainingParams, max_axis_units: usize)
 
 /// One training step — sample a minibatch from every
 /// axis, compute each axis's NCE loss, return the λ-weighted sum.
-///
 fn sum_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,
