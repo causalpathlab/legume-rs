@@ -299,7 +299,12 @@ fn step(
     // Negatives reuse z_b: score_neg[i,j] = z_b[i] · ρ_{neg[i,j]} + b_{neg[i,j]}.
     let rho_neg = rho.index_select(&gn_t, 0)?.reshape((b, k, h))?; // [B, K, H]
     let b_neg = b_gene.index_select(&gn_t, 0)?.reshape((b, k))?; // [B, K]
-    let neg_dot = z_b.unsqueeze(1)?.broadcast_mul(&rho_neg)?.sum(2)?; // [B, K]
+                                                                 // Batched mat-vec, not `broadcast_mul(...).sum(2)`: the broadcast form's
+                                                                 // stride-0 dim lands BETWEEN two non-zero strides, which candle's
+                                                                 // `offsets_b()` rejects, so it runs a scalar `StridedIndex` loop with no
+                                                                 // SIMD and materializes a `[B, K, H]` product that backward multiplies.
+                                                                 // Same rewrite as `JointEmbedModel::score_negatives`.
+    let neg_dot = rho_neg.matmul(&z_b.unsqueeze(2)?)?.squeeze(2)?; // [B, K]
     let neg_score = (neg_dot + b_neg)?; // [B, K]
 
     // The crate's own bipartite NCE loss, one module over — same

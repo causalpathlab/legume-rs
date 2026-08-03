@@ -1,6 +1,6 @@
 //! Unit tests for the velocity-drift SEM residual.
 
-use super::{sem_penalty, PbSemTerm};
+use super::{sem_penalty, PbSemTerm, TrainingParams};
 use crate::fit::lineage::PbLineageLevel;
 use candle_util::candle_core::{Device, Tensor, Var};
 
@@ -98,4 +98,68 @@ fn sem_term_survives_multi_edge_level() {
         velocity: vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     };
     assert!(PbSemTerm::new(&level, 2, 1.0, 1.0, &dev).unwrap().is_some());
+}
+
+/// The gate KL is a prior over GLOBAL parameters, so the share of the objective
+/// it occupies must not move when a THROUGHPUT knob moves.
+///
+/// Before this, the weight was `GATE_KL_WEIGHT / batch_size`, so
+/// `--batch-size 4096` cut the prior's share to a quarter and `64` raised it
+/// 16x — a flag chosen for memory silently retuning how sparse the learned
+/// feature sets came out. Nothing caught it because no test anywhere pinned
+/// gate sparsity or KL magnitude.
+///
+/// Calls [`gate_kl_weight_for`], the SAME function the training loop applies,
+/// rather than re-deriving the formula here: an earlier version of this test
+/// recomputed the weight in its own closure and therefore could not fail when
+/// the loop's formula changed.
+#[test]
+fn gate_kl_weight_is_invariant_to_batch_size_and_step_budget() {
+    use crate::model::{GATE_KL_REF_UNITS, GATE_KL_WEIGHT};
+    use crate::training::{gate_kl_weight_for, resolve_batches_per_epoch};
+
+    const MAX_AXIS_UNITS: usize = 8_192;
+
+    let params = |batch_size, batches_per_epoch| TrainingParams {
+        epochs: 1,
+        batches_per_epoch,
+        batch_size,
+        num_negatives: 4,
+        seed: 42,
+        objective: crate::loss::NceObjective::Softmax,
+        feature_embedding_l2: 0.0,
+        max_grad_norm: 0.0,
+        delta_l2: 0.0,
+    };
+
+    let sizes = [1usize, 64, 512, 1024, 4096, 65_536];
+    let base = gate_kl_weight_for(&params(1024, None));
+
+    for bs in sizes {
+        let got = gate_kl_weight_for(&params(bs, None));
+        assert!(
+            (got / base - 1.0).abs() < 1e-12,
+            "--batch-size {bs} moved the gate-KL weight: {got} vs {base}"
+        );
+        // The auto budget must stay positive at every size, or the epoch is skipped.
+        assert!(resolve_batches_per_epoch(&params(bs, None), MAX_AXIS_UNITS) >= 1);
+    }
+    // An explicit step budget must not move it either.
+    assert!((gate_kl_weight_for(&params(1024, Some(7))) / base - 1.0).abs() < 1e-12);
+    assert_eq!(
+        resolve_batches_per_epoch(&params(1024, Some(7)), MAX_AXIS_UNITS),
+        7
+    );
+
+    // THE LOAD-BEARING CLAIM: at the default `--batch-size 1024`, which both
+    // `senna bge` and `faba gem` carry, the weight equals the `λ/batch_size`
+    // this replaced. That is the whole reason it lands as a correctness fix
+    // rather than a re-tune, so it is pinned rather than argued.
+    let historical = GATE_KL_WEIGHT / 1024.0;
+    assert!(
+        (base - historical).abs() < 1e-15,
+        "not behaviour-preserving at the default: {base} vs {historical}"
+    );
+    // Pin the level, so re-tuning it is a reviewed edit rather than drift.
+    assert!((base - GATE_KL_WEIGHT / GATE_KL_REF_UNITS).abs() < 1e-15);
 }

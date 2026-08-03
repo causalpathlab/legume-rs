@@ -74,8 +74,9 @@ pub enum GateKind {
 ///
 /// # KL loss
 ///
-/// Always added, at the fixed [`GATE_KL_WEIGHT`], amortized `1/B` over the
-/// minibatch:
+/// Always added, at the fixed [`GATE_KL_WEIGHT`], scaled by
+/// [`gate_kl_step_weight`] so the share of the objective it occupies does not
+/// move when a throughput knob does:
 ///
 ///   `loss += mean_{g,h}[ KL(Bern(α_{g,h}) ‖ Bern(π_h)) + α_{g,h}·KL(N(E,σ²) ‖ N(0,σ₀²)) ]`
 ///          `+ Σ_h −log Beta(π_h; a, b)`
@@ -93,10 +94,50 @@ pub struct FeatureGateSpec {
 
 /// Effect-prior variance `σ₀²` for the Gaussian KL `KL(N(μ,σ²) ‖ N(0,σ₀²))`.
 pub const GATE_EFFECT_PRIOR_VAR: f64 = 1.0;
-/// Fixed weight `λ` on the spike-and-slab KL. The gate is always variational;
-/// the KL is applied amortized `λ/B` over the minibatch, so `1.0` gives the `1/B`
-/// scale. A single source of truth rather than a per-run CLI knob.
+/// Fixed weight `λ` on the spike-and-slab KL. The gate is always variational.
+/// A single source of truth rather than a per-run CLI knob; see
+/// [`gate_kl_step_weight`] for how it reaches a step's loss.
 pub const GATE_KL_WEIGHT: f64 = 1.0;
+
+/// Calibration reference for [`gate_kl_step_weight`], in data-term units.
+///
+/// `1024` is deliberately the historical default `--batch-size` of both
+/// `senna bge` and `faba gem`, whose data term contributes exactly one
+/// per-example mean per axis. At that default the weight is numerically
+/// identical to the `λ/batch_size` this replaced, so pinning the reference here
+/// is what makes the change a correctness fix rather than a re-tune.
+pub const GATE_KL_REF_UNITS: f64 = 1024.0;
+
+/// How much of a step's loss the gate KL should be.
+///
+/// [`JointEmbedModel::gate_kl`] is a prior over GLOBAL parameters, not a
+/// per-example term: it is mean-reduced per `(feature, dim)` entry and is `O(1)`
+/// whatever the runtime knobs are. What matters is the share of the objective it
+/// occupies, `w / u`, where `u` = `data_units` is the number of `O(1)`
+/// per-example means the data term contributes THAT STEP. Holding `w/u` fixed
+/// makes the fitted sparsity independent of batching. The step count cancels: it
+/// multiplies the KL total and the data total over an epoch alike, so
+/// "per-epoch KL total" is the wrong thing to hold constant.
+///
+/// `data_units` is a property of the caller's reduction: a MEAN data term is
+/// intensive so `u` is its term count, a SUM data term is extensive so `u` is
+/// the mass it summed.
+///
+/// The one caller today is geu's `train_composite`, via
+/// `crate::training::gate_kl_weight_for`, and it passes `1` rather than its
+/// axis count — deliberately, to reproduce the historical `λ/batch_size` level
+/// exactly at the default `--batch-size`. `pinto cage` does NOT call this: it
+/// applies its own Fisher-weighted mass ratio, on a different reference, so the
+/// two are not calibrated to a common scale. Re-levelling them onto one is a
+/// behavioural change and is deferred; until then, changing
+/// [`GATE_KL_REF_UNITS`] moves geu's consumers only.
+///
+/// Before this existed geu used `λ/batch_size`, which made the share `∝ 1/B`:
+/// `--batch-size 4096` cut the prior to a quarter and `64` raised it 16×, so a
+/// throughput flag silently retuned how sparse the feature sets came out.
+pub fn gate_kl_step_weight(kl_weight: f64, data_units: usize) -> f64 {
+    kl_weight * data_units.max(1) as f64 / GATE_KL_REF_UNITS
+}
 /// `Beta(a, b)` hyperprior on each dim's inclusion rate `π_h`.
 ///
 /// **Mind the convention.** `posterior::hyper::sample_pi0` draws `π₀ = P(OFF)` under
