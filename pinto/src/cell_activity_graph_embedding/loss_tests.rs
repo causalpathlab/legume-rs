@@ -276,3 +276,103 @@ fn objective_selects_a_different_loss() {
     // above is the objective and not batch noise.
     assert!((mean_per_level(NceObjective::Softmax) - softmax).abs() < 1e-6);
 }
+
+/// `fit.rs` weights the gate KL by the mass its data term carries, and that
+/// term is `per_level_gl` SUMMED. So the unit count must track the tensor's
+/// real shape on both axes — genes AND chain levels.
+///
+/// The previous version of this test asserted `elem_count == n_ids * L` with
+/// `L` a test constant, which is true by construction and pins nothing. This
+/// one varies the level count and asserts the shape follows, which is the
+/// property `fit.rs` actually depends on (its weight omits the `L` factor, so
+/// `--chain-levels` still moves the prior's share — a known, documented gap
+/// this test makes visible rather than hides).
+#[test]
+fn per_level_shape_tracks_genes_and_levels() {
+    let dev = Device::Cpu;
+    let varmap = VarMap::new();
+    let m = model(&varmap, &dev);
+
+    for n_levels in [1usize, 2, L] {
+        let (mut bs, ids) = batches();
+        for cb in &mut bs {
+            cb.per_level_neg.truncate(n_levels);
+        }
+        let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Softmax, &dev).unwrap();
+        assert_eq!(
+            out.per_level.dims(),
+            &[ids.len(), n_levels],
+            "per-level loss must be [genes, levels] so the KL weight can track it"
+        );
+        assert_eq!(out.per_level.elem_count(), ids.len() * n_levels);
+    }
+}
+
+/// The negative branch now delegates to `JointEmbedModel::score_negatives`, so
+/// pin THAT function against the broadcast formulation it replaced — not a
+/// locally re-implemented matmul, which would only prove candle agrees with
+/// candle and would keep passing if `score_negatives` dropped a bias term.
+#[test]
+fn score_negatives_matches_the_broadcast_formulation() {
+    use candle_util::candle_core::{DType, Tensor};
+    use graph_embedding_util::model::JointEmbedModel;
+
+    let dev = Device::Cpu;
+    let (rows, k, d) = (512usize, 8usize, 16usize);
+
+    let mk = |seed: u64, n: usize| -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let x = (i as u64).wrapping_mul(seed).wrapping_add(12345);
+                ((x % 2000) as f32) / 1000.0 - 1.0
+            })
+            .collect()
+    };
+    let e_neg = Tensor::from_vec(mk(7, rows * k * d), (rows, k, d), &dev).unwrap();
+    let e_c = Tensor::from_vec(mk(13, rows * d), (rows, d), &dev).unwrap();
+    let b_neg = Tensor::from_vec(mk(29, rows * k), (rows, k), &dev).unwrap();
+    let b_c = Tensor::from_vec(mk(31, rows), rows, &dev).unwrap();
+
+    // The real function, biases included.
+    let got = JointEmbedModel::score_negatives(&e_neg, &e_c, &b_neg, &b_c).unwrap();
+
+    // The formulation it replaced, written out independently.
+    let tl_3d = e_c
+        .unsqueeze(1)
+        .unwrap()
+        .broadcast_as((rows, k, d))
+        .unwrap();
+    let dot = (&e_neg * &tl_3d).unwrap().sum(2).unwrap();
+    let b_c_b = b_c.unsqueeze(1).unwrap().broadcast_as((rows, k)).unwrap();
+    let want = ((dot + &b_neg).unwrap() + b_c_b).unwrap();
+
+    assert_eq!(got.dims(), want.dims());
+    let diff = (&got - &want)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .max_all()
+        .unwrap()
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    assert!(
+        diff < 1e-4,
+        "score_negatives disagrees with the broadcast form by {diff}"
+    );
+
+    // Dropping either bias must be caught — the dot product alone is not enough.
+    let dot_only = (&got - &b_neg)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .max_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    assert!(
+        dot_only > 1e-3,
+        "the bias terms must actually be in the score"
+    );
+}

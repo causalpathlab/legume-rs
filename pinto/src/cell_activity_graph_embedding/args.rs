@@ -494,6 +494,32 @@ pub struct CellActivityGraphEmbeddingArgs {
     pub gate_mode: GateMode,
 
     #[arg(
+        long = "gate-kl-weight",
+        default_value_t = 1.0,
+        hide = true,
+        help = "Multiplier on the learned gate's spike-and-slab KL (--gate-mode learned only)",
+        long_help = "Scales the KL that pulls the learned gate toward its Beta(1,9)\n\
+                     inclusion prior, i.e. how hard the model is pushed to switch\n\
+                     features OFF.\n\
+                     \n\
+                     Must be finite and >= 0; a negative weight would train the\n\
+                     gate AWAY from its prior. Rejected under --gate-mode sampled,\n\
+                     where no learned gate exists for it to act on.\n\
+                     \n\
+                     1.0 is cage's own reference, NOT geu's — the two are not\n\
+                     calibrated to a common scale. On GBM that level left\n\
+                     every inclusion probability above 0.95 — no selection at all —\n\
+                     because cage's data term is a SUM over genes x levels where\n\
+                     bge's is a mean, leaving the prior ~36x weaker here.\n\
+                     \n\
+                     Hidden and experimental: raising it is how you find out\n\
+                     whether this gate can select on your data. Watch the run's\n\
+                     mean |pair| — if it decays toward zero while the loss falls,\n\
+                     the prior is winning and the embedding is collapsing."
+    )]
+    pub gate_kl_weight: f64,
+
+    #[arg(
         long = "feature-gate-temp",
         default_value_t = 1.0,
         help = "Learned-gate temperature τ; < 1 sharpens toward 0/1 (--gate-mode learned only)"

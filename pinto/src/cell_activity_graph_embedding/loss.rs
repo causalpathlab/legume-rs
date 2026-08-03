@@ -144,11 +144,9 @@ pub fn cage_nce_loss_per_level(
     // rank-1 PSD form cannot express.
     // `θ_g ⊙ e_left` does not change across chain levels or between the
     // positive and its negatives, so it is formed ONCE — a 3x saving on the
-    // left factor. It does NOT avoid a `[G*B, K, D]` temporary: the negative
-    // branch below still materializes one per level, because `broadcast_as` is
-    // a view but the multiply that consumes it is not. A batched
-    // `e_neg.matmul(theta_left.unsqueeze(2))` would cut that 64x and hit BLAS;
-    // not done yet.
+    // left factor. The `[G*B, K, D]` temporary this used to leave behind is
+    // gone: the negative branch below goes through `score_negatives`, which is
+    // a batched mat-vec, so the product stays implicit.
     let theta_left = (&e_gene_l * &e_left)?; // [G*B, D]
     let pair_pos = (&theta_left * &e_right)?.sum(1)?; // [G*B]
                                                       // Collapse detector: the bias-free pair term, so its magnitude is not
@@ -165,11 +163,14 @@ pub fn cage_nce_loss_per_level(
         let e_neg = e_neg_flat.reshape((total_b, k, h))?;
         let b_neg = b_neg_flat.reshape((total_b, k))?;
         // Negatives replace the RIGHT endpoint: the edge embedding becomes
-        // `e_u * e_w`, scored against the same gene direction.
-        let tl_3d = theta_left.unsqueeze(1)?.broadcast_as((total_b, k, h))?;
-        let pair_neg = (&e_neg * &tl_3d)?.sum(2)?; // [G*B, K]
-        let b_left_2d = b_left.unsqueeze(1)?.broadcast_as((total_b, k))?;
-        let neg_score = ((pair_neg + b_left_2d)? + &b_neg)?;
+        // `e_u * e_w`, scored against the same gene direction — which is exactly
+        // geu's `score_negatives` with the gene-projected anchor as the cell
+        // side. Call it rather than re-derive it: cage's own copy of this
+        // expression was the slow broadcast form long after the shape of the fix
+        // was known, and one definition is what stops that recurring. (The bias
+        // terms associate in the other order here; same value, and float
+        // associativity is well inside the run-to-run spread.)
+        let neg_score = JointEmbedModel::score_negatives(&e_neg, &theta_left, &b_neg, &b_left)?;
         let negs = std::slice::from_ref(&neg_score);
         let per_edge = match objective {
             NceObjective::Logistic => logistic_nce(&pos_score, negs)?,
