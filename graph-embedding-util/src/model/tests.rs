@@ -359,19 +359,20 @@ fn ungated_model_is_inert() {
     assert!(m.feature_selection().unwrap().is_none());
 }
 
-/// An untrained gate is inert **on dim 0 only** — and that is a deliberate change.
+/// An untrained gate is a graded RANKING, centred on `σ(0) = 0.5`.
 ///
-/// Before the IBP ladder every entry started at `σ(4) ≈ 0.98`, so a fresh model's
-/// `Ẽ ≈ β` everywhere. The ladder tilts from the very first step, by construction:
-/// that ordering IS the prior, and a prior that only switched on after some warmup
-/// would just be a schedule. So the invariant weakens to a graded one.
+/// Two deliberate changes are pinned here. The gate no longer starts inert — the
+/// ladder tilts from the first step, because that ordering IS the prior and one
+/// that switched on after a warmup would just be a schedule. And the init moved
+/// from 4.0 to 0.0, trading dictionary scale (the effective `‖α·β‖²` fell ~4× on
+/// GBM) for gradient: `dα/dS = α(1−α)` is 0.018 at `σ(4)` and 0.25 here.
 ///
-/// What must NOT weaken is the reason the init is not zero: no coordinate may start
-/// at a multiplier so small that `β`'s gradient through `α·β` dies, because SGD
-/// cannot bring a zeroed coordinate back. The floor is the last dim's `σ(0) = 0.5`
-/// — a halving, matching the old worst case, not an extinction.
+/// What must NOT weaken is that no coordinate starts saturated at either end. A
+/// multiplier near 0 kills `β`'s gradient through `α·β` and SGD cannot bring it
+/// back, where Gibbs resurrects one from a likelihood ratio. With the ladder
+/// centred on the init, the bound is symmetric and holds at both ends.
 #[test]
-fn untrained_gate_is_inert_on_dim_zero_and_graded_after() {
+fn untrained_gate_is_a_graded_ranking_with_no_saturated_dim() {
     let (n_features, h) = (6usize, 4usize);
     let vm = VarMap::new();
     let m = gated_model(n_features, h, &vm);
@@ -379,35 +380,36 @@ fn untrained_gate_is_inert_on_dim_zero_and_graded_after() {
     assert_eq!(sel.dims(), &[n_features, h], "no null column");
 
     for row in sel.to_vec2::<f32>().unwrap() {
-        assert!(
-            row[0] > 0.97 && row[0] < 1.0,
-            "dim 0 must still pass the loading through nearly unchanged, got {}",
-            row[0]
-        );
         for w in row.windows(2) {
             assert!(
                 w[1] <= w[0],
                 "the ladder must be monotone across dims: {row:?}"
             );
         }
+        // Symmetric about the init: the ends mirror, so the mean stays at 0.5 and
+        // changing alpha re-ranks without rescaling the dictionary.
         assert!(
-            row[h - 1] >= 0.5 - 1e-5,
-            "no dim may start below the sigmoid's midpoint — a smaller multiplier \
-             kills beta's gradient and SGD cannot recover it: {row:?}"
+            ((row[0] + row[h - 1]) - 1.0).abs() < 1e-5,
+            "ladder must be centred on sigma(0): {row:?}"
         );
+        for (j, a) in row.iter().enumerate() {
+            let slope = a * (1.0 - a);
+            assert!(
+                slope > 0.10,
+                "dim {j} starts saturated (alpha={a}, dalpha/dS={slope}); SGD \
+                 cannot recover a dead multiplier: {row:?}"
+            );
+        }
     }
 
-    // Applying it to an all-ones base shrinks the tail but never zeroes it.
+    // Applying it to an all-ones base tilts the base but never zeroes it.
     let base = Tensor::ones((n_features, h), DType::F32, &dev()).unwrap();
     let w = m
         .gate_weights(GateKind::Identity, m.s_feat.as_ref().unwrap())
         .unwrap();
     let gated = base.mul(&w).unwrap();
     for x in gated.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
-        assert!(
-            (0.5 - 1e-5..=1.0).contains(&x),
-            "gated base out of range: {x}"
-        );
+        assert!((0.1..=0.9).contains(&x), "gated base out of range: {x}");
     }
 }
 
@@ -767,28 +769,36 @@ fn default_ibp_ladder_keeps_the_tail_trainable() {
         let alpha = crate::model::ibp_alpha_for_drop(h, crate::model::GATE_IBP_LOGIT_DROP);
         let bias = crate::model::ibp_gate_logit_bias(alpha, h);
 
-        assert!(bias[0].abs() < 1e-12, "h={h}: dim 0 must be unbiased");
-        let drop = -bias[h - 1];
+        // CENTRED: the span sits either side of the init, so the mean bias is 0
+        // and changing α re-ranks the dims without rescaling the dictionary.
+        let mean: f64 = bias.iter().sum::<f64>() / h as f64;
         assert!(
-            (drop - crate::model::GATE_IBP_LOGIT_DROP).abs() < 1e-9,
-            "h={h}: ladder must span exactly the target drop, got {drop}"
+            mean.abs() < 1e-9,
+            "h={h}: ladder must be centred, mean {mean}"
+        );
+        assert!(
+            (bias[0] + bias[h - 1]).abs() < 1e-9,
+            "h={h}: ends must be symmetric about the init"
+        );
+        let span = bias[0] - bias[h - 1];
+        assert!(
+            (span - crate::model::GATE_IBP_LOGIT_DROP).abs() < 1e-9,
+            "h={h}: ladder must span exactly the target drop, got {span}"
         );
 
-        // What the gate actually sees, at the untrained logit.
-        let init = f64::from(4.0f32); // GATE_LOGIT_INIT
-        let a_first = 1.0 / (1.0 + (-(init + bias[0])).exp());
-        let a_last = 1.0 / (1.0 + (-(init + bias[h - 1])).exp());
-        assert!(
-            a_first > 0.97,
-            "h={h}: dim 0 starts ~ungated, got {a_first}"
-        );
-        assert!(
-            (a_last - 0.5).abs() < 1e-6,
-            "h={h}: last dim must start at the sigmoid's most responsive point, got {a_last}"
-        );
-        // σ'(x) = α(1−α): the tail must still have gradient to move on.
-        let slope = a_last * (1.0 - a_last);
-        assert!(slope > 0.2, "h={h}: tail gradient is dead ({slope})");
+        // What the gate actually sees, at the untrained logit. EVERY dim must
+        // keep gradient — that is the constraint the ladder is bounded by, and
+        // the one the sampler's α=1 violates (6 of 16 dims frozen at init).
+        let init = f64::from(crate::model::gate_logit_init());
+        for (j, b) in bias.iter().enumerate() {
+            let a = 1.0 / (1.0 + (-(init + b)).exp());
+            let slope = a * (1.0 - a); // σ'(x) = α(1−α)
+            assert!(
+                slope > 0.10,
+                "h={h} dim {j}: starts frozen (alpha={a}, dalpha/dS={slope}) — a \
+                 gradient cannot recover a saturated multiplier the way Gibbs can"
+            );
+        }
     }
 }
 
@@ -837,6 +847,65 @@ fn ibp_ladder_tilts_the_gate_weights() {
         assert!(
             row[h - 1] < row[0] - 0.4,
             "the gate's own weights must carry the ladder: {row:?}"
+        );
+    }
+}
+
+/// Pathological `α` must not produce NaN or a permanently stuck dim.
+///
+/// `α` reaches the ladder straight from a CLI flag. `ln(α/(α+1))` is `−∞` at
+/// `α = 0`, and the CENTRE rung then evaluates `0 · −∞` = **NaN** — which would
+/// not merely freeze one dim but poison every gradient in the forward pass, with
+/// no error raised anywhere. The other end is subtler: a tiny-but-valid `α` gives
+/// a huge finite ladder, which saturates `σ` to gradient 0, and a dim at gradient
+/// 0 never comes back.
+#[test]
+fn pathological_ibp_alpha_stays_finite_and_unstuck() {
+    for &(alpha, label) in &[
+        (0.0, "zero"),
+        (-1.0, "negative"),
+        (f64::NAN, "nan"),
+        (f64::INFINITY, "inf"),
+        (1e-300, "denormal-small"),
+        (1e300, "huge"),
+    ] {
+        for h in [1usize, 2, 16, 31] {
+            let bias = crate::model::ibp_gate_logit_bias(alpha, h);
+            assert_eq!(bias.len(), h, "{label}/h={h}: wrong length");
+            let init = f64::from(crate::model::gate_logit_init());
+            for (j, b) in bias.iter().enumerate() {
+                assert!(
+                    b.is_finite(),
+                    "{label}/h={h} dim {j}: non-finite ladder bias {b}"
+                );
+                // The real requirement: gradient still flows. `σ` itself never
+                // NaNs, so what has to hold is that `σ' = α(1−α)` is not zero.
+                let a = 1.0 / (1.0 + (-(init + b)).exp());
+                let slope = a * (1.0 - a);
+                assert!(
+                    a.is_finite() && slope > 0.0,
+                    "{label}/h={h} dim {j}: stuck (alpha={a}, slope={slope})"
+                );
+            }
+        }
+    }
+}
+
+/// The surviving `exp` in the prior term must stay finite for any log-std the
+/// optimizer can reach — `exp` is the one op here that genuinely overflows.
+#[test]
+fn effect_prior_exp_cannot_overflow() {
+    let (n_features, h) = (8usize, 4usize);
+    for logstd in [-1e30f32, -50.0, 0.0, 50.0, 1e30] {
+        let vm = VarMap::new();
+        let mut m = gated_model(n_features, h, &vm);
+        m.e_feat_logstd =
+            Some(Tensor::from_vec(vec![logstd; n_features * h], (n_features, h), &dev()).unwrap());
+        let kl: f32 = m.gate_kl().unwrap().unwrap().to_scalar().unwrap();
+        assert!(
+            kl.is_finite(),
+            "logstd={logstd}: prior term overflowed to {kl} (clamp at \
+             GATE_LOGSTD_CLAMP is what bounds exp here)"
         );
     }
 }

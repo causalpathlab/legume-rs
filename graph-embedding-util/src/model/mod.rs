@@ -23,8 +23,8 @@ mod score;
 mod vars;
 
 pub use gate::{
-    gate_kl_step_weight, ibp_alpha_for_drop, ibp_gate_logit_bias, FeatureGateSpec, GateKind,
-    GATE_EFFECT_PRIOR_VAR, GATE_IBP_LOGIT_DROP, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT,
+    gate_kl_step_weight, gate_logit_init, ibp_alpha_for_drop, ibp_gate_logit_bias, FeatureGateSpec,
+    GateKind, GATE_EFFECT_PRIOR_VAR, GATE_IBP_LOGIT_DROP, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT,
     GATE_KL_WEIGHT,
 };
 use vars::{

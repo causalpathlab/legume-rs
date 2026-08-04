@@ -81,7 +81,7 @@ pub enum GateKind {
 ///
 /// The softmax pinned each dim's mass at exactly 1.000 by construction. A sigmoid
 /// constrains nothing, so mass control moves into the prior — but as STRUCTURE, not
-/// as a penalty. Dim `h` carries a fixed logit offset `h · ln(α/(α+1))`
+/// as a penalty. Dim `h` carries a fixed logit offset `(h − (H−1)/2) · ln(α/(α+1))`
 /// ([`ibp_gate_logit_bias`]), so inclusion decays geometrically with the dim index
 /// and the fit must spend dim 0 before dim 7.
 ///
@@ -178,27 +178,54 @@ pub const GATE_KL_STEP_WEIGHT: f64 = GATE_KL_WEIGHT / GATE_KL_REF_UNITS;
 /// Mirrors `posterior::hyper::PI0_EPS`, which does the same job for the sampler.
 const GATE_PI_EPS: f64 = 1e-6;
 
-/// Total logit drop the DEFAULT IBP ladder spans from dim `0` to dim `H−1`.
+/// Total logit span the DEFAULT IBP ladder covers from dim `0` to dim `H−1`.
 ///
-/// Set equal to [`GATE_LOGIT_INIT`] on purpose: dim 0 starts at `σ(4) ≈ 0.98` and
-/// the last dim at `σ(4 − 4) = σ(0) = 0.5`, the sigmoid's most responsive point.
-/// So the ladder biases the tail without freezing it, and it is the DATA that
-/// decides whether a late dim lives.
+/// The ladder is CENTRED (see [`ibp_gate_logit_bias`]), so at
+/// [`GATE_LOGIT_INIT`]` = 0` this runs `+2 … −2`: inclusion from `σ(2) = 0.88` on
+/// dim 0 down to `σ(−2) = 0.12` on the last. Every dim then sits where
+/// `dα/dS = α(1−α) ≥ 0.10`, so none of them starts frozen.
+///
+/// Independent of [`GATE_LOGIT_INIT`] now. It was tied to it while the ladder was
+/// anchored at dim 0 — the tie was what put the last rung on `σ(0)` — and
+/// centring removes the need: the span sets the ORDERING and the init sets the
+/// LEVEL, which are separate choices.
 ///
 /// # Why the gate cannot use the sampler's `α`
 ///
 /// `posterior::hyper::ibp_pi0` runs at `α = 1`, whose inclusion rates are
 /// `0.5, 0.25, 0.125, …` — a ~11-logit drop by dim 16. Handing that to a
-/// GRADIENT-trained gate does not make it sparse, it makes it small: at
-/// `σ(4 − 11) ≈ 0.001` the multiplier is ~0 **and** `dα/dS ≈ 0`, so the dim is
-/// frozen at init before a single gradient arrives. That is the exact failure
-/// [`GATE_LOGIT_INIT`] warns about — "Gibbs can turn a coordinate back on from a
-/// likelihood ratio; gradient descent cannot recover from a zeroed multiplier".
+/// GRADIENT-trained gate does not make it sparse, it makes it small: the tail
+/// multiplier goes to ~0 **and** `dα/dS → 0`, so those dims are frozen at init
+/// before a single gradient arrives. Measured on GBM, `α = 1` put 62.5% of
+/// entries below 0.5 — and 62.5% were already there AT INIT, with 6 of 16 dims
+/// dead. That is truncation, not selection.
+///
 /// Gibbs tolerates a steep ladder because a resurrection is one likelihood ratio
-/// away. SGD does not, so the gate's `α` is a genuinely different quantity from
-/// the sampler's and is chosen against a different constraint: keep the tail
+/// away. SGD does not. So the gate's `α` is a genuinely different quantity from
+/// the sampler's, chosen against a different constraint: keep every dim
 /// RESPONSIVE, and let selection be earned rather than imposed by construction.
-pub const GATE_IBP_LOGIT_DROP: f64 = GATE_LOGIT_INIT as f64;
+pub const GATE_IBP_LOGIT_DROP: f64 = 4.0;
+
+/// Bound on the per-dim ladder bias, in logits — the anti-STUCK guard.
+///
+/// `σ` cannot overflow or NaN on its own: `1/(1+exp(−x))` saturates cleanly to 0
+/// or 1. What dies with it is `σ' = α(1−α)`, and a dim at gradient 0 is stuck for
+/// good, because SGD has no way back from a zeroed multiplier. So the hazard from
+/// a large `|b|` is a silently frozen dim, not a numeric blowup — and an
+/// unclamped ladder reaches that easily: `--gate-ibp-alpha 1e-6` is `ln v ≈ −13.8`
+/// per dim, a ±110-logit span across 16 dims.
+///
+/// At ±8 the extreme init sits `3.4e-4` from the rail with `σ' ≈ 3.4e-4` — small,
+/// but strictly positive and finite, so the dim can still climb out. The default
+/// ladder spans ±2 and never approaches this.
+///
+/// **Clamping here is free; clamping the LOGIT FIELD would not be.** This bounds a
+/// constant with no gradient, so nothing is lost. `clamp` has zero derivative
+/// outside its range, so applying the same bound to the differentiable
+/// `(S + b)/τ` would manufacture exactly the stuck gradient this exists to
+/// prevent — strictly worse than letting `σ` saturate, where the gradient is
+/// merely small. See [`JointEmbedModel::gate_logit_field`].
+const GATE_LADDER_CLAMP: f64 = 8.0;
 
 /// The IBP concentration whose ladder falls exactly `drop` logits across `h` dims.
 ///
@@ -214,10 +241,10 @@ pub fn ibp_alpha_for_drop(h: usize, drop: f64) -> f64 {
     v / (1.0 - v)
 }
 
-/// Per-dim gate logit bias from a truncated IBP ladder: `b_h = h · ln v`,
-/// `v = α/(α+1)`.
+/// Per-dim gate logit bias from a truncated IBP ladder, CENTRED:
+/// `b_h = (h − (H−1)/2) · ln v`, `v = α/(α+1)`.
 ///
-/// # This is the IBP's SHAPE, anchored at dim 0
+/// # This is the IBP's SHAPE, centred on the init
 ///
 /// The IBP's inclusion rates are `π_h = v^{h+1}` (`posterior::hyper::ibp_pi0`
 /// returns their complement, the EXCLUSION rates). Their geometric decay — a
@@ -228,11 +255,19 @@ pub fn ibp_alpha_for_drop(h: usize, drop: f64) -> f64 {
 /// simply outvoted, and each unused dim re-estimates the same rate instead of
 /// collapsing.
 ///
-/// What is dropped is the ABSOLUTE level: `b_0 = 0` rather than `logit(v)`,
-/// because the gate's overall level is already set by [`GATE_LOGIT_INIT`], chosen
-/// so an untrained gate is ~the identity. Re-adding an absolute offset would
-/// fight that init for no modelling gain — the ordering is what the IBP buys, and
-/// the ordering is scale-free.
+/// What is dropped is the ABSOLUTE level — the IBP's own `logit(v^{h+1})` — because
+/// the gate's level is set by [`GATE_LOGIT_INIT`]. The ordering is what the IBP
+/// buys, and the ordering is scale-free.
+///
+/// # Why CENTRED rather than anchored at dim 0
+///
+/// Anchoring (`b_0 = 0`) puts the whole span BELOW the init, so the last dim sits
+/// at `init − span`. That was fine at `init = 4`, where it landed on `σ(0) = 0.5`,
+/// and it is fatal at `init = 0`, where it lands on `σ(−4) = 0.018`: frozen, and
+/// unrecoverable under a gradient. Centring splits the span either side of the
+/// init instead, so the ORDERING is independent of the LEVEL and neither end can
+/// saturate as the init moves. It also keeps the mean bias at zero, so changing
+/// `α` re-ranks the dims without rescaling the dictionary as a side effect.
 ///
 /// Side benefit worth naming: a decreasing ladder is also the cheapest fix for
 /// the `O(D)` rotation invariance that makes a free edge embedding average to
@@ -241,20 +276,50 @@ pub fn ibp_alpha_for_drop(h: usize, drop: f64) -> f64 {
 #[must_use]
 pub fn ibp_gate_logit_bias(alpha: f64, h: usize) -> Vec<f64> {
     let ln_v = (alpha / (alpha + 1.0)).ln();
-    (0..h).map(|j| j as f64 * ln_v).collect()
+    // `α` arrives from a CLI flag, so the domain is not ours to assume. At `α = 0`
+    // this is `−∞`, and the CENTRE rung then computes `0 · −∞`, which is **NaN** —
+    // not merely a saturated dim but a value that would poison the whole forward
+    // pass and every gradient in it, silently. A non-finite ladder means "no
+    // usable ordering", so degrade to FLAT rather than emit NaN biases.
+    let ln_v = if ln_v.is_finite() { ln_v } else { 0.0 };
+    let mid = h.saturating_sub(1) as f64 / 2.0;
+    (0..h)
+        .map(|j| ((j as f64 - mid) * ln_v).clamp(-GATE_LADDER_CLAMP, GATE_LADDER_CLAMP))
+        .collect()
 }
-/// Initial gate logit. `σ(4) ≈ 0.982`, so an untrained gate is ~the identity and a
-/// fresh model's `Ẽ ≈ β` — the same "inert rather than biased" property the softmax
-/// gate got from a zero init (`softmax(0)·D = 1` exactly).
+/// Initial gate logit, at the sigmoid's most responsive point.
 ///
-/// **Do NOT init at 0 here, and note the asymmetry with the sampler.**
-/// `σ(0) = 0.5` would halve the entire dictionary, which propagates into the NCE
-/// scale and the phase-2 projection. And where `dim_block` cold-starts `z` all-OFF
-/// so the data has to earn each dim, SGD cannot: a zeroed gate kills the gradient
-/// reaching `β` through `α·β`, so the fit starts dead. Gibbs can turn a coordinate
-/// back on from a likelihood ratio; gradient descent cannot recover from a zeroed
-/// multiplier.
-const GATE_LOGIT_INIT: f32 = 4.0;
+/// `dα/dS = α(1−α)` is maximal at `σ(0) = 0.5` and collapses to 0.018 by `σ(4)`.
+/// The gate spent a long time at 4.0 and barely moved because of it: the fitted
+/// per-dim means sat within 0.026 of their init, and what movement there was
+/// tracked the ladder — the dims starting nearest 0.5 moved most. Starting here
+/// gives every dim `α(1−α) ≥ 0.10` once the centred ladder spreads them over
+/// `±`[`GATE_IBP_LOGIT_DROP`]`/2`, so the gate can actually earn its selection.
+///
+/// # The cost, measured — do not rediscover it by surprise
+///
+/// A 0.5-centred gate halves the dictionary, and on GBM the loading shrank to
+/// match rather than compensating: mean `α` 0.82 → 0.54 and mean `‖e_g‖²`
+/// 1.16 → 0.62, so the effective `‖α·β‖²` fell ~4×. That propagates into the NCE
+/// scale and the phase-2 projection, which is what the previous init was
+/// protecting. It buys ~42% more within-dim spread (0.0151 → 0.0215, and the
+/// within-dim spread is 100% learned since every gene starts at this same value).
+///
+/// The asymmetry with the sampler still holds and still bounds the ladder:
+/// `dim_block` cold-starts `z` all-OFF so the data earns each dim, and SGD cannot
+/// do that — a zeroed multiplier kills `β`'s gradient through `α·β` and Gibbs
+/// resurrects a coordinate from a likelihood ratio where a gradient cannot. So no
+/// dim may START near 0; see [`ibp_gate_logit_bias`] on why the ladder is centred
+/// rather than hung below this value.
+const GATE_LOGIT_INIT: f32 = 0.0;
+
+/// [`GATE_LOGIT_INIT`], for tests that must reason about where a dim STARTS.
+/// Exposed as a function rather than making the constant public so it stays a
+/// gate-internal choice.
+#[must_use]
+pub fn gate_logit_init() -> f32 {
+    GATE_LOGIT_INIT
+}
 /// Initial effect log-std (`σ_init = e^{-4.6} ≈ 0.01`, a near-deterministic start).
 const GATE_LOGSTD_INIT: f32 = -4.6;
 /// Clamp bound on the effect log-std in the forward — keeps `σ = exp(logstd)` and
@@ -434,6 +499,14 @@ impl JointEmbedModel {
             Some(b) => logits.broadcast_add(b)?,
             None => logits.clone(),
         };
+        // NOT clamped, deliberately. The consumer is always `sigmoid`, which
+        // cannot overflow or NaN however extreme this gets — it saturates to 0/1.
+        // A `clamp` here would bound a DIFFERENTIABLE value, and `clamp` has zero
+        // derivative outside its range, so every entry a small `τ` pushed past the
+        // bound would get exactly 0 gradient and stick there forever. Letting `σ`
+        // saturate instead leaves `σ' = α(1−α)` small but non-zero, which is
+        // recoverable. The bound belongs on the constant ladder, where it costs no
+        // gradient at all — see [`GATE_LADDER_CLAMP`].
         if (tau - 1.0).abs() > f32::EPSILON {
             tilted.affine(1.0 / tau as f64, 0.0)
         } else {
