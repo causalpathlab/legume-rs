@@ -369,6 +369,19 @@ pub trait IoOps {
                 .collect();
             relevant_indices.extend(name_indices);
         }
+
+        // Neither selector given: take EVERY column except the row-name one.
+        // Without this the selection stays empty and the reader silently returns
+        // a 0-column matrix, so `read_data(.., None, None)` — the form used by
+        // `senna`'s `read_mat` and `data-beans-sim`'s topic-file loader — could
+        // never read a delimited file at all.
+        if column_indices.is_none() && column_names.is_none() {
+            let n_col = header
+                .len()
+                .max(lines.first().map_or(0, |words| words.len()));
+            relevant_indices.extend((0..n_col).filter(|j| Some(*j) != row_name_index));
+        }
+
         relevant_indices.sort_unstable();
         relevant_indices.dedup();
 
