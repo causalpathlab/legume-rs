@@ -150,7 +150,7 @@ fn print_logo() {
                   Downstream commands read data and batch files from it.\n\
                   Steps 3 and 5 still need their own --latent / --out.\n\
                   \n  \
-                  1. Train embedding   senna topic | masked-topic | svd\n                       \
+                  1. Train embedding   senna topic | masked-topic | svd | bge\n                       \
                   senna joint-topic | joint-svd       (multi-modality)\n  \
                   2. Held-out inference senna predict                       (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
@@ -160,7 +160,18 @@ fn print_logo() {
                   7. Scatter plot      senna plot       --from run.senna.json\n  \
                   8. Topic diagnostics senna plot-topic --from run.senna.json\n\
                   \n\
-                  `senna plot` auto-runs steps 3 + 6 on demand."
+                  `senna plot` auto-runs steps 3 + 6 on demand.\n\
+                  \n\
+                  Bulk deconvolution is a side branch off a `bge` run.\n\
+                  It needs markers and bulk counts, not the cell-side steps above.\n\
+                  \n  \
+                  senna deconvolve --from bge.senna.json -m markers.tsv --bulk bulk.parquet\n\
+                  \n\
+                  Artifact naming: a slot name fixes the axis, never the numeric scale.\n\
+                  `feature_loading` is the per-gene loading rho, and it is signed.\n\
+                  `dictionary` is a topic dictionary in LOG space, or SVD signed loadings.\n\
+                  Reading one as the other yields NaN, so check `kind` before assuming.\n\
+                  See senna/docs/deconvolve.md and the run_manifest module docs."
 )]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Verbose logging")]

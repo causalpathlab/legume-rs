@@ -26,7 +26,6 @@ use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 pub struct FrozenFeatureSpec {
@@ -40,45 +39,22 @@ pub struct FrozenFeatureSpec {
 }
 
 impl FrozenFeatureSpec {
-    /// Probe `{prefix}.dictionary.parquet` + `{prefix}.feature_bias.parquet`
-    /// (gbe layout); fall back to `{prefix}.feature_embedding.parquet`
-    /// (topic / cell-embedded-topic layout, bias defaults to zero).
-    /// Errors if neither layout is present.
+    /// Locate the frozen feature side for `{prefix}` via the shared resolver
+    /// [`crate::run_manifest::resolve_feature_loading`].
+    ///
+    /// This used to probe filenames directly and accept
+    /// `{prefix}.dictionary.parquet` as the feature embedding — but on a DEFAULT
+    /// `bge` run that file is the topic dictionary β (`D×K`, log-simplex), not
+    /// the per-gene loading ρ, so freezing against an ordinary bge run silently
+    /// picked up the wrong object. The resolver checks each candidate's scale
+    /// before accepting it, and knows the canonical `feature_loading` slot.
     pub fn resolve_from_prefix(prefix: &str, name_kind: FeatureNameKind) -> anyhow::Result<Self> {
-        let bge_dict = format!("{prefix}.dictionary.parquet");
-        let bias_file = format!("{prefix}.feature_bias.parquet");
-        let topic_dict = format!("{prefix}.feature_embedding.parquet");
-
-        let (dictionary_path, bias_path) = if Path::new(&bge_dict).exists() {
-            let bias = if Path::new(&bias_file).exists() {
-                Some(bias_file)
-            } else {
-                log::warn!(
-                    "{bge_dict} found but {bias_file} missing — loading dictionary only, bias defaults to zero"
-                );
-                None
-            };
-            (bge_dict, bias)
-        } else if Path::new(&topic_dict).exists() {
-            // The topic-style filename is also written by `senna fne`,
-            // which DOES emit a learned per-gene bias. Pick it up when
-            // present; fall back to zero otherwise.
-            let bias = if Path::new(&bias_file).exists() {
-                log::info!(
-                    "Frozen feature side: loading {topic_dict} + {bias_file} (fne-style with learned bias)"
-                );
-                Some(bias_file)
-            } else {
-                log::info!("Frozen feature side: loading topic-style {topic_dict} (bias = 0)");
-                None
-            };
-            (topic_dict, bias)
-        } else {
-            anyhow::bail!(
-                "--freeze-feature-embedding {prefix}: neither {prefix}.dictionary.parquet \
-                 nor {prefix}.feature_embedding.parquet found"
-            );
-        };
+        let (dictionary_path, bias_path) = crate::run_manifest::resolve_feature_loading(prefix)
+            .map_err(|e| anyhow::anyhow!("--freeze-feature-embedding {prefix}: {e}"))?;
+        match &bias_path {
+            Some(b) => log::info!("Frozen feature side: {dictionary_path} + {b}"),
+            None => log::info!("Frozen feature side: {dictionary_path} (bias = 0)"),
+        }
         Ok(Self {
             dictionary_path,
             bias_path,
