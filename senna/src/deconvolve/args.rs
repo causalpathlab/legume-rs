@@ -151,8 +151,21 @@ pub struct DeconvolveArgs {
 
     #[arg(
         long = "anchor-prior-scale",
-        default_value_t = 1.0,
-        help = "Multiplier on the anchor prior spread (larger → looser, wider fraction CIs)"
+        default_value_t = 0.1,
+        help = "Multiplier on the anchor prior spread; larger lets anchors drift from their markers",
+        long_help = "Multiplier on the marker-derived anchor spread.\n\
+                     Larger values let the sampler move each anchor further from its markers.\n\
+                     \n\
+                     That freedom is mostly harmful.\n\
+                     The reference is low-rank, so it cannot match the bulk exactly.\n\
+                     A free anchor absorbs the misfit by drifting off the true position.\n\
+                     Composition is what pays for the improved fit.\n\
+                     \n\
+                     On a real pseudobulk benchmark, accuracy falls away as anchors loosen.\n\
+                     Pearson r runs 0.75, 0.55, 0.36, 0.11 at 0.1, 0.2, 0.3, 0.5.\n\
+                     It reaches ~0 at 1.0, which was the old default.\n\
+                     On a well-specified synthetic reference the same change costs little.\n\
+                     There r moves 0.989 -> 0.984, and the systematic bias halves."
     )]
     pub anchor_prior_scale: f32,
 }
