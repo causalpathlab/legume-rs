@@ -18,28 +18,36 @@
 //! directory, so a run directory can be moved or copied without
 //! breaking downstream reads.
 //!
-//! # Output naming conventions
+//! # Output conventions: axis, and SCALE
 //!
-//! One axis per name, and the name says which axis and which space:
+//! A slot name fixes the axis and shape. It does **not** fix the numeric scale,
+//! and scale is where the bugs live — signed vs log-simplex vs probability-simplex
+//! all look alike in a `D × K` float table, so a misread produces `NaN` or a
+//! degenerate model with no shape mismatch to catch it. Classify with
+//! [`ArtifactScale::detect`], or assert with [`ArtifactScale::ensure`].
 //!
-//! | slot | shape | what it holds |
-//! |---|---|---|
-//! | `latent` | N × K | per-cell `log θ` (topic family) / component scores (SVD) |
-//! | `cell_embedding` | N × H | per-cell embedding `Z` in the model's H-space |
-//! | `feature_loading` | D × H | per-gene loading `ρ` on the model axis — the vector that MULTIPLIES `Z` in the log-rate `ρ_g·z_n + a_g + b_n` |
-//! | `feature_embedding` | D × H | where each gene SITS, after re-projection onto the cell manifold (bge's SIMBA co-embed). Overloaded: `masked-topic` puts its raw ρ here |
-//! | `dictionary` | D × K | the softmax dictionary β (log-simplex over genes). Overloaded: legacy `bge --skip-etm` puts ρ here |
-//! | `topic_embedding` | K × H | per-topic embedding `α` |
-//! | `feature_bias` / `cell_bias` | D / N | the additive offsets `a_g` / `b_n` |
+//! | slot | shape | scale | holds |
+//! |---|---|---|---|
+//! | `latent` | N × K | log-simplex ROWS (topic) / signed (SVD, masked-vae) | per-cell `log θ` or component scores — gate on [`RunKind::latent_is_log_simplex`] |
+//! | `cell_embedding` | N × H | signed | per-cell embedding `Z` |
+//! | `feature_loading` | D × H | signed | per-gene loading `ρ` — MULTIPLIES `Z` in the log-rate `ρ_g·z_n + a_g + b_n` |
+//! | `feature_embedding` | D × H | signed | where each gene SITS, re-projected onto the cell manifold (co-embed). ⚠ `masked-topic` puts its raw ρ here |
+//! | `softmax_dictionary` | D × K | **log**-simplex COLUMNS | topic dictionary `β` — `Σ_g exp(β[g,k]) = 1` |
+//! | `dictionary` | D × K | signed | SVD component loadings; also where pre-split manifests land. ⚠ legacy `bge --skip-etm` puts ρ here |
+//! | `dictionary_empirical` | D × K | probability-simplex COLUMNS | empirical `β`, full gene resolution |
+//! | `topic_embedding` | K × H | signed | per-topic embedding `α` |
+//! | `feature_bias` / `cell_bias` | D / N | signed (log-scale offsets) | `a_g` / `b_n` |
+//!
+//! Read a dictionary through [`RunOutputs::gene_dictionary`] when either form
+//! will do; branch on `kind` (or detect) when the scale matters.
 //!
 //! `feature_loading` and `feature_embedding` are NOT interchangeable: the
 //! co-embed is a lossy derived view of ρ (a convex combination of cell
 //! embeddings), so ρ → co-embed is one-way.
 //!
-//! Two slots (`dictionary`, `feature_embedding`) carry different content
-//! depending on `kind`. That overloading is historical and has caused real bugs;
-//! prefer the unambiguous slots, and when reading an overloaded one, branch on
-//! `kind` rather than on which other slots happen to be populated.
+//! The two slots still marked ⚠ are historical overloads that have each caused a
+//! real bug. They are read defensively (by content, not by which sibling slots
+//! are populated) and are on the way out; write the unambiguous slot.
 
 use matrix_util::traits::IoOps;
 use serde::{Deserialize, Serialize};
@@ -206,6 +214,58 @@ pub struct RunData {
     pub batch: Vec<String>,
 }
 
+/// The numeric SCALE a gene × component artifact is stored in.
+///
+/// Every feature-side parquet in a senna run is one of these, and confusing them
+/// is the single most productive source of bugs in the chain: reading a
+/// `LogSimplexColumns` table as if it were `ProbabilitySimplexColumns` gives
+/// `ln(negative)` — silent `NaN`s and a degenerate downstream model, with no
+/// shape mismatch to catch it. Slot names say which axis; this says which scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactScale {
+    /// Unconstrained real values: embeddings (ρ, co-embed) and SVD loadings.
+    Signed,
+    /// Each COLUMN is a log-simplex over rows: `Σ_g exp(x[g,k]) = 1`. The
+    /// `log_softmax`-over-genes topic dictionary β.
+    LogSimplexColumns,
+    /// Each COLUMN is a probability simplex over rows: `Σ_g x[g,k] = 1`, all
+    /// non-negative. The empirical dictionary.
+    ProbabilitySimplexColumns,
+}
+
+impl ArtifactScale {
+    /// Classify a loaded matrix by its own contents. Independent of filename and
+    /// of manifest bookkeeping, both of which have moved between versions.
+    #[must_use]
+    pub fn detect(m: &Mat) -> Self {
+        if m.ncols() == 0 || m.nrows() == 0 {
+            return Self::Signed;
+        }
+        let close_to_one = |x: f64| (x - 1.0).abs() < 1e-2;
+        let all_cols = |f: &dyn Fn(usize) -> f64| (0..m.ncols()).all(|k| close_to_one(f(k)));
+        if all_cols(&|k| m.column(k).iter().map(|&v| f64::from(v).exp()).sum()) {
+            Self::LogSimplexColumns
+        } else if m.iter().all(|&v| v >= 0.0)
+            && all_cols(&|k| m.column(k).iter().map(|&v| f64::from(v)).sum())
+        {
+            Self::ProbabilitySimplexColumns
+        } else {
+            Self::Signed
+        }
+    }
+
+    /// Fail loudly when a file is not in the scale the caller assumes.
+    pub fn ensure(m: &Mat, want: Self, what: &str) -> anyhow::Result<()> {
+        let got = Self::detect(m);
+        anyhow::ensure!(
+            got == want,
+            "{what}: expected {want:?} but the values are {got:?} — reading one as the other \
+             silently produces NaN or a degenerate model"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunOutputs {
     /// `{out}.latent.parquet`: cell × K matrix. For topic runs this is
@@ -226,8 +286,24 @@ pub struct RunOutputs {
     ///   (`masked-topic --freeze-feature-embedding`, `annotate`).
     ///
     /// Anything that needs ρ should read `feature_loading` and never this slot.
+    ///
+    /// Retained for the SVD family (signed loadings) and as the parse target for
+    /// pre-split manifests. Topic runs now write
+    /// [`RunOutputs::softmax_dictionary`]; read either through
+    /// [`RunOutputs::gene_dictionary`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary: Option<String>,
+    /// `{out}.softmax_dictionary.parquet` — gene × K topic dictionary β, in
+    /// **log space** and column-wise a simplex over genes
+    /// ([`ArtifactScale::LogSimplexColumns`]).
+    ///
+    /// Split out of `dictionary` so the name states both the axis and the scale:
+    /// `dictionary` had meant β, SVD signed loadings, or (legacy `bge
+    /// --skip-etm`) the embedding ρ, and the resulting shape/scale ambiguity
+    /// produced real bugs — reading this table as probabilities yields
+    /// `ln(negative)`, i.e. silent NaN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub softmax_dictionary: Option<String>,
     /// Optional `group_id<TAB>display_name` TSV for `senna plot` labels.
     /// User-populated; no senna subcommand writes this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,6 +387,21 @@ pub struct RunOutputs {
 }
 
 impl RunOutputs {
+    /// The gene × component dictionary, whichever slot holds it: the topic
+    /// family's [`Self::softmax_dictionary`] (log-simplex β) or the SVD family's
+    /// [`Self::dictionary`] (signed loadings), the latter also being where
+    /// pre-split manifests land.
+    ///
+    /// Callers that care about the SCALE must still branch on `kind`, or classify
+    /// the loaded matrix with [`ArtifactScale::detect`] — the two differ by more
+    /// than a name, and mixing them silently produces NaN.
+    #[must_use]
+    pub fn gene_dictionary(&self) -> Option<&str> {
+        self.softmax_dictionary
+            .as_deref()
+            .or(self.dictionary.as_deref())
+    }
+
     /// The cell × H table to use for GEOMETRY — kNN graphs, layout,
     /// clustering, trajectory: prefer `cell_embedding`, fall back to `latent`.
     ///
@@ -856,5 +947,32 @@ mod tests {
         let raw = r#"{"version":1,"kind":"topic","prefix":"r","extra_future_field":42}"#;
         let m: RunManifest = serde_json::from_str(raw).unwrap();
         assert_eq!(m.prefix, "r");
+    }
+
+    /// The three feature-side scales must be distinguishable from contents alone
+    /// — slot names and filenames have both moved between versions, so content is
+    /// the only stable signal. Confusing log-simplex with probability-simplex is
+    /// what silently produced NaN references.
+    #[test]
+    fn artifact_scale_distinguishes_the_three_forms() {
+        let (d, k) = (64usize, 4usize);
+        // probability simplex: non-negative columns summing to 1
+        let prob = Mat::from_fn(d, k, |_, _| 1.0 / d as f32);
+        assert_eq!(
+            ArtifactScale::detect(&prob),
+            ArtifactScale::ProbabilitySimplexColumns
+        );
+        // log simplex: ln of the above
+        let logp = prob.map(f32::ln);
+        assert_eq!(
+            ArtifactScale::detect(&logp),
+            ArtifactScale::LogSimplexColumns
+        );
+        // signed embedding: neither
+        let emb = Mat::from_fn(d, k, |g, j| (((g * 7 + j * 13) % 11) as f32 / 11.0) - 0.5);
+        assert_eq!(ArtifactScale::detect(&emb), ArtifactScale::Signed);
+        // and the guard rejects a mismatch rather than proceeding
+        assert!(ArtifactScale::ensure(&logp, ArtifactScale::Signed, "x").is_err());
+        assert!(ArtifactScale::ensure(&emb, ArtifactScale::Signed, "x").is_ok());
     }
 }

@@ -343,7 +343,7 @@ fn resolve_inputs(args: &PlotTopicArgs) -> anyhow::Result<ResolvedInputs> {
             m.outputs
                 .dictionary_empirical
                 .as_deref()
-                .or(m.outputs.dictionary.as_deref())
+                .or_else(|| m.outputs.gene_dictionary())
                 .map(&resolve_str)
         })
     });
