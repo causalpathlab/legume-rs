@@ -22,7 +22,7 @@
 //! Topic-family runs are rejected; see [`EmbeddingSource::from_masked_topic`].
 
 use crate::embed_common::{DVec, Mat};
-use crate::run_manifest::{self, RunKind, RunManifest};
+use crate::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use anyhow::{Context, Result};
 use log::info;
 use matrix_util::dmatrix_io::DMatrix;
@@ -103,7 +103,9 @@ impl EmbeddingSource {
         let (rho, rho_path) = match m.outputs.feature_loading.as_deref() {
             Some(rel) => {
                 let p = resolve(rel);
-                (load_mat(&p, "raw ρ")?, p)
+                let rho = load_mat(&p, "raw ρ")?;
+                ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &p)?;
+                (rho, p)
             }
             None => {
                 let dict_rel = m.outputs.dictionary.as_deref().ok_or_else(|| {
@@ -183,7 +185,7 @@ impl EmbeddingSource {
         // `logsumexp_k(logβ[g,k]) − ln K`, NOT `ln(mean_k logβ)` (whose argument
         // is negative, which silently yields NaN and a degenerate reference).
         let k = beta.mat.ncols().max(1) as f32;
-        let gene_offset = if is_log_simplex_columns(&beta.mat) {
+        let gene_offset = if ArtifactScale::detect(&beta.mat) == ArtifactScale::LogSimplexColumns {
             DVec::from_iterator(
                 beta.mat.nrows(),
                 beta.mat.row_iter().map(|r| {
@@ -262,13 +264,10 @@ fn load_mat(path: &str, what: &str) -> Result<MatWithNames<Mat>> {
     DMatrix::<f32>::from_parquet(path).with_context(|| format!("reading {what} {path}"))
 }
 
-/// True when every column is a log-simplex over rows (`Σ_g exp(x) ≈ 1`) — the
-/// signature of an ETM β dictionary (`log_softmax` over genes), which a raw
-/// embedding ρ never satisfies.
+/// True when every column is a log-simplex over rows — the signature of an ETM β
+/// dictionary, which a raw embedding ρ never satisfies. Thin wrapper over the
+/// shared [`ArtifactScale`] classifier so slot-identification and scale-checking
+/// cannot drift apart.
 pub(super) fn is_log_simplex_columns(m: &Mat) -> bool {
-    m.ncols() > 0
-        && (0..m.ncols()).all(|k| {
-            let sum: f64 = m.column(k).iter().map(|&v| f64::from(v).exp()).sum();
-            (sum - 1.0).abs() < 1e-2
-        })
+    ArtifactScale::detect(m) == ArtifactScale::LogSimplexColumns
 }
