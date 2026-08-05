@@ -780,6 +780,28 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             confidence.as_deref(),
         )?;
 
+        // Raw ρ, on BOTH paths. This is the model-axis loading that pairs with
+        // the cell embedding in the Poisson rate `exp(ρ_g·z_n + a_g + b_n)` —
+        // NOT interchangeable with the co-embed written just above, which is a
+        // LOSSY derived view of it (a convex combination of cell embeddings;
+        // ρ → co-embed is one-way). ρ used to survive only under `--skip-etm`,
+        // where it borrowed the `dictionary` slot that the ETM path claims for
+        // β, so a default run lost it entirely and rate-reconstruction consumers
+        // (e.g. `senna deconvolve`) had to demand that flag. Purely additive.
+        //
+        // Under `--skip-etm` this DOES duplicate `dictionary` (same bytes, two
+        // files). Kept deliberately: `dictionary`-as-ρ is what
+        // `masked-topic --freeze-feature-embedding` and `annotate` already read.
+        // The tidy end-state is to migrate those consumers onto `feature_loading`
+        // and drop the alias, which is a wider change than this one.
+        let rho_mat = Mat::from_tensor(&e_feat_cpu)?;
+        let rho_h_names = axis_id_names("h", rho_mat.ncols());
+        rho_mat.to_parquet_with_names(
+            &format!("{}.feature_loading.parquet", args.out),
+            (Some(&unified.feature_names), Some("gene")),
+            Some(&rho_h_names),
+        )?;
+
         // Output layout: the H-space cell embedding Z ALWAYS goes to
         // {out}.cell_embedding.parquet, on both paths. ETM resolved (default)
         // additionally emits the topic-model tables (latent = log θ,
@@ -843,6 +865,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // skip-etm run's annotate-by-projection falls back to the raw-ρ
         // dictionary and ignores the co-embed file on disk).
         feature_embedding_suffix: Some("feature_embedding.parquet"),
+        feature_loading_suffix: Some("feature_loading.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
         // --skip-etm paths — so every geometry consumer finds the H-space
         // embedding at one fixed name.

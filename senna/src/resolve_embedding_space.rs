@@ -448,6 +448,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
+        feature_loading_suffix: None,
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         default_colour_by: "cluster",
         // Z is the cell table and lives in cell_embedding; this run emits no

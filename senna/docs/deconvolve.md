@@ -9,7 +9,7 @@ This is BayesPrism's deliverable, but the reference is built from a **learned
 gene embedding** rather than from empirical per-cell-type means.
 
 ```
-senna bge <sc.zarr> --skip-etm -o ref          # gene embedding (raw Poisson ρ)
+senna bge <sc.zarr> -o ref                     # gene embedding (any bge run)
 senna deconvolve --from ref.senna.json \
                  -m markers.tsv \
                  --bulk bulk.parquet -o out
@@ -109,8 +109,8 @@ its cells — this is why the mixture is exact rather than an approximation.
 
 ## 4. The algorithm
 
-**Step 0 — load the reference.** Read the gated `ρ` (`dictionary.parquet`), the
-co-embedding (`feature_embedding.parquet`) and `a_g` (`feature_bias.parquet`).
+**Step 0 — load the reference.** Read the gated `ρ` (`feature_loading.parquet`),
+the co-embedding (`feature_embedding.parquet`) and `a_g` (`feature_bias.parquet`).
 
 **Step 1 — build anchors.** Marker TSV → per-type IDF-weighted centroid `t̂_c`
 and spread `Σ_c` (§2).
@@ -175,12 +175,13 @@ per-draw arrays are stored.
 
 ## 7. Requirements and caveats
 
-**Must be `bge --skip-etm`.** The raw Poisson `ρ` is persisted as
-`dictionary.parquet` only in that mode; the default ETM run overwrites the
-dictionary with the topic dictionary `β`. Deconvolve detects this from the
-dictionary's *content* (a `β` has columns that are gene log-simplexes) rather
-than from manifest bookkeeping, because the manifest's `latent` /
-`cell_embedding` slots have swapped roles between bge versions.
+**Any `senna bge` run works** — `--skip-etm` is no longer required. Every bge run
+records the per-gene loading `ρ` as `{out}.feature_loading.parquet` on both
+paths. Runs written before that slot existed kept `ρ` only under `--skip-etm`,
+where it borrowed the `dictionary` slot; that legacy layout is still read as a
+fallback, and there the slot is identified by its *content* (a `β` has columns
+that are gene log-simplexes) rather than by manifest bookkeeping, since the
+`latent` / `cell_embedding` slots have swapped roles between bge versions.
 
 **The gate is already baked in.** `bge`'s feature gate multiplies every feature
 loading, and `materialize_e_feat` writes the *gated* values into `e_feat`. So
