@@ -4,8 +4,14 @@
 //! - **`bge --skip-etm`** (exact): the raw Poisson ρ = `e_feat` is persisted as
 //!   `dictionary.parquet`; the co-embedding (genes on the cell manifold) is
 //!   `feature_embedding.parquet` and grounds the marker anchors; the per-gene
-//!   Poisson offset is `feature_bias.parquet`. Detected by `kind == Bge` with
-//!   NO `cell_embedding` output (ETM mode records one and overwrites ρ with β).
+//!   Poisson offset is `feature_bias.parquet`. An ETM-resolved run is rejected by
+//!   inspecting the dictionary's CONTENT (β columns are gene log-simplexes) rather
+//!   than which manifest slots are populated — `latent` and `cell_embedding` are
+//!   interchangeable cell-side slots whose usage has flipped between bge versions,
+//!   so neither identifies the layout. The persisted ρ is the GATED snapshot
+//!   (`materialize_e_feat` bakes the feature gate into `e_feat`), i.e. the loading
+//!   that actually enters the Poisson rate, so the reconstruction stays consistent
+//!   with the model — do not correct for the gate separately.
 //! - **`masked-topic`** (approximate): `feature_embedding.parquet` IS the raw
 //!   learned ρ `[D,H]` (used for both projection and anchors); ρ was trained
 //!   under a softmax-ETM head, so projecting it through the Poisson solver is a
@@ -70,11 +76,6 @@ impl EmbeddingSource {
 
     /// `bge --skip-etm`: dictionary = raw ρ, feature_embedding = co-embed anchors.
     fn from_bge(m: &RunManifest, resolve: &impl Fn(&str) -> String) -> Result<Self> {
-        anyhow::ensure!(
-            m.outputs.cell_embedding.is_none(),
-            "deconvolve: this bge run resolved the ETM topic layer, so `dictionary.parquet` is β \
-             (not the raw Poisson ρ). Re-run `senna bge --skip-etm` so the raw ρ is persisted."
-        );
         let dict_rel =
             m.outputs.dictionary.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("bge manifest has no `outputs.dictionary` (raw ρ)")
@@ -86,6 +87,16 @@ impl EmbeddingSource {
         let dict_path = resolve(dict_rel);
         let rho = load_mat(&dict_path, "raw ρ (dictionary)")?;
         let coembed = load_mat(&resolve(coembed_rel), "co-embedding")?;
+        // Discriminate on CONTENT, not on which manifest fields are populated:
+        // `latent` / `cell_embedding` are interchangeable cell-side slots whose
+        // usage has flipped between bge versions, so neither identifies the
+        // layout. β is `log_softmax` over genes, so each of its columns
+        // exponentiates to 1; a raw embedding ρ never does.
+        anyhow::ensure!(
+            !is_log_simplex_columns(&rho.mat),
+            "deconvolve: `{dict_path}` holds an ETM β (its columns are gene simplexes), not the \
+             raw Poisson ρ. Re-run `senna bge --skip-etm` so the raw ρ is persisted."
+        );
         // feature_bias sits beside the dictionary; it is not recorded in the manifest.
         let bias_path = sibling(&dict_path, ".dictionary.parquet", ".feature_bias.parquet")?;
         let gene_offset = load_mat(&bias_path, "feature_bias")?
@@ -179,6 +190,17 @@ impl EmbeddingSource {
 /// Read a matrix parquet with a descriptive error context.
 fn load_mat(path: &str, what: &str) -> Result<MatWithNames<Mat>> {
     DMatrix::<f32>::from_parquet(path).with_context(|| format!("reading {what} {path}"))
+}
+
+/// True when every column is a log-simplex over rows (`Σ_g exp(x) ≈ 1`) — the
+/// signature of an ETM β dictionary (`log_softmax` over genes), which a raw
+/// embedding ρ never satisfies.
+pub(super) fn is_log_simplex_columns(m: &Mat) -> bool {
+    m.ncols() > 0
+        && (0..m.ncols()).all(|k| {
+            let sum: f64 = m.column(k).iter().map(|&v| f64::from(v).exp()).sum();
+            (sum - 1.0).abs() < 1e-2
+        })
 }
 
 /// Derive a sibling artifact path by swapping a known suffix on the last path
