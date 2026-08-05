@@ -228,10 +228,38 @@ pub fn read_bulk_data_aligned(
         let ncols = raw_samples.len();
 
         let mut padded_ds = Mat::zeros(ngenes, ncols);
+        let mut matched = 0usize;
         for (i, g) in raw_genes.iter().enumerate() {
             if let Some(r) = gene_to_position.get(g) {
                 padded_ds.row_mut(*r.value()).copy_from(&raw_ds.row(i));
+                matched += 1;
             }
+        }
+        // Names are matched EXACTLY, and non-matches are silently zero-filled —
+        // so a naming-convention mismatch (`ENSG0000..._CD19` vs `CD19`) yields an
+        // all-zero bulk and a confident, meaningless downstream answer. Say so.
+        let frac = matched as f64 / raw_genes.len().max(1) as f64;
+        anyhow::ensure!(
+            matched > 0,
+            "{bulk_file}: none of its {} gene names match the reference. Bulk rows look like \
+             `{}`, the reference like `{}` — align the naming convention (e.g. strip an \
+             `ENSG…_` prefix) before deconvolving.",
+            raw_genes.len(),
+            raw_genes.first().map_or("", |g| g.as_ref()),
+            genes.first().map_or("", |g| g.as_ref())
+        );
+        if frac < 0.5 {
+            log::warn!(
+                "{bulk_file}: only {matched}/{} bulk genes ({:.1}%) match the reference; the rest \
+                 are zero-filled and contribute nothing",
+                raw_genes.len(),
+                100.0 * frac
+            );
+        } else {
+            info!(
+                "{bulk_file}: matched {matched}/{} genes to the reference",
+                raw_genes.len()
+            );
         }
 
         samples.extend(raw_samples);

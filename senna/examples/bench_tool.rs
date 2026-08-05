@@ -53,6 +53,16 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        // TSV (with header) -> parquet, preserving row/column names. `senna`'s
+        // `read_mat` passes header_row=None, so a headered TSV cannot be fed
+        // directly to --bulk.
+        Some("topar") => {
+            let m = load_named(&args[2])?;
+            m.mat
+                .to_parquet_with_names(&args[3], (Some(&m.rows), Some("gene")), Some(&m.cols))?;
+            eprintln!("wrote {} x {} -> {}", m.mat.nrows(), m.mat.ncols(), args[3]);
+            Ok(())
+        }
         Some("expr") => expr(&args[2], &args[3], &args[4]),
         Some("profile") => profile(
             &args[2],
@@ -75,6 +85,18 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+    }
+}
+
+/// Load a named matrix from parquet, or from a delimited text file (header row,
+/// row names in column 0) so ground truth can be supplied either way.
+fn load_named(
+    path: &str,
+) -> anyhow::Result<matrix_util::traits::MatWithNames<nalgebra::DMatrix<f32>>> {
+    if path.ends_with(".parquet") {
+        DMatrix::<f32>::from_parquet(path)
+    } else {
+        DMatrix::<f32>::read_data(path, &['\t', ','][..], Some(0), Some(0), None, None)
     }
 }
 
@@ -103,10 +125,10 @@ fn score(
     dict: Option<&str>,
     feat_list: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut t = DMatrix::<f32>::from_parquet(truth)?; // rows=sample, cols=celltype
-                                                      // Optional: convert the CELL-fraction truth into the mRNA-fraction the model
-                                                      // actually estimates. Per-type output s_k = Σ_g β(g,k) (restricted to the
-                                                      // genes the reference retained, since only those carry counts here).
+    let mut t = load_named(truth)?; // rows=sample, cols=celltype
+                                    // Optional: convert the CELL-fraction truth into the mRNA-fraction the model
+                                    // actually estimates. Per-type output s_k = Σ_g β(g,k) (restricted to the
+                                    // genes the reference retained, since only those carry counts here).
     if let Some(dpath) = dict {
         let d = DMatrix::<f32>::from_parquet(dpath)?; // G×K
         let keep: Option<HashMap<String, ()>> = match feat_list {
@@ -282,7 +304,7 @@ fn score(
 ///   (b) SCALE  — does `Σ_g E[Z_{s,c,g}]` track that type's true abundance?
 fn expr(expr_dir: &str, true_dict: &str, true_frac: &str) -> anyhow::Result<()> {
     let tb = DMatrix::<f32>::from_parquet(true_dict)?; // G×K true beta
-    let tf = DMatrix::<f32>::from_parquet(true_frac)?; // S×K true fractions
+    let tf = load_named(true_frac)?; // S×K true fractions
     println!(
         "{:<8} {:>16} {:>16} {:>14}",
         "type", "shape corr(raw)", "shape corr(log)", "scale corr"
