@@ -46,7 +46,6 @@ fn synthetic() -> (EmbeddingSource, AnchorPrior, Mat, Mat) {
         feature_names,
         h,
         kind: RunKind::Bge,
-        exact: true,
     };
     // Anchors pinned near truth (tiny prior spread) so we isolate fraction recovery.
     let prior = AnchorPrior {
@@ -134,36 +133,6 @@ fn tempering_widens_posterior() {
     assert!(
         loose > 2.0 * tight,
         "tempering did not widen posterior: sd(τ=1)={tight:.5}, sd(τ=0.02)={loose:.5}"
-    );
-}
-
-/// The bge layout is identified by the dictionary's CONTENT, not by which
-/// manifest slots are populated (`latent` / `cell_embedding` have swapped roles
-/// between bge versions). A β dictionary is a per-column gene log-simplex; a raw
-/// ρ embedding is not.
-#[test]
-fn beta_and_rho_dictionaries_are_distinguishable() {
-    use super::source::is_log_simplex_columns;
-
-    // β = log_softmax over genes: each column exponentiates to 1.
-    let (d, k) = (64usize, 5usize);
-    let beta = Mat::from_fn(d, k, |g, kk| {
-        let logit = (((g * 7 + kk * 13) % 11) as f32 / 11.0) - 0.5;
-        let denom: f32 = (0..d)
-            .map(|gg| ((((gg * 7 + kk * 13) % 11) as f32 / 11.0) - 0.5).exp())
-            .sum();
-        logit - denom.ln()
-    });
-    assert!(
-        is_log_simplex_columns(&beta),
-        "β dictionary should be detected as a gene log-simplex"
-    );
-
-    // Raw ρ embedding: no simplex constraint.
-    let rho = Mat::from_fn(d, 32, |g, j| (((g * 5 + j * 17) % 13) as f32 / 13.0) - 0.5);
-    assert!(
-        !is_log_simplex_columns(&rho),
-        "raw ρ must not be mistaken for a β dictionary"
     );
 }
 

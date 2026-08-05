@@ -285,6 +285,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
         feature_loading_suffix: None,
+        softmax_dictionary_suffix: None,
         cell_embedding_suffix: None,
         // SVD produces no topic / cluster labels on its own; users
         // typically run `senna clustering` next, so the viz column

@@ -866,6 +866,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // dictionary and ignores the co-embed file on disk).
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("feature_loading.parquet"),
+        // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
+        softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
         // --skip-etm paths — so every geometry consumer finds the H-space
         // embedding at one fixed name.

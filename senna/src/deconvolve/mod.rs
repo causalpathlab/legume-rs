@@ -65,7 +65,6 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         from: &args.from,
         markers: &args.markers,
         kind: src.kind.to_string(),
-        exact: src.exact,
         warmup: cfg.warmup,
         draws: cfg.draws,
         bulk_files: &args.bulk,

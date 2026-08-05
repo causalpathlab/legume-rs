@@ -19,7 +19,7 @@
 //! gate into `e_feat`), i.e. already the loading that enters the Poisson rate —
 //! do not correct for the gate separately.
 //!
-//! Topic-family runs are rejected; see [`EmbeddingSource::from_masked_topic`].
+//! Topic-family runs are rejected up front; see [`EmbeddingSource::load`].
 
 use crate::embed_common::{DVec, Mat};
 use crate::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
@@ -45,9 +45,6 @@ pub struct EmbeddingSource {
     pub h: usize,
     /// Source run kind (for logging).
     pub kind: RunKind,
-    /// True when the projection geometry is exact. Always true today (bge is the
-    /// only supported source); retained for a future source whose geometry is not.
-    pub exact: bool,
 }
 
 impl EmbeddingSource {
@@ -64,7 +61,7 @@ impl EmbeddingSource {
         };
 
         match manifest.kind {
-            RunKind::Bge => Self::from_bge(&manifest, &resolve),
+            RunKind::Bge => Self::from_bge(&manifest, &dir, &resolve),
             // Topic-family sources are DISABLED: benchmarked at Pearson 0.08
             // (noise) vs 0.99 for `bge --skip-etm` on identical data. Their ρ
             // pairs with the topic embeddings α under a softmax head, not with
@@ -88,128 +85,33 @@ impl EmbeddingSource {
         }
     }
 
-    /// `bge`: raw ρ + the co-embedding that grounds the marker anchors.
+    /// `bge`: the per-gene loading ρ + the co-embedding that grounds the anchors.
     ///
-    /// ρ comes from `outputs.feature_loading` when the run recorded it (any bge run,
-    /// with or without `--skip-etm`). Runs written before that field existed only
-    /// kept ρ under `--skip-etm`, where it borrowed the `dictionary` slot — hence
-    /// the fallback, which must then verify the slot really holds ρ and not β.
-    fn from_bge(m: &RunManifest, resolve: &impl Fn(&str) -> String) -> Result<Self> {
+    /// Resolution is delegated to [`run_manifest::resolve_feature_loading_for`],
+    /// the single place that knows where ρ can live and that verifies each
+    /// candidate's scale. Duplicating that probe here is what let the same bug
+    /// recur in three consumers.
+    fn from_bge(m: &RunManifest, dir: &Path, resolve: &impl Fn(&str) -> String) -> Result<Self> {
         let coembed_rel = m.outputs.feature_embedding.as_deref().ok_or_else(|| {
             anyhow::anyhow!("bge manifest has no `outputs.feature_embedding` (co-embed anchors)")
         })?;
         let coembed = load_mat(&resolve(coembed_rel), "co-embedding")?;
 
-        let (rho, rho_path) = match m.outputs.feature_loading.as_deref() {
-            Some(rel) => {
-                let p = resolve(rel);
-                let rho = load_mat(&p, "raw ρ")?;
-                ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &p)?;
-                (rho, p)
-            }
-            None => {
-                let dict_rel = m.outputs.dictionary.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "bge manifest records neither `outputs.feature_loading` nor `outputs.dictionary`"
-                    )
-                })?;
-                let p = resolve(dict_rel);
-                let rho = load_mat(&p, "raw ρ (legacy dictionary slot)")?;
-                // Legacy layout only: discriminate on CONTENT, never on which
-                // cell-side slots are populated (`latent` / `cell_embedding` are
-                // interchangeable and have swapped roles between bge versions).
-                // β is `log_softmax` over genes, so each of its columns
-                // exponentiates to 1; a raw embedding ρ never does.
-                anyhow::ensure!(
-                    !is_log_simplex_columns(&rho.mat),
-                    "deconvolve: `{p}` holds an ETM β (its columns are gene simplexes), not the \
-                     raw Poisson ρ, and this run predates `outputs.feature_loading`. Re-run \
-                     `senna bge` (any recent build records ρ on both paths)."
-                );
-                (rho, p)
-            }
-        };
+        let (rho_path, bias_path) = run_manifest::resolve_feature_loading_for(m, dir)?;
+        let rho = load_mat(&rho_path, "per-gene loading ρ")?;
+        ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
 
-        // feature_bias sits beside ρ; it is not recorded in the manifest.
-        let bias_path = rho_path
-            .strip_suffix(".feature_loading.parquet")
-            .or_else(|| rho_path.strip_suffix(".dictionary.parquet"))
-            .map(|stem| format!("{stem}.feature_bias.parquet"))
-            .ok_or_else(|| anyhow::anyhow!("cannot derive feature_bias path from `{rho_path}`"))?;
+        // The Poisson rate needs `a_g`; without it μ would silently lose its
+        // per-gene offset, so this is required rather than defaulted to zero.
+        let bias_path = bias_path.ok_or_else(|| {
+            anyhow::anyhow!("no feature_bias.parquet beside `{rho_path}` — deconvolve needs the per-gene offset a_g")
+        })?;
         let gene_offset = load_mat(&bias_path, "feature_bias")?
             .mat
             .column(0)
             .into_owned();
 
-        Self::assemble(rho, coembed.mat, gene_offset, RunKind::Bge, true)
-    }
-
-    /// `masked-topic` / topic-family. **Disabled**: benchmarked at Pearson 0.08
-    /// (noise) against a `bge` run's 0.99 on identical data.
-    ///
-    /// This is not a mild approximation. A topic model's ρ pairs with the TOPIC
-    /// embeddings α under a softmax head (`β = log_softmax_d(ρ·αᵀ)`); it does not
-    /// pair with cell-space positions under a Poisson rate, so both the
-    /// `project_cells` bulk projection and the `exp(ρ·t + a)` reconstruction are
-    /// applying the wrong likelihood.
-    ///
-    /// The right rework is not to fix the projection but to skip it: for a topic
-    /// run each β column already IS a per-type gene simplex (`Σ_g exp(β) = 1`) —
-    /// precisely BayesPrism's normalized reference — so the reference should be
-    /// read straight off β, with markers used only to map topics onto cell types.
-    /// Kept behind this guard rather than deleted so that rework has a home.
-    #[allow(dead_code)]
-    fn from_masked_topic(m: &RunManifest, resolve: &impl Fn(&str) -> String) -> Result<Self> {
-        let feat_rel = m.outputs.feature_embedding.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "manifest has no `outputs.feature_embedding` — a plain `topic` run has no per-gene \
-                 embedding ρ. Use `senna bge`."
-            )
-        })?;
-        let rho = load_mat(&resolve(feat_rel), "feature embedding ρ")?;
-
-        // Offset a_g = ln(mean_k β[g,k]): the gene marginal under uniform topics.
-        let dict_rel = m.outputs.dictionary.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("masked-topic manifest has no `outputs.dictionary` (β) for the offset")
-        })?;
-        let beta = load_mat(&resolve(dict_rel), "β dictionary")?;
-        anyhow::ensure!(
-            beta.mat.nrows() == rho.mat.nrows(),
-            "masked-topic: β genes ({}) != ρ genes ({})",
-            beta.mat.nrows(),
-            rho.mat.nrows()
-        );
-        // Topic-family runs store LOG β (`log_softmax` over genes); a few paths
-        // store β directly. Detect which, then take the gene marginal under
-        // uniform topics — in log space that is
-        // `logsumexp_k(logβ[g,k]) − ln K`, NOT `ln(mean_k logβ)` (whose argument
-        // is negative, which silently yields NaN and a degenerate reference).
-        let k = beta.mat.ncols().max(1) as f32;
-        let gene_offset = if ArtifactScale::detect(&beta.mat) == ArtifactScale::LogSimplexColumns {
-            DVec::from_iterator(
-                beta.mat.nrows(),
-                beta.mat.row_iter().map(|r| {
-                    let mx = r.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                    let se: f32 = r.iter().map(|&v| (v - mx).exp()).sum();
-                    mx + se.max(1e-30).ln() - k.ln()
-                }),
-            )
-        } else {
-            DVec::from_iterator(
-                beta.mat.nrows(),
-                beta.mat.row_iter().map(|r| (r.sum() / k + 1e-8).ln()),
-            )
-        };
-        anyhow::ensure!(
-            gene_offset.iter().all(|v| v.is_finite()),
-            "deconvolve: masked-topic gene offset is not finite — the β dictionary at `{}` is \
-             neither log-simplex nor probability-scaled",
-            resolve(dict_rel)
-        );
-
-        // Anchors share ρ's space; clone the matrix for the (identical) anchor role.
-        let anchor_mat = rho.mat.clone();
-        Self::assemble(rho, anchor_mat, gene_offset, RunKind::Topic, false)
+        Self::assemble(rho, coembed.mat, gene_offset, RunKind::Bge)
     }
 
     fn assemble(
@@ -217,7 +119,6 @@ impl EmbeddingSource {
         anchor_mat: Mat,
         gene_offset: DVec,
         kind: RunKind,
-        exact: bool,
     ) -> Result<Self> {
         let h = rho.mat.ncols();
         anyhow::ensure!(
@@ -238,14 +139,8 @@ impl EmbeddingSource {
             rho.mat.nrows()
         );
         info!(
-            "deconvolve: ρ [{} genes × {h}], {} source{}",
-            rho.mat.nrows(),
-            kind,
-            if exact {
-                ""
-            } else {
-                " (approximate projection)"
-            }
+            "deconvolve: ρ [{} genes × {h}], {kind} source",
+            rho.mat.nrows()
         );
         Ok(Self {
             rho: rho.mat,
@@ -254,7 +149,6 @@ impl EmbeddingSource {
             feature_names: rho.rows,
             h,
             kind,
-            exact,
         })
     }
 }
@@ -262,12 +156,4 @@ impl EmbeddingSource {
 /// Read a matrix parquet with a descriptive error context.
 fn load_mat(path: &str, what: &str) -> Result<MatWithNames<Mat>> {
     DMatrix::<f32>::from_parquet(path).with_context(|| format!("reading {what} {path}"))
-}
-
-/// True when every column is a log-simplex over rows — the signature of an ETM β
-/// dictionary, which a raw embedding ρ never satisfies. Thin wrapper over the
-/// shared [`ArtifactScale`] classifier so slot-identification and scale-checking
-/// cannot drift apart.
-pub(super) fn is_log_simplex_columns(m: &Mat) -> bool {
-    ArtifactScale::detect(m) == ArtifactScale::LogSimplexColumns
 }
