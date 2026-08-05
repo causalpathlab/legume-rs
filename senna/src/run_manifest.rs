@@ -100,6 +100,59 @@ pub fn load_cell_to_pb_raw(path: &str) -> anyhow::Result<InheritedPartition> {
     Ok((cell_to_pb_per_level, cell_names_src))
 }
 
+/// Locate a run's per-gene loading `ρ` from its `--out` prefix.
+///
+/// **The single place that knows where ρ can live.** Consumers used to probe for
+/// it independently — `FrozenFeatureSpec` by filename, `deconvolve` by manifest
+/// slot, `annotate` by a fixed field — and every layout change broke each of
+/// them differently. Three separate bugs came out of that.
+///
+/// Candidates, in priority order:
+/// 1. `{prefix}.feature_loading.parquet` — the canonical slot; every `bge` run
+///    writes it, on both the ETM and `--skip-etm` paths.
+/// 2. `{prefix}.dictionary.parquet` — legacy `bge --skip-etm`. **Shared with the
+///    topic dictionary β**, so it is accepted only after
+///    [`ArtifactScale`] confirms it is signed rather than a log-simplex.
+/// 3. `{prefix}.feature_embedding.parquet` — `masked-topic` / `fne` layout.
+///    Also shared (it is bge's co-embedding), hence the same scale check.
+///
+/// Returns `(rho_path, bias_path)`; the bias is `None` when absent (callers
+/// default it to zero).
+pub fn resolve_feature_loading(prefix: &str) -> anyhow::Result<(String, Option<String>)> {
+    let bias = format!("{prefix}.feature_bias.parquet");
+    let bias = Path::new(&bias).exists().then_some(bias);
+
+    let mut rejected: Vec<String> = Vec::new();
+    for suffix in [
+        "feature_loading.parquet",
+        "dictionary.parquet",
+        "feature_embedding.parquet",
+    ] {
+        let cand = format!("{prefix}.{suffix}");
+        if !Path::new(&cand).exists() {
+            continue;
+        }
+        // A candidate is only ρ if it is SIGNED. The two legacy names are shared
+        // with β, whose columns are a log-simplex over genes; loading that as a
+        // feature embedding trains on the wrong object with no shape mismatch to
+        // catch it.
+        let m = Mat::from_parquet(&cand)?;
+        if ArtifactScale::detect(&m.mat) == ArtifactScale::Signed {
+            return Ok((cand, bias));
+        }
+        rejected.push(format!("{cand} (holds a log-simplex dictionary, not ρ)"));
+    }
+    anyhow::bail!(
+        "no per-gene loading ρ found for prefix `{prefix}` — looked for \
+         .feature_loading.parquet, .dictionary.parquet, .feature_embedding.parquet{}",
+        if rejected.is_empty() {
+            String::new()
+        } else {
+            format!("; rejected: {}", rejected.join(", "))
+        }
+    )
+}
+
 /// Schema version. Bump only on breaking renames or semantic changes.
 /// Readers accept any version and log a warning for newer-than-known.
 pub const MANIFEST_VERSION: u32 = 1;
