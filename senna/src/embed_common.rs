@@ -199,65 +199,105 @@ pub struct BulkDataOut {
     pub data: Mat,
 }
 
-/// Read bulk data files and align rows to the given gene list
+/// Read bulk data files and align rows to the given gene list.
+///
+/// Names are reconciled through the shared canonicalizer
+/// ([`auxiliary_data::feature_names::FeatureNameKind`]) rather than by string
+/// equality, so a bulk file naming genes `ENSG00000105329_TGFB1` aligns to a
+/// reference naming them `TGFB1` (and vice versa) with no pre-editing.
+///
+/// The rule is detected over the UNION of both axes, not the reference alone:
+/// the naming signature usually lives on only one side (a bare-symbol reference
+/// carries no `_`, so by itself it sniffs as `Exact` and the bridge is never
+/// built). Locus-style and mixed axes ride the same path.
 pub fn read_bulk_data_aligned(
     bulk_data_files: &[Box<str>],
     genes: &[Box<str>],
 ) -> anyhow::Result<BulkDataOut> {
+    use auxiliary_data::feature_names::FeatureNameKind;
     use dashmap::DashMap as HashMap;
 
-    let gene_to_position: HashMap<Box<str>, usize> = genes
+    // Read every bulk file up front so the naming rule can see both axes.
+    let loaded: Vec<MatWithNames<Mat>> = bulk_data_files
         .iter()
-        .enumerate()
-        .map(|(i, x)| (x.clone(), i))
-        .collect();
+        .map(|f| read_mat(f.as_ref()))
+        .collect::<anyhow::Result<_>>()?;
 
-    let ngenes = gene_to_position.len();
-    info!("use {ngenes} genes as common features");
+    // Detect PER AXIS and keep whichever is informative. Sniffing the pooled
+    // names does not work: `auto_detect` needs a >=50% majority, and a
+    // bare-symbol reference pooled with an `ENSG…_SYM` bulk leaves the gene-like
+    // share under half, so the pair sniffs as `Exact` and never bridges.
+    // Canonicalizing under `Gene` is a no-op for names lacking the delimiter, so
+    // adopting the informative side is safe for both.
+    let ref_kind = FeatureNameKind::auto_detect(genes);
+    let bulk_kind = loaded
+        .iter()
+        .map(|m| FeatureNameKind::auto_detect(&m.rows))
+        .find(|k| !k.is_exact());
+    let name_kind = match (ref_kind.is_exact(), bulk_kind) {
+        (false, _) => ref_kind,
+        (true, Some(k)) => k,
+        (true, None) => ref_kind,
+    };
+
+    // First writer wins, matching the positional-scan semantics elsewhere.
+    let gene_to_position: HashMap<Box<str>, usize> = HashMap::new();
+    for (i, g) in genes.iter().enumerate() {
+        gene_to_position
+            .entry(name_kind.canonicalize(g))
+            .or_insert(i);
+    }
+
+    let ngenes = genes.len();
+    info!("use {ngenes} genes as common features (name rule: {name_kind:?})");
 
     let mut samples = vec![];
     let mut bulk_data_vec = vec![];
 
-    for bulk_file in bulk_data_files {
+    for (bulk_file, m) in bulk_data_files.iter().zip(loaded) {
         let MatWithNames {
             rows: raw_genes,
             cols: raw_samples,
             mat: raw_ds,
-        } = read_mat(bulk_file.as_ref())?;
+        } = m;
 
         let ncols = raw_samples.len();
 
         let mut padded_ds = Mat::zeros(ngenes, ncols);
         let mut matched = 0usize;
         for (i, g) in raw_genes.iter().enumerate() {
-            if let Some(r) = gene_to_position.get(g) {
-                padded_ds.row_mut(*r.value()).copy_from(&raw_ds.row(i));
+            if let Some(r) = gene_to_position.get(&name_kind.canonicalize(g)) {
+                // ADD rather than overwrite: canonicalization is many-to-one
+                // (several bulk rows can collapse onto one reference gene), and
+                // these are counts, so the contributions sum.
+                let mut dst = padded_ds.row_mut(*r.value());
+                dst += &raw_ds.row(i);
                 matched += 1;
             }
         }
-        // Names are matched EXACTLY, and non-matches are silently zero-filled —
-        // so a naming-convention mismatch (`ENSG0000..._CD19` vs `CD19`) yields an
-        // all-zero bulk and a confident, meaningless downstream answer. Say so.
+        // Unmatched rows are silently zero-filled, so a naming convention the
+        // canonicalizer cannot bridge would yield an all-zero bulk and a
+        // confident, meaningless downstream answer. Say so instead.
         let frac = matched as f64 / raw_genes.len().max(1) as f64;
         anyhow::ensure!(
             matched > 0,
-            "{bulk_file}: none of its {} gene names match the reference. Bulk rows look like \
-             `{}`, the reference like `{}` — align the naming convention (e.g. strip an \
-             `ENSG…_` prefix) before deconvolving.",
+            "{bulk_file}: none of its {} gene names align to the reference, even after \
+             canonicalization ({name_kind:?}). Bulk rows look like `{}`, the reference like \
+             `{}`.",
             raw_genes.len(),
             raw_genes.first().map_or("", |g| g.as_ref()),
             genes.first().map_or("", |g| g.as_ref())
         );
         if frac < 0.5 {
             log::warn!(
-                "{bulk_file}: only {matched}/{} bulk genes ({:.1}%) match the reference; the rest \
-                 are zero-filled and contribute nothing",
+                "{bulk_file}: only {matched}/{} bulk genes ({:.1}%) align to the reference; the \
+                 rest are zero-filled and contribute nothing",
                 raw_genes.len(),
                 100.0 * frac
             );
         } else {
             info!(
-                "{bulk_file}: matched {matched}/{} genes to the reference",
+                "{bulk_file}: aligned {matched}/{} genes to the reference",
                 raw_genes.len()
             );
         }
