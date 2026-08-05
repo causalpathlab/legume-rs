@@ -19,11 +19,13 @@ pub struct DeconvolveArgs {
         required = true,
         help = "Run manifest with a feature embedding:\n\
                 `senna bge --skip-etm` or `masked-topic`",
-        long_help = "Run manifest exposing a per-gene embedding ρ.\n\
-                     `senna bge --skip-etm` is exact:\n\
-                     the raw Poisson ρ is persisted as dictionary.parquet.\n\
-                     Default ETM bge overwrites it with β — re-run with --skip-etm.\n\
-                     `masked-topic` is supported as a transfer approximation (its ρ was trained under a softmax-ETM head)."
+        long_help = "Run manifest from `senna bge`, with or without --skip-etm.\n\
+                     Every bge run records the per-gene loading ρ.\n\
+                     Older runs kept it only under --skip-etm; those still work.\n\
+                     \n\
+                     Topic-family runs are not supported.\n\
+                     Their ρ pairs with the topic embeddings under a softmax head.\n\
+                     It does not pair with cell positions under a Poisson rate."
     )]
     pub from: Box<str>,
 

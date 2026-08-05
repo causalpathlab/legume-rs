@@ -122,20 +122,23 @@ pub fn resolve_feature_loading(prefix: &str) -> anyhow::Result<(String, Option<S
     let bias = format!("{prefix}.feature_bias.parquet");
     let bias = Path::new(&bias).exists().then_some(bias);
 
+    // `feature_loading` is unambiguous by construction, so it needs no content
+    // check — skipping it also avoids decoding a D×H parquet purely to classify
+    // it, which the caller then re-reads. The two legacy names ARE shared with
+    // the topic dictionary β, so those must be verified: loading a log-simplex β
+    // as a feature embedding trains on the wrong object with no shape mismatch
+    // to catch it.
+    let canonical = format!("{prefix}.feature_loading.parquet");
+    if Path::new(&canonical).exists() {
+        return Ok((canonical, bias));
+    }
+
     let mut rejected: Vec<String> = Vec::new();
-    for suffix in [
-        "feature_loading.parquet",
-        "dictionary.parquet",
-        "feature_embedding.parquet",
-    ] {
+    for suffix in ["dictionary.parquet", "feature_embedding.parquet"] {
         let cand = format!("{prefix}.{suffix}");
         if !Path::new(&cand).exists() {
             continue;
         }
-        // A candidate is only ρ if it is SIGNED. The two legacy names are shared
-        // with β, whose columns are a log-simplex over genes; loading that as a
-        // feature embedding trains on the wrong object with no shape mismatch to
-        // catch it.
         let m = Mat::from_parquet(&cand)?;
         if ArtifactScale::detect(&m.mat) == ArtifactScale::Signed {
             return Ok((cand, bias));
@@ -151,6 +154,33 @@ pub fn resolve_feature_loading(prefix: &str) -> anyhow::Result<(String, Option<S
             format!("; rejected: {}", rejected.join(", "))
         }
     )
+}
+
+/// Resolve `ρ` (and its bias) for a run that has a manifest in hand.
+///
+/// The manifest's `outputs.feature_loading` is authoritative when present — a
+/// recorded path beats probing. Only pre-`feature_loading` manifests fall
+/// through to [`resolve_feature_loading`], which probes the run prefix.
+///
+/// This is the entry point for manifest-holding consumers; [`resolve_feature_loading`]
+/// is the prefix-only adapter for callers such as `--freeze-feature-embedding`
+/// that are handed a bare prefix.
+pub fn resolve_feature_loading_for(
+    m: &RunManifest,
+    manifest_dir: &Path,
+) -> anyhow::Result<(String, Option<String>)> {
+    if let Some(rel) = m.outputs.feature_loading.as_deref() {
+        let rho = resolve(manifest_dir, rel).to_string_lossy().into_owned();
+        let bias = rho
+            .strip_suffix(".feature_loading.parquet")
+            .map(|stem| format!("{stem}.feature_bias.parquet"))
+            .filter(|b| Path::new(b).exists());
+        return Ok((rho, bias));
+    }
+    let prefix = resolve(manifest_dir, &m.prefix)
+        .to_string_lossy()
+        .into_owned();
+    resolve_feature_loading(&prefix)
 }
 
 /// Schema version. Bump only on breaking renames or semantic changes.
@@ -294,13 +324,17 @@ impl ArtifactScale {
         if m.ncols() == 0 || m.nrows() == 0 {
             return Self::Signed;
         }
-        let close_to_one = |x: f64| (x - 1.0).abs() < 1e-2;
-        let all_cols = |f: &dyn Fn(usize) -> f64| (0..m.ncols()).all(|k| close_to_one(f(k)));
-        if all_cols(&|k| m.column(k).iter().map(|&v| f64::from(v).exp()).sum()) {
+        // Both checks short-circuit on the first column that disagrees, so the
+        // common (signed) case costs one column, not the whole matrix.
+        let sums_to_one = |f: fn(f32) -> f64| {
+            (0..m.ncols()).all(|k| {
+                let s: f64 = m.column(k).iter().map(|&v| f(v)).sum();
+                (s - 1.0).abs() < 1e-2
+            })
+        };
+        if sums_to_one(|v| f64::from(v).exp()) {
             Self::LogSimplexColumns
-        } else if m.iter().all(|&v| v >= 0.0)
-            && all_cols(&|k| m.column(k).iter().map(|&v| f64::from(v)).sum())
-        {
+        } else if m.iter().all(|&v| v >= 0.0) && sums_to_one(f64::from) {
             Self::ProbabilitySimplexColumns
         } else {
             Self::Signed
@@ -884,6 +918,12 @@ pub struct RunDescription<'a> {
     /// [`RunOutputs::feature_loading`] for why this is separate from
     /// `feature_embedding_suffix`.
     pub feature_loading_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the log-simplex topic dictionary β, e.g.
+    /// `"dictionary.parquet"`. Set by kinds whose dictionary IS a
+    /// `log_softmax`-over-genes simplex; `None` for signed loadings, which stay
+    /// in `dictionary_suffix`. The two may name the SAME file — the point is
+    /// that the manifest slot states the scale.
+    pub softmax_dictionary_suffix: Option<&'a str>,
     /// Suffix after `{basename}.` for the H-space per-cell embedding Z
     /// parquet, e.g. `"cell_embedding.parquet"`. Set by every embedding
     /// command (`bge`, `fne`, `resolve-embedding-space`) — Z always lands
@@ -947,6 +987,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.feature_loading_suffix {
         m.outputs.feature_loading = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.softmax_dictionary_suffix {
+        m.outputs.softmax_dictionary = Some(format!("{basename}.{suf}"));
     }
     if let Some(suf) = desc.cell_embedding_suffix {
         m.outputs.cell_embedding = Some(format!("{basename}.{suf}"));

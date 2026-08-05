@@ -1,7 +1,3 @@
-// Dense numeric loops where one index addresses several arrays at once; the
-// iterator rewrites read worse than the maths they implement.
-#![allow(clippy::needless_range_loop)]
-
 //! Benchmark harness for `senna deconvolve`, scored against `data-beans-sim`
 //! ground truth. See `senna/docs/deconvolve.md` §8.
 //!
@@ -18,6 +14,9 @@
 //! anchors  <cell_emb> <prop> <feature_emb> <markers.tsv> [posterior_anchors.parquet]
 //!     marker/co-embedding anchors vs true cell-type centroids (and ESS drift)
 //! ```
+// Dense numeric loops where one index addresses several arrays at once; the
+// iterator rewrites read worse than the maths they implement.
+#![allow(clippy::needless_range_loop)]
 
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
