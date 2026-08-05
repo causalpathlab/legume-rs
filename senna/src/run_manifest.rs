@@ -17,6 +17,29 @@
 //! All path values are resolved relative to the manifest file's own
 //! directory, so a run directory can be moved or copied without
 //! breaking downstream reads.
+//!
+//! # Output naming conventions
+//!
+//! One axis per name, and the name says which axis and which space:
+//!
+//! | slot | shape | what it holds |
+//! |---|---|---|
+//! | `latent` | N × K | per-cell `log θ` (topic family) / component scores (SVD) |
+//! | `cell_embedding` | N × H | per-cell embedding `Z` in the model's H-space |
+//! | `feature_loading` | D × H | per-gene loading `ρ` on the model axis — the vector that MULTIPLIES `Z` in the log-rate `ρ_g·z_n + a_g + b_n` |
+//! | `feature_embedding` | D × H | where each gene SITS, after re-projection onto the cell manifold (bge's SIMBA co-embed). Overloaded: `masked-topic` puts its raw ρ here |
+//! | `dictionary` | D × K | the softmax dictionary β (log-simplex over genes). Overloaded: legacy `bge --skip-etm` puts ρ here |
+//! | `topic_embedding` | K × H | per-topic embedding `α` |
+//! | `feature_bias` / `cell_bias` | D / N | the additive offsets `a_g` / `b_n` |
+//!
+//! `feature_loading` and `feature_embedding` are NOT interchangeable: the
+//! co-embed is a lossy derived view of ρ (a convex combination of cell
+//! embeddings), so ρ → co-embed is one-way.
+//!
+//! Two slots (`dictionary`, `feature_embedding`) carry different content
+//! depending on `kind`. That overloading is historical and has caused real bugs;
+//! prefer the unambiguous slots, and when reading an overloaded one, branch on
+//! `kind` rather than on which other slots happen to be populated.
 
 use matrix_util::traits::IoOps;
 use serde::{Deserialize, Serialize};
@@ -191,7 +214,18 @@ pub struct RunOutputs {
     /// topic`) should check `kind` before assuming topic semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latent: Option<String>,
-    /// `{out}.dictionary.parquet`: gene × K loadings.
+    /// `{out}.dictionary.parquet` — gene × K. **Overloaded slot; check `kind`.**
+    ///
+    /// - topic family: the **softmax dictionary** β, i.e. `log_softmax` over
+    ///   GENES, so each column exponentiates to 1 (`Σ_g exp(β[g,k]) = 1`). It is
+    ///   in LOG space — a frequent source of bugs when read as probabilities.
+    /// - SVD family: signed component loadings (no simplex).
+    /// - `bge --skip-etm` (legacy alias): the raw gene loading ρ. Superseded by
+    ///   [`RunOutputs::feature_loading`], which every bge run now records on both
+    ///   paths; the alias stays only for consumers that already read it
+    ///   (`masked-topic --freeze-feature-embedding`, `annotate`).
+    ///
+    /// Anything that needs ρ should read `feature_loading` and never this slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary: Option<String>,
     /// Optional `group_id<TAB>display_name` TSV for `senna plot` labels.
@@ -237,6 +271,21 @@ pub struct RunOutputs {
     /// learned coordinate in the topic-model embedding space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
+    /// `{out}.feature_loading.parquet` — D × H RAW per-gene embedding ρ on the
+    /// model's own axis, i.e. the loading that pairs with `cell_embedding` in
+    /// the Poisson rate `exp(ρ_g · z_n + a_g + b_n)`.
+    ///
+    /// Distinct from `feature_embedding`, which for `bge` is the SIMBA co-embed
+    /// (genes re-projected ONTO the cell manifold). Both are D × H and neither
+    /// substitutes for the other: the co-embed is what nearest-centroid
+    /// annotation needs, ρ is what a rate reconstruction needs.
+    ///
+    /// Written by `bge` on BOTH paths. Previously ρ only survived under
+    /// `--skip-etm`, where it borrowed the `dictionary` slot; the ETM path
+    /// claims that slot for β, so ρ was unrecoverable from a default run and
+    /// consumers such as `senna deconvolve` had to demand `--skip-etm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_loading: Option<String>,
     /// `{out}.cell_embedding.parquet` — N × H per-cell embedding Z in the
     /// SAME H-space as `feature_embedding` ρ.
     ///
@@ -686,6 +735,11 @@ pub struct RunDescription<'a> {
     /// parquet (masked-topic only), e.g. `"feature_embedding.parquet"`.
     /// `None` to omit.
     pub feature_embedding_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the RAW model-axis gene embedding ρ,
+    /// e.g. `"feature_loading.parquet"`. `None` to omit. See
+    /// [`RunOutputs::feature_loading`] for why this is separate from
+    /// `feature_embedding_suffix`.
+    pub feature_loading_suffix: Option<&'a str>,
     /// Suffix after `{basename}.` for the H-space per-cell embedding Z
     /// parquet, e.g. `"cell_embedding.parquet"`. Set by every embedding
     /// command (`bge`, `fne`, `resolve-embedding-space`) — Z always lands
@@ -746,6 +800,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.feature_embedding_suffix {
         m.outputs.feature_embedding = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.feature_loading_suffix {
+        m.outputs.feature_loading = Some(format!("{basename}.{suf}"));
     }
     if let Some(suf) = desc.cell_embedding_suffix {
         m.outputs.cell_embedding = Some(format!("{basename}.{suf}"));
