@@ -200,9 +200,35 @@ erythrocytes) it matters, and `M_c` is the conversion factor.
 **Counts, not TPM.** Bulk values are rounded to integers for the multinomial
 split.
 
-**`masked-topic` is an approximation.** Its `ρ` was trained under a softmax-ETM
-head, so pushing it through the Poisson projection is a transfer approximation;
-`bge --skip-etm` is exact.
+**Topic-family sources (`masked-topic`, `topic`, `itopic`, `masked-vae`) are
+disabled.** They were once offered as an "approximation"; benchmarked on
+identical data they score **Pearson 0.08** (noise) against `bge --skip-etm`'s
+0.99, so they now fail with an explanatory error rather than return
+plausible-looking numbers.
+
+The reason is not that a topic run lacks a feature embedding — it writes
+`feature_embedding.parquet` (`D × H` ρ) just like `bge`. It is that **ρ's
+partner is missing**: under `bge`, cells and genes share one `H`-dim space
+(`cell_embedding` is `N × H`), so `ρ_g · z` is meaningful and bulk can be
+projected into it. Under a topic model, ρ pairs with the *topic* embeddings α
+(`β = log_softmax_d(ρ·αᵀ)`) while cells live on the `K`-simplex — `latent` is
+`N × K` log θ and there is no `H`-dim cell representation at all. Projecting
+bulk into a space containing no cells is ill-posed, and the softmax head has no
+per-gene additive bias for `a_g` to be.
+
+Two coherent reworks, both of which skip the projection entirely:
+
+1. **Read the reference off β.** `dictionary_empirical.parquet` is already a
+   full-resolution per-topic gene simplex — precisely BayesPrism's normalized
+   `φ` — and `dispersion.parquet` is a per-gene NB dispersion that would replace
+   the hand-set scalar `--nb-dispersion`. Markers would then be needed only to
+   map topics onto cell types.
+2. **Encode the bulk.** A topic run ships its encoder (`safetensors` +
+   `model.json` + `feature_mean.parquet`), and `senna predict` already performs
+   encoder-only inference, so a bulk sample can be encoded straight to `θ_bulk`.
+
+Route 1 is also the fix for the reference bottleneck in §8, so a topic run may
+end up the *better* deconvolution source rather than the weaker one.
 
 ---
 

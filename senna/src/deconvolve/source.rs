@@ -61,11 +61,22 @@ impl EmbeddingSource {
 
         match manifest.kind {
             RunKind::Bge => Self::from_bge(&manifest, &resolve),
-            // masked-vae included: this path reads β + ρ only, and its β is the
-            // same gene-simplex the other topic-family kinds produce. The
-            // Gaussian latent never enters here.
+            // Topic-family sources are DISABLED: benchmarked at Pearson 0.08
+            // (noise) vs 0.99 for `bge --skip-etm` on identical data. Their ρ
+            // pairs with the topic embeddings α under a softmax head, not with
+            // cell-space positions under a Poisson rate, so the projection and
+            // the `exp(ρ·t + a)` reconstruction both use the wrong likelihood.
+            // Failing loudly beats returning plausible-looking noise.
             RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic => {
-                Self::from_masked_topic(&manifest, &resolve)
+                anyhow::bail!(
+                    "deconvolve: topic-family runs (`{}`) are not supported — the embedding-projection \
+                     reference is invalid under a softmax-ETM head (benchmarked at r=0.08). Use \
+                     `senna bge --skip-etm`.\n\nNote: this run already carries a better reference than \
+                     the one deconvolve reconstructs — `dictionary_empirical.parquet` is a \
+                     full-resolution per-topic gene simplex, and `dispersion.parquet` a per-gene NB \
+                     dispersion. Consuming those directly is the planned rework.",
+                    manifest.kind
+                )
             }
             other => anyhow::bail!(
                 "deconvolve: unsupported source kind `{other}` — use `senna bge --skip-etm` \
@@ -107,8 +118,21 @@ impl EmbeddingSource {
         Self::assemble(rho, coembed.mat, gene_offset, RunKind::Bge, true)
     }
 
-    /// `masked-topic`: feature_embedding = raw ρ (also the anchor space); the
-    /// per-gene offset is the log topic-averaged marginal of β.
+    /// `masked-topic` / topic-family. **Disabled**: benchmarked at Pearson 0.08
+    /// (noise) against a `bge --skip-etm` run's 0.99 on identical data.
+    ///
+    /// This is not a mild approximation. A topic model's ρ pairs with the TOPIC
+    /// embeddings α under a softmax head (`β = log_softmax_d(ρ·αᵀ)`); it does not
+    /// pair with cell-space positions under a Poisson rate, so both the
+    /// `project_cells` bulk projection and the `exp(ρ·t + a)` reconstruction are
+    /// applying the wrong likelihood.
+    ///
+    /// The right rework is not to fix the projection but to skip it: for a topic
+    /// run each β column already IS a per-type gene simplex (`Σ_g exp(β) = 1`) —
+    /// precisely BayesPrism's normalized reference — so the reference should be
+    /// read straight off β, with markers used only to map topics onto cell types.
+    /// Kept behind this guard rather than deleted so that rework has a home.
+    #[allow(dead_code)]
     fn from_masked_topic(m: &RunManifest, resolve: &impl Fn(&str) -> String) -> Result<Self> {
         let feat_rel = m.outputs.feature_embedding.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -129,10 +153,32 @@ impl EmbeddingSource {
             beta.mat.nrows(),
             rho.mat.nrows()
         );
+        // Topic-family runs store LOG β (`log_softmax` over genes); a few paths
+        // store β directly. Detect which, then take the gene marginal under
+        // uniform topics — in log space that is
+        // `logsumexp_k(logβ[g,k]) − ln K`, NOT `ln(mean_k logβ)` (whose argument
+        // is negative, which silently yields NaN and a degenerate reference).
         let k = beta.mat.ncols().max(1) as f32;
-        let gene_offset = DVec::from_iterator(
-            beta.mat.nrows(),
-            beta.mat.row_iter().map(|r| (r.sum() / k + 1e-8).ln()),
+        let gene_offset = if is_log_simplex_columns(&beta.mat) {
+            DVec::from_iterator(
+                beta.mat.nrows(),
+                beta.mat.row_iter().map(|r| {
+                    let mx = r.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let se: f32 = r.iter().map(|&v| (v - mx).exp()).sum();
+                    mx + se.max(1e-30).ln() - k.ln()
+                }),
+            )
+        } else {
+            DVec::from_iterator(
+                beta.mat.nrows(),
+                beta.mat.row_iter().map(|r| (r.sum() / k + 1e-8).ln()),
+            )
+        };
+        anyhow::ensure!(
+            gene_offset.iter().all(|v| v.is_finite()),
+            "deconvolve: masked-topic gene offset is not finite — the β dictionary at `{}` is \
+             neither log-simplex nor probability-scaled",
+            resolve(dict_rel)
         );
 
         // Anchors share ρ's space; clone the matrix for the (identical) anchor role.

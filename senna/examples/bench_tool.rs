@@ -33,6 +33,27 @@ fn main() -> anyhow::Result<()> {
             args.get(4).map(String::as_str),
             args.get(5).map(String::as_str),
         ),
+        Some("shape") => {
+            for p in &args[2..] {
+                match DMatrix::<f32>::from_parquet(p) {
+                    Ok(m) => {
+                        let v: Vec<f32> =
+                            (0..m.mat.ncols().min(3)).map(|j| m.mat[(0, j)]).collect();
+                        println!(
+                            "{:<44} {:>6} x {:<4} rows[{}..] cols[{}..] head={:?}",
+                            p.rsplit('/').next().unwrap_or(p),
+                            m.mat.nrows(),
+                            m.mat.ncols(),
+                            m.rows.first().map_or("", |s| s.as_ref()),
+                            m.cols.first().map_or("", |s| s.as_ref()),
+                            v
+                        );
+                    }
+                    Err(e) => println!("{p}: <unreadable: {e}>"),
+                }
+            }
+            Ok(())
+        }
         Some("expr") => expr(&args[2], &args[3], &args[4]),
         Some("profile") => profile(
             &args[2],
