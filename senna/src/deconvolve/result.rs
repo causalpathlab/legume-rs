@@ -22,6 +22,10 @@ pub struct DeconvResult {
     pub fractions_lo: Mat,
     pub fractions_hi: Mat,
     pub abundance_mean: Mat,
+    /// Posterior-mean abundance per *component*, `S×R`, before the readout maps
+    /// it onto cell types. Diagnostic: comparing it with a known per-archetype
+    /// mass separates a distorted readout from a distorted fit.
+    pub component_abundance: Mat,
     /// Posterior-mean allocated counts `E[Z_{s,c,g}]`, the within-type
     /// expression tensor.
     pub expression: ExpressionTensor,

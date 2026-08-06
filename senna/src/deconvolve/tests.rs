@@ -108,7 +108,12 @@ fn drive(
     anchors: Option<AnchorSampler<'_>>,
 ) -> super::result::DeconvResult {
     let mut monitor = Monitor::silent();
-    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes());
+    let mut accum = PosteriorAccum::new(
+        bulk.ncols(),
+        reference.n_types(),
+        reference.n_genes(),
+        reference.n_comp(),
+    );
     run_chain(
         reference,
         bulk,
@@ -285,6 +290,7 @@ fn archetype_problem(dup: bool) -> (Reference, Mat, Mat) {
         readout,
         coords: Mat::zeros(r, 2),
         comp_names: (0..r).map(|m| format!("a{m}").into_boxed_str()).collect(),
+        n_cells: vec![1.0; r],
         celltype_names: (0..c).map(|ct| format!("T{ct}").into_boxed_str()).collect(),
         units: FractionUnits::Mrna,
         axis: ComponentAxis::Archetype,
@@ -369,7 +375,14 @@ fn drive_pooled(
     n_chains: usize,
 ) -> super::result::DeconvResult {
     let mut monitor = Monitor::silent();
-    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes());
+    // Each chain claims its own slice of the pooled component axis; here every
+    // chain reuses the same reference, so the axis is `n_chains` copies of it.
+    let mut accum = PosteriorAccum::new(
+        bulk.ncols(),
+        reference.n_types(),
+        reference.n_genes(),
+        reference.n_comp() * n_chains,
+    );
     for chain in 0..n_chains {
         let mut chain_cfg = SamplerConfig { ..*cfg };
         chain_cfg.seed = cfg

@@ -4,6 +4,8 @@ use super::result::DeconvResult;
 use crate::embed_common::{axis_id_names, Mat};
 use anyhow::{Context, Result};
 use log::info;
+use matrix_util::common_io::write_lines;
+use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::traits::IoOps;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -89,6 +91,17 @@ pub fn write_outputs(
         )?;
     }
 
+    // Pre-readout abundances, for auditing the fit against a known composition.
+    // Columns are the component labels, so this joins to `archetypes.parquet`.
+    // Only meaningful when components are finer than cell types.
+    if result.anchor_axis == super::reference::ComponentAxis::Archetype {
+        result.component_abundance.to_parquet_with_names(
+            &format!("{out}.abundance_component.parquet"),
+            (Some(sample_names), Some("sample")),
+            Some(&result.anchor_names),
+        )?;
+    }
+
     // Per-sample QC + sampler diagnostics.
     write_residual(&format!("{out}.residual.tsv"), sample_names, result)?;
     let converged_written =
@@ -99,6 +112,78 @@ pub fn write_outputs(
         "senna deconvolve: wrote {out}.{{fractions,fractions_ci,abundance,residual}}.tsv, \
          {out}.{{sample_embedding,anchors}}.parquet, {out}.expression/*.parquet"
     );
+    Ok(())
+}
+
+/// Per-component readout and size, plus the cell → component membership.
+///
+/// The readout is the map from components to reported cell types, and it is the
+/// one part of the model the data cannot correct — it is estimated upstream and
+/// applied as a fixed linear map. Writing it out, with the membership that
+/// produced it, is what allows the reported composition to be checked against a
+/// known one at a *perfect* abundance vector, separating a wrong reference from
+/// a wrong fit.
+///
+/// Called before sampling rather than from [`write_outputs`], because it needs
+/// the references and the chain loop consumes them.
+pub fn write_archetype_diagnostics(
+    out: &str,
+    references: &[super::reference::Reference],
+    membership: &super::archetypes::Membership,
+) -> Result<()> {
+    use super::reference::comp_label;
+    let n_chains = references.len();
+    let c = references[0].n_types();
+
+    let mut rows: Vec<Box<str>> = Vec::new();
+    let mut readout: Vec<Vec<f32>> = vec![Vec::new(); c];
+    let mut n_cells: Vec<i32> = Vec::new();
+    for (chain, r) in references.iter().enumerate() {
+        for (m, &n) in r.n_cells.iter().enumerate() {
+            rows.push(comp_label(n_chains, chain, &r.comp_names[m]));
+            for (ct, col) in readout.iter_mut().enumerate() {
+                col.push(r.readout[(m, ct)]);
+            }
+            n_cells.push(n as i32);
+        }
+    }
+    let mut columns: Vec<(Box<str>, Column)> = references[0]
+        .celltype_names
+        .iter()
+        .zip(&readout)
+        .map(|(name, col)| (name.clone(), Column::F32(col)))
+        .collect();
+    columns.push(("n_cells".into(), Column::I32(&n_cells)));
+    write_named_table(
+        &format!("{out}.archetypes.parquet"),
+        "component",
+        &rows,
+        &columns,
+    )?;
+
+    // Two headerless columns, matching the `{prefix}.membership.tsv` contract the
+    // rest of the workspace consumes — the chain rides in the component label, so
+    // the file is usable directly as a grouping key.
+    let mut lines: Vec<Box<str>> = Vec::new();
+    for (chain, labels) in membership.per_chain.iter().enumerate() {
+        let r = &references[chain];
+        for (ci, &m) in labels.iter().enumerate() {
+            if m >= r.n_comp() {
+                continue;
+            }
+            lines.push(
+                format!(
+                    "{}\t{}",
+                    membership.cell_names[ci],
+                    comp_label(n_chains, chain, &r.comp_names[m])
+                )
+                .into_boxed_str(),
+            );
+        }
+    }
+    let mpath = format!("{out}.membership.tsv.gz");
+    write_lines(&lines, &mpath)?;
+    info!("deconvolve: wrote {out}.archetypes.parquet and {mpath}");
     Ok(())
 }
 
@@ -236,6 +321,9 @@ fn write_manifest(out: &str, meta: &RunMeta, converged_written: bool) -> Result<
             "residual": format!("{out}.residual.tsv"),
             "convergence": converged_written.then(|| format!("{out}.convergence.tsv")),
             "trace": meta.traced.then(|| format!("{out}.trace.tsv.gz")),
+            "components": format!("{out}.archetypes.parquet"),
+            "membership": format!("{out}.membership.tsv.gz"),
+            "abundance_component": format!("{out}.abundance_component.parquet"),
         },
     });
     std::fs::write(&path, serde_json::to_string_pretty(&json)?)

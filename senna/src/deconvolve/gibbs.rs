@@ -406,6 +406,13 @@ pub struct PosteriorAccum {
     frac_sumsq: Vec<f64>,
     frac_quant: RunningQuantiles,
     abundance_sum: Vec<f64>,
+    /// Per-component abundance sum over the POOLED component axis, `S×ΣR` —
+    /// the pre-readout quantity, laid out so its columns line up with the
+    /// component table's rows.
+    comp_abundance_sum: Vec<f64>,
+    /// Where the current chain's components start in that axis.
+    comp_offset: usize,
+    n_comp_total: usize,
     /// Allocated counts, laid out sample-major `[si*C*D + ct*D + g]`.
     ///
     /// Sample-major so each sample's block is contiguous and can be handed to
@@ -437,7 +444,7 @@ impl PosteriorAccum {
     const LARGE_TENSOR: u128 = 200_000_000;
 
     #[must_use]
-    pub fn new(s: usize, c: usize, d: usize) -> Self {
+    pub fn new(s: usize, c: usize, d: usize, n_comp_total: usize) -> Self {
         let elements = (c as u128) * (d as u128) * (s as u128);
         if elements > Self::LARGE_TENSOR {
             info!(
@@ -454,6 +461,9 @@ impl PosteriorAccum {
             frac_sumsq: vec![0f64; s * c],
             frac_quant: RunningQuantiles::new(s * c, &[0.025, 0.975]),
             abundance_sum: vec![0f64; s * c],
+            comp_abundance_sum: vec![0f64; s * n_comp_total],
+            comp_offset: 0,
+            n_comp_total,
             zexp: vec![0f32; c * d * s],
             lam_sum: vec![0f64; d * s],
             n_collect: 0,
@@ -517,6 +527,12 @@ pub fn run_chain(
         accum.s,
         accum.c,
         accum.d
+    );
+    anyhow::ensure!(
+        accum.comp_offset + r <= accum.n_comp_total,
+        "gibbs: component axis holds {} slots, chain needs {r} more from {}",
+        accum.n_comp_total,
+        accum.comp_offset
     );
     accum.begin_chain();
     accum.trace.reserve(cfg.draws * s * c);
@@ -600,6 +616,13 @@ pub fn run_chain(
                 frac_flat[si * c + ct] = st.frac[ct];
             }
             if collecting {
+                let base = si * accum.n_comp_total + accum.comp_offset;
+                for (acc, &w) in accum.comp_abundance_sum[base..base + r]
+                    .iter_mut()
+                    .zip(&st.w)
+                {
+                    *acc += f64::from(w);
+                }
                 for (ct, &f) in st.frac.iter().enumerate() {
                     let idx = si * c + ct;
                     let frac = f64::from(f);
@@ -643,6 +666,7 @@ pub fn run_chain(
             );
         }
     }
+    accum.comp_offset += r;
     Ok(anchors.map(|a| a.posterior_anchors(collected_here.max(1))))
 }
 
@@ -712,6 +736,9 @@ pub fn finalize(
         fractions_lo,
         fractions_hi,
         abundance_mean,
+        component_abundance: Mat::from_fn(s, accum.n_comp_total, |si, m| {
+            (accum.comp_abundance_sum[si * accum.n_comp_total + m] / nc) as f32
+        }),
         expression,
         anchors_post: components.coords,
         anchor_names: components.names,
