@@ -13,8 +13,10 @@
 //! - the cell embedding, which the archetypes are clustered in.
 //! - the input counts and the cell annotation, which the profiles are built from.
 //!
-//! Only ρ's row names and width are retained; its values are not used, because
-//! the reference is measured from the counts rather than reconstructed.
+//! Only ρ's row names and width are retained — the reference is measured from
+//! the counts rather than reconstructed — but its values are still scale-checked,
+//! so a manifest pointing at a topic dictionary is caught rather than silently
+//! supplying the wrong gene axis.
 //!
 //! Topic-family runs are rejected up front; see [`EmbeddingSource::load`].
 
@@ -59,7 +61,7 @@ impl EmbeddingSource {
         };
 
         let mut built = match manifest.kind {
-            RunKind::Bge => Self::from_bge(&manifest, &dir, &resolve),
+            RunKind::Bge => Self::from_bge(&manifest, &dir),
             // Topic-family sources are DISABLED: benchmarked at Pearson 0.08
             // (noise) vs 0.99 for `bge --skip-etm` on identical data. Their ρ
             // pairs with the topic embeddings α under a softmax head, not with
@@ -106,7 +108,7 @@ impl EmbeddingSource {
     /// the single place that knows where ρ can live and that verifies each
     /// candidate's scale. Duplicating that probe here is what let the same bug
     /// recur in three consumers.
-    fn from_bge(m: &RunManifest, dir: &Path, _resolve: &impl Fn(&str) -> String) -> Result<Self> {
+    fn from_bge(m: &RunManifest, dir: &Path) -> Result<Self> {
         let (rho_path, _) = run_manifest::resolve_feature_loading_for(m, dir)?;
         let rho = load_mat(&rho_path, "per-gene loading ρ")?;
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;

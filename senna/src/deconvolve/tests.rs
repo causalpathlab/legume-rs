@@ -181,17 +181,43 @@ fn tempering_widens_posterior() {
     // Lower τ (fewer effective counts) must widen the fraction posterior.
     let mean_sd = |tau: f32| {
         let (mut reference, bulk, _) = archetype_problem(false);
-        let mut cfg = cfg_tau(tau);
-        cfg.a0 = 1.0;
+        let cfg = cfg_tau(tau);
         let init_w = reference.init_abundances(&bulk);
         let res = drive(&mut reference, &bulk, &init_w, &cfg);
         res.fractions_sd.iter().sum::<f32>() / res.fractions_sd.len() as f32
     };
     let tight = mean_sd(1.0);
     let loose = mean_sd(0.02);
+    // Variance scales as 1/τ, so sd should grow by about sqrt(50) ≈ 7. A
+    // one-sided bound would pass a regression that tempered the numerator but
+    // not the exposure, which widens by the wrong factor.
+    let ratio = loose / tight;
     assert!(
-        loose > 2.0 * tight,
-        "tempering did not widen posterior: sd(τ=1)={tight:.5}, sd(τ=0.02)={loose:.5}"
+        (4.0..12.0).contains(&ratio),
+        "tempering widened by {ratio:.2}x, expected about 7x \
+         (sd(τ=1)={tight:.5}, sd(τ=0.02)={loose:.5})"
+    );
+
+    // The prior is proper (a0 = b0 = 1), so as τ falls the posterior must also
+    // shrink toward it — that is, toward a uniform composition. Asserting the
+    // mean is *unchanged* would be wrong; asserting it moves the right way is
+    // what distinguishes tempering from a mis-wired exposure.
+    let mean_at = |tau: f32| {
+        let (mut reference, bulk, _) = archetype_problem(false);
+        let init_w = reference.init_abundances(&bulk);
+        drive(&mut reference, &bulk, &init_w, &cfg_tau(tau)).fractions_mean
+    };
+    let (tight_m, loose_m) = (mean_at(1.0), mean_at(0.02));
+    let c = tight_m.ncols();
+    let spread = |m: &Mat| -> f32 {
+        let uniform = 1.0 / c as f32;
+        m.iter().map(|v| (v - uniform).abs()).sum::<f32>() / m.len() as f32
+    };
+    assert!(
+        spread(&loose_m) < spread(&tight_m),
+        "tempering did not shrink toward the prior: spread(τ=1)={:.4}, spread(τ=0.02)={:.4}",
+        spread(&tight_m),
+        spread(&loose_m)
     );
 }
 
@@ -308,6 +334,78 @@ fn pooling_chains_agrees_with_one_long_chain() {
     );
     assert_eq!(one.n_chains, 1, "chain count not recorded");
     assert_eq!(three.n_chains, 3, "chain count not recorded");
+}
+
+#[test]
+fn pooled_component_axis_is_per_chain() {
+    // The component axis is the concatenation of the chains' components, and
+    // each block must be divided by the draws that chain contributed — not by
+    // the pooled total, which would scale every block down by the chain count
+    // and make it incomparable with a known per-component mass.
+    let (mut reference, bulk, _) = archetype_problem(false);
+    let r = reference.n_comp();
+    let init_w = reference.init_abundances(&bulk);
+    let res = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 3);
+
+    assert_eq!(
+        res.component_abundance.ncols(),
+        3 * r,
+        "component axis is not the concatenation of the chains"
+    );
+    // Every block holds mass: a dropped offset would leave one all-zero.
+    for chain in 0..3 {
+        let block: f32 = (0..bulk.ncols())
+            .flat_map(|si| (0..r).map(move |m| (si, chain * r + m)))
+            .map(|ix| res.component_abundance[ix])
+            .sum();
+        assert!(block > 0.0, "chain {chain} contributed no component mass");
+    }
+    // Same reference, different seed: the blocks must agree, and each must be a
+    // posterior mean rather than a fraction of one.
+    for si in 0..bulk.ncols() {
+        let first: f32 = (0..r).map(|m| res.component_abundance[(si, m)]).sum();
+        for chain in 1..3 {
+            let other: f32 = (0..r)
+                .map(|m| res.component_abundance[(si, chain * r + m)])
+                .sum();
+            assert!(
+                (first - other).abs() <= 0.05 * first,
+                "chain {chain} block totals {other:.1} against chain 0's {first:.1}"
+            );
+        }
+        // ... and on the same scale as the per-type abundance it contracts to.
+        let by_type: f32 = (0..res.abundance_mean.ncols())
+            .map(|ct| res.abundance_mean[(si, ct)])
+            .sum();
+        assert!(
+            (first - by_type).abs() <= 0.05 * by_type,
+            "component total {first:.1} disagrees with per-type total {by_type:.1}"
+        );
+    }
+}
+
+#[test]
+fn recovers_fractions_from_a_neutral_start() {
+    // Every other test warm-starts from `init_abundances`, which leaves open
+    // whether the sampler recovers the truth or merely keeps the start it was
+    // given. This one begins flat.
+    let (mut reference, bulk, f_true) = archetype_problem(false);
+    let neutral = Mat::from_element(bulk.ncols(), reference.n_comp(), 1.0);
+    let cold = drive(&mut reference, &bulk, &neutral, &cfg());
+    let (corr, max_abs) = agreement(&cold.fractions_mean, &f_true);
+    assert!(
+        corr > 0.95 && max_abs < 0.05,
+        "cold start did not recover: corr={corr:.3}, max|Δ|={max_abs:.3}"
+    );
+
+    let (mut reference, bulk, _) = archetype_problem(false);
+    let warm_init = reference.init_abundances(&bulk);
+    let warm = drive(&mut reference, &bulk, &warm_init, &cfg());
+    let (_, drift) = agreement(&cold.fractions_mean, &warm.fractions_mean);
+    assert!(
+        drift < 0.02,
+        "cold and warm starts disagree by {drift:.3} — the start is being kept"
+    );
 }
 
 #[test]

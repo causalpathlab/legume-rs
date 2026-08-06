@@ -1,4 +1,4 @@
-//! Posterior summaries shared by both reference modes.
+//! Posterior summaries.
 //!
 //! The sampler allocates counts against `R` reference *components* and reports
 //! against `C` *cell types*, with `R ≫ C` and the mapping given by the soft

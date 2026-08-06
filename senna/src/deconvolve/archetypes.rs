@@ -147,8 +147,8 @@ impl ArchetypeInputs {
         let data_files: Vec<Box<str>> = if cfg.sc_data.is_empty() {
             anyhow::ensure!(
                 !src.data_files.is_empty(),
-                "deconvolve --reference archetype needs the single-cell counts: pass `--sc-data`, \
-                 or use a `--from` manifest that records its input data"
+                "deconvolve needs the single-cell counts the profiles are measured from: \
+                 pass `--sc-data`, or use a `--from` manifest that records its input data"
             );
             src.data_files.clone()
         } else {
@@ -498,8 +498,8 @@ fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<GeneMap>
 fn load_cell_embedding(src: &EmbeddingSource) -> Result<MatWithNames<Mat>> {
     anyhow::ensure!(
         !src.cell_embedding_paths.is_empty(),
-        "deconvolve --reference archetype needs a cell embedding, but the `--from` manifest \
-         records neither `cell_embedding` nor `latent`"
+        "deconvolve needs a cell embedding to cluster the reference cells in, but the \
+         `--from` manifest records neither `cell_embedding` nor `latent`"
     );
     let mut last_err = None;
     for path in &src.cell_embedding_paths {

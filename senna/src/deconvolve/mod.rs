@@ -87,7 +87,7 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let mut comp_names: Vec<Box<str>> = Vec::new();
     let mut comp_coords: Vec<f32> = Vec::new();
 
-    for (chain, mut reference) in references.into_iter().enumerate() {
+    for (chain, reference) in references.into_iter().enumerate() {
         anyhow::ensure!(
             reference.celltype_names == celltype_names && reference.coords.ncols() == coord_dim,
             "deconvolve: chain {} does not agree with the first chain on cell types or \
@@ -117,7 +117,7 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
             .wrapping_add((chain as u64).wrapping_mul(SEED_STRIDE));
         monitor.begin_chain(chain);
         gibbs::run_chain(
-            &mut reference,
+            &reference,
             &bulk.data,
             &init_w,
             &cfg,
