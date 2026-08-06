@@ -13,18 +13,13 @@ use std::io::{BufWriter, Write};
 /// Metadata recorded in the run summary JSON.
 pub struct RunMeta<'a> {
     pub from: &'a str,
-    pub markers: Option<&'a str>,
     pub kind: String,
-    /// Which reference built the component profiles.
-    pub reference: &'a str,
     /// Number of reference components `R` (cell types, or archetypes), pooled
     /// across chains.
     pub n_components: usize,
     /// Chains pooled into the posterior; >1 means the reference partition was
     /// averaged over rather than conditioned on.
     pub n_chains: usize,
-    /// `cell` or `mrna` — what the reported fractions are shares of.
-    pub fraction_units: &'a str,
     pub warmup: usize,
     pub draws: usize,
     pub bulk_files: &'a [Box<str>],
@@ -37,12 +32,11 @@ pub fn write_outputs(
     out: &str,
     sample_names: &[Box<str>],
     gene_names: &[Box<str>],
-    sample_z: &Mat,
     result: &DeconvResult,
     meta: &RunMeta,
 ) -> Result<()> {
     let ct = &result.celltype_names;
-    let h_names = axis_id_names("h", sample_z.ncols());
+    let h_names = axis_id_names("h", result.anchors_post.ncols());
 
     // Fractions (posterior mean, wide) + credible-interval long form.
     write_wide_tsv(
@@ -61,18 +55,10 @@ pub fn write_outputs(
         &result.abundance_mean,
     )?;
 
-    // Projected bulk + posterior anchors (embedding space).
-    sample_z.to_parquet_with_names(
-        &format!("{out}.sample_embedding.parquet"),
-        (Some(sample_names), Some("sample")),
-        Some(&h_names),
-    )?;
+    // Component coordinates in the embedding.
     result.anchors_post.to_parquet_with_names(
         &format!("{out}.anchors.parquet"),
-        (
-            Some(&result.anchor_names),
-            Some(result.anchor_axis.corner()),
-        ),
+        (Some(&result.anchor_names), Some("component")),
         Some(&h_names),
     )?;
 
@@ -93,14 +79,11 @@ pub fn write_outputs(
 
     // Pre-readout abundances, for auditing the fit against a known composition.
     // Columns are the component labels, so this joins to `archetypes.parquet`.
-    // Only meaningful when components are finer than cell types.
-    if result.anchor_axis == super::reference::ComponentAxis::Archetype {
-        result.component_abundance.to_parquet_with_names(
-            &format!("{out}.abundance_component.parquet"),
-            (Some(sample_names), Some("sample")),
-            Some(&result.anchor_names),
-        )?;
-    }
+    result.component_abundance.to_parquet_with_names(
+        &format!("{out}.abundance_component.parquet"),
+        (Some(sample_names), Some("sample")),
+        Some(&result.anchor_names),
+    )?;
 
     // Per-sample QC + sampler diagnostics.
     write_residual(&format!("{out}.residual.tsv"), sample_names, result)?;
@@ -110,7 +93,7 @@ pub fn write_outputs(
 
     info!(
         "senna deconvolve: wrote {out}.{{fractions,fractions_ci,abundance,residual}}.tsv, \
-         {out}.{{sample_embedding,anchors}}.parquet, {out}.expression/*.parquet"
+         {out}.anchors.parquet, {out}.expression/*.parquet"
     );
     Ok(())
 }
@@ -302,12 +285,10 @@ fn write_manifest(out: &str, meta: &RunMeta, converged_written: bool) -> Result<
         "version": 1,
         "kind": "deconvolve",
         "from": meta.from,
-        "markers": meta.markers,
         "source_kind": meta.kind,
-        "reference": meta.reference,
         "n_components": meta.n_components,
         "n_chains": meta.n_chains,
-        "fraction_units": meta.fraction_units,
+        "fraction_units": "mrna",
         "warmup": meta.warmup,
         "draws": meta.draws,
         "bulk": meta.bulk_files.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
@@ -315,7 +296,6 @@ fn write_manifest(out: &str, meta: &RunMeta, converged_written: bool) -> Result<
             "fractions": format!("{out}.fractions.tsv"),
             "fractions_ci": format!("{out}.fractions_ci.tsv"),
             "abundance": format!("{out}.abundance.tsv"),
-            "sample_embedding": format!("{out}.sample_embedding.parquet"),
             "anchors": format!("{out}.anchors.parquet"),
             "expression_dir": format!("{out}.expression"),
             "residual": format!("{out}.residual.tsv"),

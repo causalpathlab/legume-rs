@@ -20,36 +20,22 @@
 //! counts) of evidence and its variance scales as 1/τ — the CI calibration knob
 //! at high read depth.
 //!
-//! In the low-rank reference mode the components are the cell types themselves
-//! and their anchors `t_c` are resampled by one elliptical-slice step per sweep
-//! under the annotate-by-projection prior `N(t̂_c, Σ_c)`, with the pooled Poisson
-//! likelihood
-//! `ℓ(t_c) = τ·Σ_g[A_{c,g}(ρ_g·t_c+a_g) − W_{c,g}·exp(ρ_g·t_c+a_g)]`,
-//! `A_{c,g}=Σ_s Z_{s,c,g}`, `W_{c,g}=Σ_s u_{s,c}·ε_{s,g}` (ε-weighted exposure).
-//! This is the coupling that lets annotation uncertainty widen (or confident
-//! types pin) the fraction posterior. The archetype reference is fixed, so that
-//! step is skipped entirely.
 
-use super::anchors::AnchorPrior;
 use super::args::SamplerConfig;
 use super::monitor::Monitor;
-use super::reference::{Reference, SCORE_CLAMP};
+use super::reference::Reference;
 use super::result::{
     residual_stat, split_rhat_ess, Convergence, DeconvResult, ExpressionTensor,
     MIN_DRAWS_FOR_DIAGNOSTICS,
 };
-use super::source::EmbeddingSource;
-use crate::embed_common::{DVec, Mat};
+use crate::embed_common::Mat;
 use log::info;
 use matrix_util::running_quantile::RunningQuantiles;
-use mcmc_util::engine::elliptical_slice_step;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
-use rand_distr::{Binomial, Distribution, Gamma, StandardNormal};
+use rand_distr::{Binomial, Distribution, Gamma};
 use rayon::prelude::*;
 
-/// Offset for the anchor-chain RNG seed (separate stream from the per-sample chains).
-const ANCHOR_SEED_OFFSET: u64 = super::SEED_STRIDE;
 /// Floor on a sampled abundance, so a zeroed component can still recover.
 const ABUNDANCE_FLOOR: f32 = 1e-12;
 
@@ -61,8 +47,6 @@ struct SweepCtx<'a> {
     r: usize,
     c: usize,
     cfg: &'a SamplerConfig,
-    /// Materialise the full `R×D` allocation (the anchor ESS needs it).
-    keep_contrib: bool,
 }
 
 /// Per-sample chain state and scratch, allocated once and reused every sweep.
@@ -88,15 +72,13 @@ struct SampleState {
     touched: Vec<u32>,
     /// `D` per-gene NB factor.
     eps: Vec<f32>,
-    /// `R×D` full allocation, laid out `m*D + g`. Empty unless `keep_contrib`.
-    contrib: Vec<f32>,
     /// `C` fractions this sweep, and the abundance total they were scaled by.
     frac: Vec<f32>,
     w_total: f32,
 }
 
 impl SampleState {
-    fn new(seed: u64, r: usize, c: usize, d: usize, keep_contrib: bool) -> Self {
+    fn new(seed: u64, r: usize, c: usize, d: usize) -> Self {
         Self {
             rng: SmallRng::seed_from_u64(seed),
             w: vec![1.0; r],
@@ -107,11 +89,6 @@ impl SampleState {
             counts: vec![0.0; r],
             touched: Vec::with_capacity(r.min(64)),
             eps: vec![0.0; d],
-            contrib: if keep_contrib {
-                vec![0.0; r * d]
-            } else {
-                Vec::new()
-            },
             frac: vec![0.0; c],
             w_total: 0.0,
         }
@@ -188,9 +165,6 @@ impl SampleState {
         let (nb_r, tau) = (ctx.cfg.nb_r, ctx.cfg.tau);
         self.nvec.fill(0.0);
         self.m_exp.fill(0.0);
-        if ctx.keep_contrib {
-            self.contrib.fill(0.0);
-        }
         for (g, raw) in y_col.iter().enumerate() {
             let mu_row = &ctx.mu_gm[g * r..g * r + r]; // contiguous over components
             let mut lam = 0f32;
@@ -226,9 +200,6 @@ impl SampleState {
                 let m = mu32 as usize;
                 let zc = self.counts[m];
                 self.nvec[m] += zc;
-                if ctx.keep_contrib {
-                    self.contrib[m * d + g] = zc;
-                }
                 if let Some(dst) = zexp_dst.as_deref_mut() {
                     for ct in 0..c {
                         dst[ct * d + g] += zc * ctx.readout[(m, ct)];
@@ -262,128 +233,6 @@ impl SampleState {
                 *f /= total;
             }
         }
-    }
-}
-
-//////////////////////////////////////
-// Low-rank anchors (elliptical slice) //
-//////////////////////////////////////
-
-/// Resamples the per-cell-type anchors and refreshes the reference rates.
-/// Present only in the low-rank mode.
-pub struct AnchorSampler<'a> {
-    src: &'a EmbeddingSource,
-    prior: &'a AnchorPrior,
-    rng: SmallRng,
-    /// `t_c = t̂_c + δ_c`.
-    delta: Vec<DVec>,
-    delta_sum: Vec<DVec>,
-    tmat: Mat,
-    /// `D×C` constant part `ρ·t̂ᵀ`, so each lnpdf only adds `ρ·δ`.
-    base: Mat,
-    /// `H×D`, reused every sweep to form the `C×D` log-rate in one gemm.
-    rho_t: Mat,
-    h: usize,
-}
-
-impl<'a> AnchorSampler<'a> {
-    pub fn new(src: &'a EmbeddingSource, prior: &'a AnchorPrior, seed: u64) -> Self {
-        let c = prior.mean.nrows();
-        let h = src.h;
-        Self {
-            src,
-            prior,
-            rng: SmallRng::seed_from_u64(seed.wrapping_add(ANCHOR_SEED_OFFSET)),
-            delta: (0..c).map(|_| DVec::zeros(h)).collect(),
-            delta_sum: (0..c).map(|_| DVec::zeros(h)).collect(),
-            tmat: prior.mean.clone(),
-            base: &src.rho * prior.mean.transpose(),
-            rho_t: src.rho.transpose(),
-            h,
-        }
-    }
-
-    /// Rebuild `μ_{g,c} = exp(ρ_g·t_c + a_g)` from the current anchors.
-    ///
-    /// `tmat·ρᵀ` is `C×D` column-major, whose buffer index `g*C+ct` already
-    /// equals `ρ_g·t_c` — exactly the gene-major layout the sampler reads.
-    fn refresh(&self, mu_gm: &mut [f32], c: usize) {
-        let scd = &self.tmat * &self.rho_t;
-        let scd_buf = scd.as_slice();
-        let a = &self.src.gene_offset;
-        for (i, mu) in mu_gm.iter_mut().enumerate() {
-            *mu = (scd_buf[i] + a[i / c])
-                .clamp(-SCORE_CLAMP, SCORE_CLAMP)
-                .exp();
-        }
-    }
-
-    /// One elliptical-slice step per cell type against the pooled statistics.
-    fn step(&mut self, a_pool: &[f32], w_exp: &[f32], d: usize, tau: f32, collecting: bool) {
-        let c = self.prior.mean.nrows();
-        let a = &self.src.gene_offset;
-        for ct in 0..c {
-            let a_c = &a_pool[ct * d..(ct + 1) * d];
-            let w_cg = &w_exp[ct * d..(ct + 1) * d];
-            let base_c = self.base.column(ct);
-            let lnpdf = |dl: &DVec| -> f32 {
-                let rd = &self.src.rho * dl; // D
-                let mut ll = 0f32;
-                for g in 0..d {
-                    let sg = base_c[g] + rd[g] + a[g];
-                    ll += a_c[g] * sg - w_cg[g] * sg.clamp(-SCORE_CLAMP, SCORE_CLAMP).exp();
-                }
-                tau * ll
-            };
-            let prior_sample = draw_prior(self.prior, ct, self.h, &mut self.rng);
-            // Recomputed every sweep: the sufficient statistics changed, so a
-            // cached value from the previous sweep would be for a different target.
-            let cur_ll = lnpdf(&self.delta[ct]);
-            let (new_delta, _) = elliptical_slice_step(
-                &self.delta[ct],
-                &prior_sample,
-                &lnpdf,
-                cur_ll,
-                &mut self.rng,
-            );
-            self.delta[ct] = new_delta;
-            for j in 0..self.h {
-                self.tmat[(ct, j)] = self.prior.mean[(ct, j)] + self.delta[ct][j];
-            }
-            if collecting {
-                self.delta_sum[ct] += &self.delta[ct];
-            }
-        }
-    }
-
-    /// Mean displacement `‖δ‖` across types — the anchor-drift monitor.
-    fn mean_drift(&self) -> f32 {
-        if self.delta.is_empty() {
-            return 0.0;
-        }
-        self.delta.iter().map(nalgebra::DVector::norm).sum::<f32>() / self.delta.len() as f32
-    }
-
-    fn posterior_anchors(&self, n_collect: usize) -> Mat {
-        let mut out = self.prior.mean.clone();
-        for ct in 0..out.nrows() {
-            for j in 0..self.h {
-                out[(ct, j)] += self.delta_sum[ct][j] / n_collect as f32;
-            }
-        }
-        out
-    }
-}
-
-/// Draw `ν ~ N(0, Σ_c)`: `σ_c·z` (isotropic) or `L_c·z` (full).
-fn draw_prior(prior: &AnchorPrior, ct: usize, h: usize, rng: &mut SmallRng) -> DVec {
-    let z = DVec::from_fn(h, |_, _| {
-        let v: f64 = StandardNormal.sample(rng);
-        v as f32
-    });
-    match &prior.chol {
-        Some(chols) => &chols[ct] * z,
-        None => z * prior.sigma[ct],
     }
 }
 
@@ -427,8 +276,7 @@ pub struct PosteriorAccum {
     /// Rebuilding it as `Σ_c abundance_c · μ̄_{g,c}` — a per-type average rate
     /// times a per-type abundance — is a product of sums, and differs from the
     /// true `Σ_m u_m μ_{g,m}` whenever components within a type carry unequal
-    /// abundance. It also could not be right for a low-rank run, whose rates are
-    /// left at the last anchor draw when the loop ends.
+    /// abundance.
     lam_sum: Vec<f64>,
     n_collect: usize,
     n_expr: usize,
@@ -493,19 +341,14 @@ impl PosteriorAccum {
 }
 
 /// Run one chain, appending its draws to `accum`.
-///
-/// Returns the posterior-mean anchor coordinates when the low-rank reference
-/// moved them, so the caller reports where the anchors ended up rather than
-/// where their prior sat.
 pub fn run_chain(
     reference: &mut Reference,
     bulk: &Mat,
     init_w: &Mat,
     cfg: &SamplerConfig,
-    mut anchors: Option<AnchorSampler<'_>>,
     monitor: &mut Monitor,
     accum: &mut PosteriorAccum,
-) -> anyhow::Result<Option<Mat>> {
+) -> anyhow::Result<()> {
     let d = reference.n_genes();
     let r = reference.n_comp();
     let c = reference.n_types();
@@ -537,10 +380,9 @@ pub fn run_chain(
     accum.begin_chain();
     accum.trace.reserve(cfg.draws * s * c);
 
-    let keep_contrib = anchors.is_some();
     let mut states: Vec<SampleState> = (0..s)
         .map(|si| {
-            let mut st = SampleState::new(cfg.seed.wrapping_add(si as u64), r, c, d, keep_contrib);
+            let mut st = SampleState::new(cfg.seed.wrapping_add(si as u64), r, c, d);
             for m in 0..r {
                 st.w[m] = init_w[(si, m)].max(ABUNDANCE_FLOOR);
             }
@@ -549,18 +391,6 @@ pub fn run_chain(
         .collect();
 
     let mut frac_flat = vec![0f32; s * c];
-
-    // Only the anchor ESS needs the R×D pooled statistics.
-    let mut a_pool = if keep_contrib {
-        vec![0f32; r * d]
-    } else {
-        Vec::new()
-    };
-    let mut w_exp = if keep_contrib {
-        vec![0f32; r * d]
-    } else {
-        Vec::new()
-    };
 
     let total = cfg.warmup + cfg.draws * cfg.thin.max(1);
     let mut collected_here = 0usize;
@@ -577,7 +407,6 @@ pub fn run_chain(
             r,
             c,
             cfg,
-            keep_contrib,
         };
         let bulk_buf = bulk.as_slice();
         states
@@ -594,24 +423,9 @@ pub fn run_chain(
                 );
             });
 
-        // 2. Aggregate: fractions, pooled anchor statistics, and post-warmup collection.
-        if keep_contrib {
-            a_pool.fill(0.0);
-            w_exp.fill(0.0);
-        }
+        // 2. Aggregate: fractions and post-warmup collection.
         for (si, st) in states.iter_mut().enumerate() {
             st.fractions(reference);
-            if keep_contrib {
-                for (ap, &cn) in a_pool.iter_mut().zip(&st.contrib) {
-                    *ap += cn;
-                }
-                for m in 0..r {
-                    let wm = st.w[m];
-                    for (we, &e) in w_exp[m * d..(m + 1) * d].iter_mut().zip(&st.eps) {
-                        *we += wm * e;
-                    }
-                }
-            }
             for ct in 0..c {
                 frac_flat[si * c + ct] = st.frac[ct];
             }
@@ -634,12 +448,6 @@ pub fn run_chain(
             }
         }
 
-        // 3. Anchor ESS update (pooled statistics changed this sweep).
-        if let Some(anch) = anchors.as_mut() {
-            anch.step(&a_pool, &w_exp, d, cfg.tau, collecting);
-            anch.refresh(&mut reference.mu_gm, c);
-        }
-
         if collecting {
             accum.frac_quant.add_dense_column(&frac_flat);
             accum.trace.extend_from_slice(&frac_flat);
@@ -650,12 +458,7 @@ pub fn run_chain(
             }
         }
 
-        monitor.record(
-            it,
-            it >= cfg.warmup,
-            &frac_flat,
-            anchors.as_ref().map_or(0.0, AnchorSampler::mean_drift),
-        )?;
+        monitor.record(it, it >= cfg.warmup, &frac_flat)?;
         if accum.n_collect > 0 {
             monitor.checkpoint(it, &accum.frac_sum, accum.n_collect)?;
         }
@@ -667,7 +470,7 @@ pub fn run_chain(
         }
     }
     accum.comp_offset += r;
-    Ok(anchors.map(|a| a.posterior_anchors(collected_here.max(1))))
+    Ok(())
 }
 
 /// The component axis carried through to the output: where each component sits,
@@ -677,8 +480,6 @@ pub fn run_chain(
 pub struct ComponentTable {
     pub coords: Mat,
     pub names: Vec<Box<str>>,
-    pub axis: super::reference::ComponentAxis,
-    pub units: super::reference::FractionUnits,
 }
 
 /// Turn the pooled draws into the reported posterior.
@@ -742,8 +543,6 @@ pub fn finalize(
         expression,
         anchors_post: components.coords,
         anchor_names: components.names,
-        anchor_axis: components.axis,
-        units: components.units,
         residual,
         celltype_names,
         convergence: diagnose(&accum),

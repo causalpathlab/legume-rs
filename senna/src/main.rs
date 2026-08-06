@@ -151,10 +151,11 @@ fn print_logo() {
                   Steps 3 and 5 still need their own --latent / --out.\n\
                   \n  \
                   1. Train embedding   senna topic | masked-topic | svd | bge\n                       \
-                  senna joint-topic | joint-svd       (multi-modality)\n  \
-                  2. Held-out inference senna predict                       (apply trained model)\n  \
+                  senna joint-topic | joint-svd   (multi-modality)\n  \
+                  2. Held-out inference senna predict            (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
-                  4. Annotate cells    senna annotate-by-enrichment --from run.senna.json -m markers.tsv\n  \
+                  4. Annotate cells    senna annotate-by-enrichment --from run.senna.json\n                       \
+                  -m markers.tsv\n  \
                   5. Trajectory        senna pseudotime --from run.senna.json --out O\n  \
                   6. 2D layout         senna layout {phate|tsne|umap} --from run.senna.json\n  \
                   7. Scatter plot      senna plot       --from run.senna.json\n  \
@@ -163,9 +164,10 @@ fn print_logo() {
                   `senna plot` auto-runs steps 3 + 6 on demand.\n\
                   \n\
                   Bulk deconvolution is a side branch off a `bge` run.\n\
-                  It needs markers and bulk counts, not the cell-side steps above.\n\
+                  It needs an annotation and bulk counts, plus the single-cell\n\
+                  counts the reference profiles are measured from.\n\
                   \n  \
-                  senna deconvolve --from bge.senna.json -m markers.tsv --bulk bulk.parquet\n\
+                  senna deconvolve --from bge.senna.json --annotation A --bulk bulk.parquet\n\
                   \n\
                   Artifact naming: a slot name fixes the axis, never the numeric scale.\n\
                   `feature_loading` is the per-gene loading rho, and it is signed.\n\
@@ -186,13 +188,16 @@ enum Commands {
     // ─────────── 1. Train embedding (writes the run manifest) ───────────
     #[command(
         about = "Train topic-model embedding (VAE).",
-        long_about = "Probabilistic topic-model embedding.\n\n\
+        long_about = "Probabilistic topic-model embedding.\n\
+                      \n\
                       Stages:\n\
                       \x20 1. batch-aware pseudobulk collapsing\n\
                       \x20 2. encoder-decoder VAE via SGD\n\
-                      \x20 3. per-cell topic inference\n\n\
+                      \x20 3. per-cell topic inference\n\
+                      \n\
                       Decoders are multinom, nb and nbmixture (the default).\n\
-                      Combine them with a comma-separated --decoder.\n\n\
+                      Combine them with a comma-separated --decoder.\n\
+                      \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
                       {out}.model.json, {out}.senna.json (run manifest)."
     )]
@@ -238,9 +243,10 @@ enum Commands {
                       \n\
                       Masked objective and KL together train that embedding,\n\
                       which stays unconstrained and continuous.\n\
-                      The masked decoder is reused unchanged. Held-out genes are imputed,\n\
-                      and the masked objective — not the KL alone —\n\
-                      keeps the latent from collapsing.\n\
+                      The masked decoder is reused unchanged.\n\
+                      Held-out genes are imputed.\n\
+                      The masked objective keeps the latent from collapsing.\n\
+                      The KL alone does not.\n\
                       \n\
                       Writes the same artifacts as `masked-topic`.\n\
                       The NB objective is the only one available.",
@@ -293,7 +299,8 @@ enum Commands {
         long_about = "Three stages:\n\
                       \x20 1. batch-aware pseudobulk collapsing\n\
                       \x20 2. randomized SVD\n\
-                      \x20 3. per-cell Nyström projection\n\n\
+                      \x20 3. per-cell Nyström projection\n\
+                      \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.senna.json."
     )]
     Svd(SvdArgs),
@@ -370,7 +377,8 @@ enum Commands {
                       Input is a TSV/CSV of feature-feature edges. BioGRID, STRING,\n\
                       KEGG and regulatory networks all fit.\n\
                       \n\
-                      Embeddings E ∈ ℝ^{D×H} come from a continuous Miller-Griffiths-Jordan link-prediction model.\n  \
+                      Embeddings E ∈ ℝ^{D×H} come from a link-prediction model.\n\
+                      That model is a continuous Miller-Griffiths-Jordan.\n  \
                       \n  \
                       s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \
                       \n\
@@ -380,7 +388,8 @@ enum Commands {
                       Writes {out}.feature_embedding.parquet. feature_bias, gamma,\n\
                       log_likelihood and senna.json ship too.\n\
                       \n\
-                      The output shape matches the freeze loader behind `senna masked-topic --freeze-feature-embedding`.\n\
+                      The output shape matches the freeze loader.\n\
+                      That is `senna masked-topic --freeze-feature-embedding`.\n\
                       An `fne` run is a direct gene-side input downstream."
     )]
     Fne(FneArgs),
@@ -440,7 +449,7 @@ enum Commands {
     Probe(ProbeArgs),
 
     #[command(
-        about = "Impute full-feature counts on new (sparse-panel) cells via kNN over a reference latent.",
+        about = "Impute full-feature counts on new cells by kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
                       1. Project new sparse-panel data through the trained\n  \
                       \x20  masked-topic encoder, giving θ_new [N_new, K].\n  \
@@ -448,7 +457,8 @@ enum Commands {
                       2. For each new cell, find its K nearest reference cells\n  \
                       \x20  in θ-space, by L2 over the topic simplex.\n  \
                       \x20  Softmax-weight their distances, then accumulate\n  \
-                      \x20  those reference cells' full-feature counts.\n\n\
+                      \x20  those reference cells' full-feature counts.\n\
+                      \n\
                       Writes {out}.imputed.parquet (N_new × n_ref_features)."
     )]
     Impute(ImputeArgs),
@@ -482,8 +492,11 @@ enum Commands {
                       3. weighted-KS marker enrichment, with cross-cluster simplex\n  \
                       \x20  normalization to suppress housekeeping genes.\n  \
                       4. softmax-normalized per-cluster Q matrix.\n  \
-                      5. cluster-broadcast per-cell labels.\n\n\
-                      Usage: senna annotate-by-enrichment --from run.senna.json -m markers.tsv -o out\n\n\
+                      5. cluster-broadcast per-cell labels.\n\
+                      \n\
+                      Usage:\n\
+                      senna annotate-by-enrichment -f run.senna.json -m markers.tsv -o out\n\
+                      \n\
                       Updates `manifest.annotate.{argmax,annotation,...}`.\n\
                       Later `senna plot` runs then colour by predicted cell type.\n\
                       Writes {out}.argmax.tsv, {out}.annotation.parquet and {out}.cluster_*.parquet."
@@ -507,8 +520,9 @@ enum Commands {
                       `annotate-by-enrichment --obo --label-cl` does the same inline,\n\
                       with no re-run needed.\n\
                       \n\
-                      Usage: senna annotate-ontology --from run.senna.json \\\n\
-                      --label-cl label_cl.tsv --obo cl-basic.obo"
+                      Usage:\n\
+                      senna annotate-ontology -f run.senna.json \\\n\
+                      \x20 --label-cl label_cl.tsv --obo cl-basic.obo"
     )]
     AnnotateOntology(AnnotateOntologyArgs),
 
@@ -518,7 +532,8 @@ enum Commands {
         about = "Annotate cells via firm marker over-representation on the co-embedding.",
         long_about = "Embedding-grounded alternative to `annotate-by-enrichment`.\n\
                       It suits runs with a co-embedded gene space:\n\
-                      bge, fne or resolve-embedding-space.\n\n\
+                      bge, fne or resolve-embedding-space.\n\
+                      \n\
                       Pipeline:\n  \
                       1. build each type's IDF-weighted marker centroid.\n  \
                       2. assign each cell to its Euclidean nearest centroid.\n  \
@@ -526,12 +541,15 @@ enum Commands {
                       4. Leiden-cluster the cells.\n  \
                       5. test cluster × term hypergeometric over-representation,\n  \
                       \x20  permutation-calibrated.\n  \
-                      6. broadcast the per-cluster call to cells.\n\n\
+                      6. broadcast the per-cluster call to cells.\n\
+                      \n\
                       --obo and --label-cl add an optional TreeBH ontology.\n\
                       Raw counts are never re-read.\n\
                       That makes this complementary to enrichment.\n\
-                      Enrichment is raw-count-grounded instead.\n\n\
-                      Usage: senna annotate-by-projection --from run.senna.json -m markers.tsv -o out\n\
+                      Enrichment is raw-count-grounded instead.\n\
+                      \n\
+                      Usage:\n\
+                      senna annotate-by-projection -f run.senna.json -m markers.tsv -o out\n\
                       Writes {out}.{argmax.tsv,membership.tsv,annot.parquet,cluster_term_*.parquet,\n\
                       null_calibration.tsv}; updates `manifest.annotate.*`."
     )]
@@ -541,20 +559,25 @@ enum Commands {
         name = "deconvolve",
         visible_aliases = ["deconv", "deconvolution"],
         about = "Deconvolve bulk samples into cell-type fractions + per-type expression.",
-        long_about = "Projection-based hierarchical-Bayes bulk deconvolution.\n\
-                      It is built on a feature embedding. `senna bge --skip-etm` is exact;\n\
-                      `masked-topic` approximates.\n\
+        long_about = "Hierarchical-Bayes bulk deconvolution against an empirical reference.\n\
                       \n\
-                      Each cell type's gene profile comes from the embedding.\n\
-                      Bulk samples are projected into the shared latent.\n\
-                      A full Gibbs sampler then runs: Gamma-Poisson fractions,\n\
-                      a multinomial gene split, and elliptical-slice anchor updates.\n\
-                      Those updates carry annotate-by-projection uncertainty.\n\
+                      Annotated single cells are collapsed into archetypes, and each\n\
+                      archetype's gene profile is measured from its member cells.\n\
+                      Profiles are measured rather than reconstructed, so nothing caps\n\
+                      how well a composition can fit.\n\
+                      A full Gibbs sampler then runs a multinomial gene split with\n\
+                      Gamma-Poisson conjugate abundances.\n\
+                      \n\
+                      Several archetype granularities are pooled, so the partition is\n\
+                      averaged over rather than conditioned on.\n\
                       \n\
                       Usage:\n\
-                      senna deconvolve --from run.senna.json -m markers.tsv --bulk bulk.parquet\n  \
+                      senna deconvolve --from run.senna.json --annotation A --bulk bulk.parquet\n  \
                       Writes {out}.{fractions,fractions_ci,abundance,residual}.tsv,\n\
-                      {out}.{sample_embedding,anchors}.parquet, {out}.expression/*.parquet."
+                      {out}.expression/*.parquet, and component diagnostics.\n\
+                      \n\
+                      Reported fractions are mRNA shares, not cell shares, and their\n\
+                      range is compressed. See senna/docs/deconvolve.md for the limits."
     )]
     Deconvolve(DeconvolveArgs),
 
@@ -568,7 +591,8 @@ enum Commands {
                       (3) project each cell onto its nearest tree edge,\n\
                       (4) Dijkstra geodesic from a chosen root → pseudotime.\n\
                       \n\
-                      Outputs {out}.pseudotime.parquet and {out}.principal_graph.{nodes,edges}.parquet."
+                      Outputs {out}.pseudotime.parquet.\n\
+                      It also writes {out}.principal_graph.{nodes,edges}.parquet."
     )]
     Pseudotime(PseudotimeArgs),
 
@@ -605,7 +629,8 @@ enum Commands {
                       • `--colour-by cluster` but no clusters → runs Leiden on the latent.\n\
                       \n\
                       --colour-by cluster (default) | annotation | topic | pb-id | pseudotime.\n\
-                      The default flips to `annotation` once `senna annotate-by-enrichment` populates the manifest.\n\
+                      The default flips to `annotation` once the manifest has one.\n\
+                      `senna annotate-by-enrichment` is what populates it.\n\
                       Cells are then coloured and labelled by predicted cell type.\n\
                       \n\
                       Outputs {out}.plot.{svg,png,pdf}. PDF is the default;\n\

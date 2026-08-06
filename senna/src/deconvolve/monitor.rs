@@ -3,8 +3,7 @@
 //!
 //! Disk is cheap next to a thousand-sweep run, so the sampler writes as it goes
 //! rather than only at the end. The trace covers warmup as well as the retained
-//! draws — burn-in is the part worth looking at, and a reference drifting off
-//! its prior shows up there first.
+//! draws — burn-in is the part worth looking at.
 
 use crate::embed_common::Mat;
 use anyhow::{Context, Result};
@@ -47,7 +46,7 @@ impl Monitor {
 
             let path = format!("{out}.trace_fit.tsv");
             let mut w = open_buf_writer(&path).with_context(|| format!("creating {path}"))?;
-            writeln!(w, "chain\tsweep\tphase\tmean_anchor_drift")?;
+            writeln!(w, "chain\tsweep\tphase")?;
             fit = Some(w);
         }
         Ok(Self {
@@ -84,13 +83,7 @@ impl Monitor {
     }
 
     /// Append one trace block for sweep `it`. `frac_flat` is `[si*C + ct]`.
-    pub fn record(
-        &mut self,
-        it: usize,
-        past_warmup: bool,
-        frac_flat: &[f32],
-        drift: f32,
-    ) -> Result<()> {
+    pub fn record(&mut self, it: usize, past_warmup: bool, frac_flat: &[f32]) -> Result<()> {
         if self.cfg.trace_every == 0 || !it.is_multiple_of(self.cfg.trace_every) {
             return Ok(());
         }
@@ -108,7 +101,7 @@ impl Monitor {
             }
         }
         if let Some(w) = self.fit.as_mut() {
-            writeln!(w, "{chain}\t{it}\t{phase}\t{drift:.6}")?;
+            writeln!(w, "{chain}\t{it}\t{phase}")?;
         }
         Ok(())
     }

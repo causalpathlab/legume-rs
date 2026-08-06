@@ -1,12 +1,11 @@
 //! Empirical archetype reference: many fine-grained profiles collapsed from
 //! annotated cells, plus a soft map from archetype to reported cell type.
 //!
-//! The low-rank reference reconstructs one profile per cell type from the gene
-//! embedding. That reconstruction is rank-limited and cannot match a real bulk
-//! profile even when the anchor sits exactly on the true cell-type centroid, so
-//! it caps how well any composition can fit. Here the profiles are measured
-//! rather than reconstructed, which removes that ceiling at the cost of needing
-//! the single-cell counts at deconvolution time.
+//! Profiles are measured rather than reconstructed. Reconstructing one profile
+//! per cell type from the gene embedding is rank-limited: it cannot match a real
+//! bulk profile even with the anchor exactly on the true cell-type centroid, and
+//! that caps how well any composition can fit. Measuring instead removes the
+//! ceiling, at the cost of needing the single-cell counts at deconvolution time.
 //!
 //! Granularity matters. Collapsing straight to cell types would reproduce the
 //! same problem in a different form — one mean profile per type is a poor
@@ -16,7 +15,7 @@
 //! uncertainty into the readout instead of forcing a hard label.
 
 use super::args::ArchetypeConfig;
-use super::reference::{ComponentAxis, FractionUnits, Reference};
+use super::reference::Reference;
 use super::source::EmbeddingSource;
 use crate::cluster::leiden_clustering;
 use crate::cluster_aggregation::accumulate_gene_sum_multi;
@@ -306,9 +305,6 @@ impl ArchetypeInputs {
                 .collect(),
             n_cells,
             celltype_names: self.annotation.cols.clone(),
-            // Profiles are normalised over genes, so an abundance is mRNA mass.
-            units: FractionUnits::Mrna,
-            axis: ComponentAxis::Archetype,
         })
     }
 

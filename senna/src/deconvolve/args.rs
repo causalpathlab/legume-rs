@@ -1,24 +1,6 @@
 //! CLI arguments for `senna deconvolve`.
 
-use clap::{Args, ValueEnum};
-
-/// How the per-component gene reference is built.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum ReferenceMode {
-    /// One anchor per cell type, `μ = exp(ρ·t + a)` reconstructed from the embedding.
-    LowRank,
-    /// Many empirical profiles collapsed from annotated cells.
-    Archetype,
-}
-
-/// Prior covariance shape for the per-cell-type anchor `t_c`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum AnchorCov {
-    /// `Σ_c = σ_c²·I` — one scale per type from the marker-coordinate scatter.
-    Isotropic,
-    /// Shrunk empirical `H×H` covariance of the type's marker coordinates.
-    Full,
-}
+use clap::Args;
 
 #[derive(Args, Debug)]
 pub struct DeconvolveArgs {
@@ -37,33 +19,6 @@ pub struct DeconvolveArgs {
                      It does not pair with cell positions under a Poisson rate."
     )]
     pub from: Box<str>,
-
-    #[arg(
-        short = 'm',
-        long = "markers",
-        help = "Marker-gene TSV: `gene<TAB>celltype` per line (required for `--reference low-rank`)"
-    )]
-    pub markers: Option<Box<str>>,
-
-    #[arg(
-        long = "reference",
-        value_enum,
-        default_value_t = ReferenceMode::LowRank,
-        help = "How the gene reference is built: reconstructed anchors, or empirical archetypes",
-        long_help = "Which reference the sampler allocates bulk counts against.\n\
-                     \n\
-                     `low-rank` reconstructs one profile per cell type from the embedding,\n\
-                     as exp(rho_g . t_c + a_g), with the anchors t_c resampled under a\n\
-                     marker-derived prior. It is exact on a well-specified reference.\n\
-                     Its weakness is that the reconstruction is rank-limited, so it cannot\n\
-                     match a real bulk profile even at the true cell-type centroid.\n\
-                     \n\
-                     `archetype` collapses the annotated cells into many empirical profiles\n\
-                     and maps them onto cell types through the annotation posterior.\n\
-                     There is no reconstruction step, so that ceiling does not apply.\n\
-                     It needs the single-cell counts and an annotation, not markers."
-    )]
-    pub reference: ReferenceMode,
 
     #[arg(
         long = "bulk",
@@ -107,7 +62,7 @@ pub struct DeconvolveArgs {
     #[arg(
         long = "seed",
         default_value_t = 42,
-        help = "RNG seed (per-sample + anchor chains)"
+        help = "RNG seed (one stream per sample and per chain)"
     )]
     pub seed: u64,
 
@@ -140,20 +95,6 @@ pub struct DeconvolveArgs {
         help = "Gamma prior rate b0 on cell-type abundances w (weak: 1.0)"
     )]
     pub frac_prior_rate: f32,
-
-    #[arg(
-        long = "project-ridge",
-        default_value_t = 1.0,
-        help = "Ridge λ for the Poisson projection of bulk into the embedding"
-    )]
-    pub project_ridge: f64,
-
-    #[arg(
-        long = "init-iters",
-        default_value_t = 50,
-        help = "Frank-Wolfe iterations for the simplex fraction initialization"
-    )]
-    pub init_iters: usize,
 
     #[arg(
         long = "nb-dispersion",
@@ -289,37 +230,6 @@ pub struct DeconvolveArgs {
                      Passing the complement of the bulk cells here gives a clean estimate."
     )]
     pub archetype_cells: Option<Box<str>>,
-
-    //////////////////////////////////////////////////
-    // Anchors (annotate-by-projection uncertainty) //
-    //////////////////////////////////////////////////
-    #[arg(
-        long = "anchor-cov",
-        value_enum,
-        default_value_t = AnchorCov::Isotropic,
-        help = "Anchor prior covariance: isotropic scale, or shrunk full H×H"
-    )]
-    pub anchor_cov: AnchorCov,
-
-    #[arg(
-        long = "anchor-prior-scale",
-        default_value_t = 0.1,
-        help = "Multiplier on the anchor prior spread; larger lets anchors drift from their markers",
-        long_help = "Multiplier on the marker-derived anchor spread.\n\
-                     Larger values let the sampler move each anchor further from its markers.\n\
-                     \n\
-                     That freedom is mostly harmful.\n\
-                     The reference is low-rank, so it cannot match the bulk exactly.\n\
-                     A free anchor absorbs the misfit by drifting off the true position.\n\
-                     Composition is what pays for the improved fit.\n\
-                     \n\
-                     On a real pseudobulk benchmark, accuracy falls away as anchors loosen.\n\
-                     Pearson r runs 0.75, 0.55, 0.36, 0.11 at 0.1, 0.2, 0.3, 0.5.\n\
-                     It reaches ~0 at 1.0, which was the old default.\n\
-                     On a well-specified synthetic reference the same change costs little.\n\
-                     There r moves 0.989 -> 0.984, and the systematic bias halves."
-    )]
-    pub anchor_prior_scale: f32,
 }
 
 /// Plain (non-clap) sampler settings threaded into the Gibbs core.
@@ -330,20 +240,12 @@ pub struct SamplerConfig {
     pub seed: u64,
     pub a0: f32,
     pub b0: f32,
-    pub project_ridge: f64,
-    pub init_iters: usize,
     /// NB dispersion r (`--nb-dispersion`), held fixed.
     pub nb_r: f32,
     /// Likelihood tempering τ (`--count-scale`).
     pub tau: f32,
     /// Collect the expression tensor every this many retained draws.
     pub expression_every: usize,
-}
-
-/// Plain (non-clap) anchor-prior settings.
-pub struct AnchorConfig {
-    pub cov: AnchorCov,
-    pub scale: f32,
 }
 
 /// Plain (non-clap) archetype-construction settings.
@@ -368,19 +270,9 @@ impl DeconvolveArgs {
             // the first place the component count and the bulk depth are known.
             a0: self.frac_prior_shape.unwrap_or(1.0),
             b0: self.frac_prior_rate,
-            project_ridge: self.project_ridge,
-            init_iters: self.init_iters,
             nb_r: self.nb_dispersion,
             tau: self.count_scale,
             expression_every: self.expression_every.max(1),
-        }
-    }
-
-    #[must_use]
-    pub fn anchor_config(&self) -> AnchorConfig {
-        AnchorConfig {
-            cov: self.anchor_cov,
-            scale: self.anchor_prior_scale,
         }
     }
 
