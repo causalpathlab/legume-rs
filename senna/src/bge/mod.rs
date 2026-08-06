@@ -21,6 +21,7 @@ use data_beans_alg::hvg::{select_hvg_streaming, HvgCliArgs};
 use graph_embedding_util as ge;
 
 mod resolve_etm;
+pub(crate) mod score;
 
 use resolve_etm::resolve_etm_topics;
 

@@ -1,10 +1,12 @@
-//! What a `senna bge` model is on disk, for read-only consumers.
+//! Score cells against a frozen `senna bge` gene embedding.
 //!
-//! The sibling of [`crate::topic::masked_artifact`], and deliberately **not** a shared trait
-//! with it: the two artifacts have almost nothing in common. A bge run writes **no
-//! `.safetensors` and no `.model.json`** (`has_model: false`) — everything a consumer needs
-//! is in parquet, described by the run manifest. So "open a model" here means "read a
-//! manifest and resolve two parquets", not "rebuild a network and load a checkpoint".
+//! Not the counterpart of [`crate::topic::masked_artifact`], despite both being "how you open
+//! a model": that module *declares which files must exist* and validates them, because a
+//! masked model is a checkpoint plus six parquets that several writers can drift apart. A bge
+//! run has no checkpoint at all (`has_model: false`), so there is nothing to declare — the
+//! whole model on the gene side is `(ρ, b_feat)`, and the only real work is finding them and
+//! then scoring against them. Hence a scorer, in the bge module, rather than an artifact
+//! declaration at the crate root.
 //!
 //! **ρ lives in more than one place, and only one resolver knows the rules.**
 //! [`crate::run_manifest::resolve_feature_loading_for`] exists because three consumers each
@@ -41,7 +43,7 @@ use std::path::Path;
 const PROJECTION_RIDGE: f64 = 1.0;
 
 /// An opened `senna bge` model: the frozen feature side, and the gene axis it lives on.
-pub struct BgeModel {
+pub struct BgeEmbedding {
     /// ρ as **row-major** `[D, H]`. `project_cells` and `FrozenSide` both want that layout;
     /// nalgebra stores column-major, so this is transposed once at load rather than per cell.
     pub rho: Vec<f32>,
@@ -50,13 +52,13 @@ pub struct BgeModel {
     pub h: usize,
 }
 
-pub struct BgeScored {
+pub struct BgeFit {
     pub data_vec: SparseIoVec,
     pub llik: Vec<f32>,
     pub total: Vec<f32>,
 }
 
-impl BgeModel {
+impl BgeEmbedding {
     /// Open from a run prefix or a `{run}.senna.json` path.
     pub fn open(from: &str) -> anyhow::Result<Self> {
         let (manifest, dir) = RunManifest::load(Path::new(from))?;
@@ -118,7 +120,7 @@ impl BgeModel {
         files: &[Box<str>],
         preload: bool,
         block: usize,
-    ) -> anyhow::Result<BgeScored> {
+    ) -> anyhow::Result<BgeFit> {
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload,
@@ -191,7 +193,7 @@ impl BgeModel {
             }
         }
 
-        Ok(BgeScored {
+        Ok(BgeFit {
             data_vec,
             llik,
             total,

@@ -33,7 +33,6 @@
 mod anchor_common;
 mod annotate;
 mod bge;
-mod bge_artifact;
 mod cluster;
 mod cluster_aggregation;
 mod cluster_bhc;
