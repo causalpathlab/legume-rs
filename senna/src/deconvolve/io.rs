@@ -78,9 +78,10 @@ pub fn write_outputs(
     let expr_dir = format!("{out}.expression");
     std::fs::create_dir_all(&expr_dir)
         .with_context(|| format!("creating expression dir {expr_dir}"))?;
-    for (c, mat) in result.expression.iter().enumerate() {
-        let sg = mat.transpose(); // D×S → S×D
-        let fname = format!("{expr_dir}/{}.parquet", sanitize(&ct[c]));
+    for (c, name) in ct.iter().enumerate().take(result.expression.n_types()) {
+        // One block at a time, dropped before the next is built.
+        let sg = result.expression.sample_by_gene(c);
+        let fname = format!("{expr_dir}/{}.parquet", sanitize(name));
         sg.to_parquet_with_names(
             &fname,
             (Some(sample_names), Some("sample")),

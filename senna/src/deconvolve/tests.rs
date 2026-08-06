@@ -108,7 +108,7 @@ fn drive(
     anchors: Option<AnchorSampler<'_>>,
 ) -> super::result::DeconvResult {
     let mut monitor = Monitor::silent();
-    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes);
+    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes());
     run_chain(
         reference,
         bulk,
@@ -120,7 +120,7 @@ fn drive(
     )
     .unwrap();
     finalize(
-        &accum,
+        accum,
         bulk,
         ComponentTable {
             coords: reference.coords.clone(),
@@ -206,7 +206,7 @@ fn expression_conserves_counts() {
     // Σ_c E[Z_{s,c,g}] ≈ y_{s,g}: the gene split apportions all observed counts.
     for si in 0..s {
         for g in (0..d).step_by(7) {
-            let split: f32 = (0..c).map(|ct| res.expression[ct][(g, si)]).sum();
+            let split: f32 = (0..c).map(|ct| res.expression.get(ct, g, si)).sum();
             let y = bulk[(g, si)];
             assert!(
                 (split - y).abs() <= 0.02 * y + 1.0,
@@ -282,8 +282,6 @@ fn archetype_problem(dup: bool) -> (Reference, Mat, Mat) {
     }
     let reference = Reference {
         mu_gm,
-        n_genes: d,
-        n_comp: r,
         readout,
         coords: Mat::zeros(r, 2),
         comp_names: (0..r).map(|m| format!("a{m}").into_boxed_str()).collect(),
@@ -307,9 +305,7 @@ fn archetype_problem(dup: bool) -> (Reference, Mat, Mat) {
 fn run_archetype(reference: &mut Reference, bulk: &Mat, a0: f32) -> super::result::DeconvResult {
     let mut cfg = cfg();
     cfg.a0 = a0;
-    let init_w = Mat::from_fn(bulk.ncols(), reference.n_comp, |si, _| {
-        bulk.column(si).iter().sum::<f32>() / reference.n_comp as f32
-    });
+    let init_w = reference.init_abundances(bulk);
     drive(reference, bulk, &init_w, &cfg, None)
 }
 
@@ -349,7 +345,7 @@ fn archetype_expression_conserves_counts() {
     let res = run_archetype(&mut reference, &bulk, 1.0);
     for si in 0..bulk.ncols() {
         for g in (0..bulk.nrows()).step_by(5) {
-            let split: f32 = (0..c).map(|ct| res.expression[ct][(g, si)]).sum();
+            let split: f32 = (0..c).map(|ct| res.expression.get(ct, g, si)).sum();
             let y = bulk[(g, si)];
             assert!(
                 (split - y).abs() <= 0.02 * y + 1.0,
@@ -373,12 +369,12 @@ fn drive_pooled(
     n_chains: usize,
 ) -> super::result::DeconvResult {
     let mut monitor = Monitor::silent();
-    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes);
+    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes());
     for chain in 0..n_chains {
         let mut chain_cfg = SamplerConfig { ..*cfg };
         chain_cfg.seed = cfg
             .seed
-            .wrapping_add((chain as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            .wrapping_add((chain as u64).wrapping_mul(super::SEED_STRIDE));
         run_chain(
             reference,
             bulk,
@@ -391,7 +387,7 @@ fn drive_pooled(
         .unwrap();
     }
     finalize(
-        &accum,
+        accum,
         bulk,
         ComponentTable {
             coords: reference.coords.clone(),
@@ -411,9 +407,7 @@ fn pooling_chains_agrees_with_one_long_chain() {
     // over the archetype partition meaningful — any bias here would be read as
     // partition sensitivity.
     let (mut reference, bulk, _) = archetype_problem(false);
-    let init_w = Mat::from_fn(bulk.ncols(), reference.n_comp, |si, _| {
-        bulk.column(si).iter().sum::<f32>() / reference.n_comp as f32
-    });
+    let init_w = reference.init_abundances(&bulk);
     let one = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 1);
     let three = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 3);
 
@@ -432,9 +426,7 @@ fn pooled_chains_report_between_chain_diagnostics() {
     // comparison, not from splitting a concatenated trace whose chain
     // boundaries would read as drift.
     let (mut reference, bulk, _) = archetype_problem(false);
-    let init_w = Mat::from_fn(bulk.ncols(), reference.n_comp, |si, _| {
-        bulk.column(si).iter().sum::<f32>() / reference.n_comp as f32
-    });
+    let init_w = reference.init_abundances(&bulk);
     let res = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 3);
     assert!(
         !res.convergence.is_empty(),
