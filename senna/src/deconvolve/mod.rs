@@ -90,19 +90,24 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     // references are built together, because the parquet loads, the cell
     // alignment and the streaming gene sums are the same for every granularity
     // and must not be re-done per chain.
-    let references: Vec<Reference> = match prior.as_ref() {
+    let references = match prior.as_ref() {
         Some(prior) => vec![Reference::low_rank(&src, prior, d)],
         None => {
             anyhow::ensure!(
                 !args.archetypes.is_empty(),
                 "deconvolve: `--archetypes` needs at least one target"
             );
-            archetypes::build_all(
+            let (refs, membership) = archetypes::build_all(
                 &args.archetype_config(),
                 &src,
                 &bulk.genes,
                 &args.archetypes,
-            )?
+            )?;
+            // Written here, not in `write_outputs`: it needs the references,
+            // which the chain loop consumes. Dropping the membership at the end
+            // of this arm also keeps it off the heap for the whole sampling run.
+            io::write_archetype_diagnostics(&out, &refs, &membership)?;
+            refs
         }
     };
     anyhow::ensure!(!references.is_empty(), "deconvolve: no reference built");
@@ -114,7 +119,8 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let celltype_names = first.celltype_names.clone();
     let (axis, units) = (first.axis, first.units);
     let coord_dim = first.coords.ncols();
-    let mut accum = PosteriorAccum::new(s, first.n_types(), d);
+    let n_comp_total: usize = references.iter().map(Reference::n_comp).sum();
+    let mut accum = PosteriorAccum::new(s, first.n_types(), d, n_comp_total);
     let mut monitor = Monitor::new(args.monitor_config(), &out, &bulk.samples, &celltype_names)?;
     let mut comp_names: Vec<Box<str>> = Vec::new();
     let mut comp_coords: Vec<f32> = Vec::new();
@@ -170,11 +176,11 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         // position; archetypes are fixed, so theirs is the reference coordinate.
         let coords = posterior_anchors.unwrap_or(reference.coords);
         for m in 0..coords.nrows() {
-            comp_names.push(if n_chains > 1 {
-                format!("c{chain}_{}", reference.comp_names[m]).into_boxed_str()
-            } else {
-                reference.comp_names[m].clone()
-            });
+            comp_names.push(reference::comp_label(
+                n_chains,
+                chain,
+                &reference.comp_names[m],
+            ));
             comp_coords.extend(coords.row(m).iter().copied());
         }
     }

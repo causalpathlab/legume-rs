@@ -67,6 +67,9 @@ pub struct Reference {
     pub coords: Mat,
     /// Component row names (cell types, or archetype ids).
     pub comp_names: Vec<Box<str>>,
+    /// Cells behind each component, counted over the cells that actually formed
+    /// its readout row.
+    pub n_cells: Vec<f32>,
     pub celltype_names: Vec<Box<str>>,
     pub units: FractionUnits,
     pub axis: ComponentAxis,
@@ -94,6 +97,7 @@ impl Reference {
             readout: Mat::identity(c, c),
             coords: prior.mean.clone(),
             comp_names: prior.names.clone(),
+            n_cells: vec![0.0; c],
             celltype_names: prior.names.clone(),
             units: FractionUnits::Cell,
             axis: ComponentAxis::CellType,
@@ -169,6 +173,20 @@ impl Reference {
                 *o += vm * self.readout[(m, ct)];
             }
         }
+    }
+}
+
+/// Label for one component in the pooled output.
+///
+/// Pooled chains hold different partitions, so a component's label carries its
+/// chain. This is the join key between the component tables and the abundance
+/// columns, so it must be produced in exactly one place.
+#[must_use]
+pub fn comp_label(n_chains: usize, chain: usize, name: &str) -> Box<str> {
+    if n_chains > 1 {
+        format!("c{chain}_{name}").into_boxed_str()
+    } else {
+        name.into()
     }
 }
 

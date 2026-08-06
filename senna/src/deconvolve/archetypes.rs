@@ -59,7 +59,21 @@ struct ArchetypeInputs {
     /// of tiny blocks for a handful of real many-to-one collapses.
     panel_to_sc: GeneMap,
     n_sc_genes: usize,
-    n_cells: usize,
+    /// Column names of the count matrix, carried for the membership output.
+    cell_names: Vec<Box<str>>,
+}
+
+/// Which cell landed in which archetype, per pooled partition.
+///
+/// Emitted so the readout can be audited against a known composition: without
+/// the membership there is no way to evaluate what the model would report at a
+/// *perfect* abundance vector, and therefore no way to tell reference error
+/// apart from sampler error.
+pub struct Membership {
+    pub cell_names: Vec<Box<str>>,
+    /// Per chain, the archetype of each cell (`usize::MAX` where the cell was
+    /// not used — outside `--archetype-cells`, or missing from a table).
+    pub per_chain: Vec<Vec<usize>>,
 }
 
 /// Build one archetype reference per target granularity.
@@ -72,7 +86,7 @@ pub fn build_all(
     src: &EmbeddingSource,
     genes: &[Box<str>],
     targets: &[usize],
-) -> Result<Vec<Reference>> {
+) -> Result<(Vec<Reference>, Membership)> {
     anyhow::ensure!(!targets.is_empty(), "deconvolve archetypes: no targets");
     let inputs = ArchetypeInputs::load(cfg, src, genes)?;
 
@@ -110,14 +124,20 @@ pub fn build_all(
         BLOCK_SIZE,
     )?;
 
-    partitions
+    let references: Vec<Reference> = partitions
         .iter()
         .zip(&groupings)
         .zip(sums)
         .map(|((labels, &(_, k)), gene_sum)| {
             inputs.assemble(labels, k, &gene_sum, genes, cfg.shrink)
         })
-        .collect()
+        .collect::<Result<_>>()?;
+
+    let membership = Membership {
+        cell_names: inputs.cell_names,
+        per_chain: partitions,
+    };
+    Ok((references, membership))
 }
 
 impl ArchetypeInputs {
@@ -218,8 +238,8 @@ impl ArchetypeInputs {
         let panel_to_sc = map_panel_genes(&sc_genes, genes)?;
 
         Ok(Self {
-            n_cells: cell_names.len(),
             n_sc_genes: sc_genes.len(),
+            cell_names,
             stack,
             annotation,
             rows,
@@ -255,7 +275,7 @@ impl ArchetypeInputs {
             self.rows.len()
         );
 
-        let mut labels_all = vec![usize::MAX; self.n_cells];
+        let mut labels_all = vec![usize::MAX; self.cell_names.len()];
         for (i, row) in self.rows.iter().enumerate() {
             labels_all[row.counts] = labels_sub[i];
         }
@@ -274,7 +294,7 @@ impl ArchetypeInputs {
         let mu_gm = self.align_and_shrink(gene_sum, genes.len(), n_arch, shrink);
 
         let labels_sub: Vec<usize> = self.rows.iter().map(|r| labels_all[r.counts]).collect();
-        let (coords, readout) = self.summarize(&labels_sub, n_arch);
+        let (coords, readout, n_cells) = self.summarize(&labels_sub, n_arch);
         self.warn_missing_types(&readout, n_arch);
 
         Ok(Reference {
@@ -284,6 +304,7 @@ impl ArchetypeInputs {
             comp_names: (0..n_arch)
                 .map(|m| format!("archetype{m:04}").into_boxed_str())
                 .collect(),
+            n_cells,
             celltype_names: self.annotation.cols.clone(),
             // Profiles are normalised over genes, so an abundance is mRNA mass.
             units: FractionUnits::Mrna,
@@ -339,7 +360,7 @@ impl ArchetypeInputs {
     }
 
     /// Community means of the embedding (coordinates) and of the annotation (readout).
-    fn summarize(&self, labels: &[usize], n_arch: usize) -> (Mat, Mat) {
+    fn summarize(&self, labels: &[usize], n_arch: usize) -> (Mat, Mat, Vec<f32>) {
         let h = self.sub.ncols();
         let c = self.annotation.mat.ncols();
         let mut coords = Mat::zeros(n_arch, h);
@@ -374,7 +395,7 @@ impl ArchetypeInputs {
                 }
             }
         }
-        (coords, readout)
+        (coords, readout, counts)
     }
 
     /// A cell type with no archetype behind it can never be reported, whatever
