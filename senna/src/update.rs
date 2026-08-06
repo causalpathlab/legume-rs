@@ -109,6 +109,49 @@ pub struct UpdateArgs {
     preload_data: bool,
 }
 
+/// How much reference data gets replayed alongside the new batch, and how much is
+/// withheld to measure the effect on.
+///
+/// A third of the reference is reserved unreplayed — mirroring probe's `c_eval` — so
+/// there is always an untouched slice to report against; replay is drawn from the
+/// remaining two thirds. When the request exceeds that, it is **capped**, which silently
+/// weakens the protection the caller asked for, so `capped()` gates a loud warning.
+struct ReplayPlan {
+    /// Cells the caller asked for: `ratio × n_new`.
+    n_wanted: usize,
+    /// The most that can be replayed while keeping the measurement reserve.
+    n_replay_cap: usize,
+    /// What is actually replayed.
+    n_replay: usize,
+}
+
+impl ReplayPlan {
+    fn new(n_cal: usize, n_new: usize, ratio: f64) -> Self {
+        let n_replay_cap = n_cal - (n_cal / 3).max(1).min(n_cal);
+        let n_wanted = (ratio.max(0.0) * n_new as f64).round() as usize;
+        Self {
+            n_wanted,
+            n_replay_cap,
+            n_replay: n_wanted.min(n_replay_cap),
+        }
+    }
+
+    /// The request could not be honoured in full.
+    fn capped(&self) -> bool {
+        self.n_replay < self.n_wanted
+    }
+
+    /// Replay actually achieved, as a multiple of the new batch — what the caller gets,
+    /// which is what the warning must report rather than the ratio they asked for.
+    fn effective_ratio(&self, n_new: usize) -> f64 {
+        if n_new == 0 {
+            0.0
+        } else {
+            self.n_replay as f64 / n_new as f64
+        }
+    }
+}
+
 pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.out.as_ref() != args.model.as_ref(),
@@ -149,6 +192,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             query_name_opts: &qopts,
             metadata: &metadata,
             head,
+            need_llik: false,
         })
     };
     let cal = scored(std::slice::from_ref(&args.calibration))?;
@@ -195,39 +239,37 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // 3. Refit α on (replay ∪ new cells) //
     ///////////////////////////////////////
 
-    // CellBank packs calibration first, then the new batch. Reserve a third of the
-    // reference (mirroring probe's `c_eval`) so there is always an untouched slice to
-    // report the realized effect on; replay is drawn from the remaining two thirds.
-    let n_replay_cap = n_cal - (n_cal / 3).max(1);
-    let n_wanted = (args.replay_ratio * n_new as f64).round() as usize;
-    let n_replay = n_wanted.min(n_replay_cap);
+    // CellBank packs calibration first, then the new batch.
+    let plan = ReplayPlan::new(n_cal, n_new, args.replay_ratio);
 
     let mut cal_ids: Vec<usize> = (0..n_cal).collect();
     let mut rng = StdRng::seed_from_u64(args.seed);
     cal_ids.shuffle(&mut rng);
-    let mut fit_ids: Vec<usize> = cal_ids[..n_replay].to_vec();
+    let mut fit_ids: Vec<usize> = cal_ids[..plan.n_replay].to_vec();
     fit_ids.extend(n_cal..n_cal + n_new);
 
     info!(
         "update: refitting α on {} cells ({} new + {} replayed of {} reference); {} steps, lr {}",
         fit_ids.len(),
         n_new,
-        n_replay,
+        plan.n_replay,
         n_cal,
         args.steps,
         args.lr
     );
-    if n_replay < n_wanted {
+    if plan.capped() {
         log::warn!(
-            "--replay-ratio {:.2} wanted {n_wanted} replay cells but at most {n_replay_cap} are \
-             available (of {n_cal} reference cells, a third is reserved unreplayed to measure the \
-             effect on). The EFFECTIVE ratio is {:.2}, so old knowledge is protected less than \
-             requested — supply a larger --calibration for a batch this size.",
+            "--replay-ratio {:.2} wanted {} replay cells but at most {} are available (of {n_cal} \
+             reference cells, a third is reserved unreplayed to measure the effect on). The \
+             EFFECTIVE ratio is {:.2}, so old knowledge is protected less than requested — supply \
+             a larger --calibration for a batch this size.",
             args.replay_ratio,
-            n_replay as f64 / n_new as f64,
+            plan.n_wanted,
+            plan.n_replay_cap,
+            plan.effective_ratio(n_new),
         );
     }
-    if n_replay == 0 {
+    if plan.n_replay == 0 {
         log::warn!(
             "zero replay cells: this is an unprotected fine-tune and will forget the reference."
         );
@@ -238,7 +280,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     //   all_new  — every new cell, all of which ARE in `fit_ids`: in-sample training fit.
     // The new side is in-sample by design — an update should train on all the data it is
     // given — so its number is optimistic and is labelled as such rather than fixed.
-    let held_ref: Vec<usize> = cal_ids[n_replay..].to_vec();
+    let held_ref: Vec<usize> = cal_ids[plan.n_replay..].to_vec();
     let all_new: Vec<usize> = (n_cal..n_cal + n_new).collect();
     let score = |ids: &[usize]| score_cells(&rebuilt.decoder, &bank, ids);
 
@@ -309,6 +351,40 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     new_meta.n_train_cells = Some(metadata.n_train_cells.unwrap_or(0) + n_new);
     new_meta.save(&args.out)?;
 
+    // Without a manifest the child is invisible to every `RunManifest::load` consumer —
+    // clustering, annotate, plot-topic, layouts, pseudotime, deconvolve — so it would load
+    // in `predict`/`probe` and nowhere else. The child keeps its parent's `kind`: an
+    // updated masked-topic model is still a masked-topic model.
+    //
+    // Suffixes are set to exactly what `update` writes. Notably `dictionary_empirical` is
+    // absent: it is a per-pseudobulk empirical β and `update` runs no collapse, so there is
+    // no cell→pseudobulk map to build one from. Consumers that prefer it fall back to the
+    // factorized `dictionary.parquet` (`plot-topic` already does `dictionary_empirical
+    // .or(dictionary)`), which is the same fallback `vae` and `joint-topic` rely on. That
+    // does mean a parent and its child answer the gene-ranking question with different
+    // estimators, so `--dictionary` should be passed explicitly when comparing them.
+    let input: Vec<String> = args.data_files.iter().map(ToString::to_string).collect();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        kind: crate::masked_topic::masked_run_kind(head),
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &[],
+        data_input_null: &[],
+        dictionary_suffix: Some("dictionary.parquet"),
+        has_model: true,
+        has_cell_proj: false,
+        pb_gene_suffix: None,
+        pb_latent_suffix: None,
+        dictionary_empirical_suffix: None,
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
+        feature_loading_suffix: None,
+        softmax_dictionary_suffix: Some("dictionary.parquet"),
+        cell_embedding_suffix: None,
+        default_colour_by: "cluster",
+        has_latent: false,
+        has_cell_to_pb: false,
+    })?;
+
     info!(
         "update: wrote {} (n_train_cells {} → {})",
         args.out,
@@ -317,4 +393,62 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     );
     info!("update: parent {} left untouched", args.model);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_plan_honours_the_ratio_when_reference_is_ample() {
+        // 3000 reference: 1000 reserved, 2000 replayable. 400 wanted fits easily.
+        let p = ReplayPlan::new(3000, 400, 1.0);
+        assert_eq!(p.n_wanted, 400);
+        assert_eq!(p.n_replay, 400);
+        assert!(!p.capped());
+        assert!((p.effective_ratio(400) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn replay_plan_caps_and_reports_the_ratio_actually_achieved() {
+        // The regression this guards: a 654-cell batch against 402 reference cells
+        // silently got ~0.41 while reporting 1.00, i.e. far less protection than asked.
+        let p = ReplayPlan::new(402, 654, 1.0);
+        assert_eq!(p.n_replay_cap, 402 - 134);
+        assert_eq!(p.n_wanted, 654);
+        assert_eq!(p.n_replay, 268);
+        assert!(
+            p.capped(),
+            "the request exceeded the cap and must be flagged"
+        );
+        let eff = p.effective_ratio(654);
+        assert!((eff - 268.0 / 654.0).abs() < 1e-12);
+        assert!(
+            eff < 1.0,
+            "effective ratio must reflect the cap, not the request"
+        );
+    }
+
+    #[test]
+    fn replay_plan_always_leaves_cells_to_measure_on() {
+        // Whatever the ratio, the reserve survives — otherwise there is no held-out
+        // reference slice and the realized-effect report is vacuous.
+        for n_cal in [1usize, 2, 3, 10, 397, 5000] {
+            for ratio in [0.0, 1.0, 10.0, 1e6] {
+                let p = ReplayPlan::new(n_cal, 500, ratio);
+                assert!(
+                    p.n_replay < n_cal,
+                    "n_cal={n_cal} ratio={ratio}: replay {} consumed the whole reference",
+                    p.n_replay
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replay_plan_ratio_zero_disables_replay() {
+        let p = ReplayPlan::new(900, 300, 0.0);
+        assert_eq!(p.n_replay, 0);
+        assert!(!p.capped(), "asking for nothing is not a capped request");
+    }
 }

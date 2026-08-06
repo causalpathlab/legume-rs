@@ -768,6 +768,7 @@ fn predict_masked(
         query_name_opts: &args.query_name_opts(),
         metadata,
         head,
+        need_llik: true,
     })?;
     write_outputs(
         args,
@@ -789,7 +790,9 @@ fn predict_masked(
 pub(crate) struct MaskedScored {
     pub data_vec: SparseIoVec,
     pub z_nk: Mat,
+    /// Empty when the caller passed `need_llik: false` (see `MaskedScoreArgs`).
     pub llik: Vec<f32>,
+    /// Empty when the caller passed `need_llik: false`.
     pub total: Vec<f32>,
     /// Query→training gene mapping used for the scores; `probe` reuses it for
     /// the influence/gradient pass.
@@ -805,6 +808,11 @@ pub(crate) struct MaskedScoreArgs<'a> {
     pub query_name_opts: &'a QueryNameOpts,
     pub metadata: &'a TopicModelMetadata,
     pub head: candle_util::vae::masked_topic::LatentHead,
+    /// Compute the per-cell predictive log-likelihood. `false` skips it entirely,
+    /// leaving `llik`/`total` empty — worth it for callers that want only `z_nk`
+    /// (e.g. `senna update`), since the score costs a second full pass over every
+    /// column plus a dense `[D, minibatch]` reconstruction per block.
+    pub need_llik: bool,
 }
 
 /// Rebuild the indexed encoder from a trained masked model, run encoder-only
@@ -895,14 +903,18 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 
     // The stored latent stays raw (`z` for the Gaussian head); scoring needs
     // proportions, so convert per the head rather than assuming `exp`.
-    let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, a.head);
-    let (llik, total) = predictive_llik_masked(
-        &data_vec,
-        &theta_nk,
-        &beta_dk,
-        gene_remap.as_ref(),
-        a.minibatch_size,
-    )?;
+    let (llik, total) = if a.need_llik {
+        let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, a.head);
+        predictive_llik_masked(
+            &data_vec,
+            &theta_nk,
+            &beta_dk,
+            gene_remap.as_ref(),
+            a.minibatch_size,
+        )?
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     Ok(MaskedScored {
         data_vec,

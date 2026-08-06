@@ -621,7 +621,7 @@ pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
 
 /// The manifest kind for a masked run. `masked-vae` gets its own kind because
 /// its latent is a Gaussian `z`, not `log θ` — see [`RunKind::latent_is_log_simplex`].
-fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind {
+pub(crate) fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind {
     match head {
         LatentHead::Gaussian => crate::run_manifest::RunKind::MaskedVae,
         LatentHead::Softmax | LatentHead::StickBreaking => crate::run_manifest::RunKind::Itopic,
