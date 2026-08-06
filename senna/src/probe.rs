@@ -30,16 +30,10 @@
 //! - De Donno et al. (2023) *Population-level integration of single-cell datasets enables
 //!   multi-scale analysis across samples* (scPoli). Nat. Methods 20:1683.
 
-use crate::counterfactual::{
-    counterfactual, BankArgs, BankSource, CellBank, CfArgs, Counterfactual, RefitCfg,
-};
+use crate::counterfactual::{counterfactual, CellBank, CfArgs, Counterfactual, RefitCfg};
 use crate::embed_common::*;
-use crate::masked_topic::FeatureNameKindArg;
-use crate::predict::{score_masked_backend, MaskedScoreArgs, MaskedScored};
-use crate::topic::eval::QueryNameOpts;
-use crate::topic::model_metadata::{
-    load_feature_mean, load_shortlist_weights, masked_head_from_model_type, TopicModelMetadata,
-};
+use crate::predict::MaskedScored;
+use crate::topic::masked_artifact::MaskedModel;
 use log::info;
 use std::f64::consts::SQRT_2;
 
@@ -190,37 +184,16 @@ fn quantile(xs: &[f32], q: f64) -> f32 {
 /// the reading, and warns when the permutation floor cannot reach `CF_ALPHA`.
 fn counterfactual_json(
     args: &ProbeArgs,
-    metadata: &TopicModelMetadata,
+    model: &MaskedModel<'_>,
     cal: &MaskedScored,
     query: &MaskedScored,
 ) -> anyhow::Result<String> {
     let dev = candle_core::Device::Cpu;
-    let (_, feature_mean) = load_feature_mean(&args.model)?;
-    let (_, shortlist) = load_shortlist_weights(&args.model)?;
-    let context_size = metadata
-        .enc_context_size
-        .ok_or_else(|| anyhow::anyhow!("counterfactual: metadata missing enc_context_size"))?;
-
-    let bank = CellBank::build(BankArgs {
-        calib: BankSource {
-            data_vec: &cal.data_vec,
-            z_nk: &cal.z_nk,
-            gene_remap: cal.gene_remap.as_ref(),
-        },
-        query: BankSource {
-            data_vec: &query.data_vec,
-            z_nk: &query.z_nk,
-            gene_remap: query.gene_remap.as_ref(),
-        },
-        context_size,
-        feature_mean: &feature_mean,
-        shortlist_weights: &shortlist,
-        dev: &dev,
-    })?;
+    let bank = CellBank::from_scored(model, cal, query, &dev)?;
 
     let r = counterfactual(CfArgs {
-        model: &args.model,
-        metadata,
+        model: model.prefix,
+        metadata: &model.metadata,
         dev: &dev,
         bank: &bank,
         cfg: &RefitCfg {
@@ -294,32 +267,9 @@ fn counterfactual_json(
 pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
-    let metadata = TopicModelMetadata::load(&args.model)?;
-    let head = masked_head_from_model_type(&metadata.model_type).ok_or_else(|| {
-        anyhow::anyhow!(
-            "probe supports masked models only (masked-topic/-vae/-sbp); got '{}'",
-            metadata.model_type
-        )
-    })?;
-    let qopts = QueryNameOpts {
-        kind: FeatureNameKindArg::Exact.resolve_or_gene(),
-        suffix_delim: None,
-        keep_suffix: None,
-    };
-
-    let scored = |files: &[Box<str>]| -> anyhow::Result<MaskedScored> {
-        score_masked_backend(MaskedScoreArgs {
-            model: &args.model,
-            data_files: files,
-            batch_files: None,
-            preload: args.preload_data,
-            minibatch_size: args.minibatch_size,
-            query_name_opts: &qopts,
-            metadata: &metadata,
-            head,
-            need_llik: true,
-        })
-    };
+    let model = MaskedModel::open(&args.model)?;
+    let scored =
+        |files: &[Box<str>]| model.score(files, args.preload_data, args.minibatch_size, true);
 
     // Per-cell fit = predictive log-likelihood / count (depth-invariant).
     fn per_cell_fit(s: &MaskedScored) -> Vec<f32> {
@@ -355,7 +305,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
 
     // Counterfactual axes: enact the control arm, calibrate with a permutation null.
     let cf_json = if args.counterfactual > 0 {
-        counterfactual_json(args, &metadata, &cal, &query)?
+        counterfactual_json(args, &model, &cal, &query)?
     } else {
         String::new()
     };
@@ -377,7 +327,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
 
     info!(
         "probe [{}]: null p{:.0} fit ≤ {:.4}; flagged {}/{} query cells ({:.1}%), p = {:.2e}",
-        metadata.model_type,
+        model.metadata.model_type,
         args.alpha * 100.0,
         thr,
         n_flag,

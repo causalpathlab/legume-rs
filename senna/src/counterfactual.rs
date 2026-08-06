@@ -195,6 +195,39 @@ fn pack_side(src: &BankSource<'_>, a: &BankArgs<'_>) -> anyhow::Result<(Tensor, 
 }
 
 impl CellBank {
+    /// Pack a calibration/query pair from an opened model plus its two scored sides.
+    ///
+    /// `probe` and `update` both need exactly this wiring, and the model's per-gene mean
+    /// / shortlist / context size all come from the already-open [`MaskedModel`], so
+    /// nothing is re-read from disk here.
+    pub fn from_scored(
+        model: &crate::topic::masked_artifact::MaskedModel<'_>,
+        cal: &crate::predict::MaskedScored,
+        query: &crate::predict::MaskedScored,
+        dev: &Device,
+    ) -> anyhow::Result<Self> {
+        let context_size = model
+            .metadata
+            .enc_context_size
+            .ok_or_else(|| anyhow::anyhow!("metadata missing enc_context_size"))?;
+        Self::build(BankArgs {
+            calib: BankSource {
+                data_vec: &cal.data_vec,
+                z_nk: &cal.z_nk,
+                gene_remap: cal.gene_remap.as_ref(),
+            },
+            query: BankSource {
+                data_vec: &query.data_vec,
+                z_nk: &query.z_nk,
+                gene_remap: query.gene_remap.as_ref(),
+            },
+            context_size,
+            feature_mean: &model.feature_mean,
+            shortlist_weights: &model.shortlist,
+            dev,
+        })
+    }
+
     pub fn build(a: BankArgs<'_>) -> anyhow::Result<Self> {
         let (ci, cv, cz) = pack_side(&a.calib, &a)?;
         let (qi, qv, qz) = pack_side(&a.query, &a)?;

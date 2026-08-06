@@ -31,17 +31,10 @@
 
 use crate::counterfactual::{
     alpha_var, detached_copy, mean, rebuild_model, refit_alpha, row_norms_of_diff, score_cells,
-    BankArgs, BankSource, CellBank, RefitCfg,
+    CellBank, RefitCfg,
 };
 use crate::embed_common::*;
-use crate::masked_topic::FeatureNameKindArg;
-use crate::predict::{score_masked_backend, MaskedScoreArgs, MaskedScored};
-use crate::topic::eval::QueryNameOpts;
-use crate::topic::model_metadata::{
-    load_feature_mean, load_shortlist_weights, masked_head_from_model_type, save_feature_mean,
-    save_parameters, save_shortlist_weights, TopicModelMetadata,
-};
-use crate::topic::train_masked::{write_feature_embedding, write_masked_dictionary};
+use crate::topic::masked_artifact::{write_masked_model, MaskedModel, WriteArgs};
 use log::info;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -162,39 +155,16 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     );
     mkdir_parent(&args.out)?;
 
-    let metadata = TopicModelMetadata::load(&args.model)?;
-    let head = masked_head_from_model_type(&metadata.model_type).ok_or_else(|| {
-        anyhow::anyhow!(
-            "update supports masked models only (masked-topic/-vae/-sbp); got '{}'",
-            metadata.model_type
-        )
-    })?;
-    let context_size = metadata
-        .enc_context_size
-        .ok_or_else(|| anyhow::anyhow!("update: metadata missing enc_context_size"))?;
+    let parent = MaskedModel::open(&args.model)?;
 
     ////////////////////////////////////////
     // 1. Score both sides, encoder frozen //
     ////////////////////////////////////////
 
-    let qopts = QueryNameOpts {
-        kind: FeatureNameKindArg::Exact.resolve_or_gene(),
-        suffix_delim: None,
-        keep_suffix: None,
-    };
-    let scored = |files: &[Box<str>]| -> anyhow::Result<MaskedScored> {
-        score_masked_backend(MaskedScoreArgs {
-            model: &args.model,
-            data_files: files,
-            batch_files: None,
-            preload: args.preload_data,
-            minibatch_size: args.minibatch_size,
-            query_name_opts: &qopts,
-            metadata: &metadata,
-            head,
-            need_llik: false,
-        })
-    };
+    // `need_llik: false` — the refit uses only `z_nk`, and the per-cell predictive score
+    // costs a second full pass over every column plus a dense reconstruction per block.
+    let scored =
+        |files: &[Box<str>]| parent.score(files, args.preload_data, args.minibatch_size, false);
     let cal = scored(std::slice::from_ref(&args.calibration))?;
     let new = scored(&args.data_files)?;
     let n_new = new.z_nk.nrows();
@@ -206,30 +176,11 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     /////////////////////////////////////////////
 
     let dev = candle_core::Device::Cpu;
-    let rebuilt = rebuild_model(&args.model, &metadata, &dev)?;
+    let rebuilt = rebuild_model(&args.model, &parent.metadata, &dev)?;
     let alpha = alpha_var(&rebuilt.parameters, &rebuilt.alpha_name)?;
     let alpha0 = detached_copy(alpha.as_tensor())?;
 
-    // `load_feature_mean` already returns the gene axis, so no separate dictionary read.
-    let (gene_names, feature_mean) = load_feature_mean(&args.model)?;
-    let (_, shortlist) = load_shortlist_weights(&args.model)?;
-
-    let bank = CellBank::build(BankArgs {
-        calib: BankSource {
-            data_vec: &cal.data_vec,
-            z_nk: &cal.z_nk,
-            gene_remap: cal.gene_remap.as_ref(),
-        },
-        query: BankSource {
-            data_vec: &new.data_vec,
-            z_nk: &new.z_nk,
-            gene_remap: new.gene_remap.as_ref(),
-        },
-        context_size,
-        feature_mean: &feature_mean,
-        shortlist_weights: &shortlist,
-        dev: &dev,
-    })?;
+    let bank = CellBank::from_scored(&parent, &cal, &new, &dev)?;
     // The bank owns copies now; these hold a whole SparseIoVec each (the full matrix
     // under --preload-data) and are dead from here on. Peak RSS is in the refit below.
     drop(cal);
@@ -334,22 +285,22 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // the PARQUET, not the safetensors. Regenerating it here is what keeps scoring
     // in sync with the weights — skip it and the new model silently scores as the
     // old one.
-    write_masked_dictionary(&rebuilt.decoder, &gene_names, &args.out)?;
-    // ρ is unchanged (that is the thesis), but the artifact must be self-contained
-    // for `--freeze-feature-embedding` / `--warm-start-rho` to resolve against it.
-    write_feature_embedding(rebuilt.decoder.feature_embeddings(), &gene_names, &args.out)?;
-    // Gene axis is unchanged, so these carry over verbatim.
-    save_shortlist_weights(&shortlist, &gene_names, &args.out)?;
-    save_feature_mean(&feature_mean, &gene_names, &args.out)?;
-
-    save_parameters(&rebuilt.parameters, &args.out)?;
-
     // `n_train_cells` becomes the running `N_absorbed` the net-gain ranking needs;
     // `theta_mean` is carried forward rather than recomputed (the masked path never
     // reads it, and recomputing needs a full encoder pass over the parent's cells).
-    let mut new_meta = metadata.clone();
-    new_meta.n_train_cells = Some(metadata.n_train_cells.unwrap_or(0) + n_new);
-    new_meta.save(&args.out)?;
+    // The gene axis is unchanged by an α refit, so the parent's per-gene vectors carry
+    // over verbatim.
+    let mut new_meta = parent.metadata.clone();
+    new_meta.n_train_cells = Some(parent.metadata.n_train_cells.unwrap_or(0) + n_new);
+    write_masked_model(WriteArgs {
+        out: &args.out,
+        decoder: &rebuilt.decoder,
+        parameters: &rebuilt.parameters,
+        metadata: &new_meta,
+        gene_names: &parent.gene_names,
+        feature_mean: &parent.feature_mean,
+        shortlist: &parent.shortlist,
+    })?;
 
     // Without a manifest the child is invisible to every `RunManifest::load` consumer —
     // clustering, annotate, plot-topic, layouts, pseudotime, deconvolve — so it would load
@@ -365,7 +316,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // estimators, so `--dictionary` should be passed explicitly when comparing them.
     let input: Vec<String> = args.data_files.iter().map(ToString::to_string).collect();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind: crate::masked_topic::masked_run_kind(head),
+        kind: crate::masked_topic::masked_run_kind(parent.head),
         prefix: &args.out,
         data_input: &input,
         data_batch: &[],
@@ -388,7 +339,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     info!(
         "update: wrote {} (n_train_cells {} → {})",
         args.out,
-        metadata.n_train_cells.unwrap_or(0),
+        parent.metadata.n_train_cells.unwrap_or(0),
         new_meta.n_train_cells.unwrap_or(0)
     );
     info!("update: parent {} left untouched", args.model);
