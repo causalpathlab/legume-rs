@@ -2,6 +2,15 @@
 
 use clap::{Args, ValueEnum};
 
+/// How the per-component gene reference is built.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ReferenceMode {
+    /// One anchor per cell type, `μ = exp(ρ·t + a)` reconstructed from the embedding.
+    LowRank,
+    /// Many empirical profiles collapsed from annotated cells.
+    Archetype,
+}
+
 /// Prior covariance shape for the per-cell-type anchor `t_c`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum AnchorCov {
@@ -32,10 +41,29 @@ pub struct DeconvolveArgs {
     #[arg(
         short = 'm',
         long = "markers",
-        required = true,
-        help = "Marker-gene TSV: `gene<TAB>celltype` per line (tab/comma/space delimited)"
+        help = "Marker-gene TSV: `gene<TAB>celltype` per line (required for `--reference low-rank`)"
     )]
-    pub markers: Box<str>,
+    pub markers: Option<Box<str>>,
+
+    #[arg(
+        long = "reference",
+        value_enum,
+        default_value_t = ReferenceMode::LowRank,
+        help = "How the gene reference is built: reconstructed anchors, or empirical archetypes",
+        long_help = "Which reference the sampler allocates bulk counts against.\n\
+                     \n\
+                     `low-rank` reconstructs one profile per cell type from the embedding,\n\
+                     as exp(rho_g . t_c + a_g), with the anchors t_c resampled under a\n\
+                     marker-derived prior. It is exact on a well-specified reference.\n\
+                     Its weakness is that the reconstruction is rank-limited, so it cannot\n\
+                     match a real bulk profile even at the true cell-type centroid.\n\
+                     \n\
+                     `archetype` collapses the annotated cells into many empirical profiles\n\
+                     and maps them onto cell types through the annotation posterior.\n\
+                     There is no reconstruction step, so that ceiling does not apply.\n\
+                     It needs the single-cell counts and an annotation, not markers."
+    )]
+    pub reference: ReferenceMode,
 
     #[arg(
         long = "bulk",
@@ -85,10 +113,26 @@ pub struct DeconvolveArgs {
 
     #[arg(
         long = "frac-prior-shape",
-        default_value_t = 1.0,
-        help = "Gamma prior shape a0 on cell-type abundances w (weak: 1.0)"
+        help = "Gamma prior shape a0 per component (default: 1.0 low-rank, auto-scaled archetype)",
+        long_help = "Gamma prior shape a0 on each component's abundance, in pseudo-counts.\n\
+                     \n\
+                     It is what stops a component being driven to zero. The gene allocation\n\
+                     is a winner-take-all dynamic between overlapping profiles, so a component\n\
+                     that loses ground early can be extinguished and never recover.\n\
+                     With few components that rarely happens, and a0 = 1 is a fine weak prior.\n\
+                     With many, it happens readily and costs real accuracy.\n\
+                     \n\
+                     The archetype default is therefore 2*sqrt(mean sample counts / R),\n\
+                     which holds each component a couple of sampling-noise units off zero\n\
+                     and scales with depth. A fixed value cannot: it would be negligible on\n\
+                     a deep bulk and would swamp a shallow one.\n\
+                     \n\
+                     Measured on a real pseudobulk benchmark at R = 180, fraction accuracy\n\
+                     runs r = 0.68, 0.71, 0.78, 0.60, 0.44 at a0 = 1, 10, 100, 1000, 10000.\n\
+                     The optimum is interior: too little lets components die, too much pulls\n\
+                     every sample toward the same uniform composition."
     )]
-    pub frac_prior_shape: f32,
+    pub frac_prior_shape: Option<f32>,
 
     #[arg(
         long = "frac-prior-rate",
@@ -138,6 +182,109 @@ pub struct DeconvolveArgs {
     )]
     pub count_scale: f32,
 
+    #[arg(
+        long = "expression-every",
+        default_value_t = 10,
+        help = "Accumulate the expression tensor every N collected draws (1 = every draw)",
+        long_help = "Thinning for the per-cell-type expression tensor only.\n\
+                     Fractions are collected on every draw; they are cheap.\n\
+                     The expression tensor costs one pass of genes x components per draw,\n\
+                     which dominates the run once the reference has many components.\n\
+                     Raise this to trade expression-tensor precision for speed."
+    )]
+    pub expression_every: usize,
+
+    ////////////////
+    // Monitoring //
+    ////////////////
+    #[arg(
+        long = "trace-every",
+        default_value_t = 10,
+        help = "Write a fraction trace row every N sweeps, warmup included (0 disables)"
+    )]
+    pub trace_every: usize,
+
+    #[arg(
+        long = "checkpoint-every",
+        default_value_t = 100,
+        help = "Re-write the fraction table from the running mean every N sweeps (0 disables)"
+    )]
+    pub checkpoint_every: usize,
+
+    /////////////////////////////////
+    // Archetype reference sources //
+    /////////////////////////////////
+    #[arg(
+        long = "sc-data",
+        num_args = 1..,
+        help = "Single-cell count matrices behind the archetypes (zarr/h5)"
+    )]
+    pub sc_data: Vec<Box<str>>,
+
+    #[arg(
+        long = "annotation",
+        help = "Cell x celltype annotation parquet; defaults to the one named in `--from`",
+        long_help = "Soft per-cell annotation, cells x cell types, with a leading name column.\n\
+                     Both annotate layouts are accepted: the posterior table, and the\n\
+                     bootstrap label-stability table. A hard membership table also works,\n\
+                     and is read as a one-hot posterior.\n\
+                     Rows are averaged within an archetype, so a cell whose label is\n\
+                     uncertain contributes that uncertainty to the archetype it lands in."
+    )]
+    pub annotation: Option<Box<str>>,
+
+    #[arg(
+        long = "archetypes",
+        num_args = 1..,
+        default_values_t = [150usize, 300, 600],
+        help = "Target archetype counts; one chain per value, pooled (Leiden resolution is searched)",
+        long_help = "How finely the reference cells are collapsed into archetypes.\n\
+                     Leiden resolution is binary-searched to reach each target.\n\
+                     \n\
+                     Several values run several chains and pool their draws.\n\
+                     The partition is a nuisance parameter, not something the data pins down,\n\
+                     and the granularity does move the answer, so averaging over a few\n\
+                     granularities is better than conditioning on one.\n\
+                     Pooling also gives a between-chain R-hat: if the chains disagree,\n\
+                     the reported spread reflects that rather than hiding it.\n\
+                     \n\
+                     Pass a single value to condition on one partition.\n\
+                     Targets that leave fewer than `--archetype-min-cells` cells per\n\
+                     archetype are merged back down, so asking for too many is safe."
+    )]
+    pub archetypes: Vec<usize>,
+
+    #[arg(
+        long = "archetype-min-cells",
+        default_value_t = 20,
+        help = "Merge archetypes below this many cells into the nearest surviving one"
+    )]
+    pub archetype_min_cells: usize,
+
+    #[arg(
+        long = "archetype-shrink",
+        default_value_t = 5.0,
+        help = "Pseudo-count shrinking each archetype profile toward the pooled profile",
+        long_help = "Empirical-Bayes shrinkage of the archetype profiles.\n\
+                     A gene seen in no cell of an archetype would otherwise have rate zero,\n\
+                     and any bulk count on that gene then has nowhere to go.\n\
+                     Each profile is pulled toward the pooled profile by this many\n\
+                     pseudo-counts, which keeps every rate strictly positive.\n\
+                     Larger values blur the archetypes together."
+    )]
+    pub archetype_shrink: f32,
+
+    #[arg(
+        long = "archetype-cells",
+        help = "Restrict archetypes to the cell names in this file (one per line)",
+        long_help = "Build the archetype profiles from a subset of cells only.\n\
+                     The point is leakage: when a bulk sample is itself made of reference\n\
+                     cells, an empirical reference can read back the very counts it is\n\
+                     meant to explain, and the accuracy reported is not real.\n\
+                     Passing the complement of the bulk cells here gives a clean estimate."
+    )]
+    pub archetype_cells: Option<Box<str>>,
+
     //////////////////////////////////////////////////
     // Anchors (annotate-by-projection uncertainty) //
     //////////////////////////////////////////////////
@@ -184,12 +331,25 @@ pub struct SamplerConfig {
     pub nb_r: f32,
     /// Likelihood tempering τ (`--count-scale`).
     pub tau: f32,
+    /// Collect the expression tensor every this many retained draws.
+    pub expression_every: usize,
 }
 
 /// Plain (non-clap) anchor-prior settings.
 pub struct AnchorConfig {
     pub cov: AnchorCov,
     pub scale: f32,
+}
+
+/// Plain (non-clap) archetype-construction settings.
+pub struct ArchetypeConfig<'a> {
+    pub sc_data: &'a [Box<str>],
+    pub annotation: Option<&'a str>,
+    pub target: usize,
+    pub min_cells: usize,
+    pub shrink: f32,
+    pub cells: Option<&'a str>,
+    pub seed: u64,
 }
 
 impl DeconvolveArgs {
@@ -200,12 +360,15 @@ impl DeconvolveArgs {
             draws: self.draws,
             thin: self.thin,
             seed: self.seed,
-            a0: self.frac_prior_shape,
+            // Resolved against the reference size in `deconvolve::run`, which is
+            // the first place the component count and the bulk depth are known.
+            a0: self.frac_prior_shape.unwrap_or(1.0),
             b0: self.frac_prior_rate,
             project_ridge: self.project_ridge,
             init_iters: self.init_iters,
             nb_r: self.nb_dispersion,
             tau: self.count_scale,
+            expression_every: self.expression_every.max(1),
         }
     }
 
@@ -214,6 +377,27 @@ impl DeconvolveArgs {
         AnchorConfig {
             cov: self.anchor_cov,
             scale: self.anchor_prior_scale,
+        }
+    }
+
+    #[must_use]
+    pub fn archetype_config(&self) -> ArchetypeConfig<'_> {
+        ArchetypeConfig {
+            sc_data: &self.sc_data,
+            annotation: self.annotation.as_deref(),
+            target: 0, // set per chain by the caller
+            min_cells: self.archetype_min_cells,
+            shrink: self.archetype_shrink,
+            cells: self.archetype_cells.as_deref(),
+            seed: self.seed,
+        }
+    }
+
+    #[must_use]
+    pub fn monitor_config(&self) -> crate::deconvolve::monitor::MonitorConfig {
+        crate::deconvolve::monitor::MonitorConfig {
+            trace_every: self.trace_every,
+            checkpoint_every: self.checkpoint_every,
         }
     }
 }

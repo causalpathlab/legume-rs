@@ -45,6 +45,15 @@ pub struct EmbeddingSource {
     pub h: usize,
     /// Source run kind (for logging).
     pub kind: RunKind,
+    /// Candidate `N×H` cell-embedding paths from the manifest, most specific
+    /// first. The archetype reference picks the first whose width matches `H`;
+    /// older runs recorded Z under `latent` instead of `cell_embedding`.
+    pub cell_embedding_paths: Vec<String>,
+    /// Count matrices the source run was trained on — the archetype profile
+    /// source when `--sc-data` is not given.
+    pub data_files: Vec<Box<str>>,
+    /// Cell annotation recorded by the manifest, if any.
+    pub annotation_path: Option<String>,
 }
 
 impl EmbeddingSource {
@@ -60,7 +69,7 @@ impl EmbeddingSource {
                 .into_owned()
         };
 
-        match manifest.kind {
+        let mut built = match manifest.kind {
             RunKind::Bge => Self::from_bge(&manifest, &dir, &resolve),
             // Topic-family sources are DISABLED: benchmarked at Pearson 0.08
             // (noise) vs 0.99 for `bge --skip-etm` on identical data. Their ρ
@@ -82,7 +91,26 @@ impl EmbeddingSource {
             other => {
                 anyhow::bail!("deconvolve: unsupported source kind `{other}` — use `senna bge`")
             }
-        }
+        }?;
+
+        // Extras used only by the archetype reference; absent is not an error
+        // here, since the low-rank mode never touches them.
+        built.cell_embedding_paths = manifest
+            .outputs
+            .cell_embedding
+            .as_deref()
+            .into_iter()
+            .chain(manifest.outputs.latent.as_deref())
+            .map(&resolve)
+            .collect();
+        built.data_files = manifest
+            .data
+            .input
+            .iter()
+            .map(|f| resolve(f).into_boxed_str())
+            .collect();
+        built.annotation_path = manifest.annotate.annotation.as_deref().map(&resolve);
+        Ok(built)
     }
 
     /// `bge`: the per-gene loading ρ + the co-embedding that grounds the anchors.
@@ -149,6 +177,9 @@ impl EmbeddingSource {
             feature_names: rho.rows,
             h,
             kind,
+            cell_embedding_paths: Vec::new(),
+            data_files: Vec::new(),
+            annotation_path: None,
         })
     }
 }

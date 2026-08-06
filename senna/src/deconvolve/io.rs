@@ -1,6 +1,6 @@
 //! Output writers for `senna deconvolve`.
 
-use super::gibbs::DeconvResult;
+use super::result::DeconvResult;
 use crate::embed_common::{axis_id_names, Mat};
 use anyhow::{Context, Result};
 use log::info;
@@ -11,8 +11,18 @@ use std::io::{BufWriter, Write};
 /// Metadata recorded in the run summary JSON.
 pub struct RunMeta<'a> {
     pub from: &'a str,
-    pub markers: &'a str,
+    pub markers: Option<&'a str>,
     pub kind: String,
+    /// Which reference built the component profiles.
+    pub reference: &'a str,
+    /// Number of reference components `R` (cell types, or archetypes), pooled
+    /// across chains.
+    pub n_components: usize,
+    /// Chains pooled into the posterior; >1 means the reference partition was
+    /// averaged over rather than conditioned on.
+    pub n_chains: usize,
+    /// `cell` or `mrna` — what the reported fractions are shares of.
+    pub fraction_units: &'a str,
     pub warmup: usize,
     pub draws: usize,
     pub bulk_files: &'a [Box<str>],
@@ -52,9 +62,16 @@ pub fn write_outputs(
         (Some(sample_names), Some("sample")),
         Some(&h_names),
     )?;
+    // Rows are cell types in the low-rank mode and archetypes in the other, so
+    // the row-name column is labelled by what the rows actually are.
+    let anchor_corner = if result.anchor_names.len() == ct.len() {
+        "celltype"
+    } else {
+        "archetype"
+    };
     result.anchors_post.to_parquet_with_names(
         &format!("{out}.anchors.parquet"),
-        (Some(ct), Some("celltype")),
+        (Some(&result.anchor_names), Some(anchor_corner)),
         Some(&h_names),
     )?;
 
@@ -72,8 +89,9 @@ pub fn write_outputs(
         )?;
     }
 
-    // Per-sample QC.
+    // Per-sample QC + sampler diagnostics.
     write_residual(&format!("{out}.residual.tsv"), sample_names, result)?;
+    write_convergence(&format!("{out}.convergence.tsv"), sample_names, ct, result)?;
     write_manifest(out, meta)?;
 
     info!(
@@ -145,6 +163,41 @@ fn write_residual(path: &str, samples: &[Box<str>], result: &DeconvResult) -> Re
     Ok(())
 }
 
+/// Split-R̂ and effective sample size per reported scalar.
+///
+/// Single-chain split-R̂ catches a drifting or unconverged chain, but not
+/// multimodality — for that, rerun with a different `--seed` and compare.
+fn write_convergence(
+    path: &str,
+    samples: &[Box<str>],
+    cols: &[Box<str>],
+    result: &DeconvResult,
+) -> Result<()> {
+    if result.convergence.is_empty() {
+        return Ok(());
+    }
+    let mut w = BufWriter::new(File::create(path).with_context(|| format!("create {path}"))?);
+    writeln!(w, "sample\tcelltype\tsplit_rhat\tess")?;
+    for cv in &result.convergence {
+        writeln!(
+            w,
+            "{}\t{}\t{:.4}\t{:.1}",
+            samples[cv.sample], cols[cv.celltype], cv.rhat, cv.ess
+        )?;
+    }
+    let worst = result
+        .convergence
+        .iter()
+        .fold(0f32, |acc, cv| acc.max(cv.rhat));
+    if worst > 1.05 {
+        log::warn!(
+            "deconvolve: worst split-R̂ is {worst:.3} (> 1.05) — the chain has not settled; \
+             raise --warmup or --draws"
+        );
+    }
+    Ok(())
+}
+
 fn write_manifest(out: &str, meta: &RunMeta) -> Result<()> {
     let path = format!("{out}.deconvolve.json");
     let json = serde_json::json!({
@@ -153,6 +206,10 @@ fn write_manifest(out: &str, meta: &RunMeta) -> Result<()> {
         "from": meta.from,
         "markers": meta.markers,
         "source_kind": meta.kind,
+        "reference": meta.reference,
+        "n_components": meta.n_components,
+        "n_chains": meta.n_chains,
+        "fraction_units": meta.fraction_units,
         "warmup": meta.warmup,
         "draws": meta.draws,
         "bulk": meta.bulk_files.iter().map(std::string::ToString::to_string).collect::<Vec<_>>(),
@@ -164,6 +221,8 @@ fn write_manifest(out: &str, meta: &RunMeta) -> Result<()> {
             "anchors": format!("{out}.anchors.parquet"),
             "expression_dir": format!("{out}.expression"),
             "residual": format!("{out}.residual.tsv"),
+            "convergence": format!("{out}.convergence.tsv"),
+            "trace": format!("{out}.trace.tsv.gz"),
         },
     });
     std::fs::write(&path, serde_json::to_string_pretty(&json)?)
