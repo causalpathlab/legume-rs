@@ -44,6 +44,10 @@ use monitor::Monitor;
 use reference::Reference;
 use source::EmbeddingSource;
 
+/// Seed stride between pooled chains — an odd, well-mixed constant so the
+/// per-sample streams of different chains cannot coincide.
+const CHAIN_SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+
 pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let out: String = match args.out.as_deref() {
         Some(o) => o.to_string(),
@@ -109,7 +113,6 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let mut comp_names: Vec<Box<str>> = Vec::new();
     let mut comp_coords: Vec<f32> = Vec::new();
     let mut coord_dim = 0usize;
-    let mut rates_sum: Option<Mat> = None;
     let mut axis_units: Option<(reference::ComponentAxis, reference::FractionUnits)> = None;
 
     for (chain, mut reference) in references.into_iter().enumerate() {
@@ -150,6 +153,12 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
             chain + 1
         );
 
+        // Each chain gets its own RNG stream. Sharing one would make two chains
+        // over the same reference bit-identical, which triple-counts the same
+        // draws and reports R̂ = 1 from no independent information.
+        cfg.seed = args
+            .seed
+            .wrapping_add((chain as u64).wrapping_mul(CHAIN_SEED_STRIDE));
         let anchor_sampler = prior
             .as_ref()
             .map(|p| AnchorSampler::new(&src, p, cfg.seed));
@@ -180,21 +189,12 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
             });
             comp_coords.extend(coords.row(m).iter().copied());
         }
-
-        // Per-type rates for the residual report, averaged over the partitions
-        // that produced them.
-        let rates = reference.type_rates();
-        rates_sum = Some(match rates_sum.take() {
-            Some(acc) => acc + rates,
-            None => rates,
-        });
     }
 
     let accum = accum.expect("at least one chain");
     if let Some(m) = monitor.as_mut() {
         m.finish()?;
     }
-    let type_rates = rates_sum.expect("at least one chain") / n_chains as f32;
     let coords = Mat::from_row_slice(
         comp_coords.len() / coord_dim.max(1),
         coord_dim,
@@ -204,7 +204,6 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let result = gibbs::finalize(
         &accum,
         &bulk.data,
-        &type_rates,
         gibbs::ComponentTable {
             coords,
             names: comp_names,
@@ -229,6 +228,7 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         warmup: cfg.warmup,
         draws: cfg.draws,
         bulk_files: &args.bulk,
+        traced: args.trace_every > 0,
     };
     io::write_outputs(&out, &bulk.samples, &bulk.genes, &sample_z, &result, &meta)?;
     info!("senna deconvolve complete → {out}.*");

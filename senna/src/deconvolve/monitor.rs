@@ -134,13 +134,15 @@ impl Monitor {
         )
     }
 
-    /// Flush and close the trace writers.
+    /// Close the trace writers.
+    ///
+    /// The trace is gzipped, and a gzip stream is only valid once its trailer is
+    /// written — which happens when the encoder is dropped, not when it is
+    /// flushed. Taking the writers here drops them while we can still report a
+    /// write error, instead of leaving it to an ignored `Drop`.
     pub fn finish(&mut self) -> Result<()> {
-        if let Some(w) = self.trace.as_mut() {
-            w.flush()?;
-        }
-        if let Some(w) = self.fit.as_mut() {
-            w.flush()?;
+        for w in [self.trace.take(), self.fit.take()].iter_mut().flatten() {
+            w.flush().context("flushing the trace")?;
         }
         Ok(())
     }

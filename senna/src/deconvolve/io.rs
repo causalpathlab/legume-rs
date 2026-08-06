@@ -26,6 +26,9 @@ pub struct RunMeta<'a> {
     pub warmup: usize,
     pub draws: usize,
     pub bulk_files: &'a [Box<str>],
+    /// Whether a trace was requested; the manifest must not point at a file
+    /// that was never created.
+    pub traced: bool,
 }
 
 pub fn write_outputs(
@@ -87,8 +90,9 @@ pub fn write_outputs(
 
     // Per-sample QC + sampler diagnostics.
     write_residual(&format!("{out}.residual.tsv"), sample_names, result)?;
-    write_convergence(&format!("{out}.convergence.tsv"), sample_names, ct, result)?;
-    write_manifest(out, meta)?;
+    let converged_written =
+        write_convergence(&format!("{out}.convergence.tsv"), sample_names, ct, result)?;
+    write_manifest(out, meta, converged_written)?;
 
     info!(
         "senna deconvolve: wrote {out}.{{fractions,fractions_ci,abundance,residual}}.tsv, \
@@ -118,7 +122,7 @@ pub(super) fn write_wide_tsv(
         }
         writeln!(w)?;
     }
-    Ok(())
+    w.flush().with_context(|| format!("flushing {path}"))
 }
 
 /// Long-form fraction credible intervals.
@@ -142,7 +146,7 @@ fn write_fraction_ci(
             )?;
         }
     }
-    Ok(())
+    w.flush().with_context(|| format!("flushing {path}"))
 }
 
 fn write_residual(path: &str, samples: &[Box<str>], result: &DeconvResult) -> Result<()> {
@@ -156,7 +160,7 @@ fn write_residual(path: &str, samples: &[Box<str>], result: &DeconvResult) -> Re
             r.total, r.deviance, r.pearson
         )?;
     }
-    Ok(())
+    w.flush().with_context(|| format!("flushing {path}"))
 }
 
 /// Split-R̂ and effective sample size per reported scalar.
@@ -168,9 +172,9 @@ fn write_convergence(
     samples: &[Box<str>],
     cols: &[Box<str>],
     result: &DeconvResult,
-) -> Result<()> {
+) -> Result<bool> {
     if result.convergence.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let mut w = BufWriter::new(File::create(path).with_context(|| format!("create {path}"))?);
     writeln!(w, "sample\tcelltype\tsplit_rhat\tess")?;
@@ -186,15 +190,27 @@ fn write_convergence(
         .iter()
         .fold(0f32, |acc, cv| acc.max(cv.rhat));
     if worst > 1.05 {
-        log::warn!(
-            "deconvolve: worst split-R̂ is {worst:.3} (> 1.05) — the chain has not settled; \
-             raise --warmup or --draws"
-        );
+        // With pooled chains the chains hold *different references*, so a large
+        // R̂ is the partitions disagreeing, not a chain failing to settle.
+        // Telling the user to raise --warmup would be advice that cannot work.
+        if result.n_chains > 1 {
+            log::warn!(
+                "deconvolve: worst between-chain R̂ is {worst:.3} over {} pooled references — \
+                 the reference partition moves the answer more than sampling noise does. The \
+                 pooled interval reflects that; treat a single-partition run as overconfident.",
+                result.n_chains
+            );
+        } else {
+            log::warn!(
+                "deconvolve: worst split-R̂ is {worst:.3} (> 1.05) — the chain has not settled; \
+                 raise --warmup or --draws"
+            );
+        }
     }
-    Ok(())
+    Ok(true)
 }
 
-fn write_manifest(out: &str, meta: &RunMeta) -> Result<()> {
+fn write_manifest(out: &str, meta: &RunMeta, converged_written: bool) -> Result<()> {
     let path = format!("{out}.deconvolve.json");
     let json = serde_json::json!({
         "version": 1,
@@ -217,8 +233,8 @@ fn write_manifest(out: &str, meta: &RunMeta) -> Result<()> {
             "anchors": format!("{out}.anchors.parquet"),
             "expression_dir": format!("{out}.expression"),
             "residual": format!("{out}.residual.tsv"),
-            "convergence": format!("{out}.convergence.tsv"),
-            "trace": format!("{out}.trace.tsv.gz"),
+            "convergence": converged_written.then(|| format!("{out}.convergence.tsv")),
+            "trace": meta.traced.then(|| format!("{out}.trace.tsv.gz")),
         },
     });
     std::fs::write(&path, serde_json::to_string_pretty(&json)?)

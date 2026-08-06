@@ -199,6 +199,31 @@ pub struct BulkDataOut {
     pub data: Mat,
 }
 
+/// Pick the naming rule that bridges a reference gene axis and one or more
+/// other axes.
+///
+/// The signature usually lives on only one axis — a bare-symbol reference
+/// carries no delimiter, so by itself it sniffs as `Exact` and no bridge is
+/// built. Detect per axis and adopt whichever is informative; canonicalizing
+/// under `Gene` is a no-op for names lacking the delimiter, so adopting the
+/// informative side is safe for both.
+#[must_use]
+pub fn reconcile_name_kind(
+    reference: &[Box<str>],
+    others: &[&[Box<str>]],
+) -> auxiliary_data::feature_names::FeatureNameKind {
+    use auxiliary_data::feature_names::FeatureNameKind;
+    let ref_kind = FeatureNameKind::auto_detect(reference);
+    if !ref_kind.is_exact() {
+        return ref_kind;
+    }
+    others
+        .iter()
+        .map(|axis| FeatureNameKind::auto_detect(axis))
+        .find(|k| !k.is_exact())
+        .unwrap_or(ref_kind)
+}
+
 /// Read bulk data files and align rows to the given gene list.
 ///
 /// Names are reconciled through the shared canonicalizer
@@ -210,32 +235,10 @@ pub struct BulkDataOut {
 /// the naming signature usually lives on only one side (a bare-symbol reference
 /// carries no `_`, so by itself it sniffs as `Exact` and the bridge is never
 /// built). Locus-style and mixed axes ride the same path.
-/// Pick the naming rule that bridges two gene axes.
-///
-/// The signature usually lives on only one axis — a bare-symbol reference
-/// carries no delimiter, so by itself it sniffs as `Exact` and no bridge is
-/// built. Detect per axis and adopt whichever is informative; canonicalizing
-/// under `Gene` is a no-op for names lacking the delimiter, so adopting the
-/// informative side is safe for both.
-#[must_use]
-pub fn reconcile_name_kind(
-    reference: &[Box<str>],
-    other: &[Box<str>],
-) -> auxiliary_data::feature_names::FeatureNameKind {
-    use auxiliary_data::feature_names::FeatureNameKind;
-    let ref_kind = FeatureNameKind::auto_detect(reference);
-    if ref_kind.is_exact() {
-        FeatureNameKind::auto_detect(other)
-    } else {
-        ref_kind
-    }
-}
-
 pub fn read_bulk_data_aligned(
     bulk_data_files: &[Box<str>],
     genes: &[Box<str>],
 ) -> anyhow::Result<BulkDataOut> {
-    use auxiliary_data::feature_names::FeatureNameKind;
     use dashmap::DashMap as HashMap;
 
     // Read every bulk file up front so the naming rule can see both axes.
@@ -250,16 +253,8 @@ pub fn read_bulk_data_aligned(
     // share under half, so the pair sniffs as `Exact` and never bridges.
     // Canonicalizing under `Gene` is a no-op for names lacking the delimiter, so
     // adopting the informative side is safe for both.
-    let ref_kind = FeatureNameKind::auto_detect(genes);
-    let bulk_kind = loaded
-        .iter()
-        .map(|m| FeatureNameKind::auto_detect(&m.rows))
-        .find(|k| !k.is_exact());
-    let name_kind = match (ref_kind.is_exact(), bulk_kind) {
-        (false, _) => ref_kind,
-        (true, Some(k)) => k,
-        (true, None) => ref_kind,
-    };
+    let bulk_axes: Vec<&[Box<str>]> = loaded.iter().map(|m| m.rows.as_slice()).collect();
+    let name_kind = reconcile_name_kind(genes, &bulk_axes);
 
     // First writer wins, matching the positional-scan semantics elsewhere.
     let gene_to_position: HashMap<Box<str>, usize> = HashMap::new();

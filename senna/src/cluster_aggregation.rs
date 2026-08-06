@@ -79,23 +79,29 @@ pub fn accumulate_gene_sum_multi(
         .map(|lb| (lb, (lb + block_size).min(n)))
         .collect();
 
-    let per_block: Vec<Vec<Vec<f64>>> = blocks
-        .par_iter()
-        .map(|&(lb, ub)| block_gene_sum(data_vec, groupings, lb, ub, m))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let mut sums: Vec<Vec<f64>> = groupings
-        .iter()
-        .map(|&(_, k)| vec![0.0f64; k * m])
-        .collect();
-    for block in per_block {
-        for (acc, part) in sums.iter_mut().zip(block) {
-            for (a, x) in acc.iter_mut().zip(part.iter()) {
-                *a += x;
+    // Reduce as we go rather than collecting every block. Each block's buffers
+    // are `Σ_i k_i · m` f64, so holding all of them at once is fine for one or
+    // two small groupings but not for the many-group case this generalisation
+    // exists to serve: 1000 groups over 30k genes is ~250 MB per block.
+    let zero = || -> Vec<Vec<f64>> {
+        groupings
+            .iter()
+            .map(|&(_, k)| vec![0.0f64; k * m])
+            .collect()
+    };
+    let add = |mut acc: Vec<Vec<f64>>, part: Vec<Vec<f64>>| {
+        for (a, p) in acc.iter_mut().zip(part) {
+            for (x, y) in a.iter_mut().zip(p) {
+                *x += y;
             }
         }
-    }
-    Ok(sums)
+        acc
+    };
+    blocks
+        .par_iter()
+        .map(|&(lb, ub)| block_gene_sum(data_vec, groupings, lb, ub, m))
+        .try_fold(zero, |acc, part| part.map(|p| add(acc, p)))
+        .try_reduce(zero, |a, b| Ok(add(a, b)))
 }
 
 fn block_gene_sum(

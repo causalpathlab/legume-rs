@@ -119,27 +119,6 @@ impl Reference {
             }
         }
     }
-
-    /// Per-cell-type rate `μ_{g,c} = Σ_m μ_{g,m}·A[m,c] / Σ_m A[m,c]`, used only
-    /// for the posterior-predictive residual report.
-    ///
-    /// `mu_gm` is already an `R×D` column-major matrix, so the contraction is one
-    /// gemm rather than a `D·C·R` scan — at D = 36 000 and R = 600 the scan
-    /// streams the whole 86 MB buffer once per cell type.
-    #[must_use]
-    pub fn type_rates(&self) -> Mat {
-        let (d, r, c) = (self.n_genes, self.n_comp, self.n_types());
-        let mu_rd = Mat::from_column_slice(r, d, &self.mu_gm);
-        // (C×R)·(R×D) = C×D, then transpose to the D×C the residual expects.
-        let mut out = (self.readout.transpose() * mu_rd).transpose();
-        for ct in 0..c {
-            let wsum: f32 = self.readout.column(ct).sum();
-            if wsum > 0.0 {
-                out.column_mut(ct).scale_mut(1.0 / wsum);
-            }
-        }
-        out
-    }
 }
 
 /// Rebuild `μ_{g,c} = exp(ρ_g·t_c + a_g)` from anchor rows `tmat` (`C×H`).

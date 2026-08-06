@@ -34,7 +34,9 @@ use super::anchors::AnchorPrior;
 use super::args::SamplerConfig;
 use super::monitor::Monitor;
 use super::reference::{Reference, SCORE_CLAMP};
-use super::result::{residual_stat, split_rhat_ess, Convergence, DeconvResult};
+use super::result::{
+    residual_stat, split_rhat_ess, Convergence, DeconvResult, MIN_DRAWS_FOR_DIAGNOSTICS,
+};
 use super::source::EmbeddingSource;
 use crate::embed_common::{DVec, Mat};
 use log::info;
@@ -98,6 +100,9 @@ struct SampleState {
     /// `C` fractions this sweep, and the abundance total they were scaled by.
     frac: Vec<f32>,
     w_total: f32,
+    /// `D` this sweep's Poisson rate `λ_g = Σ_m u_m μ_{g,m}`, kept so the
+    /// residual report can average the rate the sampler actually used.
+    lam: Vec<f32>,
 }
 
 impl SampleState {
@@ -120,6 +125,7 @@ impl SampleState {
             },
             frac: vec![0.0; c],
             w_total: 0.0,
+            lam: vec![0.0; d],
         }
     }
 
@@ -206,6 +212,7 @@ impl SampleState {
                 lam += rc;
                 *cum = lam;
             }
+            self.lam[g] = lam;
             let y = raw.round();
             // ε_g ~ Gamma(r + τy, r + τλ): soaks per-gene misfit; ε→1 as r→∞.
             let eg = Gamma::new(f64::from(nb_r + tau * y), 1.0 / f64::from(nb_r + tau * lam))
@@ -405,6 +412,15 @@ pub struct PosteriorAccum {
     abundance_sum: Vec<f64>,
     /// Per type a contiguous column-major D×S block: `[ct*D*S + si*D + g]`.
     zexp: Vec<f64>,
+    /// Posterior-mean Poisson rate, column-major `D×S`.
+    ///
+    /// Accumulated from the sampler's own `λ` rather than rebuilt afterwards.
+    /// Rebuilding it as `Σ_c abundance_c · μ̄_{g,c}` — a per-type average rate
+    /// times a per-type abundance — is a product of sums, and differs from the
+    /// true `Σ_m u_m μ_{g,m}` whenever components within a type carry unequal
+    /// abundance. It also could not be right for a low-rank run, whose rates are
+    /// left at the last anchor draw when the loop ends.
+    lam_sum: Vec<f64>,
     n_collect: usize,
     n_expr: usize,
     /// Retained per-draw fractions, laid out `[draw][si*C + ct]`.
@@ -414,8 +430,20 @@ pub struct PosteriorAccum {
 }
 
 impl PosteriorAccum {
+    /// Expression-tensor size (`C·D·S` f64) past which the allocation is worth
+    /// warning about, in elements.
+    const LARGE_TENSOR: u128 = 200_000_000;
+
     #[must_use]
     pub fn new(s: usize, c: usize, d: usize) -> Self {
+        let elements = (c as u128) * (d as u128) * (s as u128);
+        if elements > Self::LARGE_TENSOR {
+            info!(
+                "deconvolve: expression tensor is large (C·D·S ≈ {elements} f64, {} GiB); \
+                 consider a reduced gene reference if memory is tight",
+                elements * 8 / (1 << 30)
+            );
+        }
         Self {
             s,
             c,
@@ -425,6 +453,7 @@ impl PosteriorAccum {
             frac_quant: RunningQuantiles::new(s * c, &[0.025, 0.975]),
             abundance_sum: vec![0f64; s * c],
             zexp: vec![0f64; c * d * s],
+            lam_sum: vec![0f64; d * s],
             n_collect: 0,
             n_expr: 0,
             trace: Vec::new(),
@@ -571,6 +600,10 @@ pub fn run_chain(
                     // The un-normalised contraction, without redoing it.
                     accum.abundance_sum[idx] += frac * f64::from(st.w_total);
                 }
+                let lam_dst = &mut accum.lam_sum[si * d..(si + 1) * d];
+                for (acc, &l) in lam_dst.iter_mut().zip(&st.lam) {
+                    *acc += f64::from(l);
+                }
                 if collect_expr {
                     for ct in 0..c {
                         let off = ct * d * s + si * d;
@@ -634,7 +667,6 @@ pub struct ComponentTable {
 pub fn finalize(
     accum: &PosteriorAccum,
     bulk: &Mat,
-    type_rates: &Mat,
     components: ComponentTable,
     celltype_names: Vec<Box<str>>,
 ) -> anyhow::Result<DeconvResult> {
@@ -654,9 +686,12 @@ pub fn finalize(
     for si in 0..s {
         for ct in 0..c {
             let idx = si * c + ct;
-            let mean = (accum.frac_sum[idx] / nc) as f32;
-            let var = (accum.frac_sumsq[idx] / nc - f64::from(mean) * f64::from(mean)).max(0.0);
-            fractions_mean[(si, ct)] = mean;
+            // Keep the mean in f64 for the variance: squaring an f32-rounded
+            // mean injects an error that swamps any sd below ~1e-4, which is
+            // exactly the regime a tight posterior lives in.
+            let mean = accum.frac_sum[idx] / nc;
+            let var = (accum.frac_sumsq[idx] / nc - mean * mean).max(0.0);
+            fractions_mean[(si, ct)] = mean as f32;
             fractions_sd[(si, ct)] = var.sqrt() as f32;
             fractions_lo[(si, ct)] = frac_lo[idx];
             fractions_hi[(si, ct)] = frac_hi[idx];
@@ -673,7 +708,7 @@ pub fn finalize(
         .collect();
 
     let residual = (0..s)
-        .map(|si| residual_stat(bulk, type_rates, &abundance_mean, si))
+        .map(|si| residual_stat(bulk, &accum.lam_sum[si * d..(si + 1) * d], nc, si))
         .collect();
 
     Ok(DeconvResult {
@@ -690,6 +725,7 @@ pub fn finalize(
         residual,
         celltype_names,
         convergence: diagnose(accum),
+        n_chains: accum.chain_starts.len(),
     })
 }
 
@@ -707,10 +743,17 @@ fn diagnose(accum: &PosteriorAccum) -> Vec<Convergence> {
         .chain_starts
         .iter()
         .zip(accum.chain_lengths())
-        .filter(|(_, len)| *len >= 2)
+        .filter(|(_, len)| *len >= MIN_DRAWS_FOR_DIAGNOSTICS)
         .map(|(&start, len)| (start, len))
         .collect();
+    let n_chains = accum.chain_starts.len();
     let between_chain = usable.len() > 1;
+    // With several chains but fewer than two long enough to compare, the single
+    // chain path would walk the concatenated trace and read the jump between
+    // chains as drift. Report nothing rather than something wrong.
+    if n_chains > 1 && !between_chain {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     let mut chain = vec![0f32; accum.n_collect];
     for si in 0..s {
@@ -737,6 +780,10 @@ fn diagnose(accum: &PosteriorAccum) -> Vec<Convergence> {
 }
 
 /// Gelman–Rubin R̂ across chains of possibly different lengths.
+///
+/// Chains shorter than [`MIN_DRAWS_FOR_DIAGNOSTICS`] are filtered out by the
+/// caller, matching the single-chain guard — otherwise a two-draw run would
+/// report a confident-looking R̂ built from nothing.
 fn multi_chain_rhat(
     accum: &PosteriorAccum,
     usable: &[(usize, usize)],

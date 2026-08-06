@@ -40,6 +40,10 @@ pub struct DeconvResult {
     /// Per-(sample, celltype) split-R̂ and effective sample size, in the draw
     /// order of `fractions_mean`. Empty when too few draws were collected.
     pub convergence: Vec<Convergence>,
+    /// Chains pooled into the posterior. Above one, R̂ compares chains rather
+    /// than halves of one chain, and disagreement means the references differ —
+    /// not that a chain failed to settle.
+    pub n_chains: usize,
 }
 
 /// Convergence diagnostics for one scalar chain.
@@ -54,19 +58,19 @@ pub struct Convergence {
 }
 
 /// Poisson deviance and Pearson correlation of sample `si` against the
-/// posterior-mean rate `Σ_c abundance_{s,c}·mu_{g,c}`.
-pub fn residual_stat(bulk: &Mat, mu: &Mat, abundance: &Mat, si: usize) -> ResidualStat {
+/// posterior-mean rate.
+///
+/// `lam_sum` is the running sum of the sampler's own per-gene rate over
+/// `n_draws` retained draws, so the comparison is against the rate the model
+/// actually used rather than one reconstructed from marginal summaries.
+pub fn residual_stat(bulk: &Mat, lam_sum: &[f64], n_draws: f64, si: usize) -> ResidualStat {
     let d = bulk.nrows();
-    let c = mu.ncols();
     let mut total = 0f64;
     let mut deviance = 0f64;
     let (mut sy, mut sl, mut syy, mut sll, mut syl) = (0f64, 0f64, 0f64, 0f64, 0f64);
     for g in 0..d {
         let y = f64::from(bulk[(g, si)]).max(0.0);
-        let mut lam = 0f64;
-        for ct in 0..c {
-            lam += f64::from(abundance[(si, ct)]) * f64::from(mu[(g, ct)]);
-        }
+        let mut lam = lam_sum[g] / n_draws;
         lam = lam.max(1e-12);
         total += y;
         deviance += if y > 0.0 {
@@ -101,7 +105,7 @@ pub fn residual_stat(bulk: &Mat, mu: &Mat, abundance: &Mat, si: usize) -> Residu
 ////////////////////////////
 
 /// Minimum retained draws before split-R̂ / ESS are meaningful.
-const MIN_DRAWS_FOR_DIAGNOSTICS: usize = 8;
+pub const MIN_DRAWS_FOR_DIAGNOSTICS: usize = 8;
 
 /// Split-R̂ and effective sample size for one scalar chain.
 ///
