@@ -79,7 +79,10 @@ pub fn masked_decoder_type(head: LatentHead) -> &'static str {
 }
 
 /// Metadata needed to reconstruct a trained topic model for inference.
-#[derive(Serialize, Deserialize)]
+///
+/// `Clone` so `senna update` can derive a child model's metadata from its parent's,
+/// changing only the fields an update actually alters (`n_train_cells`).
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TopicModelMetadata {
     /// Model variant: `topic`, `indexed_topic_packed`, `joint_topic`
     pub model_type: Box<str>,
