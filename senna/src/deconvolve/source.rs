@@ -62,20 +62,19 @@ impl EmbeddingSource {
 
         let mut built = match manifest.kind {
             RunKind::Bge => Self::from_bge(&manifest, &dir),
-            // Topic-family sources are DISABLED: benchmarked at Pearson 0.08
-            // (noise) vs 0.99 for `bge --skip-etm` on identical data. Their ρ
-            // pairs with the topic embeddings α under a softmax head, not with
-            // cell-space positions under a Poisson rate, so the projection and
-            // the `exp(ρ·t + a)` reconstruction both use the wrong likelihood.
-            // Failing loudly beats returning plausible-looking noise.
+            // Topic-family sources are not accepted. The archetype reference
+            // needs only a gene axis, a cell embedding, the counts and an
+            // annotation, all of which a topic run has, so this is a matter of
+            // the path being unverified rather than a structural bar. Failing
+            // loudly beats returning plausible-looking numbers.
             RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic => {
                 anyhow::bail!(
-                    "deconvolve: topic-family runs (`{}`) are not supported — the embedding-projection \
-                     reference is invalid under a softmax-ETM head (benchmarked at r=0.08). Use \
-                     `senna bge`.\n\nNote: this run already carries a better reference than \
-                     the one deconvolve reconstructs — `dictionary_empirical.parquet` is a \
-                     full-resolution per-topic gene simplex, and `dispersion.parquet` a per-gene NB \
-                     dispersion. Consuming those directly is the planned rework.",
+                    "deconvolve: topic-family runs (`{}`) are not supported; use `senna bge`.\n\n\
+                     The archetype reference needs a gene axis, a cell embedding, the counts and \
+                     an annotation, which a topic run does have — this path is simply unverified. \
+                     Such a run also carries `dictionary_empirical.parquet`, a per-topic gene \
+                     simplex, and `dispersion.parquet`, a per-gene NB dispersion; consuming those \
+                     directly is the planned rework.",
                     manifest.kind
                 )
             }
