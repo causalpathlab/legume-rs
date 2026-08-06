@@ -1,27 +1,24 @@
-//! Resolve a per-gene embedding + reconstruction offset from an upstream run
-//! manifest, abstracting over the two supported feature-embedding sources.
+//! Resolve the gene axis and the archetype inputs from an upstream run manifest.
 //!
 //! **`senna bge` is the only supported source**, with or without `--skip-etm`.
-//! It provides three things:
+//! What is taken from it:
 //!
-//! - `feature_loading.parquet` — the per-gene loading ρ on the model axis, i.e.
-//!   what multiplies the cell embedding in the Poisson log-rate. Recorded on both
-//!   paths. Older runs kept ρ only under `--skip-etm`, where it borrowed the
-//!   `dictionary` slot, so that legacy layout is still read as a fallback — and
-//!   there the slot must be checked by CONTENT (a β has gene-log-simplex columns),
-//!   never by which cell-side slots are populated, since `latent` and
-//!   `cell_embedding` are interchangeable and have swapped roles between versions.
-//! - `feature_embedding.parquet` — the co-embedding (genes on the cell manifold),
-//!   whose marker-weighted centroids become the cell-type anchors.
-//! - `feature_bias.parquet` — the per-gene offset `a_g`.
+//! - the gene axis and embedding width, from `feature_loading.parquet` — the
+//!   per-gene loading ρ. Older runs kept ρ only under `--skip-etm`, where it
+//!   borrowed the `dictionary` slot, so that legacy layout is read as a
+//!   fallback. There the slot must be checked by CONTENT (a β has
+//!   gene-log-simplex columns), never by which cell-side slots are populated,
+//!   since `latent` and `cell_embedding` are interchangeable and have swapped
+//!   roles between versions.
+//! - the cell embedding, which the archetypes are clustered in.
+//! - the input counts and the cell annotation, which the profiles are built from.
 //!
-//! The persisted ρ is the GATED snapshot (`materialize_e_feat` bakes the feature
-//! gate into `e_feat`), i.e. already the loading that enters the Poisson rate —
-//! do not correct for the gate separately.
+//! Only ρ's row names and width are retained; its values are not used, because
+//! the reference is measured from the counts rather than reconstructed.
 //!
 //! Topic-family runs are rejected up front; see [`EmbeddingSource::load`].
 
-use crate::embed_common::{DVec, Mat};
+use crate::embed_common::Mat;
 use crate::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use anyhow::{Context, Result};
 use log::info;
@@ -31,22 +28,14 @@ use std::path::Path;
 
 /// Everything the deconvolution needs from the upstream embedding run.
 pub struct EmbeddingSource {
-    /// `D×H` embedding used for the Poisson projection and the reconstruction
-    /// `μ_{g,c} = exp(ρ_g·t_c + a_g)`.
-    pub rho: Mat,
-    /// `D×H` embedding whose marker-weighted centroids define the anchors:
-    /// bge's co-embedding, i.e. genes placed on the cell manifold.
-    pub anchor_emb: Mat,
-    /// `D` per-gene log-offset `a_g` in the Poisson rate.
-    pub gene_offset: DVec,
-    /// `D` gene names (row order of `rho`).
+    /// `D` gene names, defining the panel the bulk is aligned to.
     pub feature_names: Vec<Box<str>>,
-    /// Embedding dimension `H`.
+    /// Embedding dimension `H`, used to pick the cell embedding.
     pub h: usize,
     /// Source run kind (for logging).
     pub kind: RunKind,
     /// Candidate `N×H` cell-embedding paths from the manifest, most specific
-    /// first. The archetype reference picks the first whose width matches `H`;
+    /// first. The archetypes are clustered in the first whose width matches `H`;
     /// older runs recorded Z under `latent` instead of `cell_embedding`.
     pub cell_embedding_paths: Vec<String>,
     /// Count matrices the source run was trained on — the archetype profile
@@ -93,8 +82,6 @@ impl EmbeddingSource {
             }
         }?;
 
-        // Extras used only by the archetype reference; absent is not an error
-        // here, since the low-rank mode never touches them.
         built.cell_embedding_paths = manifest
             .outputs
             .cell_embedding
@@ -113,67 +100,27 @@ impl EmbeddingSource {
         Ok(built)
     }
 
-    /// `bge`: the per-gene loading ρ + the co-embedding that grounds the anchors.
+    /// `bge`: the gene axis and the embedding width.
     ///
     /// Resolution is delegated to [`run_manifest::resolve_feature_loading_for`],
     /// the single place that knows where ρ can live and that verifies each
     /// candidate's scale. Duplicating that probe here is what let the same bug
     /// recur in three consumers.
-    fn from_bge(m: &RunManifest, dir: &Path, resolve: &impl Fn(&str) -> String) -> Result<Self> {
-        let coembed_rel = m.outputs.feature_embedding.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("bge manifest has no `outputs.feature_embedding` (co-embed anchors)")
-        })?;
-        let coembed = load_mat(&resolve(coembed_rel), "co-embedding")?;
-
-        let (rho_path, bias_path) = run_manifest::resolve_feature_loading_for(m, dir)?;
+    fn from_bge(m: &RunManifest, dir: &Path, _resolve: &impl Fn(&str) -> String) -> Result<Self> {
+        let (rho_path, _) = run_manifest::resolve_feature_loading_for(m, dir)?;
         let rho = load_mat(&rho_path, "per-gene loading ρ")?;
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
-
-        // The Poisson rate needs `a_g`; without it μ would silently lose its
-        // per-gene offset, so this is required rather than defaulted to zero.
-        let bias_path = bias_path.ok_or_else(|| {
-            anyhow::anyhow!("no feature_bias.parquet beside `{rho_path}` — deconvolve needs the per-gene offset a_g")
-        })?;
-        let gene_offset = load_mat(&bias_path, "feature_bias")?
-            .mat
-            .column(0)
-            .into_owned();
-
-        Self::assemble(rho, coembed.mat, gene_offset, RunKind::Bge)
+        Self::assemble(rho, RunKind::Bge)
     }
 
-    fn assemble(
-        rho: MatWithNames<Mat>,
-        anchor_mat: Mat,
-        gene_offset: DVec,
-        kind: RunKind,
-    ) -> Result<Self> {
+    /// Keep the gene axis and the width; the values are not needed.
+    fn assemble(rho: MatWithNames<Mat>, kind: RunKind) -> Result<Self> {
         let h = rho.mat.ncols();
-        anyhow::ensure!(
-            anchor_mat.ncols() == h,
-            "deconvolve: anchor embedding H={} != ρ H={h}",
-            anchor_mat.ncols()
-        );
-        anyhow::ensure!(
-            anchor_mat.nrows() == rho.mat.nrows(),
-            "deconvolve: anchor genes ({}) != ρ genes ({})",
-            anchor_mat.nrows(),
-            rho.mat.nrows()
-        );
-        anyhow::ensure!(
-            gene_offset.len() == rho.mat.nrows(),
-            "deconvolve: gene offset ({}) != ρ genes ({})",
-            gene_offset.len(),
-            rho.mat.nrows()
-        );
         info!(
-            "deconvolve: ρ [{} genes × {h}], {kind} source",
+            "deconvolve: gene axis [{} genes], embedding H={h}, {kind} source",
             rho.mat.nrows()
         );
         Ok(Self {
-            rho: rho.mat,
-            anchor_emb: anchor_mat,
-            gene_offset,
             feature_names: rho.rows,
             h,
             kind,

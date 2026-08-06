@@ -1,11 +1,9 @@
 //! Posterior summaries shared by both reference modes.
 //!
 //! The sampler allocates counts against `R` reference *components* and reports
-//! against `C` *cell types*. In the low-rank mode the two coincide (one anchor
-//! per type); in the archetype mode `R ≫ C` and the mapping is the soft
+//! against `C` *cell types*, with `R ≫ C` and the mapping given by the soft
 //! annotation readout. Everything here is already at `C`.
 
-use super::reference::{ComponentAxis, FractionUnits};
 use crate::embed_common::Mat;
 use mcmc_util::engine::{ess, split_rhat};
 
@@ -29,16 +27,10 @@ pub struct DeconvResult {
     /// Posterior-mean allocated counts `E[Z_{s,c,g}]`, the within-type
     /// expression tensor.
     pub expression: ExpressionTensor,
-    /// Posterior-mean component coordinates in the embedding: anchors `t_c`
-    /// (low-rank) or archetype positions `z_m` (archetype mode).
+    /// Posterior-mean component coordinates in the embedding.
     pub anchors_post: Mat,
-    /// Row names for `anchors_post` — cell types or archetype ids.
+    /// Row names for `anchors_post` — the component labels.
     pub anchor_names: Vec<Box<str>>,
-    /// What those rows are. Carried rather than inferred: an archetype run whose
-    /// partition happens to collapse to `R == C` would otherwise be mislabelled.
-    pub anchor_axis: ComponentAxis,
-    /// What the reported fractions are shares of.
-    pub units: FractionUnits,
     pub residual: Vec<ResidualStat>,
     pub celltype_names: Vec<Box<str>>,
     /// Per-(sample, celltype) split-R̂ and effective sample size, in the draw

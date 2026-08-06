@@ -1,30 +1,22 @@
-//! `senna deconvolve` — hierarchical-Bayes bulk deconvolution on a feature embedding.
+//! `senna deconvolve` — hierarchical-Bayes bulk deconvolution.
 //!
-//! Bulk counts are split across reference components by a full Gibbs sampler
-//! (Gamma-Poisson conjugate abundances + multinomial gene allocation), yielding
-//! BayesPrism-style deliverables: per-sample cell-type fractions with credible
-//! intervals, and a per-cell-type expression tensor for within-type DE.
+//! Bulk counts are split across empirical reference components by a full Gibbs
+//! sampler (Gamma-Poisson conjugate abundances + multinomial gene allocation),
+//! yielding BayesPrism-style deliverables: per-sample cell-type fractions with
+//! credible intervals, and a per-cell-type expression tensor for within-type DE.
 //!
-//! Two references are available, sharing the sampler and the outputs:
-//!
-//! * `--reference low-rank` reconstructs one profile per cell type from the
-//!   embedding, `μ_{g,c} = exp(ρ_g·t_c + a_g)`, with anchors `t_c` drawn from
-//!   the annotate-by-projection marker centroids and resampled by elliptical
-//!   slice sampling. Annotation uncertainty widens the fraction posterior.
-//! * `--reference archetype` measures the profiles instead, collapsing
-//!   annotated cells into empirical archetypes mapped onto cell types by the
-//!   annotation posterior. It needs the single-cell counts, and it is not
-//!   subject to the reconstruction's rank ceiling. Several archetype
-//!   granularities are run and pooled, so the partition — a nuisance parameter
-//!   the data does not pin down — is averaged over rather than conditioned on.
+//! The reference is built by collapsing annotated single cells into archetypes
+//! and mapping those onto cell types through the annotation posterior. Profiles
+//! are measured rather than reconstructed, so nothing caps how well a
+//! composition can fit the way a low-rank reconstruction does. Several archetype
+//! granularities are run and pooled, so the partition — a nuisance parameter the
+//! data does not pin down — is averaged over rather than conditioned on.
 
-mod anchors;
 mod archetypes;
 mod args;
 mod gibbs;
 mod io;
 mod monitor;
-mod project;
 mod reference;
 mod result;
 mod source;
@@ -36,8 +28,7 @@ pub use args::DeconvolveArgs;
 use crate::embed_common::{read_bulk_data_aligned, Mat};
 use crate::run_manifest;
 use anyhow::Result;
-use args::ReferenceMode;
-use gibbs::{AnchorSampler, PosteriorAccum};
+use gibbs::PosteriorAccum;
 use log::info;
 use matrix_util::common_io::mkdir_parent;
 use monitor::Monitor;
@@ -61,54 +52,26 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let mut cfg = args.sampler_config();
     let (d, s) = (bulk.genes.len(), bulk.samples.len());
 
-    // The projected bulk position is carried through as a QC artifact in both
-    // modes. It is not used to place the bulk against cells — a mixture does not
-    // sit near its constituents in a log-linear embedding.
-    let sample_z = project::project_bulk(&src.rho, &src.gene_offset, &bulk.data, cfg.project_ridge);
-
-    // The low-rank marker prior, when that reference is selected.
-    let prior = match args.reference {
-        ReferenceMode::LowRank => {
-            let markers = args.markers.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "deconvolve --reference low-rank needs `--markers`; the archetype reference \
-                     takes `--annotation` instead"
-                )
-            })?;
-            Some(anchors::build_anchor_prior(
-                &src.anchor_emb,
-                &src.feature_names,
-                markers,
-                &args.anchor_config(),
-            )?)
-        }
-        ReferenceMode::Archetype => None,
-    };
-
-    // 2. One chain per reference, all pooling into one posterior. The low-rank
-    // reference has nothing to partition, so it is a single chain; the archetype
-    // references are built together, because the parquet loads, the cell
+    // 2. One chain per archetype granularity, all pooling into one posterior.
+    // The references are built together, because the parquet loads, the cell
     // alignment and the streaming gene sums are the same for every granularity
     // and must not be re-done per chain.
-    let references = match prior.as_ref() {
-        Some(prior) => vec![Reference::low_rank(&src, prior, d)],
-        None => {
-            anyhow::ensure!(
-                !args.archetypes.is_empty(),
-                "deconvolve: `--archetypes` needs at least one target"
-            );
-            let (refs, membership) = archetypes::build_all(
-                &args.archetype_config(),
-                &src,
-                &bulk.genes,
-                &args.archetypes,
-            )?;
-            // Written here, not in `write_outputs`: it needs the references,
-            // which the chain loop consumes. Dropping the membership at the end
-            // of this arm also keeps it off the heap for the whole sampling run.
-            io::write_archetype_diagnostics(&out, &refs, &membership)?;
-            refs
-        }
+    anyhow::ensure!(
+        !args.archetypes.is_empty(),
+        "deconvolve: `--archetypes` needs at least one target"
+    );
+    let references = {
+        let (refs, membership) = archetypes::build_all(
+            &args.archetype_config(),
+            &src,
+            &bulk.genes,
+            &args.archetypes,
+        )?;
+        // Written here, not in `write_outputs`: it needs the references, which
+        // the chain loop consumes. Dropping the membership at the end of this
+        // block also keeps it off the heap for the whole sampling run.
+        io::write_archetype_diagnostics(&out, &refs, &membership)?;
+        refs
     };
     anyhow::ensure!(!references.is_empty(), "deconvolve: no reference built");
     let n_chains = references.len();
@@ -117,7 +80,6 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     // it is read once here rather than deferred into the loop behind an Option.
     let first = &references[0];
     let celltype_names = first.celltype_names.clone();
-    let (axis, units) = (first.axis, first.units);
     let coord_dim = first.coords.ncols();
     let n_comp_total: usize = references.iter().map(Reference::n_comp).sum();
     let mut accum = PosteriorAccum::new(s, first.n_types(), d, n_comp_total);
@@ -134,20 +96,16 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         );
         // How to start and how strongly to hold each component follow from how
         // the reference scales its profiles, so the reference decides both.
-        let init_w = match prior.as_ref() {
-            Some(prior) => project::init_fractions(&prior.mean, &sample_z, cfg.init_iters),
-            None => reference.init_abundances(&bulk.data),
-        };
+        let init_w = reference.init_abundances(&bulk.data);
         if args.frac_prior_shape.is_none() {
             cfg.a0 = reference.default_prior_shape(&bulk.data);
         }
         info!(
-            "deconvolve: chain {}/{n_chains} — {s} samples × {d} genes, {} components → {} cell \
-             types ({:?} reference, a0 = {:.1})",
+            "deconvolve: chain {}/{n_chains} — {s} samples × {d} genes, {} archetypes → {} cell \
+             types (a0 = {:.1})",
             chain + 1,
             reference.n_comp(),
             reference.n_types(),
-            args.reference,
             cfg.a0
         );
 
@@ -157,24 +115,19 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         cfg.seed = args
             .seed
             .wrapping_add((chain as u64).wrapping_mul(SEED_STRIDE));
-        let anchor_sampler = prior
-            .as_ref()
-            .map(|p| AnchorSampler::new(&src, p, cfg.seed));
         monitor.begin_chain(chain);
-        let posterior_anchors = gibbs::run_chain(
+        gibbs::run_chain(
             &mut reference,
             &bulk.data,
             &init_w,
             &cfg,
-            anchor_sampler,
             &mut monitor,
             &mut accum,
         )?;
 
         // Component-axis bookkeeping for the output table, prefixed per chain so
-        // pooled partitions stay distinguishable. Anchors report their posterior
-        // position; archetypes are fixed, so theirs is the reference coordinate.
-        let coords = posterior_anchors.unwrap_or(reference.coords);
+        // pooled partitions stay distinguishable.
+        let coords = reference.coords;
         for m in 0..coords.nrows() {
             comp_names.push(reference::comp_label(
                 n_chains,
@@ -193,8 +146,6 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         gibbs::ComponentTable {
             coords,
             names: comp_names,
-            axis,
-            units,
         },
         celltype_names,
     )?;
@@ -202,21 +153,15 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     // 3. Write deliverables.
     let meta = io::RunMeta {
         from: &args.from,
-        markers: args.markers.as_deref(),
         kind: src.kind.to_string(),
-        reference: match args.reference {
-            ReferenceMode::LowRank => "low-rank",
-            ReferenceMode::Archetype => "archetype",
-        },
         n_components: result.anchor_names.len(),
         n_chains,
-        fraction_units: result.units.as_str(),
         warmup: cfg.warmup,
         draws: cfg.draws,
         bulk_files: &args.bulk,
         traced: args.trace_every > 0,
     };
-    io::write_outputs(&out, &bulk.samples, &bulk.genes, &sample_z, &result, &meta)?;
+    io::write_outputs(&out, &bulk.samples, &bulk.genes, &result, &meta)?;
     info!("senna deconvolve complete → {out}.*");
     Ok(())
 }
