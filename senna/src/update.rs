@@ -35,6 +35,7 @@ use crate::counterfactual::{
 };
 use crate::embed_common::*;
 use crate::topic::masked_artifact::{write_masked_model, MaskedModel, WriteArgs};
+use crate::topic::model_metadata::UpdateRecord;
 use log::info;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -97,6 +98,22 @@ pub struct UpdateArgs {
 
     #[arg(long, default_value_t = 500, help = "Evaluation minibatch size")]
     minibatch_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.1,
+        help = "Minimum fraction of the model's genes the new data must map to",
+        long_help = "A sanity floor on gene-name agreement, not an identification criterion.\n\
+                     \n\
+                     A high floor belongs to models with a free `[D,K]` dictionary, where an\n\
+                     unobserved gene has nothing behind it. Here `log β = α·ρᵀ`, so one α serves\n\
+                     every gene and an unobserved gene still gets the model's honest\n\
+                     generalization `α_k·ρ_d`. What matters is whether α is IDENTIFIED, which\n\
+                     `update` checks separately via the conditioning of ρ over the mapped genes.\n\
+                     \n\
+                     So keep this low. A large shortfall usually means the gene names disagree."
+    )]
+    min_gene_overlap: f64,
 
     #[arg(long, help = "Load all columns into memory before scoring")]
     preload_data: bool,
@@ -171,6 +188,24 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     let n_cal = cal.z_nk.nrows();
     anyhow::ensure!(n_new > 0, "update: the new batch has no cells");
 
+    // Gene-name agreement. This is a sanity floor only — the identification question is
+    // asked below, against ρ, once the model is rebuilt. `None` means the axes matched.
+    let n_genes_model = parent.gene_names.len();
+    let mapped_genes: Vec<usize> = match new.gene_remap.as_ref() {
+        Some(r) => r.new_to_train.iter().flatten().copied().collect(),
+        None => (0..n_genes_model).collect(),
+    };
+    let n_genes_mapped = mapped_genes.len();
+    let overlap = n_genes_mapped as f64 / n_genes_model.max(1) as f64;
+    anyhow::ensure!(
+        overlap >= args.min_gene_overlap,
+        "update: the new data maps to only {n_genes_mapped}/{n_genes_model} of the model's genes \
+         ({:.1}%), below --min-gene-overlap {:.1}%. That large a shortfall usually means the gene \
+         names disagree rather than that the panel is narrow — check the naming first.",
+        100.0 * overlap,
+        100.0 * args.min_gene_overlap
+    );
+
     /////////////////////////////////////////////
     // 2. Rebuild ALL levels and load the parent //
     /////////////////////////////////////////////
@@ -179,6 +214,16 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     let rebuilt = rebuild_model(&args.model, &parent.metadata, &dev)?;
     let alpha = alpha_var(&rebuilt.parameters, &rebuilt.alpha_name)?;
     let alpha0 = detached_copy(alpha.as_tensor())?;
+
+    // How well the batch pins α — the question a gene *fraction* cannot answer.
+    let alpha_condition = alpha_conditioning(rebuilt.decoder.feature_embeddings(), &mapped_genes)?;
+    info!(
+        "update: {n_genes_mapped}/{n_genes_model} genes mapped ({:.1}%); cond(ρ_S) = {:.3e} over \
+         the model's {} embedding dimensions",
+        100.0 * overlap,
+        alpha_condition,
+        rebuilt.decoder.feature_embeddings().dim(1)?
+    );
 
     let bank = CellBank::from_scored(&parent, &cal, &new, &dev)?;
     // The bank owns copies now; these hold a whole SparseIoVec each (the full matrix
@@ -223,6 +268,27 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     if plan.n_replay == 0 {
         log::warn!(
             "zero replay cells: this is an unprotected fine-tune and will forget the reference."
+        );
+    }
+    // Replay cells carry the FULL gene axis, so they constrain α in every direction no matter
+    // how narrow the new panel is. A rank-deficient ρ_S is therefore only fatal when nothing is
+    // replayed — that is the one case where some direction of α is pinned by nobody and the
+    // refit will move it arbitrarily, then write the result into β for every gene.
+    if !alpha_condition.is_finite() {
+        anyhow::ensure!(
+            plan.n_replay > 0,
+            "update refuses to write: ρ restricted to the {n_genes_mapped} mapped genes is \
+             rank-deficient, so some directions of α are unconstrained by this batch — and with \
+             zero replay nothing else constrains them either. The refit would move α arbitrarily \
+             there and regenerate β for all {n_genes_model} genes from it. Raise --replay-ratio \
+             above 0, or supply a batch covering more of the embedding space."
+        );
+        log::warn!(
+            "ρ over the {n_genes_mapped} mapped genes is rank-deficient: this batch does not \
+             constrain every direction of α. The {} replayed reference cells do, so the update is \
+             identified — but what it learns in those directions comes from replay, not from the \
+             new data.",
+            plan.n_replay
         );
     }
 
@@ -292,6 +358,25 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // over verbatim.
     let mut new_meta = parent.metadata.clone();
     new_meta.n_train_cells = Some(parent.metadata.n_train_cells.unwrap_or(0) + n_new);
+    // `n_train_cells` is a running total and loses the breakdown. The history keeps it, so a
+    // child of a child can still say what each round did — and so absorbing the same batch
+    // twice, or two children differing only in `--steps`, are visible on disk instead of
+    // indistinguishable.
+    new_meta.update_history.push(UpdateRecord {
+        parent: args.model.clone(),
+        data: args.data_files.clone(),
+        calibration: args.calibration.clone(),
+        n_new,
+        n_replay: plan.n_replay,
+        replay_ratio_requested: args.replay_ratio,
+        replay_ratio_effective: plan.effective_ratio(n_new),
+        steps: args.steps,
+        lr: args.lr,
+        seed: args.seed,
+        n_genes_mapped,
+        n_genes_model,
+        alpha_condition,
+    });
     write_masked_model(WriteArgs {
         out: &args.out,
         decoder: &rebuilt.decoder,
@@ -344,6 +429,47 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     );
     info!("update: parent {} left untouched", args.model);
     Ok(())
+}
+
+/// How well the genes this batch observed pin `α`.
+///
+/// **Why this and not a gene-count fraction.** `α` is `[K,H]` and enters the likelihood only
+/// through `α·ρᵀ`, so a batch constrains `α` exactly in the directions spanned by `ρ_S` — the
+/// mapped-gene rows of ρ. Identification is therefore a question about **H**, not about **D**:
+/// `|S| ≳ H` can suffice even when `|S| ≪ D`, because one `α_k` serves every gene and an
+/// unobserved gene still gets `α_k·ρ_d`. A high gene-*fraction* floor is the right instrument for
+/// a model with a free `[D,K]` dictionary, where an unobserved gene genuinely has nothing behind
+/// it; importing it here would throw away the property the embedding exists to provide.
+///
+/// Returns `√(λ_max/λ_min)` of `ρ_Sᵀρ_S`. That Gram matrix is `[H,H]`, so this stays a ~128×128
+/// symmetric eigenproblem however large D and `|S|` are. `INFINITY` means `ρ_S` is rank-deficient:
+/// some direction of `α` is unconstrained by this batch.
+fn alpha_conditioning(rho: &candle_core::Tensor, mapped: &[usize]) -> anyhow::Result<f64> {
+    let h = rho.dim(1)?;
+    if mapped.len() < h {
+        // Fewer observed genes than embedding dimensions: rank-deficient by counting alone.
+        return Ok(f64::INFINITY);
+    }
+    let idx = candle_core::Tensor::from_vec(
+        mapped.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+        mapped.len(),
+        rho.device(),
+    )?;
+    let rho_s = rho.index_select(&idx, 0)?;
+    let gram = rho_s.t()?.matmul(&rho_s)?.flatten_all()?.to_vec1::<f32>()?;
+    // The Gram matrix is symmetric, so nalgebra's column-major read of a row-major buffer is
+    // the same matrix — no transpose needed.
+    let g = nalgebra::DMatrix::<f64>::from_iterator(h, h, gram.iter().map(|&x| f64::from(x)));
+    let eig = g.symmetric_eigenvalues();
+    let (l_max, l_min) = eig
+        .iter()
+        .fold((f64::MIN, f64::MAX), |(a, b), &x| (a.max(x), b.min(x)));
+    // Relative tolerance: a tiny or slightly negative eigenvalue is numerical rank deficiency.
+    Ok(if l_max <= 0.0 || l_min <= l_max * 1e-12 {
+        f64::INFINITY
+    } else {
+        (l_max / l_min).sqrt()
+    })
 }
 
 #[cfg(test)]
@@ -401,5 +527,55 @@ mod tests {
         let p = ReplayPlan::new(900, 300, 0.0);
         assert_eq!(p.n_replay, 0);
         assert!(!p.capped(), "asking for nothing is not a capped request");
+    }
+
+    /// `[n_genes, h]` row-major ρ for tests.
+    fn rho(rows: &[&[f32]]) -> candle_core::Tensor {
+        let h = rows[0].len();
+        let flat: Vec<f32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+        candle_core::Tensor::from_vec(flat, (rows.len(), h), &candle_core::Device::Cpu)
+            .expect("tensor")
+    }
+
+    #[test]
+    fn orthonormal_genes_are_perfectly_conditioned() {
+        let r = rho(&[&[1., 0., 0.], &[0., 1., 0.], &[0., 0., 1.]]);
+        let c = alpha_conditioning(&r, &[0, 1, 2]).expect("cond");
+        assert!(
+            (c - 1.0).abs() < 1e-6,
+            "an orthonormal ρ_S pins every direction of α equally well; got {c}"
+        );
+    }
+
+    #[test]
+    fn too_few_genes_to_span_the_embedding_is_rank_deficient() {
+        // The point of the check: with H=3, two genes cannot constrain α however many
+        // CELLS the batch has. Identification is about H, not about D or N.
+        let r = rho(&[&[1., 0., 0.], &[0., 1., 0.], &[0., 0., 1.]]);
+        assert!(!alpha_conditioning(&r, &[0, 1]).expect("cond").is_finite());
+    }
+
+    #[test]
+    fn genes_confined_to_a_subspace_are_rank_deficient() {
+        // Enough genes by count, but they all lie in the first two embedding dimensions —
+        // so α's third direction is unconstrained and a count-based floor would miss it.
+        let r = rho(&[&[1., 0., 0.], &[0., 1., 0.], &[1., 1., 0.], &[2., -1., 0.]]);
+        assert!(
+            !alpha_conditioning(&r, &[0, 1, 2, 3])
+                .expect("cond")
+                .is_finite(),
+            "four genes spanning a 2-D subspace must not read as identified"
+        );
+    }
+
+    #[test]
+    fn a_narrow_but_spanning_panel_is_accepted() {
+        // The case the old fraction-based gate got wrong: 3 of 100 genes, but they span
+        // the embedding, so α is identified and the update is legitimate.
+        let mut rows: Vec<Vec<f32>> = vec![vec![1., 0., 0.], vec![0., 1., 0.], vec![0., 0., 1.]];
+        rows.extend((0..97).map(|i| vec![i as f32, 0., 0.]));
+        let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
+        let c = alpha_conditioning(&rho(&refs), &[0, 1, 2]).expect("cond");
+        assert!(c.is_finite(), "3/100 genes that span H must be accepted");
     }
 }

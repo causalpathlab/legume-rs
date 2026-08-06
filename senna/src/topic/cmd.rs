@@ -939,6 +939,7 @@ where
         dec_context_size: None,
         theta_mean: None,
         n_train_cells: Some(ctx.data_vec.num_columns()),
+        update_history: Vec::new(),
     };
     metadata.save(&ctx.args.out)?;
 

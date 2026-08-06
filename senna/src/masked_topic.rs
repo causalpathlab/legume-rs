@@ -1073,6 +1073,8 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         dec_context_size: Some(dec_context_size),
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
+        // A freshly trained model has absorbed nothing; `senna update` appends.
+        update_history: Vec::new(),
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
