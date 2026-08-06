@@ -82,6 +82,16 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let celltype_names = first.celltype_names.clone();
     let coord_dim = first.coords.ncols();
     let n_comp_total: usize = references.iter().map(Reference::n_comp).sum();
+    // One prior for every chain. Chains differ by partition and by RNG stream —
+    // nothing else — so a between-chain disagreement is attributable to the
+    // partition, which is the whole point of pooling over it.
+    if args.frac_prior_shape.is_none() {
+        cfg.a0 = reference::default_prior_shape(&bulk.data, n_comp_total / n_chains.max(1));
+        info!(
+            "deconvolve: per-component prior shape a0 = {:.1}, shared by all {n_chains} chains",
+            cfg.a0
+        );
+    }
     let mut accum = PosteriorAccum::new(s, first.n_types(), d, n_comp_total);
     let mut monitor = Monitor::new(args.monitor_config(), &out, &bulk.samples, &celltype_names)?;
     let mut comp_names: Vec<Box<str>> = Vec::new();
@@ -94,19 +104,14 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
              embedding dimension",
             chain + 1
         );
-        // How to start and how strongly to hold each component follow from how
-        // the reference scales its profiles, so the reference decides both.
+        // How to start follows from how the reference scales its profiles.
         let init_w = reference.init_abundances(&bulk.data);
-        if args.frac_prior_shape.is_none() {
-            cfg.a0 = reference.default_prior_shape(&bulk.data);
-        }
         info!(
             "deconvolve: chain {}/{n_chains} — {s} samples × {d} genes, {} archetypes → {} cell \
-             types (a0 = {:.1})",
+             types",
             chain + 1,
             reference.n_comp(),
-            reference.n_types(),
-            cfg.a0
+            reference.n_types()
         );
 
         // Each chain gets its own RNG stream. Sharing one would make two chains

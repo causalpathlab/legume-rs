@@ -54,19 +54,6 @@ impl Reference {
         Mat::from_fn(bulk.ncols(), r, |si, _| totals[si])
     }
 
-    /// Per-component prior shape when the user did not set one.
-    ///
-    /// Two standard deviations of the counts a component would hold under a
-    /// uniform split. The gene allocation is winner-take-all among overlapping
-    /// profiles, so a component that falls behind early is extinguished; holding
-    /// it a couple of sampling-noise units off zero is what prevents that, and
-    /// that scale is `sqrt(N/R)`.
-    #[must_use]
-    pub fn default_prior_shape(&self, bulk: &Mat) -> f32 {
-        let mean_total = f64::from(bulk.sum()) / bulk.ncols().max(1) as f64;
-        (2.0 * (mean_total / self.n_comp().max(1) as f64).sqrt()).max(1.0) as f32
-    }
-
     /// `out[c] = Σ_m v[m]·A[m,c]` — component-indexed vector to cell types.
     ///
     /// The zero skip matters: with many archetypes most components hold no mass
@@ -82,6 +69,26 @@ impl Reference {
             }
         }
     }
+}
+
+/// Per-component prior shape when the user did not set one.
+///
+/// Two standard deviations of the counts a component would hold under a uniform
+/// split. The gene allocation is winner-take-all among overlapping profiles, so
+/// a component that falls behind early is extinguished; holding it a couple of
+/// sampling-noise units off zero is what prevents that, and that scale is
+/// `sqrt(N/R)`.
+///
+/// `n_comp` is the mean across the pooled chains, deliberately, so the prior is
+/// **identical for every chain**. Deriving it from each chain's own component
+/// count would give the chains different priors, and then they would target
+/// different posteriors: pooling their draws would average three models rather
+/// than one model over a partition, and the between-chain R̂ would be measuring
+/// the prior as much as the partition.
+#[must_use]
+pub fn default_prior_shape(bulk: &Mat, n_comp: usize) -> f32 {
+    let mean_total = f64::from(bulk.sum()) / bulk.ncols().max(1) as f64;
+    (2.0 * (mean_total / n_comp.max(1) as f64).sqrt()).max(1.0) as f32
 }
 
 /// Label for one component in the pooled output.
