@@ -22,9 +22,9 @@ pub struct DeconvResult {
     pub fractions_lo: Mat,
     pub fractions_hi: Mat,
     pub abundance_mean: Mat,
-    /// One `D×S` block per cell type: posterior-mean allocated counts
-    /// `E[Z_{s,c,g}]`, the within-type expression tensor.
-    pub expression: Vec<Mat>,
+    /// Posterior-mean allocated counts `E[Z_{s,c,g}]`, the within-type
+    /// expression tensor.
+    pub expression: ExpressionTensor,
     /// Posterior-mean component coordinates in the embedding: anchors `t_c`
     /// (low-rank) or archetype positions `z_m` (archetype mode).
     pub anchors_post: Mat,
@@ -44,6 +44,56 @@ pub struct DeconvResult {
     /// than halves of one chain, and disagreement means the references differ —
     /// not that a chain failed to settle.
     pub n_chains: usize,
+}
+
+/// The within-type expression tensor, kept flat and materialised one cell type
+/// at a time.
+///
+/// Building all `C` matrices up front would hold a second copy of the whole
+/// tensor alongside the accumulator, and the writer only ever needs one at a
+/// time. The flat layout is sample-major, so a single cell type's block is
+/// already `samples × genes` — the orientation the writer wants, with no
+/// transpose.
+pub struct ExpressionTensor {
+    /// `[si*C*D + ct*D + g]`, already divided by the number of draws.
+    data: Vec<f32>,
+    n_genes: usize,
+    n_samples: usize,
+    n_types: usize,
+}
+
+impl ExpressionTensor {
+    #[must_use]
+    pub fn new(data: Vec<f32>, n_genes: usize, n_samples: usize, n_types: usize) -> Self {
+        debug_assert_eq!(data.len(), n_genes * n_samples * n_types);
+        Self {
+            data,
+            n_genes,
+            n_samples,
+            n_types,
+        }
+    }
+
+    #[must_use]
+    pub fn n_types(&self) -> usize {
+        self.n_types
+    }
+
+    /// The `samples × genes` block for one cell type.
+    #[must_use]
+    pub fn sample_by_gene(&self, ct: usize) -> Mat {
+        let (d, c) = (self.n_genes, self.n_types);
+        Mat::from_fn(self.n_samples, d, |si, g| {
+            self.data[si * c * d + ct * d + g]
+        })
+    }
+
+    /// One posterior-mean count, for spot checks.
+    #[cfg(test)]
+    #[must_use]
+    pub fn get(&self, ct: usize, g: usize, si: usize) -> f32 {
+        self.data[si * self.n_types * self.n_genes + ct * self.n_genes + g]
+    }
 }
 
 /// Convergence diagnostics for one scalar chain.

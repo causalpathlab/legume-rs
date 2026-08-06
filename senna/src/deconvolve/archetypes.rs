@@ -38,7 +38,6 @@ const BLOCK_SIZE: usize = 1000;
 /// One reference cell, indexed into each of the three tables it must appear in.
 struct CellRow {
     counts: usize,
-    embedding: usize,
     annotation: usize,
 }
 
@@ -48,15 +47,17 @@ struct CellRow {
 /// partition — the column reads are the raw matrix off disk and dominate.
 struct ArchetypeInputs {
     stack: crate::senna_input::SparseStackWithBatch,
-    embedding: MatWithNames<Mat>,
     annotation: MatWithNames<Mat>,
     /// Cells shared by counts, embedding and annotation, after `--archetype-cells`.
     rows: Vec<CellRow>,
     /// `rows.len() × H` embedding of exactly those cells, for clustering.
     sub: Mat,
     /// Panel gene → row in the single-cell counts, reconciled by name once.
-    /// Panel gene → the single-cell rows that canonicalize to it (may be several).
-    panel_to_sc: Vec<Vec<usize>>,
+    /// Panel gene → the single-cell rows that canonicalize to it, as CSR.
+    ///
+    /// A `Vec<Vec<_>>` here is one heap allocation per gene — tens of thousands
+    /// of tiny blocks for a handful of real many-to-one collapses.
+    panel_to_sc: GeneMap,
     n_sc_genes: usize,
     n_cells: usize,
 }
@@ -83,7 +84,7 @@ pub fn build_all(
             inputs.partition(
                 target,
                 cfg.seed
-                    .wrapping_add((chain as u64).wrapping_mul(0x9E37_79B9)),
+                    .wrapping_add((chain as u64).wrapping_mul(super::SEED_STRIDE)),
                 cfg.min_cells,
             )
         })
@@ -180,6 +181,7 @@ impl ArchetypeInputs {
         };
 
         let mut rows = Vec::with_capacity(cell_names.len());
+        let mut emb_rows: Vec<usize> = Vec::with_capacity(cell_names.len());
         for (ci, name) in cell_names.iter().enumerate() {
             if keep.as_ref().is_some_and(|k| !k.contains(name)) {
                 continue;
@@ -189,9 +191,9 @@ impl ArchetypeInputs {
             {
                 rows.push(CellRow {
                     counts: ci,
-                    embedding: ei,
                     annotation: ai,
                 });
+                emb_rows.push(ei);
             }
         }
         anyhow::ensure!(
@@ -208,15 +210,17 @@ impl ArchetypeInputs {
             );
         }
 
+        // `sub` is the only view of the embedding anything downstream needs, so
+        // the full N×H matrix is dropped here rather than carried for the run.
         let h = embedding.mat.ncols();
-        let sub = Mat::from_fn(rows.len(), h, |i, j| embedding.mat[(rows[i].embedding, j)]);
+        let sub = Mat::from_fn(rows.len(), h, |i, j| embedding.mat[(emb_rows[i], j)]);
+        drop(embedding);
         let panel_to_sc = map_panel_genes(&sc_genes, genes)?;
 
         Ok(Self {
             n_cells: cell_names.len(),
             n_sc_genes: sc_genes.len(),
             stack,
-            embedding,
             annotation,
             rows,
             sub,
@@ -275,8 +279,6 @@ impl ArchetypeInputs {
 
         Ok(Reference {
             mu_gm,
-            n_genes: genes.len(),
-            n_comp: n_arch,
             readout,
             coords,
             comp_names: (0..n_arch)
@@ -301,12 +303,13 @@ impl ArchetypeInputs {
         let mut mu = vec![0f32; d * n_arch];
         let mut pooled = vec![0f64; d];
         let mut totals = vec![0f64; n_arch];
-        for (g, slots) in self.panel_to_sc.iter().enumerate() {
+        for g in 0..d {
+            let slots = self.panel_to_sc.get(g);
             let row = &mut mu[g * n_arch..(g + 1) * n_arch];
             for (m, cell) in row.iter_mut().enumerate() {
                 let v: f64 = slots
                     .iter()
-                    .map(|&sg| gene_sum[m * self.n_sc_genes + sg])
+                    .map(|&sg| gene_sum[m * self.n_sc_genes + sg as usize])
                     .sum();
                 *cell = v as f32;
                 pooled[g] += v;
@@ -337,7 +340,7 @@ impl ArchetypeInputs {
 
     /// Community means of the embedding (coordinates) and of the annotation (readout).
     fn summarize(&self, labels: &[usize], n_arch: usize) -> (Mat, Mat) {
-        let h = self.embedding.mat.ncols();
+        let h = self.sub.ncols();
         let c = self.annotation.mat.ncols();
         let mut coords = Mat::zeros(n_arch, h);
         let mut readout = Mat::zeros(n_arch, c);
@@ -349,7 +352,7 @@ impl ArchetypeInputs {
             }
             counts[m] += 1.0;
             for j in 0..h {
-                coords[(m, j)] += self.embedding.mat[(row.embedding, j)];
+                coords[(m, j)] += self.sub[(i, j)];
             }
             for ct in 0..c {
                 readout[(m, ct)] += self.annotation.mat[(row.annotation, ct)];
@@ -398,11 +401,32 @@ impl ArchetypeInputs {
     }
 }
 
+/// Panel gene → single-cell rows, in compressed row form.
+struct GeneMap {
+    offsets: Vec<u32>,
+    rows: Vec<u32>,
+}
+
+impl GeneMap {
+    fn get(&self, gene: usize) -> &[u32] {
+        let (lo, hi) = (self.offsets[gene] as usize, self.offsets[gene + 1] as usize);
+        &self.rows[lo..hi]
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+
+    fn matched(&self) -> usize {
+        (0..self.len()).filter(|&g| !self.get(g).is_empty()).count()
+    }
+}
+
 /// Panel gene → single-cell row, reconciled through the shared canonicalizer.
 ///
 /// Built once: canonicalizing tens of thousands of names per partition would
 /// repeat the same work for every granularity.
-fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<Vec<Vec<usize>>> {
+fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<GeneMap> {
     let name_kind = crate::embed_common::reconcile_name_kind(genes, &[sc_genes]);
     // Many-to-one collapses keep every source row: these are counts, so the
     // contributions sum. The bulk loader does the same, and taking only the
@@ -411,16 +435,20 @@ fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<Vec<Vec<
     for (i, n) in sc_genes.iter().enumerate() {
         index.entry(name_kind.canonicalize(n)).or_default().push(i);
     }
-    let out: Vec<Vec<usize>> = genes
-        .iter()
-        .map(|name| {
-            index
-                .get(&name_kind.canonicalize(name))
-                .cloned()
-                .unwrap_or_default()
-        })
-        .collect();
-    let matched = out.iter().filter(|s| !s.is_empty()).count();
+    let mut offsets = Vec::with_capacity(genes.len() + 1);
+    let mut flat: Vec<u32> = Vec::with_capacity(genes.len());
+    offsets.push(0u32);
+    for name in genes {
+        if let Some(rows) = index.get(&name_kind.canonicalize(name)) {
+            flat.extend(rows.iter().map(|&i| i as u32));
+        }
+        offsets.push(flat.len() as u32);
+    }
+    let out = GeneMap {
+        offsets,
+        rows: flat,
+    };
+    let matched = out.matched();
     let d = genes.len();
     // Nothing matching means the counts are not the ones the embedding was
     // trained on, or the two axes name genes differently. Either way the run

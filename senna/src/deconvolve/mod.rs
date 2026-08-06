@@ -44,9 +44,9 @@ use monitor::Monitor;
 use reference::Reference;
 use source::EmbeddingSource;
 
-/// Seed stride between pooled chains — an odd, well-mixed constant so the
+/// Seed stride between independent streams — an odd, well-mixed constant so the
 /// per-sample streams of different chains cannot coincide.
-const CHAIN_SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(super) const SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 
 pub fn run(args: &DeconvolveArgs) -> Result<()> {
     let out: String = match args.out.as_deref() {
@@ -105,52 +105,44 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
             )?
         }
     };
+    anyhow::ensure!(!references.is_empty(), "deconvolve: no reference built");
     let n_chains = references.len();
 
-    let mut accum: Option<PosteriorAccum> = None;
-    let mut monitor: Option<Monitor> = None;
-    let mut celltype_names: Vec<Box<str>> = Vec::new();
+    // Everything the pooled posterior needs is fixed by the first reference, so
+    // it is read once here rather than deferred into the loop behind an Option.
+    let first = &references[0];
+    let celltype_names = first.celltype_names.clone();
+    let (axis, units) = (first.axis, first.units);
+    let coord_dim = first.coords.ncols();
+    let mut accum = PosteriorAccum::new(s, first.n_types(), d);
+    let mut monitor = Monitor::new(args.monitor_config(), &out, &bulk.samples, &celltype_names)?;
     let mut comp_names: Vec<Box<str>> = Vec::new();
     let mut comp_coords: Vec<f32> = Vec::new();
-    let mut coord_dim = 0usize;
-    let mut axis_units: Option<(reference::ComponentAxis, reference::FractionUnits)> = None;
 
     for (chain, mut reference) in references.into_iter().enumerate() {
+        anyhow::ensure!(
+            reference.celltype_names == celltype_names && reference.coords.ncols() == coord_dim,
+            "deconvolve: chain {} does not agree with the first chain on cell types or \
+             embedding dimension",
+            chain + 1
+        );
+        // How to start and how strongly to hold each component follow from how
+        // the reference scales its profiles, so the reference decides both.
         let init_w = match prior.as_ref() {
             Some(prior) => project::init_fractions(&prior.mean, &sample_z, cfg.init_iters),
-            None => {
-                if args.frac_prior_shape.is_none() {
-                    cfg.a0 = auto_prior_shape(&bulk.data, reference.n_comp);
-                }
-                flat_init(&bulk.data, reference.n_comp)
-            }
+            None => reference.init_abundances(&bulk.data),
         };
+        if args.frac_prior_shape.is_none() {
+            cfg.a0 = reference.default_prior_shape(&bulk.data);
+        }
         info!(
-            "deconvolve: chain {}/{} — {s} samples × {d} genes, {} components → {} cell types \
-             ({:?} reference, a0 = {:.1})",
+            "deconvolve: chain {}/{n_chains} — {s} samples × {d} genes, {} components → {} cell \
+             types ({:?} reference, a0 = {:.1})",
             chain + 1,
-            n_chains,
-            reference.n_comp,
+            reference.n_comp(),
             reference.n_types(),
             args.reference,
             cfg.a0
-        );
-
-        if accum.is_none() {
-            celltype_names = reference.celltype_names.clone();
-            axis_units = Some((reference.axis, reference.units));
-            accum = Some(PosteriorAccum::new(s, reference.n_types(), d));
-            monitor = Some(Monitor::new(
-                args.monitor_config(),
-                &out,
-                &bulk.samples,
-                &celltype_names,
-            )?);
-        }
-        anyhow::ensure!(
-            reference.celltype_names == celltype_names,
-            "deconvolve: chain {} reports different cell types than the first chain",
-            chain + 1
         );
 
         // Each chain gets its own RNG stream. Sharing one would make two chains
@@ -158,30 +150,26 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         // draws and reports R̂ = 1 from no independent information.
         cfg.seed = args
             .seed
-            .wrapping_add((chain as u64).wrapping_mul(CHAIN_SEED_STRIDE));
+            .wrapping_add((chain as u64).wrapping_mul(SEED_STRIDE));
         let anchor_sampler = prior
             .as_ref()
             .map(|p| AnchorSampler::new(&src, p, cfg.seed));
-        monitor
-            .as_mut()
-            .expect("monitor initialised above")
-            .begin_chain(chain);
+        monitor.begin_chain(chain);
         let posterior_anchors = gibbs::run_chain(
             &mut reference,
             &bulk.data,
             &init_w,
             &cfg,
             anchor_sampler,
-            monitor.as_mut().expect("monitor initialised above"),
-            accum.as_mut().expect("accumulator initialised above"),
+            &mut monitor,
+            &mut accum,
         )?;
 
         // Component-axis bookkeeping for the output table, prefixed per chain so
         // pooled partitions stay distinguishable. Anchors report their posterior
         // position; archetypes are fixed, so theirs is the reference coordinate.
-        let coords = posterior_anchors.unwrap_or_else(|| reference.coords.clone());
-        coord_dim = coords.ncols();
-        for m in 0..reference.n_comp {
+        let coords = posterior_anchors.unwrap_or(reference.coords);
+        for m in 0..coords.nrows() {
             comp_names.push(if n_chains > 1 {
                 format!("c{chain}_{}", reference.comp_names[m]).into_boxed_str()
             } else {
@@ -191,18 +179,10 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         }
     }
 
-    let accum = accum.expect("at least one chain");
-    if let Some(m) = monitor.as_mut() {
-        m.finish()?;
-    }
-    let coords = Mat::from_row_slice(
-        comp_coords.len() / coord_dim.max(1),
-        coord_dim,
-        &comp_coords,
-    );
-    let (axis, units) = axis_units.expect("at least one chain");
+    monitor.finish()?;
+    let coords = Mat::from_row_slice(comp_names.len(), coord_dim, &comp_coords);
     let result = gibbs::finalize(
-        &accum,
+        accum,
         &bulk.data,
         gibbs::ComponentTable {
             coords,
@@ -233,27 +213,4 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     io::write_outputs(&out, &bulk.samples, &bulk.genes, &sample_z, &result, &meta)?;
     info!("senna deconvolve complete → {out}.*");
     Ok(())
-}
-
-/// Per-component prior shape for the archetype reference: two standard
-/// deviations of the counts a component would hold under a uniform split.
-///
-/// The allocation step is winner-take-all among overlapping profiles, so a
-/// component that falls behind early can be extinguished. Holding it a couple of
-/// sampling-noise units off zero is what keeps that from happening, and that
-/// scale is `sqrt(N/R)` — which is why the default tracks depth instead of being
-/// a constant.
-fn auto_prior_shape(bulk: &Mat, r: usize) -> f32 {
-    let mean_total = f64::from(bulk.sum()) / bulk.ncols().max(1) as f64;
-    (2.0 * (mean_total / r as f64).sqrt()).max(1.0) as f32
-}
-
-/// Warm start with each sample's counts spread evenly over the components.
-/// Archetype profiles sum to one over genes, so an abundance is on the scale of
-/// allocated counts and `total/R` is the uniform-composition point.
-fn flat_init(bulk: &Mat, r: usize) -> Mat {
-    let totals: Vec<f32> = (0..bulk.ncols())
-        .map(|si| bulk.column(si).iter().sum::<f32>() / r as f32)
-        .collect();
-    Mat::from_fn(bulk.ncols(), r, |si, _| totals[si].max(1e-6))
 }

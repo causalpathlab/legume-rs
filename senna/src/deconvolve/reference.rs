@@ -57,13 +57,10 @@ impl ComponentAxis {
     }
 }
 
-#[derive(Clone)]
 pub struct Reference {
     /// Gene-major rates `mu_gm[g*n_comp + m] = μ_{g,m}`, so the inner per-component
     /// loop reads a contiguous, SIMD-friendly slice instead of a strided column.
     pub mu_gm: Vec<f32>,
-    pub n_genes: usize,
-    pub n_comp: usize,
     /// `R×C`, rows summing to 1: how much of component `m` counts as type `c`.
     pub readout: Mat,
     /// `R×H` component coordinates in the embedding, carried through to output.
@@ -85,11 +82,15 @@ impl Reference {
     pub fn low_rank(src: &EmbeddingSource, prior: &AnchorPrior, d: usize) -> Self {
         let c = prior.mean.nrows();
         let mut mu_gm = vec![0.0f32; d * c];
-        refresh_low_rank(&mut mu_gm, &prior.mean, src, c);
+        refresh_low_rank(
+            &mut mu_gm,
+            &prior.mean,
+            &src.rho.transpose(),
+            &src.gene_offset,
+            c,
+        );
         Self {
             mu_gm,
-            n_genes: d,
-            n_comp: c,
             readout: Mat::identity(c, c),
             coords: prior.mean.clone(),
             comp_names: prior.names.clone(),
@@ -102,6 +103,56 @@ impl Reference {
     #[must_use]
     pub fn n_types(&self) -> usize {
         self.readout.ncols()
+    }
+
+    #[must_use]
+    pub fn n_comp(&self) -> usize {
+        self.readout.nrows()
+    }
+
+    #[must_use]
+    pub fn n_genes(&self) -> usize {
+        self.mu_gm.len() / self.n_comp().max(1)
+    }
+
+    /// Warm start for the abundances, `S×R`.
+    ///
+    /// How to start follows from how the profiles are scaled, which is the
+    /// reference's business rather than the caller's: normalised profiles make
+    /// an abundance a count, so an even split of the sample's total is the
+    /// uniform-composition point; reconstructed rates carry their own exposure
+    /// and start neutral, with the caller free to supply a better guess.
+    #[must_use]
+    pub fn init_abundances(&self, bulk: &Mat) -> Mat {
+        let r = self.n_comp();
+        match self.units {
+            FractionUnits::Cell => Mat::from_element(bulk.ncols(), r, 1.0),
+            FractionUnits::Mrna => {
+                let totals: Vec<f32> = (0..bulk.ncols())
+                    .map(|si| (bulk.column(si).iter().sum::<f32>() / r as f32).max(1e-6))
+                    .collect();
+                Mat::from_fn(bulk.ncols(), r, |si, _| totals[si])
+            }
+        }
+    }
+
+    /// Per-component prior shape when the user did not set one.
+    ///
+    /// Two standard deviations of the counts a component would hold under a
+    /// uniform split. The gene allocation is winner-take-all among overlapping
+    /// profiles, so a component that falls behind early is extinguished; holding
+    /// it a couple of sampling-noise units off zero is what prevents that, and
+    /// that scale is `sqrt(N/R)`. With few, well-separated components — the
+    /// low-rank case — nothing is at risk and a weak prior is right.
+    #[must_use]
+    pub fn default_prior_shape(&self, bulk: &Mat) -> f32 {
+        match self.units {
+            FractionUnits::Cell => 1.0,
+            FractionUnits::Mrna => {
+                let mean_total = f64::from(bulk.sum()) / bulk.ncols().max(1) as f64;
+                (2.0 * (mean_total / self.n_comp().max(1) as f64).sqrt()).max(1.0) as f32
+            }
+        }
     }
 
     /// `out[c] = Σ_m v[m]·A[m,c]` — component-indexed vector to cell types.
@@ -125,10 +176,16 @@ impl Reference {
 ///
 /// `tmat·ρᵀ` is `C×D` column-major, whose buffer index `g*C+ct` already equals
 /// `ρ_g·t_c` — exactly the gene-major layout the sampler reads.
-pub fn refresh_low_rank(mu_gm: &mut [f32], tmat: &Mat, src: &EmbeddingSource, c: usize) {
-    let scd = tmat * src.rho.transpose();
+pub fn refresh_low_rank(
+    mu_gm: &mut [f32],
+    tmat: &Mat,
+    rho_t: &Mat,
+    gene_offset: &crate::embed_common::DVec,
+    c: usize,
+) {
+    let scd = tmat * rho_t;
     let scd_buf = scd.as_slice();
-    let a = &src.gene_offset;
+    let a = gene_offset;
     for (i, mu) in mu_gm.iter_mut().enumerate() {
         *mu = (scd_buf[i] + a[i / c])
             .clamp(-SCORE_CLAMP, SCORE_CLAMP)

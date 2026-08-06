@@ -35,7 +35,8 @@ use super::args::SamplerConfig;
 use super::monitor::Monitor;
 use super::reference::{Reference, SCORE_CLAMP};
 use super::result::{
-    residual_stat, split_rhat_ess, Convergence, DeconvResult, MIN_DRAWS_FOR_DIAGNOSTICS,
+    residual_stat, split_rhat_ess, Convergence, DeconvResult, ExpressionTensor,
+    MIN_DRAWS_FOR_DIAGNOSTICS,
 };
 use super::source::EmbeddingSource;
 use crate::embed_common::{DVec, Mat};
@@ -48,7 +49,7 @@ use rand_distr::{Binomial, Distribution, Gamma, StandardNormal};
 use rayon::prelude::*;
 
 /// Offset for the anchor-chain RNG seed (separate stream from the per-sample chains).
-const ANCHOR_SEED_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
+const ANCHOR_SEED_OFFSET: u64 = super::SEED_STRIDE;
 /// Floor on a sampled abundance, so a zeroed component can still recover.
 const ABUNDANCE_FLOOR: f32 = 1e-12;
 
@@ -59,15 +60,9 @@ struct SweepCtx<'a> {
     d: usize,
     r: usize,
     c: usize,
-    a0: f32,
-    b0: f32,
-    /// NB dispersion `r` and likelihood temperature `τ`.
-    nb_r: f32,
-    tau: f32,
+    cfg: &'a SamplerConfig,
     /// Materialise the full `R×D` allocation (the anchor ESS needs it).
     keep_contrib: bool,
-    /// Accumulate the `D×C` expression contribution this sweep.
-    collect_expr: bool,
 }
 
 /// Per-sample chain state and scratch, allocated once and reused every sweep.
@@ -93,16 +88,11 @@ struct SampleState {
     touched: Vec<u32>,
     /// `D` per-gene NB factor.
     eps: Vec<f32>,
-    /// `D×C` allocation contracted through the readout, laid out `ct*D + g`.
-    zc: Vec<f32>,
     /// `R×D` full allocation, laid out `m*D + g`. Empty unless `keep_contrib`.
     contrib: Vec<f32>,
     /// `C` fractions this sweep, and the abundance total they were scaled by.
     frac: Vec<f32>,
     w_total: f32,
-    /// `D` this sweep's Poisson rate `λ_g = Σ_m u_m μ_{g,m}`, kept so the
-    /// residual report can average the rate the sampler actually used.
-    lam: Vec<f32>,
 }
 
 impl SampleState {
@@ -117,7 +107,6 @@ impl SampleState {
             counts: vec![0.0; r],
             touched: Vec::with_capacity(r.min(64)),
             eps: vec![0.0; d],
-            zc: vec![0.0; c * d],
             contrib: if keep_contrib {
                 vec![0.0; r * d]
             } else {
@@ -125,7 +114,6 @@ impl SampleState {
             },
             frac: vec![0.0; c],
             w_total: 0.0,
-            lam: vec![0.0; d],
         }
     }
 
@@ -185,18 +173,24 @@ impl SampleState {
 
     /// One full pass over the genes of a single bulk sample: per-gene NB factor,
     /// gene allocation, then a tempered Gamma draw of the abundances.
-    fn sweep(&mut self, ctx: &SweepCtx, y_col: &[f32]) {
+    /// `lam_dst` and `zexp_dst` are this sample's slices of the run
+    /// accumulators, written in place. Staging them per sample first would cost
+    /// `C·D` floats for every sample alive under rayon — 292 MB at 200 samples —
+    /// and buy nothing but a second copy.
+    fn sweep(
+        &mut self,
+        ctx: &SweepCtx,
+        y_col: &[f32],
+        mut lam_dst: Option<&mut [f64]>,
+        mut zexp_dst: Option<&mut [f32]>,
+    ) {
         let (d, r, c) = (ctx.d, ctx.r, ctx.c);
-        let (nb_r, tau) = (ctx.nb_r, ctx.tau);
+        let (nb_r, tau) = (ctx.cfg.nb_r, ctx.cfg.tau);
         self.nvec.fill(0.0);
         self.m_exp.fill(0.0);
         if ctx.keep_contrib {
             self.contrib.fill(0.0);
         }
-        if ctx.collect_expr {
-            self.zc.fill(0.0);
-        }
-
         for (g, raw) in y_col.iter().enumerate() {
             let mu_row = &ctx.mu_gm[g * r..g * r + r]; // contiguous over components
             let mut lam = 0f32;
@@ -212,7 +206,9 @@ impl SampleState {
                 lam += rc;
                 *cum = lam;
             }
-            self.lam[g] = lam;
+            if let Some(dst) = lam_dst.as_deref_mut() {
+                dst[g] += f64::from(lam);
+            }
             let y = raw.round();
             // ε_g ~ Gamma(r + τy, r + τλ): soaks per-gene misfit; ε→1 as r→∞.
             let eg = Gamma::new(f64::from(nb_r + tau * y), 1.0 / f64::from(nb_r + tau * lam))
@@ -233,9 +229,9 @@ impl SampleState {
                 if ctx.keep_contrib {
                     self.contrib[m * d + g] = zc;
                 }
-                if ctx.collect_expr {
+                if let Some(dst) = zexp_dst.as_deref_mut() {
                     for ct in 0..c {
-                        self.zc[ct * d + g] += zc * ctx.readout[(m, ct)];
+                        dst[ct * d + g] += zc * ctx.readout[(m, ct)];
                     }
                 }
                 self.counts[m] = 0.0;
@@ -244,8 +240,8 @@ impl SampleState {
 
         // u_m ~ Gamma(a0 + τ·n_m, b0 + τ·M_m): tempered, ε-weighted exposure.
         for m in 0..r {
-            let shape = f64::from(ctx.a0 + tau * self.nvec[m]);
-            let scale = 1.0 / f64::from(ctx.b0 + tau * self.m_exp[m]);
+            let shape = f64::from(ctx.cfg.a0 + tau * self.nvec[m]);
+            let scale = 1.0 / f64::from(ctx.cfg.b0 + tau * self.m_exp[m]);
             let draw = Gamma::new(shape, scale)
                 .map_or(ABUNDANCE_FLOOR, |g| g.sample(&mut self.rng) as f32);
             self.w[m] = if draw.is_finite() && draw > ABUNDANCE_FLOOR {
@@ -410,8 +406,14 @@ pub struct PosteriorAccum {
     frac_sumsq: Vec<f64>,
     frac_quant: RunningQuantiles,
     abundance_sum: Vec<f64>,
-    /// Per type a contiguous column-major D×S block: `[ct*D*S + si*D + g]`.
-    zexp: Vec<f64>,
+    /// Allocated counts, laid out sample-major `[si*C*D + ct*D + g]`.
+    ///
+    /// Sample-major so each sample's block is contiguous and can be handed to
+    /// its own rayon worker, which is what removes the per-sample staging copy.
+    /// `f32` because this sums one term per retained expression draw — a few
+    /// hundred — not millions, so the accumulation error stays far below the
+    /// f32 resolution of the value that is finally reported.
+    zexp: Vec<f32>,
     /// Posterior-mean Poisson rate, column-major `D×S`.
     ///
     /// Accumulated from the sampler's own `λ` rather than rebuilt afterwards.
@@ -452,7 +454,7 @@ impl PosteriorAccum {
             frac_sumsq: vec![0f64; s * c],
             frac_quant: RunningQuantiles::new(s * c, &[0.025, 0.975]),
             abundance_sum: vec![0f64; s * c],
-            zexp: vec![0f64; c * d * s],
+            zexp: vec![0f32; c * d * s],
             lam_sum: vec![0f64; d * s],
             n_collect: 0,
             n_expr: 0,
@@ -466,7 +468,7 @@ impl PosteriorAccum {
     }
 
     /// Draws collected by each chain, in order.
-    pub fn chain_lengths(&self) -> Vec<usize> {
+    fn chain_lengths(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.chain_starts.len());
         for (i, &start) in self.chain_starts.iter().enumerate() {
             let end = self
@@ -494,8 +496,8 @@ pub fn run_chain(
     monitor: &mut Monitor,
     accum: &mut PosteriorAccum,
 ) -> anyhow::Result<Option<Mat>> {
-    let d = reference.n_genes;
-    let r = reference.n_comp;
+    let d = reference.n_genes();
+    let r = reference.n_comp();
     let c = reference.n_types();
     let s = bulk.ncols();
     anyhow::ensure!(
@@ -517,6 +519,7 @@ pub fn run_chain(
         accum.d
     );
     accum.begin_chain();
+    accum.trace.reserve(cfg.draws * s * c);
 
     let keep_contrib = anchors.is_some();
     let mut states: Vec<SampleState> = (0..s)
@@ -557,18 +560,23 @@ pub fn run_chain(
             d,
             r,
             c,
-            a0: cfg.a0,
-            b0: cfg.b0,
-            nb_r: cfg.nb_r,
-            tau: cfg.tau,
+            cfg,
             keep_contrib,
-            collect_expr,
         };
         let bulk_buf = bulk.as_slice();
         states
             .par_iter_mut()
+            .zip(accum.lam_sum.par_chunks_mut(d))
+            .zip(accum.zexp.par_chunks_mut(c * d))
             .enumerate()
-            .for_each(|(si, st)| st.sweep(&ctx, &bulk_buf[si * d..(si + 1) * d]));
+            .for_each(|(si, ((st, lam_dst), zexp_dst))| {
+                st.sweep(
+                    &ctx,
+                    &bulk_buf[si * d..(si + 1) * d],
+                    collecting.then_some(lam_dst),
+                    collect_expr.then_some(zexp_dst),
+                );
+            });
 
         // 2. Aggregate: fractions, pooled anchor statistics, and post-warmup collection.
         if keep_contrib {
@@ -599,19 +607,6 @@ pub fn run_chain(
                     accum.frac_sumsq[idx] += frac * frac;
                     // The un-normalised contraction, without redoing it.
                     accum.abundance_sum[idx] += frac * f64::from(st.w_total);
-                }
-                let lam_dst = &mut accum.lam_sum[si * d..(si + 1) * d];
-                for (acc, &l) in lam_dst.iter_mut().zip(&st.lam) {
-                    *acc += f64::from(l);
-                }
-                if collect_expr {
-                    for ct in 0..c {
-                        let off = ct * d * s + si * d;
-                        let dst = &mut accum.zexp[off..off + d];
-                        for (z, &v) in dst.iter_mut().zip(&st.zc[ct * d..ct * d + d]) {
-                            *z += f64::from(v);
-                        }
-                    }
                 }
             }
         }
@@ -665,7 +660,7 @@ pub struct ComponentTable {
 /// Turn the pooled draws into the reported posterior.
 ///
 pub fn finalize(
-    accum: &PosteriorAccum,
+    mut accum: PosteriorAccum,
     bulk: &Mat,
     components: ComponentTable,
     celltype_names: Vec<Box<str>>,
@@ -699,13 +694,13 @@ pub fn finalize(
         }
     }
 
-    let expression: Vec<Mat> = (0..c)
-        .map(|ct| {
-            Mat::from_fn(d, s, |g, si| {
-                (accum.zexp[ct * d * s + si * d + g] / ne) as f32
-            })
-        })
-        .collect();
+    // Scale in place and hand the buffer over: the tensor is the largest thing
+    // here, and copying it into per-type matrices would double the peak.
+    let inv = 1.0 / ne as f32;
+    for z in &mut accum.zexp {
+        *z *= inv;
+    }
+    let expression = ExpressionTensor::new(std::mem::take(&mut accum.zexp), d, s, c);
 
     let residual = (0..s)
         .map(|si| residual_stat(bulk, &accum.lam_sum[si * d..(si + 1) * d], nc, si))
@@ -724,7 +719,7 @@ pub fn finalize(
         units: components.units,
         residual,
         celltype_names,
-        convergence: diagnose(accum),
+        convergence: diagnose(&accum),
         n_chains: accum.chain_starts.len(),
     })
 }

@@ -79,44 +79,72 @@ pub fn accumulate_gene_sum_multi(
         .map(|lb| (lb, (lb + block_size).min(n)))
         .collect();
 
-    // Reduce as we go rather than collecting every block. Each block's buffers
-    // are `Σ_i k_i · m` f64, so holding all of them at once is fine for one or
-    // two small groupings but not for the many-group case this generalisation
-    // exists to serve: 1000 groups over 30k genes is ~250 MB per block.
-    let zero = || -> Vec<Vec<f64>> {
-        groupings
-            .iter()
-            .map(|&(_, k)| vec![0.0f64; k * m])
-            .collect()
-    };
-    let add = |mut acc: Vec<Vec<f64>>, part: Vec<Vec<f64>>| {
-        for (a, p) in acc.iter_mut().zip(part) {
-            for (x, y) in a.iter_mut().zip(p) {
-                *x += y;
-            }
-        }
-        acc
-    };
+    // One accumulator per worker, and workers are capped by what an accumulator
+    // costs. This is the peak allocation of the whole aggregation: every worker
+    // holds `Σ_i k_i · m` f64 at once, which for a thousand groups over 30k
+    // genes is ~250 MB each — enough to exhaust memory on a machine with plenty
+    // of cores before any of the count data is even touched.
+    let acc_elems: usize = groupings.iter().map(|&(_, k)| k * m).sum();
+    let acc_bytes = acc_elems * std::mem::size_of::<f64>();
+    let affordable = (ACCUMULATOR_BUDGET_BYTES / acc_bytes.max(1)).max(1);
+    let workers = rayon::current_num_threads()
+        .min(affordable)
+        .min(blocks.len().max(1));
+    if workers < rayon::current_num_threads() {
+        log::info!(
+            "gene-sum aggregation: {workers} workers (not {}) — each holds {} MiB of group sums",
+            rayon::current_num_threads(),
+            acc_bytes >> 20
+        );
+    }
+
+    let chunk = blocks.len().div_ceil(workers.max(1));
     blocks
-        .par_iter()
-        .map(|&(lb, ub)| block_gene_sum(data_vec, groupings, lb, ub, m))
-        .try_fold(zero, |acc, part| part.map(|p| add(acc, p)))
-        .try_reduce(zero, |a, b| Ok(add(a, b)))
+        .par_chunks(chunk.max(1))
+        .map(|chunk| {
+            // Accumulate every block of this chunk into ONE buffer. Giving each
+            // block its own would double the peak for no benefit.
+            let mut acc: Vec<Vec<f64>> = groupings
+                .iter()
+                .map(|&(_, k)| vec![0.0f64; k * m])
+                .collect();
+            for &(lb, ub) in chunk {
+                add_block_gene_sum(&mut acc, data_vec, groupings, lb, ub, m)?;
+            }
+            anyhow::Ok(acc)
+        })
+        .try_reduce_with(|mut a, b| {
+            for (x, y) in a.iter_mut().zip(b) {
+                for (xi, yi) in x.iter_mut().zip(y) {
+                    *xi += yi;
+                }
+            }
+            anyhow::Ok(a)
+        })
+        .unwrap_or_else(|| {
+            Ok(groupings
+                .iter()
+                .map(|&(_, k)| vec![0.0f64; k * m])
+                .collect())
+        })
 }
 
-fn block_gene_sum(
+/// Peak group-sum memory allowed across all aggregation workers.
+///
+/// Parallelism here is bounded by memory, not by cores: the column reads are
+/// cheap next to holding one full group-sum tensor per worker.
+const ACCUMULATOR_BUDGET_BYTES: usize = 1 << 30;
+
+/// Add one column block into an existing per-grouping accumulator.
+fn add_block_gene_sum(
+    sums: &mut [Vec<f64>],
     data_vec: &SparseIoVec,
     groupings: &[(&[usize], usize)],
     lb: usize,
     ub: usize,
     m: usize,
-) -> anyhow::Result<Vec<Vec<f64>>> {
+) -> anyhow::Result<()> {
     let csc = data_vec.read_columns_csc(lb..ub)?;
-    let mut sums: Vec<Vec<f64>> = groupings
-        .iter()
-        .map(|&(_, k)| vec![0.0f64; k * m])
-        .collect();
-
     for j in 0..csc.ncols() {
         let global = lb + j;
         let col = csc.col(j);
@@ -134,7 +162,7 @@ fn block_gene_sum(
             }
         }
     }
-    Ok(sums)
+    Ok(())
 }
 
 /// Convert a row-major `gene_sum` tensor (`k · m`) into a `m × k` mean-profile
