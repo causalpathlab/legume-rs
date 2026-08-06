@@ -23,8 +23,8 @@ pub fn accumulate_gene_sum(
     m: usize,
     block_size: usize,
 ) -> anyhow::Result<Vec<f64>> {
-    let (gs, _) = accumulate_gene_sum_pair(data_vec, labels, k, &[], 0, m, block_size)?;
-    Ok(gs)
+    let mut out = accumulate_gene_sum_multi(data_vec, &[(labels, k)], m, block_size)?;
+    Ok(out.pop().expect("one grouping in, one out"))
 }
 
 /// Like `accumulate_gene_sum` but accumulates two independent groupings
@@ -41,13 +41,37 @@ pub fn accumulate_gene_sum_pair(
     m: usize,
     block_size: usize,
 ) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
-    let n = labels_a.len();
-    if !labels_b.is_empty() {
+    if labels_b.is_empty() {
+        let sum_a = accumulate_gene_sum(data_vec, labels_a, k_a, m, block_size)?;
+        return Ok((sum_a, vec![0.0; k_b * m]));
+    }
+    let mut out =
+        accumulate_gene_sum_multi(data_vec, &[(labels_a, k_a), (labels_b, k_b)], m, block_size)?;
+    let sum_b = out.pop().expect("two groupings in, two out");
+    let sum_a = out.pop().expect("two groupings in, two out");
+    Ok((sum_a, sum_b))
+}
+
+/// Accumulate any number of independent groupings in one pass over the columns.
+///
+/// Reading the columns is the expensive part — it is the raw matrix off disk —
+/// so a caller that needs several partitions of the same cells (deconvolve pools
+/// over archetype granularities) must not re-stream the matrix per partition.
+/// Each grouping is `(labels, k)`; cells whose label is outside `0..k` are
+/// skipped, which is how callers park cells they mean to exclude.
+pub fn accumulate_gene_sum_multi(
+    data_vec: &SparseIoVec,
+    groupings: &[(&[usize], usize)],
+    m: usize,
+    block_size: usize,
+) -> anyhow::Result<Vec<Vec<f64>>> {
+    anyhow::ensure!(!groupings.is_empty(), "no groupings to accumulate");
+    let n = groupings[0].0.len();
+    for (labels, _) in groupings {
         anyhow::ensure!(
-            labels_b.len() == n,
-            "labels_a/labels_b length mismatch: {} vs {}",
-            n,
-            labels_b.len()
+            labels.len() == n,
+            "grouping length mismatch: {} vs {n}",
+            labels.len()
         );
     }
     let blocks: Vec<(usize, usize)> = (0..n)
@@ -55,39 +79,37 @@ pub fn accumulate_gene_sum_pair(
         .map(|lb| (lb, (lb + block_size).min(n)))
         .collect();
 
-    let per_block: Vec<(Vec<f64>, Vec<f64>)> = blocks
+    let per_block: Vec<Vec<Vec<f64>>> = blocks
         .par_iter()
-        .map(|&(lb, ub)| block_gene_sum(data_vec, labels_a, k_a, labels_b, k_b, lb, ub, m))
+        .map(|&(lb, ub)| block_gene_sum(data_vec, groupings, lb, ub, m))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let mut sum_a = vec![0.0f64; k_a * m];
-    let mut sum_b = vec![0.0f64; k_b * m];
-    for (a, b) in per_block {
-        for (acc, x) in sum_a.iter_mut().zip(a.iter()) {
-            *acc += x;
-        }
-        for (acc, x) in sum_b.iter_mut().zip(b.iter()) {
-            *acc += x;
+    let mut sums: Vec<Vec<f64>> = groupings
+        .iter()
+        .map(|&(_, k)| vec![0.0f64; k * m])
+        .collect();
+    for block in per_block {
+        for (acc, part) in sums.iter_mut().zip(block) {
+            for (a, x) in acc.iter_mut().zip(part.iter()) {
+                *a += x;
+            }
         }
     }
-    Ok((sum_a, sum_b))
+    Ok(sums)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn block_gene_sum(
     data_vec: &SparseIoVec,
-    labels_a: &[usize],
-    k_a: usize,
-    labels_b: &[usize],
-    k_b: usize,
+    groupings: &[(&[usize], usize)],
     lb: usize,
     ub: usize,
     m: usize,
-) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
+) -> anyhow::Result<Vec<Vec<f64>>> {
     let csc = data_vec.read_columns_csc(lb..ub)?;
-    let mut sum_a = vec![0.0f64; k_a * m];
-    let mut sum_b = vec![0.0f64; k_b * m];
-    let do_b = !labels_b.is_empty();
+    let mut sums: Vec<Vec<f64>> = groupings
+        .iter()
+        .map(|&(_, k)| vec![0.0f64; k * m])
+        .collect();
 
     for j in 0..csc.ncols() {
         let global = lb + j;
@@ -95,24 +117,18 @@ fn block_gene_sum(
         let rows = col.row_indices();
         let vals = col.values();
 
-        let kk_a = labels_a[global];
-        if kk_a < k_a {
-            let row = &mut sum_a[kk_a * m..(kk_a + 1) * m];
+        for (sum, &(labels, k)) in sums.iter_mut().zip(groupings) {
+            let kk = labels[global];
+            if kk >= k {
+                continue;
+            }
+            let row = &mut sum[kk * m..(kk + 1) * m];
             for (&g, &v) in rows.iter().zip(vals.iter()) {
                 row[g] += f64::from(v);
             }
         }
-        if do_b {
-            let kk_b = labels_b[global];
-            if kk_b < k_b {
-                let row = &mut sum_b[kk_b * m..(kk_b + 1) * m];
-                for (&g, &v) in rows.iter().zip(vals.iter()) {
-                    row[g] += f64::from(v);
-                }
-            }
-        }
     }
-    Ok((sum_a, sum_b))
+    Ok(sums)
 }
 
 /// Convert a row-major `gene_sum` tensor (`k · m`) into a `m × k` mean-profile

@@ -95,8 +95,9 @@ struct SampleState {
     zc: Vec<f32>,
     /// `R×D` full allocation, laid out `m*D + g`. Empty unless `keep_contrib`.
     contrib: Vec<f32>,
-    /// `C` fractions this sweep.
+    /// `C` fractions this sweep, and the abundance total they were scaled by.
     frac: Vec<f32>,
+    w_total: f32,
 }
 
 impl SampleState {
@@ -118,6 +119,7 @@ impl SampleState {
                 Vec::new()
             },
             frac: vec![0.0; c],
+            w_total: 0.0,
         }
     }
 
@@ -251,6 +253,7 @@ impl SampleState {
     fn fractions(&mut self, reference: &Reference) {
         let total: f32 = self.w.iter().sum();
         reference.contract(&self.w, &mut self.frac);
+        self.w_total = total;
         if total > 0.0 {
             for f in &mut self.frac {
                 *f /= total;
@@ -434,7 +437,7 @@ impl PosteriorAccum {
     }
 
     /// Draws collected by each chain, in order.
-    fn chain_lengths(&self) -> Vec<usize> {
+    pub fn chain_lengths(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.chain_starts.len());
         for (i, &start) in self.chain_starts.iter().enumerate() {
             let end = self
@@ -511,10 +514,6 @@ pub fn run_chain(
         Vec::new()
     };
 
-    if let Some(anch) = anchors.as_ref() {
-        anch.refresh(&mut reference.mu_gm, c);
-    }
-
     let total = cfg.warmup + cfg.draws * cfg.thin.max(1);
     let mut collected_here = 0usize;
     for it in 0..total {
@@ -564,14 +563,13 @@ pub fn run_chain(
                 frac_flat[si * c + ct] = st.frac[ct];
             }
             if collecting {
-                let mut abund = vec![0f32; c];
-                reference.contract(&st.w, &mut abund);
-                for (ct, &ab) in abund.iter().enumerate() {
+                for (ct, &f) in st.frac.iter().enumerate() {
                     let idx = si * c + ct;
-                    let frac = f64::from(st.frac[ct]);
+                    let frac = f64::from(f);
                     accum.frac_sum[idx] += frac;
                     accum.frac_sumsq[idx] += frac * frac;
-                    accum.abundance_sum[idx] += f64::from(ab);
+                    // The un-normalised contraction, without redoing it.
+                    accum.abundance_sum[idx] += frac * f64::from(st.w_total);
                 }
                 if collect_expr {
                     for ct in 0..c {
@@ -608,7 +606,7 @@ pub fn run_chain(
             anchors.as_ref().map_or(0.0, AnchorSampler::mean_drift),
         )?;
         if accum.n_collect > 0 {
-            monitor.checkpoint(it, &accum.frac_sum, &frac_flat, accum.n_collect)?;
+            monitor.checkpoint(it, &accum.frac_sum, accum.n_collect)?;
         }
         if it.is_multiple_of(100) {
             info!(
@@ -620,17 +618,24 @@ pub fn run_chain(
     Ok(anchors.map(|a| a.posterior_anchors(collected_here.max(1))))
 }
 
+/// The component axis carried through to the output: where each component sits,
+/// what it is called, and what kind of thing it is. With several partitions
+/// pooled these are the concatenation, so the table shows every partition that
+/// contributed.
+pub struct ComponentTable {
+    pub coords: Mat,
+    pub names: Vec<Box<str>>,
+    pub axis: super::reference::ComponentAxis,
+    pub units: super::reference::FractionUnits,
+}
+
 /// Turn the pooled draws into the reported posterior.
 ///
-/// `coords` and `comp_names` describe the component axis carried through to the
-/// output; with several partitions pooled they are the concatenation, so the
-/// archetype table shows every partition that contributed.
 pub fn finalize(
     accum: &PosteriorAccum,
     bulk: &Mat,
     type_rates: &Mat,
-    coords: Mat,
-    anchor_names: Vec<Box<str>>,
+    components: ComponentTable,
     celltype_names: Vec<Box<str>>,
 ) -> anyhow::Result<DeconvResult> {
     anyhow::ensure!(accum.n_collect > 0, "gibbs: no posterior draws collected");
@@ -678,8 +683,10 @@ pub fn finalize(
         fractions_hi,
         abundance_mean,
         expression,
-        anchors_post: coords,
-        anchor_names,
+        anchors_post: components.coords,
+        anchor_names: components.names,
+        anchor_axis: components.axis,
+        units: components.units,
         residual,
         celltype_names,
         convergence: diagnose(accum),
@@ -694,20 +701,26 @@ pub fn finalize(
 /// disagreement there means the partition itself is moving the answer.
 fn diagnose(accum: &PosteriorAccum) -> Vec<Convergence> {
     let (s, c) = (accum.s, accum.c);
-    let lengths = accum.chain_lengths();
+    // Chains usable for the between-chain comparison, found once rather than
+    // per reported scalar.
+    let usable: Vec<(usize, usize)> = accum
+        .chain_starts
+        .iter()
+        .zip(accum.chain_lengths())
+        .filter(|(_, len)| *len >= 2)
+        .map(|(&start, len)| (start, len))
+        .collect();
+    let between_chain = usable.len() > 1;
     let mut out = Vec::new();
-    let mut chain = Vec::new();
+    let mut chain = vec![0f32; accum.n_collect];
     for si in 0..s {
         for ct in 0..c {
-            let pull = |start: usize, len: usize, buf: &mut Vec<f32>| {
-                buf.clear();
-                buf.extend((0..len).map(|t| accum.trace[(start + t) * s * c + si * c + ct]));
-            };
-            let stat = if lengths.len() > 1 {
-                // Between-chain: pool the per-chain means/variances directly.
-                multi_chain_rhat(accum, &lengths, si, ct)
+            let stat = if between_chain {
+                multi_chain_rhat(accum, &usable, si, ct)
             } else {
-                pull(0, accum.n_collect, &mut chain);
+                for (t, v) in chain.iter_mut().enumerate() {
+                    *v = accum.trace[t * s * c + si * c + ct];
+                }
                 split_rhat_ess(&chain)
             };
             if let Some((rhat, ess)) = stat {
@@ -726,35 +739,28 @@ fn diagnose(accum: &PosteriorAccum) -> Vec<Convergence> {
 /// Gelman–Rubin R̂ across chains of possibly different lengths.
 fn multi_chain_rhat(
     accum: &PosteriorAccum,
-    lengths: &[usize],
+    usable: &[(usize, usize)],
     si: usize,
     ct: usize,
 ) -> Option<(f32, f32)> {
     let (s, c) = (accum.s, accum.c);
-    let usable: Vec<(usize, usize)> = accum
-        .chain_starts
-        .iter()
-        .zip(lengths)
-        .filter(|(_, &len)| len >= 2)
-        .map(|(&start, &len)| (start, len))
-        .collect();
     if usable.len() < 2 {
         return None;
     }
     let mut means = Vec::with_capacity(usable.len());
     let mut vars = Vec::with_capacity(usable.len());
     let mut total = 0usize;
-    for &(start, len) in &usable {
-        let mut sum = 0f64;
-        for t in 0..len {
-            sum += f64::from(accum.trace[(start + t) * s * c + si * c + ct]);
-        }
-        let mean = sum / len as f64;
-        let mut var = 0f64;
+    for &(start, len) in usable {
+        // One pass per chain: the trace is strided by S·C, so a second pass is a
+        // second sweep of cache misses over the whole buffer.
+        let (mut sum, mut sumsq) = (0f64, 0f64);
         for t in 0..len {
             let v = f64::from(accum.trace[(start + t) * s * c + si * c + ct]);
-            var += (v - mean).powi(2);
+            sum += v;
+            sumsq += v * v;
         }
+        let mean = sum / len as f64;
+        let var = (sumsq - sum * mean).max(0.0);
         means.push(mean);
         vars.push(var / (len as f64 - 1.0).max(1.0));
         total += len;

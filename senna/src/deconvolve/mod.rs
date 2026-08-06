@@ -41,7 +41,7 @@ use gibbs::{AnchorSampler, PosteriorAccum};
 use log::info;
 use matrix_util::common_io::mkdir_parent;
 use monitor::Monitor;
-use reference::{identity_readout, Reference};
+use reference::Reference;
 use source::EmbeddingSource;
 
 pub fn run(args: &DeconvolveArgs) -> Result<()> {
@@ -81,62 +81,52 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         ReferenceMode::Archetype => None,
     };
 
-    // 2. One chain per reference partition, all pooling into one posterior.
-    // The low-rank reference has nothing to partition, so it is a single chain.
-    let targets: Vec<usize> = match args.reference {
-        ReferenceMode::LowRank => vec![0],
-        ReferenceMode::Archetype => {
+    // 2. One chain per reference, all pooling into one posterior. The low-rank
+    // reference has nothing to partition, so it is a single chain; the archetype
+    // references are built together, because the parquet loads, the cell
+    // alignment and the streaming gene sums are the same for every granularity
+    // and must not be re-done per chain.
+    let references: Vec<Reference> = match prior.as_ref() {
+        Some(prior) => vec![Reference::low_rank(&src, prior, d)],
+        None => {
             anyhow::ensure!(
                 !args.archetypes.is_empty(),
                 "deconvolve: `--archetypes` needs at least one target"
             );
-            args.archetypes.clone()
+            archetypes::build_all(
+                &args.archetype_config(),
+                &src,
+                &bulk.genes,
+                &args.archetypes,
+            )?
         }
     };
+    let n_chains = references.len();
 
     let mut accum: Option<PosteriorAccum> = None;
     let mut monitor: Option<Monitor> = None;
     let mut celltype_names: Vec<Box<str>> = Vec::new();
     let mut comp_names: Vec<Box<str>> = Vec::new();
-    let mut comp_coords: Vec<Vec<f32>> = Vec::new();
+    let mut comp_coords: Vec<f32> = Vec::new();
+    let mut coord_dim = 0usize;
     let mut rates_sum: Option<Mat> = None;
+    let mut axis_units: Option<(reference::ComponentAxis, reference::FractionUnits)> = None;
 
-    for (chain, &target) in targets.iter().enumerate() {
-        let (mut reference, init_w) = match prior.as_ref() {
-            Some(prior) => {
-                let c = prior.mean.nrows();
-                let reference = Reference {
-                    mu_gm: vec![0.0; d * c],
-                    n_genes: d,
-                    n_comp: c,
-                    readout: identity_readout(c),
-                    coords: prior.mean.clone(),
-                    comp_names: prior.names.clone(),
-                    celltype_names: prior.names.clone(),
-                };
-                let init_w = project::init_fractions(&prior.mean, &sample_z, cfg.init_iters);
-                (reference, init_w)
-            }
+    for (chain, mut reference) in references.into_iter().enumerate() {
+        let init_w = match prior.as_ref() {
+            Some(prior) => project::init_fractions(&prior.mean, &sample_z, cfg.init_iters),
             None => {
-                let mut acfg = args.archetype_config();
-                acfg.target = target;
-                // A different seed per chain so the partitions are genuinely
-                // distinct draws, not the same clustering at another resolution.
-                acfg.seed = args.seed.wrapping_add(chain as u64 * 0x9E37_79B9);
-                let reference = archetypes::build(&acfg, &src, &bulk.genes)?;
-                let init_w = flat_init(&bulk.data, reference.n_comp);
-                (reference, init_w)
+                if args.frac_prior_shape.is_none() {
+                    cfg.a0 = auto_prior_shape(&bulk.data, reference.n_comp);
+                }
+                flat_init(&bulk.data, reference.n_comp)
             }
         };
-
-        if args.reference == ReferenceMode::Archetype && args.frac_prior_shape.is_none() {
-            cfg.a0 = auto_prior_shape(&bulk.data, reference.n_comp);
-        }
         info!(
             "deconvolve: chain {}/{} — {s} samples × {d} genes, {} components → {} cell types \
              ({:?} reference, a0 = {:.1})",
             chain + 1,
-            targets.len(),
+            n_chains,
             reference.n_comp,
             reference.n_types(),
             args.reference,
@@ -145,6 +135,7 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
 
         if accum.is_none() {
             celltype_names = reference.celltype_names.clone();
+            axis_units = Some((reference.axis, reference.units));
             accum = Some(PosteriorAccum::new(s, reference.n_types(), d));
             monitor = Some(Monitor::new(
                 args.monitor_config(),
@@ -162,6 +153,10 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         let anchor_sampler = prior
             .as_ref()
             .map(|p| AnchorSampler::new(&src, p, cfg.seed));
+        monitor
+            .as_mut()
+            .expect("monitor initialised above")
+            .begin_chain(chain);
         let posterior_anchors = gibbs::run_chain(
             &mut reference,
             &bulk.data,
@@ -176,13 +171,14 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
         // pooled partitions stay distinguishable. Anchors report their posterior
         // position; archetypes are fixed, so theirs is the reference coordinate.
         let coords = posterior_anchors.unwrap_or_else(|| reference.coords.clone());
+        coord_dim = coords.ncols();
         for m in 0..reference.n_comp {
-            comp_names.push(if targets.len() > 1 {
+            comp_names.push(if n_chains > 1 {
                 format!("c{chain}_{}", reference.comp_names[m]).into_boxed_str()
             } else {
                 reference.comp_names[m].clone()
             });
-            comp_coords.push(coords.row(m).iter().copied().collect());
+            comp_coords.extend(coords.row(m).iter().copied());
         }
 
         // Per-type rates for the residual report, averaged over the partitions
@@ -198,15 +194,23 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     if let Some(m) = monitor.as_mut() {
         m.finish()?;
     }
-    let type_rates = rates_sum.expect("at least one chain") / targets.len() as f32;
-    let h = comp_coords.first().map_or(0, Vec::len);
-    let coords = Mat::from_fn(comp_coords.len(), h, |i, j| comp_coords[i][j]);
+    let type_rates = rates_sum.expect("at least one chain") / n_chains as f32;
+    let coords = Mat::from_row_slice(
+        comp_coords.len() / coord_dim.max(1),
+        coord_dim,
+        &comp_coords,
+    );
+    let (axis, units) = axis_units.expect("at least one chain");
     let result = gibbs::finalize(
         &accum,
         &bulk.data,
         &type_rates,
-        coords,
-        comp_names,
+        gibbs::ComponentTable {
+            coords,
+            names: comp_names,
+            axis,
+            units,
+        },
         celltype_names,
     )?;
 
@@ -220,8 +224,8 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
             ReferenceMode::Archetype => "archetype",
         },
         n_components: result.anchor_names.len(),
-        n_chains: targets.len(),
-        fraction_units: fraction_units(args.reference),
+        n_chains,
+        fraction_units: result.units.as_str(),
         warmup: cfg.warmup,
         draws: cfg.draws,
         bulk_files: &args.bulk,
@@ -229,17 +233,6 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
     io::write_outputs(&out, &bulk.samples, &bulk.genes, &sample_z, &result, &meta)?;
     info!("senna deconvolve complete → {out}.*");
     Ok(())
-}
-
-/// Fractions are mRNA-mass shares when the reference profiles are normalised to
-/// sum to one over genes (the archetype mode), and cell shares when the
-/// per-type exposure carries the total transcript load (the low-rank mode).
-/// Recorded in the manifest so a units mismatch is not read as a model error.
-fn fraction_units(mode: ReferenceMode) -> &'static str {
-    match mode {
-        ReferenceMode::LowRank => "cell",
-        ReferenceMode::Archetype => "mrna",
-    }
 }
 
 /// Per-component prior shape for the archetype reference: two standard
@@ -251,21 +244,16 @@ fn fraction_units(mode: ReferenceMode) -> &'static str {
 /// scale is `sqrt(N/R)` — which is why the default tracks depth instead of being
 /// a constant.
 fn auto_prior_shape(bulk: &Mat, r: usize) -> f32 {
-    let s = bulk.ncols().max(1);
-    let mean_total: f64 = (0..bulk.ncols())
-        .map(|si| f64::from(bulk.column(si).iter().sum::<f32>()))
-        .sum::<f64>()
-        / s as f64;
-    let per_component = (mean_total / r as f64).max(0.0);
-    (2.0 * per_component.sqrt()).max(1.0) as f32
+    let mean_total = f64::from(bulk.sum()) / bulk.ncols().max(1) as f64;
+    (2.0 * (mean_total / r as f64).sqrt()).max(1.0) as f32
 }
 
 /// Warm start with each sample's counts spread evenly over the components.
 /// Archetype profiles sum to one over genes, so an abundance is on the scale of
 /// allocated counts and `total/R` is the uniform-composition point.
 fn flat_init(bulk: &Mat, r: usize) -> Mat {
-    Mat::from_fn(bulk.ncols(), r, |si, _| {
-        let total: f32 = bulk.column(si).iter().sum();
-        (total / r as f32).max(1e-6)
-    })
+    let totals: Vec<f32> = (0..bulk.ncols())
+        .map(|si| bulk.column(si).iter().sum::<f32>() / r as f32)
+        .collect();
+    Mat::from_fn(bulk.ncols(), r, |si, _| totals[si].max(1e-6))
 }

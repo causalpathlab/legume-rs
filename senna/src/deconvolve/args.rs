@@ -345,7 +345,6 @@ pub struct AnchorConfig {
 pub struct ArchetypeConfig<'a> {
     pub sc_data: &'a [Box<str>],
     pub annotation: Option<&'a str>,
-    pub target: usize,
     pub min_cells: usize,
     pub shrink: f32,
     pub cells: Option<&'a str>,
@@ -385,7 +384,6 @@ impl DeconvolveArgs {
         ArchetypeConfig {
             sc_data: &self.sc_data,
             annotation: self.annotation.as_deref(),
-            target: 0, // set per chain by the caller
             min_cells: self.archetype_min_cells,
             shrink: self.archetype_shrink,
             cells: self.archetype_cells.as_deref(),
