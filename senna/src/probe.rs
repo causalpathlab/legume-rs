@@ -317,6 +317,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
             query_name_opts: &qopts,
             metadata: &metadata,
             head,
+            need_llik: true,
         })
     };
 
