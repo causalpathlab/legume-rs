@@ -22,8 +22,9 @@ pub struct EvalTopicArgs {
         value_delimiter = ',',
         help = "Input data files (.zarr or .h5)",
         long_help = "Sparse backends to embed with the pre-trained model.\n\
-                     Gene sets may differ from training;\n\
-                     missing genes are padded and batch delta is re-estimated from the frozen dictionary."
+                     Gene sets may differ from training.\n\
+                     Missing genes are padded.\n\
+                     Batch delta is re-estimated from the frozen dictionary."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
@@ -53,7 +54,8 @@ pub struct EvalTopicArgs {
         long,
         value_delimiter = ',',
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+        long_help = "Each file lists a batch label per cell.\n\
+                     The cells come in the same order as its matching data file.\n\
                      Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,

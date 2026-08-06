@@ -118,8 +118,8 @@ pub struct PseudotimeArgs {
     #[arg(
         long = "from",
         help = "Run manifest from `senna topic|masked-topic|joint-topic|svd|joint-svd`",
-        long_help = "When given,\n\
-                     latent is read from the manifest's outputs.latent path (resolved relative to the manifest directory).\n\
+        long_help = "When given, latent is read from the manifest's outputs.latent path.\n\
+                     That path resolves relative to the manifest directory.\n\
                      One of --latent or --from is required."
     )]
     from: Option<Box<str>>,

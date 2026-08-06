@@ -73,7 +73,8 @@ pub struct ClusteringArgs {
         long_help = "Clustering algorithm:\n\
                      \n\
                      - kmeans: K-means clustering (default)\n\
-                     Fast, works well for spherical clusters Requires specifying k\n\
+                     Fast, and works well for spherical clusters.\n\
+                     Requires specifying k.\n\
                      \n\
                      - leiden: Leiden algorithm (graph-based)\n\
                      Finds communities in the cell similarity graph,\n\
@@ -81,8 +82,9 @@ pub struct ClusteringArgs {
                      Use --knn and --resolution to tune.\n\
                      \n\
                      - hsblock: Hierarchical Stochastic Block Model (graph-based)\n\
-                     Collapsed Gibbs sampling + greedy refinement Number of clusters = 2^(tree_depth-1) Use --knn,\n\
-                     --tree-depth, and --edge-scale to tune"
+                     Collapsed Gibbs sampling plus greedy refinement.\n\
+                     Number of clusters = 2^(tree_depth-1).\n\
+                     Use --knn, --tree-depth, and --edge-scale to tune"
     )]
     method: ClusterMethodCli,
 
@@ -100,7 +102,8 @@ pub struct ClusteringArgs {
         long,
         default_value_t = 1.0,
         help = "Resolution parameter for Leiden modularity",
-        long_help = "Resolution parameter for Leiden modularity (higher = more clusters, default 1.0)."
+        long_help = "Resolution parameter for Leiden modularity.\n\
+                     Higher gives more clusters. The default is 1.0."
     )]
     resolution: f64,
 
@@ -122,8 +125,9 @@ pub struct ClusteringArgs {
         long,
         default_value_t = 100.0,
         help = "Edge weight scale for HSBM (default 100.0)",
-        long_help = "Edge weight scale for HSBM (default 100.0);\n\
-                     scales fuzzy KNN weights to count-like values expected by the graph-tool backend."
+        long_help = "Edge weight scale for HSBM (default 100.0).\n\
+                     It scales fuzzy KNN weights to count-like values.\n\
+                     Those are what the graph-tool backend expects."
     )]
     edge_scale: f64,
 

@@ -13,11 +13,11 @@ pub struct AnnotateArgs {
     #[arg(
         short = 'c',
         long = "clusters",
-        help = "Cluster parquet from `senna cluster` (cells × 1 cluster column,",
-        long_help = "Cluster parquet from `senna cluster` (cells × 1 cluster column, `NaN` for unassigned).\n\
-                     When omitted,\n\
-                     the path is read from `manifest.cluster.clusters` if populated;\n\
-                     otherwise annotate runs Leiden internally on the latent matrix from the manifest."
+        help = "Cluster parquet from `senna cluster` (cells × 1 cluster column)",
+        long_help = "Cluster parquet from `senna cluster`.\n\
+                     It is cells × 1 cluster column, with `NaN` for unassigned.\n\
+                     When omitted, the path comes from `manifest.cluster.clusters`.\n\
+                     If that is empty, annotate runs Leiden on the latent matrix."
     )]
     pub clusters: Option<Box<str>>,
 
@@ -25,8 +25,9 @@ pub struct AnnotateArgs {
         long = "knn",
         default_value_t = 15,
         help = "Nearest neighbors for the internal Leiden cosine-KNN graph",
-        long_help = "Number of nearest neighbors for the cosine-KNN graph used by the internal Leiden clustering.\n\
-                     Ignored when --clusters / manifest cluster path is provided."
+        long_help = "Number of nearest neighbors for the cosine-KNN graph.\n\
+                     The graph feeds the internal Leiden clustering.\n\
+                     Ignored when --clusters or the manifest cluster path is given."
     )]
     pub knn: usize,
 
@@ -158,7 +159,8 @@ pub struct AnnotateArgs {
         long_help = "Number of PB-level sample permutations for the correlation-preserving null:\n\
                      shuffle pb_membership, recompute β̃ = pb_gene · shuffled,\n\
                      take ES per permutation, then pool across clusters.\n\
-                     Set 0 to fall back to row-randomization-based p-values (useful for small nClusters)."
+                     Set 0 to fall back to row-randomization-based p-values.\n\
+                     That fallback is useful when there are few clusters."
     )]
     pub num_perm: usize,
 
@@ -285,12 +287,13 @@ pub struct AnnotateArgs {
                      The default instead draws within gene-abundance strata, as GOseq does.\n\
                      NOT recommended — this restores a known bias.\n\
                      \n\
-                     The enrichment score is standardized against random gene sets,\n\
-                     and that standardization is the decision variable (the label is the argmax over celltypes of it).\n\
+                     The enrichment score is standardized against random gene sets.\n\
+                     That standardization is the decision variable.\n\
+                     The label is its argmax over celltypes.\n\
                      A uniform draw is ~30% undetected genes.\n\
                      Those sort to the bottom of every ranking, and can never be enriched.\n\
-                     So the null is trivially easy to beat. Worse,\n\
-                     it is easy to beat by an amount that DIFFERS PER CELLTYPE,\n\
+                     So the null is trivially easy to beat.\n\
+                     Worse, it is easy to beat by an amount that DIFFERS PER CELLTYPE,\n\
                      because panels differ in how well-expressed their markers are.\n\
                      \n\
                      Measured with the uniform null:\n\
@@ -344,18 +347,20 @@ pub struct AnnotateArgs {
         long = "boot-num-draws",
         default_value_t = 100,
         help = "Random gene sets per bootstrap draw for the restandardization moments",
-        long_help = "Random gene sets drawn per bootstrap draw, per celltype,\n\
-                     for the restandardization moments.\n\
+        long_help = "Random gene sets per bootstrap draw, per celltype.\n\
+                     They supply the restandardization moments.\n\
                      \n\
-                     This is the cost centre of the bootstrap (n_boot x C x this x K enrichment walks).\n\
+                     This is the cost centre of the bootstrap.\n\
+                     It costs n_boot x C x this x K enrichment walks.\n\
                      It cannot be replaced by the observed row-randomization null:\n\
-                     that one uses binary weights at the panel's nominal size,\n\
-                     while a resampled panel has ~0.632x the distinct genes AND a dispersed weight multiset.\n\
-                     Standardizing a resampled score against an unmatched null inflates small panels —\n\
-                     which is precisely the winner's curse the bootstrap exists to remove.\n\
+                     that one uses binary weights at the panel's nominal size.\n\
+                     A resampled panel has ~0.632x the distinct genes,\n\
+                     and a dispersed weight multiset besides.\n\
+                     Standardizing against an unmatched null inflates small panels.\n\
+                     That is precisely the winner's curse the bootstrap exists to remove.\n\
                      \n\
-                     The moments only need ~10% relative accuracy on the SD, so 100 is plenty;\n\
-                     lower it first if the bootstrap is too slow"
+                     The moments only need ~10% relative accuracy on the SD.\n\
+                     So 100 is plenty; lower it first if the bootstrap is too slow"
     )]
     pub boot_num_draws: usize,
 
@@ -363,12 +368,14 @@ pub struct AnnotateArgs {
         long = "min-support",
         default_value_t = 0.5,
         help = "Minimum fraction of resamples the top label must win for a cluster to be called",
-        long_help = "Minimum fraction of resamples the top label must win for the cluster to be called at all.\n\
+        long_help = "Minimum fraction of resamples the top label must win.\n\
+                     Below this bar the cluster is not called at all.\n\
                      \n\
-                     NOTE this bar is NOT scale-free. With C celltypes,\n\
-                     chance agreement is 1/C,\n\
-                     so 0.5 sits at ~3x chance on a 6-type panel and ~12x chance on a 24-type one —\n\
-                     the same value is a different test on different panels,\n\
+                     NOTE this bar is NOT scale-free.\n\
+                     With C celltypes, chance agreement is 1/C.\n\
+                     So 0.5 sits at ~3x chance on a 6-type panel,\n\
+                     and at ~12x chance on a 24-type one.\n\
+                     The same value is a different test on different panels,\n\
                      and their abstention rates are not comparable.\n\
                      --abstain-separable (a sign test) avoids that"
     )]
@@ -427,12 +434,12 @@ pub struct AnnotateProjectionArgs {
         long = "from",
         required = true,
         help = "Run manifest from a co-embedding run (`senna bge|fne|resolve-embedding-space`)",
-        long_help = "Run manifest with a co-embedded gene space — `senna bge`, `fne`,\n\
-                     or `resolve-embedding-space`.\n\
-                     Reads `outputs.feature_embedding` + `outputs.cell_embedding`,\n\
-                     falling back to `outputs.latent` for the cell side on plain bge/fne.\n\
-                     topic/svd runs have no genes-on-the-cell-manifold embedding —\n\
-                     use `annotate-by-enrichment` for those."
+        long_help = "Run manifest with a co-embedded gene space.\n\
+                     That means `senna bge`, `fne`, or `resolve-embedding-space`.\n\
+                     Reads `outputs.feature_embedding` + `outputs.cell_embedding`.\n\
+                     It falls back to `outputs.latent` for the cell side on plain bge/fne.\n\
+                     topic/svd runs have no genes-on-the-cell-manifold embedding.\n\
+                     Use `annotate-by-enrichment` for those."
     )]
     pub from: Box<str>,
 
@@ -486,11 +493,11 @@ pub struct AnnotateProjectionArgs {
         long_help = "Minimum usable markers before a cell type is allowed to compete.\n\
                      \n\
                      A type below this is not weakly located, it is UNLOCATED.\n\
-                     The mean of one or two points has no direction worth the name,\n\
-                     and a centroid built from too few markers lands short —\n\
-                     near the middle of the cell cloud,\n\
-                     where it is close to EVERY cell at once. It does not compete weakly;\n\
-                     it becomes a magnet and takes the dataset.\n\
+                     The mean of one or two points has no direction worth the name.\n\
+                     A centroid built from too few markers lands short.\n\
+                     It sits near the middle of the cell cloud,\n\
+                     where it is close to EVERY cell at once.\n\
+                     It does not compete weakly; it becomes a magnet and takes over.\n\
                      \n\
                      A dropped type keeps its column in every output.\n\
                      It simply never wins a cell.\n\
@@ -569,14 +576,14 @@ pub struct AnnotateProjectionArgs {
         help = "Marker-panel permutation null (the BIAS guard). 0 = off; try 200",
         long_help = "Marker-panel permutation null — the BIAS guard.\n\
                      \n\
-                     Puts each type on trial:\n\
-                     replace ONLY its markers with the same number of random genes:\n\
-                     same IDF weights, matched on gene norm, drawn from the live marker pool,\n\
-                     leave every rival type real,\n\
-                     and ask whether its own genes place its prototype any better than random ones would.\n\
+                     Puts each type on trial.\n\
+                     Replace ONLY its markers with the same number of random genes:\n\
+                     same IDF weights, matched on gene norm, from the live marker pool.\n\
+                     Leave every rival type real.\n\
+                     Then ask if its own genes place its prototype better than random.\n\
                      \n\
-                     The bootstrap only measures VARIANCE,\n\
-                     so a type whose markers are simply wrong comes back perfectly stable,\n\
+                     The bootstrap only measures VARIANCE.\n\
+                     A type whose markers are simply wrong comes back perfectly stable,\n\
                      and looks like the most confident call in the run.\n\
                      This is what catches that.\n\
                      \n\
@@ -597,13 +604,16 @@ pub struct AnnotateProjectionArgs {
                      That shows what support looks like on an uninformative panel.\n\
                      \n\
                      This replaces an arbitrary bar with a calibrated one.\n\
-                     --min-support 0.5 is not scale-free: with C types, chance agreement is 1/C,\n\
-                     so 0.5 sits at 3x chance on a 6-type panel and 12x on a 24-type one —\n\
-                     the same flag is a different test on different panels.\n\
+                     --min-support 0.5 is not scale-free.\n\
+                     With C types, chance agreement is 1/C.\n\
+                     So 0.5 sits at 3x chance on a 6-type panel,\n\
+                     and at 12x on a 24-type one.\n\
+                     The same flag is a different test on different panels.\n\
                      An FDR means the same thing everywhere.\n\
                      \n\
-                     0 = off; needs the bootstrap. Reuses the bootstrap's cached partitions,\n\
-                     so the cost is the cheap half of a replicate, not a re-clustering.\n\
+                     0 = off; needs the bootstrap.\n\
+                     It reuses the bootstrap's cached partitions.\n\
+                     So the cost is the cheap half of a replicate, not a re-clustering.\n\
                      Adds support_p / support_q / null_support to {out}.annot.parquet"
     )]
     pub support_perm: usize,
@@ -614,14 +624,15 @@ pub struct AnnotateProjectionArgs {
         long_help = "Turn OFF the stability bootstrap and ship a bare point estimate.\n\
                      \n\
                      The bootstrap is ON by default.\n\
-                     Each draw resamples every type's marker panel with replacement AND re-derives the clustering;\n\
-                     the consensus is what ships.\n\
-                     So every call carries the fraction of resamples that agreed on it,\n\
-                     and a call that cannot hold up across them abstains rather than being printed.\n\
+                     Each draw resamples every type's marker panel with replacement.\n\
+                     It also re-derives the clustering.\n\
+                     The consensus is what ships.\n\
+                     So every call carries the fraction of resamples that agreed on it.\n\
+                     A call that cannot hold up across them abstains.\n\
                      \n\
                      Without it, `argmin` over marker centroids always returns something,\n\
-                     and returns it with no error bar. Measured:\n\
-                     28.2% of cells were assigned to types the tissue does not contain,\n\
+                     and returns it with no error bar.\n\
+                     Measured: 28.2% of cells got types the tissue does not contain,\n\
                      against 2.4% with it on"
     )]
     pub no_bootstrap_markers: bool,
@@ -655,15 +666,19 @@ pub struct AnnotateProjectionArgs {
         long = "min-support",
         default_value_t = 0.5,
         help = "Minimum fraction of resamples the top label must win to be called",
-        long_help = "Minimum fraction of resamples the top label must win for the cell to be called at all.\n\
+        long_help = "Minimum fraction of resamples the top label must win.\n\
+                     Below this bar the cell is not called at all.\n\
                      \n\
-                     NOTE this bar is NOT scale-free. With C types, chance agreement is 1/C,\n\
-                     so 0.5 sits at ~3x chance on a 6-type panel and ~12x chance on a 24-type one —\n\
-                     the same value is a different test on different panels,\n\
+                     NOTE this bar is NOT scale-free.\n\
+                     With C types, chance agreement is 1/C.\n\
+                     So 0.5 sits at ~3x chance on a 6-type panel,\n\
+                     and at ~12x chance on a 24-type one.\n\
+                     The same value is a different test on different panels,\n\
                      and their abstention rates are not comparable.\n\
                      \n\
-                     --abstain-separable (a sign test) and --support-perm (a calibrated FDR)\n\
-                     both avoid that"
+                     Two flags avoid that.\n\
+                     --abstain-separable is a sign test.\n\
+                     --support-perm is a calibrated FDR."
     )]
     pub min_support: f32,
 
@@ -711,11 +726,13 @@ pub struct AnnotateProjectionArgs {
         long = "max-set-size",
         default_value_t = 3,
         help = "Largest `label_set` worth printing (a 4-way tie is not an annotation)",
-        long_help = "Largest `label_set` worth printing.\n\n\
-            `HSPC/LMPP` is an annotation; a four-way tie is not.\n\
-            Past a point a set stops narrowing anything down.\n\
-            It starts laundering \"we don't know\" as though it were a finding.\n\n\
-            A cell that needs more labels than this to reach --set-coverage is left unassigned"
+        long_help = "Largest `label_set` worth printing.\n\
+                     \n\
+                     `HSPC/LMPP` is an annotation; a four-way tie is not.\n\
+                     Past a point a set stops narrowing anything down.\n\
+                     It starts laundering \"we don't know\" as though it were a finding.\n\
+                     \n\
+                     A cell needing more than this to reach --set-coverage is unassigned"
     )]
     pub max_set_size: usize,
 
@@ -748,7 +765,7 @@ pub struct AnnotateOntologyArgs {
     #[arg(
         long = "label-cl",
         required = true,
-        help = "Curated `label<TAB>CL:id` TSV mapping each marker celltype to a Cell Ontology term"
+        help = "Curated `label<TAB>CL:id` TSV mapping celltypes to Cell Ontology terms"
     )]
     pub label_cl: Box<str>,
 
@@ -757,8 +774,8 @@ pub struct AnnotateOntologyArgs {
         required = true,
         help = "Cell Ontology OBO file (e.g. cl-basic.obo)",
         long_help = "Cell Ontology OBO file.\n\
-                     Fetch the basic release with:\n\
-                     \x20 curl -sSL https://github.com/obophenotype/cell-ontology/releases/latest/download/cl-basic.obo -o cl-basic.obo"
+                     Download `cl-basic.obo` from the latest cell-ontology release:\n\
+                     \x20 https://github.com/obophenotype/cell-ontology/releases"
     )]
     pub obo: Box<str>,
 
@@ -772,15 +789,15 @@ pub struct AnnotateOntologyArgs {
     #[arg(
         long = "fdr-q",
         default_value_t = 0.1,
-        help = "Per-level selective-FDR target (TreeBH); lower → descends less,\n\
-                abstains more"
+        help = "Per-level selective-FDR target (TreeBH).\n\
+                Lower → descends less, abstains more"
     )]
     pub fdr_q: f64,
 
     #[arg(
         long = "by",
         default_value_t = false,
-        help = "Benjamini–Yekutieli within families (valid under any dependence; more conservative)"
+        help = "Benjamini–Yekutieli within families (any dependence; more conservative)"
     )]
     pub by: bool,
 

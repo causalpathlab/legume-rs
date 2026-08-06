@@ -109,18 +109,20 @@ pub struct BgeArgs {
         long = "gate-ibp-alpha",
         help = "Truncated-IBP concentration for the gate's per-dim inclusion ladder;\n\
                 unset = auto",
-        long_help = "Concentration alpha of the truncated Indian Buffet Process whose\n\
-                     ladder tilts the feature gate: dim h carries a fixed logit\n\
-                     offset h * ln(alpha/(alpha+1)), so later dims must earn their\n\
-                     inclusion against a steeper prior. Chosen, never fitted.\n\
+        long_help = "Concentration alpha of the truncated Indian Buffet Process.\n\
+                     Its ladder tilts the feature gate.\n\
+                     Dim h carries a fixed logit offset h * ln(alpha/(alpha+1)).\n\
+                     So later dims must earn inclusion against a steeper prior.\n\
+                     Chosen, never fitted.\n\
                      \n\
-                     Unset (the default) derives alpha from --embedding-dim so the\n\
-                     ladder spans 4 logits end to end, leaving the last dim at the\n\
-                     sigmoid's most responsive point rather than frozen.\n\
+                     Unset (the default) derives alpha from --embedding-dim.\n\
+                     The ladder then spans 4 logits end to end.\n\
+                     That leaves the last dim at the sigmoid's most responsive point,\n\
+                     rather than frozen.\n\
                      \n\
-                     SMALLER alpha means a steeper ladder and more sparsity. This\n\
-                     replaced a KL toward a Beta(1,9) inclusion prior, which had no\n\
-                     natural weight under bge's noise-contrastive objective."
+                     SMALLER alpha means a steeper ladder and more sparsity.\n\
+                     This replaced a KL toward a Beta(1,9) inclusion prior.\n\
+                     It had no natural weight under bge's noise-contrastive objective."
     )]
     gate_ibp_alpha: Option<f64>,
 
@@ -133,9 +135,10 @@ pub struct BgeArgs {
                      Controls what shapes the feature dictionary in phase 1;\n\
                      phase 2 ALWAYS analytically projects every cell,\n\
                      so the per-cell embedding output is unaffected.\n\
-                     k=0 (default) → suppress the cell axis entirely (pure-pb: E_feat from pb aggregates only — fastest).\n\
-                     1≤k<n_cells → keep ≤k cells per pb-sample at each collapse level (union),\n\
-                     cutting the phase-1 step budget while preserving rare-cell coverage.\n\
+                     k=0 (default) → suppress the cell axis entirely.\n\
+                     This is pure-pb: E_feat from pb aggregates only, and fastest.\n\
+                     1≤k<n_cells → keep ≤k cells per pb-sample at each level (union).\n\
+                     That cuts the phase-1 step budget, preserving rare-cell coverage.\n\
                      k≥n_cells → all cells (legacy; slowest).",
         hide = true
     )]
@@ -249,15 +252,18 @@ pub struct BgeArgs {
         long,
         default_value_t = 0.0,
         help = "L2 penalty λ on E_feat (row-mean of ‖e_d‖²). Default 0 (off).",
-        long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}:\n\
-                     adds λ · mean_d ‖e_d‖² to the per-step composite loss —\n\
-                     summed over the H latent dims, averaged over the D rows,\n\
-                     so λ stays scale-invariant across D but not diluted by H.\n\
-                     E_feat is largely self-bounded under the NCE +\n\
-                     analytical-projection setup, hence the default of 0 (off).\n\
-                     Raise it if E_feat drifts on long/deep runs. Note this penalty\n\
-                     was previously divided by H as well, which made it\n\
-                     ~H× weaker than the same λ buys today."
+        long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}.\n\
+                     It adds λ · mean_d ‖e_d‖² to the per-step composite loss.\n\
+                     The norm is summed over the H latent dims.\n\
+                     The mean is taken over the D rows.\n\
+                     So λ stays scale-invariant across D, but is not diluted by H.\n\
+                     \n\
+                     E_feat is largely self-bounded under the NCE setup,\n\
+                     with its analytical projection, hence the default of 0 (off).\n\
+                     Raise it if E_feat drifts on long/deep runs.\n\
+                     \n\
+                     Note this penalty was previously divided by H as well.\n\
+                     That made it ~H× weaker than the same λ buys today."
     )]
     feature_embedding_l2: f32,
 
@@ -265,7 +271,8 @@ pub struct BgeArgs {
         long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay (all params). Default 0.0 = off.",
-        long_help = "AdamW decoupled weight decay applied uniformly to every parameter (E_feat, b_feat, per-axis heads).\n\
+        long_help = "AdamW decoupled weight decay, applied uniformly to every parameter.\n\
+                     That covers E_feat, b_feat, and the per-axis heads.\n\
                      Per-step post-update shrinkage; doesn't enter the backward graph.\n\
                      Default 0.0 (off — plain Adam despite the optimizer name)."
     )]
@@ -284,7 +291,8 @@ pub struct BgeArgs {
         long,
         help = "Cells per block for column I/O / streaming (omit for auto).",
         long_help = "Cells per parallel block for streaming column-block I/O.\n\
-                     Omit for auto-scaling (clamps to 100 for large feature counts — slow on rotational disks).\n\
+                     Omit for auto-scaling, which clamps to 100 for large feature counts.\n\
+                     That is slow on rotational disks.\n\
                      Pass 1024+ when you have RAM, especially without --preload-data.",
         hide = true
     )]

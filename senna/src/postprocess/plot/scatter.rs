@@ -110,8 +110,9 @@ pub struct PlotArgs {
     #[arg(
         long,
         help = "Annotation argmax TSV from `senna annotate-by-enrichment`",
-        long_help = "Annotation argmax TSV from `senna annotate-by-enrichment`\n\
-                     (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax."
+        long_help = "Annotation argmax TSV from `senna annotate-by-enrichment`.\n\
+                     Columns are cell\\tcell_type\\tprobability.\n\
+                     Defaults to the manifest's annotate.argmax."
     )]
     pub annotation: Option<Box<str>>,
 
@@ -216,10 +217,11 @@ pub struct PlotArgs {
         long,
         default_value_t = 0.95,
         help = "Fraction of closest-to-median points used for each hull (1.0 = all)",
-        long_help = "Only applies when --hull is enabled. For each group,\n\
-                     keep only the {coverage} fraction of points that are nearest the coordinate-wise median,\n\
-                     Euclidean, before computing the hull.\n\
-                     Strips a few fringe cells so one outlier can't drag the polygon across the plot.\n\
+        long_help = "Only applies when --hull is enabled.\n\
+                     For each group, keep only the points nearest the median.\n\
+                     The median is coordinate-wise; the distance is Euclidean.\n\
+                     {coverage} is the fraction kept, before computing the hull.\n\
+                     Strips a few fringe cells so one outlier can't drag the polygon.\n\
                      Set to 1.0 to use every point."
     )]
     pub hull_coverage: f32,
