@@ -2,9 +2,9 @@
 
 use super::anchors::AnchorPrior;
 use super::args::SamplerConfig;
-use super::gibbs::{finalize, run_chain, AnchorSampler, PosteriorAccum};
+use super::gibbs::{finalize, run_chain, AnchorSampler, ComponentTable, PosteriorAccum};
 use super::monitor::Monitor;
-use super::reference::{identity_readout, Reference};
+use super::reference::{ComponentAxis, FractionUnits, Reference};
 use super::result::split_rhat_ess;
 use super::source::EmbeddingSource;
 use crate::embed_common::Mat;
@@ -85,20 +85,6 @@ fn cfg() -> SamplerConfig {
     cfg_tau(1.0)
 }
 
-/// Low-rank reference shell; `run_gibbs` fills `mu_gm` from the anchors.
-fn lowrank_reference(prior: &AnchorPrior, d: usize) -> Reference {
-    let c = prior.mean.nrows();
-    Reference {
-        mu_gm: vec![0.0; d * c],
-        n_genes: d,
-        n_comp: c,
-        readout: identity_readout(c),
-        coords: prior.mean.clone(),
-        comp_names: prior.names.clone(),
-        celltype_names: prior.names.clone(),
-    }
-}
-
 /// Run the low-rank sampler end to end on the synthetic problem.
 fn run_lowrank(
     src: &EmbeddingSource,
@@ -107,7 +93,7 @@ fn run_lowrank(
     cfg: &SamplerConfig,
 ) -> super::result::DeconvResult {
     let (s, c) = (bulk.ncols(), prior.mean.nrows());
-    let mut reference = lowrank_reference(prior, bulk.nrows());
+    let mut reference = Reference::low_rank(src, prior, bulk.nrows());
     let init_w = Mat::from_element(s, c, 1.0); // neutral start
     let anchors = AnchorSampler::new(src, prior, cfg.seed);
     drive(&mut reference, bulk, &init_w, cfg, Some(anchors))
@@ -138,8 +124,12 @@ fn drive(
         &accum,
         bulk,
         &rates,
-        reference.coords.clone(),
-        reference.comp_names.clone(),
+        ComponentTable {
+            coords: reference.coords.clone(),
+            names: reference.comp_names.clone(),
+            axis: reference.axis,
+            units: reference.units,
+        },
         reference.celltype_names.clone(),
     )
     .unwrap()
@@ -300,6 +290,8 @@ fn archetype_problem(dup: bool) -> (Reference, Mat, Mat) {
         coords: Mat::zeros(r, 2),
         comp_names: (0..r).map(|m| format!("a{m}").into_boxed_str()).collect(),
         celltype_names: (0..c).map(|ct| format!("T{ct}").into_boxed_str()).collect(),
+        units: FractionUnits::Mrna,
+        axis: ComponentAxis::Archetype,
     };
 
     // True fractions at the type level.
@@ -374,22 +366,15 @@ fn archetype_expression_conserves_counts() {
 ///////////////////////////
 
 #[test]
-fn split_rhat_flags_drift_and_passes_stationary() {
-    // A chain drifting from 0 toward 1 must fail; white noise must not.
+fn diagnostics_guard_and_wiring() {
+    // The estimators themselves are mcmc-util's and tested there; what is ours
+    // is the short-chain guard and that a drifting chain reaches them.
+    assert!(
+        split_rhat_ess(&[0.1, 0.2, 0.3]).is_none(),
+        "too few draws should yield no diagnostic"
+    );
     let drifting: Vec<f32> = (0..400).map(|t| t as f32 / 400.0).collect();
-    let (rhat_drift, _) = split_rhat_ess(&drifting).expect("enough draws");
-    assert!(
-        rhat_drift > 1.05,
-        "split-R̂ missed a drifting chain: {rhat_drift:.3}"
-    );
-
-    let stationary: Vec<f32> = (0..400)
-        .map(|t| (((t * 37) % 101) as f32 / 101.0) - 0.5)
-        .collect();
-    let (rhat_flat, ess) = split_rhat_ess(&stationary).expect("enough draws");
-    assert!(
-        rhat_flat < 1.05,
-        "split-R̂ flagged a stationary chain: {rhat_flat:.3}"
-    );
-    assert!(ess > 1.0, "ESS should be positive, got {ess}");
+    let (rhat, ess) = split_rhat_ess(&drifting).expect("enough draws");
+    assert!(rhat > 1.05, "split-R̂ missed a drifting chain: {rhat:.3}");
+    assert!(ess > 0.0, "ESS should be positive, got {ess}");
 }

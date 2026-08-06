@@ -62,16 +62,12 @@ pub fn write_outputs(
         (Some(sample_names), Some("sample")),
         Some(&h_names),
     )?;
-    // Rows are cell types in the low-rank mode and archetypes in the other, so
-    // the row-name column is labelled by what the rows actually are.
-    let anchor_corner = if result.anchor_names.len() == ct.len() {
-        "celltype"
-    } else {
-        "archetype"
-    };
     result.anchors_post.to_parquet_with_names(
         &format!("{out}.anchors.parquet"),
-        (Some(&result.anchor_names), Some(anchor_corner)),
+        (
+            Some(&result.anchor_names),
+            Some(result.anchor_axis.corner()),
+        ),
         Some(&h_names),
     )?;
 
@@ -102,7 +98,7 @@ pub fn write_outputs(
 }
 
 /// Wide `sample × celltype` TSV of a matrix.
-fn write_wide_tsv(
+pub(super) fn write_wide_tsv(
     path: &str,
     corner: &str,
     rows: &[Box<str>],

@@ -210,6 +210,27 @@ pub struct BulkDataOut {
 /// the naming signature usually lives on only one side (a bare-symbol reference
 /// carries no `_`, so by itself it sniffs as `Exact` and the bridge is never
 /// built). Locus-style and mixed axes ride the same path.
+/// Pick the naming rule that bridges two gene axes.
+///
+/// The signature usually lives on only one axis — a bare-symbol reference
+/// carries no delimiter, so by itself it sniffs as `Exact` and no bridge is
+/// built. Detect per axis and adopt whichever is informative; canonicalizing
+/// under `Gene` is a no-op for names lacking the delimiter, so adopting the
+/// informative side is safe for both.
+#[must_use]
+pub fn reconcile_name_kind(
+    reference: &[Box<str>],
+    other: &[Box<str>],
+) -> auxiliary_data::feature_names::FeatureNameKind {
+    use auxiliary_data::feature_names::FeatureNameKind;
+    let ref_kind = FeatureNameKind::auto_detect(reference);
+    if ref_kind.is_exact() {
+        FeatureNameKind::auto_detect(other)
+    } else {
+        ref_kind
+    }
+}
+
 pub fn read_bulk_data_aligned(
     bulk_data_files: &[Box<str>],
     genes: &[Box<str>],

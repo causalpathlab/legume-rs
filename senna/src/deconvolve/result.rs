@@ -5,7 +5,9 @@
 //! per type); in the archetype mode `R ≫ C` and the mapping is the soft
 //! annotation readout. Everything here is already at `C`.
 
+use super::reference::{ComponentAxis, FractionUnits};
 use crate::embed_common::Mat;
+use mcmc_util::engine::{ess, split_rhat};
 
 /// Posterior-predictive fit of one bulk sample at the posterior-mean reference.
 pub struct ResidualStat {
@@ -28,6 +30,11 @@ pub struct DeconvResult {
     pub anchors_post: Mat,
     /// Row names for `anchors_post` — cell types or archetype ids.
     pub anchor_names: Vec<Box<str>>,
+    /// What those rows are. Carried rather than inferred: an archetype run whose
+    /// partition happens to collapse to `R == C` would otherwise be mislabelled.
+    pub anchor_axis: ComponentAxis,
+    /// What the reported fractions are shares of.
+    pub units: FractionUnits,
     pub residual: Vec<ResidualStat>,
     pub celltype_names: Vec<Box<str>>,
     /// Per-(sample, celltype) split-R̂ and effective sample size, in the draw
@@ -98,65 +105,13 @@ const MIN_DRAWS_FOR_DIAGNOSTICS: usize = 8;
 
 /// Split-R̂ and effective sample size for one scalar chain.
 ///
-/// Split-R̂ halves the chain and compares within- to between-half variance, so a
-/// drifting chain is caught even with a single run. It cannot detect
+/// Split-R̂ segments the chain and compares within- to between-segment variance,
+/// so a drifting chain is caught even with a single run. It cannot detect
 /// multimodality — for that, run independent seeds and compare.
 #[must_use]
 pub fn split_rhat_ess(draws: &[f32]) -> Option<(f32, f32)> {
-    let n = draws.len();
-    if n < MIN_DRAWS_FOR_DIAGNOSTICS {
+    if draws.len() < MIN_DRAWS_FOR_DIAGNOSTICS {
         return None;
     }
-    let half = n / 2;
-    let a = &draws[..half];
-    let b = &draws[n - half..];
-    let mean = |x: &[f32]| x.iter().map(|&v| f64::from(v)).sum::<f64>() / x.len() as f64;
-    let var = |x: &[f32], m: f64| {
-        x.iter()
-            .map(|&v| (f64::from(v) - m).powi(2))
-            .sum::<f64>()
-            .max(0.0)
-            / (x.len() as f64 - 1.0).max(1.0)
-    };
-    let (ma, mb) = (mean(a), mean(b));
-    let (va, vb) = (var(a, ma), var(b, mb));
-    let m = half as f64;
-    let w = 0.5 * (va + vb);
-    // Between-half variance of two chains of length `half`.
-    let grand = 0.5 * (ma + mb);
-    let bvar = m * ((ma - grand).powi(2) + (mb - grand).powi(2));
-    let rhat = if w > 0.0 {
-        let var_hat = (m - 1.0) / m * w + bvar / m;
-        (var_hat / w).max(0.0).sqrt() as f32
-    } else {
-        1.0
-    };
-
-    // ESS from the initial-positive-sequence estimator on the pooled chain.
-    let gm = mean(draws);
-    let gv = var(draws, gm);
-    if gv <= 0.0 {
-        return Some((rhat, n as f32));
-    }
-    let mut rho_sum = 0f64;
-    let max_lag = (n / 2).min(256);
-    let mut lag = 1;
-    while lag < max_lag {
-        let acf = |k: usize| {
-            let mut acc = 0f64;
-            for t in 0..(n - k) {
-                acc += (f64::from(draws[t]) - gm) * (f64::from(draws[t + k]) - gm);
-            }
-            acc / ((n - k) as f64 * gv)
-        };
-        // Sum consecutive pairs; stop when a pair turns negative (Geyer).
-        let pair = acf(lag) + acf(lag + 1);
-        if pair <= 0.0 {
-            break;
-        }
-        rho_sum += pair;
-        lag += 2;
-    }
-    let ess = (n as f64 / (1.0 + 2.0 * rho_sum)).clamp(1.0, n as f64) as f32;
-    Some((rhat, ess))
+    Some((split_rhat(draws), ess(draws)))
 }
