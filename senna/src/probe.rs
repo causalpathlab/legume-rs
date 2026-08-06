@@ -311,7 +311,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
 /// `bge --skip-etm` → `masked-topic --freeze-feature-embedding` → `probe --counterfactual`
 /// when the counterfactual is what you want.
 fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
-    use crate::bge_artifact::BgeModel;
+    use crate::bge::score::BgeEmbedding;
 
     anyhow::ensure!(
         args.counterfactual == 0,
@@ -321,7 +321,7 @@ fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
         args.model
     );
 
-    let model = BgeModel::open(&args.model)?;
+    let model = BgeEmbedding::open(&args.model)?;
     let cal = model.score(
         std::slice::from_ref(&args.calibration),
         args.preload_data,
