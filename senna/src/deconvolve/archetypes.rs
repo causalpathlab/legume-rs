@@ -19,7 +19,7 @@ use super::args::ArchetypeConfig;
 use super::reference::{ComponentAxis, FractionUnits, Reference};
 use super::source::EmbeddingSource;
 use crate::cluster::leiden_clustering;
-use crate::cluster_aggregation::{accumulate_gene_sum_multi, weighted_mean_profile};
+use crate::cluster_aggregation::accumulate_gene_sum_multi;
 use crate::embed_common::Mat;
 use crate::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
 use anyhow::{Context, Result};
@@ -55,7 +55,8 @@ struct ArchetypeInputs {
     /// `rows.len() × H` embedding of exactly those cells, for clustering.
     sub: Mat,
     /// Panel gene → row in the single-cell counts, reconciled by name once.
-    panel_to_sc: Vec<Option<usize>>,
+    /// Panel gene → the single-cell rows that canonicalize to it (may be several).
+    panel_to_sc: Vec<Vec<usize>>,
     n_sc_genes: usize,
     n_cells: usize,
 }
@@ -81,7 +82,8 @@ pub fn build_all(
         .map(|(chain, &target)| {
             inputs.partition(
                 target,
-                cfg.seed.wrapping_add(chain as u64 * 0x9E37_79B9),
+                cfg.seed
+                    .wrapping_add((chain as u64).wrapping_mul(0x9E37_79B9)),
                 cfg.min_cells,
             )
         })
@@ -90,14 +92,14 @@ pub fn build_all(
     let groupings: Vec<(&[usize], usize)> = partitions
         .iter()
         .map(|labels| {
-            // Cells outside the retained subset sit in a sentinel group that is
-            // dropped when the profiles are read back.
+            // Excluded cells carry `usize::MAX`, which the aggregator skips as
+            // out of range — there is no sentinel group to allocate or drop.
             let n_arch = labels
                 .iter()
                 .filter(|&&l| l != usize::MAX)
                 .max()
                 .map_or(0, |m| m + 1);
-            (labels.as_slice(), n_arch + 1)
+            (labels.as_slice(), n_arch)
         })
         .collect();
     let sums = accumulate_gene_sum_multi(
@@ -112,7 +114,7 @@ pub fn build_all(
         .zip(&groupings)
         .zip(sums)
         .map(|((labels, &(_, k)), gene_sum)| {
-            inputs.assemble(labels, k - 1, &gene_sum, genes, cfg.shrink)
+            inputs.assemble(labels, k, &gene_sum, genes, cfg.shrink)
         })
         .collect()
 }
@@ -265,8 +267,7 @@ impl ArchetypeInputs {
         genes: &[Box<str>],
         shrink: f32,
     ) -> Result<Reference> {
-        let profiles = weighted_mean_profile(gene_sum, n_arch + 1, self.n_sc_genes, &[]);
-        let mu_gm = self.align_and_shrink(&profiles, genes.len(), n_arch, shrink);
+        let mu_gm = self.align_and_shrink(gene_sum, genes.len(), n_arch, shrink);
 
         let labels_sub: Vec<usize> = self.rows.iter().map(|r| labels_all[r.counts]).collect();
         let (coords, readout) = self.summarize(&labels_sub, n_arch);
@@ -295,39 +296,40 @@ impl ArchetypeInputs {
     /// Shrinkage is what keeps every rate strictly positive: a gene absent from
     /// an archetype would otherwise have rate zero, and a bulk count on that gene
     /// would have nowhere to be allocated.
-    fn align_and_shrink(&self, profiles: &Mat, d: usize, n_arch: usize, shrink: f32) -> Vec<f32> {
+    fn align_and_shrink(&self, gene_sum: &[f64], d: usize, n_arch: usize, shrink: f32) -> Vec<f32> {
+        // `gene_sum` is row-major over groups: `gene_sum[m * n_sc_genes + g]`.
         let mut mu = vec![0f32; d * n_arch];
-        let mut pooled = vec![0f32; d];
-        for (g, slot) in self.panel_to_sc.iter().enumerate() {
-            let Some(sg) = *slot else { continue };
+        let mut pooled = vec![0f64; d];
+        let mut totals = vec![0f64; n_arch];
+        for (g, slots) in self.panel_to_sc.iter().enumerate() {
             let row = &mut mu[g * n_arch..(g + 1) * n_arch];
             for (m, cell) in row.iter_mut().enumerate() {
-                let v = profiles[(sg, m)];
-                *cell = v;
+                let v: f64 = slots
+                    .iter()
+                    .map(|&sg| gene_sum[m * self.n_sc_genes + sg])
+                    .sum();
+                *cell = v as f32;
                 pooled[g] += v;
+                totals[m] += v;
             }
         }
-        let pooled_total: f32 = pooled.iter().sum();
+        // Pooled profile as a probability over the panel.
+        let pooled_total: f64 = pooled.iter().sum();
         if pooled_total > 0.0 {
             for p in &mut pooled {
                 *p /= pooled_total;
             }
         }
-        // Add the floor, then renormalise each archetype to sum to 1 over genes.
-        let mut totals = vec![0f32; n_arch];
+        // `x̄_{m,g} = (n_{m,g} + κ·pooled_g) / (n_m + κ)`: κ is a pseudo-count
+        // against real counts, so it only matters where an archetype has none.
+        // Shrinking the already-normalised profile instead would put κ units of
+        // prior against a profile summing to 1, making κ = 5 an 83% blend.
         for g in 0..d {
             let row = &mut mu[g * n_arch..(g + 1) * n_arch];
             for (m, cell) in row.iter_mut().enumerate() {
-                *cell += shrink * pooled[g];
-                totals[m] += *cell;
-            }
-        }
-        for g in 0..d {
-            let row = &mut mu[g * n_arch..(g + 1) * n_arch];
-            for (m, cell) in row.iter_mut().enumerate() {
-                if totals[m] > 0.0 {
-                    *cell /= totals[m];
-                }
+                let num = f64::from(*cell) + f64::from(shrink) * pooled[g];
+                let den = totals[m] + f64::from(shrink);
+                *cell = if den > 0.0 { (num / den) as f32 } else { 0.0 };
             }
         }
         mu
@@ -400,17 +402,25 @@ impl ArchetypeInputs {
 ///
 /// Built once: canonicalizing tens of thousands of names per partition would
 /// repeat the same work for every granularity.
-fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<Vec<Option<usize>>> {
-    let name_kind = crate::embed_common::reconcile_name_kind(genes, sc_genes);
-    let mut index: FxHashMap<Box<str>, usize> = FxHashMap::default();
+fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<Vec<Vec<usize>>> {
+    let name_kind = crate::embed_common::reconcile_name_kind(genes, &[sc_genes]);
+    // Many-to-one collapses keep every source row: these are counts, so the
+    // contributions sum. The bulk loader does the same, and taking only the
+    // first row here would scale those genes differently on the two sides.
+    let mut index: FxHashMap<Box<str>, Vec<usize>> = FxHashMap::default();
     for (i, n) in sc_genes.iter().enumerate() {
-        index.entry(name_kind.canonicalize(n)).or_insert(i);
+        index.entry(name_kind.canonicalize(n)).or_default().push(i);
     }
-    let out: Vec<Option<usize>> = genes
+    let out: Vec<Vec<usize>> = genes
         .iter()
-        .map(|name| index.get(&name_kind.canonicalize(name)).copied())
+        .map(|name| {
+            index
+                .get(&name_kind.canonicalize(name))
+                .cloned()
+                .unwrap_or_default()
+        })
         .collect();
-    let matched = out.iter().filter(|s| s.is_some()).count();
+    let matched = out.iter().filter(|s| !s.is_empty()).count();
     let d = genes.len();
     // Nothing matching means the counts are not the ones the embedding was
     // trained on, or the two axes name genes differently. Either way the run
@@ -425,9 +435,12 @@ fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<Vec<Opti
         sc_genes.first().map_or("", |g| g.as_ref())
     );
     if matched * 2 < d {
+        // Unmatched genes have no reference rate at all, so any bulk count on
+        // them is dropped from the likelihood rather than shrunk toward a
+        // pooled profile — the composition is then fit to a truncated bulk.
         warn!(
             "deconvolve archetypes: only {matched}/{d} reference genes ({:.1}%) found in the \
-             single-cell counts; the rest carry only the shrinkage floor",
+             single-cell counts; bulk counts on the remainder are excluded from the fit",
             100.0 * matched as f64 / d as f64
         );
     } else if matched < d {

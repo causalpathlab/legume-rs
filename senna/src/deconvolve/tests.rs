@@ -119,11 +119,9 @@ fn drive(
         &mut accum,
     )
     .unwrap();
-    let rates = reference.type_rates();
     finalize(
         &accum,
         bulk,
-        &rates,
         ComponentTable {
             coords: reference.coords.clone(),
             names: reference.comp_names.clone(),
@@ -359,6 +357,95 @@ fn archetype_expression_conserves_counts() {
             );
         }
     }
+}
+
+/////////////////////
+// Pooled chains   //
+/////////////////////
+
+/// Run `n_chains` chains over the same reference into one accumulator, the way
+/// `deconvolve::run` pools over archetype granularities.
+fn drive_pooled(
+    reference: &mut Reference,
+    bulk: &Mat,
+    init_w: &Mat,
+    cfg: &SamplerConfig,
+    n_chains: usize,
+) -> super::result::DeconvResult {
+    let mut monitor = Monitor::silent();
+    let mut accum = PosteriorAccum::new(bulk.ncols(), reference.n_types(), reference.n_genes);
+    for chain in 0..n_chains {
+        let mut chain_cfg = SamplerConfig { ..*cfg };
+        chain_cfg.seed = cfg
+            .seed
+            .wrapping_add((chain as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        run_chain(
+            reference,
+            bulk,
+            init_w,
+            &chain_cfg,
+            None,
+            &mut monitor,
+            &mut accum,
+        )
+        .unwrap();
+    }
+    finalize(
+        &accum,
+        bulk,
+        ComponentTable {
+            coords: reference.coords.clone(),
+            names: reference.comp_names.clone(),
+            axis: reference.axis,
+            units: reference.units,
+        },
+        reference.celltype_names.clone(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn pooling_chains_agrees_with_one_long_chain() {
+    // Pooling three chains over the same reference must land where a single
+    // chain does; only the interval should differ. This is what makes averaging
+    // over the archetype partition meaningful — any bias here would be read as
+    // partition sensitivity.
+    let (mut reference, bulk, _) = archetype_problem(false);
+    let init_w = Mat::from_fn(bulk.ncols(), reference.n_comp, |si, _| {
+        bulk.column(si).iter().sum::<f32>() / reference.n_comp as f32
+    });
+    let one = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 1);
+    let three = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 3);
+
+    let (corr, max_abs) = agreement(&one.fractions_mean, &three.fractions_mean);
+    assert!(
+        corr > 0.99 && max_abs < 0.02,
+        "pooled mean drifted from the single-chain mean: corr={corr:.4}, max|Δ|={max_abs:.4}"
+    );
+    assert_eq!(one.n_chains, 1, "chain count not recorded");
+    assert_eq!(three.n_chains, 3, "chain count not recorded");
+}
+
+#[test]
+fn pooled_chains_report_between_chain_diagnostics() {
+    // With several chains the diagnostic must come from the between-chain
+    // comparison, not from splitting a concatenated trace whose chain
+    // boundaries would read as drift.
+    let (mut reference, bulk, _) = archetype_problem(false);
+    let init_w = Mat::from_fn(bulk.ncols(), reference.n_comp, |si, _| {
+        bulk.column(si).iter().sum::<f32>() / reference.n_comp as f32
+    });
+    let res = drive_pooled(&mut reference, &bulk, &init_w, &cfg(), 3);
+    assert!(
+        !res.convergence.is_empty(),
+        "pooled run reported no convergence diagnostics"
+    );
+    // Independent chains over one reference should agree.
+    let worst = res.convergence.iter().fold(0f32, |a, cv| a.max(cv.rhat));
+    assert!(
+        worst.is_finite() && worst < 1.5,
+        "chains over the same reference disagree: worst R-hat {worst:.3}"
+    );
 }
 
 ///////////////////////////
