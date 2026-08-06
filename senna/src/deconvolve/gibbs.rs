@@ -51,10 +51,9 @@ struct SweepCtx<'a> {
 
 /// Per-sample chain state and scratch, allocated once and reused every sweep.
 ///
-/// The `R×D` allocation block is materialised only when the anchor sampler
-/// needs it — that mode has `R = C`, a handful of components. The archetype
-/// mode contracts counts through the readout to `C` inside the gene loop
-/// instead: at `R = 500` and `D = 25 000` the block would be 50 MB per sample.
+/// Counts are contracted through the readout to `C` inside the gene loop rather
+/// than staged as an `R×D` block: at `R = 500` and `D = 25 000` that block would
+/// be 50 MB per sample, and every sample is live at once under rayon.
 struct SampleState {
     rng: SmallRng,
     /// `R` current abundances `u`.
@@ -70,15 +69,13 @@ struct SampleState {
     /// buffer is cleared in O(touched) rather than O(R).
     counts: Vec<f32>,
     touched: Vec<u32>,
-    /// `D` per-gene NB factor.
-    eps: Vec<f32>,
     /// `C` fractions this sweep, and the abundance total they were scaled by.
     frac: Vec<f32>,
     w_total: f32,
 }
 
 impl SampleState {
-    fn new(seed: u64, r: usize, c: usize, d: usize) -> Self {
+    fn new(seed: u64, r: usize, c: usize) -> Self {
         Self {
             rng: SmallRng::seed_from_u64(seed),
             w: vec![1.0; r],
@@ -88,7 +85,6 @@ impl SampleState {
             cum: vec![0.0; r],
             counts: vec![0.0; r],
             touched: Vec::with_capacity(r.min(64)),
-            eps: vec![0.0; d],
             frac: vec![0.0; c],
             w_total: 0.0,
         }
@@ -187,7 +183,6 @@ impl SampleState {
             // ε_g ~ Gamma(r + τy, r + τλ): soaks per-gene misfit; ε→1 as r→∞.
             let eg = Gamma::new(f64::from(nb_r + tau * y), 1.0 / f64::from(nb_r + tau * lam))
                 .map_or(1.0, |gm| gm.sample(&mut self.rng) as f32);
-            self.eps[g] = eg;
             for (me, &mu) in self.m_exp.iter_mut().zip(mu_row) {
                 *me += eg * mu;
             }
@@ -261,6 +256,9 @@ pub struct PosteriorAccum {
     comp_abundance_sum: Vec<f64>,
     /// Where the current chain's components start in that axis.
     comp_offset: usize,
+    /// `(offset, width)` per chain, so each block can be divided by the draws
+    /// that actually went into it rather than by the pooled total.
+    comp_spans: Vec<(usize, usize)>,
     n_comp_total: usize,
     /// Allocated counts, laid out sample-major `[si*C*D + ct*D + g]`.
     ///
@@ -311,6 +309,7 @@ impl PosteriorAccum {
             abundance_sum: vec![0f64; s * c],
             comp_abundance_sum: vec![0f64; s * n_comp_total],
             comp_offset: 0,
+            comp_spans: Vec::new(),
             n_comp_total,
             zexp: vec![0f32; c * d * s],
             lam_sum: vec![0f64; d * s],
@@ -342,7 +341,7 @@ impl PosteriorAccum {
 
 /// Run one chain, appending its draws to `accum`.
 pub fn run_chain(
-    reference: &mut Reference,
+    reference: &Reference,
     bulk: &Mat,
     init_w: &Mat,
     cfg: &SamplerConfig,
@@ -382,7 +381,7 @@ pub fn run_chain(
 
     let mut states: Vec<SampleState> = (0..s)
         .map(|si| {
-            let mut st = SampleState::new(cfg.seed.wrapping_add(si as u64), r, c, d);
+            let mut st = SampleState::new(cfg.seed.wrapping_add(si as u64), r, c);
             for m in 0..r {
                 st.w[m] = init_w[(si, m)].max(ABUNDANCE_FLOOR);
             }
@@ -469,14 +468,14 @@ pub fn run_chain(
             );
         }
     }
+    accum.comp_spans.push((accum.comp_offset, r));
     accum.comp_offset += r;
     Ok(())
 }
 
-/// The component axis carried through to the output: where each component sits,
-/// what it is called, and what kind of thing it is. With several partitions
-/// pooled these are the concatenation, so the table shows every partition that
-/// contributed.
+/// The component axis carried through to the output: where each component sits
+/// and what it is called. With several partitions pooled these are the
+/// concatenation, so the table shows every partition that contributed.
 pub struct ComponentTable {
     pub coords: Mat,
     pub names: Vec<Box<str>>,
@@ -537,9 +536,7 @@ pub fn finalize(
         fractions_lo,
         fractions_hi,
         abundance_mean,
-        component_abundance: Mat::from_fn(s, accum.n_comp_total, |si, m| {
-            (accum.comp_abundance_sum[si * accum.n_comp_total + m] / nc) as f32
-        }),
+        component_abundance: component_means(&accum),
         expression,
         anchors_post: components.coords,
         anchor_names: components.names,
@@ -548,6 +545,28 @@ pub fn finalize(
         convergence: diagnose(&accum),
         n_chains: accum.chain_starts.len(),
     })
+}
+
+/// Per-component posterior-mean abundance, `S × ΣR`.
+///
+/// Each chain's block is divided by the draws that chain contributed, not by the
+/// pooled total: a component only ever accumulates while its own chain is
+/// running, so the pooled count would scale every block down by the number of
+/// chains and make the values incomparable with a known per-component mass.
+fn component_means(accum: &PosteriorAccum) -> Mat {
+    let (s, total) = (accum.s, accum.n_comp_total);
+    let lengths = accum.chain_lengths();
+    let mut out = Mat::zeros(s, total);
+    for (&(offset, width), &len) in accum.comp_spans.iter().zip(&lengths) {
+        let n = (len as f64).max(1.0);
+        for si in 0..s {
+            for m in 0..width {
+                out[(si, offset + m)] =
+                    (accum.comp_abundance_sum[si * total + offset + m] / n) as f32;
+            }
+        }
+    }
+    out
 }
 
 /// Split-R̂ / ESS per (sample, celltype).

@@ -1,19 +1,18 @@
 //! Benchmark harness for `senna deconvolve`, scored against `data-beans-sim`
-//! ground truth. See `senna/docs/deconvolve.md` §8.
+//! ground truth. See `senna/docs/deconvolve.md`.
 //!
 //! ```text
-//! markers  <dict.parquet> <out.tsv> <topN>
-//!     top-N genes per topic → marker TSV
 //! score    <true_fractions.parquet> <fractions_ci.tsv> [dict.parquet] [feature_list.parquet]
 //!     fraction accuracy + CI calibration; with `dict` the CELL-fraction truth
 //!     is converted to the mRNA-fraction scale
 //! expr     <expression_dir> <true_dict.parquet> <true_fractions.parquet>
 //!     per-sample × per-cell-type expression: profile SHAPE and abundance SCALE
-//! profile  <cell_emb> <prop> <rho_dict> <feature_bias> <true_dict> [ln_batch]
-//!     how well exp(ρ·t_c + a) reproduces the true per-type profile at the TRUE centroid
-//! anchors  <cell_emb> <prop> <feature_emb> <markers.tsv> [posterior_anchors.parquet]
-//!     marker/co-embedding anchors vs true cell-type centroids (and ESS drift)
 //! ```
+//!
+//! The `markers`, `profile` and `anchors` subcommands are gone with the
+//! reconstructed reference they measured. In particular `anchors` read
+//! `{out}.anchors.parquet` as one row per cell type; that file now holds one row
+//! per archetype, so it would have silently compared unrelated rows.
 // Dense numeric loops where one index addresses several arrays at once; the
 // iterator rewrites read worse than the maths they implement.
 #![allow(clippy::needless_range_loop)]
@@ -25,7 +24,6 @@ use std::collections::HashMap;
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("markers") => markers(&args[2], &args[3], args[4].parse()?),
         Some("score") => score(
             &args[2],
             &args[3],
@@ -64,25 +62,8 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("expr") => expr(&args[2], &args[3], &args[4]),
-        Some("profile") => profile(
-            &args[2],
-            &args[3],
-            &args[4],
-            &args[5],
-            &args[6],
-            args.get(7).map(String::as_str),
-        ),
-        Some("anchors") => anchors(
-            &args[2],
-            &args[3],
-            &args[4],
-            &args[5],
-            args.get(6).map(String::as_str),
-        ),
         _ => {
-            eprintln!(
-                "usage: bench_tool <markers|score|expr|profile|anchors> ... (see module docs)"
-            );
+            eprintln!("usage: bench_tool <score|expr|shape|topar> ... (see module docs)");
             Ok(())
         }
     }
@@ -98,25 +79,6 @@ fn load_named(
     } else {
         DMatrix::<f32>::read_data(path, &['\t', ','][..], Some(0), Some(0), None, None)
     }
-}
-
-fn markers(dict: &str, out: &str, top_n: usize) -> anyhow::Result<()> {
-    let m = DMatrix::<f32>::from_parquet(dict)?; // G×K
-    let (g, k) = (m.mat.nrows(), m.mat.ncols());
-    let mut lines = Vec::new();
-    for kk in 0..k {
-        let mut idx: Vec<usize> = (0..g).collect();
-        idx.sort_by(|&a, &b| m.mat[(b, kk)].total_cmp(&m.mat[(a, kk)]));
-        for &gi in idx.iter().take(top_n) {
-            lines.push(format!("{}\t{}", m.rows[gi], m.cols[kk]));
-        }
-    }
-    std::fs::write(out, lines.join("\n"))?;
-    eprintln!(
-        "wrote {} marker rows ({top_n}/topic × {k} topics) → {out}",
-        lines.len()
-    );
-    Ok(())
 }
 
 fn score(
@@ -383,322 +345,6 @@ fn expr(expr_dir: &str, true_dict: &str, true_frac: &str) -> anyhow::Result<()> 
 /// How well does the embedding reconstruction `μ_c = exp(ρ·t_c + a)` reproduce the
 /// TRUE per-cell-type gene profile, when `t_c` is the true cell-type centroid?
 /// This isolates the reference model from anchor placement.
-fn profile(
-    cell_emb: &str,
-    prop: &str,
-    rho_dict: &str,
-    feat_bias: &str,
-    true_dict: &str,
-    ln_batch: Option<&str>,
-) -> anyhow::Result<()> {
-    let ce = DMatrix::<f32>::from_parquet(cell_emb)?;
-    let pr = DMatrix::<f32>::from_parquet(prop)?;
-    let rho = DMatrix::<f32>::from_parquet(rho_dict)?; // D×H (gated ρ)
-    let bias = DMatrix::<f32>::from_parquet(feat_bias)?; // D×1
-    let tb = DMatrix::<f32>::from_parquet(true_dict)?; // G×K true beta
-    let h = ce.mat.ncols();
-    let k = pr.mat.ncols();
-
-    let mut label: HashMap<&str, usize> = HashMap::new();
-    for (i, b) in pr.rows.iter().enumerate() {
-        let mut best = (0usize, f32::NEG_INFINITY);
-        for kk in 0..k {
-            if pr.mat[(i, kk)] > best.1 {
-                best = (kk, pr.mat[(i, kk)]);
-            }
-        }
-        label.insert(b.as_ref(), best.0);
-    }
-    let mut tc = vec![vec![0f64; h]; k];
-    let mut cnt = vec![0usize; k];
-    for (i, b) in ce.rows.iter().enumerate() {
-        if let Some(&c) = label.get(b.as_ref()) {
-            cnt[c] += 1;
-            for j in 0..h {
-                tc[c][j] += f64::from(ce.mat[(i, j)]);
-            }
-        }
-    }
-    for c in 0..k {
-        if cnt[c] > 0 {
-            for j in 0..h {
-                tc[c][j] /= cnt[c] as f64;
-            }
-        }
-    }
-
-    // genes shared between the reference (ρ rows) and the simulator's β
-    let true_row: HashMap<&str, usize> = tb
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (r.as_ref(), i))
-        .collect();
-    let pairs: Vec<(usize, usize)> = rho
-        .rows
-        .iter()
-        .enumerate()
-        .filter_map(|(di, g)| true_row.get(g.as_ref()).map(|&ti| (di, ti)))
-        .collect();
-    // Optional control: the simulator's rate carries a per-gene batch factor
-    // δ(g) that the reference's `a_g` absorbs; without it the comparison is
-    // unfair to the reconstruction.
-    let delta: Option<HashMap<String, f64>> = match ln_batch {
-        Some(p) => {
-            let lb = DMatrix::<f32>::from_parquet(p)?;
-            Some(
-                lb.rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, g)| (g.to_string(), f64::from(lb.mat[(i, 0)]).exp()))
-                    .collect(),
-            )
-        }
-        None => None,
-    };
-    println!(
-        "genes matched: {} (of {} in reference); delta control: {}",
-        pairs.len(),
-        rho.rows.len(),
-        if delta.is_some() { "ON" } else { "off" }
-    );
-    // M_c = Σ_g μ_{g,c}: the per-type "exposure". BayesPrism normalizes its
-    // reference so this is 1 for every type (making theta an mRNA fraction);
-    // ours is unnormalized, so M_c varies and w_c is cell-count-like.
-    let mut mc = Vec::new();
-    for c in 0..k {
-        let mut tot = 0f64;
-        for &(di, _) in &pairs {
-            let mut s = f64::from(bias.mat[(di, 0)]);
-            for j in 0..h {
-                s += f64::from(rho.mat[(di, j)]) * tc[c][j];
-            }
-            tot += s.clamp(-30.0, 30.0).exp();
-        }
-        mc.push(tot);
-    }
-    let mean_mc: f64 = mc.iter().sum::<f64>() / mc.len() as f64;
-    println!(
-        "reference exposure M_c/mean = {:?}  (BayesPrism normalizes these to 1)",
-        mc.iter()
-            .map(|v| (v / mean_mc * 100.0).round() / 100.0)
-            .collect::<Vec<_>>()
-    );
-
-    println!("\n{:<8} {:>14} {:>14}", "type", "corr(raw)", "corr(log)");
-    for c in 0..k.min(tb.mat.ncols()) {
-        let mut rec = Vec::with_capacity(pairs.len());
-        let mut tru = Vec::with_capacity(pairs.len());
-        for &(di, ti) in &pairs {
-            let mut s = f64::from(bias.mat[(di, 0)]);
-            for j in 0..h {
-                s += f64::from(rho.mat[(di, j)]) * tc[c][j];
-            }
-            rec.push(s.clamp(-30.0, 30.0).exp() as f32);
-            let d = delta
-                .as_ref()
-                .and_then(|m| m.get(rho.rows[di].as_ref()).copied())
-                .unwrap_or(1.0);
-            tru.push((f64::from(tb.mat[(ti, c)]) * d) as f32);
-        }
-        let lr: Vec<f32> = rec
-            .iter()
-            .map(|&v| (f64::from(v) + 1e-12).ln() as f32)
-            .collect();
-        let lt: Vec<f32> = tru
-            .iter()
-            .map(|&v| (f64::from(v) + 1e-12).ln() as f32)
-            .collect();
-        println!(
-            "{:<8} {:>14.4} {:>14.4}",
-            tb.cols.get(c).map_or("?", |s| s.as_ref()),
-            pearson(&rec, &tru),
-            pearson(&lr, &lt)
-        );
-    }
-    Ok(())
-}
-
-/// Compare the marker/co-embedding anchors deconvolve actually uses against the
-/// TRUE per-cell-type centroids in the same latent (from labelled cells). Tests
-/// whether the co-embedding shrinks anchors toward the global centroid, which
-/// would under-separate the reference and bias the fractions systematically.
-fn anchors(
-    cell_emb: &str,
-    prop: &str,
-    feat_emb: &str,
-    markers_tsv: &str,
-    post: Option<&str>,
-) -> anyhow::Result<()> {
-    let ce = DMatrix::<f32>::from_parquet(cell_emb)?; // N×H (barcodes)
-    let pr = DMatrix::<f32>::from_parquet(prop)?; // N×K (barcodes, true theta)
-    let fe = DMatrix::<f32>::from_parquet(feat_emb)?; // D×H (genes)
-    let h = ce.mat.ncols();
-
-    // true label per barcode = argmax of theta
-    let mut label: HashMap<&str, usize> = HashMap::new();
-    for (i, b) in pr.rows.iter().enumerate() {
-        let mut best = (0usize, f32::NEG_INFINITY);
-        for k in 0..pr.mat.ncols() {
-            if pr.mat[(i, k)] > best.1 {
-                best = (k, pr.mat[(i, k)]);
-            }
-        }
-        label.insert(b.as_ref(), best.0);
-    }
-    let k = pr.mat.ncols();
-
-    // TRUE centroids: mean cell embedding per label; and the global centroid.
-    let mut tc = vec![vec![0f64; h]; k];
-    let mut cnt = vec![0usize; k];
-    let mut g = vec![0f64; h];
-    let mut n_used = 0usize;
-    for (i, b) in ce.rows.iter().enumerate() {
-        let Some(&c) = label.get(b.as_ref()) else {
-            continue;
-        };
-        cnt[c] += 1;
-        n_used += 1;
-        for j in 0..h {
-            tc[c][j] += f64::from(ce.mat[(i, j)]);
-            g[j] += f64::from(ce.mat[(i, j)]);
-        }
-    }
-    for j in 0..h {
-        g[j] /= n_used as f64;
-    }
-    for c in 0..k {
-        if cnt[c] > 0 {
-            for j in 0..h {
-                tc[c][j] /= cnt[c] as f64;
-            }
-        }
-    }
-
-    // CO-EMBEDDING anchors: mean marker-gene co-embedding row per type.
-    let gene_row: HashMap<&str, usize> = fe
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (r.as_ref(), i))
-        .collect();
-    let mut types: Vec<String> = Vec::new();
-    let mut ac: Vec<Vec<f64>> = Vec::new();
-    let mut acn: Vec<usize> = Vec::new();
-    for line in std::fs::read_to_string(markers_tsv)?.lines() {
-        let mut it = line.split('\t');
-        let (Some(gene), Some(ty)) = (it.next(), it.next()) else {
-            continue;
-        };
-        let ti = types.iter().position(|t| t == ty).unwrap_or_else(|| {
-            types.push(ty.to_string());
-            ac.push(vec![0f64; h]);
-            acn.push(0);
-            types.len() - 1
-        });
-        if let Some(&gi) = gene_row.get(gene) {
-            acn[ti] += 1;
-            for j in 0..h {
-                ac[ti][j] += f64::from(fe.mat[(gi, j)]);
-            }
-        }
-    }
-    for ti in 0..types.len() {
-        if acn[ti] > 0 {
-            for j in 0..h {
-                ac[ti][j] /= acn[ti] as f64;
-            }
-        }
-    }
-
-    let dist = |a: &[f64], b: &[f64]| -> f64 {
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| (x - y) * (x - y))
-            .sum::<f64>()
-            .sqrt()
-    };
-    let cos = |a: &[f64], b: &[f64]| -> f64 {
-        let d: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let na: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let nb: f64 = b.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if na > 0.0 && nb > 0.0 {
-            d / (na * nb)
-        } else {
-            f64::NAN
-        }
-    };
-
-    println!(
-        "cells used = {n_used}, K = {k}, H = {h}, marker types = {}",
-        types.len()
-    );
-    println!(
-        "\n{:<8} {:>12} {:>12} {:>10} {:>10}",
-        "type", "|true-g|", "|anchor-g|", "shrink", "cos"
-    );
-    let m = k.min(types.len());
-    for c in 0..m {
-        let td: Vec<f64> = (0..h).map(|j| tc[c][j] - g[j]).collect();
-        let ad: Vec<f64> = (0..h).map(|j| ac[c][j] - g[j]).collect();
-        println!(
-            "{:<8} {:>12.4} {:>12.4} {:>10.3} {:>10.3}",
-            types.get(c).map_or("?", String::as_str),
-            dist(&tc[c], &g),
-            dist(&ac[c], &g),
-            dist(&ac[c], &g) / dist(&tc[c], &g).max(1e-12),
-            cos(&td, &ad)
-        );
-    }
-    // mutual separation: how distinct the references are from each other
-    let mut sep_t = 0f64;
-    let mut sep_a = 0f64;
-    let mut np = 0usize;
-    for i in 0..m {
-        for j in (i + 1)..m {
-            sep_t += dist(&tc[i], &tc[j]);
-            sep_a += dist(&ac[i], &ac[j]);
-            np += 1;
-        }
-    }
-    println!(
-        "\nmean pairwise separation: true = {:.4}, co-embed anchors = {:.4}  ({:.0}% of true)",
-        sep_t / np as f64,
-        sep_a / np as f64,
-        100.0 * (sep_a / np as f64) / (sep_t / np as f64)
-    );
-
-    // Did the ESS anchor update move anchors TOWARD the true centroids?
-    if let Some(p) = post {
-        let pa = DMatrix::<f32>::from_parquet(p)?; // C×H posterior anchors
-        println!(
-            "\n{:<8} {:>14} {:>14} {:>10}",
-            "type", "prior→true", "post→true", "improved?"
-        );
-        let mut better = 0usize;
-        for c in 0..m.min(pa.mat.nrows()) {
-            let pv: Vec<f64> = (0..h).map(|j| f64::from(pa.mat[(c, j)])).collect();
-            let d_prior = dist(&ac[c], &tc[c]);
-            let d_post = dist(&pv, &tc[c]);
-            if d_post < d_prior {
-                better += 1;
-            }
-            println!(
-                "{:<8} {:>14.4} {:>14.4} {:>10}",
-                types.get(c).map_or("?", String::as_str),
-                d_prior,
-                d_post,
-                if d_post < d_prior { "yes" } else { "NO" }
-            );
-        }
-        println!(
-            "anchors moved closer to truth: {better}/{}",
-            m.min(pa.mat.nrows())
-        );
-    }
-    Ok(())
-}
-
 fn pearson(x: &[f32], y: &[f32]) -> f64 {
     let n = x.len() as f64;
     if n < 2.0 {

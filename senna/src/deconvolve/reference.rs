@@ -16,7 +16,7 @@ pub struct Reference {
     pub readout: Mat,
     /// `R×H` component coordinates in the embedding, carried through to output.
     pub coords: Mat,
-    /// Component row names (cell types, or archetype ids).
+    /// Component row names.
     pub comp_names: Vec<Box<str>>,
     /// Cells behind each component, counted over the cells that actually formed
     /// its readout row.

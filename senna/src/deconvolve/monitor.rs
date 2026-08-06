@@ -24,7 +24,6 @@ pub struct Monitor {
     sample_names: Vec<Box<str>>,
     celltype_names: Vec<Box<str>>,
     trace: Option<Box<dyn Write>>,
-    fit: Option<Box<dyn Write>>,
     /// Which chain is currently sampling. Pooled chains each restart their sweep
     /// counter, so without this the trace cannot be split back apart.
     chain: usize,
@@ -37,17 +36,12 @@ impl Monitor {
         sample_names: &[Box<str>],
         celltype_names: &[Box<str>],
     ) -> Result<Self> {
-        let (mut trace, mut fit) = (None, None);
+        let mut trace = None;
         if cfg.trace_every > 0 {
             let path = format!("{out}.trace.tsv.gz");
             let mut w = open_buf_writer(&path).with_context(|| format!("creating {path}"))?;
             writeln!(w, "chain\tsweep\tphase\tsample\tcelltype\tfraction")?;
             trace = Some(w);
-
-            let path = format!("{out}.trace_fit.tsv");
-            let mut w = open_buf_writer(&path).with_context(|| format!("creating {path}"))?;
-            writeln!(w, "chain\tsweep\tphase")?;
-            fit = Some(w);
         }
         Ok(Self {
             cfg,
@@ -55,7 +49,6 @@ impl Monitor {
             sample_names: sample_names.to_vec(),
             celltype_names: celltype_names.to_vec(),
             trace,
-            fit,
             chain: 0,
         })
     }
@@ -73,7 +66,6 @@ impl Monitor {
             sample_names: Vec::new(),
             celltype_names: Vec::new(),
             trace: None,
-            fit: None,
             chain: 0,
         }
     }
@@ -99,9 +91,6 @@ impl Monitor {
                     )?;
                 }
             }
-        }
-        if let Some(w) = self.fit.as_mut() {
-            writeln!(w, "{chain}\t{it}\t{phase}")?;
         }
         Ok(())
     }
@@ -134,9 +123,10 @@ impl Monitor {
     /// flushed. Taking the writers here drops them while we can still report a
     /// write error, instead of leaving it to an ignored `Drop`.
     pub fn finish(&mut self) -> Result<()> {
-        for w in [self.trace.take(), self.fit.take()].iter_mut().flatten() {
+        if let Some(w) = self.trace.as_mut() {
             w.flush().context("flushing the trace")?;
         }
+        self.trace = None;
         Ok(())
     }
 }

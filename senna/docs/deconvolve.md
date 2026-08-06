@@ -81,7 +81,7 @@ hiding it.
 | `{out}.fractions_ci.tsv` | mean, sd and 95 % interval per (sample, cell type) |
 | `{out}.abundance.tsv` | un-normalised per-type abundance |
 | `{out}.expression/{celltype}.parquet` | `E[Z_{s,c,g}]`, samples × genes — the DE input |
-| `{out}.anchors.parquet` | component coordinates in the embedding |
+| `{out}.anchors.parquet` | component coordinates in the embedding; row-name column is `component` |
 | `{out}.archetypes.parquet` | per component: readout row and cell count |
 | `{out}.membership.tsv.gz` | cell → component, two headerless columns |
 | `{out}.abundance_component.parquet` | abundances **before** the readout |

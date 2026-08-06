@@ -14,8 +14,7 @@ use std::io::{BufWriter, Write};
 pub struct RunMeta<'a> {
     pub from: &'a str,
     pub kind: String,
-    /// Number of reference components `R` (cell types, or archetypes), pooled
-    /// across chains.
+    /// Number of reference components `R`, pooled across chains.
     pub n_components: usize,
     /// Chains pooled into the posterior; >1 means the reference partition was
     /// averaged over rather than conditioned on.
