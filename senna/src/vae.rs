@@ -69,7 +69,8 @@ pub struct VaeArgs {
     #[arg(
         long = "init-from",
         help = "Initialize weights from a previously trained `senna vae` model",
-        long_help = "Initialize encoder + decoder weights from a previously trained `senna vae` model."
+        long_help = "Initialize encoder + decoder weights from a trained model.\n\
+                     The model must come from a previous `senna vae` run."
     )]
     pub(crate) init_from: Option<Box<str>>,
 

@@ -35,9 +35,9 @@ pub struct JointSvdArgs {
         long_help = "Prefix for generated files:\n  \
                      {out}.dictionary.parquet  gene × component loadings\n  \
                      {out}.latent.parquet      cell × component scores\n  \
-                     {out}.cell_proj.parquet   cached random projection (consumed by `senna layout`)\n  \
+                     {out}.cell_proj.parquet   cached random projection\n  \
                      {out}_{d}.delta.parquet   per-batch effects for modality d\n  \
-                     {out}.senna.json          run manifest consumed by `senna layout --from` and `senna plot --from`"
+                     {out}.senna.json          run manifest for `senna layout/plot --from`"
     )]
     out: Box<str>,
 
@@ -46,7 +46,8 @@ pub struct JointSvdArgs {
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+        long_help = "Each file lists a batch label per cell.\n\
+                     The cells come in the same order as its matching data file.\n\
                      Example: batch1.tsv,batch2.tsv"
     )]
     batch_files: Option<Vec<Box<str>>>,

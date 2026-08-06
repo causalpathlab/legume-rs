@@ -63,7 +63,8 @@ pub struct ProbeArgs {
         long,
         required = true,
         help = "In-distribution calibration backend that defines the null",
-        long_help = "A backend of cells the model already explains (e.g. held-out training-distribution cells).\n\
+        long_help = "A backend of cells the model already explains.\n\
+                     Held-out training-distribution cells are the usual choice.\n\
                      Its per-cell fit distribution sets the null;\n\
                      the query is flagged relative to its lower tail."
     )]
@@ -105,12 +106,14 @@ pub struct ProbeArgs {
                      `benefit` is the fit gained on held-out query cells;\n\
                      `forgetting` is the fit lost on held-out reference cells.\n\
                      Both are signed so larger is more extreme.\n\
-                     Permuting the treatment/control label of the pooled fit cells gives an exact finite-sample null —\n\
-                     no χ², no Fisher, no EIF.\n\
+                     Permute the treatment/control label of the pooled fit cells.\n\
+                     That gives an exact finite-sample null.\n\
+                     No χ², no Fisher, no EIF.\n\
                      \n\
                      Cost is 2 refits per permutation, and p bottoms out at 1/(N+1).\n\
                      Reaches `forgetting`, which the fit score cannot:\n\
-                     an in-distribution but contaminated batch reconstructs well and still degrades the dictionary."
+                     an in-distribution but contaminated batch reconstructs well,\n\
+                     and still degrades the dictionary."
     )]
     counterfactual: usize,
 

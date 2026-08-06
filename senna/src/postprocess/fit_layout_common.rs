@@ -62,8 +62,9 @@ pub struct LayoutCommonArgs {
         long_help = "Fills in data files and batch files from the manifest.\n\
                      It also supplies the output prefix when --out is absent.\n\
                      \n\
-                     The manifest is then updated in place. Its `layout.cell_coords`,\n\
-                     `layout.pb_coords` and `layout.pb_gene_mean` fields point at the paths just written.\n\
+                     The manifest is then updated in place.\n\
+                     Three fields point at the paths just written:\n\
+                     `layout.cell_coords`, `layout.pb_coords`, `layout.pb_gene_mean`.\n\
                      \n\
                      Explicit CLI flags still override manifest values."
     )]

@@ -134,8 +134,10 @@ pub struct PredictArgs {
         long,
         help = "Skip the encoder;\n\
                 init θ uniform and optimize purely against the frozen decoder",
-        long_help = "Useful when the held-out feature set is too divergent for the trained encoder.\n\
-                     Uses --refine-steps and --refine-lr (defaults bumped to 100 / 0.05 if --refine-steps was left at 0)."
+        long_help = "Useful when the held-out feature set is too divergent.\n\
+                     The trained encoder cannot handle it.\n\
+                     Uses --refine-steps and --refine-lr.\n\
+                     Those default to 100 / 0.05 if --refine-steps was left at 0."
     )]
     pub(crate) decoder_only: bool,
 
@@ -176,9 +178,10 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Fold per-batch δ into μ (removes topics AND batch effect)",
-        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk) —\n\
-                     the residual is harmonized (batch effect divided out too). When unset,\n\
-                     μ comes from topics only and the residual still carries batch effects."
+        long_help = "When set, the per-gene denominator is δ_{d,b}·Σ_k θ_k·exp(β_dk).\n\
+                     The residual is then harmonized, with the batch effect divided out.\n\
+                     When unset, μ comes from topics only.\n\
+                     The residual then still carries batch effects."
     )]
     pub(crate) residual_include_delta: bool,
 
@@ -205,10 +208,10 @@ pub struct PredictArgs {
     #[arg(
         long,
         help = "Split query row names on this char; keep prefix as base key",
-        long_help = "Split query row names on this character. With '/',\n\
-                     `ENSG00000000003_TSPAN6/count/spliced` splits into\n\
-                     the base `ENSG00000000003_TSPAN6`,\n\
-                     and the suffix `count/spliced`.\n\
+        long_help = "Split query row names on this character.\n\
+                     With '/', `ENSG00000000003_TSPAN6/count/spliced` splits in two.\n\
+                     The base is `ENSG00000000003_TSPAN6`.\n\
+                     The suffix is `count/spliced`.\n\
                      The suffix is then available to --keep-feature-suffix.\n\
                      The base is handed to --feature-name-kind."
     )]

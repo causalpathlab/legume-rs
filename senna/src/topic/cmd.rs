@@ -52,8 +52,10 @@ pub struct TopicArgs {
         long_help = "Read a `{run}.senna.json` manifest and pre-fill `data_files`,\n\
                      `--batch-files`,\n\
                      and (when present) the cell→pb partition from the source run.\n\
-                     Inheriting the partition skips the expensive BBKNN + Poisson DC-SBM refinement step.\n\
-                     Explicit CLI flags override the manifest. SVD-family sources are rejected."
+                     Inheriting the partition skips a costly refinement step.\n\
+                     That step is BBKNN plus Poisson DC-SBM.\n\
+                     Explicit CLI flags override the manifest.\n\
+                     SVD-family sources are rejected."
     )]
     pub(crate) from: Option<Box<str>>,
 
@@ -85,7 +87,8 @@ pub struct TopicArgs {
         short,
         value_delimiter(','),
         help = "Batch membership files, one per data file",
-        long_help = "Each file lists a batch label per cell in the same order as its matching data file.\n\
+        long_help = "Each file lists a batch label per cell.\n\
+                     The cells come in the same order as its matching data file.\n\
                      Example: batch1.tsv,batch2.tsv"
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
@@ -96,10 +99,12 @@ pub struct TopicArgs {
     #[arg(
         long = "init-from",
         help = "Initialize encoder + decoder weights from a previously trained model",
-        long_help = "Path prefix of a model saved by `senna topic` (matching {prefix}.model.json + {prefix}.safetensors).\n\
+        long_help = "Path prefix of a model saved by `senna topic`.\n\
+                     It matches {prefix}.model.json + {prefix}.safetensors.\n\
                      Architecture must match: same K, encoder layers, level_decoder_dims,\n\
                      and n_features_full / n_features_encoder.\n\
-                     Cross-gene-set warm-start is not supported — train on the same gene set."
+                     Cross-gene-set warm-start is not supported.\n\
+                     Train on the same gene set."
     )]
     pub(crate) init_from: Option<Box<str>>,
 

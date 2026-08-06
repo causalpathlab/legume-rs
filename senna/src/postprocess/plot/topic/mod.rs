@@ -148,8 +148,9 @@ pub struct PlotTopicArgs {
     #[arg(
         long,
         help = "Argmax TSV from `senna annotate-by-enrichment`",
-        long_help = "Argmax TSV from `senna annotate-by-enrichment`\n\
-                     (cell\\tcell_type\\tprobability). Defaults to manifest's annotate.argmax.\n\
+        long_help = "Argmax TSV from `senna annotate-by-enrichment`.\n\
+                     Columns are cell\\tcell_type\\tprobability.\n\
+                     Defaults to the manifest's annotate.argmax.\n\
                      Required for --group-by annotation."
     )]
     pub annotation: Option<Box<str>>,

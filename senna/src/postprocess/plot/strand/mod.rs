@@ -42,10 +42,11 @@ pub struct PlotStrandArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna {topic,...}` enriched by `senna annotate-by-enrichment`",
+        help = "Run manifest JSON from `senna {topic,...}` + `annotate-by-enrichment`",
         long_help = "Fills in --activity and --out from the manifest.\n\
-                     --activity comes from annotate.cluster_expression and\n\
-                     annotate.cluster_celltype_q; --out from the manifest prefix.\n\
+                     --activity comes from annotate.cluster_expression,\n\
+                     and from annotate.cluster_celltype_q.\n\
+                     --out comes from the manifest prefix.\n\
                      Explicit CLI flags still win.\n\
                      Paths inside the manifest resolve against its own directory."
     )]

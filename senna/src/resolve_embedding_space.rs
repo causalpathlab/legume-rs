@@ -75,14 +75,19 @@ pub struct RestArgs {
         long = "out",
         help = "Output prefix (default: --from with .senna.json stripped)",
         long_help = "Output prefix for every artifact.\n\
-                     It defaults to `--from` with a trailing `.senna.json` (or `.json`) removed.\n\
+                     It defaults to `--from` with a trailing `.senna.json` removed.\n\
+                     A trailing `.json` is removed too.\n\
                      Writes:\n  \
-                     {out}.feature_embedding.parquet  co-embed  gene × H (ρ re-embedded onto the cell manifold; annotate reads this)\n  \
-                     {out}.cell_embedding.parquet     Z=θ·α  cell × H (the cell side annotate-by-projection reads)\n  \
-                     {out}.topic_embedding.parquet    α      topic × H\n  \
-                     {out}.feature_bias.parquet       b      gene × 1\n  \
+                     {out}.feature_embedding.parquet  co-embed  gene × H\n  \
+                     {out}.cell_embedding.parquet     Z=θ·α     cell × H\n  \
+                     {out}.topic_embedding.parquet    α         topic × H\n  \
+                     {out}.feature_bias.parquet       b         gene × 1\n  \
                      {out}.log_likelihood.parquet     per-epoch NCE loss\n  \
-                     {out}.senna.json                 run manifest (kind=resolve-embedding-space)"
+                     {out}.senna.json                 run manifest\n\
+                     \n\
+                     The feature embedding is ρ re-embedded onto the cell manifold.\n\
+                     `annotate-by-projection` reads it, alongside the cell embedding.\n\
+                     The manifest records kind=resolve-embedding-space."
     )]
     out: Option<Box<str>>,
 
@@ -90,12 +95,14 @@ pub struct RestArgs {
         long,
         default_value_t = 0,
         help = "Embedding dimension H (0 = K, the topic count)",
-        long_help = "Dimensionality H of the shared cell+gene space. The default of 0 uses K,\n\
-                     the number of topics in θ.\n\
+        long_help = "Dimensionality H of the shared cell+gene space.\n\
+                     The default of 0 uses K, the number of topics in θ.\n\
                      \n\
                      Training runs against the counts, not a closed-form SVD of β.\n\
-                     So H may be set LARGER than K. The extra dimensions let ρ capture per-gene structure.\n\
-                     That structure lies beyond the K topic axes. H < K compresses instead.\n\
+                     So H may be set LARGER than K.\n\
+                     The extra dimensions let ρ capture per-gene structure.\n\
+                     That structure lies beyond the K topic axes.\n\
+                     H < K compresses instead.\n\
                      At H = K the geometry nearly recasts the topic dictionary."
     )]
     embedding_dim: usize,

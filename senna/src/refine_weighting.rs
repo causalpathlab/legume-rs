@@ -158,7 +158,8 @@ pub(crate) struct CollapseArgs {
         long,
         default_value_t = 10,
         help = "In-batch k-NN for pb-sample merging",
-        long_help = "Number of within-batch nearest neighbours used when aggregating cells into pseudobulk pb-samples."
+        long_help = "Number of within-batch nearest neighbours.\n\
+                     They are used when aggregating cells into pseudobulk pb-samples."
     )]
     pub(crate) knn_cells: usize,
 
