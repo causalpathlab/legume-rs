@@ -8,15 +8,14 @@ pub struct DeconvolveArgs {
         short = 'f',
         long = "from",
         required = true,
-        help = "Run manifest with a feature embedding:\n\
-                `senna bge --skip-etm` or `masked-topic`",
+        help = "Run manifest from `senna bge`",
         long_help = "Run manifest from `senna bge`, with or without --skip-etm.\n\
-                     Every bge run records the per-gene loading ρ.\n\
-                     Older runs kept it only under --skip-etm; those still work.\n\
+                     It supplies the gene axis and the cell embedding.\n\
+                     It also names the counts and the annotation by default.\n\
                      \n\
-                     Topic-family runs are not supported.\n\
-                     Their ρ pairs with the topic embeddings under a softmax head.\n\
-                     It does not pair with cell positions under a Poisson rate."
+                     Topic-family runs are not accepted.\n\
+                     They do carry everything the reference needs.\n\
+                     The path is simply unverified, not structurally barred."
     )]
     pub from: Box<str>,
 
@@ -82,8 +81,7 @@ pub struct DeconvolveArgs {
                      It also scales with depth, which a fixed value cannot:\n\
                      a constant would be negligible on a deep bulk and swamp a shallow one.\n\
                      \n\
-                     On a real pseudobulk benchmark, accuracy falls off either side.\n\
-                     Pearson r runs 0.68, 0.71, 0.78, 0.60, 0.44 at a0 = 1, 10, 100, 1e3, 1e4.\n\
+                     The optimum is interior, so both directions cost accuracy.\n\
                      Too little lets components die.\n\
                      Too much pulls every sample toward the same uniform composition."
     )]
@@ -92,7 +90,17 @@ pub struct DeconvolveArgs {
     #[arg(
         long = "frac-prior-rate",
         default_value_t = 1.0,
-        help = "Gamma prior rate b0 on cell-type abundances w (weak: 1.0)"
+        help = "Gamma prior rate b0 per component",
+        long_help = "Gamma prior rate b0 on each component's abundance.\n\
+                     \n\
+                     It is not the weak prior its default suggests.\n\
+                     Profiles are normalised over genes.\n\
+                     A component's exposure is therefore close to 1.\n\
+                     A b0 of 1 therefore halves every abundance the run reports.\n\
+                     \n\
+                     Fractions are unaffected.\n\
+                     b0 is common to every component and cancels on normalising.\n\
+                     Lower it to put the reported abundances on the count scale."
     )]
     pub frac_prior_rate: f32,
 
