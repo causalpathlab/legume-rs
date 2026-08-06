@@ -264,28 +264,183 @@ fn counterfactual_json(
     ))
 }
 
-pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
-    mkdir_parent(&args.out)?;
+/// Per-cell fit = predictive log-likelihood / count (depth-invariant).
+fn per_cell_fit(llik: &[f32], total: &[f32]) -> Vec<f32> {
+    llik.iter()
+        .zip(total)
+        .map(|(&l, &t)| if t > 0.0 { l / t } else { 0.0 })
+        .collect()
+}
 
+/// Everything the verdict needs, once a family-specific scorer has produced it.
+///
+/// The verdict itself is model-agnostic — a quantile of the calibration fits, a flag rate,
+/// and a one-sided binomial test — so it lives here once rather than in each branch. Only
+/// the *scoring* differs by family, and only masked models get `cf_json`.
+struct Verdict<'a> {
+    args: &'a ProbeArgs,
+    model_type: &'a str,
+    cal_fit: Vec<f32>,
+    q_fit: Vec<f32>,
+    q_names: Vec<Box<str>>,
+    cf_json: String,
+}
+
+pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
+    use crate::topic::model_metadata::masked_head_from_model_type;
+
+    mkdir_parent(&args.out)?;
+    let metadata = crate::topic::model_metadata::TopicModelMetadata::load(&args.model)?;
+    if masked_head_from_model_type(&metadata.model_type).is_some() {
+        probe_masked(args)
+    } else {
+        probe_fit_only(args, &metadata)
+    }
+}
+
+fn probe_masked(args: &ProbeArgs) -> anyhow::Result<()> {
     let model = MaskedModel::open(&args.model)?;
     let scored =
         |files: &[Box<str>]| model.score(files, args.preload_data, args.minibatch_size, true);
 
-    // Per-cell fit = predictive log-likelihood / count (depth-invariant).
-    fn per_cell_fit(s: &MaskedScored) -> Vec<f32> {
-        s.llik
-            .iter()
-            .zip(&s.total)
-            .map(|(&l, &t)| if t > 0.0 { l / t } else { 0.0 })
-            .collect()
-    }
-
     let cal = scored(std::slice::from_ref(&args.calibration))?;
-    let thr = quantile(&per_cell_fit(&cal), args.alpha);
-
     let query = scored(&args.data_files)?;
-    let q_fit = per_cell_fit(&query);
-    let q_names = query.data_vec.column_names()?;
+
+    // Counterfactual axes: enact the control arm, calibrate with a permutation null.
+    let cf_json = if args.counterfactual > 0 {
+        counterfactual_json(args, &model, &cal, &query)?
+    } else {
+        String::new()
+    };
+
+    write_verdict(Verdict {
+        args,
+        model_type: &model.metadata.model_type,
+        cal_fit: per_cell_fit(&cal.llik, &cal.total),
+        q_fit: per_cell_fit(&query.llik, &query.total),
+        q_names: query.data_vec.column_names()?,
+        cf_json,
+    })
+}
+
+/// Fit score only, for the families that have no small identified block to refit.
+///
+/// **Why no counterfactual here.** The masked refit moves `α [K,H]` — ~640 numbers. The dense
+/// families have no such factorization: `topic`'s block is `dictionary.logits [K,D]` (~400k at
+/// K=20, D=20k) and `vae`'s is `gauss_decoder.weight [D,K]`. Refitting either from a few hundred
+/// query cells is underpowered, and `CellBank`'s indexed top-K packing has no dense equivalent —
+/// it needs `enc_context_size` and `shortlist_weights.parquet`, which dense artifacts do not have.
+/// For a dense counterfactual today, chain `bge --skip-etm` → `masked-topic
+/// --freeze-feature-embedding` → `probe --counterfactual`.
+fn probe_fit_only(
+    args: &ProbeArgs,
+    metadata: &crate::topic::model_metadata::TopicModelMetadata,
+) -> anyhow::Result<()> {
+    use crate::masked_topic::FeatureNameKindArg;
+    use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
+    use crate::topic::eval::QueryNameOpts;
+    use crate::topic::model_metadata::{MODEL_TYPE_TOPIC, MODEL_TYPE_VAE};
+    use crate::topic::predict_common::LatentMode;
+    use candle_util::topic_refinement::TopicRefinementConfig;
+
+    anyhow::ensure!(
+        args.counterfactual == 0,
+        "--counterfactual is available for masked models only ({} is a '{}' model); see the \
+         `probe_fit_only` docs for why, and for the chaining route that gets you one.",
+        args.model,
+        metadata.model_type
+    );
+
+    let qopts = QueryNameOpts {
+        kind: FeatureNameKindArg::Exact.resolve_or_gene(),
+        suffix_delim: None,
+        keep_suffix: None,
+    };
+
+    let (cal_fit, q_fit, q_names) = match metadata.model_type.as_ref() {
+        MODEL_TYPE_VAE => {
+            let score = |files: &[Box<str>]| {
+                score_vae_backend(VaeScoreArgs {
+                    model: &args.model,
+                    data_files: files,
+                    batch_files: None,
+                    preload: args.preload_data,
+                    minibatch_size: args.minibatch_size,
+                    query_name_opts: &qopts,
+                    metadata,
+                    need_llik: true,
+                })
+            };
+            let cal = score(std::slice::from_ref(&args.calibration))?;
+            let query = score(&args.data_files)?;
+            (
+                per_cell_fit(&cal.llik, &cal.total),
+                per_cell_fit(&query.llik, &query.total),
+                query.data_vec.column_names()?,
+            )
+        }
+        MODEL_TYPE_TOPIC => {
+            // `LatentMode::Encoder` mirrors the masked path (encoder-only, no per-cell
+            // refinement), so `refine_config` is never read.
+            let refine = TopicRefinementConfig {
+                num_steps: 0,
+                learning_rate: 0.0,
+                regularization: 0.0,
+            };
+            // ⚠️ `delta_iters: 0` keeps the legacy single-pass plug-in δ rather than the TMLE
+            // refinement `predict` defaults to. δ is estimated **from the query**, so refining it
+            // would let a genuinely novel batch explain itself away as a batch effect — the
+            // aliasing failure, on exactly the query this tool exists to flag. The plug-in is the
+            // conservative end of that trade; the masked path has no δ at all.
+            let score = |files: &[Box<str>]| {
+                score_dense_backend(DenseScoreArgs {
+                    model: &args.model,
+                    data_files: files,
+                    batch_files: None,
+                    preload: args.preload_data,
+                    minibatch_size: args.minibatch_size,
+                    block_size: None,
+                    delta_iters: 0,
+                    query_name_opts: &qopts,
+                    metadata,
+                    mode: LatentMode::Encoder,
+                    refine_config: &refine,
+                })
+            };
+            let cal = score(std::slice::from_ref(&args.calibration))?;
+            let query = score(&args.data_files)?;
+            (
+                per_cell_fit(&cal.llik, &cal.total),
+                per_cell_fit(&query.llik, &query.total),
+                query.data_vec.column_names()?,
+            )
+        }
+        other => anyhow::bail!(
+            "probe does not support '{other}' models; masked-topic/-vae/-sbp, topic and vae only"
+        ),
+    };
+
+    write_verdict(Verdict {
+        args,
+        model_type: &metadata.model_type,
+        cal_fit,
+        q_fit,
+        q_names,
+        cf_json: String::new(),
+    })
+}
+
+fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
+    let Verdict {
+        args,
+        model_type,
+        cal_fit,
+        q_fit,
+        q_names,
+        cf_json,
+    } = v;
+
+    let thr = quantile(&cal_fit, args.alpha);
     let n = q_fit.len();
     anyhow::ensure!(n > 0, "probe: query has no cells");
     let n_flag = q_fit.iter().filter(|&&f| f < thr).count();
@@ -301,13 +456,6 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
         "NOVEL — update warranted"
     } else {
         "COVERED — certify"
-    };
-
-    // Counterfactual axes: enact the control arm, calibrate with a permutation null.
-    let cf_json = if args.counterfactual > 0 {
-        counterfactual_json(args, &model, &cal, &query)?
-    } else {
-        String::new()
     };
 
     let mut tsv = String::from("cell\tfit\tflag\n");
@@ -327,7 +475,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
 
     info!(
         "probe [{}]: null p{:.0} fit ≤ {:.4}; flagged {}/{} query cells ({:.1}%), p = {:.2e}",
-        model.metadata.model_type,
+        model_type,
         args.alpha * 100.0,
         thr,
         n_flag,
