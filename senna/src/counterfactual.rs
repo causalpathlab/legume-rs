@@ -62,14 +62,36 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
 
-/// Rebuild the encoder (only to obtain the shared `ρ` handle and to create the
-/// `enc.*` vars the safetensors file expects) plus the **finest** decoder, then load
-/// the trained weights. Returns the varmap, the decoder, and the name of the `α` var.
-pub(crate) fn rebuild_decoder(
+/// A model rebuilt from disk: the varmap, the **finest** level's decoder (the only one
+/// ever scored), and the name of its `α` var.
+pub(crate) struct RebuiltModel {
+    pub parameters: VarMap,
+    pub decoder: EmbeddedNbTopicDecoder,
+    /// `dec_{num_levels-1}.topic.embeddings` — derived, not stored in the metadata.
+    pub alpha_name: String,
+}
+
+/// Rebuild the encoder (for the shared `ρ` handle and the `enc.*` vars the safetensors
+/// file expects) plus **all** `num_levels` decoders, then load the trained weights.
+///
+/// The coarser levels are constructed purely to **register** their vars and are then
+/// dropped: `EmbeddedNbTopicDecoder::new` registers through `VarBuilder::get_with_hints`,
+/// so the `Var`s outlive the struct. `VarMap::save` writes exactly what is registered, so
+/// a caller that persists this varmap (`senna update`) would otherwise drop
+/// `dec_0..dec_{lvl-1}` and produce a checkpoint `masked-topic --init-from` cannot load.
+///
+/// `ρ` is **detached** before the decoders take it. `refit_alpha` optimizes `α` alone, but
+/// `backward_step` differentiates every `is_variable()` node it reaches — and `ρ` is the
+/// encoder's `Var`, shared by construction. Left attached it costs, per SGD step, a
+/// `[H,K]×[K,D]` matmul backward plus an index_add scattering `[N·C, H]` into a zeroed
+/// `[D,H]`, both discarded. Detaching shares the same storage and only clears the variable
+/// flag, so values still round-trip through `VarMap::save` — pinning `ρ` is the intent
+/// anyway.
+pub(crate) fn rebuild_model(
     model: &str,
     metadata: &crate::topic::model_metadata::TopicModelMetadata,
     dev: &Device,
-) -> anyhow::Result<(VarMap, EmbeddedNbTopicDecoder, String)> {
+) -> anyhow::Result<RebuiltModel> {
     use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 
     let embedding_dim = metadata
@@ -91,16 +113,22 @@ pub(crate) fn rebuild_decoder(
         vb.pp("enc"),
     )?;
 
-    // Decoders share the encoder's ρ; predict/probe only use the finest level.
-    let lvl = metadata.num_levels.saturating_sub(1);
-    let decoder = EmbeddedNbTopicDecoder::new(
-        metadata.n_topics,
-        encoder.feature_embeddings().clone(),
-        vb.pp(format!("dec_{lvl}")),
-    )?;
+    let rho = encoder.feature_embeddings().detach();
+    let num_levels = metadata.num_levels.max(1);
+    let finest = num_levels - 1;
+    for i in 0..finest {
+        EmbeddedNbTopicDecoder::new(metadata.n_topics, rho.clone(), vb.pp(format!("dec_{i}")))?;
+    }
+    let decoder =
+        EmbeddedNbTopicDecoder::new(metadata.n_topics, rho, vb.pp(format!("dec_{finest}")))?;
+
     parameters.load(format!("{model}.safetensors"))?;
 
-    Ok((parameters, decoder, format!("dec_{lvl}.topic.embeddings")))
+    Ok(RebuiltModel {
+        alpha_name: format!("dec_{finest}.topic.embeddings"),
+        parameters,
+        decoder,
+    })
 }
 
 /// One side (calibration or query) of the cell bank.
@@ -132,7 +160,7 @@ pub(crate) struct CellBank {
 
 /// A storage-independent copy. `Tensor::clone` is shallow, and `Var::set` refuses a
 /// source derived from the var's own value.
-fn detached_copy(t: &Tensor) -> anyhow::Result<Tensor> {
+pub(crate) fn detached_copy(t: &Tensor) -> anyhow::Result<Tensor> {
     let dims = t.dims().to_vec();
     let v = t.flatten_all()?.to_vec1::<f32>()?;
     Ok(Tensor::from_vec(v, dims, t.device())?)
@@ -229,7 +257,7 @@ pub(crate) struct RefitCfg {
 
 /// Refit `α` (only) on `fit_ids`, starting from wherever `α` currently sits —
 /// the caller resets it between arms.
-fn refit_alpha(
+pub(crate) fn refit_alpha(
     decoder: &EmbeddedNbTopicDecoder,
     alpha: &candle_core::Var,
     bank: &CellBank,
@@ -253,7 +281,7 @@ fn refit_alpha(
 }
 
 /// Per-cell mean log-likelihood over that cell's scored genes.
-fn score_cells(
+pub(crate) fn score_cells(
     decoder: &EmbeddedNbTopicDecoder,
     bank: &CellBank,
     ids: &[usize],
@@ -298,7 +326,7 @@ pub(crate) struct Counterfactual {
     pub n_eval_calib: usize,
 }
 
-fn mean(x: &[f32]) -> f64 {
+pub(crate) fn mean(x: &[f32]) -> f64 {
     if x.is_empty() {
         return 0.0;
     }
@@ -382,7 +410,7 @@ fn splits(n_calib: usize, n_query: usize) -> anyhow::Result<Splits> {
 }
 
 /// Row-wise `‖a − b‖` for two `[K, H]` tensors.
-fn row_norms_of_diff(a: &Tensor, b: &Tensor) -> anyhow::Result<Vec<f64>> {
+pub(crate) fn row_norms_of_diff(a: &Tensor, b: &Tensor) -> anyhow::Result<Vec<f64>> {
     let d = (a - b)?.sqr()?.sum(1)?.sqrt()?.to_vec1::<f32>()?;
     Ok(d.into_iter().map(f64::from).collect())
 }
@@ -452,23 +480,26 @@ fn build_worker(
     metadata: &crate::topic::model_metadata::TopicModelMetadata,
     dev: &Device,
 ) -> anyhow::Result<Worker> {
-    let (params, decoder, alpha_name) = rebuild_decoder(model, metadata, dev)?;
-    let alpha = params
-        .data()
-        .lock()
-        .expect("varmap poisoned")
-        .get(&alpha_name)
-        .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!("counterfactual: var `{alpha_name}` not found in the model")
-        })?;
+    let rebuilt = rebuild_model(model, metadata, dev)?;
+    let alpha = alpha_var(&rebuilt.parameters, &rebuilt.alpha_name)?;
     let alpha0 = detached_copy(alpha.as_tensor())?;
     Ok(Worker {
-        _params: params,
-        decoder,
+        _params: rebuilt.parameters,
+        decoder: rebuilt.decoder,
         alpha,
         alpha0,
     })
+}
+
+/// Fetch the `α` `Var` out of a loaded varmap by name.
+pub(crate) fn alpha_var(parameters: &VarMap, alpha_name: &str) -> anyhow::Result<candle_core::Var> {
+    parameters
+        .data()
+        .lock()
+        .expect("varmap poisoned")
+        .get(alpha_name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("var `{alpha_name}` not found in the model"))
 }
 
 pub(crate) struct CfArgs<'a> {
