@@ -290,12 +290,53 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
     use crate::topic::model_metadata::masked_head_from_model_type;
 
     mkdir_parent(&args.out)?;
+    // `senna bge` writes no `model.json` — it has no checkpoint at all — so it is identified
+    // by the absence of one plus a `RunKind::Bge` manifest, not by a `model_type` string.
+    if !std::path::Path::new(&format!("{}.model.json", args.model)).exists() {
+        return probe_bge(args);
+    }
     let metadata = crate::topic::model_metadata::TopicModelMetadata::load(&args.model)?;
     if masked_head_from_model_type(&metadata.model_type).is_some() {
         probe_masked(args)
     } else {
         probe_fit_only(args, &metadata)
     }
+}
+
+/// Fit score for a `senna bge` run.
+///
+/// No refit is possible here for the same reason as the dense families, only more so: bge's
+/// only learnable object on the gene side is ρ itself (`[D,H]`, ~2.5M numbers at D=20k),
+/// which a few hundred query cells cannot identify. Chain
+/// `bge --skip-etm` → `masked-topic --freeze-feature-embedding` → `probe --counterfactual`
+/// when the counterfactual is what you want.
+fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
+    use crate::bge_artifact::BgeModel;
+
+    anyhow::ensure!(
+        args.counterfactual == 0,
+        "--counterfactual is available for masked models only; {} is a `senna bge` run, whose \
+         gene-side parameter is ρ itself (~2.5M numbers at D=20k) rather than a K×H block. See \
+         the `probe_bge` docs for the chaining route.",
+        args.model
+    );
+
+    let model = BgeModel::open(&args.model)?;
+    let cal = model.score(
+        std::slice::from_ref(&args.calibration),
+        args.preload_data,
+        args.minibatch_size,
+    )?;
+    let query = model.score(&args.data_files, args.preload_data, args.minibatch_size)?;
+
+    write_verdict(Verdict {
+        args,
+        model_type: "bge",
+        cal_fit: per_cell_fit(&cal.llik, &cal.total),
+        q_fit: per_cell_fit(&query.llik, &query.total),
+        q_names: query.data_vec.column_names()?,
+        cf_json: String::new(),
+    })
 }
 
 fn probe_masked(args: &ProbeArgs) -> anyhow::Result<()> {
