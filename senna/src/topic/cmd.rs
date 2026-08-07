@@ -940,6 +940,8 @@ where
         theta_mean: None,
         n_train_cells: Some(ctx.data_vec.num_columns()),
         update_history: Vec::new(),
+        // Dense `topic` uses no indexed encoder, so the module branch does not apply.
+        n_gene_modules: None,
     };
     metadata.save(&ctx.args.out)?;
 

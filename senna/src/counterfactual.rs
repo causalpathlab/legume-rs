@@ -108,6 +108,9 @@ pub(crate) fn rebuild_model(
             layers: &metadata.encoder_hidden,
             use_gcn: false,
             attn_pool: true,
+            // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
+            // errors on a shape mismatch.
+            n_gene_modules: metadata.n_gene_modules.unwrap_or(0),
         },
         &parameters,
         vb.pp("enc"),
