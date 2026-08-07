@@ -82,29 +82,16 @@ fn parse_header(header: &str) -> Option<SumstatColumns> {
     })
 }
 
-/// Read z-scores from a BGZF-compressed summary statistics file.
-///
-/// Returns a matrix of z-scores (M × T) aligned to the reference panel SNP ordering.
-/// SNPs in the sumstat file that are not in the reference panel are skipped.
-/// Reference panel SNPs missing from the sumstat file get z-score = 0.
-pub fn read_sumstat_zscores(path: &str, ref_snp_ids: &[Box<str>]) -> Result<DMatrix<f32>> {
-    let (zscores, _) = read_sumstat_zscores_with_n(
-        path,
-        ref_snp_ids,
-        &[], // no chromosomes
-        &[], // no positions
-        &[], // no allele1
-        &[], // no allele2
-    )?;
-    Ok(zscores)
-}
-
 /// Read z-scores and median sample size from a BGZF-compressed summary statistics file.
 ///
+/// Returns a matrix of z-scores (M × T) aligned to the reference panel SNP ordering.
+/// SNPs in the sumstat file that are not in the reference panel are skipped;
+/// reference panel SNPs missing from the sumstat file get z-score = 0.
+///
 /// When ref_chromosomes/ref_positions are provided, primary matching uses (chr, position).
-/// Falls back to snp_id matching otherwise. When ref_allele1/ref_allele2 are provided,
-/// allele alignment is performed (flipping z-scores when the effect allele is swapped,
-/// dropping strand-ambiguous or mismatched SNPs).
+/// Falls back to snp_id matching otherwise; pass empty slices to match on snp_id alone.
+/// When ref_allele1/ref_allele2 are provided, allele alignment is performed (flipping
+/// z-scores when the effect allele is swapped, dropping strand-ambiguous or mismatched SNPs).
 pub fn read_sumstat_zscores_with_n(
     path: &str,
     ref_snp_ids: &[Box<str>],
@@ -346,7 +333,8 @@ mod tests {
         let ref_snp_ids: Vec<Box<str>> =
             vec![Box::from("rs1"), Box::from("rs2"), Box::from("rs_missing")];
 
-        let zscores = read_sumstat_zscores(&path, &ref_snp_ids).unwrap();
+        let (zscores, _) =
+            read_sumstat_zscores_with_n(&path, &ref_snp_ids, &[], &[], &[], &[]).unwrap();
 
         assert_eq!(zscores.nrows(), 3);
         assert_eq!(zscores.ncols(), 2);

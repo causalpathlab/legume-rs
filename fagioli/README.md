@@ -1,31 +1,49 @@
 # Fagioli
 
-Faceted Associations of Genotype Information in Omics-based Locus Investigation
+Faceted Associations of Genotype Information via Omics-based Locus Identification
 
-## Features
+## Subcommands
 
-- **eQTL Simulation** (`sim-qtl`): Simulate realistic single-cell eQTL data with cell type heterogeneity
+### Simulation
+
+- **`sim-geno`** — Wright-Fisher forward simulation of genotypes → PLINK BED
+- **`sim-qtl`** — single-cell eQTL data with cell type heterogeneity
   - Gene-by-gene cis-eQTL effects (TSS ± cis window)
   - Hybrid genetic architecture (shared + independent causal variants across cell types)
   - Factor model for gene-gene correlations (W × Z factorization)
   - Two-level variance decomposition (cell type identity vs individual genetic/noise)
   - Single-cell count generation with Poisson sampling
-- **Summary Statistics Simulation** (`sim-sumstat`): Simulate multi-trait GWAS summary statistics with LD structure
+- **`sim-sumstat`** — multi-trait GWAS summary statistics with LD structure
   - Block-level causal architecture (shared + independent causal SNPs per LD block)
+  - Sparse and polygenic (infinitesimal) heritability components
   - Optional low-rank confounders
   - Marginal OLS summary statistics and within-block LD scores
-- **Fine-Mapping from Summary Statistics** (`map-sumstat`): Multi-trait fine-mapping from GWAS z-scores
+- **`sim-mediation`** — SNP → expression → phenotype with confounders
+  - Cis-eQTL effects on mediator genes, mediated and direct pheno
+  - Supports collider bias and winner's-curse scenarios
+
+### Fine-mapping and regression
+
+- **`fit-sumstat-sgvb`** — multi-trait fine-mapping from GWAS z-scores
   - RSS likelihood with rSVD-compressed LD (Zhu & Stephens 2017 eigenspace approach)
-  - SuSiE and BiSuSiE variational models with SGVB optimization
-  - Optional multilevel SuSiE (`--multilevel`) with LD-aware hierarchical softmax for large blocks
+  - `--model susie | bisusie | spike-slab`
+  - `--prior-type single | ash` (ash turns the `--prior-var` grid into a learnable mixture)
   - Adaptive prior variance grid from LDSC h² estimation
   - Local LDSC intercept correction and PVE adjustment
-- **Fine-Mapping from Single-Cell Data** (`map-qtl`): Cis-eQTL fine-mapping with cell type heterogeneity
+  - Optional `--refine` for joint refinement of high-PIP variants across blocks
+- **`fit-sumstat-mcmc`** — same RSS likelihood, sampled by elliptical slice sampling
+- **`fit-qtl-sgvb`** — cis-eQTL fine-mapping with cell type heterogeneity
   - Poisson-Gamma pseudobulk aggregation per (individual, cell type) pair
   - Weighted Gaussian likelihood with per-observation variance
-  - Optional multilevel SuSiE (`--multilevel`) for large cis-windows
-  - Cross-gene empirical Bayes for prior variance reweighting
-- **Pseudobulk** (`pseudobulk`): Collapse single-cell counts into Poisson-Gamma pseudobulk profiles
+  - Cross-gene empirical Bayes prior-variance reweighting (`--empirical-bayes`)
+- **`fit-prs-susie`** — ridge PRS from z-scores, then SuSiE fine-mapping on the predicted
+  phenotypes; `--method cavi` (classical IBSS) or `--method sgvb`
+- **`fit-regression`** — generic SGVB regression, `--model gaussian|poisson|nb` ×
+  `--prior gaussian|susie` (aliased as `regression`)
+
+### Utility
+
+- **`pseudobulk`** — collapse single-cell counts into Poisson-Gamma pseudobulk profiles
 
 ## Generative Models
 
@@ -88,11 +106,11 @@ Generates multi-trait summary statistics from PLINK genotype files with block-st
 
 #### Phenotype model
 
-The genome is partitioned into LD blocks. Each block $b$ is causal with probability `causal_block_density`. Within each causal block, the genetic value for individual $i$ and trait $t$ is:
+The genome is partitioned into LD blocks, of which `--num-causal-blocks` are drawn to carry causal SNPs. Within each causal block, the genetic value for individual $i$ and trait $t$ is:
 
 $$G_{it}^{(b)} = \sum_{j \in \mathcal{S}_b} X_{ij} \beta^{\text{sh}}_{jt} + \sum_{j \in \mathcal{I}_{bt}} X_{ij} \beta^{\text{ind}}_{jt}$$
 
-where $\mathcal{S}_b$ are shared causal SNPs (same across traits) and $\mathcal{I}_{bt}$ are independent causal SNPs (different per trait). Effect sizes are scaled so that the total genetic variance across all causal blocks sums to $h^2$:
+where $\mathcal{S}_b$ are shared causal SNPs (same across traits) and $\mathcal{I}_{bt}$ are independent causal SNPs (different per trait). Effect sizes are scaled so that the total genetic variance across all causal blocks sums to $h^2$ = `--h2-sparse`:
 
 $$\beta^{\text{sh}}_{jt} \sim \mathcal{N}\!\left(0,\; \frac{\sigma^2_{\text{sh}}}{T \cdot S}\right), \quad \beta^{\text{ind}}_{jt} \sim \mathcal{N}\!\left(0,\; \frac{\sigma^2_{\text{ind}}}{I}\right)$$
 
@@ -103,6 +121,8 @@ The final phenotype combines genetic signal, optional low-rank confounders, and 
 $$Y_t = \widetilde{G}_t + \widetilde{C \gamma_t} + \widetilde{\varepsilon}_t, \quad \text{Var}(\widetilde{G}) = h^2, \quad \text{Var}(\widetilde{C\gamma}) = \rho_c, \quad \text{Var}(\widetilde{\varepsilon}) = 1 - h^2 - \rho_c$$
 
 where tildes denote standardized-then-scaled components, $C = \text{QR}(R_{N \times r}) \cdot \Lambda_{r \times L}$ is a low-rank confounder matrix, $\gamma_t \sim \mathcal{N}(0, 1/L)$, and $\varepsilon_t \sim \mathcal{N}(0,1)$.
+
+A separate polygenic component (`--h2-polygenic`) puts dense infinitesimal effects on all SNPs; when present, the sparse and polygenic genetic values are standardized independently so each contributes its specified PVE.
 
 ```mermaid
 graph LR
@@ -123,6 +143,20 @@ $$\hat\beta_{jt} = \frac{X_j^\top Y_t}{X_j^\top X_j}, \quad \text{SE}_{jt} = \fr
 
 Within-block LD scores: $\ell_j = \sum_{k \in \text{block}} r^2_{jk}$.
 
+### `fit-sumstat-*`: RSS eigenspace
+
+Both summary-statistic fitters start from the RSS likelihood (Zhu & Stephens 2017):
+
+$$z \sim \mathcal{N}(R\beta,\; R), \qquad R = X^\top X / n$$
+
+$R$ is never formed. Instead $X/\sqrt{n} = UDV^\top$ gives $R = VD^2V^\top$, and the model is
+solved in the $K$-dimensional eigenspace:
+
+$$\tilde{y} = \tilde{D}^{-1}V^\top z, \qquad \tilde{X} = \tilde{D}V^\top, \qquad \tilde{D} = \sqrt{D^2 + \lambda}$$
+
+which is a fixed-variance Gaussian regression in $K$-space. `fit-sumstat-sgvb` optimizes it with
+SGVB; `fit-sumstat-mcmc` samples it with elliptical slice sampling.
+
 ## Installation
 
 ```bash
@@ -131,9 +165,21 @@ cargo build --release
 
 ## Usage
 
-### eQTL Simulation
+### Genotype Simulation
 
-Generate single-cell eQTL data with realistic genetic architecture:
+```bash
+fagioli sim-geno \
+  --num-individuals 2000 \
+  --num-snps 10000 \
+  --chromosome 22 \
+  --ne 10000 \
+  --num-generations 1000 \
+  --output ./results/geno
+```
+
+**Output files:** `geno.bed`, `geno.bim`, `geno.fam`
+
+### eQTL Simulation
 
 ```bash
 fagioli sim-qtl \
@@ -183,8 +229,6 @@ fagioli sim-qtl \
 
 ### Summary Statistics Simulation
 
-Simulate multi-trait GWAS summary statistics with LD block structure:
-
 ```bash
 fagioli sim-sumstat \
   --bed-prefix /path/to/genotypes \
@@ -193,8 +237,9 @@ fagioli sim-sumstat \
   --num-traits 10 \
   --num-shared-causal 5 \
   --num-independent-causal 3 \
-  --genetic-variance 0.4 \
-  --causal-block-density 0.3 \
+  --h2-sparse 0.4 \
+  --h2-polygenic 0.1 \
+  --num-causal-blocks 5 \
   --num-confounders 10 \
   --num-hidden-factors 5 \
   --pve-confounders 0.1 \
@@ -211,12 +256,39 @@ fagioli sim-sumstat \
 
 LD blocks can be provided via `--ld-block-file` (BED format) or estimated from data using Nystrom + rSVD.
 
+### Mediation Simulation
+
+```bash
+fagioli sim-mediation \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/med \
+  --num-genes 200 \
+  --num-mediator-genes 20 \
+  --num-observed-mediators 10 \
+  --n-eqtl-per-gene 2 \
+  --h2-eqtl 0.3 \
+  --h2-mediated 0.2 \
+  --seed 42
+```
+
+**Output files:**
+- `med.gwas.sumstats.bed.gz` — GWAS summary statistics
+- `med.eqtl.sumstats.bed.gz` — cis-eQTL summary statistics
+- `med.eqtl.discovery.sumstats.bed.gz`, `med.eqtl.replication.sumstats.bed.gz` — split-sample
+  eQTL statistics, for winner's-curse scenarios
+- `med.ld_scores.bed.gz`, `med.ld_blocks.bed.gz` — LD structure
+- `med.ground_truth.bed.gz` — True causal effects
+- `med.genes.bed.gz` — Gene annotations with mediator status
+- `med.confounders.tsv.gz` — Confounder matrix
+- `med.parameters.json` — All simulation parameters
+
 ### Summary Statistics Fine-Mapping
 
 Multi-trait fine-mapping from summary statistics with an LD reference panel:
 
 ```bash
-fagioli map-sumstat \
+fagioli fit-sumstat-sgvb \
   --sumstat-file ./results/sim.sumstats.bed.gz \
   --bed-prefix /path/to/genotypes \
   --chromosome 22 \
@@ -228,20 +300,32 @@ fagioli map-sumstat \
   --seed 42
 ```
 
-With multilevel SuSiE for large blocks (LD-aware hierarchical variable selection):
+With the ash mixture prior and cross-block refinement:
 
 ```bash
-fagioli map-sumstat \
+fagioli fit-sumstat-sgvb \
   --sumstat-file ./results/sim.sumstats.bed.gz \
   --bed-prefix /path/to/genotypes \
   --chromosome 22 \
-  --output ./results/map_ml \
+  --output ./results/map_ash \
   --model susie \
-  --multilevel \
+  --prior-type ash \
+  --refine \
   --num-iterations 500
 ```
 
-Available models: `susie`, `bisusie`. Add `--multilevel` for hierarchical SuSiE (susie only).
+Available models: `susie`, `bisusie`, `spike-slab`.
+
+The MCMC counterpart takes the same input and produces the same outputs:
+
+```bash
+fagioli fit-sumstat-mcmc \
+  --sumstat-file ./results/sim.sumstats.bed.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/mcmc \
+  --num-components 10
+```
 
 **Output files:**
 - `map.results.bed.gz` — Per-SNP-trait PIPs, posterior effect mean/std, marginal z-scores
@@ -249,10 +333,8 @@ Available models: `susie`, `bisusie`. Add `--multilevel` for hierarchical SuSiE 
 
 ### eQTL Fine-Mapping from Single-Cell Data
 
-Fine-map cis-eQTL from single-cell RNA-seq with cell type heterogeneity:
-
 ```bash
-fagioli map-qtl \
+fagioli fit-qtl-sgvb \
   --sc-backend-files /path/to/counts.zarr \
   --cell-annotations /path/to/cells.tsv.gz \
   --bed-prefix /path/to/genotypes \
@@ -264,28 +346,44 @@ fagioli map-qtl \
   --seed 42
 ```
 
-With multilevel SuSiE for large cis-windows:
-
-```bash
-fagioli map-qtl \
-  --sc-backend-files /path/to/counts.zarr \
-  --cell-annotations /path/to/cells.tsv.gz \
-  --bed-prefix /path/to/genotypes \
-  --chromosome 22 \
-  --gtf-file /path/to/genes.gtf \
-  --output ./results/qtl_ml \
-  --multilevel \
-  --seed 42
-```
-
 **Output files:**
 - `qtl.results.bed.gz` — Per-SNP-trait PIPs, posterior effect mean/std, marginal z-scores
 - `qtl.gene_summary.tsv.gz` — Per-gene summary (best ELBO, top PIP SNPs)
 - `qtl.parameters.json` — All mapping parameters
 
-### Pseudobulk Aggregation
+### PRS + SuSiE
 
-Collapse single-cell counts into pseudobulk profiles using Poisson-Gamma model:
+Builds a ridge polygenic score from z-scores, then fine-maps on the predicted phenotypes:
+
+```bash
+fagioli fit-prs-susie \
+  --sumstat-file ./results/sim.sumstats.bed.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/prs \
+  --ridge-lambda 0.1 \
+  --method cavi \
+  --num-components 10
+```
+
+**Output files:** `prs.results.bed.gz`, `prs.parameters.json`
+
+### Generic Regression
+
+```bash
+fagioli fit-regression \
+  -x design.parquet \
+  -y outcome.parquet \
+  --model gaussian \
+  --prior susie \
+  --iters 1000 \
+  --output ./results/reg
+```
+
+**Output files:** `reg.mean.parquet`, `reg.var.parquet`, and `reg.disp.parquet` for the
+negative-binomial likelihood.
+
+### Pseudobulk Aggregation
 
 ```bash
 fagioli pseudobulk \

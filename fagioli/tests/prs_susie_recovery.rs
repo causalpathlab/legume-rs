@@ -284,6 +284,37 @@ fn test_prs_susie_recovers_causal_snps() -> Result<()> {
     Ok(())
 }
 
+/// Truncated-pseudo-inverse PRS: Ŷ = U diag(1/d, thresholded) V' z.
+///
+/// The library only ships the ridge weighting, since that is what `fit-prs-susie`
+/// uses. This local copy exists so the test can pin ridge against the limiting
+/// truncation behaviour it is supposed to approach as λ → 0.
+fn block_prs_truncated(x_block: &DMatrix<f32>, z_block: &DMatrix<f32>) -> DMatrix<f32> {
+    const TRUNCATION_RATIO: f32 = 1e-4;
+
+    let n = x_block.nrows();
+    let mut x_scaled = x_block.clone();
+    x_scaled.scale_columns_inplace();
+    x_scaled *= 1.0 / (n as f32).sqrt();
+
+    let svd = x_scaled.svd(true, true);
+    let u = svd.u.as_ref().expect("SVD U");
+    let vt = svd.v_t.as_ref().expect("SVD V'");
+    let d = &svd.singular_values;
+
+    let max_sv = d.iter().cloned().fold(0.0f32, f32::max);
+    let mut weighted = vt * z_block;
+    for i in 0..d.len() {
+        let w = if d[i] > max_sv * TRUNCATION_RATIO {
+            1.0 / d[i]
+        } else {
+            0.0
+        };
+        weighted.row_mut(i).scale_mut(w);
+    }
+    u * weighted
+}
+
 #[test]
 fn test_ridge_vs_truncation_prs() -> Result<()> {
     let n = 200;
@@ -293,8 +324,7 @@ fn test_ridge_vs_truncation_prs() -> Result<()> {
     let z = DMatrix::<f32>::rnorm(p, 1);
 
     let yhat_ridge = compute_block_polygenic_scores_ridge(&x, &z, 0.1)?;
-    let yhat_trunc =
-        fagioli::summary_stats::polygenic_score::compute_block_polygenic_scores(&x, &z)?;
+    let yhat_trunc = block_prs_truncated(&x, &z);
 
     assert_eq!(yhat_ridge.nrows(), n);
     assert_eq!(yhat_ridge.ncols(), 1);
