@@ -18,8 +18,16 @@
 //! fitted geometry is real before there is a model to defend.
 
 pub mod diagnostics;
+pub mod model;
+pub mod noise;
+pub mod train;
+pub mod whiten;
 
 pub use diagnostics::{
     compare_geometry, cross_trait_moments, estimate_trait_geometry, CrossTraitMoments,
     GeometryVerdict, TraitGeometry,
 };
+pub use model::{EmbedConfig, EmbedModel};
+pub use noise::{omega_sqrt_pair, NoiseModel};
+pub use train::{train, EmbedFit};
+pub use whiten::{unwhiten_traits, whiten_blocks, WhitenedBlock};
