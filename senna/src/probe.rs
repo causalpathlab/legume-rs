@@ -286,20 +286,80 @@ struct Verdict<'a> {
     cf_json: String,
 }
 
-pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
-    use crate::topic::model_metadata::masked_head_from_model_type;
+/// Which scoring path a run prefix needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Family {
+    /// `masked-topic` / `masked-sbp` / `masked-vae` — the only family with a counterfactual.
+    Masked,
+    Dense,
+    Vae,
+    Bge,
+}
 
-    mkdir_parent(&args.out)?;
-    // `senna bge` writes no `model.json` — it has no checkpoint at all — so it is identified
-    // by the absence of one plus a `RunKind::Bge` manifest, not by a `model_type` string.
-    if !std::path::Path::new(&format!("{}.model.json", args.model)).exists() {
-        return probe_bge(args);
+/// Route a prefix to its family, from the run manifest's [`RunKind`].
+///
+/// **Why the manifest and not the files on disk.** `RunKind` is the one place senna already
+/// enumerates its families; inferring from which files happen to exist means re-deriving that
+/// enumeration badly. The previous probe for `{prefix}.model.json` sent *anything* lacking one
+/// — an `svd` run, an `fne` run, a half-written directory — down the bge path, which then
+/// failed with a bge-flavoured complaint about a file the user had never mentioned.
+///
+/// **Two levels, deliberately.** `RunKind` gives the family; `model_type` gives the head
+/// *within* the masked family, because `masked-topic` and `masked-sbp` share
+/// `RunKind::Itopic` and are told apart only by `model_type` — which `MaskedModel::open` reads
+/// anyway. Family routing and head selection are different questions and now ask different
+/// sources.
+fn resolve_family(prefix: &str) -> anyhow::Result<Family> {
+    use crate::run_manifest::{RunKind, RunManifest};
+    use crate::topic::model_metadata::{
+        masked_head_from_model_type, TopicModelMetadata, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
+    };
+
+    let manifest = std::path::PathBuf::from(format!("{prefix}.senna.json"));
+    if manifest.is_file() {
+        let (m, _) = RunManifest::load(&manifest)?;
+        return match m.kind {
+            RunKind::Itopic | RunKind::MaskedVae => Ok(Family::Masked),
+            RunKind::Topic => Ok(Family::Dense),
+            RunKind::Vae => Ok(Family::Vae),
+            RunKind::Bge => Ok(Family::Bge),
+            other => anyhow::bail!(
+                "probe does not support a '{}' run. Supported: masked-topic / masked-sbp / \
+                 masked-vae, topic, vae, bge.",
+                other.as_str()
+            ),
+        };
     }
-    let metadata = crate::topic::model_metadata::TopicModelMetadata::load(&args.model)?;
+
+    // Manifests postdate some saved models, so fall back to the metadata every checkpointed
+    // family writes. bge has neither a checkpoint nor metadata, so it can only arrive above.
+    anyhow::ensure!(
+        std::path::Path::new(&format!("{prefix}.model.json")).is_file(),
+        "{prefix}: not a senna model prefix — neither {prefix}.senna.json nor \
+         {prefix}.model.json exists."
+    );
+    let metadata = TopicModelMetadata::load(prefix)?;
     if masked_head_from_model_type(&metadata.model_type).is_some() {
-        probe_masked(args)
+        Ok(Family::Masked)
+    } else if metadata.model_type.as_ref() == MODEL_TYPE_VAE {
+        Ok(Family::Vae)
+    } else if metadata.model_type.as_ref() == MODEL_TYPE_TOPIC {
+        Ok(Family::Dense)
     } else {
-        probe_fit_only(args, &metadata)
+        anyhow::bail!(
+            "probe does not support '{}' models; masked-topic/-sbp/-vae, topic, vae and bge only",
+            metadata.model_type
+        )
+    }
+}
+
+pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
+    mkdir_parent(&args.out)?;
+    let family = resolve_family(&args.model)?;
+    match family {
+        Family::Masked => probe_masked(args),
+        Family::Bge => probe_bge(args),
+        Family::Dense | Family::Vae => probe_fit_only(args, family),
     }
 }
 
@@ -373,16 +433,59 @@ fn probe_masked(args: &ProbeArgs) -> anyhow::Result<()> {
 /// it needs `enc_context_size` and `shortlist_weights.parquet`, which dense artifacts do not have.
 /// For a dense counterfactual today, chain `bge --skip-etm` → `masked-topic
 /// --freeze-feature-embedding` → `probe --counterfactual`.
-fn probe_fit_only(
+/// The three fields the verdict needs, from whichever family produced them.
+///
+/// `MaskedScored`, `DenseScored`, `VaeScored` and `BgeFit` all carry exactly these; without the
+/// trait, "score the calibration set, score the query, reduce both" was written out four times
+/// and the definition of *per-cell fit* lived in four places.
+trait Scored {
+    fn parts(&self) -> (&[f32], &[f32], &data_beans::sparse_io_vector::SparseIoVec);
+}
+
+macro_rules! impl_scored {
+    ($($t:ty),+) => { $(impl Scored for $t {
+        fn parts(&self) -> (&[f32], &[f32], &data_beans::sparse_io_vector::SparseIoVec) {
+            (&self.llik, &self.total, &self.data_vec)
+        }
+    })+ };
+}
+impl_scored!(
+    MaskedScored,
+    crate::predict::DenseScored,
+    crate::predict::VaeScored,
+    crate::bge::score::BgeFit
+);
+
+/// `(calibration fits, query fits, query cell names)` — what the verdict consumes.
+type FitPair = (Vec<f32>, Vec<f32>, Vec<Box<str>>);
+
+/// Score calibration then query, and reduce both to per-cell fits.
+///
+/// The calibration score is scoped so its backend — a whole `SparseIoVec`, the full matrix
+/// under `--preload-data` — drops *before* the query one is opened. Only its two `f32` vectors
+/// are needed afterwards, and `update` already takes this care explicitly.
+fn cal_and_query<S: Scored>(
     args: &ProbeArgs,
-    metadata: &crate::topic::model_metadata::TopicModelMetadata,
-) -> anyhow::Result<()> {
+    score: impl Fn(&[Box<str>]) -> anyhow::Result<S>,
+) -> anyhow::Result<FitPair> {
+    let cal_fit = {
+        let cal = score(std::slice::from_ref(&args.calibration))?;
+        let (llik, total, _) = cal.parts();
+        per_cell_fit(llik, total)
+    };
+    let query = score(&args.data_files)?;
+    let (llik, total, data_vec) = query.parts();
+    Ok((cal_fit, per_cell_fit(llik, total), data_vec.column_names()?))
+}
+
+fn probe_fit_only(args: &ProbeArgs, family: Family) -> anyhow::Result<()> {
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
     use crate::topic::eval::QueryNameOpts;
-    use crate::topic::model_metadata::{MODEL_TYPE_TOPIC, MODEL_TYPE_VAE};
+    use crate::topic::model_metadata::TopicModelMetadata;
     use crate::topic::predict_common::LatentMode;
     use candle_util::topic_refinement::TopicRefinementConfig;
 
+    let metadata = TopicModelMetadata::load(&args.model)?;
     anyhow::ensure!(
         args.counterfactual == 0,
         "--counterfactual is available for masked models only ({} is a '{}' model); see the \
@@ -392,68 +495,44 @@ fn probe_fit_only(
     );
 
     let qopts = QueryNameOpts::default();
-
-    let (cal_fit, q_fit, q_names) = match metadata.model_type.as_ref() {
-        MODEL_TYPE_VAE => {
-            let score = |files: &[Box<str>]| {
-                score_vae_backend(VaeScoreArgs {
-                    model: &args.model,
-                    data_files: files,
-                    batch_files: None,
-                    preload: args.preload_data,
-                    minibatch_size: args.minibatch_size,
-                    query_name_opts: &qopts,
-                    metadata,
-                    need_llik: true,
-                })
-            };
-            let cal = score(std::slice::from_ref(&args.calibration))?;
-            let query = score(&args.data_files)?;
-            (
-                per_cell_fit(&cal.llik, &cal.total),
-                per_cell_fit(&query.llik, &query.total),
-                query.data_vec.column_names()?,
-            )
-        }
-        MODEL_TYPE_TOPIC => {
-            // `LatentMode::Encoder` mirrors the masked path (encoder-only, no per-cell
-            // refinement), so `refine_config` is never read.
-            let refine = TopicRefinementConfig {
-                num_steps: 0,
-                learning_rate: 0.0,
-                regularization: 0.0,
-            };
-            // ⚠️ `delta_iters: 0` keeps the legacy single-pass plug-in δ rather than the TMLE
-            // refinement `predict` defaults to. δ is estimated **from the query**, so refining it
-            // would let a genuinely novel batch explain itself away as a batch effect — the
-            // aliasing failure, on exactly the query this tool exists to flag. The plug-in is the
-            // conservative end of that trade; the masked path has no δ at all.
-            let score = |files: &[Box<str>]| {
-                score_dense_backend(DenseScoreArgs {
-                    model: &args.model,
-                    data_files: files,
-                    batch_files: None,
-                    preload: args.preload_data,
-                    minibatch_size: args.minibatch_size,
-                    block_size: None,
-                    delta_iters: 0,
-                    query_name_opts: &qopts,
-                    metadata,
-                    mode: LatentMode::Encoder,
-                    refine_config: &refine,
-                })
-            };
-            let cal = score(std::slice::from_ref(&args.calibration))?;
-            let query = score(&args.data_files)?;
-            (
-                per_cell_fit(&cal.llik, &cal.total),
-                per_cell_fit(&query.llik, &query.total),
-                query.data_vec.column_names()?,
-            )
-        }
-        other => anyhow::bail!(
-            "probe does not support '{other}' models; masked-topic/-vae/-sbp, topic and vae only"
-        ),
+    let (cal_fit, q_fit, q_names) = match family {
+        Family::Vae => cal_and_query(args, |files| {
+            score_vae_backend(VaeScoreArgs {
+                model: &args.model,
+                data_files: files,
+                batch_files: None,
+                preload: args.preload_data,
+                minibatch_size: args.minibatch_size,
+                query_name_opts: &qopts,
+                metadata: &metadata,
+                need_llik: true,
+            })
+        })?,
+        // `LatentMode::Encoder` mirrors the masked path (encoder-only, no per-cell refinement),
+        // so `refine_config` is never read.
+        //
+        // ⚠️ `delta_iters: 0` keeps the legacy single-pass plug-in δ rather than the TMLE
+        // refinement `predict` defaults to. δ is estimated **from the query**, so refining it
+        // would let a genuinely novel batch explain itself away as a batch effect — the aliasing
+        // failure, on exactly the query this tool exists to flag. The plug-in is the conservative
+        // end of that trade; the masked path has no δ at all.
+        Family::Dense => cal_and_query(args, |files| {
+            score_dense_backend(DenseScoreArgs {
+                model: &args.model,
+                data_files: files,
+                batch_files: None,
+                preload: args.preload_data,
+                minibatch_size: args.minibatch_size,
+                block_size: None,
+                delta_iters: 0,
+                query_name_opts: &qopts,
+                metadata: &metadata,
+                mode: LatentMode::Encoder,
+                refine_config: &TopicRefinementConfig::default(),
+            })
+        })?,
+        // `run_probe` only routes these two here.
+        Family::Masked | Family::Bge => unreachable!("{family:?} has its own path"),
     };
 
     write_verdict(Verdict {
