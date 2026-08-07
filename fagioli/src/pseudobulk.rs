@@ -6,11 +6,11 @@ use nalgebra::DMatrix;
 
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans_alg::pseudobulk::collapse_pseudobulk;
 use fagioli::io::cell_annotations::{
     build_onehot_membership, infer_cell_annotations, read_cell_annotations,
-    read_membership_proportions,
+    read_membership_proportions, Membership,
 };
-use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
 use matrix_param::io::ParamIo;
 use matrix_util::common_io::{basename, mkdir_parent};
 

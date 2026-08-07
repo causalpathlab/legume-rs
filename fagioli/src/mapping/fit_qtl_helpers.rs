@@ -10,7 +10,7 @@ use nalgebra::DMatrix;
 
 use crate::genotype::GenotypeMatrix;
 use crate::io::results::VariantRow;
-use crate::mapping::pseudobulk::CollapsedPseudobulk;
+use data_beans_alg::pseudobulk::CollapsedPseudobulk;
 use crate::sgvb::BlockFitResultDetailed;
 use crate::simulation::GeneAnnotations;
 use matrix_param::traits::Inference;

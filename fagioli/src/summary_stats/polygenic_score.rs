@@ -6,9 +6,6 @@ use rayon::prelude::*;
 
 use super::ld_block::LdBlock;
 
-/// Minimum singular value ratio (relative to max) to keep in SVD truncation.
-const SVD_TRUNCATION_RATIO: f32 = 1e-4;
-
 /// Core SVD-based PRS: Ŷ = U * diag(w(d)) * V' * z
 ///
 /// `sv_weight` maps (singular_value, max_singular_value) to a weight.
@@ -51,21 +48,6 @@ fn compute_block_prs_svd(
     }
 
     Ok(u * weighted_vt_z)
-}
-
-/// Compute polygenic scores for a single LD block using truncated SVD inverse.
-pub fn compute_block_polygenic_scores(
-    x_block: &DMatrix<f32>,
-    z_block: &DMatrix<f32>,
-) -> Result<DMatrix<f32>> {
-    compute_block_prs_svd(x_block, z_block, |d, max_sv| {
-        let threshold = max_sv * SVD_TRUNCATION_RATIO;
-        if d > threshold {
-            1.0 / d
-        } else {
-            0.0
-        }
-    })
 }
 
 /// Compute ridge-regularized polygenic scores for a single LD block.
@@ -127,27 +109,6 @@ pub fn compute_all_polygenic_scores_ridge(
     Ok(yhat)
 }
 
-/// Compute polygenic scores across all LD blocks (parallel).
-pub fn compute_all_polygenic_scores(
-    genotypes: &DMatrix<f32>,
-    zscores: &DMatrix<f32>,
-    blocks: &[LdBlock],
-) -> Result<DMatrix<f32>> {
-    info!(
-        "Computing polygenic scores: {} individuals, {} traits, {} blocks",
-        genotypes.nrows(),
-        zscores.ncols(),
-        blocks.len(),
-    );
-    let yhat = compute_all_prs(genotypes, zscores, blocks, compute_block_polygenic_scores)?;
-    info!(
-        "Polygenic scores computed: {} x {}",
-        yhat.nrows(),
-        yhat.ncols(),
-    );
-    Ok(yhat)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,7 +123,7 @@ mod tests {
         let x = DMatrix::<f32>::rnorm(n, m);
         let z = DMatrix::<f32>::rnorm(m, t);
 
-        let yhat = compute_block_polygenic_scores(&x, &z).unwrap();
+        let yhat = compute_block_polygenic_scores_ridge(&x, &z, 0.1).unwrap();
         assert_eq!(yhat.nrows(), n);
         assert_eq!(yhat.ncols(), t);
     }
@@ -195,7 +156,8 @@ mod tests {
             },
         ];
 
-        let yhat = compute_all_polygenic_scores(&genotypes, &zscores, &blocks).unwrap();
+        let yhat =
+            compute_all_polygenic_scores_ridge(&genotypes, &zscores, &blocks, 0.1).unwrap();
         assert_eq!(yhat.nrows(), n);
         assert_eq!(yhat.ncols(), t);
 
@@ -208,7 +170,7 @@ mod tests {
         let t = 3;
         let x = DMatrix::<f32>::zeros(n, 0);
         let z = DMatrix::<f32>::zeros(0, t);
-        let yhat = compute_block_polygenic_scores(&x, &z).unwrap();
+        let yhat = compute_block_polygenic_scores_ridge(&x, &z, 0.1).unwrap();
         assert_eq!(yhat.nrows(), n);
         assert_eq!(yhat.ncols(), t);
     }
