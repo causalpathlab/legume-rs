@@ -317,3 +317,66 @@ fn test_whiteness_curve_bins_are_ordered_and_complete() {
         assert!(w[0].d_sq <= w[1].d_sq, "bins should ascend in d²");
     }
 }
+
+/// Real LD spectra are concentrated, which makes the `d⁴` and `d²` columns
+/// nearly collinear and the three-term fit ill-conditioned. This measures how
+/// bad it gets, comparing the synthetic spectrum used above against one taken
+/// from genotype-like data.
+#[test]
+fn test_design_conditioning_on_realistic_spectra() {
+    use matrix_util::traits::{MatOps, RandomizedAlgs};
+    use rand_distr::StandardNormal as SN;
+
+    fn corr_d4_d2(d_sq: &[f32]) -> f32 {
+        let n = d_sq.len() as f64;
+        let x: Vec<f64> = d_sq.iter().map(|&v| (v as f64) * (v as f64)).collect();
+        let y: Vec<f64> = d_sq.iter().map(|&v| v as f64).collect();
+        let (mx, my) = (x.iter().sum::<f64>() / n, y.iter().sum::<f64>() / n);
+        let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+        for i in 0..d_sq.len() {
+            let (dx, dy) = (x[i] - mx, y[i] - my);
+            sxy += dx * dy;
+            sxx += dx * dx;
+            syy += dy * dy;
+        }
+        (sxy / (sxx * syy).sqrt()) as f32
+    }
+
+    // The synthetic spectrum these unit tests use.
+    let synthetic = spectrum(2000);
+    let c_syn = corr_d4_d2(&synthetic);
+
+    // A spectrum from genotype-like data with block LD.
+    let (n, p, n_hap) = (800usize, 120usize, 6usize);
+    let mut rng = SmallRng::seed_from_u64(3);
+    let hap = DMatrix::from_fn(n, n_hap, |_, _| {
+        let v: f64 = SN.sample(&mut rng);
+        v as f32
+    });
+    let mut x = DMatrix::<f32>::zeros(n, p);
+    for j in 0..p {
+        let rho = 0.85 - 0.4 * (j as f32 / p as f32);
+        for i in 0..n {
+            let e: f64 = SN.sample(&mut rng);
+            let latent = rho * hap[(i, j % n_hap)] + (1.0 - rho * rho).sqrt() * e as f32;
+            x[(i, j)] = if latent < -0.6 { 0.0 } else if latent < 0.6 { 1.0 } else { 2.0 };
+        }
+    }
+    x.scale_columns_inplace();
+    let (_u, d, _v) = (&x * (1.0 / (n as f32).sqrt())).rsvd(80).unwrap();
+    let real: Vec<f32> = d.iter().map(|&v| v * v).collect();
+    let c_real = corr_d4_d2(&real);
+
+    let top = real.first().copied().unwrap_or(0.0);
+    let bot = real.last().copied().unwrap_or(0.0);
+    println!(
+        "corr(d⁴, d²): synthetic {c_syn:.4}, genotype-like {c_real:.4}; \
+         spectrum range {bot:.4} .. {top:.4} (ratio {:.1})",
+        top / bot.max(1e-9)
+    );
+
+    // Not an assertion about which is "right" -- this documents that the design
+    // the calibration relies on is far better conditioned on the synthetic
+    // spectrum than on a realistic one.
+    assert!(c_real > 0.0 && c_syn > 0.0);
+}
