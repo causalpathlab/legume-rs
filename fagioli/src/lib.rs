@@ -1,3 +1,4 @@
+pub mod embedding;
 pub mod genotype;
 pub mod io;
 pub mod mapping;
