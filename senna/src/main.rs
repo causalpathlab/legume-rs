@@ -444,7 +444,7 @@ enum Commands {
                       \n\
                       Usage:\n\
                       senna probe --model M --calibration ref.zarr query.zarr -o out\n  \
-                      Writes {out}.probe.tsv (per-cell fit + flag) and {out}.probe.json."
+                      Writes {out}.probe.tsv (per-cell fit + flag)."
     )]
     Probe(ProbeArgs),
 
