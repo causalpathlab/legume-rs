@@ -874,9 +874,9 @@ pub(crate) struct MaskedScoreArgs<'a> {
     pub metadata: &'a TopicModelMetadata,
     pub head: candle_util::vae::masked_topic::LatentHead,
     /// Compute the per-cell predictive log-likelihood. `false` skips it entirely,
-    /// leaving `llik`/`total` empty — worth it for callers that want only `z_nk`
-    /// (e.g. `senna update`), since the score costs a second full pass over every
-    /// column plus a dense `[D, minibatch]` reconstruction per block.
+    /// leaving `llik`/`total` empty — worth it for callers that want only the latent,
+    /// since the score costs a second full pass over every column plus a dense
+    /// `[D, minibatch]` reconstruction per block.
     pub need_llik: bool,
 }
 

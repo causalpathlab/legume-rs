@@ -78,63 +78,8 @@ pub fn masked_decoder_type(head: LatentHead) -> &'static str {
     }
 }
 
-/// One `senna update` applied to a model, appended in the order performed.
-///
-/// **Why a history and not a single record.** The target deployment is sequential:
-/// M datasets, one per round, model-only handoff. A child's child must be able to say
-/// what every round did, so a scalar "last update" field would erase the provenance
-/// that matters most. `n_train_cells` accumulates a *total*; this recovers the
-/// breakdown, and `update_history.len()` is the round counter.
-///
-/// **What it must be able to answer.** Two children produced from the same parent and
-/// the same data but different `--steps` are different artifacts and were previously
-/// indistinguishable on disk. Absorbing the same batch twice was invisible. Both are
-/// now readable off the model.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UpdateRecord {
-    /// Parent model prefix this round started from.
-    pub parent: Box<str>,
-    /// Data absorbed this round.
-    pub data: Vec<Box<str>>,
-    /// Reference backend replayed against. Recorded because nothing links a
-    /// `--calibration` to the parent's actual training data: pass the wrong reference
-    /// and replay protects the wrong distribution while `n_train_cells` still
-    /// increments. At least the choice is now auditable.
-    pub calibration: Box<str>,
-    pub n_new: usize,
-    pub n_replay: usize,
-    /// What `--replay-ratio` asked for, and what the reference size actually allowed.
-    /// They differ whenever `ReplayPlan` caps, and the second is the protection the
-    /// model really got.
-    pub replay_ratio_requested: f64,
-    pub replay_ratio_effective: f64,
-    pub steps: usize,
-    pub lr: f64,
-    pub seed: u64,
-    /// Training genes the new data actually mapped to, out of the model's full axis.
-    /// α is refit from `n_genes_mapped` genes while the dictionary is regenerated for
-    /// all `n_genes_model` of them, so this ratio bounds how much of the child's β is
-    /// evidence-backed.
-    pub n_genes_mapped: usize,
-    pub n_genes_model: usize,
-    /// `√(λ_max/λ_min)` of `ρ_Sᵀρ_S` over the mapped genes — how well this batch pinned α.
-    /// **`None` means `ρ_S` was rank-deficient**, so some directions of α came from replay
-    /// rather than from the new data. This is what a gene-count fraction cannot tell you.
-    ///
-    /// `Option` rather than a bare `f64` **because rank deficiency is representable and
-    /// expected**: `serde_json` renders a non-finite float as `null`, and deserializing `null`
-    /// into `f64` then *fails* — so an `f64::INFINITY` here would write a `model.json` that can
-    /// never be read back, bricking the child for `predict`, `probe` and further `update`. The
-    /// same hazard is already guarded for `theta_mean` below; this field must not reintroduce it.
-    #[serde(default)]
-    pub alpha_condition: Option<f64>,
-}
-
 /// Metadata needed to reconstruct a trained topic model for inference.
 ///
-/// `Clone` so `senna update` can derive a child model's metadata from its parent's,
-/// changing only the fields an update actually alters (`n_train_cells`,
-/// `update_history`).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TopicModelMetadata {
     /// Model variant: `topic`, `indexed_topic_packed`, `joint_topic`
@@ -179,12 +124,6 @@ pub struct TopicModelMetadata {
     /// proportion to how much data the model already carries. Absent in older models.
     #[serde(default)]
     pub n_train_cells: Option<usize>,
-    /// Every `senna update` applied to this model, oldest first. See [`UpdateRecord`].
-    ///
-    /// `serde(default)` so models written before this field still load as an empty history,
-    /// which reads correctly: they were trained, never updated.
-    #[serde(default)]
-    pub update_history: Vec<UpdateRecord>,
     /// Number of learned gene modules `M` in the encoder's module-pooling branch
     /// (masked heads only). `0`/absent means the branch is off.
     ///

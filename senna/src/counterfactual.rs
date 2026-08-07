@@ -76,9 +76,9 @@ pub(crate) struct RebuiltModel {
 ///
 /// The coarser levels are constructed purely to **register** their vars and are then
 /// dropped: `EmbeddedNbTopicDecoder::new` registers through `VarBuilder::get_with_hints`,
-/// so the `Var`s outlive the struct. `VarMap::save` writes exactly what is registered, so
-/// a caller that persists this varmap (`senna update`) would otherwise drop
-/// `dec_0..dec_{lvl-1}` and produce a checkpoint `masked-topic --init-from` cannot load.
+/// so the `Var`s outlive the struct. `VarMap::save` writes exactly what is registered, so a
+/// caller that ever persists this varmap would otherwise drop `dec_0..dec_{lvl-1}` and produce
+/// a checkpoint `masked-topic --init-from` cannot load.
 ///
 /// `ρ` is **detached** before the decoders take it. `refit_alpha` optimizes `α` alone, but
 /// `backward_step` differentiates every `is_variable()` node it reaches — and `ρ` is the

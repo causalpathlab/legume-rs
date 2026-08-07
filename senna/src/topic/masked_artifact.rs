@@ -1,18 +1,15 @@
 //! What a masked model **is** on disk — declared once, here.
 //!
-//! Before this module the definition was implicit and scattered: `masked_topic`'s
-//! output phase wrote one set of files, `update` wrote another, `probe` and `update`
-//! each re-derived how to open one, and nothing connected them. A file added to
-//! training and forgotten in `update` produced a child that loaded fine in `predict`
-//! and failed somewhere else, much later, with an unrelated-looking error.
+//! Before this module the definition was implicit and scattered: each consumer re-derived
+//! how to open a model, and nothing connected them. A file added to training and forgotten
+//! elsewhere produced a model that loaded fine in `predict` and failed somewhere else, much
+//! later, with an unrelated-looking error.
 //!
-//! The fix is not a single writer — training's writes are legitimately interleaved with
-//! its holdout eval and device move, so forcing them together would change behaviour.
-//! It is a single **declaration** ([`REQUIRED`]) plus a reader that refuses anything
-//! incomplete ([`MaskedModel::open`]). Any writer that drifts from the declaration is
-//! caught at the next open, by name, instead of degrading silently.
+//! The fix is a single **declaration** ([`REQUIRED`]) plus a reader that refuses anything
+//! incomplete ([`MaskedModel::open`]). Any writer that drifts from the declaration is caught
+//! at the next open, by name, instead of degrading silently.
 //!
-//! **When `probe`/`update` grow to cover `bge`, dense `topic` and `vae`,** each family
+//! **When `probe` grows to cover more families,** each family
 //! gets its own module of this shape — their artifacts genuinely differ (bge has no
 //! checkpoint or metadata at all; dense `topic` has `fisher_weights` and no feature
 //! embedding), so a shared trait would be inventing commonality that is not there. What
@@ -22,10 +19,8 @@
 use crate::predict::{score_masked_backend, MaskedScoreArgs, MaskedScored};
 use crate::topic::eval::QueryNameOpts;
 use crate::topic::model_metadata::{
-    load_feature_mean, load_shortlist_weights, masked_head_from_model_type, save_feature_mean,
-    save_parameters, save_shortlist_weights, TopicModelMetadata,
+    load_feature_mean, load_shortlist_weights, masked_head_from_model_type, TopicModelMetadata,
 };
-use crate::topic::train_masked::{write_feature_embedding, write_masked_dictionary};
 use candle_util::vae::masked_topic::LatentHead;
 
 /// Every file a masked model must have for *all* of its consumers to work.
@@ -78,9 +73,6 @@ pub struct MaskedModel<'a> {
     pub prefix: &'a str,
     pub metadata: TopicModelMetadata,
     pub head: LatentHead,
-    /// The training gene axis, from `feature_mean.parquet` (which returns it alongside
-    /// the values, so no separate dictionary read).
-    pub gene_names: Vec<Box<str>>,
     pub feature_mean: Vec<f32>,
     pub shortlist: Vec<f32>,
 }
@@ -98,14 +90,13 @@ impl<'a> MaskedModel<'a> {
                 metadata.model_type
             )
         })?;
-        let (gene_names, feature_mean) = load_feature_mean(prefix)?;
+        let (_gene_names, feature_mean) = load_feature_mean(prefix)?;
         let (_, shortlist) = load_shortlist_weights(prefix)?;
 
         Ok(Self {
             prefix,
             metadata,
             head,
-            gene_names,
             feature_mean,
             shortlist,
         })
@@ -139,36 +130,6 @@ impl<'a> MaskedModel<'a> {
     }
 }
 
-/// Write every file in [`REQUIRED`], in one call.
-///
-/// `update` uses this directly. Training cannot — its writes are interleaved with the
-/// holdout eval and the CPU move, and reordering them would change behaviour — so it
-/// writes the same set inline and the test below pins that the two agree.
-pub struct WriteArgs<'a> {
-    pub out: &'a str,
-    pub decoder: &'a candle_util::decoder::EmbeddedNbTopicDecoder,
-    pub parameters: &'a candle_util::candle_nn::VarMap,
-    pub metadata: &'a TopicModelMetadata,
-    pub gene_names: &'a [Box<str>],
-    pub feature_mean: &'a [f32],
-    pub shortlist: &'a [f32],
-}
-
-pub fn write_masked_model(a: WriteArgs<'_>) -> anyhow::Result<()> {
-    // The dictionary is `log_softmax_d(α·ρᵀ)` and `probe`/`predict` score against the
-    // PARQUET, not the safetensors — so it must be regenerated from the current α or the
-    // written model silently scores as whatever it was before.
-    write_masked_dictionary(a.decoder, a.gene_names, a.out)?;
-    // ρ is unchanged by an α refit, but the artifact has to be self-contained for
-    // `--freeze-feature-embedding` / `--init-feature-embedding` to resolve against it.
-    write_feature_embedding(a.decoder.feature_embeddings(), a.gene_names, a.out)?;
-    save_shortlist_weights(a.shortlist, a.gene_names, a.out)?;
-    save_feature_mean(a.feature_mean, a.gene_names, a.out)?;
-    save_parameters(a.parameters, a.out)?;
-    a.metadata.save(a.out)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,28 +152,5 @@ mod tests {
                 "the error must name {suffix} so the writer that dropped it is obvious; got: {msg}"
             );
         }
-    }
-
-    #[test]
-    fn required_set_is_what_the_writer_emits() {
-        // Pins the declaration against `write_masked_model`'s body. If a file is added
-        // to one and not the other, this fails rather than shipping a model that loads
-        // in some subcommands and not others.
-        let written = [
-            "dictionary.parquet",
-            "feature_embedding.parquet",
-            "shortlist_weights.parquet",
-            "feature_mean.parquet",
-            "safetensors",
-            "model.json",
-        ];
-        let mut a: Vec<&str> = REQUIRED.to_vec();
-        let mut b: Vec<&str> = written.to_vec();
-        a.sort_unstable();
-        b.sort_unstable();
-        assert_eq!(
-            a, b,
-            "REQUIRED and write_masked_model disagree — update both together"
-        );
     }
 }

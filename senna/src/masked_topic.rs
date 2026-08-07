@@ -1095,8 +1095,6 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         dec_context_size: Some(dec_context_size),
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
-        // A freshly trained model has absorbed nothing; `senna update` appends.
-        update_history: Vec::new(),
         // Round-trips the encoder's FC input width; without it every rebuild site
         // would construct `[L, H]` and `VarMap::load` would reject the checkpoint.
         n_gene_modules: Some(args.gene_modules),
