@@ -175,8 +175,16 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // Gene-name agreement. This is a sanity floor only — the identification question is
     // asked below, against ρ, once the model is rebuilt. `None` means the axes matched.
     let n_genes_model = parent.gene_names.len();
+    // DISTINCT training genes. `build_gene_remap_with` is many-to-one — two query names can
+    // canonicalize onto the same training gene — so a raw flatten would count a gene twice,
+    // double-weight its ρ row in the Gram matrix, and let `n_genes_mapped` exceed the axis.
     let mapped_genes: Vec<usize> = match new.gene_remap.as_ref() {
-        Some(r) => r.new_to_train.iter().flatten().copied().collect(),
+        Some(r) => {
+            let mut v: Vec<usize> = r.new_to_train.iter().flatten().copied().collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
         None => (0..n_genes_model).collect(),
     };
     let n_genes_mapped = mapped_genes.len();
@@ -202,12 +210,14 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     let alpha0 = detached_copy(alpha.as_tensor())?;
 
     // How well the batch pins α — the question a gene *fraction* cannot answer.
+    // `None` = rank-deficient. Kept as an Option rather than an infinity because a non-finite
+    // float serializes to `null` and then fails to deserialize — see `UpdateRecord`.
     let alpha_condition = alpha_conditioning(rebuilt.decoder.feature_embeddings(), &mapped_genes)?;
     info!(
-        "update: {n_genes_mapped}/{n_genes_model} genes mapped ({:.1}%); cond(ρ_S) = {:.3e} over \
+        "update: {n_genes_mapped}/{n_genes_model} genes mapped ({:.1}%); cond(ρ_S) = {} over \
          the model's {} embedding dimensions",
         100.0 * overlap,
-        alpha_condition,
+        alpha_condition.map_or_else(|| "rank-deficient".to_string(), |c| format!("{c:.3e}")),
         rebuilt.decoder.feature_embeddings().dim(1)?
     );
 
@@ -260,7 +270,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // how narrow the new panel is. A rank-deficient ρ_S is therefore only fatal when nothing is
     // replayed — that is the one case where some direction of α is pinned by nobody and the
     // refit will move it arbitrarily, then write the result into β for every gene.
-    if !alpha_condition.is_finite() {
+    if alpha_condition.is_none() {
         anyhow::ensure!(
             plan.n_replay > 0,
             "update refuses to write: ρ restricted to the {n_genes_mapped} mapped genes is \
@@ -430,11 +440,11 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
 /// Returns `√(λ_max/λ_min)` of `ρ_Sᵀρ_S`. That Gram matrix is `[H,H]`, so this stays a ~128×128
 /// symmetric eigenproblem however large D and `|S|` are. `INFINITY` means `ρ_S` is rank-deficient:
 /// some direction of `α` is unconstrained by this batch.
-fn alpha_conditioning(rho: &candle_core::Tensor, mapped: &[usize]) -> anyhow::Result<f64> {
+fn alpha_conditioning(rho: &candle_core::Tensor, mapped: &[usize]) -> anyhow::Result<Option<f64>> {
     let h = rho.dim(1)?;
     if mapped.len() < h {
         // Fewer observed genes than embedding dimensions: rank-deficient by counting alone.
-        return Ok(f64::INFINITY);
+        return Ok(None);
     }
     let idx = candle_core::Tensor::from_vec(
         mapped.iter().map(|&i| i as u32).collect::<Vec<_>>(),
@@ -452,9 +462,9 @@ fn alpha_conditioning(rho: &candle_core::Tensor, mapped: &[usize]) -> anyhow::Re
         .fold((f64::MIN, f64::MAX), |(a, b), &x| (a.max(x), b.min(x)));
     // Relative tolerance: a tiny or slightly negative eigenvalue is numerical rank deficiency.
     Ok(if l_max <= 0.0 || l_min <= l_max * 1e-12 {
-        f64::INFINITY
+        None
     } else {
-        (l_max / l_min).sqrt()
+        Some((l_max / l_min).sqrt())
     })
 }
 
@@ -523,10 +533,66 @@ mod tests {
             .expect("tensor")
     }
 
+    /// A rank-deficient batch must still produce a **readable** child model.
+    ///
+    /// The regression: `alpha_condition` used to be a bare `f64` holding `INFINITY` for that
+    /// case. `serde_json` renders a non-finite float as `null`, and deserializing `null` into
+    /// `f64` fails — so the child's `model.json` was written successfully and could then never
+    /// be loaded again, breaking `predict`, `probe` and every later `update` on it. Rank
+    /// deficiency is an expected outcome (it only aborts when replay is also zero), so this
+    /// path is reachable in normal use.
+    #[test]
+    fn a_rank_deficient_update_still_round_trips_through_json() {
+        let rec = UpdateRecord {
+            parent: "parent".into(),
+            data: vec!["new.zarr".into()],
+            calibration: "ref.zarr".into(),
+            n_new: 10,
+            n_replay: 10,
+            replay_ratio_requested: 1.0,
+            replay_ratio_effective: 1.0,
+            steps: 100,
+            lr: 0.05,
+            seed: 42,
+            n_genes_mapped: 3,
+            n_genes_model: 100,
+            alpha_condition: None,
+        };
+        let json = serde_json::to_string(&rec).expect("serialize");
+        let back: UpdateRecord = serde_json::from_str(&json).expect(
+            "a rank-deficient record must deserialize; a bare f64::INFINITY here serializes to \
+             null and then fails to read, bricking the child model",
+        );
+        assert!(back.alpha_condition.is_none());
+
+        // And the finite case must survive unchanged.
+        let ok = UpdateRecord {
+            alpha_condition: Some(15.5),
+            ..rec
+        };
+        let back: UpdateRecord =
+            serde_json::from_str(&serde_json::to_string(&ok).expect("serialize")).expect("read");
+        assert!((back.alpha_condition.expect("finite") - 15.5).abs() < 1e-9);
+    }
+
+    /// The gene remap is many-to-one, so the mapped-gene list must be deduplicated: two query
+    /// names canonicalizing onto one training gene would otherwise double-weight that ρ row and
+    /// let `n_genes_mapped` exceed the model's axis.
+    #[test]
+    fn duplicate_remap_targets_collapse_to_distinct_genes() {
+        let new_to_train = [Some(7usize), Some(7), Some(2), None, Some(2), Some(9)];
+        let mut v: Vec<usize> = new_to_train.iter().flatten().copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        assert_eq!(v, vec![2, 7, 9], "distinct training genes only");
+    }
+
     #[test]
     fn orthonormal_genes_are_perfectly_conditioned() {
         let r = rho(&[&[1., 0., 0.], &[0., 1., 0.], &[0., 0., 1.]]);
-        let c = alpha_conditioning(&r, &[0, 1, 2]).expect("cond");
+        let c = alpha_conditioning(&r, &[0, 1, 2])
+            .expect("cond")
+            .expect("full rank");
         assert!(
             (c - 1.0).abs() < 1e-6,
             "an orthonormal ρ_S pins every direction of α equally well; got {c}"
@@ -538,7 +604,7 @@ mod tests {
         // The point of the check: with H=3, two genes cannot constrain α however many
         // CELLS the batch has. Identification is about H, not about D or N.
         let r = rho(&[&[1., 0., 0.], &[0., 1., 0.], &[0., 0., 1.]]);
-        assert!(!alpha_conditioning(&r, &[0, 1]).expect("cond").is_finite());
+        assert!(alpha_conditioning(&r, &[0, 1]).expect("cond").is_none());
     }
 
     #[test]
@@ -547,9 +613,9 @@ mod tests {
         // so α's third direction is unconstrained and a count-based floor would miss it.
         let r = rho(&[&[1., 0., 0.], &[0., 1., 0.], &[1., 1., 0.], &[2., -1., 0.]]);
         assert!(
-            !alpha_conditioning(&r, &[0, 1, 2, 3])
+            alpha_conditioning(&r, &[0, 1, 2, 3])
                 .expect("cond")
-                .is_finite(),
+                .is_none(),
             "four genes spanning a 2-D subspace must not read as identified"
         );
     }
@@ -562,6 +628,6 @@ mod tests {
         rows.extend((0..97).map(|i| vec![i as f32, 0., 0.]));
         let refs: Vec<&[f32]> = rows.iter().map(Vec::as_slice).collect();
         let c = alpha_conditioning(&rho(&refs), &[0, 1, 2]).expect("cond");
-        assert!(c.is_finite(), "3/100 genes that span H must be accepted");
+        assert!(c.is_some(), "3/100 genes that span H must be accepted");
     }
 }

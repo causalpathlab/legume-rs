@@ -118,9 +118,16 @@ pub struct UpdateRecord {
     pub n_genes_mapped: usize,
     pub n_genes_model: usize,
     /// `√(λ_max/λ_min)` of `ρ_Sᵀρ_S` over the mapped genes — how well this batch pinned α.
-    /// Non-finite means `ρ_S` was rank-deficient, so some directions of α came from replay
+    /// **`None` means `ρ_S` was rank-deficient**, so some directions of α came from replay
     /// rather than from the new data. This is what a gene-count fraction cannot tell you.
-    pub alpha_condition: f64,
+    ///
+    /// `Option` rather than a bare `f64` **because rank deficiency is representable and
+    /// expected**: `serde_json` renders a non-finite float as `null`, and deserializing `null`
+    /// into `f64` then *fails* — so an `f64::INFINITY` here would write a `model.json` that can
+    /// never be read back, bricking the child for `predict`, `probe` and further `update`. The
+    /// same hazard is already guarded for `theta_mean` below; this field must not reintroduce it.
+    #[serde(default)]
+    pub alpha_condition: Option<f64>,
 }
 
 /// Metadata needed to reconstruct a trained topic model for inference.
