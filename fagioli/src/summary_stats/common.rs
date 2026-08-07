@@ -187,6 +187,18 @@ pub struct CommonSumstatArgs {
     )]
     pub min_block_snps: usize,
 
+    #[arg(
+        long,
+        help_heading = "LD Blocks",
+        default_value = "5000",
+        help = "Maximum LD block size in SNPs (larger blocks are split)",
+        long_help = "Maximum LD block size in SNPs. Larger estimated blocks are split.\n\
+                     Blocks bound the per-block eigendecomposition and, for models\n\
+                     that select among variants within a block, the size of that choice.\n\
+                     Only applies when blocks are estimated, not to --ld-block-file."
+    )]
+    pub max_block_snps: usize,
+
     // ── RSS SVD parameters ───────────────────────────────────────────────
     #[arg(
         long,
@@ -406,7 +418,7 @@ pub fn prepare_sumstat_input(args: &CommonSumstatArgs) -> Result<SumstatInput> {
                 num_landmarks: args.num_landmarks,
                 num_components: args.num_ld_components,
                 min_block_snps: Some(args.min_block_snps),
-                max_block_snps: None,
+                max_block_snps: Some(args.max_block_snps),
                 seed: args.seed,
             },
         )?
