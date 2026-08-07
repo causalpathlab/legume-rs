@@ -940,6 +940,9 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             layers: &a.metadata.encoder_hidden,
             use_gcn: false,
             attn_pool: true,
+            // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
+            // errors on a shape mismatch.
+            n_gene_modules: a.metadata.n_gene_modules.unwrap_or(0),
         },
         &parameters,
         vb.pp("enc"),

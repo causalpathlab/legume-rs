@@ -178,6 +178,17 @@ pub struct TopicModelMetadata {
     /// which reads correctly: they were trained, never updated.
     #[serde(default)]
     pub update_history: Vec<UpdateRecord>,
+    /// Number of learned gene modules `M` in the encoder's module-pooling branch
+    /// (masked heads only). `0`/absent means the branch is off.
+    ///
+    /// **This must round-trip or the model will not load.** `M` widens the encoder's
+    /// first FC layer to `[L, H + 2M]`, and `VarMap::load` errors on any shape
+    /// mismatch — so every site that rebuilds the encoder (`predict`, `probe`,
+    /// `update`, warm start) has to construct it with the same `M` the checkpoint was
+    /// written with. `serde(default)` gives older models `None ⇒ 0`, which is exactly
+    /// the shape they were trained at.
+    #[serde(default)]
+    pub n_gene_modules: Option<usize>,
 }
 
 impl TopicModelMetadata {
