@@ -61,8 +61,26 @@ pub struct BgeFit {
 
 impl BgeEmbedding {
     /// Open from a run prefix or a `{run}.senna.json` path.
+    ///
+    /// Both, because the two callers disagree: `probe --model` is documented as a run
+    /// *prefix* (every other family resolves `{prefix}.model.json` from one), while
+    /// `deconvolve --from` is handed the manifest path itself. `RunManifest::load` reads a
+    /// file, so a prefix alone used to fail with a bare "No such file or directory" naming a
+    /// path the user never typed.
     pub fn open(from: &str) -> anyhow::Result<Self> {
-        let (manifest, dir) = RunManifest::load(Path::new(from))?;
+        let direct = Path::new(from);
+        let suffixed = std::path::PathBuf::from(format!("{from}.senna.json"));
+        let manifest_path = if direct.is_file() {
+            direct.to_path_buf()
+        } else if suffixed.is_file() {
+            suffixed
+        } else {
+            anyhow::bail!(
+                "{from}: no run manifest here. Looked for `{from}` and `{from}.senna.json` — \
+                 `senna bge -o {from}` writes the second."
+            );
+        };
+        let (manifest, dir) = RunManifest::load(&manifest_path)?;
         anyhow::ensure!(
             manifest.kind == RunKind::Bge,
             "{from} is a '{}' run; this reader is for `senna bge` output",
@@ -113,6 +131,16 @@ impl BgeEmbedding {
     /// profiles the per-cell intercept `b_a` out analytically — so it is depth-invariant *by
     /// construction*, which is what the topic paths approximate by hand with `llik / total`.
     /// It is also the estimand bge's own phase-1 trains under.
+    ///
+    /// ⚠️ **This is a much weaker novelty detector than the topic families, structurally.** A
+    /// cell here is fitted with a *free* `H`-dimensional vector (H = 128 by default); in a
+    /// topic model it is confined to the `K`-simplex over fixed topics — 4 free parameters at
+    /// K = 5. With that much per-cell freedom a genuinely novel cell simply finds somewhere in
+    /// ℝ^H to sit and reconstructs well. Measured on a held-out-topic batch that `topic` and
+    /// `vae` both flagged at 100%, bge flagged 2.4% (p = 0.97) while calibrating correctly
+    /// against itself at 5.1%. So a COVERED verdict from bge means "the embedding can represent
+    /// these cells", **not** "the model has seen this biology" — read it as a floor, and prefer
+    /// a topic-family probe when the question is novelty.
     pub fn score(&self, files: &[Box<str>], preload: bool, block: usize) -> anyhow::Result<BgeFit> {
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
             data_files: files.to_vec(),
