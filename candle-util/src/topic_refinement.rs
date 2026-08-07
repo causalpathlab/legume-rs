@@ -4,6 +4,11 @@ use candle_core::{Result, Tensor, Var};
 use candle_nn::ops;
 
 /// Configuration for per-cell topic proportion refinement.
+///
+/// `Default` is all-zeros, i.e. **no refinement** — the correct value for callers running
+/// `LatentMode::Encoder`, where this config is never read. Those callers previously spelled out
+/// a zeroed literal plus a comment explaining it was ignored.
+#[derive(Default)]
 pub struct TopicRefinementConfig {
     pub num_steps: usize,
     pub learning_rate: f64,
