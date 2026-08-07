@@ -1176,26 +1176,29 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         vb.clone(),
     )?;
 
-    // Register a decoder at every level so the safetensors keys match training — the same
-    // reason the dense path does it. Only the finest is ever used, and only for the score.
-    let decoders: Vec<candle_util::decoder::GaussianNbDecoder> = if a.need_llik {
-        (0..metadata.num_levels)
-            .map(|i| {
-                candle_util::decoder::GaussianNbDecoder::new(
-                    metadata.n_features_full,
-                    metadata.n_topics,
-                    vb.pp(format!("dec_{i}")),
-                )
-            })
-            .collect::<candle_core::Result<Vec<_>>>()?
+    // Only the finest level is ever scored, and only it needs registering: `VarMap::load`
+    // iterates the varmap's OWN entries and looks each up in the file, so extra tensors in the
+    // checkpoint are simply never visited. (`counterfactual::rebuild_model` must register every
+    // level for the opposite reason — it *writes* a child checkpoint that `--init-from` would
+    // reject if levels were missing. This path writes nothing.)
+    let finest = metadata.num_levels.saturating_sub(1);
+    let decoder = if a.need_llik {
+        Some(candle_util::decoder::GaussianNbDecoder::new(
+            *metadata
+                .level_decoder_dims
+                .last()
+                .unwrap_or(&metadata.n_features_full),
+            metadata.n_topics,
+            vb.pp(format!("dec_{finest}")),
+        )?)
     } else {
-        Vec::new()
+        None
     };
 
     let safetensors_path = format!("{}.safetensors", a.model);
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
-    let decoder = decoders.last();
+    let decoder = decoder.as_ref();
 
     let ntot = data_vec.num_columns();
     let (z_nk, llik, total) =

@@ -99,22 +99,6 @@ pub struct UpdateArgs {
     #[arg(long, default_value_t = 500, help = "Evaluation minibatch size")]
     minibatch_size: usize,
 
-    #[arg(
-        long,
-        default_value_t = 0.1,
-        help = "Minimum fraction of the model's genes the new data must map to",
-        long_help = "A sanity floor on gene-name agreement, not an identification criterion.\n\
-                     \n\
-                     A high floor belongs to models with a free `[D,K]` dictionary, where an\n\
-                     unobserved gene has nothing behind it. Here `log β = α·ρᵀ`, so one α serves\n\
-                     every gene and an unobserved gene still gets the model's honest\n\
-                     generalization `α_k·ρ_d`. What matters is whether α is IDENTIFIED, which\n\
-                     `update` checks separately via the conditioning of ρ over the mapped genes.\n\
-                     \n\
-                     So keep this low. A large shortfall usually means the gene names disagree."
-    )]
-    min_gene_overlap: f64,
-
     #[arg(long, help = "Load all columns into memory before scoring")]
     preload_data: bool,
 }
@@ -197,14 +181,16 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     };
     let n_genes_mapped = mapped_genes.len();
     let overlap = n_genes_mapped as f64 / n_genes_model.max(1) as f64;
-    anyhow::ensure!(
-        overlap >= args.min_gene_overlap,
-        "update: the new data maps to only {n_genes_mapped}/{n_genes_model} of the model's genes \
-         ({:.1}%), below --min-gene-overlap {:.1}%. That large a shortfall usually means the gene \
-         names disagree rather than that the panel is narrow — check the naming first.",
-        100.0 * overlap,
-        100.0 * args.min_gene_overlap
-    );
+    // No fraction gate here. `build_remap` (predict.rs) already hard-fails below 10% on the
+    // scoring call above, so a second, laxer threshold on this side was unreachable — a
+    // `--min-gene-overlap` under 0.1 could never fire. The gate that *is* ours is the
+    // identification check below, which asks the question a fraction cannot: whether the genes
+    // this batch did map to span ρ well enough to pin α.
+    //
+    // ⚠️ Consequence worth knowing: a narrow-but-spanning panel (say 3% of genes covering all H
+    // directions) is legitimate for an embedded dictionary and `alpha_conditioning` would accept
+    // it — but `build_remap`'s shared 10% floor rejects it before we ever get here. Lifting that
+    // for the embedded path is a separate change.
 
     /////////////////////////////////////////////
     // 2. Rebuild ALL levels and load the parent //

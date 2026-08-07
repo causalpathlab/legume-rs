@@ -377,7 +377,6 @@ fn probe_fit_only(
     args: &ProbeArgs,
     metadata: &crate::topic::model_metadata::TopicModelMetadata,
 ) -> anyhow::Result<()> {
-    use crate::masked_topic::FeatureNameKindArg;
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::{MODEL_TYPE_TOPIC, MODEL_TYPE_VAE};
@@ -392,11 +391,7 @@ fn probe_fit_only(
         metadata.model_type
     );
 
-    let qopts = QueryNameOpts {
-        kind: FeatureNameKindArg::Exact.resolve_or_gene(),
-        suffix_delim: None,
-        keep_suffix: None,
-    };
+    let qopts = QueryNameOpts::default();
 
     let (cal_fit, q_fit, q_names) = match metadata.model_type.as_ref() {
         MODEL_TYPE_VAE => {

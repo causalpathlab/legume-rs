@@ -124,12 +124,7 @@ impl<'a> MaskedModel<'a> {
         minibatch_size: usize,
         need_llik: bool,
     ) -> anyhow::Result<MaskedScored> {
-        use crate::masked_topic::FeatureNameKindArg;
-        let qopts = QueryNameOpts {
-            kind: FeatureNameKindArg::Exact.resolve_or_gene(),
-            suffix_delim: None,
-            keep_suffix: None,
-        };
+        let qopts = QueryNameOpts::default();
         score_masked_backend(MaskedScoreArgs {
             model: self.prefix,
             data_files: files,

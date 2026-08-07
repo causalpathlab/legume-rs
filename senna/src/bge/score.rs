@@ -32,6 +32,7 @@ use graph_embedding_util::posterior::{FrozenSide, NodeTerm};
 use log::info;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
+use rayon::prelude::*;
 use std::path::Path;
 
 /// Ridge on the per-cell Poisson MAP solve.
@@ -92,12 +93,9 @@ impl BgeEmbedding {
         );
 
         let (d, h) = (rho.mat.nrows(), rho.mat.ncols());
-        let mut rho_rm = Vec::with_capacity(d * h);
-        for i in 0..d {
-            for k in 0..h {
-                rho_rm.push(rho.mat[(i, k)]);
-            }
-        }
+        // nalgebra stores column-major, so the transpose's buffer *is* row-major of the
+        // original — no hand-rolled loop, and no second place stating the layout invariant.
+        let rho_rm = rho.mat.transpose().as_slice().to_vec();
         info!("bge model: {d} genes, H={h} (ρ {rho_path})");
 
         Ok(Self {
@@ -115,12 +113,7 @@ impl BgeEmbedding {
     /// profiles the per-cell intercept `b_a` out analytically — so it is depth-invariant *by
     /// construction*, which is what the topic paths approximate by hand with `llik / total`.
     /// It is also the estimand bge's own phase-1 trains under.
-    pub fn score(
-        &self,
-        files: &[Box<str>],
-        preload: bool,
-        block: usize,
-    ) -> anyhow::Result<BgeFit> {
+    pub fn score(&self, files: &[Box<str>], preload: bool, block: usize) -> anyhow::Result<BgeFit> {
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload,
@@ -134,11 +127,7 @@ impl BgeEmbedding {
         );
 
         let new_genes = data_vec.row_names()?;
-        let qopts = QueryNameOpts {
-            kind: crate::masked_topic::FeatureNameKindArg::Exact.resolve_or_gene(),
-            suffix_delim: None,
-            keep_suffix: None,
-        };
+        let qopts = QueryNameOpts::default();
         let remap = build_gene_remap_with(&self.gene_names, &new_genes, &qopts);
         let n_model = self.gene_names.len();
         anyhow::ensure!(
@@ -163,16 +152,23 @@ impl BgeEmbedding {
         for lb in (0..ntot).step_by(block) {
             let ub = (lb + block).min(ntot);
             let csc = data_vec.read_columns_csc(lb..ub)?;
-            let per_cell: Vec<Vec<(u32, f32)>> = (0..csc.ncols())
+            // One walk per cell yields both the remapped entries and the cell's total; the
+            // total used to be a third pass over the same nonzeros.
+            let (per_cell, totals): (Vec<Vec<(u32, f32)>>, Vec<f32>) = (0..csc.ncols())
                 .map(|j| {
-                    csc.col(j)
+                    let col = csc.col(j);
+                    let pos: Vec<(u32, f32)> = col
                         .row_indices()
                         .iter()
-                        .zip(csc.col(j).values())
+                        .zip(col.values())
                         .filter_map(|(&i, &v)| remap.new_to_train[i].map(|t| (t as u32, v)))
-                        .collect()
+                        .collect();
+                    let tot = pos.iter().map(|&(_, v)| v).sum::<f32>();
+                    (pos, tot)
                 })
-                .collect();
+                .unzip();
+            // ~12 B/nnz, and `per_cell` now holds everything downstream needs.
+            drop(csc);
 
             let (e_cell, _b_cell) = project_cells(
                 &self.rho,
@@ -182,15 +178,15 @@ impl BgeEmbedding {
                 PROJECTION_RIDGE,
                 None,
             );
-            for (c, pos) in per_cell.iter().enumerate() {
+            // `multinomial_ll` walks the whole gene axis twice per cell for the normalizer,
+            // which makes it the dominant cost here — and it sat serial directly below
+            // `project_cells`, which is already rayon-parallel. Everything it reads is shared
+            // and immutable, so the map parallelizes as-is and stays in order.
+            llik.par_extend(per_cell.par_iter().enumerate().map(|(c, pos)| {
                 let node = NodeTerm::new(pos, &partition, 1.0);
-                llik.push(multinomial_ll(
-                    &e_cell[c * self.h..(c + 1) * self.h],
-                    &node,
-                    &side,
-                ));
-                total.push(pos.iter().map(|&(_, v)| v).sum::<f32>());
-            }
+                multinomial_ll(&e_cell[c * self.h..(c + 1) * self.h], &node, &side)
+            }));
+            total.extend(totals);
         }
 
         Ok(BgeFit {
