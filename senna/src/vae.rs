@@ -340,7 +340,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         dec_context_size: None,
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
-        update_history: Vec::new(),
         // `vae` uses a GaussianEncoder, not the indexed one; the module branch does not apply.
         n_gene_modules: None,
     };

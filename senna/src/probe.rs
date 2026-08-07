@@ -568,7 +568,7 @@ fn write_verdict(v: Verdict<'_>) -> anyhow::Result<()> {
     let pval = norm_sf((rate - args.alpha) / se);
     let novel = rate > args.alpha && pval < 0.05;
     let verdict = if novel {
-        "NOVEL — update warranted"
+        "NOVEL — the model does not explain this batch"
     } else {
         "COVERED — certify"
     };

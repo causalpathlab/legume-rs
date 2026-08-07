@@ -65,7 +65,6 @@ mod senna_input;
 mod svd;
 mod topic;
 mod tree_layout;
-mod update;
 mod vae;
 
 use annotate::{
@@ -88,7 +87,6 @@ use pseudotime::{run_pseudotime, PseudotimeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use svd::*;
 use topic::cmd::*;
-use update::{run_update, UpdateArgs};
 use vae::*;
 
 use colored::Colorize;
@@ -451,24 +449,6 @@ enum Commands {
     Probe(ProbeArgs),
 
     #[command(
-        about = "Absorb a new batch into a trained masked model, writing a NEW model.",
-        long_about = "Incremental update — the mutating counterpart to `senna probe`.\n\
-                      \n\
-                      It refits the topic embeddings on the new batch with the encoder\n\
-                      frozen, replaying reference cells alongside. That is exactly the\n\
-                      intervention probe measures, so probe's benefit and forgetting\n\
-                      describe the operation this performs.\n\
-                      \n\
-                      The replay mass is the protection knob. --replay-ratio 1.0 matches\n\
-                      probe's own sizing; larger values protect old knowledge harder.\n\
-                      \n\
-                      Usage:\n\
-                      senna update --model M --calibration ref.zarr new.zarr -o M_v2\n  \
-                      Writes a complete model at M_v2. The parent is never modified."
-    )]
-    Update(UpdateArgs),
-
-    #[command(
         about = "Impute full-feature counts on new cells by kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
                       1. Project new sparse-panel data through the trained\n  \
@@ -785,9 +765,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Probe(args) => {
             run_probe(args)?;
-        }
-        Commands::Update(args) => {
-            run_update(args)?;
         }
         Commands::Impute(args) => {
             impute_model(args)?;
