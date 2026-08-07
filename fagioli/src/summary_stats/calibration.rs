@@ -78,7 +78,85 @@ impl BlockCalibration {
     }
 }
 
-/// Fit `E[(V'z)²_k] = a₁ d⁴_k + a₂ d²_k + a₃` per trait by ordinary least squares.
+/// Precomputed design for the three-term eigenspace regression on `[d⁴, d², 1]`.
+///
+/// The design depends only on the block's spectrum, so one instance serves
+/// every trait *and* every trait pair — the same fit yields per-trait variance
+/// components from squares and cross-trait ones from cross-products.
+pub struct ThreeTermDesign {
+    /// Scaled rows `[d⁴/mean_d4, d²/mean_d2, 1]`.
+    rows: Vec<[f64; 3]>,
+    gram: Matrix3<f64>,
+    mean_d2: f64,
+    mean_d4: f64,
+}
+
+impl ThreeTermDesign {
+    /// Build the design, or `None` if the block is too short to identify three
+    /// parameters or its spectrum is degenerate.
+    pub fn new(d_sq: &[f32]) -> Option<Self> {
+        let k = d_sq.len();
+        if k < MIN_RANK_FOR_FIT {
+            return None;
+        }
+
+        // Scale the two predictors to O(1) before forming normal equations; d⁴
+        // and d² otherwise differ by orders of magnitude and the 3x3 solve
+        // loses rank.
+        let mean_d2 = mean_f64(d_sq.iter().map(|&v| v as f64));
+        let mean_d4 = mean_f64(d_sq.iter().map(|&v| (v as f64) * (v as f64)));
+        if mean_d2 <= 0.0 || mean_d4 <= 0.0 || !mean_d2.is_finite() || !mean_d4.is_finite() {
+            return None;
+        }
+
+        let mut gram = Matrix3::<f64>::zeros();
+        let mut rows: Vec<[f64; 3]> = Vec::with_capacity(k);
+        for &d2 in d_sq {
+            let d2 = d2 as f64;
+            let row = [d2 * d2 / mean_d4, d2 / mean_d2, 1.0];
+            for i in 0..3 {
+                for j in 0..3 {
+                    gram[(i, j)] += row[i] * row[j];
+                }
+            }
+            rows.push(row);
+        }
+
+        Some(Self {
+            rows,
+            gram,
+            mean_d2,
+            mean_d4,
+        })
+    }
+
+    pub fn rank(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Least-squares fit of `response(k)` on `[d⁴, d², 1]`.
+    ///
+    /// Returns `[d⁴ coefficient, d² coefficient, intercept]` on the original
+    /// (unscaled) predictor scale. Coefficients are *not* clamped — a
+    /// cross-trait covariance is legitimately negative.
+    pub fn solve(&self, response: impl Fn(usize) -> f64) -> Option<[f32; 3]> {
+        let mut rhs = Vector3::<f64>::zeros();
+        for (ki, row) in self.rows.iter().enumerate() {
+            let y = response(ki);
+            for i in 0..3 {
+                rhs[i] += row[i] * y;
+            }
+        }
+        let beta = self.gram.qr().solve(&rhs)?;
+        Some([
+            (beta[0] / self.mean_d4) as f32,
+            (beta[1] / self.mean_d2) as f32,
+            beta[2] as f32,
+        ])
+    }
+}
+
+/// Fit `E[(V'z)²_k] = N σ²_β d⁴_k + c d²_k + τ` per trait by ordinary least squares.
 ///
 /// `d_sq` holds `d²_k` (length K) and `vt_z` is the *raw* projection `V'z`,
 /// shape (K, T) — that is [`crate::summary_stats::rss_svd::RssEigenBasis::project_raw`],
@@ -89,54 +167,24 @@ impl BlockCalibration {
 pub fn calibrate_block(d_sq: &[f32], vt_z: &DMatrix<f32>) -> Option<BlockCalibration> {
     let k = d_sq.len().min(vt_z.nrows());
     let t = vt_z.ncols();
-    if k < MIN_RANK_FOR_FIT || t == 0 {
+    if t == 0 {
         return None;
     }
-
-    // Scale the two predictors to O(1) before forming normal equations; d⁴ and
-    // d² otherwise differ by orders of magnitude and the 3x3 solve loses rank.
-    let mean_d2 = mean_f64(d_sq.iter().take(k).map(|&v| v as f64));
-    let mean_d4 = mean_f64(d_sq.iter().take(k).map(|&v| (v as f64) * (v as f64)));
-    if mean_d2 <= 0.0 || mean_d4 <= 0.0 || !mean_d2.is_finite() || !mean_d4.is_finite() {
-        return None;
-    }
-
-    // Gram matrix of [d⁴/mean_d4, d²/mean_d2, 1] — shared across traits.
-    let mut gram = Matrix3::<f64>::zeros();
-    let mut rows: Vec<[f64; 3]> = Vec::with_capacity(k);
-    for &d2 in d_sq.iter().take(k) {
-        let d2 = d2 as f64;
-        let row = [d2 * d2 / mean_d4, d2 / mean_d2, 1.0];
-        for i in 0..3 {
-            for j in 0..3 {
-                gram[(i, j)] += row[i] * row[j];
-            }
-        }
-        rows.push(row);
-    }
-
-    let decomp = gram.qr();
+    let design = ThreeTermDesign::new(&d_sq[..k])?;
 
     let mut polygenic = Vec::with_capacity(t);
     let mut c = Vec::with_capacity(t);
     let mut tau = Vec::with_capacity(t);
 
     for tt in 0..t {
-        let mut rhs = Vector3::<f64>::zeros();
-        for (ki, row) in rows.iter().enumerate() {
+        let beta = design.solve(|ki| {
             let y = vt_z[(ki, tt)] as f64;
-            let y2 = y * y;
-            for i in 0..3 {
-                rhs[i] += row[i] * y2;
-            }
-        }
-
-        let beta = decomp.solve(&rhs)?;
-
-        // Undo the predictor scaling.
-        polygenic.push((beta[0] / mean_d4).max(0.0) as f32);
-        c.push((beta[1] / mean_d2).max(0.0) as f32);
-        tau.push(beta[2].max(0.0) as f32);
+            y * y
+        })?;
+        // Variance components on the diagonal cannot be negative.
+        polygenic.push(beta[0].max(0.0));
+        c.push(beta[1].max(0.0));
+        tau.push(beta[2].max(0.0));
     }
 
     Some(BlockCalibration {
