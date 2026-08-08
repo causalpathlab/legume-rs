@@ -52,6 +52,9 @@ pub(crate) struct Rebase {
     pub parent_embedding_dim: Option<usize>,
     /// Capacity to add. Zero on both axes is an ordinary continue.
     pub growth: crate::topic::warm_start::Growth,
+    /// The parent's carried pseudobulks when they are standing in for its
+    /// cells; `None` means this round re-collapses.
+    pub reference: Option<crate::pb_reference::ReferenceInput>,
 }
 
 /// A fit whose recorded arguments can be re-pointed at a larger cohort.
@@ -105,6 +108,29 @@ pub struct UpdateArgs {
                      the original fit. Omit to reuse whatever the parent used."
     )]
     epochs: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Reuse the parent's carried pseudobulks instead of re-reading its cells",
+        long_help = "Needs the parent to have been trained with --emit-pb-reference.\n\
+                     \n\
+                     Absorbing a sample normally re-collapses the whole cohort, so\n\
+                     taking S samples one at a time re-reads every earlier cell each\n\
+                     time. This substitutes the parent's stored pseudobulks for its\n\
+                     cells, making a round cost the NEW data only.\n\
+                     \n\
+                     The trade is resolution: old-vs-new batch matching drops from\n\
+                     cell level to pseudobulk level, and it is only a saving when a\n\
+                     pseudobulk stands for many cells. `update` reports the ratio\n\
+                     and says so when it does not.\n\
+                     \n\
+                     One consequence: the old cells are never loaded, so\n\
+                     {out}.latent.parquet covers the NEW cells only. The parent's\n\
+                     latent remains the record for everything absorbed earlier.\n\
+                     \n\
+                     Off by default — re-collapsing is the exact computation."
+    )]
+    use_pb_reference: bool,
 
     #[arg(
         long,
@@ -248,22 +274,88 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     })?;
     let kind = manifest.kind;
 
-    let data_files = union_inputs(recorded_paths(&manifest.data.input, &dir), &args.data_files)?;
-    let batch_files = union_batches(
-        recorded_paths(&manifest.data.batch, &dir),
-        args.batch_files.as_deref(),
-        args.data_files.len(),
-    )?;
+    // Either substitute the parent's carried pseudobulks for its cells, or
+    // re-read the cells. The substitution is what turns a round from
+    // "every cell ever absorbed" into "the new cells only".
+    let reference = if args.use_pb_reference {
+        anyhow::ensure!(
+            kind == RunKind::Topic,
+            "--use-pb-reference is wired for `topic` runs so far; {kind} still re-collapses."
+        );
+        let r = crate::pb_reference::prepare(&args.model, &args.out)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} carries no pseudobulks, so there is nothing to substitute for its cells.                  Re-train it with --emit-pb-reference, or drop --use-pb-reference and let this                  round re-collapse.",
+                args.model,
+            )
+        })?;
+        Some(r)
+    } else {
+        None
+    };
+
+    let (data_files, batch_files) = if let Some(r) = reference.as_ref() {
+        // The reference goes LAST: `weights_for` keys on that, and the loader
+        // concatenates columns in file order.
+        let mut d: Vec<Box<str>> = args.data_files.clone();
+        d.push(r.backend.clone());
+        let b = match args.batch_files.as_deref() {
+            Some(new_b) => {
+                anyhow::ensure!(
+                    new_b.len() == args.data_files.len(),
+                    "--batch-files has {} entries but {} new data file(s) were given",
+                    new_b.len(),
+                    args.data_files.len(),
+                );
+                let mut v = new_b.to_vec();
+                v.push(r.batch_file.clone());
+                Some(v)
+            }
+            None => anyhow::bail!(
+                "--use-pb-reference needs --batch-files for the new data: the carried                  pseudobulks are their own batch, and the loader takes one batch file per                  data file."
+            ),
+        };
+        (d, b)
+    } else {
+        (
+            union_inputs(recorded_paths(&manifest.data.input, &dir), &args.data_files)?,
+            union_batches(
+                recorded_paths(&manifest.data.batch, &dir),
+                args.batch_files.as_deref(),
+                args.data_files.len(),
+            )?,
+        )
+    };
 
     // Deliberately does not claim "warm-starting": `svd` has no weights, and
     // each arm below says what it actually does.
-    info!(
-        "update [{kind}]: continuing {} from {} recorded + {} new = {} data file(s)",
-        args.model,
-        manifest.data.input.len(),
-        args.data_files.len(),
-        data_files.len(),
-    );
+    if let Some(r) = reference.as_ref() {
+        let (n_cols, n_cells) = (r.cell_counts.len() as f32, r.cells_represented());
+        let ratio = n_cells / n_cols.max(1.0);
+        info!(
+            "update [{kind}]: reusing {} carried pseudobulks in place of {} cells ({ratio:.1} \
+             cells each), plus {} new file(s)",
+            n_cols as usize,
+            n_cells as usize,
+            args.data_files.len(),
+        );
+        // The saving is the ratio. Below ~2 the pseudobulks are near-singletons,
+        // so this costs pseudobulk-level batch matching and buys almost nothing.
+        if ratio < 2.0 {
+            log::warn!(
+                "carried pseudobulks hold {ratio:.1} cells each, so substituting them saves \
+                 little while coarsening old-vs-new batch matching. Re-collapsing (drop \
+                 --use-pb-reference) is likely the better trade at this scale."
+            );
+        }
+    } else {
+        info!(
+            "update [{kind}]: continuing {} from {} recorded + {} new = {} data file(s)",
+            args.model,
+            manifest.data.input.len(),
+            args.data_files.len(),
+            data_files.len(),
+        );
+    }
 
     let growth = crate::topic::warm_start::Growth {
         add_topics: args.add_topics,
@@ -314,6 +406,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         parent_topics,
         parent_embedding_dim,
         growth,
+        reference,
     };
 
     match kind {
