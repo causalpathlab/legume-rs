@@ -45,6 +45,13 @@ pub(crate) struct Rebase {
     pub init_from: Box<str>,
     /// Per-round epoch override; `None` keeps the recorded count.
     pub epochs: Option<usize>,
+    /// The parent's own K and H. Growth resolves against these rather than
+    /// against the recorded arguments, because a recorded `--embedding-dim 0`
+    /// means "auto = 2K" — which would silently resize ρ the moment K grows.
+    pub parent_topics: usize,
+    pub parent_embedding_dim: Option<usize>,
+    /// Capacity to add. Zero on both axes is an ordinary continue.
+    pub growth: crate::topic::warm_start::Growth,
 }
 
 /// A fit whose recorded arguments can be re-pointed at a larger cohort.
@@ -98,6 +105,32 @@ pub struct UpdateArgs {
                      the original fit. Omit to reuse whatever the parent used."
     )]
     epochs: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Grow the model by N topics while absorbing (topic / masked-* only)",
+        long_help = "Replay alone cannot represent biology the parent has no topic for —\n\
+                     the new cohort has to distort an existing topic to be explained.\n\
+                     This adds capacity instead.\n\
+                     \n\
+                     Added topics start switched off (~0 mass) and the parent's keep\n\
+                     their indices, so existing annotations stay valid. Off by default:\n\
+                     K is part of every downstream artifact's identity."
+    )]
+    add_topics: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Grow the gene embedding ρ by N dimensions (masked family only)",
+        long_help = "Widens H. Exactly function-preserving at step 0 — β is unchanged bit\n\
+                     for bit — while the added subspace still receives gradient.\n\
+                     \n\
+                     Only the masked family has a ρ to widen; `topic`, `vae` and `svd`\n\
+                     reject this."
+    )]
+    add_embedding_dim: usize,
 }
 
 /// Locate the parent's recorded input files.
@@ -232,6 +265,44 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         data_files.len(),
     );
 
+    let growth = crate::topic::warm_start::Growth {
+        add_topics: args.add_topics,
+        add_embedding_dim: args.add_embedding_dim,
+    };
+    // Only the checkpointed families have anything to grow, and the parent's
+    // own K / H are the base to grow from — the recorded arguments may say
+    // `--embedding-dim 0`, meaning "auto", which would track the grown K.
+    let (parent_topics, parent_embedding_dim) = if growth.is_none() {
+        (0, None)
+    } else {
+        anyhow::ensure!(
+            kind.is_masked_family() || kind == RunKind::Topic,
+            "growth is not available for a '{kind}' run. `--add-topics` needs a checkpoint to \
+             widen, which only topic and the masked family have."
+        );
+        // Rejected here rather than at warm start: only the masked args carry an
+        // `add_embedding_dim`, so on a dense parent the flag would otherwise be
+        // dropped on the floor and the user would sit through a full retrain
+        // that did nothing they asked for.
+        anyhow::ensure!(
+            args.add_embedding_dim == 0 || kind.is_masked_family(),
+            "--add-embedding-dim has no meaning for a '{kind}' run: its decoder has no per-gene \
+             embedding ρ to widen. Use --add-topics to add capacity here, or the masked family \
+             if you want a wider embedding."
+        );
+        let m = crate::topic::model_metadata::TopicModelMetadata::load(&args.model)?;
+        info!(
+            "growth: K {} → {}{}",
+            m.n_topics,
+            m.n_topics + growth.add_topics,
+            match (m.embedding_dim, growth.add_embedding_dim) {
+                (Some(h), a) if a > 0 => format!(", H {h} → {}", h + a),
+                _ => String::new(),
+            },
+        );
+        (m.n_topics, m.embedding_dim)
+    };
+
     // A value, not a closure: the match arms are mutually exclusive, so exactly
     // one moves it and none of the vectors need cloning.
     let rebase = Rebase {
@@ -240,6 +311,9 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         out: args.out.clone(),
         init_from: args.model.clone(),
         epochs: args.epochs,
+        parent_topics,
+        parent_embedding_dim,
+        growth,
     };
 
     match kind {
