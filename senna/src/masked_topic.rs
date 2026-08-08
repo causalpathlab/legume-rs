@@ -140,6 +140,36 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Add N topics on top of the warm-started model (needs --init-from)",
+        long_help = "Grow K when continuing a trained run, so a cohort carrying biology the\n\
+                     parent has no topic for can acquire one instead of distorting an\n\
+                     existing topic.\n\
+                     \n\
+                     Added topics start switched off: their encoder rows get zero weights\n\
+                     and a strongly negative bias, so they hold ~0 mass at step 0 and have\n\
+                     to earn their way in. The parent's topics keep their indices, so\n\
+                     annotations keyed to them stay valid.\n\
+                     \n\
+                     Off by default — K is part of every downstream artifact's identity."
+    )]
+    add_topics: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Add N dimensions to the gene embedding ρ (needs --init-from)",
+        long_help = "Widen H when continuing a trained run, giving the dictionary room for\n\
+                     structure the parent's embedding cannot represent.\n\
+                     \n\
+                     Exactly function-preserving at step 0: the new α columns are zero, so\n\
+                     β = softmax(α·ρᵀ) is unchanged bit for bit, while the new ρ columns\n\
+                     stay random so the added subspace still receives gradient."
+    )]
+    add_embedding_dim: usize,
+
+    #[arg(
+        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
         hide = true
     )]
@@ -937,6 +967,10 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
+                growth: crate::topic::warm_start::Growth {
+                    add_topics: args.add_topics,
+                    add_embedding_dim: args.add_embedding_dim,
+                },
             },
         )?;
     }
@@ -1354,6 +1388,16 @@ impl crate::update::Updatable for MaskedTopicArgs {
         self.batch_files = r.batch_files;
         self.out = r.out;
         self.init_from = Some(r.init_from);
+        // Only when growth was asked for; otherwise the recorded sizes replay
+        // verbatim. Both axes are pinned together even if only one grows: a
+        // recorded `--embedding-dim 0` means "auto = 2K", which would otherwise
+        // track the grown K and silently resize ρ.
+        if !r.growth.is_none() {
+            self.n_latent_topics = r.parent_topics + r.growth.add_topics;
+            self.add_topics = r.growth.add_topics;
+            self.embedding_dim = r.parent_embedding_dim.unwrap_or(0) + r.growth.add_embedding_dim;
+            self.add_embedding_dim = r.growth.add_embedding_dim;
+        }
         // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
         // (Here `--from` also carries --freeze-feature-embedding, which a warm
         // start supersedes: the weights already contain that ρ.)

@@ -112,6 +112,23 @@ pub struct TopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Add N topics on top of the warm-started model (needs --init-from)",
+        long_help = "Grow K when continuing a trained run, so a cohort carrying biology the\n\
+                     parent has no topic for can acquire one instead of distorting an\n\
+                     existing topic.\n\
+                     \n\
+                     Added topics start switched off: their encoder rows get zero weights\n\
+                     and a strongly negative bias, so they hold ~0 mass at step 0 and have\n\
+                     to earn their way in. The parent's topics keep their indices, so\n\
+                     annotations keyed to them stay valid.\n\
+                     \n\
+                     Off by default — K is part of every downstream artifact's identity."
+    )]
+    pub(crate) add_topics: usize,
+
+    #[arg(
+        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
         hide = true
     )]
@@ -849,6 +866,10 @@ where
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
+                growth: crate::topic::warm_start::Growth {
+                    add_topics: ctx.args.add_topics,
+                    add_embedding_dim: 0,
+                },
             },
         )?;
     }
@@ -1169,6 +1190,10 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
+                growth: crate::topic::warm_start::Growth {
+                    add_topics: ctx.args.add_topics,
+                    add_embedding_dim: 0,
+                },
             },
         )?;
     }
@@ -1220,6 +1245,12 @@ impl crate::update::Updatable for TopicArgs {
         self.batch_files = r.batch_files;
         self.out = r.out;
         self.init_from = Some(r.init_from);
+        // Only when growth was asked for: otherwise the recorded K is replayed
+        // verbatim, and `parent_topics` is not even looked up.
+        if !r.growth.is_none() {
+            self.n_latent_topics = r.parent_topics + r.growth.add_topics;
+            self.add_topics = r.growth.add_topics;
+        }
         // NOT inherited: `--from` would pull the parent's cell→pb partition,
         // and `align_cell_to_pb_to_cells` bails on any cell absent from the
         // source — which every newly absorbed cell is.

@@ -8,6 +8,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod frozen_features;
 pub mod grad_clip;
+pub mod grow;
 pub mod loss;
 pub mod mcmc;
 pub mod nn;

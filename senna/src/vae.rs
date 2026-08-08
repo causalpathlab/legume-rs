@@ -271,6 +271,8 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features; num_levels],
                 embedding_dim: None,
+                // `senna vae` has no growth surface yet.
+                growth: crate::topic::warm_start::Growth::default(),
             },
         )?;
     }
