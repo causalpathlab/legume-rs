@@ -20,13 +20,33 @@
 //! either, then trait-specific variants are simply invisible to it, and the
 //! pleiotropic-vs-specific contrast is an artefact of that blindness.
 //!
+//! **These numbers do not reproduce run to run, and that is not this test's
+//! doing.** `EmbedConfig::seed` reaches the NCE negatives but not the parameter
+//! initialisation: `V̌` is drawn with `Init::Randn`, and candle's CPU backend
+//! cannot be seeded — `Device::set_seed` errors outright there. Repeating the
+//! sweep on one binary moves an AUC by up to ~0.12, which is the same size as
+//! the seed-to-seed spread reported below. So read a single cell as indicative
+//! and the trend across a column as the result. The offset column is the
+//! exception and is stable to ~0.01, which is why the overfitting conclusion is
+//! the firmer of the two.
+//!
+//! That caution turned out to be the finding. [`test_sweep_embedding_dim`]
+//! varies `H` with everything else fixed, and the two columns move in opposite
+//! directions: trait-specific-vs-null climbs from 0.66 to 0.86 as `H` goes 1 to
+//! 20, while pleiotropic-vs-specific falls from its 0.65 peak at `H = 2` to
+//! 0.42, i.e. through chance and out the other side. The `H` values where the
+//! contrast looks best are exactly the ones where the model half-sees the
+//! trait-specific class. So `‖u_g‖` is not a pleiotropy statistic at any `H`;
+//! it is a detection statistic, and a good one — pleiotropic-vs-null holds
+//! 0.70-0.86 across the whole sweep and needs no tuning.
+//!
 //! Run: cargo test -p fagioli --test pleiotropy_discrimination -- --nocapture
 use anyhow::Result;
 use candle_util::candle_core::Device;
 use fagioli::embedding::model::{EmbedConfig, UPrior};
 use fagioli::embedding::noise::NoiseModel;
 use fagioli::embedding::train::{train, EmbedFit};
-use fagioli::embedding::whiten::whiten_blocks;
+use fagioli::embedding::whiten::{whiten_blocks, WhitenedBlock};
 use fagioli::genotype::GenotypeMatrix;
 use fagioli::summary_stats::calibration::calibrate_input;
 use fagioli::summary_stats::common::SumstatInput;
@@ -141,6 +161,23 @@ struct Classes {
     input: SumstatInput,
     pleiotropic: HashSet<usize>,
     trait_specific: HashSet<usize>,
+    /// RMS of `‖β_g‖` within each causal class. The pleiotropic-vs-specific
+    /// contrast is only about *structure* if these two agree — otherwise a
+    /// norm-based score is reading total effect size instead.
+    rms_norm_pleio: f32,
+    rms_norm_specific: f32,
+}
+
+/// RMS row norm of `b` over the given rows.
+fn rms_row_norm(b: &DMatrix<f32>, rows: &HashSet<usize>) -> f32 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let acc: f32 = rows
+        .iter()
+        .map(|&j| (0..b.ncols()).map(|t| b[(j, t)] * b[(j, t)]).sum::<f32>())
+        .sum();
+    (acc / rows.len() as f32).sqrt()
 }
 
 fn simulate_classes(h2: f32, seed: u64) -> Classes {
@@ -211,7 +248,12 @@ fn simulate_classes(h2: f32, seed: u64) -> Classes {
         }
     }
 
+    let rms_norm_pleio = rms_row_norm(&b, &pleiotropic);
+    let rms_norm_specific = rms_row_norm(&b, &trait_specific);
+
     Classes {
+        rms_norm_pleio,
+        rms_norm_specific,
         pleiotropic,
         trait_specific,
         input: SumstatInput {
@@ -237,6 +279,91 @@ fn auc_pair(score: &[f32], pos: &HashSet<usize>, neg: &HashSet<usize>) -> f32 {
     auc(&s, &p)
 }
 
+/// Everything upstream of the fit. None of it depends on `H`, so the sweep
+/// below pays for it once per seed and varies only the program dimension.
+struct Prepared {
+    blocks: Vec<WhitenedBlock>,
+    noise: NoiseModel,
+    pleiotropic: HashSet<usize>,
+    trait_specific: HashSet<usize>,
+    null: HashSet<usize>,
+    /// Eigen-coordinates per block, i.e. the data one block's `U` is fitted on.
+    rank: usize,
+    /// Variants per block, i.e. the rows of that `U`.
+    num_snps: usize,
+    rms_norm_pleio: f32,
+    rms_norm_specific: f32,
+}
+
+fn prepare(h2: f32, seed: u64) -> Result<Prepared> {
+    let cl = simulate_classes(h2, seed);
+    let all: HashSet<usize> = cl.pleiotropic.union(&cl.trait_specific).copied().collect();
+    let null: HashSet<usize> = (0..cl.input.geno.num_snps())
+        .filter(|j| !all.contains(j))
+        .collect();
+
+    let input = cl.input;
+    let (report, bases) = calibrate_input(&input).expect("calibration");
+    let lambda = report.noise.lambda_white();
+    let blocks = whiten_blocks(&input, bases, None, lambda)?;
+    let d_sq: Vec<Vec<f32>> = blocks.iter().map(|x| x.d_sq.clone()).collect();
+    let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
+
+    let rank = blocks.first().map(|b| b.rank()).unwrap_or(0);
+    let num_snps = blocks.first().map(|b| b.num_snps).unwrap_or(0);
+
+    Ok(Prepared {
+        blocks,
+        noise,
+        pleiotropic: cl.pleiotropic,
+        trait_specific: cl.trait_specific,
+        null,
+        rank,
+        num_snps,
+        rms_norm_pleio: cl.rms_norm_pleio,
+        rms_norm_specific: cl.rms_norm_specific,
+    })
+}
+
+/// One fit's three AUCs and its NCE offset.
+struct Scored {
+    pleio_vs_null: f32,
+    specific_vs_null: f32,
+    pleio_vs_specific: f32,
+    offset: f32,
+}
+
+/// Fit at program dimension `h`. Every other knob is fixed, so a difference
+/// between two calls is a difference in `H` and nothing else.
+fn fit_at(prep: &Prepared, h: usize, seed: u64) -> Result<Scored> {
+    let fit = train(
+        &prep.blocks,
+        &prep.noise,
+        &EmbedConfig {
+            embedding_dim: h,
+            num_negatives: 4,
+            prior_inclusion: 0.02,
+            u_prior: UPrior::SpikeSlab,
+            num_components: 5,
+            prior_alpha: 1.0,
+            learning_rate: 0.05,
+            num_iterations: 400,
+            grad_clip: Some(10.0),
+            dense_arm: false,
+            gauge_weight: 0.0,
+            seed,
+        },
+        &Device::Cpu,
+    )?;
+    let norms = variant_norms(&fit);
+    Ok(Scored {
+        pleio_vs_null: auc_pair(&norms, &prep.pleiotropic, &prep.null),
+        specific_vs_null: auc_pair(&norms, &prep.trait_specific, &prep.null),
+        pleio_vs_specific: auc_pair(&norms, &prep.pleiotropic, &prep.trait_specific),
+        offset: fit.offset,
+    })
+}
+
 #[test]
 fn test_pleiotropic_versus_trait_specific() -> Result<()> {
     println!(
@@ -248,45 +375,15 @@ fn test_pleiotropic_versus_trait_specific() -> Result<()> {
     let (mut a, mut b_, mut c) = (0.0f32, 0.0f32, 0.0f32);
     let seeds = [20250808u64, 111, 222];
     for &seed in &seeds {
-        let cl = simulate_classes(0.4, seed);
-        let all: HashSet<usize> = cl.pleiotropic.union(&cl.trait_specific).copied().collect();
-        let null: HashSet<usize> = (0..cl.input.geno.num_snps())
-            .filter(|j| !all.contains(j))
-            .collect();
-        let input = cl.input;
-        let (report, bases) = calibrate_input(&input).expect("calibration");
-        let lambda = report.noise.lambda_white();
-        let blocks = whiten_blocks(&input, bases, None, lambda)?;
-        let d_sq: Vec<Vec<f32>> = blocks.iter().map(|x| x.d_sq.clone()).collect();
-        let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
-        let fit = train(
-            &blocks,
-            &noise,
-            &EmbedConfig {
-                embedding_dim: NUM_PROGRAMS,
-                num_negatives: 4,
-                prior_inclusion: 0.02,
-                u_prior: UPrior::SpikeSlab,
-                num_components: 5,
-                prior_alpha: 1.0,
-                learning_rate: 0.05,
-                num_iterations: 400,
-                grad_clip: Some(10.0),
-                dense_arm: false,
-                gauge_weight: 0.0,
-                seed,
-            },
-            &Device::Cpu,
-        )?;
-        let norms = variant_norms(&fit);
-
-        let pn = auc_pair(&norms, &cl.pleiotropic, &null);
-        let sn = auc_pair(&norms, &cl.trait_specific, &null);
-        let ps = auc_pair(&norms, &cl.pleiotropic, &cl.trait_specific);
-        println!("{seed:>8} | {pn:>14.3} {sn:>14.3} {ps:>14.3}");
-        a += pn;
-        b_ += sn;
-        c += ps;
+        let prep = prepare(0.4, seed)?;
+        let s = fit_at(&prep, NUM_PROGRAMS, seed)?;
+        println!(
+            "{seed:>8} | {:>14.3} {:>14.3} {:>14.3}",
+            s.pleio_vs_null, s.specific_vs_null, s.pleio_vs_specific
+        );
+        a += s.pleio_vs_null;
+        b_ += s.specific_vs_null;
+        c += s.pleio_vs_specific;
     }
     let n = seeds.len() as f32;
     println!(
@@ -301,4 +398,165 @@ fn test_pleiotropic_versus_trait_specific() -> Result<()> {
          discrimination.\n"
     );
     Ok(())
+}
+
+/// Does `H` explain the weak pleiotropy result, and does a large `H` overfit?
+///
+/// Two questions, one sweep, because they share an instrument.
+///
+/// The first is the mechanism proposed when `pleio vs specific` came back at
+/// 0.668: with `H = 3` against `T = 10` the programs span a 3-dimensional
+/// subspace of trait space, a single-trait direction has a generic non-zero
+/// projection onto it, and so an off-program effect is partly absorbed rather
+/// than ignored. If that is the whole story then `H` is the knob, and the
+/// contrast should move with it.
+///
+/// The second is whether picking `H` needs cross-validation at all. The NCE
+/// offset is a validated overfitting instrument — it is not a free parameter,
+/// since the score is exactly normalised, so what it measures is the model
+/// memorising a fixed set of positives against negatives that are redrawn every
+/// step (`+0.907 -> -0.027` as samples-per-parameter improved). Raising `H`
+/// raises `p·H` parameters per block against a fixed `K·T` of data, so if the
+/// offset stays flat across the sweep there is nothing to select against, and
+/// if it climbs it says where to stop without any held-out data.
+///
+/// Run: cargo test -p fagioli --test pleiotropy_discrimination \
+///        sweep_embedding_dim -- --nocapture
+#[test]
+fn test_sweep_embedding_dim() -> Result<()> {
+    let seeds = [20250808u64, 111, 222, 333, 444];
+    let dims = [1usize, 2, 3, 5, 8, 10, 15, 20];
+
+    // Upstream of the fit and independent of H, so it is paid once per seed.
+    let prepared: Vec<(u64, Prepared)> = seeds
+        .iter()
+        .map(|&s| Ok((s, prepare(0.4, s)?)))
+        .collect::<Result<Vec<_>>>()?;
+
+    let (rank, num_snps) = prepared
+        .first()
+        .map(|(_, p)| (p.rank, p.num_snps))
+        .unwrap_or((0, 0));
+    println!(
+        "\n{} traits, {} true programs, {} variants and {} eigen-coordinates per block.\n\
+         U carries p*H = {}*H free rows against K*T = {} whitened observations.\n",
+        NUM_TRAITS,
+        NUM_PROGRAMS,
+        num_snps,
+        rank,
+        num_snps,
+        rank * NUM_TRAITS,
+    );
+
+    // ‖u_g‖ is a magnitude, so it can only be reading structure if the two
+    // classes carry the same planted magnitude.
+    let (mp, ms) = prepared.iter().fold((0.0f32, 0.0f32), |(p, s), (_, x)| {
+        (p + x.rms_norm_pleio, s + x.rms_norm_specific)
+    });
+    let n_seeds = prepared.len() as f32;
+    println!(
+        "planted RMS ‖β_g‖: pleiotropic {:.3}, trait-specific {:.3} (ratio {:.2})\n",
+        mp / n_seeds,
+        ms / n_seeds,
+        (ms / n_seeds) / (mp / n_seeds).max(1e-6),
+    );
+    println!(
+        "{:>3} {:>9} | {:>13} {:>13} {:>15} | {:>14}",
+        "H", "obs/param", "pleio vs null", "spec vs null", "pleio vs spec", "offset"
+    );
+    println!("{}", "-".repeat(80));
+
+    let mut pleio_vs_null = Vec::new();
+    let mut spec_vs_null = Vec::new();
+    let mut pleio_vs_spec = Vec::new();
+    let mut offsets = Vec::new();
+
+    for &h in &dims {
+        let scored: Vec<Scored> = prepared
+            .iter()
+            .map(|(seed, prep)| fit_at(prep, h, *seed))
+            .collect::<Result<Vec<_>>>()?;
+
+        let obs_per_param = (rank * NUM_TRAITS) as f32 / (num_snps * h) as f32;
+        let pn = mean(&scored.iter().map(|s| s.pleio_vs_null).collect::<Vec<_>>());
+        let sn = mean(&scored.iter().map(|s| s.specific_vs_null).collect::<Vec<_>>());
+        let ps = mean_sd(&scored.iter().map(|s| s.pleio_vs_specific).collect::<Vec<_>>());
+        let off = mean_sd(&scored.iter().map(|s| s.offset).collect::<Vec<_>>());
+        println!(
+            "{h:>3} {obs_per_param:>9.2} | {pn:>13.3} {sn:>13.3} | {:>7.3} ±{:<6.3} | {:>+7.3} ±{:<5.3}",
+            ps.0, ps.1, off.0, off.1,
+        );
+        pleio_vs_null.push(pn);
+        spec_vs_null.push(sn);
+        pleio_vs_spec.push(ps.0);
+        offsets.push(off.0);
+    }
+
+    println!(
+        "\nobs/param is K*T per p*H, the ratio the offset was shown to track. A flat\n\
+         offset would mean large H does not overfit and needs no held-out selection.\n\
+         A climbing one names the ceiling instead, and does it without holding\n\
+         anything out.\n"
+    );
+
+    let at = |h: usize| dims.iter().position(|&d| d == h).expect("dim in sweep");
+    let (lo, mid, hi) = (at(1), at(3), at(20));
+
+    // Characterisation, in the sense of f9175a8d: these assert what is *wrong*,
+    // so that a fix trips them rather than passing silently.
+
+    // The offset responds to H the way it responded to samples-per-parameter.
+    // If this stops holding, either the instrument broke or the model stopped
+    // overfitting, and both are worth stopping for.
+    assert!(
+        offsets[hi] > offsets[lo] + 0.3,
+        "offset should climb with H: {:+.3} at H=1 against {:+.3} at H=20",
+        offsets[lo],
+        offsets[hi],
+    );
+
+    // Raising H past the truth does not rescue the pleiotropy contrast. This is
+    // the claim the sweep was run to test, and it failed.
+    assert!(
+        pleio_vs_spec[hi] <= pleio_vs_spec[mid],
+        "more programs did not help the contrast, yet H=20 scored {:.3} against \
+         {:.3} at the planted H=3",
+        pleio_vs_spec[hi],
+        pleio_vs_spec[mid],
+    );
+
+    // ...because the extra programs go to *representing* the trait-specific
+    // class, not to setting it apart.
+    assert!(
+        spec_vs_null[hi] > spec_vs_null[lo],
+        "trait-specific detection should improve with H: {:.3} at H=1 against \
+         {:.3} at H=20",
+        spec_vs_null[lo],
+        spec_vs_null[hi],
+    );
+
+    // Detection, unlike discrimination, barely depends on H at all.
+    let pn_min = pleio_vs_null.iter().copied().fold(f32::INFINITY, f32::min);
+    assert!(
+        pn_min > 0.6,
+        "pleiotropic-vs-null should stay a good detector at every H, worst was {pn_min:.3}",
+    );
+
+    Ok(())
+}
+
+fn mean(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.iter().sum::<f32>() / v.len() as f32
+}
+
+fn mean_sd(v: &[f32]) -> (f32, f32) {
+    let m = mean(v);
+    if v.len() < 2 {
+        return (m, 0.0);
+    }
+    let var = v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / (v.len() - 1) as f32;
+    (m, var.sqrt())
 }
