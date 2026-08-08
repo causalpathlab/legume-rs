@@ -10,7 +10,7 @@ use rustc_hash::FxHashSet as HashSet;
 
 use anyhow::{ensure, Result};
 use clap::Args;
-use log::info;
+use log::{info, warn};
 use matrix_util::common_io::read_lines;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
@@ -406,7 +406,17 @@ pub fn decompose_blocks(input: &SumstatInput) -> BlockEigenBases {
                 return None;
             }
             let x_block = input.standardized_block(block);
-            let basis = RssEigenBasis::from_genotypes(&x_block, input.max_rank).ok()?;
+            // A failure here drops the block from the whole analysis, not just
+            // from one stage, so it is worth saying so rather than swallowing.
+            let basis = RssEigenBasis::from_genotypes(&x_block, input.max_rank)
+                .inspect_err(|e| {
+                    warn!(
+                        "Block {} ({} SNPs) failed to decompose and is excluded \
+                         from both calibration and the fit: {}",
+                        block_idx, num_snps, e,
+                    )
+                })
+                .ok()?;
             Some(BlockBasis {
                 block_idx,
                 snp_start: block.snp_start,
@@ -418,11 +428,18 @@ pub fn decompose_blocks(input: &SumstatInput) -> BlockEigenBases {
 
     blocks.sort_by_key(|b| b.block_idx);
 
+    let too_short = input
+        .blocks
+        .iter()
+        .filter(|b| b.num_snps() < MIN_BLOCK_SNPS)
+        .count();
     info!(
-        "Decomposed {}/{} LD blocks (max rank {})",
+        "Decomposed {}/{} LD blocks (max rank {}); {} below {} SNPs",
         blocks.len(),
         input.blocks.len(),
         input.max_rank,
+        too_short,
+        MIN_BLOCK_SNPS,
     );
 
     BlockEigenBases { blocks }
