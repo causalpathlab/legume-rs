@@ -66,11 +66,7 @@ pub struct UpdateArgs {
         required = true,
         help = "Parent model prefix to continue training from",
         long_help = "A run prefix written by `senna topic / masked-topic / masked-sbp /\n\
-                     masked-vae / vae / svd`.\n\
-                     \n\
-                     Its manifest supplies both the inputs it was trained on and\n\
-                     the exact arguments it was trained with, so the update runs\n\
-                     the same fit over a larger cohort."
+                     masked-vae / vae / svd`."
     )]
     model: Box<str>,
 
@@ -208,7 +204,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // cannot help here anyway: without a manifest there is no recorded fit to
     // replay, so a manifest-less prefix has to fail — with this message rather
     // than a bare io error one line later.
-    let manifest_path = PathBuf::from(format!("{}.senna.json", args.model));
+    let manifest_path = PathBuf::from(crate::run_manifest::default_path(&args.model));
     let (manifest, dir) = RunManifest::load(&manifest_path).map_err(|e| {
         anyhow::anyhow!(
             "{e}\n`senna update` replays the parent's recorded fit, which lives in its run \
@@ -219,10 +215,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     })?;
     let kind = manifest.kind;
 
-    let data_files = union_inputs(
-        recorded_paths(&manifest.data.input, &dir),
-        &args.data_files,
-    )?;
+    let data_files = union_inputs(recorded_paths(&manifest.data.input, &dir), &args.data_files)?;
     let batch_files = union_batches(
         recorded_paths(&manifest.data.batch, &dir),
         args.batch_files.as_deref(),
@@ -238,7 +231,6 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         args.data_files.len(),
         data_files.len(),
     );
-
 
     // A value, not a closure: the match arms are mutually exclusive, so exactly
     // one moves it and none of the vectors need cloning.

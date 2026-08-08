@@ -17,19 +17,13 @@
 /// architecture, so a wrong value here cannot reach training unnoticed.
 pub fn clap_defaults<T: clap::Args + clap::FromArgMatches>() -> T {
     let cmd = T::augment_args(clap::Command::new("defaults")).mut_args(|a| {
-            // Only `required` args need anything done to them: everything else
-            // either declares a default or is happy being absent. Touching the
-            // rest is how a boolean flag ends up being handed `""`, which is
-            // not one of its accepted values.
-            if !a.is_required_set() {
-                return a;
-            }
-            let takes_a_value = matches!(
-                a.get_action(),
-                clap::ArgAction::Set | clap::ArgAction::Append
-            );
-            let needs_placeholder = takes_a_value && a.get_default_values().is_empty();
-            let a = a.required(false);
+        // Only `required` args need anything: everything else either declares a
+        // default or is content to be absent. Handing a placeholder to, say, a
+        // boolean flag would offer it a value it does not accept.
+        let needs_placeholder = a.is_required_set()
+            && a.get_action().takes_values()
+            && a.get_default_values().is_empty();
+        let a = a.required(false);
         if needs_placeholder {
             a.default_value("")
         } else {
@@ -42,4 +36,3 @@ pub fn clap_defaults<T: clap::Args + clap::FromArgMatches>() -> T {
     T::from_arg_matches(&matches)
         .expect("clap defaults: every argument has a value after relaxation")
 }
-

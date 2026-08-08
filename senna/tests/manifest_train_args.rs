@@ -209,6 +209,9 @@ fn masked_family_is_exactly_the_two_masked_kinds() {
         RunKind::Bge,
         RunKind::Fne,
     ] {
-        assert!(!k.is_masked_family(), "{k} must not route to the masked path");
+        assert!(
+            !k.is_masked_family(),
+            "{k} must not route to the masked path"
+        );
     }
 }

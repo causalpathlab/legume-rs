@@ -72,8 +72,9 @@ pub(crate) struct GeneRemap {
     pub n_mapped: usize,
 }
 
-/// Optional query (held-out) row-name transforms applied *before*
-/// matching against the training dictionary.
+/// How a query's feature axis is aligned onto the model's: the row-name
+/// transforms applied *before* matching, plus the coverage floor applied after
+/// (see [`ensure_gene_coverage`]).
 ///
 /// Order per query name: (1) if `suffix_delim` is set, split once into
 /// `(base, suffix)` and — when `keep_suffix` is set — drop the row unless
@@ -176,11 +177,12 @@ pub(crate) fn build_gene_remap_with(
 
     let n_mapped = n_exact + n_flexible;
     log::info!(
-        "Gene alignment: {n_mapped}/{} new genes mapped to {}/{} training genes \
+        "Gene alignment: {n_mapped}/{} new genes mapped to {}/{} training genes, {:.1}% coverage \
          ({n_exact} exact, {n_flexible} flexible, {n_dropped} dropped by suffix filter)",
         new_data_genes.len(),
         n_mapped,
-        training_genes.len()
+        training_genes.len(),
+        100.0 * n_mapped as f32 / training_genes.len().max(1) as f32,
     );
 
     GeneRemap {
@@ -188,6 +190,43 @@ pub(crate) fn build_gene_remap_with(
         d_train: training_genes.len(),
         n_mapped,
     }
+}
+
+/// The one gene-coverage policy, shared by every path that scores query data
+/// against a trained model.
+///
+/// It used to be spelled three times — `predict`, `eval_topic` and `bge/score`
+/// each carried their own hardcoded "at least 10% of the model's genes" gate —
+/// so the same query was accepted or refused depending on which command saw it.
+///
+/// **A low overlap is not by itself an error**, which is why the floor is off
+/// unless asked for: a targeted panel legitimately measures a small slice of a
+/// whole-transcriptome model, and a narrow panel that still spans the latent
+/// directions can identify it. Zero mapped genes *is* refused — the remapped
+/// matrix would be all zeros, making every downstream number a fiction rather
+/// than a weak estimate.
+pub(crate) fn ensure_gene_coverage(
+    remap: &GeneRemap,
+    min_overlap: f32,
+    name_kind_flag: &str,
+) -> anyhow::Result<()> {
+    let n_train = remap.d_train;
+    let frac = remap.n_mapped as f32 / n_train.max(1) as f32;
+    anyhow::ensure!(
+        remap.n_mapped > 0,
+        "No query gene maps onto the model's {n_train}-gene axis, even after canonicalization. \
+         Every value would be zero — check that the two datasets use the same identifier style \
+         (see {name_kind_flag})."
+    );
+    anyhow::ensure!(
+        min_overlap <= 0.0 || frac >= min_overlap,
+        "Gene coverage {:.1}% is below the requested --min-gene-overlap {:.1}% ({}/{n_train} \
+         mapped).",
+        frac * 100.0,
+        min_overlap * 100.0,
+        remap.n_mapped,
+    );
+    Ok(())
 }
 
 /// Evaluate latent states with optional gene remapping and pre-computed delta.

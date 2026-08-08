@@ -52,7 +52,7 @@ pub(crate) const WEIGHTING_HELP: &str =
 /// `--pb-refine-{gibbs,greedy,weighting,seed}` and call [`PbRefineArgs::to_params`]
 /// to build the `RefineParams` passed into `MultilevelParams::refine`.
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub(crate) struct PbRefineArgs {
     #[arg(
         id = "pb_refine_gibbs",
@@ -90,15 +90,6 @@ pub(crate) struct PbRefineArgs {
     pub(crate) seed: u64,
 }
 
-impl Default for PbRefineArgs {
-    /// Clap's declared defaults. Hand-copying every `default_value_t` here is
-    /// how the two drift apart, and these are now load-bearing: `senna update`
-    /// replays a recorded fit through them.
-    fn default() -> Self {
-        crate::embed_common::clap_defaults()
-    }
-}
-
 impl PbRefineArgs {
     /// Build the algorithm-side [`RefineParams`] from these CLI args.
     pub(crate) fn to_params(&self) -> RefineParams {
@@ -125,7 +116,7 @@ impl PbRefineArgs {
 /// `--pb-refine-*`. Keeps the upstream flag surface identical across every
 /// senna subcommand that collapses cells into pseudobulks.
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub(crate) struct CollapseArgs {
     #[arg(
         long,
@@ -188,21 +179,12 @@ pub(crate) struct CollapseArgs {
     pub(crate) pb_refine: PbRefineArgs,
 }
 
-impl Default for CollapseArgs {
-    /// Clap's declared defaults. Hand-copying every `default_value_t` here is
-    /// how the two drift apart, and these are now load-bearing: `senna update`
-    /// replays a recorded fit through them.
-    fn default() -> Self {
-        crate::embed_common::clap_defaults()
-    }
-}
-
 /// CLI args for inference-time amortization refinement on topic models.
 ///
 /// `--amort-refine-steps = 0` disables refinement; in that case
 /// [`AmortRefineArgs::to_config`] returns `None`.
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub(crate) struct AmortRefineArgs {
     #[arg(
         long = "amort-refine-steps",
@@ -226,15 +208,6 @@ pub(crate) struct AmortRefineArgs {
         help = "Amortization refinement L2 regularization"
     )]
     pub(crate) reg: f64,
-}
-
-impl Default for AmortRefineArgs {
-    /// Clap's declared defaults. Hand-copying every `default_value_t` here is
-    /// how the two drift apart, and these are now load-bearing: `senna update`
-    /// replays a recorded fit through them.
-    fn default() -> Self {
-        crate::embed_common::clap_defaults()
-    }
 }
 
 impl AmortRefineArgs {

@@ -465,4 +465,3 @@ impl crate::update::Updatable for SvdArgs {
         // rejects `--epochs` for an svd parent before reaching this.
     }
 }
-

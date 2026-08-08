@@ -461,4 +461,3 @@ impl crate::update::Updatable for VaeArgs {
         }
     }
 }
-

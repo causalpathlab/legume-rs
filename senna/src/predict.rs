@@ -310,49 +310,16 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
     }
 }
 
-/// Align query genes onto the model's axis, reporting the coverage.
-///
-/// `min_overlap` is a *fraction* of the model's genes, and **0 disables the
-/// gate** — the default. A low overlap is not by itself an error: a targeted
-/// panel legitimately covers a small slice of a whole-transcriptome model, and
-/// a narrow-but-spanning panel can still identify the latent. The number is
-/// always logged so the decision stays with the caller; pass a threshold when
-/// you want it enforced.
-///
-/// Zero mapped genes is refused regardless — the remapped matrix would be all
-/// zeros, so every downstream number would be a fiction rather than a weak
-/// estimate.
+/// Align query genes onto the model's axis, or `None` when the axes already
+/// match. Coverage is logged and gated by
+/// [`crate::topic::eval::ensure_gene_coverage`].
 fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
     opts: &QueryNameOpts,
 ) -> anyhow::Result<Option<GeneRemap>> {
     let gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
-    let n_train = training_genes.len();
-    let frac = gene_remap.n_mapped as f32 / n_train.max(1) as f32;
-    log::info!(
-        "Gene coverage: {}/{n_train} of the model's genes are measured by the query \
-         ({:.1}%); {} query gene(s) unmapped and dropped",
-        gene_remap.n_mapped,
-        frac * 100.0,
-        new_genes.len().saturating_sub(gene_remap.n_mapped),
-    );
-    anyhow::ensure!(
-        gene_remap.n_mapped > 0,
-        "No query gene maps onto the model's {n_train}-gene axis, even after \
-         canonicalization. Every value would be zero — check that the two datasets use the \
-         same identifier style (see --query-name-kind)."
-    );
-    if opts.min_overlap > 0.0 {
-        anyhow::ensure!(
-            frac >= opts.min_overlap,
-            "Gene coverage {:.1}% is below the requested --min-gene-overlap {:.1}% \
-             ({}/{n_train} mapped).",
-            frac * 100.0,
-            opts.min_overlap * 100.0,
-            gene_remap.n_mapped,
-        );
-    }
+    crate::topic::eval::ensure_gene_coverage(&gene_remap, opts.min_overlap, "--feature-name-kind")?;
 
     let needs_remap = gene_remap
         .new_to_train
