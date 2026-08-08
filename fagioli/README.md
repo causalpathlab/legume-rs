@@ -15,6 +15,8 @@ Faceted Associations of Genotype Information via Omics-based Locus Identificatio
   - Single-cell count generation with Poisson sampling
 - **`sim-sumstat`** — multi-trait GWAS summary statistics with LD structure
   - Block-level causal architecture (shared + independent causal SNPs per LD block)
+  - Correlated genetic architecture via `--num-genetic-factors` — **required for a
+    nonzero genetic correlation**; see the caveat below
   - Sparse and polygenic (infinitesimal) heritability components
   - Optional low-rank confounders
   - Marginal OLS summary statistics and within-block LD scores
@@ -123,6 +125,29 @@ $$Y_t = \widetilde{G}_t + \widetilde{C \gamma_t} + \widetilde{\varepsilon}_t, \q
 where tildes denote standardized-then-scaled components, $C = \text{QR}(R_{N \times r}) \cdot \Lambda_{r \times L}$ is a low-rank confounder matrix, $\gamma_t \sim \mathcal{N}(0, 1/L)$, and $\varepsilon_t \sim \mathcal{N}(0,1)$.
 
 A separate polygenic component (`--h2-polygenic`) puts dense infinitesimal effects on all SNPs; when present, the sparse and polygenic genetic values are standardized independently so each contributes its specified PVE.
+
+#### Genetic correlation between traits
+
+By default $\beta^{\text{sh}}_{jt}$ is drawn **independently for each trait** at the shared causal
+variants. Traits then share causal *loci* but not effect sizes, so
+$\mathbb{E}[\text{Cov}_g(t,t')] = 0$ and **the genetic correlation is zero**. That is fine for
+testing per-trait fine-mapping, but it cannot exercise any method that depends on traits being
+genetically related.
+
+`--num-genetic-factors H` replaces the shared component with a factor model,
+$\beta^{\text{sh}}_j = \Lambda f_j$ for a genome-wide $\Lambda_{T \times H}$, giving
+
+$$\text{Cov}_g = \Lambda \Big(\textstyle\sum_j f_j f_j^\top\Big) \Lambda^\top$$
+
+$\Lambda$ is drawn once and reused across blocks — a genetic factor is a property of the traits,
+not of a locus, and per-block loadings would largely cancel when summed genome-wide. `H = 1` gives
+a single shared axis ($|r_g| \to 1$); `H < T` gives low-rank pleiotropy. Independent causal
+variants sit at distinct SNPs per trait and so add only to the diagonal, which dilutes $r_g$
+without removing it.
+
+The realised covariance is written to `{prefix}.genetic_covariance.tsv.gz` so downstream estimates
+can be checked against it. Measured on 600 individuals × 1500 SNPs, 8 traits, 15 shared causal
+variants per block: mean $|r_g|$ is **0.78** at `--num-genetic-factors 2` and **0.09** by default.
 
 ```mermaid
 graph LR
@@ -237,6 +262,7 @@ fagioli sim-sumstat \
   --num-traits 10 \
   --num-shared-causal 5 \
   --num-independent-causal 3 \
+  --num-genetic-factors 2 \
   --h2-sparse 0.4 \
   --h2-polygenic 0.1 \
   --num-causal-blocks 5 \
@@ -251,6 +277,7 @@ fagioli sim-sumstat \
 - `sim.ld_scores.bed.gz` — Within-block LD scores
 - `sim.ld_blocks.bed.gz` — LD block intervals (BED format)
 - `sim.ground_truth.bed.gz` — True causal effect sizes
+- `sim.genetic_covariance.tsv.gz` — Realised genetic covariance between traits (T×T)
 - `sim.confounders.tsv.gz` — Confounder matrix (if `--num-confounders > 0`)
 - `sim.parameters.json` — All simulation parameters
 
