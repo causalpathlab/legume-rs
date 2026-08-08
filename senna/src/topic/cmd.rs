@@ -629,11 +629,21 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         false
     };
 
+    let has_pb_reference = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+    )?;
+
     write_topic_manifest(
         &args.out,
         &data_files,
         batch_files.as_deref(),
         has_cell_to_pb,
+        has_pb_reference,
         crate::run_manifest::record_train_args(args)?,
     )?;
 
@@ -707,6 +717,7 @@ fn write_topic_manifest(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
     has_cell_to_pb: bool,
+    has_pb_reference: bool,
     train_args: crate::run_manifest::TrainArgsRecord,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files
@@ -727,6 +738,7 @@ fn write_topic_manifest(
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix: has_pb_reference.then_some(crate::pb_reference::BACKEND_SUFFIX),
         pb_latent_suffix: Some("pb_latent.parquet"),
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: None,

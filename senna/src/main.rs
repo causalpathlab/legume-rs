@@ -52,6 +52,7 @@ mod logging;
 mod marker_support;
 mod masked_topic;
 mod output_helpers;
+mod pb_reference;
 mod postprocess;
 mod predict;
 mod predict_tmle;

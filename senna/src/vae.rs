@@ -412,6 +412,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: None,
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,

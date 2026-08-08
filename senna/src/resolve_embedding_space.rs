@@ -453,6 +453,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
