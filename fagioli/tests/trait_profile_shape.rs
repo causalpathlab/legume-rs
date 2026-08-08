@@ -56,8 +56,12 @@
 //!
 //! Run: cargo test -p fagioli --test trait_profile_shape -- --nocapture
 use anyhow::Result;
+use fagioli::embedding::noise::omega_sqrt_pair;
 use fagioli::summary_stats::common::SumstatInput;
 use nalgebra::DMatrix;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
+use rand_distr::{Distribution, StandardNormal};
 use rustc_hash::FxHashSet as HashSet;
 
 #[path = "common/three_class.rs"]
@@ -405,6 +409,234 @@ fn test_participation_ratio_tracks_the_number_of_traits() -> Result<()> {
             counts[i - 1],
         );
     }
+    Ok(())
+}
+
+/// Every variant in LD with one of `seed_set`: same block and same haplotype
+/// index, which is exactly how the fixture builds correlation.
+fn ld_partners_of(seed_set: &HashSet<usize>) -> HashSet<usize> {
+    use three_class::{N_HAPLOTYPES, NUM_BLOCKS, SNPS_PER_BLOCK};
+    let key = |g: usize| (g / SNPS_PER_BLOCK, (g % SNPS_PER_BLOCK) % N_HAPLOTYPES);
+    let keys: HashSet<(usize, usize)> = seed_set.iter().map(|&g| key(g)).collect();
+    (0..NUM_BLOCKS * SNPS_PER_BLOCK)
+        .filter(|&g| keys.contains(&key(g)))
+        .collect()
+}
+
+/// The trait-by-trait covariance of the null rows, `Ω`.
+///
+/// Estimated from the z-scores themselves — no panel. Rows above the `keep`
+/// quantile of `‖z_g‖` are dropped, because a handful of large causal rows
+/// would otherwise pull the genetic covariance into what is meant to be the
+/// noise law.
+fn trimmed_trait_covariance(z: &DMatrix<f32>, keep: f32) -> DMatrix<f32> {
+    let norms: Vec<f32> = (0..z.nrows()).map(|g| z.row(g).norm()).collect();
+    let mut sorted = norms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cutoff = sorted[((sorted.len() as f32 * keep) as usize).min(sorted.len() - 1)];
+
+    let t = z.ncols();
+    let mut acc = DMatrix::<f32>::zeros(t, t);
+    let mut n = 0usize;
+    for (g, &norm) in norms.iter().enumerate() {
+        if norm > cutoff {
+            continue;
+        }
+        let r = z.row(g);
+        acc += r.transpose() * r;
+        n += 1;
+    }
+    if n > 0 {
+        acc /= n as f32;
+    }
+    acc
+}
+
+/// A random orthogonal `T x T` matrix, from the QR of a Gaussian.
+fn random_orthogonal(t: usize, rng: &mut SmallRng) -> DMatrix<f32> {
+    let g = DMatrix::from_fn(t, t, |_, _| {
+        let v: f64 = StandardNormal.sample(rng);
+        v as f32
+    });
+    g.qr().q()
+}
+
+/// Benjamini-Hochberg. Returns the selected indices at level `q`.
+fn bh_select(p: &[f32], q: f32) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..p.len()).collect();
+    order.sort_by(|&a, &b| p[a].partial_cmp(&p[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let n = p.len() as f32;
+    let mut cut = 0usize;
+    for (rank, &i) in order.iter().enumerate() {
+        if p[i] <= q * (rank + 1) as f32 / n {
+            cut = rank + 1;
+        }
+    }
+    order[..cut].to_vec()
+}
+
+/// The LD-free null: rotate the trait axis and let the data supply its own
+/// contrast.
+///
+/// `E ~ MN(0, R, Ω)` implies `EQ ~ MN(0, R, Q'ΩQ)`, so at `Ω = I` a right
+/// rotation leaves the noise law *identical*, leaves `R` — hence LD, hence the
+/// correlation between neighbouring variants' statistics — exactly intact, and
+/// leaves every row's magnitude alone. It destroys only the alignment between
+/// the effect rows and the trait basis, which is precisely the alternative
+/// being tested.
+///
+/// Note it must be a **rotation**, not a permutation of trait labels: `PR` is
+/// permutation-invariant, so relabelling is inert against this statistic.
+///
+/// The point is not the per-variant p-value — at `Ω = I` that reduces to the
+/// isotropic reference already used above. It is that the *joint* null carries
+/// the true sample's LD, so a genome-wide threshold is calibrated without any
+/// reference panel.
+#[test]
+fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
+    let seeds = [20250808u64, 111, 222];
+    let draws = 400usize;
+    let q_level = 0.10f32;
+
+    println!(
+        "\n{:>8} | {:>22} | {:>26}",
+        "", "p < 0.05, by class", "BH at q = 0.10"
+    );
+    println!(
+        "{:>8} | {:>7} {:>7} {:>6} {:>6} | {:>7} {:>7} {:>7}",
+        "seed", "specif", "tags", "pleio", "null", "n_sel", "FDP", "FDP*"
+    );
+    println!("{}", "-".repeat(72));
+
+    let (mut sp, mut pl, mut nu) = (vec![], vec![], vec![]);
+    let (mut fdps, mut fdps_locus) = (vec![], vec![]);
+    for &seed in &seeds {
+        let cl = simulate_classes(0.4, seed);
+        let null = null_set(&cl);
+        let z = &cl.input.zscores;
+        let (_, observed) = raw_statistics(z);
+
+        // A bare rotation is only exchangeable at Ω = I. These ten traits are
+        // genetically correlated by construction, so a null row has covariance
+        // Ω and Q'ΩQ ≠ Ω. Rotate inside the whitened trait space and map back:
+        //
+        //     A = Ω^{1/2} Q Ω^{-1/2}    ⟹    Cov(A z) = A Ω A' = Ω
+        //
+        // which leaves the noise law exact, leaves R untouched (the same linear
+        // map is applied to every row), and still scrambles alignment with the
+        // trait basis — where the alternative lives.
+        let (om_sqrt, om_inv_sqrt) = omega_sqrt_pair(&trimmed_trait_covariance(z, 0.90))?;
+
+        let mut rng = SmallRng::seed_from_u64(seed ^ 0x5EED_D0DA);
+        let mut ge = vec![0usize; observed.len()];
+        for _ in 0..draws {
+            let qm = random_orthogonal(z.ncols(), &mut rng);
+            let a = &om_sqrt * &qm * &om_inv_sqrt;
+            let zq = z * a.transpose();
+            for g in 0..zq.nrows() {
+                if participation_ratio(&row(&zq, g)) <= observed[g] {
+                    ge[g] += 1;
+                }
+            }
+        }
+        // One-sided lower tail: trait-specific means unusually *concentrated*.
+        let p: Vec<f32> =
+            ge.iter().map(|&c| (1 + c) as f32 / (1 + draws) as f32).collect();
+
+        // A "null" variant sharing a haplotype with a trait-specific one is its
+        // tag: it carries a scaled copy of that concentrated profile, so firing
+        // on it is correct locus-level behaviour, not a false positive. The
+        // calibration check therefore needs a null with the tags removed.
+        let tagged = ld_partners_of(&cl.trait_specific);
+        let clean_null: HashSet<usize> =
+            null.iter().copied().filter(|g| !tagged.contains(g)).collect();
+
+        let frac = |s: &HashSet<usize>| {
+            s.iter().filter(|&&g| p[g] < 0.05).count() as f32 / s.len().max(1) as f32
+        };
+        let (a, b, c) = (
+            frac(&cl.trait_specific),
+            frac(&cl.pleiotropic),
+            frac(&clean_null),
+        );
+        let tag_rate = frac(&tagged.difference(&cl.trait_specific).copied().collect());
+
+        let selected = bh_select(&p, q_level);
+        let n_sel = selected.len();
+        let false_sel: Vec<usize> = selected
+            .iter()
+            .copied()
+            .filter(|g| !cl.trait_specific.contains(g))
+            .collect();
+        let fdp = false_sel.len() as f32 / n_sel.max(1) as f32;
+        // A tag of a true trait-specific variant inherits its direction, so it
+        // is a locus-level hit rather than a mistake. Splitting the two says
+        // whether the FDP is the method erring or the resolution limit.
+        // FDP* counts a hit as correct if it is a trait-specific variant *or*
+        // in LD with one — the locus-level reading, which is the strongest
+        // claim a shape statistic on marginal rows can support.
+        let fdp_locus = false_sel.iter().filter(|g| !tagged.contains(g)).count() as f32
+            / n_sel.max(1) as f32;
+
+        println!(
+            "{seed:>8} | {a:>7.2} {tag_rate:>7.2} {b:>7.2} {c:>6.2} | \
+             {n_sel:>7} {fdp:>7.2} {fdp_locus:>7.2}"
+        );
+        sp.push(a);
+        pl.push(b);
+        nu.push(c);
+        fdps.push(fdp);
+        fdps_locus.push(fdp_locus);
+    }
+
+    println!("{}", "-".repeat(72));
+    println!(
+        "{:>8} | {:>7.2} {:>7} {:>7.2} {:>6.2} | {:>7} {:>7.2} {:>7.2}",
+        "mean",
+        mean(&sp),
+        "",
+        mean(&pl),
+        mean(&nu),
+        "",
+        mean(&fdps),
+        mean(&fdps_locus),
+    );
+    println!(
+        "\nnull is the calibration check and sits at nominal. tags are LD copies of\n\
+         trait-specific variants: firing on them is correct at locus resolution,\n\
+         which is why FDP (variant-level) and FDP* (locus-level) differ so much.\n\
+         pleio below nominal is the point — this tests specificity, not signal.\n"
+    );
+
+    // Calibration: the null class must not fire more than the nominal rate,
+    // with slack for the tags LD forces into it.
+    assert!(
+        mean(&nu) < 0.10,
+        "rotation null must be calibrated on variants with no signal and no LD \
+         to any: nominal 0.05, got {:.3}",
+        mean(&nu),
+    );
+    assert!(
+        mean(&fdps_locus) < 0.15,
+        "BH at q = 0.10 should control locus-level FDP, got {:.3}",
+        mean(&fdps_locus),
+    );
+    // Power: trait-specific variants must fire far more often than nulls.
+    assert!(
+        mean(&sp) > 3.0 * mean(&nu).max(0.01),
+        "trait-specific variants should fire well above the null rate: {:.3} against {:.3}",
+        mean(&sp),
+        mean(&nu),
+    );
+    // Pleiotropic variants are isotropic in trait space, so this test must be
+    // blind to them — that is what makes it a specificity test and not a
+    // detector.
+    assert!(
+        mean(&pl) < mean(&sp),
+        "the test must be specific to trait-specificity: pleio {:.3}, specific {:.3}",
+        mean(&pl),
+        mean(&sp),
+    );
     Ok(())
 }
 

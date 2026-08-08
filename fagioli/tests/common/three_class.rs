@@ -31,6 +31,9 @@ pub const NUM_INDIVIDUALS: usize = 800;
 pub const NUM_TRAITS: usize = 10;
 pub const NUM_PROGRAMS: usize = 3;
 pub const CAUSAL_PER_PROGRAM: usize = 4;
+/// Haplotypes per block. SNP `j` loads on haplotype `j % N_HAPLOTYPES`, so two
+/// SNPs in one block are in LD exactly when that index matches.
+pub const N_HAPLOTYPES: usize = 6;
 
 pub fn randn(r: usize, c: usize, rng: &mut SmallRng) -> DMatrix<f32> {
     DMatrix::from_fn(r, c, |_, _| {
@@ -43,7 +46,7 @@ pub fn simulate_genotypes(rng: &mut SmallRng) -> DMatrix<f32> {
     let m = NUM_BLOCKS * SNPS_PER_BLOCK;
     let mut x = DMatrix::<f32>::zeros(NUM_INDIVIDUALS, m);
     for b in 0..NUM_BLOCKS {
-        let n_hap = 6;
+        let n_hap = N_HAPLOTYPES;
         let hap = randn(NUM_INDIVIDUALS, n_hap, rng);
         for j in 0..SNPS_PER_BLOCK {
             let rho = 0.9 - 0.45 * (j as f32 / SNPS_PER_BLOCK as f32);
