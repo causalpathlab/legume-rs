@@ -15,7 +15,15 @@ use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
 #[derive(
-    clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    clap::ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum MaskScheduleArg {
@@ -29,7 +37,15 @@ pub enum MaskScheduleArg {
 /// Per-gene likelihood for the masked imputation loss (CLI surface for
 /// [`candle_util::vae::masked_topic::MaskedLikelihood`]).
 #[derive(
-    clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+    clap::ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[serde(rename_all = "kebab-case")]
 pub enum MaskedLikelihoodArg {
@@ -1347,4 +1363,3 @@ impl crate::update::Updatable for MaskedTopicArgs {
         }
     }
 }
-

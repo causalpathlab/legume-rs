@@ -60,7 +60,9 @@ pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
 pub use crate::embed_common::latent_to_theta;
 
 /// Resolve which family of run lives at `prefix`, for commands that dispatch on
-/// it (`probe`, `update`).
+/// it. `probe` is the caller; `update` deliberately is not — it needs the whole
+/// manifest anyway, and the `model.json` fallback below cannot help a command
+/// that also requires a recorded fit.
 ///
 /// **Why the manifest first, and not which files happen to exist.** [`RunKind`]
 /// is the one place senna enumerates its families; inferring from the presence
@@ -77,7 +79,7 @@ pub use crate::embed_common::latent_to_theta;
 pub fn resolve_run_kind(prefix: &str) -> anyhow::Result<crate::run_manifest::RunKind> {
     use crate::run_manifest::{RunKind, RunManifest};
 
-    let manifest = std::path::PathBuf::from(format!("{prefix}.senna.json"));
+    let manifest = std::path::PathBuf::from(crate::run_manifest::default_path(prefix));
     if manifest.is_file() {
         let (m, _) = RunManifest::load(&manifest)?;
         return Ok(m.kind);
@@ -244,11 +246,11 @@ fn coarsening_path(prefix: &str) -> String {
 /// different one silently mis-keys that level's weights. The file therefore now
 /// holds every level, and the bare form is still accepted so runs written
 /// before this keep loading.
-#[derive(Deserialize)]
-struct CoarseningFile {
+#[derive(Serialize, Deserialize)]
+struct CoarseningFile<'a> {
     /// Finest **last**, parallel to `level_decoder_dims`. Entries are `None`
     /// for levels that train at full resolution.
-    levels: Vec<Option<FeatureCoarsening>>,
+    levels: std::borrow::Cow<'a, [Option<FeatureCoarsening>]>,
 }
 
 /// Save every level's feature coarsening alongside the model, finest last.
@@ -257,14 +259,12 @@ pub fn save_coarsening_levels(
     prefix: &str,
 ) -> anyhow::Result<()> {
     let path = coarsening_path(prefix);
-    // Borrowed view: `levels.to_vec()` would deep-clone every `fine_to_coarse`
-    // and `coarse_to_fine` (one usize per gene per level) purely to hand serde
-    // an owned value.
-    #[derive(Serialize)]
-    struct Borrowed<'a> {
-        levels: &'a [Option<FeatureCoarsening>],
-    }
-    let json = serde_json::to_string(&Borrowed { levels })?;
+    // `Cow::Borrowed` so writing does not deep-clone every `fine_to_coarse` and
+    // `coarse_to_fine` (one usize per gene per level) just to hand serde an
+    // owned value.
+    let json = serde_json::to_string(&CoarseningFile {
+        levels: std::borrow::Cow::Borrowed(levels),
+    })?;
     std::fs::write(&path, json)?;
     log::info!("Saved {} feature-coarsening levels to {path}", levels.len());
     Ok(())
@@ -288,7 +288,7 @@ pub fn load_coarsening_levels(
     // absent from the old, so a failed parse of the first is an unambiguous
     // signal to try the second.
     if let Ok(f) = serde_json::from_str::<CoarseningFile>(&json) {
-        return Ok(Some(f.levels));
+        return Ok(Some(f.levels.into_owned()));
     }
     let fc: FeatureCoarsening = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("{path}: not a feature-coarsening file ({e})"))?;

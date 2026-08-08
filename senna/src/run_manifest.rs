@@ -317,11 +317,7 @@ pub struct RunManifest {
 /// version that added a flag could no longer *open* a run — `senna plot` would
 /// fail, not just `senna update`. As a [`serde_json::Value`] it passes through
 /// untouched and only the one command that interprets it can be affected.
-///
-/// A field the writing version did not have is filled from **clap's** declared
-/// default rather than `Default::default()`, which is what lets a senna that
-/// has gained a flag still replay an older fit — see
-/// [`crate::embed_common::clap_defaults`] for why that distinction matters.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainArgsRecord {
     /// senna version that wrote the record, named in the error when a later

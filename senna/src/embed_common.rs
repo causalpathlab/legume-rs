@@ -120,7 +120,7 @@ impl AdjMethod {
 /// Providing `--gff` or `--cnv-ground-truth` turns on the per-sample HMM CNV
 /// model from `cnv::per_sample`.
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct CnvArgs {
     #[arg(long, help = "GFF/GTF annotation for CNV detection.")]
     pub gff: Option<Box<str>>,

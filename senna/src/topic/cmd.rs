@@ -188,7 +188,7 @@ pub struct TopicArgs {
     #[arg(
         long,
         value_enum,
-        default_value = "exact",
+        default_value = "auto",
         help = "Canonicalize row names across backends: auto|exact|gene|locus|locus-overlap|mixed",
         long_help = "How to decide that two backends mean the same feature.\n\
                      \n\
@@ -202,9 +202,10 @@ pub struct TopicArgs {
                      mixed  — per-row dispatch for a heterogeneous axis\n\
                      auto   — detect from the names present\n\
                      \n\
-                     Defaults to `exact`, which is what single-cohort runs have\n\
-                     always done. Set it when combining cohorts that were annotated\n\
-                     separately."
+                     Defaults to `auto`, which detects the rule from the names\n\
+                     present — the behaviour this command already had before the\n\
+                     flag was exposed. Set it explicitly when auto-detection\n\
+                     picks wrong for a cohort."
     )]
     pub(crate) feature_name_kind: crate::masked_topic::FeatureNameKindArg,
 
@@ -612,12 +613,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     };
 
     write_topic_manifest(
-        crate::run_manifest::RunKind::Topic,
         &args.out,
         &data_files,
         batch_files.as_deref(),
         has_cell_to_pb,
-        Some(crate::run_manifest::record_train_args(args)?),
+        crate::run_manifest::record_train_args(args)?,
     )?;
 
     info!("Done");
@@ -659,15 +659,20 @@ fn inherit_level_coarsenings(
             anyhow::ensure!(
                 fc.fine_to_coarse.len() == n_features_full,
                 "--init-from {parent}: level {i}'s coarsening covers {} features but this \
-                 run has {n_features_full}. The gene axes differ — warm start requires the \
-                 same gene set.",
+                 run has {n_features_full}. The two cohorts do not share a gene axis — either \
+                 they spell some genes differently (see --feature-name-kind) or the new data \
+                 measures genes the model has never seen, which cannot be added to a trained \
+                 model.",
                 fc.fine_to_coarse.len(),
             );
         }
     }
     let widths: Vec<String> = levels
         .iter()
-        .map(|l| l.as_ref().map_or_else(|| "full".into(), |c| c.num_coarse.to_string()))
+        .map(|l| {
+            l.as_ref()
+                .map_or_else(|| "full".into(), |c| c.num_coarse.to_string())
+        })
         .collect();
     log::info!(
         "--init-from {parent}: inheriting feature coarsening, level widths [{}] \
@@ -681,12 +686,11 @@ fn inherit_level_coarsenings(
 /// The other families build their `RunDescription` inline; this one is split
 /// out only because `fit_topic_model` is already long.
 fn write_topic_manifest(
-    kind: crate::run_manifest::RunKind,
     prefix: &str,
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
     has_cell_to_pb: bool,
-    train_args: Option<crate::run_manifest::TrainArgsRecord>,
+    train_args: crate::run_manifest::TrainArgsRecord,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files
         .iter()
@@ -696,8 +700,8 @@ fn write_topic_manifest(
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        train_args,
-        kind,
+        train_args: Some(train_args),
+        kind: crate::run_manifest::RunKind::Topic,
         prefix,
         data_input: &input,
         data_batch: &batch,
@@ -1225,4 +1229,3 @@ impl crate::update::Updatable for TopicArgs {
         }
     }
 }
-
