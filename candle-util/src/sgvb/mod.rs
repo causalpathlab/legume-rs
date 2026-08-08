@@ -43,7 +43,6 @@ mod composite_model;
 mod gaussian_prior;
 pub mod likelihood;
 mod regression_linear;
-pub mod regression_multilevel;
 mod sgvb_util;
 mod susie_util;
 mod traits;
@@ -66,10 +65,6 @@ pub use likelihood::{
     WeightedGaussianLikelihood,
 };
 pub use regression_linear::{GaussianRegressionSGVB, RegressionSGVB, SusieRegressionSGVB};
-pub use regression_multilevel::{
-    multilevel_loss, MultilevelParams, MultilevelPartitionParams, MultilevelRegressionSGVB,
-    MultilevelSusieSGVB,
-};
 pub use sgvb_util::{
     antithetic_epsilon, generic_local_reparam_loss, local_reparam_loss, SGVBConfig,
 };
