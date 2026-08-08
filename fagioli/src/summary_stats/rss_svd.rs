@@ -23,6 +23,75 @@ use anyhow::Result;
 use matrix_util::traits::RandomizedAlgs;
 use nalgebra::{DMatrix, DVector};
 
+/// The λ-independent half of the RSS eigendecomposition: `D` and `V`.
+///
+/// The randomized SVD is the expensive step; λ enters only afterwards, through
+/// `D̃ = √(D² + λ)`. Holding the decomposition separately is what lets
+/// [`RssEigenBasis::project_raw`] exist: `V'z` is λ-independent, so calibration
+/// can fit the moment law on it and derive λ before any ridge is applied.
+pub struct RssEigenBasis {
+    /// Singular values D of X/√n, length K. D² are the eigenvalues of R.
+    singular_values: DVector<f32>,
+    /// V, shape (p, K)
+    v_mat: DMatrix<f32>,
+}
+
+impl RssEigenBasis {
+    /// Randomized SVD of a standardized genotype matrix.
+    ///
+    /// # Arguments
+    /// * `x` - Standardized genotype matrix, shape (n, p). Columns should be
+    ///   mean-centered and unit-variance.
+    /// * `max_rank` - Maximum rank for randomized SVD.
+    pub fn from_genotypes(x: &DMatrix<f32>, max_rank: usize) -> Result<Self> {
+        let n = x.nrows();
+        let scale = 1.0 / (n as f32).sqrt();
+        let x_scaled = x * scale;
+
+        let (_u, d, v) = x_scaled.rsvd(max_rank)?;
+
+        Ok(Self {
+            singular_values: d,
+            v_mat: v,
+        })
+    }
+
+    /// Squared singular values d²_k — the eigenvalues of R.
+    pub fn singular_values_sq(&self) -> Vec<f32> {
+        self.singular_values.iter().map(|&d| d * d).collect()
+    }
+
+
+    /// Raw eigenspace projection V'z, shape (K, T).
+    ///
+    /// Unlike [`RssSvdNal::project_zscores`] this applies no `D̃⁻¹`, so it does
+    /// not depend on λ. Calibration fits the moment law on it to *derive* λ,
+    /// which has to happen before any ridge can be applied.
+    pub fn project_raw(&self, z: &DMatrix<f32>) -> DMatrix<f32> {
+        self.v_mat.tr_mul(z)
+    }
+
+    /// Apply a ridge λ, consuming the basis.
+    pub fn into_svd(self, lambda: f64) -> RssSvdNal {
+        let k = self.singular_values.len();
+        let lambda_f = lambda as f32;
+        let d = &self.singular_values;
+        let d_reg: DVector<f32> = DVector::from_fn(k, |i, _| (d[i] * d[i] + lambda_f).sqrt());
+        let d_reg_inv: DVector<f32> = DVector::from_fn(k, |i, _| 1.0 / d_reg[i]);
+
+        // X̃ = D̃ V' → (K, p), reading V transposed without allocating V'
+        let x_tilde = DMatrix::from_fn(k, self.v_mat.nrows(), |i, j| d_reg[i] * self.v_mat[(j, i)]);
+
+        RssSvdNal {
+            x_tilde,
+            d_reg_inv,
+            singular_values: self.singular_values,
+            v_mat: self.v_mat,
+            lambda,
+        }
+    }
+}
+
 /// Precomputed SVD of the reference genotype matrix for RSS likelihood (nalgebra).
 pub struct RssSvdNal {
     /// X̃ = D̃ V', shape (K, p)
@@ -37,7 +106,11 @@ pub struct RssSvdNal {
 }
 
 impl RssSvdNal {
-    /// Compute the SVD of a standardized genotype matrix.
+    /// Compute the SVD of a standardized genotype matrix and apply the ridge λ.
+    ///
+    /// Equivalent to [`RssEigenBasis::from_genotypes`] followed by
+    /// [`RssEigenBasis::into_svd`]; use those directly to sweep λ without
+    /// repeating the decomposition.
     ///
     /// # Arguments
     /// * `x` - Standardized genotype matrix, shape (n, p). Columns should be
@@ -45,27 +118,7 @@ impl RssSvdNal {
     /// * `max_rank` - Maximum rank for randomized SVD.
     /// * `lambda` - Regularization: D̃ = √(D² + λ).
     pub fn from_genotypes(x: &DMatrix<f32>, max_rank: usize, lambda: f64) -> Result<Self> {
-        let n = x.nrows();
-        let scale = 1.0 / (n as f32).sqrt();
-        let x_scaled = x * scale;
-
-        let (_u, d, v) = x_scaled.rsvd(max_rank)?;
-        let k = d.len();
-
-        let lambda_f = lambda as f32;
-        let d_reg: DVector<f32> = DVector::from_fn(k, |i, _| (d[i] * d[i] + lambda_f).sqrt());
-        let d_reg_inv: DVector<f32> = DVector::from_fn(k, |i, _| 1.0 / d_reg[i]);
-
-        // X̃ = D̃ V' → (K, p), reading V transposed without allocating V'
-        let x_tilde = DMatrix::from_fn(k, v.nrows(), |i, j| d_reg[i] * v[(j, i)]);
-
-        Ok(Self {
-            x_tilde,
-            d_reg_inv,
-            singular_values: d,
-            v_mat: v,
-            lambda,
-        })
+        Ok(RssEigenBasis::from_genotypes(x, max_rank)?.into_svd(lambda))
     }
 
     /// Project z-scores into the eigenspace: ỹ = D̃⁻¹ V' z.
@@ -83,6 +136,15 @@ impl RssSvdNal {
 
     pub fn x_design(&self) -> &DMatrix<f32> {
         &self.x_tilde
+    }
+
+    /// Take `X̃` by value, dropping `V` with it.
+    ///
+    /// A caller that keeps only the design would otherwise clone a `(K, p)`
+    /// matrix and immediately drop the original alongside `V`, holding three
+    /// copies of the block at the moment it needs one.
+    pub fn into_x_design(self) -> DMatrix<f32> {
+        self.x_tilde
     }
 
     pub fn singular_values(&self) -> &DVector<f32> {
