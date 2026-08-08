@@ -222,7 +222,9 @@ pub fn embed_sumstat(args: &EmbedSumstatArgs) -> Result<()> {
     let num_traits = input.zscores.ncols();
 
     // ── Step 2: Calibrate the null and choose lambda ─────────────────────
-    let report = calibrate_input(&input)
+    // The bases carry calibration's randomized SVDs into the whitening below,
+    // which needs the same D and V and differs only by the ridge.
+    let (report, bases) = calibrate_input(&input)
         .ok_or_else(|| anyhow::anyhow!("Could not calibrate the null; no block was large enough"))?;
     let lambda = match args.common.lambda {
         Some(l) => {
@@ -243,7 +245,7 @@ pub fn embed_sumstat(args: &EmbedSumstatArgs) -> Result<()> {
     // only ever entered through the trait axis, which is correct for disjoint
     // cohorts. Overlapping cohorts need Omega, and the estimator for it is not
     // trustworthy on realistic LD yet.
-    let blocks = whiten_blocks(&input, None, lambda)?;
+    let blocks = whiten_blocks(&input, bases, None, lambda)?;
     anyhow::ensure!(!blocks.is_empty(), "No LD block was large enough to fit");
 
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();

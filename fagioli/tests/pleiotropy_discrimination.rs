@@ -254,9 +254,9 @@ fn test_pleiotropic_versus_trait_specific() -> Result<()> {
             .filter(|j| !all.contains(j))
             .collect();
         let input = cl.input;
-        let report = calibrate_input(&input).expect("calibration");
+        let (report, bases) = calibrate_input(&input).expect("calibration");
         let lambda = report.noise.lambda_white();
-        let blocks = whiten_blocks(&input, None, lambda)?;
+        let blocks = whiten_blocks(&input, bases, None, lambda)?;
         let d_sq: Vec<Vec<f32>> = blocks.iter().map(|x| x.d_sq.clone()).collect();
         let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
         let fit = train(

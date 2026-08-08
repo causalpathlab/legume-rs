@@ -259,9 +259,9 @@ struct Measured {
 }
 
 fn run(truth: &Truth, u_prior: UPrior, seed: u64) -> Result<Measured> {
-    let report = calibrate_input(&truth.input).expect("calibration");
+    let (report, bases) = calibrate_input(&truth.input).expect("calibration");
     let lambda = report.noise.lambda_white();
-    let blocks = whiten_blocks(&truth.input, None, lambda)?;
+    let blocks = whiten_blocks(&truth.input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();
     let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
 
@@ -384,7 +384,7 @@ fn test_embedding_against_rss_susie() -> Result<()> {
             let emb = run(&truth, UPrior::Susie, seed)?;
 
             // RSS SuSiE, per block, on the same z-scores and the same panel.
-            let report = calibrate_input(&truth.input).expect("calibration");
+            let (report, _) = calibrate_input(&truth.input).expect("calibration");
             let lambda = report.noise.lambda_white();
             let config = FitConfig {
                 model_type: ModelType::Susie,

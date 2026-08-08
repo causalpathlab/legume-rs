@@ -43,7 +43,7 @@ use nalgebra::DMatrix;
 use rayon::prelude::*;
 
 use crate::summary_stats::common::SumstatInput;
-use crate::summary_stats::rss_svd::RssEigenBasis;
+use crate::summary_stats::rss_svd::{BlockEigenBases, RssEigenBasis};
 
 /// Blocks below this many SNPs carry too little rank to be worth fitting.
 pub const MIN_BLOCK_SNPS: usize = 10;
@@ -76,32 +76,47 @@ impl WhitenedBlock {
 
 /// Whiten every block that is large enough to fit.
 ///
+/// `bases` are the decompositions [`crate::summary_stats::calibration::calibrate_input`]
+/// already paid for. `D` and `V` do not depend on λ, so the only thing this
+/// stage adds is the ridge: reusing them makes the randomized SVD a single pass
+/// over the panel instead of two. Pass [`BlockEigenBases::empty`] to decompose
+/// here instead — the two stages filter blocks on different thresholds, so any
+/// block without a basis is decomposed on the spot rather than dropped.
+///
 /// `omega_inv_sqrt` is `Ω^{-1/2}` (T x T), or `None` for `Ω = I` — the default,
 /// correct whenever the cohorts behind the traits are disjoint. `lambda` should
 /// be the calibrated `λ_white`.
 pub fn whiten_blocks(
     input: &SumstatInput,
+    bases: BlockEigenBases,
     omega_inv_sqrt: Option<&DMatrix<f32>>,
     lambda: f64,
 ) -> Result<Vec<WhitenedBlock>> {
-    let mut blocks: Vec<WhitenedBlock> = input
-        .blocks
-        .par_iter()
+    let slots = bases.into_slots(input.blocks.len());
+
+    let mut blocks: Vec<(WhitenedBlock, bool)> = slots
+        .into_par_iter()
+        .zip(input.blocks.par_iter())
         .enumerate()
-        .filter_map(|(block_idx, block)| {
+        .filter_map(|(block_idx, (cached, block))| {
             let num_snps = block.num_snps();
             if num_snps < MIN_BLOCK_SNPS {
                 return None;
             }
 
-            let mut x_block = input
-                .geno
-                .genotypes
-                .columns(block.snp_start, num_snps)
-                .clone_owned();
-            x_block.scale_columns_inplace();
-
-            let basis = RssEigenBasis::from_genotypes(&x_block, input.max_rank).ok()?;
+            let reused = cached.is_some();
+            let basis = match cached {
+                Some(basis) => basis,
+                None => {
+                    let mut x_block = input
+                        .geno
+                        .genotypes
+                        .columns(block.snp_start, num_snps)
+                        .clone_owned();
+                    x_block.scale_columns_inplace();
+                    RssEigenBasis::from_genotypes(&x_block, input.max_rank).ok()?
+                }
+            };
             let d_sq = basis.singular_values_sq();
             let svd = basis.into_svd(lambda);
 
@@ -113,26 +128,36 @@ pub fn whiten_blocks(
                 None => z_tilde,
             };
 
-            Some(WhitenedBlock {
-                block_idx,
-                snp_start: block.snp_start,
-                num_snps,
-                x_design: svd.x_design().clone(),
-                z_white,
-                d_sq,
-            })
+            Some((
+                WhitenedBlock {
+                    block_idx,
+                    snp_start: block.snp_start,
+                    num_snps,
+                    // Consumes the SVD, so V goes out of scope with it rather
+                    // than being held alongside a clone of the design.
+                    x_design: svd.into_x_design(),
+                    z_white,
+                    d_sq,
+                },
+                reused,
+            ))
         })
         .collect();
 
-    blocks.sort_by_key(|b| b.block_idx);
+    blocks.sort_by_key(|(b, _)| b.block_idx);
+
+    let reused = blocks.iter().filter(|(_, r)| *r).count();
+    let blocks: Vec<WhitenedBlock> = blocks.into_iter().map(|(b, _)| b).collect();
 
     let total_rank: usize = blocks.iter().map(WhitenedBlock::rank).sum();
     info!(
-        "Whitened {}/{} blocks (λ={:.4}): {} eigen-coordinates total",
+        "Whitened {}/{} blocks (λ={:.4}): {} eigen-coordinates total, \
+         {} decompositions reused from calibration",
         blocks.len(),
         input.blocks.len(),
         lambda,
         total_rank,
+        reused,
     );
 
     Ok(blocks)

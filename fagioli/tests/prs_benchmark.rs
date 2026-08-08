@@ -222,9 +222,9 @@ fn one_replicate(seed: u64, trait_specific: f32, verbose: bool) -> Result<(f32, 
     };
 
     // ── Embedding PRS ────────────────────────────────────────────────────
-    let report = calibrate_input(&input).expect("calibration");
+    let (report, bases) = calibrate_input(&input).expect("calibration");
     let lambda = report.noise.lambda_white();
-    let blocks = whiten_blocks(&input, None, lambda)?;
+    let blocks = whiten_blocks(&input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();
     let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
 
