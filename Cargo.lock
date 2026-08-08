@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "anyhow",
  "approx",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "approx",

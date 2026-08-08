@@ -423,7 +423,7 @@ pub(super) fn refine_and_collect_stack(
 
     // Build shared pb-sample layout from layer[0]'s row count and the shared
     // projection. The layout only uses `proj_kn` + grouping, no raw reads.
-    let layout = build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn)?;
+    let layout = build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn, None)?;
     let num_pb = layout.cell_counts.len();
 
     // Gene sums for layer[0] drive the refinement (first-layer-owns).
