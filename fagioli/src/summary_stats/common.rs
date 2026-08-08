@@ -1,8 +1,10 @@
 //! Shared pipeline infrastructure for summary-statistics fine-mapping.
 //!
-//! Both `map-sumstat` (SGVB) and `mcmc-sumstat` (MCMC) share the same input
-//! parsing, LD block estimation, z-score adjustment, and output writing.
-//! The per-block fitting strategy is abstracted via [`RssBlockFitter`].
+//! `fit-sumstat-sgvb`, `fit-sumstat-mcmc`, `fit-prs-susie` and `embed-sumstat`
+//! share the same input parsing, LD block estimation and z-score adjustment.
+//! The per-block fitting strategy is abstracted via [`RssBlockFitter`], which
+//! the two fine-mappers implement; `embed-sumstat` consumes the prepared input
+//! directly rather than fitting block by block.
 
 use rustc_hash::FxHashSet as HashSet;
 
@@ -266,7 +268,12 @@ pub struct CommonSumstatArgs {
     #[arg(
         short,
         long,
-        help = "Output file prefix (produces {prefix}.results.bed.gz and {prefix}.parameters.json)"
+        help = "Output file prefix",
+        long_help = "Prefix for every file this run writes.\n\
+                     \n\
+                     Parent directories are created if they do not exist.\n\
+                     Which files appear depends on the subcommand.\n\
+                     Every subcommand writes {prefix}.parameters.json."
     )]
     pub output: Box<str>,
 
