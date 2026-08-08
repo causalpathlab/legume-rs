@@ -140,6 +140,27 @@ pub struct MaskedTopicArgs {
     )]
     encoder_layers: Vec<usize>,
 
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Learned gene modules M in the encoder (0 = off)",
+        long_help = "Pool the encoder's context genes within M learned groups, alongside the\n\
+                     existing attention pool.\n\
+                     \n\
+                     Several genes often do the same job — paralogues, co-regulated members\n\
+                     of a program, alternative probes for one transcript. Which of them a\n\
+                     dataset captures varies with chemistry, dropout and panel, so any single\n\
+                     gene is fragile across datasets. A group mean is not.\n\
+                     \n\
+                     Each gene gets a soft membership from its position in the embedding, and\n\
+                     the encoder additionally sees each module's level and how much of it was\n\
+                     actually observed. Set M well above the topic count; these are\n\
+                     fine-grained redundancy sets, not topics.\n\
+                     \n\
+                     0 leaves the encoder exactly as it was."
+    )]
+    gene_modules: usize,
+
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     epochs: usize,
 
@@ -808,6 +829,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
             layers: &args.encoder_layers,
             use_gcn: false,
             attn_pool: true,
+            n_gene_modules: args.gene_modules,
         },
         &parameters,
         param_builder.pp("enc"),
@@ -1073,8 +1095,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         dec_context_size: Some(dec_context_size),
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
-        // A freshly trained model has absorbed nothing; `senna update` appends.
-        update_history: Vec::new(),
+        // Round-trips the encoder's FC input width; without it every rebuild site
+        // would construct `[L, H]` and `VarMap::load` would reject the checkpoint.
+        n_gene_modules: Some(args.gene_modules),
     };
     metadata.save(&args.out)?;
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
@@ -1095,6 +1118,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
             layers: &args.encoder_layers,
             use_gcn: false,
             attn_pool: true,
+            n_gene_modules: args.gene_modules,
         },
         &parameters,
         cpu_vb.pp("enc"),

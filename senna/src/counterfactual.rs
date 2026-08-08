@@ -1,70 +1,121 @@
 //! Counterfactual axes **benefit** / **forgetting** for `senna probe --counterfactual`.
 //!
 //! `probe`'s default score is the potential outcome `Y(0)` — does the frozen model
-//! explain these cells. This module estimates the **effect of updating on them**:
+//! explain these cells. This module estimates the **effect of updating on them**, to
+//! first order:
 //!
 //! ```text
-//!   benefit    =  E[Y_query(1)     − Y_query(0)]        efficacy  (> 0 ⇒ the batch teaches)
-//!   forgetting = −E[Y_reference(1) − Y_reference(0)]    toxicity  (> 0 ⇒ the batch damages)
+//!   g  = ∇ℓ(Q_fit) − ∇ℓ(C_ctrl)          the contrast direction   [K,H]
+//!
+//!   benefit    =  ⟨ ∇ℓ(Q_eval), g ⟩       efficacy  (> 0 ⇒ the batch teaches)
+//!   forgetting = −⟨ ∇ℓ(C_eval), g ⟩       toxicity  (> 0 ⇒ the batch damages)
 //! ```
 //!
-//! One causal effect, two disjoint evaluation sets. `forgetting` is negated so that
-//! "larger is worse" on both axes; the price is that the size-weighted net gain
+//! These are the first-order terms of a refit: `ℓ(eval; α + η∇ℓ(fit)) − ℓ(eval; α₀)`
+//! expands to `η⟨∇ℓ(eval), ∇ℓ(fit)⟩`, and differencing treatment against control leaves
+//! `η⟨∇ℓ(eval), g⟩`. The step size `η` is a common scale, so it is dropped — it cancels in
+//! every comparison between datasets. **Do not normalize `g`**; see below.
+//!
+//! Read it as: *step `α` in the direction this batch pulls, rather than where ordinary
+//! reference data pulls; how does held-out fit move on each side?* `forgetting` is negated
+//! so "larger is worse" on both axes; the price is that the size-weighted net gain
 //! **subtracts** — `n_query · benefit − n_reference · forgetting` — so the minus sign
 //! lives here and nowhere else.
 //!
-//! The `forgetting` axis is the reason this module exists. A goodness-of-fit score
-//! cannot see it: a contaminated but in-distribution batch reconstructs perfectly and
-//! still drags the dictionary off. That is the *covered + risky* quadrant, and only an
-//! estimate of the training effect reaches it.
+//! The `forgetting` axis is the reason this module exists. A goodness-of-fit score cannot
+//! see it: a contaminated but in-distribution batch reconstructs perfectly and still drags
+//! the dictionary off.
+//!
+//! **The control arm is enacted, not subtracted.** Even a null batch improves fit when you
+//! train on it, so the estimand is *"the effect of adding **this** batch rather than
+//! ordinary in-distribution data"*. That is the `− ∇ℓ(C_ctrl)` term, and dropping it would
+//! measure "does training help at all", which is always yes.
 //!
 //! **`forgetting > 0` does not mean "refuse".** A batch carrying a topic the model
 //! lacks *must* distort the existing ones to make room, so genuine novelty and genuine
-//! contamination both forget. They separate on the other axis: high benefit with high
-//! forgetting means grow the model; near-zero benefit with high forgetting means refuse.
+//! contamination both forget — they are not separable on this axis alone. Nor is
+//! forgetting unconditionally a cost: knowledge is worth protecting in proportion to how
+//! likely it is to be needed again, which is a property of the dataset stream and is not
+//! observable from one probe call.
 //!
-//! **Intervention (stated, not implied).** With the encoder frozen, cell
-//! representations `θ_j` are held fixed and only the dictionary `α` is refit. This is
-//! "update the dictionary", not a joint retrain — a real one would also move the
-//! encoder, hence `θ`. The permutation null below is exact for *this* intervention.
-//! `α` is only `K×H` (tens of numbers), so refitting it directly is cheaper than the
-//! influence-function surrogate it replaces (see the design doc for why that was dropped).
+//! **Intervention (stated, not implied).** The encoder is frozen, so cell representations
+//! `θ_j` are fixed and only the dictionary `α` moves. This is "update the dictionary", not
+//! a joint retrain — a real one would also move the encoder, hence `θ`.
 //!
-//! **The control arm is enacted, not subtracted.** Even a null batch improves fit when
-//! you train on it, so the estimand is *"the effect of adding **this** batch rather
-//! than an equally-sized in-distribution batch"*:
+//! **Scale and direction are reported separately, because they answer different
+//! questions.** `‖g‖` is *how hard* this batch pulls; the two cosines are *where*. Both
+//! effects are projections of the same `g`, so they are **correlated by construction** —
+//! a merely divergent dataset inflates `‖g‖` and hence both at once. Coupled benefit and
+//! forgetting is geometry, never evidence about the data.
 //!
-//! ```text
-//!   treatment: refit α on  C_base ∪ Q_fit   -> α₁
-//!   control:   refit α on  C_base ∪ C₂      -> α₀      (C₂ = same-sized reference sample)
-//!   benefit    =  mean_{Q_eval} [ ℓ(α₁) − ℓ(α₀) ]
-//!   forgetting = −mean_{C_eval} [ ℓ(α₁) − ℓ(α₀) ]
-//! ```
+//! ⚠️ **Never divide the effects by `‖g‖`.** It looks like a harmless standardization and
+//! it inverts the null: a query drawn from the reference has `g ≈ 0` — pure sampling noise
+//! — and rescaling that to unit length collides it with the parent's own misfit direction,
+//! which is large because the parent is not a stationary point of the scored objective. An
+//! in-distribution arm then outscores one carrying a held-out cell type. The cosines exist
+//! to carry the scale-free reading without contaminating the effects.
 //!
-//! Contrast this with the continual-learning convention, where backward transfer is
-//! measured against the *pre-update* model: that baseline confounds the effect of this
-//! batch with the effect of spending another gradient budget at all. The matched
-//! control also earns the inference — under H₀ the treatment/control assignment among
-//! the pooled fit cells carries no information, so **permuting that assignment gives an
-//! exact finite-sample null**. No χ², no Fisher, no efficient influence function.
+//! Direction and evaluation use disjoint cells, so neither effect carries in-sample
+//! optimism, and roles come from a **seeded shuffle**, not file position — see `splits`.
 //!
-//! Fitting and evaluation use disjoint cells, so neither effect carries in-sample optimism.
+//! # ❌ Do not reintroduce the refit (removed 2026-08-07)
+//!
+//! Earlier versions ran two 100-step full-batch AdamW refits of `α` — treatment on
+//! `C_base ∪ Q_fit`, control on `C_base ∪ C₂` — and differenced held-out fit. That put
+//! `--cf-steps`, `--cf-lr` and an inherited `weight_decay: 0.01` **inside the estimand**:
+//! "the effect of absorbing this dataset" silently meant "under this optimizer
+//! configuration", and no two runs at different settings were comparable.
+//!
+//! The first-order effect needs none of that — no step count, no learning rate, no
+//! shrinkage prior, and no stationarity assumption either. **That last point is what
+//! distinguishes this from the deleted influence screen** (`influence.rs`, 0.8.6): that one
+//! needed `H⁻¹` and a quadratic approximation around a mode, which the parent's non-zero
+//! training gradient invalidated. A directional derivative is valid wherever it is taken.
+//!
+//! What the refit could see and this cannot: **higher-order terms**. Over many steps topics
+//! can reorganize in ways no derivative at the parent predicts. If that turns out to
+//! matter, report the curvature along `g` — do not restore a procedure whose
+//! hyperparameters are indistinguishable from its findings.
+//!
+//! # ❌ Do not reintroduce the label-permutation null (removed 2026-08-07)
+//!
+//! Earlier versions permuted the treatment/control label over the pooled fit cells
+//! `Q_fit ∪ C₂` and reported upper-tail p-values. The test was *valid* and it was
+//! *useless*, for a structural reason:
+//!
+//! `Q_eval` is pure query and fixed across permutations. Under a permuted split each arm
+//! receives about half of `Q_fit`, so both refits explain `Q_eval` about equally well and
+//! the permuted `benefit` sits near zero. The observed arrangement — all query cells in
+//! treatment, none in control — is the extreme point of the arrangement space by
+//! construction. The same argument applies to `forgetting` with `C_eval`.
+//!
+//! So the sharp null being tested was *"the query cells are exchangeable with reference
+//! cells"* — i.e. the new dataset is drawn from the reference distribution. That is false
+//! for every dataset anyone would probe, so the test had near-total power against it and
+//! `p` collapsed to the `1/(N+1)` floor mechanically, identically for arms differing in
+//! biology, in platform, and in both. Only a query genuinely drawn from the reference
+//! failed to reject — the consistency check confirming the diagnosis, not a defence.
+//!
+//! A p-value that fires on any distributional difference answers the fit score's question,
+//! not this module's. **The effect sizes carry the information; the p-values did not.**
+//! What would supply a real scale is a *reference* arm — the same contrast with a held-out
+//! slice of the reference playing the query role — which is how the fit score is already
+//! calibrated. Until that lands, this module reports magnitudes and no verdict.
 
 use crate::embed_common::*;
 use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::{csc_to_indexed, PerGeneContext};
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, VarMap};
+use candle_nn::VarMap;
 use candle_util::decoder::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use data_beans::sparse_io_vector::SparseIoVec;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use rayon::prelude::*;
 
 /// A model rebuilt from disk: the varmap, the **finest** level's decoder (the only one
 /// ever scored), and the name of its `α` var.
-pub(crate) struct RebuiltModel {
+struct RebuiltModel {
     pub parameters: VarMap,
     pub decoder: EmbeddedNbTopicDecoder,
     /// `dec_{num_levels-1}.topic.embeddings` — derived, not stored in the metadata.
@@ -76,18 +127,18 @@ pub(crate) struct RebuiltModel {
 ///
 /// The coarser levels are constructed purely to **register** their vars and are then
 /// dropped: `EmbeddedNbTopicDecoder::new` registers through `VarBuilder::get_with_hints`,
-/// so the `Var`s outlive the struct. `VarMap::save` writes exactly what is registered, so
-/// a caller that persists this varmap (`senna update`) would otherwise drop
-/// `dec_0..dec_{lvl-1}` and produce a checkpoint `masked-topic --init-from` cannot load.
+/// so the `Var`s outlive the struct. `VarMap::save` writes exactly what is registered, so a
+/// caller that ever persists this varmap would otherwise drop `dec_0..dec_{lvl-1}` and produce
+/// a checkpoint `masked-topic --init-from` cannot load.
 ///
-/// `ρ` is **detached** before the decoders take it. `refit_alpha` optimizes `α` alone, but
-/// `backward_step` differentiates every `is_variable()` node it reaches — and `ρ` is the
-/// encoder's `Var`, shared by construction. Left attached it costs, per SGD step, a
+/// `ρ` is **detached** before the decoders take it. `Arm::grad` differentiates w.r.t. `α`
+/// alone, but `backward()` walks every `is_variable()` node it reaches — and `ρ` is the
+/// encoder's `Var`, shared by construction. Left attached it costs, per gradient, a
 /// `[H,K]×[K,D]` matmul backward plus an index_add scattering `[N·C, H]` into a zeroed
 /// `[D,H]`, both discarded. Detaching shares the same storage and only clears the variable
 /// flag, so values still round-trip through `VarMap::save` — pinning `ρ` is the intent
 /// anyway.
-pub(crate) fn rebuild_model(
+fn rebuild_model(
     model: &str,
     metadata: &crate::topic::model_metadata::TopicModelMetadata,
     dev: &Device,
@@ -108,6 +159,9 @@ pub(crate) fn rebuild_model(
             layers: &metadata.encoder_hidden,
             use_gcn: false,
             attn_pool: true,
+            // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
+            // errors on a shape mismatch.
+            n_gene_modules: metadata.n_gene_modules.unwrap_or(0),
         },
         &parameters,
         vb.pp("enc"),
@@ -132,13 +186,13 @@ pub(crate) fn rebuild_model(
 }
 
 /// One side (calibration or query) of the cell bank.
-pub(crate) struct BankSource<'a> {
+struct BankSource<'a> {
     pub data_vec: &'a SparseIoVec,
     pub z_nk: &'a Mat,
     pub gene_remap: Option<&'a GeneRemap>,
 }
 
-pub(crate) struct BankArgs<'a> {
+struct BankArgs<'a> {
     pub calib: BankSource<'a>,
     pub query: BankSource<'a>,
     pub context_size: usize,
@@ -160,7 +214,7 @@ pub(crate) struct CellBank {
 
 /// A storage-independent copy. `Tensor::clone` is shallow, and `Var::set` refuses a
 /// source derived from the var's own value.
-pub(crate) fn detached_copy(t: &Tensor) -> anyhow::Result<Tensor> {
+fn detached_copy(t: &Tensor) -> anyhow::Result<Tensor> {
     let dims = t.dims().to_vec();
     let v = t.flatten_all()?.to_vec1::<f32>()?;
     Ok(Tensor::from_vec(v, dims, t.device())?)
@@ -228,7 +282,7 @@ impl CellBank {
         })
     }
 
-    pub fn build(a: BankArgs<'_>) -> anyhow::Result<Self> {
+    fn build(a: BankArgs<'_>) -> anyhow::Result<Self> {
         let (ci, cv, cz) = pack_side(&a.calib, &a)?;
         let (qi, qv, qz) = pack_side(&a.query, &a)?;
         let n_calib = ci.dim(0)?;
@@ -283,249 +337,279 @@ fn nb_llik(
     Ok((llik, mask))
 }
 
-pub(crate) struct RefitCfg {
-    pub steps: usize,
-    pub lr: f64,
-}
+/// Half-width of the central difference, as a fraction of `‖α‖`. Small enough that the
+/// linear term dominates, large enough that `f32` cancellation does not: per-cell fit is
+/// `O(1)` nats, so the differenced signal is `~2ε` against an `f32` relative precision of
+/// `~1e-7`. `Counterfactual::fd_warning` checks the choice against autograd on every call
+/// rather than trusting it.
+const FD_EPS_REL: f64 = 1e-3;
 
-/// Refit `α` (only) on `fit_ids`, starting from wherever `α` currently sits —
-/// the caller resets it between arms.
-pub(crate) fn refit_alpha(
-    decoder: &EmbeddedNbTopicDecoder,
-    alpha: &candle_core::Var,
-    bank: &CellBank,
-    fit_ids: &[usize],
-    cfg: &RefitCfg,
-) -> anyhow::Result<()> {
-    let (idx, val, lz) = bank.subset(fit_ids)?;
-    let mut adam = AdamW::new(
-        vec![alpha.clone()],
-        candle_nn::ParamsAdamW {
-            lr: cfg.lr,
-            ..Default::default()
-        },
-    )?;
-    for _ in 0..cfg.steps {
-        let (llik, _) = nb_llik(decoder, &idx, &val, &lz)?;
-        let loss = llik.mean_all()?.neg()?;
-        adam.backward_step(&loss)?;
-    }
-    Ok(())
-}
+/// Warn above this relative gap between a finite-difference effect and its autograd
+/// counterpart. Leaves room for `f32` noise while still catching a mis-scaled step. Lives
+/// beside `FD_EPS_REL` because it is a judgement about *that* constant, and the caller
+/// cannot see it.
+const FD_CHECK_TOL: f64 = 0.01;
 
-/// Per-cell mean log-likelihood over that cell's scored genes.
-pub(crate) fn score_cells(
+/// Per-cell mean log-likelihood over each cell's scored genes — `[N]`, differentiable.
+///
+/// The single definition of "fit" in this module. Both the gradients that build the
+/// contrast direction and the values read out on the evaluation sets come from here, so
+/// "the direction and the outcome are the same functional" is enforced by construction
+/// rather than by two call sites agreeing.
+fn per_cell_fit(
     decoder: &EmbeddedNbTopicDecoder,
     bank: &CellBank,
     ids: &[usize],
-) -> anyhow::Result<Vec<f32>> {
+) -> anyhow::Result<Tensor> {
     let (idx, val, lz) = bank.subset(ids)?;
     // `impute_masked_nb` already sums over the cell's scored genes -> `[N]`.
     let (llik, mask) = nb_llik(decoder, &idx, &val, &lz)?;
     let den = mask.sum(1)?.clamp(1.0f32, 1e30f32)?;
-    Ok(llik.div(&den)?.to_vec1::<f32>()?)
+    Ok(llik.div(&den)?)
+}
+
+/// A loaded model plus the handles needed to read gradients and directional derivatives
+/// off it. Bundled rather than passed as four repeated arguments to every helper.
+struct Arm<'a> {
+    decoder: &'a EmbeddedNbTopicDecoder,
+    alpha: candle_core::Var,
+    /// The trained `α`, detached. Every perturbation departs from and returns to it.
+    alpha0: Tensor,
+    bank: &'a CellBank,
+}
+
+impl Arm<'_> {
+    /// `∇_α` of the mean per-cell fit over `ids`, at the current `α`.
+    fn grad(&self, ids: &[usize]) -> anyhow::Result<Tensor> {
+        let grads = per_cell_fit(self.decoder, self.bank, ids)?
+            .mean_all()?
+            .backward()?;
+        grads
+            .get(self.alpha.as_tensor())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("counterfactual: α received no gradient"))
+    }
+
+    /// Per-cell `⟨∇ℓᵢ, dir⟩` by central difference — **unnormalized**, so the caller gets
+    /// the projection onto `dir` itself rather than onto `dir/‖dir‖`.
+    ///
+    /// Finite differences rather than autograd because the **per-cell** decomposition is
+    /// what the influence-function variance needs, and per-cell autograd would cost one
+    /// backward pass per cell. Two forward passes give all of them.
+    ///
+    /// The walk is along the *unit* direction for numerical conditioning, with `‖dir‖`
+    /// folded back into the divisor — no second pass over the result.
+    fn ddir(&self, ids: &[usize], dir: &Tensor, eps: f64) -> anyhow::Result<Vec<f32>> {
+        let scale = tensor_norm(dir)?;
+        anyhow::ensure!(scale > 0.0, "counterfactual: zero direction");
+        let step = (dir * (eps / scale))?;
+
+        // `α` is restored unconditionally, so an error inside the walk cannot leave the
+        // shared `Var` perturbed for the gradients read afterwards.
+        let walk = || -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
+            self.alpha.set(&(&self.alpha0 + &step)?)?;
+            let plus = per_cell_fit(self.decoder, self.bank, ids)?.to_vec1::<f32>()?;
+            self.alpha.set(&(&self.alpha0 - &step)?)?;
+            let minus = per_cell_fit(self.decoder, self.bank, ids)?.to_vec1::<f32>()?;
+            Ok((plus, minus))
+        };
+        let walked = walk();
+        self.alpha.set(&self.alpha0)?;
+        let (plus, minus) = walked?;
+
+        let inv = (scale / (2.0 * eps)) as f32;
+        Ok(plus
+            .iter()
+            .zip(&minus)
+            .map(|(p, m)| (p - m) * inv)
+            .collect())
+    }
 }
 
 pub(crate) struct Counterfactual {
-    /// Fit the update *gains* on held-out **query** cells. `> 0` ⇒ the batch teaches
-    /// the model something. Efficacy.
+    /// First-order fit **gained** on held-out query cells along `g`. `> 0` ⇒ the batch
+    /// teaches. Efficacy. Computed by autograd, so it is exact rather than differenced.
     pub benefit: f64,
-    /// Fit the update *costs* on held-out **reference** cells, sign-flipped so that
+    /// First-order fit **lost** on held-out reference cells along `g`, sign-flipped so
     /// larger is worse. `> 0` ⇒ forgetting. Toxicity.
     ///
-    /// Both are the same causal effect — refit the dictionary including this batch
-    /// rather than an equally sized reference batch — read out on two disjoint
-    /// evaluation sets. Because `forgetting` is negated, the size-weighted net gain
-    /// **subtracts**: `n_query · benefit − n_reference · forgetting`. Do not add them.
+    /// Both read the *same* direction `g` against two disjoint evaluation sets. Because
+    /// `forgetting` is negated, the size-weighted net gain **subtracts**:
+    /// `n_query · benefit − n_reference · forgetting`. Do not add them.
+    ///
+    /// ⚠️ They are two projections of one vector, so they are **correlated by
+    /// construction** — near-orthogonal `∇ℓ(Q_eval)` and `∇ℓ(C_eval)` is the only way they
+    /// come apart. Coupled benefit and forgetting is geometry, never evidence about the
+    /// data.
     pub forgetting: f64,
-    /// Upper-tail permutation p-values: `P(benefit ≥ observed)` and
-    /// `P(forgetting ≥ observed)` under the exchangeable treatment/control labelling.
-    pub p_benefit: f64,
-    pub p_forgetting: f64,
-    /// 95% Bayesian-bootstrap intervals (Rubin 1981; Dirichlet(1,…,1) reweighting of the
-    /// per-cell differences) — `(lo, hi)` for each effect. Distribution-free, so no
-    /// normality assumption. These condition on the fit split (eval-cell variance only);
-    /// for the fit-cell component too, bootstrap the input backends and re-invoke `probe`.
-    /// `benefit`/`forgetting` themselves stay the plain sample means.
-    pub benefit_ci: (f64, f64),
-    pub forgetting_ci: (f64, f64),
-    /// `‖α₁_k − α₀_k‖` — how far the query moved topic `k` *beyond* what an equally
-    /// sized reference batch moved it. The enacted analog of the influence step's
-    /// per-topic `‖Δ_k‖`, and unlike it, the move actually taken.
-    pub delta_norm_per_topic: Vec<f64>,
-    pub n_perm: usize,
+    /// Standard errors from the **infinitesimal jackknife** — the delta-method limit of the
+    /// bootstrap, in closed form, no resampling.
+    ///
+    /// The SE is stored rather than an interval so the confidence level is the reporter's
+    /// choice and never has to be inferred back out of a pair of bounds.
+    ///
+    /// Each effect is a bilinear form `⟨â, b̂⟩` in two independent sample means, so its
+    /// variance is the sum of one term per sampled set, each the sample variance of a
+    /// per-cell projection over that set's size:
+    ///
+    /// ```text
+    ///   Var(benefit) = Var_k⟨∇ℓ_k, g⟩/n_qeval        which eval cells were drawn
+    ///                + Var_i⟨∇ℓ_i, ∇ℓ(Q_eval)⟩/n_qfit    which cells set the direction
+    ///                + Var_j⟨∇ℓ_j, ∇ℓ(Q_eval)⟩/n_cctrl   which cells set the control
+    /// ```
+    ///
+    /// The second and third terms are the reason this replaced a bootstrap over eval cells:
+    /// that form could only ever see the first, treating the one realized direction as
+    /// fixed when *which cells defined it* is the larger source of variation. Every
+    /// projection is a directional derivative, so all three come from passes already
+    /// being made.
+    ///
+    /// ⚠️ Still not reachable: `Q_fit` and `Q_eval` are halves of the **same** dataset, so
+    /// no term here sees between-dataset variation. Intervals derived from these are
+    /// symmetric, the delta method being first-order.
+    pub benefit_se: f64,
+    pub forgetting_se: f64,
+    /// `‖g‖` — how hard this batch pulls `α` beyond what ordinary reference data does.
+    ///
+    /// The scale/direction split matters: `‖g‖` is **how hard** the batch pulls and the
+    /// two cosines are **where** it pulls. A merely divergent dataset inflates `‖g‖`, hence
+    /// both effects at once; the cosines are what distinguish a pull that generalizes
+    /// within the batch from one that opposes the reference.
+    pub pull_norm: f64,
+    /// `cos(∇ℓ(Q_eval), g)` — does the pull generalize to *held-out cells of the same
+    /// batch*? This is the axis `benefit` is weakest on: any reproducible structure,
+    /// artifact included, scores positive.
+    pub benefit_cos: f64,
+    /// `−cos(∇ℓ(C_eval), g)` — does the pull oppose what the reference wants?
+    pub forgetting_cos: f64,
+    /// `‖g_k‖` per topic — which topics this batch pulls on, beyond ordinary data.
+    pub pull_norm_per_topic: Vec<f64>,
+    /// Largest relative gap between a differenced effect and its autograd counterpart.
+    /// Read it through `fd_warning`, which owns the tolerance.
+    fd_check: f64,
     pub n_fit: usize,
     pub n_eval_query: usize,
     pub n_eval_calib: usize,
 }
 
-pub(crate) fn mean(x: &[f32]) -> f64 {
+impl Counterfactual {
+    /// `Some(message)` when the central-difference step is mis-scaled for this model.
+    ///
+    /// Only the *intervals* are affected: the effects themselves come from autograd, so a
+    /// warning here never impugns them. Owned by this module because it is a judgement
+    /// about `FD_EPS_REL`, which the caller cannot see.
+    pub fn fd_warning(&self) -> Option<String> {
+        (self.fd_check > FD_CHECK_TOL).then(|| {
+            format!(
+                "counterfactual: differenced effects disagree with autograd by {:.1}% — the \
+                 central-difference step is mis-scaled for this model, so the intervals are \
+                 unreliable (the effects themselves are exact and unaffected)",
+                100.0 * self.fd_check
+            )
+        })
+    }
+}
+
+fn mean(x: &[f32]) -> f64 {
     if x.is_empty() {
         return 0.0;
     }
     x.iter().map(|&v| f64::from(v)).sum::<f64>() / x.len() as f64
 }
 
-/// Replicate count for the Bayesian-bootstrap intervals. Free (reweights an in-memory
-/// vector, no refits), so we can afford enough for stable 2.5/97.5 tail quantiles.
-const CI_BOOT_REPS: usize = 2000;
-
-/// 95% Bayesian bootstrap interval (Rubin 1981) for `sign · mean(x)`, using Dirichlet(1,…,1)
-/// weights (normalized Exp(1) draws). Distribution-free — no CLT/normality assumption, and
-/// the interval is asymmetric where the per-cell differences are skewed. Uses its **own**
-/// RNG so the permutation stream, and hence the reported p-values, are untouched.
-fn bayes_ci(x: &[f32], sign: f64, rng: &mut StdRng) -> (f64, f64) {
-    let point = sign * mean(x);
-    if x.len() < 2 {
-        return (point, point);
+/// Variance of the sample mean: `Var(x) / n`, one infinitesimal-jackknife component.
+fn var_of_mean(x: &[f32]) -> f64 {
+    let n = x.len();
+    if n < 2 {
+        return 0.0;
     }
-    let mut reps = Vec::with_capacity(CI_BOOT_REPS);
-    for _ in 0..CI_BOOT_REPS {
-        let (mut num, mut den) = (0f64, 0f64);
-        for &v in x {
-            let w = -rng.random::<f64>().max(f64::MIN_POSITIVE).ln(); // Exp(1) = Gamma(1,1)
-            num += w * f64::from(v);
-            den += w;
-        }
-        reps.push(sign * num / den);
-    }
-    reps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let q = |p: f64| reps[((p * (reps.len() - 1) as f64).round() as usize).min(reps.len() - 1)];
-    (q(0.025), q(0.975))
+    let m = mean(x);
+    let ss: f64 = x.iter().map(|&v| (f64::from(v) - m).powi(2)).sum();
+    ss / ((n - 1) * n) as f64
 }
 
-/// Which cells train each arm, and which cells the two arms are compared on.
-struct ArmSpec<'a> {
-    /// Shared reference cells present in *both* arms.
-    base: &'a [usize],
-    /// Added in the treatment arm (the query batch, or a permuted stand-in).
-    treat_extra: &'a [usize],
-    /// Added in the control arm (a same-sized reference batch, or its stand-in).
-    ctrl_extra: &'a [usize],
-    eval_q: &'a [usize],
-    eval_c: &'a [usize],
+/// Two-sided 99% normal critical value. Exposed so the reporter and the struct agree on
+/// what an interval built from a stored SE means.
+pub(crate) const Z_99: f64 = 2.575_829_303_548_9;
+
+/// Standard error of a sum of independent infinitesimal-jackknife variance components.
+fn ij_se(components: [f64; 3]) -> f64 {
+    components.iter().sum::<f64>().max(0.0).sqrt()
 }
 
-/// Disjoint cell roles. Query splits half to fit, half to evaluate; calibration
-/// splits into an evaluation set, the same-sized control batch `c2`, and the shared
-/// base both arms train on.
+/// Disjoint cell roles. Two former requirements are absent because a gradient contrast
+/// does not need them — the shared replay base cancels exactly (a gradient of a mean over
+/// a union is the size-weighted average of the group means, so a base common to both arms
+/// contributes identically to each), and the control need not be size-matched (it is a
+/// sample mean, unbiased at any size). Two consequences:
+///
+/// - **At first order replay damps, it does not redirect.** It scales the step without
+///   changing where it points, so a coreset's *composition* is irrelevant here and only its
+///   size matters — a statement about this readout, not about a real multi-step update.
+/// - **`c_ctrl` takes half the calibration cells** rather than exactly `|Q_fit|`: strictly
+///   more precise, and it removes the "calibration too small for a control arm" failure.
 struct Splits {
+    /// Supplies the pull direction `∇ℓ(Q_fit)`.
     q_fit: Vec<usize>,
+    /// Held out from the direction; reads `benefit`.
     q_eval: Vec<usize>,
+    /// The enacted control: what an *ordinary* reference batch pulls toward.
+    c_ctrl: Vec<usize>,
+    /// Held out from the control; reads `forgetting`.
     c_eval: Vec<usize>,
-    c2: Vec<usize>,
-    c_base: Vec<usize>,
 }
 
-fn splits(n_calib: usize, n_query: usize) -> anyhow::Result<Splits> {
-    let q: Vec<usize> = (n_calib..n_calib + n_query).collect();
+/// Assign the four roles by a **seeded shuffle**, never by file position.
+///
+/// Contiguous slices would be a real defect, not a stylistic one: single-cell matrices
+/// arrive ordered far more often than not — by cell type from an annotated source, by
+/// dataset from a concatenation, by barcode grouping. Under file order, `c_ctrl` (which is
+/// supposed to be an *ordinary* reference sample, the whole point of the enacted control)
+/// could be a single cell type, `c_eval` could be another, and `q_fit` / `q_eval` could
+/// differ in composition — so a novel type might land entirely in one half, meaning either
+/// the refit never sees it or the evaluation never does. All three break the contrast in
+/// ways that depend on nothing but row order.
+fn splits(n_calib: usize, n_query: usize, rng: &mut StdRng) -> anyhow::Result<Splits> {
+    let mut q: Vec<usize> = (n_calib..n_calib + n_query).collect();
+    q.shuffle(rng);
     let (q_fit, q_eval) = q.split_at(q.len() / 2);
     anyhow::ensure!(!q_fit.is_empty(), "counterfactual: query needs ≥ 2 cells");
 
-    let c: Vec<usize> = (0..n_calib).collect();
-    let n_c_eval = (n_calib / 3).max(1);
-    let (c_eval, c_rest) = c.split_at(n_c_eval.min(n_calib));
+    let mut c: Vec<usize> = (0..n_calib).collect();
+    c.shuffle(rng);
+    let (c_ctrl, c_eval) = c.split_at(c.len() / 2);
     anyhow::ensure!(
-        c_rest.len() > q_fit.len(),
-        "counterfactual: calibration too small ({} usable) for a control batch of {} cells",
-        c_rest.len(),
-        q_fit.len()
+        !c_ctrl.is_empty() && !c_eval.is_empty(),
+        "counterfactual: calibration needs ≥ 2 cells"
     );
-    let (c2, c_base) = c_rest.split_at(q_fit.len());
 
     Ok(Splits {
         q_fit: q_fit.to_vec(),
         q_eval: q_eval.to_vec(),
+        c_ctrl: c_ctrl.to_vec(),
         c_eval: c_eval.to_vec(),
-        c2: c2.to_vec(),
-        c_base: c_base.to_vec(),
     })
 }
 
-/// Row-wise `‖a − b‖` for two `[K, H]` tensors.
-pub(crate) fn row_norms_of_diff(a: &Tensor, b: &Tensor) -> anyhow::Result<Vec<f64>> {
-    let d = (a - b)?.sqr()?.sum(1)?.sqrt()?.to_vec1::<f32>()?;
+/// Row-wise `‖·‖` for a `[K, H]` tensor — one norm per topic.
+fn row_norms(t: &Tensor) -> anyhow::Result<Vec<f64>> {
+    let d = t.sqr()?.sum(1)?.sqrt()?.to_vec1::<f32>()?;
     Ok(d.into_iter().map(f64::from).collect())
 }
 
-/// Outcome of one treatment/control pair: the two scalar effects, the raw per-cell
-/// difference vectors they average (kept so the observed pair can be bootstrapped), and
-/// the per-topic ‖α₁ − α₀‖. `forgetting` is the *negated* reference-cell effect, so both
-/// scalar effects are "larger is more extreme".
-struct ArmOutcome {
-    benefit: f64,
-    forgetting: f64,
-    dq: Vec<f32>,
-    dc: Vec<f32>,
-    delta_norm_per_topic: Vec<f64>,
+/// `⟨a, b⟩` over all entries of two same-shaped tensors. `Tensor::dot` is 1-D only and
+/// every operand here is `[K, H]`.
+fn dot(a: &Tensor, b: &Tensor) -> anyhow::Result<f64> {
+    Ok(f64::from((a * b)?.sum_all()?.to_scalar::<f32>()?))
 }
 
-/// Run the treatment and control arms from a common starting `α`.
-fn two_arms(
-    decoder: &EmbeddedNbTopicDecoder,
-    alpha: &candle_core::Var,
-    alpha0: &Tensor,
-    bank: &CellBank,
-    spec: &ArmSpec<'_>,
-    cfg: &RefitCfg,
-) -> anyhow::Result<ArmOutcome> {
-    // One arm: restart from the shared `α₀`, refit on `base ∪ extra`, then read both
-    // evaluation sets and copy out the resulting `α`. Treatment and control differ only
-    // in `extra`, so they share this path.
-    let run_arm = |extra: &[usize]| -> anyhow::Result<(Vec<f32>, Vec<f32>, Tensor)> {
-        let mut fit = spec.base.to_vec();
-        fit.extend_from_slice(extra);
-        alpha.set(alpha0)?;
-        refit_alpha(decoder, alpha, bank, &fit, cfg)?;
-        let q = score_cells(decoder, bank, spec.eval_q)?;
-        let c = score_cells(decoder, bank, spec.eval_c)?;
-        Ok((q, c, detached_copy(alpha.as_tensor())?))
-    };
-
-    let (tq, tc, a_treat) = run_arm(spec.treat_extra)?;
-    let (cq, cc, a_ctrl) = run_arm(spec.ctrl_extra)?;
-
-    let dq: Vec<f32> = tq.iter().zip(&cq).map(|(a, b)| a - b).collect();
-    let dc: Vec<f32> = tc.iter().zip(&cc).map(|(a, b)| a - b).collect();
-    // Negate the reference effect: `forgetting` is a loss, so larger is worse.
-    Ok(ArmOutcome {
-        benefit: mean(&dq),
-        forgetting: -mean(&dc),
-        dq,
-        dc,
-        delta_norm_per_topic: row_norms_of_diff(&a_treat, &a_ctrl)?,
-    })
-}
-
-/// A self-contained decoder plus its **own** `α` (and `α₀`), so one rayon worker can refit
-/// without touching another's parameters. Holds the `VarMap` only to keep `α` alive.
-struct Worker {
-    _params: VarMap,
-    decoder: EmbeddedNbTopicDecoder,
-    alpha: candle_core::Var,
-    alpha0: Tensor,
-}
-
-/// Rebuild an independent decoder from the model file and detach its loaded `α` as `α₀`.
-/// Called once for the observed pair and once per rayon worker (via `map_init`).
-fn build_worker(
-    model: &str,
-    metadata: &crate::topic::model_metadata::TopicModelMetadata,
-    dev: &Device,
-) -> anyhow::Result<Worker> {
-    let rebuilt = rebuild_model(model, metadata, dev)?;
-    let alpha = alpha_var(&rebuilt.parameters, &rebuilt.alpha_name)?;
-    let alpha0 = detached_copy(alpha.as_tensor())?;
-    Ok(Worker {
-        _params: rebuilt.parameters,
-        decoder: rebuilt.decoder,
-        alpha,
-        alpha0,
-    })
+/// Frobenius norm as a scalar — `Tensor::norm` returns a tensor.
+fn tensor_norm(t: &Tensor) -> anyhow::Result<f64> {
+    Ok(f64::from(t.norm()?.to_scalar::<f32>()?))
 }
 
 /// Fetch the `α` `Var` out of a loaded varmap by name.
-pub(crate) fn alpha_var(parameters: &VarMap, alpha_name: &str) -> anyhow::Result<candle_core::Var> {
+fn alpha_var(parameters: &VarMap, alpha_name: &str) -> anyhow::Result<candle_core::Var> {
     parameters
         .data()
         .lock()
@@ -540,97 +624,86 @@ pub(crate) struct CfArgs<'a> {
     pub metadata: &'a crate::topic::model_metadata::TopicModelMetadata,
     pub dev: &'a Device,
     pub bank: &'a CellBank,
-    pub cfg: &'a RefitCfg,
-    pub n_perm: usize,
+    /// Seeds the role shuffle in `splits`, so a run is reproducible without depending on
+    /// the row order of either backend.
     pub seed: u64,
 }
 
-/// Enacted control arm + label-permutation null.
+/// Two gradients for the contrast direction, two held-out directional reads, and the
+/// influence-function variance of each.
 ///
-/// The permutations are generated **serially** (same RNG sequence as a plain loop, so the
-/// set of shuffles — hence the p-values — is identical), then evaluated **in parallel**:
-/// each refit is deterministic and independent, so the only shared state is the read-only
-/// `CellBank`. Every rayon worker rebuilds its own decoder/`α`, so parallel refits never
-/// collide, and the result is bit-identical to the serial version.
+/// Returns **magnitudes and no verdict.** The label-permutation null and the AdamW refit
+/// that used to live here were both removed — see the module docs for the structural
+/// reasons, which are worth reading before adding anything back.
 pub(crate) fn counterfactual(a: CfArgs<'_>) -> anyhow::Result<Counterfactual> {
-    let (bank, cfg) = (a.bank, a.cfg);
-    let main = build_worker(a.model, a.metadata, a.dev)?;
-
-    let s = splits(bank.n_calib, bank.n_query)?;
-    let spec = ArmSpec {
-        base: &s.c_base,
-        treat_extra: &s.q_fit,
-        ctrl_extra: &s.c2,
-        eval_q: &s.q_eval,
-        eval_c: &s.c_eval,
+    let rebuilt = rebuild_model(a.model, a.metadata, a.dev)?;
+    let alpha = alpha_var(&rebuilt.parameters, &rebuilt.alpha_name)?;
+    let arm = Arm {
+        decoder: &rebuilt.decoder,
+        alpha0: detached_copy(alpha.as_tensor())?,
+        alpha,
+        bank: a.bank,
     };
-    let obs = two_arms(&main.decoder, &main.alpha, &main.alpha0, bank, &spec, cfg)?;
-    let (benefit, forgetting) = (obs.benefit, obs.forgetting);
 
-    // Pre-generate the permutations serially — identical RNG sequence to a plain loop, so
-    // the null set and its p-values are unchanged; only the (deterministic) evaluation runs
-    // in parallel. Both effects are signed "larger is more extreme", so both tests upper-tail.
-    let mut pool: Vec<usize> = s.q_fit.clone();
-    pool.extend_from_slice(&s.c2);
-    let qn = s.q_fit.len();
-    let mut rng = StdRng::seed_from_u64(a.seed);
-    let perms: Vec<(Vec<usize>, Vec<usize>)> = (0..a.n_perm)
-        .map(|_| {
-            pool.shuffle(&mut rng);
-            let (g1, g2) = pool.split_at(qn);
-            (g1.to_vec(), g2.to_vec())
-        })
-        .collect();
+    let mut split_rng = StdRng::seed_from_u64(a.seed);
+    let s = splits(a.bank.n_calib, a.bank.n_query, &mut split_rng)?;
 
-    // Evaluate in parallel: each worker rebuilds its own decoder/α (once, via `map_init`) so
-    // refits never collide. ~1.4× wall-clock here — modest because candle and this loop share
-    // rayon's global pool, so the refits and this fan-out contend. It stays worthwhile for a
-    // single call; across many concurrent probe calls (a sweep or an external bootstrap),
-    // single-core-per-call would compose better.
-    let (ge_benefit, ge_forgetting) = perms
-        .par_iter()
-        .map_init(
-            || build_worker(a.model, a.metadata, a.dev),
-            |worker, (g1, g2)| -> anyhow::Result<(usize, usize)> {
-                let w = worker
-                    .as_mut()
-                    .map_err(|e| anyhow::anyhow!("counterfactual worker init: {e}"))?;
-                let perm = ArmSpec {
-                    base: &s.c_base,
-                    treat_extra: g1,
-                    ctrl_extra: g2,
-                    eval_q: &s.q_eval,
-                    eval_c: &s.c_eval,
-                };
-                let o = two_arms(&w.decoder, &w.alpha, &w.alpha0, bank, &perm, cfg)?;
-                Ok((
-                    usize::from(o.benefit >= benefit),
-                    usize::from(o.forgetting >= forgetting),
-                ))
-            },
-        )
-        .try_reduce(
-            || (0usize, 0usize),
-            |(a1, b1), (a2, b2)| Ok((a1 + a2, b1 + b2)),
-        )?;
+    // The contrast direction: where this batch pulls `α` beyond where ordinary reference
+    // data pulls it. Everything downstream is this one vector read two ways.
+    let g = (arm.grad(&s.q_fit)? - arm.grad(&s.c_ctrl)?)?;
+    let pull_norm = tensor_norm(&g)?;
+    anyhow::ensure!(
+        pull_norm.is_finite() && pull_norm > 0.0,
+        "counterfactual: query and control pull `α` identically (‖g‖ = {pull_norm}); \
+         the effects are undefined"
+    );
 
-    // Effect-size intervals from the observed pair. A *separate* RNG stream keeps the
-    // permutation p-values above bit-identical regardless of the bootstrap.
-    let mut boot_rng = StdRng::seed_from_u64(a.seed ^ 0x9E37_79B9_7F4A_7C15);
-    let benefit_ci = bayes_ci(&obs.dq, 1.0, &mut boot_rng);
-    let forgetting_ci = bayes_ci(&obs.dc, -1.0, &mut boot_rng);
+    // Effects by autograd — exact, and free given that the same gradients supply the
+    // cosine denominators. Differencing would give the same quantity less precisely.
+    let (gq, gc) = (arm.grad(&s.q_eval)?, arm.grad(&s.c_eval)?);
+    let (benefit, forgetting) = (dot(&gq, &g)?, -dot(&gc, &g)?);
 
-    let denom = (a.n_perm + 1) as f64;
+    // Infinitesimal-jackknife variance: one component per sampled set. Each is the sample
+    // variance of a per-cell projection, and each projection is a directional derivative,
+    // so all of them come from three walks. Evaluation and direction sets are concatenated
+    // per walk — same direction, same perturbation, disjoint rows.
+    let eps = FD_EPS_REL * tensor_norm(&arm.alpha0)?.max(f64::MIN_POSITIVE);
+    let evals = [&s.q_eval[..], &s.c_eval[..]].concat();
+    let dirs = [&s.q_fit[..], &s.c_ctrl[..]].concat();
+
+    let along_g = arm.ddir(&evals, &g, eps)?;
+    let (dq, dc) = along_g.split_at(s.q_eval.len());
+    let along_gq = arm.ddir(&dirs, &gq, eps)?;
+    let along_gc = arm.ddir(&dirs, &gc, eps)?;
+    let (bq, bc) = along_gq.split_at(s.q_fit.len());
+    let (fq, fc) = along_gc.split_at(s.q_fit.len());
+
+    let benefit_se = ij_se([var_of_mean(dq), var_of_mean(bq), var_of_mean(bc)]);
+    let forgetting_se = ij_se([var_of_mean(dc), var_of_mean(fq), var_of_mean(fc)]);
+
+    // The differenced effects must reproduce the autograd ones; a gap means `FD_EPS_REL`
+    // is mis-scaled, which impugns the variances above but never the effects themselves.
+    let rel = |fd: f64, exact: f64| (fd - exact).abs() / exact.abs().max(1e-12);
+    let fd_check = rel(mean(dq), benefit).max(rel(-mean(dc), forgetting));
+
+    // Scale-free companion: the effect divided by both norms. Separates *where* the batch
+    // pulls from *how hard*, which the raw effects deliberately conflate.
+    let cos = |g_eval: &Tensor, v: f64| -> anyhow::Result<f64> {
+        let n = tensor_norm(g_eval)? * pull_norm;
+        Ok(if n > 0.0 { v / n } else { 0.0 })
+    };
+
     Ok(Counterfactual {
         benefit,
         forgetting,
-        p_benefit: (ge_benefit + 1) as f64 / denom,
-        p_forgetting: (ge_forgetting + 1) as f64 / denom,
-        benefit_ci,
-        forgetting_ci,
-        delta_norm_per_topic: obs.delta_norm_per_topic,
-        n_perm: a.n_perm,
-        n_fit: s.c_base.len() + s.q_fit.len(),
+        benefit_se,
+        forgetting_se,
+        pull_norm,
+        benefit_cos: cos(&gq, benefit)?,
+        forgetting_cos: cos(&gc, forgetting)?,
+        pull_norm_per_topic: row_norms(&g)?,
+        fd_check,
+        n_fit: s.q_fit.len() + s.c_ctrl.len(),
         n_eval_query: s.q_eval.len(),
         n_eval_calib: s.c_eval.len(),
     })
@@ -641,16 +714,16 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn split_with_seed(n_calib: usize, n_query: usize, seed: u64) -> anyhow::Result<Splits> {
+        splits(n_calib, n_query, &mut StdRng::seed_from_u64(seed))
+    }
+
     #[test]
-    fn splits_are_disjoint_and_control_matches_treatment_size() {
+    fn splits_are_disjoint_and_cover_every_cell() {
         let (n_calib, n_query) = (300usize, 40usize);
-        let s = splits(n_calib, n_query).expect("splits");
+        let s = split_with_seed(n_calib, n_query, 42).expect("splits");
 
-        // The control batch must be the same size as the treated batch, or the
-        // arms differ in gradient budget and τ is not an effect of *this* batch.
-        assert_eq!(s.c2.len(), s.q_fit.len());
-
-        let all: Vec<usize> = [&s.q_fit, &s.q_eval, &s.c_eval, &s.c2, &s.c_base]
+        let all: Vec<usize> = [&s.q_fit, &s.q_eval, &s.c_ctrl, &s.c_eval]
             .iter()
             .flat_map(|v| v.iter().copied())
             .collect();
@@ -658,16 +731,52 @@ mod tests {
         assert_eq!(all.len(), uniq.len(), "cell roles must be disjoint");
         assert_eq!(all.len(), n_calib + n_query, "every cell has a role");
 
+        // The direction-defining sets must not overlap the sets they are read on, or
+        // both effects would carry in-sample optimism.
         assert!(s.q_fit.iter().all(|&i| i >= n_calib));
         assert!(s.q_eval.iter().all(|&i| i >= n_calib));
+        assert!(s.c_ctrl.iter().all(|&i| i < n_calib));
         assert!(s.c_eval.iter().all(|&i| i < n_calib));
-        assert!(s.c2.iter().all(|&i| i < n_calib));
-        assert!(s.c_base.iter().all(|&i| i < n_calib));
+    }
+
+    /// The gradient contrast needs no size matching — `∇ℓ(C_ctrl)` is a sample mean,
+    /// unbiased at any size — so a calibration set that the old refit rejected for being
+    /// "too small for a control arm" is now perfectly usable.
+    #[test]
+    fn splits_accept_a_calibration_smaller_than_the_query() {
+        let s = split_with_seed(12, 20, 42).expect("splits");
+        assert_eq!(s.c_ctrl.len() + s.c_eval.len(), 12);
+        assert!(s.c_ctrl.len() < s.q_fit.len());
     }
 
     #[test]
-    fn splits_reject_a_calibration_too_small_for_a_control_arm() {
-        // 20 query -> 10 fit; 12 calib -> 4 eval, 8 rest: 8 is not > 10.
-        assert!(splits(12, 20).is_err());
+    fn splits_reject_a_calibration_of_one_cell() {
+        assert!(split_with_seed(1, 20, 42).is_err());
+    }
+
+    /// Roles must come from a shuffle, never from row order. A file ordered by cell type
+    /// or by source dataset would otherwise make `c_ctrl` a non-representative control and
+    /// `c_eval` a non-representative reference — silently, and differently per input.
+    #[test]
+    fn splits_do_not_follow_file_order() {
+        let (n_calib, n_query) = (300usize, 40usize);
+        let s = split_with_seed(n_calib, n_query, 42).expect("splits");
+
+        let contiguous_prefix: Vec<usize> = (0..s.c_eval.len()).collect();
+        assert_ne!(
+            s.c_eval, contiguous_prefix,
+            "c_eval must not be the leading block of the calibration file"
+        );
+        let query_prefix: Vec<usize> = (n_calib..n_calib + s.q_fit.len()).collect();
+        assert_ne!(
+            s.q_fit, query_prefix,
+            "q_fit must not be the leading block of the query file"
+        );
+
+        // …and the assignment must actually depend on the seed, or it is not randomized.
+        let other = split_with_seed(n_calib, n_query, 7).expect("splits");
+        let a: HashSet<usize> = s.c_eval.iter().copied().collect();
+        let b: HashSet<usize> = other.c_eval.iter().copied().collect();
+        assert_ne!(a, b, "role assignment must depend on the seed");
     }
 }
