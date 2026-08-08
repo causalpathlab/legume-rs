@@ -118,13 +118,17 @@ pub(super) fn collect_basic_stat_visitor(
 
     let mut stat = arc_stat.lock().expect("lock stat");
 
-    for y_j in yy.col_iter() {
+    // `w` is how many observations the column stands for — 1 for a cell, `m`
+    // for a column carrying the mean profile of `m` cells. Scaling both the
+    // counts and the size keeps `μ = Σy / n` the per-cell rate either way.
+    for (y_j, &col) in yy.col_iter().zip(cells.iter()) {
+        let w = data_vec.column_multiplicity(col);
         let rows = y_j.row_indices();
         let vals = y_j.values();
         for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.observed_sum_ds[(gene, sample)] += y;
+            stat.observed_sum_ds[(gene, sample)] += y * w;
         }
-        stat.size_s[sample] += 1_f32; // each column is a sample
+        stat.size_s[sample] += w;
     }
     Ok(())
 }
@@ -144,14 +148,18 @@ pub(super) fn collect_batch_stat_visitor(
 
     let mut stat = arc_stat.lock().expect("lock stat");
 
-    yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
-        let rows = y_j.row_indices();
-        let vals = y_j.values();
-        for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.observed_sum_db[(gene, b)] += y;
-        }
-        stat.n_bs[(b, sample)] += 1_f32;
-    });
+    yy.col_iter()
+        .zip(batches.iter())
+        .zip(cells_in_sample.iter())
+        .for_each(|((y_j, &b), &col)| {
+            let w = data_vec.column_multiplicity(col);
+            let rows = y_j.row_indices();
+            let vals = y_j.values();
+            for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                stat.observed_sum_db[(gene, b)] += y * w;
+            }
+            stat.n_bs[(b, sample)] += w;
+        });
     Ok(())
 }
 

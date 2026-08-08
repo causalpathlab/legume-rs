@@ -59,14 +59,19 @@ pub(super) fn build_pb_sample_layout(
     group_to_cols: &[Vec<usize>],
     col_to_batch: &[usize],
     proj_kn: &DMatrix<f32>,
+    col_weight: Option<&[f32]>,
 ) -> anyhow::Result<PbSampleLayout> {
     let proj_dim = proj_kn.nrows();
 
     /// Intermediate per-batch accumulator for centroid computation.
     struct CentroidAccum {
         centroid_sum: Vec<f32>,
-        count: usize,
+        /// Summed multiplicity, not a raw column count: a column standing for
+        /// `m` cells must weigh `m` in both the centroid and `cell_counts`,
+        /// or a carried pseudobulk counts the same as one cell.
+        count: f32,
     }
+    let weight_of = |c: usize| col_weight.map_or(1.0, |w| w[c]);
 
     // Collect centroid data per group in parallel
     type CentroidTuple = (usize, usize, Vec<f32>, f32);
@@ -78,24 +83,25 @@ pub(super) fn build_pb_sample_layout(
 
             for &glob_idx in cells {
                 let batch = col_to_batch[glob_idx];
+                let w = weight_of(glob_idx);
                 let acc = batch_data.entry(batch).or_insert_with(|| CentroidAccum {
                     centroid_sum: vec![0f32; proj_dim],
-                    count: 0,
+                    count: 0.0,
                 });
                 for d in 0..proj_dim {
-                    acc.centroid_sum[d] += proj_kn[(d, glob_idx)];
+                    acc.centroid_sum[d] += proj_kn[(d, glob_idx)] * w;
                 }
-                acc.count += 1;
+                acc.count += w;
             }
 
             batch_data
                 .into_iter()
-                .filter(|(_, acc)| acc.count > 0)
+                .filter(|(_, acc)| acc.count > 0.0)
                 .map(|(batch, acc)| {
-                    let inv_count = 1.0 / acc.count as f32;
+                    let inv_count = 1.0 / acc.count;
                     let centroid: Vec<f32> =
                         acc.centroid_sum.iter().map(|v| v * inv_count).collect();
-                    (batch, group, centroid, acc.count as f32)
+                    (batch, group, centroid, acc.count)
                 })
                 .collect::<Vec<_>>()
         })
@@ -174,10 +180,15 @@ pub(super) fn collect_pb_sample_gene_sums(
             let mut batch_gene_sums: HashMap<usize, HashMap<usize, f32>> = HashMap::default();
 
             for (local_idx, y_j) in yy.col_iter().enumerate() {
-                let batch = col_to_batch[cells[local_idx]];
+                let col = cells[local_idx];
+                let batch = col_to_batch[col];
+                // Weighted to stay consistent with the weighted `cell_counts`
+                // in the layout: `collect_matched_stat_coarse` divides one by
+                // the other, and the quotient has to remain the per-cell rate.
+                let w = data_vec.column_multiplicity(col);
                 let gene_map = batch_gene_sums.entry(batch).or_default();
                 for (&gene, &val) in y_j.row_indices().iter().zip(y_j.values().iter()) {
-                    *gene_map.entry(gene).or_default() += val;
+                    *gene_map.entry(gene).or_default() += val * w;
                 }
             }
 
@@ -215,7 +226,12 @@ pub(super) fn build_pb_samples(
         .map(|c| data_vec.get_batch_membership(std::iter::once(c))[0])
         .collect();
 
-    let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn)?;
+    let weights: Option<Vec<f32>> = data_vec.has_column_multiplicity().then(|| {
+        (0..proj_kn.ncols())
+            .map(|c| data_vec.column_multiplicity(c))
+            .collect()
+    });
+    let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, weights.as_deref())?;
     let num_pb = layout.cell_counts.len();
     let gene_sums = collect_pb_sample_gene_sums(
         data_vec,

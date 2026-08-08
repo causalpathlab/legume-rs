@@ -79,6 +79,9 @@ struct DerivedCaches {
     batch_to_cols: Option<Vec<Vec<usize>>>,
     batch_idx_to_name: Option<Vec<Box<str>>>,
     between_batch_proximity: Option<Vec<Vec<usize>>>,
+    // how many observations each column stands for (built by
+    // `register_column_multiplicity`); `None` means one apiece
+    col_multiplicity: Option<Vec<f32>>,
 }
 
 impl Clone for DerivedCaches {

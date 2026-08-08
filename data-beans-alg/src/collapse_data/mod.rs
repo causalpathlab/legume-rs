@@ -964,7 +964,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
             finest_dim,
             num_groups
         );
-        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn)?;
+        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, None)?;
         let num_pb = layout.cell_counts.len();
         info!("Built {} pb-samples, matching with knn={} ...", num_pb, knn);
 
