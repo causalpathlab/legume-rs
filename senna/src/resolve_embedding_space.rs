@@ -443,6 +443,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     write_outputs(&trained, &gene_names, &kept_names, &out)?;
 
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: None,
         kind: crate::run_manifest::RunKind::ResolveEmbeddingSpace,
         prefix: &out,
         data_input: &input_for_manifest,

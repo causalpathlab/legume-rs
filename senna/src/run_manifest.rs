@@ -9,10 +9,16 @@
 //! available and win over manifest values when both are supplied.
 //!
 //! The schema is deliberately narrow — data paths + output artifact
-//! paths + a couple of UI defaults. Training hyperparameters are
-//! intentionally *not* serialized: the manifest is a run descriptor,
-//! not a config language. If you want to re-run with the same settings,
-//! that's what shell history and Makefiles are for.
+//! paths + a couple of UI defaults. It is a run descriptor, not a config
+//! language, and nothing here should grow into one.
+//!
+//! The one exception is [`RunManifest::train_args`], added for `senna update`,
+//! which continues a run's training and therefore needs the parent's exact fit
+//! configuration to reproduce its architecture. It is stored as an **opaque**
+//! [`serde_json::Value`] precisely to preserve the rule above: no command other
+//! than `update` parses it, so the manifest stays readable by every version
+//! regardless of which flags a fit command has gained. Shell history and
+//! Makefiles remain the answer for re-running by hand.
 //!
 //! All path values are resolved relative to the manifest file's own
 //! directory, so a run directory can be moved or copied without
@@ -245,6 +251,16 @@ impl RunKind {
         )
     }
 
+    /// Masked-imputation kinds — `masked-topic`, `masked-sbp` (both
+    /// [`RunKind::Itopic`]) and `masked-vae`. They share one artifact layout
+    /// (`MaskedModel`), one scorer, and one warm-start shape, so consumers that
+    /// care about *how the model is built* rather than what its latent means
+    /// gate on this. The three heads are told apart only by `model_type`.
+    #[must_use]
+    pub fn is_masked_family(self) -> bool {
+        matches!(self, RunKind::Itopic | RunKind::MaskedVae)
+    }
+
     /// True when `{out}.latent.parquet` holds `log θ` on the probability
     /// simplex — i.e. `exp()` of it gives per-cell topic proportions that sum
     /// to 1.
@@ -285,6 +301,42 @@ pub struct RunManifest {
     pub pseudotime: RunPseudotime,
     #[serde(default)]
     pub defaults: RunDefaults,
+    /// The fit configuration this run was trained with — see
+    /// [`TrainArgsRecord`]. Absent for runs written before it existed, and for
+    /// commands that produce no re-runnable fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub train_args: Option<TrainArgsRecord>,
+}
+
+/// The training subcommand's own argument struct, recorded so `senna update`
+/// can continue the run without the user retyping its configuration.
+///
+/// **`args` is deliberately untyped.** Every downstream command that touches a
+/// manifest loads it, mutates a section and saves it back, so all of them
+/// round-trip this field. Storing it as a typed struct would mean a senna
+/// version that added a flag could no longer *open* a run — `senna plot` would
+/// fail, not just `senna update`. As a [`serde_json::Value`] it passes through
+/// untouched and only the one command that interprets it can be affected.
+///
+/// A field the writing version did not have is filled from **clap's** declared
+/// default rather than `Default::default()`, which is what lets a senna that
+/// has gained a flag still replay an older fit — see
+/// [`crate::embed_common::clap_defaults`] for why that distinction matters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainArgsRecord {
+    /// senna version that wrote the record, named in the error when a later
+    /// version cannot replay it.
+    pub senna_version: Box<str>,
+    /// The serialized argument struct for [`RunManifest::kind`].
+    pub args: serde_json::Value,
+}
+
+/// Serialize a fit's argument struct for [`RunManifest::train_args`].
+pub fn record_train_args<T: Serialize>(args: &T) -> anyhow::Result<TrainArgsRecord> {
+    Ok(TrainArgsRecord {
+        senna_version: env!("CARGO_PKG_VERSION").into(),
+        args: serde_json::to_value(args)?,
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -626,6 +678,7 @@ impl RunManifest {
             annotate: RunAnnotate::default(),
             pseudotime: RunPseudotime::default(),
             defaults: RunDefaults::default(),
+            train_args: None,
         }
     }
 
@@ -656,6 +709,40 @@ impl RunManifest {
         fs::write(path, s).map_err(|e| anyhow::anyhow!("write {}: {e}", path.display()))?;
         log::info!("wrote {}", path.display());
         Ok(())
+    }
+
+    /// Rebuild the fit's argument struct from [`RunManifest::train_args`].
+    ///
+    /// `T` must be the arg struct matching [`RunManifest::kind`]; the caller
+    /// establishes that by dispatching on the kind first. `prefix` only names
+    /// the run in error messages.
+    ///
+    /// A field absent from the record takes clap's declared default, so a
+    /// senna that has gained a flag can still replay an older fit. What does
+    /// fail is a record that cannot be read at all — a renamed or retyped
+    /// field. This is the *only* reader of the blob, so such a failure never
+    /// blocks opening the run for anything else.
+    pub fn train_args_as<T: serde::de::DeserializeOwned>(&self, prefix: &str) -> anyhow::Result<T> {
+        let rec = self.train_args.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{prefix}: this run's manifest records no fit configuration. It predates \
+                 `train_args`, so its settings are not recoverable — re-train it, or drive the \
+                 family command directly with `--init-from {prefix}`."
+            )
+        })?;
+        // Borrow the blob rather than cloning it: serde_json implements
+        // `Deserializer` for `&Value`.
+        T::deserialize(&rec.args).map_err(|e| {
+            anyhow::anyhow!(
+                "{prefix}: cannot replay the recorded fit configuration ({e}).\n\
+                 It was written by senna {} and this is senna {}. A setting that merely went \
+                 missing would take its declared default, so this is a setting that changed \
+                 shape — renamed, or retyped. Re-train the parent, or drive the family command \
+                 directly with `--init-from {prefix}`.",
+                rec.senna_version,
+                env!("CARGO_PKG_VERSION"),
+            )
+        })
     }
 }
 
@@ -883,6 +970,10 @@ pub struct RunDescription<'a> {
     /// The `--out` prefix; used both for the manifest filename and as
     /// the `prefix` field inside.
     pub prefix: &'a str,
+    /// The fit's own arguments, from [`record_train_args`]. `Some` for the
+    /// families `senna update` can continue (topic, masked-*, svd, vae);
+    /// `None` for runs with no re-runnable fit of their own.
+    pub train_args: Option<TrainArgsRecord>,
     pub data_input: &'a [String],
     pub data_batch: &'a [String],
     pub data_input_null: &'a [String],
@@ -959,6 +1050,7 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     m.data.input = desc.data_input.to_vec();
     m.data.input_null = desc.data_input_null.to_vec();
     m.data.batch = desc.data_batch.to_vec();
+    m.train_args = desc.train_args.clone();
 
     if desc.has_latent {
         m.outputs.latent = Some(format!("{basename}.latent.parquet"));

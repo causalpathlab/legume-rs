@@ -21,8 +21,11 @@ use clap::{Args, ValueEnum};
 use data_beans_alg::dc_poisson::FeatureWeighting;
 use data_beans_alg::refine_multilevel::RefineParams;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[value(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum WeightingArg {
     /// Fisher-info weight from fitted NB mean-variance trend. Default.
     #[default]
@@ -48,7 +51,8 @@ pub(crate) const WEIGHTING_HELP: &str =
 /// Flatten into any subcommand args struct with `#[command(flatten)]` to expose
 /// `--pb-refine-{gibbs,greedy,weighting,seed}` and call [`PbRefineArgs::to_params`]
 /// to build the `RefineParams` passed into `MultilevelParams::refine`.
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct PbRefineArgs {
     #[arg(
         id = "pb_refine_gibbs",
@@ -87,13 +91,11 @@ pub(crate) struct PbRefineArgs {
 }
 
 impl Default for PbRefineArgs {
+    /// Clap's declared defaults. Hand-copying every `default_value_t` here is
+    /// how the two drift apart, and these are now load-bearing: `senna update`
+    /// replays a recorded fit through them.
     fn default() -> Self {
-        Self {
-            gibbs: 20,
-            greedy: 10,
-            weighting: WeightingArg::NbFisherInfo,
-            seed: 42,
-        }
+        crate::embed_common::clap_defaults()
     }
 }
 
@@ -122,7 +124,8 @@ impl PbRefineArgs {
 /// `--iter-opt`, `--ignore-batch`, and (via the nested [`PbRefineArgs`])
 /// `--pb-refine-*`. Keeps the upstream flag surface identical across every
 /// senna subcommand that collapses cells into pseudobulks.
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct CollapseArgs {
     #[arg(
         long,
@@ -186,16 +189,11 @@ pub(crate) struct CollapseArgs {
 }
 
 impl Default for CollapseArgs {
+    /// Clap's declared defaults. Hand-copying every `default_value_t` here is
+    /// how the two drift apart, and these are now load-bearing: `senna update`
+    /// replays a recorded fit through them.
     fn default() -> Self {
-        Self {
-            proj_dim: 50,
-            sort_dim: 10,
-            ignore_batch: false,
-            knn_cells: 10,
-            num_levels: 3,
-            iter_opt: 30,
-            pb_refine: PbRefineArgs::default(),
-        }
+        crate::embed_common::clap_defaults()
     }
 }
 
@@ -203,7 +201,8 @@ impl Default for CollapseArgs {
 ///
 /// `--amort-refine-steps = 0` disables refinement; in that case
 /// [`AmortRefineArgs::to_config`] returns `None`.
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub(crate) struct AmortRefineArgs {
     #[arg(
         long = "amort-refine-steps",
@@ -230,12 +229,11 @@ pub(crate) struct AmortRefineArgs {
 }
 
 impl Default for AmortRefineArgs {
+    /// Clap's declared defaults. Hand-copying every `default_value_t` here is
+    /// how the two drift apart, and these are now load-bearing: `senna update`
+    /// replays a recorded fit through them.
     fn default() -> Self {
-        Self {
-            steps: 0,
-            lr: 0.01,
-            reg: 1.0,
-        }
+        crate::embed_common::clap_defaults()
     }
 }
 

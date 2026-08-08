@@ -220,6 +220,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         .map(std::string::ToString::to_string)
         .collect();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: None,
         kind: crate::run_manifest::RunKind::Fne,
         prefix: &args.out,
         data_input: &input,

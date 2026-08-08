@@ -227,80 +227,29 @@ struct Verdict<'a> {
     q_names: Vec<Box<str>>,
 }
 
-/// Which scoring path a run prefix needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Family {
-    /// `masked-topic` / `masked-sbp` / `masked-vae` — the only family with a counterfactual.
-    Masked,
-    Dense,
-    Vae,
-    Bge,
-}
-
-/// Route a prefix to its family, from the run manifest's [`RunKind`].
-///
-/// **Why the manifest and not the files on disk.** `RunKind` is the one place senna already
-/// enumerates its families; inferring from which files happen to exist means re-deriving that
-/// enumeration badly. The previous probe for `{prefix}.model.json` sent *anything* lacking one
-/// — an `svd` run, an `fne` run, a half-written directory — down the bge path, which then
-/// failed with a bge-flavoured complaint about a file the user had never mentioned.
-///
-/// **Two levels, deliberately.** `RunKind` gives the family; `model_type` gives the head
-/// *within* the masked family, because `masked-topic` and `masked-sbp` share
-/// `RunKind::Itopic` and are told apart only by `model_type` — which `MaskedModel::open` reads
-/// anyway. Family routing and head selection are different questions and now ask different
-/// sources.
-fn resolve_family(prefix: &str) -> anyhow::Result<Family> {
-    use crate::run_manifest::{RunKind, RunManifest};
-    use crate::topic::model_metadata::{
-        masked_head_from_model_type, TopicModelMetadata, MODEL_TYPE_TOPIC, MODEL_TYPE_VAE,
-    };
-
-    let manifest = std::path::PathBuf::from(format!("{prefix}.senna.json"));
-    if manifest.is_file() {
-        let (m, _) = RunManifest::load(&manifest)?;
-        return match m.kind {
-            RunKind::Itopic | RunKind::MaskedVae => Ok(Family::Masked),
-            RunKind::Topic => Ok(Family::Dense),
-            RunKind::Vae => Ok(Family::Vae),
-            RunKind::Bge => Ok(Family::Bge),
-            other => anyhow::bail!(
-                "probe does not support a '{}' run. Supported: masked-topic / masked-sbp / \
-                 masked-vae, topic, vae, bge.",
-                other.as_str()
-            ),
-        };
-    }
-
-    // Manifests postdate some saved models, so fall back to the metadata every checkpointed
-    // family writes. bge has neither a checkpoint nor metadata, so it can only arrive above.
-    anyhow::ensure!(
-        std::path::Path::new(&format!("{prefix}.model.json")).is_file(),
-        "{prefix}: not a senna model prefix — neither {prefix}.senna.json nor \
-         {prefix}.model.json exists."
-    );
-    let metadata = TopicModelMetadata::load(prefix)?;
-    if masked_head_from_model_type(&metadata.model_type).is_some() {
-        Ok(Family::Masked)
-    } else if metadata.model_type.as_ref() == MODEL_TYPE_VAE {
-        Ok(Family::Vae)
-    } else if metadata.model_type.as_ref() == MODEL_TYPE_TOPIC {
-        Ok(Family::Dense)
-    } else {
-        anyhow::bail!(
-            "probe does not support '{}' models; masked-topic/-sbp/-vae, topic, vae and bge only",
-            metadata.model_type
-        )
-    }
-}
-
 pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
+    use crate::run_manifest::RunKind;
+    use crate::topic::model_metadata::resolve_run_kind;
+
     mkdir_parent(&args.out)?;
-    let family = resolve_family(&args.model)?;
-    match family {
-        Family::Masked => probe_masked(args),
-        Family::Bge => probe_bge(args),
-        Family::Dense | Family::Vae => probe_fit_only(args, family),
+    // `resolve_run_kind` says what the run *is*; the match below is probe's own
+    // support policy. `update` asks the same question and answers it differently
+    // (it supports svd, which has no scorer here), so the two must not share a
+    // pre-filtered "family" enum — only the resolution.
+    //
+    // Head selection *within* the masked family stays with `MaskedModel::open`,
+    // which reads `model_type` anyway: `masked-topic` and `masked-sbp` share
+    // `RunKind::Itopic` and are told apart only there.
+    let kind = resolve_run_kind(&args.model)?;
+    match kind {
+        k if k.is_masked_family() => probe_masked(args),
+        RunKind::Bge => probe_bge(args),
+        RunKind::Topic | RunKind::Vae => probe_fit_only(args, kind),
+        other => anyhow::bail!(
+            "probe does not support a '{}' run. Supported: masked-topic / masked-sbp / \
+             masked-vae, topic, vae, bge.",
+            other.as_str()
+        ),
     }
 }
 
@@ -415,8 +364,9 @@ fn cal_and_query<S: Scored>(
     Ok((cal_fit, per_cell_fit(llik, total), data_vec.column_names()?))
 }
 
-fn probe_fit_only(args: &ProbeArgs, family: Family) -> anyhow::Result<()> {
+fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyhow::Result<()> {
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
+    use crate::run_manifest::RunKind;
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::TopicModelMetadata;
     use crate::topic::predict_common::LatentMode;
@@ -432,8 +382,8 @@ fn probe_fit_only(args: &ProbeArgs, family: Family) -> anyhow::Result<()> {
     );
 
     let qopts = QueryNameOpts::default();
-    let (cal_fit, q_fit, q_names) = match family {
-        Family::Vae => cal_and_query(args, |files| {
+    let (cal_fit, q_fit, q_names) = match kind {
+        RunKind::Vae => cal_and_query(args, |files| {
             score_vae_backend(VaeScoreArgs {
                 model: &args.model,
                 data_files: files,
@@ -453,7 +403,7 @@ fn probe_fit_only(args: &ProbeArgs, family: Family) -> anyhow::Result<()> {
         // would let a genuinely novel batch explain itself away as a batch effect — the aliasing
         // failure, on exactly the query this tool exists to flag. The plug-in is the conservative
         // end of that trade; the masked path has no δ at all.
-        Family::Dense => cal_and_query(args, |files| {
+        RunKind::Topic => cal_and_query(args, |files| {
             score_dense_backend(DenseScoreArgs {
                 model: &args.model,
                 data_files: files,
@@ -468,8 +418,8 @@ fn probe_fit_only(args: &ProbeArgs, family: Family) -> anyhow::Result<()> {
                 refine_config: &TopicRefinementConfig::default(),
             })
         })?,
-        // `run_probe` only routes these two here.
-        Family::Masked | Family::Bge => unreachable!("{family:?} has its own path"),
+        // `run_probe` routes every other kind elsewhere or rejects it.
+        other => unreachable!("{other} has its own path"),
     };
 
     write_verdict(Verdict {

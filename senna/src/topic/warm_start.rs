@@ -56,8 +56,15 @@ pub fn warm_start_load(
     );
     anyhow::ensure!(
         metadata.n_features_full == expected.n_features_full,
-        "warm-start: n_features_full mismatch (saved={}, current={}). \
-         Cross-gene-set warm-start not supported — train on the same gene set.",
+        "warm-start: n_features_full mismatch (saved={}, current={}). The saved weights are \
+         keyed to the parent's gene axis, so it has to be the same axis.\n\
+         \n\
+         Absorbing a new cohort is the usual cause, and it splits two ways. If the axis GREW, \
+         the new data names some genes differently and each unreconciled name became a second \
+         row — set --feature-name-kind (`gene` reconciles `ENSG00000105329_TGFB1` with \
+         `TGFB1`). If it grew because the new cohort genuinely measures genes the model has \
+         never seen, those cannot be added to a trained model: restrict the input to the \
+         parent's gene set, or re-train.",
         metadata.n_features_full,
         expected.n_features_full,
     );

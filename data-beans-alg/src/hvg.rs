@@ -95,7 +95,8 @@ pub fn select_hvg_by_stats(means: &[f32], vars: &[f32], n_genes: usize) -> Vec<u
 }
 
 /// Shared CLI args for HVG gating of the random projection.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct HvgCliArgs {
     #[arg(
         long = "n-hvg",

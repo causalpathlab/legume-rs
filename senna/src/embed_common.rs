@@ -72,9 +72,15 @@ pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
     cols.iter().map(|c| parse_axis_id(c, prefix)).collect()
 }
 
+/// Clap-declared defaults for an `Args` struct — see
+/// [`matrix_util::clap_defaults`]. Re-exported because senna's arg structs name
+/// it by path in `#[serde(default = "...")]`.
+pub use matrix_util::clap_defaults::clap_defaults;
+
 /// Shared compute device enum for candle-based models
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ComputeDevice {
     Cpu,
     Cuda,
@@ -92,8 +98,9 @@ impl ComputeDevice {
 }
 
 /// Batch adjustment method
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum AdjMethod {
     Batch,
     Residual,
@@ -112,7 +119,8 @@ impl AdjMethod {
 /// Shared CNV detection CLI args (used by SVD, topic, masked-topic).
 /// Providing `--gff` or `--cnv-ground-truth` turns on the per-sample HMM CNV
 /// model from `cnv::per_sample`.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct CnvArgs {
     #[arg(long, help = "GFF/GTF annotation for CNV detection.")]
     pub gff: Option<Box<str>>,
