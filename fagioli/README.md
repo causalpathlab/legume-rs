@@ -43,6 +43,12 @@ Faceted Associations of Genotype Information via Omics-based Locus Identificatio
 - **`fit-regression`** — generic SGVB regression, `--model gaussian|poisson|nb` ×
   `--prior gaussian|susie` (aliased as `regression`)
 
+- **`embed-sumstat`** — embed variants and traits into a shared program space
+  - Factors the direct, LD-free effect matrix as `B = U V'`
+  - Null calibrated from the panel; the whitening ridge λ is derived, not tuned
+  - Contrastive objective against that calibrated null
+  - Optional marginalised polygenic arm (`--dense-arm`), off by default
+
 ### Utility
 
 - **`pseudobulk`** — collapse single-cell counts into Poisson-Gamma pseudobulk profiles
@@ -409,6 +415,29 @@ fagioli fit-regression \
 
 **Output files:** `reg.mean.parquet`, `reg.var.parquet`, and `reg.disp.parquet` for the
 negative-binomial likelihood.
+
+### Summary Statistics Embedding
+
+```bash
+fagioli embed-sumstat \
+  --sumstat-file ./results/sim.sumstats.bed.gz \
+  --bed-prefix /path/to/genotypes \
+  --chromosome 22 \
+  --output ./results/emb \
+  --embedding-dim 20 \
+  --num-negatives 5 \
+  --num-iterations 500
+```
+
+**Output files:**
+- `emb.variant_embedding.parquet` — variant loadings `U` (M × H)
+- `emb.trait_embedding.parquet` — trait loadings `V` (T × H)
+- `emb.panel.tsv.gz` — panel standardization needed to score another cohort
+- `emb.whiteness.tsv.gz` — whether λ whitened the null
+- `emb.parameters.json` — all settings plus fit diagnostics
+
+No trait-geometry verdict is emitted: the estimator for it is not reliable on
+realistic LD, so the fitted geometry is reported without an independent check.
 
 ### Pseudobulk Aggregation
 
