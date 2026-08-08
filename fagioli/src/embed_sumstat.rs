@@ -4,7 +4,7 @@ use log::{info, warn};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::IoOps;
 
-use fagioli::embedding::model::EmbedConfig;
+use fagioli::embedding::model::{EmbedConfig, UPrior};
 use fagioli::embedding::noise::NoiseModel;
 use fagioli::embedding::score::{assemble_u, PanelStandardization};
 use fagioli::embedding::train::train;
@@ -78,6 +78,43 @@ pub struct EmbedSumstatArgs {
                      The prior enters the objective through its KL term."
     )]
     pub prior_inclusion: f64,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "spike-slab",
+        help_heading = "Embedding",
+        help = "Variational family for the variant loadings",
+        long_help = "How selection over variants is parameterised.\n\
+                     \n\
+                     spike-slab gives each (variant, program) pair its own\n\
+                     Bernoulli gate. There is no categorical anywhere, so the\n\
+                     degeneracy that appears when a softmax spans many\n\
+                     thousands of categories cannot arise.\n\
+                     It reports marginal inclusion probabilities only.\n\
+                     \n\
+                     susie places L single-effect components in each block.\n\
+                     Each is a categorical over that block's variants, so the\n\
+                     softmax is bounded by --max-block-snps and never by the\n\
+                     genome. Mass competes within a block, which is what makes\n\
+                     credible sets meaningful.\n\
+                     Use --num-components to set L."
+    )]
+    pub u_prior: UPrior,
+
+    #[arg(
+        long,
+        default_value = "1.0",
+        help_heading = "Embedding",
+        help = "Dirichlet concentration for the SuSiE selection prior",
+        long_help = "Concentration of the Dirichlet prior on the selection\n\
+                     probabilities within a block.\n\
+                     \n\
+                     Values below one favour concentrated selection.\n\
+                     Values above one spread mass across variants.\n\
+                     Ignored when --u-prior is spike-slab."
+    )]
+    pub prior_alpha: f64,
 
     #[arg(
         long,
@@ -225,6 +262,9 @@ pub fn embed_sumstat(args: &EmbedSumstatArgs) -> Result<()> {
         embedding_dim: args.embedding_dim,
         num_negatives: args.num_negatives,
         prior_inclusion: args.prior_inclusion,
+        u_prior: args.u_prior,
+        num_components: args.common.num_components,
+        prior_alpha: args.prior_alpha,
         learning_rate: args.learning_rate,
         num_iterations: args.num_iterations,
         grad_clip: (args.grad_clip > 0.0).then_some(args.grad_clip),
@@ -277,6 +317,9 @@ pub fn embed_sumstat(args: &EmbedSumstatArgs) -> Result<()> {
         "embedding_dim": args.embedding_dim,
         "num_negatives": args.num_negatives,
         "prior_inclusion": args.prior_inclusion,
+        "u_prior": format!("{:?}", args.u_prior),
+        "num_components": args.common.num_components,
+        "prior_alpha": args.prior_alpha,
         "dense_arm": args.dense_arm,
         "gauge_weight": gauge_weight,
         "learning_rate": args.learning_rate,

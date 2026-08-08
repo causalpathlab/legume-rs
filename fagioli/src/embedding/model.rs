@@ -42,13 +42,27 @@
 use anyhow::Result;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::VarBuilder;
-use candle_util::sgvb::SpikeSlabVar;
+use candle_util::sgvb::{SpikeSlabVar, SusieVar};
 use candle_util::sgvb::VariationalDistribution;
 use matrix_util::traits::ConvertMatOps;
 use nalgebra::DMatrix;
 
 use super::noise::NoiseModel;
 use super::whiten::WhitenedBlock;
+
+/// Which variational family carries the sparse variant loadings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum UPrior {
+    /// Independent Bernoulli per (variant, program). No categorical anywhere,
+    /// so the softmax degeneracy that appears past a few thousand categories
+    /// cannot arise. Gives no credible sets.
+    SpikeSlab,
+    /// `L` single-effect components per block, each a categorical over that
+    /// block's variants. The softmax is bounded by the block size rather than
+    /// the genome, which is what `--max-block-snps` is for. Gives credible sets.
+    Susie,
+}
 
 /// Knobs for a fit.
 #[derive(Debug, Clone)]
@@ -59,6 +73,12 @@ pub struct EmbedConfig {
     pub num_negatives: usize,
     /// Prior inclusion probability for the spike-slab on `U`.
     pub prior_inclusion: f64,
+    /// Which variational family carries `U`.
+    pub u_prior: UPrior,
+    /// Single-effect components per block, for [`UPrior::Susie`].
+    pub num_components: usize,
+    /// Dirichlet concentration for the SuSiE selection prior.
+    pub prior_alpha: f64,
     pub learning_rate: f64,
     pub num_iterations: usize,
     /// Global-norm gradient clip; `None` disables.
@@ -79,6 +99,9 @@ impl Default for EmbedConfig {
             embedding_dim: 20,
             num_negatives: 5,
             prior_inclusion: 0.01,
+            u_prior: UPrior::SpikeSlab,
+            num_components: 5,
+            prior_alpha: 1.0,
             learning_rate: 0.01,
             num_iterations: 500,
             grad_clip: Some(10.0),
@@ -105,12 +128,50 @@ pub struct BlockTensors {
     pub num_snps: usize,
 }
 
+/// The sparse variant loadings for one block.
+///
+/// Both families expose a posterior mean and a per-(variant, program)
+/// inclusion probability, so the score and the readouts are identical; they
+/// differ in how selection is parameterised and therefore in what the
+/// inclusion probabilities mean.
+pub(crate) enum VariantLoadings {
+    /// Independent gates: `pip` is a marginal inclusion probability.
+    SpikeSlab(SpikeSlabVar),
+    /// Single-effect components: `pip` aggregates `L` categoricals, so mass is
+    /// forced to compete within a block and credible sets follow.
+    Susie(SusieVar),
+}
+
+impl VariantLoadings {
+    fn mean(&self) -> Result<Tensor> {
+        Ok(match self {
+            Self::SpikeSlab(v) => v.mean()?,
+            Self::Susie(v) => v.mean()?,
+        })
+    }
+
+    fn pip(&self) -> Result<Tensor> {
+        Ok(match self {
+            Self::SpikeSlab(v) => v.pip()?,
+            Self::Susie(v) => v.pip()?,
+        })
+    }
+
+    fn kl(&self, prior_inclusion: f64, prior_alpha: f64) -> Result<Tensor> {
+        use candle_util::sgvb::IndependentGateVariational;
+        Ok(match self {
+            Self::SpikeSlab(v) => v.kl_bernoulli(prior_inclusion)?,
+            Self::Susie(v) => v.kl_categorical(prior_alpha)?,
+        })
+    }
+}
+
 /// The embedding: a shared trait side, a block-local sparse variant side.
 pub struct EmbedModel {
     /// `V̌ = Ω^{-1/2} Λ_N V`, shape (T, H). Learned in whitened coordinates.
     v_check: Tensor,
     /// Sparse `U_b` per block.
-    u_blocks: Vec<SpikeSlabVar>,
+    u_blocks: Vec<VariantLoadings>,
     /// NCE offset. Should stay near zero for a correctly normalised score.
     offset: Tensor,
     /// `log σ²_d,h`, shape (H,). The entire polygenic arm: one variance per
@@ -159,12 +220,22 @@ impl EmbedModel {
         let mut tensors = Vec::with_capacity(blocks.len());
 
         for (bi, b) in blocks.iter().enumerate() {
-            u_blocks.push(SpikeSlabVar::new(
-                vb.pp(format!("u_{bi}")),
-                b.num_snps,
-                h,
-                config.prior_inclusion.clamp(1e-6, 0.5),
-            )?);
+            u_blocks.push(match config.u_prior {
+                UPrior::SpikeSlab => VariantLoadings::SpikeSlab(SpikeSlabVar::new(
+                    vb.pp(format!("u_{bi}")),
+                    b.num_snps,
+                    h,
+                    config.prior_inclusion.clamp(1e-6, 0.5),
+                )?),
+                // The categorical runs over this block's variants only, never
+                // the genome, so its dimension is bounded by --max-block-snps.
+                UPrior::Susie => VariantLoadings::Susie(SusieVar::new_with_null(
+                    vb.pp(format!("u_{bi}")),
+                    config.num_components.max(1),
+                    b.num_snps,
+                    h,
+                )?),
+            });
 
             let inv_var: Vec<f32> = noise.scale[bi]
                 .iter()
@@ -268,10 +339,9 @@ impl EmbedModel {
         }
     }
 
-    /// Bernoulli selection KL for a block's `U`.
+    /// Selection KL for a block's `U`: Bernoulli or categorical by family.
     pub fn kl_selection(&self, block: usize) -> Result<Tensor> {
-        use candle_util::sgvb::IndependentGateVariational;
-        Ok(self.u_blocks[block].kl_bernoulli(self.config.prior_inclusion)?)
+        self.u_blocks[block].kl(self.config.prior_inclusion, self.config.prior_alpha)
     }
 
     pub fn v_check_tensor(&self) -> &Tensor {

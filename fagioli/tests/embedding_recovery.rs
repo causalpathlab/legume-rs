@@ -25,7 +25,7 @@
 use anyhow::Result;
 use candle_util::candle_core::Device;
 use fagioli::embedding::diagnostics::to_correlation;
-use fagioli::embedding::model::EmbedConfig;
+use fagioli::embedding::model::{EmbedConfig, UPrior};
 use fagioli::embedding::noise::NoiseModel;
 use fagioli::embedding::train::train;
 use fagioli::embedding::whiten::whiten_blocks;
@@ -234,6 +234,9 @@ fn run_pipeline(planted: &Planted, label: &str) -> Result<(f32, f64, f32, f32)> 
         embedding_dim: NUM_PROGRAMS,
         num_negatives: 4,
         prior_inclusion: 0.02,
+        u_prior: UPrior::SpikeSlab,
+        num_components: 5,
+        prior_alpha: 1.0,
         learning_rate: 0.05,
         num_iterations: 400,
         grad_clip: Some(10.0),

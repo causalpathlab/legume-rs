@@ -28,7 +28,7 @@ pub use diagnostics::{
     compare_geometry, cross_trait_moments, estimate_trait_geometry, CrossTraitMoments,
     GeometryVerdict, TraitGeometry,
 };
-pub use model::{EmbedConfig, EmbedModel};
+pub use model::{EmbedConfig, EmbedModel, UPrior};
 pub use noise::{omega_sqrt_pair, NoiseModel};
 pub use score::{assemble_u, score_cohort, PanelStandardization, ProgramScores};
 pub use train::{train, EmbedFit};
