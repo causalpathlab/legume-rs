@@ -20,6 +20,7 @@
 pub mod diagnostics;
 pub mod model;
 pub mod noise;
+pub mod score;
 pub mod train;
 pub mod whiten;
 
@@ -29,5 +30,6 @@ pub use diagnostics::{
 };
 pub use model::{EmbedConfig, EmbedModel};
 pub use noise::{omega_sqrt_pair, NoiseModel};
+pub use score::{assemble_u, score_cohort, PanelStandardization, ProgramScores};
 pub use train::{train, EmbedFit};
 pub use whiten::{unwhiten_traits, whiten_blocks, WhitenedBlock};
