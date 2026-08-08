@@ -3,7 +3,8 @@ use crate::hvg::HvgCliArgs;
 use crate::topic::common::{load_and_project, LoadProjectArgs, ProjectedData};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct SvdArgs {
     #[arg(
         required = true,
@@ -273,6 +274,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Svd,
         prefix: &args.out,
         data_input: &input,
@@ -453,3 +455,14 @@ fn adjust_triplets_visitor(
     triplets.extend(new_triplets);
     Ok(())
 }
+
+impl crate::update::Updatable for SvdArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        // `svd` has no weights, no `--init-from` and no epoch loop. `update`
+        // rejects `--epochs` for an svd parent before reaching this.
+    }
+}
+

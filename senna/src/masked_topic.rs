@@ -14,7 +14,10 @@ use candle_util::vae::masked_topic::LatentHead;
 use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum MaskScheduleArg {
     /// Constant mask fraction (`--mask-fraction`).
     #[default]
@@ -25,7 +28,10 @@ pub enum MaskScheduleArg {
 
 /// Per-gene likelihood for the masked imputation loss (CLI surface for
 /// [`candle_util::vae::masked_topic::MaskedLikelihood`]).
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum MaskedLikelihoodArg {
     /// Negative binomial — overdispersed counts (library-scaled, learnable φ).
     #[default]
@@ -46,7 +52,8 @@ impl MaskedLikelihoodArg {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct MaskedTopicArgs {
     #[arg(
         value_delimiter = ',',
@@ -580,7 +587,8 @@ pub struct MaskedTopicArgs {
     qc: QcArgs,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug, Default)]
+#[derive(clap::ValueEnum, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FeatureNameKindArg {
     #[default]
     Auto,
@@ -649,7 +657,7 @@ pub(crate) fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind 
     }
 }
 
-fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
+pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
@@ -1296,6 +1304,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: masked_run_kind(head),
         prefix: &args.out,
         data_input: &input,
@@ -1322,3 +1331,20 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
     info!("Done");
     Ok(())
 }
+
+impl crate::update::Updatable for MaskedTopicArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.init_from = Some(r.init_from);
+        // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
+        // (Here `--from` also carries --freeze-feature-embedding, which a warm
+        // start supersedes: the weights already contain that ρ.)
+        self.from = None;
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
+}
+

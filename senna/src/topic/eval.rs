@@ -88,6 +88,10 @@ pub(crate) struct QueryNameOpts {
     pub kind: auxiliary_data::feature_names::FeatureNameKind,
     pub suffix_delim: Option<char>,
     pub keep_suffix: Option<Box<str>>,
+    /// Fraction of the model's genes the query must cover. `0` — the derived
+    /// `Default`, and what every caller but `predict` wants — reports coverage
+    /// without gating on it.
+    pub min_overlap: f32,
 }
 
 /// Build a gene remap from training gene names and new-data gene names.
@@ -330,6 +334,7 @@ mod tests {
             kind: FeatureNameKind::Gene { delim: '_' },
             suffix_delim: Some('/'),
             keep_suffix: Some("count/spliced".into()),
+            ..Default::default()
         };
         let remap = build_gene_remap_with(&training, &query, &opts);
         // spliced TSPAN6 → training row 0
@@ -354,6 +359,7 @@ mod tests {
             kind: FeatureNameKind::Gene { delim: '_' },
             suffix_delim: None,
             keep_suffix: None,
+            ..Default::default()
         };
         let remap = build_gene_remap_with(&training, &query, &opts);
         assert_eq!(remap.new_to_train[0], Some(0));

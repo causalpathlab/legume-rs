@@ -558,7 +558,8 @@ pub fn write_qc_report(
 /// name/barcode column. Pass `--no-qc` to disable and keep every cell, or
 /// `--qc-report <path>` to dump the per-cell keep/drop flags. (Feature/row QC
 /// is OFF unless `--qc-feature-min-cells` is set.)
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct QcArgs {
     /// Disable cell QC entirely (keep every input cell).
     #[arg(

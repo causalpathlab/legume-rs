@@ -24,7 +24,8 @@ use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use candle_util::decoder::GaussianNbDecoder;
 use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct VaeArgs {
     #[arg(
         value_delimiter = ',',
@@ -399,6 +400,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Vae,
         prefix: &args.out,
         data_input: &input,
@@ -445,3 +447,18 @@ fn build_encoder(
         vb,
     )?)
 }
+
+impl crate::update::Updatable for VaeArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.init_from = Some(r.init_from);
+        // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
+        self.from = None;
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
+}
+

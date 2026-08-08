@@ -65,6 +65,7 @@ mod senna_input;
 mod svd;
 mod topic;
 mod tree_layout;
+mod update;
 mod vae;
 
 use annotate::{
@@ -87,6 +88,7 @@ use pseudotime::{run_pseudotime, PseudotimeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use svd::*;
 use topic::cmd::*;
+use update::{run_update, UpdateArgs};
 use vae::*;
 
 use colored::Colorize;
@@ -449,6 +451,29 @@ enum Commands {
     Probe(ProbeArgs),
 
     #[command(
+        about = "Absorb new samples into a trained model by continuing its training.",
+        long_about = "Continue a trained run over a larger cohort.\n\
+                      \n\
+                      The parent's manifest records both the data it was trained on\n\
+                      and the arguments it was trained with, so the update re-runs\n\
+                      that same fit over `recorded + new` data with warm start on.\n\
+                      Only the new files and the output prefix are named here.\n\
+                      \n\
+                      Every family trains on pseudobulks, so the old cohort is\n\
+                      replayed exactly and old-vs-new batch effects are matched at\n\
+                      cell resolution. The cost is that each round re-reads every\n\
+                      previously absorbed cell.\n\
+                      \n\
+                      Usage:\n\
+                      senna update new.zarr --model M_v1 -o M_v2\n\
+                      \n\
+                      Families: topic, masked-topic, masked-sbp, masked-vae, vae.\n\
+                      For svd this re-fits on the union — there are no weights to\n\
+                      warm-start. bge is unsupported: it saves no checkpoint."
+    )]
+    Update(UpdateArgs),
+
+    #[command(
         about = "Impute full-feature counts on new cells by kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
                       1. Project new sparse-panel data through the trained\n  \
@@ -765,6 +790,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Probe(args) => {
             run_probe(args)?;
+        }
+        Commands::Update(args) => {
+            run_update(args)?;
         }
         Commands::Impute(args) => {
             impute_model(args)?;

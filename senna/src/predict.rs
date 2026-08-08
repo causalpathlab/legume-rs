@@ -154,6 +154,21 @@ pub struct PredictArgs {
     )]
     pub(crate) delta_iters: usize,
 
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_name = "FRACTION",
+        help = "Refuse to score below this share of the model's genes (0 = no gate)",
+        long_help = "Gene coverage is always reported. This turns it into a hard floor.\n\
+                     \n\
+                     Off by default, because low coverage is not by itself wrong:\n\
+                     a targeted panel legitimately measures a small slice of a\n\
+                     whole-transcriptome model, and a narrow panel that spans the\n\
+                     latent directions can still identify it. Zero mapped genes is\n\
+                     always refused — that is a naming failure, not thin coverage."
+    )]
+    pub(crate) min_gene_overlap: f32,
+
     #[arg(short, long, help = "Verbose logging")]
     pub(crate) verbose: bool,
 
@@ -235,6 +250,7 @@ impl PredictArgs {
             kind: self.feature_name_kind.clone().resolve_or_gene(),
             suffix_delim: self.feature_name_suffix_delim,
             keep_suffix: self.keep_feature_suffix.clone(),
+            min_overlap: self.min_gene_overlap,
         }
     }
 }
@@ -294,20 +310,49 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
     }
 }
 
+/// Align query genes onto the model's axis, reporting the coverage.
+///
+/// `min_overlap` is a *fraction* of the model's genes, and **0 disables the
+/// gate** — the default. A low overlap is not by itself an error: a targeted
+/// panel legitimately covers a small slice of a whole-transcriptome model, and
+/// a narrow-but-spanning panel can still identify the latent. The number is
+/// always logged so the decision stays with the caller; pass a threshold when
+/// you want it enforced.
+///
+/// Zero mapped genes is refused regardless — the remapped matrix would be all
+/// zeros, so every downstream number would be a fiction rather than a weak
+/// estimate.
 fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
     opts: &QueryNameOpts,
 ) -> anyhow::Result<Option<GeneRemap>> {
     let gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
-    let min_overlap = (training_genes.len() as f32 * 0.1) as usize;
-    anyhow::ensure!(
-        gene_remap.n_mapped >= min_overlap,
-        "Too few genes overlap: {}/{} mapped (need at least {})",
+    let n_train = training_genes.len();
+    let frac = gene_remap.n_mapped as f32 / n_train.max(1) as f32;
+    log::info!(
+        "Gene coverage: {}/{n_train} of the model's genes are measured by the query \
+         ({:.1}%); {} query gene(s) unmapped and dropped",
         gene_remap.n_mapped,
-        training_genes.len(),
-        min_overlap,
+        frac * 100.0,
+        new_genes.len().saturating_sub(gene_remap.n_mapped),
     );
+    anyhow::ensure!(
+        gene_remap.n_mapped > 0,
+        "No query gene maps onto the model's {n_train}-gene axis, even after \
+         canonicalization. Every value would be zero — check that the two datasets use the \
+         same identifier style (see --query-name-kind)."
+    );
+    if opts.min_overlap > 0.0 {
+        anyhow::ensure!(
+            frac >= opts.min_overlap,
+            "Gene coverage {:.1}% is below the requested --min-gene-overlap {:.1}% \
+             ({}/{n_train} mapped).",
+            frac * 100.0,
+            opts.min_overlap * 100.0,
+            gene_remap.n_mapped,
+        );
+    }
 
     let needs_remap = gene_remap
         .new_to_train

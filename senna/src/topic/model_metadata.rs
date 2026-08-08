@@ -59,6 +59,52 @@ pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
 
 pub use crate::embed_common::latent_to_theta;
 
+/// Resolve which family of run lives at `prefix`, for commands that dispatch on
+/// it (`probe`, `update`).
+///
+/// **Why the manifest first, and not which files happen to exist.** [`RunKind`]
+/// is the one place senna enumerates its families; inferring from the presence
+/// of files means re-deriving that enumeration badly. An earlier `probe`
+/// checked for `{prefix}.model.json` and sent *anything* lacking one — an `svd`
+/// run, an `fne` run, a half-written directory — down the bge path, which then
+/// failed with a bge-flavoured complaint about a file the user never mentioned.
+///
+/// The `model.json` fallback exists only because manifests postdate some saved
+/// models. bge has neither a checkpoint nor metadata, so it can only be
+/// resolved through a manifest.
+///
+/// Callers decide what they *support*; this only says what the run *is*.
+pub fn resolve_run_kind(prefix: &str) -> anyhow::Result<crate::run_manifest::RunKind> {
+    use crate::run_manifest::{RunKind, RunManifest};
+
+    let manifest = std::path::PathBuf::from(format!("{prefix}.senna.json"));
+    if manifest.is_file() {
+        let (m, _) = RunManifest::load(&manifest)?;
+        return Ok(m.kind);
+    }
+
+    anyhow::ensure!(
+        std::path::Path::new(&format!("{prefix}.model.json")).is_file(),
+        "{prefix}: not a senna model prefix — neither {prefix}.senna.json nor \
+         {prefix}.model.json exists."
+    );
+    let metadata = TopicModelMetadata::load(prefix)?;
+    let model_type = metadata.model_type.as_ref();
+    // The masked heads split across two kinds: the two simplex heads keep the
+    // legacy `itopic` wire string, the Gaussian head is its own kind because
+    // its latent is NOT log-simplex (`RunKind::latent_is_log_simplex`).
+    if let Some(head) = masked_head_from_model_type(model_type) {
+        return Ok(crate::masked_topic::masked_run_kind(head));
+    }
+    match model_type {
+        MODEL_TYPE_VAE => Ok(RunKind::Vae),
+        MODEL_TYPE_TOPIC => Ok(RunKind::Topic),
+        other => anyhow::bail!(
+            "{prefix}: unrecognized model_type '{other}' and no run manifest to fall back on"
+        ),
+    }
+}
+
 /// Human-facing CLI/log label for a masked head (the subcommand name).
 pub fn masked_head_label(head: LatentHead) -> &'static str {
     match head {
@@ -186,26 +232,72 @@ impl TopicModelMetadata {
     }
 }
 
-/// Save feature coarsening to JSON alongside the model.
-pub fn save_coarsening(coarsening: &FeatureCoarsening, prefix: &str) -> anyhow::Result<()> {
-    let path = format!("{prefix}.coarsening.json");
-    let json = serde_json::to_string(coarsening)?;
+fn coarsening_path(prefix: &str) -> String {
+    format!("{prefix}.coarsening.json")
+}
+
+/// On-disk shape of `{prefix}.coarsening.json`.
+///
+/// It used to be a bare [`FeatureCoarsening`] — the finest level only, which is
+/// all `predict` and `eval_topic` ever need. Warm start needs the *whole*
+/// ladder: each decoder level has its own grouping, and resuming with a
+/// different one silently mis-keys that level's weights. The file therefore now
+/// holds every level, and the bare form is still accepted so runs written
+/// before this keep loading.
+#[derive(Deserialize)]
+struct CoarseningFile {
+    /// Finest **last**, parallel to `level_decoder_dims`. Entries are `None`
+    /// for levels that train at full resolution.
+    levels: Vec<Option<FeatureCoarsening>>,
+}
+
+/// Save every level's feature coarsening alongside the model, finest last.
+pub fn save_coarsening_levels(
+    levels: &[Option<FeatureCoarsening>],
+    prefix: &str,
+) -> anyhow::Result<()> {
+    let path = coarsening_path(prefix);
+    // Borrowed view: `levels.to_vec()` would deep-clone every `fine_to_coarse`
+    // and `coarse_to_fine` (one usize per gene per level) purely to hand serde
+    // an owned value.
+    #[derive(Serialize)]
+    struct Borrowed<'a> {
+        levels: &'a [Option<FeatureCoarsening>],
+    }
+    let json = serde_json::to_string(&Borrowed { levels })?;
     std::fs::write(&path, json)?;
-    log::info!("Saved feature coarsening to {path}");
+    log::info!("Saved {} feature-coarsening levels to {path}", levels.len());
     Ok(())
 }
 
-/// Load feature coarsening from JSON.
-pub fn load_coarsening(prefix: &str) -> anyhow::Result<Option<FeatureCoarsening>> {
-    let path = format!("{prefix}.coarsening.json");
-    match std::fs::read_to_string(&path) {
-        Ok(json) => {
-            let fc: FeatureCoarsening = serde_json::from_str(&json)?;
-            Ok(Some(fc))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+/// Load every level's coarsening, finest last. `None` when the run has none.
+///
+/// A file in the legacy bare form yields a single level — correct for
+/// single-level runs, and detected as a length mismatch by the caller
+/// otherwise.
+pub fn load_coarsening_levels(
+    prefix: &str,
+) -> anyhow::Result<Option<Vec<Option<FeatureCoarsening>>>> {
+    let path = coarsening_path(prefix);
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    // The two shapes are disjoint: `levels` is required by the new form and
+    // absent from the old, so a failed parse of the first is an unambiguous
+    // signal to try the second.
+    if let Ok(f) = serde_json::from_str::<CoarseningFile>(&json) {
+        return Ok(Some(f.levels));
     }
+    let fc: FeatureCoarsening = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("{path}: not a feature-coarsening file ({e})"))?;
+    Ok(Some(vec![Some(fc)]))
+}
+
+/// Load the finest level's coarsening — what inference needs.
+pub fn load_coarsening(prefix: &str) -> anyhow::Result<Option<FeatureCoarsening>> {
+    Ok(load_coarsening_levels(prefix)?.and_then(|mut l| l.pop().flatten()))
 }
 
 /// Load dictionary parquet, returning gene names and the beta matrix [D × K].
