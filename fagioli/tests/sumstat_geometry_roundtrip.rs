@@ -291,6 +291,8 @@ fn test_embedding_geometry_tracks_simulated_rg() -> Result<()> {
             learning_rate: 0.05,
             num_iterations: 300,
             grad_clip: Some(10.0),
+            dense_arm: false,
+            gauge_weight: 0.0,
             seed: 5,
         },
         &Device::Cpu,

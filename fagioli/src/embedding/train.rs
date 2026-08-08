@@ -58,6 +58,11 @@ pub struct EmbedFit {
     pub loss_trace: Vec<f32>,
     /// Final NCE offset; near zero means the score is correctly normalised.
     pub offset: f32,
+    /// Fitted polygenic variance per program, when the dense arm is on.
+    pub dense_variance: Option<Vec<f32>>,
+    /// Final `‖V̌'V̌ − I‖²_F`; large means the gauge did not hold and the dense
+    /// arm's diagonal assumption is violated.
+    pub gauge_residual: f32,
 }
 
 /// Numerically stable `log σ(x)` = `−softplus(−x)`.
@@ -149,7 +154,15 @@ pub fn train(
             n_terms += 1;
         }
 
-        let loss = (total / n_terms as f64)?;
+        // The dense arm's score assumes an orthonormal V̌, but the gauge is
+        // applied independently of it: it is also what identifies V̌ at all, so
+        // "dense arm on" and "gauge on" must be separable conditions or any
+        // comparison between them is confounded.
+        let mut loss = (total / n_terms as f64)?;
+        if model.config.gauge_weight > 0.0 {
+            loss = (loss + (model.gauge_penalty()? * model.config.gauge_weight)?)?;
+        }
+        let loss = loss;
         let mut grads = loss.backward()?;
         if let Some(max_norm) = config.grad_clip {
             clip_grad_global_norm(&mut grads, max_norm)?;
@@ -186,6 +199,17 @@ pub fn train(
         .map(|b| model.u_pip_matrix(b))
         .collect::<Result<Vec<_>>>()?;
 
+    let gauge_residual = model.gauge_penalty()?.to_scalar::<f32>()?;
+    if model.config.dense_arm {
+        log::info!(
+            "Dense arm: σ²_d = {:?}, gauge residual {:.4}",
+            model
+                .dense_variance()?
+                .map(|v| v.iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>()),
+            gauge_residual,
+        );
+    }
+
     Ok(EmbedFit {
         v_check: model.v_check_matrix()?,
         trait_geometry: model.trait_geometry()?,
@@ -193,6 +217,8 @@ pub fn train(
         u_pip,
         loss_trace,
         offset,
+        dense_variance: model.dense_variance()?,
+        gauge_residual,
     })
 }
 

@@ -237,6 +237,8 @@ fn run_pipeline(planted: &Planted, label: &str) -> Result<(f32, f64, f32, f32)> 
         learning_rate: 0.05,
         num_iterations: 400,
         grad_clip: Some(10.0),
+        dense_arm: false,
+        gauge_weight: 0.0,
         seed: 7,
     };
     let fit = train(&blocks, &noise, &cfg, &Device::Cpu)?;
