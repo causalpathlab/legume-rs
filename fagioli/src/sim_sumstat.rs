@@ -10,7 +10,8 @@ use rust_htslib::tpool::ThreadPool;
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::simulation::{
     compose_phenotype, compose_phenotype_with_polygenic, compute_genetic_values,
-    generate_confounder_matrix, sample_cell_type_genetic_effects, CellTypeGeneticEffects,
+    generate_confounder_matrix, genetic_covariance, sample_cell_type_genetic_effects,
+    sample_factor_genetic_effects, CellTypeGeneticEffects, TraitFactorLoadings,
     ConfounderParams,
 };
 use fagioli::summary_stats::{
@@ -57,6 +58,26 @@ pub struct SimSumstatArgs {
         help = "Per-trait independent causal SNPs per causal block"
     )]
     pub num_independent_causal: usize,
+
+    #[arg(
+        long,
+        default_value = "0",
+        help = "Genetic factors linking traits (0 = uncorrelated effects)",
+        long_help = "Number of latent genetic factors shared across traits.\n\
+                     \n\
+                     At 0, shared causal variants get effect sizes drawn\n\
+                     independently for each trait. They share loci but not\n\
+                     effects, so the genetic correlation is zero in expectation.\n\
+                     \n\
+                     Above 0, shared effects follow beta_j = Lambda f_j with a\n\
+                     genome-wide Lambda, giving Cov_g = Lambda F F' Lambda'.\n\
+                     This is what produces a nonzero genetic correlation, and\n\
+                     what any multi-trait method needs in order to be tested.\n\
+                     \n\
+                     Fewer factors than traits means low-rank pleiotropy; set\n\
+                     it to 1 for a single shared axis."
+    )]
+    pub num_genetic_factors: usize,
 
     #[arg(
         long,
@@ -211,6 +232,24 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         num_causal_blocks, num_blocks,
     );
 
+    // Genome-wide trait loadings, drawn once: a genetic factor belongs to the
+    // traits, not to a locus. Per-block loadings would give each block its own
+    // geometry, which largely cancels when summed across the genome.
+    let trait_loadings = (args.num_genetic_factors > 0).then(|| {
+        info!(
+            "Correlated genetic architecture: {} factor(s) across {} traits",
+            args.num_genetic_factors, t,
+        );
+        TraitFactorLoadings::sample(t, args.num_genetic_factors, args.seed + SEED_EFFECTS)
+    });
+    if trait_loadings.is_none() {
+        info!(
+            "Uncorrelated genetic architecture: shared loci carry independent \
+             per-trait effects, so the genetic correlation is zero in expectation. \
+             Pass --num-genetic-factors to make it nonzero."
+        );
+    }
+
     // Pass 1: Parallel computation of per-block genetic values
     let block_results: Vec<(usize, CellTypeGeneticEffects, DMatrix<f32>)> = causal_block_indices
         .par_iter()
@@ -219,14 +258,28 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
             let block_m = block.num_snps();
 
             let block_seed = args.seed + SEED_EFFECTS + block_idx as u64 * 1000;
-            let effects = sample_cell_type_genetic_effects(
-                block_m,
-                t,
-                args.num_shared_causal,
-                args.num_independent_causal,
-                args.h2_sparse / num_causal_blocks.max(1) as f32,
-                block_seed,
-            )
+            let block_h2 = args.h2_sparse / num_causal_blocks.max(1) as f32;
+            let effects = match trait_loadings.as_ref() {
+                // Correlated architecture: shared effects run through a
+                // genome-wide Λ, so Cov_g is nonzero and low-rank.
+                Some(loadings) => sample_factor_genetic_effects(
+                    block_m,
+                    args.num_shared_causal,
+                    args.num_independent_causal,
+                    loadings,
+                    block_h2,
+                    block_seed,
+                ),
+                // Legacy architecture: shared loci, independent effects, r_g = 0.
+                None => sample_cell_type_genetic_effects(
+                    block_m,
+                    t,
+                    args.num_shared_causal,
+                    args.num_independent_causal,
+                    block_h2,
+                    block_seed,
+                ),
+            }
             .expect("Failed to sample genetic effects");
 
             let x_block = geno
@@ -323,6 +376,16 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
         phenotypes.nrows(),
         phenotypes.ncols()
     );
+
+    // True genetic covariance, summed over causal blocks. Without this the
+    // simulator states an architecture but never reports the r_g it implies,
+    // so nothing downstream can be checked against it.
+    let mut cov_g = DMatrix::<f32>::zeros(t, t);
+    for (_, effects) in &block_effects {
+        cov_g += genetic_covariance(effects);
+    }
+    let rg_file = format!("{}.genetic_covariance.tsv.gz", args.output);
+    write_trait_matrix(&rg_file, &cov_g, "genetic covariance")?;
 
     // Write ground truth
     let gt_file = format!("{}.ground_truth.bed.gz", args.output);
@@ -441,5 +504,29 @@ pub fn sim_sumstat(args: &SimSumstatArgs) -> Result<()> {
     info!("Wrote parameters: {}", param_file);
 
     info!("sim-sumstat completed successfully");
+    Ok(())
+}
+
+/// Write a dense trait-by-trait matrix as a gzipped TSV with a header row.
+fn write_trait_matrix(path: &str, m: &DMatrix<f32>, what: &str) -> Result<()> {
+    use matrix_util::common_io::open_buf_writer;
+    use std::io::Write;
+
+    let t = m.nrows();
+    let mut w = open_buf_writer(path)?;
+    write!(w, "trait")?;
+    for j in 0..t {
+        write!(w, "\ttrait_{j}")?;
+    }
+    writeln!(w)?;
+    for i in 0..t {
+        write!(w, "trait_{i}")?;
+        for j in 0..t {
+            write!(w, "\t{:.6}", m[(i, j)])?;
+        }
+        writeln!(w)?;
+    }
+    w.flush()?;
+    info!("Wrote {} ({}x{}) to {}", what, t, t, path);
     Ok(())
 }

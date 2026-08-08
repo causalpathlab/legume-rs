@@ -391,3 +391,360 @@ mod tests {
         }
     }
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Correlated (factor-structured) genetic architecture
+////////////////////////////////////////////////////////////////////////////////
+
+/// Offset giving the independent-effects arm its own RNG stream, so that the
+/// two samplers agree on it at a common seed.
+const SEED_INDEPENDENT_ARM: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Genome-wide trait loadings for a factor genetic architecture.
+///
+/// [`sample_cell_type_genetic_effects`] gives shared causal *loci* whose effect
+/// sizes are drawn independently per trait, so `E[Cov_g(t,t')] = 0` -- shared
+/// loci, not shared genetics, and no genetic correlation to recover. Real
+/// pleiotropy is correlated, and multi-trait methods (cross-trait LDSC, MTAG,
+/// GenomicSEM) cannot be validated against a simulator that always returns
+/// `r_g = 0`.
+///
+/// This structure supplies the missing piece: effects at shared causal variants
+/// are `β_j = Λ f_j`, giving
+///
+/// ```text
+/// Cov_g = Λ (Σ_j f_j f_j') Λ'
+/// ```
+///
+/// which is genuinely low-rank across traits. `Λ` is drawn **once** and reused
+/// for every block, because a genetic factor is a property of the traits, not
+/// of a locus -- per-block loadings would give each block its own geometry and
+/// largely cancel when summed genome-wide.
+#[derive(Debug, Clone)]
+pub struct TraitFactorLoadings {
+    /// `Λ`, shape (T, H_g). Rows are traits, columns genetic factors.
+    pub lambda: DMatrix<f32>,
+}
+
+impl TraitFactorLoadings {
+    /// Draw `Λ` with i.i.d. standard normal entries, scaled so each trait's
+    /// loading vector has unit norm in expectation.
+    pub fn sample(num_traits: usize, num_factors: usize, seed: u64) -> Self {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let normal = Normal::new(0.0, 1.0).expect("standard normal");
+        let scale = 1.0 / (num_factors.max(1) as f32).sqrt();
+        let lambda = DMatrix::from_fn(num_traits, num_factors, |_, _| {
+            normal.sample(&mut rng) as f32 * scale
+        });
+        Self { lambda }
+    }
+
+    pub fn num_traits(&self) -> usize {
+        self.lambda.nrows()
+    }
+
+    pub fn num_factors(&self) -> usize {
+        self.lambda.ncols()
+    }
+}
+
+/// Sample genetic effects whose shared component is correlated across traits.
+///
+/// Identical to [`sample_cell_type_genetic_effects`] except that the shared
+/// effect sizes come from the factor model `β_j = Λ f_j` rather than from
+/// independent per-trait draws. Independent effects are unchanged: they sit at
+/// different variants per trait and so contribute only to the diagonal of
+/// `Cov_g`.
+pub fn sample_factor_genetic_effects(
+    num_snps: usize,
+    num_shared_causal: usize,
+    num_independent_causal: usize,
+    loadings: &TraitFactorLoadings,
+    genetic_variance: f32,
+    seed: u64,
+) -> Result<CellTypeGeneticEffects> {
+    let num_traits = loadings.num_traits();
+    let num_factors = loadings.num_factors();
+
+    if num_shared_causal + num_independent_causal > num_snps {
+        anyhow::bail!(
+            "num_shared_causal ({}) + num_independent_causal ({}) cannot exceed num_snps ({})",
+            num_shared_causal,
+            num_independent_causal,
+            num_snps
+        );
+    }
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+    let total_causal = num_shared_causal + num_independent_causal;
+    let (shared_variance, independent_variance) = if total_causal > 0 {
+        (
+            genetic_variance * (num_shared_causal as f32 / total_causal as f32),
+            genetic_variance * (num_independent_causal as f32 / total_causal as f32),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
+    // ── Shared: correlated through Λ ──────────────────────────────────────
+    let (shared_causal_indices, shared_effect_sizes) = if num_shared_causal > 0 {
+        let mut all: Vec<usize> = (0..num_snps).collect();
+        all.shuffle(&mut rng);
+        let indices = all[..num_shared_causal].to_vec();
+
+        // Per-variant factor scores f_j, then β_j = Λ f_j.
+        let effect_variance =
+            shared_variance / (num_traits as f32 * num_shared_causal as f32);
+        let f_std = (effect_variance / num_factors.max(1) as f32).sqrt() * num_factors as f32;
+        let normal = Normal::new(0.0, f_std as f64)
+            .map_err(|e| anyhow::anyhow!("Failed to create Normal distribution: {}", e))?;
+
+        let f_scores = DMatrix::from_fn(num_factors, num_shared_causal, |_, _| {
+            normal.sample(&mut rng) as f32
+        });
+        // (T, H) x (H, S) -> (T, S)
+        let effects = &loadings.lambda * f_scores;
+
+        info!(
+            "Sampled {} shared causal variants through {} genetic factor(s)",
+            indices.len(),
+            num_factors,
+        );
+        (indices, effects)
+    } else {
+        (Vec::new(), DMatrix::zeros(num_traits, 0))
+    };
+
+    // ── Independent: unchanged, distinct variants per trait ───────────────
+    // Drawn from its own stream. The shared arm above consumes H*S normals
+    // where `sample_cell_type_genetic_effects` consumes K*S, so sharing one
+    // stream would leave the two samplers with different trait-specific
+    // effects at the same seed -- and the contrast between them is exactly
+    // what the tests measure.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ SEED_INDEPENDENT_ARM);
+    let (independent_causal_indices, independent_effect_sizes) = if num_independent_causal > 0 {
+        let effect_variance = independent_variance / num_independent_causal as f32;
+        let normal = Normal::new(0.0, (effect_variance.sqrt()) as f64)
+            .map_err(|e| anyhow::anyhow!("Failed to create Normal distribution: {}", e))?;
+
+        let available: Vec<usize> = (0..num_snps)
+            .filter(|j| !shared_causal_indices.contains(j))
+            .collect();
+
+        let mut indices = Vec::with_capacity(num_traits);
+        let mut effects = DMatrix::zeros(num_traits, num_independent_causal);
+        for t in 0..num_traits {
+            let mut pool = available.clone();
+            pool.shuffle(&mut rng);
+            let take = num_independent_causal.min(pool.len());
+            indices.push(pool[..take].to_vec());
+            for j in 0..take {
+                effects[(t, j)] = normal.sample(&mut rng) as f32;
+            }
+        }
+        (indices, effects)
+    } else {
+        (vec![Vec::new(); num_traits], DMatrix::zeros(num_traits, 0))
+    };
+
+    Ok(CellTypeGeneticEffects {
+        shared_causal_indices,
+        shared_effect_sizes,
+        independent_causal_indices,
+        independent_effect_sizes,
+        num_cell_types: num_traits,
+    })
+}
+
+/// True genetic covariance `Cov_g = Σ_j β_j β_j'` implied by a block's effects.
+///
+/// Shared variants contribute `B_sh B_sh'` in full; independent variants sit at
+/// distinct SNPs per trait and so contribute only to the diagonal. Summing this
+/// over causal blocks gives the genome-wide `Cov_g` that cross-trait LDSC and
+/// any trait-geometry estimate should recover.
+pub fn genetic_covariance(effects: &CellTypeGeneticEffects) -> DMatrix<f32> {
+    let t = effects.num_cell_types;
+    let mut cov = &effects.shared_effect_sizes * effects.shared_effect_sizes.transpose();
+    for tt in 0..t {
+        if tt < effects.independent_effect_sizes.nrows() {
+            let own: f32 = effects
+                .independent_effect_sizes
+                .row(tt)
+                .iter()
+                .map(|v| v * v)
+                .sum();
+            cov[(tt, tt)] += own;
+        }
+    }
+    cov
+}
+
+#[cfg(test)]
+mod factor_tests {
+    use super::*;
+
+    fn to_corr(m: &DMatrix<f32>) -> DMatrix<f32> {
+        let t = m.nrows();
+        DMatrix::from_fn(t, t, |i, j| {
+            let d = (m[(i, i)] * m[(j, j)]).sqrt();
+            if d > 0.0 {
+                (m[(i, j)] / d).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+    }
+
+    fn mean_abs_offdiag(m: &DMatrix<f32>) -> f32 {
+        let t = m.nrows();
+        let mut s = 0.0;
+        let mut n = 0;
+        for i in 0..t {
+            for j in (i + 1)..t {
+                s += m[(i, j)].abs();
+                n += 1;
+            }
+        }
+        s / n.max(1) as f32
+    }
+
+    /// The defect this architecture exists to fix: shared *loci* with
+    /// independently drawn per-trait effects give no genetic correlation.
+    #[test]
+    fn test_independent_architecture_has_no_genetic_correlation() {
+        let t = 12;
+        // Average over blocks so this is about the expectation, not one draw.
+        let mut cov = DMatrix::<f32>::zeros(t, t);
+        for b in 0..40 {
+            let e = sample_cell_type_genetic_effects(500, t, 20, 5, 0.4, 1000 + b).unwrap();
+            cov += genetic_covariance(&e);
+        }
+        let rg = to_corr(&cov);
+        let m = mean_abs_offdiag(&rg);
+        println!("independent architecture: mean |r_g| = {m:.4}");
+        assert!(
+            m < 0.15,
+            "shared loci with independent effects should give r_g ~ 0, got {m}"
+        );
+    }
+
+    /// The same configuration, with and without a genome-wide Λ. The contrast is
+    /// the point; the absolute level is not, because trait-specific
+    /// (independent) effects legitimately dilute `r_g` by adding variance to the
+    /// diagonal only.
+    #[test]
+    fn test_factor_architecture_produces_genetic_correlation() {
+        let t = 12;
+        let loadings = TraitFactorLoadings::sample(t, 3, 7);
+
+        let mut cov_factor = DMatrix::<f32>::zeros(t, t);
+        let mut cov_indep = DMatrix::<f32>::zeros(t, t);
+        for b in 0..40 {
+            cov_factor += genetic_covariance(
+                &sample_factor_genetic_effects(500, 20, 5, &loadings, 0.4, 1000 + b).unwrap(),
+            );
+            cov_indep += genetic_covariance(
+                &sample_cell_type_genetic_effects(500, t, 20, 5, 0.4, 1000 + b).unwrap(),
+            );
+        }
+
+        let m_factor = mean_abs_offdiag(&to_corr(&cov_factor));
+        let m_indep = mean_abs_offdiag(&to_corr(&cov_indep));
+        println!(
+            "mean |r_g| with 3 factors {m_factor:.4} vs independent {m_indep:.4} \
+             (ratio {:.1}x)",
+            m_factor / m_indep.max(1e-6)
+        );
+
+        assert!(
+            m_factor > 10.0 * m_indep,
+            "the factor architecture must dominate the independent one: \
+             {m_factor} vs {m_indep}"
+        );
+        assert!(
+            m_factor > 0.1,
+            "factor architecture should give clearly nonzero r_g, got {m_factor}"
+        );
+    }
+
+    /// Without trait-specific effects there is nothing to dilute, so the same
+    /// loadings give a much stronger correlation — which is what confirms the
+    /// dilution above is the independent effects and not a defect in Λ.
+    #[test]
+    fn test_independent_effects_dilute_but_do_not_destroy_rg() {
+        let t = 12;
+        let loadings = TraitFactorLoadings::sample(t, 3, 7);
+
+        let level = |n_indep: usize| {
+            let mut cov = DMatrix::<f32>::zeros(t, t);
+            for b in 0..40 {
+                cov += genetic_covariance(
+                    &sample_factor_genetic_effects(500, 20, n_indep, &loadings, 0.4, 1000 + b)
+                        .unwrap(),
+                );
+            }
+            mean_abs_offdiag(&to_corr(&cov))
+        };
+
+        let none = level(0);
+        let some = level(5);
+        let lots = level(40);
+        println!("mean |r_g| by independent-causal count: 0 -> {none:.4}, 5 -> {some:.4}, 40 -> {lots:.4}");
+
+        assert!(none > some, "trait-specific effects should dilute r_g");
+        assert!(some > lots, "more trait-specific effects should dilute it further");
+        assert!(none > 0.3, "undiluted r_g should be substantial, got {none}");
+    }
+
+    /// The implied `r_g` must track the loadings that generated it, not merely
+    /// be nonzero — otherwise the simulator states a geometry it does not honour.
+    #[test]
+    fn test_implied_rg_tracks_the_loadings() {
+        let t = 12;
+        let loadings = TraitFactorLoadings::sample(t, 2, 11);
+        let mut cov = DMatrix::<f32>::zeros(t, t);
+        for b in 0..60 {
+            let e =
+                sample_factor_genetic_effects(500, 30, 0, &loadings, 0.4, 5000 + b).unwrap();
+            cov += genetic_covariance(&e);
+        }
+        let rg = to_corr(&cov);
+        // With no independent effects, Cov_g ∝ Λ F F' Λ' and F F' → cI, so the
+        // implied correlation should approach corr(ΛΛ').
+        let target = to_corr(&(&loadings.lambda * loadings.lambda.transpose()));
+
+        let (mut sxy, mut sxx, mut syy) = (0.0f64, 0.0f64, 0.0f64);
+        for i in 0..t {
+            for j in (i + 1)..t {
+                let (a, b) = (rg[(i, j)] as f64, target[(i, j)] as f64);
+                sxy += a * b;
+                sxx += a * a;
+                syy += b * b;
+            }
+        }
+        let corr = sxy / (sxx * syy).sqrt();
+        println!("implied r_g vs corr(ΛΛ'): {corr:.4}");
+        assert!(
+            corr > 0.9,
+            "implied r_g should follow the generating loadings, got {corr}"
+        );
+    }
+
+    /// A single factor makes every trait pair correlated through one axis.
+    #[test]
+    fn test_one_factor_gives_a_single_shared_axis() {
+        let t = 8;
+        let loadings = TraitFactorLoadings::sample(t, 1, 13);
+        let mut cov = DMatrix::<f32>::zeros(t, t);
+        for b in 0..40 {
+            let e = sample_factor_genetic_effects(400, 25, 0, &loadings, 0.4, 9000 + b).unwrap();
+            cov += genetic_covariance(&e);
+        }
+        let rg = to_corr(&cov);
+        // Rank-1: every |r_g| should be near 1.
+        let m = mean_abs_offdiag(&rg);
+        println!("one factor: mean |r_g| = {m:.4}");
+        assert!(m > 0.85, "a single factor should give near-perfect |r_g|, got {m}");
+    }
+}

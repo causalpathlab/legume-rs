@@ -1,14 +1,16 @@
 //! Shared pipeline infrastructure for summary-statistics fine-mapping.
 //!
-//! Both `map-sumstat` (SGVB) and `mcmc-sumstat` (MCMC) share the same input
-//! parsing, LD block estimation, z-score adjustment, and output writing.
-//! The per-block fitting strategy is abstracted via [`RssBlockFitter`].
+//! `fit-sumstat-sgvb`, `fit-sumstat-mcmc`, `fit-prs-susie` and `embed-sumstat`
+//! share the same input parsing, LD block estimation and z-score adjustment.
+//! The per-block fitting strategy is abstracted via [`RssBlockFitter`], which
+//! the two fine-mappers implement; `embed-sumstat` consumes the prepared input
+//! directly rather than fitting block by block.
 
 use rustc_hash::FxHashSet as HashSet;
 
 use anyhow::{ensure, Result};
 use clap::Args;
-use log::info;
+use log::{info, warn};
 use matrix_util::common_io::read_lines;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
@@ -17,7 +19,7 @@ use rust_htslib::tpool::ThreadPool;
 
 use crate::genotype::{BedReader, GenomicRegion, GenotypeMatrix, GenotypeReader};
 use crate::io::results::{write_parameters, write_variant_results, VariantRow};
-use crate::summary_stats::rss_svd::RssSvdNal;
+use crate::summary_stats::rss_svd::{RssEigenBasis, RssSvdNal};
 use crate::summary_stats::{
     create_uniform_blocks, estimate_ld_blocks, load_ld_blocks_from_file,
     read_sumstat_zscores_with_n, LdBlock, LdBlockParams,
@@ -187,6 +189,18 @@ pub struct CommonSumstatArgs {
     )]
     pub min_block_snps: usize,
 
+    #[arg(
+        long,
+        help_heading = "LD Blocks",
+        default_value = "5000",
+        help = "Maximum LD block size in SNPs (larger blocks are split)",
+        long_help = "Maximum LD block size in SNPs. Larger estimated blocks are split.\n\
+                     Blocks bound the per-block eigendecomposition and, for models\n\
+                     that select among variants within a block, the size of that choice.\n\
+                     Only applies when blocks are estimated, not to --ld-block-file."
+    )]
+    pub max_block_snps: usize,
+
     // ── RSS SVD parameters ───────────────────────────────────────────────
     #[arg(
         long,
@@ -254,7 +268,12 @@ pub struct CommonSumstatArgs {
     #[arg(
         short,
         long,
-        help = "Output file prefix (produces {prefix}.results.bed.gz and {prefix}.parameters.json)"
+        help = "Output file prefix",
+        long_help = "Prefix for every file this run writes.\n\
+                     \n\
+                     Parent directories are created if they do not exist.\n\
+                     Which files appear depends on the subcommand.\n\
+                     Every subcommand writes {prefix}.parameters.json."
     )]
     pub output: Box<str>,
 
@@ -298,6 +317,132 @@ pub struct SumstatInput {
     pub blocks: Vec<LdBlock>,
     pub median_n: u64,
     pub max_rank: usize,
+}
+
+impl SumstatInput {
+    /// This block's genotypes, column-standardized — the matrix `R = X'X/n` is
+    /// defined from.
+    pub fn standardized_block(&self, block: &LdBlock) -> DMatrix<f32> {
+        let mut x = self
+            .geno
+            .genotypes
+            .columns(block.snp_start, block.num_snps())
+            .clone_owned();
+        x.scale_columns_inplace();
+        x
+    }
+
+    /// This block's z-scores, shape (p_b, T).
+    pub fn block_zscores(&self, block: &LdBlock) -> DMatrix<f32> {
+        self.zscores
+            .rows(block.snp_start, block.num_snps())
+            .clone_owned()
+    }
+}
+
+// ── The shared eigen-decomposition pass ─────────────────────────────────────
+
+/// Blocks below this many SNPs carry too little rank to be worth decomposing.
+///
+/// One threshold, deliberately. Calibration and whitening used to filter on two
+/// different constants in two different modules, which meant each stage
+/// described a slightly different set of blocks than the other acted on.
+pub const MIN_BLOCK_SNPS: usize = 10;
+
+/// One block's eigenbasis, with enough of the block to use it.
+pub struct BlockBasis {
+    /// Index into [`SumstatInput::blocks`].
+    pub block_idx: usize,
+    /// Offset of this block's first SNP in the global variant ordering.
+    pub snp_start: usize,
+    /// Number of SNPs in the block.
+    pub num_snps: usize,
+    /// `D` and `V` for this block. λ-independent.
+    pub basis: RssEigenBasis,
+}
+
+/// Every block's eigenbasis, decomposed once.
+pub struct BlockEigenBases {
+    blocks: Vec<BlockBasis>,
+}
+
+impl BlockEigenBases {
+    pub fn blocks(&self) -> &[BlockBasis] {
+        &self.blocks
+    }
+
+    pub fn into_blocks(self) -> Vec<BlockBasis> {
+        self.blocks
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+/// Decompose every block large enough to be worth it.
+///
+/// This is the expensive step of a summary-statistics fit — a randomized SVD
+/// per block — and it is the step calibration and whitening share. They differ
+/// only in what they do afterwards: calibration fits the moment law on the
+/// λ-independent projection `V'z` to derive τ, and whitening applies the ridge
+/// `λ = τ` that τ defines. Running it once and lending the result to both is
+/// what keeps that from being paid twice.
+///
+/// Borrow for calibration, then move for whitening — the ownership follows the
+/// order the two stages have to run in.
+pub fn decompose_blocks(input: &SumstatInput) -> BlockEigenBases {
+    let mut blocks: Vec<BlockBasis> = input
+        .blocks
+        .par_iter()
+        .enumerate()
+        .filter_map(|(block_idx, block)| {
+            let num_snps = block.num_snps();
+            if num_snps < MIN_BLOCK_SNPS {
+                return None;
+            }
+            let x_block = input.standardized_block(block);
+            // A failure here drops the block from the whole analysis, not just
+            // from one stage, so it is worth saying so rather than swallowing.
+            let basis = RssEigenBasis::from_genotypes(&x_block, input.max_rank)
+                .inspect_err(|e| {
+                    warn!(
+                        "Block {} ({} SNPs) failed to decompose and is excluded \
+                         from both calibration and the fit: {}",
+                        block_idx, num_snps, e,
+                    )
+                })
+                .ok()?;
+            Some(BlockBasis {
+                block_idx,
+                snp_start: block.snp_start,
+                num_snps,
+                basis,
+            })
+        })
+        .collect();
+
+    blocks.sort_by_key(|b| b.block_idx);
+
+    let too_short = input
+        .blocks
+        .iter()
+        .filter(|b| b.num_snps() < MIN_BLOCK_SNPS)
+        .count();
+    info!(
+        "Decomposed {}/{} LD blocks (max rank {}); {} below {} SNPs",
+        blocks.len(),
+        input.blocks.len(),
+        input.max_rank,
+        too_short,
+        MIN_BLOCK_SNPS,
+    );
+
+    BlockEigenBases { blocks }
 }
 
 // ── Shared pipeline functions ───────────────────────────────────────────────
@@ -406,7 +551,7 @@ pub fn prepare_sumstat_input(args: &CommonSumstatArgs) -> Result<SumstatInput> {
                 num_landmarks: args.num_landmarks,
                 num_components: args.num_ld_components,
                 min_block_snps: Some(args.min_block_snps),
-                max_block_snps: None,
+                max_block_snps: Some(args.max_block_snps),
                 seed: args.seed,
             },
         )?

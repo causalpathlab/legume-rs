@@ -1,3 +1,4 @@
+mod embed_sumstat;
 mod fit_prs_susie;
 mod fit_qtl_sgvb;
 mod fit_regression;
@@ -9,6 +10,7 @@ mod sim_mediation;
 mod sim_qtl;
 mod sim_sumstat;
 
+use embed_sumstat::*;
 use fit_prs_susie::*;
 use fit_qtl_sgvb::*;
 use fit_regression::*;
@@ -81,6 +83,8 @@ enum Commands {
     /// Generic SGVB regression (Gaussian/NB/Poisson likelihoods × mean-field/SuSiE variational)
     #[command(alias = "regression")]
     FitRegression(FitRegressionArgs),
+    /// Embed GWAS summary statistics into a shared variant-trait program space
+    EmbedSumstat(EmbedSumstatArgs),
     /// Collapse single-cell counts into Poisson-Gamma pseudobulk per individual and cell type
     Pseudobulk(PseudobulkArgs),
 }
@@ -128,6 +132,9 @@ fn main() -> Result<()> {
         }
         Commands::FitRegression(args) => {
             fit_regression(args)?;
+        }
+        Commands::EmbedSumstat(args) => {
+            embed_sumstat(args)?;
         }
         Commands::Pseudobulk(args) => {
             pseudobulk(args)?;
