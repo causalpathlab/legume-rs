@@ -103,74 +103,6 @@ fn wrap(x: DMatrix<f32>) -> GenotypeMatrix {
     }
 }
 
-struct Truth {
-    input: SumstatInput,
-    causal: HashSet<usize>,
-    ld_score: Vec<f32>,
-}
-
-fn simulate(h2: f32, seed: u64) -> Truth {
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let x_raw = simulate_genotypes(&mut rng);
-    let m = x_raw.ncols();
-    let mut x = x_raw.clone();
-    x.scale_columns_inplace();
-
-    let mut u = DMatrix::<f32>::zeros(m, NUM_PROGRAMS);
-    let mut causal = HashSet::default();
-    for prog in 0..NUM_PROGRAMS {
-        for j in rand::seq::index::sample(&mut rng, m, CAUSAL_PER_PROGRAM) {
-            let v: f64 = StandardNormal.sample(&mut rng);
-            u[(j, prog)] = v as f32;
-            causal.insert(j);
-        }
-    }
-    let v_true = randn(NUM_TRAITS, NUM_PROGRAMS, &mut rng);
-    let g = &x * (&u * v_true.transpose());
-
-    let n = NUM_INDIVIDUALS as f32;
-    let mut y = DMatrix::<f32>::zeros(NUM_INDIVIDUALS, NUM_TRAITS);
-    for t in 0..NUM_TRAITS {
-        let gt = g.column(t);
-        let sd = (gt.iter().map(|v| v * v).sum::<f32>() / n).sqrt();
-        for i in 0..NUM_INDIVIDUALS {
-            let e: f64 = StandardNormal.sample(&mut rng);
-            let genetic = if sd > 0.0 { h2.sqrt() * gt[i] / sd } else { 0.0 };
-            y[(i, t)] = genetic + (1.0 - h2).sqrt() * e as f32;
-        }
-    }
-
-    let mut z = DMatrix::<f32>::zeros(m, NUM_TRAITS);
-    for t in 0..NUM_TRAITS {
-        let yt = y.column(t);
-        let y_sd = (yt.iter().map(|v| v * v).sum::<f32>() / n).sqrt().max(1e-8);
-        for j in 0..m {
-            z[(j, t)] = x.column(j).dot(&yt) / (y_sd * n.sqrt());
-        }
-    }
-
-    let mut ld_score = vec![0.0f32; m];
-    for b in 0..NUM_BLOCKS {
-        let s = b * SNPS_PER_BLOCK;
-        let xb = x.columns(s, SNPS_PER_BLOCK);
-        let r = (xb.transpose() * xb) / n;
-        for j in 0..SNPS_PER_BLOCK {
-            ld_score[s + j] = (0..SNPS_PER_BLOCK).map(|k| r[(j, k)] * r[(j, k)]).sum();
-        }
-    }
-
-    Truth {
-        causal,
-        ld_score,
-        input: SumstatInput {
-            geno: wrap(x_raw),
-            zscores: z,
-            blocks: uniform_blocks(),
-            median_n: NUM_INDIVIDUALS as u64,
-            max_rank: 90,
-        },
-    }
-}
 
 fn auc(score: &[f32], positive: &HashSet<usize>) -> f32 {
     let mut idx: Vec<usize> = (0..score.len()).collect();
@@ -189,37 +121,6 @@ fn auc(score: &[f32], positive: &HashSet<usize>) -> f32 {
     ((rank_sum - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos * n_neg) as f64) as f32
 }
 
-/// AUC against LD-score-matched controls — the honest baseline, since ranking
-/// by marginal evidence alone recovers tags.
-fn auc_ld_matched(score: &[f32], positive: &HashSet<usize>, ld: &[f32]) -> f32 {
-    let mut order: Vec<usize> = (0..score.len()).collect();
-    order.sort_by(|&a, &b| ld[a].partial_cmp(&ld[b]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut controls: HashSet<usize> = HashSet::default();
-    for &c in positive {
-        let p = order.iter().position(|&x| x == c).unwrap_or(0);
-        for step in 1..order.len() {
-            let mut placed = 0;
-            for cand in [p.saturating_sub(step), (p + step).min(order.len() - 1)] {
-                let g = order[cand];
-                if !positive.contains(&g) && controls.insert(g) {
-                    placed += 1;
-                }
-            }
-            if placed > 0 {
-                break;
-            }
-        }
-    }
-    let subset: Vec<usize> = positive.iter().chain(controls.iter()).copied().collect();
-    let sub_scores: Vec<f32> = subset.iter().map(|&i| score[i]).collect();
-    let sub_pos: HashSet<usize> = subset
-        .iter()
-        .enumerate()
-        .filter(|(_, &g)| positive.contains(&g))
-        .map(|(i, _)| i)
-        .collect();
-    auc(&sub_scores, &sub_pos)
-}
 
 fn variant_norms(fit: &EmbedFit) -> Vec<f32> {
     let mut out = Vec::new();
@@ -231,68 +132,8 @@ fn variant_norms(fit: &EmbedFit) -> Vec<f32> {
     out
 }
 
-/// Fraction of a (block, program)'s inclusion mass carried by its top `k`
-/// variants, averaged. High means selection concentrated; low means it is
-/// spread, and no credible set of useful size exists.
-fn top_k_mass(fit: &EmbedFit, k: usize) -> f32 {
-    let (mut total, mut n) = (0.0f32, 0usize);
-    for pip in &fit.u_pip {
-        for h in 0..pip.ncols() {
-            let mut col: Vec<f32> = (0..pip.nrows()).map(|g| pip[(g, h)]).collect();
-            let sum: f32 = col.iter().sum();
-            if sum <= 0.0 {
-                continue;
-            }
-            col.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-            total += col.iter().take(k).sum::<f32>() / sum;
-            n += 1;
-        }
-    }
-    total / n.max(1) as f32
-}
 
-struct Measured {
-    auc_matched: f32,
-    top4: f32,
-    top20: f32,
-    loss: f32,
-}
 
-fn run(truth: &Truth, u_prior: UPrior, seed: u64) -> Result<Measured> {
-    let report = calibrate_input(&truth.input).expect("calibration");
-    let lambda = report.noise.lambda_white();
-    let blocks = whiten_blocks(&truth.input, None, lambda)?;
-    let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();
-    let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
-
-    let fit = train(
-        &blocks,
-        &noise,
-        &EmbedConfig {
-            embedding_dim: NUM_PROGRAMS,
-            num_negatives: 4,
-            prior_inclusion: 0.02,
-            u_prior,
-            num_components: 5,
-            prior_alpha: 1.0,
-            learning_rate: 0.05,
-            num_iterations: 400,
-            grad_clip: Some(10.0),
-            dense_arm: false,
-            gauge_weight: 0.0,
-            seed,
-        },
-        &Device::Cpu,
-    )?;
-
-    let norms = variant_norms(&fit);
-    Ok(Measured {
-        auc_matched: auc_ld_matched(&norms, &truth.causal, &truth.ld_score),
-        top4: top_k_mass(&fit, 4),
-        top20: top_k_mass(&fit, 20),
-        loss: *fit.loss_trace.last().unwrap_or(&f32::NAN),
-    })
-}
 
 
 /// Three planted classes.
@@ -300,7 +141,6 @@ struct Classes {
     input: SumstatInput,
     pleiotropic: HashSet<usize>,
     trait_specific: HashSet<usize>,
-    ld_score: Vec<f32>,
 }
 
 fn simulate_classes(h2: f32, seed: u64) -> Classes {
@@ -374,7 +214,6 @@ fn simulate_classes(h2: f32, seed: u64) -> Classes {
     Classes {
         pleiotropic,
         trait_specific,
-        ld_score,
         input: SumstatInput {
             geno: wrap(x_raw),
             zscores: z,
@@ -414,15 +253,10 @@ fn test_pleiotropic_versus_trait_specific() -> Result<()> {
         let null: HashSet<usize> = (0..cl.input.geno.num_snps())
             .filter(|j| !all.contains(j))
             .collect();
-
-        let truth = Truth {
-            input: cl.input,
-            causal: cl.pleiotropic.clone(),
-            ld_score: cl.ld_score.clone(),
-        };
-        let report = calibrate_input(&truth.input).expect("calibration");
+        let input = cl.input;
+        let report = calibrate_input(&input).expect("calibration");
         let lambda = report.noise.lambda_white();
-        let blocks = whiten_blocks(&truth.input, None, lambda)?;
+        let blocks = whiten_blocks(&input, None, lambda)?;
         let d_sq: Vec<Vec<f32>> = blocks.iter().map(|x| x.d_sq.clone()).collect();
         let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
         let fit = train(

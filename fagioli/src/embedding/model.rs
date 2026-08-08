@@ -125,7 +125,6 @@ pub struct BlockTensors {
     /// as `d̃`, which is what makes the two separable.
     pub ratio: Tensor,
     pub rank: usize,
-    pub num_snps: usize,
 }
 
 /// The sparse variant loadings for one block.
@@ -255,7 +254,6 @@ impl EmbedModel {
                 inv_var: Tensor::from_slice(&inv_var, (b.rank(), 1), device)?,
                 ratio: Tensor::from_slice(&ratio, (b.rank(), 1), device)?,
                 rank: b.rank(),
-                num_snps: b.num_snps,
             });
         }
 
@@ -344,9 +342,6 @@ impl EmbedModel {
         self.u_blocks[block].kl(self.config.prior_inclusion, self.config.prior_alpha)
     }
 
-    pub fn v_check_tensor(&self) -> &Tensor {
-        &self.v_check
-    }
 
     pub fn offset_value(&self) -> Result<f32> {
         Ok(self.offset.flatten_all()?.to_vec1::<f32>()?[0])

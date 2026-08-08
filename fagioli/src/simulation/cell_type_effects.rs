@@ -396,6 +396,10 @@ mod tests {
 // Correlated (factor-structured) genetic architecture
 ////////////////////////////////////////////////////////////////////////////////
 
+/// Offset giving the independent-effects arm its own RNG stream, so that the
+/// two samplers agree on it at a common seed.
+const SEED_INDEPENDENT_ARM: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// Genome-wide trait loadings for a factor genetic architecture.
 ///
 /// [`sample_cell_type_genetic_effects`] gives shared causal *loci* whose effect
@@ -513,6 +517,12 @@ pub fn sample_factor_genetic_effects(
     };
 
     // ── Independent: unchanged, distinct variants per trait ───────────────
+    // Drawn from its own stream. The shared arm above consumes H*S normals
+    // where `sample_cell_type_genetic_effects` consumes K*S, so sharing one
+    // stream would leave the two samplers with different trait-specific
+    // effects at the same seed -- and the contrast between them is exactly
+    // what the tests measure.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ SEED_INDEPENDENT_ARM);
     let (independent_causal_indices, independent_effect_sizes) = if num_independent_causal > 0 {
         let effect_variance = independent_variance / num_independent_causal as f32;
         let normal = Normal::new(0.0, (effect_variance.sqrt()) as f64)

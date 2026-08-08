@@ -121,7 +121,6 @@ pub fn train(
 
     for iter in 0..config.num_iterations {
         let mut total = Tensor::zeros((), candle_util::candle_core::DType::F32, device)?;
-        let mut n_terms = 0usize;
 
         for b in 0..model.num_blocks() {
             let bt = &model.blocks[b];
@@ -151,18 +150,16 @@ pub fn train(
             let nce = ((pos_term + neg_term)?.neg()? / samples as f64)?;
             let kl = (model.kl_selection(b)?.sum_all()? / samples as f64)?;
             total = ((total + nce)? + kl)?;
-            n_terms += 1;
         }
 
         // The dense arm's score assumes an orthonormal V̌, but the gauge is
         // applied independently of it: it is also what identifies V̌ at all, so
         // "dense arm on" and "gauge on" must be separable conditions or any
         // comparison between them is confounded.
-        let mut loss = (total / n_terms as f64)?;
+        let mut loss = (total / model.num_blocks() as f64)?;
         if model.config.gauge_weight > 0.0 {
             loss = (loss + (model.gauge_penalty()? * model.config.gauge_weight)?)?;
         }
-        let loss = loss;
         let mut grads = loss.backward()?;
         if let Some(max_norm) = config.grad_clip {
             clip_grad_global_norm(&mut grads, max_norm)?;
