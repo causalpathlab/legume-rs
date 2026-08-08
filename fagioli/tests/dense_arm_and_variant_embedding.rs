@@ -28,7 +28,7 @@
 
 use anyhow::Result;
 use candle_util::candle_core::Device;
-use fagioli::embedding::model::EmbedConfig;
+use fagioli::embedding::model::{EmbedConfig, UPrior};
 use fagioli::embedding::noise::NoiseModel;
 use fagioli::embedding::train::{train, EmbedFit};
 use fagioli::embedding::whiten::whiten_blocks;
@@ -332,6 +332,9 @@ fn run(truth: &Truth, dense_arm: bool, gauge_weight: f64) -> Result<Measured> {
             embedding_dim: NUM_PROGRAMS,
             num_negatives: 4,
             prior_inclusion: 0.02,
+            u_prior: UPrior::SpikeSlab,
+            num_components: 5,
+            prior_alpha: 1.0,
             learning_rate: 0.05,
             num_iterations: 400,
             grad_clip: Some(10.0),

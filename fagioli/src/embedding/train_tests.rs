@@ -7,7 +7,7 @@
 //! first test that points them at the low-rank premise itself.
 
 use super::*;
-use crate::embedding::model::EmbedConfig;
+use crate::embedding::model::{EmbedConfig, UPrior};
 use crate::embedding::whiten::WhitenedBlock;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
@@ -125,6 +125,9 @@ fn test_recovers_a_known_low_rank_geometry() {
         embedding_dim: h,
         num_negatives: 4,
         prior_inclusion: 0.05,
+        u_prior: UPrior::SpikeSlab,
+        num_components: 5,
+        prior_alpha: 1.0,
         learning_rate: 0.05,
         num_iterations: 400,
         grad_clip: Some(10.0),
@@ -161,6 +164,9 @@ fn test_pure_noise_yields_no_geometry() {
         embedding_dim: h,
         num_negatives: 4,
         prior_inclusion: 0.05,
+        u_prior: UPrior::SpikeSlab,
+        num_components: 5,
+        prior_alpha: 1.0,
         learning_rate: 0.05,
         num_iterations: 300,
         grad_clip: Some(10.0),
@@ -191,6 +197,9 @@ fn test_recovery_improves_with_signal() {
             embedding_dim: h,
             num_negatives: 4,
             prior_inclusion: 0.05,
+            u_prior: UPrior::SpikeSlab,
+            num_components: 5,
+            prior_alpha: 1.0,
             learning_rate: 0.05,
             num_iterations: 300,
             grad_clip: Some(10.0),

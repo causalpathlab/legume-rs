@@ -14,7 +14,7 @@
 use anyhow::Result;
 use candle_util::candle_core::Device;
 use fagioli::embedding::diagnostics::{estimate_trait_geometry, to_correlation};
-use fagioli::embedding::model::EmbedConfig;
+use fagioli::embedding::model::{EmbedConfig, UPrior};
 use fagioli::embedding::noise::NoiseModel;
 use fagioli::embedding::train::train;
 use fagioli::embedding::whiten::whiten_blocks;
@@ -288,6 +288,9 @@ fn test_embedding_geometry_tracks_simulated_rg() -> Result<()> {
             embedding_dim: NUM_FACTORS,
             num_negatives: 4,
             prior_inclusion: 0.02,
+            u_prior: UPrior::SpikeSlab,
+            num_components: 5,
+            prior_alpha: 1.0,
             learning_rate: 0.05,
             num_iterations: 300,
             grad_clip: Some(10.0),

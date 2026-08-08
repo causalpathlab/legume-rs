@@ -22,7 +22,7 @@
 
 use anyhow::Result;
 use candle_util::candle_core::Device;
-use fagioli::embedding::model::EmbedConfig;
+use fagioli::embedding::model::{EmbedConfig, UPrior};
 use fagioli::embedding::noise::NoiseModel;
 use fagioli::embedding::score::{assemble_u, score_cohort, PanelStandardization};
 use fagioli::embedding::train::train;
@@ -235,6 +235,9 @@ fn one_replicate(seed: u64, trait_specific: f32, verbose: bool) -> Result<(f32, 
             embedding_dim: NUM_PROGRAMS,
             num_negatives: 4,
             prior_inclusion: 0.02,
+            u_prior: UPrior::SpikeSlab,
+            num_components: 5,
+            prior_alpha: 1.0,
             learning_rate: 0.05,
             num_iterations: 400,
             grad_clip: Some(10.0),
