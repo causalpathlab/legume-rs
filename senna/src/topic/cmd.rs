@@ -127,6 +127,13 @@ pub struct TopicArgs {
     )]
     pub(crate) add_topics: usize,
 
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
+
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
@@ -346,6 +353,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         .transpose()?
         .flatten();
 
+    let weight_fn: Option<Box<crate::topic::common::ColumnWeightFn>> =
+        args.pb_reference.as_ref().map(|r| {
+            let r = r.clone();
+            let f: Box<crate::topic::common::ColumnWeightFn> =
+                Box::new(move |names: &[Box<str>]| r.weights_for(names));
+            f
+        });
+
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -372,6 +387,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
+        column_weight_fn: weight_fn.as_deref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: args.feature_name_kind.clone().into(),
@@ -384,6 +400,25 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // 4. Per-level feature coarsenings for decoders.
     //    Dense encoder operates at D_coarse (finest level's coarsening).
     //    Decoders at coarser levels use fewer feature groups.
+    // Carried pseudobulks are training inputs, not cells. They must not reach
+    // the per-cell outputs, or `clustering` / `plot` / `annotate` would treat
+    // each one as an extra cell. The QC keep-mask is exactly the right lever —
+    // they are the trailing columns, since `update` appends the reference last.
+    let output_keep_idx = match args.pb_reference.as_ref() {
+        None => output_keep_idx,
+        Some(r) => {
+            let n_real = data_vec.num_columns().saturating_sub(r.cell_counts.len());
+            info!(
+                "Excluding {} carried pseudobulks from the per-cell outputs ({n_real} cells remain)",
+                r.cell_counts.len(),
+            );
+            Some(match output_keep_idx {
+                Some(keep) => keep.into_iter().filter(|&i| i < n_real).collect(),
+                None => (0..n_real).collect::<Vec<usize>>(),
+            })
+        }
+    };
+
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
 
@@ -1257,6 +1292,8 @@ impl crate::update::Updatable for TopicArgs {
         self.batch_files = r.batch_files;
         self.out = r.out;
         self.init_from = Some(r.init_from);
+        self.pb_reference = r.reference;
+
         // Only when growth was asked for: otherwise the recorded K is replayed
         // verbatim, and `parent_topics` is not even looked up.
         if !r.growth.is_none() {

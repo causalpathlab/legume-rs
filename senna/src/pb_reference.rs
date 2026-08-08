@@ -187,6 +187,74 @@ pub fn emit_if_requested(
     Ok(true)
 }
 
+/// A parent's carried pseudobulks, prepared as an ordinary input for the next
+/// fit: a backend path, a synthesized batch file, and the per-column weights.
+///
+/// `#[serde(skip)]` on the field that holds this — it is derived per invocation
+/// from the parent, never part of a recorded fit configuration.
+#[derive(Debug, Clone, Default)]
+pub struct ReferenceInput {
+    pub backend: Box<str>,
+    pub batch_file: Box<str>,
+    /// One weight per reference column, in column order.
+    pub cell_counts: Vec<f32>,
+}
+
+impl ReferenceInput {
+    /// Cells the reference stands for.
+    #[must_use]
+    pub fn cells_represented(&self) -> f32 {
+        self.cell_counts.iter().sum()
+    }
+
+    /// Weights for the whole loaded cohort, given its column names.
+    ///
+    /// The reference is appended last, so its columns are the trailing
+    /// `cell_counts.len()`. The count is checked rather than assumed: a
+    /// mismatch means the loader did not lay the columns out as expected, and
+    /// silently weighting the wrong ones would corrupt every pseudobulk size.
+    pub fn weights_for(&self, column_names: &[Box<str>]) -> anyhow::Result<Vec<f32>> {
+        let n_ref = self.cell_counts.len();
+        let n_total = column_names.len();
+        anyhow::ensure!(
+            n_total >= n_ref,
+            "pb_reference has {n_ref} columns but only {n_total} were loaded"
+        );
+        let mut w = vec![1.0f32; n_total];
+        w[n_total - n_ref..].copy_from_slice(&self.cell_counts);
+        Ok(w)
+    }
+}
+
+/// Prepare a parent's carried pseudobulks for reuse, writing the batch file
+/// the loader needs beside `out`.
+///
+/// `None` when the parent has none, which is the signal to fall back to
+/// re-reading its cells.
+pub fn prepare(parent: &str, out: &str) -> anyhow::Result<Option<ReferenceInput>> {
+    let Some(meta) = read_meta(parent)? else {
+        return Ok(None);
+    };
+    let backend = backend_path(parent);
+    anyhow::ensure!(
+        std::path::Path::new(&backend).exists(),
+        "{parent} records carried pseudobulks but {backend} is missing"
+    );
+
+    // The loader takes batch labels as a file, one line per column.
+    let batch_file = format!("{out}.pb_reference_batch.txt");
+    let body: String = std::iter::repeat_n(meta.batch_label.as_ref(), meta.cell_counts.len())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&batch_file, body + "\n")?;
+
+    Ok(Some(ReferenceInput {
+        backend: backend.into(),
+        batch_file: batch_file.into(),
+        cell_counts: meta.cell_counts,
+    }))
+}
+
 /// Read the sidecar for a run's carried pseudobulks, or `None` when it has none.
 pub fn read_meta(prefix: &str) -> anyhow::Result<Option<PbReferenceMeta>> {
     let path = sidecar_path(prefix);

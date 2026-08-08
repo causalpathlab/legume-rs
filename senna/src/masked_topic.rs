@@ -824,6 +824,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn,
+        column_weight_fn: None,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: if effective_multiome {
             data_beans::sparse_io_vector::ColumnAlignment::Union

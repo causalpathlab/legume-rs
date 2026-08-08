@@ -236,6 +236,13 @@ pub struct LoadProjectArgs<'a> {
     /// `SparseIoVec::mask_rows` before projection. Use this to restrict
     /// the model to features covered by a feature network / curated list.
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
+    /// Optional per-column weights, keyed on the post-load column names.
+    /// Registered before projection so every downstream statistic — the
+    /// pseudobulk sizes, the per-batch counts, the pb-sample cell counts —
+    /// treats a column standing for `m` cells as `m` observations. Used to
+    /// bring a run's carried pseudobulks back in without their weighing one
+    /// cell apiece; `None` leaves every column at 1.
+    pub column_weight_fn: Option<&'a ColumnWeightFn>,
     /// Row-alignment strategy when multiple `data_files` are passed.
     /// Default Union — keep every row from any backend (single-
     /// modality cohorts unchanged because all backends share the same
@@ -260,6 +267,10 @@ pub struct LoadProjectArgs<'a> {
 /// and [`LoadCollapseArgs::feature_mask_fn`] to physically subset rows
 /// (via `SparseIoVec::mask_rows`) before projection / collapse / training.
 pub type FeatureMaskFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<bool>>;
+
+/// Callback that, given the loaded data's column names, returns one weight per
+/// column. See [`LoadProjectArgs::column_weight_fn`].
+pub type ColumnWeightFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<f32>>;
 
 /// Read sparse files, resolve batch membership, optionally pick HVGs,
 /// then run the random projection. Used by `load_and_collapse` and by
@@ -305,6 +316,21 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
             "feature_mask_fn dropped every feature — check name resolution"
         );
         data_vec.mask_rows(&keep)?;
+    }
+
+    // Before projection: the sketch that drives PB partitioning should already
+    // see a carried pseudobulk as the many cells it stands for.
+    if let Some(weight_fn) = args.column_weight_fn {
+        let col_names = data_vec.column_names()?;
+        let w = weight_fn(&col_names)?;
+        data_vec.register_column_multiplicity(&w)?;
+        let carried: f32 = w.iter().filter(|&&x| x > 1.0).sum();
+        info!(
+            "Column multiplicity: {} of {} columns stand for more than one cell ({} cells total)",
+            w.iter().filter(|&&x| x > 1.0).count(),
+            w.len(),
+            carried as usize,
+        );
     }
 
     let mut selected_features: Option<HvgSelection> = None;
@@ -386,6 +412,8 @@ pub struct LoadCollapseArgs<'a> {
     pub qc_report_out: Option<&'a str>,
     /// Optional row-subset hook — see [`LoadProjectArgs::feature_mask_fn`].
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
+    /// Optional per-column weights — see [`LoadProjectArgs::column_weight_fn`].
+    pub column_weight_fn: Option<&'a ColumnWeightFn>,
     /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
     pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
     /// Column-alignment strategy — see [`LoadProjectArgs::column_alignment`].
@@ -437,6 +465,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         qc_block_size: args.qc_block_size,
         qc_report_out: args.qc_report_out,
         feature_mask_fn: args.feature_mask_fn,
+        column_weight_fn: args.column_weight_fn,
         row_alignment: args.row_alignment,
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
