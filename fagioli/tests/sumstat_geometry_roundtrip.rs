@@ -20,7 +20,7 @@ use fagioli::embedding::train::train;
 use fagioli::embedding::whiten::whiten_blocks;
 use fagioli::genotype::{BedReader, GenotypeReader};
 use fagioli::summary_stats::calibration::calibrate_input;
-use fagioli::summary_stats::common::SumstatInput;
+use fagioli::summary_stats::common::{decompose_blocks, SumstatInput};
 use fagioli::summary_stats::{create_uniform_blocks, read_sumstat_zscores_with_n};
 use flate2::read::GzDecoder;
 use nalgebra::DMatrix;
@@ -262,7 +262,8 @@ fn test_embedding_geometry_tracks_simulated_rg() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let sim = simulate(dir.path(), NUM_FACTORS, 424242)?;
 
-    let (report, bases) = calibrate_input(&sim.input).expect("calibration");
+    let bases = decompose_blocks(&sim.input);
+    let report = calibrate_input(&sim.input, &bases).expect("calibration");
     let lambda = report.noise.lambda_white();
     println!(
         "\ncalibration: c={:.3}, τ={:.4} (SE {:.4}), whiteness dev {:.3}{}",

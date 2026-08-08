@@ -34,7 +34,7 @@ use fagioli::embedding::train::{train, EmbedFit};
 use fagioli::embedding::whiten::whiten_blocks;
 use fagioli::genotype::GenotypeMatrix;
 use fagioli::summary_stats::calibration::calibrate_input;
-use fagioli::summary_stats::common::SumstatInput;
+use fagioli::summary_stats::common::{decompose_blocks, SumstatInput};
 use fagioli::summary_stats::LdBlock;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
@@ -319,7 +319,8 @@ struct Measured {
 }
 
 fn run(truth: &Truth, dense_arm: bool, gauge_weight: f64) -> Result<Measured> {
-    let (report, bases) = calibrate_input(&truth.input).expect("calibration");
+    let bases = decompose_blocks(&truth.input);
+    let report = calibrate_input(&truth.input, &bases).expect("calibration");
     let lambda = report.noise.lambda_white();
     let blocks = whiten_blocks(&truth.input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();

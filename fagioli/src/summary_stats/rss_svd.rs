@@ -92,47 +92,6 @@ impl RssEigenBasis {
     }
 }
 
-/// One pass of per-block randomized SVDs, indexed by position in the block list.
-///
-/// `D` and `V` do not depend on λ, but the two stages that need them are
-/// separated by λ: calibration has to fit the moment law on `V'z` to derive τ,
-/// and λ is τ. Carrying the bases across that boundary is what stops the
-/// randomized SVD — the dominant cost of a fit — from being paid twice for the
-/// same block.
-///
-/// Slots are `None` where nothing was decomposed, so a consumer whose block
-/// filter is not the producer's still gets a correct answer by decomposing the
-/// misses itself. The two filters are deliberately not assumed to agree.
-pub struct BlockEigenBases {
-    slots: Vec<Option<RssEigenBasis>>,
-}
-
-impl BlockEigenBases {
-    /// Wrap one slot per block, `None` where no decomposition was attempted.
-    pub fn from_slots(slots: Vec<Option<RssEigenBasis>>) -> Self {
-        Self { slots }
-    }
-
-    /// A cache holding nothing — every lookup misses and the consumer
-    /// decomposes for itself, which is the behaviour before this existed.
-    pub fn empty() -> Self {
-        Self { slots: Vec::new() }
-    }
-
-    /// How many blocks actually carry a basis.
-    pub fn num_cached(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_some()).count()
-    }
-
-    /// Consume into exactly `num_blocks` slots, padding or truncating so the
-    /// result can be zipped against the block list without a length check.
-    pub fn into_slots(mut self, num_blocks: usize) -> Vec<Option<RssEigenBasis>> {
-        self.slots.truncate(num_blocks);
-        self.slots.resize_with(num_blocks, || None);
-        self.slots
-    }
-}
-
 /// Precomputed SVD of the reference genotype matrix for RSS likelihood (nalgebra).
 pub struct RssSvdNal {
     /// X̃ = D̃ V', shape (K, p)

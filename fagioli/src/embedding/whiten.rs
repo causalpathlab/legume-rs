@@ -38,15 +38,10 @@
 
 use anyhow::Result;
 use log::info;
-use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
-use crate::summary_stats::common::SumstatInput;
-use crate::summary_stats::rss_svd::{BlockEigenBases, RssEigenBasis};
-
-/// Blocks below this many SNPs carry too little rank to be worth fitting.
-pub const MIN_BLOCK_SNPS: usize = 10;
+use crate::summary_stats::common::{BlockEigenBases, SumstatInput};
 
 /// One LD block, whitened on both axes and ready for training.
 pub struct WhitenedBlock {
@@ -74,14 +69,14 @@ impl WhitenedBlock {
     }
 }
 
-/// Whiten every block that is large enough to fit.
+/// Whiten every decomposed block.
 ///
-/// `bases` are the decompositions [`crate::summary_stats::calibration::calibrate_input`]
-/// already paid for. `D` and `V` do not depend on λ, so the only thing this
-/// stage adds is the ridge: reusing them makes the randomized SVD a single pass
-/// over the panel instead of two. Pass [`BlockEigenBases::empty`] to decompose
-/// here instead — the two stages filter blocks on different thresholds, so any
-/// block without a basis is decomposed on the spot rather than dropped.
+/// `bases` comes from [`decompose_blocks`](crate::summary_stats::common::decompose_blocks)
+/// and is *consumed*: `D` and `V` are
+/// λ-independent, so the only thing this stage adds is the ridge, and each
+/// basis is turned into the design it implies rather than held alongside it.
+/// Calibration borrows the same bases beforehand to derive the `lambda` passed
+/// here, which is why the randomized SVD happens once for the two of them.
 ///
 /// `omega_inv_sqrt` is `Ω^{-1/2}` (T x T), or `None` for `Ω = I` — the default,
 /// correct whenever the cohorts behind the traits are disjoint. `lambda` should
@@ -92,35 +87,16 @@ pub fn whiten_blocks(
     omega_inv_sqrt: Option<&DMatrix<f32>>,
     lambda: f64,
 ) -> Result<Vec<WhitenedBlock>> {
-    let slots = bases.into_slots(input.blocks.len());
+    let num_decomposed = bases.len();
 
-    let mut blocks: Vec<(WhitenedBlock, bool)> = slots
+    let mut blocks: Vec<WhitenedBlock> = bases
+        .into_blocks()
         .into_par_iter()
-        .zip(input.blocks.par_iter())
-        .enumerate()
-        .filter_map(|(block_idx, (cached, block))| {
-            let num_snps = block.num_snps();
-            if num_snps < MIN_BLOCK_SNPS {
-                return None;
-            }
+        .map(|b| {
+            let d_sq = b.basis.singular_values_sq();
+            let svd = b.basis.into_svd(lambda);
 
-            let reused = cached.is_some();
-            let basis = match cached {
-                Some(basis) => basis,
-                None => {
-                    let mut x_block = input
-                        .geno
-                        .genotypes
-                        .columns(block.snp_start, num_snps)
-                        .clone_owned();
-                    x_block.scale_columns_inplace();
-                    RssEigenBasis::from_genotypes(&x_block, input.max_rank).ok()?
-                }
-            };
-            let d_sq = basis.singular_values_sq();
-            let svd = basis.into_svd(lambda);
-
-            let z_block = input.zscores.rows(block.snp_start, num_snps).clone_owned();
+            let z_block = input.zscores.rows(b.snp_start, b.num_snps).clone_owned();
             // D̃⁻¹ V_R' z, then Ω^{-1/2} on the trait axis when overlap is modelled.
             let z_tilde = svd.project_zscores(&z_block);
             let z_white = match omega_inv_sqrt {
@@ -128,36 +104,28 @@ pub fn whiten_blocks(
                 None => z_tilde,
             };
 
-            Some((
-                WhitenedBlock {
-                    block_idx,
-                    snp_start: block.snp_start,
-                    num_snps,
-                    // Consumes the SVD, so V goes out of scope with it rather
-                    // than being held alongside a clone of the design.
-                    x_design: svd.into_x_design(),
-                    z_white,
-                    d_sq,
-                },
-                reused,
-            ))
+            WhitenedBlock {
+                block_idx: b.block_idx,
+                snp_start: b.snp_start,
+                num_snps: b.num_snps,
+                // Consumes the SVD, so V goes out of scope with it rather than
+                // being held alongside a clone of the design.
+                x_design: svd.into_x_design(),
+                z_white,
+                d_sq,
+            }
         })
         .collect();
 
-    blocks.sort_by_key(|(b, _)| b.block_idx);
-
-    let reused = blocks.iter().filter(|(_, r)| *r).count();
-    let blocks: Vec<WhitenedBlock> = blocks.into_iter().map(|(b, _)| b).collect();
+    blocks.sort_by_key(|b| b.block_idx);
 
     let total_rank: usize = blocks.iter().map(WhitenedBlock::rank).sum();
     info!(
-        "Whitened {}/{} blocks (λ={:.4}): {} eigen-coordinates total, \
-         {} decompositions reused from calibration",
+        "Whitened {}/{} decomposed blocks (λ={:.4}): {} eigen-coordinates total",
         blocks.len(),
-        input.blocks.len(),
+        num_decomposed,
         lambda,
         total_rank,
-        reused,
     );
 
     Ok(blocks)

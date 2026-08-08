@@ -12,7 +12,7 @@ use fagioli::embedding::whiten::whiten_blocks;
 use fagioli::io::results::write_parameters;
 use fagioli::sgvb::ComputeDevice;
 use fagioli::summary_stats::calibration::calibrate_input;
-use fagioli::summary_stats::common::{prepare_sumstat_input, CommonSumstatArgs};
+use fagioli::summary_stats::common::{decompose_blocks, prepare_sumstat_input, CommonSumstatArgs};
 
 #[derive(Args, Debug, Clone)]
 #[command(long_about = "Embed GWAS summary statistics into a shared variant-trait program space.
@@ -222,9 +222,11 @@ pub fn embed_sumstat(args: &EmbedSumstatArgs) -> Result<()> {
     let num_traits = input.zscores.ncols();
 
     // ── Step 2: Calibrate the null and choose lambda ─────────────────────
-    // The bases carry calibration's randomized SVDs into the whitening below,
-    // which needs the same D and V and differs only by the ridge.
-    let (report, bases) = calibrate_input(&input)
+    // One randomized SVD per block, borrowed by the calibration below and moved
+    // into the whitening after it: both stages need the same D and V, and only
+    // the ridge between them depends on lambda.
+    let bases = decompose_blocks(&input);
+    let report = calibrate_input(&input, &bases)
         .ok_or_else(|| anyhow::anyhow!("Could not calibrate the null; no block was large enough"))?;
     let lambda = match args.common.lambda {
         Some(l) => {
