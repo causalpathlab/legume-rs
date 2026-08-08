@@ -4,6 +4,7 @@ use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
 use crate::nn::gcn::GcnBlock;
 use crate::nn::layers::*;
+use crate::sgvb::l2_normalize_dim;
 use crate::traits::indexed::*;
 use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
@@ -37,7 +38,35 @@ pub struct IndexedEmbeddingEncoder {
     /// (dense/legacy/pinto) neither allocate nor persist this var, and old
     /// safetensors (lacking `attn.query`) still load.
     attn_query: Option<Tensor>,
+    /// Gene-module centroids `C [H, M]` for the module-pooling branch.
+    ///
+    /// Several features often do the same job — paralogues, co-regulated members of
+    /// one program, alternative probes for a transcript — and *which* of them a
+    /// dataset captures varies with chemistry, dropout and panel. The single-query
+    /// pool attends to each gene separately, so it has no way to know two genes were
+    /// interchangeable. Pooling *within a learned group* gives a statistic that
+    /// survives when individual members drop out.
+    ///
+    /// `None` when `n_gene_modules == 0`: no var is registered, the FC input width is
+    /// unchanged, and the safetensors are byte-identical to a build without this.
+    module_centroids: Option<Tensor>,
+    n_gene_modules: usize,
 }
+
+/// Softmax temperature for gene-module membership.
+///
+/// Membership logits are **cosine** similarities, so they live in `[-1, 1]` and this
+/// is the only thing setting sharpness — on a fixed, interpretable scale. Too low and
+/// membership goes one-hot with dead modules; too high and every gene belongs to every
+/// module, so the branch carries nothing. Deliberately a constant, not a tuned knob.
+const MODULE_TEMP: f64 = 0.1;
+
+/// Floor on per-module coverage when it is used as a divisor.
+///
+/// Bounds `∂u/∂numerator` at `1/EPS_COVERAGE`; see the note in
+/// [`IndexedEmbeddingEncoder::module_pool`]. Only binds for modules a cell has
+/// effectively not observed, where `u` carries no information anyway.
+const EPS_COVERAGE: f32 = 1e-2;
 
 pub struct IndexedEmbeddingEncoderArgs<'a> {
     pub n_features: usize,
@@ -56,6 +85,12 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     /// (dense ELBO / pinto) set this `false` so no `attn.query` var is
     /// registered — keeping their safetensors unchanged.
     pub attn_pool: bool,
+    /// Number of learned gene modules `M` for the module-pooling branch (see
+    /// [`IndexedEmbeddingEncoder`]'s `module_centroids`).
+    ///
+    /// `0` disables it entirely: no new var, unchanged FC input width, byte-identical
+    /// safetensors. Callers that do not want it pass `0`.
+    pub n_gene_modules: usize,
 }
 
 impl IndexedEmbeddingEncoder {
@@ -83,9 +118,11 @@ impl IndexedEmbeddingEncoder {
             None
         };
 
-        // FC stack: embedding_dim -> ... -> final_hidden
+        // FC stack: (embedding_dim + 2M) -> ... -> final_hidden. The module branch
+        // appends `log u` and `log1p(cov)`, hence 2M; at M = 0 this is `embedding_dim`
+        // and the layer shapes are unchanged.
         let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
-        let in_dim = args.embedding_dim;
+        let in_dim = args.embedding_dim + 2 * args.n_gene_modules;
         let out_dim = *args.layers.last().unwrap();
         let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
 
@@ -96,6 +133,16 @@ impl IndexedEmbeddingEncoder {
 
         let attn_query = if args.attn_pool {
             Some(vb.get_with_hints((1, args.embedding_dim), "attn.query", init_ws)?)
+        } else {
+            None
+        };
+
+        let module_centroids = if args.n_gene_modules > 0 {
+            Some(vb.get_with_hints(
+                (args.embedding_dim, args.n_gene_modules),
+                "modules.centroids",
+                init_ws,
+            )?)
         } else {
             None
         };
@@ -111,7 +158,29 @@ impl IndexedEmbeddingEncoder {
             z_mean,
             z_lnvar,
             attn_query,
+            module_centroids,
+            n_gene_modules: args.n_gene_modules,
         })
+    }
+
+    /// Number of learned gene modules `M` (`0` when the branch is disabled).
+    pub fn n_gene_modules(&self) -> usize {
+        self.n_gene_modules
+    }
+
+    /// Gene-module centroids `C [H, M]`, or `None` when the branch is disabled.
+    ///
+    /// The Kaiming default is deliberate, not a placeholder: membership is scored by
+    /// **cosine**, so the init's scale is discarded and what remains is `M` random unit
+    /// directions — the right uninformative prior for a directional quantity, and
+    /// near-orthogonal already at the usual `H` (expected pairwise `|cos| ≈ 1/√H`).
+    ///
+    /// Read-only. Seeding `C` from data (spherical k-means on a *pretrained* `ρ`) is
+    /// worth doing only if the per-module load histogram shows dead modules, or if `M`
+    /// approaches `H` where random directions start colliding. That write goes through
+    /// the `enc.modules.centroids` `Var` in the `VarMap`, not through here.
+    pub fn module_centroids(&self) -> Option<&Tensor> {
+        self.module_centroids.as_ref()
     }
 
     /// Whether this encoder owns a [`GcnBlock`]. Callers use this to
@@ -259,7 +328,104 @@ impl IndexedEmbeddingEncoder {
             .sum_keepdim(1)?
             .gt(0.0)?
             .to_dtype(pooled_nh.dtype())?; // [N, 1]
-        pooled_nh.broadcast_mul(&has_visible_n1) // [N, H]
+        let pooled_nh = pooled_nh.broadcast_mul(&has_visible_n1)?; // [N, H]
+
+        // Module branch. Disabled ⇒ return exactly what this function always returned.
+        let Some(centroids) = self.module_centroids.as_ref() else {
+            return Ok(pooled_nh);
+        };
+        let (u_nm, cov_nm) = self.module_pool(&e_nk_h, &a_nk, visible_mask, centroids)?;
+
+        // Plain `log`, NOT centered. Expression is multiplicative so a log belongs
+        // here, but a linear layer downstream can already form any log-ratio
+        // `log u_j − log u_k`, so centering would add no representational power — it
+        // would only delete the overall-level direction, which is mostly (not purely)
+        // depth. `cov` is likewise uncentered: its absolute level ("3 of 5 members
+        // seen") IS the reliability signal it exists to carry.
+        let feats_n2m = Tensor::cat(&[&(u_nm + 1e-6)?.log()?, &(cov_nm + 1.0)?.log()?], 1)?; // [N, 2M]
+        Tensor::cat(&[&pooled_nh, &feats_n2m.broadcast_mul(&has_visible_n1)?], 1)
+        // [N, H + 2M]
+    }
+
+    /// Per-module level `u [N, M]` and coverage `cov [N, M]` for one minibatch.
+    ///
+    /// `cov[n,j] = Σ_{g∈ctx} m[g,j]` over the slots this cell actually observed, and
+    /// `u[n,j]` is the membership-weighted mean of the value gate over the *same*
+    /// slots.
+    ///
+    /// **The denominator is the whole point.** Dividing by the total over all context
+    /// genes would make `u[n,j]` shrink whenever module `j`'s members happen to be
+    /// missing — exactly the cross-dataset fragility this branch exists to remove.
+    /// Dividing by `cov[n,j]` instead makes `u` a mean over the members that *were*
+    /// captured, so losing members costs variance, not level.
+    fn module_pool(
+        &self,
+        e_nk_h: &Tensor,
+        a_nk: &Tensor,
+        visible_mask: &Tensor,
+        centroids: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let (n, k, h) = e_nk_h.dims3()?;
+        let m = self.n_gene_modules;
+
+        // Cosine, not dot product: magnitude is the channel by which one centroid
+        // swallows every gene, and bounded logits are what make `MODULE_TEMP` mean
+        // something on a fixed scale.
+        let logits_nkm = l2_normalize_dim(&e_nk_h.reshape((n * k, h))?, 1)?
+            .matmul(&l2_normalize_dim(centroids, 0)?)?
+            .reshape((n, k, m))?;
+        let mem_nkm = ops::softmax(&(logits_nkm / MODULE_TEMP)?, 2)?; // [N, K, M]
+
+        // Restrict to observed slots: a masked gene must not contribute to either the
+        // level or the coverage, or the branch leaks the value being imputed.
+        let mem_vis = mem_nkm.broadcast_mul(&visible_mask.unsqueeze(2)?)?; // [N, K, M]
+        let cov_nm = mem_vis.sum(1)?; // [N, M]
+
+        // Divide by a FLOORED coverage. `cov` is never exactly zero — membership is a
+        // softmax, so every module gets some mass from every observed gene — but it
+        // spans orders of magnitude: at `MODULE_TEMP = 0.1` a maximally mismatched
+        // module receives ~exp(-2/τ) ≈ 2e-9 per slot, so with a few hundred visible
+        // slots its coverage lands near 1e-6. Dividing by that directly makes
+        // `∂u/∂numerator = 1/cov ≈ 1e6`, and the downstream `log(u + ε)` multiplies by
+        // another `1/(u+ε)` — an absent module would then dominate the gradient of the
+        // whole branch. The floor caps that at `1/EPS_COVERAGE` and costs nothing where
+        // a module is genuinely present, since real coverage is O(1) or larger.
+        let u_nm = mem_vis
+            .broadcast_mul(&a_nk.unsqueeze(2)?)?
+            .sum(1)?
+            .div(&cov_nm.clamp(EPS_COVERAGE, f32::INFINITY)?)?; // [N, M]
+
+        Ok((u_nm, cov_nm))
+    }
+
+    /// Diagnostic read-out of the module branch: `(u [N, M], cov [N, M])`, or `None`
+    /// when it is disabled.
+    ///
+    /// Not used by training — the objective is deliberately unchanged by this branch.
+    /// It exists so the per-module load histogram can be logged without a second
+    /// forward pass. Watch it from the first epoch: without a load-balancing penalty
+    /// (which would be a loss change) collapse is resisted only by the cosine
+    /// parameterization, the centroid init and `MODULE_TEMP`, and it is self-absorbing
+    /// once it happens, because a dead module's centroid stops receiving gradient.
+    pub fn module_activity(
+        &self,
+        indices: &Tensor,
+        values: &Tensor,
+        values_null: Option<&Tensor>,
+        values_mean: Option<&Tensor>,
+        visible_mask: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        let Some(centroids) = self.module_centroids.as_ref() else {
+            return Ok(None);
+        };
+        let (n, k) = indices.dims2()?;
+        let e_nk_h = self
+            .feature_embeddings
+            .index_select(&indices.flatten_all()?, 0)?
+            .reshape((n, k, self.embedding_dim))?;
+        let a_nk = anscombe_lite(values, values_null, values_mean)?;
+        self.module_pool(&e_nk_h, &a_nk, visible_mask, centroids)
+            .map(Some)
     }
 
     /// Shared masked-encoder trunk: visible-pool → FC → BN → `bn_nl [N, L]`.
@@ -492,6 +658,7 @@ mod tests {
                 layers: &layers,
                 use_gcn: false,
                 attn_pool: false,
+                n_gene_modules: 0,
             },
             &varmap,
             vb,
@@ -511,5 +678,230 @@ mod tests {
                 assert!(v.is_finite(), "non-finite pooled value {v}");
             }
         }
+    }
+
+    /// Build an encoder and report `(sorted var names, fc-input width)`.
+    fn var_signature(n_gene_modules: usize) -> (Vec<String>, usize) {
+        let device = Device::Cpu;
+        let embedding_dim = 4;
+        let varmap = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+        let layers = vec![8, 5];
+        IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: 6,
+                n_topics: 2,
+                embedding_dim,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: true,
+                n_gene_modules,
+            },
+            &varmap,
+            vb.pp("enc"),
+        )
+        .unwrap();
+
+        let data = varmap.data().lock().unwrap();
+        let mut names: Vec<String> = data.keys().cloned().collect();
+        names.sort();
+        // First FC layer: [hidden, in_dim].
+        let fc_in = data["enc.nn.enc.fc.relu_linear_stack.0.weight"].dims()[1];
+        (names, fc_in)
+    }
+
+    /// `n_gene_modules = 0` must leave the checkpoint exactly as it was before the
+    /// module branch existed: same vars, same FC input width. This is the
+    /// compatibility gate — every model trained before this feature has to keep
+    /// loading, and `VarMap::load` errors on any shape mismatch.
+    #[test]
+    fn module_branch_off_is_indistinguishable() {
+        let (names, fc_in) = var_signature(0);
+        assert_eq!(
+            fc_in, 4,
+            "at M = 0 the FC stack must take exactly embedding_dim"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("modules")),
+            "M = 0 must register no module var; got {names:?}"
+        );
+    }
+
+    /// `M > 0` adds exactly one var and widens the FC input by `2M` — `log u` and
+    /// `log1p(cov)` per module, nothing else.
+    #[test]
+    fn module_branch_adds_one_var_and_widens_by_two_m() {
+        let m = 3;
+        let (off, fc_off) = var_signature(0);
+        let (on, fc_on) = var_signature(m);
+
+        assert_eq!(
+            fc_on,
+            fc_off + 2 * m,
+            "FC input must grow by 2M (level + coverage per module)"
+        );
+
+        let added: Vec<&String> = on.iter().filter(|n| !off.contains(n)).collect();
+        assert_eq!(
+            added,
+            vec!["enc.modules.centroids"],
+            "the branch must add exactly the centroid var"
+        );
+        assert!(
+            off.iter().all(|n| on.contains(n)),
+            "enabling modules must not remove any existing var"
+        );
+    }
+
+    /// The module read-out must be finite, correctly shaped, and — the property the
+    /// whole branch exists for — **masked slots must not contribute**, or the encoder
+    /// leaks the value being imputed.
+    #[test]
+    fn module_activity_respects_the_visible_mask() {
+        let device = Device::Cpu;
+        let embedding_dim = 4;
+        let m = 3;
+        let varmap = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+        let layers = vec![8, 5];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: 6,
+                n_topics: 2,
+                embedding_dim,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: true,
+                n_gene_modules: m,
+            },
+            &varmap,
+            vb.pp("enc"),
+        )
+        .unwrap();
+
+        let indices = Tensor::from_vec(vec![0u32, 1, 2, 3], (2, 2), &device).unwrap();
+        let values = Tensor::from_vec(vec![4.0f32, 9.0, 16.0, 25.0], (2, 2), &device).unwrap();
+        // Cell 0 sees both slots; cell 1 sees neither.
+        let vis = Tensor::from_vec(vec![1.0f32, 1.0, 0.0, 0.0], (2, 2), &device).unwrap();
+
+        let (u, cov) = enc
+            .module_activity(&indices, &values, None, None, &vis)
+            .unwrap()
+            .expect("module branch is enabled");
+        assert_eq!(u.dims(), &[2, m]);
+        assert_eq!(cov.dims(), &[2, m]);
+
+        let cov_v = cov.to_vec2::<f32>().unwrap();
+        let u_v = u.to_vec2::<f32>().unwrap();
+        // Coverage sums to the number of VISIBLE slots, since membership is a
+        // distribution over modules for each observed gene.
+        assert!(
+            (cov_v[0].iter().sum::<f32>() - 2.0).abs() < 1e-4,
+            "cell 0 saw 2 slots; got {:?}",
+            cov_v[0]
+        );
+        for (j, &c) in cov_v[1].iter().enumerate() {
+            assert!(
+                c.abs() < 1e-6,
+                "fully masked cell must have zero coverage in module {j}: {c}"
+            );
+        }
+        for row in u_v.iter().chain(cov_v.iter()) {
+            for v in row {
+                assert!(v.is_finite(), "non-finite module read-out {v}");
+            }
+        }
+    }
+
+    /// Gradients through the module branch must stay bounded for a cell that barely
+    /// observed a module. Coverage is never exactly zero (membership is a softmax), but
+    /// it can land near 1e-6, and dividing by that unfloored would let an *absent*
+    /// module dominate the gradient of the whole branch.
+    #[test]
+    fn module_gradients_stay_finite_and_bounded() {
+        let device = Device::Cpu;
+        let embedding_dim = 4;
+        let m = 6;
+        let varmap = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+        let layers = vec![8, 5];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: 6,
+                n_topics: 2,
+                embedding_dim,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: true,
+                n_gene_modules: m,
+            },
+            &varmap,
+            vb.pp("enc"),
+        )
+        .unwrap();
+
+        let indices = Tensor::from_vec(vec![0u32, 1, 2, 3], (2, 2), &device).unwrap();
+        let values = Tensor::from_vec(vec![4.0f32, 9.0, 16.0, 25.0], (2, 2), &device).unwrap();
+        // Cell 1 has a single visible slot, so most of its modules are effectively
+        // unobserved — the regime where an unfloored divisor blows up.
+        let vis = Tensor::from_vec(vec![1.0f32, 1.0, 1.0, 0.0], (2, 2), &device).unwrap();
+
+        let pooled = enc
+            .preprocess_indexed_masked(&indices, &values, None, None, &vis)
+            .unwrap();
+        assert_eq!(pooled.dims(), &[2, embedding_dim + 2 * m]);
+
+        let loss = pooled.sqr().unwrap().sum_all().unwrap();
+        let grads = loss.backward().unwrap();
+
+        let vars = varmap.all_vars();
+        let centroids = vars
+            .iter()
+            .find(|v| v.dims() == [embedding_dim, m])
+            .expect("centroid var");
+        let g = grads
+            .get(centroids)
+            .expect("centroids must receive gradient");
+        for row in g.to_vec2::<f32>().unwrap() {
+            for v in row {
+                assert!(v.is_finite(), "non-finite centroid gradient {v}");
+                assert!(
+                    v.abs() < 1e5,
+                    "centroid gradient {v} is exploding — check the coverage floor"
+                );
+            }
+        }
+    }
+
+    /// A disabled branch must report `None` rather than an empty tensor, so callers
+    /// cannot silently log a zero-width histogram and conclude nothing collapsed.
+    #[test]
+    fn module_activity_is_none_when_disabled() {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+        let layers = vec![8, 5];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: 6,
+                n_topics: 2,
+                embedding_dim: 4,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: true,
+                n_gene_modules: 0,
+            },
+            &varmap,
+            vb.pp("enc"),
+        )
+        .unwrap();
+
+        let indices = Tensor::from_vec(vec![0u32, 1], (1, 2), &device).unwrap();
+        let values = Tensor::from_vec(vec![4.0f32, 9.0], (1, 2), &device).unwrap();
+        let vis = Tensor::from_vec(vec![1.0f32, 1.0], (1, 2), &device).unwrap();
+        assert!(enc
+            .module_activity(&indices, &values, None, None, &vis)
+            .unwrap()
+            .is_none());
     }
 }

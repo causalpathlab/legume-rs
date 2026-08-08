@@ -363,9 +363,89 @@ pub(crate) fn aggregate_feature_mean_to_coarse(
 //////////////////////
 
 fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
-    let (training_genes, beta_dk) = load_dictionary(&args.model)?;
+    let mode = resolve_mode(args);
+    let refine_config = TopicRefinementConfig {
+        num_steps: if args.decoder_only && args.refine_steps == 0 {
+            100
+        } else {
+            args.refine_steps
+        },
+        learning_rate: if args.decoder_only && args.refine_lr <= 0.01 {
+            0.05
+        } else {
+            args.refine_lr
+        },
+        regularization: args.refine_reg,
+    };
+
+    let s = score_dense_backend(DenseScoreArgs {
+        model: &args.model,
+        data_files: &args.data_files,
+        batch_files: args.batch_files.as_deref(),
+        preload: args.preload_data,
+        minibatch_size: args.minibatch_size,
+        block_size: args.block_size,
+        delta_iters: args.delta_iters,
+        query_name_opts: &args.query_name_opts(),
+        metadata,
+        mode,
+        refine_config: &refine_config,
+    })?;
+
+    finalize_predict(FinalizePredict {
+        args,
+        data_vec: &s.data_vec,
+        z_nk: &s.z_nk,
+        llik: &s.llik,
+        total: &s.total,
+        beta_dk: &s.beta_dk,
+        delta_db: s.delta_db.as_ref(),
+        gene_remap: s.gene_remap.as_ref(),
+    })
+}
+
+/// Inputs for [`score_dense_backend`] — the `predict`-independent subset, so `probe` can
+/// score a dense model without constructing a whole `PredictArgs`.
+pub(crate) struct DenseScoreArgs<'a> {
+    pub model: &'a str,
+    pub data_files: &'a [Box<str>],
+    pub batch_files: Option<&'a [Box<str>]>,
+    pub preload: bool,
+    pub minibatch_size: usize,
+    pub block_size: Option<usize>,
+    pub delta_iters: usize,
+    pub query_name_opts: &'a QueryNameOpts,
+    pub metadata: &'a TopicModelMetadata,
+    pub mode: LatentMode,
+    pub refine_config: &'a TopicRefinementConfig,
+}
+
+/// What the dense scoring pass produces.
+///
+/// `predict` consumes every field; `probe` needs only `data_vec` / `llik` / `total`. The
+/// struct exists because the dense path used to return a bare 4-tuple from inside a driver
+/// that also wrote files, so there was no way to ask it for a score and nothing else.
+///
+/// ⚠️ `llik`'s **scale** is decoder-dependent: `multinom` gives `Σ_d w_d·x_d·log p_d` (NB-Fisher
+/// weighted, against an unweighted `total`), while `nb`/`nbmixture` give an NB log-density sum.
+/// All are monotone in fit, and `probe` calibrates against its own null, so verdicts are
+/// unaffected — but these numbers are not comparable to the masked path's nats/count.
+pub(crate) struct DenseScored {
+    pub data_vec: SparseIoVec,
+    pub z_nk: Mat,
+    pub llik: Vec<f32>,
+    pub total: Vec<f32>,
+    pub gene_remap: Option<GeneRemap>,
+    pub beta_dk: Mat,
+    /// The TMLE-refined δ, so the caller can regress it out when writing a residual backend.
+    pub delta_db: Option<Mat>,
+}
+
+pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<DenseScored> {
+    let metadata = a.metadata;
+    let (training_genes, beta_dk) = load_dictionary(a.model)?;
     let coarsening = if metadata.has_coarsening {
-        load_coarsening(&args.model)?
+        load_coarsening(a.model)?
     } else {
         None
     };
@@ -375,15 +455,15 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
     // training time; absent for older models, where the encoder falls
     // back to live per-feature batch centering inside `anscombe_residual`.
     let feature_mean_enc: Option<Vec<f32>> =
-        match crate::topic::model_metadata::load_feature_mean(&args.model) {
+        match crate::topic::model_metadata::load_feature_mean(a.model) {
             Ok((_, full)) => Some(aggregate_feature_mean_to_coarse(&full, coarsening.as_ref())),
             Err(_) => None,
         };
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload_data,
+        data_files: a.data_files.to_vec(),
+        batch_files: a.batch_files.map(<[_]>::to_vec),
+        preload: a.preload,
         ..Default::default()
     })?;
     let mut data_vec = loaded.data;
@@ -395,14 +475,14 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
+    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     let delta_db = estimate_delta(
         &data_vec,
         &beta_dk,
         metadata.theta_mean.as_deref(),
         gene_remap.as_ref(),
-        args.block_size,
+        a.block_size,
     )?;
 
     let cpu_dev = Device::Cpu;
@@ -420,21 +500,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         vb.clone(),
     )?;
 
-    let mode = resolve_mode(args);
-    let refine_config = TopicRefinementConfig {
-        num_steps: if args.decoder_only && args.refine_steps == 0 {
-            100
-        } else {
-            args.refine_steps
-        },
-        learning_rate: if args.decoder_only && args.refine_lr <= 0.01 {
-            0.05
-        } else {
-            args.refine_lr
-        },
-        regularization: args.refine_reg,
-    };
-    info!("Latent inference mode: {mode:?}");
+    info!("Latent inference mode: {:?}", a.mode);
 
     let decoder_name = metadata
         .decoder_types
@@ -446,19 +512,19 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         metadata,
         parameters: &mut parameters,
         vb: &vb,
-        model_prefix: &args.model,
+        model_prefix: a.model,
         encoder: &encoder,
         data_vec: &data_vec,
         delta_db,
         gene_remap: gene_remap.as_ref(),
         coarsening: coarsening.as_ref(),
         beta_dk: &beta_dk,
-        delta_iters: args.delta_iters,
+        delta_iters: a.delta_iters,
         cpu_dev: &cpu_dev,
         adj_method: AdjMethod::Batch,
-        minibatch_size: args.minibatch_size,
-        mode,
-        refine_config: &refine_config,
+        minibatch_size: a.minibatch_size,
+        mode: a.mode,
+        refine_config: a.refine_config,
     };
 
     let (z_nk, llik, total, delta_final) = match decoder_name {
@@ -470,15 +536,14 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         other => anyhow::bail!("unsupported decoder type in metadata: {other}"),
     };
 
-    finalize_predict(FinalizePredict {
-        args,
-        data_vec: &data_vec,
-        z_nk: &z_nk,
-        llik: &llik,
-        total: &total,
-        beta_dk: &beta_dk,
-        delta_db: delta_final.as_ref(),
-        gene_remap: gene_remap.as_ref(),
+    Ok(DenseScored {
+        data_vec,
+        z_nk,
+        llik,
+        total,
+        gene_remap,
+        beta_dk,
+        delta_db: delta_final,
     })
 }
 
@@ -809,9 +874,9 @@ pub(crate) struct MaskedScoreArgs<'a> {
     pub metadata: &'a TopicModelMetadata,
     pub head: candle_util::vae::masked_topic::LatentHead,
     /// Compute the per-cell predictive log-likelihood. `false` skips it entirely,
-    /// leaving `llik`/`total` empty — worth it for callers that want only `z_nk`
-    /// (e.g. `senna update`), since the score costs a second full pass over every
-    /// column plus a dense `[D, minibatch]` reconstruction per block.
+    /// leaving `llik`/`total` empty — worth it for callers that want only the latent,
+    /// since the score costs a second full pass over every column plus a dense
+    /// `[D, minibatch]` reconstruction per block.
     pub need_llik: bool,
 }
 
@@ -875,6 +940,9 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             layers: &a.metadata.encoder_hidden,
             use_gcn: false,
             attn_pool: true,
+            // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
+            // errors on a shape mismatch.
+            n_gene_modules: a.metadata.n_gene_modules.unwrap_or(0),
         },
         &parameters,
         vb.pp("enc"),
@@ -1000,8 +1068,6 @@ fn predictive_llik_masked(
 /// `anscombe_residual`); a per-cell residual null is a future refinement. The
 /// latent is continuous factors, so there is no decoder refinement to do.
 fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Result<()> {
-    use crate::topic::model_metadata::load_feature_mean;
-
     // The vae path is encoder-only: it never calls `resolve_mode`, so the
     // latent-mode flags have no effect here. Say so instead of ignoring them
     // silently — a caller passing --decoder-only otherwise gets encoder-only
@@ -1013,8 +1079,65 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         );
     }
 
-    let (training_genes, _loadings) = load_dictionary(&args.model)?;
-    let (_fm_genes, feature_mean) = load_feature_mean(&args.model)?;
+    // `need_llik: false` keeps `predict`'s vae output exactly as it was — latent only,
+    // no `.predictive.parquet`, and no decoder rebuilt. `probe` asks for the score.
+    let s = score_vae_backend(VaeScoreArgs {
+        model: &args.model,
+        data_files: &args.data_files,
+        batch_files: args.batch_files.as_deref(),
+        preload: args.preload_data,
+        minibatch_size: args.minibatch_size,
+        query_name_opts: &args.query_name_opts(),
+        metadata,
+        need_llik: false,
+    })?;
+
+    let cell_names = s.data_vec.column_names()?;
+    // Inference: emit a row per query cell (no QC dropping).
+    crate::output_helpers::save_latent(&args.out, &s.z_nk, &cell_names, None)?;
+    info!("Wrote {}.latent.parquet (vae, encoder-only)", args.out);
+    Ok(())
+}
+
+/// Inputs for [`score_vae_backend`].
+pub(crate) struct VaeScoreArgs<'a> {
+    pub model: &'a str,
+    pub data_files: &'a [Box<str>],
+    pub batch_files: Option<&'a [Box<str>]>,
+    pub preload: bool,
+    pub minibatch_size: usize,
+    pub query_name_opts: &'a QueryNameOpts,
+    pub metadata: &'a TopicModelMetadata,
+    /// `predict` wants the latent only and passes `false`, which also skips rebuilding the
+    /// decoder entirely. `probe` needs the per-cell score and passes `true`.
+    pub need_llik: bool,
+}
+
+pub(crate) struct VaeScored {
+    pub data_vec: SparseIoVec,
+    pub z_nk: Mat,
+    /// Empty when `need_llik` was `false`.
+    pub llik: Vec<f32>,
+    /// Empty when `need_llik` was `false`.
+    pub total: Vec<f32>,
+}
+
+/// Encoder pass for a `senna vae` model, optionally with the NB predictive score.
+///
+/// **This is new capability, not a refactor.** `predict_vae` never built a decoder, so the
+/// vae family had no fit score at all while every other family did — which is exactly what
+/// `probe` needs. The decoder is rebuilt here only when asked for.
+///
+/// ⚠️ `dictionary.parquet` for a vae holds **raw `[D,K]` factor loadings**, not log-β: the
+/// model is `π = softmax_d(z·W + b)`, a per-cell softmax over the gene axis, not a mixture of
+/// per-topic simplices. So the parquet shortcut the masked path uses is invalid here and the
+/// score must go through the rebuilt decoder.
+pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored> {
+    use crate::topic::model_metadata::load_feature_mean;
+
+    let metadata = a.metadata;
+    let (training_genes, _loadings) = load_dictionary(a.model)?;
+    let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
     anyhow::ensure!(
         feature_mean.len() == training_genes.len(),
         "feature_mean gene count ({}) != dictionary gene count ({})",
@@ -1023,9 +1146,9 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     );
 
     let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload_data,
+        data_files: a.data_files.to_vec(),
+        batch_files: a.batch_files.map(<[_]>::to_vec),
+        preload: a.preload,
         ..Default::default()
     })?;
     let mut data_vec = loaded.data;
@@ -1037,7 +1160,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes, &args.query_name_opts())?;
+    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     let cpu_dev = Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
@@ -1052,27 +1175,58 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         &parameters,
         vb.clone(),
     )?;
-    let safetensors_path = format!("{}.safetensors", args.model);
+
+    // Only the finest level is ever scored, and only it needs registering: `VarMap::load`
+    // iterates the varmap's OWN entries and looks each up in the file, so extra tensors in the
+    // checkpoint are simply never visited. (`counterfactual::rebuild_model` must register every
+    // level for the opposite reason — it *writes* a child checkpoint that `--init-from` would
+    // reject if levels were missing. This path writes nothing.)
+    let finest = metadata.num_levels.saturating_sub(1);
+    let decoder = if a.need_llik {
+        Some(candle_util::decoder::GaussianNbDecoder::new(
+            *metadata
+                .level_decoder_dims
+                .last()
+                .unwrap_or(&metadata.n_features_full),
+            metadata.n_topics,
+            vb.pp(format!("dec_{finest}")),
+        )?)
+    } else {
+        None
+    };
+
+    let safetensors_path = format!("{}.safetensors", a.model);
     info!("Loading weights from {safetensors_path}");
     parameters.load(&safetensors_path)?;
+    let decoder = decoder.as_ref();
 
     let ntot = data_vec.num_columns();
-    let (z_nk, _llik, _total) =
-        run_predict_blocks(ntot, metadata.n_topics, args.minibatch_size, |(lb, ub)| {
+    let (z_nk, llik, total) =
+        run_predict_blocks(ntot, metadata.n_topics, a.minibatch_size, |(lb, ub)| {
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
             let csc = data_vec.read_columns_csc(lb..ub)?;
             let x_nd = remap_and_coarsen_dense(&csc, gene_remap.as_ref(), None, &cpu_dev)?;
             let (z, _) = encoder.forward_t(&x_nd, None, false)?;
             let z_mat = Mat::from_tensor(&z.to_device(&Device::Cpu)?)?;
-            Ok((lb, z_mat, Vec::new(), Vec::new()))
+            let Some(dec) = decoder else {
+                return Ok((lb, z_mat, Vec::new(), Vec::new()));
+            };
+            // `GaussianNbDecoder` takes the **raw** `z` — it applies its own softmax over the
+            // gene axis — unlike the topic decoders, which are handed log θ.
+            let llik: Vec<f32> = predictive_llik_dense(dec, &z, &x_nd)?
+                .to_device(&Device::Cpu)?
+                .to_vec1()?;
+            let total: Vec<f32> = x_nd.sum(1)?.to_device(&Device::Cpu)?.to_vec1()?;
+            Ok((lb, z_mat, llik, total))
         })?;
 
-    let cell_names = data_vec.column_names()?;
-    // Inference: emit a row per query cell (no QC dropping).
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
-    info!("Wrote {}.latent.parquet (vae, encoder-only)", args.out);
-    Ok(())
+    Ok(VaeScored {
+        data_vec,
+        z_nk,
+        llik,
+        total,
+    })
 }
 
 /// Run `block_fn` over `[0, ntot)` in `minibatch_size` blocks, concatenating

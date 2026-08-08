@@ -261,6 +261,8 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
             layers: &encoder_layers,
             use_gcn: false,
             attn_pool,
+            // lc-etm does not use gene-module pooling; 0 keeps its safetensors unchanged.
+            n_gene_modules: 0,
         },
         &parameters,
         param_builder.pp("enc"),
