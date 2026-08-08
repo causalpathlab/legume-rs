@@ -31,7 +31,7 @@ use fagioli::embedding::train::train;
 use fagioli::embedding::whiten::whiten_blocks;
 use fagioli::genotype::GenotypeMatrix;
 use fagioli::summary_stats::calibration::calibrate_input;
-use fagioli::summary_stats::common::SumstatInput;
+use fagioli::summary_stats::common::{decompose_blocks, SumstatInput};
 use fagioli::summary_stats::LdBlock;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
@@ -208,7 +208,9 @@ fn offdiag_corr(a: &DMatrix<f32>, b: &DMatrix<f32>) -> f32 {
 /// Run calibration + whitening + NCE, returning (geometry correlation, λ,
 /// whiteness deviation, NCE offset).
 fn run_pipeline(planted: &Planted, label: &str) -> Result<(f32, f64, f32, f32)> {
-    let (report, bases) = calibrate_input(&planted.input).expect("calibration should succeed");
+    let bases = decompose_blocks(&planted.input);
+    let report =
+        calibrate_input(&planted.input, &bases).expect("calibration should succeed");
     let lambda = report.noise.lambda_white();
 
     println!(

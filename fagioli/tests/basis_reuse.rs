@@ -1,25 +1,25 @@
-//! Reusing calibration's eigenbasis must change the whitening not at all.
+//! One eigen-decomposition, two stages, and no difference in the answer.
 //!
-//! `calibrate_input` and `whiten_blocks` both decompose every block, with the
-//! same standardisation and the same `max_rank`; only the ridge differs, and
-//! the ridge is applied after the decomposition. The randomized SVD is seed-
-//! pinned (`RSVD_SUBSPACE_SEED` in matrix-util), so the two decompositions were
-//! bit-identical and one of them was waste.
+//! Calibration and whitening both need `R = V D² V'` per block, and they differ
+//! only in what they do next: calibration fits the moment law on the
+//! λ-independent projection `V'z` to derive τ, whitening applies the ridge
+//! `λ = τ`. `decompose_blocks` therefore runs the randomized SVD once and lends
+//! the result to both — borrowed for the fit, moved for the whitening.
 //!
-//! That is the argument. This is the check: whiten once from the handed-over
-//! bases and once from an empty cache — which forces the old decompose-here
-//! path — and require every entry of `X̃`, `ž` and `d²` to agree exactly. Not
-//! approximately: a tolerance would hide exactly the drift this exists to
-//! catch, since a re-decomposition that differed at all would differ in the
-//! subspace, not in the last bit.
+//! The risk in sharing is that the shared basis is not the basis a stage would
+//! have computed for itself. [`test_shared_basis_matches_an_independent_one`]
+//! rules that out by decomposing again, by hand, and requiring `X̃` and `ž` to
+//! agree **exactly**. Not approximately: `rsvd` is seed-pinned
+//! (`RSVD_SUBSPACE_SEED` in matrix-util), so a drift would be a drift in the
+//! recovered subspace, and a tolerance would hide precisely what this is for.
 //!
 //! Run: cargo test -p fagioli --test basis_reuse -- --nocapture
 use anyhow::Result;
 use fagioli::embedding::whiten::whiten_blocks;
 use fagioli::genotype::GenotypeMatrix;
 use fagioli::summary_stats::calibration::calibrate_input;
-use fagioli::summary_stats::common::SumstatInput;
-use fagioli::summary_stats::rss_svd::BlockEigenBases;
+use fagioli::summary_stats::common::{decompose_blocks, SumstatInput, MIN_BLOCK_SNPS};
+use fagioli::summary_stats::rss_svd::RssEigenBasis;
 use fagioli::summary_stats::LdBlock;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
@@ -104,121 +104,122 @@ fn simulate_sized(
 }
 
 #[test]
-fn test_reused_basis_reproduces_the_whitening_exactly() -> Result<()> {
+fn test_shared_basis_matches_an_independent_one() -> Result<()> {
     let input = simulate(20250808);
 
-    let (report, bases) = calibrate_input(&input).expect("calibration");
+    let bases = decompose_blocks(&input);
+    let report = calibrate_input(&input, &bases).expect("calibration");
     let lambda = report.noise.lambda_white();
-    println!("λ_white = {lambda:.6}, {} bases cached", bases.num_cached());
-    assert_eq!(
-        bases.num_cached(),
-        NUM_BLOCKS,
-        "calibration must hand over one basis per block it decomposed",
+    println!("λ_white = {lambda:.6} over {} blocks", bases.len());
+
+    let whitened = whiten_blocks(&input, bases, None, lambda)?;
+    assert!(
+        !whitened.is_empty(),
+        "nothing was whitened, so nothing is tested"
     );
 
-    let reused = whiten_blocks(&input, bases, None, lambda)?;
-    // An empty cache is the pre-change path: whitening decomposes for itself.
-    let fresh = whiten_blocks(&input, BlockEigenBases::empty(), None, lambda)?;
-
-    assert_eq!(reused.len(), fresh.len(), "block count moved");
-    assert!(!reused.is_empty(), "nothing was whitened, so nothing is tested");
-
     let mut compared = 0usize;
-    for (r, f) in reused.iter().zip(fresh.iter()) {
-        assert_eq!(r.block_idx, f.block_idx);
-        assert_eq!(r.num_snps, f.num_snps);
-        assert_eq!(r.d_sq, f.d_sq, "block {} spectrum differs", r.block_idx);
-        assert_eq!(
-            r.x_design.shape(),
-            f.x_design.shape(),
-            "block {} design shape differs",
-            r.block_idx,
-        );
-        assert_eq!(
-            r.z_white.shape(),
-            f.z_white.shape(),
-            "block {} response shape differs",
-            r.block_idx,
-        );
+    for w in &whitened {
+        let block = &input.blocks[w.block_idx];
+
+        // Decompose again, by hand, exactly as a stage would have for itself.
+        let x_block = input.standardized_block(block);
+        let basis = RssEigenBasis::from_genotypes(&x_block, input.max_rank)?;
+        let d_sq = basis.singular_values_sq();
+        let svd = basis.into_svd(lambda);
+        let z_white = svd.project_zscores(&input.block_zscores(block));
+
+        assert_eq!(w.d_sq, d_sq, "block {} spectrum differs", w.block_idx);
+        // nalgebra's PartialEq compares shape then elements, so this is the
+        // bitwise check and the shape check at once. `assert!` rather than
+        // `assert_eq!` so a failure does not dump the whole matrix.
         assert!(
-            r.x_design.iter().eq(f.x_design.iter()),
+            *svd.x_design() == w.x_design,
             "block {} design differs bitwise",
-            r.block_idx,
+            w.block_idx,
         );
         assert!(
-            r.z_white.iter().eq(f.z_white.iter()),
+            z_white == w.z_white,
             "block {} whitened z differs bitwise",
-            r.block_idx,
+            w.block_idx,
         );
-        compared += r.x_design.len() + r.z_white.len() + r.d_sq.len();
+        compared += w.x_design.len() + w.z_white.len() + w.d_sq.len();
     }
 
-    println!("{compared} values identical across {} blocks", reused.len());
+    println!("{compared} values identical across {} blocks", whitened.len());
     Ok(())
 }
 
-/// What the reuse is worth, on a panel large enough for the decomposition to
-/// dominate. Printed, not asserted: wall-clock on a shared machine is not a
-/// property of the code.
+/// The two stages must describe the same blocks. They used to filter on two
+/// different constants in two different modules, which meant calibration could
+/// pool a block that training never saw, and λ would then be fitted partly on
+/// data the model was never shown.
 #[test]
-fn measure_whitening_cost_with_and_without_reuse() -> Result<()> {
+fn test_both_stages_see_the_same_blocks() -> Result<()> {
+    let mut input = simulate(111);
+    // One block too short to decompose, so the filter is actually exercised.
+    input.blocks[2].snp_end = input.blocks[2].snp_start + MIN_BLOCK_SNPS - 1;
+
+    let bases = decompose_blocks(&input);
+    let decomposed: Vec<usize> = bases.blocks().iter().map(|b| b.block_idx).collect();
+    assert_eq!(
+        decomposed,
+        vec![0, 1, 3, 4],
+        "the short block should be the only one dropped",
+    );
+
+    let report = calibrate_input(&input, &bases).expect("calibration");
+    let whitened = whiten_blocks(&input, bases, None, report.noise.lambda_white())?;
+
+    let trained: Vec<usize> = whitened.iter().map(|b| b.block_idx).collect();
+    assert_eq!(
+        trained, decomposed,
+        "every decomposed block must reach training, and no other",
+    );
+    Ok(())
+}
+
+/// Where the time goes. Ignored by default: wall-clock on a shared machine is
+/// not a property of the code, and this allocates panels big enough to matter.
+///
+/// Run: cargo test -p fagioli --release --test basis_reuse -- --ignored --nocapture
+#[test]
+#[ignore = "wall-clock benchmark, not a correctness check"]
+fn measure_where_the_time_goes() -> Result<()> {
     use std::time::Instant;
 
     println!(
-        "\n{:>6} {:>6} {:>6} | {:>10} {:>10} {:>10} {:>8}",
-        "blocks", "snps", "n", "calibrate", "whiten+", "whiten-", "saved"
+        "\n{:>6} {:>6} {:>6} | {:>10} {:>10} {:>10} | {:>12}",
+        "blocks", "snps", "n", "decompose", "calibrate", "whiten", "2nd pass cost"
     );
-    println!("{}", "-".repeat(72));
+    println!("{}", "-".repeat(76));
 
     for &(nb, spb, n, rank) in &[(8usize, 400usize, 1000usize, 300usize), (16, 500, 1500, 400)] {
         let input = simulate_sized(20250808, nb, spb, n, rank);
 
         let t0 = Instant::now();
-        let (report, bases) = calibrate_input(&input).expect("calibration");
-        let t_cal = t0.elapsed().as_secs_f64();
-        let lambda = report.noise.lambda_white();
+        let bases = decompose_blocks(&input);
+        let t_decompose = t0.elapsed().as_secs_f64();
 
         let t1 = Instant::now();
-        let reused = whiten_blocks(&input, bases, None, lambda)?;
-        let t_reused = t1.elapsed().as_secs_f64();
+        let report = calibrate_input(&input, &bases).expect("calibration");
+        let t_calibrate = t1.elapsed().as_secs_f64();
 
         let t2 = Instant::now();
-        let fresh = whiten_blocks(&input, BlockEigenBases::empty(), None, lambda)?;
-        let t_fresh = t2.elapsed().as_secs_f64();
+        let whitened = whiten_blocks(&input, bases, None, report.noise.lambda_white())?;
+        let t_whiten = t2.elapsed().as_secs_f64();
+        assert_eq!(whitened.len(), nb);
 
-        assert_eq!(reused.len(), fresh.len());
-        let saved = (t_fresh - t_reused) / (t_cal + t_fresh);
+        let total = t_decompose + t_calibrate + t_whiten;
         println!(
-            "{nb:>6} {spb:>6} {n:>6} | {t_cal:>10.3} {t_reused:>10.3} {t_fresh:>10.3} \
-             {:>7.1}%",
-            saved * 100.0,
+            "{nb:>6} {spb:>6} {n:>6} | {t_decompose:>10.3} {t_calibrate:>10.3} {t_whiten:>10.3} \
+             | {:>11.1}%",
+            100.0 * t_decompose / total,
         );
     }
     println!(
-        "\nwhiten+ reuses calibration's bases, whiten- decomposes again. `saved` is\n\
-         the share of a calibrate-then-whiten pass that the reuse removes.\n"
+        "\nThe last column is what a second decomposition would have added, as a\n\
+         share of the pass — which is what running one per stage used to cost.\n"
     );
-    Ok(())
-}
-
-/// A block the calibration could not *fit* must still be whitened. The two
-/// stages filter on different thresholds, so the cache is allowed to miss, and
-/// a miss has to cost a decomposition rather than a dropped block.
-#[test]
-fn test_empty_cache_still_whitens_every_block() -> Result<()> {
-    let input = simulate(111);
-    let (report, _) = calibrate_input(&input).expect("calibration");
-    let lambda = report.noise.lambda_white();
-
-    let fresh = whiten_blocks(&input, BlockEigenBases::empty(), None, lambda)?;
-    assert_eq!(
-        fresh.len(),
-        NUM_BLOCKS,
-        "an empty cache must fall back to decomposing, not to skipping",
-    );
-
-    // A short cache is the same situation: the tail is padded with misses.
-    let short = whiten_blocks(&input, BlockEigenBases::from_slots(vec![None]), None, lambda)?;
-    assert_eq!(short.len(), NUM_BLOCKS, "a short cache dropped blocks");
     Ok(())
 }

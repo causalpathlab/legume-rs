@@ -43,14 +43,15 @@
 //! mismatch that no choice of λ can repair.
 
 use log::{info, warn};
-use matrix_util::traits::MatOps;
 use nalgebra::{DMatrix, Matrix3, Vector3};
 use rayon::prelude::*;
 
-use crate::summary_stats::common::SumstatInput;
-use crate::summary_stats::rss_svd::{BlockEigenBases, RssEigenBasis};
+use crate::summary_stats::common::{BlockEigenBases, SumstatInput};
 
 /// Minimum eigen-coordinates needed to identify three parameters with slack.
+///
+/// A rank, not a SNP count — [`decompose_blocks`](crate::summary_stats::common::decompose_blocks)
+/// is what decides which blocks exist at all.
 const MIN_RANK_FOR_FIT: usize = 8;
 
 /// A whiteness deviation above this means no λ made the null white, so the
@@ -343,19 +344,13 @@ pub struct CalibrationReport {
     pub misspecified: bool,
 }
 
-/// One block's randomized SVD, and the calibration fitted on it when the block
-/// could support one.
-///
-/// The basis is kept even when the fit fails, because the caller's block filter
-/// is not this module's: a block that cannot identify three parameters can
-/// still be whitened and trained on.
-struct BlockPass {
-    block_idx: usize,
-    basis: RssEigenBasis,
+/// One block's fitted calibration, with the λ-independent quantities the
+/// whiteness curve is drawn from afterwards.
+struct FittedBlock {
+    calibration: BlockCalibration,
     d_sq: Vec<f32>,
     vt_z: DMatrix<f32>,
     num_snps: usize,
-    calibration: Option<BlockCalibration>,
 }
 
 /// Fit the eigenspace noise model across every LD block and select λ.
@@ -365,51 +360,38 @@ struct BlockPass {
 /// *report* the whiteness curve — and because λ enters after the randomized
 /// SVD, that sweep reuses one decomposition per block.
 ///
-/// The returned [`BlockEigenBases`] carries those decompositions onward.
-/// Whitening needs the identical `D` and `V` and differs only by the ridge, so
-/// handing them over is what keeps the randomized SVD to one pass over the
-/// panel — see [`crate::embedding::whiten::whiten_blocks`].
-pub fn calibrate_input(input: &SumstatInput) -> Option<(CalibrationReport, BlockEigenBases)> {
+/// `bases` comes from [`decompose_blocks`](crate::summary_stats::common::decompose_blocks)
+/// and is only borrowed here: the fit
+/// reads `V'z`, which is λ-independent, and it is [`whiten_blocks`] that
+/// consumes the same bases afterwards to apply the ridge this function derives.
+///
+/// [`whiten_blocks`]: crate::embedding::whiten::whiten_blocks
+pub fn calibrate_input(
+    input: &SumstatInput,
+    bases: &BlockEigenBases,
+) -> Option<CalibrationReport> {
     let num_traits = input.zscores.ncols();
 
     // The projections are λ-independent, so they are computed once and reused
-    // for every λ; so is the basis each one came from.
-    let per_block: Vec<BlockPass> = input
-        .blocks
+    // for every λ.
+    let fitted: Vec<FittedBlock> = bases
+        .blocks()
         .par_iter()
-        .enumerate()
-        .filter_map(|(block_idx, block)| {
-            let block_m = block.num_snps();
-            if block_m < MIN_RANK_FOR_FIT {
-                return None;
-            }
-            let mut x_block = input
-                .geno
-                .genotypes
-                .columns(block.snp_start, block_m)
+        .filter_map(|b| {
+            let z_block = input
+                .zscores
+                .rows(b.snp_start, b.num_snps)
                 .clone_owned();
-            x_block.scale_columns_inplace();
-
-            let basis = RssEigenBasis::from_genotypes(&x_block, input.max_rank).ok()?;
-            let z_block = input.zscores.rows(block.snp_start, block_m).clone_owned();
-            let vt_z = basis.project_raw(&z_block);
-            let d_sq = basis.singular_values_sq();
-
-            let calibration = calibrate_block(&d_sq, &vt_z);
-            Some(BlockPass {
-                block_idx,
-                basis,
+            let vt_z = b.basis.project_raw(&z_block);
+            let d_sq = b.basis.singular_values_sq();
+            let calibration = calibrate_block(&d_sq, &vt_z)?;
+            Some(FittedBlock {
+                calibration,
                 d_sq,
                 vt_z,
-                num_snps: block_m,
-                calibration,
+                num_snps: b.num_snps,
             })
         })
-        .collect();
-
-    let fitted: Vec<&BlockPass> = per_block
-        .iter()
-        .filter(|p| p.calibration.is_some())
         .collect();
 
     if fitted.is_empty() {
@@ -417,10 +399,7 @@ pub fn calibrate_input(input: &SumstatInput) -> Option<(CalibrationReport, Block
         return None;
     }
 
-    let cals: Vec<BlockCalibration> = fitted
-        .iter()
-        .filter_map(|p| p.calibration.clone())
-        .collect();
+    let cals: Vec<BlockCalibration> = fitted.iter().map(|f| f.calibration.clone()).collect();
     let noise = pool_calibrations(&cals, num_traits)?;
     let lambda = noise.lambda_white();
 
@@ -428,12 +407,12 @@ pub fn calibrate_input(input: &SumstatInput) -> Option<(CalibrationReport, Block
     let curve = pool_curves(
         &fitted
             .iter()
-            .map(|p| whiteness_curve(&p.d_sq, &p.vt_z, lambda, 12))
+            .map(|f| whiteness_curve(&f.d_sq, &f.vt_z, lambda, 12))
             .collect::<Vec<_>>(),
     );
     let deviation = whiteness_deviation(&curve);
 
-    let block_sizes: Vec<usize> = fitted.iter().map(|p| p.num_snps).collect();
+    let block_sizes: Vec<usize> = fitted.iter().map(|f| f.num_snps).collect();
     let block_lambdas: Vec<f32> = cals.iter().map(|c| c.lambda_white() as f32).collect();
     let lambda_se = delete_a_group_se(&block_lambdas, &block_sizes);
 
@@ -460,24 +439,13 @@ pub fn calibrate_input(input: &SumstatInput) -> Option<(CalibrationReport, Block
         );
     }
 
-    // Every basis that was decomposed, fitted or not, so the whitening finds a
-    // hit for every block it wants rather than for every block that calibrated.
-    drop(fitted);
-    let mut slots: Vec<Option<RssEigenBasis>> = (0..input.blocks.len()).map(|_| None).collect();
-    for pass in per_block {
-        slots[pass.block_idx] = Some(pass.basis);
-    }
-
-    Some((
-        CalibrationReport {
-            noise,
-            curve,
-            deviation,
-            lambda_se,
-            misspecified,
-        },
-        BlockEigenBases::from_slots(slots),
-    ))
+    Some(CalibrationReport {
+        noise,
+        curve,
+        deviation,
+        lambda_se,
+        misspecified,
+    })
 }
 
 /// Average per-block whiteness curves bin-by-bin, weighted by bin occupancy.

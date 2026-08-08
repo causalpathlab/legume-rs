@@ -49,7 +49,7 @@ use fagioli::embedding::train::{train, EmbedFit};
 use fagioli::embedding::whiten::{whiten_blocks, WhitenedBlock};
 use fagioli::genotype::GenotypeMatrix;
 use fagioli::summary_stats::calibration::calibrate_input;
-use fagioli::summary_stats::common::SumstatInput;
+use fagioli::summary_stats::common::{decompose_blocks, SumstatInput};
 use fagioli::summary_stats::LdBlock;
 use matrix_util::traits::MatOps;
 use nalgebra::DMatrix;
@@ -173,10 +173,7 @@ fn rms_row_norm(b: &DMatrix<f32>, rows: &HashSet<usize>) -> f32 {
     if rows.is_empty() {
         return 0.0;
     }
-    let acc: f32 = rows
-        .iter()
-        .map(|&j| (0..b.ncols()).map(|t| b[(j, t)] * b[(j, t)]).sum::<f32>())
-        .sum();
+    let acc: f32 = rows.iter().map(|&j| b.row(j).norm_squared()).sum();
     (acc / rows.len() as f32).sqrt()
 }
 
@@ -238,16 +235,6 @@ fn simulate_classes(h2: f32, seed: u64) -> Classes {
         }
     }
 
-    let mut ld_score = vec![0.0f32; m];
-    for bi in 0..NUM_BLOCKS {
-        let s = bi * SNPS_PER_BLOCK;
-        let xb = x.columns(s, SNPS_PER_BLOCK);
-        let r = (xb.transpose() * xb) / n;
-        for j in 0..SNPS_PER_BLOCK {
-            ld_score[s + j] = (0..SNPS_PER_BLOCK).map(|k| r[(j, k)] * r[(j, k)]).sum();
-        }
-    }
-
     let rms_norm_pleio = rms_row_norm(&b, &pleiotropic);
     let rms_norm_specific = rms_row_norm(&b, &trait_specific);
 
@@ -287,10 +274,6 @@ struct Prepared {
     pleiotropic: HashSet<usize>,
     trait_specific: HashSet<usize>,
     null: HashSet<usize>,
-    /// Eigen-coordinates per block, i.e. the data one block's `U` is fitted on.
-    rank: usize,
-    /// Variants per block, i.e. the rows of that `U`.
-    num_snps: usize,
     rms_norm_pleio: f32,
     rms_norm_specific: f32,
 }
@@ -303,14 +286,12 @@ fn prepare(h2: f32, seed: u64) -> Result<Prepared> {
         .collect();
 
     let input = cl.input;
-    let (report, bases) = calibrate_input(&input).expect("calibration");
+    let bases = decompose_blocks(&input);
+    let report = calibrate_input(&input, &bases).expect("calibration");
     let lambda = report.noise.lambda_white();
     let blocks = whiten_blocks(&input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|x| x.d_sq.clone()).collect();
     let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
-
-    let rank = blocks.first().map(|b| b.rank()).unwrap_or(0);
-    let num_snps = blocks.first().map(|b| b.num_snps).unwrap_or(0);
 
     Ok(Prepared {
         blocks,
@@ -318,8 +299,6 @@ fn prepare(h2: f32, seed: u64) -> Result<Prepared> {
         pleiotropic: cl.pleiotropic,
         trait_specific: cl.trait_specific,
         null,
-        rank,
-        num_snps,
         rms_norm_pleio: cl.rms_norm_pleio,
         rms_norm_specific: cl.rms_norm_specific,
     })
@@ -435,7 +414,8 @@ fn test_sweep_embedding_dim() -> Result<()> {
 
     let (rank, num_snps) = prepared
         .first()
-        .map(|(_, p)| (p.rank, p.num_snps))
+        .and_then(|(_, p)| p.blocks.first())
+        .map(|b| (b.rank(), b.num_snps))
         .unwrap_or((0, 0));
     println!(
         "\n{} traits, {} true programs, {} variants and {} eigen-coordinates per block.\n\
@@ -466,30 +446,31 @@ fn test_sweep_embedding_dim() -> Result<()> {
     );
     println!("{}", "-".repeat(80));
 
-    let mut pleio_vs_null = Vec::new();
-    let mut spec_vs_null = Vec::new();
-    let mut pleio_vs_spec = Vec::new();
-    let mut offsets = Vec::new();
+    // One row per H, holding that row's across-seed means.
+    let mut by_dim: Vec<Scored> = Vec::with_capacity(dims.len());
 
     for &h in &dims {
         let scored: Vec<Scored> = prepared
             .iter()
             .map(|(seed, prep)| fit_at(prep, h, *seed))
             .collect::<Result<Vec<_>>>()?;
+        let stat = |get: fn(&Scored) -> f32| mean_sd(&scored.iter().map(get).collect::<Vec<_>>());
 
         let obs_per_param = (rank * NUM_TRAITS) as f32 / (num_snps * h) as f32;
-        let pn = mean(&scored.iter().map(|s| s.pleio_vs_null).collect::<Vec<_>>());
-        let sn = mean(&scored.iter().map(|s| s.specific_vs_null).collect::<Vec<_>>());
-        let ps = mean_sd(&scored.iter().map(|s| s.pleio_vs_specific).collect::<Vec<_>>());
-        let off = mean_sd(&scored.iter().map(|s| s.offset).collect::<Vec<_>>());
+        let pn = stat(|s| s.pleio_vs_null);
+        let sn = stat(|s| s.specific_vs_null);
+        let ps = stat(|s| s.pleio_vs_specific);
+        let off = stat(|s| s.offset);
         println!(
-            "{h:>3} {obs_per_param:>9.2} | {pn:>13.3} {sn:>13.3} | {:>7.3} ±{:<6.3} | {:>+7.3} ±{:<5.3}",
-            ps.0, ps.1, off.0, off.1,
+            "{h:>3} {obs_per_param:>9.2} | {:>13.3} {:>13.3} | {:>7.3} ±{:<6.3} | {:>+7.3} ±{:<5.3}",
+            pn.0, sn.0, ps.0, ps.1, off.0, off.1,
         );
-        pleio_vs_null.push(pn);
-        spec_vs_null.push(sn);
-        pleio_vs_spec.push(ps.0);
-        offsets.push(off.0);
+        by_dim.push(Scored {
+            pleio_vs_null: pn.0,
+            specific_vs_null: sn.0,
+            pleio_vs_specific: ps.0,
+            offset: off.0,
+        });
     }
 
     println!(
@@ -509,34 +490,37 @@ fn test_sweep_embedding_dim() -> Result<()> {
     // If this stops holding, either the instrument broke or the model stopped
     // overfitting, and both are worth stopping for.
     assert!(
-        offsets[hi] > offsets[lo] + 0.3,
+        by_dim[hi].offset > by_dim[lo].offset + 0.3,
         "offset should climb with H: {:+.3} at H=1 against {:+.3} at H=20",
-        offsets[lo],
-        offsets[hi],
+        by_dim[lo].offset,
+        by_dim[hi].offset,
     );
 
     // Raising H past the truth does not rescue the pleiotropy contrast. This is
     // the claim the sweep was run to test, and it failed.
     assert!(
-        pleio_vs_spec[hi] <= pleio_vs_spec[mid],
+        by_dim[hi].pleio_vs_specific <= by_dim[mid].pleio_vs_specific,
         "more programs did not help the contrast, yet H=20 scored {:.3} against \
          {:.3} at the planted H=3",
-        pleio_vs_spec[hi],
-        pleio_vs_spec[mid],
+        by_dim[hi].pleio_vs_specific,
+        by_dim[mid].pleio_vs_specific,
     );
 
     // ...because the extra programs go to *representing* the trait-specific
     // class, not to setting it apart.
     assert!(
-        spec_vs_null[hi] > spec_vs_null[lo],
+        by_dim[hi].specific_vs_null > by_dim[lo].specific_vs_null,
         "trait-specific detection should improve with H: {:.3} at H=1 against \
          {:.3} at H=20",
-        spec_vs_null[lo],
-        spec_vs_null[hi],
+        by_dim[lo].specific_vs_null,
+        by_dim[hi].specific_vs_null,
     );
 
     // Detection, unlike discrimination, barely depends on H at all.
-    let pn_min = pleio_vs_null.iter().copied().fold(f32::INFINITY, f32::min);
+    let pn_min = by_dim
+        .iter()
+        .map(|s| s.pleio_vs_null)
+        .fold(f32::INFINITY, f32::min);
     assert!(
         pn_min > 0.6,
         "pleiotropic-vs-null should stay a good detector at every H, worst was {pn_min:.3}",
