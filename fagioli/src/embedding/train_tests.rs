@@ -128,6 +128,8 @@ fn test_recovers_a_known_low_rank_geometry() {
         learning_rate: 0.05,
         num_iterations: 400,
         grad_clip: Some(10.0),
+        dense_arm: false,
+        gauge_weight: 0.0,
         seed: 11,
     };
     let fit = train(&planted.blocks, &noise, &cfg, &Device::Cpu).unwrap();
@@ -162,6 +164,8 @@ fn test_pure_noise_yields_no_geometry() {
         learning_rate: 0.05,
         num_iterations: 300,
         grad_clip: Some(10.0),
+        dense_arm: false,
+        gauge_weight: 0.0,
         seed: 17,
     };
     let fit = train(&planted.blocks, &noise, &cfg, &Device::Cpu).unwrap();
@@ -190,6 +194,8 @@ fn test_recovery_improves_with_signal() {
             learning_rate: 0.05,
             num_iterations: 300,
             grad_clip: Some(10.0),
+            dense_arm: false,
+            gauge_weight: 0.0,
             seed: 31,
         };
         let fit = train(&planted.blocks, &noise, &cfg, &Device::Cpu).unwrap();
