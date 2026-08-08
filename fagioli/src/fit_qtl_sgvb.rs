@@ -9,16 +9,16 @@ use rust_htslib::tpool::ThreadPool;
 
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans_alg::pseudobulk::collapse_pseudobulk;
 use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::io::cell_annotations::{
     build_onehot_membership, infer_cell_annotations, read_cell_annotations,
-    read_membership_proportions,
+    read_membership_proportions, Membership,
 };
 use fagioli::io::covariates::load_covariate_files;
 use fagioli::io::gene_annotations::{load_bed_annotations, load_gtf};
 use fagioli::io::results::{write_gene_summary, write_parameters, write_variant_results};
 use fagioli::mapping::fit_qtl_helpers::*;
-use fagioli::mapping::pseudobulk::{collapse_pseudobulk, Membership};
 use fagioli::sgvb::{fit_block_weighted, ComputeDevice, FitConfig, ModelType, PriorType};
 use matrix_util::common_io::{basename, mkdir_parent};
 
@@ -254,7 +254,7 @@ pub struct FitQtlSgvbArgs {
                      They are random, of this size, one per iteration.\n\
                      When N is at or below it, the full batch is used.\n\
                      \n\
-                     Multilevel models disable this. Omit it for auto-scaling by variant count."
+                     Omit it for auto-scaling by variant count."
     )]
     pub batch_size: Option<usize>,
 
