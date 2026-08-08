@@ -1364,6 +1364,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix: None,
         pb_latent_suffix: Some("pb_latent.parquet"),
         // Full-gene-resolution β̂, the same object `senna topic` writes. Preferred over the
         // factorized `dictionary.parquet` by anything that ranks genes (plot-topic already does

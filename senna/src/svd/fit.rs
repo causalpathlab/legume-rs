@@ -284,6 +284,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,

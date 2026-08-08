@@ -468,6 +468,12 @@ pub struct RunOutputs {
     /// collapse; for SVD it's `proj_kn.transpose()` at the finest level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_latent: Option<String>,
+    /// `{out}.pb_reference.zarr` — this run's pseudobulks, carried forward so a
+    /// later `senna update` can absorb a sample without re-reading every cell
+    /// already seen. `None` unless `--emit-pb-reference` was passed. The
+    /// sidecar `{out}.pb_reference.json` sits beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_reference: Option<String>,
     /// `{out}.dictionary_empirical.parquet` — G × K empirical β at full
     /// gene resolution: row-scaled by NB Fisher-info weights and column-
     /// normalized to the topic simplex. Avoids the lossy expand-from-coarse
@@ -992,6 +998,9 @@ pub struct RunDescription<'a> {
     /// Suffix after `{basename}.` for the PB-level latent parquet, e.g.
     /// `"pb_latent.parquet"`. `None` to omit.
     pub pb_latent_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the carried pseudobulk backend, e.g.
+    /// `"pb_reference.zarr"`. `None` unless the run emitted them.
+    pub pb_reference_suffix: Option<&'a str>,
     /// Suffix after `{basename}.` for the empirical NB-Fisher-weighted
     /// dictionary parquet, e.g. `"dictionary_empirical.parquet"`. `None`
     /// to omit.
@@ -1066,6 +1075,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.pb_latent_suffix {
         m.outputs.pb_latent = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.pb_reference_suffix {
+        m.outputs.pb_reference = Some(format!("{basename}.{suf}"));
     }
     if let Some(suf) = desc.dictionary_empirical_suffix {
         m.outputs.dictionary_empirical = Some(format!("{basename}.{suf}"));

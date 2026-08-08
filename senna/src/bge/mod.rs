@@ -868,6 +868,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         // The SIMBA co-embed is written as feature_embedding.parquet in BOTH

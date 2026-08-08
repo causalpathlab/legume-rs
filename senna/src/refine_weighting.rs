@@ -175,6 +175,23 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) iter_opt: usize,
 
+    #[arg(
+        long,
+        help = "Carry this run's pseudobulks forward for a later `senna update`",
+        long_help = "Writes {out}.pb_reference.zarr — one column per pseudobulk, holding\n\
+                     its batch-adjusted per-cell rate — plus a sidecar with each\n\
+                     column's cell count.\n\
+                     \n\
+                     `senna update` can then absorb a new sample by re-collapsing\n\
+                     only the NEW cells against these, instead of re-reading every\n\
+                     cell the model has already seen. Absorbing S samples one at a\n\
+                     time goes from quadratic to linear in cell reads.\n\
+                     \n\
+                     Off by default: it is a second copy of the pseudobulks, useful\n\
+                     only if you intend to keep growing this model."
+    )]
+    pub(crate) emit_pb_reference: bool,
+
     #[command(flatten)]
     pub(crate) pb_refine: PbRefineArgs,
 }
