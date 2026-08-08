@@ -262,7 +262,7 @@ fn test_embedding_geometry_tracks_simulated_rg() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let sim = simulate(dir.path(), NUM_FACTORS, 424242)?;
 
-    let report = calibrate_input(&sim.input).expect("calibration");
+    let (report, bases) = calibrate_input(&sim.input).expect("calibration");
     let lambda = report.noise.lambda_white();
     println!(
         "\ncalibration: c={:.3}, τ={:.4} (SE {:.4}), whiteness dev {:.3}{}",
@@ -277,7 +277,7 @@ fn test_embedding_geometry_tracks_simulated_rg() -> Result<()> {
         },
     );
 
-    let blocks = whiten_blocks(&sim.input, None, lambda)?;
+    let blocks = whiten_blocks(&sim.input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();
     let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
 

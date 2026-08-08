@@ -208,7 +208,7 @@ fn offdiag_corr(a: &DMatrix<f32>, b: &DMatrix<f32>) -> f32 {
 /// Run calibration + whitening + NCE, returning (geometry correlation, λ,
 /// whiteness deviation, NCE offset).
 fn run_pipeline(planted: &Planted, label: &str) -> Result<(f32, f64, f32, f32)> {
-    let report = calibrate_input(&planted.input).expect("calibration should succeed");
+    let (report, bases) = calibrate_input(&planted.input).expect("calibration should succeed");
     let lambda = report.noise.lambda_white();
 
     println!(
@@ -226,7 +226,7 @@ fn run_pipeline(planted: &Planted, label: &str) -> Result<(f32, f64, f32, f32)> 
 
     // Ω = I: the traits here share one cohort by construction, but with no
     // cohort-specific noise, so overlap is the identity.
-    let blocks = whiten_blocks(&planted.input, None, lambda)?;
+    let blocks = whiten_blocks(&planted.input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();
     let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
 
