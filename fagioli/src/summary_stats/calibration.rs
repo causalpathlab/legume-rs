@@ -130,9 +130,6 @@ impl ThreeTermDesign {
         })
     }
 
-    pub fn rank(&self) -> usize {
-        self.rows.len()
-    }
 
     /// Least-squares fit of `response(k)` on `[d⁴, d², 1]`.
     ///

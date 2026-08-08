@@ -26,9 +26,9 @@ use nalgebra::{DMatrix, DVector};
 /// The λ-independent half of the RSS eigendecomposition: `D` and `V`.
 ///
 /// The randomized SVD is the expensive step; λ enters only afterwards, through
-/// `D̃ = √(D² + λ)`. Holding the decomposition separately lets an entire λ grid
-/// reuse one factorization — see [`crate::summary_stats::calibration`], where
-/// selecting λ costs `O(KT)` per grid point instead of a re-decomposition.
+/// `D̃ = √(D² + λ)`. Holding the decomposition separately is what lets
+/// [`RssEigenBasis::project_raw`] exist: `V'z` is λ-independent, so calibration
+/// can fit the moment law on it and derive λ before any ridge is applied.
 pub struct RssEigenBasis {
     /// Singular values D of X/√n, length K. D² are the eigenvalues of R.
     singular_values: DVector<f32>,
@@ -56,27 +56,19 @@ impl RssEigenBasis {
         })
     }
 
-    pub fn rank(&self) -> usize {
-        self.singular_values.len()
-    }
 
-    pub fn singular_values(&self) -> &DVector<f32> {
-        &self.singular_values
-    }
 
     /// Squared singular values d²_k — the eigenvalues of R.
     pub fn singular_values_sq(&self) -> Vec<f32> {
         self.singular_values.iter().map(|&d| d * d).collect()
     }
 
-    pub fn v_mat(&self) -> &DMatrix<f32> {
-        &self.v_mat
-    }
 
     /// Raw eigenspace projection V'z, shape (K, T).
     ///
     /// Unlike [`RssSvdNal::project_zscores`] this applies no `D̃⁻¹`, so it does
-    /// not depend on λ — one call feeds an entire λ grid.
+    /// not depend on λ. Calibration fits the moment law on it to *derive* λ,
+    /// which has to happen before any ridge can be applied.
     pub fn project_raw(&self, z: &DMatrix<f32>) -> DMatrix<f32> {
         self.v_mat.tr_mul(z)
     }
@@ -101,14 +93,6 @@ impl RssEigenBasis {
         }
     }
 
-    /// Apply a ridge λ, keeping the basis for further grid points.
-    pub fn to_svd(&self, lambda: f64) -> RssSvdNal {
-        Self {
-            singular_values: self.singular_values.clone(),
-            v_mat: self.v_mat.clone(),
-        }
-        .into_svd(lambda)
-    }
 }
 
 /// Precomputed SVD of the reference genotype matrix for RSS likelihood (nalgebra).
