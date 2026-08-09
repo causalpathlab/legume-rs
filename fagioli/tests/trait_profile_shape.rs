@@ -17,10 +17,16 @@
 //! z_g = R_gj · β_j Λ_N + e_g
 //! ```
 //!
-//! where `R_gj` is a *scalar*: it rescales the row and leaves its direction
-//! alone. So the *shape* of a raw marginal z-row is LD-invariant, while its
-//! *magnitude* is not — and "pleiotropic versus trait-specific" is a question
-//! about shape.
+//! where `R_gj` is a *scalar*: it rescales the mean and leaves its direction
+//! alone. So the **mean direction** of a raw marginal z-row is LD-invariant.
+//!
+//! The *observable* shape is not, and the reason is in the same two lines:
+//! `Cov(e_g) = Ω` is **not** scaled by `R_gj`, so a weakly-tagging variant has
+//! the same noise on a smaller mean, and `PR` is pulled toward isotropy as
+//! `R_gj` falls. [`test_raw_zscore_shape_separates_without_any_ld`] reports
+//! that attenuation directly: LD tags of a trait-specific variant sit between
+//! their source and a pure null. So the claim is that shape is invariant to LD
+//! *in expectation*, degrading with tag strength — not that it is untouched.
 //!
 //! If that is right, the question needs no reference panel, no randomized SVD,
 //! no calibration and no ridge: it is answerable from the z-score matrix alone.
@@ -33,23 +39,32 @@
 //! PR(x) = (Σ_t x²_t)² / Σ_t x⁴_t
 //! ```
 //!
-//! `PR(c·e_t) = 1` exactly. For `x ~ N(0, I_T)`, `Σx² ~ χ²_T` so
-//! `E[(Σx²)²] = T(T+2)`, while `E[Σx⁴] = 3T`, giving
+//! `PR(c·e_t) = 1` exactly. The isotropic case needs care. Writing
+//! `y = x/‖x‖`, uniform on the sphere, `PR = 1/Σ_t y⁴_t` and
+//! `E[Σ y⁴] = 3/(T+2)`, so by Jensen
 //!
 //! ```text
-//! PR ≈ T(T+2) / 3T = (T+2)/3        →  4.0 at T = 10
+//! E[PR]  >  (T+2)/3        =  4.0 at T = 10
 //! ```
 //!
-//! (Not `T/3`: that is the ratio of `E[Σx²]²` to `E[Σx⁴]` and drops the
-//! variance of the numerator.) The simulation plants pleiotropic effects as
-//! `c·v_h` with `v_h ~ N(0, I_T)`, so the predicted contrast is **1 against
-//! 4.0** — and isotropic noise also sits at 4.0, which is why this separates
-//! trait-specific from *everything else* rather than signal from null.
+//! **strictly** — `(T+2)/3` is a lower bound, not the mean, because `E[A/B]`
+//! is not `E[A]/E[B]`. [`isotropic_reference_pr`] measures the actual value by
+//! Monte Carlo (≈4.36 at `T = 10`) and every table below compares against that.
+//! An earlier version of this file quoted `(T+2)/3` as the prediction and
+//! "confirmed" it against a null mean of 3.93 — but that 3.93 was contaminated
+//! by LD tags of causal variants, and the two errors cancelled. Genuinely null
+//! rows sit near 4.3.
+//!
+//! The simulation plants pleiotropic effects as `c·v_h` with `v_h ~ N(0, I_T)`,
+//! so isotropic noise and pleiotropic signal land in the *same* place, which is
+//! why this separates trait-specific from everything else rather than signal
+//! from null.
 //!
 //! # What this cannot do
 //!
-//! A tag inherits its causal variant's direction, so shape ranks tags
-//! alongside causal variants: these are locus claims, not variant claims.
+//! A tag inherits its causal variant's *direction*, attenuated by tag strength,
+//! so shape ranks tags between their source and the null: these are locus
+//! claims, not variant claims.
 //! And a neighbourhood containing two causal variants with *different* trait
 //! profiles blends into a mixture — [`test_blended_neighbourhood_is_the_limit`]
 //! plants exactly that.
@@ -83,6 +98,25 @@ fn participation_ratio(x: impl Iterator<Item = f32>) -> f32 {
         return 0.0;
     }
     (s2 * s2 / s4) as f32
+}
+
+/// `E[PR]` for an isotropic Gaussian of length `t`, by Monte Carlo.
+///
+/// `(T+2)/3` is a strict lower bound on this (Jensen), so it cannot be used as
+/// the reference value — see the module docs.
+fn isotropic_reference_pr(t: usize, draws: usize, rng: &mut SmallRng) -> f32 {
+    let acc: f64 = (0..draws)
+        .map(|_| {
+            let x: Vec<f32> = (0..t)
+                .map(|_| {
+                    let v: f64 = StandardNormal.sample(rng);
+                    v as f32
+                })
+                .collect();
+            participation_ratio(x.into_iter()) as f64
+        })
+        .sum();
+    (acc / draws as f64) as f32
 }
 
 /// `PR(z_g)` for every row.
@@ -130,6 +164,7 @@ fn test_raw_zscore_shape_separates_without_any_ld() -> Result<()> {
     let (mut n_pn, mut n_sn, mut n_ps) = (vec![], vec![], vec![]);
     let (mut p_pn, mut p_sn, mut p_ps) = (vec![], vec![], vec![]);
     let (mut pr_pleio, mut pr_spec, mut pr_null) = (vec![], vec![], vec![]);
+    let mut pr_tags: Vec<f32> = vec![];
 
     for &seed in &seeds {
         let cl = simulate_classes(0.4, seed);
@@ -160,7 +195,18 @@ fn test_raw_zscore_shape_separates_without_any_ld() -> Result<()> {
         p_ps.push(f);
         pr_pleio.push(mean_over(&pr, &cl.pleiotropic));
         pr_spec.push(mean_over(&pr, &cl.trait_specific));
-        pr_null.push(mean_over(&pr, &null));
+        // Tags of a trait-specific variant carry an attenuated copy of its
+        // profile; a pure null carries none. Separating them is what shows the
+        // shape is LD-invariant only in expectation.
+        let tagged = ld_partners_of(&cl.trait_specific);
+        let tags: HashSet<usize> = tagged
+            .iter()
+            .copied()
+            .filter(|g| !cl.trait_specific.contains(g) && !cl.pleiotropic.contains(g))
+            .collect();
+        let clean: HashSet<usize> = null.iter().copied().filter(|g| !tagged.contains(g)).collect();
+        pr_tags.push(mean_over(&pr, &tags));
+        pr_null.push(mean_over(&pr, &clean));
     }
 
     println!("{}", "-".repeat(76));
@@ -175,14 +221,38 @@ fn test_raw_zscore_shape_separates_without_any_ld() -> Result<()> {
         mean(&p_ps),
     );
 
-    let isotropic = (NUM_TRAITS as f32 + 2.0) / 3.0;
+    let mut ref_rng = SmallRng::seed_from_u64(0x150_7807);
+    let isotropic = isotropic_reference_pr(NUM_TRAITS, 200_000, &mut ref_rng);
+    let bound = (NUM_TRAITS as f32 + 2.0) / 3.0;
     println!(
-        "\nmean PR: pleiotropic {:.2}, trait-specific {:.2}, null {:.2}   \
-         (predicted {isotropic:.2} / 1.00 / {isotropic:.2})\n\
-         Trait-specific sits above 1 because noise is isotropic and pulls PR\n\
-         toward {isotropic:.2} at finite SNR.",
-        mean(&pr_pleio),
+        "\nmean PR   trait-specific {:.2}   its LD tags {:.2}   pure null {:.2}   \
+         pleiotropic {:.2}\n\
+         reference: E[PR] for an isotropic row = {isotropic:.2} by Monte Carlo\n\
+         ({bound:.2} = (T+2)/3 is a strict LOWER bound on that, not the mean)\n\n\
+         Trait-specific sits above 1 because noise is isotropic and pulls PR up\n\
+         at finite SNR. Its tags sit between it and the null: the same profile,\n\
+         attenuated by tag strength. That gradient is the honest form of the\n\
+         LD-invariance claim.",
         mean(&pr_spec),
+        mean(&pr_tags),
+        mean(&pr_null),
+        mean(&pr_pleio),
+    );
+
+    // The pure null must match the isotropic reference; an earlier version of
+    // this test compared a tag-contaminated null against (T+2)/3 and the two
+    // errors cancelled into an apparent confirmation.
+    assert!(
+        (mean(&pr_null) - isotropic).abs() < 0.25,
+        "pure-null PR {:.2} should match the isotropic reference {isotropic:.2}",
+        mean(&pr_null),
+    );
+    // Attenuation, stated as an ordering rather than assumed away.
+    assert!(
+        mean(&pr_spec) < mean(&pr_tags) && mean(&pr_tags) < mean(&pr_null),
+        "tags should sit between their source and the null: {:.2} / {:.2} / {:.2}",
+        mean(&pr_spec),
+        mean(&pr_tags),
         mean(&pr_null),
     );
 
@@ -268,11 +338,10 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
     println!("{}", "-".repeat(62));
 
     let (mut un, mut fitted_pr, mut raw_pr, mut rot) = (vec![], vec![], vec![], vec![]);
+    let mut un_shift: Vec<f32> = vec![];
     for &seed in &seeds {
         let cl = simulate_classes(0.4, seed);
-        let fit = fit_embedding(&cl, three_class::NUM_PROGRAMS, seed)?;
-
-        let starts: Vec<usize> = cl.input.blocks.iter().map(|b| b.snp_start).collect();
+        let (fit, starts) = fit_embedding(&cl, three_class::NUM_PROGRAMS, seed)?;
         let u = assemble_u(&fit.u_mean, &starts, cl.input.zscores.nrows());
 
         // ‖u_g‖ — the statistic used so far.
@@ -286,11 +355,15 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
         // A = diag(a_h), invertible and non-orthogonal. U→UA, V̌→V̌A⁻¹ leaves
         // U V̌' exactly unchanged.
         let h = fit.v_check.ncols();
-        let a: Vec<f32> = (0..h).map(|i| 3.0f32.powi(i as i32 - (h as i32) / 2)).collect();
+        let a: Vec<f32> = (0..h).map(|i| 10.0f32.powi(i as i32 - (h as i32) / 2)).collect();
         let u_rot = DMatrix::from_fn(u.nrows(), h, |g, k| u[(g, k)] * a[k]);
         let v_rot = DMatrix::from_fn(fit.v_check.nrows(), h, |t, k| fit.v_check[(t, k)] / a[k]);
         let drift = (&u_rot * v_rot.transpose() - &b_hat).abs().max();
-        assert!(drift < 1e-3, "the rotation must not change U V̌': {drift}");
+        let scale = b_hat.abs().max().max(1.0);
+        assert!(
+            drift <= 1e-5 * scale,
+            "the rotation must not change U V̌': drift {drift} at scale {scale}",
+        );
         let norms_rot = row_norms(&u_rot);
 
         let (x, y, z, w) = (
@@ -301,6 +374,7 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
         );
         println!("{seed:>8} | {x:>10.3} {y:>10.3} {z:>10.3} | {w:>12.3}");
         un.push(x);
+        un_shift.push((x - w).abs());
         fitted_pr.push(y);
         raw_pr.push(z);
         rot.push(w);
@@ -320,10 +394,42 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
          every prediction bit-identical. Any movement between columns 1 and 4 is\n\
          a statistic that was never a property of the fit.\n"
     );
+
+    // The conclusion, asserted rather than printed.
+    //
+    // Per seed, not on the mean: the shifts partly cancel across seeds, so a
+    // mean-vs-mean test understates a per-fit defect. The claim is that any one
+    // fit's ‖u_g‖ AUC is not a property of that fit.
+    println!(
+        "mean per-seed |Δ AUC| under reparameterisation: {:.3}\n",
+        mean(&un_shift)
+    );
+    assert!(
+        mean(&un_shift) > 0.02,
+        "‖u_g‖ should not survive a reparameterisation that leaves U V̌' \
+         bit-identical, yet per-seed |Δ| averaged only {:.3}",
+        mean(&un_shift),
+    );
+    assert!(
+        mean(&raw_pr) > mean(&un) + 0.15,
+        "the raw-row shape should beat the fitted norm by more than the fit's own \
+         wobble: {:.3} against {:.3}",
+        mean(&raw_pr),
+        mean(&un),
+    );
     Ok(())
 }
 
-fn fit_embedding(cl: &Classes, h: usize, seed: u64) -> Result<fagioli::embedding::train::EmbedFit> {
+/// Returns the fit and the whitened blocks' SNP starts.
+///
+/// `assemble_u` zips `u_mean` against `snp_starts` positionally, and
+/// `decompose_blocks` is a filter that can drop a block — so the starts have to
+/// come from the blocks that were actually fitted, not from `input.blocks`.
+fn fit_embedding(
+    cl: &Classes,
+    h: usize,
+    seed: u64,
+) -> Result<(fagioli::embedding::train::EmbedFit, Vec<usize>)> {
     use candle_util::candle_core::Device;
     use fagioli::embedding::model::{EmbedConfig, UPrior};
     use fagioli::embedding::noise::NoiseModel;
@@ -338,7 +444,8 @@ fn fit_embedding(cl: &Classes, h: usize, seed: u64) -> Result<fagioli::embedding
     let blocks = whiten_blocks(&cl.input, bases, None, lambda)?;
     let d_sq: Vec<Vec<f32>> = blocks.iter().map(|b| b.d_sq.clone()).collect();
     let noise = NoiseModel::new(&d_sq, report.noise.c, report.noise.tau, lambda);
-    train(
+    let starts: Vec<usize> = blocks.iter().map(|b| b.snp_start).collect();
+    let fit = train(
         &blocks,
         &noise,
         &EmbedConfig {
@@ -356,7 +463,8 @@ fn fit_embedding(cl: &Classes, h: usize, seed: u64) -> Result<fagioli::embedding
             seed,
         },
         &Device::Cpu,
-    )
+    )?;
+    Ok((fit, starts))
 }
 
 /// Calibration, not classification. Does `PR(z_g)` track the *number of traits*
@@ -371,13 +479,15 @@ fn fit_embedding(cl: &Classes, h: usize, seed: u64) -> Result<fagioli::embedding
 fn test_participation_ratio_tracks_the_number_of_traits() -> Result<()> {
     let seeds = [20250808u64, 111, 222];
     let counts = [1usize, 2, 3, 5, 10];
+    // Every planted variant needs its own LD group; there are NUM_LD_GROUPS.
+    const PER_COUNT: usize = 7;
 
-    println!("\n{:>7} {:>10} {:>12}", "traits", "PR(z_g)", "predicted");
+    println!("\n{:>7} {:>10} {:>14}", "traits", "PR(z_g)", "lower bound");
     println!("{}", "-".repeat(32));
 
     let mut observed = vec![Vec::new(); counts.len()];
     for &seed in &seeds {
-        let g = three_class::simulate_graded(0.4, seed, &counts, 12);
+        let g = three_class::simulate_graded(0.4, seed, &counts, PER_COUNT);
         let pr = pr_rows(&g.input.zscores);
         for (i, (_, group)) in g.by_count.iter().enumerate() {
             observed[i].push(mean_over(&pr, group));
@@ -387,7 +497,7 @@ fn test_participation_ratio_tracks_the_number_of_traits() -> Result<()> {
     let mut means = Vec::new();
     for (i, &k) in counts.iter().enumerate() {
         let m = mean(&observed[i]);
-        println!("{k:>7} {m:>10.2} {:>12.2}", (k as f32 + 2.0) / 3.0);
+        println!("{k:>7} {m:>10.2} {:>14.2}", (k as f32 + 2.0) / 3.0);
         means.push(m);
     }
 
@@ -502,45 +612,56 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
         "", "p < 0.05, by class", "BH at q = 0.10"
     );
     println!(
-        "{:>8} | {:>7} {:>7} {:>6} {:>6} | {:>7} {:>7} {:>7}",
-        "seed", "specif", "tags", "pleio", "null", "n_sel", "FDP", "FDP*"
+        "{:>8} | {:>7} {:>7} {:>6} {:>6} {:>6} | {:>7} {:>7}",
+        "seed", "specif", "tags", "pleio", "null", "null Q", "n_sel", "FDP*"
     );
     println!("{}", "-".repeat(72));
 
     let (mut sp, mut pl, mut nu) = (vec![], vec![], vec![]);
-    let (mut fdps, mut fdps_locus) = (vec![], vec![]);
+    let (mut fdps_locus, mut nu_plain) = (vec![], vec![]);
     for &seed in &seeds {
         let cl = simulate_classes(0.4, seed);
         let null = null_set(&cl);
         let z = &cl.input.zscores;
         let observed = pr_rows(z);
 
-        // A bare rotation is only exchangeable at Ω = I. These ten traits are
-        // genetically correlated by construction, so a null row has covariance
-        // Ω and Q'ΩQ ≠ Ω. Rotate inside the whitened trait space and map back:
+        // A bare rotation is exchangeable only at Ω = I, and these ten traits
+        // are genetically correlated by construction. Rotating inside the
+        // whitened trait space and mapping back keeps the law exact:
         //
         //     A = Ω^{1/2} Q Ω^{-1/2}    ⟹    Cov(A z) = A Ω A' = Ω
         //
-        // which leaves the noise law exact, leaves R untouched (the same linear
-        // map is applied to every row), and still scrambles alignment with the
-        // trait basis — where the alternative lives.
+        // R is untouched either way, since the same linear map is applied to
+        // every row. Note `Ω̂` is estimated by trimming on ‖z_g‖, which
+        // `omega_sqrt_pair`'s own docs record as biased ~16% low; it also
+        // flattens the spectrum, which would make the draws too isotropic.
+        //
+        // Both arms are run because the correction turns out not to be what
+        // makes this calibrate — see the printed comparison. Q need not be Haar:
+        // it is drawn independently of z, and for ANY fixed orthogonal Q,
+        // Q'w ~ N(0,I) when w ~ N(0,I).
         let (om_sqrt, om_inv_sqrt) = omega_sqrt_pair(&trimmed_trait_covariance(z, 0.90))?;
 
-        let mut rng = SmallRng::seed_from_u64(seed ^ 0x5EED_D0DA);
         let mut ge = vec![0usize; observed.len()];
+        let mut ge_plain = vec![0usize; observed.len()];
+        let mut rng = SmallRng::seed_from_u64(seed ^ 0x5EED_D0DA);
         for _ in 0..draws {
             let qm = random_orthogonal(z.ncols(), &mut rng);
             let a = &om_sqrt * &qm * &om_inv_sqrt;
-            let zq = z * a.transpose();
-            for g in 0..zq.nrows() {
-                if participation_ratio(zq.row(g).iter().copied()) <= observed[g] {
-                    ge[g] += 1;
+            for (acc, m) in [(&mut ge, &a), (&mut ge_plain, &qm)] {
+                let zq = z * m.transpose();
+                for g in 0..zq.nrows() {
+                    if participation_ratio(zq.row(g).iter().copied()) <= observed[g] {
+                        acc[g] += 1;
+                    }
                 }
             }
         }
         // One-sided lower tail: trait-specific means unusually *concentrated*.
-        let p: Vec<f32> =
-            ge.iter().map(|&c| (1 + c) as f32 / (1 + draws) as f32).collect();
+        let pv = |c: &[usize]| -> Vec<f32> {
+            c.iter().map(|&k| (1 + k) as f32 / (1 + draws) as f32).collect()
+        };
+        let (p, p_plain) = (pv(&ge), pv(&ge_plain));
 
         // A "null" variant sharing a haplotype with a trait-specific one is its
         // tag: it carries a scaled copy of that concentrated profile, so firing
@@ -558,6 +679,8 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
             frac(&cl.pleiotropic),
             frac(&clean_null),
         );
+        let c_plain = clean_null.iter().filter(|&&g| p_plain[g] < 0.05).count() as f32
+            / clean_null.len().max(1) as f32;
         let tag_rate = frac(&tagged.difference(&cl.trait_specific).copied().collect());
 
         let selected = bh_select(&p, q_level);
@@ -567,7 +690,6 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
             .copied()
             .filter(|g| !cl.trait_specific.contains(g))
             .collect();
-        let fdp = false_sel.len() as f32 / n_sel.max(1) as f32;
         // A tag of a true trait-specific variant inherits its direction, so it
         // is a locus-level hit rather than a mistake. Splitting the two says
         // whether the FDP is the method erring or the resolution limit.
@@ -578,33 +700,46 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
             / n_sel.max(1) as f32;
 
         println!(
-            "{seed:>8} | {a:>7.2} {tag_rate:>7.2} {b:>7.2} {c:>6.2} | \
-             {n_sel:>7} {fdp:>7.2} {fdp_locus:>7.2}"
+            "{seed:>8} | {a:>7.2} {tag_rate:>7.2} {b:>7.2} {c:>6.2} {c_plain:>6.2} | \
+             {n_sel:>7} {fdp_locus:>7.2}"
         );
         sp.push(a);
         pl.push(b);
         nu.push(c);
-        fdps.push(fdp);
+        nu_plain.push(c_plain);
         fdps_locus.push(fdp_locus);
     }
 
     println!("{}", "-".repeat(72));
     println!(
-        "{:>8} | {:>7.2} {:>7} {:>7.2} {:>6.2} | {:>7} {:>7.2} {:>7.2}",
+        "{:>8} | {:>7.2} {:>7} {:>7.2} {:>6.2} {:>6.2} | {:>7} {:>7.2}",
         "mean",
         mean(&sp),
         "",
         mean(&pl),
         mean(&nu),
+        mean(&nu_plain),
         "",
-        mean(&fdps),
         mean(&fdps_locus),
     );
     println!(
-        "\nnull is the calibration check and sits at nominal. tags are LD copies of\n\
-         trait-specific variants: firing on them is correct at locus resolution,\n\
-         which is why FDP (variant-level) and FDP* (locus-level) differ so much.\n\
-         pleio below nominal is the point — this tests specificity, not signal.\n"
+        "
+null is the calibration check; `null Q` repeats it with a plain
+\
+         rotation and no Omega correction. The two agree, so the whitening is
+\
+         NOT what makes this calibrate -- defining the null class correctly is.
+\
+         tags are LD copies of trait-specific variants, carrying an attenuated
+\
+         copy of the same profile, so firing on them is right at locus
+\
+         resolution and only FDP* is reported. pleio near nominal is the point:
+\
+         this tests specificity, not signal -- though 12 variants x 3 seeds
+\
+         cannot resolve much there.
+"
     );
 
     // Calibration: the null class must not fire more than the nominal rate,

@@ -144,6 +144,36 @@ pub fn rms_row_norm(b: &DMatrix<f32>, rows: &HashSet<usize>) -> f32 {
     (acc / rows.len() as f32).sqrt()
 }
 
+/// Number of independent LD groups. SNPs correlate only within a
+/// `(block, haplotype)` pair, so this bounds how many causal variants can be
+/// planted in distinct neighbourhoods.
+pub const NUM_LD_GROUPS: usize = NUM_BLOCKS * N_HAPLOTYPES;
+
+/// One variant from each of `count` distinct LD groups, sampled without
+/// replacement.
+///
+/// Two causal variants in one `(block, haplotype)` group are correlated, so
+/// their marginal rows are a mixture of both trait profiles. That is precisely
+/// the condition [`simulate_blended`] introduces on purpose, and it has to be
+/// absent from the baseline or the dose-response starts from a contaminated
+/// zero.
+pub fn sample_distinct_ld_groups(rng: &mut SmallRng, count: usize) -> Vec<usize> {
+    assert!(
+        count <= NUM_LD_GROUPS,
+        "cannot plant {count} causal variants in distinct LD groups; only \
+         {NUM_LD_GROUPS} exist ({NUM_BLOCKS} blocks x {N_HAPLOTYPES} haplotypes)",
+    );
+    let per_group = SNPS_PER_BLOCK.div_ceil(N_HAPLOTYPES);
+    rand::seq::index::sample(rng, NUM_LD_GROUPS, count)
+        .into_iter()
+        .map(|g| {
+            let (block, hap) = (g / N_HAPLOTYPES, g % N_HAPLOTYPES);
+            let k = rand::seq::index::sample(rng, per_group, 1).index(0);
+            block * SNPS_PER_BLOCK + hap + k * N_HAPLOTYPES
+        })
+        .collect()
+}
+
 pub fn simulate_classes(h2: f32, seed: u64) -> Classes {
     simulate_inner(h2, seed, 0.0)
 }
@@ -186,17 +216,14 @@ pub fn simulate_graded(h2: f32, seed: u64, counts: &[usize], per_count: usize) -
 
     let mut b = DMatrix::<f32>::zeros(m, NUM_TRAITS);
     let mut by_count: Vec<(usize, HashSet<usize>)> = Vec::new();
-    let mut used: HashSet<usize> = HashSet::default();
 
-    for &k in counts {
+    // One LD group per planted variant, for the same reason as `simulate_inner`:
+    // two planted variants in one group blend into a single marginal row, which
+    // would compress exactly the ladder this fixture exists to resolve.
+    let sites = sample_distinct_ld_groups(&mut rng, counts.len() * per_count);
+    for (gi, &k) in counts.iter().enumerate() {
         let mut group: HashSet<usize> = HashSet::default();
-        for j in rand::seq::index::sample(&mut rng, m, per_count * 2) {
-            if group.len() >= per_count {
-                break;
-            }
-            if used.contains(&j) {
-                continue;
-            }
+        for &j in &sites[gi * per_count..(gi + 1) * per_count] {
             // Exactly k traits, equal expected magnitude per variant.
             let traits = rand::seq::index::sample(&mut rng, NUM_TRAITS, k);
             let mut row: Vec<f32> = vec![0.0; NUM_TRAITS];
@@ -208,9 +235,9 @@ pub fn simulate_graded(h2: f32, seed: u64, counts: &[usize], per_count: usize) -
             for (t, v) in row.iter().enumerate() {
                 b[(j, t)] = v / norm; // ‖β_g‖ = 1 for every planted variant
             }
-            used.insert(j);
             group.insert(j);
         }
+        assert_eq!(group.len(), per_count, "graded group k={k} came up short");
         by_count.push((k, group));
     }
 
@@ -264,36 +291,36 @@ fn simulate_inner(h2: f32, seed: u64, blend_rho: f32) -> Classes {
     let mut x = x_raw.clone();
     x.scale_columns_inplace();
 
-    // Pleiotropic: through the programs.
+    // Every causal variant gets its own LD group, so no two of them share a
+    // marginal row by accident. Sampled up front and split, which also makes
+    // the two classes disjoint by construction.
+    let n_pleio = NUM_PROGRAMS * CAUSAL_PER_PROGRAM;
+    let n_specific = 2 * NUM_TRAITS;
+    let sites = sample_distinct_ld_groups(&mut rng, n_pleio + n_specific);
+    let pleio_order: Vec<usize> = sites[..n_pleio].to_vec();
+    let specific_order: Vec<usize> = sites[n_pleio..].to_vec();
+
+    // Pleiotropic: through the programs, one program each.
     let mut u = DMatrix::<f32>::zeros(m, NUM_PROGRAMS);
     let mut pleiotropic = HashSet::default();
-    let mut pleio_order: Vec<usize> = Vec::new();
-    for prog in 0..NUM_PROGRAMS {
-        for j in rand::seq::index::sample(&mut rng, m, CAUSAL_PER_PROGRAM) {
-            let v: f64 = StandardNormal.sample(&mut rng);
-            u[(j, prog)] = v as f32;
-            if pleiotropic.insert(j) {
-                pleio_order.push(j);
-            }
-        }
+    for (i, &j) in pleio_order.iter().enumerate() {
+        let v: f64 = StandardNormal.sample(&mut rng);
+        u[(j, i / CAUSAL_PER_PROGRAM)] = v as f32;
+        pleiotropic.insert(j);
     }
     let v_true = randn(NUM_TRAITS, NUM_PROGRAMS, &mut rng);
     let mut b = &u * v_true.transpose();
 
-    // Trait-specific: one trait each, outside the program space. Scaled to the
-    // same typical magnitude as a pleiotropic entry so the contrast is about
-    // structure and not about effect size.
+    // Trait-specific: exactly one trait each, outside the program space. Scaled
+    // to the same typical magnitude as a pleiotropic entry so the contrast is
+    // about structure and not about effect size.
     let scale = b.abs().max().max(1e-6);
     let mut trait_specific = HashSet::default();
-    for t in 0..NUM_TRAITS {
-        for j in rand::seq::index::sample(&mut rng, m, 2) {
-            if pleiotropic.contains(&j) {
-                continue;
-            }
-            let v: f64 = StandardNormal.sample(&mut rng);
-            b[(j, t)] += scale * v as f32;
-            trait_specific.insert(j);
-        }
+    for (i, &j) in specific_order.iter().enumerate() {
+        let t = i % NUM_TRAITS;
+        let v: f64 = StandardNormal.sample(&mut rng);
+        b[(j, t)] += scale * v as f32;
+        trait_specific.insert(j);
     }
 
     // Blended arm: mix each pleiotropic variant's genotype into its paired
@@ -301,8 +328,7 @@ fn simulate_inner(h2: f32, seed: u64, blend_rho: f32) -> Classes {
     // a weighted sum of both profiles. Re-standardized afterwards, so the mix
     // changes the correlation and not the scale.
     if blend_rho > 0.0 && !pleio_order.is_empty() {
-        let mut targets: Vec<usize> = trait_specific.iter().copied().collect();
-        targets.sort_unstable();
+        let targets = &specific_order;
         let keep = (1.0 - blend_rho * blend_rho).max(0.0).sqrt();
         for (i, &j) in targets.iter().enumerate() {
             let src = pleio_order[i % pleio_order.len()];

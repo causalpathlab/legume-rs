@@ -51,6 +51,7 @@ participation_ratio <- function(x) {
 auc_pair <- function(score, pos, neg) {
   s <- c(score[pos], score[neg])
   lab <- c(rep(1L, length(pos)), rep(0L, length(neg)))
+  keep <- !is.na(s); s <- s[keep]; lab <- lab[keep]
   r <- rank(s)
   n1 <- sum(lab == 1L); n0 <- sum(lab == 0L)
   if (n1 == 0 || n0 == 0) return(0.5)
@@ -70,11 +71,15 @@ read_mat <- function(path) {
   as.matrix(d[, setdiff(names(d), "snp_id"), drop = FALSE])
 }
 
-## The exported LD is f32, so the round trip leaves it asymmetric in the last
-## bit and susieR warns. Symmetrize rather than let it do so silently.
+## susieR warns that Xcorr "is not symmetric" on every fit. The values are
+## bit-exactly symmetric -- the culprit is dimnames: read_mat drops the snp_id
+## column, so colnames are set while rownames are NULL, and isSymmetric()
+## compares attributes. Stripping them silences it at the source; averaging with
+## the transpose (an earlier attempt) is a no-op and does not.
 read_ld <- function(path) {
   r <- read_mat(path)
-  (r + t(r)) / 2
+  dimnames(r) <- NULL
+  r
 }
 
 ## ---- per seed -------------------------------------------------------------
@@ -94,6 +99,7 @@ for (seed in SEEDS) {
   pip <- matrix(0, m, tt)
   eff <- matrix(0, m, tt)
   in_cs <- logical(m)
+  n_skip <- 0L
   for (b in seq_len(N_BLOCKS)) {
     idx <- ((b - 1) * SNPS_PER_BLOCK + 1):(b * SNPS_PER_BLOCK)
     R <- read_ld(file.path(EXPORT, sprintf("ld_%s_block%d.parquet", sid, b - 1)))
@@ -102,7 +108,9 @@ for (seed in SEEDS) {
         susie_rss(z = z[idx, t], R = R, n = N_IND, L = 5, verbose = FALSE),
         error = function(e) NULL
       )
-      if (is.null(fit)) next
+      ## A skipped fit leaves 150 rows of this trait at zero, which silently
+      ## removes a coordinate from every profile in the block. Count them.
+      if (is.null(fit)) { n_skip <- n_skip + 1; next }
       pip[idx, t] <- susieR::susie_get_pip(fit)
       eff[idx, t] <- coef(fit)[-1]
       cs <- susieR::susie_get_cs(fit, Xcorr = R)$cs
@@ -110,11 +118,17 @@ for (seed in SEEDS) {
     }
   }
 
-  ## A variant's trait profile under SuSiE: its posterior effect across traits,
-  ## gated by inclusion. PR of that is the same shape question, asked of a
-  ## method that resolved LD first.
-  prof <- pip * eff
+  ## A variant's trait profile under SuSiE is its posterior effect across
+  ## traits. `coef.susie` returns colSums(alpha * mu), which ALREADY integrates
+  ## over inclusion -- multiplying by susie_get_pip() again would apply the
+  ## inclusion weight twice and artificially sharpen each row toward its
+  ## highest-PIP trait, which is exactly what PR measures.
+  prof <- eff
   pr_susie <- apply(prof, 1, participation_ratio)
+  ## A variant SuSiE never included has an all-zero profile. PR = 0 there would
+  ## rank it as MAXIMALLY trait-specific, scoring non-detection as evidence of
+  ## specificity and pushing this arm's AUC down. Drop those instead.
+  pr_susie[rowSums(abs(prof)) == 0] <- NA_real_
   susie_any <- in_cs
 
   ## SuSiE selects CAUSAL variants, not trait-specific ones, so its FDP has to
@@ -137,7 +151,9 @@ for (seed in SEEDS) {
     fdp_variant = fdp_v,
     fdp_locus = fdp_l
   )
-  cat(sprintf("seed %-9s done: %d variants in a credible set\n", sid, sum(susie_any)))
+  cat(sprintf("seed %-9s done: %d variants in a credible set, %d fits skipped\n",
+              sid, sum(susie_any), n_skip))
+  stopifnot(n_skip == 0L)
 }
 
 res <- do.call(rbind, rows)
@@ -156,5 +172,7 @@ cat("\n== variant resolution: SuSiE credible sets, scored against CAUSAL ==\n")
 print(round(res[, c("seed", "n_cs", "fdp_variant", "fdp_locus")], 3), row.names = FALSE)
 cat(sprintf("\nmean FDP: variant-level %.3f, locus-level %.3f\n",
             mean(res$fdp_variant, na.rm = TRUE), mean(res$fdp_locus, na.rm = TRUE)))
-cat("\nNot comparable to the rotation arm's 0.80/0.03: that arm selects for\n",
-    "trait-SPECIFICITY, this one for causality. Different targets, different FDPs.\n", sep = "")
+cat("\nThis is a coverage property of credible sets, not FDR control -- susieR\n",
+    "makes no FDR claim, so read it as the realized FDP on one fixture. It is\n",
+    "also not comparable to the rotation arm's FDP*: that arm selects for\n",
+    "trait-SPECIFICITY, this one for causality. Different targets.\n", sep = "")
