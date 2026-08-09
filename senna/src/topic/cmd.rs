@@ -517,28 +517,40 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
 
-    // Per-level NB-Fisher weights at the *coarse* feature resolution
-    // each decoder operates on. Computed via a fresh streaming pass
-    // over coarsened cells so the dispersion trend matches the data
-    // the decoder actually sees. Used by `MultinomTopicDecoder` to
-    // multiplicatively weight the per-gene log-likelihood term.
+    // Per-level NB-Fisher weights at the *coarse* feature resolution each
+    // decoder operates on, so the dispersion trend matches the data the
+    // decoder actually sees. Used by `MultinomTopicDecoder` to multiplicatively
+    // weight the per-gene log-likelihood term.
+    //
+    // `collapsed_levels` and `level_coarsenings` are indexed alike (both
+    // finest-last, and `build_level_data` zips them), so a level's own
+    // pseudobulks are its trend's population.
     let feature_fisher_per_level: Vec<Vec<f32>> = {
         info!(
-            "Computing per-level NB-Fisher weights at coarse resolution ({} levels)",
-            level_coarsenings.len()
+            "Computing per-level NB-Fisher weights at coarse resolution from {} ({} levels)",
+            if args.pb_reference.is_some() {
+                "pseudobulks"
+            } else {
+                "cells"
+            },
+            level_coarsenings.len(),
         );
-        level_coarsenings
+        // Zip would silently truncate; every construction branch above sizes
+        // `level_coarsenings` to `num_levels = collapsed_levels.len()`.
+        debug_assert_eq!(collapsed_levels.len(), level_coarsenings.len());
+        collapsed_levels
             .iter()
-            .map(|fc_opt| match fc_opt.as_ref() {
-                Some(fc) => data_beans_alg::gene_weighting::compute_nb_fisher_weights_coarsened(
+            .enumerate()
+            .zip(level_coarsenings.iter())
+            .map(|((level, collapsed), fc)| {
+                crate::refine_weighting::fit_fisher_weights(
+                    args.pb_reference.as_ref(),
+                    collapsed,
+                    cell_to_pb_per_level.as_ref().map(|c| c[level].as_slice()),
+                    fc.as_ref(),
                     &data_vec,
-                    fc,
                     args.block_size,
-                ),
-                None => data_beans_alg::gene_weighting::compute_nb_fisher_weights(
-                    &data_vec,
-                    args.block_size,
-                ),
+                )
             })
             .collect::<anyhow::Result<Vec<_>>>()?
     };
@@ -563,6 +575,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         level_coarsenings: &level_coarsenings,
         finest_coarsening,
         finest_collapsed,
+        cell_to_pb_finest: cell_to_pb_per_level
+            .as_deref()
+            .and_then(<[Vec<usize>]>::last)
+            .map(Vec::as_slice),
         n_features_full,
         gene_names: &gene_names,
         data_vec: &data_vec,
@@ -816,6 +832,9 @@ struct PipelineCtx<'a> {
     level_coarsenings: &'a [Option<FeatureCoarsening>],
     finest_coarsening: Option<&'a FeatureCoarsening>,
     finest_collapsed: &'a CollapsedOut,
+    /// Finest-level cell → pb membership, for anything that needs to know how
+    /// many cells a pseudobulk stands for. `None` when the run built no hierarchy.
+    cell_to_pb_finest: Option<&'a [usize]>,
     n_features_full: usize,
     gene_names: &'a [Box<str>],
     data_vec: &'a SparseIoVec,
@@ -986,8 +1005,16 @@ where
         // `dictionary.parquet` so rare informative genes survive into the
         // annotate-side enrichment ranking.
         info!("Computing NB Fisher gene weights for empirical dictionary");
-        let fisher_w =
-            crate::empirical_dict::compute_nb_fisher_weights(ctx.data_vec, ctx.args.block_size)?;
+        // Full gene resolution — the point of the empirical dictionary is to
+        // escape the coarsening, so no `FeatureCoarsening` here.
+        let fisher_w = crate::refine_weighting::fit_fisher_weights(
+            ctx.args.pb_reference.as_ref(),
+            ctx.finest_collapsed,
+            ctx.cell_to_pb_finest,
+            None,
+            ctx.data_vec,
+            ctx.args.block_size,
+        )?;
         crate::output_helpers::save_fisher_weights(
             ctx.args.out.as_ref(),
             &fisher_w,
