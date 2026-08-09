@@ -1,4 +1,5 @@
 use crate::embed_common::*;
+pub use crate::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
 use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
@@ -81,26 +82,6 @@ pub(crate) fn expand_delta_for_block(
     let membership = block_membership(data_vec, adj_method, lb, ub)?;
     let indices = Tensor::from_iter(membership.into_iter().map(|x| x as u32), dev)?;
     Ok(delta_bd.index_select(&indices, 0)?)
-}
-
-/// Posterior-mean PB matrix `[D, n_pb]`, preferring the batch-adjusted
-/// estimate when available. Anchor selection and ambient-profile
-/// estimation both want the cleanest cell-type signal — the batch-
-/// adjusted posterior strips per-batch effects out of the mean.
-pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
-    collapsed.mu_adjusted.as_ref().map_or_else(
-        || collapsed.mu_observed.posterior_mean(),
-        matrix_param::traits::Inference::posterior_mean,
-    )
-}
-
-/// Posterior log-mean PB matrix `[D, n_pb]`, preferring batch-adjusted.
-/// For Gamma(α, β), returns E[log X] = ψ(α) - log(β).
-pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
-    collapsed.mu_adjusted.as_ref().map_or_else(
-        || collapsed.mu_observed.posterior_log_mean(),
-        matrix_param::traits::Inference::posterior_log_mean,
-    )
 }
 
 /// Build per-level feature coarsenings via the multilevel pipeline:

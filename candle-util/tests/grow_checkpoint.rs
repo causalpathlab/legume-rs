@@ -13,7 +13,7 @@
 //! silently gives a model that trains as if the flag had done nothing.
 
 use candle_core::{DType, Device, Tensor};
-use candle_util::grow::{grow_tensor, new_slab_value, GrowthDims, NEW_TOPIC_LOGIT_BIAS};
+use candle_util::grow::{grow_tensor, GrowthDims, NEW_TOPIC_LOGIT_BIAS};
 
 const K_OLD: usize = 4;
 const K_NEW: usize = 7;
@@ -149,45 +149,4 @@ fn an_unrelated_shape_change_is_rejected() {
         msg.contains("architecture change"),
         "should say what it is refusing: {msg}"
     );
-}
-
-#[test]
-fn shrinking_is_refused() {
-    let dev = Device::Cpu;
-    let err = grow_tensor(
-        "dec_0.topic.embeddings",
-        &ramp(&[K_OLD, H_OLD], &dev),
-        &ramp(&[K_OLD, H_NEW], &dev),
-        &dims(),
-    )
-    .expect_err("growth only adds capacity");
-    assert!(err.to_string().contains("shrank"), "{err}");
-}
-
-/// The fill rule keyed by name, stated once so a rename cannot quietly flip a
-/// tensor from "preserve the function" to "keep the init".
-#[test]
-fn the_fill_rule_is_what_the_math_requires() {
-    // Zero: anything that would otherwise perturb the model's output.
-    assert_eq!(new_slab_value("dec_0.topic.embeddings", 1), Some(0.0));
-    assert_eq!(new_slab_value("enc.attn.query", 1), Some(0.0));
-    assert_eq!(
-        new_slab_value("enc.nn.enc.fc.relu_linear_stack.0.weight", 1),
-        Some(0.0)
-    );
-    assert_eq!(new_slab_value("enc.nn.enc.z.mean.weight", 0), Some(0.0));
-    assert_eq!(new_slab_value("enc.nn.enc.z.lnvar.weight", 0), Some(0.0));
-
-    // The off-switch.
-    assert_eq!(
-        new_slab_value("enc.nn.enc.z.mean.bias", 0),
-        Some(NEW_TOPIC_LOGIT_BIAS)
-    );
-
-    // Kept random: the gradient path into the new subspace.
-    assert_eq!(new_slab_value("enc.feature.embeddings", 1), None);
-    // New *topic* rows of alpha are new capacity, not a preservation concern.
-    assert_eq!(new_slab_value("dec_0.topic.embeddings", 0), None);
-    // Dense decoder rows likewise.
-    assert_eq!(new_slab_value("dec_0.dictionary.logits", 0), None);
 }

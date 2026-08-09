@@ -67,6 +67,11 @@ pub struct PbReferenceMeta {
 /// files, so this cannot collide unless someone names a batch after it.
 pub const REFERENCE_BATCH: &str = "__pb_reference__";
 
+/// Column-name prefix for carried pseudobulks. Written by [`write`] and relied
+/// on by [`ReferenceInput::weights_for`] to tell them from real cells, so the
+/// two must agree — hence one constant.
+pub const COLUMN_PREFIX: &str = "PBREF_";
+
 /// Cells per finest-level pseudobulk, from the cell → pb membership.
 fn cell_counts_from(cell_to_pb_finest: &[usize], n_pb: usize) -> Vec<f32> {
     let mut counts = vec![0.0f32; n_pb];
@@ -90,7 +95,7 @@ pub fn write(
     generation: u32,
 ) -> anyhow::Result<()> {
     let batch_adjusted = finest.mu_adjusted.is_some();
-    let rate_dp: &Mat = crate::topic::common::preferred_posterior_mean(finest);
+    let rate_dp: &Mat = preferred_posterior_mean(finest);
     let (n_genes, n_pb) = (rate_dp.nrows(), rate_dp.ncols());
     anyhow::ensure!(
         n_genes == gene_names.len(),
@@ -135,7 +140,7 @@ pub fn write(
         Some(&SparseIoBackend::Zarr),
     )?;
     backend.register_row_names_vec(gene_names);
-    backend.register_column_names_vec(&axis_id_names("PBREF_", n_pb));
+    backend.register_column_names_vec(&axis_id_names(COLUMN_PREFIX, n_pb));
 
     let meta = PbReferenceMeta {
         senna_version: env!("CARGO_PKG_VERSION").into(),
@@ -210,18 +215,46 @@ impl ReferenceInput {
     /// Weights for the whole loaded cohort, given its column names.
     ///
     /// The reference is appended last, so its columns are the trailing
-    /// `cell_counts.len()`. The count is checked rather than assumed: a
-    /// mismatch means the loader did not lay the columns out as expected, and
-    /// silently weighting the wrong ones would corrupt every pseudobulk size.
+    /// `cell_counts.len()`. That is an assumption about how the loader lays
+    /// columns out, and applying weights to the wrong ones would silently
+    /// corrupt every pseudobulk size — a wrong denominator with no shape
+    /// mismatch to catch it. So the tail is *identified*, not just counted:
+    /// carried columns are named `PBREF_*` at write time, and the loader
+    /// suffixes `@<backend basename>` when several backends are pushed.
+    ///
+    /// Both halves are checked. If the tail does not look like the reference,
+    /// or a `PBREF_` column shows up outside it, this fails rather than
+    /// guessing.
     pub fn weights_for(&self, column_names: &[Box<str>]) -> anyhow::Result<Vec<f32>> {
         let n_ref = self.cell_counts.len();
         let n_total = column_names.len();
         anyhow::ensure!(
-            n_total >= n_ref,
-            "pb_reference has {n_ref} columns but only {n_total} were loaded"
+            n_total > n_ref,
+            "pb_reference has {n_ref} columns and {n_total} were loaded — that leaves no new \
+             cells, so the reference is the whole cohort"
         );
+        let split = n_total - n_ref;
+        let is_ref = |n: &str| n.starts_with(COLUMN_PREFIX);
+
+        if let Some(i) = column_names[split..].iter().position(|n| !is_ref(n)) {
+            anyhow::bail!(
+                "expected the last {n_ref} loaded columns to be the carried pseudobulks, but \
+                 column {} is `{}`. The loader did not append the reference last, so weighting \
+                 by position would put every multiplicity on the wrong column.",
+                split + i,
+                column_names[split + i],
+            );
+        }
+        if let Some(i) = column_names[..split].iter().position(|n| is_ref(n)) {
+            anyhow::bail!(
+                "column {i} (`{}`) looks like a carried pseudobulk but sits among the new cells; \
+                 the reference must be contiguous at the end.",
+                column_names[i],
+            );
+        }
+
         let mut w = vec![1.0f32; n_total];
-        w[n_total - n_ref..].copy_from_slice(&self.cell_counts);
+        w[split..].copy_from_slice(&self.cell_counts);
         Ok(w)
     }
 }

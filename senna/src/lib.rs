@@ -13,4 +13,5 @@
 
 pub mod embed_common;
 pub mod output_helpers;
+pub mod pb_reference;
 pub mod run_manifest;
