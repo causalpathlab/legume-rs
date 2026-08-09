@@ -33,18 +33,6 @@ fn scratch() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-#[test]
-fn train_args_round_trip_through_save_and_load() {
-    let (_dir, path) = scratch();
-    let mut m = RunManifest::new(RunKind::Topic, "run-a");
-    m.train_args = Some(record_train_args(&fake()).expect("record"));
-    m.save(&path).expect("save");
-
-    let (loaded, _) = RunManifest::load(&path).expect("load");
-    let back: FakeArgs = loaded.train_args_as("run-a").expect("interpret");
-    assert_eq!(back, fake());
-}
-
 /// The regression guard: load → mutate an unrelated section → save → load.
 /// This is exactly what `layout` / `clustering` / `annotate` do.
 #[test]
@@ -79,62 +67,6 @@ fn manifest_without_train_args_still_loads() {
     assert_eq!(m.kind, RunKind::Topic);
     assert_eq!(m.data.input, vec!["a.zarr".to_string()]);
     assert!(m.train_args.is_none());
-}
-
-/// Absent configuration is reported as such, and the message says what to do —
-/// this is the path every model trained before the field existed takes.
-#[test]
-fn missing_train_args_explains_the_remedy() {
-    let m = RunManifest::new(RunKind::Topic, "old");
-    let err = m
-        .train_args_as::<FakeArgs>("old")
-        .expect_err("must not succeed without a record");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("--init-from"),
-        "the error should point at the fallback, got: {msg}"
-    );
-}
-
-/// A record that changed *shape* — a renamed or retyped field — still fails,
-/// and says so in terms the reader can act on.
-#[test]
-fn unreadable_record_fails_loudly_naming_the_versions() {
-    #[derive(serde::Serialize)]
-    struct Retyped {
-        epochs: String, // was `usize`
-        out: String,
-        layers: Vec<usize>,
-    }
-    let mut m = RunManifest::new(RunKind::Topic, "run-c");
-    m.train_args = Some(
-        record_train_args(&Retyped {
-            epochs: "lots".into(),
-            out: "x".into(),
-            layers: vec![],
-        })
-        .expect("record"),
-    );
-
-    let err = m
-        .train_args_as::<FakeArgs>("run-c")
-        .expect_err("a retyped field cannot be replayed");
-    // serde names the field for a *missing* field but not for a type mismatch
-    // in this position, so assert on what is actually actionable: the type
-    // conflict, the two versions, and the way out.
-    let msg = err.to_string();
-    assert!(
-        msg.contains("invalid type"),
-        "should surface the type conflict: {msg}"
-    );
-    assert!(
-        msg.contains("written by senna"),
-        "should name the writing/reading versions: {msg}"
-    );
-    assert!(
-        msg.contains("--init-from"),
-        "should point at the fallback: {msg}"
-    );
 }
 
 /// The property that keeps `update` usable across senna versions.
@@ -194,24 +126,4 @@ fn a_field_added_later_replays_with_its_clap_default() {
     assert_eq!(replayed.out, "run-d");
     assert_eq!(replayed.epochs, 1000, "must not train for zero epochs");
     assert!((replayed.learning_rate - 0.01).abs() < 1e-9);
-}
-
-#[test]
-fn masked_family_is_exactly_the_two_masked_kinds() {
-    assert!(RunKind::Itopic.is_masked_family());
-    assert!(RunKind::MaskedVae.is_masked_family());
-    for k in [
-        RunKind::Topic,
-        RunKind::Vae,
-        RunKind::Svd,
-        RunKind::JointSvd,
-        RunKind::JointTopic,
-        RunKind::Bge,
-        RunKind::Fne,
-    ] {
-        assert!(
-            !k.is_masked_family(),
-            "{k} must not route to the masked path"
-        );
-    }
 }

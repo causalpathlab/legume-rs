@@ -77,6 +77,26 @@ pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
 /// it by path in `#[serde(default = "...")]`.
 pub use matrix_util::clap_defaults::clap_defaults;
 
+/// Posterior-mean PB matrix `[D, n_pb]`, preferring the batch-adjusted
+/// estimate when available. Anchor selection and ambient-profile
+/// estimation both want the cleanest cell-type signal — the batch-
+/// adjusted posterior strips per-batch effects out of the mean.
+pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed.mu_adjusted.as_ref().map_or_else(
+        || collapsed.mu_observed.posterior_mean(),
+        matrix_param::traits::Inference::posterior_mean,
+    )
+}
+
+/// Posterior log-mean PB matrix `[D, n_pb]`, preferring batch-adjusted.
+/// For Gamma(α, β), returns E[log X] = ψ(α) - log(β).
+pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed.mu_adjusted.as_ref().map_or_else(
+        || collapsed.mu_observed.posterior_log_mean(),
+        matrix_param::traits::Inference::posterior_log_mean,
+    )
+}
+
 /// Shared compute device enum for candle-based models
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
