@@ -189,6 +189,7 @@ pub struct JointTopicArgs {
 
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    args.collapse.reject_pb_reference("joint-topic")?;
 
     // 1. Read the data with batch membership
     let SparseStackWithBatch {

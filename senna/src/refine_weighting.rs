@@ -188,12 +188,35 @@ pub(crate) struct CollapseArgs {
                      time goes from quadratic to linear in cell reads.\n\
                      \n\
                      Off by default: it is a second copy of the pseudobulks, useful\n\
-                     only if you intend to keep growing this model."
+                     only if you intend to keep growing this model.\n\
+                     \n\
+                     Available on topic, masked-topic, masked-sbp, masked-vae, vae\n\
+                     and svd — the families `senna update` can continue."
     )]
     pub(crate) emit_pb_reference: bool,
 
     #[command(flatten)]
     pub(crate) pb_refine: PbRefineArgs,
+}
+
+impl CollapseArgs {
+    /// Refuse `--emit-pb-reference` on a family that would ignore it.
+    ///
+    /// The flag rides on this shared struct, so it appears on every command
+    /// that flattens `CollapseArgs` — including `joint-topic`, `joint-svd` and
+    /// `bge`, which `senna update` cannot continue and which therefore write
+    /// nothing. Accepting it there and silently doing nothing is the worst of
+    /// the three options: the user believes the reference exists and only finds
+    /// out a round later, when the parent turns out to carry nothing.
+    pub(crate) fn reject_pb_reference(&self, kind: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.emit_pb_reference,
+            "--emit-pb-reference has no effect on `{kind}`: `senna update` cannot continue a \
+             '{kind}' run, so the carried pseudobulks would have no consumer. Supported: topic, \
+             masked-topic, masked-sbp, masked-vae, vae, svd."
+        );
+        Ok(())
+    }
 }
 
 /// CLI args for inference-time amortization refinement on topic models.

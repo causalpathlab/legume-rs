@@ -168,6 +168,13 @@ pub struct MaskedTopicArgs {
     )]
     add_embedding_dim: usize,
 
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pb_reference: Option<crate::pb_reference::ReferenceInput>,
+
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
@@ -800,6 +807,23 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         (None, None) => None,
     };
 
+    // `ColumnAlignment::Union` matches columns by name across backends, and
+    // nothing in that pass promises the unmatched `PBREF_*` columns come out
+    // last. `weights_for` would catch it, but only after the whole cohort had
+    // been read — say so now instead.
+    anyhow::ensure!(
+        args.pb_reference.is_none() || !effective_multiome,
+        "--use-pb-reference and --multiome do not compose: multiome loads backends with union \
+         column alignment, which gives no guarantee the carried pseudobulks stay contiguous at \
+         the end — and their weights are applied by position. Drop --use-pb-reference for this \
+         round and let it re-collapse."
+    );
+
+    let weight_fn = args
+        .pb_reference
+        .as_ref()
+        .map(crate::pb_reference::ReferenceInput::weight_fn);
+
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -824,7 +848,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn,
-        column_weight_fn: None,
+        column_weight_fn: weight_fn.as_deref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: if effective_multiome {
             data_beans::sparse_io_vector::ColumnAlignment::Union
@@ -839,6 +863,14 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
+
+    // Carried pseudobulks train the model but are not cells; hold them out of
+    // every per-cell artifact. See `pb_reference::exclude_carried`.
+    let output_keep_idx = crate::pb_reference::exclude_carried(
+        args.pb_reference.as_ref(),
+        data_vec.num_columns(),
+        output_keep_idx,
+    );
 
     // 4. No feature coarsening for indexed model — both encoder and decoder
     //    use indexed top-K lookup, so D_full is efficient.
@@ -1308,6 +1340,18 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let gene_names = data_vec.row_names()?;
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
 
+    // Emitted before CNV detection, which consumes `data_vec` — the carried
+    // pseudobulks need each column's multiplicity to know what it stands for.
+    let has_pb_reference = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        &data_vec,
+        &gene_names,
+        args.init_from.as_deref(),
+    )?;
+
     if let Some(positions) = cnv_positions {
         if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
             // `theta_nk` is unused after this; `detect_cnv_topic_informed` takes
@@ -1365,7 +1409,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
-        pb_reference_suffix: None,
+        pb_reference_suffix: has_pb_reference.then_some(crate::pb_reference::BACKEND_SUFFIX),
         pb_latent_suffix: Some("pb_latent.parquet"),
         // Full-gene-resolution β̂, the same object `senna topic` writes. Preferred over the
         // factorized `dictionary.parquet` by anything that ranks genes (plot-topic already does
@@ -1390,6 +1434,7 @@ impl crate::update::Updatable for MaskedTopicArgs {
         self.batch_files = r.batch_files;
         self.out = r.out;
         self.init_from = Some(r.init_from);
+        self.pb_reference = r.reference;
         // Only when growth was asked for; otherwise the recorded sizes replay
         // verbatim. Both axes are pinned together even if only one grows: a
         // recorded `--embedding-dim 0` means "auto = 2K", which would otherwise

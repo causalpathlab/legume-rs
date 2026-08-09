@@ -1,5 +1,7 @@
 use crate::embed_common::*;
-pub use crate::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
+pub use crate::embed_common::{
+    preferred_posterior_log_mean, preferred_posterior_mean, ColumnWeightFn,
+};
 use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
@@ -248,10 +250,6 @@ pub struct LoadProjectArgs<'a> {
 /// and [`LoadCollapseArgs::feature_mask_fn`] to physically subset rows
 /// (via `SparseIoVec::mask_rows`) before projection / collapse / training.
 pub type FeatureMaskFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<bool>>;
-
-/// Callback that, given the loaded data's column names, returns one weight per
-/// column. See [`LoadProjectArgs::column_weight_fn`].
-pub type ColumnWeightFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<f32>>;
 
 /// Read sparse files, resolve batch membership, optionally pick HVGs,
 /// then run the random projection. Used by `load_and_collapse` and by
