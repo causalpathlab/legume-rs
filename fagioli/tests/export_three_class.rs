@@ -10,7 +10,22 @@ use nalgebra::DMatrix;
 
 #[path = "common/three_class.rs"]
 mod three_class;
-use three_class::{simulate_classes, NUM_BLOCKS, NUM_TRAITS, SNPS_PER_BLOCK};
+#[path = "common/pipeline.rs"]
+mod pipeline;
+use fagioli::embedding::score::assemble_u;
+use three_class::{simulate_classes, NUM_BLOCKS, NUM_PROGRAMS, NUM_TRAITS, SNPS_PER_BLOCK};
+
+/// Effective number of nonzero coordinates.
+fn participation_ratio(x: impl Iterator<Item = f32>) -> f32 {
+    let (s2, s4) = x.fold((0.0f64, 0.0f64), |(a, b), v| {
+        let v2 = (v as f64) * (v as f64);
+        (a + v2, b + v2 * v2)
+    });
+    if s4 <= 0.0 {
+        return 0.0;
+    }
+    (s2 * s2 / s4) as f32
+}
 
 const OUT: &str = "target/three_class_export";
 
@@ -72,6 +87,21 @@ fn export_for_external_comparison() -> Result<()> {
                 Some(&names),
             )?;
         }
+        // The NCE arm's per-variant statistics, so R can curve it against
+        // susieR without reimplementing the embedding.
+        let (fit, starts) = pipeline::fit_embedding(&cl.input, NUM_PROGRAMS, seed)?;
+        let u = assemble_u(&fit.u_mean, &starts, m);
+        let b_hat = &u * fit.v_check.transpose();
+        let nce = DMatrix::from_fn(m, 2, |g, c| match c {
+            0 => u.row(g).norm(),
+            _ => participation_ratio(b_hat.row(g).iter().copied()),
+        });
+        nce.to_parquet_with_names(
+            &format!("{OUT}/nce_{seed}.parquet"),
+            (Some(&snp_names), Some("snp_id")),
+            Some(&[Box::from("u_norm"), Box::from("pr_fitted")]),
+        )?;
+
         println!("wrote seed {seed}: {m} variants, {NUM_TRAITS} traits, {NUM_BLOCKS} blocks");
     }
 
