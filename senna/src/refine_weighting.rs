@@ -199,6 +199,78 @@ pub(crate) struct CollapseArgs {
     pub(crate) pb_refine: PbRefineArgs,
 }
 
+/// NB-Fisher gene weights for a fit, sourced from whichever population this
+/// run actually has.
+///
+/// **Cells are the default and stay the default.** An A/B on HCA_BM (39k
+/// cells, K=20, 300 epochs) could not separate a cell-fitted trend from a
+/// pseudobulk-fitted one: the arm differences in ARI (0.0018), purity (0.0097)
+/// and held-out likelihood (0.012) all landed *inside* the spread between two
+/// runs of the same configuration (0.0057 / 0.0155 / 0.118). There is no
+/// measured reason to prefer one, so nothing changes for an ordinary fit.
+///
+/// **`senna update --use-pb-reference` is not an ordinary fit.** There the
+/// backend holds the parent's carried pseudobulks — per-cell **rates** — beside
+/// the new cohort's real cell **counts**. A trend fitted across that mixture is
+/// fitted on two incompatible units: averaging already removed the Poisson
+/// component the trend measures, and no weighting puts it back. So the choice
+/// there is not a preference between two estimators; one of them has no
+/// coherent population. Hence no flag — the reference's presence *is* the
+/// condition.
+///
+/// Measured against the exact re-collapse (900-cell parent absorbing 400
+/// cells), on Spearman ρ of the induced gene ranking:
+///
+/// | trend source | ρ vs exact | mean ratio |
+/// | --- | --- | --- |
+/// | cells, mixed units (what this replaces) | 0.815 | 1.71 |
+/// | pseudobulks, batch-adjusted | 0.469 | 0.53 |
+/// | pseudobulks, observed | **0.975** | 0.45 |
+///
+/// The residual uniform ~2.2× shrink is not explained. It is left alone
+/// because the A/B above says model quality is insensitive to this trend at a
+/// far larger perturbation than a constant factor.
+pub(crate) fn fit_fisher_weights(
+    reference: Option<&crate::pb_reference::ReferenceInput>,
+    collapsed: &data_beans_alg::collapse_data::CollapsedOut,
+    cell_to_pb: Option<&[usize]>,
+    coarsening: Option<&data_beans_alg::feature_coarsening::FeatureCoarsening>,
+    data_vec: &data_beans::sparse_io_vector::SparseIoVec,
+    block_size: Option<usize>,
+) -> anyhow::Result<Vec<f32>> {
+    if reference.is_some() {
+        // `mu_observed`, NOT the batch-adjusted posterior — even though the
+        // carried columns were *stored* adjusted. The NB trend describes the
+        // observation process, and between-batch spread is part of the
+        // variance it is meant to see; the cell-level pass this has to agree
+        // with reads raw counts. Removing δ first shrinks apparent dispersion
+        // and reorders which genes look over-dispersed — measured above as
+        // ρ 0.47 against ρ 0.98 for the observed posterior.
+        let mu_ds = matrix_param::traits::Inference::posterior_mean(&collapsed.mu_observed);
+        let cell_to_pb = cell_to_pb.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--use-pb-reference needs this run's cell → pb membership to know how many cells \
+                 each pseudobulk stands for; without it the NB-Fisher trend cannot be put back on \
+                 the count scale it is defined for."
+            )
+        })?;
+        let column_weight: Vec<f32> = (0..data_vec.num_columns())
+            .map(|c| data_vec.column_multiplicity(c))
+            .collect();
+        let size_s =
+            crate::pb_reference::cell_counts_from(cell_to_pb, mu_ds.ncols(), &column_weight);
+        return data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk(
+            mu_ds, &size_s, coarsening,
+        );
+    }
+    match coarsening {
+        Some(fc) => data_beans_alg::gene_weighting::compute_nb_fisher_weights_coarsened(
+            data_vec, fc, block_size,
+        ),
+        None => data_beans_alg::gene_weighting::compute_nb_fisher_weights(data_vec, block_size),
+    }
+}
+
 impl CollapseArgs {
     /// Refuse `--emit-pb-reference` on a family that would ignore it.
     ///

@@ -1020,8 +1020,18 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let stop = setup_stop_handler();
 
     info!("Computing NB-Fisher weights for shortlist scoring");
-    let shortlist_weights: Vec<f32> =
-        crate::empirical_dict::compute_nb_fisher_weights(&data_vec, args.block_size)?;
+    // Full gene resolution: the masked head has no feature coarsening.
+    let shortlist_weights: Vec<f32> = crate::refine_weighting::fit_fisher_weights(
+        args.pb_reference.as_ref(),
+        finest_collapsed,
+        cell_to_pb_per_level
+            .as_deref()
+            .and_then(<[Vec<usize>]>::last)
+            .map(Vec::as_slice),
+        None,
+        &data_vec,
+        args.block_size,
+    )?;
 
     // Per-gene mean expression rate `μ_d` from the finest-level pseudobulk
     // posterior. The encoder composes it with the per-cell batch null as a
