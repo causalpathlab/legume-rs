@@ -278,13 +278,11 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // re-read the cells. The substitution is what turns a round from
     // "every cell ever absorbed" into "the new cells only".
     let reference = if args.use_pb_reference {
-        anyhow::ensure!(
-            kind == RunKind::Topic,
-            "--use-pb-reference is wired for `topic` runs so far; {kind} still re-collapses."
-        );
         let r = crate::pb_reference::prepare(&args.model, &args.out)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "{} carries no pseudobulks, so there is nothing to substitute for its cells.                  Re-train it with --emit-pb-reference, or drop --use-pb-reference and let this                  round re-collapse.",
+                "{} carries no pseudobulks, so there is nothing to substitute for its cells. \
+                 Re-train it with --emit-pb-reference, or drop --use-pb-reference and let this \
+                 round re-collapse.",
                 args.model,
             )
         })?;
@@ -311,7 +309,9 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
                 Some(v)
             }
             None => anyhow::bail!(
-                "--use-pb-reference needs --batch-files for the new data: the carried                  pseudobulks are their own batch, and the loader takes one batch file per                  data file."
+                "--use-pb-reference needs --batch-files for the new data: the carried \
+                 pseudobulks are their own batch, and the loader takes one batch file per \
+                 data file."
             ),
         };
         (d, b)

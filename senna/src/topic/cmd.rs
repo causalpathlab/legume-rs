@@ -353,13 +353,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         .transpose()?
         .flatten();
 
-    let weight_fn: Option<Box<crate::topic::common::ColumnWeightFn>> =
-        args.pb_reference.as_ref().map(|r| {
-            let r = r.clone();
-            let f: Box<crate::topic::common::ColumnWeightFn> =
-                Box::new(move |names: &[Box<str>]| r.weights_for(names));
-            f
-        });
+    let weight_fn = args
+        .pb_reference
+        .as_ref()
+        .map(crate::pb_reference::ReferenceInput::weight_fn);
 
     let PreparedData {
         data_vec,
@@ -400,24 +397,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // 4. Per-level feature coarsenings for decoders.
     //    Dense encoder operates at D_coarse (finest level's coarsening).
     //    Decoders at coarser levels use fewer feature groups.
-    // Carried pseudobulks are training inputs, not cells. They must not reach
-    // the per-cell outputs, or `clustering` / `plot` / `annotate` would treat
-    // each one as an extra cell. The QC keep-mask is exactly the right lever —
-    // they are the trailing columns, since `update` appends the reference last.
-    let output_keep_idx = match args.pb_reference.as_ref() {
-        None => output_keep_idx,
-        Some(r) => {
-            let n_real = data_vec.num_columns().saturating_sub(r.cell_counts.len());
-            info!(
-                "Excluding {} carried pseudobulks from the per-cell outputs ({n_real} cells remain)",
-                r.cell_counts.len(),
-            );
-            Some(match output_keep_idx {
-                Some(keep) => keep.into_iter().filter(|&i| i < n_real).collect(),
-                None => (0..n_real).collect::<Vec<usize>>(),
-            })
-        }
-    };
+    // The QC keep-mask is exactly the right lever for holding carried
+    // pseudobulks out of the per-cell outputs — they are the trailing columns,
+    // since `update` appends the reference last.
+    let output_keep_idx = crate::pb_reference::exclude_carried(
+        args.pb_reference.as_ref(),
+        data_vec.num_columns(),
+        output_keep_idx,
+    );
 
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
@@ -625,6 +612,19 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     // CNV detection using topic proportions as cell-type membership
     let gene_names = data_vec.row_names()?;
+
+    // Emitted before CNV detection, which consumes `data_vec` — the carried
+    // pseudobulks need each column's multiplicity to know what it stands for.
+    let has_pb_reference = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        &data_vec,
+        &gene_names,
+        args.init_from.as_deref(),
+    )?;
+
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
 
     if let Some(positions) = cnv_positions {
@@ -663,15 +663,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     } else {
         false
     };
-
-    let has_pb_reference = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
-        &args.out,
-        finest_collapsed,
-        cell_to_pb_per_level.as_deref(),
-        &gene_names,
-        args.init_from.as_deref(),
-    )?;
 
     write_topic_manifest(
         &args.out,
