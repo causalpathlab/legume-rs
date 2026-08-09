@@ -57,7 +57,6 @@
 //! Run: cargo test -p fagioli --test trait_profile_shape -- --nocapture
 use anyhow::Result;
 use fagioli::embedding::noise::omega_sqrt_pair;
-use fagioli::summary_stats::common::SumstatInput;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -70,28 +69,32 @@ use three_class::{auc_pair, simulate_classes, Classes, NUM_TRAITS};
 
 /// Effective number of nonzero coordinates of `x`.
 ///
-/// `PR(c·e_t) = 1`; `PR` of a length-`T` isotropic Gaussian tends to `T/3`.
-fn participation_ratio(x: &[f32]) -> f32 {
-    let s2: f64 = x.iter().map(|&v| (v as f64) * (v as f64)).sum();
-    let s4: f64 = x.iter().map(|&v| (v as f64).powi(4)).sum();
+/// `PR(c·e_t) = 1` exactly; for an isotropic Gaussian of length `T` it sits
+/// near `(T+2)/3` — see the module docs for why it is not `T/3`.
+///
+/// Takes an iterator so the hot path (one call per variant per rotation draw)
+/// does not allocate a row.
+fn participation_ratio(x: impl Iterator<Item = f32>) -> f32 {
+    let (s2, s4) = x.fold((0.0f64, 0.0f64), |(a, b), v| {
+        let v2 = (v as f64) * (v as f64);
+        (a + v2, b + v2 * v2)
+    });
     if s4 <= 0.0 {
         return 0.0;
     }
     (s2 * s2 / s4) as f32
 }
 
-fn row(m: &DMatrix<f32>, g: usize) -> Vec<f32> {
-    (0..m.ncols()).map(|t| m[(g, t)]).collect()
+/// `PR(z_g)` for every row.
+fn pr_rows(m: &DMatrix<f32>) -> Vec<f32> {
+    (0..m.nrows())
+        .map(|g| participation_ratio(m.row(g).iter().copied()))
+        .collect()
 }
 
-/// Per-variant `‖z_g‖` and `PR(z_g)`, straight off the z-score matrix.
-fn raw_statistics(z: &DMatrix<f32>) -> (Vec<f32>, Vec<f32>) {
-    (0..z.nrows())
-        .map(|g| {
-            let r = row(z, g);
-            (r.iter().map(|v| v * v).sum::<f32>().sqrt(), participation_ratio(&r))
-        })
-        .unzip()
+/// `‖z_g‖` for every row.
+fn row_norms(m: &DMatrix<f32>) -> Vec<f32> {
+    (0..m.nrows()).map(|g| m.row(g).norm()).collect()
 }
 
 fn mean(v: &[f32]) -> f32 {
@@ -131,7 +134,7 @@ fn test_raw_zscore_shape_separates_without_any_ld() -> Result<()> {
     for &seed in &seeds {
         let cl = simulate_classes(0.4, seed);
         let null = null_set(&cl);
-        let (norm, pr) = raw_statistics(&cl.input.zscores);
+        let (norm, pr) = (row_norms(&cl.input.zscores), pr_rows(&cl.input.zscores));
 
         // PR is *low* for a trait-specific variant, so the pleiotropic class is
         // the high side of that contrast — the same orientation as ‖z‖ for
@@ -267,21 +270,18 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
     let (mut un, mut fitted_pr, mut raw_pr, mut rot) = (vec![], vec![], vec![], vec![]);
     for &seed in &seeds {
         let cl = simulate_classes(0.4, seed);
-        let null = null_set(&cl);
         let fit = fit_embedding(&cl, three_class::NUM_PROGRAMS, seed)?;
 
         let starts: Vec<usize> = cl.input.blocks.iter().map(|b| b.snp_start).collect();
         let u = assemble_u(&fit.u_mean, &starts, cl.input.zscores.nrows());
 
         // ‖u_g‖ — the statistic used so far.
-        let norms: Vec<f32> = (0..u.nrows()).map(|g| u.row(g).norm()).collect();
+        let norms = row_norms(&u);
         // PR(V̌ u_g) — row g of the fitted effect matrix, invariant to A.
         let b_hat = &u * fit.v_check.transpose();
-        let fpr: Vec<f32> = (0..b_hat.nrows())
-            .map(|g| participation_ratio(&row(&b_hat, g)))
-            .collect();
+        let fpr = pr_rows(&b_hat);
         // PR(z_g) — no model at all.
-        let (_, rpr) = raw_statistics(&cl.input.zscores);
+        let rpr = pr_rows(&cl.input.zscores);
 
         // A = diag(a_h), invertible and non-orthogonal. U→UA, V̌→V̌A⁻¹ leaves
         // U V̌' exactly unchanged.
@@ -291,7 +291,7 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
         let v_rot = DMatrix::from_fn(fit.v_check.nrows(), h, |t, k| fit.v_check[(t, k)] / a[k]);
         let drift = (&u_rot * v_rot.transpose() - &b_hat).abs().max();
         assert!(drift < 1e-3, "the rotation must not change U V̌': {drift}");
-        let norms_rot: Vec<f32> = (0..u_rot.nrows()).map(|g| u_rot.row(g).norm()).collect();
+        let norms_rot = row_norms(&u_rot);
 
         let (x, y, z, w) = (
             auc_pair(&norms, &cl.pleiotropic, &cl.trait_specific),
@@ -299,7 +299,6 @@ fn test_fitted_versus_raw_and_the_rotation_attack() -> Result<()> {
             auc_pair(&rpr, &cl.pleiotropic, &cl.trait_specific),
             auc_pair(&norms_rot, &cl.pleiotropic, &cl.trait_specific),
         );
-        let _ = &null;
         println!("{seed:>8} | {x:>10.3} {y:>10.3} {z:>10.3} | {w:>12.3}");
         un.push(x);
         fitted_pr.push(y);
@@ -379,7 +378,7 @@ fn test_participation_ratio_tracks_the_number_of_traits() -> Result<()> {
     let mut observed = vec![Vec::new(); counts.len()];
     for &seed in &seeds {
         let g = three_class::simulate_graded(0.4, seed, &counts, 12);
-        let (_, pr) = raw_statistics(&g.input.zscores);
+        let pr = pr_rows(&g.input.zscores);
         for (i, (_, group)) in g.by_count.iter().enumerate() {
             observed[i].push(mean_over(&pr, group));
         }
@@ -430,7 +429,7 @@ fn ld_partners_of(seed_set: &HashSet<usize>) -> HashSet<usize> {
 /// would otherwise pull the genetic covariance into what is meant to be the
 /// noise law.
 fn trimmed_trait_covariance(z: &DMatrix<f32>, keep: f32) -> DMatrix<f32> {
-    let norms: Vec<f32> = (0..z.nrows()).map(|g| z.row(g).norm()).collect();
+    let norms = row_norms(z);
     let mut sorted = norms.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let cutoff = sorted[((sorted.len() as f32 * keep) as usize).min(sorted.len() - 1)];
@@ -514,7 +513,7 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
         let cl = simulate_classes(0.4, seed);
         let null = null_set(&cl);
         let z = &cl.input.zscores;
-        let (_, observed) = raw_statistics(z);
+        let observed = pr_rows(z);
 
         // A bare rotation is only exchangeable at Ω = I. These ten traits are
         // genetically correlated by construction, so a null row has covariance
@@ -534,7 +533,7 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
             let a = &om_sqrt * &qm * &om_inv_sqrt;
             let zq = z * a.transpose();
             for g in 0..zq.nrows() {
-                if participation_ratio(&row(&zq, g)) <= observed[g] {
+                if participation_ratio(zq.row(g).iter().copied()) <= observed[g] {
                     ge[g] += 1;
                 }
             }
@@ -641,15 +640,12 @@ fn test_rotation_null_calibrates_without_a_panel() -> Result<()> {
 }
 
 fn pleio_vs_specific_pr(cl: &Classes) -> f32 {
-    let (_, pr) = raw_statistics(&cl.input.zscores);
+    let pr = pr_rows(&cl.input.zscores);
     auc_pair(&pr, &cl.pleiotropic, &cl.trait_specific)
 }
 
 fn null_set(cl: &Classes) -> HashSet<usize> {
     let all: HashSet<usize> = cl.pleiotropic.union(&cl.trait_specific).copied().collect();
-    (0..num_snps(&cl.input)).filter(|g| !all.contains(g)).collect()
+    (0..cl.input.zscores.nrows()).filter(|g| !all.contains(g)).collect()
 }
 
-fn num_snps(input: &SumstatInput) -> usize {
-    input.zscores.nrows()
-}

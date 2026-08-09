@@ -81,9 +81,9 @@ read_ld <- function(path) {
 
 rows <- list()
 for (seed in SEEDS) {
-  z <- read_mat(file.path(EXPORT, sprintf("z_%s.parquet", format(seed, scientific = FALSE))))
-  cls <- as.integer(read_mat(file.path(EXPORT, sprintf("labels_%s.parquet",
-                                                       format(seed, scientific = FALSE))))[, 1])
+  sid <- format(seed, scientific = FALSE)
+  z <- read_mat(file.path(EXPORT, sprintf("z_%s.parquet", sid)))
+  cls <- as.integer(read_mat(file.path(EXPORT, sprintf("labels_%s.parquet", sid)))[, 1])
   m <- nrow(z); tt <- ncol(z)
   pleio <- which(cls == 1L); spec <- which(cls == 2L); nul <- which(cls == 0L)
 
@@ -93,11 +93,10 @@ for (seed in SEEDS) {
   ## Arm 2: per-trait SuSiE-RSS, one fit per (block, trait).
   pip <- matrix(0, m, tt)
   eff <- matrix(0, m, tt)
-  in_cs <- matrix(FALSE, m, tt)
+  in_cs <- logical(m)
   for (b in seq_len(N_BLOCKS)) {
     idx <- ((b - 1) * SNPS_PER_BLOCK + 1):(b * SNPS_PER_BLOCK)
-    R <- read_ld(file.path(EXPORT, sprintf("ld_%s_block%d.parquet",
-                                            format(seed, scientific = FALSE), b - 1)))
+    R <- read_ld(file.path(EXPORT, sprintf("ld_%s_block%d.parquet", sid, b - 1)))
     for (t in seq_len(tt)) {
       fit <- tryCatch(
         susie_rss(z = z[idx, t], R = R, n = N_IND, L = 5, verbose = FALSE),
@@ -107,7 +106,7 @@ for (seed in SEEDS) {
       pip[idx, t] <- susieR::susie_get_pip(fit)
       eff[idx, t] <- coef(fit)[-1]
       cs <- susieR::susie_get_cs(fit, Xcorr = R)$cs
-      if (length(cs)) in_cs[idx[unique(unlist(cs))], t] <- TRUE
+      if (length(cs)) in_cs[idx[unique(unlist(cs))]] <- TRUE
     }
   }
 
@@ -116,7 +115,7 @@ for (seed in SEEDS) {
   ## method that resolved LD first.
   prof <- pip * eff
   pr_susie <- apply(prof, 1, participation_ratio)
-  susie_any <- rowSums(in_cs) > 0
+  susie_any <- in_cs
 
   ## SuSiE selects CAUSAL variants, not trait-specific ones, so its FDP has to
   ## be scored against the causal class. Scoring it against `spec` would be
@@ -138,7 +137,7 @@ for (seed in SEEDS) {
     fdp_variant = fdp_v,
     fdp_locus = fdp_l
   )
-  cat(sprintf("seed %-9s done: %d variants in a credible set\n", seed, sum(susie_any)))
+  cat(sprintf("seed %-9s done: %d variants in a credible set\n", sid, sum(susie_any)))
 }
 
 res <- do.call(rbind, rows)

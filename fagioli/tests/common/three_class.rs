@@ -312,27 +312,7 @@ fn simulate_inner(h2: f32, seed: u64, blend_rho: f32) -> Classes {
         x.scale_columns_inplace();
     }
 
-    let g = &x * &b;
-    let n = NUM_INDIVIDUALS as f32;
-    let mut y = DMatrix::<f32>::zeros(NUM_INDIVIDUALS, NUM_TRAITS);
-    for t in 0..NUM_TRAITS {
-        let gt = g.column(t);
-        let sd = (gt.iter().map(|v| v * v).sum::<f32>() / n).sqrt();
-        for i in 0..NUM_INDIVIDUALS {
-            let e: f64 = StandardNormal.sample(&mut rng);
-            let genetic = if sd > 0.0 { h2.sqrt() * gt[i] / sd } else { 0.0 };
-            y[(i, t)] = genetic + (1.0 - h2).sqrt() * e as f32;
-        }
-    }
-
-    let mut z = DMatrix::<f32>::zeros(m, NUM_TRAITS);
-    for t in 0..NUM_TRAITS {
-        let yt = y.column(t);
-        let y_sd = (yt.iter().map(|v| v * v).sum::<f32>() / n).sqrt().max(1e-8);
-        for j in 0..m {
-            z[(j, t)] = x.column(j).dot(&yt) / (y_sd * n.sqrt());
-        }
-    }
+    let z = marginal_zscores(&x, &b, h2, &mut rng);
 
     let rms_norm_pleio = rms_row_norm(&b, &pleiotropic);
     let rms_norm_specific = rms_row_norm(&b, &trait_specific);
