@@ -353,11 +353,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         .transpose()?
         .flatten();
 
-    let weight_fn = args
-        .pb_reference
-        .as_ref()
-        .map(crate::pb_reference::ReferenceInput::weight_fn);
-
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -384,7 +379,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
-        column_weight_fn: weight_fn.as_deref(),
+        pb_reference: args.pb_reference.as_ref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: args.feature_name_kind.clone().into(),
@@ -397,15 +392,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // 4. Per-level feature coarsenings for decoders.
     //    Dense encoder operates at D_coarse (finest level's coarsening).
     //    Decoders at coarser levels use fewer feature groups.
-    // The QC keep-mask is exactly the right lever for holding carried
-    // pseudobulks out of the per-cell outputs — they are the trailing columns,
-    // since `update` appends the reference last.
-    let output_keep_idx = crate::pb_reference::exclude_carried(
-        args.pb_reference.as_ref(),
-        data_vec.num_columns(),
-        output_keep_idx,
-    );
-
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
 
@@ -528,25 +514,26 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let feature_fisher_per_level: Vec<Vec<f32>> = {
         info!(
             "Computing per-level NB-Fisher weights at coarse resolution from {} ({} levels)",
-            if args.pb_reference.is_some() {
+            if data_vec.has_column_multiplicity() {
                 "pseudobulks"
             } else {
                 "cells"
             },
             level_coarsenings.len(),
         );
-        // Zip would silently truncate; every construction branch above sizes
-        // `level_coarsenings` to `num_levels = collapsed_levels.len()`.
+        // Every construction branch above sizes `level_coarsenings` to
+        // `num_levels = collapsed_levels.len()`; debug-checked because a zip
+        // would otherwise truncate without a word.
         debug_assert_eq!(collapsed_levels.len(), level_coarsenings.len());
+        let membership_per_level = cell_to_pb_per_level.as_deref().unwrap_or(&[]);
         collapsed_levels
             .iter()
             .enumerate()
             .zip(level_coarsenings.iter())
             .map(|((level, collapsed), fc)| {
                 crate::refine_weighting::fit_fisher_weights(
-                    args.pb_reference.as_ref(),
                     collapsed,
-                    cell_to_pb_per_level.as_ref().map(|c| c[level].as_slice()),
+                    membership_per_level.get(level).map(Vec::as_slice),
                     fc.as_ref(),
                     &data_vec,
                     args.block_size,
@@ -629,17 +616,9 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     // CNV detection using topic proportions as cell-type membership
     let gene_names = data_vec.row_names()?;
 
-    // Emitted before CNV detection, which consumes `data_vec` — the carried
-    // pseudobulks need each column's multiplicity to know what it stands for.
-    let has_pb_reference = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
-        &args.out,
-        finest_collapsed,
-        cell_to_pb_per_level.as_deref(),
-        &data_vec,
-        &gene_names,
-        args.init_from.as_deref(),
-    )?;
+    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
+    // its triplet build never overlaps the live backend in memory.
+    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
 
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
 
@@ -680,12 +659,22 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         false
     };
 
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        column_weight.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+    )?;
+
     write_topic_manifest(
         &args.out,
         &data_files,
         batch_files.as_deref(),
         has_cell_to_pb,
-        has_pb_reference,
+        pb_reference_suffix,
         crate::run_manifest::record_train_args(args)?,
     )?;
 
@@ -759,7 +748,7 @@ fn write_topic_manifest(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
     has_cell_to_pb: bool,
-    has_pb_reference: bool,
+    pb_reference_suffix: Option<&'static str>,
     train_args: crate::run_manifest::TrainArgsRecord,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files
@@ -780,7 +769,7 @@ fn write_topic_manifest(
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
-        pb_reference_suffix: has_pb_reference.then_some(crate::pb_reference::BACKEND_SUFFIX),
+        pb_reference_suffix,
         pb_latent_suffix: Some("pb_latent.parquet"),
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: None,
@@ -1008,7 +997,6 @@ where
         // Full gene resolution — the point of the empirical dictionary is to
         // escape the coarsening, so no `FeatureCoarsening` here.
         let fisher_w = crate::refine_weighting::fit_fisher_weights(
-            ctx.args.pb_reference.as_ref(),
             ctx.finest_collapsed,
             ctx.cell_to_pb_finest,
             None,

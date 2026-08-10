@@ -97,15 +97,6 @@ pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
     )
 }
 
-/// Callback that, given the loaded data's column names, returns one weight per
-/// column — see `topic::common::LoadProjectArgs::column_weight_fn`.
-///
-/// Declared here rather than beside its sibling `FeatureMaskFn` because
-/// [`crate::pb_reference`] is a library module and `topic::common` is not; the
-/// only producer of these weights lives on the library side. `topic::common`
-/// re-exports it, so call sites there are unaffected.
-pub type ColumnWeightFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<f32>>;
-
 /// Shared compute device enum for candle-based models
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]

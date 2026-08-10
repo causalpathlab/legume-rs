@@ -53,6 +53,13 @@ pub struct SvdArgs {
     #[serde(skip)]
     pb_reference: Option<crate::pb_reference::ReferenceInput>,
 
+    /// The parent run this one continues, set by `senna update` — svd has no
+    /// weights to warm-start, so unlike the other families this is not a CLI
+    /// flag; it only chains the emitted reference's generation counter.
+    #[arg(skip)]
+    #[serde(skip)]
+    init_from: Option<Box<str>>,
+
     #[arg(
         long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
@@ -109,11 +116,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let proj_dim = args.collapse.proj_dim.max(args.n_latent_topics);
-    let weight_fn = args
-        .pb_reference
-        .as_ref()
-        .map(crate::pb_reference::ReferenceInput::weight_fn);
-
     let ProjectedData {
         mut data_vec,
         batch_membership,
@@ -134,17 +136,11 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
-        column_weight_fn: weight_fn.as_deref(),
+        pb_reference: args.pb_reference.as_ref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
     })?;
-
-    let output_keep_idx = crate::pb_reference::exclude_carried(
-        args.pb_reference.as_ref(),
-        data_vec.num_columns(),
-        output_keep_idx,
-    );
 
     // 3. Batch-adjusted collapsing (pseudobulk)
     //
@@ -153,13 +149,10 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // `--emit-pb-reference` needs it, to know how many cells each carried
     // column stands for. Same work, one more return value.
     //
-    // data-beans-alg hands levels back finest-first; senna's convention
-    // everywhere else is finest-last, so both vectors are reversed to match
-    // (`pb_reference::emit_if_requested` reads `.last()`).
-    let data_beans_alg::collapse_data::MultilevelCollapseOut {
-        mut levels,
-        mut cell_to_pb_per_level,
-    } = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
+    // data-beans-alg hands levels back finest-FIRST, and svd consumes only
+    // the finest: take element 0 of each and drop the coarser tail now — a
+    // retained level is up to six `[D, S]` planes of dead weight.
+    let mut multilevel = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
         &mut data_vec,
         &proj_kn,
         &batch_membership,
@@ -172,10 +165,10 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             output_calibration: matrix_param::traits::CalibrateTarget::All,
         },
     )?;
-    levels.reverse();
-    cell_to_pb_per_level.reverse();
-    // The Nystrom projection is built from the finest level, as before.
-    let collapse_out = levels.pop().expect("collapse returns at least one level");
+    anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");
+    let collapse_out = multilevel.levels.swap_remove(0);
+    let finest_membership = multilevel.cell_to_pb_per_level.swap_remove(0);
+    drop(multilevel);
 
     // 4. batch-adjusted data
     let batch_dp = collapse_out.mu_residual.as_ref();
@@ -266,19 +259,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
     }
 
-    // Emitted before CNV detection, which consumes `data_vec` — the carried
-    // pseudobulks need each column's multiplicity to know what it stands for.
-    // `svd` has no checkpoint and so no `--init-from`; the reference it is
-    // consuming is its only link back to a parent run.
-    let has_pb_reference = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
-        &args.out,
-        &collapse_out,
-        Some(&cell_to_pb_per_level),
-        &data_vec,
-        &gene_names,
-        args.pb_reference.as_ref().map(|r| r.parent.as_ref()),
-    )?;
+    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
+    // its triplet build never overlaps the live backend in memory.
+    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
 
     // Save selected feature list if feature selection was applied
     if let Some(sel) = &selected_features {
@@ -315,8 +298,16 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         output_keep_idx.as_deref(),
     )?;
 
-    // `svd` has no checkpoint and so no `--init-from`; the reference it is
-    // consuming is its only link back to a parent run.
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        &collapse_out,
+        Some(std::slice::from_ref(&finest_membership)),
+        column_weight.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+    )?;
+
     let input: Vec<String> = args
         .data_files
         .iter()
@@ -338,7 +329,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
-        pb_reference_suffix: has_pb_reference.then_some(crate::pb_reference::BACKEND_SUFFIX),
+        pb_reference_suffix,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
@@ -517,7 +508,8 @@ impl crate::update::Updatable for SvdArgs {
         self.batch_files = r.batch_files;
         self.out = r.out;
         self.pb_reference = r.reference;
-        // `svd` has no weights, no `--init-from` and no epoch loop. `update`
-        // rejects `--epochs` for an svd parent before reaching this.
+        self.init_from = Some(r.init_from);
+        // `svd` has no weights and no epoch loop. `update` rejects `--epochs`
+        // for an svd parent before reaching this.
     }
 }

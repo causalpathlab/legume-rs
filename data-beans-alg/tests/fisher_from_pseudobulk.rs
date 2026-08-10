@@ -1,14 +1,8 @@
-//! The NB-Fisher trend can be fitted on pseudobulks instead of on cells.
-//!
-//! The thing that makes it work is the count rescaling. `phi_hat =
-//! (var - mu)/mu²` measures excess over a Poisson floor of `var = mu`, which
-//! is a statement about *counts*. A pseudobulk posterior mean is a per-cell
-//! *rate*, whose floor is `mu/size_s`, so handing rates to the trend subtracts
-//! a floor that is not there — points with `var < mu` drop out of the fit
-//! entirely and the survivors get `phi_hat` inflated by an arbitrary `1/mu`.
-//!
-//! Multiplying column `s` by its cell count puts the population back on the
-//! scale the estimator is defined for.
+//! The NB-Fisher trend can be fitted on pseudobulks instead of on cells —
+//! *if* the rates are rescaled back to counts first. The why lives on
+//! [`fisher_weights_from_pseudobulk`] itself; these tests pin that the
+//! rescaling actually is the difference between a working trend and a
+//! silently degenerate one.
 
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk;

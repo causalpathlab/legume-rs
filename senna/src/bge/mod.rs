@@ -406,7 +406,8 @@ pub struct BgeArgs {
 
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
-    args.collapse.reject_pb_reference("bge")?;
+    args.collapse
+        .reject_pb_reference(crate::run_manifest::RunKind::Bge)?;
     // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
     // contradictory pair fails in the first second rather than after the fit.
     let posterior_plan = args.posterior.resolve(args.seed)?;

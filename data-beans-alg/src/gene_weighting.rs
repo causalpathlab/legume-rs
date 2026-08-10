@@ -65,33 +65,20 @@ pub fn fisher_weights_from_stats(
 /// silently switches itself off. Multiplying column `s` by `size_s[s]` puts
 /// the population back on the scale the estimator is defined for.
 ///
-/// Rescaled, this tracks the cell-level trend closely — measured at Spearman
-/// ρ = 0.976 on the induced gene ranking, mean weight within 8%.
-///
 /// Pass the **observed** posterior mean, not a batch-adjusted one: δ-removal
 /// strips between-batch spread, which is part of the variance the trend is
-/// meant to see, and drops the agreement to ρ = 0.47.
+/// meant to see.
 ///
-/// **This is not a better estimator, it is a differently-sourced one.** An
-/// A/B on HCA_BM (39k cells, K=20) could not separate the two: every
-/// difference in ARI, purity and held-out likelihood landed inside the spread
-/// between two runs of the *same* configuration. Use it where the cell-level
-/// pass has no coherent population to fit — a cohort whose cells are no longer
-/// loaded, where the backend holds carried pseudobulk rates beside real cell
-/// counts and no weighting reconciles the two.
+/// When to reach for this over the cell-level pass — and the measurements
+/// behind both statements — is the dispatcher's decision; see
+/// `senna::refine_weighting::fit_fisher_weights`, the one production caller.
 pub fn fisher_weights_from_pseudobulk(
     mu_ds: &nalgebra::DMatrix<f32>,
     size_s: &[f32],
     coarsening: Option<&FeatureCoarsening>,
 ) -> anyhow::Result<Vec<f32>> {
-    let coarse;
-    let m = match coarsening {
-        Some(fc) => {
-            coarse = fc.aggregate_rows_ds(mu_ds);
-            &coarse
-        }
-        None => mu_ds,
-    };
+    let coarse = coarsening.map(|fc| fc.aggregate_rows_ds(mu_ds));
+    let m = coarse.as_ref().unwrap_or(mu_ds);
     // Not defaulted: a wrong-length `size_s` rescales the wrong columns and
     // returns plausible weights with no shape mismatch to give it away.
     anyhow::ensure!(
@@ -101,17 +88,12 @@ pub fn fisher_weights_from_pseudobulk(
         m.ncols(),
     );
 
-    // Scaled one column at a time into a reused buffer rather than by
-    // materializing a second `[D, S]` — at full gene resolution that copy is
-    // hundreds of MB, to be read once and dropped.
-    let mut stats = SparseRunningStatistics::<f32>::new(m.nrows());
-    let mut column = vec![0.0f32; m.nrows()];
-    for (s, src) in m.column_iter().enumerate() {
-        let n = size_s[s].max(1.0);
-        for (dst, v) in column.iter_mut().zip(src.iter()) {
-            *dst = v * n;
-        }
-        stats.add_dense_column(&column);
+    let d = m.nrows();
+    let mut stats = SparseRunningStatistics::<f32>::new(d);
+    // `DMatrix` is column-major, so `chunks_exact(d)` walks the columns
+    // without a scaled copy — the multiply folds into the accumulation.
+    for (col, &n) in m.as_slice().chunks_exact(d).zip(size_s) {
+        stats.add_dense_column_scaled(col, n.max(1.0));
     }
 
     // Total cells, not pseudobulks: `fisher_weights_from_stats` divides total
