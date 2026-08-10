@@ -485,10 +485,10 @@ pub fn prepare(parent: &str, out: &str) -> anyhow::Result<Option<ReferenceInput>
 
     // The loader takes batch labels as a file, one line per column.
     let batch_file = format!("{out}.pb_reference_batch.txt");
-    let body: String = std::iter::repeat_n(meta.batch_label.as_ref(), meta.cell_counts.len())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(&batch_file, body + "\n")?;
+    matrix_util::common_io::write_types(
+        &vec![meta.batch_label.clone(); meta.cell_counts.len()],
+        &batch_file,
+    )?;
 
     Ok(Some(ReferenceInput {
         backend: backend.into(),
