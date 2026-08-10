@@ -611,17 +611,13 @@ where
         num_groups_per_level.push(k);
         pbsamp_to_group.push(compact);
     }
-    let mut refined = crate::refine_multilevel::RefinedAssignment {
-        pbsamp_to_group,
-        num_groups_per_level,
-    };
-    split_anchored_finest_groups(
-        &mut refined,
+    let refined = split_anchored_finest_groups(
+        crate::refine_multilevel::RefinedAssignment {
+            pbsamp_to_group,
+            num_groups_per_level,
+        },
         &pb_samples.layout,
-        &pb_sample_to_cells,
-        anchor_batches.as_deref().unwrap_or(&[]),
     );
-    let refined = refined;
 
     info!(
         "Inherited partition: {} cells, {} pb-samples, finest k={} (skipped BBKNN + DC-SBM refinement)",

@@ -164,44 +164,39 @@ pub(super) fn refine_or_identity(
 /// columns, so averaging there does not compound.
 ///
 /// Only level 0 is rewritten, and splitting a group cannot break the
-/// sibling-constrained hierarchy the coarser levels assume. No-op when no
-/// pb-sample belongs to an anchor batch.
+/// sibling-constrained hierarchy the coarser levels assume. Identity when the
+/// layout holds no anchored pb-samples — the layout is the sole owner of that
+/// membership (see [`PbSampleLayout::anchored_col`]).
 pub(super) fn split_anchored_finest_groups(
-    refined: &mut crate::refine_multilevel::RefinedAssignment,
+    mut refined: crate::refine_multilevel::RefinedAssignment,
     layout: &PbSampleLayout,
-    pb_sample_to_cells: &[Vec<usize>],
-    anchor_batches: &[usize],
-) {
-    let num_pb = layout.pb_sample_to_batch.len();
-    // Anchored pb-samples are singletons (see `build_pb_sample_layout`), so
-    // each maps to exactly one column; sort by that column to pin the
+) -> crate::refine_multilevel::RefinedAssignment {
+    // Anchored pb-samples are singletons; sort by their one column to pin the
     // appended group order to the parent reference's column order.
-    let mut anchored: Vec<(usize, usize)> = (0..num_pb)
-        .filter(|&p| anchor_batches.contains(&layout.pb_sample_to_batch[p]))
-        .map(|p| (pb_sample_to_cells[p][0], p))
+    let mut anchored: Vec<(usize, usize)> = layout
+        .anchored_col
+        .iter()
+        .enumerate()
+        .filter_map(|(p, col)| col.map(|c| (c, p)))
         .collect();
     if anchored.is_empty() {
-        return;
+        return refined;
     }
     anchored.sort_unstable_by_key(|&(col, _)| col);
-    let mut is_anchored = vec![false; num_pb];
-    for &(_, p) in &anchored {
-        is_anchored[p] = true;
-    }
 
     let finest = &mut refined.pbsamp_to_group[0];
-    let mut remap = vec![usize::MAX; refined.num_groups_per_level[0]];
-    let mut k_new = 0usize;
-    for p in 0..num_pb {
-        if is_anchored[p] {
-            continue;
+    let ordinary: Vec<usize> = layout
+        .anchored_col
+        .iter()
+        .zip(finest.iter())
+        .filter_map(|(a, &g)| a.is_none().then_some(g))
+        .collect();
+    let (compact, k_new) = crate::refine_multilevel::compact_labels(&ordinary);
+    let mut compact = compact.into_iter();
+    for (p, a) in layout.anchored_col.iter().enumerate() {
+        if a.is_none() {
+            finest[p] = compact.next().expect("one compacted label per ordinary pb-sample");
         }
-        let g = finest[p];
-        if remap[g] == usize::MAX {
-            remap[g] = k_new;
-            k_new += 1;
-        }
-        finest[p] = remap[g];
     }
     for (j, &(_, p)) in anchored.iter().enumerate() {
         finest[p] = k_new + j;
@@ -212,6 +207,7 @@ pub(super) fn split_anchored_finest_groups(
         k_new,
         anchored.len()
     );
+    refined
 }
 
 /// Shared inputs to both the `SparseIoVec` and `SparseIoStack` refinement
@@ -322,14 +318,10 @@ pub(super) fn refine_and_collect_single_layer(
         initial_sc_to_group_per_level: &initial_per_level,
         reproject_offsets_per_level: &reproject_offsets,
     };
-    let mut refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
-    split_anchored_finest_groups(
-        &mut refined,
+    let refined = split_anchored_finest_groups(
+        refine_or_identity(num_batches >= 2, &inputs, refine_params)?,
         &pb_samples.layout,
-        &pb_sample_to_cells,
-        ctx.anchor_batches.unwrap_or(&[]),
     );
-    let refined = refined;
 
     ///////////////////////////////////
     // collapse-structure diagnostic //

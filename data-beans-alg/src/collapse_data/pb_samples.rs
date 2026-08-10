@@ -20,6 +20,12 @@ pub struct PbSampleLayout {
     pub bg_to_pbsamp: HashMap<(usize, usize), usize>,
     /// Global cell index → owning pb-sample index.
     pub cell_to_pbsamp: Vec<usize>,
+    /// For an anchored singleton pb-sample, the one column it stands for;
+    /// `None` for ordinary (batch, group) pb-samples. The layout is the
+    /// single owner of "which pb-samples are anchored" — downstream steps
+    /// (`split_anchored_finest_groups`) read it here instead of re-deriving
+    /// membership from batch labels.
+    pub anchored_col: Vec<Option<usize>>,
 }
 
 /// Pre-aggregated pb-sample data for fast cross-batch matching.
@@ -138,6 +144,7 @@ pub(super) fn build_pb_sample_layout(
     let mut cell_counts = Vec::with_capacity(num_pb);
     let mut pbsamp_to_batch = Vec::with_capacity(num_pb);
     let mut pbsamp_to_group = Vec::with_capacity(num_pb);
+    let mut anchored_col = Vec::with_capacity(num_pb);
     let mut bg_to_pbsamp = HashMap::default();
 
     let ncols = col_to_batch.len();
@@ -149,6 +156,7 @@ pub(super) fn build_pb_sample_layout(
         cell_counts.push(count);
         pbsamp_to_batch.push(batch);
         pbsamp_to_group.push(group);
+        anchored_col.push(singleton_col);
         match singleton_col {
             // An anchored column IS its pb-sample; `(batch, group)` is not a
             // unique key for singletons, so they are mapped directly and stay
@@ -180,6 +188,7 @@ pub(super) fn build_pb_sample_layout(
         pb_sample_to_group: pbsamp_to_group,
         bg_to_pbsamp,
         cell_to_pbsamp,
+        anchored_col,
     })
 }
 

@@ -200,41 +200,33 @@ pub fn write(
     // "pure carried" when every member sits in that tail. Alongside, remember
     // each pure-carried singleton's source column so its origin round can be
     // looked up in the parent sidecar.
-    let split = cell_to_pb_finest.len() - n_carried_tail.min(cell_to_pb_finest.len());
-    let mut has_new = vec![false; n_pb];
-    let mut carried_members = vec![0usize; n_pb];
-    let mut carried_first = vec![usize::MAX; n_pb];
+    let split = cell_to_pb_finest.len().saturating_sub(n_carried_tail);
+    // The append-only collapse keeps each carried column in a singleton
+    // group; a multi-member or mixed group (a deliberate re-collapse, or an
+    // older binary) is a fresh summary and takes the current round. New
+    // columns all precede the tail, so a mixed group is marked re-summarized
+    // before its carried member is seen.
+    let mut carried_col: Vec<Option<usize>> = vec![None; n_pb];
+    let mut resummarized = vec![false; n_pb];
     for (col, &pb) in cell_to_pb_finest.iter().enumerate() {
         if pb >= n_pb {
             continue;
         }
-        if col < split {
-            has_new[pb] = true;
+        if col < split || carried_col[pb].is_some() {
+            resummarized[pb] = true;
         } else {
-            carried_members[pb] += 1;
-            if carried_first[pb] == usize::MAX {
-                carried_first[pb] = col - split;
-            }
+            carried_col[pb] = Some(col - split);
         }
     }
-    // The append-only collapse keeps each carried column in a singleton
-    // group; a multi-member or mixed group (a deliberate re-collapse, or an
-    // older binary) is a fresh summary and takes the current round.
-    let pure_carried = |pb: usize| !has_new[pb] && carried_members[pb] == 1;
+    let pure_carried = |pb: usize| !resummarized[pb] && carried_col[pb].is_some();
 
     let generation = parent_meta.map_or(0, |m| m.generation) + 1;
     let column_generation: Vec<u32> = (0..n_pb)
-        .map(|pb| {
-            if pure_carried(pb) {
-                parent_meta.map_or(generation, |m| {
-                    m.column_generation
-                        .get(carried_first[pb])
-                        .copied()
-                        .unwrap_or(m.generation)
-                })
-            } else {
-                generation
-            }
+        .map(|pb| match carried_col[pb] {
+            Some(j) if !resummarized[pb] => parent_meta.map_or(generation, |m| {
+                m.column_generation.get(j).copied().unwrap_or(m.generation)
+            }),
+            _ => generation,
         })
         .collect();
 

@@ -24,9 +24,23 @@ const D: usize = 8;
 /// Deterministic layout: types alternate; the anchor batch's columns are
 /// clean type profiles (as a carried reference would be), the new batch's are
 /// the same profiles times a per-gene platform factor.
+/// Clean per-type profile of column `i` (types alternate by parity).
+fn type_profile(i: usize) -> Vec<f32> {
+    if i % 2 == 0 {
+        (0..D).map(|g| 10.0 + 3.0 * (g % 2) as f32).collect()
+    } else {
+        (0..D).map(|g| 4.0 + 2.0 * ((g + 1) % 2) as f32).collect()
+    }
+}
+
+/// The stored profile of carried reference column `i` — one source for both
+/// the cohort builder and the passthrough assertion, so they cannot drift.
+fn carried_profile(i: usize) -> Vec<f32> {
+    let wiggle = 1.0 + 0.04 * ((i % 3) as f32 - 1.0);
+    type_profile(i).into_iter().map(|v| v * wiggle).collect()
+}
+
 fn two_batch_cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
-    let type_a: Vec<f32> = (0..D).map(|g| 10.0 + 3.0 * (g % 2) as f32).collect();
-    let type_b: Vec<f32> = (0..D).map(|g| 4.0 + 2.0 * ((g + 1) % 2) as f32).collect();
     let platform: Vec<f32> = (0..D).map(|g| if g < D / 2 { 2.0 } else { 0.5 }).collect();
 
     let mut cols: Vec<Vec<f32>> = Vec::new();
@@ -36,12 +50,12 @@ fn two_batch_cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
     // 40 "new" cells per type, platform-shifted, weight 1. A ± wiggle keeps
     // per-gene variance non-degenerate without an RNG.
     for i in 0..80 {
-        let base = if i % 2 == 0 { &type_a } else { &type_b };
         let wiggle = 1.0 + 0.05 * ((i % 5) as f32 - 2.0);
         cols.push(
-            base.iter()
+            type_profile(i)
+                .into_iter()
                 .zip(platform.iter())
-                .map(|(&v, &p)| v * p * wiggle)
+                .map(|(v, &p)| v * p * wiggle)
                 .collect(),
         );
         batches.push("new");
@@ -49,9 +63,7 @@ fn two_batch_cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
     }
     // 10 carried reference columns per type: clean profiles, 20 cells each.
     for i in 0..20 {
-        let base = if i % 2 == 0 { &type_a } else { &type_b };
-        let wiggle = 1.0 + 0.04 * ((i % 3) as f32 - 1.0);
-        cols.push(base.iter().map(|&v| v * wiggle).collect());
+        cols.push(carried_profile(i));
         batches.push("__ref__");
         weights.push(20.0);
     }
@@ -377,16 +389,10 @@ fn anchored_columns_keep_singleton_finest_groups() {
 
     // The singleton's observed evidence is the stored rate again — the
     // lossless passthrough that makes re-emission reproduce the parent
-    // instead of re-summarizing it. Values reconstructed from the cohort
-    // builder's own formula.
-    let type_a: Vec<f32> = (0..D).map(|g| 10.0 + 3.0 * (g % 2) as f32).collect();
-    let type_b: Vec<f32> = (0..D).map(|g| 4.0 + 2.0 * ((g + 1) % 2) as f32).collect();
+    // instead of re-summarizing it.
     for i in 0..n_ref {
-        let base = if i % 2 == 0 { &type_a } else { &type_b };
-        let wiggle = 1.0 + 0.04 * ((i % 3) as f32 - 1.0);
         let g_id = k_new + i;
-        for (row, &v) in base.iter().enumerate() {
-            let stored = v * wiggle;
+        for (row, stored) in carried_profile(i).into_iter().enumerate() {
             let back = out.levels[0].mu_observed.evidence_mean(row, g_id);
             assert!(
                 (back - stored).abs() <= 1e-4 * stored.abs(),
