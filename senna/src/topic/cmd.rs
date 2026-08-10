@@ -668,6 +668,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         column_weight.as_deref(),
         &gene_names,
         args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
     )?;
 
     write_topic_manifest(

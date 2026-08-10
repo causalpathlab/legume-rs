@@ -53,6 +53,15 @@ pub struct ReadSharedRowsArgs {
     /// output keep-mask is returned in `output_keep_idx`. `None`
     /// (the default) = no QC, i.e. today's behavior.
     pub qc: Option<data_beans::qc_lib::QcConfig>,
+    /// Per-`data_files` entry: `true` exempts that file's columns from QC —
+    /// out of the band statistics AND out of every verdict (see
+    /// `qc_from_metrics`). For inputs whose columns are not cells (a carried
+    /// `pb_reference`, bulk samples): a pseudobulk standing for hundreds of
+    /// cells is a legitimate depth outlier, and letting it into the MAD band
+    /// either gets it dropped or — worse, as the mixture grows — recenters
+    /// the band and guillotines the real cells. `None` = no exemption. Must
+    /// match `data_files` length when `Some`.
+    pub qc_exempt_files: Option<Vec<bool>>,
     /// Block size for the QC streaming stat passes (`None` = default).
     pub qc_block_size: Option<usize>,
     /// Optional path for a per-cell QC report TSV (`None` = don't write).
@@ -300,7 +309,31 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
     // registration, which happens later during projection) so all
     // downstream stages see the QC-reduced axes consistently.
     let output_keep_idx = if let Some(cfg) = args.qc.as_ref() {
-        let report = data_beans::qc_lib::compute_qc(&data_vec, cfg, args.qc_block_size)?;
+        // Columns of exempt files stay out of the QC bands and verdicts;
+        // resolved per column through the loaded vec's backend attribution so
+        // it is correct under any stacking order.
+        let mut exempt: Option<Vec<bool>> = None;
+        if let Some(flags) = args.qc_exempt_files.as_ref() {
+            anyhow::ensure!(
+                flags.len() == args.data_files.len(),
+                "qc_exempt_files has {} entries for {} data files",
+                flags.len(),
+                args.data_files.len(),
+            );
+            if flags.iter().any(|&f| f) {
+                exempt = Some(
+                    (0..data_vec.num_columns())
+                        .map(|c| data_vec.column_source(c).is_some_and(|b| flags[b]))
+                        .collect(),
+                );
+            }
+        }
+        let report = data_beans::qc_lib::compute_qc_exempting(
+            &data_vec,
+            cfg,
+            args.qc_block_size,
+            exempt.as_deref(),
+        )?;
         if let Some(path) = args.qc_report_out.as_deref() {
             data_beans::qc_lib::write_qc_report(path, &data_vec.column_names()?, &report)?;
         }

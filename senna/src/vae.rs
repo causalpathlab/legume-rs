@@ -393,6 +393,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         data_vec.column_multiplicities(),
         &gene_names,
         args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
     )?;
 
     crate::postprocess::viz_prep::write_cell_proj(

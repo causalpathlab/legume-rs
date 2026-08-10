@@ -147,6 +147,73 @@ pub(super) fn refine_or_identity(
     }
 }
 
+/// Append-only memory: give each anchored (carried) pb-sample its own
+/// finest group, appended after the groups of the ordinary pb-samples.
+///
+/// The refined partition still decides the finest groups of the NEW columns;
+/// carried columns are removed from those groups (a group left with only
+/// carried members disappears in the compaction) and instead keep their
+/// stored granularity as singleton groups, ordered by column index so a
+/// re-emitted reference preserves the parent's column order. Every finest
+/// stat for a singleton group then reduces to the carried column's own
+/// values — observed sum `y·w` over size `w` is the stored rate again — so
+/// carrying a reference through a round reproduces it instead of
+/// re-averaging it into (batch × group) blends, which would compound
+/// resolution loss every round. Coarser levels are left blended: they are
+/// transient training aids recomputed each round from the frozen finest
+/// columns, so averaging there does not compound.
+///
+/// Only level 0 is rewritten, and splitting a group cannot break the
+/// sibling-constrained hierarchy the coarser levels assume. No-op when no
+/// pb-sample belongs to an anchor batch.
+pub(super) fn split_anchored_finest_groups(
+    refined: &mut crate::refine_multilevel::RefinedAssignment,
+    layout: &PbSampleLayout,
+    pb_sample_to_cells: &[Vec<usize>],
+    anchor_batches: &[usize],
+) {
+    let num_pb = layout.pb_sample_to_batch.len();
+    // Anchored pb-samples are singletons (see `build_pb_sample_layout`), so
+    // each maps to exactly one column; sort by that column to pin the
+    // appended group order to the parent reference's column order.
+    let mut anchored: Vec<(usize, usize)> = (0..num_pb)
+        .filter(|&p| anchor_batches.contains(&layout.pb_sample_to_batch[p]))
+        .map(|p| (pb_sample_to_cells[p][0], p))
+        .collect();
+    if anchored.is_empty() {
+        return;
+    }
+    anchored.sort_unstable_by_key(|&(col, _)| col);
+    let mut is_anchored = vec![false; num_pb];
+    for &(_, p) in &anchored {
+        is_anchored[p] = true;
+    }
+
+    let finest = &mut refined.pbsamp_to_group[0];
+    let mut remap = vec![usize::MAX; refined.num_groups_per_level[0]];
+    let mut k_new = 0usize;
+    for p in 0..num_pb {
+        if is_anchored[p] {
+            continue;
+        }
+        let g = finest[p];
+        if remap[g] == usize::MAX {
+            remap[g] = k_new;
+            k_new += 1;
+        }
+        finest[p] = remap[g];
+    }
+    for (j, &(_, p)) in anchored.iter().enumerate() {
+        finest[p] = k_new + j;
+    }
+    refined.num_groups_per_level[0] = k_new + anchored.len();
+    info!(
+        "Append-only finest partition: {} new-data groups + {} carried singletons",
+        k_new,
+        anchored.len()
+    );
+}
+
 /// Shared inputs to both the `SparseIoVec` and `SparseIoStack` refinement
 /// helpers. Keeps call-site signatures compact; every field is derivable
 /// from `MultilevelParams` + the finest-level hash partition.
@@ -255,7 +322,14 @@ pub(super) fn refine_and_collect_single_layer(
         initial_sc_to_group_per_level: &initial_per_level,
         reproject_offsets_per_level: &reproject_offsets,
     };
-    let refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
+    let mut refined = refine_or_identity(num_batches >= 2, &inputs, refine_params)?;
+    split_anchored_finest_groups(
+        &mut refined,
+        &pb_samples.layout,
+        &pb_sample_to_cells,
+        ctx.anchor_batches.unwrap_or(&[]),
+    );
+    let refined = refined;
 
     ///////////////////////////////////
     // collapse-structure diagnostic //

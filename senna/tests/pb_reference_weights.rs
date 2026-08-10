@@ -139,6 +139,7 @@ fn sidecar_round_trips_and_absence_is_not_an_error() {
         batch_label: REFERENCE_BATCH.into(),
         batch_adjusted: true,
         generation: 4,
+        column_generation: vec![4, 1, 2],
     };
     std::fs::write(
         sidecar_path(&prefix),
@@ -151,4 +152,15 @@ fn sidecar_round_trips_and_absence_is_not_an_error() {
     assert_eq!(back.generation, 4);
     assert!(back.batch_adjusted);
     assert_eq!(back.batch_label.as_ref(), REFERENCE_BATCH);
+    assert_eq!(back.column_generation, vec![4, 1, 2]);
+
+    // Sidecars written before per-column provenance existed must still load:
+    // the field defaults to empty, which readers treat as "all from
+    // `generation`".
+    let old = serde_json::to_string(&meta)
+        .expect("serialize")
+        .replace(",\"column_generation\":[4,1,2]", "");
+    std::fs::write(sidecar_path(&prefix), old).expect("write old-style");
+    let back = read_meta(&prefix).expect("read").expect("present");
+    assert!(back.column_generation.is_empty());
 }

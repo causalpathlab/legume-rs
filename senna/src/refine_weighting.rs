@@ -190,11 +190,12 @@ pub(crate) struct CollapseArgs {
                      Off by default: it is a second copy of the pseudobulks, useful\n\
                      only if you intend to keep growing this model.\n\
                      \n\
-                     The reference does NOT grow unboundedly across rounds: each\n\
-                     update re-partitions old-plus-new into at most 2^sort-dim + 1\n\
-                     groups, so the emitted file stays capped at that many columns\n\
-                     while total cell mass is conserved exactly. The cost of a round\n\
-                     is within-group resolution on old data, never cell mass.\n\
+                     The reference is APPEND-ONLY across rounds: carried columns\n\
+                     pass through byte-stable and each update adds at most\n\
+                     2^sort-dim + 1 new columns for its own cells, so growth is\n\
+                     linear in rounds and independent of sample size, with total\n\
+                     cell mass conserved exactly. Old rounds are never re-averaged\n\
+                     — re-summarizing every round would compound resolution loss.\n\
                      \n\
                      Available on topic, masked-topic, masked-sbp, masked-vae, vae,\n\
                      svd and bge — the families `senna update` can continue."

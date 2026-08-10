@@ -12,8 +12,12 @@
 //! **What is stored.** One column per finest-level pseudobulk, holding the
 //! **batch-adjusted per-cell evidence rate** — `sum/denom` with no prior in
 //! either, from `mu_adjusted` (falling back to `mu_observed` when a run had no
-//! batch structure), zero wherever the posterior has no data support. Three
-//! consequences:
+//! batch structure), zero wherever the posterior has no data support. Columns
+//! a run itself carried in are the exception: the collapse keeps each in its
+//! own singleton finest group and [`write`] re-emits it from `mu_observed` —
+//! its stored, already-adjusted values back out — so the reference is
+//! **append-only**: it extends by the new data's groups each round and never
+//! re-averages what earlier rounds summarized. Three consequences:
 //!
 //! - It is a *rate*, so a carried column is directly comparable with a real
 //!   cell — which is what makes the cross-batch matching, itself already in
@@ -67,6 +71,13 @@ pub struct PbReferenceMeta {
     pub batch_adjusted: bool,
     /// Rounds of accumulation behind this file, for provenance in the log.
     pub generation: u32,
+    /// The round each column was first summarized in, in column order —
+    /// carried columns keep their origin round across re-emissions, so a
+    /// grown reference can be audited (or a bad round dropped) later.
+    /// Empty in sidecars written before this field existed; treat as
+    /// "all from `generation`".
+    #[serde(default)]
+    pub column_generation: Vec<u32>,
 }
 
 /// The reserved batch label. A run's own batches come from user-supplied batch
@@ -121,13 +132,32 @@ pub fn cell_counts_from(
 /// `cell_to_pb_finest` is the finest level of the run's cell → pb membership,
 /// and `column_weight` is each column's multiplicity — see
 /// [`cell_counts_from`] for why counting columns is not enough.
+///
+/// **Append-only across rounds.** `n_carried_tail` is how many trailing
+/// loaded columns are a parent's carried reference (0 on a fresh fit). The
+/// collapse keeps each of those in its own singleton finest group
+/// (`split_anchored_finest_groups`), so the emitted reference is the parent's
+/// columns reproduced from their own evidence plus the new data's groups —
+/// the memory *extends* every round rather than being re-averaged into
+/// (batch × group) blends, which would compound resolution loss. Two
+/// consequences enforced here:
+///
+/// - A pure-carried group re-emits from **`mu_observed`**, not the adjusted
+///   posterior: its stored values are already in the reference frame (δ for
+///   the anchor batch sits at the prior), and observed evidence is exactly
+///   `y·w / w` — the stored rate back out, up to one f32 rounding. Running
+///   it through `mu_adjusted` instead would re-apply the near-1 anchor δ
+///   each round and drift the frame.
+/// - A group holding new mass emits from `mu_adjusted` as before — corrected
+///   *toward* the frozen frame, then frozen in turn.
 pub fn write(
     prefix: &str,
     finest: &CollapsedOut,
     cell_to_pb_finest: &[usize],
     column_weight: Option<&[f32]>,
     gene_names: &[Box<str>],
-    generation: u32,
+    n_carried_tail: usize,
+    parent_meta: Option<&PbReferenceMeta>,
 ) -> anyhow::Result<()> {
     // Evidence, not posterior. Two distinct mistakes hid in "store the
     // posterior mean, keep v > 0":
@@ -164,13 +194,62 @@ pub fn write(
          collapsed output"
     );
 
+    // Which groups hold new mass, and which are a carried column passing
+    // through. The carried columns are the trailing `n_carried_tail` of the
+    // loaded cohort (the identified tail — see `weights_for`); a group is
+    // "pure carried" when every member sits in that tail. Alongside, remember
+    // each pure-carried singleton's source column so its origin round can be
+    // looked up in the parent sidecar.
+    let split = cell_to_pb_finest.len() - n_carried_tail.min(cell_to_pb_finest.len());
+    let mut has_new = vec![false; n_pb];
+    let mut carried_members = vec![0usize; n_pb];
+    let mut carried_first = vec![usize::MAX; n_pb];
+    for (col, &pb) in cell_to_pb_finest.iter().enumerate() {
+        if pb >= n_pb {
+            continue;
+        }
+        if col < split {
+            has_new[pb] = true;
+        } else {
+            carried_members[pb] += 1;
+            if carried_first[pb] == usize::MAX {
+                carried_first[pb] = col - split;
+            }
+        }
+    }
+    // The append-only collapse keeps each carried column in a singleton
+    // group; a multi-member or mixed group (a deliberate re-collapse, or an
+    // older binary) is a fresh summary and takes the current round.
+    let pure_carried = |pb: usize| !has_new[pb] && carried_members[pb] == 1;
+
+    let generation = parent_meta.map_or(0, |m| m.generation) + 1;
+    let column_generation: Vec<u32> = (0..n_pb)
+        .map(|pb| {
+            if pure_carried(pb) {
+                parent_meta.map_or(generation, |m| {
+                    m.column_generation
+                        .get(carried_first[pb])
+                        .copied()
+                        .unwrap_or(m.generation)
+                })
+            } else {
+                generation
+            }
+        })
+        .collect();
+
     let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
     for (pb, &count) in cell_counts.iter().enumerate() {
         if count <= 0.0 {
             continue;
         }
+        let src = if pure_carried(pb) {
+            &finest.mu_observed
+        } else {
+            param
+        };
         for g in 0..n_genes {
-            let v = param.evidence_mean(g, pb);
+            let v = src.evidence_mean(g, pb);
             if v > 0.0 && v.is_finite() {
                 triplets.push((g as u64, pb as u64, v));
             }
@@ -198,19 +277,24 @@ pub fn write(
     backend.register_row_names_vec(gene_names);
     backend.register_column_names_vec(&axis_id_names(COLUMN_PREFIX, n_pb));
 
+    let n_passthrough = (0..n_pb).filter(|&pb| pure_carried(pb)).count();
     let meta = PbReferenceMeta {
         senna_version: env!("CARGO_PKG_VERSION").into(),
         cell_counts,
         batch_label: REFERENCE_BATCH.into(),
         batch_adjusted,
         generation,
+        column_generation,
     };
     std::fs::write(sidecar_path(prefix), serde_json::to_string_pretty(&meta)?)?;
 
     info!(
-        "Wrote {path}: {n_pb} pseudobulks over {n_genes} genes ({} cells, {}adjusted, gen {generation})",
+        "Wrote {path}: {n_pb} pseudobulks over {n_genes} genes ({} cells, {}adjusted, gen \
+         {generation}; {} carried through, {} new)",
         meta.cell_counts.iter().sum::<f32>() as usize,
         if batch_adjusted { "" } else { "un" },
+        n_passthrough,
+        n_pb - n_passthrough,
     );
     Ok(())
 }
@@ -232,6 +316,14 @@ pub fn write(
 /// `parent` is the run this one continues (`--init-from`); absent, the count
 /// restarts at 1, which is honest: nothing on disk connects this run to an
 /// earlier one.
+///
+/// `reference` is the carried input this run actually *loaded* (`None` on a
+/// fresh fit or an exact re-collapse) — its column count identifies the
+/// carried tail so [`write`] can pass those columns through instead of
+/// re-summarizing them. It is deliberately separate from `parent`: an update
+/// without `--use-pb-reference` has a parent (for the generation counter) but
+/// no carried tail.
+#[allow(clippy::too_many_arguments)] // one slot per provenance source, each documented above
 pub fn emit_if_requested(
     enabled: bool,
     prefix: &str,
@@ -240,6 +332,7 @@ pub fn emit_if_requested(
     column_weight: Option<&[f32]>,
     gene_names: &[Box<str>],
     parent: Option<&str>,
+    reference: Option<&ReferenceInput>,
 ) -> anyhow::Result<Option<&'static str>> {
     if !enabled {
         return Ok(None);
@@ -252,18 +345,15 @@ pub fn emit_if_requested(
         );
         return Ok(None);
     };
-    let generation = parent
-        .map(|p| read_meta(p).map(|m| m.map_or(0, |m| m.generation)))
-        .transpose()?
-        .unwrap_or(0)
-        + 1;
+    let parent_meta = parent.map(read_meta).transpose()?.flatten();
     write(
         prefix,
         finest,
         finest_membership,
         column_weight,
         gene_names,
-        generation,
+        reference.map_or(0, |r| r.cell_counts.len()),
+        parent_meta.as_ref(),
     )?;
     Ok(Some(BACKEND_SUFFIX))
 }

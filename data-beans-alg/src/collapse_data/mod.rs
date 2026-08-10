@@ -46,7 +46,7 @@ mod refine;
 use refine::{
     compute_fine_to_coarse_mapping, compute_level_sort_dims, fine_to_coarse_from_refined,
     pad_numeric_labels, refine_and_collect_single_layer, refine_and_collect_stack,
-    RefineCollectCtx,
+    split_anchored_finest_groups, RefineCollectCtx,
 };
 mod stats;
 use stats::{
@@ -611,10 +611,17 @@ where
         num_groups_per_level.push(k);
         pbsamp_to_group.push(compact);
     }
-    let refined = crate::refine_multilevel::RefinedAssignment {
+    let mut refined = crate::refine_multilevel::RefinedAssignment {
         pbsamp_to_group,
         num_groups_per_level,
     };
+    split_anchored_finest_groups(
+        &mut refined,
+        &pb_samples.layout,
+        &pb_sample_to_cells,
+        anchor_batches.as_deref().unwrap_or(&[]),
+    );
+    let refined = refined;
 
     info!(
         "Inherited partition: {} cells, {} pb-samples, finest k={} (skipped BBKNN + DC-SBM refinement)",

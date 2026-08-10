@@ -1375,6 +1375,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         column_weight.as_deref(),
         &gene_names,
         args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
     )?;
 
     let input: Vec<String> = data_files
