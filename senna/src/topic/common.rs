@@ -280,6 +280,16 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
         qc: args.qc.clone(),
+        // The carried pseudobulks are training inputs, not cells: a column
+        // standing for hundreds of cells is a legitimate depth outlier, and
+        // as the reference grows across rounds the cell/carried mixture
+        // eventually splits the MAD band — QC then drops columns and the
+        // positional weighting refuses the shifted tail. Exempt the
+        // reference file (always loaded last) from bands and verdicts.
+        qc_exempt_files: args.pb_reference.map(|_| {
+            let n = args.data_files.len();
+            (0..n).map(|i| i == n - 1).collect()
+        }),
         qc_block_size: args.qc_block_size,
         qc_report_out: args.qc_report_out.map(Box::<str>::from),
         per_file_feature_suffix: None,

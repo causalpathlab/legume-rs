@@ -322,3 +322,76 @@ fn novel_biology_survives_into_the_adjusted_target() {
         "novel program lost from the observed posterior: best contrast {best_contrast} of 15x true"
     );
 }
+
+/// Append-only memory: every anchored column keeps its own finest group.
+///
+/// Re-merging carried columns into this round's (batch × group) blends would
+/// re-average the reference every round — averages of averages, compounding —
+/// and would leave no group whose stats are purely one carried column, so a
+/// re-emitted reference could never reproduce its parent. The collapse
+/// therefore appends one singleton group per anchored column after the
+/// new-data groups, in column order, and each singleton's observed evidence
+/// is the stored rate back out.
+#[test]
+fn anchored_columns_keep_singleton_finest_groups() {
+    let (mut v, batches, weights) = two_batch_cohort("singleton");
+    v.register_column_multiplicity(&weights).expect("weights");
+    let proj = v
+        .project_columns_with_batch_correction(4, None, Some(&batches))
+        .expect("proj")
+        .proj;
+    let params = MultilevelParams {
+        knn_pb_samples: 3,
+        num_levels: 1,
+        sort_dim: 3,
+        num_opt_iter: 30,
+        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        output_calibration: matrix_param::traits::CalibrateTarget::All,
+        anchor_batches: Some(vec!["__ref__".into()]),
+        observe_panels: true,
+        keep_finest_stats: true,
+    };
+    let out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
+        .expect("collapse");
+    let finest_membership = &out.cell_to_pb_per_level[0];
+    let k = out.levels[0].mu_observed.posterior_mean().ncols();
+
+    let n_new = 80;
+    let n_ref = 20;
+    let k_new = k - n_ref;
+
+    // New columns stay in the leading groups; each anchored column owns the
+    // appended group matching its position, so a re-emitted reference keeps
+    // the parent's column order.
+    for (c, &g) in finest_membership.iter().enumerate() {
+        if c < n_new {
+            assert!(g < k_new, "new column {c} landed in a carried group {g}");
+        } else {
+            assert_eq!(
+                g,
+                k_new + (c - n_new),
+                "anchored column {c} not in its own appended group"
+            );
+        }
+    }
+
+    // The singleton's observed evidence is the stored rate again — the
+    // lossless passthrough that makes re-emission reproduce the parent
+    // instead of re-summarizing it. Values reconstructed from the cohort
+    // builder's own formula.
+    let type_a: Vec<f32> = (0..D).map(|g| 10.0 + 3.0 * (g % 2) as f32).collect();
+    let type_b: Vec<f32> = (0..D).map(|g| 4.0 + 2.0 * ((g + 1) % 2) as f32).collect();
+    for i in 0..n_ref {
+        let base = if i % 2 == 0 { &type_a } else { &type_b };
+        let wiggle = 1.0 + 0.04 * ((i % 3) as f32 - 1.0);
+        let g_id = k_new + i;
+        for (row, &v) in base.iter().enumerate() {
+            let stored = v * wiggle;
+            let back = out.levels[0].mu_observed.evidence_mean(row, g_id);
+            assert!(
+                (back - stored).abs() <= 1e-4 * stored.abs(),
+                "carried column {i} gene {row}: stored {stored}, evidence {back}"
+            );
+        }
+    }
+}

@@ -786,6 +786,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             unified.count_backend().column_multiplicities(),
             &unified.count_backend().row_names()?,
             args.init_from.as_deref(),
+            args.pb_reference.as_ref(),
         )?,
         None => None,
     };

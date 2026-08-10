@@ -314,6 +314,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         column_weight.as_deref(),
         &gene_names,
         args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
     )?;
 
     let input: Vec<String> = args
