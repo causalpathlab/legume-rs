@@ -68,47 +68,58 @@ pub struct PbReferenceMeta {
 pub const REFERENCE_BATCH: &str = "__pb_reference__";
 
 /// Column-name prefix for carried pseudobulks. Written by [`write`] and relied
-/// on by [`ReferenceInput::weights_for`] to tell them from real cells, so the
+/// on by [`weights_for`] to tell them from real cells, so the
 /// two must agree — hence one constant.
 pub const COLUMN_PREFIX: &str = "PBREF_";
 
 /// Cells per finest-level pseudobulk, from the cell → pb membership.
 ///
-/// `column_weight` is what each loaded column stands for: 1 for a real cell,
-/// and its own cell count for a pseudobulk this run itself carried in. Without
-/// it the mass of every earlier cohort would collapse to "one cell per carried
-/// column" each round, so a model that absorbed 900 cells and then 400 more
-/// would record 735 rather than 1300 — old data quietly decaying toward
-/// irrelevance the longer a model is grown, which is the one thing carrying
-/// pseudobulks forward exists to prevent.
+/// `column_weight` is the cohort's [`SparseIoVec::column_multiplicities`]:
+/// what each loaded column stands for — 1 for a real cell, its own cell count
+/// for a pseudobulk this run itself carried in, `None` when no multiplicities
+/// were registered at all. Without it the mass of every earlier cohort would
+/// collapse to "one cell per carried column" each round, so a model that
+/// absorbed 900 cells and then 400 more would record 735 rather than 1300 —
+/// old data quietly decaying toward irrelevance the longer a model is grown,
+/// which is the one thing carrying pseudobulks forward exists to prevent.
+/// A `Some` of the wrong length is refused for the same reason: it would
+/// silently mis-weight the tail.
 ///
 /// Total mass is therefore conserved: `Σ cell_counts == Σ column_weight` over
 /// the columns that land in range.
-#[must_use]
 pub fn cell_counts_from(
     cell_to_pb_finest: &[usize],
     n_pb: usize,
-    column_weight: &[f32],
-) -> Vec<f32> {
+    column_weight: Option<&[f32]>,
+) -> anyhow::Result<Vec<f32>> {
+    if let Some(w) = column_weight {
+        anyhow::ensure!(
+            w.len() == cell_to_pb_finest.len(),
+            "cell_counts_from: {} column weights for {} columns — the weights were built in a \
+             different column space",
+            w.len(),
+            cell_to_pb_finest.len(),
+        );
+    }
     let mut counts = vec![0.0f32; n_pb];
     for (col, &pb) in cell_to_pb_finest.iter().enumerate() {
         if pb < n_pb {
-            counts[pb] += column_weight.get(col).copied().unwrap_or(1.0);
+            counts[pb] += column_weight.map_or(1.0, |w| w[col]);
         }
     }
-    counts
+    Ok(counts)
 }
 
 /// Write this run's pseudobulks as `{prefix}.pb_reference.{zarr,json}`.
 ///
 /// `cell_to_pb_finest` is the finest level of the run's cell → pb membership,
-/// and `data_vec` supplies each column's multiplicity — see
+/// and `column_weight` is each column's multiplicity — see
 /// [`cell_counts_from`] for why counting columns is not enough.
 pub fn write(
     prefix: &str,
     finest: &CollapsedOut,
     cell_to_pb_finest: &[usize],
-    data_vec: &SparseIoVec,
+    column_weight: Option<&[f32]>,
     gene_names: &[Box<str>],
     generation: u32,
 ) -> anyhow::Result<()> {
@@ -121,10 +132,7 @@ pub fn write(
         gene_names.len(),
     );
 
-    let column_weight: Vec<f32> = (0..data_vec.num_columns())
-        .map(|c| data_vec.column_multiplicity(c))
-        .collect();
-    let cell_counts = cell_counts_from(cell_to_pb_finest, n_pb, &column_weight);
+    let cell_counts = cell_counts_from(cell_to_pb_finest, n_pb, column_weight)?;
     let n_empty = cell_counts.iter().filter(|&&c| c <= 0.0).count();
     anyhow::ensure!(
         n_empty < n_pb,
@@ -135,7 +143,7 @@ pub fn write(
     // Zeros are dropped, as in any sparse write; a pseudobulk rate is dense
     // enough that this is a modest saving, and exact — the loader reads a
     // missing entry as zero, which is what it was.
-    let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+    let mut triplets: Vec<(u64, u64, f32)> = Vec::with_capacity(n_genes * (n_pb - n_empty));
     for pb in 0..n_pb {
         if cell_counts[pb] <= 0.0 {
             continue;
@@ -182,25 +190,32 @@ pub fn write(
 
 /// Emit the carried pseudobulks when the run asked for them.
 ///
-/// Returns whether anything was written, for the manifest slot. The generation
-/// counter comes from the parent when this run was itself an update, so the log
-/// says how many rounds of accumulation are behind the file.
+/// Returns the manifest's `pb_reference_suffix` — `Some(BACKEND_SUFFIX)` when
+/// the file was written — so call sites assign it straight into the
+/// `RunDescription` instead of each re-mapping a bool. The generation counter
+/// comes from the parent when this run was itself an update, so the log says
+/// how many rounds of accumulation are behind the file.
 ///
-/// `parent` is whichever link back this family has: its warm-start prefix for
-/// the checkpointed families, or — for `svd`, which has no checkpoint — the
-/// reference it is consuming. Absent either, the count restarts at 1, which is
-/// honest: nothing on disk connects this run to an earlier one.
+/// `column_weight` is the loaded cohort's
+/// [`SparseIoVec::column_multiplicities`], captured while the backend is
+/// still alive — taking the slice rather than the `SparseIoVec` lets callers
+/// run this *after* the steps that consume the backend (CNV detection), so
+/// the triplet build never overlaps it in memory.
+///
+/// `parent` is the run this one continues (`--init-from`); absent, the count
+/// restarts at 1, which is honest: nothing on disk connects this run to an
+/// earlier one.
 pub fn emit_if_requested(
     enabled: bool,
     prefix: &str,
     finest: &CollapsedOut,
     cell_to_pb_per_level: Option<&[Vec<usize>]>,
-    data_vec: &SparseIoVec,
+    column_weight: Option<&[f32]>,
     gene_names: &[Box<str>],
     parent: Option<&str>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<&'static str>> {
     if !enabled {
-        return Ok(false);
+        return Ok(None);
     }
     // Finest-last, matching `collapsed_levels`.
     let Some(finest_membership) = cell_to_pb_per_level.and_then(<[Vec<usize>]>::last) else {
@@ -208,7 +223,7 @@ pub fn emit_if_requested(
             "--emit-pb-reference: this run has no cell → pb membership, so the carried \
              pseudobulks would have no cell counts and would weigh one cell apiece. Skipping."
         );
-        return Ok(false);
+        return Ok(None);
     };
     let generation = parent
         .map(|p| read_meta(p).map(|m| m.map_or(0, |m| m.generation)))
@@ -219,11 +234,11 @@ pub fn emit_if_requested(
         prefix,
         finest,
         finest_membership,
-        data_vec,
+        column_weight,
         gene_names,
         generation,
     )?;
-    Ok(true)
+    Ok(Some(BACKEND_SUFFIX))
 }
 
 /// A parent's carried pseudobulks, prepared as an ordinary input for the next
@@ -233,9 +248,6 @@ pub fn emit_if_requested(
 /// from the parent, never part of a recorded fit configuration.
 #[derive(Debug, Clone, Default)]
 pub struct ReferenceInput {
-    /// The run prefix these came from. `svd` has no `--init-from` to record a
-    /// parent with, so this is its only link back — see [`emit_if_requested`].
-    pub parent: Box<str>,
     pub backend: Box<str>,
     pub batch_file: Box<str>,
     /// One weight per reference column, in column order.
@@ -248,50 +260,31 @@ impl ReferenceInput {
     pub fn cells_represented(&self) -> f32 {
         self.cell_counts.iter().sum()
     }
-
-    /// [`Self::weights_for`] as the loader wants it — see
-    /// `topic::common::LoadProjectArgs::column_weight_fn`.
-    ///
-    /// Owns the counts rather than borrowing `self`, because the callback
-    /// outlives the argument struct it is handed to.
-    #[must_use]
-    pub fn weight_fn(&self) -> Box<ColumnWeightFn> {
-        let cell_counts = self.cell_counts.clone();
-        Box::new(move |names: &[Box<str>]| weights_for(&cell_counts, names))
-    }
-
-    /// Keep-mask over the loaded columns that excludes the carried
-    /// pseudobulks, intersected with whatever QC already dropped.
-    ///
-    /// Carried pseudobulks are training inputs, not cells. Left in, every
-    /// downstream per-cell artifact — `clustering`, `plot`, `annotate` — would
-    /// treat each one as an extra cell whose "barcode" is `PBREF_37`.
-    #[must_use]
-    pub fn keep_new_cells_only(&self, n_columns: usize, keep: Option<Vec<usize>>) -> Vec<usize> {
-        let n_real = n_columns.saturating_sub(self.cell_counts.len());
-        info!(
-            "Excluding {} carried pseudobulks from the per-cell outputs ({n_real} cells remain)",
-            self.cell_counts.len(),
-        );
-        match keep {
-            Some(keep) => keep.into_iter().filter(|&i| i < n_real).collect(),
-            None => (0..n_real).collect(),
-        }
-    }
 }
 
-/// [`ReferenceInput::keep_new_cells_only`] threaded through the optional
-/// reference, so a family can apply it without branching at the call site.
+/// Keep-mask over the loaded columns that excludes the carried pseudobulks,
+/// intersected with whatever QC already dropped. `None` reference passes the
+/// QC mask through untouched.
+///
+/// Carried pseudobulks are training inputs, not cells. Left in, every
+/// downstream per-cell artifact — `clustering`, `plot`, `annotate` — would
+/// treat each one as an extra cell whose "barcode" is `PBREF_37`.
 #[must_use]
 pub fn exclude_carried(
     reference: Option<&ReferenceInput>,
     n_columns: usize,
     keep: Option<Vec<usize>>,
 ) -> Option<Vec<usize>> {
-    match reference {
-        None => keep,
-        Some(r) => Some(r.keep_new_cells_only(n_columns, keep)),
-    }
+    let Some(r) = reference else { return keep };
+    let n_real = n_columns.saturating_sub(r.cell_counts.len());
+    info!(
+        "Excluding {} carried pseudobulks from the per-cell outputs ({n_real} cells remain)",
+        r.cell_counts.len(),
+    );
+    Some(match keep {
+        Some(keep) => keep.into_iter().filter(|&i| i < n_real).collect(),
+        None => (0..n_real).collect(),
+    })
 }
 
 /// One weight per loaded column: 1 for a real cell, its cell count for a
@@ -363,7 +356,6 @@ pub fn prepare(parent: &str, out: &str) -> anyhow::Result<Option<ReferenceInput>
     std::fs::write(&batch_file, body + "\n")?;
 
     Ok(Some(ReferenceInput {
-        parent: parent.into(),
         backend: backend.into(),
         batch_file: batch_file.into(),
         cell_counts: meta.cell_counts,

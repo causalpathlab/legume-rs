@@ -194,11 +194,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         .transpose()?
         .flatten();
 
-    let weight_fn = args
-        .pb_reference
-        .as_ref()
-        .map(crate::pb_reference::ReferenceInput::weight_fn);
-
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -225,7 +220,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
-        column_weight_fn: weight_fn.as_deref(),
+        pb_reference: args.pb_reference.as_ref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
@@ -234,14 +229,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
-
-    // Carried pseudobulks train the model but are not cells; hold them out of
-    // every per-cell artifact. See `pb_reference::exclude_carried`.
-    let output_keep_idx = crate::pb_reference::exclude_carried(
-        args.pb_reference.as_ref(),
-        data_vec.num_columns(),
-        output_keep_idx,
-    );
 
     let n_features = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
@@ -397,14 +384,12 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     let cell_names = data_vec.column_names()?;
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
-    // Emitted before CNV detection, which consumes `data_vec` — the carried
-    // pseudobulks need each column's multiplicity to know what it stands for.
-    let has_pb_reference = crate::pb_reference::emit_if_requested(
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
         args.collapse.emit_pb_reference,
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),
-        &data_vec,
+        data_vec.column_multiplicities(),
         &gene_names,
         args.init_from.as_deref(),
     )?;
@@ -446,7 +431,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: None,
-        pb_reference_suffix: has_pb_reference.then_some(crate::pb_reference::BACKEND_SUFFIX),
+        pb_reference_suffix,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,

@@ -341,6 +341,17 @@ impl SparseIoVec {
         self.derived.col_multiplicity.is_some()
     }
 
+    /// The whole multiplicity vector, one weight per column — `None` when no
+    /// multiplicities are registered (every column is one observation).
+    ///
+    /// Prefer this over gathering [`Self::column_multiplicity`] in a loop:
+    /// callers were rebuilding the vector element-by-element, re-encoding the
+    /// "absent means 1.0" default at every site.
+    #[must_use]
+    pub fn column_multiplicities(&self) -> Option<&[f32]> {
+        self.derived.col_multiplicity.as_deref()
+    }
+
     pub fn batch_names(&self) -> Option<Vec<Box<str>>> {
         self.derived.batch_idx_to_name.clone()
     }

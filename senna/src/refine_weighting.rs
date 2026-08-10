@@ -215,8 +215,12 @@ pub(crate) struct CollapseArgs {
 /// fitted on two incompatible units: averaging already removed the Poisson
 /// component the trend measures, and no weighting puts it back. So the choice
 /// there is not a preference between two estimators; one of them has no
-/// coherent population. Hence no flag — the reference's presence *is* the
-/// condition.
+/// coherent population. Hence no flag — and the condition is not even the
+/// reference itself. What invalidates the cell-level trend is "this cohort
+/// holds columns that are summaries, not cells", which the loader records as
+/// [`SparseIoVec::has_column_multiplicity`] when it registers the carried
+/// columns' weights. Keying on that keeps the choice correct for any future
+/// producer of weighted columns (bulk samples), not just `--use-pb-reference`.
 ///
 /// Measured against the exact re-collapse (900-cell parent absorbing 400
 /// cells), on Spearman ρ of the induced gene ranking:
@@ -231,34 +235,33 @@ pub(crate) struct CollapseArgs {
 /// because the A/B above says model quality is insensitive to this trend at a
 /// far larger perturbation than a constant factor.
 pub(crate) fn fit_fisher_weights(
-    reference: Option<&crate::pb_reference::ReferenceInput>,
     collapsed: &data_beans_alg::collapse_data::CollapsedOut,
     cell_to_pb: Option<&[usize]>,
     coarsening: Option<&data_beans_alg::feature_coarsening::FeatureCoarsening>,
     data_vec: &data_beans::sparse_io_vector::SparseIoVec,
     block_size: Option<usize>,
 ) -> anyhow::Result<Vec<f32>> {
-    if reference.is_some() {
+    if data_vec.has_column_multiplicity() {
         // `mu_observed`, NOT the batch-adjusted posterior — even though the
         // carried columns were *stored* adjusted. The NB trend describes the
         // observation process, and between-batch spread is part of the
         // variance it is meant to see; the cell-level pass this has to agree
         // with reads raw counts. Removing δ first shrinks apparent dispersion
-        // and reorders which genes look over-dispersed — measured above as
-        // ρ 0.47 against ρ 0.98 for the observed posterior.
+        // and reorders which genes look over-dispersed — the middle row of
+        // the table above.
         let mu_ds = matrix_param::traits::Inference::posterior_mean(&collapsed.mu_observed);
         let cell_to_pb = cell_to_pb.ok_or_else(|| {
             anyhow::anyhow!(
-                "--use-pb-reference needs this run's cell → pb membership to know how many cells \
+                "weighted columns need this run's cell → pb membership to know how many cells \
                  each pseudobulk stands for; without it the NB-Fisher trend cannot be put back on \
                  the count scale it is defined for."
             )
         })?;
-        let column_weight: Vec<f32> = (0..data_vec.num_columns())
-            .map(|c| data_vec.column_multiplicity(c))
-            .collect();
-        let size_s =
-            crate::pb_reference::cell_counts_from(cell_to_pb, mu_ds.ncols(), &column_weight);
+        let size_s = crate::pb_reference::cell_counts_from(
+            cell_to_pb,
+            mu_ds.ncols(),
+            data_vec.column_multiplicities(),
+        )?;
         return data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk(
             mu_ds, &size_s, coarsening,
         );
@@ -280,7 +283,10 @@ impl CollapseArgs {
     /// nothing. Accepting it there and silently doing nothing is the worst of
     /// the three options: the user believes the reference exists and only finds
     /// out a round later, when the parent turns out to carry nothing.
-    pub(crate) fn reject_pb_reference(&self, kind: &str) -> anyhow::Result<()> {
+    pub(crate) fn reject_pb_reference(
+        &self,
+        kind: crate::run_manifest::RunKind,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.emit_pb_reference,
             "--emit-pb-reference has no effect on `{kind}`: `senna update` cannot continue a \

@@ -807,23 +807,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         (None, None) => None,
     };
 
-    // `ColumnAlignment::Union` matches columns by name across backends, and
-    // nothing in that pass promises the unmatched `PBREF_*` columns come out
-    // last. `weights_for` would catch it, but only after the whole cohort had
-    // been read — say so now instead.
-    anyhow::ensure!(
-        args.pb_reference.is_none() || !effective_multiome,
-        "--use-pb-reference and --multiome do not compose: multiome loads backends with union \
-         column alignment, which gives no guarantee the carried pseudobulks stay contiguous at \
-         the end — and their weights are applied by position. Drop --use-pb-reference for this \
-         round and let it re-collapse."
-    );
-
-    let weight_fn = args
-        .pb_reference
-        .as_ref()
-        .map(crate::pb_reference::ReferenceInput::weight_fn);
-
     let PreparedData {
         data_vec,
         collapsed_levels,
@@ -848,7 +831,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn,
-        column_weight_fn: weight_fn.as_deref(),
+        pb_reference: args.pb_reference.as_ref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: if effective_multiome {
             data_beans::sparse_io_vector::ColumnAlignment::Union
@@ -863,14 +846,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
-
-    // Carried pseudobulks train the model but are not cells; hold them out of
-    // every per-cell artifact. See `pb_reference::exclude_carried`.
-    let output_keep_idx = crate::pb_reference::exclude_carried(
-        args.pb_reference.as_ref(),
-        data_vec.num_columns(),
-        output_keep_idx,
-    );
 
     // 4. No feature coarsening for indexed model — both encoder and decoder
     //    use indexed top-K lookup, so D_full is efficient.
@@ -1022,7 +997,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     info!("Computing NB-Fisher weights for shortlist scoring");
     // Full gene resolution: the masked head has no feature coarsening.
     let shortlist_weights: Vec<f32> = crate::refine_weighting::fit_fisher_weights(
-        args.pb_reference.as_ref(),
         finest_collapsed,
         cell_to_pb_per_level
             .as_deref()
@@ -1350,17 +1324,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let gene_names = data_vec.row_names()?;
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
 
-    // Emitted before CNV detection, which consumes `data_vec` — the carried
-    // pseudobulks need each column's multiplicity to know what it stands for.
-    let has_pb_reference = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
-        &args.out,
-        finest_collapsed,
-        cell_to_pb_per_level.as_deref(),
-        &data_vec,
-        &gene_names,
-        args.init_from.as_deref(),
-    )?;
+    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
+    // its triplet build never overlaps the live backend in memory.
+    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
 
     if let Some(positions) = cnv_positions {
         if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
@@ -1400,6 +1366,16 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         false
     };
 
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        column_weight.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+    )?;
+
     let input: Vec<String> = data_files
         .iter()
         .map(std::string::ToString::to_string)
@@ -1419,7 +1395,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
-        pb_reference_suffix: has_pb_reference.then_some(crate::pb_reference::BACKEND_SUFFIX),
+        pb_reference_suffix,
         pb_latent_suffix: Some("pb_latent.parquet"),
         // Full-gene-resolution β̂, the same object `senna topic` writes. Preferred over the
         // factorized `dictionary.parquet` by anything that ranks genes (plot-topic already does

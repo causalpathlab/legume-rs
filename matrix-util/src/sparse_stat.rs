@@ -140,6 +140,29 @@ where
         self.ncols_processed += 1;
     }
 
+    /// [`Self::add_dense_column`] with every value scaled by `scale` on the
+    /// way in. Folding the multiply into the accumulation loop touches each
+    /// element once, where scale-into-a-buffer-then-add would write and
+    /// re-read the whole column.
+    pub fn add_dense_column_scaled(&mut self, values: &[T], scale: T) {
+        debug_assert_eq!(values.len(), self.nrows);
+        let zero = T::zero();
+        let one = T::one();
+        for ((v_in, npos), (s1, s2)) in values
+            .iter()
+            .zip(self.npos.iter_mut())
+            .zip(self.s1.iter_mut().zip(self.s2.iter_mut()))
+        {
+            let v = *v_in * scale;
+            let v = if v.is_finite() { v } else { zero };
+            let pos = if v > zero { one } else { zero };
+            *npos += pos;
+            *s1 += v;
+            *s2 += v * v;
+        }
+        self.ncols_processed += 1;
+    }
+
     /// Add every column of a dense `[D, n]` matrix in column-major
     /// order. Calls [`add_dense_column`] per column so the inner loop
     /// stays vectorizable; the per-column overhead is negligible
