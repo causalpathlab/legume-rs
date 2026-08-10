@@ -24,7 +24,7 @@ const D: usize = 8;
 /// Deterministic layout: types alternate; the anchor batch's columns are
 /// clean type profiles (as a carried reference would be), the new batch's are
 /// the same profiles times a per-gene platform factor.
-fn two_batch_cohort() -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
+fn two_batch_cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
     let type_a: Vec<f32> = (0..D).map(|g| 10.0 + 3.0 * (g % 2) as f32).collect();
     let type_b: Vec<f32> = (0..D).map(|g| 4.0 + 2.0 * ((g + 1) % 2) as f32).collect();
     let platform: Vec<f32> = (0..D).map(|g| if g < D / 2 { 2.0 } else { 0.5 }).collect();
@@ -56,7 +56,9 @@ fn two_batch_cohort() -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
         weights.push(20.0);
     }
 
-    let dir = std::env::temp_dir().join(format!("dba_anchor_{}", std::process::id()));
+    // Tagged per test: the three tests run concurrently in one binary, and a
+    // shared path means one test's remove_dir_all races another's reads.
+    let dir = std::env::temp_dir().join(format!("dba_anchor_{tag}_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let path = dir.join("anchor.zarr");
     let _ = std::fs::remove_dir_all(&path);
@@ -93,8 +95,8 @@ fn two_batch_cohort() -> (SparseIoVec, Vec<&'static str>, Vec<f32>) {
     (v, batches, weights)
 }
 
-fn run(anchored: bool) -> data_beans_alg::collapse_data::CollapsedOut {
-    let (mut v, batches, weights) = two_batch_cohort();
+fn run(tag: &str, anchored: bool) -> data_beans_alg::collapse_data::CollapsedOut {
+    let (mut v, batches, weights) = two_batch_cohort(tag);
     v.register_column_multiplicity(&weights).expect("weights");
 
     // A tiny deterministic projection: enough dims for the partition to
@@ -134,7 +136,7 @@ fn mean_abs_log_delta(out: &data_beans_alg::collapse_data::CollapsedOut, b: usiz
 
 #[test]
 fn the_anchor_batch_keeps_delta_at_one() {
-    let out = run(true);
+    let out = run("anchored", true);
     // batch indices are registration order of first appearance; find them by
     // magnitude instead of guessing: the anchor's δ must hug 1, the new
     // batch's must not (it carries a genuine 2×/0.5× platform shift).
@@ -156,7 +158,7 @@ fn the_anchor_batch_keeps_delta_at_one() {
 /// test above meaningful rather than trivially satisfiable.
 #[test]
 fn pooled_matching_adjusts_both_sides() {
-    let out = run(false);
+    let out = run("pooled", false);
     let d0 = mean_abs_log_delta(&out, 0);
     let d1 = mean_abs_log_delta(&out, 1);
     let smaller = d0.min(d1);
@@ -170,7 +172,7 @@ fn pooled_matching_adjusts_both_sides() {
 /// pooled behavior it exists to replace.
 #[test]
 fn an_unknown_anchor_batch_is_refused() {
-    let (mut v, batches, weights) = two_batch_cohort();
+    let (mut v, batches, weights) = two_batch_cohort("refused");
     v.register_column_multiplicity(&weights).expect("weights");
     let proj = v
         .project_columns_with_batch_correction(4, None, Some(&batches))

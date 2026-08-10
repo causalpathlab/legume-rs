@@ -10,16 +10,22 @@
 //! blob would instead need bespoke append, merge and re-fit logic.
 //!
 //! **What is stored.** One column per finest-level pseudobulk, holding the
-//! **batch-adjusted per-cell rate** (`mu_adjusted`, falling back to
-//! `mu_observed` when a run had no batch structure). Two consequences:
+//! **batch-adjusted per-cell evidence rate** — `sum/denom` with no prior in
+//! either, from `mu_adjusted` (falling back to `mu_observed` when a run had no
+//! batch structure), zero wherever the posterior has no data support. Three
+//! consequences:
 //!
 //! - It is a *rate*, so a carried column is directly comparable with a real
 //!   cell — which is what makes the cross-batch matching, itself already in
 //!   rate space, treat them alike.
-//! - It is *adjusted*, so the batch correction this run computed at cell
-//!   resolution is baked into the values. The next round therefore estimates δ
-//!   only for its new batches, against an already-clean reference. That is the
-//!   sense in which the expensive cell-level work is not thrown away.
+//! - It is *adjusted*, so the batch correction this run computed is baked into
+//!   the values. The next round anchors on it (see
+//!   `MultilevelParams::anchor_batches`): new batches are corrected toward
+//!   this frame, and the frame itself is never re-adjusted.
+//! - Paired with the sidecar's cell counts it is a **bijection of the
+//!   sufficient statistics** `(observed_sum, size)`: the next round's collapse
+//!   reconstructs them exactly through the weighted-column path, so carrying
+//!   pseudobulks forward is lossless at the finest level.
 //!
 //! The sidecar carries each column's cell count, which becomes its
 //! [multiplicity](data_beans::sparse_io_vector::SparseIoVec::register_column_multiplicity)
@@ -123,9 +129,27 @@ pub fn write(
     gene_names: &[Box<str>],
     generation: u32,
 ) -> anyhow::Result<()> {
+    // Evidence, not posterior. Two distinct mistakes hid in "store the
+    // posterior mean, keep v > 0":
+    //
+    // - A Gamma posterior mean is nonzero at EVERY entry — unobserved genes
+    //   sit at the prior floor `a0/(b0 + n)` — so the reference serialized
+    //   100.0% dense (measured: 34M of 34M entries), and that haze rode every
+    //   counterfactual and polluted the observed sums at multiplicity weight.
+    // - Even on supported entries, the mean `(a0 + sum)/(b0 + n)` carries
+    //   prior shrinkage that the next round re-ingests as data.
+    //
+    // `evidence_mean` fixes both at once: `sum/denom` where there is data,
+    // zero where there is not. Paired with the sidecar's cell counts it is a
+    // bijection of the sufficient statistics — the next round's collapse
+    // reconstructs `(observed_sum, size)` exactly, so carrying pseudobulks
+    // forward is lossless at the finest level rather than approximately right.
+    let param = finest.mu_adjusted.as_ref().unwrap_or(&finest.mu_observed);
     let batch_adjusted = finest.mu_adjusted.is_some();
-    let rate_dp: &Mat = preferred_posterior_mean(finest);
-    let (n_genes, n_pb) = (rate_dp.nrows(), rate_dp.ncols());
+    let (n_genes, n_pb) = (
+        param.posterior_mean().nrows(),
+        param.posterior_mean().ncols(),
+    );
     anyhow::ensure!(
         n_genes == gene_names.len(),
         "pb_reference: {n_genes} rows but {} gene names",
@@ -140,16 +164,13 @@ pub fn write(
          collapsed output"
     );
 
-    // Zeros are dropped, as in any sparse write; a pseudobulk rate is dense
-    // enough that this is a modest saving, and exact — the loader reads a
-    // missing entry as zero, which is what it was.
-    let mut triplets: Vec<(u64, u64, f32)> = Vec::with_capacity(n_genes * (n_pb - n_empty));
-    for pb in 0..n_pb {
-        if cell_counts[pb] <= 0.0 {
+    let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+    for (pb, &count) in cell_counts.iter().enumerate() {
+        if count <= 0.0 {
             continue;
         }
         for g in 0..n_genes {
-            let v = rate_dp[(g, pb)];
+            let v = param.evidence_mean(g, pb);
             if v > 0.0 && v.is_finite() {
                 triplets.push((g as u64, pb as u64, v));
             }
@@ -158,6 +179,12 @@ pub fn write(
     anyhow::ensure!(
         !triplets.is_empty(),
         "pb_reference: refusing to write an all-zero reference"
+    );
+    let density = triplets.len() as f64 / (n_genes as f64 * n_pb as f64);
+    info!(
+        "pb_reference support: {} entries ({:.1}% dense)",
+        triplets.len(),
+        100.0 * density
     );
 
     let path = backend_path(prefix);

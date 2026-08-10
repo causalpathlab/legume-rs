@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-param"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "approx",
@@ -5006,7 +5006,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "anyhow",
  "approx",
