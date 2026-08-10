@@ -260,6 +260,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             observe_panels: true,
+            keep_finest_stats: false,
         },
     )?;
     // Reverse so training goes coarse→fine: coarsest (fewest samples)

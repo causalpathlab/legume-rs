@@ -32,8 +32,9 @@ type MultiomeFile = (Option<Box<str>>, Box<str>);
 
 /// NCE training objective for the bge feature/cell embedding (maps to
 /// [`ge::loss::NceObjective`]).
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 enum NceObjectiveArg {
     /// Per-pair logistic (SGNS) — bge's historical loss; byte-identical runs.
     Logistic,
@@ -51,7 +52,8 @@ impl NceObjectiveArg {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct BgeArgs {
     #[arg(
         value_delimiter = ',',
@@ -72,6 +74,21 @@ pub struct BgeArgs {
         help = "Batch label files, one per data file"
     )]
     batch_files: Option<Vec<Box<str>>>,
+
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pb_reference: Option<crate::pb_reference::ReferenceInput>,
+
+    /// The parent run this one continues, set by `senna update`. Like `svd`,
+    /// bge has no weights to warm-start (its ETM is re-derived by archetypal
+    /// analysis each run), so this only chains the emitted reference's
+    /// generation counter.
+    #[arg(skip)]
+    #[serde(skip)]
+    init_from: Option<Box<str>>,
 
     #[command(flatten)]
     hvg: HvgCliArgs,
@@ -406,8 +423,13 @@ pub struct BgeArgs {
 
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
-    args.collapse
-        .reject_pb_reference(crate::run_manifest::RunKind::Bge)?;
+    anyhow::ensure!(
+        args.pb_reference.is_none() || args.multiome.is_empty(),
+        "a pb_reference and --multiome do not compose: multiome loads with union column \
+         alignment, which gives no guarantee the carried pseudobulks stay contiguous at the \
+         end — and their weights are applied by position. Drop --use-pb-reference for this \
+         round and let it re-collapse."
+    );
     // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
     // contradictory pair fails in the first second rather than after the fit.
     let posterior_plan = args.posterior.resolve(args.seed)?;
@@ -541,6 +563,25 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         ..Default::default()
     })?;
 
+    // Carried pseudobulks: registered exactly like every other family — their
+    // cell counts become column multiplicities on the count backend (weights
+    // keyed on the PBREF_-tail layout, verified by name), so the collapse and
+    // every downstream statistic treat a carried column as the cells it
+    // stands for. The CELL axis of phase 1 sees them unweighted, as ~1k
+    // prototype profiles among the new cells — a documented approximation;
+    // the pb axis carries the properly weighted signal.
+    if let Some(r) = args.pb_reference.as_ref() {
+        let v = unified.count_backend_mut();
+        let names = v.column_names()?;
+        let w = crate::pb_reference::weights_for(&r.cell_counts, &names)?;
+        v.register_column_multiplicity(&w)?;
+        info!(
+            "Column multiplicity: {} carried pseudobulks stand for {} cells",
+            r.cell_counts.len(),
+            r.cells_represented() as usize,
+        );
+    }
+
     // Guard barcode identity across groups: disjoint barcodes, so Union
     // loading never merges cells from different samples. No-op for one group.
     if is_multiome {
@@ -565,8 +606,21 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                  dictionary keeps all features)"
             );
         }
-        let report =
-            data_beans::qc_lib::compute_qc(unified.count_backend(), &cfg, args.block_size)?;
+        // Carried pseudobulks are processed outputs, not cells: they must
+        // neither receive a QC verdict nor sit inside the MAD band statistics
+        // (a few hundred smooth averages drag the robust center and can
+        // guillotine every real cell as an "outlier" — measured 400 of 400).
+        let exempt: Option<Vec<bool>> = args.pb_reference.as_ref().map(|r| {
+            let n = unified.n_cells();
+            let n_real = n.saturating_sub(r.cell_counts.len());
+            (0..n).map(|c| c >= n_real).collect()
+        });
+        let report = data_beans::qc_lib::compute_qc_exempting(
+            unified.count_backend(),
+            &cfg,
+            args.block_size,
+            exempt.as_deref(),
+        )?;
         let keep = report.emit_idx_unmasked();
         info!(
             "QC: {} / {} cells kept for output ({} near-empty, {} MAD-outlier dropped)",
@@ -579,6 +633,16 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Carried pseudobulks train the model but are not cells; hold them out of
+    // every per-cell artifact (bge does no column masking, so the qc indices
+    // are already in original column order — the same space `exclude_carried`
+    // composes on).
+    let qc_keep_idx = crate::pb_reference::exclude_carried(
+        args.pb_reference.as_ref(),
+        unified.n_cells(),
+        qc_keep_idx,
+    );
 
     // HVG → projection weights (no longer subsets the feature axis).
     // Mirrors senna topic: HVG down-weights uninformative genes for the
@@ -653,6 +717,13 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             };
         Ok(ge::FitConfig {
             embedding_dim: args.embedding_dim,
+            // Greedy batch correction against the carried reference, exactly
+            // as in the other families — see `MultilevelParams::anchor_batches`.
+            anchor_batches: args
+                .pb_reference
+                .is_some()
+                .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            emit_finest_collapse: args.collapse.emit_pb_reference,
             num_levels: args.collapse.num_levels,
             sort_dim: args.collapse.sort_dim,
             knn_pb_samples: args.collapse.knn_cells,
@@ -703,6 +774,21 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // feature selection during training (no post-hoc null-drop / refit).
     let cfg = build_config(&unified)?;
     let out = ge::fit(&mut unified, cfg)?;
+
+    // Carried pseudobulks out, same contract as every other family: the
+    // finest collapse level's evidence rates + per-column cell counts.
+    let pb_reference_suffix = match out.finest_collapse.as_ref() {
+        Some((finest, membership)) => crate::pb_reference::emit_if_requested(
+            args.collapse.emit_pb_reference,
+            &args.out,
+            finest,
+            Some(std::slice::from_ref(membership)),
+            unified.count_backend().column_multiplicities(),
+            &unified.count_backend().row_names()?,
+            args.init_from.as_deref(),
+        )?,
+        None => None,
+    };
 
     // No per-batch cell QC: it was removed because the per-batch debris cut
     // behaved incoherently across batches (near-identical depth distributions
@@ -854,7 +940,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        train_args: None,
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Bge,
         prefix: &args.out,
         data_input: &input,
@@ -870,7 +956,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
-        pb_reference_suffix: None,
+        pb_reference_suffix,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         // The SIMBA co-embed is written as feature_embedding.parquet in BOTH
@@ -962,4 +1048,21 @@ fn median_of(v: &[f64]) -> f64 {
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     s[s.len() / 2]
+}
+
+impl crate::update::Updatable for BgeArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.pb_reference = r.reference;
+        // Like `svd`, bge has no weights to warm-start: `update` re-fits on
+        // the union with the recorded configuration, and the carried
+        // reference (when used) is what keeps that O(new). `init_from` only
+        // chains the emitted reference's generation counter.
+        self.init_from = Some(r.init_from);
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
 }

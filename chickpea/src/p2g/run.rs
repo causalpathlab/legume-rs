@@ -285,6 +285,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             observe_panels: true,
+            keep_finest_stats: false,
         },
     )?;
     if levels.is_empty() {

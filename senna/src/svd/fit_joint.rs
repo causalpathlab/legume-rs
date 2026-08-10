@@ -144,6 +144,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             observe_panels: true,
+            keep_finest_stats: false,
         },
     )?;
 

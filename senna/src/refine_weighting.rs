@@ -196,8 +196,8 @@ pub(crate) struct CollapseArgs {
                      while total cell mass is conserved exactly. The cost of a round\n\
                      is within-group resolution on old data, never cell mass.\n\
                      \n\
-                     Available on topic, masked-topic, masked-sbp, masked-vae, vae\n\
-                     and svd — the families `senna update` can continue."
+                     Available on topic, masked-topic, masked-sbp, masked-vae, vae,\n\
+                     svd and bge — the families `senna update` can continue."
     )]
     pub(crate) emit_pb_reference: bool,
 
@@ -287,7 +287,7 @@ impl CollapseArgs {
             !self.emit_pb_reference,
             "--emit-pb-reference has no effect on `{kind}`: `senna update` cannot continue a \
              '{kind}' run, so the carried pseudobulks would have no consumer. Supported: topic, \
-             masked-topic, masked-sbp, masked-vae, vae, svd."
+             masked-topic, masked-sbp, masked-vae, vae, svd, bge."
         );
         Ok(())
     }

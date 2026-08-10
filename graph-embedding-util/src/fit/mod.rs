@@ -69,6 +69,18 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_to_pb_per_level,
         blobs: pb_blobs,
     } = pb;
+    // Levels run coarsest..finest here, so the finest is `.last()`. Cloned
+    // rather than moved: the level list feeds training below. The clone is
+    // cheap relative to the fit and only happens when a reference is emitted.
+    let finest_collapse = config.emit_finest_collapse.then(|| {
+        (
+            collapsed_levels.last().expect("at least one level").clone(),
+            cell_to_pb_per_level
+                .last()
+                .expect("membership per level")
+                .clone(),
+        )
+    });
 
     ////////////////////////////////
     // VarMap and embedding heads //
@@ -480,6 +492,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
 
     Ok(FitOutput {
         model: cell_model,
+        finest_collapse,
         varmap,
         cell_nrms: phase2.cell_nrms,
         cell_velocity: phase2.velocity,

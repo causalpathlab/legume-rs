@@ -117,6 +117,7 @@ fn run(tag: &str, anchored: bool) -> data_beans_alg::collapse_data::CollapsedOut
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: anchored.then(|| vec!["__ref__".into()]),
         observe_panels: true,
+        keep_finest_stats: false,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -188,6 +189,7 @@ fn an_unknown_anchor_batch_is_refused() {
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["no_such_batch".into()]),
         observe_panels: true,
+        keep_finest_stats: false,
     };
     let err = match collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params) {
         Ok(_) => panic!("an unknown anchor batch must be refused"),
@@ -282,6 +284,7 @@ fn novel_biology_survives_into_the_adjusted_target() {
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["__ref__".into()]),
         observe_panels: true,
+        keep_finest_stats: false,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");

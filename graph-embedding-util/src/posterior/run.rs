@@ -20,7 +20,8 @@ pub const DEFAULT_PARTITION: usize = 1024;
 ///
 /// The help covers both callers. Anything true of only one of them — gem's second
 /// gate, bge's co-embed shrinkage — belongs on that CLI's own flag, not here.
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct PosteriorArgs {
     #[arg(
         long = "posterior",
