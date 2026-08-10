@@ -501,6 +501,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             .pb_reference
             .is_some()
             .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+        bulk_batches: None,
         observe_panels: args.observe_panels,
         keep_finest_stats: false,
     };

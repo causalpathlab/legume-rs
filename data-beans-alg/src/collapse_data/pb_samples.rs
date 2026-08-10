@@ -20,12 +20,27 @@ pub struct PbSampleLayout {
     pub bg_to_pbsamp: HashMap<(usize, usize), usize>,
     /// Global cell index → owning pb-sample index.
     pub cell_to_pbsamp: Vec<usize>,
-    /// For an anchored singleton pb-sample, the one column it stands for;
-    /// `None` for ordinary (batch, group) pb-samples. The layout is the
-    /// single owner of "which pb-samples are anchored" — downstream steps
+    /// For a singleton pb-sample (an anchored reference column or a bulk
+    /// sample), the one column it stands for; `None` for ordinary
+    /// (batch, group) pb-samples. The layout is the single owner of "which
+    /// pb-samples are already summaries" — downstream steps
     /// (`split_anchored_finest_groups`) read it here instead of re-deriving
     /// membership from batch labels.
-    pub anchored_col: Vec<Option<usize>>,
+    pub singleton_col: Vec<Option<usize>>,
+    /// Batches whose columns are bulk samples: singletons like anchors, but
+    /// excluded from cross-batch matching in BOTH directions (see
+    /// [`bbknn_match_one_pbsamp`]).
+    pub bulk_batches: Vec<usize>,
+}
+
+impl PbSampleLayout {
+    /// Whether this pb-sample is a bulk sample (a singleton that takes no
+    /// part in matching).
+    #[must_use]
+    pub fn is_bulk(&self, pbsamp: usize) -> bool {
+        self.bulk_batches
+            .contains(&self.pb_sample_to_batch[pbsamp])
+    }
 }
 
 /// Pre-aggregated pb-sample data for fast cross-batch matching.
@@ -65,6 +80,9 @@ pub(super) struct PbSampleData {
 /// partition would flatten resolution the parent already paid for (averages
 /// of averages), so each anchored column becomes its own singleton pb-sample
 /// instead, keeping the reference at its stored granularity for matching.
+/// `bulk_batches` get the same singleton treatment (a bulk sample is already
+/// a summary) but are additionally barred from matching — see
+/// [`bbknn_match_one_pbsamp`].
 ///
 /// This only uses `proj_kn` (no CSC reads), so it can be shared across layers.
 pub(super) fn build_pb_sample_layout(
@@ -73,6 +91,7 @@ pub(super) fn build_pb_sample_layout(
     proj_kn: &DMatrix<f32>,
     col_weight: Option<&[f32]>,
     anchor_batches: &[usize],
+    bulk_batches: &[usize],
 ) -> anyhow::Result<PbSampleLayout> {
     let proj_dim = proj_kn.nrows();
 
@@ -100,7 +119,7 @@ pub(super) fn build_pb_sample_layout(
             for &glob_idx in cells {
                 let batch = col_to_batch[glob_idx];
                 let w = weight_of(glob_idx);
-                if anchor_batches.contains(&batch) {
+                if anchor_batches.contains(&batch) || bulk_batches.contains(&batch) {
                     let centroid: Vec<f32> =
                         (0..proj_dim).map(|d| proj_kn[(d, glob_idx)]).collect();
                     singletons.push((batch, group, centroid, w, Some(glob_idx)));
@@ -144,21 +163,21 @@ pub(super) fn build_pb_sample_layout(
     let mut cell_counts = Vec::with_capacity(num_pb);
     let mut pbsamp_to_batch = Vec::with_capacity(num_pb);
     let mut pbsamp_to_group = Vec::with_capacity(num_pb);
-    let mut anchored_col = Vec::with_capacity(num_pb);
+    let mut singleton_col = Vec::with_capacity(num_pb);
     let mut bg_to_pbsamp = HashMap::default();
 
     let ncols = col_to_batch.len();
     let mut cell_to_pbsamp = vec![usize::MAX; ncols];
-    for (i, (batch, group, centroid, count, singleton_col)) in all_pbsamp.into_iter().enumerate() {
+    for (i, (batch, group, centroid, count, sc)) in all_pbsamp.into_iter().enumerate() {
         for (d, &v) in centroid.iter().enumerate() {
             centroids[(d, i)] = v;
         }
         cell_counts.push(count);
         pbsamp_to_batch.push(batch);
         pbsamp_to_group.push(group);
-        anchored_col.push(singleton_col);
-        match singleton_col {
-            // An anchored column IS its pb-sample; `(batch, group)` is not a
+        singleton_col.push(sc);
+        match sc {
+            // A singleton column IS its pb-sample; `(batch, group)` is not a
             // unique key for singletons, so they are mapped directly and stay
             // out of `bg_to_pbsamp`.
             Some(col) => cell_to_pbsamp[col] = i,
@@ -188,7 +207,8 @@ pub(super) fn build_pb_sample_layout(
         pb_sample_to_group: pbsamp_to_group,
         bg_to_pbsamp,
         cell_to_pbsamp,
-        anchored_col,
+        singleton_col,
+        bulk_batches: bulk_batches.to_vec(),
     })
 }
 
@@ -250,6 +270,7 @@ pub(super) fn build_pb_samples(
     proj_kn: &DMatrix<f32>,
     num_genes: usize,
     anchor_batches: &[usize],
+    bulk_batches: &[usize],
 ) -> anyhow::Result<PbSampleCollection> {
     let group_to_cols = data_vec
         .take_grouped_columns()
@@ -269,6 +290,7 @@ pub(super) fn build_pb_samples(
         proj_kn,
         weights.as_deref(),
         anchor_batches,
+        bulk_batches,
     )?;
     let num_pb = layout.cell_counts.len();
     let gene_sums =
@@ -348,15 +370,25 @@ pub(crate) fn bbknn_match_one_pbsamp(
     pbsamp: usize,
     anchor_batches: Option<&[usize]>,
 ) -> anyhow::Result<Vec<(usize, f32)>> {
+    // Bulk takes no part in matching, in either direction. As a receiver: a
+    // bulk sample is a mixture over cell states, and a counterfactual drawn
+    // from single-state pb-samples would hand composition to δ — so it gets
+    // no matches, its imputed sums stay zero, and its δ rests at the prior.
+    // (As a source it is skipped below, and never enters an anchor set.)
+    if layout.is_bulk(pbsamp) {
+        return Ok(Vec::new());
+    }
     let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
     let centroid: Vec<f32> = layout.centroids.column(pbsamp).iter().copied().collect();
     let mut all_hits: Vec<(usize, f32)> = Vec::new();
     match anchor_batches {
-        // Pooled matching: every non-own batch contributes counterfactual
-        // candidates, symmetrically.
+        // Pooled matching: every non-own, non-bulk batch contributes
+        // counterfactual candidates, symmetrically. A bulk batch cannot be a
+        // source: matching a cell pb-sample to a mixture is the same
+        // composition-into-δ leak in the other direction.
         None => {
             for (b, bknn) in batch_knn_lookup.iter().enumerate() {
-                if b == pbsamp_batch {
+                if b == pbsamp_batch || layout.bulk_batches.contains(&b) {
                     continue;
                 }
                 let per_batch = knn_distinct_pbsamples_in_batch(

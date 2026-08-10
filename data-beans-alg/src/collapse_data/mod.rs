@@ -51,7 +51,8 @@ use refine::{
 mod stats;
 use stats::{
     collect_basic_stat_visitor, collect_batch_stat_visitor, collect_matched_stat_coarse,
-    collect_matched_stat_visitor, merge_stat, optimize, KnnParams, DEFAULT_NUM_LEVELS,
+    collect_matched_stat_visitor, mark_bulk_no_adjust, merge_stat, optimize, KnnParams,
+    DEFAULT_NUM_LEVELS,
 };
 pub use stats::{resample_and_optimize, CollapsedOut, CollapsedStat};
 
@@ -85,6 +86,17 @@ pub struct MultilevelParams {
     /// resolution the prior run already paid for. `None` = pooled behavior,
     /// bit-identical to before this field existed.
     pub anchor_batches: Option<Vec<Box<str>>>,
+    /// Batch labels whose columns are ALREADY summaries but are **not** a
+    /// reference frame — bulk RNA-seq samples. Like anchors, each column
+    /// bypasses the partition entirely (its own singleton pb-sample and its
+    /// own singleton finest group — a bulk sample is never re-averaged), but
+    /// unlike anchors it takes no part in cross-batch matching in EITHER
+    /// direction: a bulk sample is a mixture over cell states, so matching it
+    /// to a single-state pb-sample (as source or receiver) would let δ absorb
+    /// composition rather than platform. Bulk therefore contributes observed
+    /// sums only — the dictionary sees it, δ/γ never do, and δ for a bulk
+    /// batch stays at its prior structurally. `None` = no bulk batches.
+    pub bulk_batches: Option<Vec<Box<str>>>,
     /// Distinguish "unmeasured" from "measured as zero" when backends carry
     /// different feature panels (`RowAlignment::Union`): per-gene denominators
     /// count only the mass whose source measures the gene, and δ falls to its
@@ -111,36 +123,57 @@ impl MultilevelParams {
             refine: Some(crate::refine_multilevel::RefineParams::default()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
+            bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
         }
     }
 }
 
-/// Resolve [`MultilevelParams::anchor_batches`] names to batch indices.
+/// Resolve [`MultilevelParams::anchor_batches`] / `bulk_batches` names to
+/// batch indices.
 ///
 /// A named batch that does not exist is an error, not a shrug: silently
 /// dropping it would quietly fall back to pooled mutual adjustment — the
-/// exact behavior anchoring exists to prevent.
-fn resolve_anchor_batches(
+/// exact behavior anchoring (and the bulk exclusion) exists to prevent.
+fn resolve_named_batches(
     data_vec: &SparseIoVec,
+    role: &str,
     names: Option<&[Box<str>]>,
 ) -> anyhow::Result<Option<Vec<usize>>> {
     let Some(names) = names else { return Ok(None) };
     let map = data_vec
         .batch_name_map()
-        .ok_or_else(|| anyhow::anyhow!("anchor batches given but no batches are registered"))?;
+        .ok_or_else(|| anyhow::anyhow!("{role} batches given but no batches are registered"))?;
     let mut idx = Vec::with_capacity(names.len());
     for n in names {
         let Some(&b) = map.get(n) else {
             anyhow::bail!(
-                "anchor batch `{n}` is not among the registered batches ({:?})",
+                "{role} batch `{n}` is not among the registered batches ({:?})",
                 map.keys().collect::<Vec<_>>(),
             );
         };
         idx.push(b);
     }
     Ok(Some(idx))
+}
+
+/// A batch cannot be both an anchor (a counterfactual source) and bulk
+/// (barred from matching): the two roles contradict each other, and which
+/// one silently won would decide whether composition leaks into δ.
+fn ensure_disjoint_roles(
+    anchors: Option<&[usize]>,
+    bulk: Option<&[usize]>,
+) -> anyhow::Result<()> {
+    if let (Some(a), Some(b)) = (anchors, bulk) {
+        if let Some(shared) = a.iter().find(|x| b.contains(x)) {
+            anyhow::bail!(
+                "batch index {shared} is named as both an anchor and a bulk batch; \
+                 the roles are mutually exclusive"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Attach per-panel observability to a freshly collected fine-level stat.
@@ -508,7 +541,9 @@ where
         )
     })?;
 
-    let anchor_batches = resolve_anchor_batches(data_vec, params.anchor_batches.as_deref())?;
+    let anchor_batches = resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
+    let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
+    ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
     let ctx = RefineCollectCtx {
         fine_codes: &fine_codes,
         group_to_cols_finest: &group_to_cols,
@@ -520,6 +555,7 @@ where
         refine_params,
         output_calibration: params.output_calibration,
         anchor_batches: anchor_batches.as_deref(),
+        bulk_batches: bulk_batches.as_deref(),
         observe_panels: params.observe_panels,
         keep_finest_stats: params.keep_finest_stats,
     };
@@ -576,12 +612,15 @@ where
     // pb-samples are still built locally — they're needed for the
     // cross-batch matched-stat path on multi-batch data. Refinement is
     // what we skip; pb-sample construction is cheap.
-    let anchor_batches = resolve_anchor_batches(data_vec, params.anchor_batches.as_deref())?;
+    let anchor_batches = resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
+    let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
+    ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
     let pb_samples = build_pb_samples(
         data_vec,
         proj_kn,
         num_features,
         anchor_batches.as_deref().unwrap_or(&[]),
+        bulk_batches.as_deref().unwrap_or(&[]),
     )?;
     let num_pb = pb_samples.layout.cell_counts.len();
     let ncols = proj_kn.ncols();
@@ -664,6 +703,7 @@ where
             anchor_batches.as_deref(),
             &mut fine_stat,
         )?;
+        mark_bulk_no_adjust(&mut fine_stat, &pb_samples.layout, &refined.pbsamp_to_group[0]);
     }
     if params.observe_panels {
         attach_observability(&mut fine_stat, data_vec)?;
@@ -828,7 +868,10 @@ impl MultilevelCollapsingOps for SparseIoVec {
         ////////////////////////////////////////////////////////////////////
 
         if let Some(refine_params) = params.refine.as_ref() {
-            let anchor_batches = resolve_anchor_batches(self, params.anchor_batches.as_deref())?;
+            let anchor_batches =
+                resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
+            let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
+            ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
             let ctx = RefineCollectCtx {
                 fine_codes: &fine_codes,
                 group_to_cols_finest: &group_to_cols,
@@ -840,6 +883,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 refine_params,
                 output_calibration: params.output_calibration,
                 anchor_batches: anchor_batches.as_deref(),
+                bulk_batches: bulk_batches.as_deref(),
                 observe_panels: params.observe_panels,
                 keep_finest_stats: params.keep_finest_stats,
             };
@@ -862,12 +906,16 @@ impl MultilevelCollapsingOps for SparseIoVec {
             self.collect_batch_stat(&mut fine_stat)?;
 
             info!("Building pb-samples ...");
-            let anchor_batches = resolve_anchor_batches(self, params.anchor_batches.as_deref())?;
+            let anchor_batches =
+                resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
+            let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
+            ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
             let pb_samples = build_pb_samples(
                 self,
                 proj_kn,
                 num_features,
                 anchor_batches.as_deref().unwrap_or(&[]),
+                bulk_batches.as_deref().unwrap_or(&[]),
             )?;
             info!(
                 "Built {} pb-samples, matching with knn={} ...",
@@ -886,6 +934,11 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 anchor_batches.as_deref(),
                 &mut fine_stat,
             )?;
+            mark_bulk_no_adjust(
+                &mut fine_stat,
+                &pb_samples.layout,
+                &pb_samples.layout.pb_sample_to_group,
+            );
         }
         if params.observe_panels {
             attach_observability(&mut fine_stat, self)?;
@@ -1013,9 +1066,9 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 .clone();
             let num_features = self.stack[0].num_rows();
             anyhow::ensure!(
-                params.anchor_batches.is_none(),
-                "anchor_batches is not supported on the stack path — nothing produces a \
-                 carried reference for stacked modalities"
+                params.anchor_batches.is_none() && params.bulk_batches.is_none(),
+                "anchor_batches / bulk_batches are not supported on the stack path — nothing \
+                 produces a carried reference or bulk input for stacked modalities"
             );
             let ctx = RefineCollectCtx {
                 fine_codes: &fine_codes,
@@ -1028,6 +1081,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 refine_params,
                 output_calibration: params.output_calibration,
                 anchor_batches: None,
+                bulk_batches: None,
                 observe_panels: false,
                 keep_finest_stats: false,
             };
@@ -1154,7 +1208,8 @@ impl MultilevelCollapsingOps for SparseIoStack {
             finest_dim,
             num_groups
         );
-        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, None, &[])?;
+        let layout =
+            build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, None, &[], &[])?;
         let num_pb = layout.cell_counts.len();
         info!("Built {} pb-samples, matching with knn={} ...", num_pb, knn);
 

@@ -128,6 +128,7 @@ fn run(tag: &str, anchored: bool) -> data_beans_alg::collapse_data::CollapsedOut
         refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: anchored.then(|| vec!["__ref__".into()]),
+        bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
     };
@@ -200,6 +201,7 @@ fn an_unknown_anchor_batch_is_refused() {
         refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["no_such_batch".into()]),
+        bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
     };
@@ -295,6 +297,7 @@ fn novel_biology_survives_into_the_adjusted_target() {
         refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["__ref__".into()]),
+        bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
     };
@@ -360,6 +363,7 @@ fn anchored_columns_keep_singleton_finest_groups() {
         refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["__ref__".into()]),
+        bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: true,
     };

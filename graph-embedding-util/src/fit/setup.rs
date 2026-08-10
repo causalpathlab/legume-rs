@@ -71,6 +71,7 @@ pub(super) fn build_pseudobulks(
             // pb-sample counts.
             output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
             anchor_batches: config.anchor_batches.clone(),
+            bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: config.emit_finest_collapse,
         },

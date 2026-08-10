@@ -284,6 +284,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             refine: Some(RefineParams::default()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
+            bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
         },
