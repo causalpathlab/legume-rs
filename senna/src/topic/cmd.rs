@@ -380,6 +380,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
         pb_reference: args.pb_reference.as_ref(),
+        observe_panels: true,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: args.feature_name_kind.clone().into(),

@@ -284,6 +284,7 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
         // Same choice `faba gem` makes.
         output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
         anchor_batches: None,
+        observe_panels: true,
     };
     let out =
         collapse_columns_multilevel_with_hierarchy(&mut data_vec, &proj_kn, &batch_membership, &ml)

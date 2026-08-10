@@ -85,6 +85,14 @@ pub struct MultilevelParams {
     /// resolution the prior run already paid for. `None` = pooled behavior,
     /// bit-identical to before this field existed.
     pub anchor_batches: Option<Vec<Box<str>>>,
+    /// Distinguish "unmeasured" from "measured as zero" when backends carry
+    /// different feature panels (`RowAlignment::Union`): per-gene denominators
+    /// count only the mass whose source measures the gene, and δ falls to its
+    /// prior where a batch has no panel coverage. A no-op (bitwise) when every
+    /// backend covers every row. Off for callers whose union is *intentional*
+    /// structural disjointness — multiome stacks modalities on one axis, and
+    /// re-weighting that is its own decision, not a side effect.
+    pub observe_panels: bool,
 }
 
 impl MultilevelParams {
@@ -97,6 +105,7 @@ impl MultilevelParams {
             refine: Some(crate::refine_multilevel::RefineParams::default()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
+            observe_panels: true,
         }
     }
 }
@@ -125,6 +134,102 @@ fn resolve_anchor_batches(
         idx.push(b);
     }
     Ok(Some(idx))
+}
+
+/// Attach per-panel observability to a freshly collected fine-level stat.
+///
+/// `size_ds[g, s] = Σ_{sources b measuring g} count[b, s]` where `count[b, s]`
+/// is the multiplicity-weighted mass batch/backends contribute to sample `s` —
+/// the factorized form, so the cost is `O(D·S·B + N)`, never `O(D·N)`. The
+/// per-(gene, batch) δ mask is 1 where any source in the batch measures the
+/// gene. Uses whatever group assignment currently stands on `data_vec`, i.e.
+/// exactly the one that filled the stat.
+///
+/// Leaves the stat untouched (the bitwise-historical path) when every backend
+/// covers every row, or when columns merge several backends (column-union /
+/// multiome), whose panel semantics are deliberate.
+fn attach_observability(stat: &mut CollapsedStat, data_vec: &SparseIoVec) -> anyhow::Result<()> {
+    let Some(coverage) = data_vec.row_coverage_by_backend() else {
+        return Ok(());
+    };
+    let ncols = data_vec.num_columns();
+    let mut sources = Vec::with_capacity(ncols);
+    for c in 0..ncols {
+        match data_vec.column_source(c) {
+            Some(b) => sources.push(b),
+            None => {
+                warn!(
+                    "panel observability skipped: column {c} merges several backends \
+                     (column-union alignment)"
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let num_genes = stat.num_genes();
+    let num_samples = stat.num_samples();
+    let num_sources = data_vec.len();
+    let cell_to_group = data_vec.get_group_membership(0..ncols)?;
+
+    // Multiplicity-weighted mass per (source, sample) and per-batch source use.
+    let mut count_bs = DMatrix::<f32>::zeros(num_sources, num_samples);
+    let batch_of = data_vec.get_batch_membership(0..ncols);
+    let num_batches = stat.num_batches();
+    let mut source_in_batch = vec![vec![false; num_batches]; num_sources];
+    for c in 0..ncols {
+        let s = cell_to_group[c];
+        if s < num_samples {
+            count_bs[(sources[c], s)] += data_vec.column_multiplicity(c);
+        }
+        if let Some(&b) = batch_of.get(c) {
+            if b < num_batches {
+                source_in_batch[sources[c]][b] = true;
+            }
+        }
+    }
+
+    let mut size_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
+    for (src, cov) in coverage.iter().enumerate() {
+        anyhow::ensure!(
+            cov.len() == num_genes,
+            "row coverage has {} rows but the stat has {num_genes} genes",
+            cov.len(),
+        );
+        for (g, &covered) in cov.iter().enumerate() {
+            if covered {
+                for s in 0..num_samples {
+                    size_ds[(g, s)] += count_bs[(src, s)];
+                }
+            }
+        }
+    }
+
+    let mut mask_db = DMatrix::<f32>::zeros(num_genes, num_batches);
+    for (src, cov) in coverage.iter().enumerate() {
+        for (b, &used) in source_in_batch[src].iter().enumerate() {
+            if used {
+                for (g, &covered) in cov.iter().enumerate() {
+                    if covered {
+                        mask_db[(g, b)] = 1.0;
+                    }
+                }
+            }
+        }
+    }
+
+    info!(
+        "panel observability attached: {} of {} (gene, sample) entries below full size",
+        size_ds
+            .column_iter()
+            .enumerate()
+            .map(|(s, col)| col.iter().filter(|&&v| v < stat.size_s[s]).count())
+            .sum::<usize>(),
+        num_genes * num_samples,
+    );
+    stat.size_ds = Some(size_ds);
+    stat.obs_mask_db = (mask_db.iter().any(|&v| v == 0.0)).then_some(mask_db);
+    Ok(())
 }
 
 pub struct EmptyArg {}
@@ -407,6 +512,7 @@ where
         refine_params,
         output_calibration: params.output_calibration,
         anchor_batches: anchor_batches.as_deref(),
+        observe_panels: params.observe_panels,
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -546,6 +652,9 @@ where
             anchor_batches.as_deref(),
             &mut fine_stat,
         )?;
+    }
+    if params.observe_panels {
+        attach_observability(&mut fine_stat, data_vec)?;
     }
 
     let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
@@ -717,6 +826,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 refine_params,
                 output_calibration: params.output_calibration,
                 anchor_batches: anchor_batches.as_deref(),
+                observe_panels: params.observe_panels,
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
@@ -761,6 +871,9 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 anchor_batches.as_deref(),
                 &mut fine_stat,
             )?;
+        }
+        if params.observe_panels {
+            attach_observability(&mut fine_stat, self)?;
         }
 
         // Optimize finest level
@@ -898,6 +1011,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 refine_params,
                 output_calibration: params.output_calibration,
                 anchor_batches: None,
+                observe_panels: false,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }

@@ -415,6 +415,10 @@ pub struct LoadCollapseArgs<'a> {
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
     /// A parent run's carried pseudobulks — see [`LoadProjectArgs::pb_reference`].
     pub pb_reference: Option<&'a crate::pb_reference::ReferenceInput>,
+    /// Panel observability — see `MultilevelParams::observe_panels`. On for
+    /// every family except masked-topic under `--multiome`, whose row union
+    /// is intentional modality stacking rather than differing panels.
+    pub observe_panels: bool,
     /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
     pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
     /// Column-alignment strategy — see [`LoadProjectArgs::column_alignment`].
@@ -487,6 +491,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             .pb_reference
             .is_some()
             .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+        observe_panels: args.observe_panels,
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /

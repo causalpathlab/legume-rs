@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "approx",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.12"
+version = "0.3.13"
 dependencies = [
  "anyhow",
  "approx",
@@ -5006,7 +5006,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "approx",
