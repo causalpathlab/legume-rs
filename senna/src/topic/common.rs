@@ -480,6 +480,13 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         num_opt_iter: args.iter_opt,
         refine: args.refine.clone(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
+        // Greedy batch correction: with carried pseudobulks loaded, every
+        // counterfactual is drawn from the reference frame — new batches are
+        // corrected toward it, and the reference itself is never re-adjusted.
+        anchor_batches: args
+            .pb_reference
+            .is_some()
+            .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /

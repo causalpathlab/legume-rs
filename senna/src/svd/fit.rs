@@ -163,6 +163,12 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             num_opt_iter: args.collapse.iter_opt,
             refine: Some(args.collapse.pb_refine.to_params()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
+            // See `topic::common::load_and_collapse` — greedy correction
+            // against the carried reference when one is loaded.
+            anchor_batches: args
+                .pb_reference
+                .is_some()
+                .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
         },
     )?;
     anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");
