@@ -53,17 +53,10 @@ fn read_backend_dense(prefix: &str) -> DMatrix<f32> {
         &data_beans::sparse_io::SparseIoBackend::Zarr,
     )
     .expect("open emitted reference");
-    let (rows, cols) = (backend.num_rows().unwrap(), backend.num_columns().unwrap());
-    let csc = backend
-        .read_columns_csc((0..cols).collect())
-        .expect("read emitted columns");
-    let mut dense = DMatrix::<f32>::zeros(rows, cols);
-    for (j, col) in csc.col_iter().enumerate() {
-        for (&g, &v) in col.row_indices().iter().zip(col.values().iter()) {
-            dense[(g, j)] = v;
-        }
-    }
-    dense
+    let cols = backend.num_columns().unwrap();
+    backend
+        .read_columns_dmatrix((0..cols).collect())
+        .expect("read emitted columns")
 }
 
 #[test]
