@@ -285,6 +285,7 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
         // Same choice `faba gem` makes.
         output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
         anchor_batches: None,
+        bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
     };

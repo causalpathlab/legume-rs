@@ -126,6 +126,7 @@ fn run(tag: &str, observe_panels: bool) -> (CollapsedOut, Vec<Box<str>>) {
         refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: None,
+        bulk_batches: None,
         observe_panels,
         keep_finest_stats: false,
     };
@@ -265,6 +266,7 @@ fn identical_panels_are_a_bitwise_no_op() {
             refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
+            bulk_batches: None,
             observe_panels: observe,
             keep_finest_stats: false,
         };

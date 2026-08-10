@@ -119,7 +119,7 @@ fn make_toy_layout_and_profiles(
         })
         .collect();
 
-    let anchored_col = vec![None; cell_counts.len()];
+    let singleton_col = vec![None; cell_counts.len()];
     let layout = PbSampleLayout {
         centroids,
         cell_counts,
@@ -127,7 +127,8 @@ fn make_toy_layout_and_profiles(
         pb_sample_to_group: pbsamp_to_group,
         bg_to_pbsamp,
         cell_to_pbsamp: cell_to_pbsamp_vec,
-        anchored_col,
+        singleton_col,
+        bulk_batches: Vec::new(),
     };
     ToyFixture {
         layout,

@@ -169,6 +169,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
                 .pb_reference
                 .is_some()
                 .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
         },

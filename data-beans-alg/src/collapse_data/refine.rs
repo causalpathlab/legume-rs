@@ -163,10 +163,15 @@ pub(super) fn refine_or_identity(
 /// transient training aids recomputed each round from the frozen finest
 /// columns, so averaging there does not compound.
 ///
+/// Bulk pb-samples are singletons through the same mechanism (a bulk sample
+/// is already a summary and must never be re-averaged), so they get their own
+/// finest groups here too; what distinguishes them is the matching exclusion
+/// in `bbknn_match_one_pbsamp`, not the grouping.
+///
 /// Only level 0 is rewritten, and splitting a group cannot break the
 /// sibling-constrained hierarchy the coarser levels assume. Identity when the
-/// layout holds no anchored pb-samples — the layout is the sole owner of that
-/// membership (see [`PbSampleLayout::anchored_col`]).
+/// layout holds no singleton pb-samples — the layout is the sole owner of that
+/// membership (see [`PbSampleLayout::singleton_col`]).
 pub(super) fn split_anchored_finest_groups(
     mut refined: crate::refine_multilevel::RefinedAssignment,
     layout: &PbSampleLayout,
@@ -174,7 +179,7 @@ pub(super) fn split_anchored_finest_groups(
     // Anchored pb-samples are singletons; sort by their one column to pin the
     // appended group order to the parent reference's column order.
     let mut anchored: Vec<(usize, usize)> = layout
-        .anchored_col
+        .singleton_col
         .iter()
         .enumerate()
         .filter_map(|(p, col)| col.map(|c| (c, p)))
@@ -186,14 +191,14 @@ pub(super) fn split_anchored_finest_groups(
 
     let finest = &mut refined.pbsamp_to_group[0];
     let ordinary: Vec<usize> = layout
-        .anchored_col
+        .singleton_col
         .iter()
         .zip(finest.iter())
         .filter_map(|(a, &g)| a.is_none().then_some(g))
         .collect();
     let (compact, k_new) = crate::refine_multilevel::compact_labels(&ordinary);
     let mut compact = compact.into_iter();
-    for (p, a) in layout.anchored_col.iter().enumerate() {
+    for (p, a) in layout.singleton_col.iter().enumerate() {
         if a.is_none() {
             finest[p] = compact.next().expect("one compacted label per ordinary pb-sample");
         }
@@ -203,9 +208,13 @@ pub(super) fn split_anchored_finest_groups(
     }
     refined.num_groups_per_level[0] = k_new + anchored.len();
     info!(
-        "Append-only finest partition: {} new-data groups + {} carried singletons",
+        "Append-only finest partition: {} new-data groups + {} carried + {} bulk singletons",
         k_new,
-        anchored.len()
+        anchored
+            .iter()
+            .filter(|&&(_, p)| !layout.is_bulk(p))
+            .count(),
+        anchored.iter().filter(|&&(_, p)| layout.is_bulk(p)).count(),
     );
     refined
 }
@@ -228,6 +237,8 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) output_calibration: matrix_param::traits::CalibrateTarget,
     /// Resolved anchor-batch indices — see `MultilevelParams::anchor_batches`.
     pub(super) anchor_batches: Option<&'a [usize]>,
+    /// Resolved bulk-batch indices — see `MultilevelParams::bulk_batches`.
+    pub(super) bulk_batches: Option<&'a [usize]>,
     /// See `MultilevelParams::observe_panels`.
     pub(super) observe_panels: bool,
     /// See `MultilevelParams::keep_finest_stats`.
@@ -260,6 +271,7 @@ pub(super) fn refine_and_collect_single_layer(
         refine_params,
         output_calibration,
         anchor_batches: _,
+        bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
     } = *ctx;
@@ -274,6 +286,7 @@ pub(super) fn refine_and_collect_single_layer(
         proj_kn,
         num_features,
         ctx.anchor_batches.unwrap_or(&[]),
+        ctx.bulk_batches.unwrap_or(&[]),
     )?;
     let num_pb = pb_samples.layout.cell_counts.len();
     let ncells_dbg = proj_kn.ncols();
@@ -404,6 +417,7 @@ pub(super) fn refine_and_collect_single_layer(
             ctx.anchor_batches,
             &mut fine_stat,
         )?;
+        super::mark_bulk_no_adjust(&mut fine_stat, &pb_samples.layout, &refined.pbsamp_to_group[0]);
     }
 
     info!(
@@ -496,6 +510,7 @@ pub(super) fn refine_and_collect_stack(
         refine_params,
         output_calibration,
         anchor_batches: _,
+        bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
     } = *ctx;
@@ -511,7 +526,8 @@ pub(super) fn refine_and_collect_stack(
 
     // Build shared pb-sample layout from layer[0]'s row count and the shared
     // projection. The layout only uses `proj_kn` + grouping, no raw reads.
-    let layout = build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn, None, &[])?;
+    let layout =
+        build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn, None, &[], &[])?;
     let num_pb = layout.cell_counts.len();
 
     // Gene sums for layer[0] drive the refinement (first-layer-owns).
