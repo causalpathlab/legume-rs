@@ -38,6 +38,16 @@ pub(crate) const LINEAGE_WARMUP_FRAC: f64 = 0.5;
 /// `clap`.
 pub struct FitConfig {
     pub embedding_dim: usize,
+    /// Batch labels to anchor the cross-batch counterfactual on — a prior
+    /// run's carried pseudobulks. Maps to [`MultilevelParams::anchor_batches`]
+    /// (greedy batch correction: new batches corrected toward the anchor
+    /// frame, the frame never re-adjusted).
+    pub anchor_batches: Option<Vec<Box<str>>>,
+    /// Carry the finest collapse level (posterior + cell → pb membership) out
+    /// on [`FitOutput::finest_collapse`], retaining its sufficient statistics
+    /// even under the memory-lean calibration. `senna bge --emit-pb-reference`
+    /// serializes it as the next round's carried reference.
+    pub emit_finest_collapse: bool,
     /// Number of multilevel-collapse levels (coarse → fine). Maps
     /// directly to [`MultilevelParams::num_levels`].
     pub num_levels: usize,
@@ -198,6 +208,10 @@ pub use crate::model::FeatureGateSpec as FeatureGateConfig;
 /// gbe`) only consumes `model`, so it sits unused but kept alive.
 pub struct FitOutput {
     pub model: JointEmbedModel,
+    /// The finest collapse level and its cell → pb membership, present iff
+    /// [`FitConfig::emit_finest_collapse`] was set. The membership indexes
+    /// the global cell ids of the `UnifiedData` the fit ran on.
+    pub finest_collapse: Option<(data_beans_alg::collapse_data::CollapsedOut, Vec<usize>)>,
     pub varmap: VarMap,
     /// Un-normalized baseline MAP per-cell projection norm from phase 2 (`0`
     /// for cells with no observed features / when phase 2 was skipped). The

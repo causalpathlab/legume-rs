@@ -162,6 +162,7 @@ impl RandPartitionOps for SparseIoVec {
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             observe_panels: true,
+            keep_finest_stats: false,
         };
 
         // collapse_columns_multilevel_vec:

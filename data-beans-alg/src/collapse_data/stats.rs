@@ -364,6 +364,9 @@ pub(super) fn optimize(
     num_iter: usize,
     label: &str,
     out_target: CalibrateTarget,
+    // Retain a_stat/b_stat even under MeanOnly — the finest level of an
+    // `--emit-pb-reference` run serializes `evidence_mean`, which reads them.
+    keep_stats: bool,
 ) -> anyhow::Result<CollapsedOut> {
     let num_genes = stat.num_genes();
     let num_samples = stat.num_samples();
@@ -391,7 +394,7 @@ pub(super) fn optimize(
     // `posterior_sample` (topic path) reads a_stat/b_stat; bge (MeanOnly)
     // does not, so those planes can be discarded per block — that's what
     // keeps the assembled output from holding the full sufficient stats.
-    let keep_stats = matches!(out_target, CalibrateTarget::All);
+    let keep_stats = keep_stats || matches!(out_target, CalibrateTarget::All);
 
     // The moving unit is one descent iteration whenever the batch-correction
     // loop runs: each block ticks `num_iter` times (`optimize_block` handed the
@@ -492,7 +495,7 @@ pub(super) fn optimize(
 }
 
 /// output struct to make the model parameters more accessible
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CollapsedOut {
     pub mu_observed: GammaMatrix,
     pub mu_adjusted: Option<GammaMatrix>,
@@ -660,6 +663,7 @@ pub fn resample_and_optimize(
         opt_iter,
         "Optimizing",
         CalibrateTarget::All,
+        false,
     )
 }
 

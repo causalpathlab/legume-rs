@@ -76,7 +76,7 @@ pub struct UpdateArgs {
         required = true,
         help = "Parent model prefix to continue training from",
         long_help = "A run prefix written by `senna topic / masked-topic / masked-sbp /\n\
-                     masked-vae / vae / svd`."
+                     masked-vae / vae / svd / bge`."
     )]
     model: Box<str>,
 
@@ -457,13 +457,18 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             // we already have one.
             crate::masked_topic::fit_masked_model(&a, head)
         }
+        // Like `svd`: no weights to warm-start (the ETM is re-derived by
+        // archetypal analysis each run), so this is a re-fit on the union —
+        // O(new) when the parent carries a pb_reference.
+        RunKind::Bge => {
+            let mut a: crate::bge::BgeArgs = manifest.train_args_as(&args.model)?;
+            a.rebase(rebase);
+            info!("bge has no trainable checkpoint — re-fitting on the union (not a warm start)");
+            crate::bge::fit_bge(&a)
+        }
         other => anyhow::bail!(
             "update does not support a '{other}' run. Supported: topic, masked-topic, \
-             masked-sbp, masked-vae, vae, svd.\n\
-             \n\
-             `bge` is absent because it saves no checkpoint to continue from — its gene side \
-             is ρ, written as a parquet with no optimizer state. To extend a bge run, chain \
-             `bge --skip-etm` into `masked-topic --freeze-feature-embedding` and update that."
+             masked-sbp, masked-vae, vae, svd, bge."
         ),
     }
 }

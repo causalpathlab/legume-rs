@@ -93,6 +93,12 @@ pub struct MultilevelParams {
     /// structural disjointness — multiome stacks modalities on one axis, and
     /// re-weighting that is its own decision, not a side effect.
     pub observe_panels: bool,
+    /// Retain the finest level's Gamma sufficient statistics even under
+    /// `MeanOnly` calibration. `--emit-pb-reference` serializes
+    /// `evidence_mean` — data sum over data denominator — which reads
+    /// `a_stat`/`b_stat`; `MeanOnly` normally drops them per block to bound
+    /// memory. Costs two extra `[D, S]` planes per finest-level parameter.
+    pub keep_finest_stats: bool,
 }
 
 impl MultilevelParams {
@@ -106,6 +112,7 @@ impl MultilevelParams {
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             observe_panels: true,
+            keep_finest_stats: false,
         }
     }
 }
@@ -400,6 +407,7 @@ impl CollapsingOps for SparseIoVec {
             num_opt_iter.unwrap_or(DEFAULT_OPT_ITER),
             "Optimizing",
             CalibrateTarget::All,
+            false,
         )
     }
 
@@ -513,6 +521,7 @@ where
         output_calibration: params.output_calibration,
         anchor_batches: anchor_batches.as_deref(),
         observe_panels: params.observe_panels,
+        keep_finest_stats: params.keep_finest_stats,
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -668,6 +677,7 @@ where
         opt_iter,
         &format!("Inherit L1/{}", num_levels),
         CalibrateTarget::All,
+        false,
     )?;
     results.push(finest_out);
 
@@ -695,6 +705,7 @@ where
             level_opt_iter,
             &format!("Inherit L{}/{}", level + 1, num_levels),
             CalibrateTarget::All,
+            false,
         )?;
         results.push(out);
         prev_stat = coarse_stat;
@@ -827,6 +838,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 output_calibration: params.output_calibration,
                 anchor_batches: anchor_batches.as_deref(),
                 observe_panels: params.observe_panels,
+                keep_finest_stats: params.keep_finest_stats,
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
@@ -883,6 +895,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
             opt_iter,
             &format!("Fit L1/{}", level_dims.len()),
             CalibrateTarget::All,
+            false,
         )?;
         let mut results = vec![result];
 
@@ -913,6 +926,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 level_opt_iter,
                 &format!("Fit L{}/{}", level + 1, level_dims.len()),
                 CalibrateTarget::All,
+                false,
             )?;
             results.push(coarse_result);
 
@@ -1012,6 +1026,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 output_calibration: params.output_calibration,
                 anchor_batches: None,
                 observe_panels: false,
+                keep_finest_stats: false,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }
@@ -1053,6 +1068,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                     opt_iter,
                     &format!("Fit L1/{} layer {}/{}", level_dims.len(), d + 1, num_layers),
                     CalibrateTarget::All,
+                    false,
                 )?);
                 fine_stats.push(stat);
             }
@@ -1087,6 +1103,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                             num_layers
                         ),
                         CalibrateTarget::All,
+                        false,
                     )?);
                     coarse_stats.push(coarse_stat);
                 }
@@ -1176,6 +1193,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 opt_iter,
                 &format!("Fit L1/{} layer {}/{}", level_dims.len(), d + 1, num_layers),
                 CalibrateTarget::All,
+                false,
             )?);
             fine_stats.push(stat);
         }
@@ -1221,6 +1239,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                         num_layers
                     ),
                     CalibrateTarget::All,
+                    false,
                 )?);
                 coarse_stats.push(coarse_stat);
             }

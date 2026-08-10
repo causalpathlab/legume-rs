@@ -167,6 +167,8 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) anchor_batches: Option<&'a [usize]>,
     /// See `MultilevelParams::observe_panels`.
     pub(super) observe_panels: bool,
+    /// See `MultilevelParams::keep_finest_stats`.
+    pub(super) keep_finest_stats: bool,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -196,6 +198,7 @@ pub(super) fn refine_and_collect_single_layer(
         output_calibration,
         anchor_batches: _,
         observe_panels: _,
+        keep_finest_stats: _,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -352,6 +355,7 @@ pub(super) fn refine_and_collect_single_layer(
         opt_iter,
         &format!("Fit L1/{}", num_levels),
         output_calibration,
+        ctx.keep_finest_stats,
     )?;
     results.push(finest_out);
 
@@ -379,6 +383,7 @@ pub(super) fn refine_and_collect_single_layer(
             level_opt_iter,
             &format!("Fit L{}/{}", level + 1, num_levels),
             output_calibration,
+            false,
         )?;
         results.push(out);
         prev_stat = coarse_stat;
@@ -426,6 +431,7 @@ pub(super) fn refine_and_collect_stack(
         output_calibration,
         anchor_batches: _,
         observe_panels: _,
+        keep_finest_stats: _,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
@@ -559,6 +565,7 @@ pub(super) fn refine_and_collect_stack(
             opt_iter,
             &format!("Fit L1/{} layer {}/{}", num_levels, d + 1, num_layers),
             output_calibration,
+            false,
         )?;
         finest_layer_results.push(out);
         fine_stats.push(stat);
@@ -596,6 +603,7 @@ pub(super) fn refine_and_collect_stack(
                     num_layers
                 ),
                 output_calibration,
+                false,
             )?;
             layer_results.push(out);
             coarse_stats.push(coarse_stat);

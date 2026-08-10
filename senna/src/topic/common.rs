@@ -492,6 +492,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             .is_some()
             .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
         observe_panels: args.observe_panels,
+        keep_finest_stats: false,
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /
