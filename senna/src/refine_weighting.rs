@@ -242,14 +242,6 @@ pub(crate) fn fit_fisher_weights(
     block_size: Option<usize>,
 ) -> anyhow::Result<Vec<f32>> {
     if data_vec.has_column_multiplicity() {
-        // `mu_observed`, NOT the batch-adjusted posterior — even though the
-        // carried columns were *stored* adjusted. The NB trend describes the
-        // observation process, and between-batch spread is part of the
-        // variance it is meant to see; the cell-level pass this has to agree
-        // with reads raw counts. Removing δ first shrinks apparent dispersion
-        // and reorders which genes look over-dispersed — the middle row of
-        // the table above.
-        let mu_ds = matrix_param::traits::Inference::posterior_mean(&collapsed.mu_observed);
         let cell_to_pb = cell_to_pb.ok_or_else(|| {
             anyhow::anyhow!(
                 "weighted columns need this run's cell → pb membership to know how many cells \
@@ -257,13 +249,11 @@ pub(crate) fn fit_fisher_weights(
                  the count scale it is defined for."
             )
         })?;
-        let size_s = crate::pb_reference::cell_counts_from(
+        return crate::pb_reference::fisher_weights_for_weighted_cohort(
+            collapsed,
             cell_to_pb,
-            mu_ds.ncols(),
             data_vec.column_multiplicities(),
-        )?;
-        return data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk(
-            mu_ds, &size_s, coarsening,
+            coarsening,
         );
     }
     match coarsening {

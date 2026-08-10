@@ -262,6 +262,32 @@ impl ReferenceInput {
     }
 }
 
+/// NB-Fisher gene weights for a cohort whose columns carry multiplicities —
+/// the pseudobulk-fitted branch of `refine_weighting::fit_fisher_weights`,
+/// which owns the cell-vs-pseudobulk policy and the measurements behind it.
+///
+/// **The load-bearing choice here is `mu_observed`, NOT the batch-adjusted
+/// posterior** — even though the carried columns were *stored* adjusted, and
+/// even though `preferred_posterior_mean` is the idiom everywhere else. The
+/// NB trend describes the observation process, and between-batch spread is
+/// part of the variance it is meant to see; the cell-level pass this has to
+/// agree with reads raw counts. Removing δ first shrinks apparent dispersion
+/// and reorders which genes look over-dispersed — measured at Spearman
+/// ρ 0.47 against the exact re-collapse, versus ρ 0.98 for the observed
+/// posterior. A "consistency" cleanup that swaps this back to
+/// `preferred_posterior_mean` compiles fine and quietly re-breaks it, which
+/// is why the choice is pinned by a test rather than only by this comment.
+pub fn fisher_weights_for_weighted_cohort(
+    collapsed: &CollapsedOut,
+    cell_to_pb_finest: &[usize],
+    column_weight: Option<&[f32]>,
+    coarsening: Option<&FeatureCoarsening>,
+) -> anyhow::Result<Vec<f32>> {
+    let mu_ds = collapsed.mu_observed.posterior_mean();
+    let size_s = cell_counts_from(cell_to_pb_finest, mu_ds.ncols(), column_weight)?;
+    data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk(mu_ds, &size_s, coarsening)
+}
+
 /// Keep-mask over the loaded columns that excludes the carried pseudobulks,
 /// intersected with whatever QC already dropped. `None` reference passes the
 /// QC mask through untouched.
