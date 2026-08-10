@@ -362,6 +362,46 @@ impl SparseIoVec {
         self.column_alignment
     }
 
+    /// Per-backend row coverage on the exposed (compact) row axis:
+    /// `coverage[d][r]` is true when backend `d` measures row `r`.
+    ///
+    /// Under [`RowAlignment::Union`] a backend with a smaller panel simply
+    /// has no entry at the rows it lacks — reads return zero there, which is
+    /// indistinguishable from "measured, and absent". This is the map that
+    /// lets a consumer tell the two apart: unmeasured is *no evidence*, not
+    /// evidence of zero.
+    ///
+    /// `None` when every backend covers every row (single backend, identical
+    /// panels, or intersect alignment) — the common case, so callers can skip
+    /// observability handling entirely on `None`.
+    #[must_use]
+    pub fn row_coverage_by_backend(&self) -> Option<Vec<Vec<bool>>> {
+        let n = self.cached_num_rows;
+        let mut coverage = vec![vec![false; n]; self.data_vec.len()];
+        let mut any_gap = false;
+        for (d, locals) in self.data_local_to_global_row.iter().enumerate() {
+            for &g in locals {
+                if let Some(r) = self.global_to_compact_row[g] {
+                    coverage[d][r] = true;
+                }
+            }
+            any_gap |= coverage[d].iter().any(|&c| !c);
+        }
+        any_gap.then_some(coverage)
+    }
+
+    /// The single backend a global column comes from, or `None` when the
+    /// column merges several backends (column-union alignment). Observability
+    /// accounting needs one source per column; a merged column has a *set* of
+    /// panels, which callers must handle (or refuse) explicitly.
+    #[must_use]
+    pub fn column_source(&self, col: usize) -> Option<usize> {
+        match self.col_to_data.get(col)?.as_slice() {
+            [one] => Some(one.backend as usize),
+            _ => None,
+        }
+    }
+
     pub fn num_non_zeros(&self) -> anyhow::Result<usize> {
         let mut ret = 0;
         for dat in self.data_vec.iter() {

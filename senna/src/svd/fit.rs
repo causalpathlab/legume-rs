@@ -169,6 +169,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
                 .pb_reference
                 .is_some()
                 .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            observe_panels: true,
         },
     )?;
     anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");

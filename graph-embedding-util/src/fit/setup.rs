@@ -71,6 +71,7 @@ pub(super) fn build_pseudobulks(
             // pb-sample counts.
             output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
             anchor_batches: None,
+            observe_panels: true,
         },
     )?;
     let mut collapsed_levels = collapse_out.levels;

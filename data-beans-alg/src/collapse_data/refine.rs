@@ -165,6 +165,8 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) output_calibration: matrix_param::traits::CalibrateTarget,
     /// Resolved anchor-batch indices — see `MultilevelParams::anchor_batches`.
     pub(super) anchor_batches: Option<&'a [usize]>,
+    /// See `MultilevelParams::observe_panels`.
+    pub(super) observe_panels: bool,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -193,6 +195,7 @@ pub(super) fn refine_and_collect_single_layer(
         refine_params,
         output_calibration,
         anchor_batches: _,
+        observe_panels: _,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -338,6 +341,10 @@ pub(super) fn refine_and_collect_single_layer(
         "Level 1/{}: refined k={} (finest; {} cells read)",
         num_levels, k_finest, ncols
     );
+    if ctx.observe_panels {
+        attach_observability(&mut fine_stat, data_vec)?;
+    }
+
     let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
     let finest_out = optimize(
         &fine_stat,
@@ -418,6 +425,7 @@ pub(super) fn refine_and_collect_stack(
         refine_params,
         output_calibration,
         anchor_batches: _,
+        observe_panels: _,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
