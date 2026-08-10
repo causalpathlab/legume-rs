@@ -74,6 +74,17 @@ pub struct MultilevelParams {
     /// a big memory win for consumers that only read `posterior_mean()`
     /// (e.g. bge). Use `All` when the caller exports log-scale dictionaries.
     pub output_calibration: matrix_param::traits::CalibrateTarget,
+    /// Batch labels whose columns are ALREADY batch-corrected pseudobulks —
+    /// a prior run's carried reference. `Some` switches the cross-batch
+    /// counterfactual from pooled mutual adjustment to **greedy batch
+    /// correction**: every pb-sample's counterfactual is drawn from the
+    /// anchor batches only, so new batches are corrected *toward* the anchor
+    /// frame while an anchor pb-sample self-matches (its δ settles at the
+    /// prior ≈ 1 and is never re-adjusted). Anchored columns also skip
+    /// pb-sample re-merging — each stays its own matching unit, at the
+    /// resolution the prior run already paid for. `None` = pooled behavior,
+    /// bit-identical to before this field existed.
+    pub anchor_batches: Option<Vec<Box<str>>>,
 }
 
 impl MultilevelParams {
@@ -85,8 +96,35 @@ impl MultilevelParams {
             num_opt_iter: DEFAULT_OPT_ITER,
             refine: Some(crate::refine_multilevel::RefineParams::default()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
+            anchor_batches: None,
         }
     }
+}
+
+/// Resolve [`MultilevelParams::anchor_batches`] names to batch indices.
+///
+/// A named batch that does not exist is an error, not a shrug: silently
+/// dropping it would quietly fall back to pooled mutual adjustment — the
+/// exact behavior anchoring exists to prevent.
+fn resolve_anchor_batches(
+    data_vec: &SparseIoVec,
+    names: Option<&[Box<str>]>,
+) -> anyhow::Result<Option<Vec<usize>>> {
+    let Some(names) = names else { return Ok(None) };
+    let map = data_vec
+        .batch_name_map()
+        .ok_or_else(|| anyhow::anyhow!("anchor batches given but no batches are registered"))?;
+    let mut idx = Vec::with_capacity(names.len());
+    for n in names {
+        let Some(&b) = map.get(n) else {
+            anyhow::bail!(
+                "anchor batch `{n}` is not among the registered batches ({:?})",
+                map.keys().collect::<Vec<_>>(),
+            );
+        };
+        idx.push(b);
+    }
+    Ok(Some(idx))
 }
 
 pub struct EmptyArg {}
@@ -357,6 +395,7 @@ where
         )
     })?;
 
+    let anchor_batches = resolve_anchor_batches(data_vec, params.anchor_batches.as_deref())?;
     let ctx = RefineCollectCtx {
         fine_codes: &fine_codes,
         group_to_cols_finest: &group_to_cols,
@@ -367,6 +406,7 @@ where
         opt_iter,
         refine_params,
         output_calibration: params.output_calibration,
+        anchor_batches: anchor_batches.as_deref(),
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -417,20 +457,20 @@ where
     let kk = proj_kn.nrows().min(finest_dim).min(nn);
     let fine_codes = binary_sort_columns(proj_kn, kk)?;
     data_vec.assign_groups(&fine_codes, None);
-    let group_to_cols = data_vec
-        .take_grouped_columns()
-        .ok_or_else(|| anyhow::anyhow!("columns not assigned"))?
-        .clone();
 
     // pb-samples are still built locally — they're needed for the
     // cross-batch matched-stat path on multi-batch data. Refinement is
     // what we skip; pb-sample construction is cheap.
-    let pb_samples = build_pb_samples(data_vec, proj_kn, num_features)?;
+    let anchor_batches = resolve_anchor_batches(data_vec, params.anchor_batches.as_deref())?;
+    let pb_samples = build_pb_samples(
+        data_vec,
+        proj_kn,
+        num_features,
+        anchor_batches.as_deref().unwrap_or(&[]),
+    )?;
     let num_pb = pb_samples.layout.cell_counts.len();
     let ncols = proj_kn.ncols();
-    let col_to_batch: Vec<usize> = data_vec.get_batch_membership(0..ncols);
-    let pb_sample_to_cells =
-        build_pb_sample_to_cells(&pb_samples.layout, &group_to_cols, &col_to_batch);
+    let pb_sample_to_cells = build_pb_sample_to_cells(&pb_samples.layout);
 
     // Synthesize a RefinedAssignment from the inherited cell→pb
     // membership via per-pb-sample modal vote at each level. Modal vote
@@ -503,6 +543,7 @@ where
             &refined.pbsamp_to_group[0],
             batch_knn.as_slice(),
             knn,
+            anchor_batches.as_deref(),
             &mut fine_stat,
         )?;
     }
@@ -664,6 +705,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
         ////////////////////////////////////////////////////////////////////
 
         if let Some(refine_params) = params.refine.as_ref() {
+            let anchor_batches = resolve_anchor_batches(self, params.anchor_batches.as_deref())?;
             let ctx = RefineCollectCtx {
                 fine_codes: &fine_codes,
                 group_to_cols_finest: &group_to_cols,
@@ -674,6 +716,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 opt_iter,
                 refine_params,
                 output_calibration: params.output_calibration,
+                anchor_batches: anchor_batches.as_deref(),
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
@@ -694,7 +737,13 @@ impl MultilevelCollapsingOps for SparseIoVec {
             self.collect_batch_stat(&mut fine_stat)?;
 
             info!("Building pb-samples ...");
-            let pb_samples = build_pb_samples(self, proj_kn, num_features)?;
+            let anchor_batches = resolve_anchor_batches(self, params.anchor_batches.as_deref())?;
+            let pb_samples = build_pb_samples(
+                self,
+                proj_kn,
+                num_features,
+                anchor_batches.as_deref().unwrap_or(&[]),
+            )?;
             info!(
                 "Built {} pb-samples, matching with knn={} ...",
                 pb_samples.layout.cell_counts.len(),
@@ -709,6 +758,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 &pb_samples.layout.pb_sample_to_group,
                 batch_knn.as_slice(),
                 knn,
+                anchor_batches.as_deref(),
                 &mut fine_stat,
             )?;
         }
@@ -832,6 +882,11 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 .ok_or(anyhow::anyhow!("columns not assigned"))?
                 .clone();
             let num_features = self.stack[0].num_rows();
+            anyhow::ensure!(
+                params.anchor_batches.is_none(),
+                "anchor_batches is not supported on the stack path — nothing produces a \
+                 carried reference for stacked modalities"
+            );
             let ctx = RefineCollectCtx {
                 fine_codes: &fine_codes,
                 group_to_cols_finest: &group_to_cols,
@@ -842,6 +897,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 opt_iter,
                 refine_params,
                 output_calibration: params.output_calibration,
+                anchor_batches: None,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }
@@ -964,7 +1020,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
             finest_dim,
             num_groups
         );
-        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, None)?;
+        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, None, &[])?;
         let num_pb = layout.cell_counts.len();
         info!("Built {} pb-samples, matching with knn={} ...", num_pb, knn);
 
@@ -981,13 +1037,8 @@ impl MultilevelCollapsingOps for SparseIoStack {
             layer.collect_batch_stat(&mut stat)?;
 
             // Collect layer-specific gene sums
-            let gene_sums = collect_pb_sample_gene_sums(
-                layer,
-                group_to_cols,
-                &col_to_batch,
-                &layout.bg_to_pbsamp,
-                num_pb,
-            )?;
+            let gene_sums =
+                collect_pb_sample_gene_sums(layer, group_to_cols, &layout.cell_to_pbsamp, num_pb)?;
 
             // Match across batches using shared layout + layer gene sums
             let batch_knn = layer
@@ -999,6 +1050,8 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 &layout.pb_sample_to_group,
                 batch_knn.as_slice(),
                 knn,
+                // Stack path: anchoring rejected upstream, always pooled.
+                None,
                 &mut stat,
             )?;
 

@@ -615,12 +615,13 @@ pub(super) fn collect_matched_stat_coarse(
     pbsamp_to_group: &[usize],
     batch_knn_lookup: &[ColumnDict<usize>],
     knn: usize,
+    anchor_batches: Option<&[usize]>,
     stat: &mut CollapsedStat,
 ) -> anyhow::Result<()> {
     let num_pb = layout.cell_counts.len();
     debug_assert_eq!(pbsamp_to_group.len(), num_pb);
 
-    let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn)?;
+    let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn, anchor_batches)?;
 
     use indicatif::ParallelProgressIterator;
     let prog_bar = styled_progress_bar(num_pb as u64, "pb-samples (matched stats)");

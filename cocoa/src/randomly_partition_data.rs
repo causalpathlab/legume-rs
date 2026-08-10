@@ -160,6 +160,7 @@ impl RandPartitionOps for SparseIoVec {
             num_opt_iter: refine.num_opt_iter,
             refine: Some(refine.refine_params.clone()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
+            anchor_batches: None,
         };
 
         // collapse_columns_multilevel_vec:

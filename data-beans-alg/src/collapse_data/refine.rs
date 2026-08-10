@@ -163,6 +163,8 @@ pub(super) struct RefineCollectCtx<'a> {
     /// Posterior planes the emitted `CollapsedOut` should carry (threaded
     /// from `MultilevelParams::output_calibration`).
     pub(super) output_calibration: matrix_param::traits::CalibrateTarget,
+    /// Resolved anchor-batch indices — see `MultilevelParams::anchor_batches`.
+    pub(super) anchor_batches: Option<&'a [usize]>,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -182,7 +184,7 @@ pub(super) fn refine_and_collect_single_layer(
 ) -> anyhow::Result<MultilevelCollapseOut> {
     let RefineCollectCtx {
         fine_codes,
-        group_to_cols_finest,
+        group_to_cols_finest: _,
         level_dims,
         num_features,
         num_batches,
@@ -190,6 +192,7 @@ pub(super) fn refine_and_collect_single_layer(
         opt_iter,
         refine_params,
         output_calibration,
+        anchor_batches: _,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -197,7 +200,12 @@ pub(super) fn refine_and_collect_single_layer(
     );
 
     // 1. Build pb-samples (layout + gene sums) from the finest partition.
-    let pb_samples = build_pb_samples(data_vec, proj_kn, num_features)?;
+    let pb_samples = build_pb_samples(
+        data_vec,
+        proj_kn,
+        num_features,
+        ctx.anchor_batches.unwrap_or(&[]),
+    )?;
     let num_pb = pb_samples.layout.cell_counts.len();
     let ncells_dbg = proj_kn.ncols();
     info!(
@@ -215,11 +223,9 @@ pub(super) fn refine_and_collect_single_layer(
         );
     }
 
-    // 2. pbsamp → cells and col → batch.
+    // 2. pbsamp → cells, via the layout's own column mapping.
     let ncols = proj_kn.ncols();
-    let col_to_batch: Vec<usize> = data_vec.get_batch_membership(0..ncols);
-    let pb_sample_to_cells =
-        build_pb_sample_to_cells(&pb_samples.layout, group_to_cols_finest, &col_to_batch);
+    let pb_sample_to_cells = build_pb_sample_to_cells(&pb_samples.layout);
 
     let initial_per_level =
         initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims);
@@ -323,6 +329,7 @@ pub(super) fn refine_and_collect_single_layer(
             &refined.pbsamp_to_group[0],
             batch_knn.as_slice(),
             knn,
+            ctx.anchor_batches,
             &mut fine_stat,
         )?;
     }
@@ -410,6 +417,7 @@ pub(super) fn refine_and_collect_stack(
         opt_iter,
         refine_params,
         output_calibration,
+        anchor_batches: _,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
@@ -423,7 +431,7 @@ pub(super) fn refine_and_collect_stack(
 
     // Build shared pb-sample layout from layer[0]'s row count and the shared
     // projection. The layout only uses `proj_kn` + grouping, no raw reads.
-    let layout = build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn, None)?;
+    let layout = build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn, None, &[])?;
     let num_pb = layout.cell_counts.len();
 
     // Gene sums for layer[0] drive the refinement (first-layer-owns).
@@ -431,12 +439,11 @@ pub(super) fn refine_and_collect_stack(
     let gene_sums_owner = collect_pb_sample_gene_sums(
         &stack.stack[0],
         group_to_cols_finest,
-        &col_to_batch,
-        &layout.bg_to_pbsamp,
+        &layout.cell_to_pbsamp,
         num_pb,
     )?;
 
-    let pb_sample_to_cells = build_pb_sample_to_cells(&layout, group_to_cols_finest, &col_to_batch);
+    let pb_sample_to_cells = build_pb_sample_to_cells(&layout);
 
     let initial_per_level =
         initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims);
@@ -471,8 +478,7 @@ pub(super) fn refine_and_collect_stack(
             per_layer_gene_sums.push(collect_pb_sample_gene_sums(
                 layer,
                 group_to_cols_finest,
-                &col_to_batch,
-                &layout.bg_to_pbsamp,
+                &layout.cell_to_pbsamp,
                 num_pb,
             )?);
         }
@@ -535,6 +541,7 @@ pub(super) fn refine_and_collect_stack(
                 &refined.pbsamp_to_group[0],
                 batch_knn.as_slice(),
                 knn,
+                ctx.anchor_batches,
                 &mut stat,
             )?;
         }

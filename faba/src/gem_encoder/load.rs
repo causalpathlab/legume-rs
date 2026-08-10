@@ -283,6 +283,7 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
         // planes — that is the bulk of collapse-stage memory at high pb counts.
         // Same choice `faba gem` makes.
         output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
+        anchor_batches: None,
     };
     let out =
         collapse_columns_multilevel_with_hierarchy(&mut data_vec, &proj_kn, &batch_membership, &ml)
