@@ -200,7 +200,9 @@ pub(super) fn split_anchored_finest_groups(
     let mut compact = compact.into_iter();
     for (p, a) in layout.singleton_col.iter().enumerate() {
         if a.is_none() {
-            finest[p] = compact.next().expect("one compacted label per ordinary pb-sample");
+            finest[p] = compact
+                .next()
+                .expect("one compacted label per ordinary pb-sample");
         }
     }
     for (j, &(_, p)) in anchored.iter().enumerate() {
@@ -417,7 +419,6 @@ pub(super) fn refine_and_collect_single_layer(
             ctx.anchor_batches,
             &mut fine_stat,
         )?;
-        super::mark_bulk_no_adjust(&mut fine_stat, &pb_samples.layout, &refined.pbsamp_to_group[0]);
     }
 
     info!(
