@@ -38,8 +38,14 @@ impl PbSampleLayout {
     /// part in matching).
     #[must_use]
     pub fn is_bulk(&self, pbsamp: usize) -> bool {
-        self.bulk_batches
-            .contains(&self.pb_sample_to_batch[pbsamp])
+        self.is_bulk_batch(self.pb_sample_to_batch[pbsamp])
+    }
+
+    /// Whether `batch` is a bulk batch — the one spelling of the predicate,
+    /// so per-pb-sample and per-batch callers cannot drift apart.
+    #[must_use]
+    pub fn is_bulk_batch(&self, batch: usize) -> bool {
+        self.bulk_batches.contains(&batch)
     }
 }
 
@@ -388,7 +394,7 @@ pub(crate) fn bbknn_match_one_pbsamp(
         // composition-into-δ leak in the other direction.
         None => {
             for (b, bknn) in batch_knn_lookup.iter().enumerate() {
-                if b == pbsamp_batch || layout.bulk_batches.contains(&b) {
+                if b == pbsamp_batch || layout.is_bulk_batch(b) {
                     continue;
                 }
                 let per_batch = knn_distinct_pbsamples_in_batch(

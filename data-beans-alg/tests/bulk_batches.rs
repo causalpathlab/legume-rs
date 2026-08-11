@@ -109,10 +109,7 @@ fn cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>) {
     (v, batches)
 }
 
-fn mean_abs_log_delta(
-    out: &data_beans_alg::collapse_data::CollapsedOut,
-    b: usize,
-) -> f32 {
+fn mean_abs_log_delta(out: &data_beans_alg::collapse_data::CollapsedOut, b: usize) -> f32 {
     let delta = out.delta.as_ref().expect("delta").posterior_mean();
     let col = delta.column(b);
     let logs: Vec<f32> = col
@@ -166,14 +163,35 @@ fn bulk_composition_does_not_leak_into_delta() {
 
     // 2. The observed evidence of a bulk singleton is the sample's own
     //    profile back out — the dictionary sees bulk exactly as provided.
-    //    (`mu_adjusted` is NOT the plane to read for zero-imputed groups:
-    //    with no matches its residual/γ denominators sit at their priors.)
     for j in 0..MIX.len() {
         for (g, expected) in bulk_profile(j).into_iter().enumerate() {
             let back = finest.mu_observed.evidence_mean(g, k_new + j);
             assert!(
                 (back - expected).abs() <= 1e-4 * expected.abs(),
                 "bulk {j} gene {g}: expected {expected}, evidence {back}"
+            );
+        }
+    }
+
+    // 2b. THE no-adjust GUARANTEE. A bulk singleton has no counterfactual,
+    //     so "no evidence" must mean "no adjustment": μ_adjusted has to equal
+    //     μ_observed there. Without the flag the residual/γ denominators sit
+    //     at their priors and μ_adj drifts off μ_obs by a prior-shaped
+    //     factor — this is the assertion that fails if the flag is deleted.
+    let adj = finest
+        .mu_adjusted
+        .as_ref()
+        .expect("adjusted")
+        .posterior_mean();
+    let obs = finest.mu_observed.posterior_mean();
+    for j in 0..MIX.len() {
+        let s = k_new + j;
+        for g in 0..D {
+            let (a, o) = (adj[(g, s)], obs[(g, s)]);
+            assert!(
+                (a - o).abs() <= 1e-4 * o.abs().max(1e-6),
+                "bulk group {j} gene {g}: mu_adjusted {a} != mu_observed {o} — \
+                 an unmatched group received a prior-shaped adjustment"
             );
         }
     }

@@ -260,21 +260,19 @@ fn optimize_block(
             //      (μ_resid + γ) .* (1_d * size_s')
 
             denom_ds.copy_from(&(resid_ds + gamma_ds));
-            scale_by_effective_size(&mut denom_ds, stat);
 
             // "No counterfactual evidence" must mean "no adjustment": for
             // flagged groups (bulk singletons, barred from matching) the
-            // residual/γ terms above would sit at their priors and distort
-            // the quotient, so the denominator reverts to the plain
-            // effective size — μ_adj's evidence is exactly the observed one.
+            // residual/γ terms would sit at their priors and distort the
+            // quotient. Setting their factor to 1 *before* scaling leaves the
+            // plain effective size — μ_adj's evidence is exactly the observed
+            // one — and reuses the single dispatch that owns size_ds/size_s.
             if let Some(flags) = stat.no_adjust_s.as_ref() {
                 for s in (0..denom_ds.ncols()).filter(|&s| flags[s]) {
-                    match stat.size_ds.as_ref() {
-                        Some(size_ds) => denom_ds.column_mut(s).copy_from(&size_ds.column(s)),
-                        None => denom_ds.column_mut(s).fill(stat.size_s[s]),
-                    }
+                    denom_ds.column_mut(s).fill(1.0);
                 }
             }
+            scale_by_effective_size(&mut denom_ds, stat);
 
             mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
             mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
@@ -309,29 +307,29 @@ fn optimize_block(
         {
             let mu_ds = mu_adj_param.posterior_mean();
             let mut denom_db = mu_ds * &stat.n_bs.transpose();
-            // Where no source in batch `b` measures gene `g`, δ has no
-            // evidence in either direction: zero the denominator so it falls
-            // to the prior ("no adjustment") instead of reading structural
-            // absence as a strong batch effect.
-            if let Some(mask) = stat.obs_mask_db.as_ref() {
-                denom_db.component_mul_assign(mask);
-            }
-            // Bulk batches inform no δ at all: BOTH sides of their evidence
-            // are removed — numerator and denominator — so their δ posterior
-            // is the prior exactly, independent of sample depth or
-            // multiplicity. (Zeroing only the denominator would leave
-            // `a0 + observed` over `b0`, an exploding mean, not "no
-            // adjustment".)
-            match stat.no_delta_b.as_ref() {
-                Some(flags) if flags.iter().any(|&f| f) => {
+            match stat.obs_mask_db.as_ref() {
+                // Zeroing a (gene, batch) entry of `obs_mask_db` means "this
+                // batch carries no δ evidence for this gene", and the mask
+                // applies to BOTH sides of the ratio so the posterior lands
+                // on the prior exactly. Masking the denominator alone would
+                // leave `a0 + observed` over `b0` — an exploding mean, not
+                // "no adjustment".
+                //
+                // Two callers set it, and the numerator term is why they can
+                // share one mechanism. Structural absence (`attach_
+                // observability`): nothing was measured, so the numerator is
+                // already zero and masking it is a no-op — this arm stays
+                // bitwise identical to before it masked the numerator. Bulk
+                // batches (`mark_unmatched_bulk`): plenty was observed, so
+                // masking the numerator is exactly what keeps composition out
+                // of δ.
+                Some(mask) => {
+                    denom_db.component_mul_assign(mask);
                     let mut num_db = stat.observed_sum_db.clone();
-                    for b in (0..denom_db.ncols()).filter(|&b| flags[b]) {
-                        num_db.column_mut(b).fill(0.0);
-                        denom_db.column_mut(b).fill(0.0);
-                    }
+                    num_db.component_mul_assign(mask);
                     delta_param.update_stat(&num_db, &denom_db);
                 }
-                _ => delta_param.update_stat(&stat.observed_sum_db, &denom_db),
+                None => delta_param.update_stat(&stat.observed_sum_db, &denom_db),
             }
             delta_param.calibrate_with(out_target);
         }
@@ -586,11 +584,6 @@ pub struct CollapsedStat {
     /// must mean "no adjustment", not "prior-shaped adjustment". `None` = no
     /// such groups (the historical path, bitwise).
     pub no_adjust_s: Option<Vec<bool>>,
-    /// Batches that contribute **no δ evidence** — bulk batches. Their δ
-    /// denominator is zeroed so δ rests at the prior exactly ("no
-    /// adjustment"), rather than at the self-referential quotient of a
-    /// sample's own prior-shrunk mean. `None` = every batch informs δ.
-    pub no_delta_b: Option<Vec<bool>>,
 }
 
 impl CollapsedStat {
@@ -605,7 +598,6 @@ impl CollapsedStat {
             size_ds: None,
             obs_mask_db: None,
             no_adjust_s: None,
-            no_delta_b: None,
         }
     }
 
@@ -631,7 +623,6 @@ impl CollapsedStat {
         self.size_ds = None;
         self.obs_mask_db = None;
         self.no_adjust_s = None;
-        self.no_delta_b = None;
     }
 
     /// Select a subset of sample columns (groups) by index.
@@ -665,7 +656,6 @@ impl CollapsedStat {
             .no_adjust_s
             .as_ref()
             .map(|f| indices.iter().map(|&c| f[c]).collect());
-        out.no_delta_b = self.no_delta_b.clone();
         out.observed_sum_db.copy_from(&self.observed_sum_db);
         out
     }
@@ -691,19 +681,30 @@ impl CollapsedStat {
                 .as_ref()
                 .map(|m| m.rows(r0, nrows).into_owned()),
             no_adjust_s: self.no_adjust_s.clone(),
-            no_delta_b: self.no_delta_b.clone(),
         }
     }
 }
 
-/// Flag the groups whose mass is entirely bulk as no-adjust on `stat`.
+/// Record what bulk columns may and may not inform, directly on `stat`.
 ///
-/// On the refine paths bulk columns are singleton groups, so this marks
-/// exactly those singletons; on the legacy hash path (no singleton split) it
-/// marks only groups with no non-bulk member — a blended group keeps the
-/// ordinary treatment. No-op (and `no_adjust_s` stays `None`) when the
-/// layout has no bulk batches.
-pub(super) fn mark_bulk_no_adjust(
+/// Called from the tail of [`collect_matched_stat_coarse`] rather than by each
+/// caller: that function already holds every argument this needs, and it is
+/// the only place that knows a pb-sample ended with no counterfactual — so a
+/// future matched-stat path cannot forget the step. No-op when the layout has
+/// no bulk batches, which keeps every historical path bitwise unchanged.
+///
+/// Two records, because bulk is excluded from two different things:
+///
+/// - **δ**, per batch, through `obs_mask_db`: bulk is a mixture, so its
+///   discrepancy against single-state pb-samples is composition, not platform.
+///   Zeroing its mask columns puts δ at the prior on both sides of the ratio.
+///   Riding the existing mask (rather than a second field) means `merge_stat`
+///   propagates it to coarse levels for free.
+/// - **μ_adjusted**, per group, through `no_adjust_s`: a group with no
+///   counterfactual mass would otherwise divide by prior-shaped residual/γ
+///   terms, so "no evidence" would read as a prior-shaped adjustment instead
+///   of none.
+fn mark_bulk_exclusions(
     stat: &mut CollapsedStat,
     layout: &PbSampleLayout,
     pbsamp_to_group: &[usize],
@@ -711,9 +712,11 @@ pub(super) fn mark_bulk_no_adjust(
     if layout.bulk_batches.is_empty() {
         return;
     }
+    // On the refine paths bulk columns are singleton groups, so this marks
+    // exactly those singletons; on the legacy hash path (no singleton split)
+    // a blended group keeps the ordinary treatment.
     let k = stat.num_samples();
-    let mut has_bulk = vec![false; k];
-    let mut has_other = vec![false; k];
+    let (mut has_bulk, mut has_other) = (vec![false; k], vec![false; k]);
     for (p, &g) in pbsamp_to_group.iter().enumerate() {
         if g >= k {
             continue;
@@ -731,13 +734,14 @@ pub(super) fn mark_bulk_no_adjust(
             .map(|(&b, &o)| b && !o)
             .collect(),
     );
-    let mut no_delta = vec![false; stat.num_batches()];
-    for &b in &layout.bulk_batches {
-        if b < no_delta.len() {
-            no_delta[b] = true;
-        }
+
+    let (d, nb) = (stat.num_genes(), stat.num_batches());
+    let mask = stat
+        .obs_mask_db
+        .get_or_insert_with(|| nalgebra::DMatrix::<f32>::repeat(d, nb, 1.0));
+    for &b in layout.bulk_batches.iter().filter(|&&b| b < nb) {
+        mask.column_mut(b).fill(0.0);
     }
-    stat.no_delta_b = Some(no_delta);
 }
 
 /// Resample from over-resolved sufficient statistics: randomly select
@@ -787,6 +791,7 @@ pub(super) fn collect_matched_stat_coarse(
 ) -> anyhow::Result<()> {
     let num_pb = layout.cell_counts.len();
     debug_assert_eq!(pbsamp_to_group.len(), num_pb);
+    mark_bulk_exclusions(stat, layout, pbsamp_to_group);
 
     let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn, anchor_batches)?;
 
@@ -908,6 +913,15 @@ pub(super) fn merge_stat(
         coarse.size_ds = Some(size_ds);
     }
     coarse.obs_mask_db = fine_stat.obs_mask_db.clone();
+    // A coarse group takes the no-adjust treatment only when every fine group
+    // folded into it does; one ordinary member restores the ordinary path.
+    if let Some(fine_flags) = fine_stat.no_adjust_s.as_ref() {
+        let mut flags = vec![true; num_coarse_groups];
+        for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
+            flags[coarse_g] &= fine_flags[fine_g];
+        }
+        coarse.no_adjust_s = Some(flags);
+    }
 
     coarse.observed_sum_db.copy_from(&fine_stat.observed_sum_db);
     coarse
