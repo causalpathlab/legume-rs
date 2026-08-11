@@ -43,11 +43,11 @@ Faceted Associations of Genotype Information via Omics-based Locus Identificatio
 - **`fit-regression`** — generic SGVB regression, `--model gaussian|poisson|nb` ×
   `--prior gaussian|susie` (aliased as `regression`)
 
-- **`embed-sumstat`** — embed variants and traits into a shared program space
-  - Factors the direct, LD-free effect matrix as `B = U V'`
-  - Null calibrated from the panel; the whitening ridge λ is derived, not tuned
-  - Contrastive objective against that calibrated null
-  - Optional marginalised polygenic arm (`--dense-arm`), off by default
+- **`embed-eqtl`** — embed eQTL summary statistics as a variant × gene × context hyperedge
+  - `score(variant, gene, context) = Σ_h u_h v_h c_h`; a cell type is a gate over programs
+  - `ubiquitous` and `empty` are fixed values of the gate, not special cases in the code
+  - Contrastive objective; a negative corrupts one slot of the hyperedge
+  - Cells never powered to see the effect are sampled in neither class
 
 ### Utility
 
@@ -416,28 +416,34 @@ fagioli fit-regression \
 **Output files:** `reg.mean.parquet`, `reg.var.parquet`, and `reg.disp.parquet` for the
 negative-binomial likelihood.
 
-### Summary Statistics Embedding
+### eQTL Embedding
 
 ```bash
-fagioli embed-sumstat \
-  --sumstat-file ./results/sim.sumstats.bed.gz \
-  --bed-prefix /path/to/genotypes \
-  --chromosome 22 \
+fagioli embed-eqtl \
+  --qtl-files ./qtl/block_*.tsv.gz \
   --output ./results/emb \
-  --embedding-dim 20 \
-  --num-negatives 5 \
-  --num-iterations 500
+  --top-k 5 \
+  --detect-z 4.0 \
+  --embedding-dim 8 \
+  --num-iterations 4000
 ```
 
 **Output files:**
-- `emb.variant_embedding.parquet` — variant loadings `U` (M × H)
-- `emb.trait_embedding.parquet` — trait loadings `V` (T × H)
-- `emb.panel.tsv.gz` — panel standardization needed to score another cohort
-- `emb.whiteness.tsv.gz` — whether λ whitened the null
-- `emb.parameters.json` — all settings plus fit diagnostics
+- `emb.variant_embedding.parquet` — variant loadings `u` (one row per variant)
+- `emb.gene_embedding.parquet` — gene loadings `v` (one row per gene)
+- `emb.context_embedding.parquet` — context gates `c`, including `ubiquitous`
+- `emb.specificity.tsv.gz` — anchor, per-context scores, ubiquity index
+- `emb.parameters.json` — all settings, the state census, the fit diagnostics
 
-No trait-geometry verdict is emitted: the estimator for it is not reliable on
-realistic LD, so the fitted geometry is reported without an independent check.
+Every cell is classified as an **edge** (`|β|/se ≥ --detect-z`), **certified
+absent** (undetected, but powered to see the pair's reference effect), or
+**unknown** — and unknown cells are sampled in neither class. That rule is what
+keeps statistical power out of the learned geometry, so a variant tested only
+in the abundant cell types does not read as cell-type-specific.
+
+Run `--shuffle-control` for a reference: with the labels shuffled the held-out
+AUC must fall to about one half and the gate's effective rank must rise toward
+`--embedding-dim`.
 
 ### Pseudobulk Aggregation
 
