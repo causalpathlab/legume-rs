@@ -376,14 +376,13 @@ pub(crate) fn bbknn_match_one_pbsamp(
     pbsamp: usize,
     anchor_batches: Option<&[usize]>,
 ) -> anyhow::Result<Vec<(usize, f32)>> {
-    // Bulk takes no part in matching, in either direction. As a receiver: a
-    // bulk sample is a mixture over cell states, and a counterfactual drawn
-    // from single-state pb-samples would hand composition to δ — so it gets
-    // no matches, its imputed sums stay zero, and its δ rests at the prior.
-    // (As a source it is skipped below, and never enters an anchor set.)
-    if layout.is_bulk(pbsamp) {
-        return Ok(Vec::new());
-    }
+    // Bulk is a RECEIVER but never a SOURCE — greedy correction, the same
+    // discipline the carried pb_reference uses. A bulk column draws its
+    // counterfactual from the cell frame and is corrected toward it; the
+    // cells self-match through the anchor path, so their frame never moves.
+    // Letting bulk serve as a source is what would drag the cells, and that
+    // is the only direction excluded here (below, and by keeping bulk out of
+    // every anchor set).
     let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
     let centroid: Vec<f32> = layout.centroids.column(pbsamp).iter().copied().collect();
     let mut all_hits: Vec<(usize, f32)> = Vec::new();

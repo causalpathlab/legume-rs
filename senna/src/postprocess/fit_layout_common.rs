@@ -1067,6 +1067,7 @@ fn preprocess_layout_data_recompute(
         ignore_batch: false,
         feature_mask_fn: None,
         pb_reference: None,
+        mixture_batches: None,
         observe_panels: true,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),

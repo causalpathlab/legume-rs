@@ -160,6 +160,40 @@ fn resolve_named_batches(
 /// A batch cannot be both an anchor (a counterfactual source) and bulk
 /// (barred from matching): the two roles contradict each other, and which
 /// one silently won would decide whether composition leaks into δ.
+/// Greedy default: when bulk batches are named and no anchor is given, every
+/// NON-bulk batch becomes the anchor frame.
+///
+/// This is the same discipline `senna update` applies to a carried
+/// pb_reference — only the new samples are adjusted, the established frame
+/// stays fixed. Concretely it makes bulk draw its counterfactual from the
+/// cells and be corrected toward them, while the cells self-match (their δ
+/// settles at the prior) and bulk, never being in the anchor set, cannot
+/// serve as anyone's counterfactual. Pooled mutual adjustment — where the
+/// cell frame drifts toward bulk — is what this avoids.
+fn greedy_anchor_for_bulk(
+    data_vec: &SparseIoVec,
+    anchors: Option<Vec<usize>>,
+    bulk: Option<&[usize]>,
+) -> Option<Vec<usize>> {
+    match (anchors, bulk) {
+        (Some(a), _) => Some(a),
+        (None, Some(b)) if !b.is_empty() => {
+            let all = data_vec.num_batches();
+            let frame: Vec<usize> = (0..all).filter(|i| !b.contains(i)).collect();
+            (!frame.is_empty()).then(|| {
+                info!(
+                    "Greedy bulk correction: {} bulk batch(es) corrected toward {} cell batch(es); \
+                     the cell frame is anchored and does not move",
+                    b.len(),
+                    frame.len()
+                );
+                frame
+            })
+        }
+        (None, _) => None,
+    }
+}
+
 fn ensure_disjoint_roles(anchors: Option<&[usize]>, bulk: Option<&[usize]>) -> anyhow::Result<()> {
     if let (Some(a), Some(b)) = (anchors, bulk) {
         if let Some(shared) = a.iter().find(|x| b.contains(x)) {
@@ -541,6 +575,7 @@ where
         resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
     let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
     ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+    let anchor_batches = greedy_anchor_for_bulk(data_vec, anchor_batches, bulk_batches.as_deref());
     let ctx = RefineCollectCtx {
         fine_codes: &fine_codes,
         group_to_cols_finest: &group_to_cols,
@@ -613,6 +648,7 @@ where
         resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
     let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
     ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+    let anchor_batches = greedy_anchor_for_bulk(data_vec, anchor_batches, bulk_batches.as_deref());
     let pb_samples = build_pb_samples(
         data_vec,
         proj_kn,
@@ -869,6 +905,8 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
             let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
             ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+            let anchor_batches =
+                greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
             let ctx = RefineCollectCtx {
                 fine_codes: &fine_codes,
                 group_to_cols_finest: &group_to_cols,
@@ -907,6 +945,8 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
             let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
             ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+            let anchor_batches =
+                greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
             let pb_samples = build_pb_samples(
                 self,
                 proj_kn,
