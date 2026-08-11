@@ -160,19 +160,26 @@ pub(crate) struct CollapseArgs {
                      cross-batch counterfactual compares like with like and δ\n\
                      measures platform. Do NOT name those here.\n\
                      \n\
-                     A MIXED sample (whole blood, tumour, GTEx/TCGA) averages many\n\
-                     states, so matching it against a single-state pseudobulk\n\
-                     measures composition as much as platform, and δ absorbs the\n\
-                     biology. Naming it here bars it from the counterfactual in\n\
-                     BOTH directions — neither matched nor used as a match — so its\n\
-                     δ rests at the prior. Its columns still train the dictionary at\n\
-                     full weight, and each stays its own pseudobulk.\n\
+                     Naming a batch here switches its correction to GREEDY, the\n\
+                     same discipline `senna update` uses for a carried reference:\n\
+                     every OTHER batch becomes the anchor frame, so the named batch\n\
+                     is corrected toward the cells (its δ is estimated, and that\n\
+                     estimate is the platform correction) while never serving as\n\
+                     anyone else's counterfactual. The cells self-match, so the\n\
+                     frame they define does not move. Each named column also stays\n\
+                     its own pseudobulk instead of being averaged with cells.\n\
                      \n\
-                     Measured, so you can judge the trade: admitting bulk as an\n\
-                     ORDINARY batch cost ~25-37% of cell-type ARI on HCA_BM, and\n\
-                     that cost did not vary with density, purity or column count.\n\
-                     Compare against a cells-only fit with the SAME batch count — a\n\
-                     single-batch baseline skips batch correction and overstates it."
+                     This matters a lot. Measured on HCA_BM + 707 BeatAML samples\n\
+                     (bge, K=20), cell-type ARI against a cells-only fit with the\n\
+                     same batch count (0.352):\n\
+                       ordinary batch, pooled mutual adjustment .. 0.227\n\
+                       named here, greedy ....................... 0.393\n\
+                     Pooled matching drags the cell frame toward the bulk; greedy\n\
+                     removes essentially the whole penalty.\n\
+                     \n\
+                     Always compare against a baseline with the SAME batch count —\n\
+                     a single-batch fit skips batch correction entirely (0.452 here)\n\
+                     and will overstate what admitting bulk costs you."
     )]
     pub(crate) mixture_batch: Option<Vec<Box<str>>>,
 
@@ -312,6 +319,11 @@ impl CollapseArgs {
         &self,
         kind: crate::run_manifest::RunKind,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.mixture_batch.is_none(),
+            "--mixture-batch has no effect on `{kind}`: its collapse path does not carry the \
+             bulk role. Supported: topic, masked-topic, masked-sbp, masked-vae, vae, svd, bge."
+        );
         anyhow::ensure!(
             !self.emit_pb_reference,
             "--emit-pb-reference has no effect on `{kind}`: `senna update` cannot continue a \
