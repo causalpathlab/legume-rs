@@ -640,45 +640,7 @@ pub struct MaskedTopicArgs {
     qc: QcArgs,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum FeatureNameKindArg {
-    #[default]
-    Auto,
-    Exact,
-    Gene,
-    Locus,
-    LocusOverlap,
-    Mixed,
-}
-
-impl FeatureNameKindArg {
-    /// Resolve to a concrete [`FeatureNameKind`], defaulting `Auto` to
-    /// `Gene { delim: '_' }` — the standard for gene-keyed pre-train
-    /// inputs (bge / fne / topic-family dictionaries).
-    pub fn resolve_or_gene(&self) -> auxiliary_data::feature_names::FeatureNameKind {
-        Option::<auxiliary_data::feature_names::FeatureNameKind>::from(self.clone())
-            .unwrap_or(auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' })
-    }
-}
-
-impl From<FeatureNameKindArg> for Option<auxiliary_data::feature_names::FeatureNameKind> {
-    fn from(arg: FeatureNameKindArg) -> Self {
-        use auxiliary_data::feature_names::FeatureNameKind;
-        match arg {
-            FeatureNameKindArg::Auto => None,
-            FeatureNameKindArg::Exact => Some(FeatureNameKind::Exact),
-            FeatureNameKindArg::Gene => Some(FeatureNameKind::Gene { delim: '_' }),
-            FeatureNameKindArg::Locus => Some(FeatureNameKind::Locus {
-                merge_overlapping: false,
-            }),
-            FeatureNameKindArg::LocusOverlap => Some(FeatureNameKind::Locus {
-                merge_overlapping: true,
-            }),
-            FeatureNameKindArg::Mixed => Some(FeatureNameKind::Mixed),
-        }
-    }
-}
+pub use auxiliary_data::feature_names::FeatureNameKindArg;
 
 /// `senna masked-topic` — softmax simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
