@@ -118,13 +118,17 @@ pub(super) fn collect_basic_stat_visitor(
 
     let mut stat = arc_stat.lock().expect("lock stat");
 
-    for y_j in yy.col_iter() {
+    // `w` is how many observations the column stands for — 1 for a cell, `m`
+    // for a column carrying the mean profile of `m` cells. Scaling both the
+    // counts and the size keeps `μ = Σy / n` the per-cell rate either way.
+    for (y_j, &col) in yy.col_iter().zip(cells.iter()) {
+        let w = data_vec.column_multiplicity(col);
         let rows = y_j.row_indices();
         let vals = y_j.values();
         for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.observed_sum_ds[(gene, sample)] += y;
+            stat.observed_sum_ds[(gene, sample)] += y * w;
         }
-        stat.size_s[sample] += 1_f32; // each column is a sample
+        stat.size_s[sample] += w;
     }
     Ok(())
 }
@@ -144,14 +148,18 @@ pub(super) fn collect_batch_stat_visitor(
 
     let mut stat = arc_stat.lock().expect("lock stat");
 
-    yy.col_iter().zip(batches.iter()).for_each(|(y_j, &b)| {
-        let rows = y_j.row_indices();
-        let vals = y_j.values();
-        for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.observed_sum_db[(gene, b)] += y;
-        }
-        stat.n_bs[(b, sample)] += 1_f32;
-    });
+    yy.col_iter()
+        .zip(batches.iter())
+        .zip(cells_in_sample.iter())
+        .for_each(|((y_j, &b), &col)| {
+            let w = data_vec.column_multiplicity(col);
+            let rows = y_j.row_indices();
+            let vals = y_j.values();
+            for (&gene, &y) in rows.iter().zip(vals.iter()) {
+                stat.observed_sum_db[(gene, b)] += y * w;
+            }
+            stat.n_bs[(b, sample)] += w;
+        });
     Ok(())
 }
 
@@ -161,6 +169,40 @@ pub(super) fn collect_batch_stat_visitor(
 /// descent iteration (batched path only) so the driver's bar keeps moving
 /// while a block is mid-fit; `inc` is atomic, so concurrent blocks may share
 /// one bar.
+/// `denom += effective size`: per-(gene, sample) when observability is
+/// attached, the historical per-sample scalar otherwise. The `None` arm is
+/// the exact old code — full observability is bitwise-identical by
+/// construction, not by tolerance.
+fn add_effective_size(denom_ds: &mut nalgebra::DMatrix<f32>, stat: &CollapsedStat) {
+    match stat.size_ds.as_ref() {
+        Some(size_ds) => {
+            debug_assert_eq!(denom_ds.shape(), size_ds.shape());
+            *denom_ds += size_ds;
+        }
+        None => {
+            for s in 0..denom_ds.ncols() {
+                denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
+            }
+        }
+    }
+}
+
+/// `denom *= effective size`, elementwise — same dispatch as
+/// [`add_effective_size`].
+fn scale_by_effective_size(denom_ds: &mut nalgebra::DMatrix<f32>, stat: &CollapsedStat) {
+    match stat.size_ds.as_ref() {
+        Some(size_ds) => {
+            debug_assert_eq!(denom_ds.shape(), size_ds.shape());
+            denom_ds.component_mul_assign(size_ds);
+        }
+        None => {
+            for s in 0..denom_ds.ncols() {
+                denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
+            }
+        }
+    }
+}
+
 fn optimize_block(
     stat: &CollapsedStat,
     hyper: (f32, f32),
@@ -196,9 +238,7 @@ fn optimize_block(
         //            1_d * size_s'
 
         {
-            for s in 0..num_samples {
-                denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
-            }
+            add_effective_size(&mut denom_ds, stat);
             mu_resid_param.update_stat(&stat.residual_sum_ds, &denom_ds);
             // mu_resid is fixed across the loop (read via posterior_mean);
             // calibrate to the output target now so it carries sd/log only
@@ -220,9 +260,8 @@ fn optimize_block(
             //      (μ_resid + γ) .* (1_d * size_s')
 
             denom_ds.copy_from(&(resid_ds + gamma_ds));
-            for s in 0..num_samples {
-                denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
-            }
+
+            scale_by_effective_size(&mut denom_ds, stat);
 
             mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
             mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
@@ -234,9 +273,7 @@ fn optimize_block(
             //      μ .* (1_d * size_s')
 
             denom_ds.copy_from(mu_ds);
-            for s in 0..num_samples {
-                denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
-            }
+            scale_by_effective_size(&mut denom_ds, stat);
             gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
             gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
 
@@ -258,16 +295,38 @@ fn optimize_block(
         //      μ * size_bs'
         {
             let mu_ds = mu_adj_param.posterior_mean();
-            delta_param.update_stat(&stat.observed_sum_db, &(mu_ds * &stat.n_bs.transpose()));
+            let mut denom_db = mu_ds * &stat.n_bs.transpose();
+            match stat.obs_mask_db.as_ref() {
+                // Zeroing a (gene, batch) entry of `obs_mask_db` means "this
+                // batch carries no δ evidence for this gene", and the mask
+                // applies to BOTH sides of the ratio so the posterior lands
+                // on the prior exactly. Masking the denominator alone would
+                // leave `a0 + observed` over `b0` — an exploding mean, not
+                // "no adjustment".
+                //
+                // Two callers set it, and the numerator term is why they can
+                // share one mechanism. Structural absence (`attach_
+                // observability`): nothing was measured, so the numerator is
+                // already zero and masking it is a no-op — this arm stays
+                // bitwise identical to before it masked the numerator. Bulk
+                // batches (`mark_unmatched_bulk`): plenty was observed, so
+                // masking the numerator is exactly what keeps composition out
+                // of δ.
+                Some(mask) => {
+                    denom_db.component_mul_assign(mask);
+                    let mut num_db = stat.observed_sum_db.clone();
+                    num_db.component_mul_assign(mask);
+                    delta_param.update_stat(&num_db, &denom_db);
+                }
+                None => delta_param.update_stat(&stat.observed_sum_db, &denom_db),
+            }
             delta_param.calibrate_with(out_target);
         }
 
         // Take the observed mean
         {
             let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
-            for s in 0..num_samples {
-                denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
-            }
+            add_effective_size(&mut denom_ds, stat);
             mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
             mu_param.calibrate_with(out_target);
         };
@@ -292,9 +351,7 @@ fn optimize_block(
         })
     } else {
         let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
-        for s in 0..num_samples {
-            denom_ds.column_mut(s).add_scalar_mut(stat.size_s[s]);
-        }
+        add_effective_size(&mut denom_ds, stat);
         mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
         mu_param.calibrate_with(out_target);
         if matches!(out_target, CalibrateTarget::MeanOnly) {
@@ -324,6 +381,9 @@ pub(super) fn optimize(
     num_iter: usize,
     label: &str,
     out_target: CalibrateTarget,
+    // Retain a_stat/b_stat even under MeanOnly — the finest level of an
+    // `--emit-pb-reference` run serializes `evidence_mean`, which reads them.
+    keep_stats: bool,
 ) -> anyhow::Result<CollapsedOut> {
     let num_genes = stat.num_genes();
     let num_samples = stat.num_samples();
@@ -351,7 +411,7 @@ pub(super) fn optimize(
     // `posterior_sample` (topic path) reads a_stat/b_stat; bge (MeanOnly)
     // does not, so those planes can be discarded per block — that's what
     // keeps the assembled output from holding the full sufficient stats.
-    let keep_stats = matches!(out_target, CalibrateTarget::All);
+    let keep_stats = keep_stats || matches!(out_target, CalibrateTarget::All);
 
     // The moving unit is one descent iteration whenever the batch-correction
     // loop runs: each block ticks `num_iter` times (`optimize_block` handed the
@@ -452,7 +512,7 @@ pub(super) fn optimize(
 }
 
 /// output struct to make the model parameters more accessible
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CollapsedOut {
     pub mu_observed: GammaMatrix,
     pub mu_adjusted: Option<GammaMatrix>,
@@ -490,6 +550,21 @@ pub struct CollapsedStat {
     pub size_s: nalgebra::DVector<f32>,          // sample s size
     pub observed_sum_db: nalgebra::DMatrix<f32>, // divergence numerator
     pub n_bs: nalgebra::DMatrix<f32>,            // batch-specific sample size
+    /// Per-(gene, sample) effective size: the mass of sample `s` whose SOURCE
+    /// actually measures gene `g`. `None` means fully observed — every gene
+    /// sees `size_s[s]`, and `optimize` takes the exact historical code path.
+    ///
+    /// This is what distinguishes "unmeasured" from "measured as zero": a
+    /// gene absent from one cohort's panel reads 0 in all of its cells, and
+    /// without this denominator the estimate is silently dragged toward zero
+    /// by cells that never looked. Set by [`attach_observability`]; see the
+    /// plan note there for the factorized construction.
+    pub size_ds: Option<nalgebra::DMatrix<f32>>,
+    /// Per-(gene, batch) observability of δ's evidence: 1.0 when any source
+    /// in batch `b` measures gene `g`, else 0.0. Zeroing δ's denominator
+    /// there sends δ to its prior (≈ 1, "no adjustment") instead of to an
+    /// extreme driven by structurally-absent counts. `None` = all observed.
+    pub obs_mask_db: Option<nalgebra::DMatrix<f32>>,
 }
 
 impl CollapsedStat {
@@ -501,6 +576,8 @@ impl CollapsedStat {
             size_s: nalgebra::DVector::<f32>::zeros(nsample),
             observed_sum_db: nalgebra::DMatrix::<f32>::zeros(ngene, nbatch),
             n_bs: nalgebra::DMatrix::<f32>::zeros(nbatch, nsample),
+            size_ds: None,
+            obs_mask_db: None,
         }
     }
 
@@ -523,6 +600,8 @@ impl CollapsedStat {
         self.observed_sum_db.fill(0_f32);
         self.size_s.fill(0_f32);
         self.n_bs.fill(0_f32);
+        self.size_ds = None;
+        self.obs_mask_db = None;
     }
 
     /// Select a subset of sample columns (groups) by index.
@@ -546,6 +625,12 @@ impl CollapsedStat {
                 out.n_bs[(b, new_col)] = self.n_bs[(b, old_col)];
             }
         }
+        if let Some(size_ds) = self.size_ds.as_ref() {
+            out.size_ds = Some(nalgebra::DMatrix::from_fn(ng, n_new, |g, new_col| {
+                size_ds[(g, indices[new_col])]
+            }));
+        }
+        out.obs_mask_db = self.obs_mask_db.clone();
         out.observed_sum_db.copy_from(&self.observed_sum_db);
         out
     }
@@ -562,6 +647,14 @@ impl CollapsedStat {
             size_s: self.size_s.clone(),
             observed_sum_db: self.observed_sum_db.rows(r0, nrows).into_owned(),
             n_bs: self.n_bs.clone(),
+            size_ds: self
+                .size_ds
+                .as_ref()
+                .map(|m| m.rows(r0, nrows).into_owned()),
+            obs_mask_db: self
+                .obs_mask_db
+                .as_ref()
+                .map(|m| m.rows(r0, nrows).into_owned()),
         }
     }
 }
@@ -587,6 +680,7 @@ pub fn resample_and_optimize(
         opt_iter,
         "Optimizing",
         CalibrateTarget::All,
+        false,
     )
 }
 
@@ -607,12 +701,13 @@ pub(super) fn collect_matched_stat_coarse(
     pbsamp_to_group: &[usize],
     batch_knn_lookup: &[ColumnDict<usize>],
     knn: usize,
+    anchor_batches: Option<&[usize]>,
     stat: &mut CollapsedStat,
 ) -> anyhow::Result<()> {
     let num_pb = layout.cell_counts.len();
     debug_assert_eq!(pbsamp_to_group.len(), num_pb);
 
-    let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn)?;
+    let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn, anchor_batches)?;
 
     use indicatif::ParallelProgressIterator;
     let prog_bar = styled_progress_bar(num_pb as u64, "pb-samples (matched stats)");
@@ -719,6 +814,19 @@ pub(super) fn merge_stat(
             coarse.n_bs[(b, coarse_g)] += fine_stat.n_bs[(b, fine_g)];
         }
     }
+
+    // Observability descends with the merge: effective sizes add like any
+    // other per-sample mass, and the per-batch mask is sample-free.
+    if let Some(fine_size_ds) = fine_stat.size_ds.as_ref() {
+        let mut size_ds = nalgebra::DMatrix::<f32>::zeros(num_genes, num_coarse_groups);
+        for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
+            size_ds
+                .column_mut(coarse_g)
+                .add_assign(&fine_size_ds.column(fine_g));
+        }
+        coarse.size_ds = Some(size_ds);
+    }
+    coarse.obs_mask_db = fine_stat.obs_mask_db.clone();
 
     coarse.observed_sum_db.copy_from(&fine_stat.observed_sum_db);
     coarse

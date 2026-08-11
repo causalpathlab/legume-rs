@@ -12,8 +12,9 @@ use candle_util::encoder::*;
 use candle_util::traits::*;
 use log::warn;
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum DecoderType {
     /// Softmax dictionary with multinomial likelihood
     Multinom,
@@ -33,7 +34,8 @@ impl DecoderType {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct TopicArgs {
     #[arg(
         value_delimiter = ',',
@@ -110,6 +112,30 @@ pub struct TopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Add N topics on top of the warm-started model (needs --init-from)",
+        long_help = "Grow K when continuing a trained run, so a cohort carrying biology the\n\
+                     parent has no topic for can acquire one instead of distorting an\n\
+                     existing topic.\n\
+                     \n\
+                     Added topics start switched off: their encoder rows get zero weights\n\
+                     and a strongly negative bias, so they hold ~0 mass at step 0 and have\n\
+                     to earn their way in. The parent's topics keep their indices, so\n\
+                     annotations keyed to them stay valid.\n\
+                     \n\
+                     Off by default — K is part of every downstream artifact's identity."
+    )]
+    pub(crate) add_topics: usize,
+
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
+
+    #[arg(
+        long,
         help = "Cells per rayon job (omit for auto-scaling by feature count)",
         hide = true
     )]
@@ -182,6 +208,30 @@ pub struct TopicArgs {
         hide = true
     )]
     pub(crate) preload_data: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help = "Canonicalize row names across backends: auto|exact|gene|locus|locus-overlap|mixed",
+        long_help = "How to decide that two backends mean the same feature.\n\
+                     \n\
+                     Rows are unioned across input files, so a name the rule fails\n\
+                     to reconcile becomes a SECOND row for the same gene — which\n\
+                     enlarges the feature axis and, under `senna update`, no longer\n\
+                     matches the parent's.\n\
+                     \n\
+                     gene   — `ENSG00000105329_TGFB1` and `TGFB1` are one feature\n\
+                     locus  — `chr1:1000-2000`, `1:1000-2000`, `chr1_1000_2000` agree\n\
+                     mixed  — per-row dispatch for a heterogeneous axis\n\
+                     auto   — detect from the names present\n\
+                     \n\
+                     Defaults to `auto`, which detects the rule from the names\n\
+                     present — the behaviour this command already had before the\n\
+                     flag was exposed. Set it explicitly when auto-detection\n\
+                     picks wrong for a cohort."
+    )]
+    pub(crate) feature_name_kind: crate::masked_topic::FeatureNameKindArg,
 
     #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,
@@ -329,9 +379,12 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
+        pb_reference: args.pb_reference.as_ref(),
+        mixture_batches: args.collapse.mixture_batch.clone(),
+        observe_panels: true,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
-        feature_kind: None,
+        feature_kind: args.feature_name_kind.clone().into(),
         want_hierarchy: true,
         prebuilt_partition,
     })?;
@@ -344,9 +397,24 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
 
-    let level_coarsenings: Vec<Option<FeatureCoarsening>> = if args.max_coarse_features > 0
-        && n_features_full > args.max_coarse_features
+    // Warm start pins the encoder's input axis. The saved weights are keyed to
+    // the PARENT's gene → meta-feature grouping, and recomputing that grouping
+    // here from this run's pseudobulk sketch keeps the same *width*
+    // (`--max-coarse-features`) while changing *which* genes share a
+    // meta-feature. `warm_start_load` only compared widths, so the mismatch
+    // passed its check and the encoder read weights for the wrong inputs — a
+    // silent corruption, not an error. Inherit instead.
+    let inherited_coarsenings = args
+        .init_from
+        .as_deref()
+        .map(|parent| inherit_level_coarsenings(parent, num_levels, n_features_full))
+        .transpose()?;
+
+    let level_coarsenings: Vec<Option<FeatureCoarsening>> = if let Some(levels) =
+        inherited_coarsenings
     {
+        levels
+    } else if args.max_coarse_features > 0 && n_features_full > args.max_coarse_features {
         let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
         let finest_target = args.max_coarse_features;
         let min_target = (finest_target / num_levels).max(50);
@@ -437,28 +505,41 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let gene_names = data_vec.row_names()?;
 
-    // Per-level NB-Fisher weights at the *coarse* feature resolution
-    // each decoder operates on. Computed via a fresh streaming pass
-    // over coarsened cells so the dispersion trend matches the data
-    // the decoder actually sees. Used by `MultinomTopicDecoder` to
-    // multiplicatively weight the per-gene log-likelihood term.
+    // Per-level NB-Fisher weights at the *coarse* feature resolution each
+    // decoder operates on, so the dispersion trend matches the data the
+    // decoder actually sees. Used by `MultinomTopicDecoder` to multiplicatively
+    // weight the per-gene log-likelihood term.
+    //
+    // `collapsed_levels` and `level_coarsenings` are indexed alike (both
+    // finest-last, and `build_level_data` zips them), so a level's own
+    // pseudobulks are its trend's population.
     let feature_fisher_per_level: Vec<Vec<f32>> = {
         info!(
-            "Computing per-level NB-Fisher weights at coarse resolution ({} levels)",
-            level_coarsenings.len()
+            "Computing per-level NB-Fisher weights at coarse resolution from {} ({} levels)",
+            if data_vec.has_column_multiplicity() {
+                "pseudobulks"
+            } else {
+                "cells"
+            },
+            level_coarsenings.len(),
         );
-        level_coarsenings
+        // Every construction branch above sizes `level_coarsenings` to
+        // `num_levels = collapsed_levels.len()`; debug-checked because a zip
+        // would otherwise truncate without a word.
+        debug_assert_eq!(collapsed_levels.len(), level_coarsenings.len());
+        let membership_per_level = cell_to_pb_per_level.as_deref().unwrap_or(&[]);
+        collapsed_levels
             .iter()
-            .map(|fc_opt| match fc_opt.as_ref() {
-                Some(fc) => data_beans_alg::gene_weighting::compute_nb_fisher_weights_coarsened(
+            .enumerate()
+            .zip(level_coarsenings.iter())
+            .map(|((level, collapsed), fc)| {
+                crate::refine_weighting::fit_fisher_weights(
+                    collapsed,
+                    membership_per_level.get(level).map(Vec::as_slice),
+                    fc.as_ref(),
                     &data_vec,
-                    fc,
                     args.block_size,
-                ),
-                None => data_beans_alg::gene_weighting::compute_nb_fisher_weights(
-                    &data_vec,
-                    args.block_size,
-                ),
+                )
             })
             .collect::<anyhow::Result<Vec<_>>>()?
     };
@@ -483,6 +564,10 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         level_coarsenings: &level_coarsenings,
         finest_coarsening,
         finest_collapsed,
+        cell_to_pb_finest: cell_to_pb_per_level
+            .as_deref()
+            .and_then(<[Vec<usize>]>::last)
+            .map(Vec::as_slice),
         n_features_full,
         gene_names: &gene_names,
         data_vec: &data_vec,
@@ -532,6 +617,11 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     // CNV detection using topic proportions as cell-type membership
     let gene_names = data_vec.row_names()?;
+
+    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
+    // its triplet build never overlaps the live backend in memory.
+    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
 
     if let Some(positions) = cnv_positions {
@@ -571,27 +661,98 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         false
     };
 
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        column_weight.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
+    )?;
+
     write_topic_manifest(
-        crate::run_manifest::RunKind::Topic,
         &args.out,
         &data_files,
         batch_files.as_deref(),
         has_cell_to_pb,
+        pb_reference_suffix,
+        crate::run_manifest::record_train_args(args)?,
     )?;
 
     info!("Done");
     Ok(())
 }
 
-/// Assemble + save the `{prefix}.senna.json` manifest for a topic /
-/// masked-topic / joint-topic run. Factored out so all three callers stay
-/// DRY; SVD runs use a distinct helper because they produce no model.
+/// Load the parent's per-level feature coarsenings for a `--init-from` run.
+///
+/// See the call site for why recomputing them is unsafe. Both the "parent had
+/// none" and "parent had some" cases have to agree with this run, so a
+/// mismatch is reported rather than silently reconciled.
+fn inherit_level_coarsenings(
+    parent: &str,
+    num_levels: usize,
+    n_features_full: usize,
+) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
+    use crate::topic::model_metadata::load_coarsening_levels;
+
+    let Some(levels) = load_coarsening_levels(parent)? else {
+        // No file: the parent trained at full resolution. Match it, so the
+        // encoder's input width is `n_features_full` on both sides.
+        log::info!(
+            "--init-from {parent}: parent trained without feature coarsening; \
+             training at full resolution ({n_features_full} features) to match"
+        );
+        return Ok(vec![None; num_levels]);
+    };
+
+    anyhow::ensure!(
+        levels.len() == num_levels,
+        "--init-from {parent}: parent has {} coarsening level(s) but this run has \
+         --num-levels {num_levels}. The per-level decoders are keyed to their own \
+         groupings, so the ladders must match — pass --num-levels {}.",
+        levels.len(),
+        levels.len(),
+    );
+    for (i, lvl) in levels.iter().enumerate() {
+        if let Some(fc) = lvl {
+            anyhow::ensure!(
+                fc.fine_to_coarse.len() == n_features_full,
+                "--init-from {parent}: level {i}'s coarsening covers {} features but this \
+                 run has {n_features_full}. The two cohorts do not share a gene axis — either \
+                 they spell some genes differently (see --feature-name-kind) or the new data \
+                 measures genes the model has never seen, which cannot be added to a trained \
+                 model.",
+                fc.fine_to_coarse.len(),
+            );
+        }
+    }
+    let widths: Vec<String> = levels
+        .iter()
+        .map(|l| {
+            l.as_ref()
+                .map_or_else(|| "full".into(), |c| c.num_coarse.to_string())
+        })
+        .collect();
+    log::info!(
+        "--init-from {parent}: inheriting feature coarsening, level widths [{}] \
+         (--max-coarse-features is ignored)",
+        widths.join(", "),
+    );
+    Ok(levels)
+}
+
+/// Assemble + save the `{prefix}.senna.json` manifest for a `senna topic` run.
+/// The other families build their `RunDescription` inline; this one is split
+/// out only because `fit_topic_model` is already long.
 fn write_topic_manifest(
-    kind: crate::run_manifest::RunKind,
     prefix: &str,
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
     has_cell_to_pb: bool,
+    pb_reference_suffix: Option<&'static str>,
+    train_args: crate::run_manifest::TrainArgsRecord,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files
         .iter()
@@ -601,7 +762,8 @@ fn write_topic_manifest(
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        kind,
+        train_args: Some(train_args),
+        kind: crate::run_manifest::RunKind::Topic,
         prefix,
         data_input: &input,
         data_batch: &batch,
@@ -610,6 +772,7 @@ fn write_topic_manifest(
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix,
         pb_latent_suffix: Some("pb_latent.parquet"),
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: None,
@@ -661,6 +824,9 @@ struct PipelineCtx<'a> {
     level_coarsenings: &'a [Option<FeatureCoarsening>],
     finest_coarsening: Option<&'a FeatureCoarsening>,
     finest_collapsed: &'a CollapsedOut,
+    /// Finest-level cell → pb membership, for anything that needs to know how
+    /// many cells a pseudobulk stands for. `None` when the run built no hierarchy.
+    cell_to_pb_finest: Option<&'a [usize]>,
     n_features_full: usize,
     gene_names: &'a [Box<str>],
     data_vec: &'a SparseIoVec,
@@ -749,6 +915,10 @@ where
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
+                growth: crate::topic::warm_start::Growth {
+                    add_topics: ctx.args.add_topics,
+                    add_embedding_dim: 0,
+                },
             },
         )?;
     }
@@ -827,8 +997,15 @@ where
         // `dictionary.parquet` so rare informative genes survive into the
         // annotate-side enrichment ranking.
         info!("Computing NB Fisher gene weights for empirical dictionary");
-        let fisher_w =
-            crate::empirical_dict::compute_nb_fisher_weights(ctx.data_vec, ctx.args.block_size)?;
+        // Full gene resolution — the point of the empirical dictionary is to
+        // escape the coarsening, so no `FeatureCoarsening` here.
+        let fisher_w = crate::refine_weighting::fit_fisher_weights(
+            ctx.finest_collapsed,
+            ctx.cell_to_pb_finest,
+            None,
+            ctx.data_vec,
+            ctx.args.block_size,
+        )?;
         crate::output_helpers::save_fisher_weights(
             ctx.args.out.as_ref(),
             &fisher_w,
@@ -902,7 +1079,7 @@ where
     Dec: DecoderModuleT + NewDecoder + ConfigureDecoder + Send + Sync,
 {
     use crate::topic::model_metadata::{
-        save_coarsening, save_feature_mean, save_parameters, TopicModelMetadata,
+        save_coarsening_levels, save_feature_mean, save_parameters, TopicModelMetadata,
     };
     save_parameters(ctx.parameters, &ctx.args.out)?;
     // Persist `μ_d` at `D_full` (gene-name aligned). At predict time we
@@ -944,8 +1121,10 @@ where
     };
     metadata.save(&ctx.args.out)?;
 
-    if let Some(fc) = ctx.finest_coarsening {
-        save_coarsening(fc, &ctx.args.out)?;
+    // Every level, not just the finest: `predict` reads only the finest, but a
+    // `--init-from` child has to reproduce each decoder level's own grouping.
+    if ctx.level_coarsenings.iter().any(Option::is_some) {
+        save_coarsening_levels(ctx.level_coarsenings, &ctx.args.out)?;
     }
 
     // Move VarMap to CPU, then rebuild encoder from CPU Vars.
@@ -1067,6 +1246,10 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
                 encoder_hidden: &ctx.args.encoder_layers,
                 level_decoder_dims: ctx.level_decoder_dims,
                 embedding_dim: None,
+                growth: crate::topic::warm_start::Growth {
+                    add_topics: ctx.args.add_topics,
+                    add_embedding_dim: 0,
+                },
             },
         )?;
     }
@@ -1110,4 +1293,28 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
 
     let z_nk = save_metadata_and_evaluate::<MultinomTopicDecoder>(ctx, &decoder_weights)?;
     Ok((scores, z_nk))
+}
+
+impl crate::update::Updatable for TopicArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.init_from = Some(r.init_from);
+        self.pb_reference = r.reference;
+
+        // Only when growth was asked for: otherwise the recorded K is replayed
+        // verbatim, and `parent_topics` is not even looked up.
+        if !r.growth.is_none() {
+            self.n_latent_topics = r.parent_topics + r.growth.add_topics;
+            self.add_topics = r.growth.add_topics;
+        }
+        // NOT inherited: `--from` would pull the parent's cell→pb partition,
+        // and `align_cell_to_pb_to_cells` bails on any cell absent from the
+        // source — which every newly absorbed cell is.
+        self.from = None;
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
 }

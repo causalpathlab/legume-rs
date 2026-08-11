@@ -70,6 +70,10 @@ pub(super) fn build_pseudobulks(
             // log_sd planes — that is the bulk of the coarsen-stage memory at high
             // pb-sample counts.
             output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
+            anchor_batches: config.anchor_batches.clone(),
+            bulk_batches: config.bulk_batches.clone(),
+            observe_panels: true,
+            keep_finest_stats: config.emit_finest_collapse,
         },
     )?;
     let mut collapsed_levels = collapse_out.levels;

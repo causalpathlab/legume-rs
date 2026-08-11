@@ -93,6 +93,8 @@ pub struct JointSvdArgs {
 
 pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    args.collapse
+        .reject_pb_reference(crate::run_manifest::RunKind::JointSvd)?;
 
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
@@ -140,6 +142,10 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             num_opt_iter: args.collapse.iter_opt,
             refine: Some(args.collapse.pb_refine.to_params()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
+            anchor_batches: None,
+            bulk_batches: None,
+            observe_panels: true,
+            keep_finest_stats: false,
         },
     )?;
 
@@ -223,6 +229,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: None,
         kind: crate::run_manifest::RunKind::JointSvd,
         prefix: &args.out,
         data_input: &input,
@@ -232,6 +239,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,

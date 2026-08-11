@@ -72,9 +72,35 @@ pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
     cols.iter().map(|c| parse_axis_id(c, prefix)).collect()
 }
 
+/// Clap-declared defaults for an `Args` struct — see
+/// [`matrix_util::clap_defaults`]. Re-exported because senna's arg structs name
+/// it by path in `#[serde(default = "...")]`.
+pub use matrix_util::clap_defaults::clap_defaults;
+
+/// Posterior-mean PB matrix `[D, n_pb]`, preferring the batch-adjusted
+/// estimate when available. Anchor selection and ambient-profile
+/// estimation both want the cleanest cell-type signal — the batch-
+/// adjusted posterior strips per-batch effects out of the mean.
+pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed.mu_adjusted.as_ref().map_or_else(
+        || collapsed.mu_observed.posterior_mean(),
+        matrix_param::traits::Inference::posterior_mean,
+    )
+}
+
+/// Posterior log-mean PB matrix `[D, n_pb]`, preferring batch-adjusted.
+/// For Gamma(α, β), returns E[log X] = ψ(α) - log(β).
+pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
+    collapsed.mu_adjusted.as_ref().map_or_else(
+        || collapsed.mu_observed.posterior_log_mean(),
+        matrix_param::traits::Inference::posterior_log_mean,
+    )
+}
+
 /// Shared compute device enum for candle-based models
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum ComputeDevice {
     Cpu,
     Cuda,
@@ -92,8 +118,9 @@ impl ComputeDevice {
 }
 
 /// Batch adjustment method
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum AdjMethod {
     Batch,
     Residual,
@@ -112,7 +139,8 @@ impl AdjMethod {
 /// Shared CNV detection CLI args (used by SVD, topic, masked-topic).
 /// Providing `--gff` or `--cnv-ground-truth` turns on the per-sample HMM CNV
 /// model from `cnv::per_sample`.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct CnvArgs {
     #[arg(long, help = "GFF/GTF annotation for CNV detection.")]
     pub gff: Option<Box<str>>,

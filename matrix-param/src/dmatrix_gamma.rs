@@ -240,6 +240,41 @@ impl GammaMatrix {
             });
     }
 
+    /// Whether the posterior at `(row, col)` carries any data beyond the
+    /// prior: `a_stat > a0`. The read-only counterpart of
+    /// [`Self::sparsify_mean_to_support`], for consumers that serialize the
+    /// mean without owning the numerator — an unsupported entry's mean is the
+    /// prior floor `a0 / (b0 + denom)`, which is regularization, not signal.
+    /// Writing those floors out turns a sparse posterior dense: a carried
+    /// pseudobulk reference measured 100.0% dense (34M of 34M entries) before
+    /// its writer checked this.
+    #[must_use]
+    pub fn has_data_support(&self, row: usize, col: usize) -> bool {
+        self.a_stat[(row, col)] > self.a0
+    }
+
+    /// The unregularized rate at `(row, col)`: `(a_stat − a0) / (b_stat − b0)`
+    /// — data sum over data denominator, no prior in either. Zero when the
+    /// entry has no data support.
+    ///
+    /// This is what a *serialized* posterior should usually store: paired with
+    /// its denominator, it is a bijection of the sufficient statistics, so a
+    /// consumer reconstructs `a_stat`/`b_stat` exactly. The posterior mean
+    /// `(a0 + sum)/(b0 + n)` is the right *estimate* but the wrong *carrier* —
+    /// its prior shrinkage (1.85× at `sum = 1, n = 12`) gets re-ingested as if
+    /// it were data, and a second posterior forms around an already-shrunk
+    /// value.
+    #[must_use]
+    pub fn evidence_mean(&self, row: usize, col: usize) -> f32 {
+        let a = self.a_stat[(row, col)] - self.a0;
+        let b = self.b_stat[(row, col)] - self.b0;
+        if a > 0.0 && b > 0.0 {
+            a / b
+        } else {
+            0.0
+        }
+    }
+
     /// Row-stack per-feature-block parameters (from a gene-blocked fit)
     /// into one `[Σrowsᵢ × K]` parameter. All blocks must share the column
     /// count and hyper-params. Calibrated planes present in the first block

@@ -24,7 +24,8 @@ use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use candle_util::decoder::GaussianNbDecoder;
 use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct VaeArgs {
     #[arg(
         value_delimiter = ',',
@@ -73,6 +74,13 @@ pub struct VaeArgs {
                      The model must come from a previous `senna vae` run."
     )]
     pub(crate) init_from: Option<Box<str>>,
+
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
 
     #[arg(
         long,
@@ -212,6 +220,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
+        pb_reference: args.pb_reference.as_ref(),
+        mixture_batches: args.collapse.mixture_batch.clone(),
+        observe_panels: true,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
@@ -220,6 +231,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
+
     let n_features = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
     let n_latent = args.n_latent;
@@ -270,6 +282,8 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features; num_levels],
                 embedding_dim: None,
+                // `senna vae` has no growth surface yet.
+                growth: crate::topic::warm_start::Growth::default(),
             },
         )?;
     }
@@ -372,6 +386,17 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     let cell_names = data_vec.column_names()?;
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        data_vec.column_multiplicities(),
+        &gene_names,
+        args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
+    )?;
+
     crate::postprocess::viz_prep::write_cell_proj(
         &args.out,
         &proj_kn,
@@ -399,6 +424,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Vae,
         prefix: &args.out,
         data_input: &input,
@@ -408,6 +434,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: None,
+        pb_reference_suffix,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
@@ -444,4 +471,19 @@ fn build_encoder(
         parameters,
         vb,
     )?)
+}
+
+impl crate::update::Updatable for VaeArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.init_from = Some(r.init_from);
+        self.pb_reference = r.reference;
+        // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
+        self.from = None;
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
 }

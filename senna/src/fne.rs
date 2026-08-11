@@ -220,6 +220,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         .map(std::string::ToString::to_string)
         .collect();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: None,
         kind: crate::run_manifest::RunKind::Fne,
         prefix: &args.out,
         data_input: &input,
@@ -229,6 +230,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),

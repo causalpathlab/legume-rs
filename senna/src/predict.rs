@@ -154,6 +154,21 @@ pub struct PredictArgs {
     )]
     pub(crate) delta_iters: usize,
 
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_name = "FRACTION",
+        help = "Refuse to score below this share of the model's genes (0 = no gate)",
+        long_help = "Gene coverage is always reported. This turns it into a hard floor.\n\
+                     \n\
+                     Off by default, because low coverage is not by itself wrong:\n\
+                     a targeted panel legitimately measures a small slice of a\n\
+                     whole-transcriptome model, and a narrow panel that spans the\n\
+                     latent directions can still identify it. Zero mapped genes is\n\
+                     always refused — that is a naming failure, not thin coverage."
+    )]
+    pub(crate) min_gene_overlap: f32,
+
     #[arg(short, long, help = "Verbose logging")]
     pub(crate) verbose: bool,
 
@@ -235,6 +250,7 @@ impl PredictArgs {
             kind: self.feature_name_kind.clone().resolve_or_gene(),
             suffix_delim: self.feature_name_suffix_delim,
             keep_suffix: self.keep_feature_suffix.clone(),
+            min_overlap: self.min_gene_overlap,
         }
     }
 }
@@ -294,20 +310,16 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
     }
 }
 
+/// Align query genes onto the model's axis, or `None` when the axes already
+/// match. Coverage is logged and gated by
+/// [`crate::topic::eval::ensure_gene_coverage`].
 fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
     opts: &QueryNameOpts,
 ) -> anyhow::Result<Option<GeneRemap>> {
     let gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
-    let min_overlap = (training_genes.len() as f32 * 0.1) as usize;
-    anyhow::ensure!(
-        gene_remap.n_mapped >= min_overlap,
-        "Too few genes overlap: {}/{} mapped (need at least {})",
-        gene_remap.n_mapped,
-        training_genes.len(),
-        min_overlap,
-    );
+    crate::topic::eval::ensure_gene_coverage(&gene_remap, opts.min_overlap, "--feature-name-kind")?;
 
     let needs_remap = gene_remap
         .new_to_train

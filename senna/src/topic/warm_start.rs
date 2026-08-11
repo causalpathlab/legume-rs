@@ -13,6 +13,7 @@
 
 use crate::topic::model_metadata::TopicModelMetadata;
 use candle_util::candle_nn::VarMap;
+pub use candle_util::grow::Growth;
 
 /// Architecture invariants the saved checkpoint must match.
 pub struct WarmStartCheck<'a> {
@@ -25,6 +26,9 @@ pub struct WarmStartCheck<'a> {
     pub level_decoder_dims: &'a [usize],
     /// Set only for indexed; ignored for dense.
     pub embedding_dim: Option<usize>,
+    /// When non-zero, `n_topics` / `embedding_dim` above are the *grown* sizes
+    /// and the checkpoint is expected to be smaller by exactly this much.
+    pub growth: Growth,
 }
 
 /// Validate that the saved checkpoint is architecture-compatible, then load
@@ -43,9 +47,11 @@ pub fn warm_start_load(
         expected.model_type_expected,
     );
     anyhow::ensure!(
-        metadata.n_topics == expected.n_topics,
-        "warm-start: K mismatch (saved={}, current={})",
+        metadata.n_topics + expected.growth.add_topics == expected.n_topics,
+        "warm-start: K mismatch (saved={} + {} added = {}, current={})",
         metadata.n_topics,
+        expected.growth.add_topics,
+        metadata.n_topics + expected.growth.add_topics,
         expected.n_topics,
     );
     anyhow::ensure!(
@@ -56,8 +62,15 @@ pub fn warm_start_load(
     );
     anyhow::ensure!(
         metadata.n_features_full == expected.n_features_full,
-        "warm-start: n_features_full mismatch (saved={}, current={}). \
-         Cross-gene-set warm-start not supported — train on the same gene set.",
+        "warm-start: n_features_full mismatch (saved={}, current={}). The saved weights are \
+         keyed to the parent's gene axis, so it has to be the same axis.\n\
+         \n\
+         Absorbing a new cohort is the usual cause, and it splits two ways. If the axis GREW \
+         because the two cohorts spell some genes differently, each unreconciled name became a \
+         second row — reconcile them with the family's row-name canonicalization option (for \
+         example `ENSG00000105329_TGFB1` vs `TGFB1`). If it grew because the new cohort really \
+         does measure genes the model has never seen, those cannot be added to a trained \
+         model: restrict the input to the parent's gene set, or re-train.",
         metadata.n_features_full,
         expected.n_features_full,
     );
@@ -75,24 +88,50 @@ pub fn warm_start_load(
         expected.level_decoder_dims,
     );
     if let Some(emb) = expected.embedding_dim {
+        let saved_emb = metadata.embedding_dim.unwrap_or(0);
         anyhow::ensure!(
-            metadata.embedding_dim == Some(emb),
-            "warm-start: embedding_dim mismatch (saved={:?}, current={})",
+            saved_emb + expected.growth.add_embedding_dim == emb,
+            "warm-start: embedding_dim mismatch (saved={:?} + {} added, current={})",
             metadata.embedding_dim,
+            expected.growth.add_embedding_dim,
             emb,
+        );
+    } else {
+        anyhow::ensure!(
+            expected.growth.add_embedding_dim == 0,
+            "warm-start: --add-embedding-dim has no meaning for a '{}' model — it has no \
+             per-gene embedding ρ to widen. Only the masked family does.",
+            expected.model_type_expected,
         );
     }
     let safetensors_path = format!("{prefix}.safetensors");
     log::info!("Warm-starting from {safetensors_path}");
 
-    // VarMap has interior mutability via Arc<Mutex<_>>; clone shares storage
-    // and lets us call `.load()` (which takes `&mut self`) without forcing
-    // every caller to thread a mutable reference through the pipeline.
-    let mut handle = parameters.clone();
-    handle.load(&safetensors_path)?;
+    if expected.growth.is_none() {
+        // VarMap has interior mutability via Arc<Mutex<_>>; clone shares storage
+        // and lets us call `.load()` (which takes `&mut self`) without forcing
+        // every caller to thread a mutable reference through the pipeline.
+        let mut handle = parameters.clone();
+        handle.load(&safetensors_path)?;
+        log::info!(
+            "Warm-start: loaded {} variables from {prefix}",
+            handle.all_vars().len()
+        );
+        return Ok(());
+    }
+
+    let dims = candle_util::grow::GrowthDims {
+        k_old: metadata.n_topics,
+        k_new: expected.n_topics,
+        h_old: metadata.embedding_dim.unwrap_or(0),
+        h_new: expected.embedding_dim.unwrap_or(0),
+    };
     log::info!(
-        "Warm-start: loaded {} variables from {prefix}",
-        handle.all_vars().len()
+        "Warm-start with growth: K {} → {}, H {} → {}",
+        dims.k_old,
+        dims.k_new,
+        dims.h_old,
+        dims.h_new,
     );
-    Ok(())
+    candle_util::grow::load_grown(parameters, &safetensors_path, &dims)
 }

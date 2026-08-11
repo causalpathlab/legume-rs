@@ -3,7 +3,8 @@ use crate::hvg::HvgCliArgs;
 use crate::topic::common::{load_and_project, LoadProjectArgs, ProjectedData};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct SvdArgs {
     #[arg(
         required = true,
@@ -44,6 +45,20 @@ pub struct SvdArgs {
 
     #[command(flatten)]
     collapse: crate::refine_weighting::CollapseArgs,
+
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pb_reference: Option<crate::pb_reference::ReferenceInput>,
+
+    /// The parent run this one continues, set by `senna update` — svd has no
+    /// weights to warm-start, so unlike the other families this is not a CLI
+    /// flag; it only chains the emitted reference's generation counter.
+    #[arg(skip)]
+    #[serde(skip)]
+    init_from: Option<Box<str>>,
 
     #[arg(
         long,
@@ -121,13 +136,24 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn: None,
+        pb_reference: args.pb_reference.as_ref(),
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
         feature_kind: None,
     })?;
 
     // 3. Batch-adjusted collapsing (pseudobulk)
-    let collapse_out = data_vec.collapse_columns_multilevel(
+    //
+    // `collapse_columns_multilevel` would do, but it is a thin wrapper that
+    // computes the cell → pb membership and then throws it away — and
+    // `--emit-pb-reference` needs it, to know how many cells each carried
+    // column stands for. Same work, one more return value.
+    //
+    // data-beans-alg hands levels back finest-FIRST, and svd consumes only
+    // the finest: take element 0 of each and drop the coarser tail now — a
+    // retained level is up to six `[D, S]` planes of dead weight.
+    let mut multilevel = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
+        &mut data_vec,
         &proj_kn,
         &batch_membership,
         &MultilevelParams {
@@ -137,8 +163,21 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             num_opt_iter: args.collapse.iter_opt,
             refine: Some(args.collapse.pb_refine.to_params()),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
+            // See `topic::common::load_and_collapse` — greedy correction
+            // against the carried reference when one is loaded.
+            anchor_batches: args
+                .pb_reference
+                .is_some()
+                .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            bulk_batches: args.collapse.mixture_batch.clone(),
+            observe_panels: true,
+            keep_finest_stats: false,
         },
     )?;
+    anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");
+    let collapse_out = multilevel.levels.swap_remove(0);
+    let finest_membership = multilevel.cell_to_pb_per_level.swap_remove(0);
+    drop(multilevel);
 
     // 4. batch-adjusted data
     let batch_dp = collapse_out.mu_residual.as_ref();
@@ -171,7 +210,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         }
     }
 
-    if let Some(batch_db) = collapse_out.delta {
+    // Borrowed, not moved: `--emit-pb-reference` reads the rest of
+    // `collapse_out` further down, and a partial move would put it out of reach.
+    if let Some(batch_db) = collapse_out.delta.as_ref() {
         let outfile = args.out.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
@@ -227,6 +268,10 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
     }
 
+    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
+    // its triplet build never overlaps the live backend in memory.
+    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+
     // Save selected feature list if feature selection was applied
     if let Some(sel) = &selected_features {
         use matrix_util::common_io::write_lines;
@@ -262,6 +307,17 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         output_keep_idx.as_deref(),
     )?;
 
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        &collapse_out,
+        Some(std::slice::from_ref(&finest_membership)),
+        column_weight.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
+    )?;
+
     let input: Vec<String> = args
         .data_files
         .iter()
@@ -273,6 +329,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Svd,
         prefix: &args.out,
         data_input: &input,
@@ -282,6 +339,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
@@ -452,4 +510,16 @@ fn adjust_triplets_visitor(
     let mut triplets = triplets.lock().expect("lock triplets");
     triplets.extend(new_triplets);
     Ok(())
+}
+
+impl crate::update::Updatable for SvdArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.pb_reference = r.reference;
+        self.init_from = Some(r.init_from);
+        // `svd` has no weights and no epoch loop. `update` rejects `--epochs`
+        // for an svd parent before reaching this.
+    }
 }

@@ -158,11 +158,9 @@ impl BgeEmbedding {
         let qopts = QueryNameOpts::default();
         let remap = build_gene_remap_with(&self.gene_names, &new_genes, &qopts);
         let n_model = self.gene_names.len();
-        anyhow::ensure!(
-            remap.n_mapped * 10 >= n_model,
-            "too few genes overlap: {}/{n_model} mapped",
-            remap.n_mapped
-        );
+        // No default floor — see `ensure_gene_coverage`. `probe --model` on a bge
+        // run reaches here, and a thin panel is exactly what it exists to score.
+        crate::topic::eval::ensure_gene_coverage(&remap, 0.0, "--feature-name-kind")?;
 
         // The exact normalizer: every model gene, so `partition_scale = 1`.
         let partition: Vec<u32> = (0..n_model as u32).collect();

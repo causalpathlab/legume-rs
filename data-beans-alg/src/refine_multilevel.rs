@@ -71,7 +71,10 @@ fn build_bbknn_neighbors(
     (0..num_pb)
         .into_par_iter()
         .map(|pbsamp| -> anyhow::Result<Vec<usize>> {
-            let hits = bbknn_match_one_pbsamp(layout, batch_knn_lookup, knn, pbsamp)?;
+            // Pooled (None): the DC-SBM refinement graph should connect across
+            // every batch pair regardless of anchoring — anchoring shapes the
+            // counterfactual for δ, not the clustering topology.
+            let hits = bbknn_match_one_pbsamp(layout, batch_knn_lookup, knn, pbsamp, None)?;
             Ok(hits.into_iter().map(|(p, _)| p).collect())
         })
         .collect()
