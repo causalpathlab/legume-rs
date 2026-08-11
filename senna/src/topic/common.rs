@@ -429,6 +429,11 @@ pub struct LoadCollapseArgs<'a> {
     /// every family except masked-topic under `--multiome`, whose row union
     /// is intentional modality stacking rather than differing panels.
     pub observe_panels: bool,
+    /// Batch labels whose columns are mixtures over cell states — see
+    /// `CollapseArgs::mixture_batch`. Threaded to
+    /// [`MultilevelParams::bulk_batches`], which bars them from the
+    /// cross-batch counterfactual in both directions.
+    pub mixture_batches: Option<Vec<Box<str>>>,
     /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
     pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
     /// Column-alignment strategy — see [`LoadProjectArgs::column_alignment`].
@@ -501,7 +506,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             .pb_reference
             .is_some()
             .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
-        bulk_batches: None,
+        bulk_batches: args.mixture_batches.clone(),
         observe_panels: args.observe_panels,
         keep_finest_stats: false,
     };

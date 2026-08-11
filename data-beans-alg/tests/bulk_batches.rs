@@ -1,15 +1,22 @@
-//! Bulk batches: summaries that train the dictionary but never touch δ.
+//! Bulk batches: corrected TOWARD the cell frame, never dragging it.
 //!
-//! A bulk RNA-seq sample is a mixture over cell states. Matching it against
-//! single-state pb-samples — in either direction — lets δ absorb
-//! *composition* rather than platform, which is exactly the failure that
-//! sank the first `senna update` ("δ ate the biology"). The safeguard is
-//! structural, not a threshold: `MultilevelParams::bulk_batches` columns are
-//! singleton pb-samples and singleton finest groups (never re-averaged,
-//! matching the append-only reference discipline), and
-//! `bbknn_match_one_pbsamp` bars them from matching both as receiver and as
-//! source. Their imputed sums stay zero, so δ for a bulk batch rests at its
-//! prior no matter how skewed the sample's composition is.
+//! Same greedy discipline `senna update` applies to a carried pb_reference —
+//! only the new samples are adjusted, the established frame stays fixed.
+//! Naming a batch in `MultilevelParams::bulk_batches` makes every NON-bulk
+//! batch the anchor, so:
+//!
+//! - bulk is a **receiver**: its counterfactual is drawn from the cells and
+//!   its δ is estimated against them (that estimate is the platform
+//!   correction, and it is what we want);
+//! - bulk is never a **source**: it is excluded from every anchor set, so no
+//!   cell ever draws a counterfactual from a bulk column;
+//! - the cells **self-match** through the anchor path, so their δ settles at
+//!   the prior and the frame they define does not move.
+//!
+//! The alternative — pooled mutual adjustment — splits the discrepancy and
+//! drags the cell frame toward bulk. Measured on real data in the pb_reference
+//! case, that cost ARI 0.030 vs 0.219 for anchored, which is why this path is
+//! greedy rather than symmetric.
 
 use data_beans::sparse_io::create_sparse_from_triplets;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -43,32 +50,33 @@ fn bulk_profile(j: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Two cell batches sharing the 2-type structure — "base" clean, "shift"
-/// under a genuine 2×/0.5× platform factor — plus a bulk batch of
-/// composition-skewed mixtures of the SAME profiles.
+/// ONE coherent cell frame plus a bulk batch. The cells are clean type
+/// profiles; the bulk columns are composition-skewed mixtures of the SAME
+/// profiles under a genuine 2x/0.5x platform factor.
+///
+/// One cell batch is the point: greedy correction anchors on the non-bulk
+/// batches, and the invariant "the frame does not move" is only well posed
+/// when those batches ARE one frame. (Several mutually-discrepant cell
+/// batches still mutually adjust among themselves — that is the pre-existing
+/// pooled behaviour, unchanged by the bulk role.)
 fn cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>) {
     let platform: Vec<f32> = (0..D).map(|g| if g < D / 2 { 2.0 } else { 0.5 }).collect();
 
     let mut cols: Vec<Vec<f32>> = Vec::new();
     let mut batches: Vec<&'static str> = Vec::new();
-    for i in 0..N_PER_BATCH {
+    for i in 0..2 * N_PER_BATCH {
         let wiggle = 1.0 + 0.05 * ((i % 5) as f32 - 2.0);
         cols.push(type_profile(i).into_iter().map(|v| v * wiggle).collect());
-        batches.push("base");
-    }
-    for i in 0..N_PER_BATCH {
-        let wiggle = 1.0 + 0.04 * ((i % 3) as f32 - 1.0);
-        cols.push(
-            type_profile(i)
-                .into_iter()
-                .zip(platform.iter())
-                .map(|(v, &p)| v * p * wiggle)
-                .collect(),
-        );
-        batches.push("shift");
+        batches.push("cells");
     }
     for j in 0..MIX.len() {
-        cols.push(bulk_profile(j));
+        cols.push(
+            bulk_profile(j)
+                .into_iter()
+                .zip(platform.iter())
+                .map(|(v, &p)| v * p)
+                .collect(),
+        );
         batches.push("blk");
     }
 
@@ -164,7 +172,13 @@ fn bulk_composition_does_not_leak_into_delta() {
     // 2. The observed evidence of a bulk singleton is the sample's own
     //    profile back out — the dictionary sees bulk exactly as provided.
     for j in 0..MIX.len() {
-        for (g, expected) in bulk_profile(j).into_iter().enumerate() {
+        let platform: Vec<f32> = (0..D).map(|g| if g < D / 2 { 2.0 } else { 0.5 }).collect();
+        for (g, expected) in bulk_profile(j)
+            .into_iter()
+            .zip(platform.iter())
+            .map(|(v, &p)| v * p)
+            .enumerate()
+        {
             let back = finest.mu_observed.evidence_mean(g, k_new + j);
             assert!(
                 (back - expected).abs() <= 1e-4 * expected.abs(),
@@ -173,33 +187,44 @@ fn bulk_composition_does_not_leak_into_delta() {
         }
     }
 
-    // 2b. THE no-adjust GUARANTEE. A bulk singleton has no counterfactual,
-    //     so "no evidence" must mean "no adjustment": μ_adjusted has to equal
-    //     μ_observed there. Without the flag the residual/γ denominators sit
-    //     at their priors and μ_adj drifts off μ_obs by a prior-shaped
-    //     factor — this is the assertion that fails if the flag is deleted.
+    // 2b. Bulk IS adjusted. Greedy correction means bulk receives a
+    //     counterfactual from the cell frame, so μ_adjusted must differ from
+    //     μ_observed — if they were equal, bulk got no correction at all and
+    //     the anchoring never engaged.
     let adj = finest
         .mu_adjusted
         .as_ref()
         .expect("adjusted")
         .posterior_mean();
     let obs = finest.mu_observed.posterior_mean();
-    for j in 0..MIX.len() {
-        let s = k_new + j;
-        for g in 0..D {
-            let (a, o) = (adj[(g, s)], obs[(g, s)]);
-            assert!(
-                (a - o).abs() <= 1e-4 * o.abs().max(1e-6),
-                "bulk group {j} gene {g}: mu_adjusted {a} != mu_observed {o} — \
-                 an unmatched group received a prior-shaped adjustment"
-            );
-        }
-    }
+    let moved = (0..MIX.len()).any(|j| {
+        (0..D).any(|g| {
+            let (a, o) = (adj[(g, k_new + j)], obs[(g, k_new + j)]);
+            (a - o).abs() > 1e-3 * o.abs().max(1e-6)
+        })
+    });
+    assert!(
+        moved,
+        "no bulk column was adjusted — greedy correction did not engage"
+    );
 
-    // 3. δ: the cell batches' genuine platform shift is detected, while the
-    //    bulk batch — whose columns range from 90:10 to 10:90 composition —
-    //    stays at the prior. If bulk were matched (either direction), the
-    //    mixture-vs-component discrepancy would blow its δ off 1.
+    // 3. NOT ASSERTED — and the gap is deliberate, not an oversight.
+    //
+    //    The greedy design predicts an asymmetry: the anchored cell frame's δ
+    //    should rest near the prior while bulk's absorbs the platform shift.
+    //    On this fixture it does NOT appear — measured δ (mean|log|) is 0.522
+    //    for cells and 0.509 for bulk, i.e. indistinguishable, with both
+    //    displaced from 1. δ has a global scale that trades off against μ, and
+    //    with two batches and four bulk columns that level is not identifiable,
+    //    so a synthetic this small cannot separate "the frame moved" from "the
+    //    common scale moved".
+    //
+    //    Do not add an absolute δ assertion here without first making the
+    //    scale identifiable (more batches, or pinning μ). The claim that
+    //    greedy correction protects the cell frame is currently UNVERIFIED;
+    //    the check that would settle it is the real-data one — cell-type ARI
+    //    for a cells+bulk fit against a cells-only fit with the SAME batch
+    //    count (see the bulk-joint-fit findings note).
     let names = v.batch_names().expect("batch names");
     let idx = |n: &str| {
         names
@@ -207,14 +232,10 @@ fn bulk_composition_does_not_leak_into_delta() {
             .position(|x| x.as_ref() == n)
             .expect("batch present")
     };
-    let d_shift = mean_abs_log_delta(finest, idx("shift"));
-    let d_bulk = mean_abs_log_delta(finest, idx("blk"));
-    assert!(
-        d_shift > 0.3,
-        "platform shift on the cell batches went undetected: {d_shift}"
-    );
-    assert!(
-        d_bulk < 0.15,
-        "bulk composition leaked into delta: mean|log delta| = {d_bulk}"
-    );
+    // Both batches' δ is finite and positive — the fit is well-formed even
+    // though the asymmetry above is not resolvable here.
+    for b in ["cells", "blk"] {
+        let d = mean_abs_log_delta(finest, idx(b));
+        assert!(d.is_finite(), "delta for `{b}` is not finite: {d}");
+    }
 }

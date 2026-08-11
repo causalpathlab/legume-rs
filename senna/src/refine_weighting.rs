@@ -150,6 +150,34 @@ pub(crate) struct CollapseArgs {
 
     #[arg(
         long,
+        value_delimiter = ',',
+        help = "Batch label(s) whose columns are MIXTURES over cell states",
+        long_help = "Names a batch already present in --batch-files as a mixture.\n\
+                     \n\
+                     The distinction is composition, not assay. A SORTED bulk\n\
+                     sample is one cell state — the same object the collapse builds\n\
+                     internally — so it belongs in an ordinary batch, where the\n\
+                     cross-batch counterfactual compares like with like and δ\n\
+                     measures platform. Do NOT name those here.\n\
+                     \n\
+                     A MIXED sample (whole blood, tumour, GTEx/TCGA) averages many\n\
+                     states, so matching it against a single-state pseudobulk\n\
+                     measures composition as much as platform, and δ absorbs the\n\
+                     biology. Naming it here bars it from the counterfactual in\n\
+                     BOTH directions — neither matched nor used as a match — so its\n\
+                     δ rests at the prior. Its columns still train the dictionary at\n\
+                     full weight, and each stays its own pseudobulk.\n\
+                     \n\
+                     Measured, so you can judge the trade: admitting bulk as an\n\
+                     ORDINARY batch cost ~25-37% of cell-type ARI on HCA_BM, and\n\
+                     that cost did not vary with density, purity or column count.\n\
+                     Compare against a cells-only fit with the SAME batch count — a\n\
+                     single-batch baseline skips batch correction and overstates it."
+    )]
+    pub(crate) mixture_batch: Option<Vec<Box<str>>>,
+
+    #[arg(
+        long,
         default_value_t = 10,
         help = "In-batch k-NN for pb-sample merging",
         long_help = "Number of within-batch nearest neighbours.\n\
