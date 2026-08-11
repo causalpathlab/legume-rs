@@ -15,7 +15,7 @@ pub struct LdScoreRecord {
 /// where r_{jk} = (X_j' X_k) / (n * sigma_j * sigma_k)
 ///
 /// Implementation: standardize X_block columns, compute R = X'X / n,
-/// then l_j = sum_k R[j,k]^2
+/// then `l_j = sum_k R[j,k]^2`
 pub fn compute_block_ld_scores(
     x_block: &DMatrix<f32>,
     global_snp_offset: usize,

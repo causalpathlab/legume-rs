@@ -26,9 +26,9 @@ use nalgebra::{DMatrix, DVector};
 /// The λ-independent half of the RSS eigendecomposition: `D` and `V`.
 ///
 /// The randomized SVD is the expensive step; λ enters only afterwards, through
-/// `D̃ = √(D² + λ)`. Holding the decomposition separately is what lets
-/// [`RssEigenBasis::project_raw`] exist: `V'z` is λ-independent, so calibration
-/// can fit the moment law on it and derive λ before any ridge is applied.
+/// `D̃ = √(D² + λ)`. Holding the decomposition separately lets one λ-independent
+/// pass be reused by anything that has to choose λ from the data before a ridge
+/// can be applied.
 pub struct RssEigenBasis {
     /// Singular values D of X/√n, length K. D² are the eigenvalues of R.
     singular_values: DVector<f32>,
@@ -59,16 +59,6 @@ impl RssEigenBasis {
     /// Squared singular values d²_k — the eigenvalues of R.
     pub fn singular_values_sq(&self) -> Vec<f32> {
         self.singular_values.iter().map(|&d| d * d).collect()
-    }
-
-
-    /// Raw eigenspace projection V'z, shape (K, T).
-    ///
-    /// Unlike [`RssSvdNal::project_zscores`] this applies no `D̃⁻¹`, so it does
-    /// not depend on λ. Calibration fits the moment law on it to *derive* λ,
-    /// which has to happen before any ridge can be applied.
-    pub fn project_raw(&self, z: &DMatrix<f32>) -> DMatrix<f32> {
-        self.v_mat.tr_mul(z)
     }
 
     /// Apply a ridge λ, consuming the basis.

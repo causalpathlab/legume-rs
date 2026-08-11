@@ -156,8 +156,7 @@ mod tests {
             },
         ];
 
-        let yhat =
-            compute_all_polygenic_scores_ridge(&genotypes, &zscores, &blocks, 0.1).unwrap();
+        let yhat = compute_all_polygenic_scores_ridge(&genotypes, &zscores, &blocks, 0.1).unwrap();
         assert_eq!(yhat.nrows(), n);
         assert_eq!(yhat.ncols(), t);
 

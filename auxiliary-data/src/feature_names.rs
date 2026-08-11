@@ -323,6 +323,51 @@ fn strip_feature_type_suffix(name: &str, delim: char) -> &str {
     name
 }
 
+/// Clap-facing spelling of [`FeatureNameKind`].
+///
+/// The rule and the flag that selects it belong together: every crate that
+/// aligns feature names across files exposes the same `--feature-name-kind`
+/// vocabulary, so `senna`, `fagioli` and anything after them agree on what
+/// `gene` or `locus` means without each inventing a local rule.
+#[derive(clap::ValueEnum, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeatureNameKindArg {
+    #[default]
+    Auto,
+    Exact,
+    Gene,
+    Locus,
+    LocusOverlap,
+    Mixed,
+}
+
+impl FeatureNameKindArg {
+    /// Resolve to a concrete [`FeatureNameKind`], defaulting `Auto` to
+    /// `Gene { delim: '_' }` — the standard for gene-keyed pre-train
+    /// inputs (bge / fne / topic-family dictionaries).
+    pub fn resolve_or_gene(&self) -> FeatureNameKind {
+        Option::<FeatureNameKind>::from(self.clone())
+            .unwrap_or(FeatureNameKind::Gene { delim: '_' })
+    }
+}
+
+impl From<FeatureNameKindArg> for Option<FeatureNameKind> {
+    fn from(arg: FeatureNameKindArg) -> Self {
+        match arg {
+            FeatureNameKindArg::Auto => None,
+            FeatureNameKindArg::Exact => Some(FeatureNameKind::Exact),
+            FeatureNameKindArg::Gene => Some(FeatureNameKind::Gene { delim: '_' }),
+            FeatureNameKindArg::Locus => Some(FeatureNameKind::Locus {
+                merge_overlapping: false,
+            }),
+            FeatureNameKindArg::LocusOverlap => Some(FeatureNameKind::Locus {
+                merge_overlapping: true,
+            }),
+            FeatureNameKindArg::Mixed => Some(FeatureNameKind::Mixed),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

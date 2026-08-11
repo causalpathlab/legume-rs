@@ -494,8 +494,7 @@ pub fn sample_factor_genetic_effects(
         let indices = all[..num_shared_causal].to_vec();
 
         // Per-variant factor scores f_j, then β_j = Λ f_j.
-        let effect_variance =
-            shared_variance / (num_traits as f32 * num_shared_causal as f32);
+        let effect_variance = shared_variance / (num_traits as f32 * num_shared_causal as f32);
         let f_std = (effect_variance / num_factors.max(1) as f32).sqrt() * num_factors as f32;
         let normal = Normal::new(0.0, f_std as f64)
             .map_err(|e| anyhow::anyhow!("Failed to create Normal distribution: {}", e))?;
@@ -693,8 +692,14 @@ mod factor_tests {
         println!("mean |r_g| by independent-causal count: 0 -> {none:.4}, 5 -> {some:.4}, 40 -> {lots:.4}");
 
         assert!(none > some, "trait-specific effects should dilute r_g");
-        assert!(some > lots, "more trait-specific effects should dilute it further");
-        assert!(none > 0.3, "undiluted r_g should be substantial, got {none}");
+        assert!(
+            some > lots,
+            "more trait-specific effects should dilute it further"
+        );
+        assert!(
+            none > 0.3,
+            "undiluted r_g should be substantial, got {none}"
+        );
     }
 
     /// The implied `r_g` must track the loadings that generated it, not merely
@@ -705,8 +710,7 @@ mod factor_tests {
         let loadings = TraitFactorLoadings::sample(t, 2, 11);
         let mut cov = DMatrix::<f32>::zeros(t, t);
         for b in 0..60 {
-            let e =
-                sample_factor_genetic_effects(500, 30, 0, &loadings, 0.4, 5000 + b).unwrap();
+            let e = sample_factor_genetic_effects(500, 30, 0, &loadings, 0.4, 5000 + b).unwrap();
             cov += genetic_covariance(&e);
         }
         let rg = to_corr(&cov);
@@ -745,6 +749,9 @@ mod factor_tests {
         // Rank-1: every |r_g| should be near 1.
         let m = mean_abs_offdiag(&rg);
         println!("one factor: mean |r_g| = {m:.4}");
-        assert!(m > 0.85, "a single factor should give near-perfect |r_g|, got {m}");
+        assert!(
+            m > 0.85,
+            "a single factor should give near-perfect |r_g|, got {m}"
+        );
     }
 }

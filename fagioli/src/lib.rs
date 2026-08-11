@@ -1,4 +1,4 @@
-pub mod embedding;
+pub mod eqtl;
 pub mod genotype;
 pub mod io;
 pub mod mapping;
