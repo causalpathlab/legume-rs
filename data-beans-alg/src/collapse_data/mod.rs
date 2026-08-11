@@ -575,6 +575,12 @@ where
         resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
     let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
     ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+    // `summary_batches` are the batches whose columns are ALREADY summaries
+    // (a carried pb_reference, or bulk) and so must never be re-averaged.
+    // `anchor_batches` below is the MATCHING frame, which after the greedy
+    // default is the cells — and cells must still collapse into pseudobulks.
+    // Conflating the two turns every cell into its own pb-sample.
+    let summary_batches = anchor_batches.clone();
     let anchor_batches = greedy_anchor_for_bulk(data_vec, anchor_batches, bulk_batches.as_deref());
     let ctx = RefineCollectCtx {
         fine_codes: &fine_codes,
@@ -587,6 +593,7 @@ where
         refine_params,
         output_calibration: params.output_calibration,
         anchor_batches: anchor_batches.as_deref(),
+        summary_batches: summary_batches.as_deref(),
         bulk_batches: bulk_batches.as_deref(),
         observe_panels: params.observe_panels,
         keep_finest_stats: params.keep_finest_stats,
@@ -648,12 +655,18 @@ where
         resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
     let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
     ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+    // `summary_batches` are the batches whose columns are ALREADY summaries
+    // (a carried pb_reference, or bulk) and so must never be re-averaged.
+    // `anchor_batches` below is the MATCHING frame, which after the greedy
+    // default is the cells — and cells must still collapse into pseudobulks.
+    // Conflating the two turns every cell into its own pb-sample.
+    let summary_batches = anchor_batches.clone();
     let anchor_batches = greedy_anchor_for_bulk(data_vec, anchor_batches, bulk_batches.as_deref());
     let pb_samples = build_pb_samples(
         data_vec,
         proj_kn,
         num_features,
-        anchor_batches.as_deref().unwrap_or(&[]),
+        summary_batches.as_deref().unwrap_or(&[]),
         bulk_batches.as_deref().unwrap_or(&[]),
     )?;
     let num_pb = pb_samples.layout.cell_counts.len();
@@ -905,6 +918,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
             let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
             ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+            let summary_batches = anchor_batches.clone();
             let anchor_batches =
                 greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
             let ctx = RefineCollectCtx {
@@ -918,6 +932,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 refine_params,
                 output_calibration: params.output_calibration,
                 anchor_batches: anchor_batches.as_deref(),
+                summary_batches: summary_batches.as_deref(),
                 bulk_batches: bulk_batches.as_deref(),
                 observe_panels: params.observe_panels,
                 keep_finest_stats: params.keep_finest_stats,
@@ -945,13 +960,14 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
             let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
             ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+            let summary_batches = anchor_batches.clone();
             let anchor_batches =
                 greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
             let pb_samples = build_pb_samples(
                 self,
                 proj_kn,
                 num_features,
-                anchor_batches.as_deref().unwrap_or(&[]),
+                summary_batches.as_deref().unwrap_or(&[]),
                 bulk_batches.as_deref().unwrap_or(&[]),
             )?;
             info!(
@@ -1113,6 +1129,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 refine_params,
                 output_calibration: params.output_calibration,
                 anchor_batches: None,
+                summary_batches: None,
                 bulk_batches: None,
                 observe_panels: false,
                 keep_finest_stats: false,

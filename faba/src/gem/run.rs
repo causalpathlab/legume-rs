@@ -383,6 +383,7 @@ fn run_gem_genes_bge(
             embedding_dim: args.model.embedding_dim,
             // gem has no carried-reference update path.
             anchor_batches: None,
+            bulk_batches: None,
             emit_finest_collapse: false,
             num_levels: args.collapse.num_levels,
             sort_dim: args.collapse.sort_dim,
