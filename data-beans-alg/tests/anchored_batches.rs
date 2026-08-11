@@ -26,7 +26,7 @@ const D: usize = 8;
 /// the same profiles times a per-gene platform factor.
 /// Clean per-type profile of column `i` (types alternate by parity).
 fn type_profile(i: usize) -> Vec<f32> {
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         (0..D).map(|g| 10.0 + 3.0 * (g % 2) as f32).collect()
     } else {
         (0..D).map(|g| 4.0 + 2.0 * ((g + 1) % 2) as f32).collect()

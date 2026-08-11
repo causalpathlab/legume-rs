@@ -21,16 +21,24 @@ const D: usize = 3;
 /// deliberately different values so the emitted backend betrays which plane
 /// each group was read from.
 fn finest() -> data_beans_alg::collapse_data::CollapsedOut {
-    let observed_rate = DMatrix::from_row_slice(D, 2, &[
-        4.0, 7.0, //
-        5.0, 8.0, //
-        0.0, 9.0, //
-    ]);
-    let adjusted_rate = DMatrix::from_row_slice(D, 2, &[
-        2.0, 6.0, //
-        2.5, 6.5, //
-        0.0, 7.0, //
-    ]);
+    let observed_rate = DMatrix::from_row_slice(
+        D,
+        2,
+        &[
+            4.0, 7.0, //
+            5.0, 8.0, //
+            0.0, 9.0, //
+        ],
+    );
+    let adjusted_rate = DMatrix::from_row_slice(
+        D,
+        2,
+        &[
+            2.0, 6.0, //
+            2.5, 6.5, //
+            0.0, 7.0, //
+        ],
+    );
     // Evidence = sum/denom with the prior excluded; sizes: group 0 = 2 cells,
     // group 1 = 10 carried cells.
     let denom = DMatrix::from_row_slice(D, 2, &[2.0, 10.0, 2.0, 10.0, 2.0, 10.0]);
@@ -100,7 +108,11 @@ fn carried_columns_pass_through_and_new_groups_are_adjusted() {
     let meta = pb_reference::read_meta(&prefix)
         .expect("read sidecar")
         .expect("present");
-    assert_eq!(meta.cell_counts, vec![2.0, 10.0], "mass conserved per group");
+    assert_eq!(
+        meta.cell_counts,
+        vec![2.0, 10.0],
+        "mass conserved per group"
+    );
     assert_eq!(meta.generation, 4, "parent gen 3 + this round");
     assert_eq!(
         meta.column_generation,
