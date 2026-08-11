@@ -14,7 +14,18 @@ use candle_util::vae::masked_topic::LatentHead;
 use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum MaskScheduleArg {
     /// Constant mask fraction (`--mask-fraction`).
     #[default]
@@ -25,7 +36,18 @@ pub enum MaskScheduleArg {
 
 /// Per-gene likelihood for the masked imputation loss (CLI surface for
 /// [`candle_util::vae::masked_topic::MaskedLikelihood`]).
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum MaskedLikelihoodArg {
     /// Negative binomial — overdispersed counts (library-scaled, learnable φ).
     #[default]
@@ -46,7 +68,8 @@ impl MaskedLikelihoodArg {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default = "crate::embed_common::clap_defaults")]
 pub struct MaskedTopicArgs {
     #[arg(
         value_delimiter = ',',
@@ -114,6 +137,43 @@ pub struct MaskedTopicArgs {
                      Train on the same gene set."
     )]
     init_from: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Add N topics on top of the warm-started model (needs --init-from)",
+        long_help = "Grow K when continuing a trained run, so a cohort carrying biology the\n\
+                     parent has no topic for can acquire one instead of distorting an\n\
+                     existing topic.\n\
+                     \n\
+                     Added topics start switched off: their encoder rows get zero weights\n\
+                     and a strongly negative bias, so they hold ~0 mass at step 0 and have\n\
+                     to earn their way in. The parent's topics keep their indices, so\n\
+                     annotations keyed to them stay valid.\n\
+                     \n\
+                     Off by default — K is part of every downstream artifact's identity."
+    )]
+    add_topics: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Add N dimensions to the gene embedding ρ (needs --init-from)",
+        long_help = "Widen H when continuing a trained run, giving the dictionary room for\n\
+                     structure the parent's embedding cannot represent.\n\
+                     \n\
+                     Exactly function-preserving at step 0: the new α columns are zero, so\n\
+                     β = softmax(α·ρᵀ) is unchanged bit for bit, while the new ρ columns\n\
+                     stay random so the added subspace still receives gradient."
+    )]
+    add_embedding_dim: usize,
+
+    /// The parent's carried pseudobulks, when `senna update` chose to reuse
+    /// them instead of re-reading its cells. Derived per invocation, so it is
+    /// neither a CLI flag nor part of the recorded configuration.
+    #[arg(skip)]
+    #[serde(skip)]
+    pb_reference: Option<crate::pb_reference::ReferenceInput>,
 
     #[arg(
         long,
@@ -580,7 +640,8 @@ pub struct MaskedTopicArgs {
     qc: QcArgs,
 }
 
-#[derive(clap::ValueEnum, Clone, Debug, Default)]
+#[derive(clap::ValueEnum, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FeatureNameKindArg {
     #[default]
     Auto,
@@ -649,7 +710,7 @@ pub(crate) fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind 
     }
 }
 
-fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
+pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let k = args.n_latent_topics;
@@ -770,6 +831,9 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         qc_block_size: args.block_size,
         qc_report_out: args.qc.qc_report.as_deref(),
         feature_mask_fn,
+        pb_reference: args.pb_reference.as_ref(),
+        mixture_batches: args.collapse.mixture_batch.clone(),
+        observe_panels: !effective_multiome,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: if effective_multiome {
             data_beans::sparse_io_vector::ColumnAlignment::Union
@@ -913,6 +977,10 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
                 encoder_hidden: &args.encoder_layers,
                 level_decoder_dims: &vec![n_features_full; num_levels],
                 embedding_dim: Some(h),
+                growth: crate::topic::warm_start::Growth {
+                    add_topics: args.add_topics,
+                    add_embedding_dim: args.add_embedding_dim,
+                },
             },
         )?;
     }
@@ -929,8 +997,17 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
     let stop = setup_stop_handler();
 
     info!("Computing NB-Fisher weights for shortlist scoring");
-    let shortlist_weights: Vec<f32> =
-        crate::empirical_dict::compute_nb_fisher_weights(&data_vec, args.block_size)?;
+    // Full gene resolution: the masked head has no feature coarsening.
+    let shortlist_weights: Vec<f32> = crate::refine_weighting::fit_fisher_weights(
+        finest_collapsed,
+        cell_to_pb_per_level
+            .as_deref()
+            .and_then(<[Vec<usize>]>::last)
+            .map(Vec::as_slice),
+        None,
+        &data_vec,
+        args.block_size,
+    )?;
 
     // Per-gene mean expression rate `μ_d` from the finest-level pseudobulk
     // posterior. The encoder composes it with the per-cell batch null as a
@@ -1249,6 +1326,10 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
     let gene_names = data_vec.row_names()?;
     let cnv_positions = crate::cnv_pseudobulk::load_gene_positions(&args.cnv, &gene_names)?;
 
+    // Captured before CNV consumes `data_vec`; the emit itself runs after, so
+    // its triplet build never overlaps the live backend in memory.
+    let column_weight = data_vec.column_multiplicities().map(<[f32]>::to_vec);
+
     if let Some(positions) = cnv_positions {
         if let Some(batch_labels) = crate::cnv_pseudobulk::reconstruct_batch_labels(&data_vec) {
             // `theta_nk` is unused after this; `detect_cnv_topic_informed` takes
@@ -1287,6 +1368,17 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         false
     };
 
+    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+        args.collapse.emit_pb_reference,
+        &args.out,
+        finest_collapsed,
+        cell_to_pb_per_level.as_deref(),
+        column_weight.as_deref(),
+        &gene_names,
+        args.init_from.as_deref(),
+        args.pb_reference.as_ref(),
+    )?;
+
     let input: Vec<String> = data_files
         .iter()
         .map(std::string::ToString::to_string)
@@ -1296,6 +1388,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: masked_run_kind(head),
         prefix: &args.out,
         data_input: &input,
@@ -1305,6 +1398,7 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
         has_model: true,
         has_cell_proj: true,
         pb_gene_suffix: Some("pb_gene.parquet"),
+        pb_reference_suffix,
         pb_latent_suffix: Some("pb_latent.parquet"),
         // Full-gene-resolution β̂, the same object `senna topic` writes. Preferred over the
         // factorized `dictionary.parquet` by anything that ranks genes (plot-topic already does
@@ -1321,4 +1415,31 @@ fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<
 
     info!("Done");
     Ok(())
+}
+
+impl crate::update::Updatable for MaskedTopicArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        self.init_from = Some(r.init_from);
+        self.pb_reference = r.reference;
+        // Only when growth was asked for; otherwise the recorded sizes replay
+        // verbatim. Both axes are pinned together even if only one grows: a
+        // recorded `--embedding-dim 0` means "auto = 2K", which would otherwise
+        // track the grown K and silently resize ρ.
+        if !r.growth.is_none() {
+            self.n_latent_topics = r.parent_topics + r.growth.add_topics;
+            self.add_topics = r.growth.add_topics;
+            self.embedding_dim = r.parent_embedding_dim.unwrap_or(0) + r.growth.add_embedding_dim;
+            self.add_embedding_dim = r.growth.add_embedding_dim;
+        }
+        // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.
+        // (Here `--from` also carries --freeze-feature-embedding, which a warm
+        // start supersedes: the weights already contain that ρ.)
+        self.from = None;
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
 }

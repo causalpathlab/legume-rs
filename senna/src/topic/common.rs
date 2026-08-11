@@ -1,4 +1,5 @@
 use crate::embed_common::*;
+pub use crate::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
 use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
 use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
@@ -81,26 +82,6 @@ pub(crate) fn expand_delta_for_block(
     let membership = block_membership(data_vec, adj_method, lb, ub)?;
     let indices = Tensor::from_iter(membership.into_iter().map(|x| x as u32), dev)?;
     Ok(delta_bd.index_select(&indices, 0)?)
-}
-
-/// Posterior-mean PB matrix `[D, n_pb]`, preferring the batch-adjusted
-/// estimate when available. Anchor selection and ambient-profile
-/// estimation both want the cleanest cell-type signal — the batch-
-/// adjusted posterior strips per-batch effects out of the mean.
-pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
-    collapsed.mu_adjusted.as_ref().map_or_else(
-        || collapsed.mu_observed.posterior_mean(),
-        matrix_param::traits::Inference::posterior_mean,
-    )
-}
-
-/// Posterior log-mean PB matrix `[D, n_pb]`, preferring batch-adjusted.
-/// For Gamma(α, β), returns E[log X] = ψ(α) - log(β).
-pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
-    collapsed.mu_adjusted.as_ref().map_or_else(
-        || collapsed.mu_observed.posterior_log_mean(),
-        matrix_param::traits::Inference::posterior_log_mean,
-    )
 }
 
 /// Build per-level feature coarsenings via the multilevel pipeline:
@@ -236,6 +217,14 @@ pub struct LoadProjectArgs<'a> {
     /// `SparseIoVec::mask_rows` before projection. Use this to restrict
     /// the model to features covered by a feature network / curated list.
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
+    /// A parent run's carried pseudobulks, loaded as the *last* data file.
+    /// The loader owns everything they imply: their cell counts are
+    /// registered as column multiplicities before projection (so every
+    /// downstream statistic treats a column standing for `m` cells as `m`
+    /// observations), and `output_keep_idx` is narrowed so they never reach
+    /// a per-cell artifact. One hook here instead of three per family —
+    /// the keep-mask half fails *silently* when a family forgets it.
+    pub pb_reference: Option<&'a crate::pb_reference::ReferenceInput>,
     /// Row-alignment strategy when multiple `data_files` are passed.
     /// Default Union — keep every row from any backend (single-
     /// modality cohorts unchanged because all backends share the same
@@ -265,6 +254,20 @@ pub type FeatureMaskFn = dyn Fn(&[Box<str>]) -> anyhow::Result<Vec<bool>>;
 /// then run the random projection. Used by `load_and_collapse` and by
 /// `senna svd` so the pre-collapse pipeline is identical across routines.
 pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData> {
+    // Checked before anything is read: `weights_for` keys the carried
+    // pseudobulks' weights on position, verified by the PBREF_ column names —
+    // and union alignment matches columns by name across backends, with no
+    // guarantee the reference stays contiguous at the end. Failing here beats
+    // failing after a whole cohort has been loaded.
+    anyhow::ensure!(
+        args.pb_reference.is_none()
+            || args.column_alignment != data_beans::sparse_io_vector::ColumnAlignment::Union,
+        "a pb_reference and union column alignment (--multiome) do not compose: union alignment \
+         gives no guarantee the carried pseudobulks stay contiguous at the end, and their \
+         weights are applied by position. Drop --use-pb-reference for this round and let it \
+         re-collapse."
+    );
+
     let SparseDataWithBatch {
         data: mut data_vec,
         batch: mut batch_membership,
@@ -277,6 +280,16 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
         qc: args.qc.clone(),
+        // The carried pseudobulks are training inputs, not cells: a column
+        // standing for hundreds of cells is a legitimate depth outlier, and
+        // as the reference grows across rounds the cell/carried mixture
+        // eventually splits the MAD band — QC then drops columns and the
+        // positional weighting refuses the shifted tail. Exempt the
+        // reference file (always loaded last) from bands and verdicts.
+        qc_exempt_files: args.pb_reference.map(|_| {
+            let n = args.data_files.len();
+            (0..n).map(|i| i == n - 1).collect()
+        }),
         qc_block_size: args.qc_block_size,
         qc_report_out: args.qc_report_out.map(Box::<str>::from),
         per_file_feature_suffix: None,
@@ -306,6 +319,30 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         );
         data_vec.mask_rows(&keep)?;
     }
+
+    // Before projection: the sketch that drives PB partitioning should already
+    // see a carried pseudobulk as the many cells it stands for.
+    let output_keep_idx = if let Some(r) = args.pb_reference {
+        let col_names = data_vec.column_names()?;
+        let w = crate::pb_reference::weights_for(&r.cell_counts, &col_names)?;
+        data_vec.register_column_multiplicity(&w)?;
+        let carried: f32 = w.iter().filter(|&&x| x > 1.0).sum();
+        info!(
+            "Column multiplicity: {} of {} columns stand for more than one cell ({} cells total)",
+            w.iter().filter(|&&x| x > 1.0).count(),
+            w.len(),
+            carried as usize,
+        );
+        // Carried pseudobulks train the model but are not cells; hold them
+        // out of every per-cell artifact.
+        crate::pb_reference::exclude_carried(
+            args.pb_reference,
+            data_vec.num_columns(),
+            output_keep_idx,
+        )
+    } else {
+        output_keep_idx
+    };
 
     let mut selected_features: Option<HvgSelection> = None;
 
@@ -386,6 +423,17 @@ pub struct LoadCollapseArgs<'a> {
     pub qc_report_out: Option<&'a str>,
     /// Optional row-subset hook — see [`LoadProjectArgs::feature_mask_fn`].
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
+    /// A parent run's carried pseudobulks — see [`LoadProjectArgs::pb_reference`].
+    pub pb_reference: Option<&'a crate::pb_reference::ReferenceInput>,
+    /// Panel observability — see `MultilevelParams::observe_panels`. On for
+    /// every family except masked-topic under `--multiome`, whose row union
+    /// is intentional modality stacking rather than differing panels.
+    pub observe_panels: bool,
+    /// Batch labels whose columns are mixtures over cell states — see
+    /// `CollapseArgs::mixture_batch`. Threaded to
+    /// [`MultilevelParams::bulk_batches`], which bars them from the
+    /// cross-batch counterfactual in both directions.
+    pub mixture_batches: Option<Vec<Box<str>>>,
     /// Row-alignment strategy — see [`LoadProjectArgs::row_alignment`].
     pub row_alignment: data_beans::sparse_io_vector::RowAlignment,
     /// Column-alignment strategy — see [`LoadProjectArgs::column_alignment`].
@@ -437,6 +485,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         qc_block_size: args.qc_block_size,
         qc_report_out: args.qc_report_out,
         feature_mask_fn: args.feature_mask_fn,
+        pb_reference: args.pb_reference,
         row_alignment: args.row_alignment,
         column_alignment: args.column_alignment,
         feature_kind: args.feature_kind.clone(),
@@ -450,6 +499,16 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         num_opt_iter: args.iter_opt,
         refine: args.refine.clone(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
+        // Greedy batch correction: with carried pseudobulks loaded, every
+        // counterfactual is drawn from the reference frame — new batches are
+        // corrected toward it, and the reference itself is never re-adjusted.
+        anchor_batches: args
+            .pb_reference
+            .is_some()
+            .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+        bulk_batches: args.mixture_batches.clone(),
+        observe_panels: args.observe_panels,
+        keep_finest_stats: false,
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /

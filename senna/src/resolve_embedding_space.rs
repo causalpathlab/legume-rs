@@ -443,6 +443,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     write_outputs(&trained, &gene_names, &kept_names, &out)?;
 
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: None,
         kind: crate::run_manifest::RunKind::ResolveEmbeddingSpace,
         prefix: &out,
         data_input: &input_for_manifest,
@@ -452,6 +453,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
+        pb_reference_suffix: None,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),

@@ -290,6 +290,68 @@ impl SparseIoVec {
         self.derived.batch_idx_to_name = Some(batch_names);
     }
 
+    /// Declare that each column stands for more than one observation.
+    ///
+    /// A column is normally one cell, so every statistic that divides by a
+    /// count adds `1` per column. That breaks when a column is a *summary* of
+    /// many cells — a carried pseudobulk, or a bulk sample — because the
+    /// per-cell rate `μ = Σy / n` would divide a whole group's counts by one.
+    ///
+    /// With multiplicities registered, a column holding the **mean** profile of
+    /// `m` cells and a weight of `m` contributes exactly what those `m` cells
+    /// would have: `m·mean` to the sums and `m` to the count.
+    ///
+    /// Absent (the default) every column weighs `1`, and every accumulation is
+    /// bit-for-bit what it was before this existed.
+    ///
+    /// # Errors
+    /// If `multiplicity` is not one entry per column, or holds a non-finite or
+    /// non-positive weight — a zero would silently delete a column from the
+    /// denominator while leaving its counts in the numerator.
+    pub fn register_column_multiplicity(&mut self, multiplicity: &[f32]) -> anyhow::Result<()> {
+        let ntot = self.num_columns();
+        anyhow::ensure!(
+            multiplicity.len() == ntot,
+            "column multiplicity has {} entries but there are {ntot} columns",
+            multiplicity.len(),
+        );
+        if let Some((i, w)) = multiplicity
+            .iter()
+            .enumerate()
+            .find(|(_, w)| !w.is_finite() || **w <= 0.0)
+        {
+            anyhow::bail!("column {i} has multiplicity {w}; weights must be finite and positive");
+        }
+        self.derived.col_multiplicity = Some(multiplicity.to_vec());
+        Ok(())
+    }
+
+    /// Weight of a single column — `1.0` when no multiplicities are registered.
+    #[must_use]
+    pub fn column_multiplicity(&self, col: usize) -> f32 {
+        self.derived
+            .col_multiplicity
+            .as_ref()
+            .map_or(1.0, |m| m[col])
+    }
+
+    /// True when any column stands for more than one observation.
+    #[must_use]
+    pub fn has_column_multiplicity(&self) -> bool {
+        self.derived.col_multiplicity.is_some()
+    }
+
+    /// The whole multiplicity vector, one weight per column — `None` when no
+    /// multiplicities are registered (every column is one observation).
+    ///
+    /// Prefer this over gathering [`Self::column_multiplicity`] in a loop:
+    /// callers were rebuilding the vector element-by-element, re-encoding the
+    /// "absent means 1.0" default at every site.
+    #[must_use]
+    pub fn column_multiplicities(&self) -> Option<&[f32]> {
+        self.derived.col_multiplicity.as_deref()
+    }
+
     pub fn batch_names(&self) -> Option<Vec<Box<str>>> {
         self.derived.batch_idx_to_name.clone()
     }

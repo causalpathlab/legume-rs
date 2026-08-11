@@ -48,6 +48,61 @@ pub fn fisher_weights_from_stats(
         .collect()
 }
 
+/// Fisher weights fitted on **pseudobulks** rather than on cells.
+///
+/// `mu_ds` is a `[D, S]` posterior-mean matrix of per-cell *rates* — the
+/// finest `CollapsedOut` — and `size_s[s]` is the number of cells behind
+/// column `s`. `coarsening`, when given, sums features into meta-features
+/// first, matching whatever resolution the decoder runs at.
+///
+/// **The count rescaling is the whole trick.** `phi_hat = (var - mu)/mu²`
+/// measures excess over a Poisson floor of `var = mu`, which is a statement
+/// about *counts*. A pseudobulk posterior mean is a per-cell *rate*, whose
+/// floor is `mu/size_s`, so feeding rates straight in subtracts a floor that
+/// is not there: genes with `var < mu` fall out of the fit entirely, and the
+/// survivors get `phi_hat` inflated by an arbitrary `1/mu`. In the worst case
+/// every point drops and the trend degenerates to `φ = 0`, i.e. the weighting
+/// silently switches itself off. Multiplying column `s` by `size_s[s]` puts
+/// the population back on the scale the estimator is defined for.
+///
+/// Pass the **observed** posterior mean, not a batch-adjusted one: δ-removal
+/// strips between-batch spread, which is part of the variance the trend is
+/// meant to see.
+///
+/// When to reach for this over the cell-level pass — and the measurements
+/// behind both statements — is the dispatcher's decision; see
+/// `senna::refine_weighting::fit_fisher_weights`, the one production caller.
+pub fn fisher_weights_from_pseudobulk(
+    mu_ds: &nalgebra::DMatrix<f32>,
+    size_s: &[f32],
+    coarsening: Option<&FeatureCoarsening>,
+) -> anyhow::Result<Vec<f32>> {
+    let coarse = coarsening.map(|fc| fc.aggregate_rows_ds(mu_ds));
+    let m = coarse.as_ref().unwrap_or(mu_ds);
+    // Not defaulted: a wrong-length `size_s` rescales the wrong columns and
+    // returns plausible weights with no shape mismatch to give it away.
+    anyhow::ensure!(
+        size_s.len() == m.ncols(),
+        "pseudobulk NB-Fisher: {} cell counts for {} pseudobulks",
+        size_s.len(),
+        m.ncols(),
+    );
+
+    let d = m.nrows();
+    let mut stats = SparseRunningStatistics::<f32>::new(d);
+    // `DMatrix` is column-major, so `chunks_exact(d)` walks the columns
+    // without a scaled copy — the multiply folds into the accumulation.
+    for (col, &n) in m.as_slice().chunks_exact(d).zip(size_s) {
+        stats.add_dense_column_scaled(col, n.max(1.0));
+    }
+
+    // Total cells, not pseudobulks: `fisher_weights_from_stats` divides total
+    // mass by this to get the mean library size `s̄`, and the weight belongs on
+    // the per-cell scale — the same `s̄` the cell-level pass sees.
+    let n_cells = f64::from(size_s.iter().sum::<f32>()).max(1.0) as usize;
+    Ok(fisher_weights_from_stats(&stats, n_cells))
+}
+
 /// Fit the NB mean-variance trend on `data_vec` and return per-gene
 /// Fisher-info weights in row order (same as `data_vec.row_names()`).
 pub fn compute_nb_fisher_weights(

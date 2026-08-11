@@ -238,6 +238,18 @@ pub fn compute_qc(
     cfg: &QcConfig,
     block_size: Option<usize>,
 ) -> anyhow::Result<QcReport> {
+    compute_qc_exempting(data, cfg, block_size, None)
+}
+
+/// [`compute_qc`] with columns that are **not cells** exempted — a prior
+/// run's carried pseudobulks. `exempt[c] = true` keeps column `c` out of all
+/// band statistics and out of every verdict. See `qc_from_metrics`.
+pub fn compute_qc_exempting(
+    data: &SparseIoVec,
+    cfg: &QcConfig,
+    block_size: Option<usize>,
+    exempt: Option<&[bool]>,
+) -> anyhow::Result<QcReport> {
     let row_names = data.row_names()?;
 
     // Per-cell totals across all rows (nnz = n_genes, tot = total_counts).
@@ -287,6 +299,7 @@ pub fn compute_qc(
             n_rows: data.num_rows(),
         },
         cfg,
+        exempt,
     ))
 }
 
@@ -324,6 +337,7 @@ pub fn compute_qc_stack(
             n_rows: 0, // feature axis not masked on stacks
         },
         cfg,
+        None,
     ))
 }
 
@@ -341,7 +355,15 @@ struct QcMetrics {
 
 /// Apply the two-tier QC decision (near-empty floor + MAD outliers) to
 /// pre-computed metrics. Shared by [`compute_qc`] and [`compute_qc_stack`].
-fn qc_from_metrics(m: QcMetrics, cfg: &QcConfig) -> QcReport {
+///
+/// `exempt`, when given, marks columns that are **not cells** — a prior run's
+/// carried pseudobulks. They are excluded from every band statistic (a few
+/// hundred smooth averages otherwise drag the MAD center and can guillotine
+/// the real cells wholesale — measured: 400 of 400 real cells dropped as
+/// "outliers" of the carried columns' band) and they receive no verdict:
+/// never near-empty, never dropped. Their exclusion from OUTPUT is a separate
+/// concern handled by the caller.
+fn qc_from_metrics(m: QcMetrics, cfg: &QcConfig, exempt: Option<&[bool]>) -> QcReport {
     let QcMetrics {
         n_genes,
         total_counts,
@@ -352,17 +374,23 @@ fn qc_from_metrics(m: QcMetrics, cfg: &QcConfig) -> QcReport {
     } = m;
     let n_cols = n_genes.len();
 
-    // Tier 1: near-empty floor.
+    let is_exempt = |c: usize| exempt.is_some_and(|e| e[c]);
+
+    // Tier 1: near-empty floor. Exempt columns are never near-empty.
     let near_empty: Vec<bool> = n_genes
         .iter()
-        .map(|&g| (g as usize) < cfg.min_cell_nnz)
+        .enumerate()
+        .map(|(c, &g)| !is_exempt(c) && (g as usize) < cfg.min_cell_nnz)
         .collect();
 
     // Tier 2: MAD outliers among non-near-empty cells. The band statistics
-    // are fit over the non-near-empty cells only, so near-empty cells can't
-    // contaminate the robust center (matters when a large fraction of cells
-    // are near-empty, e.g. multimodal Union matrices).
-    let not_near_empty: Vec<bool> = near_empty.iter().map(|&e| !e).collect();
+    // are fit over the non-near-empty, non-exempt cells only, so neither
+    // near-empty cells nor carried pseudobulks contaminate the robust center.
+    let not_near_empty: Vec<bool> = near_empty
+        .iter()
+        .enumerate()
+        .map(|(c, &e)| !e && !is_exempt(c))
+        .collect();
     let consider = Some(not_near_empty.as_slice());
     let mut outlier = vec![false; n_cols];
     if cfg.drop_outliers {
@@ -397,8 +425,8 @@ fn qc_from_metrics(m: QcMetrics, cfg: &QcConfig) -> QcReport {
             }
         }
         for c in 0..n_cols {
-            if near_empty[c] {
-                continue; // floor takes precedence; never a train-drop
+            if near_empty[c] || is_exempt(c) {
+                continue; // floor takes precedence; exempt columns get no verdict
             }
             let mut fail = total_counts[c] < cfg.min_counts_per_cell;
             if let (Some(mf), Some(cap)) = (mito_frac.as_ref(), cfg.mito_max_frac) {
@@ -558,7 +586,8 @@ pub fn write_qc_report(
 /// name/barcode column. Pass `--no-qc` to disable and keep every cell, or
 /// `--qc-report <path>` to dump the per-cell keep/drop flags. (Feature/row QC
 /// is OFF unless `--qc-feature-min-cells` is set.)
-#[derive(clap::Args, Debug, Clone)]
+#[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct QcArgs {
     /// Disable cell QC entirely (keep every input cell).
     #[arg(
@@ -787,6 +816,7 @@ mod qc_tests {
                 n_rows: 0,
             },
             &cfg,
+            None,
         );
         assert_eq!(
             report.train_keep,

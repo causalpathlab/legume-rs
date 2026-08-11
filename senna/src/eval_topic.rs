@@ -140,14 +140,9 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_gene_remap(&training_genes, &new_genes);
 
-    let min_overlap = (training_genes.len() as f32 * 0.1) as usize;
-    anyhow::ensure!(
-        gene_remap.n_mapped >= min_overlap,
-        "Too few genes overlap: {}/{} mapped (need at least {})",
-        gene_remap.n_mapped,
-        training_genes.len(),
-        min_overlap,
-    );
+    // No default floor — see `ensure_gene_coverage`. This used to refuse below
+    // 10%, which rejected targeted panels that the model can still score.
+    crate::topic::eval::ensure_gene_coverage(&gene_remap, 0.0, "--feature-name-kind")?;
 
     // Skip remap when genes match training exactly (same set, same order)
     let needs_remap = gene_remap
