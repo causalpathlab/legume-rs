@@ -43,6 +43,10 @@ pub struct FitConfig {
     /// (greedy batch correction: new batches corrected toward the anchor
     /// frame, the frame never re-adjusted).
     pub anchor_batches: Option<Vec<Box<str>>>,
+    /// Batch labels whose columns are mixtures over cell states — maps to
+    /// [`MultilevelParams::bulk_batches`]. Greedy: they are corrected toward
+    /// the non-bulk (cell) frame and never serve as its counterfactual.
+    pub bulk_batches: Option<Vec<Box<str>>>,
     /// Carry the finest collapse level (posterior + cell → pb membership) out
     /// on [`FitOutput::finest_collapse`], retaining its sufficient statistics
     /// even under the memory-lean calibration. `senna bge --emit-pb-reference`

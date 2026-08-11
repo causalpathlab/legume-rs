@@ -723,6 +723,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 .pb_reference
                 .is_some()
                 .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            bulk_batches: args.collapse.mixture_batch.clone(),
             emit_finest_collapse: args.collapse.emit_pb_reference,
             num_levels: args.collapse.num_levels,
             sort_dim: args.collapse.sort_dim,

@@ -239,6 +239,10 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) output_calibration: matrix_param::traits::CalibrateTarget,
     /// Resolved anchor-batch indices — see `MultilevelParams::anchor_batches`.
     pub(super) anchor_batches: Option<&'a [usize]>,
+    /// Batches whose columns are already summaries (carried reference, bulk)
+    /// and must stay singleton pb-samples. Distinct from `anchor_batches`,
+    /// which is the matching frame and may be ordinary cells.
+    pub(super) summary_batches: Option<&'a [usize]>,
     /// Resolved bulk-batch indices — see `MultilevelParams::bulk_batches`.
     pub(super) bulk_batches: Option<&'a [usize]>,
     /// See `MultilevelParams::observe_panels`.
@@ -273,6 +277,7 @@ pub(super) fn refine_and_collect_single_layer(
         refine_params,
         output_calibration,
         anchor_batches: _,
+        summary_batches: _,
         bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
@@ -287,7 +292,7 @@ pub(super) fn refine_and_collect_single_layer(
         data_vec,
         proj_kn,
         num_features,
-        ctx.anchor_batches.unwrap_or(&[]),
+        ctx.summary_batches.unwrap_or(&[]),
         ctx.bulk_batches.unwrap_or(&[]),
     )?;
     let num_pb = pb_samples.layout.cell_counts.len();
@@ -511,6 +516,7 @@ pub(super) fn refine_and_collect_stack(
         refine_params,
         output_calibration,
         anchor_batches: _,
+        summary_batches: _,
         bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
