@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Auxiliary data types: cell annotations, batch metadata, and pseudobulk routines"
 
-version = "0.1.10"
+version = "0.1.11"
 
 [dependencies]
 data-beans = { workspace = true }
@@ -13,7 +13,9 @@ matrix-param = { workspace = true }
 matrix-util = { workspace = true }
 
 anyhow = { workspace = true }
+clap = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }
 env_logger = { workspace = true }
 indicatif = { workspace = true }
 indicatif-log-bridge = { workspace = true }
