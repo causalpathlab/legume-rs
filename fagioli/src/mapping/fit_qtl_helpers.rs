@@ -10,9 +10,9 @@ use nalgebra::DMatrix;
 
 use crate::genotype::GenotypeMatrix;
 use crate::io::results::VariantRow;
-use data_beans_alg::pseudobulk::CollapsedPseudobulk;
 use crate::sgvb::BlockFitResultDetailed;
 use crate::simulation::GeneAnnotations;
+use data_beans_alg::pseudobulk::CollapsedPseudobulk;
 use matrix_param::traits::Inference;
 
 // ── Data structures ──────────────────────────────────────────────────────────

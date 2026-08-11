@@ -11,8 +11,7 @@ use fagioli::genotype::{BedReader, GenomicRegion, GenotypeReader};
 use fagioli::simulation::{
     compose_phenotype, compose_phenotype_with_polygenic, compute_genetic_values,
     generate_confounder_matrix, genetic_covariance, sample_cell_type_genetic_effects,
-    sample_factor_genetic_effects, CellTypeGeneticEffects, TraitFactorLoadings,
-    ConfounderParams,
+    sample_factor_genetic_effects, CellTypeGeneticEffects, ConfounderParams, TraitFactorLoadings,
 };
 use fagioli::summary_stats::{
     compute_block_ld_scores, compute_block_sumstats, compute_yty_diagonal, create_uniform_blocks,
