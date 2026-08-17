@@ -7,7 +7,7 @@
 use crate::cluster::{leiden_clustering_with_metric, LatentMetric};
 use crate::embed_common::{read_mat, MatWithNames};
 use crate::marker_support::build_annotation_matrix;
-use crate::run_manifest::{self, RunKind, RunManifest};
+use crate::run_manifest::{self, CellSpace, RunManifest};
 use crate::senna_input::{
     read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
 };
@@ -219,11 +219,15 @@ where
         latent.mat.ncols()
     );
 
-    // Only the log-θ kinds get exponentiated. This used to sniff `max <= 0.0`
-    // instead, which mis-handles masked-vae (raw Gaussian `z`, usually max > 0
-    // so it skipped by luck) and is undefined on an all-NaN latent, where
-    // `max()`'s partial ordering decides the branch.
-    if manifest.kind.latent_is_log_simplex() {
+    // Gate on the space of the table just READ, not on what `latent.parquet`
+    // would hold. The two differ: a gem-encoder run has a log-simplex latent AND
+    // a Euclidean `cell_embedding`, and `geometry_latent` returns the latter, so
+    // keying this on `latent_is_log_simplex` exponentiated a Euclidean embedding.
+    //
+    // This used to sniff `max <= 0.0` instead, which mis-handles masked-vae (raw
+    // Gaussian `z`, usually max > 0 so it skipped by luck) and is undefined on an
+    // all-NaN latent, where `max()`'s partial ordering decides the branch.
+    if manifest.kind.cell_space() == CellSpace::LogSimplex {
         log::info!(
             "Log-simplex latent ({}); exponentiating to probabilities",
             manifest.kind
@@ -231,13 +235,14 @@ where
         latent.mat = latent.mat.map(f32::exp);
     }
 
-    // BGE / FNE are trained with a dot-product / cosine-style objective,
-    // so the kNN graph fed to Leiden should reflect angular distance —
-    // not the default per-dim z-scored Euclidean we use for topic / SVD
-    // latents.
-    let metric = match manifest.kind {
-        RunKind::Bge | RunKind::Fne => LatentMetric::Cosine,
-        _ => LatentMetric::ZScoreEuclidean,
+    // An embedding is trained with a dot-product / cosine-style objective, so the
+    // kNN graph fed to Leiden should reflect ANGULAR distance. Plain Euclidean on
+    // a raw embedding is dominated by the depth axis — `senna gem` documents that
+    // about its own output — which is why the choice follows the space rather
+    // than a hand-listed pair of kinds.
+    let metric = match manifest.kind.cell_space() {
+        CellSpace::Embedding => LatentMetric::Cosine,
+        CellSpace::LogSimplex | CellSpace::Signed => LatentMetric::ZScoreEuclidean,
     };
 
     log::info!(

@@ -685,10 +685,7 @@ fn preprocess_layout_data_from_latent(
         } else {
             format!("Hellinger-θ, τ={tau:.3}")
         }
-    } else if matches!(
-        kind,
-        crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
-    ) {
+    } else if kind.cell_space() == crate::run_manifest::CellSpace::Embedding {
         // BGE / FNE embed cells in a Euclidean space where magnitude carries
         // signal — run the layout on the RAW embedding so the DistL2 kNN
         // respects it. (Unit-sphere/cosine normalization collapsed magnitude
@@ -715,12 +712,7 @@ fn preprocess_layout_data_from_latent(
     // entirely and let the layout subcommand work cell-level directly.
     // Topic / SVD latents are noisier and still benefit from the PB
     // summarization, so they fall through to the landmark path below.
-    if allow_direct_cells
-        && matches!(
-            kind,
-            crate::run_manifest::RunKind::Bge | crate::run_manifest::RunKind::Fne
-        )
-    {
+    if allow_direct_cells && kind.cell_space() == crate::run_manifest::CellSpace::Embedding {
         info!("Graph-trained latent → DirectCells mode: skipping PB landmark sampling");
         return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
             data_vec,

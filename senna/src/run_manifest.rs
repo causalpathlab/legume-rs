@@ -228,7 +228,54 @@ pub enum RunKind {
     GemEncoder,
 }
 
+/// What the table [`RunOutputs::geometry_latent`] returns actually IS.
+///
+/// Every downstream geometry decision — exponentiate or not, cosine or z-scored
+/// Euclidean kNN, lay out on cells or on pseudobulk landmarks — is a question
+/// about this, not about which command ran. They used to be asked as
+/// `matches!(kind, Bge | Fne)` and `_ =>` at five separate sites, so a new
+/// `RunKind` compiled fine and silently took the fallback at every one of them.
+/// Adding two gem kinds in one commit missed all five.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CellSpace {
+    /// Euclidean coordinates where MAGNITUDE carries signal. Angular distance
+    /// is the right metric (plain Euclidean is dominated by the depth axis on a
+    /// raw embedding), and the layout can run on cells directly.
+    Embedding,
+    /// Rows are `log θ`: `exp()` gives a probability vector summing to 1.
+    LogSimplex,
+    /// Signed scores — component loadings, or a Gaussian `z`. No simplex, and
+    /// no magnitude semantics to preserve.
+    Signed,
+}
+
 impl RunKind {
+    /// The space of this kind's per-cell geometry table.
+    ///
+    /// Deliberately a full `match` with no `_` arm: a new variant must say what
+    /// its cells are before it compiles. That is the whole point — the previous
+    /// shape let a kind be added to the enum and silently inherit a fallback.
+    #[must_use]
+    pub fn cell_space(self) -> CellSpace {
+        match self {
+            // These write `cell_embedding` (or, for fne, a latent that IS the
+            // graph embedding), so `geometry_latent` hands back Euclidean Z.
+            RunKind::Bge
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem
+            | RunKind::GemEncoder => CellSpace::Embedding,
+            // `latent` is log θ and `cell_embedding` is absent, so the geometry
+            // table is the simplex itself.
+            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => CellSpace::LogSimplex,
+            // masked-vae is a Gaussian z despite its simplex β; svd is signed
+            // loadings; vae is an unconstrained latent.
+            RunKind::MaskedVae | RunKind::Vae | RunKind::Svd | RunKind::JointSvd => {
+                CellSpace::Signed
+            }
+        }
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -255,10 +302,25 @@ impl RunKind {
     /// but a Gaussian latent. Use [`Self::latent_is_log_simplex`] for that.
     #[must_use]
     pub fn is_topic_family(self) -> bool {
-        matches!(
-            self,
-            RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic
-        )
+        match self {
+            // masked-vae belongs here despite its Gaussian latent: the family is
+            // defined by a simplex β, and gem-encoder's log_softmax-over-genes
+            // dictionary is one. It was the first kind that is log-simplex in the
+            // LATENT sense without being topic-family, which inverted the
+            // containment callers had assumed between these two predicates.
+            RunKind::Topic
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::JointTopic
+            | RunKind::GemEncoder => true,
+            RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Bge
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem => false,
+        }
     }
 
     /// Masked-imputation kinds — `masked-topic`, `masked-sbp` (both
@@ -281,10 +343,17 @@ impl RunKind {
     /// rather than on [`Self::is_topic_family`].
     #[must_use]
     pub fn latent_is_log_simplex(self) -> bool {
-        matches!(
-            self,
-            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic | RunKind::GemEncoder
-        )
+        match self {
+            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic | RunKind::GemEncoder => true,
+            RunKind::MaskedVae
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Bge
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem => false,
+        }
     }
 }
 
