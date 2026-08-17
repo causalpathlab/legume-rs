@@ -7,7 +7,7 @@
 
 use candle_util::vae::masked_topic::LatentHead;
 use senna::embed_common::{latent_to_theta, softmax_rows_inplace, Mat};
-use senna::run_manifest::RunKind;
+use senna::run_manifest::{CellSpace, RunKind};
 
 fn rows_sum_to_one(m: &Mat) {
     for (i, row) in m.row_iter().enumerate() {
@@ -105,4 +105,91 @@ fn masked_vae_kind_round_trips_through_json() {
     // Existing manifests must keep parsing.
     let legacy: RunKind = serde_json::from_str("\"itopic\"").unwrap();
     assert_eq!(legacy, RunKind::Itopic);
+}
+
+/// Every kind's cell space, pinned.
+///
+/// `cell_space` is the single declaration five geometry decisions now read —
+/// whether to `exp()`, cosine vs z-scored Euclidean kNN, raw-embedding layout,
+/// direct-cells layout. Those used to be `matches!(kind, Bge | Fne)` and `_ =>`
+/// at five sites, so a new variant compiled and silently took the fallback at
+/// every one. The `match` in `cell_space` makes that a compile error; this test
+/// makes the ANSWER a test failure rather than a silent reclassification.
+#[test]
+fn every_kind_declares_its_cell_space() {
+    for k in [
+        RunKind::Bge,
+        RunKind::Fne,
+        RunKind::ResolveEmbeddingSpace,
+        RunKind::Gem,
+        RunKind::GemEncoder,
+    ] {
+        assert_eq!(
+            k.cell_space(),
+            CellSpace::Embedding,
+            "{k}'s geometry table is a Euclidean embedding, so it wants angular kNN"
+        );
+    }
+    for k in [RunKind::Topic, RunKind::Itopic, RunKind::JointTopic] {
+        assert_eq!(
+            k.cell_space(),
+            CellSpace::LogSimplex,
+            "{k} lays out on log θ"
+        );
+    }
+    for k in [
+        RunKind::MaskedVae,
+        RunKind::Vae,
+        RunKind::Svd,
+        RunKind::JointSvd,
+    ] {
+        assert_eq!(k.cell_space(), CellSpace::Signed, "{k} is signed scores");
+    }
+}
+
+/// The gem kinds, whose absence from these predicates was the original defect.
+///
+/// `gem` writes a Euclidean `cell_embedding` and no latent at all, so `exp()`-ing
+/// it is meaningless. `gem-encoder` is the first kind that is log-simplex in the
+/// LATENT sense while its GEOMETRY table is Euclidean — the two predicates stopped
+/// nesting there, which is exactly what a consumer reading one and assuming the
+/// other gets wrong.
+#[test]
+fn gem_kinds_are_classified_on_both_axes() {
+    assert!(
+        !RunKind::Gem.latent_is_log_simplex(),
+        "gem writes no latent; exp() of its cell embedding is meaningless"
+    );
+    assert!(!RunKind::Gem.is_topic_family(), "gem has no topic axis");
+
+    assert!(
+        RunKind::GemEncoder.latent_is_log_simplex(),
+        "gem-encoder's latent.parquet IS log θ"
+    );
+    assert!(
+        RunKind::GemEncoder.is_topic_family(),
+        "its log_softmax-over-genes dictionary is a simplex β"
+    );
+    assert_eq!(
+        RunKind::GemEncoder.cell_space(),
+        CellSpace::Embedding,
+        "but geometry_latent hands back cell_embedding (θ·α), NOT the simplex — \
+         this is the pair that stopped nesting"
+    );
+}
+
+/// The wire strings are a compatibility surface: renaming a variant without
+/// changing them orphans every manifest already on disk.
+#[test]
+fn gem_kinds_round_trip_through_json() {
+    for (k, wire) in [(RunKind::Gem, "gem"), (RunKind::GemEncoder, "gem-encoder")] {
+        assert_eq!(k.as_str(), wire);
+        let json = serde_json::to_string(&k).unwrap();
+        assert!(
+            json.contains(wire),
+            "{k} serializes as {json}, expected {wire}"
+        );
+        let back: RunKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, k);
+    }
 }
