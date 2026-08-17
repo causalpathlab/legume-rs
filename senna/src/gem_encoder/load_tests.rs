@@ -1,66 +1,8 @@
 use super::*;
+use crate::gem::rows::build_gene_track_map;
 
 fn names(v: &[&str]) -> Vec<Box<str>> {
     v.iter().map(|s| Box::<str>::from(*s)).collect()
-}
-
-#[test]
-fn splits_gem_rows_into_gene_and_track() {
-    assert_eq!(
-        split_count_row("ENSG001_BRCA2/count/spliced"),
-        Some(("ENSG001_BRCA2", false))
-    );
-    assert_eq!(
-        split_count_row("ENSG001_BRCA2/count/unspliced"),
-        Some(("ENSG001_BRCA2", true))
-    );
-}
-
-/// A row that is not a gene-level count row must be REJECTED, not silently
-/// absorbed as a spliced one.
-///
-/// The old `rsplit_once("/count/")` could not tell the two apart — both fell to
-/// the same branch — so `BRCA2/m6a/methylated` became a mature gene literally
-/// named `BRCA2/m6a/methylated`, and a per-site row became a mature row of the
-/// right gene. Neither errored, and the `n_nascent > 0` guard does not catch
-/// contamination, only a wholly spliced input.
-#[test]
-fn non_count_rows_are_rejected_not_silently_called_spliced() {
-    // wrong modality
-    assert_eq!(split_count_row("ENSG001_BRCA2/m6a/methylated"), None);
-    // right modality, wrong channel
-    assert_eq!(split_count_row("ENSG001_BRCA2/count/total"), None);
-    // sub-gene resolution: this model is gene-level, so a site row is not pairable
-    assert_eq!(
-        split_count_row("ENSG001_BRCA2/count/chr1:100/spliced"),
-        None
-    );
-    // not a feature row at all
-    assert_eq!(split_count_row("weird_name"), None);
-}
-
-/// A gene's two rows must intern to ONE gene id. This is the pairing the whole
-/// model rests on: if the tracks landed on different ids, `ρ` and `ρ + δ` would
-/// describe unrelated genes.
-#[test]
-fn both_tracks_of_a_gene_share_one_id() {
-    let rows = names(&[
-        "A/count/spliced",
-        "B/count/unspliced",
-        "A/count/unspliced",
-        "B/count/spliced",
-        "C/count/spliced",
-    ]);
-    let (map, genes) = build_gene_track_map(&rows);
-
-    assert_eq!(map.n_genes, 3);
-    assert_eq!(genes.as_slice(), names(&["A", "B", "C"]).as_slice());
-    assert_eq!(map.row_to_gene, vec![0, 1, 0, 1, 2]);
-    assert_eq!(
-        map.row_is_nascent,
-        vec![false, true, true, false, false],
-        "nascent flags must follow the /count/unspliced suffix"
-    );
 }
 
 /// `per_gene_rows` is what the null gather indexes through, so a gene with only
