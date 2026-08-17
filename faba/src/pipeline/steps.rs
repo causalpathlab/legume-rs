@@ -133,9 +133,12 @@ pub(super) fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Opti
         args.gff_file.as_ref(),
         &crate::quant::GeneQcRequest {
             bam_files: &all_bam_files,
-            cell_barcode_tag: &args.cell_barcode_tag,
-            gene_barcode_tag: &args.gene_barcode_tag,
-            umi_tag: crate::quant::resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+            count: crate::gene_count::splice::CountReadOpts {
+                cell_barcode_tag: &args.cell_barcode_tag,
+                gene_barcode_tag: &args.gene_barcode_tag,
+                umi_tag: crate::quant::resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+                min_mapping_quality: args.min_mapping_quality,
+            },
             gff_file: Some(args.gff_file.as_ref()),
             output_dir: &args.output,
             gene_type: &args.gene_type,

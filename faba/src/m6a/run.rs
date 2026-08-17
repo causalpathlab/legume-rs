@@ -9,6 +9,7 @@ use crate::editing::pipeline::{
     find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
 };
 use crate::editing::sifter::ModificationType;
+use crate::gene_count::splice::CountReadOpts;
 use crate::quant::{
     check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
@@ -695,9 +696,12 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         &mut gff_map,
         &GeneQcRequest {
             bam_files: &qc_bam_files,
-            cell_barcode_tag: &args.cell_barcode_tag,
-            gene_barcode_tag: &args.gene_barcode_tag,
-            umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+            count: CountReadOpts {
+                cell_barcode_tag: &args.cell_barcode_tag,
+                gene_barcode_tag: &args.gene_barcode_tag,
+                umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+                min_mapping_quality: args.min_mapping_quality,
+            },
             gff_file: Some(&args.gff_file),
             output_dir: &args.output,
             // Biotype is applied by subsetting the gff for site discovery; QC counts

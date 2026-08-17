@@ -22,12 +22,48 @@ pub fn format_gene_key(rec: &GffRecord) -> Box<str> {
     }
 }
 
+/// BAM tags and the read-admission threshold, shared by both gene counters.
+///
+/// Grouped rather than passed as loose arguments so every counting entry point
+/// takes the same admission policy by construction: `faba genes` and the gene QC
+/// pass behind each modality build one of these and cannot drift apart in which
+/// tag they read or which alignments they trust.
+#[derive(Clone, Copy)]
+pub struct CountReadOpts<'a> {
+    pub cell_barcode_tag: &'a str,
+    pub gene_barcode_tag: &'a str,
+    /// UMI tag for per-gene dedup; `None` counts reads instead of molecules.
+    pub umi_tag: Option<&'a [u8]>,
+    pub min_mapping_quality: u8,
+}
+
+/// Alignment-level admission for gene counting.
+///
+/// Deliberately narrower than [`bam_io::passes_alignment_filters`], which the
+/// pileup modalities use: that predicate also requires `is_proper_pair()` for
+/// paired records, which would drop legitimate reads from paired-end bulk input,
+/// and `faba genes` quantifies bulk as well as single-cell libraries. The
+/// duplicate flag is already screened by the `for_each_record_in_gene*`
+/// iterators, so it is not repeated here.
+///
+/// The `is_unmapped` clause guards the `--min-mapping-quality 0` escape hatch: a
+/// region fetch can return a placed-but-unmapped record, which has no aligned
+/// blocks, and [`SpliceAwareReadCounter::classify`] reads "no intronic block" as
+/// spliced. Without this it would be counted as a spliced molecule.
+///
+/// Call this BEFORE UMI dedup: a rejected read must not claim its molecule's
+/// `(cell, UMI)` slot, or it would shadow a later well-aligned read of the same
+/// molecule and undercount the gene.
+#[inline]
+fn passes_count_filters(bam_record: &bam::Record, min_mapping_quality: u8) -> bool {
+    !bam_record.is_unmapped() && bam_io::passes_mapping_filters(bam_record, min_mapping_quality)
+}
+
 pub fn count_read_per_gene(
+    cache: &mut bam_io::BamReaderCache,
     bam_file: &str,
     rec: &GffRecord,
-    cell_barcode_tag: &str,
-    gene_barcode_tag: &str,
-    umi_tag: Option<&[u8]>,
+    opts: CountReadOpts<'_>,
 ) -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
     if rec.gene_id == GeneId::Missing {
         return Ok(vec![]);
@@ -35,11 +71,18 @@ pub fn count_read_per_gene(
 
     let gene_name = format_gene_key(rec);
     let row_name: Box<str> = format!("{}/count/total", gene_name).into();
-    let mut read_counter = ReadCounter::new(cell_barcode_tag, umi_tag);
+    let mut read_counter = ReadCounter::new(opts);
 
-    bam_io::for_each_record_in_gene(bam_file, rec, gene_barcode_tag, false, |bam_record| {
-        read_counter.count(bam_record);
-    })?;
+    bam_io::for_each_record_in_gene_cached(
+        cache,
+        bam_file,
+        rec,
+        opts.gene_barcode_tag,
+        false,
+        |bam_record| {
+            read_counter.count(bam_record);
+        },
+    )?;
 
     Ok(read_counter
         .to_vec()
@@ -53,9 +96,7 @@ pub fn count_read_per_gene_splice(
     bam_file: &str,
     rec: &GffRecord,
     exon_intervals: &HashMap<GeneId, Vec<(i64, i64)>>,
-    cell_barcode_tag: &str,
-    gene_barcode_tag: &str,
-    umi_tag: Option<&[u8]>,
+    opts: CountReadOpts<'_>,
 ) -> anyhow::Result<SplicedUnsplicedTriplets> {
     if rec.gene_id == GeneId::Missing {
         return Ok(SplicedUnsplicedTriplets {
@@ -78,17 +119,13 @@ pub fn count_read_per_gene_splice(
     let gene_name = format_gene_key(rec);
     let spliced_name: Box<str> = format!("{}/count/spliced", gene_name).into();
     let unspliced_name: Box<str> = format!("{}/count/unspliced", gene_name).into();
-    let mut counter = SpliceAwareReadCounter::new(cell_barcode_tag, exons, umi_tag);
+    let mut counter = SpliceAwareReadCounter::new(opts, exons);
 
-    // Cached reader: the uncached entry point builds a fresh `BamReaderCache`
-    // internally, so it re-opened the BAM and re-parsed the whole-genome `.bai`
-    // for every one of ~78k genes — tens of ms each, and the dominant cost of
-    // gene QC. Every other hot path in the crate already threads a cache.
     bam_io::for_each_record_in_gene_cached(
         cache,
         bam_file,
         rec,
-        gene_barcode_tag,
+        opts.gene_barcode_tag,
         false,
         |bam_record| {
             counter.classify_and_count(bam_record);
@@ -141,31 +178,34 @@ impl<'a> UmiDedup<'a> {
     }
 }
 
-pub struct ReadCounter<'a> {
+struct ReadCounter<'a> {
     cell_to_count: HashMap<CellBarcode, usize>,
-    cell_barcode_tag: &'a str,
+    opts: CountReadOpts<'a>,
     dedup: UmiDedup<'a>,
 }
 
 impl<'a> ReadCounter<'a> {
-    pub fn new(cell_barcode_tag: &'a str, umi_tag: Option<&'a [u8]>) -> Self {
+    fn new(opts: CountReadOpts<'a>) -> Self {
         Self {
             cell_to_count: HashMap::default(),
-            cell_barcode_tag,
-            dedup: UmiDedup::new(umi_tag),
+            dedup: UmiDedup::new(opts.umi_tag),
+            opts,
         }
     }
 
-    pub fn to_vec(&self) -> Vec<(CellBarcode, usize)> {
+    fn to_vec(&self) -> Vec<(CellBarcode, usize)> {
         self.cell_to_count
             .iter()
             .map(|(cb, x)| (cb.clone(), *x))
             .collect()
     }
 
-    pub fn count(&mut self, bam_record: &bam::Record) {
+    fn count(&mut self, bam_record: &bam::Record) {
+        if !passes_count_filters(bam_record, self.opts.min_mapping_quality) {
+            return;
+        }
         let cell_barcode =
-            bam_io::extract_cell_barcode(bam_record, self.cell_barcode_tag.as_bytes());
+            bam_io::extract_cell_barcode(bam_record, self.opts.cell_barcode_tag.as_bytes());
         if self.dedup.is_duplicate(bam_record, &cell_barcode) {
             return;
         }
@@ -182,25 +222,31 @@ enum SpliceClass {
 struct SpliceAwareReadCounter<'a> {
     spliced: HashMap<CellBarcode, usize>,
     unspliced: HashMap<CellBarcode, usize>,
-    cell_barcode_tag: &'a str,
+    opts: CountReadOpts<'a>,
     exons: &'a [(i64, i64)], // sorted, merged, 0-based half-open
     dedup: UmiDedup<'a>,
 }
 
 impl<'a> SpliceAwareReadCounter<'a> {
-    fn new(cell_barcode_tag: &'a str, exons: &'a [(i64, i64)], umi_tag: Option<&'a [u8]>) -> Self {
+    fn new(opts: CountReadOpts<'a>, exons: &'a [(i64, i64)]) -> Self {
         Self {
             spliced: HashMap::default(),
             unspliced: HashMap::default(),
-            cell_barcode_tag,
             exons,
-            dedup: UmiDedup::new(umi_tag),
+            dedup: UmiDedup::new(opts.umi_tag),
+            opts,
         }
     }
 
     fn classify_and_count(&mut self, bam_record: &bam::Record) {
+        // Before dedup — here a rejected read would also freeze the molecule's
+        // spliced/unspliced class from an alignment we chose not to trust.
+        if !passes_count_filters(bam_record, self.opts.min_mapping_quality) {
+            return;
+        }
+
         let cell_barcode =
-            bam_io::extract_cell_barcode(bam_record, self.cell_barcode_tag.as_bytes());
+            bam_io::extract_cell_barcode(bam_record, self.opts.cell_barcode_tag.as_bytes());
 
         // Skip reads without a valid cell barcode
         if cell_barcode == CellBarcode::Missing {
@@ -230,9 +276,9 @@ impl<'a> SpliceAwareReadCounter<'a> {
     /// - **Spliced**: everything else (exon-only reads lumped into spliced,
     ///   following the alevin-fry S+A convention)
     fn classify(&self, bam_record: &bam::Record) -> SpliceClass {
-        let blocks: Vec<[i64; 2]> = bam_record.aligned_blocks().collect();
-
-        for &[b_start, b_end] in &blocks {
+        // Consume the block iterator directly: collecting first cost one
+        // malloc/free per counted read, and the loop only ever scans forward.
+        for [b_start, b_end] in bam_record.aligned_blocks() {
             if self.intronic_extent(b_start, b_end) > 0 {
                 return SpliceClass::Unspliced;
             }
@@ -259,3 +305,6 @@ impl<'a> SpliceAwareReadCounter<'a> {
         (b_end - b_start) - covered
     }
 }
+
+#[cfg(test)]
+mod tests;
