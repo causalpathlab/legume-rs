@@ -55,12 +55,14 @@
 //! and quant producers all go through it; the editing / mixture / pileup
 //! producers still emit their rows inline and are the remaining migration.
 //!
-//! Two consumers also still parse by hand — `senna::gem::run::split_count_row`
-//! and `faba::quant::extract_gene_key` both match on `/count/` directly. That is
-//! the failure mode [`parse_feature_row`] exists to remove: a bare `rsplit` puts
-//! "spliced", "total" and "not a count row at all" down the same branch. Both
-//! want converting, but each changes behaviour on inputs the current code
-//! silently mis-keys, so they need a test rather than a rename.
+//! One consumer still parses by hand: `faba::quant::extract_gene_key` strips a
+//! trailing `/count/{channel}` with `rfind`. That is safe *there* — it runs only
+//! over faba's own gene matrices, and its job is to group every row of a gene
+//! (including the pooled `total` track) under one key for QC, which is what its
+//! callers want. Contrast `senna::gem::rows`, which must additionally decide
+//! WHICH track a row is: there the same shortcut put `total` in the spliced
+//! bucket and double-counted the gene, so that one goes through
+//! [`parse_feature_row`].
 //!
 //! The unit is always recoverable from a parsed row's [`FeatureRow::unit`] via
 //! `unit.split('/').next()`.

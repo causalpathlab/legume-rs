@@ -28,7 +28,6 @@ use graph_embedding_util::{load_unified_data, FeatureNameKind, LoadUnifiedArgs};
 use log::info;
 use matrix_util::common_io::{basename, mkdir_parent};
 use rayon::ThreadPoolBuilder;
-use rustc_hash::FxHashMap;
 
 use crate::gem::args::GemArgs;
 use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
@@ -237,7 +236,8 @@ fn run_gem_genes_bge(
         // unspliced total mirrors the pipeline's CR-style gene filter. Ranking on rows
         // instead would return well under N genes (the two correlated tracks of a gene
         // both rank high and collapse to one gene on dedup).
-        let (row_gene, genes) = intern_gene_keys(&unified.feature_names);
+        let (track_map, genes) = crate::gem::rows::build_gene_track_map(&unified.feature_names);
+        let row_gene = track_map.row_to_gene;
         let n_genes = genes.len();
         let stat = streaming_sparse_running_stats(unified.count_backend(), None, "HVG")
             .context("HVG streaming stats")?;
@@ -875,52 +875,23 @@ fn mean_dims(pip: &[f32], h: usize) -> f64 {
     f64::from(pip.iter().sum::<f32>()) / rows as f64
 }
 
-fn split_count_row(name: &str) -> (&str, bool) {
-    match name.rsplit_once("/count/") {
-        Some((gene, suffix)) => (gene, suffix == "unspliced"),
-        None => (name, false),
-    }
-}
-
-/// Intern each row's gene key (see [`split_count_row`]) to a dense gene id. Returns
-/// `(row_to_gene, gene_names)`, `gene_names[gid]` the first-seen key for gene `gid`
-/// (id order). Single source of the β-sharing gene-identity map — used by the HVG
-/// gene filter (pre-subset) and [`build_splice_factor`] (post-subset).
-fn intern_gene_keys(feature_names: &[Box<str>]) -> (Vec<u32>, Vec<Box<str>>) {
-    let mut gene_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
-    let mut row_to_gene = Vec::with_capacity(feature_names.len());
-    let mut gene_names: Vec<Box<str>> = Vec::new();
-    for name in feature_names {
-        let gene = split_count_row(name).0;
-        // Borrow-first: only allocate a `Box<str>` key on a genuinely new gene.
-        let gid = match gene_ids.get(gene) {
-            Some(&gid) => gid,
-            None => {
-                let gid = gene_ids.len() as u32;
-                gene_ids.insert(gene.into(), gid);
-                gene_names.push(gene.into());
-                gid
-            }
-        };
-        row_to_gene.push(gid);
-    }
-    (row_to_gene, gene_names)
-}
-
 /// Build the per-gene β-sharing feature factorization + the id-ordered gene names.
-/// Each row is `{gene}/count/{spliced|unspliced}`; rows sharing a `{gene}` key map to
-/// one gene id (so both tracks embed as `β_g`), and the `unspliced` rows are flagged
-/// so phase 2 can split each cell's edges (identity θ from spliced, velocity increment
-/// δ from unspliced).
+///
+/// Interning is [`crate::gem::rows::build_gene_track_map`], the same call
+/// `gem-encoder` makes: rows sharing a `{gene}` key map to one gene id (so both
+/// tracks embed as `β_g`) and the unspliced rows are flagged, so phase 2 can
+/// split each cell's edges (identity θ from spliced, velocity increment δ from
+/// unspliced). A row that is not `{gene}/count/{spliced|unspliced}` gets its own
+/// single-track gene id and pairs with nothing, which is what keeps a
+/// `{gene}/count/total` row from being summed into that gene's spliced track.
 fn build_splice_factor(
     feature_names: &[Box<str>],
 ) -> (graph_embedding_util::FeatFactorSpec, Vec<Box<str>>) {
-    let (row_to_gene, gene_names) = intern_gene_keys(feature_names);
-    let unspliced_rows: Vec<bool> = feature_names.iter().map(|n| split_count_row(n).1).collect();
+    let (map, gene_names) = crate::gem::rows::build_gene_track_map(feature_names);
     (
         graph_embedding_util::FeatFactorSpec {
-            row_to_gene,
-            unspliced_rows,
+            row_to_gene: map.row_to_gene,
+            unspliced_rows: map.row_is_nascent,
         },
         gene_names,
     )

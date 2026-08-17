@@ -18,5 +18,7 @@ pub mod args;
 pub mod marker_embedding;
 /// The `senna gem` run: joint spliced+unspliced gene-count embedding over the shared
 /// `graph_embedding_util` engine (identity θ + velocity δ). Binary entry: [`run::run_gem_embedding`].
+/// The gene-count row grammar both gem models read their input through.
+pub mod rows;
 pub mod run;
 pub mod sample_id;
