@@ -69,6 +69,7 @@ ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
 nalgebra = { workspace = true }
 nalgebra-sparse = { workspace = true }
+parquet = { workspace = true }
 approx = { workspace = true }
 
 special = { workspace = true }

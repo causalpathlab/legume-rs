@@ -5040,6 +5040,7 @@ dependencies = [
  "ndarray",
  "ndarray-rand",
  "num_cpus",
+ "parquet",
  "petgraph",
  "plot-utils",
  "rand 0.10.1",
