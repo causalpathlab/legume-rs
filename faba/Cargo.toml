@@ -7,12 +7,12 @@ repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
 
-version = "0.12.16"
+version = "0.13.0"
 
 [lib]
-# The library surface exists so `gem`'s integration tests (tests/) can reach
-# the public API. Its module docs use illustrative math blocks (β_g ⊙ exp…),
-# not runnable examples, so doctests are disabled.
+# The library surface exists so the editing statistics can be driven from
+# integration tests under `tests/`. Its module docs use illustrative math
+# blocks, not runnable examples, so doctests are disabled.
 doctest = false
 
 [[bin]]
@@ -21,35 +21,19 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = [
-    "data-beans/cuda",
-    "data-beans-alg/cuda",
-    "matrix-util/cuda",
-    "matrix-param/cuda",
-    "candle-util/cuda",
-    "graph-embedding-util/cuda",
-    "mcmc-util/cuda",
-]
-metal = [
-    "data-beans/metal",
-    "data-beans-alg/metal",
-    "matrix-util/metal",
-    "matrix-param/metal",
-    "candle-util/metal",
-    "graph-embedding-util/metal",
-    "mcmc-util/metal",
-]
+# No `cuda` / `metal`: faba reads BAM files and writes sparse matrices, and
+# nothing on that path touches a GPU. The model-fitting subcommands that did
+# now live in senna, which carries those features.
+#
 # Forward data-beans's optional `hdf5` feature so `cargo install faba --features hdf5`
 # enables the HDF5 backend + .h5/.h5ad readers (requires libhdf5 on the build host).
 hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
+auxiliary-data = { workspace = true }
 data-beans = { workspace = true }
-data-beans-alg = { workspace = true }
 genomic-data = { workspace = true }
 matrix-util = { workspace = true }
-matrix-param = { workspace = true }
-mcmc-util = { workspace = true }
 plot-utils = { workspace = true }
 
 anyhow = { workspace = true }
@@ -59,35 +43,19 @@ num_cpus = { workspace = true }
 rayon = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
 rand_distr = { workspace = true }
-nalgebra = { workspace = true }
-nalgebra-sparse = { workspace = true }
-approx = { workspace = true }
 
-special = { workspace = true }
 indicatif = { workspace = true }
 log = { workspace = true }
-env_logger = { workspace = true }
-num-traits = { workspace = true }
 
 statrs = { workspace = true }
 coitrees = { workspace = true }
 parquet = { workspace = true }
 
-colored = { workspace = true }
 rustc-hash = { workspace = true }
 dashmap = { version = "6.1.0", features = ["rayon"] }
 rust-htslib = { workspace = true }
 arrow = "59"
 
-# rna-mod-embed subcommand. candle_core / candle_nn come transitively
-# through candle-util (matches the senna / pinto convention) so the
-# `cuda` / `metal` features propagate cleanly.
-candle-util = { workspace = true }
-graph-embedding-util = { workspace = true }
-auxiliary-data = { workspace = true }
-enrichment = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

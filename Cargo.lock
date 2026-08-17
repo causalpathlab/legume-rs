@@ -1799,34 +1799,20 @@ dependencies = [
 
 [[package]]
 name = "faba"
-version = "0.12.16"
+version = "0.13.0"
 dependencies = [
  "anyhow",
- "approx",
  "arrow",
  "auxiliary-data",
- "candle-util",
  "clap",
  "coitrees",
- "colored",
  "dashmap",
  "data-beans",
- "data-beans-alg",
- "enrichment",
- "env_logger",
  "flate2",
  "genomic-data",
- "graph-embedding-util",
  "indicatif",
  "log",
- "matrix-param",
  "matrix-util",
- "mcmc-util",
- "nalgebra 0.34.2",
- "nalgebra-sparse",
- "ndarray",
- "ndarray-rand",
- "num-traits",
  "num_cpus",
  "parquet",
  "plot-utils",
@@ -1837,7 +1823,6 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
- "special",
  "statrs",
  "tempfile",
 ]
@@ -5008,7 +4993,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.9.12"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "approx",
