@@ -206,7 +206,12 @@ pub struct PipelineArgs {
     #[arg(
         long,
         default_value_t = 20,
-        help = "Minimum mapping quality for editing/SNP reads (ATOI/m6A/SNP)"
+        help = "Minimum mapping quality (MAPQ) for every read the pipeline admits",
+        long_help = "Minimum mapping quality (MAPQ) for every read the pipeline admits.\n\
+                     Applies to the gene counts that freeze the cell set,\n\
+                     and to the editing/SNP pileups (ATOI/m6A/SNP).\n\
+                     One knob on purpose: cells are then called on the same\n\
+                     alignments the site tests later count."
     )]
     pub min_mapping_quality: u8,
 

@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::data::util_htslib::*;
+use crate::gene_count::splice::CountReadOpts;
 
 /// simply count the occurence of gene and cell barcode
 #[derive(Args, Debug)]
@@ -74,6 +75,19 @@ pub struct GeneCountArgs {
         long_help = "Cells with fewer than this many non-zero genes are removed from the output matrix."
     )]
     pub(crate) column_nnz_cutoff: usize,
+
+    /// Minimum mapping quality for a read to be counted
+    #[arg(
+        long = "min-mapping-quality",
+        default_value_t = 20,
+        help = "Minimum mapping quality (MAPQ) to count a read",
+        long_help = "Reads below this MAPQ are not counted.\n\
+                     Secondary and supplementary alignments are always skipped.\n\
+                     Cell Ranger marks a unique, confident alignment MAPQ 255,\n\
+                     so the default admits those and drops multi-mappers.\n\
+                     Pass 0 to count every alignment regardless of MAPQ."
+    )]
+    pub(crate) min_mapping_quality: u8,
 
     #[command(flatten)]
     pub(crate) cell_qc: crate::cell_qc::CellQcArgs,
@@ -151,6 +165,17 @@ impl GeneCountArgs {
     /// Resolve the UMI tag for dedup: `None` disables it (count reads).
     pub(crate) fn umi_dedup_tag(&self) -> Option<&[u8]> {
         crate::quant::resolve_umi_tag(self.no_umi_dedup, &self.umi_tag)
+    }
+
+    /// The admission policy both counting paths use, so `run_simple` and
+    /// `run_splice_aware` cannot diverge on tags or on which reads they trust.
+    pub(crate) fn count_read_opts(&self) -> CountReadOpts<'_> {
+        CountReadOpts {
+            cell_barcode_tag: &self.cell_barcode_tag,
+            gene_barcode_tag: &self.gene_barcode_tag,
+            umi_tag: self.umi_dedup_tag(),
+            min_mapping_quality: self.min_mapping_quality,
+        }
     }
 }
 

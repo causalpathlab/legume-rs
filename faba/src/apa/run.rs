@@ -3,6 +3,7 @@ use crate::apa::likelihood::*;
 use crate::common::*;
 use crate::data::poly_a_stat_map::PolyASiteArgs;
 use crate::data::util_htslib::*;
+use crate::gene_count::splice::CountReadOpts;
 use crate::quant::{resolve_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest};
 
 use genomic_data::gff::{GeneId, GeneType as GffGeneType};
@@ -632,9 +633,12 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
     if args.valid_cell_barcodes.is_none() && matches!(args.method, ApaMethod::Mixture) {
         let qc = resolve_gene_qc(&GeneQcRequest {
             bam_files: &args.bam_files,
-            cell_barcode_tag: &args.cell_barcode_tag,
-            gene_barcode_tag: &args.gene_barcode_tag,
-            umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+            count: CountReadOpts {
+                cell_barcode_tag: &args.cell_barcode_tag,
+                gene_barcode_tag: &args.gene_barcode_tag,
+                umi_tag: resolve_umi_tag(args.no_umi_dedup, &args.umi_tag),
+                min_mapping_quality: args.min_mapping_quality,
+            },
             gff_file: args.gff_file.as_deref(),
             output_dir: &args.output,
             // Biotype is applied by subsetting the gff for site discovery; QC counts

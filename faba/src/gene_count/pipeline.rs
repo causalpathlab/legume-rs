@@ -28,7 +28,7 @@ pub fn run_simple(
         .collect();
     let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
     let cell_call = args.cell_qc.params();
-    let umi_tag = args.umi_dedup_tag();
+    let opts = args.count_read_opts();
 
     // Count/cell-call on all biotypes; the gate narrows only the quantified output
     // and the pooled gene ids. Same object `faba all` and the modality QC use.
@@ -41,14 +41,8 @@ pub fn run_simple(
         let gene_level_stats: Vec<(CellBarcode, Box<str>, f32)> = records
             .par_iter()
             .progress_with(new_progress_bar(njobs))
-            .map(|rec| {
-                count_read_per_gene(
-                    bam_file,
-                    rec,
-                    &args.cell_barcode_tag,
-                    &args.gene_barcode_tag,
-                    umi_tag,
-                )
+            .map_init(crate::data::bam_io::BamReaderCache::new, |cache, rec| {
+                count_read_per_gene(cache, bam_file, rec, opts)
             })
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
@@ -141,7 +135,7 @@ pub fn run_splice_aware(
         .map(|rec| (format_gene_key(rec), rec.gene_id.clone()))
         .collect();
     let mut all_gene_ids: rustc_hash::FxHashSet<GeneId> = rustc_hash::FxHashSet::default();
-    let umi_tag = args.umi_dedup_tag();
+    let opts = args.count_read_opts();
 
     // Count/cell-call on all biotypes; the gate narrows only the quantified output
     // and the pooled gene ids. Same object `faba all` and the modality QC use.
@@ -158,15 +152,7 @@ pub fn run_splice_aware(
             .par_iter()
             .progress_with(new_progress_bar(njobs))
             .map_init(crate::data::bam_io::BamReaderCache::new, |cache, rec| {
-                count_read_per_gene_splice(
-                    cache,
-                    bam_file,
-                    rec,
-                    &exon_intervals,
-                    &args.cell_barcode_tag,
-                    &args.gene_barcode_tag,
-                    umi_tag,
-                )
+                count_read_per_gene_splice(cache, bam_file, rec, &exon_intervals, opts)
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 

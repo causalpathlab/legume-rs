@@ -11,7 +11,7 @@
 use crate::common::*;
 use crate::data::conversion::*;
 use crate::data::util_htslib::*;
-use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key};
+use crate::gene_count::splice::{count_read_per_gene_splice, format_gene_key, CountReadOpts};
 
 use dashmap::DashMap as HashMap;
 use data_beans::zarr_io::finalize_zarr_output;
@@ -503,15 +503,7 @@ pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<
             .par_iter()
             .progress_with(new_progress_bar(njobs))
             .map_init(crate::data::bam_io::BamReaderCache::new, |cache, rec| {
-                count_read_per_gene_splice(
-                    cache,
-                    bam_file,
-                    rec,
-                    &exon_intervals,
-                    req.cell_barcode_tag,
-                    req.gene_barcode_tag,
-                    req.umi_tag,
-                )
+                count_read_per_gene_splice(cache, bam_file, rec, &exon_intervals, req.count)
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
 
@@ -653,10 +645,10 @@ pub fn resolve_umi_tag(no_umi_dedup: bool, umi_tag: &str) -> Option<&[u8]> {
 /// m6a counts over `wt_bam_files`), then the resolution logic is shared.
 pub struct GeneQcRequest<'a> {
     pub bam_files: &'a [Box<str>],
-    pub cell_barcode_tag: &'a str,
-    pub gene_barcode_tag: &'a str,
-    /// UMI BAM tag for dedup during QC counting; `None` counts reads.
-    pub umi_tag: Option<&'a [u8]>,
+    /// BAM tags and the read-admission threshold for the QC counting pass. Each
+    /// modality passes its own, so the cells this pass freezes are called on the
+    /// same alignments the modality's own pileup will later admit.
+    pub count: CountReadOpts<'a>,
     /// GFF for the recompute path; `None` skips recompute (reuse can still run).
     pub gff_file: Option<&'a str>,
     /// Where the QC artifacts land (`{batch}_cells.tsv.gz`, `{batch}_mt_qc.tsv.gz`,

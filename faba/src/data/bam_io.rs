@@ -42,10 +42,20 @@ pub fn hash_umi_bytes(umi: &[u8]) -> u64 {
 /// Per-thread cache of opened `bam::IndexedReader`s keyed by file path.
 ///
 /// Opening a BAM + loading its `.bai` index is expensive (hundreds of ms on
-/// large files); the previous code paid this cost once per gene per BAM
-/// inside the rayon par_iter. With `try_for_each_init(|| BamReaderCache::new(),
-/// ...)` each worker thread pays it once per BAM total and reuses the reader
-/// across every gene scheduled to it.
+/// large files); the naive code pays this cost once per gene per BAM inside the
+/// rayon `par_iter`. Threading a cache through `map_init` amortizes it.
+///
+/// Do not read `map_init` as "once per worker thread": rayon calls the seed
+/// closure once per **leaf task**, and its splitter refreshes the split budget
+/// on every steal, so leaf count tracks stealing, not thread count. On 78k genes
+/// / 64 threads that is tens of thousands of seeds, so the cache amortizes the
+/// open only about 2x, not away.
+///
+/// Coarsening the leaves with `.with_min_len(32)` cuts the seed count by ~20x,
+/// and was measured **slower** end to end (~11%): per-gene read depth is skewed
+/// enough that a chunk holding a few deep genes becomes a straggler, which costs
+/// more than the index opens it saves. Do not add it back without measuring on a
+/// BAM whose `.bai` is large enough for the open to dominate.
 ///
 /// `bam::IndexedReader` is `!Sync` (holds a raw htslib handle), so the cache
 /// must stay thread-local — never share it across threads.
@@ -91,6 +101,17 @@ pub fn extract_umi(record: &bam::Record, tag: &[u8]) -> UmiBarcode {
     }
 }
 
+/// The clauses every read path shares: a confident, primary alignment.
+///
+/// Factored out so the pileup gate below and the gene-counting gate
+/// ([`crate::gene_count::splice`]) express the same three checks once instead of
+/// spelling them out twice. Callers that need more compose on top; nobody
+/// re-writes the body.
+#[inline]
+pub fn passes_mapping_filters(record: &bam::Record, min_mapping_quality: u8) -> bool {
+    record.mapq() >= min_mapping_quality && !record.is_secondary() && !record.is_supplementary()
+}
+
 /// The alignment-level admission gate shared by every pileup-based modality.
 ///
 /// Single definition on purpose: the cell scan
@@ -99,10 +120,8 @@ pub fn extract_umi(record: &bam::Record, tag: &[u8]) -> UmiBarcode {
 /// these checks lived in both places the invariant was asserted in a comment
 /// with nothing enforcing it.
 pub fn passes_alignment_filters(record: &bam::Record, min_mapping_quality: u8) -> bool {
-    record.mapq() >= min_mapping_quality
+    passes_mapping_filters(record, min_mapping_quality)
         && !record.is_duplicate()
-        && !record.is_secondary()
-        && !record.is_supplementary()
         && (!record.is_paired() || record.is_proper_pair())
 }
 
@@ -166,27 +185,13 @@ pub fn for_each_record_in_region_cached(
     Ok(())
 }
 
-/// Stream non-duplicate BAM records matching a gene barcode. See
-/// [`for_each_record_in_region`] for the buffer-reuse contract.
-pub fn for_each_record_in_gene(
-    bam_file_path: &str,
-    gff_record: &GffRecord,
-    gene_barcode_tag: &str,
-    include_missing_barcode: bool,
-    visitor: impl FnMut(&bam::Record),
-) -> anyhow::Result<()> {
-    let mut cache = BamReaderCache::new();
-    for_each_record_in_gene_cached(
-        &mut cache,
-        bam_file_path,
-        gff_record,
-        gene_barcode_tag,
-        include_missing_barcode,
-        visitor,
-    )
-}
-
-/// Like [`for_each_record_in_gene`] but reuses an `IndexedReader` from `cache`.
+/// Stream non-duplicate BAM records matching a gene barcode, reusing an
+/// `IndexedReader` from `cache`. See [`for_each_record_in_region`] for the
+/// buffer-reuse contract.
+///
+/// No uncached wrapper on purpose: callers iterate genes, so a fresh BAM open
+/// plus whole-genome `.bai` parse per gene would dominate. Thread the cache from
+/// the rayon `map_init` seed.
 pub fn for_each_record_in_gene_cached(
     cache: &mut BamReaderCache,
     bam_file_path: &str,
