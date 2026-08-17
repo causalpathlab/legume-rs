@@ -70,39 +70,6 @@ fn upper_tail_p(k: u64, n: u64, log_pmf: impl Fn(u64) -> f64) -> f64 {
     }
 }
 
-/// Benjamini-Hochberg FDR adjustment. Returns q-values in the input order.
-///
-/// BH controls the FDR only under independence or positive regression
-/// dependence (PRDS), so check that the tests are of that kind before reaching
-/// for it. The `lineage`, `dyn-assoc` and cell-QC callers are: their units
-/// (branches, genes, droplets) do not share observations.
-///
-/// The editing caller deliberately does NOT use this. Neighbouring conversion
-/// sites are covered by the SAME reads, and a read converted at one site is
-/// evidence against its unconverted neighbour, so the dependence is not even
-/// reliably positive. The valid procedure under arbitrary dependence is
-/// Benjamini-Yekutieli, whose `sum(1/i) ~ ln m` penalty is 10.6x at the ~28k
-/// putative sites of one library; editing selects on a marginal p-value
-/// instead, claiming no FDR guarantee rather than one whose assumption fails.
-pub fn benjamini_hochberg(pvalues: &[f32]) -> Vec<f32> {
-    let m = pvalues.len();
-    if m == 0 {
-        return Vec::new();
-    }
-    let mut order: Vec<usize> = (0..m).collect();
-    order.sort_by(|&a, &b| pvalues[a].partial_cmp(&pvalues[b]).unwrap());
-    let mut q = vec![0.0f32; m];
-    let mut running_min = 1.0f32;
-    // Walk from largest p to smallest, enforcing monotonic non-decreasing q.
-    for rank in (0..m).rev() {
-        let idx = order[rank];
-        let adj = pvalues[idx] * (m as f32) / ((rank + 1) as f32);
-        running_min = running_min.min(adj);
-        q[idx] = running_min.min(1.0);
-    }
-    q
-}
-
 /// `ln C(n, k)` via log-gamma.
 fn ln_choose(n: u64, k: u64) -> f64 {
     ln_gamma((n + 1) as f64) - ln_gamma((k + 1) as f64) - ln_gamma((n - k + 1) as f64)
@@ -297,76 +264,6 @@ pub fn log_odds_ratio_woolf(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> (f64, f64
     let log_or = (a_w * u_m).ln() - (u_w * a_m).ln();
     let se = (1.0 / a_w + 1.0 / u_w + 1.0 / a_m + 1.0 / u_m).sqrt();
     (log_or, se)
-}
-
-/// Mean of a slice (`NaN` if empty).
-pub fn mean(x: &[f32]) -> f32 {
-    if x.is_empty() {
-        f32::NAN
-    } else {
-        x.iter().sum::<f32>() / x.len() as f32
-    }
-}
-
-/// Nonparametric bootstrap of the sample **mean**: resample `x` with replacement `n_boot`
-/// times and return `(standard_error, ci_lo, ci_hi)` at confidence level `1 − alpha`
-/// (percentile interval). `NaN`s when `x` or `n_boot` is empty.
-pub fn bootstrap_mean_ci(
-    x: &[f32],
-    n_boot: usize,
-    alpha: f64,
-    rng: &mut impl rand::RngExt,
-) -> (f32, f32, f32) {
-    let n = x.len();
-    if n == 0 || n_boot == 0 {
-        return (f32::NAN, f32::NAN, f32::NAN);
-    }
-    let mut means: Vec<f32> = (0..n_boot)
-        .map(|_| {
-            let mut s = 0f32;
-            for _ in 0..n {
-                s += x[rng.random_range(0..n)];
-            }
-            s / n as f32
-        })
-        .collect();
-    means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let m = mean(&means);
-    let var = if n_boot < 2 {
-        0.0
-    } else {
-        means.iter().map(|&v| (v - m) * (v - m)).sum::<f32>() / (n_boot - 1) as f32
-    };
-    let se = var.max(0.0).sqrt();
-    let lo = means[(((alpha / 2.0) * n_boot as f64) as usize).min(n_boot - 1)];
-    let hi = means[(((1.0 - alpha / 2.0) * n_boot as f64) as usize).min(n_boot - 1)];
-    (se, lo, hi)
-}
-
-/// Two-sided **sign-flip** permutation p-value for H0: `E[x] = 0`. Each draw flips the
-/// sign of every element independently (fixing magnitudes, testing only the mean's
-/// direction), add-one corrected. `NaN` when `x` is empty.
-pub fn sign_flip_pvalue(x: &[f32], n_perm: usize, rng: &mut impl rand::RngExt) -> f32 {
-    let n = x.len();
-    if n == 0 {
-        return f32::NAN;
-    }
-    let obs = mean(x).abs();
-    let mut ge = 0usize;
-    for _ in 0..n_perm {
-        let mut s = 0f32;
-        for &xi in x {
-            if rng.random::<bool>() {
-                s += xi;
-            } else {
-                s -= xi;
-            }
-        }
-        if (s / n as f32).abs() >= obs {
-            ge += 1;
-        }
-    }
-    (1.0 + ge as f32) / (1.0 + n_perm as f32)
 }
 
 #[cfg(test)]

@@ -48,7 +48,7 @@ use crate::assoc::io::{load_celltypes, load_lineage, load_sites, Lineage, Site};
 use crate::assoc::trend::{run_trends, TrendConfig, TrendResult};
 use crate::assoc::trend_bayes::{run_trends_bayes, BayesTrendConfig};
 use crate::assoc::{BayesResult, Modality};
-use faba::hypothesis_tests::benjamini_hochberg;
+use matrix_util::hypothesis::benjamini_hochberg;
 
 /// Within-branch trend estimator.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]

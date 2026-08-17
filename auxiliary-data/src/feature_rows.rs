@@ -17,27 +17,24 @@
 //! {unit}/{modality}/{subunit}/{channel}    sub-unit (component or site)
 //! ```
 //!
-//! - `unit`     — the modelling unit. For every gene-resolution modality this is
-//!                the gene, `{gene_id}_{gene_name}`
-//!                (`gene_count::splice::format_gene_key`). [`BAF`] is the
-//!                exception: a variant is a coordinate, not a gene. It does not
-//!                belong to one, and two overlapping genes would otherwise give
-//!                the same variant two row names, so its unit is the
-//!                `{chr}:{pos}` locus.
-//! - `modality` — the lowercase subcommand name: [`COUNT`] / [`M6A`] / [`ATOI`] /
-//!                [`APA`], or [`BAF`].
-//! - `subunit`  — optional sub-gene id: a single-base `{chr}:{pos}` site (m6A
-//!                and A-to-I sites are one base pair) or an EM mixture
-//!                `{component}` index. Omitted for gene-level pooled rows.
-//!                It sits **above** the channel: a component/site is a position
-//!                cluster fit once per `(gene, modality)` and shared by both
-//!                channels, so the channel nests inside it.
-//! - `channel`  — the innermost (last) field: the two read-states that modality
-//!                contrasts (gene counts split [`SPLICED`]/[`UNSPLICED`]; m6A
-//!                [`METHYLATED`]/[`UNMETHYLATED`]; ATOI [`EDITED`]/[`UNEDITED`];
-//!                APA [`PROXIMAL`]/[`DISTAL`]; BAF [`ALT`]/[`DEPTH`]). Omitted by
-//!                the one producer whose contrast lives across the units rather
-//!                than within the row — see [`unit_row`].
+//! - `unit` — the modelling unit. For every gene-resolution modality this is
+//!   the gene, `{gene_id}_{gene_name}` (`gene_count::splice::format_gene_key`).
+//!   [`BAF`] is the exception: a variant is a coordinate, not a gene. It does
+//!   not belong to one, and two overlapping genes would otherwise give the same
+//!   variant two row names, so its unit is the `{chr}:{pos}` locus.
+//! - `modality` — the lowercase subcommand name: [`COUNT`] / [`M6A`] / [`ATOI`]
+//!   / [`APA`], or [`BAF`].
+//! - `subunit` — optional sub-gene id: a single-base `{chr}:{pos}` site (m6A and
+//!   A-to-I sites are one base pair) or an EM mixture `{component}` index.
+//!   Omitted for gene-level pooled rows. It sits **above** the channel: a
+//!   component/site is a position cluster fit once per `(gene, modality)` and
+//!   shared by both channels, so the channel nests inside it.
+//! - `channel` — the innermost (last) field: the two read-states that modality
+//!   contrasts (gene counts split [`SPLICED`]/[`UNSPLICED`]; m6A
+//!   [`METHYLATED`]/[`UNMETHYLATED`]; ATOI [`EDITED`]/[`UNEDITED`]; APA
+//!   [`PROXIMAL`]/[`DISTAL`]; BAF [`ALT`]/[`DEPTH`]). Omitted by the one
+//!   producer whose contrast lives across the units rather than within the row —
+//!   see [`unit_row`].
 //!
 //! Putting the channel last means a unit's two channel rows share a contiguous
 //! prefix (the unit), and "strip the trailing field" recovers the unit.

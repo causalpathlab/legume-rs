@@ -18,9 +18,14 @@ pub mod manifest;
 /// and [`gem_encoder::args::GemEncoderArgs`].
 pub mod gem_encoder;
 
-/// Shared test statistics: the beta-binomial and Fisher-exact p-values the
-/// editing caller is built on, plus the Benjamini-Hochberg adjustment used by
-/// `lineage`, `dyn-assoc` and cell QC. The editing caller does NOT use BH:
-/// neighbouring sites share reads, so BH's dependence assumption fails there.
-/// Exposed so the pure-function tests can live under `tests/`.
+/// The two-sample and single-sample statistics the editing caller is built on:
+/// beta-binomial and Fisher-exact p-values, and the log odds ratio. Exposed so
+/// the pure-function tests can live under `tests/`.
+///
+/// Deliberately NO FDR adjustment. Neighbouring conversion sites are covered by
+/// the same reads, and a read converted at one site is evidence against its
+/// unconverted neighbour, so the dependence is not even reliably positive and
+/// Benjamini-Hochberg's assumption fails. Editing selects on a marginal p-value
+/// and claims no FDR guarantee. Callers whose units genuinely are independent
+/// use [`matrix_util::hypothesis::benjamini_hochberg`].
 pub mod hypothesis_tests;
