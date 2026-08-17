@@ -14,6 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+log = { workspace = true }
+rayon = { workspace = true }
 clap = { workspace = true }
 base64 = { workspace = true }
 resvg = { workspace = true }

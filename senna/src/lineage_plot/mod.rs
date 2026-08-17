@@ -29,7 +29,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use log::{info, warn};
-use std::path::Path;
 
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
@@ -37,7 +36,6 @@ use matrix_util::traits::IoOps;
 
 use plot_utils::palette::Palette;
 use plot_utils::rasterize::{DataBounds, Extent};
-use plot_utils::render::{render_pdf, render_png};
 use plot_utils::svg_emit::{emit_svg, flatten_raster_layers, SvgOpts, TopicLayer};
 
 mod io;
@@ -539,28 +537,17 @@ pub fn run_lineage_plot(args: &LineagePlotArgs) -> Result<()> {
         info!("Wrote {svg_path}");
     }
 
-    // PNG + PDF share the same SVG string and are independent; render concurrently to
-    // hide resvg/svg2pdf parse latency. Default is PDF-only; PNG is opt-in.
-    let png_task = args.png.then(|| format!("{out}.plot.png"));
-    let pdf_task = (!args.no_pdf).then(|| format!("{out}.plot.pdf"));
-    let (png_res, pdf_res) = rayon::join(
-        || match &png_task {
-            Some(p) => {
-                render_png(&svg, width_px, height_px, Path::new(p)).map(|()| Some(p.clone()))
-            }
-            None => Ok(None),
+    plot_utils::write_figure(
+        &svg,
+        width_px,
+        height_px,
+        &format!("{out}.plot"),
+        plot_utils::FigureFormats {
+            svg: false, // already written above, from the spliced layer stack
+            png: args.png,
+            pdf: !args.no_pdf,
         },
-        || match &pdf_task {
-            Some(p) => render_pdf(&svg, Path::new(p)).map(|()| Some(p.clone())),
-            None => Ok(None),
-        },
-    );
-    if let Some(p) = png_res? {
-        info!("Wrote {p} ({width_px}x{height_px})");
-    }
-    if let Some(p) = pdf_res? {
-        info!("Wrote {p}");
-    }
+    )?;
     Ok(())
 }
 

@@ -1481,30 +1481,17 @@ fn render_colorbar_png(bar_w: u32, bar_h: u32) -> anyhow::Result<Vec<u8>> {
 ////////////////////////////////////////////////////
 
 fn emit_outputs(svg: &str, w: u32, h: u32, base: &str, args: &PlotTopicArgs) -> anyhow::Result<()> {
-    if args.svg {
-        let path = format!("{base}.svg");
-        fs::write(&path, svg.as_bytes())?;
-        info!("Wrote {path}");
-    }
-    let png_task = args.png.then(|| format!("{base}.png"));
-    let pdf_task = (!args.no_pdf).then(|| format!("{base}.pdf"));
-
-    let (png_res, pdf_res) = rayon::join(
-        || match &png_task {
-            Some(p) => plot_utils::render_png(svg, w, h, Path::new(p)).map(|()| Some(p.clone())),
-            None => Ok(None),
+    plot_utils::write_figure(
+        svg,
+        w,
+        h,
+        base,
+        plot_utils::FigureFormats {
+            svg: args.svg,
+            png: args.png,
+            pdf: !args.no_pdf,
         },
-        || match &pdf_task {
-            Some(p) => plot_utils::render_pdf(svg, Path::new(p)).map(|()| Some(p.clone())),
-            None => Ok(None),
-        },
-    );
-    if let Some(p) = png_res? {
-        info!("Wrote {p}");
-    }
-    if let Some(p) = pdf_res? {
-        info!("Wrote {p}");
-    }
+    )?;
     Ok(())
 }
 

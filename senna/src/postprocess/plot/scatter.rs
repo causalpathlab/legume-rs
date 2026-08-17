@@ -522,36 +522,17 @@ pub fn fit_plot(args: &PlotArgs) -> anyhow::Result<()> {
     );
 
     let base = resolved.out.clone();
-    if args.svg {
-        let svg_path = format!("{base}.plot.svg");
-        fs::write(&svg_path, svg.as_bytes())?;
-        info!("Wrote {svg_path}");
-    }
-
-    // PNG + PDF share the same SVG string and are independent; render
-    // concurrently to hide resvg/svg2pdf parse latency. Default is
-    // PDF-only; SVG/PNG are opt-in.
-    let png_task = args.png.then(|| format!("{base}.plot.png"));
-    let pdf_task = (!args.no_pdf).then(|| format!("{base}.plot.pdf"));
-    let (png_res, pdf_res) = rayon::join(
-        || match &png_task {
-            Some(p) => plot_utils::render_png(&svg, width_px, height_px, std::path::Path::new(p))
-                .map(|()| Some(p.clone())),
-            None => Ok(None),
+    plot_utils::write_figure(
+        &svg,
+        width_px,
+        height_px,
+        &format!("{base}.plot"),
+        plot_utils::FigureFormats {
+            svg: args.svg,
+            png: args.png,
+            pdf: !args.no_pdf,
         },
-        || match &pdf_task {
-            Some(p) => {
-                plot_utils::render_pdf(&svg, std::path::Path::new(p)).map(|()| Some(p.clone()))
-            }
-            None => Ok(None),
-        },
-    );
-    if let Some(p) = png_res? {
-        info!("Wrote {p}");
-    }
-    if let Some(p) = pdf_res? {
-        info!("Wrote {p}");
-    }
+    )?;
 
     Ok(())
 }
