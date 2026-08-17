@@ -35,7 +35,7 @@ use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 /// Default ridge on the per-gene splice offset δ_g, applied automatically whenever
 /// the input carries unspliced rows and the user did not set `--delta-l2`. Keeping a
 /// mild ridge on by default means every spliced+unspliced gem run always emits a δ_g
-/// dictionary (`{out}.delta_feature_embedding.parquet`) for downstream `senna annotate-gem
+/// dictionary (`{out}.delta_feature_embedding.parquet`) for downstream `senna annotate-by-projection
 /// --track velocity`, without over-shrinking. Matches the documented `--delta-l2`
 /// range (0.01–1.0).
 const DEFAULT_DELTA_L2: f32 = 1.0;
@@ -287,7 +287,7 @@ fn run_gem_genes_bge(
             info!(
                 "--markers: {on_axis} panel gene(s) on the trained axis = {:.0}% of its {} \
                  gene(s). The embedding is trained to separate what the panel will later \
-                 call, so read `annotate-gem`'s agreement as a check on the grouping, not an \
+                 call, so read `annotate-by-projection`'s agreement as a check on the grouping, not an \
                  independent one.",
                 100.0 * on_axis as f32 / keep_genes.len().max(1) as f32,
                 keep_genes.len()
@@ -345,7 +345,7 @@ fn run_gem_genes_bge(
     // maps to its gene, so a gene's two tracks embed identically as `β_g`; the splice
     // deviation is recovered as the phase-2 velocity increment δ on the CELL axis. δ_g
     // is auto-on with a mild ridge whenever both tracks are present (unless the user
-    // set `--delta-l2`) so a δ_g dictionary is always emitted for `senna annotate-gem
+    // set `--delta-l2`) so a δ_g dictionary is always emitted for `senna annotate-by-projection
     // --track velocity`; a spliced-only input keeps δ off.
     // Returns the axis-derived gene names and δ ridge the dictionary writers need,
     // plus the row→gene map and unspliced mask — the posterior anchors on genes per
@@ -491,12 +491,12 @@ fn run_gem_genes_bge(
     // either: a per-gene velocity readout, if wanted, is the in-model δ_g (`--delta-l2`
     // → `{out}.delta_feature_embedding.parquet`), not a post-hoc average. The feature embedding
     // is keyed by *feature row* (`{gene}/count/{spliced|unspliced}`); the gene-keyed β_g
-    // dictionary below is what marker-based `senna annotate-gem` consumes.
+    // dictionary below is what marker-based `senna annotate-by-projection` consumes.
     //
     // gem writes the EXPLICIT names (`{out}.cell_embedding.parquet` /
     // `{out}.feature_embedding.parquet`) rather than senna's `latent` / `dictionary` —
     // gem is not a topic model, so "latent"/"dictionary" said less than the tables are.
-    // `senna {lineage, annotate-gem}` read these names.
+    // `senna {lineage, annotate-by-projection}` read these names.
     /////////////
     // cell QC //
     /////////////
@@ -550,7 +550,7 @@ fn run_gem_genes_bge(
     // Gene-keyed β_g dictionary. `save_outputs` writes the dictionary keyed by feature
     // row (`{gene}/count/spliced|unspliced`), which a gene-symbol marker set cannot
     // match. Read the per-gene `beta` Var directly and save it row-labeled by gene —
-    // the spliced/mature gene program that `senna annotate-gem --track spliced` pairs with
+    // the spliced/mature gene program that `senna annotate-by-projection` pairs with
     // the cell latent θ. Every gene is in-model, so this table IS the whole gene axis.
     // Symmetric with the δ_g dictionary below.
     // β_g no longer needs to be snapshotted for the velocity posterior: the δ block

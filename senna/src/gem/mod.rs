@@ -13,7 +13,7 @@
 
 pub mod args;
 /// Loading gem's co-embedded **feature** embedding (`{out}.feature_embedding.parquet`)
-/// for the marker-space nearest-centroid call in `senna annotate-gem` / `senna lineage` —
+/// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage` —
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
 pub mod marker_embedding;
 /// The `senna gem` run: joint spliced+unspliced gene-count embedding over the shared

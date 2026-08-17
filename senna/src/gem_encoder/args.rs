@@ -121,14 +121,14 @@ pub struct GemEncoderArgs {
                      {out}.latent.parquet                    cell × K LOG THETA (theta = exp of these)\n\
                      {out}.latent_mature.parquet             cell × K log theta fitted to MATURE alone\n\
                      {out}.latent_nascent.parquet            cell × K log theta fitted to NASCENT alone\n\
-                     {out}.cell_embedding.parquet            cell × H (theta·alpha) for senna annotate-gem\n\
+                     {out}.cell_embedding.parquet            cell × H (theta·alpha) for annotate-by-projection\n\
                      {out}.velocity.parquet                  cell × H velocity, SAME space as cell_embedding\n\
                      {out}.velocity_factor.parquet           cell × K velocity = exp(nascent) - exp(mature)\n\
                      {out}.dictionary.parquet                gene × K MATURE program\n\
                      {out}.dictionary_nascent.parquet        gene × K nascent program\n\
                      {out}.feature_embedding.parquet         2*gene × H CO-EMBEDDED onto the cell manifold,\n\
                      .                                       /count/spliced + /count/unspliced rows;\n\
-                     .                                       this is what senna annotate-gem reads\n\
+                     .                                       this is what annotate-by-projection reads\n\
                      {out}.raw_feature_embedding.parquet     gene × H raw spliced program (rho + delta)\n\
                      {out}.delta_feature_embedding.parquet   gene × H splice-ratio offset\n\
                      {out}.splice_ratio_qc.parquet           per-gene model vs observed ratio\n\
@@ -386,7 +386,7 @@ pub struct GemEncoderArgs {
                      which is the wrong scope for a partitioning heuristic —\n\
                      a marker gene that missed the cut was not down-weighted downstream,\n\
                      it was ABSENT from dictionary.parquet,\n\
-                     and `senna annotate-gem` would score that cell type on whatever fraction of its panel survived,\n\
+                     and `senna annotate-by-projection` would score that cell type on whatever fraction of its panel survived,\n\
                      and still return a confident-looking call.\n\
                      \n\
                      0 uses every gene in the first random projection too."

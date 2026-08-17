@@ -163,8 +163,8 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // The fit above is kind-agnostic — `cell_embedding.parquet` and `velocity.parquet`
     // are an H-space pair from either producer, so k-means → MST → curves means the same
     // thing on both. The MARKER call is not: it is the co-embedded nearest-centroid
-    // statistic, which is what `senna annotate-gem --mode` exists to arbitrate, and on a topic
-    // model `annotate-gem` now defaults AWAY from it. Say so rather than let the two commands
+    // statistic, which is what `senna annotate-by-projection --mode` exists to arbitrate, and on a topic
+    // model `annotate-by-enrichment` is the right statistic. Say so rather than let the two commands
     // answer the same question differently without comment.
     let run_kind = crate::run_manifest::load_for(prefix)
         .ok()
@@ -172,9 +172,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     if args.markers.is_some() && run_kind == Some(crate::run_manifest::RunKind::GemEncoder) {
         warn!(
             "--markers on a gem-encoder run ({}): the node calls below are the co-embedded \
-             nearest-centroid statistic, which `senna annotate-gem` no longer defaults to for \
+             nearest-centroid statistic, which `senna annotate-by-projection` no longer defaults to for \
              this kind of run. The trajectory itself is unaffected — only the names on its \
-             nodes. For the topic-native cell call, run `senna annotate-gem --mode enrichment` \
+             nodes. For the topic-native cell call, run `senna annotate-by-projection --mode enrichment` \
              on the same prefix and read the two together.",
             crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix))
         );

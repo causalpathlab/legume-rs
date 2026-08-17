@@ -21,7 +21,8 @@
 
 use super::args::AnnotateProjectionArgs;
 use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
-use crate::run_manifest::{self, RunManifest};
+use crate::gem::marker_embedding::select_spliced_rows;
+use crate::run_manifest::{self, RunKind};
 use anyhow::{Context, Result};
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
@@ -43,7 +44,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         clean_outputs(&out, TERM_ORA_OUTPUT_SUFFIXES);
     }
 
-    let (mut manifest, dir) = RunManifest::load(Path::new(args.from.as_ref()))?;
+    let (mut manifest, dir) = run_manifest::load_for(&args.from)?;
     info!("Loaded manifest ({}): kind={}", args.from, manifest.kind);
     let resolve = |rel: &str| -> String {
         run_manifest::resolve(&dir, rel)
@@ -73,6 +74,15 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
     let cell_path = resolve(cell_rel);
     let feat = DMatrix::<f32>::from_parquet(&feat_path)
         .with_context(|| format!("reading feature embedding {feat_path}"))?;
+    // A gem feature embedding is keyed by FEATURE ROW, two per gene. Annotation
+    // is a statement about mature identity, so it reads the SPLICED rows and
+    // re-keys them by gene; matching the panel against the raw table would
+    // average the mature program together with the nascent one under one name.
+    let feat = if matches!(manifest.kind, RunKind::Gem | RunKind::GemEncoder) {
+        select_spliced_rows(feat, &feat_path)?
+    } else {
+        feat
+    };
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
     info!(
@@ -100,7 +110,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         ontology_by: args.ontology_by,
         panel_perm: args.panel_perm,
         support_perm: args.support_perm,
-        // ON by default, as in `senna annotate-gem`: a bare `argmin` over marker centroids always
+        // ON by default, as in `senna annotate-by-projection`: a bare `argmin` over marker centroids always
         // returns something, and returns it with no error bar.
         bootstrap: (!args.no_bootstrap_markers).then_some(MarkerBootstrapConfig {
             n_boot: args.n_boot,
@@ -154,6 +164,6 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         },
     )?;
 
-    info!("senna annotate-by-projection complete");
+    info!("senna annotate-by-projection complete → {out}.*");
     Ok(())
 }

@@ -241,7 +241,7 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
 /// and every output. That is the wrong scope for a partitioning heuristic. Its
 /// worst consequence was silent and downstream — a marker gene that missed the
 /// cut was not down-weighted in `dictionary.parquet`, it was **absent**, so
-/// `senna annotate-gem` scored that cell type on whatever fraction of its panel
+/// `senna annotate-by-projection` scored that cell type on whatever fraction of its panel
 /// happened to survive and still returned a confident-looking call.
 ///
 /// Ranking pools a gene's two tracks onto one entry before scoring: ranking

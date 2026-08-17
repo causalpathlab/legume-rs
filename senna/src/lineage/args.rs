@@ -355,7 +355,7 @@ pub struct LineageArgs {
         help_heading = "Marker annotation",
         help = "Marker TSV (gene<TAB>celltype) to name trajectory nodes by cell type",
         long_help = "Annotate each trajectory node with a cell type,\n\
-                     by term over-representation — the `senna annotate-gem` core —\n\
+                     by term over-representation — the `senna annotate-by-projection` core —\n\
                      run over the MST-node grouping,\n\
                      so the call carries the same permutation-calibrated confidence.\n\
                      pub(super) Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
@@ -384,7 +384,7 @@ pub struct LineageArgs {
         help = "Cell Ontology OBO file for the --markers ontology layer (needs --marker-label-cl)",
         long_help = "Optional.\n\
                      Adds a TreeBH Cell-Ontology layer over the per-node marker calls,\n\
-                     as in `senna annotate-gem`.\n\
+                     as in `senna annotate-by-projection`.\n\
                      Give the OBO graph here and the marker-type → CL id map via --marker-label-cl (both required together)."
     )]
     pub marker_obo: Option<Box<str>>,
@@ -417,7 +417,7 @@ pub struct LineageArgs {
                      \n\
                      Costs ~6 min at --marker-n-boot 200:\n\
                      the replicate k-means has nothing to cache,\n\
-                     unlike `senna annotate-gem`'s kNN graph"
+                     unlike `senna annotate-by-projection`'s kNN graph"
     )]
     pub no_bootstrap_markers: bool,
 

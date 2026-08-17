@@ -31,7 +31,7 @@
 //!    centroid while still counting as "matched" markers.
 //!
 //! `feature_embedding` is the model's own feature vectors — the ones actually fitted — and it is
-//! what `pinto annotate` and `senna annotate-by-projection` have always used. `senna annotate-gem` was
+//! what `pinto annotate` and `senna annotate-by-projection` have always used. `senna annotate-by-projection` was
 //! the odd one out.
 //!
 //! # The modality split
@@ -40,7 +40,7 @@
 //! `ENSG00000000971_CFH/count/spliced`, `.../count/unspliced` — a spliced *and* an unspliced row
 //! per gene. A marker panel names genes, so matching it against the raw table would silently pull
 //! **both** rows into the same centroid and average the mature identity together with the nascent
-//! one. [`load_gene_embedding`] therefore selects a single modality and strips the suffix back to
+//! one. [`select_spliced_rows`] therefore keeps the mature rows and strips the suffix back to
 //! the gene key, which is what the marker matcher expects.
 
 use anyhow::{Context, Result};
@@ -48,35 +48,27 @@ use log::info;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::{IoOps, MatWithNames};
 
-/// Which feature rows to keep out of gem's feature embedding.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Modality {
-    /// `{gene}/count/spliced` — the mature identity program.
-    Spliced,
-    /// `{gene}/count/unspliced` — the nascent program.
-    Unspliced,
-}
-
-impl Modality {
-    fn suffix(self) -> &'static str {
-        match self {
-            Self::Spliced => "/count/spliced",
-            Self::Unspliced => "/count/unspliced",
-        }
-    }
-}
-
-/// Read `{prefix}.feature_embedding.parquet`, keep only `modality`'s rows, and re-key them by
-/// gene so a marker panel can match them.
+/// The feature-row suffix annotation reads.
 ///
-/// Errors when the modality selects nothing — that is a real misconfiguration (a spliced-only gem
-/// run has no unspliced rows) and silently annotating against an empty gene set would be worse.
-pub fn load_gene_embedding(prefix: &str, modality: Modality) -> Result<MatWithNames<DMatrix<f32>>> {
-    let path = format!("{prefix}.feature_embedding.parquet");
-    let feat = DMatrix::<f32>::from_parquet(&path)
-        .with_context(|| format!("reading gene embedding {path}"))?;
+/// Spliced only, and not a parameter. A marker call is a statement about MATURE
+/// identity; the nascent program is a different quantity, and averaging the two
+/// under one gene name is what selecting a single suffix exists to prevent.
+const SPLICED_SUFFIX: &str = "/count/spliced";
 
-    let suffix = modality.suffix();
+/// Keep only the spliced rows out of a gem feature embedding, re-keyed by gene
+/// so a marker panel can match them.
+///
+/// Takes the table rather than a prefix: the caller resolves it through the run
+/// manifest, which is the one place that knows where a run's outputs are.
+///
+/// Errors when the modality selects nothing — that is a real misconfiguration (a
+/// spliced-only gem run has no unspliced rows) and silently annotating against
+/// an empty gene set would be worse.
+pub fn select_spliced_rows(
+    feat: MatWithNames<DMatrix<f32>>,
+    path: &str,
+) -> Result<MatWithNames<DMatrix<f32>>> {
+    let suffix = SPLICED_SUFFIX;
     let keep: Vec<usize> = feat
         .rows
         .iter()
@@ -108,10 +100,21 @@ pub fn load_gene_embedding(prefix: &str, modality: Modality) -> Result<MatWithNa
         mat.nrows(),
         mat.ncols()
     );
-
     Ok(MatWithNames {
+        mat,
         rows,
         cols: feat.cols,
-        mat,
     })
+}
+
+/// [`select_spliced_rows`] against `{prefix}.feature_embedding.parquet`.
+///
+/// For callers that hold only a prefix. Consumers that already loaded the run
+/// manifest should resolve the slot through it and call [`select_modality`]
+/// directly, rather than re-deriving the filename.
+pub fn load_gene_embedding(prefix: &str) -> Result<MatWithNames<DMatrix<f32>>> {
+    let path = format!("{prefix}.feature_embedding.parquet");
+    let feat = DMatrix::<f32>::from_parquet(&path)
+        .with_context(|| format!("reading gene embedding {path}"))?;
+    select_spliced_rows(feat, &path)
 }

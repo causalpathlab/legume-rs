@@ -32,7 +32,6 @@
 
 mod anchor_common;
 mod annotate;
-mod annotate_gem;
 mod assoc;
 mod bge;
 mod cluster;
@@ -80,7 +79,6 @@ use annotate::{
     annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
     AnnotateOntologyArgs, AnnotateProjectionArgs,
 };
-use annotate_gem::run::{run_annotate_gem, AnnotateGemArgs};
 use assoc::run::{run_assoc, AssocArgs};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
@@ -477,7 +475,7 @@ enum Commands {
                       That backbone is a prior for `senna lineage`, not a replacement.\n\
                       \n\
                       `{out}.gem.json` records that this prefix came from the EMBEDDING model,\n\
-                      which is how `senna annotate-gem` and `senna lineage` pick their statistic.",
+                      which is how `senna annotate-by-projection` and `senna lineage` pick their statistic.",
         after_long_help = "\
 	Example:\n\
   senna gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
@@ -764,57 +762,6 @@ enum Commands {
                       It also writes {out}.principal_graph.{nodes,edges}.parquet."
     )]
     Pseudotime(PseudotimeArgs),
-
-    #[command(
-        name = "annotate-gem",
-        aliases = ["annot-gem", "ann-gem"],
-        about = "Marker-set cell-type annotation of a `senna gem` or `gem-encoder` run",
-        long_about = "Annotate a gem-family run against a marker set.\n\
-                      \n\
-                      Reads the run's parquet outputs by prefix (`-f/--from`),\n\
-                      plus a marker TSV (`gene<TAB>celltype`, `-m/--markers`).\n\
-                      Then runs the shared term-ORA core:\n\
-                      assign → distance-outlier QC → Leiden clustering,\n\
-                      then cluster×term hypergeometric over-representation,\n\
-                      permutation-calibrated.\n\
-                      \n\
-                      TWO SCORERS (`--mode`), and they are not two flavours of one statistic:\n\
-                      they read different files and rest on different assumptions about the geometry.\n\
-                      The default is read from `{from}.gem.json` rather than fixed,\n\
-                      because the wrong one here does not error — it answers wrong.\n\
-                      An embedding run (`senna gem`) → `projection`;\n\
-                      a topic model (`senna gem-encoder` / `gem-topic`) → `enrichment`.\n\
-                      A prefix that cannot say what produced it is reported, not guessed at.\n\
-                      \n\
-                      `projection` builds each type's centroid from its markers' CO-EMBEDDED feature vectors,\n\
-                      then hands every cell to the nearest one.\n\
-                      It reads `feature_embedding.parquet` plus `cell_embedding.parquet`.\n\
-                      NOT the raw `beta_feature_embedding` or `delta_feature_embedding`,\n\
-                      which are model parameters off the cell manifold. Its tracks:\n\
-                      spliced:  /count/spliced rows   vs cell θ         → {out}.spliced.*\n\
-                      velocity: /count/unspliced rows vs cell velocity  → {out}.velocity.*\n\
-                      \n\
-                      `enrichment` never forms a cell-gene inner product —\n\
-                      on a topic model that is not a metric,\n\
-                      since β depends only on gene-to-gene differences,\n\
-                      and the absolute direction is a gauge the likelihood never pins.\n\
-                      It asks per factor whether a type's panel is over-represented at the top of that factor's gene ranking,\n\
-                      then carries the surviving factor×type edges to cells through θ.\n\
-                      It reads `dictionary.parquet`, `latent.parquet`,\n\
-                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.* Its tracks are `spliced` and `nascent`,\n\
-                      NOT velocity: a displacement has no membership to carry a call through.\n\
-                      `nascent` annotates the nascent PROGRAM — a state the cell is in,\n\
-                      on the simplex —\n\
-                      and reading it against `spliced` is the well-posed form of the question `velocity` asks.\n\
-                      \n\
-                      `--track both` (default) runs both of whichever pair applies;\n\
-                      the second track is skipped with a warning when its inputs are absent.",
-        after_long_help = "\
-	Example:\n\
-	senna gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
-  senna annotate-gem -f out/gem -m markers.tsv -o out/gem"
-    )]
-    AnnotateGem(AnnotateGemArgs),
 
     #[command(
         name = "lineage",
@@ -1164,7 +1111,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Docs(args) => run_docs(args)?,
         Commands::Gem(args) => run_gem_embedding(args)?,
         Commands::GemEncoder(args) => run_gem_encoder(args)?,
-        Commands::AnnotateGem(args) => run_annotate_gem(args)?,
         Commands::Lineage(args) => run_lineage(args)?,
         Commands::LineagePlot(args) => run_lineage_plot(args)?,
         Commands::Assoc(args) => run_assoc(args)?,

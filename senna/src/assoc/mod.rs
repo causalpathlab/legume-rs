@@ -1,6 +1,6 @@
 //! `senna dyn-assoc` — modality dynamics along the lineage.
 //!
-//! Downstream of `senna lineage` (mirrors `gem -> annotate-gem`): the trajectory is fit
+//! Downstream of `senna lineage` (mirrors `gem -> annotate-by-projection`): the trajectory is fit
 //! once; `assoc` then asks two complementary questions per modality site, with
 //! coverage n = edited+unedited as the binomial denominator (so detection bias is
 //! conditioned out) and the branches taken from gem θ + velocity with the modality
