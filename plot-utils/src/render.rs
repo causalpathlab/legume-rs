@@ -44,3 +44,61 @@ pub fn render_pdf(svg: &str, out: &Path) -> anyhow::Result<()> {
     fs::write(out, &pdf)?;
     Ok(())
 }
+
+/// Which files a figure should be written out as.
+#[derive(Copy, Clone, Debug)]
+pub struct FigureFormats {
+    pub svg: bool,
+    pub png: bool,
+    pub pdf: bool,
+}
+
+/// Write one SVG string out as `{base}.svg` / `.png` / `.pdf`, logging each.
+///
+/// Every plot command reaches the same place — one finished SVG and a choice of
+/// containers — and each had grown its own copy of this: the same `rayon::join`,
+/// the same PDF-by-default-PNG-opt-in policy, the same comment explaining it.
+/// Four copies of a decision that is not per-figure.
+///
+/// PNG and PDF share the SVG and are independent, so they render concurrently:
+/// both pay a usvg parse of the same string, and that parse is the bulk of the
+/// cost on a large scatter.
+///
+/// Returns how many files were written.
+pub fn write_figure(
+    svg: &str,
+    width_px: u32,
+    height_px: u32,
+    base: &str,
+    want: FigureFormats,
+) -> anyhow::Result<usize> {
+    let mut written = 0usize;
+    if want.svg {
+        let path = format!("{base}.svg");
+        fs::write(&path, svg.as_bytes()).map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
+        log::info!("Wrote {path}");
+        written += 1;
+    }
+
+    let png_task = want.png.then(|| format!("{base}.png"));
+    let pdf_task = want.pdf.then(|| format!("{base}.pdf"));
+    let (png_res, pdf_res) = rayon::join(
+        || match &png_task {
+            Some(p) => render_png(svg, width_px, height_px, Path::new(p)).map(|()| Some(p.clone())),
+            None => Ok(None),
+        },
+        || match &pdf_task {
+            Some(p) => render_pdf(svg, Path::new(p)).map(|()| Some(p.clone())),
+            None => Ok(None),
+        },
+    );
+    if let Some(p) = png_res? {
+        log::info!("Wrote {p} ({width_px}x{height_px})");
+        written += 1;
+    }
+    if let Some(p) = pdf_res? {
+        log::info!("Wrote {p}");
+        written += 1;
+    }
+    Ok(written)
+}

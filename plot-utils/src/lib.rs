@@ -39,6 +39,6 @@ pub use rasterize::{
     rasterize_arrow_layer_png, rasterize_group_png, rasterize_segment_layer_png, DataBounds,
     Extent, PointShape, RadiusSpec, Segment,
 };
-pub use render::{render_pdf, render_png};
+pub use render::{render_pdf, render_png, write_figure, FigureFormats};
 pub use structure_bar::structure_bar_png;
 pub use svg_emit::{emit_svg, escape_xml, SvgOpts, TopicLayer};

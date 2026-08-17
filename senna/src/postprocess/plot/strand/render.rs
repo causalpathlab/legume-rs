@@ -10,7 +10,6 @@ use super::{HeightScale, PlotStrandArgs, Strands};
 use crate::postprocess::plot::sanitize_filename as sanitize;
 use plot_utils::svg_emit::escape_xml;
 use std::fmt::Write as _;
-use std::path::Path;
 
 /// Build + render one cell-type (or consensus) figure. Returns the
 /// number of files written.
@@ -117,27 +116,17 @@ pub(super) fn render_one(
     // Render //
     ////////////
     let base = format!("{out_dir}/{}", sanitize(name));
-    let mut written = 0usize;
-    if args.svg {
-        let pth = format!("{base}.svg");
-        std::fs::write(&pth, svg.as_bytes())?;
-        written += 1;
-    }
-    let png_task = args.png.then(|| format!("{base}.png"));
-    let pdf_task = (!args.no_pdf).then(|| format!("{base}.pdf"));
-    let (png_res, pdf_res) = rayon::join(
-        || match &png_task {
-            Some(pth) => {
-                plot_utils::render_png(&svg, w as u32, h as u32, Path::new(pth)).map(|()| 1usize)
-            }
-            None => Ok(0),
+    let written = plot_utils::write_figure(
+        &svg,
+        w as u32,
+        h as u32,
+        &base,
+        plot_utils::FigureFormats {
+            svg: args.svg,
+            png: args.png,
+            pdf: !args.no_pdf,
         },
-        || match &pdf_task {
-            Some(pth) => plot_utils::render_pdf(&svg, Path::new(pth)).map(|()| 1usize),
-            None => Ok(0),
-        },
-    );
-    written += png_res? + pdf_res?;
+    )?;
     Ok(written)
 }
 
