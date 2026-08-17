@@ -1691,7 +1691,6 @@ name = "enrichment"
 version = "0.3.9"
 dependencies = [
  "anyhow",
- "approx",
  "indicatif",
  "log",
  "matrix-util",
@@ -5025,7 +5024,6 @@ dependencies = [
  "ndarray",
  "ndarray-rand",
  "num_cpus",
- "parquet",
  "petgraph",
  "plot-utils",
  "rand 0.10.1",
