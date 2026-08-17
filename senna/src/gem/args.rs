@@ -3,7 +3,8 @@ use clap::Args;
 use crate::embed_common::{ComputeDevice, NceObjectiveArg};
 
 /// Model dimensions.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct ModelArgs {
     #[arg(
         long,
@@ -143,7 +144,8 @@ pub struct ModelArgs {
 /// and the per-gene β-sharing factorization depends on that full path, so we
 /// default to **exact** matching. The delim flag is exposed for input files that
 /// carry an `ENSG..._SYMBOL` prefix inside the `{gene}` slot.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct CollapseArgs {
     #[arg(
         long,
@@ -337,7 +339,8 @@ pub struct CollapseArgs {
 }
 
 /// Training: optimizer schedule for the phase-1 pseudobulk fit.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct TrainArgs {
     #[arg(short = 'i', long, default_value_t = 1000, help = "Training epochs")]
     pub epochs: usize,
@@ -456,7 +459,8 @@ pub struct TrainArgs {
 }
 
 /// Runtime knobs: data preload, RNG seed, compute device, threads.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct RuntimeArgs {
     #[arg(
         long = "no-preload-data",
@@ -508,7 +512,8 @@ pub struct RuntimeArgs {
 /// `-b / --batch-files`, `--learning-rate` with `--lr` alias,
 /// `--preload-data`, `--device` / `--device-no`,
 /// `--feature-name-delim` / `--feature-name-exact`, `-o / --out`).
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct GemArgs {
     #[arg(
         value_name = "GENES",

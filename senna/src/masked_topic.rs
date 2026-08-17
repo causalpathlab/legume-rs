@@ -1373,6 +1373,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,
+        velocity_suffix: None,
+        velocity_factor_suffix: None,
+        delta_feature_embedding_suffix: None,
     })?;
 
     info!("Done");

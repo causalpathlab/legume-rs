@@ -49,7 +49,6 @@ mod eval_topic;
 mod fne;
 mod gem;
 mod gem_encoder;
-mod gem_manifest;
 mod geometry;
 mod hvg;
 mod impute;

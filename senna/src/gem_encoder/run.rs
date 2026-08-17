@@ -205,6 +205,48 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         write_velocity_tables(&inferred, &alpha, cell_names, args.n_latent, &args.out, qc)?;
     save_model_metadata(args, map.n_genes, &common_mode, &parameters)?;
 
+    // The shared run manifest, same as every other senna training command. gem
+    // and gem-encoder write tables under the SAME names meaning different things
+    // — `cell_embedding.parquet` is a topic membership here and Euclidean over in
+    // `gem` — so `kind` is what stops a downstream step guessing.
+    let input: Vec<String> = args
+        .genes()?
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
+        kind: crate::run_manifest::RunKind::GemEncoder,
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        // θ·α, the H-space projection every geometry consumer wants; `latent`
+        // below is the K-space log θ and is NOT a metric space.
+        cell_embedding_suffix: Some("cell_embedding.parquet"),
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
+        feature_loading_suffix: Some("raw_feature_embedding.parquet"),
+        velocity_suffix: Some("velocity.parquet"),
+        velocity_factor_suffix: Some("velocity_factor.parquet"),
+        delta_feature_embedding_suffix: Some("delta_feature_embedding.parquet"),
+        dictionary_suffix: Some("dictionary.parquet"),
+        softmax_dictionary_suffix: None,
+        has_latent: true,
+        has_model: true,
+        has_cell_proj: false,
+        has_cell_to_pb: false,
+        pb_gene_suffix: None,
+        pb_latent_suffix: None,
+        pb_reference_suffix: None,
+        dictionary_empirical_suffix: None,
+        default_colour_by: "topic",
+    })?;
+
     info!("done (gem-encoder) — prefix '{}'", args.out);
     Ok(())
 }

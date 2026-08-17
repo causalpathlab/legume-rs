@@ -74,7 +74,7 @@ use std::io::Write;
 use std::path::Path;
 
 use super::run::AnnotateGemArgs;
-use crate::gem_manifest as manifest;
+use crate::run_manifest::RunKind;
 
 /// Outputs land at `{out}.enrichment.*`, never at `{out}.{track}.*`, so running
 /// both modes at one prefix leaves both sets of results intact.
@@ -285,7 +285,9 @@ fn load_topic_model(prefix: &str, track: Track) -> Result<TopicModel> {
 
     // What the run says its per-cell table holds, read once and applied to both
     // θ tables — they come from the same producer under the same contract.
-    let stated = manifest::latent(prefix);
+    let stated = crate::run_manifest::load_for(prefix)
+        .ok()
+        .map(|(m, _)| m.kind);
 
     Ok(TopicModel {
         dictionary_gk: exp_log_beta(&dict.mat, &dict_path),
@@ -442,7 +444,7 @@ fn exp_log_beta(log_beta: &Mat, path: &str) -> Mat {
 /// heuristic is all there is, and it keeps its known blind spot — logits that
 /// happen to sum near 1 pass — which is why the remedy is to re-run the
 /// producer rather than to trust the check.
-fn exp_log_theta(log_theta: &Mat, path: &str, stated: Option<manifest::Latent>) -> Mat {
+fn exp_log_theta(log_theta: &Mat, path: &str, stated: Option<RunKind>) -> Mat {
     let theta = log_theta.map(f32::exp);
     let rows = theta.nrows();
     if rows == 0 {
@@ -456,20 +458,19 @@ fn exp_log_theta(log_theta: &Mat, path: &str, stated: Option<manifest::Latent>) 
 
     match stated {
         // Claimed log θ and behaves like it: nothing to say.
-        Some(manifest::Latent::LogTheta) if looks_like_theta => {}
-        Some(manifest::Latent::LogTheta) => warn!(
-            "{path} is stamped `\"latent\": \"log-theta\"` but exp() of it has mean row sum \
-             {mean_sum:.3}, not ~1. The manifest and the table disagree — most likely the \
-             manifest came from a different run than the parquet. Annotation continues on \
+        Some(k) if k.latent_is_log_simplex() && looks_like_theta => {}
+        Some(k) if k.latent_is_log_simplex() => warn!(
+            "{path} belongs to a run whose latent is on the simplex, but exp() of it has mean \
+             row sum {mean_sum:.3}, not ~1. The manifest and the table disagree — most likely \
+             the manifest came from a different run than the parquet. Annotation continues on \
              exp() as written; re-run `senna gem-encoder` to get a matched pair."
         ),
         // The manifest says this prefix is an embedding run, so there should be
         // no log θ here at all. Loud, because it means the enrichment path was
         // pointed at the wrong producer's output.
-        Some(manifest::Latent::Embedding) => warn!(
-            "{path} belongs to a run stamped `\"latent\": \"embedding\"` — those are Euclidean \
-             coordinates, not log θ, and exp() of them is meaningless. This prefix is a \
-             `senna gem` embedding run; use --mode projection on it."
+        Some(k) => warn!(
+            "{path} belongs to a {k} run — its per-cell coordinates are Euclidean, not log θ, \
+             and exp() of them is meaningless. Use --mode projection on this prefix."
         ),
         None if looks_like_theta => {}
         None => warn!(

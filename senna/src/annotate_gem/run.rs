@@ -45,7 +45,6 @@ use log::{info, warn};
 use std::path::Path;
 
 use crate::gem::marker_embedding::{load_gene_embedding, Modality};
-use crate::gem_manifest as manifest;
 use candle_util::decoder::gem_etm::Track as GemTrack;
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
@@ -455,42 +454,42 @@ pub struct AnnotateGemArgs {
 /// said what they wanted, and the old behaviour stays reachable for comparing
 /// against previously published calls.
 fn resolve_mode(prefix: &str, requested: Option<Mode>) -> Mode {
-    match (requested, manifest::detect_reporting(prefix)) {
-        (Some(Mode::Projection), Some(manifest::RunKind::Topic)) => {
+    let kind = crate::run_manifest::load_for(prefix)
+        .ok()
+        .map(|(m, _)| m.kind);
+    let manifest =
+        crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix));
+    match (requested, kind) {
+        (Some(Mode::Projection), Some(crate::run_manifest::RunKind::GemEncoder)) => {
             warn!(
-                "--mode projection on a TOPIC model ({} reports a gem-encoder run). \
-                 Nearest-centroid forms a cell-gene inner product that a topic model does not \
-                 identify, so the call will look reasonable and not mean what it says. \
-                 Prefer --mode enrichment, or drop --mode to let it be chosen.",
-                manifest::path(prefix)
+                "--mode projection on a gem-encoder run ({manifest}). Nearest-centroid forms a \
+                 cell-gene inner product that a topic model does not identify, so the call will \
+                 look reasonable and not mean what it says. Prefer --mode enrichment, or drop \
+                 --mode to let it be chosen."
             );
             Mode::Projection
         }
         (Some(m), _) => m,
         (None, Some(kind)) => {
-            let m = match kind {
-                manifest::RunKind::Topic => Mode::Enrichment,
-                manifest::RunKind::Embedding => Mode::Projection,
+            let m = if kind.latent_is_log_simplex() {
+                Mode::Enrichment
+            } else {
+                Mode::Projection
             };
-            info!(
-                "--mode not given; {} reports {kind:?} → {m:?}",
-                manifest::path(prefix)
-            );
+            info!("--mode not given; {manifest} reports {kind} → {m:?}");
             m
         }
         // Nothing here says what produced the prefix. Projection is what every
-        // pre-manifest `senna gem` run already got, so it stays the fallback
-        // rather than a new behaviour — but it is now announced, because the
-        // other things that land here are a typo'd prefix and an interrupted
-        // run. Those fail loudly a moment later when the parquet reads miss.
+        // pre-manifest `gem` run already got, so it stays the fallback rather
+        // than a new behaviour — but it is now announced, because the other
+        // things that land here are a typo'd prefix and an interrupted run.
+        // Those fail loudly a moment later when the parquet reads miss.
         (None, None) => {
             warn!(
-                "no {} (or legacy {}) — cannot tell which program produced this prefix, \
+                "no readable {manifest} — cannot tell which program produced this prefix, \
                  falling back to --mode projection. If this is a gem-encoder run, pass \
                  --mode enrichment or re-run the producer; if the prefix is wrong, the \
-                 table reads below will say so.",
-                manifest::path(prefix),
-                manifest::legacy_path(prefix)
+                 table reads below will say so."
             );
             Mode::Projection
         }

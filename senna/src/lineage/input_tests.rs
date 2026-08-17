@@ -1,8 +1,7 @@
 //! Which table θ comes from, and the metric it lands in.
 
 use super::*;
-use crate::gem_manifest::{self as manifest, RunKind};
-use serde_json::{Map, Value};
+use crate::run_manifest::{write_kind_only, RunKind};
 
 /// A unique scratch prefix per test, so the manifests written here cannot collide.
 fn scratch(tag: &str) -> String {
@@ -12,37 +11,31 @@ fn scratch(tag: &str) -> String {
         .into_owned()
 }
 
-/// Stamp `{prefix}.gem.json` the way a producer would.
-fn write_manifest(prefix: &str, kind: RunKind, latent: Option<&str>) {
-    let mut extra = Map::new();
-    if let Some(l) = latent {
-        extra.insert("latent".into(), Value::String(l.into()));
-    }
-    manifest::write(prefix, kind, extra).unwrap();
+/// Stamp `{prefix}.senna.json` the way a producer would.
+fn write_manifest(prefix: &str, kind: RunKind) {
+    write_kind_only(prefix, kind).unwrap();
 }
 
+/// `auto` reads the simplex exactly when the producing run has one.
+///
+/// This used to need two conditions — the kind AND a stamped `latent:
+/// log-theta` — because gem-encoder runs before 2026-07-21 wrote raw logits into
+/// `latent.parquet` under the same model type, so the kind alone could not tell
+/// them apart. Those prefixes carry no `senna.json` at all, so a readable
+/// manifest is now sufficient evidence and the second condition is gone.
 #[test]
-fn auto_reads_the_simplex_only_when_the_run_stamps_log_theta() {
-    // A topic run that states the contract → the simplex.
-    let p = scratch("topic_ok");
-    write_manifest(&p, RunKind::Topic, Some("log-theta"));
+fn auto_reads_the_simplex_only_for_a_run_that_has_one() {
+    // gem-encoder: latent.parquet is log θ.
+    let p = scratch("gem_encoder");
+    write_manifest(&p, RunKind::GemEncoder);
     assert_eq!(
         resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
         ThetaFrom::Latent
     );
 
-    // A topic run that does NOT: pre-2026-07-21 files put raw logits in latent.parquet
-    // under this same model_type, so auto must decline rather than exp() them.
-    let p = scratch("topic_unstamped");
-    write_manifest(&p, RunKind::Topic, None);
-    assert_eq!(
-        resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
-        ThetaFrom::CellEmbedding
-    );
-
-    // An embedding run writes no latent.parquet at all.
-    let p = scratch("embedding");
-    write_manifest(&p, RunKind::Embedding, Some("embedding"));
+    // gem writes no latent.parquet at all — its per-cell table is Euclidean.
+    let p = scratch("gem");
+    write_manifest(&p, RunKind::Gem);
     assert_eq!(
         resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
         ThetaFrom::CellEmbedding
@@ -58,20 +51,19 @@ fn auto_reads_the_simplex_only_when_the_run_stamps_log_theta() {
 
 #[test]
 fn explicit_latent_refuses_a_run_that_cannot_supply_it() {
-    // An embedding run has no latent.parquet: fail loudly rather than read a
-    // file that does not exist, or one that means something else.
-    let p = scratch("explicit_embedding");
-    write_manifest(&p, RunKind::Embedding, Some("embedding"));
+    // A gem run has no latent.parquet: fail loudly rather than read a file that
+    // does not exist, or one that means something else.
+    let p = scratch("explicit_gem");
+    write_manifest(&p, RunKind::Gem);
     assert!(resolve_theta_from(ThetaFrom::Latent, &p).is_err());
 
-    // An unstamped topic run is the dangerous case: latent.parquet EXISTS and has the
-    // right shape, but may hold raw logits. Refusing beats a plausible wrong θ.
-    let p = scratch("explicit_unstamped");
-    write_manifest(&p, RunKind::Topic, None);
+    // Nothing to go on is also a refusal: `--theta-from latent` is an assertion
+    // about the file, and an unverifiable assertion is not a licence to guess.
+    let p = scratch("explicit_no_manifest");
     assert!(resolve_theta_from(ThetaFrom::Latent, &p).is_err());
 
     let p = scratch("explicit_ok");
-    write_manifest(&p, RunKind::Topic, Some("log-theta"));
+    write_manifest(&p, RunKind::GemEncoder);
     assert_eq!(
         resolve_theta_from(ThetaFrom::Latent, &p).unwrap(),
         ThetaFrom::Latent
@@ -80,10 +72,10 @@ fn explicit_latent_refuses_a_run_that_cannot_supply_it() {
 
 #[test]
 fn cell_embedding_is_honoured_without_consulting_the_manifest() {
-    // Even on a topic run stamping log-theta, an explicit request stands: it is the
-    // escape hatch for comparing the co-embedding against the simplex.
+    // Even on a gem-encoder run, an explicit request stands: it is the escape
+    // hatch for comparing the co-embedding against the simplex.
     let p = scratch("forced_embedding");
-    write_manifest(&p, RunKind::Topic, Some("log-theta"));
+    write_manifest(&p, RunKind::GemEncoder);
     assert_eq!(
         resolve_theta_from(ThetaFrom::CellEmbedding, &p).unwrap(),
         ThetaFrom::CellEmbedding

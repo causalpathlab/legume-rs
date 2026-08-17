@@ -15,6 +15,7 @@ use matrix_util::traits::IoOps;
 
 use super::args::*;
 use super::layout::l2_normalize_rows;
+use crate::run_manifest::RunKind;
 
 /// θ and δ as they came off disk, plus what they are.
 ///
@@ -29,56 +30,55 @@ pub(super) struct LoadedTheta {
     pub velocity: Option<DMatrix<f32>>,
 }
 
-/// Resolve `--theta-from auto` against the manifest.
+/// Resolve `--theta-from auto` against the run manifest.
 ///
-/// `latent` requires BOTH that the run is a topic model and that it stamps
-/// `latent: log-theta`. The second is not redundant: topic runs before
-/// 2026-07-21 wrote raw logits into `latent.parquet` under the same
-/// `model_type`, and the two are indistinguishable by shape — so `exp()`-ing an
-/// unstamped file yields a plausible wrong θ rather than an error. Auto declines
-/// those; an explicit `--theta-from latent` refuses them outright.
+/// `latent` requires a run whose `latent.parquet` is on the probability simplex
+/// — `senna gem-encoder`, not `senna gem`. `gem` writes no latent at all: its
+/// per-cell table is a Euclidean embedding, and `exp()`-ing it would produce a
+/// plausible wrong θ rather than an error.
+///
+/// The stamped-contract check this used to carry is gone with the file it read.
+/// It existed because gem-encoder runs before 2026-07-21 wrote raw logits into
+/// `latent.parquet` under the same model type, so the kind alone could not tell
+/// them apart. The shared manifest did not exist then, so any prefix that has
+/// one is necessarily newer than that split, and
+/// [`RunKind::latent_is_log_simplex`] now carries the whole answer.
 pub(super) fn resolve_theta_from(requested: ThetaFrom, prefix: &str) -> Result<ThetaFrom> {
-    let kind = crate::gem_manifest::detect_reporting(prefix);
-    let contract = crate::gem_manifest::latent(prefix);
-    let is_topic = kind == Some(crate::gem_manifest::RunKind::Topic);
-    let is_log_theta = contract == Some(crate::gem_manifest::Latent::LogTheta);
+    // A missing manifest is not fatal for `auto` — it just means the geometry
+    // has to be assumed rather than read — so this stays an Option.
+    let kind = crate::run_manifest::load_for(prefix)
+        .ok()
+        .map(|(m, _)| m.kind);
+    let is_log_theta = kind.is_some_and(RunKind::latent_is_log_simplex);
+    let manifest =
+        crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix));
 
     match requested {
         ThetaFrom::CellEmbedding => Ok(ThetaFrom::CellEmbedding),
         ThetaFrom::Latent => {
             anyhow::ensure!(
-                is_topic,
-                "--theta-from latent needs a topic run; {} reports {}. \
-                 Only `senna gem-encoder` writes latent.parquet / velocity_factor.parquet.",
-                crate::gem_manifest::path(prefix),
-                kind.map_or("no manifest".into(), |k| format!("{k:?}"))
-            );
-            anyhow::ensure!(
                 is_log_theta,
-                "--theta-from latent needs {} to stamp `latent: log-theta`; it does not. \
-                 Topic runs before 2026-07-21 wrote RAW LOGITS to latent.parquet under the \
-                 same model_type, and exponentiating those gives a plausible wrong θ. \
-                 Re-run gem-encoder, or pass --theta-from cell-embedding.",
-                crate::gem_manifest::path(prefix)
+                "--theta-from latent needs a run whose latent is on the simplex; {manifest} \
+                 reports {}. Only `senna gem-encoder` writes latent.parquet / \
+                 velocity_factor.parquet; `senna gem` writes a Euclidean cell_embedding.",
+                kind.map_or_else(|| "no manifest".to_string(), |k| k.to_string())
             );
             Ok(ThetaFrom::Latent)
         }
         ThetaFrom::Auto => {
-            if is_topic && is_log_theta {
+            if is_log_theta {
                 info!(
-                    "--theta-from auto → latent: {} is a topic run stamping log-theta, so the \
-                     fit reads the SIMPLEX directly rather than the θ·α co-embedding",
-                    crate::gem_manifest::path(prefix)
+                    "--theta-from auto → latent: {manifest} is a {} run, so the fit reads the \
+                     SIMPLEX directly rather than the θ·α co-embedding",
+                    kind.expect("is_log_theta implies a kind")
                 );
                 Ok(ThetaFrom::Latent)
             } else {
-                if is_topic {
+                if kind.is_none() {
                     warn!(
-                        "topic run at {} does not stamp `latent: log-theta`, so --theta-from auto \
-                         falls back to cell_embedding (θ·α). That co-embedding compresses cells \
-                         into the convex hull of α and can look blobby; re-run gem-encoder to get \
-                         the stamp and the simplex path.",
-                        crate::gem_manifest::path(prefix)
+                        "no readable manifest at {manifest}, so --theta-from auto falls back to \
+                         cell_embedding. Pass --theta-from explicitly if that is not what this \
+                         prefix holds."
                     );
                 }
                 Ok(ThetaFrom::CellEmbedding)

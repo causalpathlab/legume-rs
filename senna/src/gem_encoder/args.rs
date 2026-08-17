@@ -3,7 +3,18 @@ use clap::Args;
 use crate::embed_common::ComputeDevice;
 
 /// Per-gene likelihood for the masked imputation loss.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "lowercase")]
 pub enum LikelihoodArg {
     /// Negative binomial — over-dispersed counts, library-scaled, learnable φ.
@@ -27,7 +38,8 @@ impl LikelihoodArg {
 }
 
 /// Runtime knobs.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct RuntimeArgs {
     #[arg(
         long = "no-preload-data",
@@ -75,7 +87,8 @@ pub struct RuntimeArgs {
 /// monotonically with KL weight), and a stick-breaking simplex (effective rank
 /// 1.33 against softmax's 3.14 on the same six-sample fit). The masked objective
 /// is the regularizer; neither addition earned its place.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct GemEncoderArgs {
     #[arg(
         value_name = "GENES",
