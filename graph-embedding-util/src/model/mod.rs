@@ -115,7 +115,7 @@ pub struct FactoredInit<'a> {
     pub unspliced_rows: Option<&'a [bool]>,
 }
 
-/// Optional per-gene β-sharing feature factorization (used by `faba gem`'s
+/// Optional per-gene β-sharing feature factorization (used by `senna gem`'s
 /// spliced/unspliced model). Instead of a free `e_feat` row per feature, every
 /// feature row reuses a per-GENE base embedding `β [G, H]`:
 ///

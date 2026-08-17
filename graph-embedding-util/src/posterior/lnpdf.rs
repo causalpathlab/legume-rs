@@ -154,7 +154,7 @@ pub struct NodeTerm<'a> {
     /// absolute loading: `⟨e_a + offset, e_o⟩`.
     ///
     /// This is what lets a second, dependent effect be sampled against a first one
-    /// held at its MAP. `faba gem`'s velocity gate is the motivating case — an
+    /// held at its MAP. `senna gem`'s velocity gate is the motivating case — an
     /// unspliced row scores `⟨β_g + δ_g, e_c⟩`, so sampling `δ_g` means carrying
     /// `β_g` as the offset — but nothing here is gem-specific. `None` is the plain
     /// case, and costs nothing.

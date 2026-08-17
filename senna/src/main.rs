@@ -42,6 +42,7 @@ mod clustering;
 mod cnv_pseudobulk;
 mod counterfactual;
 mod deconvolve;
+mod docs;
 mod embed_common;
 mod empirical_dict;
 mod eval_topic;
@@ -85,6 +86,7 @@ use assoc::run::{run_assoc, AssocArgs};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use deconvolve::DeconvolveArgs;
+use docs::{run_docs, DocsArgs};
 use embed_common::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
@@ -640,6 +642,17 @@ enum Commands {
 
     // ─────────── 4. Layout + plotting ───────────
     #[command(
+        name = "docs",
+        about = "Print the method write-ups compiled into this binary",
+        long_about = "Print the method write-ups compiled into this binary.\n\
+                      \n\
+                      Run with no topic to list what there is.\n\
+                      The text is embedded at build time, so it travels with the binary\n\
+                      to a machine that has no checkout beside it."
+    )]
+    Docs(DocsArgs),
+
+    #[command(
         name = "gem",
         aliases = ["gem-embedding"],
         about = "GEM: Geodesic Embedding for RNA Motion in one cell space",
@@ -1148,6 +1161,7 @@ fn main() -> anyhow::Result<()> {
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
         }
+        Commands::Docs(ref args) => run_docs(args)?,
         Commands::Gem(ref args) => run_gem_embedding(args)?,
         Commands::GemEncoder(ref args) => run_gem_encoder(args)?,
         Commands::AnnotateGem(ref args) => run_annotate_gem(args)?,

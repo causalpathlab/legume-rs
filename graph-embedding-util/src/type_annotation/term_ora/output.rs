@@ -359,7 +359,7 @@ pub(super) fn report_bootstrap(post: &BootstrapResult, type_names: &[Box<str>]) 
     warn!(
         "{} type(s) move further under marker resampling than the margin their assignment is \
          decided by — their cells are being called by noise: {}. This is an EMBEDDING problem, \
-         not a statistics one: re-run `faba gem --must-train-features <panel>` so the marker \
+         not a statistics one: re-run `senna gem --must-train-features <panel>` so the marker \
          genes are trained rather than post-hoc projected. See {{out}}.type_qc.tsv.",
         weak.len(),
         preview.join(", ")
@@ -447,7 +447,7 @@ pub(super) fn write_calibration(
                 "permutation null lambda_perm={:.2} strays from 1, but {:.0}% of terms have a \
                  null with no spread — too few cells are assigned to them to test at all. More \
                  permutations cannot fix this; a marker panel the embedding actually trained on \
-                 can (`faba gem --must-train-features`).",
+                 can (`senna gem --must-train-features`).",
                 cal.lambda_perm,
                 cal.degenerate_frac * 100.0
             );

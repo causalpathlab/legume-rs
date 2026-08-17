@@ -36,7 +36,7 @@ pub(super) fn leiden_from_graph(
 /// UMAP SGD layout off the fuzzy-weighted cell kNN graph, started from the
 /// leading principal components of `cell_u` (`[N×H]` row-major, unit-norm)
 /// rather than from a random scatter. Returns `[N×2]` row-major coords. Uses
-/// the shared `matrix_util::umap` kernel (same as `faba gem-plot`).
+/// the shared `matrix_util::umap` kernel (same as `senna gem-plot`).
 ///
 /// Only the *init* moves to PC space here; the graph stays the caller's,
 /// because it is the same one Leiden coarsening and fine-score smoothing

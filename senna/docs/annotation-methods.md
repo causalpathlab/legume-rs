@@ -3,13 +3,13 @@
 What the method does and why each part of it is there. Every default quoted here is the shipped
 default; every number attributed to "measured" was obtained on the dataset described in §7.
 Code: `graph-embedding-util/src/type_annotation/{term_ora,marker_bootstrap,panel_null}.rs`,
-driven by `faba annotate` and `faba lineage --markers`.
+driven by `senna annotate-gem` and `senna lineage --markers`.
 
 ---
 
 ## 1. Inputs and the space the call is made in
 
-`faba gem` embeds cells and gene features jointly. Two of its outputs matter here:
+`senna gem` embeds cells and gene features jointly. Two of its outputs matter here:
 
 | output | rows | meaning |
 |---|---|---|
@@ -43,7 +43,7 @@ between a type's centroid norm and the share of cells it captured was **+0.93**.
 >
 > At gem's default `--n-hvg 0` this is satisfied by construction: every gene is trained and the
 > per-gene softmax gate does the selecting, so no panel gene can miss the axis. The prerequisite
-> bites only when you set `--n-hvg > 0` — there, pass `faba gem --markers <panel>` (or
+> bites only when you set `--n-hvg > 0` — there, pass `senna gem --markers <panel>` (or
 > `--must-train-features <panel>`) with *the same marker file* the annotation will use, which
 > force-trains the panel regardless of the HVG cut.
 >
@@ -117,8 +117,8 @@ Rather than posit a generative density, we resample the evidence. For each of `B
 
 1. **Resample the panel.** For each type, draw `|live(T)|` of its live markers *with replacement*
    and rebuild `e_T` from that multiset (Efron's bootstrap over the marker panel).
-2. **Re-derive the grouping.** Re-run Leiden under a fresh seed (`faba annotate`), or refit the
-   k-means MST nodes under a fresh seed (`faba lineage`).
+2. **Re-derive the grouping.** Re-run Leiden under a fresh seed (`senna annotate-gem`), or refit the
+   k-means MST nodes under a fresh seed (`senna lineage`).
 3. Re-run §2–3 end to end and record each cell's resulting label.
 
 The shipped label is the consensus; `label_support` is the fraction of replicates that agreed.
@@ -357,7 +357,7 @@ confidence, not as uncertainty.
 | `{out}.null_calibration.tsv` | permutation-null diagnostics (λ, KS, analytic agreement) |
 | `{out}.cluster_term_{p,q,softq}.parquet` | group × type test matrices |
 
-`faba lineage --markers` runs the same core over the trajectory's MST nodes instead of Leiden
+`senna lineage --markers` runs the same core over the trajectory's MST nodes instead of Leiden
 communities (the bootstrap's regroup step reseeds the k-means), writing `{out}.lineage_annot.*`
 and `{out}.trajectory_annotation.parquet` (node → role → cell type → confidence). With the
 bootstrap on, that `confidence` is the mean bootstrap support of the cells that voted for the

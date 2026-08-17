@@ -18,8 +18,8 @@ use matrix_util::traits::IoOps;
 /// so pre-existing manifests still describe their files correctly. senna's
 /// embedding commands now use [`EmbeddingFileNames::SENNA_EMBEDDING`], which
 /// moves the cell table to `cell_embedding` and leaves `latent` to mean log θ.
-/// `faba gem` uses [`EmbeddingFileNames::EXPLICIT`], and its own downstream
-/// (`faba lineage` / `faba annotate`) reads those names. The conventions do
+/// `senna gem` uses [`EmbeddingFileNames::EXPLICIT`], and its own downstream
+/// (`senna lineage` / `senna annotate-gem`) reads those names. The conventions do
 /// not mix: a reader expects one or the other.
 #[derive(Clone, Copy, Debug)]
 pub struct EmbeddingFileNames {
@@ -39,7 +39,7 @@ impl Default for EmbeddingFileNames {
 }
 
 impl EmbeddingFileNames {
-    /// The explicit spelling used by `faba gem`: say what the table *is* rather
+    /// The explicit spelling used by `senna gem`: say what the table *is* rather
     /// than what role it plays in a topic model.
     pub const EXPLICIT: Self = Self {
         cell: "cell_embedding",
@@ -154,7 +154,7 @@ pub fn save_outputs_named(
 
 /// Canonical embedding-coordinate column names `h0..h{H-1}` — the single
 /// convention shared by every embedding writer (senna `save_embedding`,
-/// `faba gem`, `pinto cage`, `annotate-by-projection`). One source of truth so
+/// `senna gem`, `pinto cage`, `annotate-by-projection`). One source of truth so
 /// the `{out}.*_embedding.parquet` column schema never drifts (`h` vs `dim_` vs
 /// `e`). Embedding columns are always read positionally, so the name is purely
 /// for human/schema legibility — but it must be consistent across tools.

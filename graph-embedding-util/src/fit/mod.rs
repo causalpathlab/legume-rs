@@ -35,7 +35,7 @@ use selection::{install_selection, run_selection_pass, SelectionPassInput};
 ///
 /// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]` —
 /// the per-cell bias `b_cell` absorbs library size (consistent with
-/// `faba gem`).
+/// `senna gem`).
 ///
 /// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
 /// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-
@@ -151,7 +151,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
     // that sample's depth so the shared `E_feat` captures composition, not
     // library size. `b_cell` is re-fitted analytically in phase 2 and
-    // written alongside `e_cell` (consistent with `faba gem`).
+    // written alongside `e_cell` (consistent with `senna gem`).
 
     // Two-phase training (always — `ge::fit` is the bge driver only); see
     // the `fit()` doc for the rationale. Shared AdamW hyperparameters:

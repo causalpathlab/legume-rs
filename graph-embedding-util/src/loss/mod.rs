@@ -77,7 +77,7 @@ pub(super) use candle_util::loss::log_sigmoid;
 /// against a λ = 0 control, never by its share of the objective.
 ///
 /// One definition because three callers want it — geu's composite trainer,
-/// `pinto cage`, and (once the gate's Gaussian effect KL goes) `faba gem`,
+/// `pinto cage`, and (once the gate's Gaussian effect KL goes) `senna gem`,
 /// whose β-sharing means the ridge must point at `f.beta` rather than a free
 /// `E_feat`. `table` is `[rows, H]`; the result is a scalar.
 pub fn embedding_ridge(table: &Tensor, lambda: f64) -> Result<Tensor> {
@@ -95,7 +95,7 @@ pub fn embedding_ridge(table: &Tensor, lambda: f64) -> Result<Tensor> {
 /// several concatenated negative slates with differing K; the current callers
 /// (`feat`/`chain`) each pass a single block. Returns the per-positive loss
 /// `[B]`; callers mean/weight as needed. The [`softmax_nce`] alternative (selected
-/// per axis via [`NceObjective`]) is what `faba gem` trains its feature side with.
+/// per axis via [`NceObjective`]) is what `senna gem` trains its feature side with.
 pub fn logistic_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
     let mut term = log_sigmoid(pos)?;
     for neg in negs {
@@ -107,7 +107,7 @@ pub fn logistic_nce(pos: &Tensor, negs: &[Tensor]) -> Result<Tensor> {
 /// Which NCE objective a feature-side loss uses. `Softmax` (default) is sampled-
 /// softmax / InfoNCE: it normalizes the positive against its negatives in one
 /// distribution, which separates cell types better on dense count data than
-/// independent per-pair decisions — the default for `faba gem` and `senna bge`
+/// independent per-pair decisions — the default for `senna gem` and `senna bge`
 /// (`--nce-objective`). `Logistic` is the SGNS per-pair loss, still selectable
 /// (and the historical bge behaviour, kept byte-identical when chosen).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-//! Two-gate (splice) variant — `faba gem`. One `β_g` per gene plus a velocity deviation
+//! Two-gate (splice) variant — `senna gem`. One `β_g` per gene plus a velocity deviation
 //! `δ_g` carried only by the gene's unspliced rows, sampled as THREE blocks (`β | δ, pb`,
 //! `δ | β, pb`, `pb | β, δ`) where the plain path has two. The extra gate brings its own
 //! identifiability verdict per gene and its own accumulator over the outer sweeps.
@@ -16,7 +16,7 @@ use crate::posterior::pb_index::{build_pb_index_pair, AnchorMap, FeatureSide};
 use crate::progress::new_progress_bar;
 use log::info;
 
-/// `faba gem`'s β-sharing feature side: one `β_g` per gene, plus a velocity
+/// `senna gem`'s β-sharing feature side: one `β_g` per gene, plus a velocity
 /// deviation `δ_g` that applies only to the gene's **unspliced** rows.
 pub struct SpliceTracks<'a> {
     /// Feature row → gene, length `n_features`; `u32::MAX` drops the row.

@@ -43,7 +43,7 @@
 //! File-free by construction: the caller builds [`RestTrainInputs`] from
 //! whatever it already has in memory, matching this module's neighbours in
 //! [`crate::fit`]. `senna resolve-embedding-space` reads them off disk;
-//! `faba gem-encoder` hands over the θ and counts from the run that just
+//! `senna gem-encoder` hands over the θ and counts from the run that just
 //! finished, with no round-trip.
 
 use candle_util::batched_dot::batched_matvec;

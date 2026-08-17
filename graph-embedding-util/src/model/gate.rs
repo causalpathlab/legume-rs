@@ -11,7 +11,7 @@
 //!
 //! Sparsity pressure comes from [`ibp_gate_logit_bias`] — a fixed per-dim logit
 //! offset with no weight to choose — and NOT from a KL. Every consumer here
-//! (`senna bge`, `faba gem` phase-1, `pinto cage`) optimizes a noise-contrastive
+//! (`senna bge`, `senna gem` phase-1, `pinto cage`) optimizes a noise-contrastive
 //! objective, which bounds no marginal likelihood, so a KL added to it would be a
 //! penalty with a free coefficient rather than a term of a bound. That is not a
 //! stylistic objection: the coefficient it replaced needed `λ ≈ 1000` in cage
@@ -19,7 +19,7 @@
 //! genes-per-epoch besides.
 //!
 //! What survives is the Gaussian effect term, which is honestly an `α`-weighted
-//! ridge on the loading. It stays because `faba gem` pins `feature_embedding_l2 = 0`
+//! ridge on the loading. It stays because `senna gem` pins `feature_embedding_l2 = 0`
 //! under β-sharing and has no other shrinkage on `β`.
 
 use candle_util::candle_core::{DType, Device, Result, Tensor};
@@ -132,7 +132,7 @@ pub const GATE_KL_WEIGHT: f64 = 1.0;
 /// Calibration reference for [`gate_kl_step_weight`], in data-term units.
 ///
 /// `1024` is deliberately the historical default `--batch-size` of both
-/// `senna bge` and `faba gem`, whose data term contributes exactly one
+/// `senna bge` and `senna gem`, whose data term contributes exactly one
 /// per-example mean per axis. At that default the weight is numerically
 /// identical to the `λ/batch_size` this replaced, so pinning the reference here
 /// is what makes the change a correctness fix rather than a re-tune.
@@ -826,7 +826,7 @@ impl JointEmbedModel {
     /// rate, this effect KL, and a `Beta(1,9)` hyperprior on `π_h`. The first and
     /// third are gone, replaced by the fixed IBP ladder in
     /// [`ibp_gate_logit_bias`], for a reason that is structural rather than
-    /// cosmetic: **these models do not optimize an ELBO.** `senna bge`, `faba gem`
+    /// cosmetic: **these models do not optimize an ELBO.** `senna bge`, `senna gem`
     /// phase-1 and `pinto cage` all optimize a noise-contrastive objective, which
     /// bounds no marginal likelihood, so a "KL" added to it is not a term of
     /// anything — it is a penalty whose weight is free. And a free weight is
@@ -843,7 +843,7 @@ impl JointEmbedModel {
     ///
     /// It is not really a KL here either — read it as an `α`-weighted ridge on the
     /// loading, plus the entropy term that keeps `σ` from collapsing. It survives
-    /// because it is load-bearing: `faba gem` pins `feature_embedding_l2 = 0` (a
+    /// because it is load-bearing: `senna gem` pins `feature_embedding_l2 = 0` (a
     /// free-`E_feat` ridge is wrong under β-sharing), so this is the ONLY shrinkage
     /// on `β` for that whole fit. Dropping it once already "silently removed the
     /// ONLY shrinkage on the loading" — see [`Self::gate_kl`].
@@ -881,7 +881,7 @@ impl JointEmbedModel {
     ///
     /// Do not drop the surviving term on the jitter path. An earlier version did,
     /// and it silently removed the ONLY shrinkage on the loading for the whole
-    /// jitter fit — `faba gem` has no `E_feat` ridge to fall back on.
+    /// jitter fit — `senna gem` has no `E_feat` ridge to fall back on.
     pub fn gate_kl(&self) -> Result<Option<Tensor>> {
         if self.gate.is_none() {
             return Ok(None);

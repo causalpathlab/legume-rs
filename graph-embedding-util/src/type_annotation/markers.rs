@@ -199,7 +199,7 @@ fn report_panel_coverage(
             .take(MAX_LISTED)
             .map(|(cov, name, hit, req)| format!("{name} {hit}/{req} ({:.0}%)", cov * 100.0))
             .collect();
-        // Name `--must-train-features`, not `faba gem --markers`: this guard fires in senna and
+        // Name `--must-train-features`, not `senna gem --markers`: this guard fires in senna and
         // pinto too, and they have the former but not the latter. A warning whose remedy is a
         // flag your binary does not have is a warning you learn to ignore.
         warn!(

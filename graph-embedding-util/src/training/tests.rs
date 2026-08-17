@@ -117,7 +117,7 @@ fn gate_kl_step_weight_is_pinned_to_the_historical_level() {
     use crate::model::{GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT, GATE_KL_WEIGHT};
 
     // THE LOAD-BEARING CLAIM: at the default `--batch-size 1024`, which both
-    // `senna bge` and `faba gem` carry, this equals the `λ/batch_size` it
+    // `senna bge` and `senna gem` carry, this equals the `λ/batch_size` it
     // replaced. That is the whole reason the change was behaviour-preserving,
     // so it is pinned rather than argued.
     assert!((GATE_KL_STEP_WEIGHT - GATE_KL_WEIGHT / 1024.0).abs() < 1e-15);

@@ -36,7 +36,7 @@
 //!    near zero, so *two* of them outscore the 30 cells of the type that actually
 //!    fills the cluster. Anything that makes the groups small (a high
 //!    `--resolution`, or replacing the partition with per-cell neighbourhoods)
-//!    walks into this. See `faba/docs/annotation-grouping.md`.
+//!    walks into this. See `senna/docs/annotation-grouping.md`.
 //! 5. **Over-representation** — per (cluster K, term T) the count
 //!    `a = #{c∈K : t(c)=T}` is tested against the hypergeometric null with
 //!    fixed margins `(N, m_T, n_K)`; the statistic `−ln P(X≥a)` is **calibrated
@@ -194,14 +194,14 @@ pub(super) type Partition = (Vec<usize>, usize);
 /// ability to separate spurious calls collapses from AUC 0.93 to 0.69). The partition is where
 /// the instability lives, so the partition is what must move.
 ///
-/// It is a callback because each caller's grouping is arbitrary in its own way: `faba annotate`
+/// It is a callback because each caller's grouping is arbitrary in its own way: `senna annotate-gem`
 /// re-runs **Leiden** on a fixed kNN graph (modularity has many near-equal optima — the same
-/// cells have partitioned into anywhere from 132 to 990 communities), while `faba lineage`
+/// cells have partitioned into anywhere from 132 to 990 communities), while `senna lineage`
 /// re-runs its **seeded k-means** over the trajectory nodes. Same question, different coin.
 pub type Regroup<'a> = dyn Fn(u64) -> Result<Vec<usize>> + Sync + 'a;
 
 /// Per-community (cluster / MST-node) firm call returned by
-/// [`annotate_with_communities`], so a caller (e.g. `faba lineage --markers`) can name
+/// [`annotate_with_communities`], so a caller (e.g. `senna lineage --markers`) can name
 /// each trajectory node without re-reading the parquet.
 pub struct CommunityCalls {
     /// Called cell type per community (or `"unassigned"`), length `n_comm`.
@@ -304,11 +304,11 @@ pub fn annotate_embeddings_ora(
 /// term centroids, nearest-centroid `fine_label`, per-term QC, then cluster × term
 /// over-representation + permutation calibration over the *given* grouping — and writes
 /// every `{out_prefix}.*` artifact. [`annotate_embeddings_ora`] wraps this with Leiden;
-/// `faba lineage --markers` passes the MST-node clustering, so each trajectory node gets
+/// `senna lineage --markers` passes the MST-node clustering, so each trajectory node gets
 /// the same permutation-calibrated call.
 ///
 /// `regroup` (see [`Regroup`]) says how a bootstrap replicate re-derives the caller's grouping —
-/// `faba lineage` reseeds its k-means. Pass `None` to hold the grouping fixed, but note that a
+/// `senna lineage` reseeds its k-means. Pass `None` to hold the grouping fixed, but note that a
 /// panel-only bootstrap over a fixed partition is close to toothless (see [`Regroup`]).
 #[allow(clippy::too_many_arguments)]
 pub fn annotate_with_communities(

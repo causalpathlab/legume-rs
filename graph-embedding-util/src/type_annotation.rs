@@ -1,5 +1,5 @@
 //! Marker-set cell-type annotation by projection onto a **frozen feature
-//! embedding** — model-agnostic across `senna bge`, `faba gem`, `pinto
+//! embedding** — model-agnostic across `senna bge`, `senna gem`, `pinto
 //! cage`, and (via its adapter) topic models.
 //!
 //! The bipartite/freeze-feature pattern these embeddings share: a cell type
@@ -87,7 +87,7 @@ pub use output::write_label_tsvs;
 ///
 /// Exported because the panel is the *same object* whatever is done with it downstream — this
 /// crate's nearest-centroid path, or an enrichment walk over a topic dictionary
-/// (`faba annotate --mode enrichment`). A second parser in the caller would mean two gene
+/// (`senna annotate-gem --mode enrichment`). A second parser in the caller would mean two gene
 /// matchers, two IDF conventions and two coverage reports drifting apart on the same TSV.
 pub use markers::{parse_and_match_markers, MarkerSets};
 
@@ -130,7 +130,7 @@ pub(super) fn live_row(rows: &[f32], i: usize, h: usize) -> Option<&[f32]> {
 /// Firm projection annotation by term over-representation within cell clusters
 /// (Euclidean nearest-centroid → QC → cluster → hypergeometric + permutation
 /// calibration → optional TreeBH ontology). The statistically-firm successor to
-/// [`annotate_embeddings`]; `faba gem-annotate` drives it.
+/// [`annotate_embeddings`]; `senna gem-annotate` drives it.
 pub use term_ora::{
     annotate_embeddings_ora, annotate_with_communities, CommunityCalls, Regroup, TermOraConfig,
     TERM_ORA_OUTPUT_SUFFIXES,

@@ -3,7 +3,7 @@
 //! Parsed through clap rather than by building [`PosteriorArgs`] by hand, so the
 //! aliases and the optional-value spelling — which live in the attributes — are
 //! covered too. This is the single home for these: both `senna bge` and
-//! `faba gem` flatten the same struct, so the table cannot hold on one CLI and
+//! `senna gem` flatten the same struct, so the table cannot hold on one CLI and
 //! not the other.
 
 use super::*;
