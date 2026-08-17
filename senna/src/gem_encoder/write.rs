@@ -100,7 +100,7 @@ pub fn write_cell_table(
 
 /// Gem row names for one track, the axis both feature-embedding files are keyed
 /// on. `crate::gem::marker_embedding::load_gene_embedding` selects rows by this
-/// suffix, so it is what makes a gem-encoder run readable by `senna annotate-gem`.
+/// suffix, so it is what makes a gem-encoder run readable by `senna annotate-by-projection`.
 fn track_row_names(gene_names: &[Box<str>], track: Track) -> Vec<Box<str>> {
     gene_names
         .iter()
@@ -162,7 +162,7 @@ pub fn write_dictionaries(
 /// both (see [`write_coembedding`]); it is only this raw table that can skip the
 /// redundant half.
 ///
-/// NOTE `{out}.feature_embedding.parquet` — the one `senna annotate-gem --mode
+/// NOTE `{out}.feature_embedding.parquet` — the one `senna annotate-by-projection --mode
 /// projection` reads — is a DIFFERENT file, written by [`write_coembedding`]
 /// after this, because a nearest-centroid call needs genes on the cell manifold
 /// and these raw rows are not.
@@ -189,7 +189,7 @@ pub fn write_feature_embedding(
 }
 
 /// Write `{out}.cell_embedding.parquet` — cells placed in the GENE-embedding
-/// space, `[N, H]`, so `senna annotate-gem` / `lineage` / `lineage-plot` can read this run.
+/// space, `[N, H]`, so `senna annotate-by-projection` / `lineage` / `lineage-plot` can read this run.
 ///
 /// `cell_embedding = θ · α`. That is an identity, not an approximation: the
 /// decoder's own per-gene score is
@@ -248,7 +248,7 @@ pub fn write_cell_embedding(
 /// Cells live in the convex hull of α while ρ fans out off that simplex, so
 /// the two clouds are not in a shared metric space — measured on a six-file
 /// fit, `cos(mean cell, mean gene) = −0.92`, which made every cell roughly
-/// antipodal to every gene and left `senna annotate-gem` unable to assign a single
+/// antipodal to every gene and left `senna annotate-by-projection` unable to assign a single
 /// cell. The per-gene `logit_bias` makes this worse by construction: β only
 /// depends on gene-to-gene DIFFERENCES, so once `b_g` absorbs the level the
 /// absolute direction of ⟨α,ρ⟩ is a gauge freedom the likelihood never pins.
@@ -266,7 +266,7 @@ pub fn write_cell_embedding(
 /// rows and `ρ` as `/count/unspliced` rows — matching the layout `senna gem`
 /// emits and `crate::gem::marker_embedding::load_gene_embedding` selects on.
 ///
-/// This is what makes `senna annotate-gem --track velocity` (and therefore its
+/// This is what makes `senna annotate-by-projection --track velocity` (and therefore its
 /// `both` DEFAULT) work on a gem-encoder run. Writing only the spliced rows made
 /// that path fail outright, and the tempting shortcut — pointing the velocity
 /// track at the raw `{out}.delta_feature_embedding.parquet` — is exactly the
@@ -299,7 +299,7 @@ pub fn write_coembedding(
         .context("feature co-embedding")
 }
 
-/// Write the two pseudobulk tables that `senna annotate-gem --mode enrichment`
+/// Write the two pseudobulk tables that `senna annotate-by-projection --mode enrichment`
 /// needs on top of the dictionary and the latent.
 ///
 /// Enrichment annotation asks a different question from nearest-centroid:

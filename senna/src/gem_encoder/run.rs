@@ -153,7 +153,7 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         qc,
     )?;
     // The two per-track fits. `latent.parquet` stays the ENCODER's θ — it is
-    // what `senna annotate-gem --mode enrichment` reads as cell membership and what
+    // what `senna annotate-by-projection --mode enrichment` reads as cell membership and what
     // that result was validated on. These are the post-hoc fits against the
     // frozen dictionaries; their difference is the cell-level delta.
     for (buf, suffix) in [

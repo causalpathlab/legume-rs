@@ -433,13 +433,19 @@ pub struct AnnotateProjectionArgs {
         short = 'f',
         long = "from",
         required = true,
-        help = "Run manifest from a co-embedding run (`senna bge|fne|resolve-embedding-space`)",
-        long_help = "Run manifest with a co-embedded gene space.\n\
-                     That means `senna bge`, `fne`, or `resolve-embedding-space`.\n\
+        help = "Run manifest, or run prefix, from a co-embedding run",
+        long_help = "Run manifest (or the run's --out prefix) with a co-embedded gene space.\n\
+                     That means `senna bge`, `fne`, `resolve-embedding-space`, or `gem`.\n\
                      Reads `outputs.feature_embedding` + `outputs.cell_embedding`.\n\
                      It falls back to `outputs.latent` for the cell side on plain bge/fne.\n\
+                     \n\
+                     On a gem run the feature table carries two rows per gene.\n\
+                     The SPLICED rows are selected and re-keyed by gene:\n\
+                     annotation is a statement about mature identity,\n\
+                     and averaging the nascent program into it would blur that.\n\
+                     \n\
                      topic/svd runs have no genes-on-the-cell-manifold embedding.\n\
-                     Use `annotate-by-enrichment` for those."
+                     Use `annotate-by-enrichment` for those, and for `gem-encoder`."
     )]
     pub from: Box<str>,
 

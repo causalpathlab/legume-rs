@@ -21,7 +21,7 @@ pub struct ModelArgs {
         long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g.\n\
                      When 0 (default) and the input carries unspliced rows,\n\
                      gem auto-applies a mild ridge (L2=1.0),\n\
-                     so a δ_g dictionary is always written for `senna annotate-gem --track velocity`;\n\
+                     so a δ_g dictionary is always written for `senna annotate-by-projection --track velocity`;\n\
                      set an explicit value to override,\n\
                      or 0 on a spliced-only input keeps δ off. When > 0,\n\
                      unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase 1:\n\
@@ -286,7 +286,7 @@ pub struct CollapseArgs {
                 forced into the projection basis,\n\
                 like --must-train-features (a no-op at --n-hvg 0)",
         long_help = "The `gene<TAB>celltype` marker panel,\n\
-                     which `senna annotate-gem` or `senna lineage --markers` will later score against this embedding.\n\
+                     which `senna annotate-by-projection` or `senna lineage --markers` will later score against this embedding.\n\
                      Its genes are UNIONed into `--must-train-features`,\n\
                      so they carry projection weight regardless of the `--n-hvg` selection.\n\
                      \n\
@@ -301,11 +301,11 @@ pub struct CollapseArgs {
                      What remains is a modelling nudge, not a safety net:\n\
                      naming the panel biases the pseudobulk geometry,\n\
                      toward separating the compartments the panel will later call.\n\
-                     Read `annotate-gem`'s agreement as a check on the grouping rather than an independent confirmation —\n\
+                     Read `annotate-by-projection`'s agreement as a check on the grouping rather than an independent confirmation —\n\
                      which is what the run already logs.\n\
                      \n\
                      Same format and lenient name matching as --must-train-features (the celltype column is ignored here);\n\
-                     pass the SAME file you will pass to `senna annotate-gem --markers`."
+                     pass the SAME file you will pass to `senna annotate-by-projection --markers`."
     )]
     pub markers: Option<Box<str>>,
 

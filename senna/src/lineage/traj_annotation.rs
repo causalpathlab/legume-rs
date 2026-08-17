@@ -19,7 +19,7 @@ pub(super) struct AnnotateTrajArgs<'a> {
     pub(super) prefix: &'a str,
     pub(super) out: &'a str,
     pub(super) markers: &'a str,
-    /// Raw θ `[N × H]` — the same latent space `senna annotate-gem` scores in.
+    /// Raw θ `[N × H]` — the same latent space `senna annotate-by-projection` scores in.
     pub(super) raw_theta: &'a DMatrix<f32>,
     pub(super) cell_names: &'a [Box<str>],
     /// Per-cell MST-node id (the k-means `labels`) — the annotation clustering.
@@ -37,7 +37,7 @@ pub(super) struct AnnotateTrajArgs<'a> {
     pub(super) seed: u64,
 }
 
-/// Name each trajectory node by cell type: run the `senna annotate-gem` term-ORA core over the
+/// Name each trajectory node by cell type: run the `senna annotate-by-projection` term-ORA core over the
 /// MST-node grouping (raw θ vs the gem β dictionary), giving every node a permutation-
 /// calibrated call. Writes `{out}.lineage_annot.*` and returns the per-node
 /// [`CommunityCalls`]. Run BEFORE root selection (it doesn't depend on the root) so
@@ -46,10 +46,7 @@ pub(super) struct AnnotateTrajArgs<'a> {
 pub(super) fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
     // The co-embedded feature vectors, not β — see `crate::gem::marker_embedding` for why a
     // Euclidean nearest-centroid call against β is not a well-posed question.
-    let beta = crate::gem::marker_embedding::load_gene_embedding(
-        a.prefix,
-        crate::gem::marker_embedding::Modality::Spliced,
-    )?;
+    let beta = crate::gem::marker_embedding::load_gene_embedding(a.prefix)?;
     let cfg = TermOraConfig {
         n_perm: a.num_perm,
         // `--seed` drives the whole fit; it should drive the annotation's randomness too. It was
@@ -90,7 +87,7 @@ pub(super) fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls>
         &input,
         a.markers,
         &format!("{}.lineage_annot", a.out),
-        true, // IDF-weight markers, as `senna annotate-gem` does by default
+        true, // IDF-weight markers, as `senna annotate-by-projection` does by default
         a.labels,
         a.k,
         regroup,
