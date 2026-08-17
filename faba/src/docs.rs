@@ -42,9 +42,9 @@ pub fn run_docs(args: &DocsArgs) -> Result<()> {
     let Some(want) = args.topic else {
         println!("faba method write-ups (`faba docs <TOPIC>` to read one):\n");
         for (topic, blurb, _) in DOCS {
-            // The slug clap will actually ACCEPT. Deriving it with `format!("{topic:?}")` printed
-            // `ontologyplan` while the parser wanted `ontology-plan`, so the listing advertised
-            // names the command then refused — the one failure this table exists to prevent.
+            // The slug clap will actually ACCEPT, not the Debug spelling — see the same
+            // loop in `senna docs`, where the two diverge and a derived slug once advertised
+            // a name the parser then refused.
             let slug = topic
                 .to_possible_value()
                 .as_ref()

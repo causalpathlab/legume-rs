@@ -1,5 +1,5 @@
 //! End-to-end check that `annotate_embeddings` emits the cell→coarse-label
-//! `membership.tsv` (consumed by `faba gem-summary` and `data-beans stat -g`)
+//! `membership.tsv` (consumed by `senna gem` and `data-beans stat -g`)
 //! in the expected 2-column, header-less format.
 
 use graph_embedding_util::type_annotation::{

@@ -6,7 +6,7 @@ design directions from the 2026-07-08 discussion for a future update.
 ## Why rooting deserves expert knowledge (the motivation)
 
 The root is not a cosmetic choice — it **determines the actual deliverables** of
-the downstream `faba assoc` between-branch analysis, and automatic (data-only)
+the downstream `senna dyn-assoc` between-branch analysis, and automatic (data-only)
 rooting is unreliable in an underfit embedding. Evidence gathered on the
 cord-blood WT m6A data (15,315 cells, 6 samples):
 
@@ -46,7 +46,7 @@ to infer it from a shaky embedding.
 
 ## Current state (what exists today)
 
-- Root priority in `resolve_root` (`faba/src/run_lineage.rs`):
+- Root priority in `resolve_root` (`senna/src/lineage/root.rs`):
   `--root-node > --root-cell > --root-type > --root-from-gem > velocity-flux > node 0`.
 - `--root-type <TYPE>`: single marker-grounded type, matched to the
   highest-confidence node of that type via the marker ORA (`--markers`).
@@ -132,11 +132,11 @@ So expert knowledge **anchors** the root and the data-driven signals
 
 ## Related
 
-- `faba/src/run_lineage.rs` — `resolve_root`, `root_type_node`,
+- `senna/src/lineage/root.rs` — `resolve_root`, `root_type_node`,
   `gem_root_node`, `compute_node_calls`.
 - `graph-embedding-util/src/type_annotation/` — marker ORA node scoring
   (`term_ora`, `cluster_term_softq`) to reuse for signature rooting.
 - `docs/annotation-ontology-plan.md` — the reference-free CL-DAG annotation plan
   (shares the marker/ontology machinery).
-- `faba/src/assoc/` — the downstream that inherits the rooting choice; see the
+- `senna/src/assoc/` — the downstream that inherits the rooting choice; see the
   root-invariance decomposition (detection vs direction).

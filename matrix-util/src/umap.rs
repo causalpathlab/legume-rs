@@ -10,7 +10,7 @@
 //!
 //! Pair this with [`crate::knn_graph::KnnGraph::fuzzy_kernel_weights`]
 //! to build the input edge list. Shared by `senna layout umap` and
-//! `faba gem-plot`.
+//! `senna lineage-plot`.
 //!
 //! References:
 //! - McInnes, Healy & Melville, *arXiv* 1802.03426 — UMAP.

@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::common::{ComputeDevice, NceObjectiveArg};
+use crate::embed_common::{ComputeDevice, NceObjectiveArg};
 
 /// Model dimensions.
 #[derive(Args, Debug, Clone)]
@@ -299,7 +299,7 @@ pub struct CollapseArgs {
                      What remains is a modelling nudge, not a safety net:\n\
                      naming the panel biases the pseudobulk geometry,\n\
                      toward separating the compartments the panel will later call.\n\
-                     Read `annotate`'s agreement as a check on the grouping rather than an independent confirmation —\n\
+                     Read `annotate-gem`'s agreement as a check on the grouping rather than an independent confirmation —\n\
                      which is what the run already logs.\n\
                      \n\
                      Same format and lenient name matching as --must-train-features (the celltype column is ignored here);\n\

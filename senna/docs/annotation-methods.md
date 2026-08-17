@@ -1,4 +1,4 @@
-# Marker-based cell-type annotation in `faba` — methods
+# Marker-based cell-type annotation in `senna` — methods
 
 What the method does and why each part of it is there. Every default quoted here is the shipped
 default; every number attributed to "measured" was obtained on the dataset described in §7.

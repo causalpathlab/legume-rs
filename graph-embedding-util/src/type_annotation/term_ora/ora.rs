@@ -180,7 +180,7 @@ pub(super) fn cluster_term_ora(
     // BH q per cluster row on the permutation p.
     let mut q = vec![1f32; n_comm * c];
     for k in 0..n_comm {
-        let row_q = enrichment::bh_fdr(&p_perm[k * c..(k + 1) * c]);
+        let row_q = matrix_util::hypothesis::benjamini_hochberg(&p_perm[k * c..(k + 1) * c]);
         q[k * c..(k + 1) * c].copy_from_slice(&row_q);
     }
 

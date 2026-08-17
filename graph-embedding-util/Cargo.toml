@@ -43,7 +43,7 @@ mcmc-util = { workspace = true }
 
 anyhow = { workspace = true }
 # `posterior::run` exports the shared `--posterior` / `--mcmc` flag group and
-# writes the run's diagnostic JSON, so both `senna bge` and `faba gem` get one
+# writes the run's diagnostic JSON, so both `senna bge` and `senna gem` get one
 # implementation instead of a fork each. Same pattern as `data_beans::qc_lib::QcArgs`.
 clap = { workspace = true }
 ctrlc = { workspace = true }

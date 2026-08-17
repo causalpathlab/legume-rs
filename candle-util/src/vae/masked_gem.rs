@@ -1,4 +1,4 @@
-//! Masked-imputation trainer for `faba gem-encoder` — the `u + δ → s` objective.
+//! Masked-imputation trainer for `senna gem-encoder` — the `u + δ → s` objective.
 //!
 //! Drives [`GemIndexedEncoder`] + per-level [`GemEtmDecoder`] against
 //! [`GemIndexedData`] minibatches. There is no ELBO and no KL: the masking IS
@@ -121,7 +121,7 @@ pub struct GemTrainOpts {
     /// is a second constraint on top of that one, and it does not pay for itself
     /// — measured on 3 wt libraries, `λ_δ = 0` recovered canonical markers
     /// BETTER than `λ_δ = 1` (rank 239 vs 276 in `β`, 124 vs 204 in `δ`) for
-    /// 0.011 of splice-ratio `r`. See `faba gem-topic --help` for the table.
+    /// 0.011 of splice-ratio `r`. See `senna gem-topic --help` for the table.
     pub delta_l2: f32,
     /// Ridge `λ_ρ` on the nascent gene embedding.
     pub feature_embedding_l2: f32,

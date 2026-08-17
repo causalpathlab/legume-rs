@@ -110,7 +110,7 @@ pub fn cage_nce_loss_per_level(
     let b_right = model.b_cell.index_select(&right_idx, 0)?;
 
     // Gene rows with whatever gates them applied — geu's own helper, so cage,
-    // `senna bge` and `faba gem` share ONE definition of what multiplies a
+    // `senna bge` and `senna gem` share ONE definition of what multiplies a
     // feature loading. It dispatches on what the model actually carries:
     //
     //   - sampled mask installed: this epoch's `z` rows (or the frozen `pip`

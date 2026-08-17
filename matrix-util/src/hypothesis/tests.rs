@@ -30,9 +30,19 @@ fn benjamini_hochberg_qvalues() {
 
 #[test]
 fn bh_preserves_input_order() {
-    let p = vec![0.01, 0.50, 0.03, 0.20];
+    // The name promises order preservation, so assert it: q must track p
+    // POSITIONALLY, not in sorted order. Permuting the input must permute the
+    // output the same way — the property a sort-in-place implementation breaks.
+    let p = vec![0.01f32, 0.50, 0.03, 0.20];
     let q = benjamini_hochberg(&p);
     assert_eq!(q.len(), p.len());
+
+    let perm = [2usize, 0, 3, 1];
+    let p_perm: Vec<f32> = perm.iter().map(|&i| p[i]).collect();
+    let q_perm = benjamini_hochberg(&p_perm);
+    for (k, &i) in perm.iter().enumerate() {
+        assert_relative_eq!(q_perm[k], q[i], epsilon = 1e-6);
+    }
 }
 
 #[test]

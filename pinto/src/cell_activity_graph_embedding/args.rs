@@ -17,7 +17,7 @@ pub enum NceObjectiveArg {
     /// independently — cage's historical loss.
     Logistic,
     /// Sampled-softmax / InfoNCE: the negatives compete with the positive in one
-    /// softmax. The default here and in `senna bge` / `faba gem`.
+    /// softmax. The default here and in `senna bge` / `senna gem`.
     Softmax,
 }
 
@@ -353,7 +353,7 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     /// HVG selection: senna-style shared CLI (`--n-hvg`,
     /// `--feature-list-file`). cage **weights the random projection** with it,
-    /// exactly as `senna bge` and `faba gem` do — non-selected genes get
+    /// exactly as `senna bge` and `senna gem` do — non-selected genes get
     /// projection weight 0 and so sit out the basis the coarsening hierarchy is
     /// built from, but they stay on the trained axis: still fit, still sampled,
     /// still in the PIP table. The selection shapes *where the pseudobulks

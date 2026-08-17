@@ -10,9 +10,9 @@ edition.workspace = true
 version = "0.13.0"
 
 [lib]
-# The library surface exists so the editing statistics can be driven from
-# integration tests under `tests/`. Its module docs use illustrative math
-# blocks, not runnable examples, so doctests are disabled.
+# The library surface carries the editing statistics, shared by the binary's
+# editing caller and the integration tests under `tests/`. Its module docs use
+# illustrative math blocks, not runnable examples, so doctests are disabled.
 doctest = false
 
 [[bin]]

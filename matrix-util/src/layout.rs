@@ -4,7 +4,7 @@
 //!
 //! These are pure functions on `nalgebra` matrices with no I/O and no CLI
 //! dependencies, so they can be consumed by `senna` (PB-landmark layout),
-//! `faba gem-annotate` (cell layout off the leiden kNN graph + feature
+//! `senna annotate-gem` (cell layout off the leiden kNN graph + feature
 //! placement), and any other caller. Originally `pub(crate)` inside senna;
 //! lifted here so faba can reuse them without duplication.
 

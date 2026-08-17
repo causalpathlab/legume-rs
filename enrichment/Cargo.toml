@@ -22,6 +22,3 @@ special = { workspace = true }
 statrs = { workspace = true }
 
 matrix-util = { workspace = true }
-
-[dev-dependencies]
-approx = { workspace = true }

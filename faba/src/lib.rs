@@ -1,10 +1,13 @@
 //! Library surface for `faba`.
 //!
-//! The crate ships as the `faba` binary (see `main.rs`); this surface exists
-//! only so the pure-function statistics below can be driven from integration
-//! tests under `tests/`. Nothing else is exported, and nothing else should be:
-//! faba's product is the per-cell feature matrices its subcommands write, and
-//! every downstream consumer reads those as files rather than linking to them.
+//! The crate ships as the `faba` binary (see `main.rs`). This surface carries
+//! the one thing the binary and the integration tests under `tests/` both need:
+//! the editing caller reaches it from `editing::{sifter, io, pipeline}`, and the
+//! tests drive the same pure functions directly.
+//!
+//! Nothing else is exported, and nothing else should be. faba's product is the
+//! per-cell feature matrices its subcommands write, and every downstream
+//! consumer reads those as files rather than linking to them.
 
 /// The two-sample and single-sample statistics the editing caller is built on:
 /// beta-binomial and Fisher-exact p-values, and the log odds ratio.

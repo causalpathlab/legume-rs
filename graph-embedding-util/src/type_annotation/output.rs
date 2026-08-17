@@ -184,12 +184,12 @@ pub(super) fn write_annotation_outputs(
     // BH q-values across the N per-cell calls of each layer (FDR over the
     // selected-label p-values); NaN-filled when the null was skipped.
     let coarse_q = if res.coarse_p.is_some() {
-        enrichment::fdr::bh_fdr(&coarse_p)
+        matrix_util::hypothesis::benjamini_hochberg(&coarse_p)
     } else {
         vec![nan; n]
     };
     let fine_q = if res.fine_p.is_some() {
-        enrichment::fdr::bh_fdr(&fine_p)
+        matrix_util::hypothesis::benjamini_hochberg(&fine_p)
     } else {
         vec![nan; n]
     };

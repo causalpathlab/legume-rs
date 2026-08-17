@@ -25,7 +25,7 @@ fn read_back(path: &str) -> (Vec<String>, Vec<Vec<f32>>) {
 /// truncation.
 #[test]
 fn qc_keep_subsets_rows_and_barcodes_together() {
-    let dir = std::env::temp_dir().join("faba_gemenc_qc_test");
+    let dir = std::env::temp_dir().join(format!("senna_gemenc_qc_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("kept.parquet");
     let path = path.to_str().unwrap();
@@ -62,7 +62,7 @@ fn qc_keep_subsets_rows_and_barcodes_together() {
 /// worse, read a neighbouring cell's values.
 #[test]
 fn qc_keep_index_out_of_range_is_an_error() {
-    let dir = std::env::temp_dir().join("faba_gemenc_qc_test");
+    let dir = std::env::temp_dir().join(format!("senna_gemenc_qc_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("bad.parquet");
     let path = path.to_str().unwrap();

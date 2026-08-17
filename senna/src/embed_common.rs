@@ -117,6 +117,31 @@ impl ComputeDevice {
     }
 }
 
+/// NCE training objective for a feature/cell embedding (maps to
+/// [`graph_embedding_util::loss::NceObjective`]). Shared by `bge` and `gem`,
+/// which train the same engine and must name its losses the same way.
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum NceObjectiveArg {
+    /// Per-pair logistic (SGNS): each (positive, negative) pair decided
+    /// independently — bge's historical loss, byte-identical runs.
+    Logistic,
+    /// Sampled-softmax / InfoNCE: the negatives compete with the positive in one
+    /// softmax; sharpens separation on dense count data (gem's default).
+    Softmax,
+}
+
+impl NceObjectiveArg {
+    #[must_use]
+    pub fn to_ge(&self) -> graph_embedding_util::loss::NceObjective {
+        match self {
+            NceObjectiveArg::Logistic => graph_embedding_util::loss::NceObjective::Logistic,
+            NceObjectiveArg::Softmax => graph_embedding_util::loss::NceObjective::Softmax,
+        }
+    }
+}
+
 /// Batch adjustment method
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]

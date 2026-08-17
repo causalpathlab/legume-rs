@@ -90,7 +90,7 @@ pub enum Track {
 }
 
 #[derive(Args, Debug)]
-pub struct AnnotateArgs {
+pub struct AnnotateGemArgs {
     #[arg(
         long,
         short = 'f',
@@ -497,7 +497,7 @@ fn resolve_mode(prefix: &str, requested: Option<Mode>) -> Mode {
     }
 }
 
-pub fn run_annotate(args: &AnnotateArgs) -> Result<()> {
+pub fn run_annotate_gem(args: &AnnotateGemArgs) -> Result<()> {
     let prefix = args.from.as_ref();
     let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
@@ -665,7 +665,7 @@ struct TrackSpec {
 fn annotate_track(
     prefix: &str,
     out: &str,
-    args: &AnnotateArgs,
+    args: &AnnotateGemArgs,
     cfg: &TermOraConfig,
     spec: &TrackSpec,
 ) -> Result<()> {

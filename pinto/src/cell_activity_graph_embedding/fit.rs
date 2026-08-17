@@ -242,7 +242,7 @@ pub fn fit_cell_activity_graph_embedding(
     // the basis the coarsening hierarchy is built from, but they stay on the
     // feature axis: still trained, still sampled, still in the PIP table. The
     // selection shapes WHERE the pseudobulks land rather than which genes the
-    // model may use — matching `senna bge` and `faba gem`.
+    // model may use — matching `senna bge` and `senna gem`.
     //
     // cage used to hard-subset here, which would now mean running a
     // variance-based selector in front of the spike-and-slab gate, with the

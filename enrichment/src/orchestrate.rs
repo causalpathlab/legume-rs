@@ -27,7 +27,6 @@
 use crate::cellproj::{label_cells, LabelWithConfidence};
 use crate::consensus::{MIN_LIVE_MARKERS, UNASSIGNED};
 use crate::es::{rank_descending, weighted_ks_es};
-use crate::fdr::bh_fdr;
 use crate::gene_strata::GeneStrata;
 use crate::marker_bootstrap::{run_cluster_bootstrap, ClusterBootstrap, EnrichmentBootstrapConfig};
 use crate::null::permute_indices;
@@ -35,6 +34,7 @@ use crate::q_matrix::build_q_matrix;
 use crate::specificity::{compute_specificity, SpecificityMode};
 use crate::Mat;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
+use matrix_util::hypothesis::benjamini_hochberg;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
@@ -95,7 +95,7 @@ pub struct AnnotateConfig {
     /// carries the support it earned across resamples and an unreproducible one abstains.
     /// `None` ⇒ the point-estimate path, unchanged.
     ///
-    /// The library default is `None`; senna's CLI turns it **on**, as `faba annotate` does.
+    /// The library default is `None`; senna's CLI turns it **on**, as `senna annotate-gem` does.
     pub bootstrap: Option<EnrichmentBootstrapConfig>,
 }
 
@@ -545,7 +545,7 @@ pub fn annotate(
     let mut qvalue = Mat::zeros(k, c);
     for kk in 0..k {
         let row_p: Vec<f32> = (0..c).map(|cc| pvalue[(kk, cc)]).collect();
-        let row_q = bh_fdr(&row_p);
+        let row_q = benjamini_hochberg(&row_p);
         for cc in 0..c {
             qvalue[(kk, cc)] = row_q[cc];
         }

@@ -26,7 +26,7 @@ use super::style::{
     Seg, ARROW, ARROW_ALPHA, CURVE, CURVE_BINS, INK, MIN_VELOCITY_FLUX, TREE_BINS, VELOCITY_FIELD,
 };
 use super::svg::{emit_halo_text, emit_star, LegendEntry};
-use super::{NodeLabels, PlotArgs};
+use super::{LineagePlotArgs, NodeLabels};
 
 /// The cell point cloud and the canvas it lands on — everything both cell-colour
 /// builders need to turn a cell index into a pixel.
@@ -132,7 +132,7 @@ fn leading_fate(display: &str) -> &str {
 pub(super) fn build_celltype_layers(
     prefix: &str,
     cells: &CellScatter,
-    args: &PlotArgs,
+    args: &LineagePlotArgs,
     font_px: f32,
     layers: &mut Vec<TopicLayer>,
 ) -> Result<(Vec<LegendEntry>, String)> {
@@ -307,7 +307,7 @@ fn medoid_xy(pts: &[(f32, f32)]) -> Option<(f32, f32)> {
 pub(super) fn build_pseudotime_layer(
     prefix: &str,
     cells: &CellScatter,
-    args: &PlotArgs,
+    args: &LineagePlotArgs,
     layers: &mut Vec<TopicLayer>,
 ) -> Result<(f32, f32)> {
     let pt_path = format!("{prefix}.pseudotime.parquet");

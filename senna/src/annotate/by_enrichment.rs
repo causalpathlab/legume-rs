@@ -244,7 +244,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         seed: args.seed,
         min_markers: args.min_markers,
         stratify_null: !args.no_gene_strata,
-        // ON by default, as in `faba annotate`. A single pass over one marker panel always
+        // ON by default, as in `senna annotate-gem`. A single pass over one marker panel always
         // returns a winner, and returns it with a softmaxed `confidence` that says nothing
         // about whether the panel could have said otherwise.
         bootstrap: (!args.no_bootstrap_markers && args.n_boot > 0).then_some(

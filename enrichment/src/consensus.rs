@@ -9,7 +9,8 @@
 //! function of that distribution alone.
 //!
 //! So it lives here, in the crate *both* annotation paths already depend on, rather than in
-//! either one of them. `graph-embedding-util` depends on `enrichment` (for `bh_fdr`), so the
+//! either one of them. `graph-embedding-util` depends on `enrichment` (for the consensus and ontology
+//! helpers below), so the
 //! embedding path re-exports these; the enrichment path uses them directly. There is exactly one
 //! implementation of "what counts as agreement", which is the point — the support null and the
 //! observed run had already drifted apart once (see [`label_support`]).

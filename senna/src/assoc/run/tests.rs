@@ -9,7 +9,7 @@ use matrix_util::parquet::{peek_parquet_field_names, read_parquet_string_column}
 use matrix_util::traits::IoOps;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("faba_assoc_schema_{tag}"));
+    let d = std::env::temp_dir().join(format!("senna_assoc_schema_{tag}"));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

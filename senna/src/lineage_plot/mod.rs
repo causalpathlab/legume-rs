@@ -153,7 +153,7 @@ impl PseudotimeScale {
 }
 
 #[derive(Args, Debug)]
-pub struct PlotArgs {
+pub struct LineagePlotArgs {
     #[arg(
         long,
         short = 'f',
@@ -338,7 +338,7 @@ pub struct PlotArgs {
     pub no_pdf: bool,
 }
 
-pub fn run_plot(args: &PlotArgs) -> Result<()> {
+pub fn run_lineage_plot(args: &LineagePlotArgs) -> Result<()> {
     let prefix = args.from.as_ref();
     let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;

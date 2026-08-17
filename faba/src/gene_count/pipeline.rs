@@ -2,6 +2,7 @@ use crate::common::*;
 use crate::gene_count::run::GeneCountArgs;
 use crate::gene_count::splice::*;
 use crate::quant::extract_gene_key;
+use auxiliary_data::feature_rows;
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -249,9 +250,9 @@ pub fn run_splice_aware(
 
             let mut total_key_cache: HashMap<&str, Box<str>> = HashMap::default();
             for (_, gk) in totals.keys() {
-                total_key_cache
-                    .entry(gk)
-                    .or_insert_with(|| format!("{}/count/total", gk).into());
+                total_key_cache.entry(gk).or_insert_with(|| {
+                    feature_rows::feature_row(gk, feature_rows::COUNT, feature_rows::TOTAL, None)
+                });
             }
             totals
                 .into_iter()

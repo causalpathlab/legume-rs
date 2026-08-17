@@ -1,4 +1,4 @@
-//! Splice-aware indexed loader for `faba gem-encoder`.
+//! Splice-aware indexed loader for `senna gem-encoder`.
 //!
 //! The single-track [`super::IndexedInMemoryData`] selects a per-cell top-K over
 //! the **row** axis. That is wrong here: gem-format inputs carry two rows per

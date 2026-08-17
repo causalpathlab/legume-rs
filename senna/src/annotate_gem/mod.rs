@@ -7,5 +7,5 @@
 
 /// `--mode enrichment`: the factor-program path for the topic models.
 pub mod by_enrichment;
-/// The `senna annotate-gem` run. Binary entry: [`run::run_annotate`].
+/// The `senna annotate-gem` run. Binary entry: [`run::run_annotate_gem`].
 pub mod run;

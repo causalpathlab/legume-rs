@@ -14,6 +14,29 @@ pub fn collapse_to_single_batch(membership: &mut [Box<str>]) {
     }
 }
 
+/// The batch-label files a fit should actually use, given `--ignore-batch`.
+///
+/// `--ignore-batch` drops the labels entirely, so the projection and multilevel
+/// collapse run as if every cell shared one batch. Warning only when labels were
+/// supplied keeps a bare `--ignore-batch` quiet.
+///
+/// This is the file-list counterpart of [`collapse_to_single_batch`], which does
+/// the same thing to per-cell labels already in memory. `bge` and `gem` both
+/// reach the same decision from their own args, and must reach it identically.
+pub fn effective_batch_files(
+    ignore_batch: bool,
+    batch_files: Option<&[Box<str>]>,
+) -> Option<&[Box<str>]> {
+    if ignore_batch {
+        if batch_files.is_some() {
+            log::info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
+        }
+        None
+    } else {
+        batch_files
+    }
+}
+
 ///////////////////////////////////////////////
 // read data stack (vector of `SparseIoVec`) //
 ///////////////////////////////////////////////

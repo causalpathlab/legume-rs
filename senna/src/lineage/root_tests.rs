@@ -59,7 +59,7 @@ fn resolve_root_falls_back_to_gem_then_none() {
 fn gem_dag_n_terminals_parses_field_and_zero_vetoes() {
     let dir = std::env::temp_dir();
     let prefix = dir
-        .join(format!("faba_qc_{}", std::process::id()))
+        .join(format!("senna_lineage_root_qc_{}", std::process::id()))
         .to_string_lossy()
         .into_owned();
     let write = |body: &str| std::fs::write(format!("{prefix}.lineage_qc.json"), body).unwrap();

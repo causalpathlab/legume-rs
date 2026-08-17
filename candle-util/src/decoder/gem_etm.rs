@@ -1,4 +1,4 @@
-//! Splice-aware embedded-topic decoder for `faba gem-encoder` — the
+//! Splice-aware embedded-topic decoder for `senna gem-encoder` — the
 //! `u + δ → s` head.
 //!
 //! Two log-dictionaries built from ONE topic embedding `α`, over a **gene**-keyed
@@ -86,7 +86,7 @@
 //! **This is a parameterization choice, not an output one.** Which track is the
 //! base says nothing about what gets written: `{out}.feature_embedding.parquet`
 //! emits the SPLICED program `ρ + δ` (see `faba::gem_encoder::run`), because
-//! that is what `faba annotate`, marker projection, and `faba gem` interop read.
+//! that is what `senna annotate-gem`, marker projection, and `senna gem` interop read.
 //!
 //! # The steady-state reading of `δ`
 //!
@@ -125,7 +125,7 @@
 //! representative. Its null, `δ = 0`, is exactly "mature composition equals
 //! nascent composition" — no differential processing.
 //!
-//! **Note on the `gem` convention.** `faba gem` uses the OPPOSITE base
+//! **Note on the `gem` convention.** `senna gem` uses the OPPOSITE base
 //! (`unspliced e_f = β_g + δ_g`, see `faba::gem::run`), so its `δ_g` and this
 //! one point in opposite directions and must not be compared without accounting
 //! for it.
@@ -210,7 +210,7 @@ pub struct GemEtmDecoder {
     /// `δ [G, H]` splice-ratio offset — the **same** handle as the encoder.
     /// The MATURE embedding is `ρ + δ`; see [`GemEtmDecoder::track_embedding`].
     ///
-    /// NOTE the sign is the OPPOSITE of `faba gem`'s: there `δ_gem = unspliced −
+    /// NOTE the sign is the OPPOSITE of `senna gem`'s: there `δ_gem = unspliced −
     /// spliced`, here `δ = spliced − unspliced = −δ_gem`. The two write
     /// same-named `delta_feature_embedding.parquet` files that are NOT
     /// comparable without negating one.

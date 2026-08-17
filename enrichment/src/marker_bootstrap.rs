@@ -65,11 +65,11 @@ use crate::consensus::{
     UNASSIGNED,
 };
 use crate::es::weighted_ks_es;
-use crate::fdr::bh_fdr;
 use crate::gene_strata::GeneStrata;
 use crate::q_matrix::build_q_matrix;
 use crate::Mat;
 use anyhow::Result;
+use matrix_util::hypothesis::benjamini_hochberg;
 use matrix_util::stop::par_replicates;
 use rand::RngExt;
 
@@ -380,7 +380,7 @@ fn one_draw(
     let mut qvalue = Mat::zeros(k, c);
     for kk in 0..k {
         let row_p: Vec<f32> = (0..c).map(|cc| pvalue[(kk, cc)]).collect();
-        let row_q = bh_fdr(&row_p);
+        let row_q = benjamini_hochberg(&row_p);
         for cc in 0..c {
             qvalue[(kk, cc)] = row_q[cc];
         }
