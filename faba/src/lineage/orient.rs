@@ -6,7 +6,7 @@
 //! call per edge — the weights the max-weight branching turns into a rooted forest.
 //! [`aggregate_node_velocity`] is kept for the per-node mean-velocity output.
 
-use faba::hypothesis_tests::{benjamini_hochberg, bootstrap_mean_ci, mean, sign_flip_pvalue};
+use matrix_util::hypothesis::{benjamini_hochberg, bootstrap_mean_ci, mean, sign_flip_pvalue};
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;

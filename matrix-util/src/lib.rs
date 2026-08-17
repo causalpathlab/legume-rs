@@ -7,6 +7,7 @@ pub mod dmatrix_io;
 pub mod dmatrix_rsvd;
 pub mod dmatrix_util;
 pub mod graph;
+pub mod hypothesis;
 pub mod knn;
 pub mod knn_graph;
 pub mod knn_match;

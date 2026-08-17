@@ -1,8 +1,11 @@
 //! Unit tests for the single-sample editing statistics exposed via the lib
-//! surface (`faba::hypothesis_tests`): the beta-binomial p-value and the
-//! Benjamini-Hochberg FDR adjustment.
+//! surface (`faba::hypothesis_tests`): the beta-binomial p-value.
+//!
+//! The FDR adjustment these once sat beside is not an editing statistic and is
+//! now shared workspace-wide; its tests live with it in
+//! `matrix_util::hypothesis`.
 
-use faba::hypothesis_tests::{benjamini_hochberg, betabinom_pvalue_greater};
+use faba::hypothesis_tests::betabinom_pvalue_greater;
 use statrs::distribution::{Binomial, DiscreteCDF};
 
 #[test]
@@ -60,17 +63,4 @@ fn betabinom_overdispersion_is_conservative() {
         p_bb > p_binom,
         "overdispersed {p_bb} should exceed {p_binom}"
     );
-}
-
-#[test]
-fn benjamini_hochberg_qvalues() {
-    let p = [0.001f32, 0.01, 0.5, 0.9];
-    let q = benjamini_hochberg(&p);
-    // q monotone w.r.t. sorted p and >= p.
-    for i in 0..p.len() {
-        assert!(q[i] >= p[i] - 1e-6, "q {} < p {}", q[i], p[i]);
-        assert!(q[i] <= 1.0);
-    }
-    // Smallest p gets the largest inflation factor (m/1).
-    assert!((q[0] - 0.004).abs() < 1e-6, "q0 = {}", q[0]);
 }
