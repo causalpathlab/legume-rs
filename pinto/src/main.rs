@@ -300,7 +300,7 @@ enum Commands {
                       NOTE --n-hvg no longer subsets the trained gene axis.\n\
                       It weights the random projection instead.\n\
                       That projection builds the coarsening hierarchy.\n\
-                      senna bge and faba gem do the same.\n\
+                      senna bge and senna gem do the same.\n\
                       Every gene is trained and present in every output table.\n\
                       Use --genes-per-epoch to cap per-epoch cost instead.\n\n\
                       After training, every CELL PAIR is projected.\n\
@@ -338,7 +338,7 @@ enum Commands {
         visible_alias = "cage-annotate",
         about = "Marker-set cell-type annotation by projection (any embedding run)",
         long_about = "Firm cell-type annotation via the shared term-ORA core.\n\
-                      This is the embedding-grounded twin of `senna annotate-by-projection` and `faba annotate`.\n\
+                      This is the embedding-grounded twin of `senna annotate-by-projection` and `senna annotate-gem`.\n\
                       \n\
                       Each marker-defined type is embedded as a centroid.\n\
                       That centroid is an IDF-weighted mean.\n\

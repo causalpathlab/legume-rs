@@ -1,8 +1,8 @@
 //! Graphic parameters for `senna lineage-plot` — every colour, stroke, alpha and size
-//! decision lives here, so `run_plot.rs` only decides *what* to draw.
+//! decision lives here, so `run_lineage_plot.rs` only decides *what* to draw.
 //!
 //! The rule this file exists to enforce: nothing below reaches for the data, and
-//! nothing in `run_plot.rs` hard-codes a pixel or an RGB triple. Tuning the figure
+//! nothing in `run_lineage_plot.rs` hard-codes a pixel or an RGB triple. Tuning the figure
 //! means editing one file; changing what the figure *means* means editing the other.
 //!
 //! Sizes are expressed relative to something that moves with the figure — the

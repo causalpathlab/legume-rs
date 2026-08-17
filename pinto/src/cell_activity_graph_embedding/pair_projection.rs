@@ -4,7 +4,7 @@
 //! spatial adjacency. What the rest of pinto consumes, though, is a *pair*
 //! latent: `lc` / `dsvd` cluster cell pairs into link communities and derive a
 //! cell's propensity from the mix its incident edges carry. This module
-//! produces that pair latent the same way `senna bge` / `faba gem` produce a
+//! produces that pair latent the same way `senna bge` / `senna gem` produce a
 //! cell latent in phase 2 — freeze the feature side, re-estimate each node
 //! against its own counts.
 //!

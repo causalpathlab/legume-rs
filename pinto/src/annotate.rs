@@ -6,7 +6,7 @@
 //! nearest-centroid assignment → distance-outlier QC → Leiden clustering →
 //! cluster×term hypergeometric over-representation, permutation-calibrated →
 //! optional TreeBH Cell-Ontology calling). The embedding-grounded twin of
-//! `senna annotate-by-projection` and `faba annotate`.
+//! `senna annotate-by-projection` and `senna annotate-gem`.
 //!
 //! Input is a co-embedded (gene, cell) pair in one inner-product space:
 //! `{prefix}.feature_embedding.parquet` (gene × D) + `{prefix}.cell_embedding.parquet`

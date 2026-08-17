@@ -202,10 +202,7 @@ pub fn load_and_collapse(args: &GemEncoderArgs) -> anyhow::Result<PreparedData> 
 
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");
-        let all: Box<str> = "all".into();
-        for b in batch_membership.iter_mut() {
-            *b = all.clone();
-        }
+        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
     }
 
     info!(

@@ -73,7 +73,7 @@ use rustc_hash::FxHashMap;
 use std::io::Write;
 use std::path::Path;
 
-use super::run::AnnotateArgs;
+use super::run::AnnotateGemArgs;
 use crate::gem_manifest as manifest;
 
 /// Outputs land at `{out}.enrichment.*`, never at `{out}.{track}.*`, so running
@@ -110,7 +110,7 @@ const MAX_LISTED: usize = 10;
 /// entries that does not sum to 1, so it is not a membership on the simplex and
 /// there is nothing for the core to carry a factor×type edge through. Two
 /// calibrated calls and their difference beats one call on a displacement.
-pub fn run(prefix: &str, out: &str, track: Track, args: &AnnotateArgs) -> Result<()> {
+pub fn run(prefix: &str, out: &str, track: Track, args: &AnnotateGemArgs) -> Result<()> {
     let model = load_topic_model(prefix, track)?;
     let (markers_gc, celltype_names) = build_markers(args, &model.gene_names)?;
 
@@ -494,7 +494,7 @@ fn exp_log_theta(log_theta: &Mat, path: &str, stated: Option<manifest::Latent>) 
 /// warns in one warns in the other. Its `(gene_index, weight)` lists are simply
 /// scattered into the dense matrix `enrichment::annotate` wants; a zero entry is
 /// a miss for the KS walk, a positive one is an IDF-weighted hit.
-fn build_markers(args: &AnnotateArgs, gene_names: &[Box<str>]) -> Result<(Mat, Vec<Box<str>>)> {
+fn build_markers(args: &AnnotateGemArgs, gene_names: &[Box<str>]) -> Result<(Mat, Vec<Box<str>>)> {
     let (celltype_names, type_markers) = parse_and_match_markers(
         &args.markers,
         gene_names,

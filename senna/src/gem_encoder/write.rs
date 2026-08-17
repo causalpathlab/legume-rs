@@ -189,7 +189,7 @@ pub fn write_feature_embedding(
 }
 
 /// Write `{out}.cell_embedding.parquet` — cells placed in the GENE-embedding
-/// space, `[N, H]`, so `senna annotate-gem` / `lineage` / `plot` can read this run.
+/// space, `[N, H]`, so `senna annotate-gem` / `lineage` / `lineage-plot` can read this run.
 ///
 /// `cell_embedding = θ · α`. That is an identity, not an approximation: the
 /// decoder's own per-gene score is

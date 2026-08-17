@@ -3,7 +3,7 @@
 //!
 //! A post-processor on any `units × celltype` enrichment matrix (cluster ×
 //! celltype z from `senna annotate-by-enrichment`, cluster × term ORA from
-//! `faba gem-annotate`, …). It places each unit (cluster) on the ontology
+//! `senna annotate-gem`, …). It places each unit (cluster) on the ontology
 //! `is_a` tree at the *deepest resolution the data supports*, abstaining on
 //! sibling ties, via the TreeBH procedure (Bogomolov–Peterson–Benjamini–
 //! Sabatti, "Hypotheses on a tree", Biometrika 2021; DOI 10.1093/biomet/asaa086).

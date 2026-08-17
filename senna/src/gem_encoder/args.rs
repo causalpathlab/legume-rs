@@ -1,6 +1,6 @@
 use clap::Args;
 
-use crate::gem::common::ComputeDevice;
+use crate::embed_common::ComputeDevice;
 
 /// Per-gene likelihood for the masked imputation loss.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -255,7 +255,7 @@ fn col_stat_visitor(
 
 //////////////////////////////////////////////////////////////////////////////////
 // Automatic nnz-cutoff selection + ASCII histogram (shared by `squeeze` and by //
-// callers that want cell-calling on a per-column nnz vector, e.g. `faba gem`). //
+// callers that want cell-calling on a per-column nnz vector, e.g. `senna gem`). //
 //////////////////////////////////////////////////////////////////////////////////
 
 /// Suggest a reasonable nnz cutoff by an **exact 1-D 2-means** split of
@@ -433,7 +433,7 @@ fn fmt_stat(v: f32) -> String {
 /// an optional `suggested` value reports the 2-means suggestion.
 ///
 /// Used by `data-beans squeeze --show-histogram`, `data-beans histogram`, and
-/// `faba gem --auto-cell-cutoff`.
+/// `senna gem --auto-cell-cutoff`.
 pub fn print_nnz_summary(
     label: &str,
     metric: &str,

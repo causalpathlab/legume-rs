@@ -60,6 +60,54 @@ pub fn read_parquet_string_column(
     Ok(out)
 }
 
+/// Read several named string columns in ONE pass, returning one
+/// `Vec<Box<str>>` per requested name, in request order.
+///
+/// Prefer this over calling [`read_parquet_string_column`] once per column: that
+/// reopens the file and walks every row again for each column, so reading `k`
+/// columns costs `k` full scans instead of one.
+///
+/// Unlike [`read_parquet_string_column`], a non-string cell yields `""` rather
+/// than an error. The callers are annotation and label tables where a missing
+/// cell means "unlabelled" and refusing the whole file would lose the other
+/// columns; a missing *column* is still an error, since that is a schema
+/// mismatch rather than a gap in the data.
+pub fn read_parquet_string_columns_by_name(
+    file_path: &str,
+    wanted: &[&str],
+) -> anyhow::Result<Vec<Vec<Box<str>>>> {
+    let file = File::open(file_path).map_err(|e| anyhow::anyhow!("opening {file_path}: {e}"))?;
+    let reader = SerializedFileReader::new(file)?;
+    let fields = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .to_vec();
+    let idx: Vec<usize> = wanted
+        .iter()
+        .map(|w| {
+            fields
+                .iter()
+                .position(|f| f.name() == *w)
+                .ok_or_else(|| anyhow::anyhow!("column '{w}' not found in {file_path}"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    let mut out: Vec<Vec<Box<str>>> = vec![Vec::new(); wanted.len()];
+    for record in reader.get_row_iter(None)? {
+        let row = record?;
+        for (k, &j) in idx.iter().enumerate() {
+            let v = row
+                .get_string(j)
+                .map(|s| s.clone().into_boxed_str())
+                .unwrap_or_else(|_| Box::from(""));
+            out[k].push(v);
+        }
+    }
+    Ok(out)
+}
+
 pub struct ParquetReader {
     pub row_major_data: Vec<f64>,
     pub row_names: Vec<Box<str>>,

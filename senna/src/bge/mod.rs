@@ -30,28 +30,6 @@ use resolve_etm::resolve_etm_topics;
 /// file's features as `{name}/{modality}`.
 type MultiomeFile = (Option<Box<str>>, Box<str>);
 
-/// NCE training objective for the bge feature/cell embedding (maps to
-/// [`ge::loss::NceObjective`]).
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[clap(rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-enum NceObjectiveArg {
-    /// Per-pair logistic (SGNS) — bge's historical loss; byte-identical runs.
-    Logistic,
-    /// Sampled-softmax / InfoNCE — the negatives compete with the positive in
-    /// one softmax; sharpens separation on dense data (the loss `faba gem` uses).
-    Softmax,
-}
-
-impl NceObjectiveArg {
-    fn to_ge(&self) -> ge::loss::NceObjective {
-        match self {
-            NceObjectiveArg::Logistic => ge::loss::NceObjective::Logistic,
-            NceObjectiveArg::Softmax => ge::loss::NceObjective::Softmax,
-        }
-    }
-}
-
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "crate::embed_common::clap_defaults")]
 pub struct BgeArgs {
@@ -403,7 +381,7 @@ pub struct BgeArgs {
     device_no: usize,
 
     /// The shared `--posterior` / `--mcmc` flag group (see
-    /// `ge::posterior::PosteriorArgs`); `faba gem` flattens the same one.
+    /// `ge::posterior::PosteriorArgs`); `senna gem` flattens the same one.
     #[command(flatten)]
     posterior: ge::posterior::PosteriorArgs,
 
@@ -467,7 +445,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // The rule is fixed rather than exposed: `--feature-name-delim` /
     // `--feature-name-exact` were CLI knobs whose defaults ('_', fuzzy) were the
     // only settings anyone used, and `_` is the separator every loader in this
-    // workspace already writes (`ENSG…_TSPAN6`). `faba gem` and `senna predict`
+    // workspace already writes (`ENSG…_TSPAN6`). `senna gem` and `senna predict`
     // still expose their own overrides where query-vs-reference name bridging is
     // an actual concern.
     let feature_kind = if is_multiome {
@@ -541,16 +519,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_beans::sparse_io_vector::ColumnAlignment::Disjoint
     };
 
-    // `--ignore-batch` drops the batch labels entirely, so the projection
-    // and multilevel collapse run as if every cell shared one batch.
-    let batch_files = if args.collapse.ignore_batch {
-        if args.batch_files.is_some() {
-            info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
-        }
-        None
-    } else {
-        args.batch_files.as_deref()
-    };
+    let batch_files = crate::senna_input::effective_batch_files(
+        args.collapse.ignore_batch,
+        args.batch_files.as_deref(),
+    );
 
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
         data_files: data_files.to_vec(),

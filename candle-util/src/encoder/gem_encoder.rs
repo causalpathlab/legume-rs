@@ -1,4 +1,4 @@
-//! Splice-aware masked encoder for `faba gem-encoder`.
+//! Splice-aware masked encoder for `senna gem-encoder`.
 //!
 //! Reads a cell's top-K **genes** with BOTH tracks attached — nascent
 //! (unspliced) and mature (spliced) counts for the same gene — and pools each

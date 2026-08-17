@@ -100,7 +100,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         ontology_by: args.ontology_by,
         panel_perm: args.panel_perm,
         support_perm: args.support_perm,
-        // ON by default, as in `faba annotate`: a bare `argmin` over marker centroids always
+        // ON by default, as in `senna annotate-gem`: a bare `argmin` over marker centroids always
         // returns something, and returns it with no error bar.
         bootstrap: (!args.no_bootstrap_markers).then_some(MarkerBootstrapConfig {
             n_boot: args.n_boot,

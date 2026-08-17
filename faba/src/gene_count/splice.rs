@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::data::bam_io;
+use auxiliary_data::feature_rows;
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
 use rustc_hash::FxHashMap as HashMap;
@@ -70,7 +71,8 @@ pub fn count_read_per_gene(
     }
 
     let gene_name = format_gene_key(rec);
-    let row_name: Box<str> = format!("{}/count/total", gene_name).into();
+    let row_name =
+        feature_rows::feature_row(&gene_name, feature_rows::COUNT, feature_rows::TOTAL, None);
     let mut read_counter = ReadCounter::new(opts);
 
     bam_io::for_each_record_in_gene_cached(
@@ -117,8 +119,14 @@ pub fn count_read_per_gene_splice(
     };
 
     let gene_name = format_gene_key(rec);
-    let spliced_name: Box<str> = format!("{}/count/spliced", gene_name).into();
-    let unspliced_name: Box<str> = format!("{}/count/unspliced", gene_name).into();
+    let spliced_name =
+        feature_rows::feature_row(&gene_name, feature_rows::COUNT, feature_rows::SPLICED, None);
+    let unspliced_name = feature_rows::feature_row(
+        &gene_name,
+        feature_rows::COUNT,
+        feature_rows::UNSPLICED,
+        None,
+    );
     let mut counter = SpliceAwareReadCounter::new(opts, exons);
 
     bam_io::for_each_record_in_gene_cached(

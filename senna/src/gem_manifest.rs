@@ -145,8 +145,16 @@ pub fn path(prefix: &str) -> String {
     format!("{prefix}.gem.json")
 }
 
-/// The pre-rename name, still accepted on read. `senna gem-encoder` wrote this
-/// and `senna gem` wrote nothing, so a legacy hit is always a topic model.
+/// The pre-rename name, still accepted on read: prefixes written before the
+/// rename have this and nothing else.
+///
+/// CAUTION — this filename is NOT ours alone any more. `senna topic` /
+/// `masked-topic` / `vae` write their own [`crate::topic::model_metadata`] here
+/// for the same prefix. Detection survives that only because
+/// [`RunKind::from_model_type`] requires a `gem-` prefix and those write `topic`
+/// / `vae` / … , so a foreign file reads as `None` rather than as a gem run.
+/// Anything that widens `from_model_type` must re-check that, or start proving
+/// the file is ours before trusting it.
 #[must_use]
 pub fn legacy_path(prefix: &str) -> String {
     format!("{prefix}.model.json")
@@ -176,7 +184,7 @@ pub fn detect(prefix: &str) -> Option<Detected> {
 
 /// [`detect`], plus the one complaint every consumer would otherwise repeat.
 ///
-/// Consumers differ in what they DO with the kind — `annotate` picks a scorer,
+/// Consumers differ in what they DO with the kind — `annotate-gem` picks a scorer,
 /// `lineage` decides whether to caveat its marker calls — but they do not differ
 /// in how they should react to a prefix written under the old name. Keeping that
 /// here is what stops them drifting into two different messages for one

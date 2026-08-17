@@ -9,9 +9,8 @@
 use anyhow::{Context, Result};
 use log::warn;
 use matrix_util::dmatrix_io::DMatrix;
+pub(super) use matrix_util::parquet::read_parquet_string_columns_by_name as read_str_columns;
 use matrix_util::traits::IoOps;
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::RowAccessor;
 use plot_utils::rasterize::{DataBounds, Extent};
 use std::collections::HashMap;
 
@@ -23,42 +22,6 @@ pub(super) fn col_index(cols: &[Box<str>], name: &str, path: &str) -> Result<usi
     cols.iter()
         .position(|c| c.as_ref() == name)
         .ok_or_else(|| anyhow::anyhow!("column '{name}' not found in {path}"))
-}
-
-/// Read the named (string / `BYTE_ARRAY`) columns from a parquet file, one
-/// `Vec<Box<str>>` per requested name, in request order. Non-string cells fall
-/// back to the empty string.
-pub(super) fn read_str_columns(path: &str, wanted: &[&str]) -> Result<Vec<Vec<Box<str>>>> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {path}"))?;
-    let reader = SerializedFileReader::new(file)?;
-    let fields = reader
-        .metadata()
-        .file_metadata()
-        .schema()
-        .get_fields()
-        .to_vec();
-    let idx: Vec<usize> = wanted
-        .iter()
-        .map(|w| {
-            fields
-                .iter()
-                .position(|f| f.name() == *w)
-                .ok_or_else(|| anyhow::anyhow!("column '{w}' not found in {path}"))
-        })
-        .collect::<Result<_>>()?;
-
-    let mut out: Vec<Vec<Box<str>>> = vec![Vec::new(); wanted.len()];
-    for record in reader.get_row_iter(None)? {
-        let row = record?;
-        for (k, &j) in idx.iter().enumerate() {
-            let v = row
-                .get_string(j)
-                .map(|s| s.clone().into_boxed_str())
-                .unwrap_or_else(|_| Box::from(""));
-            out[k].push(v);
-        }
-    }
-    Ok(out)
 }
 
 //////////////////////

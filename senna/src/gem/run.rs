@@ -78,14 +78,10 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         }
     };
 
-    let batch_files: Option<&[Box<str>]> = if args.collapse.ignore_batch {
-        if args.batch_files.is_some() {
-            info!("--ignore-batch: dropping batch labels; treating all cells as one batch");
-        }
-        None
-    } else {
-        args.batch_files.as_deref()
-    };
+    let batch_files = crate::senna_input::effective_batch_files(
+        args.collapse.ignore_batch,
+        args.batch_files.as_deref(),
+    );
 
     run_gem_genes_bge(args, feature_kind, batch_files, posterior_plan)
 }
@@ -291,7 +287,7 @@ fn run_gem_genes_bge(
             info!(
                 "--markers: {on_axis} panel gene(s) on the trained axis = {:.0}% of its {} \
                  gene(s). The embedding is trained to separate what the panel will later \
-                 call, so read `annotate`'s agreement as a check on the grouping, not an \
+                 call, so read `annotate-gem`'s agreement as a check on the grouping, not an \
                  independent one.",
                 100.0 * on_axis as f32 / keep_genes.len().max(1) as f32,
                 keep_genes.len()

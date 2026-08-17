@@ -150,7 +150,7 @@ fn end_to_end_run_writes_forest_outputs() {
     let cols = names(&["d0", "d1"]);
 
     let prefix = std::env::temp_dir()
-        .join(format!("faba_lin_e2e_{}", std::process::id()))
+        .join(format!("senna_lin_e2e_{}", std::process::id()))
         .to_string_lossy()
         .into_owned();
     let hdr = (Some(rows.as_slice()), Some("cell"));

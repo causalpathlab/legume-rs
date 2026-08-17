@@ -1,4 +1,4 @@
-//! What one `faba gem --posterior` sweep costs, at a shape taken from a real run.
+//! What one `senna gem --posterior` sweep costs, at a shape taken from a real run.
 //!
 //! [`posterior_column_bench`] measures the column pass in the abstract. This one asks a
 //! narrower question: given the shapes a gem posterior run actually reports, how long is

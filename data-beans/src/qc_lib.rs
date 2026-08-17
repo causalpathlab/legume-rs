@@ -24,7 +24,7 @@ use regex::Regex;
 //
 // Shared by senna and pinto. Two-tier policy (see `compute_qc`):
 //   * near-empty cells (`nnz < min_cell_nnz`) are kept in training but
-//     dropped from the *output* (gem-style; see `faba gem --min-cell-nnz`);
+//     dropped from the *output* (gem-style; see `senna gem --min-cell-nnz`);
 //   * non-near-empty MAD outliers are dropped from *training* via
 //     `SparseIoVec::mask_columns` (so they leave the outputs too).
 
@@ -305,7 +305,7 @@ pub fn compute_qc_exempting(
 
 /// Modality-agnostic cell QC for a [`SparseIoStack`]: per-cell `n_genes` /
 /// `total_counts` are **summed across all member modalities** (mirrors
-/// `faba gem`'s "a cell rich in any one modality is kept"). Mito/ribo and
+/// `senna gem`'s "a cell rich in any one modality is kept"). Mito/ribo and
 /// feature-axis QC are skipped on stacks (row names are per-modality).
 pub fn compute_qc_stack(
     stack: &SparseIoStack,

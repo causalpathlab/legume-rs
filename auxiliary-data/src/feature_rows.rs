@@ -1,4 +1,4 @@
-//! Canonical feature-row (sparse-matrix row) convention for every faba modality.
+//! Canonical feature-row (sparse-matrix row) convention for every modality.
 //!
 //! NOT to be confused with the sibling [`crate::feature_names`], which is about a
 //! different problem. This module fixes the row-name **grammar** a producer emits
@@ -49,10 +49,19 @@
 //! depth)`. Any consumer that sums a unit's channels to recover coverage is
 //! wrong on this modality alone.
 //!
-//! This module is the intended single source of truth: consumers (e.g. the gem
-//! channel arm) split rows with [`parse_feature_row`], and producers are being
-//! migrated onto [`feature_row`] so the tokens are no longer hand-spelled at call
-//! sites (the editing / mixture / pileup producers still emit them inline today).
+//! This module is the single source of truth. Consumers split rows with
+//! [`parse_feature_row`]; producers build them with [`feature_row`] /
+//! [`unit_row`] rather than hand-spelling the tokens. The gene-count, APA, SNP
+//! and quant producers all go through it; the editing / mixture / pileup
+//! producers still emit their rows inline and are the remaining migration.
+//!
+//! Two consumers also still parse by hand — `senna::gem::run::split_count_row`
+//! and `faba::quant::extract_gene_key` both match on `/count/` directly. That is
+//! the failure mode [`parse_feature_row`] exists to remove: a bare `rsplit` puts
+//! "spliced", "total" and "not a count row at all" down the same branch. Both
+//! want converting, but each changes behaviour on inputs the current code
+//! silently mis-keys, so they need a test rather than a rename.
+//!
 //! The unit is always recoverable from a parsed row's [`FeatureRow::unit`] via
 //! `unit.split('/').next()`.
 

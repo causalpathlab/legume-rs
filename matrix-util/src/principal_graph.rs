@@ -156,7 +156,7 @@ pub fn fit_principal_graph(
 /// k-means on the rows of `z` (cells × D); returns `(centroids K×D, labels)`.
 /// Fixed-seed shim over [`kmeans_centroids_seeded`] — the two functions used to diverge (an
 /// unseeded delegate to the `clustering` crate), which risked drift; this keeps callers that
-/// don't need seed control on the same implementation as `faba lineage --seed`. Empty
+/// don't need seed control on the same implementation as `senna lineage --seed`. Empty
 /// clusters are re-seeded from the point currently worst-served by its centroid.
 pub fn kmeans_centroids(z: &DMatrix<f32>, k: usize, max_iter: usize) -> (DMatrix<f32>, Vec<usize>) {
     kmeans_centroids_seeded(z, k, max_iter, 42)
@@ -167,7 +167,7 @@ pub fn kmeans_centroids(z: &DMatrix<f32>, k: usize, max_iter: usize) -> (DMatrix
 /// Unlike [`kmeans_centroids`] — which delegates to the unseeded `clustering` crate
 /// (its kmeans++ picks the first centroid from the global thread RNG, so results vary
 /// run-to-run) — this is fully reproducible for a given `seed`. That reproducibility is
-/// what `faba lineage --seed` needs, and it is the substrate for bootstrap-support
+/// what `senna lineage --seed` needs, and it is the substrate for bootstrap-support
 /// scoring (refit under many seeds, count how often each structure recurs). Empty
 /// clusters are re-seeded from the point currently worst-served by its centroid, so `K`
 /// stays non-degenerate.

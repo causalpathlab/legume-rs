@@ -6,7 +6,7 @@
 //! places each cluster on the CL `is_a` tree at the *deepest resolution the
 //! data supports* (abstaining on sibling ties). The ontology is injected into
 //! the generic core via closures, so the calling/tree/TreeBH math lives once in
-//! `enrichment` and is reused by `faba gem-annotate`'s term-ORA path too.
+//! `enrichment` and is reused by `senna annotate-gem`'s term-ORA path too.
 //!
 //! Outputs `{out}.ontology_assignment.tsv` and (for soft viz colouring)
 //! `{out}.ontology_node_mass.parquet` (Σ of descendant-leaf Q per node).

@@ -4,8 +4,11 @@
 
 `faba` extracts per-cell genomic features directly from alignment (BAM) files:
 RNA modifications (DART-seq m6A, A-to-I editing), alternative polyadenylation
-(APA), gene counts, read depth, and SNP genotypes — plus a joint embedding
-(`gem`) that ties these modalities into a shared cell/gene space.
+(APA), gene counts, read depth, and SNP genotypes.
+
+Its product is the matrices; nothing here fits a model. The embedding,
+trajectory and annotation commands that read them live in
+[`senna`](../senna/README.md).
 
 `faba` is one crate of the [legume-rs](https://github.com/causalpathlab/legume-rs)
 workspace.
@@ -68,15 +71,15 @@ cargo install --path faba
 
 | Feature | Enables | Extra requirement |
 |---------|---------|-------------------|
-| `cuda`  | GPU acceleration (NVIDIA) for the `gem` embedding | CUDA toolkit |
-| `metal` | GPU acceleration (Apple Silicon) for `gem`        | macOS / Metal |
-| `hdf5`  | HDF5 backend + `.h5`/`.h5ad` readers              | `libhdf5` on the build host |
+| `hdf5`  | HDF5 backend + `.h5`/`.h5ad` readers | `libhdf5` on the build host |
+
+There is no `cuda` / `metal` feature: nothing on the BAM-to-matrix path touches a
+GPU. `senna` carries those for the code that does.
 
 Add them with `--features`:
 
 ```sh
 cargo install --git https://github.com/causalpathlab/legume-rs.git faba --features hdf5
-cargo install --git https://github.com/causalpathlab/legume-rs.git faba --features cuda
 ```
 
 ### Verify
@@ -134,19 +137,17 @@ faba <COMMAND> [OPTIONS]
 | `depth` (`rd`)            | Compute read depth over genomic intervals |
 | `snp` (`genotype`)        | Discover and genotype SNP variants from BAM pileup |
 | `all` (`pipeline`)        | Run the full profiling pipeline: SNP → genes → ATOI → APA → m6A |
-| **Embedding, trajectory, annotation** ||
-| `gem`                     | GEM: Geodesic Embedding + Motion — a joint cell/gene space with a velocity increment |
-| `annotate`                | Marker-set cell-type annotation of a `gem` run |
-| `lineage`                 | Velocity-oriented lineage + principal curves over a `gem` run |
-| `dyn-assoc`               | Bayesian between-branch modality contrast along a `lineage` |
 | **Inspection & reference** ||
 | `pwm`                     | Build a position weight matrix around genomic sites |
 | `pileup` (`inspect`)      | ASCII pileup, or a faceted Miami plot, for one gene |
 | `metagene` (`mg`)         | Metagene histogram of site positions across gene features |
-| `plot`                    | Publication-style figure of a `lineage` trajectory over its 2D embedding |
 | `docs`                    | Print the method write-ups compiled into this binary |
 
 Run `faba <COMMAND> --help` for the detailed options of each subcommand.
+
+Embedding (`gem`, `gem-encoder`), annotation (`annotate-gem`), trajectory
+(`lineage`, `lineage-plot`) and modality dynamics (`dyn-assoc`) are `senna`
+subcommands — they read the matrices above by prefix.
 
 ## Methods
 
@@ -156,10 +157,10 @@ checkout beside it, and the build fails if one of them goes missing.
 
 ```sh
 faba docs                # list what there is
-faba docs annotation     # marker cell-type annotation, end to end
 faba docs profiling      # BAM -> per-cell features: m6A, A-to-I, APA, counts, SNPs
-faba docs grouping       # why the annotation pools cells into coarse clusters
 ```
+
+The annotation and lineage write-ups moved with their subcommands: `senna docs`.
 
 The same files live in [`docs/`](docs/), which also carries the design notes for work that is
 planned but **not implemented** (kept separate on purpose — reading a plan as though it described

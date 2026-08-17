@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 /// A unique scratch prefix per test, so the manifests written here cannot collide.
 fn scratch(tag: &str) -> String {
     std::env::temp_dir()
-        .join(format!("faba_lin_input_{}_{tag}", std::process::id()))
+        .join(format!("senna_lin_input_{}_{tag}", std::process::id()))
         .to_string_lossy()
         .into_owned()
 }

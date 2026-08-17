@@ -164,7 +164,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // are an H-space pair from either producer, so k-means → MST → curves means the same
     // thing on both. The MARKER call is not: it is the co-embedded nearest-centroid
     // statistic, which is what `senna annotate-gem --mode` exists to arbitrate, and on a topic
-    // model `annotate` now defaults AWAY from it. Say so rather than let the two commands
+    // model `annotate-gem` now defaults AWAY from it. Say so rather than let the two commands
     // answer the same question differently without comment.
     if args.markers.is_some()
         && crate::gem_manifest::detect_reporting(prefix)

@@ -303,7 +303,7 @@ pub fn run_support_null(
         .iter()
         .map(|&k| (f64::from(k) + 1.0) as f32 / (done as f32 + 1.0))
         .collect();
-    let q = enrichment::bh_fdr(&p);
+    let q = matrix_util::hypothesis::benjamini_hochberg(&p);
     let null_support = acc
         .sum
         .iter()

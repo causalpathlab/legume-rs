@@ -12,7 +12,6 @@
 //! likelihood.
 
 pub mod args;
-pub mod common;
 /// Loading gem's co-embedded **feature** embedding (`{out}.feature_embedding.parquet`)
 /// for the marker-space nearest-centroid call in `senna annotate-gem` / `senna lineage` —
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.

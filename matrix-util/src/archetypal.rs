@@ -22,7 +22,7 @@
 //!    feature embedding `ρ [D, H]` (the anchor features ≈ markers, one per
 //!    topic), then projects `Z` onto them for θ. Deterministic, single-pass,
 //!    no RNG / no subsample / no per-K refit. This is the firmer route and
-//!    the one used by `faba gem --resolve-topics` and `senna bge
+//!    the one used by `senna gem --resolve-topics` and `senna bge
 //!    --resolve-etm`. [`topic_dictionary`] turns `(ρ, α)` into the topic ×
 //!    feature dictionary `β` shared by both call sites.
 
