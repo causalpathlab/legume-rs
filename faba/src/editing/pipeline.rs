@@ -1140,14 +1140,14 @@ fn process_bam_to_backend(
 
     let (modality, pos_channel, neg_channel) = match ctx.params.mod_type {
         ModificationType::M6A { .. } => (
-            faba::feature_name::M6A,
-            faba::feature_name::METHYLATED,
-            faba::feature_name::UNMETHYLATED,
+            auxiliary_data::feature_rows::M6A,
+            auxiliary_data::feature_rows::METHYLATED,
+            auxiliary_data::feature_rows::UNMETHYLATED,
         ),
         ModificationType::AtoI => (
-            faba::feature_name::ATOI,
-            faba::feature_name::EDITED,
-            faba::feature_name::UNEDITED,
+            auxiliary_data::feature_rows::ATOI,
+            auxiliary_data::feature_rows::EDITED,
+            auxiliary_data::feature_rows::UNEDITED,
         ),
     };
 

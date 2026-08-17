@@ -10,7 +10,7 @@ use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
 
 use super::Modality;
-use faba::feature_name::parse_feature_row;
+use auxiliary_data::feature_rows::parse_feature_row;
 use matrix_util::common_io::basename;
 use matrix_util::membership::Membership;
 

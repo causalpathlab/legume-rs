@@ -562,8 +562,8 @@ fn dedup_loci_by_owner_gene(gene_sites: &DashMap<GeneId, Vec<SnpSite>>) -> usize
 }
 
 /// Gather per-cell allele counts at called variant loci as ONE channelized
-/// triplet set: [`ALT`](faba::feature_name::ALT) reads and
-/// [`DEPTH`](faba::feature_name::DEPTH) reads per cell per locus.
+/// triplet set: [`ALT`](auxiliary_data::feature_rows::ALT) reads and
+/// [`DEPTH`](auxiliary_data::feature_rows::DEPTH) reads per cell per locus.
 ///
 /// `called_sites` is keyed by gene only because a gene gives htslib a region to
 /// fetch. Every locus must already have a single owner gene — see
@@ -617,16 +617,16 @@ pub fn gather_snp_allele_counts_by_gene(
                     // to fetch its reads, and naming it `{gene}/...` split one
                     // variant into two features wherever two genes overlapped.
                     let locus = format!("{}:{}", site.chr, site.pos);
-                    let alt_row = faba::feature_name::feature_row(
+                    let alt_row = auxiliary_data::feature_rows::feature_row(
                         &locus,
-                        faba::feature_name::BAF,
-                        faba::feature_name::ALT,
+                        auxiliary_data::feature_rows::BAF,
+                        auxiliary_data::feature_rows::ALT,
                         None,
                     );
-                    let depth_row = faba::feature_name::feature_row(
+                    let depth_row = auxiliary_data::feature_rows::feature_row(
                         &locus,
-                        faba::feature_name::BAF,
-                        faba::feature_name::DEPTH,
+                        auxiliary_data::feature_rows::BAF,
+                        auxiliary_data::feature_rows::DEPTH,
                         None,
                     );
 

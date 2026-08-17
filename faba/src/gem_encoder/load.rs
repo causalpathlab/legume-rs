@@ -34,7 +34,7 @@ type Mat = DMatrix<f32>;
 /// and whether it is the **nascent** (unspliced) track. `None` when the row is
 /// not a gene-level count row at all.
 ///
-/// Goes through [`crate::feature_name::parse_feature_row`] rather than matching
+/// Goes through [`auxiliary_data::feature_rows::parse_feature_row`] rather than matching
 /// on `/count/` directly, because a bare `rsplit_once` **cannot tell "spliced"
 /// apart from "not a count row"** — both fall to the same branch. It used to,
 /// and the consequence was silent: `BRCA2/m6a/methylated` became a mature gene
@@ -47,7 +47,7 @@ type Mat = DMatrix<f32>;
 /// per-site or per-component row is not a thing it can pair across tracks.
 #[must_use]
 pub fn split_count_row(name: &str) -> Option<(&str, bool)> {
-    use crate::feature_name::{parse_feature_row, COUNT, SPLICED, UNSPLICED};
+    use auxiliary_data::feature_rows::{parse_feature_row, COUNT, SPLICED, UNSPLICED};
     let row = parse_feature_row(name)?;
     if row.modality != COUNT || row.subunit.is_some() {
         return None;
