@@ -948,6 +948,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         // `latent` is log θ, so it exists only when the ETM actually resolved.
         has_latent: resolve_etm,
+        velocity_suffix: None,
+        velocity_factor_suffix: None,
+        delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
     })?;
 

@@ -288,42 +288,24 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
     num / (da.sqrt() * db.sqrt())
 }
 
-/// Persist weights plus the architecture needed to rebuild the model, the `δ`
-/// base convention, and the velocity offset that centring removed.
+/// Save the trained weights and the architecture record beside them.
 ///
-/// `delta_base` matters, and the trap here is subtler than it used to be. This
-/// model now shares `senna gem`'s base — both store the **spliced** embedding —
-/// but the two `δ`s still point in OPPOSITE directions, because gem derives its
-/// other track by adding (`unspliced = β + δ_gem`) while this one subtracts
-/// (`nascent = ρ − δ`):
+/// Two files, two jobs. `{out}.safetensors` is the checkpoint. `{out}.model.json`
+/// is what a reader needs to rebuild the encoder around it — the shapes are not
+/// recoverable from the tensors alone, and a mismatched `context_size` loads
+/// without error and infers nonsense.
 ///
-/// ```text
-/// gem:  δ_gem = unspliced − spliced
-/// here: δ     = spliced   − unspliced      = −δ_gem
-/// ```
-///
-/// The sign here is the ODE-natural one, so `⟨α_t, δ_g⟩ = log(β_g/γ_g)` reads
-/// directly as mature-heavy-positive. Anything reading both files must negate
-/// one; matching bases make it *look* safe to compare them raw, and it is not.
-///
-/// `velocity_common_mode` is the `[K]` per-axis offset subtracted from
-/// **`{out}.velocity_factor.parquet`** (see
-/// [`crate::gem_encoder::velocity::center_velocity`]); add it back to recover
-/// the uncentred factor-space field.
-///
-/// It is **not** the offset for `{out}.velocity.parquet`, which has `H`
-/// columns, not `K` — that file is the factor-space velocity projected through
-/// `α`, and because centring and the projection are both linear the offset
-/// there is `velocity_common_mode · α`, the decoder's topic embedding. Adding
-/// a `K`-vector to an `H`-column table is either a shape error or a silent
-/// wrong-axis broadcast, so the two are named apart here deliberately.
+/// The run description itself (which command produced this prefix, what its
+/// tables mean, where they are) is NOT here: that is the shared
+/// `{out}.senna.json` written by [`crate::run_manifest`], the same manifest
+/// every other senna training command emits. This file records only what is
+/// specific to this architecture.
 ///
 /// `"latent": "log-theta"` states the contract of `{out}.latent.parquet`:
 /// `exp()` of a row is a probability vector summing to 1. It is written
 /// explicitly because runs produced before 2026-07-21 stored **raw logits**
-/// under the same `model_type`, and the two are indistinguishable by shape —
-/// so a reader that guesses gets a plausible wrong θ rather than an error.
-/// Files without this field are the old contract.
+/// under the same model type, and the two are indistinguishable by shape — so a
+/// reader that guesses gets a plausible wrong θ rather than an error.
 pub fn save_model_metadata(
     args: &GemEncoderArgs,
     n_genes: usize,
@@ -331,28 +313,25 @@ pub fn save_model_metadata(
     parameters: &candle_util::candle_nn::VarMap,
 ) -> anyhow::Result<()> {
     parameters.save(format!("{}.safetensors", args.out))?;
-
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "latent".into(),
-        crate::gem_manifest::Latent::LogTheta.as_str().into(),
-    );
-    extra.insert("delta_base".into(), "unspliced".into());
-    extra.insert("n_genes".into(), n_genes.into());
-    extra.insert("n_latent".into(), args.n_latent.into());
-    extra.insert("embedding_dim".into(), args.embedding_dim.into());
-    extra.insert(
-        "encoder_layers".into(),
-        args.encoder_layers.iter().copied().collect(),
-    );
-    extra.insert("context_size".into(), args.context_size.into());
-    extra.insert(
-        "velocity_common_mode".into(),
-        velocity_common_mode.iter().copied().collect(),
-    );
-
     info!("wrote {}.safetensors", args.out);
-    // `model_type` is stamped by the manifest writer from `RunKind::Topic`, so
-    // this file cannot spell it differently. `write` logs the path it wrote.
-    crate::gem_manifest::write(&args.out, crate::gem_manifest::RunKind::Topic, extra)
+
+    let record = serde_json::json!({
+        "model_type": candle_util::vae::masked_gem::MODEL_TYPE,
+        "latent": "log-theta",
+        // gem's δ_g is the OPPOSITE shift (spliced → unspliced). Anything
+        // comparing the two runs' delta tables has to read this.
+        "delta_base": "unspliced",
+        "n_genes": n_genes,
+        "n_latent": args.n_latent,
+        "embedding_dim": args.embedding_dim,
+        "encoder_layers": args.encoder_layers,
+        "context_size": args.context_size,
+        "velocity_common_mode": velocity_common_mode,
+    });
+    let path = format!("{}.model.json", args.out);
+    let mut text = serde_json::to_string_pretty(&record)?;
+    text.push('\n');
+    std::fs::write(&path, text).map_err(|e| anyhow::anyhow!("writing {path}: {e}"))?;
+    info!("wrote {path}");
+    Ok(())
 }

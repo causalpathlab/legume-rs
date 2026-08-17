@@ -836,27 +836,53 @@ fn run_gem_genes_bge(
     // the warning `fit` emits — so a `--posterior` on this path is currently a
     // no-op rather than a post-hoc pass over the finished fit.
 
-    // Say what produced this prefix. gem's tables share names and shapes with
+    // Say what produced this prefix, in the same manifest every other senna
+    // training command writes. gem's tables share names and shapes with
     // gem-encoder's while meaning something different — `cell_embedding.parquet`
-    // is Euclidean here and a topic membership there — so a downstream step
-    // handed only the prefix would otherwise have to guess. `latent` records
-    // that these coordinates are NOT log θ: nothing downstream should `exp()`
-    // them.
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "latent".into(),
-        crate::gem_manifest::Latent::Embedding.as_str().into(),
-    );
-    // Record the posterior tables when they were produced, so a consumer handed
-    // only the prefix can tell a calibrated selection is available without
-    // stat()-ing for filenames. Absent on a plain run, which is the honest signal.
-    if let Some(plan) = posterior_plan {
-        extra.insert(
-            "posterior".into(),
-            serde_json::json!({ "draws": plan.n_samples }),
-        );
-    }
-    crate::gem_manifest::write(&args.out, crate::gem_manifest::RunKind::Embedding, extra)?;
+    // is Euclidean here and a topic membership there — so the `kind` field is
+    // what stops a downstream step guessing. There is deliberately no `latent`
+    // slot: gem's coordinates are not log θ and nothing should `exp()` them.
+    let input: Vec<String> = args
+        .genes()?
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
+    let batch: Vec<String> = args
+        .batch_files
+        .as_ref()
+        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
+        .unwrap_or_default();
+    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+        train_args: Some(crate::run_manifest::record_train_args(args)?),
+        kind: crate::run_manifest::RunKind::Gem,
+        prefix: &args.out,
+        data_input: &input,
+        data_batch: &batch,
+        data_input_null: &[],
+        // Z, the Euclidean identity θ. Raw — its norm carries library size — so
+        // geometry consumers should use cosine or L2-normalize first.
+        cell_embedding_suffix: Some("cell_embedding.parquet"),
+        // The co-embedded gene table, on the cell manifold. This is what makes
+        // `annotate-by-projection`'s nearest-centroid call well posed; β is NOT
+        // on that manifold and goes to `feature_loading` instead.
+        feature_embedding_suffix: Some("feature_embedding.parquet"),
+        feature_loading_suffix: Some("beta_feature_embedding.parquet"),
+        velocity_suffix: Some("velocity.parquet"),
+        velocity_factor_suffix: None,
+        delta_feature_embedding_suffix: Some("delta_feature_embedding.parquet"),
+        // gem has no topic dictionary and writes no log θ.
+        dictionary_suffix: None,
+        softmax_dictionary_suffix: None,
+        has_latent: false,
+        has_model: false,
+        has_cell_proj: false,
+        has_cell_to_pb: false,
+        pb_gene_suffix: None,
+        pb_latent_suffix: None,
+        pb_reference_suffix: None,
+        dictionary_empirical_suffix: None,
+        default_colour_by: "cluster",
+    })?;
 
     info!(
         "done (gem — raw spliced identity θ + raw velocity increment δ over the bge engine) — prefix '{}'",
@@ -865,9 +891,6 @@ fn run_gem_genes_bge(
     Ok(())
 }
 
-/// Split a gem feature row `{gene}/count/{spliced|unspliced}` into its gene key and
-/// whether it is the unspliced track. Rows not matching that shape fall back to
-/// `(whole name, spliced)` — defensive; genes-only input is all count rows.
 /// Mean row-sum of a `[n_anchors × h]` PIP table: the expected number of dims an
 /// anchor loads, as inferred. `0` for an empty table.
 fn mean_dims(pip: &[f32], h: usize) -> f64 {

@@ -125,11 +125,7 @@ fn exp_log_theta_recovers_the_simplex_exactly() {
     let theta = [0.2f32, 0.3, 0.5, 0.7, 0.2, 0.1];
     let log_theta = Mat::from_row_slice(2, 3, &theta.map(f32::ln));
 
-    let got = exp_log_theta(
-        &log_theta,
-        "latent.parquet",
-        Some(manifest::Latent::LogTheta),
-    );
+    let got = exp_log_theta(&log_theta, "latent.parquet", Some(RunKind::GemEncoder));
     for (i, want) in theta.iter().enumerate() {
         let (r, c) = (i / 3, i % 3);
         assert!(
@@ -188,10 +184,7 @@ fn exp_log_theta_leaves_an_empty_table_alone() {
 fn the_stated_contract_never_changes_the_values() {
     let logits = Mat::from_row_slice(2, 3, &[2.0f32, -1.0, 0.5, 0.1, 0.2, 0.3]);
     let baseline = exp_log_theta(&logits, "latent.parquet", None);
-    for stated in [
-        Some(manifest::Latent::LogTheta),
-        Some(manifest::Latent::Embedding),
-    ] {
+    for stated in [Some(RunKind::GemEncoder), Some(RunKind::Gem)] {
         let got = exp_log_theta(&logits, "latent.parquet", stated);
         assert!(
             (&got - &baseline).amax() < 1e-9,

@@ -511,6 +511,9 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         cell_embedding_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
+        velocity_suffix: None,
+        velocity_factor_suffix: None,
+        delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
     })?;
 

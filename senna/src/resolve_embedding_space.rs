@@ -464,6 +464,9 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         // Z is the cell table and lives in cell_embedding; this run emits no
         // log θ of its own (θ is the frozen *input*), so there is no latent.
         has_latent: false,
+        velocity_suffix: None,
+        velocity_factor_suffix: None,
+        delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
     })?;
 

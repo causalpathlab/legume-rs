@@ -166,17 +166,17 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // statistic, which is what `senna annotate-gem --mode` exists to arbitrate, and on a topic
     // model `annotate-gem` now defaults AWAY from it. Say so rather than let the two commands
     // answer the same question differently without comment.
-    if args.markers.is_some()
-        && crate::gem_manifest::detect_reporting(prefix)
-            == Some(crate::gem_manifest::RunKind::Topic)
-    {
+    let run_kind = crate::run_manifest::load_for(prefix)
+        .ok()
+        .map(|(m, _)| m.kind);
+    if args.markers.is_some() && run_kind == Some(crate::run_manifest::RunKind::GemEncoder) {
         warn!(
-            "--markers on a TOPIC model ({}): the node calls below are the co-embedded \
+            "--markers on a gem-encoder run ({}): the node calls below are the co-embedded \
              nearest-centroid statistic, which `senna annotate-gem` no longer defaults to for \
              this kind of run. The trajectory itself is unaffected — only the names on its \
              nodes. For the topic-native cell call, run `senna annotate-gem --mode enrichment` \
              on the same prefix and read the two together.",
-            crate::gem_manifest::path(prefix)
+            crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix))
         );
     }
     let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
