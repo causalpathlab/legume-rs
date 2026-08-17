@@ -98,7 +98,7 @@ pub struct TrainingParams {
     pub num_negatives: usize,
     pub seed: u64,
     /// Which NCE objective the feature side trains with ([`crate::loss::NceObjective`]).
-    /// Defaults to `Softmax` (InfoNCE). `faba gem`, `senna bge` and `pinto cage` all
+    /// Defaults to `Softmax` (InfoNCE). `senna gem`, `senna bge` and `pinto cage` all
     /// expose it as `--nce-objective` and all default to `Softmax`; `Logistic` is opt-in.
     pub objective: crate::loss::NceObjective,
     /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
@@ -281,7 +281,7 @@ pub fn train_composite(
         // Loss kept **on-device** and synced to a scalar once per epoch (not
         // per minibatch) — `detach()` keeps the running sum off the autograd
         // graph so each step's forward graph is still freed immediately,
-        // while avoiding a per-step GPU→CPU stall. Mirrors faba gem.
+        // while avoiding a per-step GPU→CPU stall. Mirrors senna gem.
         let mut loss_acc: Option<Tensor> = None;
         let mut n_steps = 0usize;
 
@@ -312,7 +312,7 @@ pub fn train_composite(
             // This replaced `GATE_KL_WEIGHT / batch_size`, which made that share
             // `∝ 1/B`: `--batch-size 4096` quartered the prior and `64` raised it 16×,
             // so a throughput flag retuned feature sparsity. At the default
-            // `--batch-size 1024` — which both `senna bge` and `faba gem` carry — the
+            // `--batch-size 1024` — which both `senna bge` and `senna gem` carry — the
             // new weight is numerically identical to the old one, so default runs are
             // unchanged.
             if let Some(kl) = ctx.axes[0].model.gate_kl()? {

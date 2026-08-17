@@ -1,6 +1,6 @@
 # Eliciting Expert Knowledge in Lineage Rooting
 
-Planning notes for `faba lineage` rooting. Not yet implemented — captures the
+Planning notes for `senna lineage` rooting. Not yet implemented — captures the
 design directions from the 2026-07-08 discussion for a future update.
 
 ## Why rooting deserves expert knowledge (the motivation)

@@ -1,6 +1,6 @@
 //! Analytical Poisson-MAP projection onto a **frozen** feature dictionary.
 //!
-//! Both `senna bge` and `faba gem` train in two phases: phase 1 fits the
+//! Both `senna bge` and `senna gem` train in two phases: phase 1 fits the
 //! shared feature side, phase 2 re-estimates the cell side. With the feature
 //! side frozen each node's embedding is independent of every other node, so
 //! the projection is embarrassingly parallel and (near) closed-form.

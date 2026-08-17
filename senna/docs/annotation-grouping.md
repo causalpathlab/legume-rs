@@ -67,7 +67,7 @@ Not the grouping. On the same negative control:
   construction). No grouping and no statistic can rescue a centroid built from genes the model
   never trained on. Fixed upstream since: gem now defaults to `--n-hvg 0` (train every gene, the
   per-gene softmax gate selects), so this run's cull no longer happens by default; if you do set
-  `--n-hvg > 0`, pass `faba gem --markers <panel>`.
+  `--n-hvg > 0`, pass `senna gem --markers <panel>`.
 
 Nothing tried here calls more than 7 of the 14 types cord blood actually contains. The grouping
 question is second-order until that is fixed.

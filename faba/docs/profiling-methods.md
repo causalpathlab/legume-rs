@@ -541,7 +541,7 @@ counted rather than differenced.
 
 Counts reads per gene, splice-aware by default. A read is called **unspliced** if any aligned
 block falls outside every annotated exon; otherwise **spliced** (the alevin-fry "S+A" convention
-[9]). Three matrices per batch: total, spliced, unspliced. These are what `faba gem` consumes.
+[9]). Three matrices per batch: total, spliced, unspliced. These are what `senna gem` consumes.
 
 **This command *does* call cells.** The default `--cell-filter` is `empty-drops`, and the cell set
 it produces is inherited by every other modality. It is the union of two rules:

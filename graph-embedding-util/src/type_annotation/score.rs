@@ -266,7 +266,7 @@ pub(super) fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// immune (the offset cancels in `x_a − x_b`), which is why this is a scorer
 /// concern and not an embedding-file one.
 ///
-/// Measured on a `faba gem-topic` fit (3 wt libraries, 8791 cells, 20 topics):
+/// Measured on a `senna gem-topic` fit (3 wt libraries, 8791 cells, 20 topics):
 /// the cell embedding was **93.8 %** common mode and the co-embedded gene
 /// vectors **99.5 %**, so every type signature was very nearly the same unit
 /// vector. Mean pairwise cell cosine was `+0.940`, and `+0.007` once centred.

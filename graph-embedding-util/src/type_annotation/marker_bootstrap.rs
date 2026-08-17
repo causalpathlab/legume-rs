@@ -43,7 +43,7 @@
 //! embedding — the bootstrap will report near-total instability, and it should. Read
 //! `{out}.type_qc.tsv`: when a type's `centroid_jitter` exceeds the `decision_gap` its cells
 //! are being assigned by noise, and no amount of downstream statistics will fix that. The
-//! cure is upstream (`faba gem --must-train-features <panel>`), not here.
+//! cure is upstream (`senna gem --must-train-features <panel>`), not here.
 
 use super::{live_row, UNASSIGNED};
 use anyhow::Result;
@@ -254,7 +254,7 @@ impl LivePanel {
             self.usable.iter().any(|&u| u),
             "not one of the {} marker type(s) has {MIN_LIVE_MARKERS} live markers in this \
              embedding, so there is nothing to assign cells to. The marker genes were matched by \
-             name but never trained: re-run `faba gem --must-train-features <panel>` with THIS \
+             name but never trained: re-run `senna gem --must-train-features <panel>` with THIS \
              panel.",
             self.live.len()
         );
@@ -264,7 +264,7 @@ impl LivePanel {
                 "{dropped} of {} type(s) have fewer than {MIN_LIVE_MARKERS} live markers and \
                  cannot be bootstrapped — they are excluded from the assignment rather than \
                  allowed to win cells on evidence whose variance is unmeasurable. Train the \
-                 panel into the embedding (`faba gem --must-train-features <panel>`) to bring \
+                 panel into the embedding (`senna gem --must-train-features <panel>`) to bring \
                  them back.",
                 self.live.len()
             );

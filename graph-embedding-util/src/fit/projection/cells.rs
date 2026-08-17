@@ -48,7 +48,7 @@ fn collect_sampler_cells(
 
 /// Phase 2 — project every cell onto the fixed feature dictionary and overwrite
 /// the `e_cell` var. The per-cell bias is fitted (to absorb library size) and
-/// written into the `b_cell` var alongside `e_cell` (consistent with `faba gem`).
+/// written into the `b_cell` var alongside `e_cell` (consistent with `senna gem`).
 ///
 /// The solve itself is a **cell-block Poisson SGD** ([`block_sgd`]): with the
 /// feature side frozen the objective is separable per cell, so a block of cells is

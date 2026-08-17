@@ -163,7 +163,7 @@ pub struct DimBlockConfig {
     /// `(anchor, dim)` regardless of the likelihood. `None` lets every coordinate
     /// be drawn.
     ///
-    /// This is how a **nested** gate is expressed. `faba gem`'s velocity `δ_g` is a
+    /// This is how a **nested** gate is expressed. `senna gem`'s velocity `δ_g` is a
     /// deviation from the identity loading `β_g`, so "this gene moves along a dim
     /// its identity does not load" is a state the model should not visit. Vetoing
     /// it also breaks the symmetry that otherwise lets two independent
@@ -373,7 +373,7 @@ pub fn dim_block(nodes: &[NodeTerm], side: &FrozenSide, cfg: &DimBlockConfig) ->
 /// Per-dim block Gibbs where each anchor's likelihood is a **sum** of terms.
 ///
 /// More than one term is needed when an anchor's data splits into blocks that see
-/// different frozen offsets. `faba gem`'s identity loading `β_g` is the motivating
+/// different frozen offsets. `senna gem`'s identity loading `β_g` is the motivating
 /// case: a spliced row scores `⟨β_g, e_p⟩` and an unspliced row scores
 /// `⟨β_g + δ_g, e_p⟩`, so β's conditional is
 ///

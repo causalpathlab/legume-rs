@@ -18,7 +18,7 @@ fn softmax_prob_at(row: &[f32], idx: usize) -> f32 {
 /// * `{prefix}.argmax.tsv` — `cell⇥cell_type⇥probability` (with header), the
 ///   argmax reader `senna plot` consumes.
 /// * `{prefix}.membership.tsv` — `cell⇥cell_type` (no header), for
-///   `data-beans stat -g` / `faba gem-summary` grouping.
+///   `data-beans stat -g` / `senna gem-summary` grouping.
 ///
 /// `labels`/`probs` are parallel to `cell_names`. The single writer keeps the
 /// two annotation passes (`-by-projection`, `-by-enrichment`) in lock-step.
