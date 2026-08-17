@@ -1,6 +1,13 @@
 //! Feature-name kind + canonicalizer hooks for multi-file data
 //! alignment.
 //!
+//! NOT to be confused with the sibling [`crate::feature_rows`]. That module
+//! defines the row-name **grammar** faba's producers emit
+//! (`{unit}/{modality}/{subunit}/{channel}`); this one **canonicalizes** a name
+//! that already exists, so the same gene or locus matches across files that
+//! spell it differently. Reach for `feature_rows` to build or split a row, and
+//! for this module to decide whether two spellings are the same feature.
+//!
 //! Loaders that union rows across multiple sparse backends
 //! ([`crate::data_loading::read_data_on_shared_rows`]) can opt into
 //! generous matching by passing a [`FeatureNameKind`] — same row-name

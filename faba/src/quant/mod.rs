@@ -94,7 +94,7 @@ pub fn create_gene_key_function(
 /// component). The single place the channel-count producers (editing, APA) spell
 /// the [`feature_row`] convention.
 ///
-/// [`feature_row`]: faba::feature_name::feature_row
+/// [`feature_row`]: auxiliary_data::feature_rows::feature_row
 pub fn push_channel_row(
     triplets: &mut Vec<(CellBarcode, Box<str>, f32)>,
     cb: &CellBarcode,
@@ -107,7 +107,7 @@ pub fn push_channel_row(
     if count > 0 {
         triplets.push((
             cb.clone(),
-            faba::feature_name::feature_row(gene, modality, channel, subunit),
+            auxiliary_data::feature_rows::feature_row(gene, modality, channel, subunit),
             count as f32,
         ));
     }
@@ -115,7 +115,7 @@ pub fn push_channel_row(
 
 /// Aggregate conversion stats to **gene level** and emit two channel rows per
 /// gene into one matrix, in the channel-last convention
-/// ([`crate::feature_name`]):
+/// ([`auxiliary_data::feature_rows`]):
 ///
 /// ```text
 /// {gene}/{modality}/{pos_channel} = Σ_sites converted    (e.g. methylated / edited)
@@ -169,7 +169,7 @@ where
 
 /// Aggregate conversion stats to **per-site** resolution and emit two channel
 /// rows per site into one matrix, using the single-base site as the subunit
-/// ([`crate::feature_name`]):
+/// ([`auxiliary_data::feature_rows`]):
 ///
 /// ```text
 /// {gene}/{modality}/{chr}:{pos}/{pos_channel} = converted    (methylated / edited)

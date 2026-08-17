@@ -951,11 +951,11 @@ fn log_rate_histogram(signal: &ActivityTally, control: &ControlCells, opts: &Nul
 /// on the first genome-wide run, warning "none matched" for genes that were
 /// certainly present.
 ///
-/// Field-anchored via [`faba::feature_name::parse_feature_row`], the crate's
+/// Field-anchored via [`auxiliary_data::feature_rows::parse_feature_row`], the
 /// single source of truth for row layout: a bare `contains(symbol)` would let
 /// `METTL3` match `METTL3L` and `RBM15` match `RBM15B`.
 fn feature_is_gene(feature: &str, symbol: &str) -> bool {
-    faba::feature_name::parse_feature_row(feature)
+    auxiliary_data::feature_rows::parse_feature_row(feature)
         .is_some_and(|r| r.gene == symbol || r.gene.rsplit('_').next() == Some(symbol))
 }
 

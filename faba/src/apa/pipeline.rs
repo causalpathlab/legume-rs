@@ -986,7 +986,7 @@ fn compute_and_write_pdui(
     let mut out_files: Vec<crate::quant::BackendOutputPath> = Vec::new();
 
     use crate::quant::push_channel_row;
-    use faba::feature_name::{APA, DISTAL, PROXIMAL};
+    use auxiliary_data::feature_rows::{APA, DISTAL, PROXIMAL};
     for (batch_idx, batch_name) in batch_names.iter().enumerate() {
         let b = batch_idx as u32;
         let mut apa_triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::new();

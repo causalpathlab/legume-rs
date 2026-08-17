@@ -1,4 +1,14 @@
-//! Canonical feature-name (sparse-matrix row) convention for every faba modality.
+//! Canonical feature-row (sparse-matrix row) convention for every faba modality.
+//!
+//! NOT to be confused with the sibling [`crate::feature_names`], which is about a
+//! different problem. This module fixes the row-name **grammar** a producer emits
+//! and a consumer splits; `feature_names` **canonicalizes** an already-emitted
+//! name so the same gene or locus matches across files that spell it differently
+//! (`FeatureNameKind`). Rows here are built and parsed; names there are matched.
+//!
+//! It lives in `auxiliary-data` rather than beside its producers because the
+//! grammar has readers on both sides of the BAM/model boundary: faba writes these
+//! rows, senna's embedding and association steps split them back apart.
 //!
 //! All per-cell matrices name their rows
 //!

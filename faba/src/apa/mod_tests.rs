@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn site_id_uses_the_shared_apa_modality_token() {
-    // The emitted token must be `feature_name::APA`, not a hand-spelled variant:
+    // The emitted token must be `feature_rows::APA`, not a hand-spelled variant:
     // consumers select rows by splitting on it (`assoc`, `gem_encoder::load`).
     assert_eq!(
         site_id("ENSG1_TP53", "3").as_ref(),
