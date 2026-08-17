@@ -32,6 +32,8 @@
 
 mod anchor_common;
 mod annotate;
+mod annotate_gem;
+mod assoc;
 mod bge;
 mod cluster;
 mod cluster_aggregation;
@@ -44,10 +46,15 @@ mod embed_common;
 mod empirical_dict;
 mod eval_topic;
 mod fne;
+mod gem;
+mod gem_encoder;
+mod gem_manifest;
 mod geometry;
 mod hvg;
 mod impute;
 mod joint_topic;
+mod lineage;
+mod lineage_plot;
 mod logging;
 mod marker_support;
 mod masked_topic;
@@ -73,14 +80,23 @@ use annotate::{
     annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
     AnnotateOntologyArgs, AnnotateProjectionArgs,
 };
+use annotate_gem::run::{run_annotate as run_annotate_gem, AnnotateArgs as AnnotateGemArgs};
+use assoc::run::{run_assoc, AssocArgs};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use deconvolve::DeconvolveArgs;
 use embed_common::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
+use gem::args::GemArgs;
+use gem::run::run_gem_embedding;
+use gem_encoder::args::GemEncoderArgs;
+use gem_encoder::run::run_gem_encoder;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
+use lineage::args::LineageArgs;
+use lineage::run::run_lineage;
+use lineage_plot::{run_plot as run_lineage_plot, PlotArgs as LineagePlotArgs};
 use masked_topic::*;
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
@@ -624,6 +640,334 @@ enum Commands {
 
     // ─────────── 4. Layout + plotting ───────────
     #[command(
+        name = "gem",
+        aliases = ["gem-embedding"],
+        about = "GEM: Geodesic Embedding for RNA Motion in one cell space",
+        long_about = "Geodesic Embedding for RNA Motion: a joint cell-feature embedding.\n\
+                      Motion is the local velocity δ (the tangent);\n\
+                      the lineage is the geodesic path it traces.\n\
+                      Runs over the shared graph_embedding_util engine,\n\
+                      which is modality-agnostic. Fed gene counts (spliced + unspliced) today;\n\
+                      embeds any per-feature count.\n\
+                      \n\
+                      Per-gene β-sharing:\n\
+                      each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
+                      A gene's spliced and unspliced tracks thus share one identity.\n\
+                      Two things are solved JOINTLY by default:\n\
+                      cell identity θ → `{out}.cell_embedding.parquet` (raw),\n\
+                      and the velocity increment δ → `{out}.velocity.parquet`.\n\
+                      so θ is powered by both splice tracks rather than the spliced one alone.\n\
+                      `--sequential-velocity` reverts to the older two-step fit:\n\
+                      θ from the spliced edges, then δ from the unspliced with θ held fixed,\n\
+                      which pins θ to the mature state for a cleaner δ readout.\n\
+                      The nascent state is just θ+δ; ‖δ‖ is speed.\n\
+                      Per-gene velocity is the in-model δ_g → `{out}.delta_feature_embedding.parquet`;\n\
+                      it is written whenever the input carries unspliced rows. `--delta-l2 0`,\n\
+                      the default, applies a mild ridge to keep it identified.\n\
+                      The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
+                      gene-keyed so a marker panel joins against it directly.\n\
+                      \n\
+                      `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
+                      it is the raw per-cell Poisson increment δ_c,\n\
+                      which a shrinkage-toward-origin common mode dominates: δ_c ≈ −0.5·θ,\n\
+                      from fitting sparse unspliced counts absolutely.\n\
+                      Use `{out}.velocity.parquet` for the velocity.\n\
+                      \n\
+                      With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
+                      It then writes a per-cell pseudotime + fate backbone.\n\
+                      That backbone is a prior for `senna lineage`, not a replacement.\n\
+                      \n\
+                      `{out}.gem.json` records that this prefix came from the EMBEDDING model,\n\
+                      which is how `senna annotate-gem` and `senna lineage` pick their statistic.",
+        after_long_help = "\
+	Example:\n\
+  senna gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
+  Multiple samples — pass them positionally, so shell globs work.\n\
+  Each sample becomes a batch via its barcodes' `@batch` tag.\n\n\
+  senna gem out/rep1_genes.zarr.zip out/rep2_genes.zarr.zip -o out/gem\n\
+  senna gem out/*_genes.zarr.zip -o out/gem\n\n\
+  The `--genes a,b` flag form still works, but not together with the positional one.")]
+    Gem(GemArgs),
+
+    #[command(
+        name = "gem-encoder",
+        // `gem-topic`: the cell latent IS a softmax simplex, so this is a
+        // topic model over the two splice tracks — the name people reach for
+        // when they come from `senna topic` rather than from `senna gem`.
+        visible_aliases = ["gem-topic"],
+        aliases = ["gem-enc"],
+        about = "GEM-encoder: a masked generative model of the GEM",
+        long_about = "GEM-encoder — the masked generative sibling of `senna gem`.\n\
+                      \n\
+                      Both fit the same geometry over the same spliced+unspliced counts,\n\
+                      from opposite directions.\n\
+                      `gem` is discriminative (NCE over cell-feature edges).\n\
+                      This is generative and amortized:\n\
+                      an encoder reads a cell\'s top-K GENES with BOTH splice tracks attached,\n\
+                      pools each track over that context (not over the full gene space),\n\
+                      and an embedded-topic decoder imputes whichever track was held out.\n\
+                      \n\
+                      The model runs the biology forward:\n\
+                      u + delta -> s. Nascent pre-mRNA is transcribed first and matures into spliced mRNA,\n\
+                      so the UNSPLICED embedding is the base rho and the spliced one is rho + delta.\n\
+                      Delta is therefore the steady-state splice-ratio offset —\n\
+                      log(splicing / degradation), not a splicing rate —\n\
+                      because that is the combination that survives at steady state (s = (beta/gamma) u).\n\
+                      A gene scores high either by splicing fast or by having stable mature mRNA,\n\
+                      and this model cannot tell those apart.\n\
+                      NOTE this is the OPPOSITE base from `senna gem`,\n\
+                      whose delta shifts spliced -> unspliced;\n\
+                      the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
+                      `{out}.gem.json` records `delta_base`.\n\
+                      \n\
+                      Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
+                      and predicts both from ONE theta. That gives delta a monopoly:\n\
+                      the only thing that can make the two tracks differ is delta itself.\n\
+                      Hiding a whole track instead was tried and removed —\n\
+                      it hands the encoder a competing LATENT delta, which it takes,\n\
+                      and delta degenerates.\n\
+                      \n\
+                      VELOCITY is the cell-level delta = theta_nascent - theta_mature,\n\
+                      each fitted POST HOC to its own track against the frozen dictionaries.\n\
+                      Elliptical slice sampling, warm-started from the encoder,\n\
+                      which also closes the amortization gap.\n\
+                      The model has one latent by design,\n\
+                      so it cannot express that difference while training;\n\
+                      estimating delta first and reading the movement out of it keeps the two from competing.\n\
+                      The per-axis population mean is removed before writing,\n\
+                      and recorded in `{out}.gem.json` as `velocity_common_mode`.\n\
+                      \n\
+                      The latent is a softmax simplex — hence the `gem-topic` alias —\n\
+                      and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
+                      the same contract every senna topic-family run follows.\n\
+                      Pick the loss with `--likelihood nb|multinomial`\n\
+                      \n\
+                      BATCH ADJUSTMENT IS ON BY DEFAULT,\n\
+                      and you should check what your batches are:\n\
+                      with several inputs and no `--batch-files`,\n\
+                      each file's cells are tagged `@<sample>` and that tag becomes the batch —\n\
+                      so on rep{1,2,3}_{wt,mut} the batches are the SIX samples,\n\
+                      and the wt-vs-mut contrast goes out with the donor effects.\n\
+                      Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\
+                      \n\
+                      Pooling is a masked value-weighted sum per track, concatenated;\n\
+                      the attention-slot variant was removed after it measured\n\
+                      3.5x worse on between-cell variance,\n\
+                      and went degenerate whenever a track was hidden.\n\
+                      Ctrl-C stops training gracefully and still writes outputs,\n\
+                      flagged as partial.",
+        after_long_help = "\
+	Example:\n\
+  senna gem-encoder out/rep2_wt_genes.zarr.zip out/rep2_mut_genes.zarr.zip \\\n\
+    -o out/gme -t 20 --device cuda\n\n\
+  senna gem-encoder out/*_genes.zarr.zip -o out/gme --likelihood nb\n\n\
+  Watch |delta| and the splice-ratio r in the log.\n\
+  If delta collapses toward 0, or r is near 0, the velocity is not trustworthy.")]
+    GemEncoder(GemEncoderArgs),
+
+    #[command(
+        name = "annotate-gem",
+        aliases = ["annot-gem", "ann-gem"],
+        about = "Marker-set cell-type annotation of a `senna gem` or `gem-encoder` run",
+        long_about = "Annotate a gem-family run against a marker set.\n\
+                      \n\
+                      Reads the run's parquet outputs by prefix (`-f/--from`),\n\
+                      plus a marker TSV (`gene<TAB>celltype`, `-m/--markers`).\n\
+                      Then runs the shared term-ORA core:\n\
+                      assign → distance-outlier QC → Leiden clustering,\n\
+                      then cluster×term hypergeometric over-representation,\n\
+                      permutation-calibrated.\n\
+                      \n\
+                      TWO SCORERS (`--mode`), and they are not two flavours of one statistic:\n\
+                      they read different files and rest on different assumptions about the geometry.\n\
+                      The default is read from `{from}.gem.json` rather than fixed,\n\
+                      because the wrong one here does not error — it answers wrong.\n\
+                      An embedding run (`senna gem`) → `projection`;\n\
+                      a topic model (`senna gem-encoder` / `gem-topic`) → `enrichment`.\n\
+                      A prefix that cannot say what produced it is reported, not guessed at.\n\
+                      \n\
+                      `projection` builds each type's centroid from its markers' CO-EMBEDDED feature vectors,\n\
+                      then hands every cell to the nearest one.\n\
+                      It reads `feature_embedding.parquet` plus `cell_embedding.parquet`.\n\
+                      NOT the raw `beta_feature_embedding` or `delta_feature_embedding`,\n\
+                      which are model parameters off the cell manifold. Its tracks:\n\
+                      spliced:  /count/spliced rows   vs cell θ         → {out}.spliced.*\n\
+                      velocity: /count/unspliced rows vs cell velocity  → {out}.velocity.*\n\
+                      \n\
+                      `enrichment` never forms a cell-gene inner product —\n\
+                      on a topic model that is not a metric,\n\
+                      since β depends only on gene-to-gene differences,\n\
+                      and the absolute direction is a gauge the likelihood never pins.\n\
+                      It asks per factor whether a type's panel is over-represented at the top of that factor's gene ranking,\n\
+                      then carries the surviving factor×type edges to cells through θ.\n\
+                      It reads `dictionary.parquet`, `latent.parquet`,\n\
+                      `pb_latent.parquet` and `pb_gene.parquet` → {out}.enrichment.* Its tracks are `spliced` and `nascent`,\n\
+                      NOT velocity: a displacement has no membership to carry a call through.\n\
+                      `nascent` annotates the nascent PROGRAM — a state the cell is in,\n\
+                      on the simplex —\n\
+                      and reading it against `spliced` is the well-posed form of the question `velocity` asks.\n\
+                      \n\
+                      `--track both` (default) runs both of whichever pair applies;\n\
+                      the second track is skipped with a warning when its inputs are absent.",
+        after_long_help = "\
+	Example:\n\
+	senna gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
+  senna annotate-gem -f out/gem -m markers.tsv -o out/gem"
+    )]
+    AnnotateGem(AnnotateGemArgs),
+
+    #[command(
+        name = "lineage",
+        aliases = ["trajectory", "traj"],
+        about = "Velocity-oriented lineage + principal curves over a `senna gem` run",
+        long_about = "Infer a velocity-oriented lineage over the embeddings from `senna gem`.\n\n\
+            Reads a θ/δ pair by prefix (`-f/--from`), picked by `--theta-from`:\n\
+            on an EMBEDDING run, cell_embedding.parquet + velocity.parquet (H space);\n\
+            on a TOPIC run, latent.parquet + velocity_factor.parquet (the K-space simplex).\n\
+            The topic default is deliberate:\n\
+            `cell_embedding = θ·α` confines every cell to the convex hull of α's K rows,\n\
+            so a diffuse softmax θ compresses the population toward that hull's centroid —\n\
+            blobby for reasons no layout can undo.\n\
+            `--latent-geometry` sets the metric (Hellinger on a simplex, else cosine).\n\
+            Fits K k-means centroids on θ and an MST over them,\n\
+            then TESTS the velocity direction of every candidate edge\n\
+            (bootstrap CI + sign-flip permutation; an edge that cannot clear\n\
+            --edge-alpha abstains rather than being handed a direction).\n\
+            Maximum-weight branching turns those calls into a rooted FOREST —\n\
+            contradictions cut, weak parents rewired —\n\
+            so a dataset with disconnected structure yields several trees, not one forced tree.\n\
+            Slingshot-style smooth principal curves are then fit per tree\n\
+            → per-cell pseudotime + branch.\n\
+            Cells on a tree too small to carry a curve get NaN pseudotime\n\
+            (reported, and skipped by `senna dyn-assoc`).\n\
+            `--no-edge-direction` keeps the geometric MST instead;\n\
+            `--no-orient-velocity` ignores velocity entirely.\n\n\
+            Root selection (priority order):\n\
+            --root-node, --root-cell, --root-type (marker-grounded, needs --markers),\n\
+            --root-from-gem (gem's velocity-DAG source),\n\
+            else the velocity-flux source.\n\n\
+            The low-coverage modalities are NOT embedded here;\n\
+            this produces the lineage ordering that a separate confounder-adjusted test runs against.\n\n\
+            Outputs (all `{out}`-prefixed parquet):\n\
+            nodes, node_velocity,\n\
+            edges (every candidate edge with its velocity_flux, CI, q and call),\n\
+            trees (the selected branching), lineages, pseudotime,\n\
+            cell_lineage_weights, lineage_pseudotime, curves;\n\
+            with --markers also lineage_annot.* + trajectory_annotation;\n\
+            with --layout phate (default) or umap also {cells,nodes,curves}_2d,\n\
+            plus velocity_grid_2d (the gridded δ arrow field, when the run has δ).\n\
+            The layout embeds θ alone by default, so position means identity,\n\
+            and the arrow field carries the direction.\n\n\
+            Reference:\n  \
+            Street et al., \"Slingshot: cell lineage and pseudotime inference for single-cell transcriptomics\",\n\
+            BMC Genomics, 19:477, 2018.\n\
+            https://doi.org/10.1186/s12864-018-4772-0",
+        after_long_help = "\
+	Example:\n\
+	senna gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
+  senna lineage -f out/gem -o out/gem"
+    )]
+    Lineage(LineageArgs),
+
+    #[command(
+        name = "lineage-plot",
+        aliases = ["plot-lineage", "trajectory-plot"],
+        about = "Publication-style figure (PDF/PNG/SVG) of a `senna lineage` trajectory over its 2D embedding",
+        long_about = "Render the outputs of `senna lineage --markers` into one annotated figure,\n\
+                      with the default --layout phate: cells laid out on the PHATE embedding,\n\
+                      coloured by coarse cell type (default) or pseudotime,\n\
+                      with a trajectory backbone, velocity arrows and MST nodes overlaid.\n\
+                      \n\
+                      Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
+                      {from}.lineage_annot.annot.parquet (per-cell coarse_label),\n\
+                      {from}.curves_2d.parquet (principal curves),\n\
+                      {from}.nodes_2d.parquet (MST nodes),\n\
+                      {from}.trajectory_annotation.parquet (node role/cell_type),\n\
+                      and {from}.pseudotime.parquet (for --color-by pseudotime).\n\
+                      \n\
+                      The cells are drawn as transparent raster layers per cell type,\n\
+                      from a qualitative palette, with a legend — confident calls solid,\n\
+                      mixed ones faded —\n\
+                      or one continuous blue->red pseudotime layer (with a colourbar).\n\
+                      \n\
+                      The backbone is `--trajectory auto` by default:\n\
+                      the Slingshot principal curves when the run has few lineages,\n\
+                      otherwise the MST drawn ONCE, with stroke weight by traversal count.\n\
+                      The curves all share the trunk,\n\
+                      so past ~24 lineages they overplot into an opaque mat.\n\
+                      Force it with `tree`, `curves` or `none`.\n\
+                      Direction is ALWAYS shown as velocity arrows read off `velocity_flux`,\n\
+                      independent of that choice, and only on edges whose velocity earned one.\n\
+                      Nodes are dark overlays; the root is marked with a red star,\n\
+                      and `--label-nodes` (default `per-type`) labels one node per called cell type,\n\
+                      on its most-differentiated node.\n\
+                      Uses the shared plot-utils rasterize -> SVG -> render pipeline;\n\
+                      writes {out}.plot.pdf by default (--png / --svg add those formats, --no-pdf skips the PDF).\n\
+                      The scatter is a raster layer,\n\
+                      so the PDF is a hybrid (vector text over raster points at --dpi; raise --dpi to 300-600 for print).",
+        after_long_help = "\
+	Example:\n\
+	senna lineage -f out/gem -o out/lin --markers markers.tsv\n\
+	senna lineage-plot -f out/lin\n\
+  senna lineage-plot -f out/lin -o out/lin_pt --color-by pseudotime"
+    )]
+    LineagePlot(LineagePlotArgs),
+
+    #[command(
+        name = "dyn-assoc",
+        aliases = ["assoc", "temporal-assoc", "trend"],
+        about = "Bayesian between-branch modality contrast along a `senna lineage`",
+        long_about = "Test whether a modality (m6a/apa/atoi) diverges between lineage branches.\n\n\
+            Downstream of `senna lineage` (like `annotate` is to `gem`).\n\
+            Cells are pooled into pseudotime BINS,\n\
+            and each branch L is tested against the rest with a binomial GLM:\n\
+            logit(p_{b,g}) = α_b + β·1[g=L],\n\
+            where b indexes the bin.\n\
+            The per-bin baseline α_b conditions out pseudotime,\n\
+            a matched null, à la tradeSeq patternTest / cocoa,\n\
+            so β is the branch's pseudotime-adjusted log-odds excess.\n\
+            Coverage (edited + unedited) is the binomial denominator,\n\
+            so detection bias is conditioned out;\n\
+            a shrinkage prior N(0, τ²) on β damps noisy calls,\n\
+            stable across seeds, with no permutation machinery.\n\
+            Reports the posterior mean effect, 90% credible interval,\n\
+            and lfsr = min(P(β>0), P(β<0));\n\
+            the within-branch trend GAM (--trend-method) runs alongside.\n\n\
+            Each level writes three tables —\n\
+            {out}.branch_contrast / _profile / _trend.parquet.\n\n\
+            If the lineage was annotated (`senna lineage --markers`, which leaves a\n\
+            {from}.lineage_annot.membership.tsv — or point `--celltype-annot` at any\n\
+            `cell<TAB>cell_type` TSV), the same two tests are also reported per CELL TYPE —\n\
+            cells sharing an annotated type are pooled across lineages\n\
+            ({out}.celltype_contrast / _profile / _trend.parquet).\n\
+            The between-cell-type contrast is the clean deliverable;\n\
+            the within-cell-type trend is secondary\n\
+            (pooling divergent lineages onto one pseudotime axis weakens the trend reading).\n\
+            Skip with --no-celltype.\n\n\
+            Not double-dipping:\n\
+            branches come from gem θ + velocity, which never see the modality.\n\n\
+            Output is tidy:\n\
+            `site | gene | subunit | branch` (branch level) or\n\
+            `site | gene | subunit | cell_type` (cell-type level —\n\
+            no branch column, because a cell-type aggregate pools cells across branches),\n\
+            then the values.\n\
+            The Bayesian tables also carry `ess` and `mcse_lfsr`:\n\
+            lfsr is a Monte-Carlo tail probability,\n\
+            so a site near --fdr-alpha can cross it with the seed,\n\
+            and mcse_lfsr is that error per site.\n\
+            When |lfsr - alpha| is not comfortably above mcse_lfsr,\n\
+            raise --posterior-samples rather than reading anything into the effect.\n\n\
+            Reference:\n  \
+            Van den Berge et al., \"Trajectory-based differential expression analysis for single-cell sequencing data\",\n\
+            Nat Commun 11:1201, 2020.",
+        after_long_help = "\
+	Example:\n\
+	senna lineage -f out/gem -o out/lin --markers markers.tsv\n\
+  senna dyn-assoc -f out/lin -s out/rep1_wt_m6a_site.zarr.zip --modality m6a -o out/m6a_assoc"
+    )]
+    Assoc(AssocArgs),
+
+    #[command(
         about = "2D layout of cells (tsne / umap / phate) over batch-corrected pseudobulks.",
         long_about = "Builds PBs by batch-corrected multi-level collapsing.\n\
                       PB-PB cosine similarity is computed on log1p-CPM gene vectors.\n\
@@ -804,6 +1148,12 @@ fn main() -> anyhow::Result<()> {
         Commands::JointSvd(args) => {
             fit_joint_svd(args)?;
         }
+        Commands::Gem(ref args) => run_gem_embedding(args)?,
+        Commands::GemEncoder(ref args) => run_gem_encoder(args)?,
+        Commands::AnnotateGem(ref args) => run_annotate_gem(args)?,
+        Commands::Lineage(ref args) => run_lineage(args)?,
+        Commands::LineagePlot(ref args) => run_lineage_plot(args)?,
+        Commands::Assoc(ref args) => run_assoc(args)?,
         Commands::Layout { cmd } => match cmd {
             LayoutCmd::Tsne(args) => {
                 fit_layout_tsne(args)?;

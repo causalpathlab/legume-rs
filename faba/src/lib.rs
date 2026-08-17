@@ -1,26 +1,13 @@
 //! Library surface for `faba`.
 //!
-//! The crate ships primarily as the `faba` binary (see `main.rs`), but the
-//! `gem` subsystem (joint spliced + unspliced gene-count embedding) is also
-//! exposed here as a library so its integration tests can live under
-//! `tests/` and drive the real `model` + `train` + `sampling` stack through
-//! the public API.
-
-pub mod gem;
-
-/// `{out}.gem.json` — the one place a consumer can ask which faba program
-/// produced a prefix. Written by every gem-family producer, read by every
-/// consumer that would otherwise have to guess.
-pub mod manifest;
-
-/// `faba gem-encoder` — masked generative embedding of the nascent→mature
-/// transition (`u + δ → s`). Binary entries: [`gem_encoder::run::run_gem_encoder`]
-/// and [`gem_encoder::args::GemEncoderArgs`].
-pub mod gem_encoder;
+//! The crate ships as the `faba` binary (see `main.rs`); this surface exists
+//! only so the pure-function statistics below can be driven from integration
+//! tests under `tests/`. Nothing else is exported, and nothing else should be:
+//! faba's product is the per-cell feature matrices its subcommands write, and
+//! every downstream consumer reads those as files rather than linking to them.
 
 /// The two-sample and single-sample statistics the editing caller is built on:
-/// beta-binomial and Fisher-exact p-values, and the log odds ratio. Exposed so
-/// the pure-function tests can live under `tests/`.
+/// beta-binomial and Fisher-exact p-values, and the log odds ratio.
 ///
 /// Deliberately NO FDR adjustment. Neighbouring conversion sites are covered by
 /// the same reads, and a read converted at one site is evidence against its
