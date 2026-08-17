@@ -945,7 +945,7 @@ fn log_rate_histogram(signal: &ActivityTally, control: &ControlCells, opts: &Nul
 /// Does this feature row belong to gene symbol `g`?
 ///
 /// Two name shapes reach here. Raw matrices carry `{ensembl}_{symbol}/count/...`,
-/// but `load_unified_data` canonicalises with `rsplit('_')`, which strips the
+/// but the shared-row loader canonicalises with `rsplit('_')`, which strips the
 /// Ensembl prefix and leaves `{symbol}/count/...`. Matching only the raw shape
 /// silently matches nothing after canonicalisation — which is exactly what it did
 /// on the first genome-wide run, warning "none matched" for genes that were
@@ -978,9 +978,9 @@ fn log_family_expression(
     scanned: &ActivityTally,
     selected: &FxHashSet<CellBarcode>,
 ) -> anyhow::Result<()> {
+    use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
     use data_beans::qc::collect_column_stat_across_vec;
-    use data_beans::sparse_io_vector::{ColumnAlignment, SparseIoVec};
-    use graph_embedding_util::{load_unified_data, LoadUnifiedArgs};
+    use data_beans::sparse_io_vector::ColumnAlignment;
     if symbols.is_empty() {
         return Ok(());
     }
@@ -994,12 +994,13 @@ fn log_family_expression(
         );
         return Ok(());
     }
-    let unified = load_unified_data(LoadUnifiedArgs {
+    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
         data_files: matrix_paths.to_vec(),
         column_alignment: ColumnAlignment::Disjoint,
         ..Default::default()
     })?;
-    let features = unified.feature_names.clone();
+    let backend = &loaded.data;
+    let features = backend.row_names()?;
     let rows: Vec<usize> = features
         .iter()
         .enumerate()
@@ -1010,13 +1011,13 @@ fn log_family_expression(
         log::warn!("{label}: none of {symbols:?} matched a feature row; skipping");
         return Ok(());
     }
-    let backend: &SparseIoVec = unified.count_backend();
     let (_, fam, _, _) = collect_column_stat_across_vec(backend, Some(&rows), None)?.to_f32_vecs();
     let (_, tot, _, _) = collect_column_stat_across_vec(backend, None, None)?.to_f32_vecs();
+    let barcodes = backend.column_names()?;
     let mut kept: Vec<f32> = Vec::new();
     let mut dropped: Vec<f32> = Vec::new();
-    for (i, cb) in unified.barcodes.iter().enumerate() {
-        // `load_unified_data` suffixes each column with `@{batch}` to keep
+    for (i, cb) in barcodes.iter().enumerate() {
+        // The Disjoint loader suffixes each column with `@{batch}` to keep
         // libraries apart; the scan keys on the bare 10x barcode.
         let bare = cb.split_once('@').map_or(cb.as_ref(), |(b, _)| b);
         let key = CellBarcode::Barcode(bare.into());
@@ -1048,7 +1049,7 @@ fn log_family_expression(
              Matrix column e.g. {:?}; scanned barcode e.g. {:?}",
             kept.len(),
             dropped.len(),
-            unified.barcodes.first().map(|b| b.as_ref()),
+            barcodes.first().map(|b| b.as_ref()),
             scanned.keys().next()
         );
         return Ok(());

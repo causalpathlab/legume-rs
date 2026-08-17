@@ -421,7 +421,7 @@ fn main() -> anyhow::Result<()> {
     // it: a hard kill before the handler existed, a graceful stop while a loop was polling, and —
     // worst — a silent no-op afterwards, where the flag was set, nothing was watching it, and the
     // process simply appeared to ignore you until you pressed it a second time.
-    let _stop = graph_embedding_util::stop_flag();
+    let _stop = matrix_util::stop::stop_flag();
 
     match cli.commands {
         Commands::DartSeq(ref args) => run_m6a(args)?,
