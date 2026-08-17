@@ -378,7 +378,49 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
             &out,
         )?;
     }
+
+    record_in_manifest(prefix, &out, branching.roots.first().copied());
     Ok(())
+}
+
+/// Record this run's tables in the SOURCE run's manifest, so `senna plot --from`
+/// can draw the trajectory without being handed six paths.
+///
+/// Updates the manifest of `--from`, not of `--out`: the trajectory is a view of
+/// that embedding, the same relationship `senna pseudotime` and the annotate
+/// commands already record. Paths are stored relative to the manifest's own
+/// directory so the run directory stays movable.
+///
+/// Best-effort. A missing or unwritable manifest must not fail a fit that has
+/// already put every table on disk — the tables are the product, and the
+/// manifest is a convenience for the next command.
+fn record_in_manifest(prefix: &str, out: &str, root: Option<usize>) {
+    let Ok((mut manifest, dir)) = crate::run_manifest::load_for(prefix) else {
+        info!("no run manifest for {prefix}; skipping the trajectory record");
+        return;
+    };
+    let manifest_path =
+        crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix));
+    let rel = |suffix: &str| -> Option<String> {
+        let path = format!("{out}.{suffix}");
+        std::path::Path::new(&path)
+            .exists()
+            .then(|| crate::run_manifest::rel_to_manifest(&dir, &path))
+    };
+
+    if let Some(p) = rel("cells_2d.parquet") {
+        manifest.layout.cell_coords = Some(p);
+    }
+    manifest.pseudotime.pseudotime = rel("pseudotime.parquet");
+    manifest.pseudotime.nodes_2d = rel("nodes_2d.parquet");
+    manifest.pseudotime.nodes_latent = rel("nodes.parquet");
+    manifest.pseudotime.edges = rel("edges.parquet");
+    manifest.pseudotime.root_node = root;
+
+    match manifest.save(std::path::Path::new(&manifest_path)) {
+        Ok(()) => info!("recorded the trajectory in {manifest_path}"),
+        Err(e) => warn!("could not update {manifest_path}: {e}"),
+    }
 }
 
 #[cfg(test)]
