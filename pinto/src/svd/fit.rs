@@ -122,7 +122,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         gene_weights: _,
         n_cells,
         n_genes,
-        gene_nnz: _,
+        gene_stats: _,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: false,

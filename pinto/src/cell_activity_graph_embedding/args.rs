@@ -194,6 +194,27 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
+        help = "Let the nascent deviation load on dims the gene's identity does not",
+        long_help = "Splice-channelized input only, and off by default.\n\
+                     \n\
+                     The nascent deviation is a DEVIATION from the identity loading.\n\
+                     By default it may only be included where the identity is:\n\
+                     a gene moving along a dim its identity does not load\n\
+                     is a state the model should not visit.\n\
+                     The nesting also breaks a symmetry.\n\
+                     Two independent spike-and-slabs can otherwise split\n\
+                     inclusion mass between (identity on, deviation off)\n\
+                     and (identity off, deviation on)\n\
+                     on a gene where only their sum is identified.\n\
+                     \n\
+                     Set this to sample the two gates independently.\n\
+                     It is an A/B arm, not a tuning knob.\n\
+                     `senna gem` nests by default for the same reason."
+    )]
+    pub independent_delta_gate: bool,
+
+    #[arg(
+        long,
         help = "Skip the degree-corrected Poisson refinement of the coarsening levels",
         long_help = "Each coarsening level gets a second-opinion refinement.\n\
                      It runs on RAW counts, degree-corrected Poisson.\n\
