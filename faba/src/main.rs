@@ -183,14 +183,16 @@ Example:\n  \
         about = "Count reads per gene for single-cell or bulk RNA-seq",
         long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\
                       \n\
-                      Produces a sparse (features x cells) count matrix per input BAM from GFF gene annotations.\n\
+                      Produces ONE sparse (features x cells) count matrix per input BAM,\n\
+                      `{batch}_genes`, from GFF gene annotations.\n\
                       Supports 10x-style cell barcodes.\n\
-                      Rows are `{gene_key}/count/{spliced|unspliced}` by default;\n\
-                      --no-splice collapses them to one `{gene_key}/count/total` row per gene.",
+                      Rows are `{gene_key}/count/{spliced|unspliced}`:\n\
+                      both tracks share the one feature axis,\n\
+                      so sum a gene's two rows to recover its total count.",
         after_long_help = "\
 	Example:\n\
 	faba genes sample.bam -g genes.gff -o out/\n\
-  faba genes sample.bam -g genes.gff -o out/ --no-splice"
+  faba genes s1.bam,s2.bam -g genes.gff -o out/ --gene-type protein_coding"
     )]
     Genes(GeneCountArgs),
 

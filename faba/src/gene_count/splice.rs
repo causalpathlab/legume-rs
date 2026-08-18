@@ -23,7 +23,7 @@ pub fn format_gene_key(rec: &GffRecord) -> Box<str> {
     }
 }
 
-/// BAM tags and the read-admission threshold, shared by both gene counters.
+/// BAM tags and the read-admission threshold for gene counting.
 ///
 /// Grouped rather than passed as loose arguments so every counting entry point
 /// takes the same admission policy by construction: `faba genes` and the gene QC
@@ -58,39 +58,6 @@ pub struct CountReadOpts<'a> {
 #[inline]
 fn passes_count_filters(bam_record: &bam::Record, min_mapping_quality: u8) -> bool {
     !bam_record.is_unmapped() && bam_io::passes_mapping_filters(bam_record, min_mapping_quality)
-}
-
-pub fn count_read_per_gene(
-    cache: &mut bam_io::BamReaderCache,
-    bam_file: &str,
-    rec: &GffRecord,
-    opts: CountReadOpts<'_>,
-) -> anyhow::Result<Vec<(CellBarcode, Box<str>, f32)>> {
-    if rec.gene_id == GeneId::Missing {
-        return Ok(vec![]);
-    }
-
-    let gene_name = format_gene_key(rec);
-    let row_name =
-        feature_rows::feature_row(&gene_name, feature_rows::COUNT, feature_rows::TOTAL, None);
-    let mut read_counter = ReadCounter::new(opts);
-
-    bam_io::for_each_record_in_gene_cached(
-        cache,
-        bam_file,
-        rec,
-        opts.gene_barcode_tag,
-        false,
-        |bam_record| {
-            read_counter.count(bam_record);
-        },
-    )?;
-
-    Ok(read_counter
-        .to_vec()
-        .into_iter()
-        .map(|(cb, x)| (cb, row_name.clone(), x as f32))
-        .collect())
 }
 
 pub fn count_read_per_gene_splice(
@@ -183,41 +150,6 @@ impl<'a> UmiDedup<'a> {
             return false;
         };
         !self.seen.insert((cell_barcode.clone(), h))
-    }
-}
-
-struct ReadCounter<'a> {
-    cell_to_count: HashMap<CellBarcode, usize>,
-    opts: CountReadOpts<'a>,
-    dedup: UmiDedup<'a>,
-}
-
-impl<'a> ReadCounter<'a> {
-    fn new(opts: CountReadOpts<'a>) -> Self {
-        Self {
-            cell_to_count: HashMap::default(),
-            dedup: UmiDedup::new(opts.umi_tag),
-            opts,
-        }
-    }
-
-    fn to_vec(&self) -> Vec<(CellBarcode, usize)> {
-        self.cell_to_count
-            .iter()
-            .map(|(cb, x)| (cb.clone(), *x))
-            .collect()
-    }
-
-    fn count(&mut self, bam_record: &bam::Record) {
-        if !passes_count_filters(bam_record, self.opts.min_mapping_quality) {
-            return;
-        }
-        let cell_barcode =
-            bam_io::extract_cell_barcode(bam_record, self.opts.cell_barcode_tag.as_bytes());
-        if self.dedup.is_duplicate(bam_record, &cell_barcode) {
-            return;
-        }
-        *self.cell_to_count.entry(cell_barcode).or_default() += 1;
     }
 }
 
