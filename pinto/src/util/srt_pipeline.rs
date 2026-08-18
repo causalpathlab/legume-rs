@@ -21,7 +21,6 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::RandProjOps;
 use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
-use matrix_util::traits::RunningStatOps;
 
 ///////////////////////////
 // Config + result types //

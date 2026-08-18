@@ -232,24 +232,44 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 64,
+        default_value_t = 2048,
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
         help = "Genes per outer parallel sampling chunk",
         long_help = "The outer loop samples this many genes in parallel via rayon.\n\
                      Forward and backward then run serially. candle Var is not parallel-safe.\n\
-                     The default is sized for a laptop. Raise it if you have many cores.",
+                     \n\
+                     This is ALSO the SGD minibatch, not just a parallel width.\n\
+                     An epoch takes trainable-genes / this many optimizer steps,\n\
+                     each paying a forward, a backward, a gradient clip and an\n\
+                     AdamW update over the whole feature table.\n\
+                     So it sets both wall-clock and how many parameter updates\n\
+                     a run performs, and it is not fit-neutral:\n\
+                     raising 64 to 2048 cut wall-clock several fold AND raised\n\
+                     spatial coherence, at an unchanged sampling budget.\n\
+                     \n\
+                     Below ~this many trainable genes an epoch is ONE step,\n\
+                     so a small panel may want a smaller value here\n\
+                     or more --epochs.\n\
+                     Lower it under memory pressure.",
         hide = true
     )]
     pub gene_batch_size: usize,
 
     #[arg(
         long,
-        default_value_t = 256,
+        default_value_t = 12,
         help = "Positive edges drawn per (gene, batch) sample",
         long_help = "Every gene draws this many positives per batch each epoch.\n\
                      \n\
-                     --positives-per-epoch overrides it with a total instead,\n\
-                     which is usually the knob you want.",
+                     The default was 256, and that was far too high.\n\
+                     Over-sampling does not merely cost time here,\n\
+                     it DEGRADES the fit: cutting the epoch budget ~20x\n\
+                     raised spatial coherence several fold on the test set.\n\
+                     Raise it only if the fit looks under-trained,\n\
+                     and check the coherence rather than the loss.\n\
+                     \n\
+                     Kept per-gene so the budget tracks the gene axis.\n\
+                     --positives-per-epoch overrides it with an absolute total.",
         hide = true
     )]
     pub per_gene_batch: usize,

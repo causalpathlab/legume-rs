@@ -426,21 +426,18 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
     let mut merge_present_with_consensus = false;
+    // Only meaningful when the merge ran AND collapsed something — that is
+    // exactly when the manifest has merge paths to hang it on.
+    let mut merge_summary: Option<crate::util::metadata::DictMergeSummary> = None;
     // Recorded in the manifest: the auto cutoff is data-dependent, so a run is
     // not reproducible from its outputs without it.
-    let merge_min_nnz_used: Option<usize>;
-    let merge_genes_scored: Option<usize>;
+
     {
         use matrix_param::traits::Inference;
 
-        // Score the merge on DETECTED genes only. An undetected gene's
-        // posterior log-rate is set by each community's exposure rather than by
-        // data, and swings far harder across communities than a well-measured
-        // gene's does — so left in, the noise rows dominate the cosine and
-        // collapse the tree. See `cosine_merge`'s step 0 for the measurements.
-        //
-        // `gene_nnz` rides out of the Fisher-weight pass rather than costing a
-        // second full read of every column.
+        // Score the merge on DETECTED genes only — see `cosine_merge`'s step 0
+        // for why undetected genes otherwise decide it. `gene_nnz` rides out of
+        // the Fisher-weight pass rather than costing a second full read.
         let gene_nnz = gene_nnz.expect("fisher_weights=true must yield Some");
         let min_nnz = args
             .merge_min_nnz
@@ -473,8 +470,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                  result. Lower --merge-min-nnz to score more genes.",
                 n_keep, min_nnz, k, draft_prefix
             );
-            merge_min_nnz_used = Some(min_nnz);
-            merge_genes_scored = Some(n_keep);
         } else {
             info!(
                 "Running cosine dictionary merge (average linkage) over K={} communities...",
@@ -527,12 +522,17 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 merge_present_with_consensus = true;
             } else {
                 info!(
-                "Dictionary merge produced no collapses at cosine ≥ {:.3}; draft outputs at {}.* are the final result",
-                args.merge_cut, draft_prefix
-            );
+                    "Dictionary merge produced no collapses at cosine ≥ {:.3}; \
+                     draft outputs at {}.* are the final result",
+                    args.merge_cut, draft_prefix
+                );
             }
-            merge_min_nnz_used = Some(min_nnz);
-            merge_genes_scored = Some(n_keep);
+            if merge_present_with_consensus {
+                merge_summary = Some(crate::util::metadata::DictMergeSummary {
+                    min_nnz,
+                    genes_scored: n_keep,
+                });
+            }
         }
     }
 
@@ -553,9 +553,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 n_edges: edges.len(),
                 k,
             },
-            merge_present_with_consensus,
-            merge_min_nnz_used,
-            merge_genes_scored,
+            merge_summary,
             &cascade_level_indices,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
