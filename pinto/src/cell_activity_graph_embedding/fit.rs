@@ -198,6 +198,7 @@ pub fn fit_cell_activity_graph_embedding(
         gene_weights: fisher_weights,
         n_cells,
         n_genes,
+            gene_nnz: _,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: !args.no_fisher_weights,

@@ -18,6 +18,9 @@ use crate::util::input::{
 };
 use crate::util::knn_graph::KnnGraph;
 use auxiliary_data::feature_names::FeatureNameKind;
+use data_beans_alg::gene_weighting::fisher_weights_from_stats;
+use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
+use matrix_util::traits::RunningStatOps;
 use data_beans_alg::random_projection::RandProjOps;
 
 ///////////////////////////
@@ -49,6 +52,10 @@ pub struct SrtPreprocessed {
     pub batch_effects: Option<Mat>,
     pub graph: KnnGraph,
     pub gene_weights: Option<Vec<f32>>,
+    /// Per-gene nonzero-cell count, carried out of the Fisher-weight pass so
+    /// consumers do not re-stream the matrix for it. `Some` iff `gene_weights`
+    /// is — they come from the same `SparseRunningStatistics`.
+    pub gene_nnz: Option<Vec<f32>>,
     pub n_cells: usize,
     pub n_genes: usize,
 }
@@ -198,18 +205,23 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         None
     };
 
-    let gene_weights = if cfg.fisher_weights {
+    // One streaming pass, two consumers. `compute_nb_fisher_weights` builds
+    // these same stats and returns only the weights, dropping `npos` — which is
+    // exactly the per-gene detection count `lc`'s dictionary merge needs. Taking
+    // the stats here saves a second full read of every column.
+    let (gene_weights, gene_nnz) = if cfg.fisher_weights {
         info!("Computing NB Fisher-info gene weights for inference...");
-        let w = compute_nb_fisher_weights(&data_vec, c.block_size)?;
+        let stats = streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?;
+        let w = fisher_weights_from_stats(&stats, data_vec.num_columns());
         info!(
             "Gene weights w_g: min={:.3e}, mean={:.3e}, max={:.3e}",
             w.iter().cloned().fold(f32::INFINITY, f32::min),
             w.iter().sum::<f32>() / (w.len().max(1) as f32),
             w.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
         );
-        Some(w)
+        (Some(w), Some(stats.count_positives()))
     } else {
-        None
+        (None, None)
     };
 
     Ok(SrtPreprocessed {
@@ -220,6 +232,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         batch_effects,
         graph,
         gene_weights,
+        gene_nnz,
         n_cells,
         n_genes,
     })
