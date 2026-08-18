@@ -38,6 +38,7 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
+use data_beans::qc::suggest_nnz_cutoff;
 use data_beans_alg::random_projection::RandProjOps;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
@@ -66,6 +67,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         batch_effects: batch_db,
         graph,
         gene_weights,
+        gene_nnz,
         n_cells,
         n_genes,
     } = preprocess_srt(SrtPreprocessConfig {
@@ -426,11 +428,49 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     let mut merge_present_with_consensus = false;
     {
         use matrix_param::traits::Inference;
+
+        // Score the merge on DETECTED genes only. An undetected gene's
+        // posterior log-rate is set by each community's exposure rather than by
+        // data, and swings far harder across communities than a well-measured
+        // gene's does — so left in, the noise rows dominate the cosine and
+        // collapse the tree. See `cosine_merge`'s step 0 for the measurements.
+        //
+        // `gene_nnz` rides out of the Fisher-weight pass rather than costing a
+        // second full read of every column.
+        let gene_nnz = gene_nnz.expect("fisher_weights=true must yield Some");
+        let min_nnz = args
+            .merge_min_nnz
+            .or_else(|| suggest_nnz_cutoff(&gene_nnz))
+            .unwrap_or(1);
+        let keep_genes: Vec<bool> = gene_nnz.iter().map(|&n| n as usize >= min_nnz).collect();
+        let n_keep = keep_genes.iter().filter(|&&b| b).count();
+        info!(
+            "Dictionary merge scores {} of {} genes (detected in ≥ {} cells{})",
+            n_keep,
+            keep_genes.len(),
+            min_nnz,
+            if args.merge_min_nnz.is_some() {
+                ", --merge-min-nnz"
+            } else {
+                ", auto"
+            }
+        );
+        if n_keep == 0 {
+            warn!(
+                "--merge-min-nnz {} kept no genes; skipping the dictionary merge \
+                 (draft outputs stand as the final result)",
+                min_nnz
+            );
+        }
+
         info!(
             "Running cosine dictionary merge (average linkage) over K={} communities...",
             k
         );
-        let merges = cosine_merge(draft_gene_community.posterior_log_mean());
+        let merges = cosine_merge(
+            draft_gene_community.posterior_log_mean(),
+            Some(&keep_genes),
+        );
         write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
 
         let labels = cosine_cut(&merges, k, args.merge_cut);
