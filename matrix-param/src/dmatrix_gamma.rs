@@ -106,14 +106,20 @@ impl TwoStatParam for GammaMatrix {
             .zip_map(&self.b_stat, |a, b| a.digamma() - b.ln());
     }
     fn map_calibrate_log_sd(&mut self) {
-        self.estimated_log_sd = self.a_stat.map(|a| -> f32 {
-            if a > 1.0 {
-                1.0 / (a - 1.0).sqrt()
-            } else {
-                // this is actually not true
-                0.0
-            }
-        });
+        // `sd[ln X] = sqrt(trigamma(a))` exactly, for `X ~ Gamma(a, b)` — note it
+        // does not depend on the rate, which is why `b_stat` plays no part here.
+        //
+        // This replaced `1/sqrt(a - 1)`, the large-`a` asymptote, which was
+        // wrong in the regime that dominates sparse count data: 46% high at
+        // `a = 1.5`, 21% high at `a = 2.2` (a typical detected feature), and
+        // agreeing only past `a ~ 100`. Below `a = 1` it has no real value at
+        // all, and the old code returned 0 there — i.e. it reported PERFECT
+        // certainty for a feature with no counts, whose posterior is the prior
+        // and whose true `sd` is the largest in the matrix (1.283 at `a = 1`).
+        // Anything reading `log_sd` as a precision was being handed the
+        // inversion of the truth.
+        use special::Gamma;
+        self.estimated_log_sd = self.a_stat.map(|a| a.trigamma().sqrt());
     }
 }
 
