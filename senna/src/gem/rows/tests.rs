@@ -2,46 +2,16 @@
 //!
 //! These moved here from `gem_encoder` when the parser did. They belong to the
 //! grammar, not to either model — which is the whole point of the module.
+//!
+//! The splitter's own tests moved one crate further down with it, to
+//! `auxiliary-data/src/feature_rows/tests.rs`. What is left here is the part
+//! that is gem's alone: interning, and the warn-and-keep policy for a row the
+//! splitter rejects.
 
 use super::*;
 
 fn names(v: &[&str]) -> Vec<Box<str>> {
     v.iter().map(|s| Box::<str>::from(*s)).collect()
-}
-
-#[test]
-fn splits_gem_rows_into_gene_and_track() {
-    assert_eq!(
-        split_count_row("ENSG001_BRCA2/count/spliced"),
-        Some(("ENSG001_BRCA2", false))
-    );
-    assert_eq!(
-        split_count_row("ENSG001_BRCA2/count/unspliced"),
-        Some(("ENSG001_BRCA2", true))
-    );
-}
-
-/// A row that is not a gene-level count row must be REJECTED, not silently
-/// absorbed as a spliced one.
-///
-/// The old `rsplit_once("/count/")` could not tell the two apart — both fell to
-/// the same branch — so `BRCA2/m6a/methylated` became a mature gene literally
-/// named `BRCA2/m6a/methylated`, and a per-site row became a mature row of the
-/// right gene. Neither errored, and the `n_nascent > 0` guard does not catch
-/// contamination, only a wholly spliced input.
-#[test]
-fn non_count_rows_are_rejected_not_silently_called_spliced() {
-    // wrong modality
-    assert_eq!(split_count_row("ENSG001_BRCA2/m6a/methylated"), None);
-    // right modality, wrong channel
-    assert_eq!(split_count_row("ENSG001_BRCA2/count/total"), None);
-    // sub-gene resolution: this model is gene-level, so a site row is not pairable
-    assert_eq!(
-        split_count_row("ENSG001_BRCA2/count/chr1:100/spliced"),
-        None
-    );
-    // not a feature row at all
-    assert_eq!(split_count_row("weird_name"), None);
 }
 
 /// A gene's two rows must intern to ONE gene id. This is the pairing the whole
