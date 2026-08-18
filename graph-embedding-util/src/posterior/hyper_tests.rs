@@ -173,3 +173,42 @@ fn h_invariance_needs_h_large_relative_to_alpha() {
          changed shape: {lo5} -> {hi5}"
     );
 }
+
+/// The slab hyperparameter, ALONE, is not where a collapsed dim gets stuck.
+///
+/// Worth pinning because it is the intuitive suspect and it is wrong. The scale
+/// mixture looks like it should erase its own barrier at zero — a small `σ²`
+/// drives the auxiliary `a` up, which drives the IG rate `1/a` down, which would
+/// admit a smaller `σ²` still. Measured here, it does not: hand the same
+/// hyperparameter real evidence again and it climbs straight back.
+///
+/// So a dim that collapses in a full run is stuck through the JOINT, not through
+/// this: once `σ²` reaches the clamp floor every `β` on that dim is drawn at
+/// essentially zero, so `Σβ²` can never recover on its own and the evidence this
+/// test supplies by hand never arrives. Any fix therefore belongs at the block
+/// level, not here — and changing this function alone will not deliver one.
+#[test]
+fn the_slab_hyperparameter_alone_recovers_from_starvation() {
+    let mut rng = StdRng::seed_from_u64(20_250_818);
+    let mut hv = HalfCauchyVar::new(1.0);
+    const N: usize = 64;
+
+    let mut starved = 0.0;
+    for _ in 0..200 {
+        starved = hv.sample(N as f64 * 1e-6, N, &mut rng);
+    }
+    assert!(
+        starved < 1e-3,
+        "a dim whose loadings vanish should shrink, got {starved:.3e}"
+    );
+
+    let mut recovered = starved;
+    for _ in 0..200 {
+        recovered = hv.sample(N as f64 * 4.0, N, &mut rng);
+    }
+    assert!(
+        recovered > 1.0,
+        "the hyperparameter climbs back once evidence returns: starved at \
+         {starved:.3e}, recovered to {recovered:.3e}"
+    );
+}
