@@ -10,7 +10,9 @@ use super::shared::{
 use super::{BetaTerm, PartitionGeometry, PbGibbsConfig};
 use crate::fit::stacked_pb::StackedPb;
 use crate::posterior::diagnostics::{scalar_diagnostics, ChainDiag};
-use crate::posterior::dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult};
+use crate::posterior::dim_block::{
+    dim_block, dim_block_multi, DimBlockConfig, DimBlockResult, HyperState,
+};
 use crate::posterior::lnpdf::{FrozenSide, NodeTerm};
 use crate::posterior::pb_index::{build_pb_index_pair, AnchorMap, FeatureSide};
 use crate::progress::new_progress_bar;
@@ -64,12 +66,17 @@ pub struct SpliceGibbsResult {
 /// Alternating sweep over gem's three blocks: `β | δ, pb`, then `δ | β, pb`, then
 /// `pb | β, δ`.
 ///
-/// **`β` reads the spliced rows only.** A [`NodeTerm`] carries one offset for all
-/// of an anchor's edges, so "β with δ added on just the unspliced edges" is not
-/// expressible as a single node; splitting β's likelihood across the two tracks
-/// would need a per-edge offset. Reading β off the spliced rows is also the
-/// cleaner estimand — those rows score exactly `⟨β_g, e_p⟩` with nothing to
-/// disentangle — and it is what gem's previous posterior did.
+/// **`β` reads BOTH tracks**, as two [`NodeTerm`]s per gene through
+/// [`dim_block_multi`]: the spliced term at offset `None`, the unspliced term
+/// carrying `δ_g` as its offset. `β` appears in the unspliced rows too — they
+/// score `⟨β + δ, e_p⟩` — so a spliced-only kernel would not be the conditional
+/// `p(β | δ, ·)` and the three blocks would stop being conditionals of one joint.
+///
+/// This is why [`dim_block_multi`] exists at all. A single `NodeTerm` carries one
+/// offset for ALL of an anchor's edges, so "β, with δ added on just the unspliced
+/// edges" is not expressible as one node; it takes two nodes over one anchor. The
+/// two tracks have independent per-row biases, so each term's intercept profiles
+/// out separately and their sum is the joint's profile.
 ///
 /// `δ` then reads the unspliced rows with `β_g` as its per-anchor offset,
 /// **refreshed every sweep**. Holding it at a one-time MAP snapshot, as the
@@ -193,6 +200,14 @@ pub(crate) fn pb_gibbs_splice(
     // Inclusion state carried between outer sweeps, one per gate — without it the
     // ESS branch is unreachable and every draw comes from the prior.
     let (mut z_beta, mut z_delta): (Option<Vec<bool>>, Option<Vec<bool>>) = (None, None);
+    // Each block owns its own slab variance, so each carries its own state across
+    // the outer sweeps. Without this every block restarts at the prior width and
+    // the adaptive slab never adapts — see `DimBlockConfig::init_hyper`.
+    let (mut hyper_beta, mut hyper_delta, mut hyper_pb): (
+        Option<HyperState>,
+        Option<HyperState>,
+        Option<HyperState>,
+    ) = (None, None, None);
 
     let mut acc = SpliceAcc::new(n_genes, pb.n_pb_total(), h);
     let (mut fallbacks, mut n_transitions) = (0usize, 0usize);
@@ -246,12 +261,16 @@ pub(crate) fn pb_gibbs_splice(
         if let Some(z) = z_beta.clone() {
             beta_cfg = beta_cfg.with_init_z(z);
         }
+        if let Some(hs) = hyper_beta.take() {
+            beta_cfg = beta_cfg.with_init_hyper(hs);
+        }
         beta_cfg.transitions_per_dim = cfg.transitions_per_dim;
         beta_cfg.stick_alpha = cfg.stick_alpha;
         let b = dim_block_multi(&beta_terms, &side_pb, &beta_cfg);
         drop(beta_terms);
         e_beta.copy_from_slice(&b.mean_beta);
         z_beta = Some(b.final_z.clone());
+        hyper_beta = Some(b.final_hyper.clone());
 
         // δ | β, pb, on the unspliced rows, with β carried as the per-anchor
         // offset so the sampler explores a deviation rather than an absolute
@@ -265,6 +284,7 @@ pub(crate) fn pb_gibbs_splice(
             Some(&e_beta),
             tracks.nested.then(|| b.final_z.clone()),
             z_delta.clone(),
+            hyper_delta.take(),
             cfg,
             sweep,
             0xD317,
@@ -272,6 +292,7 @@ pub(crate) fn pb_gibbs_splice(
         );
         e_delta.copy_from_slice(&d.mean_beta);
         z_delta = Some(d.final_z.clone());
+        hyper_delta = Some(d.final_hyper.clone());
         // Row intercepts, each from the block that last moved its track. The β block
         // carries two terms (spliced at 0, unspliced at 1), but δ ran after it, so an
         // unspliced row's current intercept is δ's; spliced rows take β's term 0.
@@ -291,6 +312,9 @@ pub(crate) fn pb_gibbs_splice(
             .without_selection()
             .quiet();
         pb_cfg.transitions_per_dim = cfg.transitions_per_dim;
+        if let Some(hs) = hyper_pb.take() {
+            pb_cfg = pb_cfg.with_init_hyper(hs);
+        }
         let pbres = {
             let nodes: Vec<NodeTerm> = beta_pair
                 .by_pb
@@ -308,6 +332,7 @@ pub(crate) fn pb_gibbs_splice(
         };
         e_pb.copy_from_slice(&pbres.mean_beta);
         b_pb_live.copy_from_slice(&pbres.b_profiled);
+        hyper_pb = Some(pbres.final_hyper.clone());
 
         fallbacks += b.fallbacks + d.fallbacks + pbres.fallbacks;
         n_transitions += b.n_transitions + d.n_transitions + pbres.n_transitions;

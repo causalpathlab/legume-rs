@@ -5,7 +5,7 @@
 
 use super::{BetaTerm, PbGibbsConfig, SpliceTracks};
 use crate::posterior::diagnostics::ChainDiag;
-use crate::posterior::dim_block::{dim_block, DimBlockConfig, DimBlockResult};
+use crate::posterior::dim_block::{dim_block, DimBlockConfig, DimBlockResult, HyperState};
 use crate::posterior::lnpdf::{FrozenSide, NodeTerm};
 use crate::posterior::pb_index::{AnchorMap, FeatureSide};
 use log::info;
@@ -136,7 +136,7 @@ pub(super) fn profiled_bias(
 /// `sweep == 0`, so on the sweep that seeds the whole chain the β, δ and pb blocks
 /// would draw the identical stream of normals and uniforms — the two gates'
 /// proposals perfectly correlated exactly where it matters most.
-pub(super) fn block_seed(seed: u64, salt: u64, sweep: usize) -> u64 {
+pub fn block_seed(seed: u64, salt: u64, sweep: usize) -> u64 {
     seed.rotate_left(17)
         ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (sweep as u64)
@@ -185,6 +185,7 @@ pub(super) fn run_block(
     offset: Option<&[f32]>,
     z_allowed: Option<Vec<bool>>,
     init_z: Option<Vec<bool>>,
+    hyper: Option<HyperState>,
     cfg: &PbGibbsConfig,
     sweep: usize,
     salt: u64,
@@ -211,6 +212,11 @@ pub(super) fn run_block(
     }
     if let Some(z) = init_z {
         bcfg = bcfg.with_init_z(z);
+    }
+    // One sweep per call, so the slab variance and its half-Cauchy auxiliary only
+    // form a chain if the driver hands them back — see `DimBlockConfig::init_hyper`.
+    if let Some(hs) = hyper {
+        bcfg = bcfg.with_init_hyper(hs);
     }
     dim_block(&nodes, side, &bcfg)
 }

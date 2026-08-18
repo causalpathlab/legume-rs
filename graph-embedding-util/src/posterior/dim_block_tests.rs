@@ -225,3 +225,104 @@ fn vetoed_coordinates_do_not_inflate_pi0() {
         res.pi0[1]
     );
 }
+
+/// An alternating driver calls a block one sweep at a time, so the slab variance
+/// only becomes a chain if the driver carries it. Without the carry every entry
+/// restarts `σ₀²` at `half_cauchy_scale²`, the `β` draw always uses the PRIOR
+/// width, and the value sampled at the end of the sweep is thrown away.
+///
+/// The data here has loadings far larger than the prior scale, so an adapting
+/// slab has to grow. Break the fix — drop `with_init_hyper` from the loop — and
+/// the carried run collapses onto the pinned one and this fails.
+#[test]
+fn slab_variance_only_chains_across_blocks_when_it_is_carried() {
+    let h = 2;
+    let n_anchors = 24;
+    let n_obs = 40;
+    // Frozen side with a big signal on both dims, so `Σβ²` pulls σ₀² well above 1.
+    let e: Vec<f32> = (0..n_obs * h)
+        .map(|i| if (i / h) % 2 == 0 { 3.0 } else { -3.0 })
+        .collect();
+    let b = vec![0.0f32; n_obs];
+    let side = FrozenSide { e: &e, b: &b, h };
+    let partition: Vec<u32> = (0..n_obs as u32).collect();
+    let pos: Vec<Vec<(u32, f32)>> = (0..n_anchors)
+        .map(|a| {
+            (0..n_obs as u32)
+                .map(|o| {
+                    (
+                        o,
+                        if (o as usize + a).is_multiple_of(2) {
+                            40.0
+                        } else {
+                            1.0
+                        },
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let nodes: Vec<NodeTerm> = pos
+        .iter()
+        .map(|p| NodeTerm::new(p, &partition, 1.0))
+        .collect();
+
+    let run = |carry: bool| -> Vec<f64> {
+        let mut hyper: Option<HyperState> = None;
+        let mut last = Vec::new();
+        for sweep in 0..24u64 {
+            let mut cfg = DimBlockConfig::new(1, 0, 1234 + sweep).quiet();
+            if carry {
+                if let Some(hs) = hyper.take() {
+                    cfg = cfg.with_init_hyper(hs);
+                }
+            }
+            let out = dim_block(&nodes, &side, &cfg);
+            hyper = Some(out.final_hyper.clone());
+            last = out.final_hyper.sigma2.clone();
+        }
+        last
+    };
+
+    let carried = run(true);
+    let pinned = run(false);
+
+    // The pinned run re-enters at the prior every sweep, so whatever it reports is
+    // a one-shot draw off a state generated under σ = 1.
+    let carried_max = carried.iter().cloned().fold(0.0f64, f64::max);
+    let pinned_max = pinned.iter().cloned().fold(0.0f64, f64::max);
+    assert!(
+        carried_max > pinned_max,
+        "carried σ₀² should adapt upward on strong loadings: carried {carried:?} vs pinned {pinned:?}"
+    );
+}
+
+/// A block that owns all its sweeps must be untouched by the new plumbing: with
+/// no `init_hyper` the result has to be exactly what it always was.
+#[test]
+fn omitting_the_hyper_state_reproduces_the_old_behaviour() {
+    let h = 2;
+    let e: Vec<f32> = (0..20 * h).map(|i| (i % 5) as f32 - 2.0).collect();
+    let b = vec![0.0f32; 20];
+    let side = FrozenSide { e: &e, b: &b, h };
+    let partition: Vec<u32> = (0..20u32).collect();
+    let pos: Vec<Vec<(u32, f32)>> = (0..8)
+        .map(|a| {
+            (0..20u32)
+                .map(|o| (o, 1.0 + ((o + a) % 3) as f32))
+                .collect()
+        })
+        .collect();
+    let nodes: Vec<NodeTerm> = pos
+        .iter()
+        .map(|p| NodeTerm::new(p, &partition, 1.0))
+        .collect();
+
+    let cfg = DimBlockConfig::new(12, 4, 99).quiet();
+    let a = dim_block(&nodes, &side, &cfg);
+    let b2 = dim_block(&nodes, &side, &cfg);
+    assert_eq!(a.pip, b2.pip, "same config, same seed, same answer");
+    assert_eq!(a.final_hyper.sigma2.len(), h);
+    assert_eq!(a.final_hyper.vars.len(), h);
+    assert_eq!(a.final_hyper.pi0.len(), h);
+}

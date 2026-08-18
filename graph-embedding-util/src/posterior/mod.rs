@@ -46,7 +46,7 @@ pub mod run;
 pub mod score;
 
 pub use diagnostics::{chain_diagnostics, scalar_diagnostics, worst_case, ChainDiag};
-pub use dim_block::{dim_block, DimBlockConfig, DimBlockResult};
+pub use dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult, HyperState};
 pub use frozen_diag::{frozen_side_diag, FrozenSideDiag};
 pub use hyper::{ibp_pi0, sample_pi0, HalfCauchyVar};
 pub use index::ContrastiveIndex;
