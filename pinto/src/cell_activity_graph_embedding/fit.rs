@@ -8,7 +8,7 @@
 //! load -> spatial KNN -> batch effects                  util::srt_pipeline
 //! HVG-weighted projection -> graph_coarsen_multilevel   nested super-cell levels
 //! build_cell_activities                                 per-gene activity, active edges
-//! collapse + SVD + block Gibbs                          selection::select_features -> pip
+//! collapse + SVD + block Gibbs (sampled arm only)       selection::select_features -> pip
 //! training loop                                         the only SGD
 //! parquet outputs + .pinto.json
 //! ```
@@ -317,16 +317,14 @@ pub fn fit_cell_activity_graph_embedding(
         },
     );
 
-    // Collapse cells into super-cells, then — on the sampled arm only — fit the
-    // gene selection against them. The pseudobulks themselves are built either
-    // way: they are cheap next to the sampler, and `pseudobulk_cells.parquet`
-    // is the diagnostic that lets the coarsening be inspected before anything
-    // is built on it. `None` under `--gate-mode learned`, where the variational
-    // gate is fit by SGD instead and no count scan happens at all.
-    // Hoisted out of the block below so the LEARNED arm skips it entirely. The
-    // collapse plus its shared SVD exist to give the Gibbs a frozen side; under
-    // `learned` nothing consumes them, and they were costing a full pseudobulk
-    // build and a [n_genes x D] SVD on every run for a diagnostic parquet.
+    // Collapse cells into super-cells, then fit the gene selection against
+    // them — the whole stage runs on the SAMPLED arm only.
+    //
+    // The collapse and its shared SVD exist to give the Gibbs a frozen side, so
+    // under `--gate-mode learned` nothing consumes them and they were costing a
+    // full pseudobulk build plus an [n_genes x D] SVD per run purely to emit a
+    // diagnostic. `pseudobulk_cells.parquet` is therefore a SAMPLED-ARM output;
+    // `pinto cage --help` says so.
     let mut sampled_selection = if args.gate_mode == GateMode::Learned {
         None
     } else {
