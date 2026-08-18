@@ -183,6 +183,17 @@ pub struct DimBlockConfig {
     /// [`Self::init_beta`] is silently discarded. `None` cold-starts every
     /// coordinate off, which is right only for a chain that owns all its sweeps.
     pub init_z: Option<Vec<bool>>,
+    /// Optional incoming hyperparameter state — see [`HyperState`].
+    ///
+    /// **Required for an alternating sampler**, for the same reason as
+    /// [`Self::init_z`]. A block driven one sweep at a time re-enters here on
+    /// every outer sweep, and without this it re-initializes `σ₀²` to
+    /// `half_cauchy_scale²` every time: the `β` draw then always uses the PRIOR
+    /// slab width, the `σ₀²` sampled at the end of the sweep is reported and
+    /// discarded, and the half-Cauchy auxiliary — which is a scale-mixture latent
+    /// that only means anything carried — is reset with it. The adaptive slab
+    /// silently stops adapting, which is most of what the spike-and-slab is for.
+    pub init_hyper: Option<HyperState>,
     /// Sample the inclusion indicators. `false` pins every `z` on and skips the
     /// draw entirely, giving a plain per-dim Gaussian block.
     ///
@@ -211,8 +222,16 @@ impl DimBlockConfig {
             show_progress: true,
             z_allowed: None,
             init_z: None,
+            init_hyper: None,
             selection: true,
         }
+    }
+
+    /// Resume the hyperparameters from a previous block — see [`Self::init_hyper`].
+    #[must_use]
+    pub fn with_init_hyper(mut self, hyper: HyperState) -> Self {
+        self.init_hyper = Some(hyper);
+        self
     }
 
     /// Resume the inclusion state from a previous sweep — see [`Self::init_z`].
@@ -265,6 +284,28 @@ impl DimBlockConfig {
     }
 }
 
+/// The per-dim hyperparameters a block carries: the slab variance `σ₀h²`, the
+/// half-Cauchy scale-mixture latent behind it, and the null mass `π₀h`.
+///
+/// This exists so an ALTERNATING driver — one that calls a block for a single
+/// sweep at a time and loops itself — can hand the state back in on the next
+/// sweep. Without it the outer loop is not a chain in these parameters at all:
+/// each entry restarts them at the prior. `init_z` / `final_z` exist for exactly
+/// the same reason, one level down.
+///
+/// A driver that owns all its sweeps (one `dim_block` call with `n_sweeps > 1`)
+/// never needs to touch this — the loop is already inside.
+#[derive(Clone, Debug)]
+pub struct HyperState {
+    /// Per-dim slab variance `σ₀h²`.
+    pub sigma2: Vec<f64>,
+    /// Per-dim half-Cauchy variance hyperparameters, carrying their auxiliaries.
+    pub vars: Vec<HalfCauchyVar>,
+    /// Per-dim null mass `π₀h`. Fixed under the IBP ladder, sampled under the
+    /// independent-Beta prior — carried either way so the two paths agree.
+    pub pi0: Vec<f64>,
+}
+
 /// Result of a per-dim block run. The `[n_genes × H]` tables are **row-major**,
 /// gene-major — `pip[g * h + d]` — matching the `{out}.{tag}_pip.parquet` layout.
 pub struct DimBlockResult {
@@ -283,6 +324,10 @@ pub struct DimBlockResult {
     pub h: usize,
     /// Sweeps actually retained (less than `n_sweeps − burnin` only if SIGINT hit).
     pub n_kept: usize,
+    /// Hyperparameter state after the LAST sweep, for an alternating driver to
+    /// feed back in via [`DimBlockConfig::init_hyper`]. Like [`Self::final_z`]
+    /// this is a single draw, not a posterior summary.
+    pub final_hyper: HyperState,
     /// `[n_anchors × h]` inclusion state after the LAST sweep — a single draw, not
     /// a posterior summary. It exists so an outer alternating sampler can condition
     /// the next block on it (see [`DimBlockConfig::z_allowed`]); for reporting,
@@ -451,19 +496,33 @@ pub fn dim_block_multi(
         .map(|lo| (lo, (lo + tile_b).min(n_genes)))
         .collect();
 
-    let mut hv: Vec<HalfCauchyVar> = (0..h)
-        .map(|_| HalfCauchyVar::new(cfg.half_cauchy_scale))
-        .collect();
-    let mut sigma2 = vec![cfg.half_cauchy_scale * cfg.half_cauchy_scale; h];
+    // Resumed when an alternating driver supplies it, otherwise started at the
+    // prior. `None` reproduces the pre-existing behaviour exactly, so a block that
+    // owns all its sweeps is untouched by this.
+    let resume = cfg
+        .init_hyper
+        .as_ref()
+        .filter(|s| s.sigma2.len() == h && s.vars.len() == h && s.pi0.len() == h);
+    let mut hv: Vec<HalfCauchyVar> = match resume {
+        Some(s) => s.vars.clone(),
+        None => (0..h)
+            .map(|_| HalfCauchyVar::new(cfg.half_cauchy_scale))
+            .collect(),
+    };
+    let mut sigma2 = match resume {
+        Some(s) => s.sigma2.clone(),
+        None => vec![cfg.half_cauchy_scale * cfg.half_cauchy_scale; h],
+    };
     // Either an independent `Beta(a,b)` per dim, or the truncated-IBP ladder. Both
     // produce the same thing — a length-`h` vector of exclusion rates — which is the
     // model's ONLY view of the prior, so nothing downstream changes with the choice.
     //
     // Under the IBP the ladder is FIXED: `α` is a chosen hyperparameter, not a sampled
     // one, so `pi0` does not move across sweeps. See [`ibp_pi0`] for why.
-    let mut pi0 = match cfg.stick_alpha {
-        Some(alpha) => ibp_pi0(alpha, h),
-        None => vec![cfg.beta_a / (cfg.beta_a + cfg.beta_b); h],
+    let mut pi0 = match (resume, cfg.stick_alpha) {
+        (Some(s), _) => s.pi0.clone(),
+        (None, Some(alpha)) => ibp_pi0(alpha, h),
+        (None, None) => vec![cfg.beta_a / (cfg.beta_a + cfg.beta_b); h],
     };
     let mut hyper_rng = StdRng::seed_from_u64(cfg.seed ^ 0x7A11_0C0D);
 
@@ -655,6 +714,11 @@ pub fn dim_block_multi(
         pi0_diag: pi0_chain.iter().map(|c| scalar_diagnostics(c)).collect(),
         h,
         n_kept,
+        final_hyper: HyperState {
+            sigma2: sigma2.clone(),
+            vars: hv.clone(),
+            pi0: pi0.clone(),
+        },
         final_z: zed,
         fallbacks,
         n_transitions,

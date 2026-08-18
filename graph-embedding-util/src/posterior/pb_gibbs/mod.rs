@@ -39,17 +39,25 @@
 
 mod hyper_io;
 mod shared;
+
+// Re-exported by NAME rather than by opening the module: every alternating driver
+// has to derive its per-(block, sweep) stream the SAME way, and a second copy of
+// this is a silent divergence between paths that are meant to agree. `pinto cage`
+// runs the same two-gate alternation outside this crate and had grown exactly
+// that — same salts, different arithmetic. A targeted re-export keeps the rest of
+// `shared` private, so its other helpers still warn when they go unused.
+pub use shared::block_seed;
 mod splice;
 
 use super::diagnostics::scalar_diagnostics;
 use super::diagnostics::ChainDiag;
-use super::dim_block::{dim_block, DimBlockConfig};
+use super::dim_block::{dim_block, DimBlockConfig, HyperState};
 use super::lnpdf::{FrozenSide, NodeTerm};
 use super::pb_index::{build_pb_index_pair, AnchorMap, FeatureSide};
 use crate::fit::stacked_pb::StackedPb;
 use crate::progress::new_progress_bar;
 use log::info;
-use shared::{block_seed, profiled_bias, report_convergence, scatter_to_rows, warm_start_genes};
+use shared::{profiled_bias, report_convergence, scatter_to_rows, warm_start_genes};
 
 pub use hyper_io::{write_posterior_hyper_from_model, write_splice_posterior_hyper};
 pub(crate) use splice::pb_gibbs_splice;
@@ -213,6 +221,8 @@ pub(crate) fn pb_gibbs(
     // Inclusion state carried BETWEEN outer sweeps. Without this every block
     // restarts cold, the ESS branch is unreachable, and every β is a prior draw.
     let mut z_gene: Option<Vec<bool>> = None;
+    // Each block owns its own slab variance and carries it across outer sweeps.
+    let (mut hyper_gene, mut hyper_pb): (Option<HyperState>, Option<HyperState>) = (None, None);
     let mut n_kept = 0usize;
     // Summed over both blocks and every sweep: a fallback anywhere is a coordinate
     // that did not move, and the ratio is what says whether the run sampled at all.
@@ -256,6 +266,10 @@ pub(crate) fn pb_gibbs(
         if let Some(z) = z_gene.clone() {
             gene_cfg = gene_cfg.with_init_z(z);
         }
+        // One sweep per call, so the slab variance chains only if it is carried.
+        if let Some(hs) = hyper_gene.take() {
+            gene_cfg = gene_cfg.with_init_hyper(hs);
+        }
         gene_cfg.transitions_per_dim = cfg.transitions_per_dim;
         // The GENE block is the one that selects, so it is the one the inclusion prior
         // reaches. The pb block below calls `without_selection`, which clears the prior
@@ -263,6 +277,7 @@ pub(crate) fn pb_gibbs(
         // there, it is that the concept does not apply.
         gene_cfg.stick_alpha = cfg.stick_alpha;
         let g = dim_block(&nodes, &side_pb, &gene_cfg);
+        hyper_gene = Some(g.final_hyper.clone());
 
         // The gene side hands the pb block its EFFECTIVE loading `z·β`: a dim the
         // gate turned off must contribute nothing to what the pseudobulks are
@@ -318,7 +333,11 @@ pub(crate) fn pb_gibbs(
             .without_selection()
             .quiet();
         pb_cfg.transitions_per_dim = cfg.transitions_per_dim;
+        if let Some(hs) = hyper_pb.take() {
+            pb_cfg = pb_cfg.with_init_hyper(hs);
+        }
         let p = dim_block(&pb_nodes, &side_gene, &pb_cfg);
+        hyper_pb = Some(p.final_hyper.clone());
         e_pb.copy_from_slice(&p.mean_beta);
         // The pb intercepts absorb the exposure: `T_p` is a pseudobulk's total COUNT
         // (edges already carry `rate · size_p`), so the profiled value is the whole
