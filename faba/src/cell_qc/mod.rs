@@ -209,10 +209,10 @@ impl CellCounts {
             .collect();
         let n_genes = gene_index.len();
 
-        // Per-cell sparse aggregation via rayon fold/reduce (mirrors the
-        // `totals` shard in gene_count::pipeline). Read counts are integers held
-        // in f32, so the sums are exact and order-independent. `Missing`
-        // barcodes are dropped.
+        // Per-cell sparse aggregation via rayon fold/reduce: each worker builds a
+        // local shard, then the shards merge. Read counts are integers held in
+        // f32, so the sums are exact and order-independent. `Missing` barcodes
+        // are dropped.
         type Shard = FxHashMap<CellBarcode, FxHashMap<u32, f32>>;
         let cell_map: Shard = spliced
             .par_iter()

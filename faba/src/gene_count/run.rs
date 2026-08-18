@@ -123,16 +123,6 @@ pub struct GeneCountArgs {
     )]
     pub(crate) output: Box<str>,
 
-    /// Disable spliced/unspliced separation (output total counts only)
-    #[arg(
-        long = "no-splice",
-        default_value_t = false,
-        help = "Disable spliced/unspliced separation",
-        long_help = "By default, faba produces separate spliced and unspliced count matrices.\n\
-                     Use this flag to output a single total count matrix instead."
-    )]
-    pub(crate) no_splice: bool,
-
     /// UMI BAM tag used for read deduplication
     #[arg(
         long = "umi-tag",
@@ -167,8 +157,9 @@ impl GeneCountArgs {
         crate::quant::resolve_umi_tag(self.no_umi_dedup, &self.umi_tag)
     }
 
-    /// The admission policy both counting paths use, so `run_simple` and
-    /// `run_splice_aware` cannot diverge on tags or on which reads they trust.
+    /// The admission policy this run hands the shared counting loop, so
+    /// `faba genes` and the gene QC pass behind each modality cannot diverge on
+    /// tags or on which reads they trust.
     pub(crate) fn count_read_opts(&self) -> CountReadOpts<'_> {
         CountReadOpts {
             cell_barcode_tag: &self.cell_barcode_tag,
@@ -179,6 +170,18 @@ impl GeneCountArgs {
     }
 }
 
+/// Count genes into one `{batch}_genes` matrix per BAM, spliced and unspliced
+/// rows in the same feature axis.
+///
+/// This is [`crate::quant::run_gene_count_qc`] with the standalone command's
+/// knobs — the same call `faba all` and the modality QC make, so all three
+/// agree on which cells and genes survive and on what a gene-count matrix
+/// looks like. It used to be a second copy of that loop with its own writers,
+/// emitting a `{batch}` (total), `{batch}_spliced` and `{batch}_unspliced`
+/// triple per BAM; the total was just the other two summed, nothing read the
+/// split halves, and a `{gene}/count/total` row is rejected downstream anyway
+/// (see `auxiliary_data::feature_rows::split_count_row`) precisely because it
+/// double-counts the gene.
 pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
     if args.bam_files.is_empty() {
         return Err(anyhow::anyhow!("need bam files"));
@@ -193,15 +196,33 @@ pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
         info!("{}", x);
     }
 
-    let batch_names = uniq_batch_names(&args.bam_files)?;
     std::fs::create_dir_all(args.output.as_ref())?;
-
-    let backend = args.backend.clone();
     info!("parsing GFF file: {}", args.gff_file);
 
-    if args.no_splice {
-        crate::gene_count::pipeline::run_simple(args, &backend, &batch_names)
-    } else {
-        crate::gene_count::pipeline::run_splice_aware(args, &backend, &batch_names)
-    }
+    crate::quant::run_gene_count_qc(
+        args.gff_file.as_ref(),
+        &crate::quant::GeneQcRequest {
+            bam_files: &args.bam_files,
+            count: args.count_read_opts(),
+            gff_file: Some(args.gff_file.as_ref()),
+            output_dir: &args.output,
+            gene_type: &args.gene_type,
+            gene_min_cells: args.row_nnz_cutoff,
+            // No total-count floor on this command; `-r/--row-nnz-cutoff` is the
+            // only gene threshold it exposes.
+            gene_min_counts: 0,
+            cell_min_genes: args.column_nnz_cutoff,
+            cell_call: args.cell_qc.params(),
+            mito: args.mito_qc.params(),
+            valid_cells_file: None,
+            valid_genes_file: None,
+            skip_gene_qc: false,
+            persist: Some(crate::quant::GeneMatrixSink {
+                backend: &args.backend,
+                zip: args.zip,
+            }),
+        },
+    )?;
+
+    Ok(())
 }

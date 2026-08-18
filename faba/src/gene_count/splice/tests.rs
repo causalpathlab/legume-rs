@@ -36,11 +36,9 @@ fn opts(min_mapping_quality: u8) -> CountReadOpts<'static> {
     }
 }
 
-fn total(counter: &ReadCounter) -> usize {
-    counter.to_vec().into_iter().map(|(_, n)| n).sum()
-}
-
-/// `(spliced, unspliced)` totals across cells.
+/// `(spliced, unspliced)` totals across cells. Every read the fixture builds is
+/// exon-contained, so an admitted read lands in `spliced` and the admission
+/// tests below read as `(1, 0)` for counted and `(0, 0)` for rejected.
 fn splice_totals(counter: &SpliceAwareReadCounter) -> (usize, usize) {
     (
         counter.spliced.values().sum(),
@@ -54,22 +52,30 @@ fn splice_totals(counter: &SpliceAwareReadCounter) -> (usize, usize) {
 
 #[test]
 fn reads_below_min_mapq_are_not_counted() {
-    let mut counter = ReadCounter::new(opts(20));
-    counter.count(&read(100, 19));
-    assert_eq!(total(&counter), 0, "MAPQ 19 must not pass a floor of 20");
+    let mut counter = SpliceAwareReadCounter::new(opts(20), &EXONS);
+    counter.classify_and_count(&read(100, 19));
+    assert_eq!(
+        splice_totals(&counter),
+        (0, 0),
+        "MAPQ 19 must not pass a floor of 20"
+    );
 
-    let mut counter = ReadCounter::new(opts(20));
-    counter.count(&read(100, 20));
-    assert_eq!(total(&counter), 1, "MAPQ 20 is at the floor, so it passes");
+    let mut counter = SpliceAwareReadCounter::new(opts(20), &EXONS);
+    counter.classify_and_count(&read(100, 20));
+    assert_eq!(
+        splice_totals(&counter),
+        (1, 0),
+        "MAPQ 20 is at the floor, so it passes"
+    );
 }
 
 #[test]
 fn zero_min_mapq_counts_every_mapped_alignment() {
     // The documented escape hatch: `--min-mapping-quality 0` waives the MAPQ
     // floor. The flag checks below still apply.
-    let mut counter = ReadCounter::new(opts(0));
-    counter.count(&read(100, 0));
-    assert_eq!(total(&counter), 1);
+    let mut counter = SpliceAwareReadCounter::new(opts(0), &EXONS);
+    counter.classify_and_count(&read(100, 0));
+    assert_eq!(splice_totals(&counter), (1, 0));
 }
 
 #[test]
@@ -89,18 +95,18 @@ fn splice_counter_applies_the_same_mapq_floor() {
 fn secondary_alignments_are_never_counted() {
     let mut rec = read(100, 255);
     rec.set_secondary();
-    let mut counter = ReadCounter::new(opts(0));
-    counter.count(&rec);
-    assert_eq!(total(&counter), 0);
+    let mut counter = SpliceAwareReadCounter::new(opts(0), &EXONS);
+    counter.classify_and_count(&rec);
+    assert_eq!(splice_totals(&counter), (0, 0));
 }
 
 #[test]
 fn supplementary_alignments_are_never_counted() {
     let mut rec = read(100, 255);
     rec.set_supplementary();
-    let mut counter = ReadCounter::new(opts(0));
-    counter.count(&rec);
-    assert_eq!(total(&counter), 0);
+    let mut counter = SpliceAwareReadCounter::new(opts(0), &EXONS);
+    counter.classify_and_count(&rec);
+    assert_eq!(splice_totals(&counter), (0, 0));
 }
 
 #[test]
@@ -121,9 +127,9 @@ fn paired_reads_without_a_proper_pair_flag_are_still_counted() {
     // `is_proper_pair` — `faba genes` quantifies bulk libraries too.
     let mut rec = read(100, 255);
     rec.set_paired();
-    let mut counter = ReadCounter::new(opts(20));
-    counter.count(&rec);
-    assert_eq!(total(&counter), 1);
+    let mut counter = SpliceAwareReadCounter::new(opts(20), &EXONS);
+    counter.classify_and_count(&rec);
+    assert_eq!(splice_totals(&counter), (1, 0));
 }
 
 /////////////////////////////////////
@@ -135,12 +141,12 @@ fn a_rejected_read_does_not_shadow_its_molecule() {
     // Same (cell, UMI) twice: a failing alignment first, a passing one second.
     // If admission ran after dedup, the first read would claim the molecule's
     // slot and the second would be dropped as a duplicate — undercounting.
-    let mut counter = ReadCounter::new(opts(20));
-    counter.count(&read(100, 0));
-    counter.count(&read(100, 255));
+    let mut counter = SpliceAwareReadCounter::new(opts(20), &EXONS);
+    counter.classify_and_count(&read(100, 0));
+    counter.classify_and_count(&read(100, 255));
     assert_eq!(
-        total(&counter),
-        1,
+        splice_totals(&counter),
+        (1, 0),
         "the passing read of the molecule must survive the rejected one"
     );
 }
