@@ -37,23 +37,23 @@
 //! that slot over completely (`model/gate.rs:503-511`), so they are mutually
 //! exclusive by construction.
 //!
-//! `sampled` (default) is the arm that actually selects: on GBM Visium it
-//! zeroes about a quarter of the (gene, dim) table. It is also the reason cage
-//! is slow, since every sample scans each nonzero gene-pseudobulk pair.
+//! `learned` (default) is the one `senna bge` uses: a variational spike-and-slab
+//! gate `σ((S + IBP ladder)/τ)` fit by SGD alongside the embedding. Nothing scans
+//! the count matrix. Because `σ(·)` multiplied the loading on every step it IS
+//! part of the fitted coefficient, so `materialize_e_feat` bakes it into the
+//! shipped dictionary and `α` ships as `feature_selection.parquet`.
 //!
-//! `learned` is the one `senna bge` uses: a
-//! variational spike-and-slab gate `σ(S/τ)` fit by SGD alongside the embedding,
-//! regularized by the KL added to the training loss. Nothing scans the count
-//! matrix. The forward carries the differentiable expectation `E[z·β] = α·E`,
-//! so there is no per-epoch draw and no sub-network sampling. Because `σ(S/τ)`
-//! multiplied the loading on every step it IS part of the fitted coefficient,
-//! so `materialize_e_feat` bakes it into the shipped dictionary and `α` ships
-//! as `feature_selection.parquet`.
+//! `sampled` runs cage's block Gibbs over super-cell counts instead and installs
+//! the result as a per-epoch Bernoulli mask. It zeroes about a
+//! quarter of the (gene, dim) table. It scans every gene on every sweep, so it
+//! is the slow arm.
 //!
-//! It scans no counts, so it ought to be the cheaper arm. Measured, it is not:
-//! its KL is a global `[G x H]` table evaluated on EVERY step, which costs more
-//! than the sampler it replaces, and on GBM it selected nothing at all (every
-//! inclusion probability stayed above 0.95). A row-subset KL would fix both.
+//! An earlier learned arm selected nothing there, every inclusion probability
+//! staying above 0.95. That was the INCLUSION KL it carried at the time: a
+//! penalty with a free coefficient under an NCE objective, needing λ≈1000 here
+//! against 1/1024 in geu. `c802f7a3` replaced it with the truncated-IBP ladder,
+//! which has nothing to calibrate, and both arms now draw selection from that
+//! same ladder. Do not cite the old measurement against the current gate.
 //!
 //! Under `sampled` there are two cadences, and they are different things:
 //!
@@ -198,7 +198,7 @@ pub fn fit_cell_activity_graph_embedding(
         gene_weights: fisher_weights,
         n_cells,
         n_genes,
-            gene_nnz: _,
+        gene_nnz: _,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: !args.no_fisher_weights,
@@ -323,7 +323,13 @@ pub fn fit_cell_activity_graph_embedding(
     // is the diagnostic that lets the coarsening be inspected before anything
     // is built on it. `None` under `--gate-mode learned`, where the variational
     // gate is fit by SGD instead and no count scan happens at all.
-    let mut sampled_selection = {
+    // Hoisted out of the block below so the LEARNED arm skips it entirely. The
+    // collapse plus its shared SVD exist to give the Gibbs a frozen side; under
+    // `learned` nothing consumes them, and they were costing a full pseudobulk
+    // build and a [n_genes x D] SVD on every run for a diagnostic parquet.
+    let mut sampled_selection = if args.gate_mode == GateMode::Learned {
+        None
+    } else {
         let pb = crate::cell_activity_graph_embedding::selection::build_pseudobulks(
             crate::cell_activity_graph_embedding::selection::PseudobulkArgs {
                 data: &data_vec,
@@ -359,9 +365,7 @@ pub fn fit_cell_activity_graph_embedding(
             info!("Wrote {}.pseudobulk_cells.parquet", c.out);
         }
 
-        if args.gate_mode == GateMode::Learned {
-            None
-        } else {
+        {
             // Sample which (gene, community) pairs are included.
             let (sel, sel_state, sel_z) =
                 crate::cell_activity_graph_embedding::selection::select_features(
@@ -496,6 +500,32 @@ pub fn fit_cell_activity_graph_embedding(
         "{} trainable genes (≥1 active batch)",
         trainable_genes.len()
     );
+
+    // Positives drawn per (gene, batch), one scalar for every gene.
+    //
+    // `--positives-per-epoch` is the knob for how much data an epoch sees;
+    // without it the historical `--per-gene-batch` applies. Note it is the TOTAL
+    // that matters: a per-gene budget proportional to each gene's evidence was
+    // tried and removed, because the loss means over a gene's positives, so
+    // varying that count moves estimator variance rather than the objective.
+    // See `GeneGatedChainSampler::batch_size`.
+    let positives_per_gene = match args.positives_per_epoch {
+        Some(total) => (total / (trainable_genes.len() * n_batches).max(1)).max(1),
+        None => args.per_gene_batch,
+    };
+    info!(
+        "Positive budget: {} per (gene, batch), {} genes x {} batch(es) = {} per epoch{}",
+        positives_per_gene,
+        trainable_genes.len(),
+        n_batches,
+        positives_per_gene * trainable_genes.len() * n_batches,
+        if args.positives_per_epoch.is_some() {
+            " (--positives-per-epoch)"
+        } else {
+            " (--per-gene-batch)"
+        }
+    );
+
     // Activities can be dropped now — the cache owns everything the
     // sampler needs for v1.
     drop(activities);
@@ -592,7 +622,7 @@ pub fn fit_cell_activity_graph_embedding(
         per_batch: &per_batch,
         cache: &cache,
         pb_maps: &pb_maps,
-        batch_size: args.per_gene_batch,
+        batch_size: positives_per_gene,
         n_negatives: args.n_negatives,
     };
 

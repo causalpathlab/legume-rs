@@ -246,9 +246,35 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 256,
         help = "Positive edges drawn per (gene, batch) sample",
+        long_help = "Every gene draws this many positives per batch each epoch.\n\
+                     \n\
+                     --positives-per-epoch overrides it with a total instead,\n\
+                     which is usually the knob you want.",
         hide = true
     )]
     pub per_gene_batch: usize,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Total positive edges drawn per epoch, across all genes (unset = auto)",
+        long_help = "The epoch's total sampling budget.\n\
+                     \n\
+                     Divided evenly: each gene draws\n\
+                     N / (trainable genes x batches) positives per batch.\n\
+                     Unset keeps the historical --per-gene-batch instead.\n\
+                     On a 17k-gene run the default is ~4.4M positives an epoch,\n\
+                     each carrying 1 + --n-negatives x --chain-levels scores.\n\
+                     \n\
+                     This is the knob for how much data an epoch sees,\n\
+                     and it is the one that moved the fit.\n\
+                     Pair it with --gene-batch-size: the budget sets work per\n\
+                     step, that sets how many steps an epoch takes.\n\
+                     \n\
+                     --genes-per-epoch is the coarse alternative:\n\
+                     it drops genes rather than sampling each one less."
+    )]
+    pub positives_per_epoch: Option<usize>,
 
     #[arg(
         long,
@@ -475,26 +501,38 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "How the per-(gene, dim) selection is estimated",
         long_help = "Which selector supplies the feature gate.\n\
                      \n\
-                     sampled is the default, and the one that actually selects.\n\
-                     cage's Gibbs profiled-Poisson sampler runs over super-cell\n\
-                     counts and installs the result as a per-epoch Bernoulli mask.\n\
-                     Measured on GBM Visium it switches off about a quarter of\n\
-                     the (gene, dim) table.\n\
+                     sampled is the default, and it MEASURED BETTER.\n\
+                     It runs cage's Gibbs profiled-Poisson sampler\n\
+                     over super-cell counts,\n\
+                     installing the result as a per-epoch Bernoulli mask.\n\
+                     It gates hard, leaving roughly a twentieth of the\n\
+                     (gene, dim) table on, and that selection buys finer\n\
+                     communities: 12.0x a neighbour-agreement null against\n\
+                     learned's 10.3x, at matched budget.\n\
+                     It scans every gene on every sweep,\n\
+                     so it costs about a third more wall-clock.\n\
                      Tune it with the --selection-* flags.\n\
                      \n\
-                     learned fits a variational spike-and-slab gate by SGD\n\
-                     alongside the embedding, the gate `senna bge` uses.\n\
-                     Its sharpness knob is --feature-gate-temp.\n\
-                     It scans no counts, so it should have been the scalable arm.\n\
-                     It is not, yet, and it is NOT a drop-in replacement:\n\
-                     the KL that drives selection is a global table evaluated on\n\
-                     every step, which costs more than the sampler it replaces\n\
-                     (+17s per 5 epochs at --gene-batch-size 64, +6s at 256),\n\
-                     and on GBM it selected nothing at all — every inclusion\n\
-                     probability stayed above 0.95.\n\
-                     Raise --gene-batch-size to cut the overhead.\n\
+                     learned is the arm `senna bge` uses,\n\
+                     and the cheaper one.\n\
+                     It fits a per-(gene, dim) Bernoulli spike-and-slab by SGD,\n\
+                     alongside the embedding, scanning no counts.\n\
+                     Its sharpness knob is --feature-gate-temp,\n\
+                     and its sparsity knob is --gate-ibp-alpha.\n\
+                     It does select (median inclusion ~0.29),\n\
+                     so prefer it when the runtime matters more\n\
+                     than the last of the resolution.\n\
                      \n\
-                     The two arms also ship different tables.\n\
+                     Both arms now draw selection from the same truncated-IBP\n\
+                     ladder, so they estimate ONE quantity two ways.\n\
+                     An earlier learned arm selected nothing there,\n\
+                     with every inclusion probability above 0.95.\n\
+                     That was the inclusion KL it used at the time:\n\
+                     a penalty with a free coefficient under an NCE objective,\n\
+                     needing lambda around 1000 in cage against 1/1024 in geu.\n\
+                     The ladder replaced it and has nothing to calibrate.\n\
+                     \n\
+                     The two arms ship different tables.\n\
                      learned bakes the gate into feature_embedding.parquet,\n\
                      because the gate multiplied the loading during training,\n\
                      and reports the inclusion table as feature_selection.parquet.\n\

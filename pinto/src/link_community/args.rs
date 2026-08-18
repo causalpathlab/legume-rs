@@ -193,25 +193,25 @@ pub struct SrtLinkCommunityArgs {
         value_name = "N",
         help = "Minimum cells a gene must appear in to score the dictionary merge (unset = auto)",
         long_help = "Genes detected in fewer than N cells are dropped before the\n\
-                     merge cosine is computed. They are NOT dropped from any\n\
-                     other output.\n\
+                     merge cosine is computed.\n\
+                     They are NOT dropped from any other output.\n\
                      \n\
                      Unset (the default) picks N by the same 2-means split\n\
                      data-beans uses for cell QC.\n\
                      Pass 0 to score every gene, which is the pre-fix behaviour.\n\
                      \n\
-                     WHY THIS EXISTS. An undetected gene still gets a\n\
-                     Poisson-Gamma posterior, driven by each community's exposure\n\
-                     rather than by data, and its log-rate swings harder across\n\
-                     communities than a well-measured gene's does.\n\
+                     WHY THIS EXISTS.\n\
+                     An undetected gene still gets a Poisson-Gamma posterior.\n\
+                     Its log-rate is then set by each community's exposure\n\
+                     rather than by data, so it swings across communities\n\
+                     harder than a well-measured gene's does.\n\
                      Cosine is dominated by the largest-magnitude rows,\n\
-                     so those genes decide the merge.\n\
+                     so left in, those genes decide the merge\n\
+                     and collapse the tree at any cut.\n\
                      \n\
-                     Measured: centred row sum-of-squares\n\
-                     ran ~13x higher for zero-count genes than for genes seen in\n\
-                     20+ spots, 43% of community pairs scored cosine >= 0.9,\n\
-                     and the default cut collapsed 50 communities into 4\n\
-                     holding 97% of cells."
+                     Raising N past the community count is refused:\n\
+                     below that the dictionary is rank-deficient\n\
+                     and every pair looks identical."
     )]
     pub merge_min_nnz: Option<usize>,
 
