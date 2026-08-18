@@ -122,6 +122,14 @@ pub struct DictMergeFiles {
     pub merges: String,
     /// Per-fine-community consensus label produced by the cut.
     pub cut: String,
+    /// Detection cutoff the merge scored on. Chosen from the data when
+    /// `--merge-min-nnz` is unset, so a run is not reproducible from its
+    /// outputs without it.
+    #[serde(default)]
+    pub min_nnz: Option<usize>,
+    /// How many genes cleared that cutoff.
+    #[serde(default)]
+    pub genes_scored: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -219,15 +227,20 @@ pub struct RunInputs<'a> {
 /// super-edges, so indices need not be contiguous and may not start at 0).
 /// `merge_present` is `true` when the dictionary-merge step produced a
 /// consensus collapse and its tree + cut files were written.
+#[allow(clippy::too_many_arguments)]
 pub fn create_lc_metadata(
     inputs: &RunInputs<'_>,
     merge_present: bool,
+    merge_min_nnz: Option<usize>,
+    merge_genes_scored: Option<usize>,
     cascade_level_indices: &[usize],
 ) -> PintoMetadata {
     let prefix = inputs.prefix;
     let dict_merge = merge_present.then(|| DictMergeFiles {
         merges: format!("{prefix}.dict_merges.parquet"),
         cut: format!("{prefix}.dict_merges.cut.parquet"),
+        min_nnz: merge_min_nnz,
+        genes_scored: merge_genes_scored,
     });
 
     let mut levels: Vec<LevelInfo> = cascade_level_indices
@@ -440,6 +453,8 @@ mod tests {
                 k: 12,
             },
             true,
+            None,
+            None,
             &[0, 1, 2],
         );
         let path = dir.path().join("run.pinto.json");
@@ -563,6 +578,8 @@ mod tests {
                 k: 8,
             },
             false,
+            None,
+            None,
             &[],
         );
         let path = dir.path().join("run.pinto.json");

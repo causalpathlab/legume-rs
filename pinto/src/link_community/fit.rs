@@ -426,6 +426,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
     let mut merge_present_with_consensus = false;
+    // Recorded in the manifest: the auto cutoff is data-dependent, so a run is
+    // not reproducible from its outputs without it.
+    let merge_min_nnz_used: Option<usize>;
+    let merge_genes_scored: Option<usize>;
     {
         use matrix_param::traits::Inference;
 
@@ -452,74 +456,83 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             if args.merge_min_nnz.is_some() {
                 ", --merge-min-nnz"
             } else {
-                ", auto"
+                ", auto cutoff"
             }
         );
-        if n_keep == 0 {
+        // Too few surviving genes is as bad as too many. The centred dictionary
+        // is `n_keep x K`, so below `K` rows its columns are linearly dependent
+        // and every pairwise cosine is forced toward +-1 — which collapses the
+        // whole partition at any cut, silently, and is exactly the failure the
+        // gene filter exists to prevent. Skip the merge instead: `cosine_merge`
+        // would return a degenerate tree, and the draft partition is a real
+        // answer whereas a merge on rank-deficient input is not.
+        if n_keep < k {
             warn!(
-                "--merge-min-nnz {} kept no genes; skipping the dictionary merge \
-                 (draft outputs stand as the final result)",
-                min_nnz
+                "only {} gene(s) are detected in >= {} cells, fewer than the {} communities; \
+                 skipping the dictionary merge, so the draft outputs at {}.* are the final \
+                 result. Lower --merge-min-nnz to score more genes.",
+                n_keep, min_nnz, k, draft_prefix
             );
-        }
-
-        info!(
-            "Running cosine dictionary merge (average linkage) over K={} communities...",
-            k
-        );
-        let merges = cosine_merge(
-            draft_gene_community.posterior_log_mean(),
-            Some(&keep_genes),
-        );
-        write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
-
-        let labels = cosine_cut(&merges, k, args.merge_cut);
-        let n_consensus = labels
-            .iter()
-            .filter(|&&v| v >= 0)
-            .map(|&v| v as usize)
-            .max()
-            .map_or(0, |m| m + 1);
-        info!(
-            "Dictionary cut (cosine ≥ {:.3}): {} merged communities",
-            args.merge_cut, n_consensus
-        );
-        write_dict_cut(&(c.out.to_string() + ".dict_merges.cut.parquet"), &labels)?;
-
-        if n_consensus > 0 && n_consensus < k {
-            let consensus_membership: Vec<usize> = final_membership
-                .iter()
-                .map(|&orig| {
-                    let lab = labels[orig];
-                    debug_assert!(
-                        lab >= 0,
-                        "non-empty community {} has no consensus label",
-                        orig
-                    );
-                    lab as usize
-                })
-                .collect();
-            info!(
-                "Writing final outputs (propensity, gene_community, link_community) → {}.*",
-                c.out
-            );
-            write_partition_outputs(
-                &c.out,
-                edges,
-                &consensus_membership,
-                n_cells,
-                n_consensus,
-                &cell_names,
-                &data_vec,
-                Some(&gene_weights),
-                c.block_size,
-            )?;
-            merge_present_with_consensus = true;
+            merge_min_nnz_used = Some(min_nnz);
+            merge_genes_scored = Some(n_keep);
         } else {
             info!(
+                "Running cosine dictionary merge (average linkage) over K={} communities...",
+                k
+            );
+            let merges = cosine_merge(draft_gene_community.posterior_log_mean(), Some(&keep_genes));
+            write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
+
+            let labels = cosine_cut(&merges, k, args.merge_cut);
+            let n_consensus = labels
+                .iter()
+                .filter(|&&v| v >= 0)
+                .map(|&v| v as usize)
+                .max()
+                .map_or(0, |m| m + 1);
+            info!(
+                "Dictionary cut (cosine ≥ {:.3}): {} merged communities",
+                args.merge_cut, n_consensus
+            );
+            write_dict_cut(&(c.out.to_string() + ".dict_merges.cut.parquet"), &labels)?;
+
+            if n_consensus > 0 && n_consensus < k {
+                let consensus_membership: Vec<usize> = final_membership
+                    .iter()
+                    .map(|&orig| {
+                        let lab = labels[orig];
+                        debug_assert!(
+                            lab >= 0,
+                            "non-empty community {} has no consensus label",
+                            orig
+                        );
+                        lab as usize
+                    })
+                    .collect();
+                info!(
+                    "Writing final outputs (propensity, gene_community, link_community) → {}.*",
+                    c.out
+                );
+                write_partition_outputs(
+                    &c.out,
+                    edges,
+                    &consensus_membership,
+                    n_cells,
+                    n_consensus,
+                    &cell_names,
+                    &data_vec,
+                    Some(&gene_weights),
+                    c.block_size,
+                )?;
+                merge_present_with_consensus = true;
+            } else {
+                info!(
                 "Dictionary merge produced no collapses at cosine ≥ {:.3}; draft outputs at {}.* are the final result",
                 args.merge_cut, draft_prefix
             );
+            }
+            merge_min_nnz_used = Some(min_nnz);
+            merge_genes_scored = Some(n_keep);
         }
     }
 
@@ -541,6 +554,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 k,
             },
             merge_present_with_consensus,
+            merge_min_nnz_used,
+            merge_genes_scored,
             &cascade_level_indices,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));

@@ -151,6 +151,17 @@ pub struct GeneGatedChainSampler<'a> {
     pub per_batch: &'a [Option<PerBatchCellSampler>],
     pub cache: &'a GeneBatchCache,
     pub pb_maps: &'a [&'a [usize]],
+    /// Positives drawn per `(gene, batch)`, the same for every gene.
+    ///
+    /// Deliberately ONE scalar. A per-gene budget was tried, on the theory that
+    /// a gene active on 20 edges should not draw as hard as one active on 3000
+    /// (`senna bge` weights its gene draws by count). It cannot work here: the
+    /// loss reduces each gene to the MEAN over its positives
+    /// (`cage_nce_loss_per_level`), so a gene's expected gradient contribution
+    /// does not depend on how many it drew — only its variance does. bge's
+    /// weighting changes how OFTEN a gene is drawn, i.e. how many gradient
+    /// steps it gets, which is a different axis entirely. If that is wanted
+    /// here, repeat genes in the epoch's visit order rather than varying this.
     pub batch_size: usize,
     pub n_negatives: usize,
 }

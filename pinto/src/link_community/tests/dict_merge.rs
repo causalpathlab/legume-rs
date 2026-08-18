@@ -14,7 +14,11 @@ use crate::util::common::*;
 /// than by data, so it is both uninformative AND high-variance. Because cosine is
 /// dominated by the largest-magnitude rows, these rows decide the merge unless
 /// they are filtered out.
-fn dictionary_with_loud_noise(n_signal: usize, n_noise: usize, noise_scale: f32) -> (Mat, Vec<bool>) {
+fn dictionary_with_loud_noise(
+    n_signal: usize,
+    n_noise: usize,
+    noise_scale: f32,
+) -> (Mat, Vec<bool>) {
     let n = n_signal + n_noise;
     let mut m = Mat::zeros(n, 4);
     for g in 0..n_signal {
@@ -41,7 +45,8 @@ fn dictionary_with_loud_noise(n_signal: usize, n_noise: usize, noise_scale: f32)
 fn merge_height_for_true_pair(merges: &[BhcMerge]) -> f64 {
     merges
         .iter()
-        .find(|m| (m.left == 0 && m.right == 1) || (m.left == 1 && m.right == 0))
+        // `cosine_merge` always emits `left < right`.
+        .find(|m| m.left == 0 && m.right == 1)
         .map(|m| m.log_bf)
         .expect("columns 0 and 1 should merge with each other")
 }
@@ -84,12 +89,10 @@ fn filtering_puts_the_right_communities_together_at_a_default_cut() {
     // True grouping is {0,1} and {2,3}. Both arms may well produce TWO groups at
     // a 0.9 cut, so counting them proves nothing -- what differs is WHICH columns
     // land together.
-    let grouped_together = |merges: &[BhcMerge], a: usize, b: usize| -> bool {
-        let lab = cosine_cut(merges, 4, 0.9);
-        lab[a] >= 0 && lab[a] == lab[b]
-    };
+    let grouped_together =
+        |lab: &[i32], a: usize, b: usize| -> bool { lab[a] >= 0 && lab[a] == lab[b] };
 
-    let filtered = cosine_merge(&m, Some(&keep));
+    let filtered = cosine_cut(&cosine_merge(&m, Some(&keep)), 4, 0.9);
     assert!(
         grouped_together(&filtered, 0, 1) && grouped_together(&filtered, 2, 3),
         "filtered cut should recover the true grouping {{0,1}},{{2,3}}"
@@ -99,7 +102,7 @@ fn filtering_puts_the_right_communities_together_at_a_default_cut() {
         "filtered cut must not merge across the true groups"
     );
 
-    let unfiltered = cosine_merge(&m, None);
+    let unfiltered = cosine_cut(&cosine_merge(&m, None), 4, 0.9);
     assert!(
         grouped_together(&unfiltered, 0, 2),
         "unfiltered cut should follow the loud noise rows and merge 0 with 2"
@@ -130,10 +133,6 @@ fn a_full_mask_matches_passing_none() {
 // moved from dict_merge.rs's inline mod //
 ///////////////////////////////////////////
 
-fn col_from(values: &[f32]) -> Vec<f32> {
-    values.to_vec()
-}
-
 /// Build an `(n_genes × k)` matrix from K column vectors.
 fn mat_from_columns(cols: &[Vec<f32>]) -> Mat {
     let n_genes = cols[0].len();
@@ -145,9 +144,9 @@ fn mat_from_columns(cols: &[Vec<f32>]) -> Mat {
 fn merges_two_identical_columns_first() {
     // Three columns: 0 and 1 identical, 2 anti-correlated.
     let cols = vec![
-        col_from(&[1.0, 0.0, -1.0, 0.5]),
-        col_from(&[1.0, 0.0, -1.0, 0.5]),
-        col_from(&[-1.0, 0.0, 1.0, -0.5]),
+        vec![1.0, 0.0, -1.0, 0.5],
+        vec![1.0, 0.0, -1.0, 0.5],
+        vec![-1.0, 0.0, 1.0, -0.5],
     ];
     let m = mat_from_columns(&cols);
     let merges = cosine_merge(&m, None);

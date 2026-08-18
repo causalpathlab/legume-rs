@@ -35,8 +35,8 @@ pub use data_beans_alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
 /// merge happened at cosine ≥ 0.9).
 ///
 /// `keep_genes` is a per-row mask of genes to score on, indexed like
-/// `post_log_mean`'s rows; `None` uses every row. A shorter mask drops the rows
-/// it does not cover rather than panicking.
+/// `post_log_mean`'s rows; `None` uses every row. Its length must equal
+/// `post_log_mean.nrows()`.
 /// Passing the detected-gene mask is strongly recommended — see the comment on
 /// step 0 for what leaving undetected genes in does to the similarity.
 ///
@@ -70,6 +70,15 @@ pub fn cosine_merge(post_log_mean: &Mat, keep_genes: Option<&[bool]>) -> Vec<Bhc
     //     the opposite question.
     //   * Filtering on low dictionary variance keeps precisely the noise, per the
     //     inverted correlation above.
+    // A mismatched mask would silently score a truncated gene set, which looks
+    // like a plausible tree and is not one.
+    if let Some(mask) = keep_genes {
+        assert_eq!(
+            mask.len(),
+            post_log_mean.nrows(),
+            "keep_genes must be indexed like post_log_mean's rows"
+        );
+    }
     let rows: Vec<usize> = (0..post_log_mean.nrows())
         .filter(|&g| keep_genes.is_none_or(|mask| mask.get(g).copied().unwrap_or(false)))
         .collect();
