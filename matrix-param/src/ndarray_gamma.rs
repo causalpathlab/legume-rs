@@ -110,13 +110,12 @@ impl TwoStatParam for GammaMatrix {
         self.estimated_log_mean = &self.a_stat.mapv(Gamma::digamma) - &self.b_stat.mapv(|b| b.ln());
     }
     fn map_calibrate_log_sd(&mut self) {
-        self.estimated_log_sd = self.a_stat.mapv(|a| -> f32 {
-            if a > 1.0 {
-                1.0 / (a - 1.0).sqrt()
-            } else {
-                // this is actually not true
-                0.0
-            }
+        // `sd[ln X] = sqrt(trigamma(a))` exactly — see the `dmatrix_gamma`
+        // sibling for why the old `1/sqrt(a - 1)` was wrong wherever counts are
+        // sparse, and why returning 0 below `a = 1` inverted the truth.
+        self.estimated_log_sd = self.a_stat.mapv(|a: f32| {
+            use special::Gamma;
+            a.trigamma().sqrt()
         });
     }
 }
