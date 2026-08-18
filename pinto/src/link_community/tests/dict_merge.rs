@@ -41,16 +41,6 @@ fn dictionary_with_loud_noise(
     (m, keep)
 }
 
-/// Cosine at which columns 0 and 1 (same true group) were joined.
-fn merge_height_for_true_pair(merges: &[BhcMerge]) -> f64 {
-    merges
-        .iter()
-        // `cosine_merge` always emits `left < right`.
-        .find(|m| m.left == 0 && m.right == 1)
-        .map(|m| m.log_bf)
-        .expect("columns 0 and 1 should merge with each other")
-}
-
 #[test]
 fn loud_undetected_genes_hijack_the_merge_when_not_filtered() {
     // 20 real genes against 200 loud noise genes at 5x amplitude.
@@ -60,25 +50,21 @@ fn loud_undetected_genes_hijack_the_merge_when_not_filtered() {
     // the first thing to merge -- 0 pairs with 2 instead, which is the noise
     // grouping, not the signal grouping.
     let unfiltered = cosine_merge(&m, None);
-    let first = &unfiltered[0];
-    let first_pair = (first.left.min(first.right), first.left.max(first.right));
     assert_ne!(
-        first_pair,
+        (unfiltered[0].left, unfiltered[0].right),
         (0, 1),
         "unfiltered merge should be hijacked by the loud noise rows"
     );
 
     // Filtered to the detected genes: the true pair merges first, at cosine 1.
     let filtered = cosine_merge(&m, Some(&keep));
-    let first = &filtered[0];
-    let first_pair = (first.left.min(first.right), first.left.max(first.right));
     assert_eq!(
-        first_pair,
+        (filtered[0].left, filtered[0].right),
         (0, 1),
         "filtered merge should recover the true grouping first"
     );
     assert!(
-        merge_height_for_true_pair(&filtered) > 0.99,
+        filtered[0].log_bf > 0.99,
         "same-group columns should merge at cosine ~1 once noise is filtered"
     );
 }
@@ -129,9 +115,9 @@ fn a_full_mask_matches_passing_none() {
     }
 }
 
-///////////////////////////////////////////
-// moved from dict_merge.rs's inline mod //
-///////////////////////////////////////////
+////////////////////////////////////////////////
+// tree shape and cut invariants, mask-free //
+////////////////////////////////////////////////
 
 /// Build an `(n_genes × k)` matrix from K column vectors.
 fn mat_from_columns(cols: &[Vec<f32>]) -> Mat {

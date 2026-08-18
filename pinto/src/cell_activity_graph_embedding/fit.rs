@@ -37,16 +37,17 @@
 //! that slot over completely (`model/gate.rs:503-511`), so they are mutually
 //! exclusive by construction.
 //!
-//! `learned` (default) is the one `senna bge` uses: a variational spike-and-slab
-//! gate `σ((S + IBP ladder)/τ)` fit by SGD alongside the embedding. Nothing scans
-//! the count matrix. Because `σ(·)` multiplied the loading on every step it IS
-//! part of the fitted coefficient, so `materialize_e_feat` bakes it into the
-//! shipped dictionary and `α` ships as `feature_selection.parquet`.
+//! `sampled` (default) runs cage's block Gibbs over super-cell counts and installs
+//! the result as a per-epoch Bernoulli mask. It scans every gene on every sweep,
+//! so it costs about a third more wall-clock than the alternative — and measured
+//! better, which is why it is the default.
 //!
-//! `sampled` runs cage's block Gibbs over super-cell counts instead and installs
-//! the result as a per-epoch Bernoulli mask. It zeroes about a
-//! quarter of the (gene, dim) table. It scans every gene on every sweep, so it
-//! is the slow arm.
+//! `learned` is the one `senna bge` uses: a variational spike-and-slab gate
+//! `σ((S + IBP ladder)/τ)` fit by SGD alongside the embedding. Nothing scans the
+//! count matrix. Because `σ(·)` multiplied the loading on every step it IS part
+//! of the fitted coefficient, so `materialize_e_feat` bakes it into the shipped
+//! dictionary and `α` ships as `feature_selection.parquet`. Prefer it when
+//! runtime matters more than the last of the resolution.
 //!
 //! An earlier learned arm selected nothing there, every inclusion probability
 //! staying above 0.95. That was the INCLUSION KL it carried at the time: a
@@ -500,13 +501,9 @@ pub fn fit_cell_activity_graph_embedding(
     );
 
     // Positives drawn per (gene, batch), one scalar for every gene.
-    //
-    // `--positives-per-epoch` is the knob for how much data an epoch sees;
-    // without it the historical `--per-gene-batch` applies. Note it is the TOTAL
-    // that matters: a per-gene budget proportional to each gene's evidence was
-    // tried and removed, because the loss means over a gene's positives, so
-    // varying that count moves estimator variance rather than the objective.
-    // See `GeneGatedChainSampler::batch_size`.
+    // `--positives-per-epoch` overrides `--per-gene-batch` with an absolute
+    // total. See `GeneGatedChainSampler::batch_size` for why the budget is not
+    // split per-gene.
     let positives_per_gene = match args.positives_per_epoch {
         Some(total) => (total / (trainable_genes.len() * n_batches).max(1)).max(1),
         None => args.per_gene_batch,

@@ -23,6 +23,7 @@
 
 use crate::util::common::Mat;
 pub use data_beans_alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
+use matrix_util::traits::MatOps;
 
 /// Build an agglomerative average-linkage merge tree over the K columns of
 /// `post_log_mean` (gene × community posterior log-mean) using cosine
@@ -80,10 +81,10 @@ pub fn cosine_merge(post_log_mean: &Mat, keep_genes: Option<&[bool]>) -> Vec<Bhc
         );
     }
     let rows: Vec<usize> = (0..post_log_mean.nrows())
-        .filter(|&g| keep_genes.is_none_or(|mask| mask.get(g).copied().unwrap_or(false)))
+        .filter(|&g| keep_genes.is_none_or(|mask| mask[g]))
         .collect();
-    let n_genes = rows.len();
-    if n_genes == 0 {
+    let n_kept = rows.len();
+    if n_kept == 0 {
         return Vec::new();
     }
 
@@ -92,7 +93,7 @@ pub fn cosine_merge(post_log_mean: &Mat, keep_genes: Option<&[bool]>) -> Vec<Bhc
     //    survives. NOTE this is NOT a Pearson correlation between communities —
     //    that would need the COLUMNS centred too. Column centring was measured to
     //    add nothing once the gene filter above is applied.
-    let mut z = Mat::zeros(n_genes, k);
+    let mut z = Mat::zeros(n_kept, k);
     for (gi, &g) in rows.iter().enumerate() {
         let mu: f32 = post_log_mean.row(g).iter().sum::<f32>() / k as f32;
         for j in 0..k {
@@ -101,22 +102,13 @@ pub fn cosine_merge(post_log_mean: &Mat, keep_genes: Option<&[bool]>) -> Vec<Bhc
     }
 
     // 2. L2-normalize columns. Pairwise cosine = Z^T Z (symmetric).
-    for j in 0..k {
-        let nrm = z.column(j).iter().map(|v| v * v).sum::<f32>().sqrt();
-        if nrm > 0.0 {
-            for g in 0..n_genes {
-                z[(g, j)] /= nrm;
-            }
-        }
-    }
+    z.normalize_columns_inplace();
 
     // 3. Cosine similarity matrix S = Zᵀ Z (K × K, f32 via nalgebra),
     //    promoted to f64 and padded to (2K-1) × (2K-1) for in-place
     //    UPGMA updates as new internal nodes are written into the
     //    extended rows/cols.
     let total_nodes = 2 * k - 1;
-    // `tr_mul` is `Zᵀ · Z` without materializing `Zᵀ` (same idiom as
-    // `selection.rs`'s frozen-side product).
     let sim_kk = z.tr_mul(&z);
     let mut sim = vec![vec![0.0f64; total_nodes]; total_nodes];
     for i in 0..k {
