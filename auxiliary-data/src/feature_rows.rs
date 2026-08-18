@@ -64,8 +64,11 @@
 //! bucket and double-counted the gene, so that one goes through
 //! [`parse_feature_row`].
 //!
-//! The unit is always recoverable from a parsed row's [`FeatureRow::unit`] via
-//! `unit.split('/').next()`.
+//! The unit of a parsed row is [`FeatureRow::unit`], and the gene is
+//! [`FeatureRow::gene`] — read those fields rather than re-splitting the string.
+//! `unit.split('/').next()` USED to recover the gene and no longer does: a unit
+//! may itself contain `/`, because gene symbols do (see [`parse_feature_row`]),
+//! so that recipe truncates such a gene at its first slash.
 
 ///////////////////////////////
 // modality tokens (field 1) //
@@ -144,8 +147,10 @@ pub struct FeatureRow<'a> {
 
 impl FeatureRow<'_> {
     /// The modelling unit of this row: the bare gene at gene resolution, or
-    /// `{gene}/{modality}/{subunit}` at sub-gene resolution. The gene stays
-    /// recoverable as `unit.split('/').next()` at any resolution.
+    /// `{gene}/{modality}/{subunit}` at sub-gene resolution.
+    ///
+    /// The gene is NOT recoverable by splitting this on `/` — a gene symbol may
+    /// contain one. Use [`Self::gene`], which is already the parsed field.
     pub fn unit(&self) -> Box<str> {
         match self.subunit {
             Some(s) => format!("{}/{}/{}", self.gene, self.modality, s).into(),
@@ -154,13 +159,71 @@ impl FeatureRow<'_> {
     }
 }
 
+/// The closed modality vocabulary, used to LOCATE the modality field rather
+/// than to validate it — see [`parse_feature_row`].
+const MODALITIES: [&str; 5] = [COUNT, M6A, ATOI, APA, BAF];
+
 /// Split a feature row into its fields. The channel is the innermost (last)
 /// field, so a 3-field row is gene-level (`{gene}/{modality}/{channel}`) and a
 /// 4-field row carries a subunit before the channel
-/// (`{gene}/{modality}/{subunit}/{channel}`). Returns `None` for rows with fewer
-/// than three or more than four `/`-fields (gene + modality + channel mandatory;
-/// neither subunit nor channel may contain `/`).
+/// (`{gene}/{modality}/{subunit}/{channel}`).
+///
+/// # A unit may contain `/`
+///
+/// Counting fields alone is not enough, because **real gene symbols contain
+/// slashes** — standard human references ship at least one. Such a gene's count
+/// row has four fields and used to parse as `gene = {id}_GENE1`,
+/// `modality = GENE1B`, `subunit = count`: not an error, just a different gene,
+/// so the two channel rows of that gene stopped pairing and nothing said so.
+///
+/// So the modality is located by NAME, scanned from the right against
+/// [`MODALITIES`], and whatever precedes it is the unit however many slashes it
+/// contains. The subunit and channel still may not contain `/` — they are a
+/// `chr:pos`, a component index, and a fixed token.
+///
+/// The two candidate positions are tried nearest-first, so a row whose unit ENDS
+/// in a modality token reads as the gene-level form: `A/count/count/spliced` is
+/// the gene `A/count`, not the gene `A` with a subunit called `count`. That
+/// ambiguity is unreachable in practice — a subunit is a `chr:pos` or a component
+/// index, never a modality name.
+///
+/// When NEITHER candidate position holds a known modality the old positional
+/// rule applies unchanged, so the producers that still emit their rows inline
+/// with a modality token outside the constant list (see the module docs) keep
+/// parsing exactly as they did. The vocabulary can only make a row parse
+/// BETTER, never make a row that parsed stop parsing.
+///
+/// Returns `None` for anything with fewer than three fields, or more than four
+/// when no known modality locates the split.
 pub fn parse_feature_row(name: &str) -> Option<FeatureRow<'_>> {
+    let is_modality = |s: &str| MODALITIES.contains(&s);
+
+    // Peel the channel, then look one and two fields further left for the
+    // modality. `rsplit_once` keeps every field a slice of `name`, so a
+    // multi-field unit costs no allocation.
+    if let Some((head, channel)) = name.rsplit_once('/') {
+        if let Some((left, mid)) = head.rsplit_once('/') {
+            if is_modality(mid) && !left.is_empty() {
+                return Some(FeatureRow {
+                    gene: left,
+                    modality: mid,
+                    channel,
+                    subunit: None,
+                });
+            }
+            if let Some((gene, modality)) = left.rsplit_once('/') {
+                if is_modality(modality) && !gene.is_empty() {
+                    return Some(FeatureRow {
+                        gene,
+                        modality,
+                        channel,
+                        subunit: Some(mid),
+                    });
+                }
+            }
+        }
+    }
+
     let parts: Vec<&str> = name.split('/').collect();
     match parts.as_slice() {
         [gene, modality, channel] => Some(FeatureRow {
@@ -176,6 +239,145 @@ pub fn parse_feature_row(name: &str) -> Option<FeatureRow<'_>> {
             subunit: Some(subunit),
         }),
         _ => None,
+    }
+}
+
+///////////////////////////////////////////////
+// gene-count rows, interned to a gene axis  //
+///////////////////////////////////////////////
+
+/// Split a gene-level count row `{gene}/count/{spliced|unspliced}` into its gene
+/// key and whether it is the **nascent** (unspliced) track. `None` when the row is
+/// not a gene-level count row at all.
+///
+/// Goes through [`parse_feature_row`] rather than matching on `/count/` directly,
+/// because a bare `rsplit_once` **cannot tell "spliced" apart from "not a count
+/// row"** — both fall to the same branch. It used to, and the consequence was
+/// silent: `GENE1/m6a/methylated` became a mature gene literally named
+/// `GENE1/m6a/methylated`, and the sub-gene form `{gene}/count/{site}/{channel}`
+/// became a mature row of the right gene.
+///
+/// [`TOTAL`] is rejected along with everything else: it already IS
+/// `spliced + unspliced`, so interning it as a third track would count the gene
+/// twice. A `subunit` is rejected because a per-site or per-component row is not
+/// a thing that pairs across tracks at gene resolution.
+#[must_use]
+pub fn split_count_row(name: &str) -> Option<(&str, bool)> {
+    let row = parse_feature_row(name)?;
+    if row.modality != COUNT || row.subunit.is_some() {
+        return None;
+    }
+    match row.channel {
+        SPLICED => Some((row.gene, false)),
+        UNSPLICED => Some((row.gene, true)),
+        _ => None,
+    }
+}
+
+/// [`CountRowMap::row_to_gene`] entry for a row that was left off the gene axis.
+/// Only ever produced under [`UnparsedRowPolicy::Reject`].
+pub const NO_GENE: u32 = u32::MAX;
+
+/// What [`intern_count_rows`] does with a row that is not
+/// `{gene}/count/{spliced|unspliced}`.
+///
+/// The two consumers want opposite things, and neither is more correct: a
+/// gene-keyed model can carry a stray row harmlessly as its own single-track
+/// gene, while a consumer that POOLS the two tracks cannot — it would have to
+/// decide which track the stray row is, and every answer is wrong.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnparsedRowPolicy {
+    /// Give the row its own single-track gene id, keyed on the whole row name,
+    /// so every index still lines up with the matrix and the row can never be
+    /// paired with a real gene. Ids stay assigned in row order across both
+    /// kinds. The caller is expected to warn.
+    OwnGene,
+    /// Leave the row off the gene axis: [`NO_GENE`] in `row_to_gene`, and its
+    /// index in [`CountRowMap::unparsed`]. The caller decides whether that is
+    /// fatal.
+    Reject,
+}
+
+/// A count matrix's feature axis interned onto a dense gene axis.
+///
+/// Row order is the matrix's own and is never permuted; gene ids are assigned in
+/// first-seen row order, so `gene_names` is stable for a given input.
+pub struct CountRowMap {
+    /// `row_to_gene[r]` = gene id of row `r`, or [`NO_GENE`].
+    pub row_to_gene: Vec<u32>,
+    /// `row_is_nascent[r]` = true when row `r` is the unspliced track. Always
+    /// `false` for an unparsed row under either policy — such a row is not a
+    /// nascent row, it is not a count row.
+    pub row_is_nascent: Vec<bool>,
+    /// Gene keys in id order.
+    pub gene_names: Vec<Box<str>>,
+    /// Indices of rows that are not `{gene}/count/{spliced|unspliced}`, in row
+    /// order. Empty on a well-formed gene-count matrix.
+    pub unparsed: Vec<usize>,
+}
+
+impl CountRowMap {
+    #[must_use]
+    pub fn n_genes(&self) -> usize {
+        self.gene_names.len()
+    }
+
+    #[must_use]
+    pub fn n_rows(&self) -> usize {
+        self.row_to_gene.len()
+    }
+
+    /// Rows on the nascent track. Zero on a spliced-only matrix — a legitimate
+    /// input that simply identifies no nascent-minus-mature contrast.
+    #[must_use]
+    pub fn n_nascent_rows(&self) -> usize {
+        self.row_is_nascent.iter().filter(|&&n| n).count()
+    }
+}
+
+/// Intern a count matrix's feature axis onto a dense gene axis, pairing a gene's
+/// two channel rows under one id.
+#[must_use]
+pub fn intern_count_rows(feature_names: &[Box<str>], policy: UnparsedRowPolicy) -> CountRowMap {
+    let mut ids: rustc_hash::FxHashMap<Box<str>, u32> = rustc_hash::FxHashMap::default();
+    let mut row_to_gene = Vec::with_capacity(feature_names.len());
+    let mut row_is_nascent = Vec::with_capacity(feature_names.len());
+    let mut gene_names: Vec<Box<str>> = Vec::new();
+    let mut unparsed: Vec<usize> = Vec::new();
+
+    for (r, name) in feature_names.iter().enumerate() {
+        let Some((gene, is_nascent)) = split_count_row(name) else {
+            unparsed.push(r);
+            match policy {
+                UnparsedRowPolicy::Reject => row_to_gene.push(NO_GENE),
+                UnparsedRowPolicy::OwnGene => {
+                    let g = gene_names.len() as u32;
+                    ids.insert(name.clone(), g);
+                    gene_names.push(name.clone());
+                    row_to_gene.push(g);
+                }
+            }
+            row_is_nascent.push(false);
+            continue;
+        };
+        let gid = match ids.get(gene) {
+            Some(&g) => g,
+            None => {
+                let g = gene_names.len() as u32;
+                ids.insert(gene.into(), g);
+                gene_names.push(gene.into());
+                g
+            }
+        };
+        row_to_gene.push(gid);
+        row_is_nascent.push(is_nascent);
+    }
+
+    CountRowMap {
+        row_to_gene,
+        row_is_nascent,
+        gene_names,
+        unparsed,
     }
 }
 
