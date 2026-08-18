@@ -1,5 +1,13 @@
 BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli
 
+# Binaries with no `cuda` / `metal` feature to pass. `faba` reads BAM files and
+# writes sparse matrices; nothing on that path touches a GPU, and the
+# model-fitting subcommands that once did now live in senna. Passing a backend
+# feature these crates do not declare makes cargo fail, which the loops below
+# would then "recover" from by retrying on CPU -- a wasted compile and a
+# summary line that reads like a GPU failure. Build them as CPU directly.
+CPU_ONLY_BINARIES := faba
+
 # Backend selection.
 #
 # `make install` auto-detects: CUDA on Linux if `nvcc` is on PATH, Metal on
@@ -189,6 +197,10 @@ _install_status_report:
 	        echo ""; \
 	        echo "  Note: one or more binaries fell back to CPU."; \
 	    fi; \
+	    if grep -q ' n/a$$' $(INSTALL_STATUS_FILE); then \
+	        echo ""; \
+	        echo "  n/a = no GPU code path; built CPU-only by design, not a fallback."; \
+	    fi; \
 	else \
 	    echo "  (no per-binary status was recorded)"; \
 	fi
@@ -209,7 +221,11 @@ install-metal:
 # backend is appended to INSTALL_STATUS_FILE for the summary.
 $(addprefix install-,$(BINARIES)):
 	@bin=$(@:install-%=%); \
-	if [ -n "$(CARGO_FEATURES)" ]; then \
+	if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
+	    echo "Installing $$bin (no GPU backend; CPU-only by design)..."; \
+	    cargo install --locked --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
+	    echo "$$bin n/a" >> $(INSTALL_STATUS_FILE); \
+	elif [ -n "$(CARGO_FEATURES)" ]; then \
 	    echo "Installing $$bin (backend: $(BACKEND))..."; \
 	    if cargo install --locked --path $$bin $(CARGO_FEATURES); then \
 	        echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS_FILE); \
@@ -247,6 +263,11 @@ else
 endif
 else
 	@for bin in $(BINARIES); do \
+	    if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
+	        echo "Building $$bin (no GPU backend; CPU-only by design)..."; \
+	        cargo build --release -p $$bin $(CARGO_FEATURES_CPU_FALLBACK) || exit $$?; \
+	        continue; \
+	    fi; \
 	    echo "Building $$bin (backend: $(BACKEND))..."; \
 	    if ! cargo build --release -p $$bin $(CARGO_FEATURES); then \
 	        echo ""; \
