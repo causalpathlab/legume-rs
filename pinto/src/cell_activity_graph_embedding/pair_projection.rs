@@ -90,6 +90,7 @@
 //! not to widen the engine — the per-node loop below has no pair-specific
 //! arithmetic in it.
 
+use crate::cell_activity_graph_embedding::gene_axis::GeneAxis;
 use crate::util::common::*;
 use matrix_util::utils::generate_minibatch_intervals;
 use rand::rngs::SmallRng;
@@ -153,8 +154,6 @@ pub struct PairProjectionArgs {
     /// Pairs per read block. Bounds the count slab held at once: a block reads
     /// the columns of its ≤ `2 × pair_block` distinct endpoints.
     pub pair_block: usize,
-    /// Cells per block for the one-off gene-total pass.
-    pub block_size: Option<usize>,
 }
 
 impl Default for PairProjectionArgs {
@@ -163,7 +162,6 @@ impl Default for PairProjectionArgs {
             projection: ProjectionArgs::default(),
             seed: 42,
             pair_block: 8192,
-            block_size: None,
         }
     }
 }
@@ -316,6 +314,13 @@ impl PairDictionary {
 
 /// Project every cell pair onto cage's frozen gene embedding.
 ///
+/// `gene_totals` is per GENE, already folded off the row axis — both the
+/// partition and each pair's profile live there, because `e_feat` is per gene
+/// and a channelized matrix's two rows are one gene's pooled count rather than
+/// two categories of the multinomial. It is passed in rather than computed here
+/// because it is a whole-matrix streaming pass and the caller has already made
+/// it for the splice report.
+///
 /// `e_feat` is cage's trained `[G × D]` gene embedding, used as-is: the
 /// selection gate is already expressed in its values, so re-applying `pip` here
 /// would shrink the same selection twice. Genes the gate drove to `‖e_g‖ ≈ 0`
@@ -327,16 +332,29 @@ pub fn project_pairs(
     e_feat: &Mat,
     batch: Option<PairBatchDivisor<'_>>,
     args: &PairProjectionArgs,
+    axis: &GeneAxis,
+    gene_totals: &[f64],
 ) -> anyhow::Result<PairLatent> {
-    let n_genes = data.num_rows();
+    let n_genes = axis.n_genes();
     let n_cells = data.num_columns();
     let d = e_feat.ncols();
+    anyhow::ensure!(
+        axis.n_rows() == data.num_rows(),
+        "pair projection: gene axis has {} rows, data has {}",
+        axis.n_rows(),
+        data.num_rows()
+    );
     anyhow::ensure!(
         e_feat.nrows() == n_genes,
         "pair projection: e_feat has {} rows, data has {n_genes} genes",
         e_feat.nrows()
     );
     anyhow::ensure!(d > 0, "pair projection: empty embedding dimension");
+    anyhow::ensure!(
+        gene_totals.len() == n_genes,
+        "pair projection: {} gene totals, expected {n_genes}",
+        gene_totals.len()
+    );
     let n_pairs = edges.len();
     if n_pairs == 0 {
         return Ok(PairLatent {
@@ -345,8 +363,7 @@ pub fn project_pairs(
         });
     }
 
-    let totals = crate::link_community::profiles::compute_gene_totals(data, args.block_size)?;
-    let dict = PairDictionary::new(e_feat, &totals, n_cells)?;
+    let dict = PairDictionary::new(e_feat, gene_totals, n_cells)?;
     if dict.n_active() < n_genes {
         info!(
             "Pair projection: {} of {n_genes} genes carry counts; the rest sit out the partition",
@@ -399,7 +416,7 @@ pub fn project_pairs(
             .par_iter()
             .enumerate()
             .map(|(i, &(u, v))| {
-                let obs = pooled_profile(
+                let obs = axis.pool_profile(pooled_profile(
                     SlabCols {
                         offsets: col_offsets,
                         rows: slab_rows,
@@ -409,7 +426,7 @@ pub fn project_pairs(
                     u,
                     v,
                     batch,
-                );
+                ));
                 // Per-pair stream keyed on the global pair id, so the fit does
                 // not depend on rayon's scheduling.
                 let mut rng = SmallRng::seed_from_u64(
@@ -444,7 +461,12 @@ struct SlabCols<'a> {
     col_of: &'a HashMap<usize, usize>,
 }
 
-/// Pooled `(gene, count)` profile for one pair, sorted by gene id.
+/// Pooled `(row, count)` profile for one pair, sorted by row index.
+///
+/// Still the ROW axis: the endpoint merge is a linear walk of two CSC columns,
+/// which are sorted by row, and folding rows onto genes here would break that
+/// ordering mid-merge. The caller applies [`GeneAxis::pool_profile`] to the
+/// result instead.
 ///
 /// The two endpoint columns are already sorted by row index, so this is a
 /// linear merge. Batch division happens per endpoint *before* pooling — the two

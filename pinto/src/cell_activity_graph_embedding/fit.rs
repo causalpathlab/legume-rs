@@ -75,6 +75,7 @@
 //! because a dropout keep-rate is not a coefficient.
 
 use crate::cell_activity_graph_embedding::args::{CellActivityGraphEmbeddingArgs, GateMode};
+use crate::cell_activity_graph_embedding::gene_axis::GeneAxis;
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -91,7 +92,7 @@ use crate::util::common::*;
 use crate::util::graph_coarsen::{
     graph_coarsen_multilevel, CoarsenConfig, DcPoissonConfig, SeedingParams,
 };
-use crate::util::metadata::{create_cage_metadata, RunInputs};
+use crate::util::metadata::{create_cage_metadata, RunInputs, SpliceTrackInfo, DELTA_BASE_SPLICED};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
 
@@ -198,8 +199,8 @@ pub fn fit_cell_activity_graph_embedding(
         graph,
         gene_weights: fisher_weights,
         n_cells,
-        n_genes,
-        gene_nnz: _,
+        n_genes: n_rows,
+        gene_stats,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: !args.no_fisher_weights,
@@ -209,13 +210,61 @@ pub fn fit_cell_activity_graph_embedding(
 
     let has_coords = c.has_coordinates();
     let cell_names = data_vec.column_names()?;
-    let gene_names = data_vec.row_names()?;
+    let row_names = data_vec.row_names()?;
+
+    // What a ROW means, decided once. On a splice-channelized matrix (faba's
+    // `{gene}/count/{spliced,unspliced}`) two rows are one gene, and everything
+    // gene-side below folds through this; on any other matrix the axis is the
+    // identity and every fold is a pass-through. The two are NOT interchangeable
+    // names for one number, so `n_rows` and `n_genes` stay apart from here on.
+    let gene_axis = GeneAxis::resolve(&row_names)?;
+    let n_genes = gene_axis.n_genes();
+    let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
 
     // Persist the NB-Fisher precision weights (when computed) so downstream
-    // tools can reload them, matching the senna/chickpea convention.
+    // tools can reload them, matching the senna/chickpea convention. These are
+    // per-ROW NB precisions, consumed by the projection and the Poisson
+    // refinement, both of which read the matrix — so they keep the row names.
     if let Some(w) = fisher_weights.as_ref() {
-        save_fisher_weights(&c.out, w, &gene_names)?;
+        save_fisher_weights(&c.out, w, &row_names)?;
     }
+
+    // Fisher weights, on the axis each consumer actually indexes.
+    //
+    // `fisher_weights` is per ROW and stays that way: the projection and the
+    // degree-corrected Poisson refinement both read the matrix. The TRAINING
+    // LOOP does not — it weights a per-GENE loss and indexes by gene id — so on
+    // a channelized matrix `w[g]` would hand gene `g` an unrelated row's
+    // precision, silently, because `n_genes < n_rows` means it never goes out of
+    // bounds.
+    //
+    // The refold happens on the SUMS AND MEANS rather than on the weights,
+    // because `fisher_weight(relative abundance, avg, mean)` is not additive: a
+    // gene's pooled abundance is the sum of its rows' abundances, and the weight
+    // is evaluated once on that. The dispersion trend is the one fitted over
+    // rows — a global mean-variance relation, so it transfers.
+    let gene_fisher_weights: Option<Vec<f32>> = match (&gene_stats, gene_axis.is_channelized()) {
+        (Some(stats), true) => {
+            use data_beans_alg::nb_dispersion::DispersionTrend;
+            let trend = DispersionTrend::from_sparse_stats(stats);
+            let sums = gene_axis.pool_totals(stats.sum().iter().map(|&x| f64::from(x)).collect());
+            let means = gene_axis.pool_totals(stats.mean().iter().map(|&x| f64::from(x)).collect());
+            let total: f64 = sums.iter().sum();
+            let inv_total = if total > 0.0 { 1.0 / total } else { 0.0 };
+            let avg_s = (total / n_cells.max(1) as f64) as f32;
+            Some(
+                (0..n_genes)
+                    .map(|g| {
+                        trend.fisher_weight((sums[g] * inv_total) as f32, avg_s, means[g] as f32)
+                    })
+                    .collect(),
+            )
+        }
+        // Identity axis: rows ARE genes, so the row weights already are the gene
+        // weights and refolding would only round-trip them.
+        // Last read of the row weights, so it can be moved rather than copied.
+        _ => fisher_weights,
+    };
 
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
     srt_cell_pairs.to_parquet(
@@ -229,7 +278,40 @@ pub fn fit_cell_activity_graph_embedding(
         .map(|&(i, j)| (i as u32, j as u32))
         .collect();
     let n_edges = edges_owned.len();
-    info!("{} cells, {} genes, {} edges", n_cells, n_genes, n_edges);
+    if gene_axis.is_channelized() {
+        info!(
+            "{} cells, {} genes ({} channel rows), {} edges",
+            n_cells, n_genes, n_rows, n_edges
+        );
+    } else {
+        info!("{} cells, {} genes, {} edges", n_cells, n_genes, n_edges);
+    }
+
+    // Per-ROW count totals, streamed ONCE. Two consumers need them and both are
+    // whole-matrix passes: the splice go/no-go here, and the pair projection's
+    // partition at the end of the run. The counts do not change in between —
+    // batch effects and QC are both already applied — so a second pass would
+    // re-read every column of the zarr to rebuild the same vector.
+    let row_totals = crate::link_community::profiles::compute_gene_totals(&data_vec, c.block_size)?;
+    let gene_totals = gene_axis.pool_totals(row_totals.clone());
+
+    // The go/no-go for everything a velocity contrast would be built on, taken
+    // BEFORE the expensive fit so a thin input is caught by reading the log
+    // rather than by reading a model. Only a channelized input has a contrast to
+    // report on at all.
+    let splice_report = gene_axis
+        .report_delta_identifiability(&row_totals)
+        .map(|r| SpliceTrackInfo {
+            n_rows,
+            n_delta_identified: r.n_identified,
+            nascent_count_fraction: r.nascent_fraction,
+            delta_base: DELTA_BASE_SPLICED.to_string(),
+            // Filled in after training, once it is known whether any refresh
+            // ran and what the sampler actually saw.
+            delta_from_refresh: None,
+            delta_median_counts: None,
+            delta_counts_per_pseudobulk: None,
+        });
 
     /////////////////////////////////////////
     // 4. HVG-weighted proj -> coarsening //
@@ -260,12 +342,24 @@ pub fn fit_cell_activity_graph_embedding(
             must_train.as_ref(),
             c.block_size,
         )?;
+        // Selection ranks ROWS, and the projection it weights reads rows, so
+        // both stay on the row axis. What cannot stay there is a gene: picking a
+        // gene's spliced row without its unspliced one would weight half a gene
+        // into the basis the coarsening hierarchy is cut from, so the weights are
+        // promoted to whole genes. `--n-hvg N` therefore still counts N ROWS —
+        // between N/2 and N genes on a channelized matrix — which is what the
+        // realized count below reports.
+        let mut w = hvg.row_weights(n_rows);
+        let n_weighted = gene_axis.promote_row_weights(&mut w);
         info!(
-            "HVG-weighted projection: {} of {} genes weighted; all stay on the trained axis",
-            hvg.selected_indices.len(),
-            n_genes
+            "HVG-weighted projection: {} of {} genes weighted ({} of {} rows); \
+             all stay on the trained axis",
+            n_weighted,
+            n_genes,
+            w.iter().filter(|&&x| x > 0.0).count(),
+            n_rows
         );
-        Some(hvg.row_weights(n_genes))
+        Some(w)
     } else {
         None
     };
@@ -313,7 +407,7 @@ pub fn fit_cell_activity_graph_embedding(
                     ..Default::default()
                 },
                 data: &data_vec,
-                num_genes: n_genes,
+                num_genes: n_rows,
             }),
         },
     );
@@ -326,6 +420,10 @@ pub fn fit_cell_activity_graph_embedding(
     // full pseudobulk build plus an [n_genes x D] SVD per run purely to emit a
     // diagnostic. `pseudobulk_cells.parquet` is therefore a SAMPLED-ARM output;
     // `pinto cage --help` says so.
+    // The most recent refreshed selection, kept because its `delta` is the only
+    // one commensurate with the shipped gene embedding — see the refresh below.
+    let mut latest_refreshed: Option<crate::cell_activity_graph_embedding::selection::Selection> =
+        None;
     let mut sampled_selection = if args.gate_mode == GateMode::Learned {
         None
     } else {
@@ -337,6 +435,7 @@ pub fn fit_cell_activity_graph_embedding(
                 cell_features: &cell_proj.proj,
                 embedding_dim: args.embedding_dim,
                 block_size: c.block_size,
+                gene_axis: &gene_axis,
             },
         )?;
         // Diagnostic export: per CELL, its spatial coords, its finest-level
@@ -369,11 +468,13 @@ pub fn fit_cell_activity_graph_embedding(
             let (sel, sel_state, sel_z) =
                 crate::cell_activity_graph_embedding::selection::select_features(
                     &pb,
+                    &gene_axis,
                     args.embedding_dim,
                     &crate::cell_activity_graph_embedding::selection::SelectArgs {
                         sweeps: args.selection_sweeps,
                         burnin: args.selection_sweeps / 2,
                         seed: c.seed,
+                        nested_delta: !args.independent_delta_gate,
                     },
                 )?;
             sel.log_summary();
@@ -400,6 +501,7 @@ pub fn fit_cell_activity_graph_embedding(
                 Some(&embedding_col_names(args.embedding_dim)),
             )?;
             info!("Wrote {}.feature_posterior_mean.parquet", c.out);
+
             Some((sel, sel_state, sel_z))
         }
     };
@@ -474,8 +576,13 @@ pub fn fit_cell_activity_graph_embedding(
     // 6. Per-gene activities + (gene, batch) cache //
     //////////////////////////////////////////////////
     info!("Computing per-gene cell activities...");
-    let activities =
-        build_cell_activities(&data_vec, &edges_owned, c.block_size, args.activity_norm)?;
+    let activities = build_cell_activities(
+        &data_vec,
+        &edges_owned,
+        c.block_size,
+        args.activity_norm,
+        &gene_axis,
+    )?;
     let nonzero_genes = activities
         .gene_active_edges
         .iter()
@@ -693,16 +800,24 @@ pub fn fit_cell_activity_graph_embedding(
             {
                 let e_cell_now = tensor_to_mat(&model.e_cell)?;
                 let e_flat = sel_state.frozen_e_from_cells(&e_cell_now);
-                let (sel_new, z_new) = sel_state.sample(
+                let (sel_new, warm_new) = sel_state.sample(
                     &e_flat,
                     &crate::cell_activity_graph_embedding::selection::SelectArgs {
                         sweeps: args.selection_refresh_sweeps,
                         burnin: args.selection_refresh_sweeps / 2,
                         seed: c.seed.wrapping_add(epoch as u64),
+                        nested_delta: !args.independent_delta_gate,
                     },
-                    Some(sel_z.clone()),
+                    std::mem::take(sel_z),
                 );
-                *sel_z = z_new;
+                *sel_z = warm_new;
+                // Keep it: the frozen side this saw is the LIVE `e_cell` folded
+                // into super-cells, so its `delta` is in the same D-dim frame as
+                // the gene embedding the run ships. The cold chain's is not — it
+                // was fit against an SVD of pseudobulk log-counts, a frame the
+                // model never uses — so a delta dictionary read off the cold run
+                // would be mixed into `e_feat`'s frame and mean nothing.
+                let sel_new = latest_refreshed.insert(sel_new);
                 let pip_t =
                     Tensor::from_vec(sel_new.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
                 model.install_gate_pip(GateKind::Identity, &pip_t)?;
@@ -747,7 +862,7 @@ pub fn fit_cell_activity_graph_embedding(
         // `1/mean(w_g)`, which varies with the dataset's dispersion profile and
         // would make the same `--gate-kl-weight` mean different things on
         // different panels. Falls back to the plain count when weighting is off.
-        let epoch_mass: f64 = match fisher_weights.as_ref() {
+        let epoch_mass: f64 = match gene_fisher_weights.as_ref() {
             Some(w) => perm
                 .iter()
                 .map(|&g| f64::from(w[g]))
@@ -816,7 +931,7 @@ pub fn fit_cell_activity_graph_embedding(
                 // (the loss-side analog of bge's count·fisher positive draw and
                 // lc's `apply_gene_weights` on the gene basis). Coverage stays
                 // uniform — every gene is still visited once per epoch.
-            let (per_level_gl, chunk_mass) = match fisher_weights.as_ref() {
+            let (per_level_gl, chunk_mass) = match gene_fisher_weights.as_ref() {
                 Some(w) => {
                     let w_chunk: Vec<f32> = gene_ids.iter().map(|&g| w[g]).collect();
                     let mass: f64 = w_chunk.iter().map(|&x| f64::from(x)).sum();
@@ -1077,6 +1192,64 @@ pub fn fit_cell_activity_graph_embedding(
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
+    // The nascent deviation, on a splice-channelized input only, and written HERE
+    // rather than beside the cold selection because of which FRAME it is in.
+    //
+    // `delta_feature_embedding` is meant to be consumed as a dictionary — an
+    // unspliced row loads `e_feat[g] + delta_g` — so it is only meaningful in the
+    // same D-dim frame as `feature_embedding.parquet` directly above. The cold
+    // chain was fit against an SVD of pseudobulk log-counts, a basis the shipped
+    // model never uses; only a refresh sees the live `e_cell` folded into
+    // super-cells. Shipping the cold delta would hand downstream a vector to add
+    // to `e_feat` that was measured in a different coordinate system.
+    //
+    // Two tables rather than one because the second is not derivable from the
+    // first: this is HOW MUCH an unspliced row loads on top of the identity,
+    // `delta_selection` is WHETHER it loads at all. Genes whose delta is not
+    // identified are NaN in both.
+    let delta_from_refresh = latest_refreshed.is_some();
+    let delta_source = latest_refreshed
+        .as_ref()
+        .or_else(|| sampled_selection.as_ref().map(|(sel, _, _)| sel));
+    if let Some(delta) = delta_source.and_then(|s| s.delta.as_ref()) {
+        if !delta_from_refresh {
+            warn!(
+                "delta was fit by the COLD chain, against an SVD of pseudobulk log-counts \
+                 rather than the live cell embedding, so it is NOT in the same frame as \
+                 feature_embedding.parquet and must not be added to it. Raise \
+                 --selection-refresh-epochs above 0 to get a usable delta dictionary."
+            );
+        }
+        let cols = embedding_col_names(args.embedding_dim);
+        delta
+            .mean_matrix(n_genes, args.embedding_dim)
+            .to_parquet_with_names(
+                &(c.out.to_string() + ".delta_feature_embedding.parquet"),
+                (Some(&gene_names), Some("gene")),
+                Some(&cols),
+            )?;
+        delta
+            .pip_matrix(n_genes, args.embedding_dim)
+            .to_parquet_with_names(
+                &(c.out.to_string() + ".delta_selection.parquet"),
+                (Some(&gene_names), Some("gene")),
+                Some(&cols),
+            )?;
+        info!(
+            "Wrote {}.delta_feature_embedding.parquet and {}.delta_selection.parquet \
+             ({} of {} genes identified, the rest NaN; fit against {})",
+            c.out,
+            c.out,
+            delta.n_identified(),
+            n_genes,
+            if delta_from_refresh {
+                "the live cell embedding"
+            } else {
+                "the COLD pseudobulk SVD basis"
+            }
+        );
+    }
+
     // The learned gate's inclusion table `α = σ(S/τ)`. Reported here — unlike
     // the sampled arm's `pip`, which stays unwritten — because α is a fitted
     // coefficient the run stands behind, not a dropout rate. `feature_selection`
@@ -1133,8 +1306,9 @@ pub fn fit_cell_activity_graph_embedding(
             },
             seed: c.seed,
             pair_block: args.pair_block,
-            block_size: c.block_size,
         },
+        &gene_axis,
+        &gene_totals,
     )?;
     {
         // `β_uv` is the pair's log pooled depth; it never leaves this function,
@@ -1194,6 +1368,16 @@ pub fn fit_cell_activity_graph_embedding(
 
     // Metadata
     {
+        let mut splice_report = splice_report;
+        if let Some(sr) = splice_report.as_mut() {
+            // Set ONLY when a delta table was actually written, so "absent" and
+            // "written against the cold basis" stay distinguishable.
+            if let Some(d) = delta_source.and_then(|s| s.delta.as_ref()) {
+                sr.delta_from_refresh = Some(delta_from_refresh);
+                sr.delta_median_counts = Some(d.strength.median_counts);
+                sr.delta_counts_per_pseudobulk = Some(d.strength.counts_per_pb());
+            }
+        }
         let coord_file_str = c.coord_files_joined();
         let meta = create_cage_metadata(
             &RunInputs {
@@ -1207,6 +1391,7 @@ pub fn fit_cell_activity_graph_embedding(
                 k: n_edge_clusters,
             },
             batch_db.is_some(),
+            splice_report,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;

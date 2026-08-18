@@ -51,10 +51,21 @@ pub struct SrtPreprocessed {
     pub batch_effects: Option<Mat>,
     pub graph: KnnGraph,
     pub gene_weights: Option<Vec<f32>>,
-    /// Per-gene nonzero-cell count, carried out of the Fisher-weight pass so
-    /// consumers do not re-stream the matrix for it. `Some` iff `gene_weights`
-    /// is — they come from the same `SparseRunningStatistics`.
-    pub gene_nnz: Option<Vec<f32>>,
+    /// The running statistics [`Self::gene_weights`] was derived from. `Some` iff
+    /// `gene_weights` is.
+    ///
+    /// Carried out for two consumers: `lc` wants the per-feature nonzero counts
+    /// (`count_positives()`) its dictionary merge keys on, and `cage` needs a
+    /// weight per GENE rather than per matrix row.
+    ///
+    /// `gene_weights` is indexed by row, which is right for the projection and
+    /// the Poisson refinement — both read the matrix. It is NOT right for
+    /// `cage`'s training loop, which weights a per-GENE loss, and on a
+    /// splice-channelized matrix the two axes differ. Refolding the WEIGHTS
+    /// would be wrong (they are not additive); the fold has to happen on the
+    /// sums and means the weight is a function of, which is why the stats
+    /// travel rather than a second weight vector.
+    pub gene_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
     pub n_cells: usize,
     pub n_genes: usize,
 }
@@ -208,7 +219,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     // these same stats and returns only the weights, dropping `npos` — which is
     // exactly the per-gene detection count `lc`'s dictionary merge needs. Taking
     // the stats here saves a second full read of every column.
-    let (gene_weights, gene_nnz) = if cfg.fisher_weights {
+    let (gene_weights, gene_stats) = if cfg.fisher_weights {
         info!("Computing NB Fisher-info gene weights for inference...");
         let stats = streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?;
         let w = fisher_weights_from_stats(&stats, data_vec.num_columns());
@@ -218,7 +229,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
             w.iter().sum::<f32>() / (w.len().max(1) as f32),
             w.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
         );
-        (Some(w), Some(stats.count_positives()))
+        (Some(w), Some(stats))
     } else {
         (None, None)
     };
@@ -231,7 +242,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         batch_effects,
         graph,
         gene_weights,
-        gene_nnz,
+        gene_stats,
         n_cells,
         n_genes,
     })

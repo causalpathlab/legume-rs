@@ -303,6 +303,28 @@ enum Commands {
                       senna bge and senna gem do the same.\n\
                       Every gene is trained and present in every output table.\n\
                       Use --genes-per-epoch to cap per-epoch cost instead.\n\n\
+                      SPLICE CHANNELS are recognised on the feature axis.\n\
+                      Rows named {gene}/count/spliced pair with their\n\
+                      {gene}/count/unspliced counterpart.\n\
+                      A gene's two rows are ONE gene everywhere the model fits.\n\
+                      Their counts are summed before the log1p activity.\n\
+                      Gene-side output tables are keyed by the bare gene name.\n\
+                      {out}.gene_community.parquet stays on the matrix rows,\n\
+                      so it still lists a gene's two channels separately.\n\
+                      --n-hvg counts ROWS, then widens to whole genes,\n\
+                      so a gene is never half-weighted in the projection.\n\
+                      A matrix mixing channel rows with plain rows is rejected.\n\
+                      A {gene}/count/total row is the usual cause.\n\n\
+                      With both tracks present, the sampler gains a second gate.\n\
+                      It samples a nascent DEVIATION on top of each gene loading:\n\
+                      spliced scores the loading, unspliced the loading plus delta.\n\
+                      That is `senna gem`'s sign, recorded as delta_base in the manifest.\n\
+                      `senna gem-encoder` uses the opposite base, so the two\n\
+                      delta tables are not comparable without reading that field.\n\
+                      A gene needs counts on BOTH tracks to identify delta at all.\n\
+                      Genes that do not are written NaN, never a number.\n\
+                      The manifest reports how many qualified.\n\
+                      See --independent-delta-gate for the un-nested arm.\n\n\
                       After training, every CELL PAIR is projected.\n\
                       The target is the frozen gene embedding.\n\
                       Its pooled counts x_gu + x_gv are fit by Poisson MAP.\n\
@@ -321,6 +343,10 @@ enum Commands {
                       \x20 {out}.cell_bias.parquet       per-cell scalar\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
                       \x20 {out}.feature_posterior_mean.parquet  feature × dim (E[z*beta])\n\
+                      \x20 {out}.delta_feature_embedding.parquet gene × dim (E[z*delta])\n\
+                      \x20                              (splice-channelized input only)\n\
+                      \x20 {out}.delta_selection.parquet  gene × dim delta inclusion\n\
+                      \x20                              (splice-channelized input only)\n\
                       \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
                       \x20                              (--gate-mode sampled only)\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\

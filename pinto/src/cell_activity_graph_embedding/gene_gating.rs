@@ -14,6 +14,7 @@
 //! [`super::selection`]; this module is purely the
 //! data-derived sampling weight and owns no learnable parameters.
 
+use crate::cell_activity_graph_embedding::gene_axis::GeneAxis;
 use crate::util::common::*;
 use clap::ValueEnum;
 use matrix_util::utils::generate_minibatch_intervals;
@@ -43,19 +44,34 @@ pub struct CellActivities {
 /// Build per-cell activity (log1p + per-gene L1/L2/identity normalization)
 /// and derive per-gene active-edge lists + endpoint-product weights via
 /// an edge-driven merge of per-cell sorted gene lists.
+///
+/// Activity is per GENE, not per matrix row: on a splice-channelized input a
+/// gene's two rows are summed BEFORE the `log1p`, so `a_g[c]` is one gene's
+/// evidence rather than two half-evidence copies competing for the same
+/// positives. `log1p(s) + log1p(u) != log1p(s + u)`, so the order matters and
+/// the summing cannot be moved after the transform.
 pub fn build_cell_activities(
     data: &SparseIoVec,
     edges: &[(u32, u32)],
     block_size: Option<usize>,
     norm: ActivityNorm,
+    axis: &GeneAxis,
 ) -> anyhow::Result<CellActivities> {
     let n_cells = data.num_columns();
-    let n_genes = data.num_rows();
+    let n_rows = data.num_rows();
+    let n_genes = axis.n_genes();
+    anyhow::ensure!(
+        axis.n_rows() == n_rows,
+        "gene axis has {} rows, data has {n_rows}",
+        axis.n_rows()
+    );
 
     // Step 1: read counts in column blocks; rayon-fold per-thread
-    // (gene, cell, log1p) entries, then concat once on the main thread.
-    // Avoids the per-row mutex on a shared CooMatrix.
-    let block = block_size.unwrap_or(n_genes.max(1));
+    // (gene, cell, count) entries, then concat once on the main thread.
+    // Avoids the per-row mutex on a shared CooMatrix. The COO→CSR conversion
+    // SUMS duplicate entries, which is what folds a gene's channel rows
+    // together; `log1p` is applied to the summed value afterwards.
+    let block = block_size.unwrap_or(n_rows.max(1));
     let intervals = generate_minibatch_intervals(n_cells, block, None);
 
     let per_block: Vec<Vec<(usize, usize, f32)>> = intervals
@@ -66,10 +82,9 @@ pub fn build_cell_activities(
             for col in 0..(ub - lb) {
                 let global_col = lb + col;
                 let column = csc.col(col);
-                for (&g, &v) in column.row_indices().iter().zip(column.values().iter()) {
-                    let a = v.ln_1p();
-                    if a > 0.0 {
-                        local.push((g, global_col, a));
+                for (&r, &v) in column.row_indices().iter().zip(column.values().iter()) {
+                    if v > 0.0 {
+                        local.push((axis.gene_of_row(r), global_col, v));
                     }
                 }
             }
@@ -84,6 +99,12 @@ pub fn build_cell_activities(
         }
     }
     let mut cell_csr = CsrMatrix::from(&coo);
+    // Over every nonzero of the matrix, so it is worth the rayon hop: this used to
+    // ride along inside the parallel block read, and moving it after the sum (which
+    // it has to be) would otherwise have made it the one serial pass.
+    cell_csr.values_mut().par_iter_mut().for_each(|x| {
+        *x = x.ln_1p();
+    });
     normalize_rows_inplace(&mut cell_csr, norm);
 
     // Step 2: invert to per-cell sorted (gene, activity) lists.

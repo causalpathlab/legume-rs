@@ -31,10 +31,76 @@ pub struct PintoMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n_communities: Option<usize>,
 
+    /// Present only when the input's feature axis carried
+    /// `{gene}/count/{spliced,unspliced}` rows. Absent means "no channels",
+    /// which is not the same as "no genes identified" — see
+    /// [`SpliceTrackInfo::n_delta_identified`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub splice: Option<SpliceTrackInfo>,
+
     pub outputs: OutputFiles,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub levels: Option<Vec<LevelInfo>>,
+}
+
+/// The base track for `delta` — see [`SpliceTrackInfo::delta_base`].
+pub const DELTA_BASE_SPLICED: &str = "spliced";
+
+/// What a splice-channelized input's two tracks can pin.
+///
+/// `n_genes` on the parent counts GENES; a channelized matrix has two rows per
+/// gene and every gene-side output is on the gene axis, so `n_rows` is the only
+/// place the matrix's own shape survives.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SpliceTrackInfo {
+    /// Matrix rows behind the parent's `n_genes`.
+    pub n_rows: usize,
+    /// Genes carrying counts on BOTH tracks — the only ones for which a
+    /// nascent-minus-mature contrast is identified at all. With no spliced
+    /// counts only `beta + delta` is pinned; with no unspliced counts `delta`
+    /// enters no likelihood term and would come straight from the prior.
+    pub n_delta_identified: usize,
+    /// Nascent share of the total library. The second half of the go/no-go: a
+    /// negligible share means the contrast is nominally identified and
+    /// practically empty.
+    pub nascent_count_fraction: f64,
+    /// Which track the deviation `delta` is measured FROM. Always `"spliced"`
+    /// here: `unspliced = beta + delta`, matching `senna gem`.
+    ///
+    /// Recorded because the sign is NOT a convention the whole workspace shares.
+    /// `senna gem-encoder` uses the opposite base (`spliced = rho + delta`), so
+    /// two `delta_feature_embedding.parquet` files are comparable only after
+    /// reading this field. Without it the tables look interchangeable and are not.
+    pub delta_base: String,
+    /// Whether `delta_feature_embedding.parquet` was fit against the LIVE cell
+    /// embedding (a refresh) or the cold pseudobulk SVD basis.
+    ///
+    /// Three states, and they are different findings:
+    /// - **absent** — no delta table was written at all (`--gate-mode learned`
+    ///   runs no sampler; a spliced-only input identifies no delta). A consumer
+    ///   should not go looking for the file.
+    /// - `false` — written, but fit against the cold pseudobulk SVD basis
+    ///   (`--selection-refresh-epochs 0`, or an early stop before the first
+    ///   refresh). A diagnostic, NOT a dictionary: it is in a different frame
+    ///   from `feature_embedding.parquet` and must not be added to it.
+    /// - `true` — written against the live cell embedding, so the two share a
+    ///   frame and delta may be added.
+    ///
+    /// A consumer that adds delta to the gene embedding MUST check this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_from_refresh: Option<bool>,
+    /// Median unspliced counts per identified gene, and the pseudobulk bins they
+    /// are spread over. `None` under `--gate-mode learned`, which runs no sampler.
+    ///
+    /// [`Self::n_delta_identified`] is STRUCTURAL — at least one count on each
+    /// track — and passing it says nothing about whether the contrast can be
+    /// estimated. These two say that. Below ~1 count per bin the Poisson has
+    /// nothing to fit, however high the identified fraction looks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_median_counts: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_counts_per_pseudobulk: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -271,6 +337,7 @@ pub fn create_lc_metadata(
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
+        splice: None,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
             coord_columns: coord_columns_field(inputs.coord_columns),
@@ -317,6 +384,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
+        splice: None,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
             coord_columns: coord_columns_field(inputs.coord_columns),
@@ -348,7 +416,11 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
 /// `{prefix}.delta.parquet` was written. `inputs.k` is the number of edge
 /// clusters, which is what `n_communities` reports — not the embedding
 /// width, which is a different quantity and has no slot here.
-pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> PintoMetadata {
+pub fn create_cage_metadata(
+    inputs: &RunInputs<'_>,
+    has_batch_effects: bool,
+    splice: Option<SpliceTrackInfo>,
+) -> PintoMetadata {
     let prefix = inputs.prefix;
 
     let levels = vec![final_level_info(prefix, 0)];
@@ -364,6 +436,7 @@ pub fn create_cage_metadata(inputs: &RunInputs<'_>, has_batch_effects: bool) -> 
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
+        splice,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
             coord_columns: coord_columns_field(inputs.coord_columns),
@@ -415,6 +488,7 @@ pub fn create_prop_metadata(
         n_genes: 0,
         n_edges: None,
         n_communities: Some(n_clusters),
+        splice: None,
         outputs: OutputFiles {
             coord_pairs: coord_pair_file.map(|s| s.to_string()),
             coord_columns: None,
@@ -507,6 +581,15 @@ mod tests {
                 k: 16, // edge clusters
             },
             true,
+            Some(SpliceTrackInfo {
+                n_rows: 40000,
+                n_delta_identified: 15000,
+                nascent_count_fraction: 0.23,
+                delta_base: DELTA_BASE_SPLICED.to_string(),
+                delta_from_refresh: Some(true),
+                delta_median_counts: Some(19.0),
+                delta_counts_per_pseudobulk: Some(0.14),
+            }),
         );
         let path = dir.path().join("run.pinto.json");
         meta.write(&path).unwrap();
@@ -523,6 +606,18 @@ mod tests {
         assert!(back.outputs.feature_embedding.is_some());
         assert!(back.outputs.gene_bias.is_some());
         assert!(back.outputs.scores.is_some());
+        // A channelized run reports GENES on `n_genes` and keeps the matrix's
+        // own row count in the splice block — reading `n_genes` as a row count
+        // is exactly the confusion the two-field split exists to prevent.
+        let splice = back.splice.expect("splice block round-trips");
+        assert_eq!(back.n_genes, 20000);
+        assert_eq!(splice.n_rows, 40000);
+        assert_eq!(splice.n_delta_identified, 15000);
+        assert_eq!(splice.delta_base, "spliced");
+        assert_eq!(splice.delta_from_refresh, Some(true));
+        // Structural identifiability and usable evidence are different findings
+        // and both have to survive the round-trip.
+        assert_eq!(splice.delta_counts_per_pseudobulk, Some(0.14));
         assert!(back.outputs.batch_effects.is_some());
         assert!(back.outputs.clusters.is_none());
         let levels = back.levels.expect("levels");
@@ -562,10 +657,15 @@ mod tests {
                 k: 8,
             },
             false,
+            None,
         );
-        let back: PintoMetadata =
-            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: PintoMetadata = serde_json::from_str(&json).unwrap();
         assert!(back.outputs.batch_effects.is_none());
+        // Absent, not zeroed: "this input had no channels" and "this input had
+        // channels that identified nothing" are different findings.
+        assert!(back.splice.is_none());
+        assert!(!json.contains("splice"));
     }
 
     #[test]

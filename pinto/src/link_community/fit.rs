@@ -67,7 +67,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         batch_effects: batch_db,
         graph,
         gene_weights,
-        gene_nnz,
+        gene_stats,
         n_cells,
         n_genes,
     } = preprocess_srt(SrtPreprocessConfig {
@@ -438,7 +438,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // Score the merge on DETECTED genes only — see `cosine_merge`'s step 0
         // for why undetected genes otherwise decide it. `gene_nnz` rides out of
         // the Fisher-weight pass rather than costing a second full read.
-        let gene_nnz = gene_nnz.expect("fisher_weights=true must yield Some");
+        let gene_nnz = gene_stats
+            .as_ref()
+            .expect("fisher_weights=true must yield Some")
+            .count_positives();
         let min_nnz = args
             .merge_min_nnz
             .or_else(|| suggest_nnz_cutoff(&gene_nnz))
