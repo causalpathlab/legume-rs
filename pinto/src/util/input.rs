@@ -273,6 +273,28 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
+        value_enum,
+        default_value_t = KnnExprScope::Within,
+        help = "Whether expression neighbours may cross disconnected tissue",
+        long_help = "Where --knn-expr searches for expression neighbours.\n\
+                     \n\
+                     within (default): inside each disconnected piece of the\n\
+                     spatial graph. Separate sections, or the cores of a tissue\n\
+                     microarray, are usually separate samples, and the rest of this\n\
+                     pipeline already treats such a piece as a batch.\n\
+                     \n\
+                     global: anywhere on the slide. Expression similarity ignores\n\
+                     geometry, so on a microarray nearly every neighbour it finds\n\
+                     will sit in a different core, and therefore a different sample.\n\
+                     Use this when a reference for what a cell type looks like is\n\
+                     wanted from the whole slide rather than one sample, and prefer\n\
+                     it with --auto-batch so the projection has had section effects\n\
+                     removed first."
+    )]
+    pub knn_expr_scope: KnnExprScope,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Use reciprocal (mutual) KNN matching for spatial graph",
         long_help = "Use reciprocal (mutual) KNN matching for the spatial graph.\n\
@@ -630,6 +652,15 @@ pub fn read_data_without_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTDat
 /// graph has multiple disconnected components (e.g., tissue microarray cores).
 ///
 /// Returns the number of components found.
+/// Where `--knn-expr` looks for expression neighbours.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KnnExprScope {
+    /// Inside each disconnected piece of the spatial graph.
+    Within,
+    /// Anywhere on the slide.
+    Global,
+}
+
 pub fn auto_batch_from_components(graph: &KnnGraph, batch_membership: &mut Vec<Box<str>>) -> usize {
     let (labels, n_components) = connected_components(graph);
     if n_components > 1 {

@@ -11,11 +11,13 @@
 
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::{
-    build_expression_graph, build_expression_knn, build_spatial_graph, SrtCellPairsArgs,
+    build_expression_graph, build_expression_knn, build_expression_knn_within,
+    build_spatial_graph, connected_components, SrtCellPairsArgs,
 };
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use crate::util::input::{
+    KnnExprScope,
     auto_batch_from_components, read_data_with_coordinates, read_data_without_coordinates, SRTData,
     SrtInputArgs,
 };
@@ -324,14 +326,30 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         let proj = cell_proj
             .as_ref()
             .expect("a projection is taken whenever knn_expr > 0 and coordinates exist");
-        let expr_graph = build_expression_knn(
-            &proj.proj,
-            SrtCellPairsArgs {
-                knn: c.knn_expr,
-                block_size: c.block_size,
-                reciprocal: c.reciprocal,
-            },
-        )?;
+        let knn_args = SrtCellPairsArgs {
+            knn: c.knn_expr,
+            block_size: c.block_size,
+            reciprocal: c.reciprocal,
+        };
+        let expr_graph = match c.knn_expr_scope {
+            KnnExprScope::Global => build_expression_knn(&proj.proj, knn_args)?,
+            KnnExprScope::Within => {
+                let (component_of_cell, n_components) = connected_components(&graph);
+                if n_components > 1 {
+                    info!(
+                        "Searching expression neighbours inside each of {} spatial \
+                         components, so they stay within a sample",
+                        n_components
+                    );
+                }
+                build_expression_knn_within(
+                    &proj.proj,
+                    &component_of_cell,
+                    n_components,
+                    knn_args,
+                )?
+            }
+        };
         let (merged, source) = graph.union_with(&expr_graph, DistanceMerge::SourceRank)?;
         let (mut n_spatial, mut n_expr, mut n_both) = (0usize, 0usize, 0usize);
         for s in source.iter() {

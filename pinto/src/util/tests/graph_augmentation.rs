@@ -108,3 +108,85 @@ fn without_augmentation_the_topology_is_the_graph_itself() {
     assert_eq!(picked.edges, spatial.edges);
     assert_eq!(picked.n_nodes, spatial.n_nodes);
 }
+
+/// Expression neighbours must not leave the spatial component they came from.
+///
+/// A tissue microarray is the case that matters: each core is a separate
+/// sample, and expression similarity ignores geometry, so an unrestricted
+/// search pairs cells across cores and therefore across samples. The rest of
+/// the pipeline treats a spatial component as a batch, so those pairs
+/// contradict its own definition of one.
+#[test]
+fn expression_neighbours_stay_inside_their_spatial_component() {
+    use crate::util::cell_pairs::{
+        build_expression_knn, build_expression_knn_within, SrtCellPairsArgs,
+    };
+    use crate::util::common::Mat;
+
+    // Two spatial components. Cells alternate between two expression profiles,
+    // so a cell's nearest neighbours by expression exist in BOTH components
+    // and an unrestricted search would happily cross.
+    let n = 12usize;
+    let proj = Mat::from_fn(2, n, |r, c| {
+        let kind = (c % 2) as f32;
+        if r == 0 {
+            kind
+        } else {
+            1.0 - kind
+        }
+    });
+    let component: Vec<usize> = (0..n).map(|c| usize::from(c >= n / 2)).collect();
+    let args = || SrtCellPairsArgs {
+        knn: 3,
+        block_size: Some(64),
+        reciprocal: false,
+    };
+
+    let within = build_expression_knn_within(&proj, &component, 2, args()).unwrap();
+    let global = build_expression_knn(&proj, args()).unwrap();
+
+    assert!(!within.edges.is_empty(), "the fixture must produce edges");
+    for &(i, j) in &within.edges {
+        assert_eq!(component[i], component[j], "edge {i}-{j} left its component");
+    }
+    // The fixture only means something if an unrestricted search DOES cross,
+    // otherwise the assertion above passes for the wrong reason.
+    assert!(
+        global
+            .edges
+            .iter()
+            .any(|&(i, j)| component[i] != component[j]),
+        "a global search must cross here, or this proves nothing"
+    );
+    assert_eq!(within.n_nodes, n, "nodes are all cells, not one component");
+}
+
+/// A component smaller than the neighbour count cannot supply that many, and
+/// taking whatever it has would give its cells a denser neighbourhood than
+/// everyone else's. They get none instead.
+#[test]
+fn a_component_too_small_for_k_contributes_no_expression_edges() {
+    use crate::util::cell_pairs::{build_expression_knn_within, SrtCellPairsArgs};
+    use crate::util::common::Mat;
+
+    let n = 10usize;
+    let proj = Mat::from_fn(2, n, |r, c| if r == 0 { c as f32 } else { 0.0 });
+    let component: Vec<usize> = (0..n).map(|c| usize::from(c >= 8)).collect();
+    let g = build_expression_knn_within(
+        &proj,
+        &component,
+        2,
+        SrtCellPairsArgs {
+            knn: 3,
+            block_size: Some(64),
+            reciprocal: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        g.edges
+            .iter()
+            .all(|&(i, j)| component[i] == 0 && component[j] == 0),
+        "the two-cell component must contribute nothing"
+    );
+}
