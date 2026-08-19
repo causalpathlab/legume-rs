@@ -253,8 +253,18 @@ pub fn read_lines_of_words_delim(
     //
     // This splitter cannot honour a quoted field containing the delimiter
     // anyway, so trimming the outer quotes loses nothing it had.
+    // Only a field quoted at BOTH ends is a quoted field. Trimming either end
+    // on its own corrupts content that merely happens to start or finish with a
+    // quote: a GTF attribute column reads `gene_id "X"; gene_name "Y"`, which
+    // ends in a quote it needs, and losing it leaves the attribute unparseable.
     fn unquote(x: &str) -> &str {
-        x.trim().trim_matches('"').trim_matches('\'')
+        let t = x.trim();
+        for q in ['"', '\''] {
+            if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+                return &t[q.len_utf8()..t.len() - q.len_utf8()];
+            }
+        }
+        t
     }
     let parse_fn = |line: &str| -> Vec<Box<str>> {
         match &delim {
