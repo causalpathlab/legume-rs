@@ -618,8 +618,8 @@ pub struct MultiLevelCoarsenResult {
 /// Interleaving them is the bug this structure exists to prevent — a node
 /// refined at a fine level could move into a cluster whose coarse parent
 /// differed, and nothing put it back. Measured before the fix: worst-level
-/// nesting purity 0.925 on a synthetic ring; on GBM Visium the finest level
-/// held 1024 super-cells non-nested vs 1402 nested.
+/// nesting purity 0.925 on a synthetic ring; on a real spatial section the
+/// finest level held 1024 super-cells non-nested vs 1402 nested.
 ///
 /// Note the re-nesting step at the top of pass 2: refining a PARENT moves nodes
 /// out of the clusters its child cut was carved from, so the child violates

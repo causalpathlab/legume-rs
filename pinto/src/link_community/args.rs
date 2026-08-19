@@ -244,7 +244,7 @@ pub struct SrtLinkCommunityArgs {
                      The final EM-Gibbs and greedy score then gains the term Σ_{k'} (θ_L[k'] + θ_R[k']) · log B[k, k'].\n\
                      That pulls the labelling toward block structure.\n\
                      The factorised Poisson rate alone cannot see it.\n\
-                     Our Xenium leukemia smoke test gained ~50% MI. It cost ~9% more wall time.\n\
+                     Our smoke test gained ~50% MI. It cost ~9% more wall time.\n\
                      \n\
                      Pass --no-incidence to disable it.",
         hide = true

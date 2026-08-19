@@ -365,7 +365,7 @@ fn ungated_model_is_inert() {
 /// ladder tilts from the first step, because that ordering IS the prior and one
 /// that switched on after a warmup would just be a schedule. And the init moved
 /// from 4.0 to 0.0, trading dictionary scale (the effective `‖α·β‖²` fell ~4× on
-/// GBM) for gradient: `dα/dS = α(1−α)` is 0.018 at `σ(4)` and 0.25 here.
+/// real data) for gradient: `dα/dS = α(1−α)` is 0.018 at `σ(4)` and 0.25 here.
 ///
 /// What must NOT weaken is that no coordinate starts saturated at either end. A
 /// multiplier near 0 kills `β`'s gradient through `α·β` and SGD cannot bring it

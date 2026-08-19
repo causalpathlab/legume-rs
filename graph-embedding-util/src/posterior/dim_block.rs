@@ -640,7 +640,7 @@ pub fn dim_block_multi(
                         //
                         // It also removes the resolution floor. Averaging `z` over
                         // `n_kept` sweeps can only land on a `1/n_kept` grid — measured
-                        // on GBM Visium at 50 kept sweeps: exactly 51 distinct values
+                        // on a real spatial run at 50 kept sweeps: exactly 51 distinct values
                         // and 64% of entries pinned at 0, which cannot tell a true PIP
                         // of 1e-6 from 0.01.
                         //
