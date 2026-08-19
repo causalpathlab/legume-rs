@@ -39,7 +39,7 @@ fn swapped(edges: &[Edge]) -> Vec<Edge> {
 #[test]
 fn a_cell_takes_the_community_of_its_incident_edges() {
     let edges = two_block_graph();
-    let d = DirectedStrata::from_edge_modes(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, &edges, 6);
     // Cells 2, 3 and 4 also touch the interface, but their own block still
     // dominates, which is what makes the assignment robust to a thin border.
     let hetero: Vec<(u32, u32)> = (0..d.n_strata())
@@ -63,7 +63,7 @@ fn a_cell_takes_the_community_of_its_incident_edges() {
 #[test]
 fn both_directions_of_an_interface_are_offered() {
     let edges = two_block_graph();
-    let d = DirectedStrata::from_edge_modes(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, &edges, 6);
     let ab = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 1)).unwrap();
     let ba = (0..d.n_strata()).find(|&s| d.pair(s) == (1, 0)).unwrap();
     assert_ne!(ab, ba, "the two directions must be separate strata");
@@ -88,7 +88,7 @@ fn both_directions_of_an_interface_are_offered() {
 #[test]
 fn a_homotypic_stratum_is_marked_and_symmetric() {
     let edges = two_block_graph();
-    let d = DirectedStrata::from_edge_modes(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, &edges, 6);
     let self0 = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 0)).unwrap();
     assert!(d.is_homotypic(self0));
     assert_eq!(d.label(self0), "C0");
@@ -108,8 +108,8 @@ fn a_homotypic_stratum_is_marked_and_symmetric() {
 fn swapping_the_endpoint_columns_changes_nothing() {
     let edges = two_block_graph();
     let flipped = swapped(&edges);
-    let a = DirectedStrata::from_edge_modes(&edges, 6);
-    let b = DirectedStrata::from_edge_modes(&flipped, 6);
+    let a = DirectedStrata::from_edge_modes(&edges, &edges, 6);
+    let b = DirectedStrata::from_edge_modes(&flipped, &flipped, 6);
 
     // Same strata, in the same order: ids are assigned by sorting the realized
     // pairs, not by the order edges arrive, so they are joinable across runs.
@@ -132,7 +132,7 @@ fn swapping_the_endpoint_columns_changes_nothing() {
 #[test]
 fn the_edge_count_matches_what_the_oriented_listing_yields() {
     let edges = two_block_graph();
-    let d = DirectedStrata::from_edge_modes(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, &edges, 6);
     for s in 0..d.n_strata() {
         assert_eq!(
             d.edges_in(s),
@@ -154,7 +154,7 @@ fn the_edge_count_matches_what_the_oriented_listing_yields() {
 #[test]
 fn stratum_ids_are_sorted_so_they_are_reproducible() {
     let edges = two_block_graph();
-    let d = DirectedStrata::from_edge_modes(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, &edges, 6);
     let pairs: Vec<(u32, u32)> = (0..d.n_strata()).map(|s| d.pair(s)).collect();
     let mut sorted = pairs.clone();
     sorted.sort_unstable();
@@ -164,7 +164,7 @@ fn stratum_ids_are_sorted_so_they_are_reproducible() {
 #[test]
 fn an_oriented_listing_puts_the_sender_first() {
     let edges = two_block_graph();
-    let d = DirectedStrata::from_edge_modes(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, &edges, 6);
     let ab = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 1)).unwrap();
     for &(e, flipped) in d.oriented(ab) {
         let (i, j, _, _) = edges[e as usize];
@@ -174,4 +174,49 @@ fn an_oriented_listing_puts_the_sender_first() {
             "sender {sender} should sit in block 0 for stratum 0->1"
         );
     }
+}
+
+/// Expression pairs join cells that are similar but NOT adjacent. A
+/// directional ligand-receptor test presupposes contact, so such a pair has no
+/// estimand and must never be tested. It may still inform the anchor: which
+/// community a cell belongs to is a statement about the partition, and more
+/// evidence there is strictly better.
+///
+/// So the two edge lists have different jobs, and this pins the difference.
+#[test]
+fn expression_pairs_inform_the_anchor_but_are_never_tested() {
+    let spatial = two_block_graph();
+
+    // Cell 5 sits in block 1 by adjacency, but gets three expression pairs
+    // into community 0. Those are enough to move its dominant community, and
+    // they are the only thing that can, since none of them is adjacent.
+    let e = |i: usize, j: usize, k: u32| -> Edge { (i, j, k, None) };
+    let mut anchor = spatial.clone();
+    anchor.extend([e(5, 0, 0), e(5, 1, 0), e(5, 2, 0)]);
+
+    let tested_only = DirectedStrata::from_edge_modes(&spatial, &spatial, 6);
+    let with_anchor = DirectedStrata::from_edge_modes(&anchor, &spatial, 6);
+
+    // The tested set is the spatial list in both, so the edge count cannot move.
+    let n_tested = |d: &DirectedStrata| (0..d.n_strata()).map(|s| d.edges_in(s)).sum::<usize>();
+    assert_eq!(
+        n_tested(&with_anchor),
+        n_tested(&tested_only),
+        "an expression pair must never enter the tested set"
+    );
+
+    // But the anchor did move. Cell 5 is adjacent only within block 1, so
+    // nothing spatial can reassign it; the three expression pairs can, and
+    // that reassignment shows up as its two spatial edges moving out of the
+    // within-block stratum and into a between-block one. Compare the edge
+    // counts per stratum, not the stratum labels: the same four strata exist
+    // either way, so the labels alone would not notice.
+    let spread = |d: &DirectedStrata| -> Vec<((u32, u32), usize)> {
+        (0..d.n_strata()).map(|s| (d.pair(s), d.edges_in(s))).collect()
+    };
+    assert_ne!(
+        spread(&with_anchor),
+        spread(&tested_only),
+        "expression pairs must reach the anchor"
+    );
 }

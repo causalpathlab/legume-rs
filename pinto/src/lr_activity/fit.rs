@@ -161,6 +161,13 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     info!("Attaching per-edge batch from {}", &coord_pairs_path);
     attach_batch_from_coord_pairs(&mut edge_records, &coord_pairs_path)?;
 
+    // Two lists with different jobs. `anchor_edges` is everything, and fixes
+    // which community each cell belongs to. `edges` is the physically adjacent
+    // subset, and is what actually gets tested: a directional test on a pair
+    // that is merely expression-similar has no estimand, since the two cells
+    // never touch. See `orientation` for why the anchor may be wider.
+    let mut anchor_edges: Vec<(usize, usize, u32, Option<Box<str>>)> =
+        Vec::with_capacity(edge_records.len());
     let mut edges: Vec<(usize, usize, u32, Option<Box<str>>)> =
         Vec::with_capacity(edge_records.len());
     let mut unresolved = 0usize;
@@ -169,9 +176,24 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             cell_to_col.get(&e.left_cell).copied(),
             cell_to_col.get(&e.right_cell).copied(),
         ) {
-            (Some(i), Some(j)) => edges.push((i, j, e.community, e.batch)),
+            (Some(i), Some(j)) => {
+                let edge = (i, j, e.community, e.batch);
+                if e.is_spatial {
+                    edges.push(edge.clone());
+                }
+                anchor_edges.push(edge);
+            }
             _ => unresolved += 1,
         }
+    }
+    let n_expression = anchor_edges.len() - edges.len();
+    if n_expression > 0 {
+        info!(
+            "{} of {} pairs are expression-similar rather than adjacent: they set \
+             each cell's community but are not themselves tested",
+            n_expression,
+            anchor_edges.len()
+        );
     }
     if unresolved > 0 {
         info!(
@@ -183,12 +205,14 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         !edges.is_empty(),
         "no edges resolved against expression data"
     );
-    let n_communities = (edges.iter().map(|e| e.2).max().unwrap_or(0) as usize) + 1;
+    // Over the anchor list: a community that exists only on expression pairs
+    // still has to be a valid stratum label.
+    let n_communities = (anchor_edges.iter().map(|e| e.2).max().unwrap_or(0) as usize) + 1;
 
     // Direction comes from community identity, never from the edge list's own
     // ordering and never from the ligand-receptor pair under test. See
     // `orientation` for why both of those are wrong.
-    let directed = DirectedStrata::from_edge_modes(&edges, n_cells);
+    let directed = DirectedStrata::from_edge_modes(&anchor_edges, &edges, n_cells);
     let n_strata_total = directed.n_strata();
     let n_hetero = (0..n_strata_total)
         .filter(|&s| !directed.is_homotypic(s))
