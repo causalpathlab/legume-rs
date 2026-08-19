@@ -2,7 +2,6 @@ mod annotate;
 mod cell_activity_graph_embedding;
 mod gene_network;
 mod link_community;
-mod link_community_etm;
 mod lr_activity;
 mod plot;
 mod propensity;
@@ -19,7 +18,6 @@ use cell_activity_graph_embedding::{
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use link_community::fit::*;
-use link_community_etm::{fit_srt_link_community_etm, SrtLinkCommunityEtmArgs};
 use lr_activity::{fit_srt_lr_activity, SrtLrActivityArgs};
 use plot::{make_srt_plot, SrtPlotArgs};
 use propensity::*;
@@ -388,8 +386,8 @@ enum Commands {
                       --obo adds optional TreeBH Cell-Ontology calling.\n\
                       \n\
                       Inputs are `{prefix}.feature_embedding.parquet` and `{prefix}.cell_embedding.parquet`.\n\
-                      Any pinto embedding run supplies them: `cage`,\n\
-                      or `lc-etm` via its SIMBA co-embedding. To annotate anything else, point\n\
+                      Any pinto embedding run supplies them, such as `cage`.\n\
+                      To annotate anything else, point\n\
                       --feature-embedding and --cell-embedding at explicit paths.\n\
                       \n\
                       Outputs follow the shared per-cell contract:\n\
@@ -397,50 +395,6 @@ enum Commands {
                       The cluster × term p/q/Q matrices ship alongside."
     )]
     Annotate(AnnotateArgs),
-
-    #[command(
-        about = "Link community via embedded topic model (indexed VAE)",
-        long_about = "Embedding-based link community detection.\n\
-                      Each cell-cell edge e = (i, j) is a 'document'.\n\
-                      Its token counts are y_e = x_i + x_j.\n\
-                      Those are fit as an indexed topic ETM,\n\
-                      after Dieng et al., 2020.\n\
-                      The implementation is `candle_util::vae::masked_topic`.\n\n\
-                      MODEL:\n\n\
-                      \x20 π_e   = encoder(top-K of y_e)         ∈ Δ^K\n\
-                      \x20 β     = softmax_g(α · ρᵀ)             [G × K]\n\
-                      \x20 ℓ_e   = Σ_g y_eg · log Σ_k π_e[k] · β_kg   (with\n\
-                      \x20           Jean importance correction over the per-\n\
-                      \x20           batch gene union; the dense [K, D] is\n\
-                      \x20           never materialised).\n\n\
-                      The K topics are the link communities.\n\
-                      β is the community→gene dictionary.\n\
-                      Per-cell propensity is a mass-preserving aggregation:\n\
-                      \x20 propensity[i, k] = (1/deg(i)) · Σ_{e ∋ i} π_e[k].\n\n\
-                      TRAINING (--train-mode):\n\n\
-                      \x20 masked (default): hold out a fraction of each\n\
-                      \x20   edge's genes and predict them (BERT-like, no KL).\n\
-                      \x20   Collapse-proof; strongly preferred on real data.\n\
-                      \x20 elbo: generative VAE with a KL'd posterior; prone\n\
-                      \x20   to posterior collapse. Use only for calibrated\n\
-                      \x20   per-edge entropy.\n\n\
-                      QUICK START:\n\n\
-                      \x20 pinto lc-etm data.h5 -c tissue_positions.csv -o out\n\
-                      \x20 pinto lc-etm data.h5 -o out  # expression-only\n\n\
-                      OUTPUT FILES (mirroring `pinto lc` where applicable):\n\n\
-                      \x20 {out}.propensity.parquet         Cell community membership\n\
-                      \x20                                  [N × K] + entropy column.\n\
-                      \x20 {out}.gene_community.parquet     Melted (gene, community, mean)\n\
-                      \x20                                  of β = softmax(α · ρᵀ).\n\
-                      \x20 {out}.link_community.parquet     Edges + hard argmax community.\n\
-                      \x20 {out}.coord_pairs.parquet        Cell pair coordinates.\n\
-                      \x20 {out}.scores.parquet             Per-epoch (llik, kl) trace.\n\
-                      \x20 {out}.delta.parquet              Batch effects (multi-sample).\n\
-                      \x20 {out}.latent.parquet             Per-edge soft π_e [E × K].\n\
-                      \x20 {out}.gene_embeddings.parquet    ρ [G × H], shared via ETM tying.\n\
-                      \x20 {out}.community_embeddings.parquet  α [K × H]."
-    )]
-    LcEtm(SrtLinkCommunityEtmArgs),
 
     #[command(
         alias = "p",
@@ -735,9 +689,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Annotate(args) => {
             run_annotate(args)?;
-        }
-        Commands::LcEtm(args) => {
-            fit_srt_link_community_etm(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;
