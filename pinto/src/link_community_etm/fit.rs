@@ -126,7 +126,7 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     };
 
     if c.auto_batch && c.batch_files.is_none() {
-        crate::util::input::auto_batch_from_components(&graph, &mut batch_membership);
+        crate::util::input::auto_batch_from_components(&graph, &coordinates, &mut batch_membership);
     }
 
     //////////////////////

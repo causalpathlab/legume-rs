@@ -264,7 +264,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     };
 
     if c.auto_batch && c.batch_files.is_none() {
-        auto_batch_from_components(&graph, &mut batch_membership);
+        auto_batch_from_components(&graph, &coordinates, &mut batch_membership);
     }
 
     let batch_effects = if cfg.batch_effects {

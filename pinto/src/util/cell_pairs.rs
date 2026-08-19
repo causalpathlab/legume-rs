@@ -222,14 +222,10 @@ pub fn build_expression_knn_within(
         );
     }
 
-    let adjacency = {
-        let mut coo = nalgebra_sparse::CooMatrix::new(n_cells, n_cells);
-        for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
-            coo.push(i, j, v);
-            coo.push(j, i, v);
-        }
-        nalgebra_sparse::CscMatrix::from(&coo)
-    };
+    // The one implementation of this invariant lives with the type: the COO to
+    // CSC conversion SUMS entries sharing a coordinate, so an edge pushed twice
+    // silently doubles its weight.
+    let adjacency = matrix_util::knn_graph::symmetric_adjacency(n_cells, &edges, &distances);
     Ok(KnnGraph {
         adjacency,
         edges,

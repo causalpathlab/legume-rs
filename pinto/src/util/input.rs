@@ -663,19 +663,128 @@ pub enum KnnExprScope {
     Global,
 }
 
-pub fn auto_batch_from_components(graph: &KnnGraph, batch_membership: &mut Vec<Box<str>>) -> usize {
+pub fn auto_batch_from_components(
+    graph: &KnnGraph,
+    coordinates: &Mat,
+    batch_membership: &mut Vec<Box<str>>,
+) -> usize {
     let (labels, n_components) = connected_components(graph);
-    if n_components > 1 {
-        *batch_membership = labels
-            .iter()
-            .map(|l| format!("cc_{l}").into_boxed_str())
+    if n_components <= 1 {
+        return n_components;
+    }
+
+    // A connected component stands in for a sample, but it is not one. The
+    // spatial graph breaks wherever the tissue does, so a single physical piece
+    // arrives as one large component plus a scatter of small ones. Treating each
+    // as a batch estimates an effect per fragment, on far too few cells.
+    //
+    // A fragment is recognised by WHERE it is, not by how small it is: it lies
+    // inside the piece it broke off from, while two genuinely different pieces
+    // sit far apart. So a component is folded into another when its centre falls
+    // within that component's extent, widened by a few cell diameters to cover
+    // the gap that split them.
+    //
+    // The widening is measured, not chosen: the graph's own edge lengths are the
+    // cell-to-cell spacing. It only has to be small against the distance between
+    // pieces, and on real tissue those differ by more than an order of
+    // magnitude, so the exact multiple does not change the answer.
+    let spacing = median_edge_length(graph).unwrap_or(0.0);
+    let slack = 3.0 * spacing;
+
+    let dims = coordinates.ncols().min(2).max(1);
+    let mut lo = vec![f64::INFINITY; n_components * dims];
+    let mut hi = vec![f64::NEG_INFINITY; n_components * dims];
+    let mut sum = vec![0.0f64; n_components * dims];
+    let mut size = vec![0usize; n_components];
+    for (cell, &l) in labels.iter().enumerate() {
+        size[l] += 1;
+        for d in 0..dims {
+            let v = coordinates[(cell, d)] as f64;
+            lo[l * dims + d] = lo[l * dims + d].min(v);
+            hi[l * dims + d] = hi[l * dims + d].max(v);
+            sum[l * dims + d] += v;
+        }
+    }
+
+    // Fold into the SMALLEST enclosing piece, so a fragment joins the core it
+    // sits in rather than any larger box that happens to span it.
+    let mut into: Vec<usize> = (0..n_components).collect();
+    for c in 0..n_components {
+        let centre: Vec<f64> = (0..dims)
+            .map(|d| sum[c * dims + d] / size[c].max(1) as f64)
             .collect();
+        let mut best: Option<(f64, usize)> = None;
+        for other in 0..n_components {
+            if other == c || size[other] <= size[c] {
+                continue;
+            }
+            let inside = (0..dims).all(|d| {
+                centre[d] >= lo[other * dims + d] - slack
+                    && centre[d] <= hi[other * dims + d] + slack
+            });
+            if !inside {
+                continue;
+            }
+            let extent: f64 = (0..dims)
+                .map(|d| hi[other * dims + d] - lo[other * dims + d])
+                .sum();
+            if best.is_none_or(|(e, _)| extent < e) {
+                best = Some((extent, other));
+            }
+        }
+        if let Some((_, target)) = best {
+            into[c] = target;
+        }
+    }
+    // A fragment may point at a piece that is itself a fragment; follow through.
+    for c in 0..n_components {
+        let mut t = into[c];
+        let mut hops = 0;
+        while into[t] != t && hops < n_components {
+            t = into[t];
+            hops += 1;
+        }
+        into[c] = t;
+    }
+
+    let kept: std::collections::BTreeSet<usize> = into.iter().copied().collect();
+    *batch_membership = labels
+        .iter()
+        .map(|&l| format!("cc_{}", into[l]).into_boxed_str())
+        .collect();
+    let n_batches = kept.len();
+    if n_batches < n_components {
+        info!(
+            "Auto-detected {} spatial components; {} lie inside another and were \
+             folded into it, giving {} batches",
+            n_components,
+            n_components - n_batches,
+            n_batches
+        );
+    } else {
         info!(
             "Auto-detected {} spatial components as batches",
             n_components
         );
     }
-    n_components
+    n_batches
+}
+
+/// Median length of the graph's edges, which on a spatial graph is the
+/// cell-to-cell spacing. `None` when the graph carries no usable lengths.
+fn median_edge_length(graph: &KnnGraph) -> Option<f64> {
+    let mut d: Vec<f32> = graph
+        .distances
+        .iter()
+        .copied()
+        .filter(|x| x.is_finite() && *x > 0.0)
+        .collect();
+    if d.is_empty() {
+        return None;
+    }
+    let mid = d.len() / 2;
+    d.select_nth_unstable_by(mid, f32::total_cmp);
+    Some(d[mid] as f64)
 }
 
 /// Read a single coordinate file with a name-then-index fallback.

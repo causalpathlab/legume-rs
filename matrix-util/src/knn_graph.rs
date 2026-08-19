@@ -675,7 +675,7 @@ mod tests;
 /// direction, because building a `CscMatrix` from a `CooMatrix` SUMS entries
 /// that share a coordinate rather than rejecting them. A duplicate would
 /// silently double that edge's weight.
-fn symmetric_adjacency(
+pub fn symmetric_adjacency(
     n_nodes: usize,
     edges: &[(usize, usize)],
     distances: &[f32],
