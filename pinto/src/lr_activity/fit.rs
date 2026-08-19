@@ -46,10 +46,12 @@
 
 use crate::lr_activity::args::SrtLrActivityArgs;
 use crate::lr_activity::io::*;
+use crate::lr_activity::orientation::DirectedStrata;
 use crate::lr_activity::outputs::{
     pvalue_histogram, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
 };
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use data_beans::convert::try_open_or_convert;
 use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
 use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -97,10 +99,26 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     info!("Loading expression data...");
     let data_vec = load_expr_data(c)?;
 
-    let gene_names = data_vec.row_names()?;
+    let row_names = data_vec.row_names()?;
     let cell_names = data_vec.column_names()?;
     let n_cells = data_vec.num_columns();
-    let n_genes = data_vec.num_rows();
+
+    // Ligand and receptor names name GENES, so they are resolved against the
+    // gene axis. Against raw row names they cannot resolve at all on a
+    // splice-channelized matrix: the resolver aliases on `--gene-delimiter`
+    // (default `_`) and never on `/`, so `GENE1` does not reach
+    // `GENE1/count/spliced` and every pair is dropped.
+    let gene_axis = GeneAxis::resolve(&row_names)?;
+    let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
+    let n_genes = gene_axis.n_genes();
+    if gene_axis.is_channelized() {
+        info!(
+            "Feature axis: {} rows carry splice channels over {} genes; a \
+             ligand or receptor is scored on its gene, both tracks summed",
+            row_names.len(),
+            n_genes
+        );
+    }
 
     let gene_resolver =
         GeneIndexResolver::build(&gene_names, args.gene_delimiter, args.gene_allow_prefix);
@@ -165,27 +183,35 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         "no edges resolved against expression data"
     );
     let n_communities = (edges.iter().map(|e| e.2).max().unwrap_or(0) as usize) + 1;
+
+    // Direction comes from community identity, never from the edge list's own
+    // ordering and never from the ligand-receptor pair under test. See
+    // `orientation` for why both of those are wrong.
+    let directed = DirectedStrata::resolve(&edges, n_cells);
+    let n_strata_total = directed.n_strata();
+    let n_hetero = (0..n_strata_total)
+        .filter(|&s| !directed.is_homotypic(s))
+        .count();
     info!(
-        "{} cells, {} edges, {} communities",
+        "{} cells, {} edges, {} communities -> {} directed strata ({} between communities, {} within)",
         n_cells,
         edges.len(),
-        n_communities
+        n_communities,
+        n_strata_total,
+        n_hetero,
+        n_strata_total - n_hetero
     );
 
-    // Sparse-community filter: communities with too few edges can't
-    // calibrate (most pseudobulk samples will be empty / have constant L
-    // or R, collapsing stat_obs to 0 and breaking restandardization).
-    let mut edges_per_community = vec![0usize; n_communities];
-    for e in &edges {
-        edges_per_community[e.2 as usize] += 1;
-    }
-    let active_communities: HashSet<u32> = (0..n_communities as u32)
-        .filter(|&c| edges_per_community[c as usize] >= args.min_edges_per_community)
+    // Sparse-stratum filter: strata with too few edges can't calibrate (most
+    // pseudobulk samples will be empty / have constant L or R, collapsing
+    // stat_obs to 0 and breaking restandardization).
+    let active_communities: HashSet<u32> = (0..n_strata_total as u32)
+        .filter(|&s| directed.edges_in(s as usize) >= args.min_edges_per_community)
         .collect();
-    let n_skipped = n_communities - active_communities.len();
+    let n_skipped = n_strata_total - active_communities.len();
     if n_skipped > 0 {
         info!(
-            "Skipping {} sparse communities (< {} edges each)",
+            "Skipping {} sparse directed strata (< {} edges each)",
             n_skipped, args.min_edges_per_community
         );
     }
@@ -227,7 +253,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // 5. Cell→community soft membership (sender / receiver) //
     ///////////////////////////////////////////////////////////
     info!("Building cell→community soft membership...");
-    let (p_send, p_recv) = build_role_memberships(&edges, n_cells, n_communities);
+    let (p_send, p_recv) = directed.role_memberships(&edges, n_cells);
 
     ////////////////////////////////////////////////////
     // 6. Per-cell batch label (modal incident batch) //
@@ -273,15 +299,55 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             }
         }
     }
-    info!("Reading {} LR gene rows from backend...", lr_genes.len());
-    let x_lr = data_vec.read_rows_dmatrix(lr_genes.iter().copied())?;
+    // `lr_genes` are gene ids; the backend is read by row, so expand each gene
+    // to the rows carrying it and fold them back afterwards. On a matrix
+    // without channels this is the identity and the read is unchanged.
+    let mut rows_to_read: Vec<usize> = Vec::with_capacity(lr_genes.len());
+    let mut row_owner: Vec<usize> = Vec::with_capacity(lr_genes.len());
+    let wanted: HashMap<usize, usize> = lr_genes
+        .iter()
+        .enumerate()
+        .map(|(local, &g)| (g, local))
+        .collect();
+    for r in 0..row_names.len() {
+        if let Some(&local) = wanted.get(&gene_axis.gene_of_row(r)) {
+            rows_to_read.push(r);
+            row_owner.push(local);
+        }
+    }
+    info!(
+        "Reading {} rows for {} LR genes from backend...",
+        rows_to_read.len(),
+        lr_genes.len()
+    );
+    let x_rows = data_vec.read_rows_dmatrix(rows_to_read.iter().copied())?;
+    let mut x_lr = DMatrix::<f32>::zeros(lr_genes.len(), n_cells);
+    for (r, &local) in row_owner.iter().enumerate() {
+        for c in 0..n_cells {
+            x_lr[(local, c)] += x_rows[(r, c)];
+        }
+    }
 
     // Fisher weight is multiplicative on pb_mean *before* log1p — without
     // the non-linear log step it would cancel out of any correlation /
     // covariance and have no effect.
     info!("Computing NB Fisher-info gene weights for LR genes...");
-    let fisher_all = compute_nb_fisher_weights(&data_vec, c.block_size)?;
-    let fisher_lr: Vec<f32> = lr_genes.iter().map(|&g| fisher_all[g]).collect();
+    let fisher_rows = compute_nb_fisher_weights(&data_vec, c.block_size)?;
+    // One weight per gene. Rows of a gene are averaged rather than summed:
+    // a weight is a precision, not a count, so adding two of them is not a
+    // quantity. Averaging keeps it in range and equals the row weight when a
+    // gene owns one row.
+    let mut fisher_lr = vec![0.0f32; lr_genes.len()];
+    let mut n_rows_of = vec![0.0f32; lr_genes.len()];
+    for (r, &local) in rows_to_read.iter().zip(row_owner.iter()) {
+        fisher_lr[local] += fisher_rows[*r];
+        n_rows_of[local] += 1.0;
+    }
+    for (w, n) in fisher_lr.iter_mut().zip(n_rows_of.iter()) {
+        if *n > 0.0 {
+            *w /= *n;
+        }
+    }
     info!(
         "Fisher w (LR genes): min={:.3e}, mean={:.3e}, max={:.3e}",
         fisher_lr.iter().cloned().fold(f32::INFINITY, f32::min),
@@ -293,8 +359,8 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // 9. Collapse into per-(community, sample) pseudobulk //
     /////////////////////////////////////////////////////////
     info!(
-        "Collapsing into pseudobulk: {} comm × {} samples × {} LR genes...",
-        n_communities,
+        "Collapsing into pseudobulk: {} strata × {} samples × {} LR genes...",
+        n_strata_total,
         n_samples,
         lr_genes.len()
     );
@@ -303,7 +369,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         &sample_id_per_cell,
         &p_send,
         &p_recv,
-        n_communities,
+        n_strata_total,
         n_samples,
     );
 
@@ -311,7 +377,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // Under weighted_cov, per-gene scalars on each side stack as `w_L · w_R`
     // on stat_obs; precomputing here saves an n_pairs × n_samples mul per
     // stratum.
-    for c in 0..n_communities {
+    for c in 0..n_strata_total {
         apply_gene_weights(&mut collapse.log_mean_send[c], &fisher_lr);
         apply_gene_weights(&mut collapse.log_mean_recv[c], &fisher_lr);
     }
@@ -345,7 +411,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         if samples_in_batch.len() < MIN_SAMPLES_PER_STRATUM {
             continue;
         }
-        for community in 0..(n_communities as u32) {
+        for community in 0..(n_strata_total as u32) {
             if !active_communities.contains(&community) {
                 continue;
             }
@@ -363,7 +429,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     if n_real_batches > 1 {
         let all_samples: Vec<usize> = (0..n_samples).collect();
         let meta_label: Box<str> = BATCH_LABEL_META.into();
-        for community in 0..(n_communities as u32) {
+        for community in 0..(n_strata_total as u32) {
             if !active_communities.contains(&community) {
                 continue;
             }
@@ -386,7 +452,8 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         let stratum_id = strata.len();
         strata.push(stratum_entry(
             &batch_label,
-            community as i32,
+            community as usize,
+            &directed,
             &edges,
             &cell_names,
             if is_meta {
@@ -394,7 +461,6 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             } else {
                 Some(batch_label.as_ref())
             },
-            community,
         ));
         let seed = if is_meta {
             base_seed
@@ -420,13 +486,14 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             /*shuffle_within_batch=*/ is_meta,
             &sample_batch_label,
             args.shuffle_stratify_dim,
+            &directed,
         );
         info!(
-            "  [{}/{}] batch={} community={} n_samples={} → {} rows ({:.1}s)",
+            "  [{}/{}] batch={} stratum={} n_samples={} → {} rows ({:.1}s)",
             k + 1,
             n_strata,
             batch_label,
-            community,
+            directed.label(community as usize),
             samples.len(),
             br.len(),
             t0.elapsed().as_secs_f32()
@@ -489,33 +556,6 @@ fn load_expr_data(c: &crate::util::input::SrtInputArgs) -> anyhow::Result<Sparse
         data_vec.push(Arc::from(data), data_name)?;
     }
     Ok(data_vec)
-}
-
-/// Per-cell soft community membership matrices for the two roles.
-/// Row-normalised so each cell's per-role mass sums to 1 (over communities
-/// that the cell touches in that role).
-fn build_role_memberships(
-    edges: &[(usize, usize, u32, Option<Box<str>>)],
-    n_cells: usize,
-    n_communities: usize,
-) -> (DMatrix<f32>, DMatrix<f32>) {
-    let mut p_send = DMatrix::<f32>::zeros(n_cells, n_communities);
-    let mut p_recv = DMatrix::<f32>::zeros(n_cells, n_communities);
-    for &(i, j, k, _) in edges {
-        p_send[(i, k as usize)] += 1.0;
-        p_recv[(j, k as usize)] += 1.0;
-    }
-    for i in 0..n_cells {
-        let s = p_send.row(i).sum();
-        if s > 0.0 {
-            p_send.row_mut(i).scale_mut(1.0 / s);
-        }
-        let r = p_recv.row(i).sum();
-        if r > 0.0 {
-            p_recv.row_mut(i).scale_mut(1.0 / r);
-        }
-    }
-    (p_send, p_recv)
 }
 
 /// Modal batch among edges incident to each cell. Cells with no batched
@@ -728,6 +768,7 @@ fn score_pairs_for_stratum(
     shuffle_within_batch: bool,
     sample_batch_label: &[Box<str>],
     shuffle_stratify_dim: usize,
+    directed: &DirectedStrata,
 ) -> Vec<LrActivityRow> {
     let c = community as usize;
     let n_s = samples_in_stratum.len();
@@ -925,9 +966,13 @@ fn score_pairs_for_stratum(
                 (zv, one_sided_p_z(zv))
             };
 
+            let (send_c, recv_c) = directed.pair(c);
             let row = LrActivityRow {
                 batch: Box::from(batch_label),
                 community: community as i32,
+                sender_community: send_c as i32,
+                receiver_community: recv_c as i32,
+                homotypic: directed.is_homotypic(c),
                 ligand: pc.lname.clone(),
                 receptor: pc.rname.clone(),
                 ligand_resolved: gene_names[pc.li].clone(),
@@ -1043,43 +1088,50 @@ fn score_pairs_for_stratum(
 
 fn stratum_entry(
     batch_label: &str,
-    community: i32,
+    stratum: usize,
+    directed: &DirectedStrata,
     edges: &[(usize, usize, u32, Option<Box<str>>)],
     cell_names: &[Box<str>],
     batch_filter: Option<&str>,
-    community_filter: u32,
 ) -> StratumEntry {
-    let edges_named: Vec<(Box<str>, Box<str>)> = edges
-        .iter()
-        .filter(|(_, _, k, b)| {
-            *k == community_filter
-                && match batch_filter {
-                    // Edges left unbatched (no `batch` column in coord_pairs)
-                    // are matched by the synthetic `BATCH_LABEL_ALL` stratum
-                    // — `derive_cell_batch_labels` already gave those cells
-                    // that label, so the per-edge filter has to agree.
-                    Some(bf) => match b.as_ref().map(|s| s.as_ref()) {
-                        Some(eb) => eb == bf,
-                        None => bf == BATCH_LABEL_ALL,
-                    },
-                    None => true,
-                }
+    let name_of = |c: usize| {
+        cell_names
+            .get(c)
+            .cloned()
+            .unwrap_or_else(|| format!("cell_{c}").into_boxed_str())
+    };
+    // Listed sender first, so a consumer drawing an arrow does not have to
+    // re-derive the direction the test actually used.
+    let edges_named: Vec<(Box<str>, Box<str>)> = directed
+        .oriented(stratum, edges)
+        .into_iter()
+        .filter(|&(e, _)| {
+            let b = &edges[e].3;
+            match batch_filter {
+                // Edges left unbatched (no `batch` column in coord_pairs)
+                // are matched by the synthetic `BATCH_LABEL_ALL` stratum
+                // — `derive_cell_batch_labels` already gave those cells
+                // that label, so the per-edge filter has to agree.
+                Some(bf) => match b.as_ref().map(|s| s.as_ref()) {
+                    Some(eb) => eb == bf,
+                    None => bf == BATCH_LABEL_ALL,
+                },
+                None => true,
+            }
         })
-        .map(|(i, j, _, _)| {
-            let l = cell_names
-                .get(*i)
-                .cloned()
-                .unwrap_or_else(|| format!("cell_{i}").into_boxed_str());
-            let r = cell_names
-                .get(*j)
-                .cloned()
-                .unwrap_or_else(|| format!("cell_{j}").into_boxed_str());
-            (l, r)
+        .map(|(e, flipped)| {
+            let (i, j, _, _) = edges[e];
+            let (send, recv) = if flipped { (j, i) } else { (i, j) };
+            (name_of(send), name_of(recv))
         })
         .collect();
+    let (a, b) = directed.pair(stratum);
     StratumEntry {
         batch: Box::from(batch_label),
-        community,
+        community: stratum as i32,
+        sender_community: a as i32,
+        receiver_community: b as i32,
+        homotypic: directed.is_homotypic(stratum),
         edges: edges_named,
     }
 }

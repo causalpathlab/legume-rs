@@ -53,7 +53,11 @@
 pub mod args;
 pub mod fit;
 pub mod io;
+pub mod orientation;
 pub mod outputs;
+
+#[cfg(test)]
+mod tests;
 
 pub use args::SrtLrActivityArgs;
 pub use fit::fit_srt_lr_activity;
