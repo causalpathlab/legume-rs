@@ -188,6 +188,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     )?;
 
     let edges = srt_cell_pairs.inner.pairs();
+    // Parallel to `edges`, so every per-edge table can carry provenance.
+    let edge_kind: Option<Vec<i32>> = srt_cell_pairs.edge_kind.clone();
+    let edge_kind = edge_kind.as_deref();
     let n_edges = edges.len();
     info!("{} cells, {} edges", n_cells, n_edges);
 
@@ -338,6 +341,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &cell_names,
         Some(&gene_weights),
         &gene_axis,
+        edge_kind,
     )?;
 
     let mut current_labels = cascade_result.fine_labels;
@@ -474,6 +478,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         Some(&gene_weights),
         &gene_axis,
         c.block_size,
+        edge_kind,
     )?;
 
     info!("Writing score trace...");
@@ -582,6 +587,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     Some(&gene_weights),
                     &gene_axis,
                     c.block_size,
+                    edge_kind,
                 )?;
                 merge_present_with_consensus = true;
             } else {
