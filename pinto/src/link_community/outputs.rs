@@ -37,13 +37,12 @@ pub fn write_link_communities(
         ParquetType::BYTE_ARRAY,
         ParquetType::FLOAT,
     ];
-    // Written as f32 like `community`, since this writer's numeric column
-    // helper takes f32 and the values are small integer codes.
-    let edge_kind_f32: Option<Vec<f32>> =
-        edge_kind.map(|k| k.iter().map(|&x| x as f32).collect());
-    if edge_kind_f32.is_some() {
+    // INT32, matching the same column in the coordinate table. One column
+    // name must mean one type across the files, or a reader written against
+    // either one silently fails on the other.
+    if edge_kind.is_some() {
         col_names.push("edge_kind".into());
-        col_types.push(ParquetType::FLOAT);
+        col_types.push(ParquetType::INT32);
     }
 
     let writer = ParquetWriter::new(
@@ -62,7 +61,7 @@ pub fn write_link_communities(
     parquet_add_string_column(&mut row_group, &left_cells)?;
     parquet_add_string_column(&mut row_group, &right_cells)?;
     parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
-    if let Some(kind) = edge_kind_f32.as_ref() {
+    if let Some(kind) = edge_kind {
         parquet_add_numeric_column(&mut row_group, kind)?;
     }
 
