@@ -186,68 +186,89 @@ pub fn build_entity_gene_sums(
     let n_cells = data.num_columns();
     let jobs = generate_minibatch_intervals(n_cells, num_genes, block_size);
 
-    let partials: Vec<Vec<Vec<(u32, f32)>>> = jobs
+    // Folded, not collected. A job's buckets hold one entry per nonzero it
+    // reads, so collecting every job first holds the whole matrix's nonzeros at
+    // once, plus an empty-bucket header per entity per job. Merging into a
+    // per-worker accumulator instead keeps the live set at the merged size,
+    // which is bounded by the output rather than by the input.
+    let merged: Vec<Vec<(u32, f32)>> = jobs
         .par_iter()
-        .map(|&(lb, ub)| -> anyhow::Result<Vec<Vec<(u32, f32)>>> {
-            let x = data.read_columns_csc(lb..ub)?;
-            let mut local: Vec<Vec<(u32, f32)>> = vec![Vec::new(); num_entities];
-            for local_col in 0..x.ncols() {
-                let cell = lb + local_col;
-                let e = cell_to_entity[cell];
-                if e >= num_entities {
-                    continue;
-                }
-                let s = x.col(local_col);
-                let bucket = &mut local[e];
-                bucket.reserve(s.nnz());
-                for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
-                    bucket.push((row as u32, val));
-                }
-            }
-            // Sort + coalesce duplicate genes within each entity's block buffer.
-            for bucket in local.iter_mut() {
-                if bucket.len() > 1 {
-                    bucket.sort_unstable_by_key(|&(g, _)| g);
-                    let mut write = 0;
-                    for read in 1..bucket.len() {
-                        if bucket[read].0 == bucket[write].0 {
-                            bucket[write].1 += bucket[read].1;
-                        } else {
-                            write += 1;
-                            bucket[write] = bucket[read];
-                        }
+        .try_fold(
+            || vec![Vec::new(); num_entities],
+            |mut acc: Vec<Vec<(u32, f32)>>, &(lb, ub)| -> anyhow::Result<Vec<Vec<(u32, f32)>>> {
+                let x = data.read_columns_csc(lb..ub)?;
+                let mut local: Vec<Vec<(u32, f32)>> = vec![Vec::new(); num_entities];
+                for local_col in 0..x.ncols() {
+                    let cell = lb + local_col;
+                    let e = cell_to_entity[cell];
+                    if e >= num_entities {
+                        continue;
                     }
-                    bucket.truncate(write + 1);
+                    let s = x.col(local_col);
+                    let bucket = &mut local[e];
+                    bucket.reserve(s.nnz());
+                    for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
+                        bucket.push((row as u32, val));
+                    }
                 }
-            }
-            Ok(local)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+                // Sort + coalesce duplicate genes within each entity's block buffer.
+                for bucket in local.iter_mut() {
+                    if bucket.len() > 1 {
+                        bucket.sort_unstable_by_key(|&(g, _)| g);
+                        let mut write = 0;
+                        for read in 1..bucket.len() {
+                            if bucket[read].0 == bucket[write].0 {
+                                bucket[write].1 += bucket[read].1;
+                            } else {
+                                write += 1;
+                                bucket[write] = bucket[read];
+                            }
+                        }
+                        bucket.truncate(write + 1);
+                    }
+                }
+                for (entity, bucket) in local.iter().enumerate() {
+                    if !bucket.is_empty() {
+                        acc[entity] = merge_sorted_sparse(&acc[entity], bucket);
+                    }
+                }
+                Ok(acc)
+            },
+        )
+        .try_reduce(
+            || vec![Vec::new(); num_entities],
+            |mut a, b| {
+                for (entity, bucket) in b.iter().enumerate() {
+                    if !bucket.is_empty() {
+                        a[entity] = merge_sorted_sparse(&a[entity], bucket);
+                    }
+                }
+                Ok(a)
+            },
+        )?;
 
-    // Merge block partials per entity via sorted-sparse merge.
-    let mut out: Vec<Vec<(usize, f32)>> = vec![Vec::new(); num_entities];
-    for mut block in partials {
-        for (e, bucket) in block.iter_mut().enumerate() {
-            if bucket.is_empty() {
-                continue;
-            }
-            out[e] = merge_sorted_sparse(&out[e], bucket);
-        }
-    }
-    Ok(out)
+    Ok(merged
+        .into_iter()
+        .map(|bucket| {
+            bucket
+                .into_iter()
+                .map(|(gene, value)| (gene as usize, value))
+                .collect()
+        })
+        .collect())
 }
 
 /// Merge two gene-sorted sparse vectors into a single gene-sorted sparse
 /// vector with summed values at shared gene indices.
-fn merge_sorted_sparse(a: &[(usize, f32)], b: &[(u32, f32)]) -> Vec<(usize, f32)> {
+fn merge_sorted_sparse(a: &[(u32, f32)], b: &[(u32, f32)]) -> Vec<(u32, f32)> {
     if a.is_empty() {
-        return b.iter().map(|&(g, v)| (g as usize, v)).collect();
+        return b.to_vec();
     }
     let mut out = Vec::with_capacity(a.len() + b.len());
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         let (ga, va) = a[i];
-        let (gb, vb) = (b[j].0 as usize, b[j].1);
+        let (gb, vb) = b[j];
         match ga.cmp(&gb) {
             std::cmp::Ordering::Less => {
                 out.push((ga, va));
@@ -265,7 +286,7 @@ fn merge_sorted_sparse(a: &[(usize, f32)], b: &[(u32, f32)]) -> Vec<(usize, f32)
         }
     }
     out.extend_from_slice(&a[i..]);
-    out.extend(b[j..].iter().map(|&(g, v)| (g as usize, v)));
+    out.extend_from_slice(&b[j..]);
     out
 }
 

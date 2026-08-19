@@ -68,6 +68,21 @@ where
 /// Target ≈ `MIN_BLOCK_SIZE × 10 000` cells×features of work per job;
 /// clamped to `[MIN_BLOCK_SIZE, MAX_BLOCK_SIZE]`.
 /// `None` passed to `generate_minibatch_intervals` / `create_jobs` resolves through this.
+///
+/// This bounds READ work per job. It is **not** a bound on what a job
+/// allocates, and it cannot be: it never sees the caller's accumulator.
+///
+/// So if a job's accumulator is sized by an OUTPUT axis rather than by the
+/// block it reads — `[n_features × k]`, one dense column per group — then
+/// collecting one per job with `map().collect()` makes peak memory scale with
+/// the JOB COUNT, which this function sets. Note the shape of that hazard: a
+/// wide, sparse input drives the block size DOWN to the floor, so the job
+/// count goes up exactly when each accumulator is at its largest.
+///
+/// Accumulate with `try_fold`/`try_reduce` so live accumulators track the
+/// worker count instead; and where the accumulator's fixed axis is itself
+/// unbounded, key the jobs by the output the job owns and write into it
+/// directly, rather than giving every job a copy of the whole thing.
 pub fn default_block_size(num_features: usize) -> usize {
     const MIN_BLOCK_SIZE: usize = 100;
     const MAX_BLOCK_SIZE: usize = 10_000;
