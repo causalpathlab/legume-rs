@@ -160,13 +160,24 @@ pub struct SrtInputArgs {
     #[arg(
         long,
         short = 'p',
-        default_value_t = 50,
+        default_value_t = 200,
         help = "Random projection dimension for cell embeddings",
         long_help = "Dimension of the random projection for cell embeddings.\n\
                      Cells are projected from G gene dimensions down to this one.\n\
-                     That projection feeds KNN construction and coarsening.\n\
-                     Higher values preserve more signal. They also cost more memory.",
-        hide = true
+                     That projection feeds KNN construction and coarsening,\n\
+                     and in `lc` it also sets the width of every edge profile.\n\
+                     \n\
+                     This is the main quality knob, and it is easy to set too low.\n\
+                     A sketch too narrow to separate two cell programs merges them,\n\
+                     so the rare profiles that sit between programs get absorbed\n\
+                     into whichever neighbouring community is largest.\n\
+                     That shows up as speckle in a propensity map\n\
+                     rather than as coherent spatial domains.\n\
+                     \n\
+                     Cost is linear in this value:\n\
+                     runtime, peak memory, and the size of the edge profile store.\n\
+                     Raise it when domains look speckled or over-merged.\n\
+                     Lower it when a large dataset will not fit."
     )]
     pub proj_dim: usize,
 
