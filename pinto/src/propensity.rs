@@ -251,6 +251,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             &edges,
             &edge_membership,
             &vertices,
+            None,
         )?;
     }
 

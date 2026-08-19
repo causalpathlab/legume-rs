@@ -101,6 +101,7 @@ pub fn run_inference_and_write(args: InferenceArgs) -> anyhow::Result<()> {
         args.edges,
         &hard_z,
         args.cell_names,
+        None,
     )?;
 
     write_propensity(

@@ -737,6 +737,7 @@ pub fn compute_propensity_and_gene_community_stat(
         edges,
         &edge_membership,
         &cell_names,
+        None,
     )?;
 
     // 3. Gene-community stat

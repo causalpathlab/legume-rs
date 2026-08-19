@@ -95,6 +95,7 @@ pub fn run_cascade(
     cell_names: &[Box<str>],
     gene_weights: Option<&[f32]>,
     gene_axis: &GeneAxis,
+    edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<CascadeResult> {
     anyhow::ensure!(
         !level_cell_labels.is_empty(),
@@ -242,6 +243,7 @@ pub fn run_cascade(
                 gene_weights,
                 gene_axis,
                 block_size,
+                edge_kind,
             )?;
             written_level_indices.push(l);
         }

@@ -11,11 +11,16 @@ use crate::util::gene_axis::GeneAxis;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 /// Write link community assignments to parquet.
+///
+/// `edge_kind` marks each pair's provenance when the pair graph was augmented
+/// with expression neighbours. `None` omits the column entirely, so an
+/// unaugmented run is byte-identical to one from before the flag existed.
 pub fn write_link_communities(
     file_path: &str,
     edges: &[(usize, usize)],
     membership: &[usize],
     cell_names: &[Box<str>],
+    edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<()> {
     use matrix_util::parquet::*;
     use parquet::basic::Type as ParquetType;
@@ -25,13 +30,21 @@ pub fn write_link_communities(
     let right_cells: Vec<Box<str>> = edges.iter().map(|&(_, j)| cell_names[j].clone()).collect();
     let cluster_f32: Vec<f32> = membership.iter().map(|&k| k as f32).collect();
 
-    let col_names: Vec<Box<str>> =
+    let mut col_names: Vec<Box<str>> =
         vec!["left_cell".into(), "right_cell".into(), "community".into()];
-    let col_types = vec![
+    let mut col_types = vec![
         ParquetType::BYTE_ARRAY,
         ParquetType::BYTE_ARRAY,
         ParquetType::FLOAT,
     ];
+    // Written as f32 like `community`, since this writer's numeric column
+    // helper takes f32 and the values are small integer codes.
+    let edge_kind_f32: Option<Vec<f32>> =
+        edge_kind.map(|k| k.iter().map(|&x| x as f32).collect());
+    if edge_kind_f32.is_some() {
+        col_names.push("edge_kind".into());
+        col_types.push(ParquetType::FLOAT);
+    }
 
     let writer = ParquetWriter::new(
         file_path,
@@ -49,6 +62,9 @@ pub fn write_link_communities(
     parquet_add_string_column(&mut row_group, &left_cells)?;
     parquet_add_string_column(&mut row_group, &right_cells)?;
     parquet_add_numeric_column(&mut row_group, &cluster_f32)?;
+    if let Some(kind) = edge_kind_f32.as_ref() {
+        parquet_add_numeric_column(&mut row_group, kind)?;
+    }
 
     row_group.close()?;
     writer.close()?;
@@ -258,12 +274,14 @@ pub fn write_partition_outputs(
     gene_weights: Option<&[f32]>,
     axis: &GeneAxis,
     block_size: Option<usize>,
+    edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<(Mat, GammaMatrix)> {
     write_link_communities(
         &format!("{}.link_community.parquet", prefix),
         edges,
         fine_labels,
         cell_names,
+        edge_kind,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
     let gene_community =
@@ -290,6 +308,7 @@ pub fn write_level_outputs(
     gene_weights: Option<&[f32]>,
     axis: &GeneAxis,
     block_size: Option<usize>,
+    edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<()> {
     write_partition_outputs(
         &format!("{}.L{}", out_prefix, level_idx),
@@ -302,6 +321,7 @@ pub fn write_level_outputs(
         gene_weights,
         axis,
         block_size,
+        edge_kind,
     )?;
     Ok(())
 }
