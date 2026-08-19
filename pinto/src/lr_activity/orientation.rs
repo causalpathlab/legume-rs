@@ -64,13 +64,28 @@ impl DirectedStrata {
     ///
     /// Ties go to the lowest community index, which is arbitrary but stable,
     /// and a tie means the cell sits between two communities in any case.
+    /// Anchor each cell to the community of its incident edges, then build the
+    /// strata over the edges that will actually be tested.
+    ///
+    /// The two lists differ once the pair graph carries expression-similar
+    /// pairs. Those pairs belong in `anchor_edges`: which community a cell sits
+    /// in is a statement about the partition, and more evidence is better. They
+    /// must NOT appear in `tested_edges`: a directional ligand-receptor test
+    /// presupposes physical contact, and a pair that is merely similar has
+    /// none, so there is no estimand to test.
+    ///
+    /// Every index this type later hands back refers to `tested_edges`, so a
+    /// caller must pass that same slice to [`Self::role_memberships`].
+    ///
+    /// Passing the same slice twice is the unaugmented case.
     pub fn from_edge_modes(
-        edges: &[(usize, usize, u32, Option<Box<str>>)],
+        anchor_edges: &[(usize, usize, u32, Option<Box<str>>)],
+        tested_edges: &[(usize, usize, u32, Option<Box<str>>)],
         n_cells: usize,
     ) -> Self {
         let mut counts: Vec<FxHashMap<u32, usize>> =
             (0..n_cells).map(|_| FxHashMap::default()).collect();
-        for &(i, j, k, _) in edges {
+        for &(i, j, k, _) in anchor_edges {
             *counts[i].entry(k).or_insert(0) += 1;
             *counts[j].entry(k).or_insert(0) += 1;
         }
@@ -84,7 +99,7 @@ impl DirectedStrata {
                     .map_or(u32::MAX, |(c, _)| c)
             })
             .collect();
-        Self::new(dominant, edges)
+        Self::new(dominant, tested_edges)
     }
 
     /// Build the strata from a per-cell community assignment.

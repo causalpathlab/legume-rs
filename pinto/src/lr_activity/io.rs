@@ -22,6 +22,10 @@ pub struct EdgeRecord {
     /// If either `left_batch` or `right_batch` is absent the whole fit is
     /// treated as single-batch and this is `None`.
     pub batch: Option<Box<str>>,
+    /// Whether the two cells are physically adjacent. `true` for every edge of
+    /// a run whose pair graph was not augmented, and for the shared pairs of
+    /// one that was, since those really are adjacent.
+    pub is_spatial: bool,
 }
 
 /// Read `{prefix}.link_community.parquet` (columns: left_cell, right_cell, community).
@@ -45,16 +49,24 @@ pub fn read_link_community(file_path: &str) -> anyhow::Result<Vec<EdgeRecord>> {
     let ci = *name_to_idx
         .get("community")
         .ok_or_else(|| anyhow::anyhow!("community missing in {file_path}"))?;
+    // Absent on a run that predates pair-graph augmentation, and on any run
+    // that did not augment. Both mean every pair is a spatial one.
+    let ki = name_to_idx.get("edge_kind").copied();
 
     let mut out = Vec::new();
     for record in reader.get_row_iter(None)? {
         let row = record?;
         let community_f = row.get_float(ci)?;
+        let is_spatial = match ki {
+            Some(k) => row.get_float(k)? as i32 == crate::util::cell_pairs::EDGE_KIND_SPATIAL,
+            None => true,
+        };
         out.push(EdgeRecord {
             left_cell: row_label(&row, li)?,
             right_cell: row_label(&row, ri)?,
             community: community_f as u32,
             batch: None,
+            is_spatial,
         });
     }
     Ok(out)
