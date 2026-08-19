@@ -136,8 +136,15 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         fisher_weights: false,
         batch_effects: true,
         gene_axis: GeneAxisMode::Rows,
-        // `dsvd` mutates its projection in place during coarsening, so it
-        // keeps taking its own rather than sharing one.
+        // `dsvd` takes its own projection because it asks for a different one:
+        // it batch-corrects unconditionally, where preprocessing corrects only
+        // when batch effects were estimated. On a single-batch run those two
+        // are not the same projection, so sharing would quietly change results.
+        //
+        // Note this is a request, not a contract: preprocessing still takes one
+        // when `--knn-expr` needs it for the expression graph, and that one is
+        // dropped here. Combining `--knn-expr` with coordinates therefore costs
+        // two projection passes.
         cell_projection: false,
         feature_kind: None,
     })?;

@@ -333,12 +333,19 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
             },
         )?;
         let (merged, source) = graph.union_with(&expr_graph, DistanceMerge::SourceRank)?;
-        let n_both = source.iter().filter(|s| **s == EdgeSource::Both).count();
+        let (mut n_spatial, mut n_expr, mut n_both) = (0usize, 0usize, 0usize);
+        for s in source.iter() {
+            match s {
+                EdgeSource::Primary => n_spatial += 1,
+                EdgeSource::Secondary => n_expr += 1,
+                EdgeSource::Both => n_both += 1,
+            }
+        }
         info!(
             "{} cell pairs after augmentation: {} spatial, {} expression, {} shared",
             merged.edges.len(),
-            source.iter().filter(|s| **s == EdgeSource::Primary).count() + n_both,
-            source.iter().filter(|s| **s == EdgeSource::Secondary).count(),
+            n_spatial + n_both,
+            n_expr,
             n_both
         );
         (merged, Some(graph), Some(source))

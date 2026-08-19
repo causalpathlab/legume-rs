@@ -61,14 +61,27 @@ pub struct SrtInputArgs {
     #[arg(
         long = "coord-column-names",
         value_delimiter(','),
-        default_value = "pxl_row_in_fullres,pxl_col_in_fullres,cell_centroid_x,cell_centroid_y",
+        default_value = "pxl_row_in_fullres,pxl_col_in_fullres,cell_centroid_x,cell_centroid_y,x_centroid,y_centroid",
         help = "Column names for spatial coordinates in coord files",
         long_help = "Column names to select as spatial coordinates, comma separated.\n\
-                     Names absent from a given file are silently skipped.\n\
-                     The default therefore covers Visium and Xenium alike.\n\
+                     Names absent from a given file are skipped, so the default\n\
+                     covers the common single-cell and spot layouts at once.\n\
                      \n\
-                     Default: pxl_row_in_fullres, pxl_col_in_fullres, cell_centroid_x,\n\
-                     cell_centroid_y"
+                     Default: pxl_row_in_fullres, pxl_col_in_fullres,\n\
+                     cell_centroid_x, cell_centroid_y, x_centroid, y_centroid.\n\
+                     \n\
+                     Quoting does not matter. A file whose header reads \"x_centroid\"\n\
+                     matches the name x_centroid, and the same holds for the cell\n\
+                     names in the first column.\n\
+                     \n\
+                     If none of these names is present, the file is read by POSITION\n\
+                     instead, taking columns 4 and 5. That is the tissue_positions\n\
+                     layout, and it is only attempted when the file looks like one,\n\
+                     meaning it also carries in_tissue, array_row and array_col.\n\
+                     Any other named file is rejected with its column list, rather\n\
+                     than read positionally: two numeric columns in those positions\n\
+                     would otherwise be accepted as coordinates without complaint.\n\
+                     Pass this flag with two of the names it printed to resolve it."
     )]
     pub coord_column_names: Vec<Box<str>>,
 
@@ -693,6 +706,42 @@ pub fn read_one_coord_file(
         // the pixel coordinates sit at indices 4 and 5.
         let fallback_indices: Vec<usize> = if is_zarr { vec![0, 1] } else { vec![4, 5] };
         let fallback_names: Vec<Box<str>> = vec!["x".into(), "y".into()];
+
+        // Taking columns 4 and 5 is not a general guess: it is knowledge of one
+        // specific layout. So check the file IS that layout before applying it.
+        //
+        // Applied blindly it produces a silent wrong answer rather than an
+        // error. A single-cell vendor cell table, for instance, carries
+        // per-cell QC counts at exactly those positions, so every cell would
+        // take the same coordinates and the run would report nothing amiss.
+        //
+        // A file with no header at all is left alone: there are no names to
+        // check, and positional reading is the only thing available.
+        if !is_zarr {
+            if let Ok(found) = peek_delimited_header(coord_file) {
+                let has = |want: &str| {
+                    found
+                        .iter()
+                        .any(|f| f.eq_ignore_ascii_case(want))
+                };
+                // The signature of `tissue_positions.{csv,parquet}`, whose
+                // pixel coordinates sit at 4 and 5 whatever they are called.
+                let is_known_layout =
+                    has("in_tissue") && has("array_row") && has("array_col");
+                if !is_known_layout && found.len() > 1 {
+                    return Err(anyhow::anyhow!(
+                        "coord file '{}' has named columns, but none of them are the \
+                         coordinates asked for {:?} and its layout is not one this \
+                         recognises. Its columns are {:?}. Pass --coord-column-names \
+                         with two of those.",
+                        coord_file,
+                        user_names,
+                        found,
+                    ));
+                }
+            }
+        }
+
         match initial {
             Err(e) => warn!(
                 "coord file '{}' could not be read by names {:?} ({}); \
@@ -747,6 +796,30 @@ fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usi
 
 /// Auto-detect whether the first line of a delimited file is a header row
 /// by checking if it contains any of the requested column names.
+/// The column names on the first line of a delimited file, if it looks like a
+/// header rather than data.
+///
+/// Only used to tell a user which columns their file actually has, so a
+/// best-effort read is enough and any failure just means we say nothing.
+fn peek_delimited_header(path: &str) -> anyhow::Result<Vec<Box<str>>> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first)?;
+    let fields: Vec<Box<str>> = first
+        .trim_end_matches(['\n', '\r'])
+        .split(['\t', ',', ' '])
+        .map(|f| f.trim().trim_matches('"').to_string().into_boxed_str())
+        .filter(|f| !f.is_empty())
+        .collect();
+    // If every field parses as a number this is data, not a header.
+    anyhow::ensure!(
+        fields.iter().any(|f| f.parse::<f64>().is_err()),
+        "first line looks like data, not a header"
+    );
+    Ok(fields)
+}
+
 fn detect_header_row(
     file_path: &str,
     delimiters: &[char],

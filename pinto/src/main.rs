@@ -306,7 +306,7 @@ enum Commands {
                       The stick-breaking (IBP) prior orders dims by admittance.\n\
                       The data decides how many are really used.\n\
                       Chain levels differ only in their negative pools.\n\
-                      This is embedding-only — there is no count decoder.\n\n\
+                      This is embedding-only. There is no count decoder.\n\n\
                       NOTE --n-hvg no longer subsets the trained gene axis.\n\
                       It weights the random projection instead.\n\
                       That projection builds the coarsening hierarchy.\n\
@@ -418,10 +418,10 @@ enum Commands {
                       Per-cell propensity is a mass-preserving aggregation:\n\
                       \x20 propensity[i, k] = (1/deg(i)) · Σ_{e ∋ i} π_e[k].\n\n\
                       TRAINING (--train-mode):\n\n\
-                      \x20 masked (default) — hold out a fraction of each\n\
+                      \x20 masked (default): hold out a fraction of each\n\
                       \x20   edge's genes and predict them (BERT-like, no KL).\n\
                       \x20   Collapse-proof; strongly preferred on real data.\n\
-                      \x20 elbo — generative VAE with a KL'd posterior; prone\n\
+                      \x20 elbo: generative VAE with a KL'd posterior; prone\n\
                       \x20   to posterior collapse. Use only for calibrated\n\
                       \x20   per-edge entropy.\n\n\
                       QUICK START:\n\n\
@@ -450,7 +450,7 @@ enum Commands {
                       Markers default to tightly tiling flat-top hexagons.\n\
                       Their size adapts to plot density.\n\n\
                       INPUT (--from):\n\n\
-                      \x20 Pass either a `{prefix}.pinto.json` (preferred —\n\
+                      \x20 Pass either a `{prefix}.pinto.json` (preferred,\n\
                       \x20 carries level list, dict-merge presence, and any lr_activity\n\
                       \x20 JSON) or a bare `{prefix}` (auto-globs *.parquet).\n\n\
                       PER-LEVEL × PER-CORE PLOTS (default = PDF only):\n\n\
@@ -468,7 +468,7 @@ enum Commands {
                       OPT-IN: --show-interfaces (per (level, core)):\n\n\
                       \x20 interfaces.pdf  All cells; radius scaled by entropy\n\
                       \x20                 quantile rank (within core), single dark\n\
-                      \x20                 gray fill — high-entropy boundary cells\n\
+                      \x20                 gray fill. High-entropy boundary cells\n\
                       \x20                 stand out as full hex tiles, low-entropy\n\
                       \x20                 interior cells fade to 0.\n\
                       \x20 interfaces.tsv  Per focal cell: dominant community,\n\
@@ -535,12 +535,12 @@ enum Commands {
                       \x20    per-stratum (median, MAD) of stat_obs (z_re / p_re), then\n\
                       \x20    Westfall-Young single-step minP for FWER (fwer_wy).\n\n\
                       QUICK START:\n\n\
-                      \x20 # Shortest form — read inputs from a prior pinto lc .pinto.json:\n\
+                      \x20 # Shortest form, reading inputs from a prior pinto lc .pinto.json:\n\
                       \x20 pinto lra --from out/run1.pinto.json --lr-pairs cellchat_pairs.tsv\n\n\
                       \x20   `--from <.pinto.json>` auto-fills `--lc-prefix`, `--out` (=\n\
                       \x20   `<prefix>.lra`), `--coord`, and the positional data files from\n\
                       \x20   the metadata. Any of those passed explicitly on the CLI win.\n\n\
-                      \x20 # Long form — same effect, fully explicit:\n\
+                      \x20 # Long form, same effect, fully explicit:\n\
                       \x20 pinto lr-activity data.h5 -c coords.csv -o out/run1.lr \\\n\
                       \x20   --lc-prefix out/run1 --lr-pairs cellchat_pairs.tsv\n\n\
                       INPUTS:\n\n\
@@ -561,31 +561,31 @@ enum Commands {
                       \x20                          buckets; 0 disables stratification).\n\
                       \x20 --n-permutations         number of sample shuffles (default 1000).\n\n\
                       OUTPUTS:\n\n\
-                      \x20 {out}.lr_activity.parquet — columns:\n\
+                      \x20 {out}.lr_activity.parquet, columns:\n\
                       \x20   batch, community, sender_community,\n\
                       \x20   receiver_community, homotypic,\n\
                       \x20   ligand, receptor, n_samples,\n\
                       \x20   stat_obs (weighted covariance of log1p(w·pb)),\n\
                       \x20   null_mean, null_sd, z, p_empirical, p_z, z_re, p_re,\n\
                       \x20   fwer_wy.\n\
-                      \x20   z_re/p_re — Efron-Tibshirani restandardization of\n\
+                      \x20   z_re/p_re: Efron-Tibshirani restandardization of\n\
                       \x20     stat_obs against per-stratum (median, MAD).\n\
-                      \x20   fwer_wy — Westfall-Young single-step minP\n\
+                      \x20   fwer_wy: Westfall-Young single-step minP\n\
                       \x20     (joint sample permutation across pairs in a stratum;\n\
                       \x20     FWER-controlled).\n\
-                      \x20   community — the DIRECTED STRATUM id, not an `lc`\n\
+                      \x20   community: the DIRECTED STRATUM id, not an `lc`\n\
                       \x20     community. It does NOT join against\n\
                       \x20     link_community.parquet or propensity.parquet.\n\
                       \x20     Join on sender_community or receiver_community\n\
                       \x20     instead, which are real community ids.\n\
-                      \x20   sender_community / receiver_community — the two\n\
+                      \x20   sender_community / receiver_community: the two\n\
                       \x20     communities the roles were scored in. A stratum\n\
                       \x20     a->b and its reverse b->a are both tested, and\n\
                       \x20     the directional finding is the contrast.\n\
-                      \x20   homotypic — both endpoints share a community, so\n\
+                      \x20   homotypic: both endpoints share a community, so\n\
                       \x20     the statistic is symmetric by construction and\n\
                       \x20     no direction may be read off that row.\n\n\
-                      \x20 {out}.lr_activity.json — sidecar consumed by `pinto plot`:\n\
+                      \x20 {out}.lr_activity.json, the sidecar consumed by `pinto plot`:\n\
                       \x20   summary stats per pair (with `ligand_resolved` /\n\
                       \x20   `receptor_resolved` row-name aliases) PLUS, for each\n\
                       \x20   significant pair (fwer_wy < --json-fwer-threshold), the\n\

@@ -356,6 +356,7 @@ pub trait IoOps {
         }
 
         if let Some(names) = column_names {
+            // The tokenizer has already unquoted both sides.
             let name_indices: Vec<usize> = header
                 .iter()
                 .enumerate()
@@ -386,6 +387,9 @@ pub trait IoOps {
         relevant_indices.dedup();
 
         let row_names: Vec<Box<str>> = match row_name_index {
+            // Unquoted, for the same reason the header is: a fully-quoted csv
+            // would otherwise yield row names carrying their quotes, which then
+            // match nothing when joined against a matrix's own names.
             Some(row_name_index) => lines
                 .iter()
                 .map(|words| words[row_name_index].clone())
@@ -394,6 +398,18 @@ pub trait IoOps {
                 .map(|x| x.to_string().into_boxed_str())
                 .collect(),
         };
+
+        // Indices can come from a caller's fallback rather than from a name
+        // match, so they are not guaranteed to exist in this file. Say which
+        // column was asked for and how many the file has, instead of panicking
+        // on the subscript several lines later.
+        let n_columns = header.len().max(lines.first().map_or(0, |w| w.len()));
+        if let Some(&bad) = relevant_indices.iter().find(|&&j| j >= n_columns) {
+            return Err(anyhow::anyhow!(
+                "column index {bad} is out of range: the file has {n_columns} column(s). \
+                 Name the columns to read, or pass indices within range."
+            ));
+        }
 
         let column_names: Vec<Box<str>> = if header.is_empty() {
             relevant_indices
