@@ -277,7 +277,12 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             .par_iter()
             .progress_with(prog_bar.clone())
             .try_fold(
-                || (Mat::zeros(genes.len(), prop_kn.nrows()), DVec::zeros(prop_kn.nrows())),
+                || {
+                    (
+                        Mat::zeros(genes.len(), prop_kn.nrows()),
+                        DVec::zeros(prop_kn.nrows()),
+                    )
+                },
                 |(mut acc_dk, mut acc_k), &(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
                     let x_dn = data_vec.read_columns_csc(lb..ub)?;
                     let mut p_kn = Mat::zeros(prop_kn.nrows(), x_dn.ncols());
@@ -294,7 +299,12 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
                 },
             )
             .try_reduce(
-                || (Mat::zeros(genes.len(), prop_kn.nrows()), DVec::zeros(prop_kn.nrows())),
+                || {
+                    (
+                        Mat::zeros(genes.len(), prop_kn.nrows()),
+                        DVec::zeros(prop_kn.nrows()),
+                    )
+                },
                 |(mut a_dk, mut a_k), (b_dk, b_k)| {
                     a_dk += b_dk;
                     a_k += b_k;

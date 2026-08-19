@@ -10,7 +10,9 @@
 //! `SrtCellPairs::with_graph(&pre.data_vec, &pre.coordinates, &pre.graph)`.
 
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
-use crate::util::cell_pairs::{build_expression_graph, build_spatial_graph, SrtCellPairsArgs};
+use crate::util::cell_pairs::{
+    build_expression_graph, build_expression_knn, build_spatial_graph, SrtCellPairsArgs,
+};
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use crate::util::input::{
@@ -18,6 +20,7 @@ use crate::util::input::{
     SrtInputArgs,
 };
 use crate::util::knn_graph::KnnGraph;
+use matrix_util::knn_graph::{DistanceMerge, EdgeSource};
 use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::RandProjOps;
@@ -43,6 +46,10 @@ pub struct SrtPreprocessConfig<'a> {
     /// `FeatureNameKind::Gene` or an `auto_detect`'d kind so gene
     /// symbols register as aliases of `ENSG..._SYMBOL` row names.
     pub feature_kind: Option<FeatureNameKind>,
+    /// Compute the shared post-batch-correction cell projection and hand it
+    /// back on [`SrtPreprocessed::cell_proj`]. `lc` and `cage` both need one
+    /// for coarsening, so taking it here spares them a second full pass.
+    pub cell_projection: bool,
 }
 
 /// How a caller wants the feature axis resolved.
@@ -71,6 +78,17 @@ pub struct SrtPreprocessed {
     /// when single-batch.
     pub batch_effects: Option<Mat>,
     pub graph: KnnGraph,
+    /// The pre-augmentation SPATIAL graph, `Some` only when `--knn-expr`
+    /// added expression edges. Prefer [`Self::topology_graph`] over reaching
+    /// for this directly.
+    pub spatial_graph: Option<KnnGraph>,
+    /// Which graph each edge of [`Self::graph`] came from, parallel to
+    /// `graph.edges`. `None` when no augmentation ran.
+    pub edge_source: Option<Vec<EdgeSource>>,
+    /// The projection taken here, with the SAME batch argument `lc` and
+    /// `cage` would have used, so they can reuse it instead of paying for a
+    /// second full pass. `None` unless the config asked for one.
+    pub cell_proj: Option<data_beans_alg::random_projection::RandColProjOut>,
     /// The gene unit axis. `Some` iff the config asked for it. Identity (one
     /// gene per row) unless the rows carry splice channels.
     pub gene_axis: Option<GeneAxis>,
@@ -98,6 +116,25 @@ pub struct SrtPreprocessed {
     pub n_cells: usize,
     /// Matrix rows. Equal to the gene count only on a non-channelized axis.
     pub n_rows: usize,
+}
+
+/// The graph neighbourhood algorithms must navigate, given the modelled graph
+/// and the pre-augmentation spatial one.
+///
+/// The union is the edge set being MODELLED. It is the wrong graph to walk:
+/// seeding floods along adjacency, and refinement asks whether removing a node
+/// would disconnect its cluster. Over expression edges the first teleports a
+/// seed across the tissue and the second is vacuous, because every cluster
+/// ends up connected to every other. Both take the spatial graph instead.
+///
+/// A free function rather than a method because every caller destructures
+/// [`SrtPreprocessed`] field by field, which is deliberate: adding a field
+/// should force each call site to say what it wants.
+pub fn topology_graph<'a>(
+    graph: &'a KnnGraph,
+    spatial_graph: &'a Option<KnnGraph>,
+) -> &'a KnnGraph {
+    spatial_graph.as_ref().unwrap_or(graph)
 }
 
 ////////////////////
@@ -245,6 +282,64 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         None
     };
 
+    // Augmentation happens AFTER this point, never before, for two reasons.
+    //
+    // `auto_batch_from_components` above must see the spatial graph: the union
+    // is a single connected component, so it would report one batch, skip
+    // batch-effect estimation entirely, and collapse every tissue core into
+    // one frame downstream. That failure is silent.
+    //
+    // And the expression graph should be built on a batch-corrected
+    // projection, or its neighbours match batch rather than cell type.
+    let batch_arg: Option<&[Box<str>]> = batch_effects
+        .is_some()
+        .then_some(batch_membership.as_slice());
+
+    let cell_proj = if cfg.cell_projection || (c.knn_expr > 0 && has_coords) {
+        Some(data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?)
+    } else {
+        None
+    };
+
+    let (graph, spatial_graph, edge_source) = if c.knn_expr == 0 {
+        (graph, None, None)
+    } else if !has_coords {
+        // The base graph already IS the expression graph, so a union would be
+        // a self-union. Say so rather than doing nothing quietly.
+        warn!(
+            "--knn-expr {} ignored: without --coord the cell-pair graph is already \
+             built from expression",
+            c.knn_expr
+        );
+        (graph, None, None)
+    } else {
+        info!(
+            "Adding expression KNN edges (k={}, proj_dim={})...",
+            c.knn_expr, c.proj_dim
+        );
+        let proj = cell_proj
+            .as_ref()
+            .expect("a projection is taken whenever knn_expr > 0 and coordinates exist");
+        let expr_graph = build_expression_knn(
+            &proj.proj,
+            SrtCellPairsArgs {
+                knn: c.knn_expr,
+                block_size: c.block_size,
+                reciprocal: c.reciprocal,
+            },
+        )?;
+        let (merged, source) = graph.union_with(&expr_graph, DistanceMerge::SourceRank)?;
+        let n_both = source.iter().filter(|s| **s == EdgeSource::Both).count();
+        info!(
+            "{} cell pairs after augmentation: {} spatial, {} expression, {} shared",
+            merged.edges.len(),
+            source.iter().filter(|s| **s == EdgeSource::Primary).count() + n_both,
+            source.iter().filter(|s| **s == EdgeSource::Secondary).count(),
+            n_both
+        );
+        (merged, Some(graph), Some(source))
+    };
+
     // What a ROW means, decided once, before anything keyed on a gene runs.
     let gene_axis = match cfg.gene_axis {
         GeneAxisMode::Rows => None,
@@ -298,6 +393,9 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         batch_membership,
         batch_effects,
         graph,
+        spatial_graph,
+        edge_source,
+        cell_proj,
         gene_axis,
         row_weights,
         row_stats,

@@ -227,6 +227,33 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
+        default_value_t = 5,
+        help = "KNN: expression-similar neighbours added to the pair graph",
+        long_help = "Neighbours per cell in a second, non-spatial KNN graph built on\n\
+                     random-projected expression.\n\
+                     Its edges are added to the spatial ones, so the cell pairs\n\
+                     downstream are the union of both.\n\
+                     \n\
+                     Expression-similar pairs are the same cell type by construction.\n\
+                     They act as a reference for what a same-type pair looks like,\n\
+                     which sharpens those communities and leaves the pairs that bridge\n\
+                     two types standing out as the residue.\n\
+                     \n\
+                     The expression graph is built after batch correction, so it\n\
+                     matches cell type rather than batch.\n\
+                     \n\
+                     This is not symmetric with -k: expression neighbours agree with\n\
+                     each other less often, so fewer of their edges collapse together\n\
+                     and the same K adds more pairs than the spatial graph holds.\n\
+                     Runtime and peak memory both rise with the resulting pair count.\n\
+                     \n\
+                     Ignored without --coord, where the graph already comes from\n\
+                     expression. Set to 0 for spatial neighbours only."
+    )]
+    pub knn_expr: usize,
+
+    #[arg(
+        long,
         default_value_t = false,
         help = "Use reciprocal (mutual) KNN matching for spatial graph",
         long_help = "Use reciprocal (mutual) KNN matching for the spatial graph.\n\

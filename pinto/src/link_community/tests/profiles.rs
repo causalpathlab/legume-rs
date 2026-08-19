@@ -271,7 +271,9 @@ fn edge_profiles_survive_a_short_final_job() {
     }
 
     // 17 edges at a block of 4 gives jobs of 4,4,4,4,1 — a short final job.
-    let edges: Vec<(usize, usize)> = (0..17).map(|i| (i % n_cells, (i * 3 + 1) % n_cells)).collect();
+    let edges: Vec<(usize, usize)> = (0..17)
+        .map(|i| (i % n_cells, (i * 3 + 1) % n_cells))
+        .collect();
     let edge_indices: Vec<usize> = (0..edges.len()).collect();
 
     let mut basis = Mat::zeros(n_genes, m);

@@ -5,7 +5,7 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{
-    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+    preprocess_srt, topology_graph, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use data_beans_alg::cell_pairs::CellPairs;
 use data_beans_alg::random_projection::*;
@@ -121,6 +121,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         batch_membership,
         batch_effects: batch_db,
         graph,
+        spatial_graph,
+        edge_source,
+        cell_proj: _,
         gene_axis: _,
         row_weights: _,
         row_stats: _,
@@ -133,13 +136,21 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         fisher_weights: false,
         batch_effects: true,
         gene_axis: GeneAxisMode::Rows,
+        // `dsvd` mutates its projection in place during coarsening, so it
+        // keeps taking its own rather than sharing one.
+        cell_projection: false,
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();
     let gene_names = data_vec.row_names()?;
 
     // Wrap graph with data for pair-level operations
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph_and_source(
+        &data_vec,
+        &coordinates,
+        &graph,
+        edge_source.as_deref(),
+    );
 
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
@@ -162,8 +173,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     let batch_ref = batch_db.as_ref();
 
+    let topology = topology_graph(&graph, &spatial_graph);
     let ml = graph_coarsen_multilevel(
-        &graph,
+        topology,
         &mut cell_proj.proj,
         srt_cell_pairs.inner.pairs(),
         CoarsenConfig {

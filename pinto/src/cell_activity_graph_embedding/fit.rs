@@ -94,7 +94,7 @@ use crate::util::graph_coarsen::{
 use crate::util::metadata::{create_cage_metadata, RunInputs, SpliceTrackInfo, DELTA_BASE_SPLICED};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
 use crate::util::srt_pipeline::{
-    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+    preprocess_srt, topology_graph, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 
 use candle_util::candle_core::Tensor;
@@ -198,6 +198,9 @@ pub fn fit_cell_activity_graph_embedding(
         batch_membership,
         batch_effects: batch_db,
         graph,
+        spatial_graph,
+        edge_source,
+        cell_proj: shared_cell_proj,
         gene_axis,
         row_weights: fisher_weights,
         row_stats,
@@ -210,6 +213,7 @@ pub fn fit_cell_activity_graph_embedding(
         fisher_weights: !args.no_fisher_weights,
         batch_effects: true,
         gene_axis: GeneAxisMode::Strict,
+        cell_projection: true,
         feature_kind: Some(feature_kind),
     })?;
 
@@ -250,7 +254,12 @@ pub fn fit_cell_activity_graph_embedding(
     // between a gene's two tracks and hands the dispersion trend a variance
     // that is too small exactly where the two tracks covary most.
 
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph_and_source(
+        &data_vec,
+        &coordinates,
+        &graph,
+        edge_source.as_deref(),
+    );
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
         Some(coordinate_names.clone()),
@@ -355,13 +364,15 @@ pub fn fit_cell_activity_graph_embedding(
     };
 
     let cell_proj = match hvg_weights.as_deref() {
+        // HVG weighting makes this a genuinely different projection, so the
+        // shared one cannot stand in for it.
         Some(w) => data_vec.project_columns_weighted(c.proj_dim, c.block_size, batch_arg, w)?,
-        None => {
-            data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?
-        }
+        None => shared_cell_proj
+            .expect("cell_projection = true above must yield a projection"),
     };
+    let topology = topology_graph(&graph, &spatial_graph);
     let ml = graph_coarsen_multilevel(
-        &graph,
+        topology,
         &mut cell_proj.proj.clone(),
         srt_cell_pairs.inner.pairs(),
         CoarsenConfig {

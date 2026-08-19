@@ -14,12 +14,34 @@ use matrix_util::parquet::Column;
 use matrix_util::traits::RandomizedAlgs;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+/// `edge_kind` for a physically adjacent pair.
+pub const EDGE_KIND_SPATIAL: i32 = 0;
+/// `edge_kind` for a pair that is expression-similar but not adjacent.
+pub const EDGE_KIND_EXPRESSION: i32 = 1;
+
+/// How a pair reads in the per-edge outputs.
+///
+/// [`EdgeSource::Both`] is deliberately spatial: such a pair is physically
+/// adjacent as well as expression-similar, and a consumer filtering on
+/// spatial is asking about adjacency.
+pub fn edge_kind_code(source: matrix_util::knn_graph::EdgeSource) -> i32 {
+    use matrix_util::knn_graph::EdgeSource::*;
+    match source {
+        Primary | Both => EDGE_KIND_SPATIAL,
+        Secondary => EDGE_KIND_EXPRESSION,
+    }
+}
+
 pub struct SrtCellPairs<'a> {
     /// The coordinate-free core: counts + the graph whose edges are the pairs.
     pub inner: CellPairs<'a>,
     /// Per-cell positions, `n_cells × n_dims`. In expression mode these are a
     /// synthesized 2D layout rather than tissue coordinates.
     pub coordinates: &'a Mat,
+    /// Per-pair `edge_kind`, parallel to `inner.pairs()`. `None` when the
+    /// graph was not augmented, in which case the column is not written at
+    /// all and an unaugmented run stays byte-identical.
+    pub edge_kind: Option<Vec<i32>>,
 }
 
 pub struct SrtCellPairsArgs {
@@ -40,6 +62,22 @@ impl<'a> SrtCellPairs<'a> {
         SrtCellPairs {
             inner: CellPairs::from_graph(data, graph),
             coordinates,
+            edge_kind: None,
+        }
+    }
+
+    /// As [`Self::with_graph`], recording which graph each pair came from.
+    pub fn with_graph_and_source(
+        data: &'a SparseIoVec,
+        coordinates: &'a Mat,
+        graph: &'a KnnGraph,
+        edge_source: Option<&[matrix_util::knn_graph::EdgeSource]>,
+    ) -> SrtCellPairs<'a> {
+        SrtCellPairs {
+            inner: CellPairs::from_graph(data, graph),
+            coordinates,
+            edge_kind: edge_source
+                .map(|src| src.iter().copied().map(edge_kind_code).collect()),
         }
     }
 
@@ -66,10 +104,16 @@ impl<'a> SrtCellPairs<'a> {
         }
 
         let coords = self.pair_coordinate_columns(&coordinate_names);
-        let columns: Vec<(Box<str>, Column<'_>)> = coords
+        let mut columns: Vec<(Box<str>, Column<'_>)> = coords
             .iter()
             .map(|(name, values)| (name.clone(), Column::F32(values)))
             .collect();
+        // Unprefixed on purpose: the plot layer discovers coordinates by
+        // scanning for a `left_` prefix, so `left_edge_kind` would be read
+        // back as a coordinate.
+        if let Some(kind) = self.edge_kind.as_ref() {
+            columns.push(("edge_kind".into(), Column::I32(kind)));
+        }
 
         self.inner.to_parquet(file_path, &columns)
     }
@@ -106,19 +150,32 @@ pub fn build_spatial_graph(coordinates: &Mat, args: SrtCellPairsArgs) -> anyhow:
 
 /// Build a KNN graph from expression embeddings (random projection).
 ///
-/// When spatial coordinates are not available, we build the cell-cell graph
-/// from random-projected gene expression. Returns the graph and a 2D
-/// force-directed layout for visualization in output files.
+/// `cell_proj` is `proj_dim x n_cells`, which is the layout
+/// [`KnnGraph::from_columns`] already wants, so no transpose is needed.
+pub fn build_expression_knn(cell_proj: &Mat, args: SrtCellPairsArgs) -> anyhow::Result<KnnGraph> {
+    KnnGraph::from_columns(
+        cell_proj,
+        KnnGraphArgs {
+            knn: args.knn,
+            block_size: args.block_size.unwrap_or(1000),
+            reciprocal: args.reciprocal,
+        },
+    )
+}
+
+/// The expression graph plus a 2D layout to stand in for real coordinates.
+///
+/// For the graph alone use [`build_expression_knn`]: the layout costs a
+/// force-directed pass over the whole edge list and is pure waste when the
+/// caller already has coordinates.
 pub fn build_expression_graph(
     cell_proj: &Mat,
     args: SrtCellPairsArgs,
 ) -> anyhow::Result<(KnnGraph, Mat)> {
-    // cell_proj is proj_dim × N from RandProjOps; transpose to N × proj_dim
-    // so each row is a cell embedding for KNN
-    let embedding_nk = cell_proj.transpose();
-    let graph = build_spatial_graph(&embedding_nk, args)?;
+    let graph = build_expression_knn(cell_proj, args)?;
 
-    // Compute 2D layout: PCA init → force-directed refinement using graph
+    // The layout wants one row per cell, unlike the KNN above.
+    let embedding_nk = cell_proj.transpose();
     info!("Computing 2D layout (PCA + force-directed)...");
     let coords_2d = force_directed_layout(&embedding_nk, &graph)?;
 
