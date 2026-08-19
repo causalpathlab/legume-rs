@@ -253,6 +253,10 @@ pub fn read_lines_of_words_delim(
     //
     // This splitter cannot honour a quoted field containing the delimiter
     // anyway, so trimming the outer quotes loses nothing it had.
+    // Every field is also trimmed. That is wider than unquoting and worth
+    // stating: it is what removes the trailing \r on CRLF input, and it applies
+    // to every delimited file the workspace reads through here.
+    //
     // Only a field quoted at BOTH ends is a quoted field. Trimming either end
     // on its own corrupts content that merely happens to start or finish with a
     // quote: a GTF attribute column reads `gene_id "X"; gene_name "Y"`, which

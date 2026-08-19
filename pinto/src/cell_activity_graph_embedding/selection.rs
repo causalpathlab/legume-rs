@@ -332,7 +332,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     // mean across pseudobulks makes cosine on the result equal Pearson on the
     // log-rates — the same reason `dict_merge.rs:47-53` centres before its
     // cosine merge. `scale_columns` alone does NOT fix this: measured on Visium
-    // that section it still left σ₁/σ₂ = 6.2.
+    // that same section it still left σ₁/σ₂ = 6.2.
     // Gene means come from the FINEST level and are reused for every level's
     // projection. Centring each level by its OWN means would put each level in
     // a different affine frame while they share one basis and one pooled
@@ -392,8 +392,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         // Dropping `.scale_columns()` here is not cosmetic. The basis is the
         // Nyström map for standardized columns, so projecting unstandardized
         // ones yields `e_pb[p,:] = sig_p · V[p,:]` — every row rescaled by its
-        // own spread of log counts, a direct depth proxy. Measured on a real
-        // Visium before the fix: corr(row norm, log library size) = 0.452,
+        // own spread of log counts, a direct depth proxy. Measured before the fix: corr(row norm, log library size) = 0.452,
         // which the per-dim correlation diagnostic could not see because
         // scaling by a positive factor moves magnitudes, not signs.
         // `tr_mul` is `Aᵀ · B` without materializing `Aᵀ`. The explicit

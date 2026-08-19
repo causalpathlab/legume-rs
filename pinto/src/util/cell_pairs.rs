@@ -222,6 +222,16 @@ pub fn build_expression_knn_within(
         );
     }
 
+    // Sorted before it leaves, so the result does not depend on the order the
+    // components happened to be labelled in. That labelling comes from a
+    // parallel union-find and varies between runs; without this the ranks the
+    // union assigns to tied distances would move with it, and those ranks are
+    // written to a file.
+    let mut order: Vec<usize> = (0..edges.len()).collect();
+    order.sort_unstable_by_key(|&i| edges[i]);
+    let edges: Vec<(usize, usize)> = order.iter().map(|&i| edges[i]).collect();
+    let distances: Vec<f32> = order.iter().map(|&i| distances[i]).collect();
+
     // The one implementation of this invariant lives with the type: the COO to
     // CSC conversion SUMS entries sharing a coordinate, so an edge pushed twice
     // silently doubles its weight.

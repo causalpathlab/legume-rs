@@ -386,6 +386,27 @@ pub trait IoOps {
         relevant_indices.sort_unstable();
         relevant_indices.dedup();
 
+        // Every subscript below is checked here first: the row-name column, the
+        // selected data columns, and the header lookup that names them. Width is
+        // the NARROWEST data row, ignoring blank ones, because a ragged file
+        // otherwise passes this and panics later in the value loop. The header
+        // is checked separately, since it can be one field short of the data
+        // rows when a writer omits a name for the row-label column.
+        let n_columns = lines
+            .iter()
+            .map(|w| w.len())
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(header.len());
+        let mut to_check: Vec<usize> = relevant_indices.clone();
+        to_check.extend(row_name_index);
+        if let Some(&bad) = to_check.iter().find(|&&j| j >= n_columns) {
+            return Err(anyhow::anyhow!(
+                "column index {bad} is out of range: the file has {n_columns} column(s). \
+                 Name the columns to read, or pass indices within range."
+            ));
+        }
+
         let row_names: Vec<Box<str>> = match row_name_index {
             // Unquoted, for the same reason the header is: a fully-quoted csv
             // would otherwise yield row names carrying their quotes, which then
@@ -403,25 +424,6 @@ pub trait IoOps {
         // match, so they are not guaranteed to exist in this file. Say which
         // column was asked for and how many the file has, instead of panicking
         // on the subscript several lines later.
-        // Checked against the NARROWEST row, and before any subscript below,
-        // including the row-name one. Validating against the first row only
-        // leaves a ragged file to panic later in the value loop, and running
-        // after `row_names` leaves that subscript unguarded.
-        let n_columns = lines
-            .iter()
-            .map(|w| w.len())
-            .min()
-            .unwrap_or(header.len())
-            .max(if lines.is_empty() { header.len() } else { 0 });
-        let mut to_check: Vec<usize> = relevant_indices.clone();
-        to_check.extend(row_name_index);
-        if let Some(&bad) = to_check.iter().find(|&&j| j >= n_columns) {
-            return Err(anyhow::anyhow!(
-                "column index {bad} is out of range: the file has {n_columns} column(s). \
-                 Name the columns to read, or pass indices within range."
-            ));
-        }
-
         let column_names: Vec<Box<str>> = if header.is_empty() {
             relevant_indices
                 .iter()
@@ -430,7 +432,14 @@ pub trait IoOps {
         } else {
             relevant_indices
                 .iter()
-                .map(|&j| header[j].clone())
+                // A header can be narrower than the data rows; fall back to the
+                // position rather than panicking on a name that was never written.
+                .map(|&j| {
+                    header
+                        .get(j)
+                        .cloned()
+                        .unwrap_or_else(|| j.to_string().into_boxed_str())
+                })
                 .collect()
         };
 
