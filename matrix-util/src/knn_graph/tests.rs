@@ -364,3 +364,54 @@ fn union_rejects_graphs_over_different_node_counts() {
     };
     assert!(err.contains("node"), "{err}");
 }
+
+/// Ranks are written into the merged graph's `distances`, and that lands in a
+/// file. The sort is parallel and unstable, so ties must be broken on
+/// something stable or the file stops being reproducible between runs. Equal
+/// distances are the common case, not a corner: a grid of coordinates ties
+/// everywhere.
+///
+/// Stated as an exact expectation rather than a repeat-and-compare, because
+/// a repeat inside one process can agree by luck.
+#[test]
+fn tied_distances_rank_in_index_order_so_the_result_is_reproducible() {
+    // The fixture has to do two things at once: be large enough to engage the
+    // parallel sort, and mix ties WITH distinct values. All-equal input does
+    // not work, because the sort recognises that pattern and moves nothing, so
+    // ties survive even with no tie-break and the test cannot fail.
+    const N: usize = 100_000;
+    let tied_and_distinct: Vec<f32> = (0..N).map(|i| (i % 4) as f32).collect();
+    let r = within_source_rank(&tied_and_distinct);
+
+    for i in 0..N {
+        for j in [i + 4, i + 400] {
+            if j < N {
+                assert!(
+                    r[i] < r[j],
+                    "equal values must rank in index order: {i} vs {j}"
+                );
+            }
+        }
+    }
+    // And the ranks are still exactly the ladder, just permuted.
+    let mut sorted = r.clone();
+    sorted.sort_by(f32::total_cmp);
+    let ladder: Vec<f32> = (0..N).map(|i| i as f32 / (N - 1) as f32).collect();
+    assert_eq!(sorted, ladder);
+
+    // A partial tie: the two 1.0s must keep their relative index order, and
+    // ranks must still be a permutation of the same ladder.
+    let mixed = vec![9.0f32, 1.0, 5.0, 1.0];
+    let r = within_source_rank(&mixed);
+    assert!(r[1] < r[3], "the earlier of two equal values ranks first");
+    assert!(r[1] < r[2] && r[2] < r[0], "distinct values keep their order");
+    let mut sorted = r.clone();
+    sorted.sort_by(f32::total_cmp);
+    assert_eq!(sorted, vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
+}
+
+#[test]
+fn ranking_handles_degenerate_lengths() {
+    assert!(within_source_rank(&[]).is_empty());
+    assert_eq!(within_source_rank(&[7.0]), vec![0.0], "no divide by n-1 == 0");
+}

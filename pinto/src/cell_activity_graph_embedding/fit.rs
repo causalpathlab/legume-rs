@@ -191,6 +191,12 @@ pub fn fit_cell_activity_graph_embedding(
     /////////////////////////////////////
     // 1-3. Load + KNN + batch effects //
     /////////////////////////////////////
+    // Needed before preprocessing, which decides whether to take a shared
+    // projection on our behalf. HVG weighting makes that projection a
+    // different object, so asking for one we cannot use would compute and
+    // then hold a full `proj_dim x n_cells` matrix for the whole run.
+    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
+
     let SrtPreprocessed {
         data_vec,
         coordinates,
@@ -213,7 +219,7 @@ pub fn fit_cell_activity_graph_embedding(
         fisher_weights: !args.no_fisher_weights,
         batch_effects: true,
         gene_axis: GeneAxisMode::Strict,
-        cell_projection: true,
+        cell_projection: !hvg_enabled,
         feature_kind: Some(feature_kind),
     })?;
 
@@ -330,7 +336,6 @@ pub fn fit_cell_activity_graph_embedding(
     // cage used to hard-subset here, which would now mean running a
     // variance-based selector in front of the spike-and-slab gate, with the
     // cruder one first and irreversible.
-    let hvg_enabled = args.hvg.n_hvg > 0 || args.hvg.feature_list_file.is_some();
     let must_train =
         data_beans_alg::hvg::load_must_train(args.hvg.must_train_features.as_deref(), hvg_enabled)?;
     let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
@@ -365,10 +370,16 @@ pub fn fit_cell_activity_graph_embedding(
 
     let cell_proj = match hvg_weights.as_deref() {
         // HVG weighting makes this a genuinely different projection, so the
-        // shared one cannot stand in for it.
-        Some(w) => data_vec.project_columns_weighted(c.proj_dim, c.block_size, batch_arg, w)?,
+        // shared one cannot stand in for it. Preprocessing skips taking one
+        // in this case, but `--knn-expr` needs an unweighted projection for
+        // its own graph and takes one anyway, so drop it rather than carry a
+        // second full matrix through training.
+        Some(w) => {
+            drop(shared_cell_proj);
+            data_vec.project_columns_weighted(c.proj_dim, c.block_size, batch_arg, w)?
+        }
         None => shared_cell_proj
-            .expect("cell_projection = true above must yield a projection"),
+            .expect("preprocessing takes the projection whenever HVG is off"),
     };
     let topology = topology_graph(&graph, &spatial_graph);
     let ml = graph_coarsen_multilevel(

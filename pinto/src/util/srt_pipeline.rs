@@ -121,11 +121,13 @@ pub struct SrtPreprocessed {
 /// The graph neighbourhood algorithms must navigate, given the modelled graph
 /// and the pre-augmentation spatial one.
 ///
-/// The union is the edge set being MODELLED. It is the wrong graph to walk:
-/// seeding floods along adjacency, and refinement asks whether removing a node
-/// would disconnect its cluster. Over expression edges the first teleports a
-/// seed across the tissue and the second is vacuous, because every cluster
-/// ends up connected to every other. Both take the spatial graph instead.
+/// The union is the edge set being MODELLED. It is the wrong graph to walk.
+/// Seeding floods along adjacency, so over expression edges a seed can jump to
+/// a similar cell anywhere in the tissue. Refinement asks whether removing a
+/// node would disconnect its cluster, and expression edges can only ever add
+/// connections, so the check weakens as they are added. How far it weakens
+/// depends on `--knn-expr` and on the data; the point is that neither question
+/// is being asked about adjacency any more. Both take the spatial graph.
 ///
 /// A free function rather than a method because every caller destructures
 /// [`SrtPreprocessed`] field by field, which is deliberate: adding a field
@@ -284,10 +286,12 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
 
     // Augmentation happens AFTER this point, never before, for two reasons.
     //
-    // `auto_batch_from_components` above must see the spatial graph: the union
-    // is a single connected component, so it would report one batch, skip
-    // batch-effect estimation entirely, and collapse every tissue core into
-    // one frame downstream. That failure is silent.
+    // `auto_batch_from_components` above must see the spatial graph. It splits
+    // batches by connected component, and expression edges bridge sections
+    // freely, so on a multi-section slide the union will typically collapse to
+    // one component. Then it reports one batch, batch-effect estimation is
+    // skipped, and every tissue core lands in one frame downstream. That
+    // failure is silent, which is why the ordering here is load-bearing.
     //
     // And the expression graph should be built on a batch-corrected
     // projection, or its neighbours match batch rather than cell type.

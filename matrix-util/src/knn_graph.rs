@@ -114,7 +114,9 @@ impl KnnGraph {
         // Sort then fold, NOT a keyed map. At a few million edges an ordered
         // map costs a pointer-chasing O(log n) descent and a node allocation
         // per insert, all of it serial. One flat buffer, one parallel sort and
-        // one linear scan is cheaper on every axis and parallelises.
+        // one linear scan replaces that, and measured an order of magnitude
+        // faster. The allocation count drops too, though only the time was
+        // measured.
         //
         // The canonical key is what makes this a set operation: a pair stored
         // one way round in one input and the other way round in the other must
@@ -686,7 +688,16 @@ fn within_source_rank(d: &[f32]) -> Vec<f32> {
         return vec![0.0; d.len()];
     }
     let mut order: Vec<usize> = (0..d.len()).collect();
-    order.sort_unstable_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap_or(std::cmp::Ordering::Equal));
+    // Ties break on the index, which is what makes this safe to sort in
+    // parallel: an unstable parallel sort would otherwise put equal distances
+    // in a run-dependent order, and these ranks are written out, so the file
+    // would stop being reproducible. Grid-spaced coordinates tie constantly,
+    // so this is the common case rather than a corner.
+    //
+    // `total_cmp` rather than `partial_cmp().unwrap_or(Equal)`: it is a total
+    // order, so it needs no per-comparison branch and it gives NaN a definite
+    // position instead of making it a wildcard that breaks transitivity.
+    order.par_sort_unstable_by(|&a, &b| d[a].total_cmp(&d[b]).then(a.cmp(&b)));
     let mut out = vec![0.0f32; d.len()];
     let denom = (d.len() - 1) as f32;
     for (rank, &idx) in order.iter().enumerate() {
