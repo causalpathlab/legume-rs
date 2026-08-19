@@ -691,7 +691,7 @@ pub fn auto_batch_from_components(
     let spacing = median_edge_length(graph).unwrap_or(0.0);
     let slack = 3.0 * spacing;
 
-    let dims = coordinates.ncols().min(2).max(1);
+    let dims = coordinates.ncols().clamp(1, 2);
     let mut lo = vec![f64::INFINITY; n_components * dims];
     let mut hi = vec![f64::NEG_INFINITY; n_components * dims];
     let mut sum = vec![0.0f64; n_components * dims];
