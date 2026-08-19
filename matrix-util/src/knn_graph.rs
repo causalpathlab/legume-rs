@@ -106,9 +106,10 @@ impl KnnGraph {
 
         let (a_dist, b_dist) = match policy {
             DistanceMerge::Raw => (self.distances.clone(), other.distances.clone()),
-            DistanceMerge::SourceRank => {
-                (within_source_rank(&self.distances), within_source_rank(&other.distances))
-            }
+            DistanceMerge::SourceRank => (
+                within_source_rank(&self.distances),
+                within_source_rank(&other.distances),
+            ),
         };
 
         // Sort then fold, NOT a keyed map. At a few million edges an ordered
@@ -674,7 +675,11 @@ mod tests;
 /// direction, because building a `CscMatrix` from a `CooMatrix` SUMS entries
 /// that share a coordinate rather than rejecting them. A duplicate would
 /// silently double that edge's weight.
-fn symmetric_adjacency(n_nodes: usize, edges: &[(usize, usize)], distances: &[f32]) -> CscMatrix<f32> {
+fn symmetric_adjacency(
+    n_nodes: usize,
+    edges: &[(usize, usize)],
+    distances: &[f32],
+) -> CscMatrix<f32> {
     let mut coo = CooMatrix::new(n_nodes, n_nodes);
     for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
         coo.push(i, j, v);

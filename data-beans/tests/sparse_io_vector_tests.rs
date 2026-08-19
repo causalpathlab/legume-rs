@@ -1311,19 +1311,19 @@ fn intra_file_canonicalizer_collisions_sum_into_one_row() -> anyhow::Result<()> 
     // Find the row index whose name canonicalizes to "GENE1" — it's whichever
     // compact row is NOT "GENE2".
     let names = vec.row_names()?;
-    let tbce_row = names
+    let gene1_row = names
         .iter()
         .position(|n| n.as_ref() == "GENE1")
         .expect("merged row should be named GENE1");
-    let other_row = 1 - tbce_row;
+    let gene2_row = 1 - gene1_row;
 
     assert_eq!(
-        dense.row(tbce_row).to_vec(),
+        dense.row(gene1_row).to_vec(),
         vec![5.0, 5.0, 3.0, 0.0],
         "GENE1 row should be the per-cell SUM of the two ENSG records"
     );
     assert_eq!(
-        dense.row(other_row).to_vec(),
+        dense.row(gene2_row).to_vec(),
         vec![0.0, 0.0, 0.0, 7.0],
         "non-collided row passes through unchanged"
     );
