@@ -424,7 +424,6 @@ pub fn fit_cell_activity_graph_embedding(
                 graph: &graph,
                 cell_features: &cell_proj.proj,
                 embedding_dim: args.embedding_dim,
-                block_size: c.block_size,
                 gene_axis: &gene_axis,
             },
         )?;

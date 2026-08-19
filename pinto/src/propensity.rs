@@ -267,34 +267,42 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         );
 
         let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-module blocks");
-        let partial_stats = jobs
+        // Folded, not collected: `sum_dk` is `[n_genes x k]` no matter how few
+        // cells a job reads, so collecting one per job makes peak memory scale
+        // with the job count. `generate_minibatch_intervals` sizes a block to
+        // bound READ work and knows nothing about that, so a wide, sparse input
+        // lands on the small-block floor and produces thousands of jobs. Same
+        // shape as `fit_gene_community_param`.
+        let (mut sum_dk, n_k_sum) = jobs
             .par_iter()
             .progress_with(prog_bar.clone())
-            .map(|&(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
-                let x_dn = data_vec.read_columns_csc(lb..ub)?;
-                let mut p_kn = Mat::zeros(prop_kn.nrows(), x_dn.ncols());
+            .try_fold(
+                || (Mat::zeros(genes.len(), prop_kn.nrows()), DVec::zeros(prop_kn.nrows())),
+                |(mut acc_dk, mut acc_k), &(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
+                    let x_dn = data_vec.read_columns_csc(lb..ub)?;
+                    let mut p_kn = Mat::zeros(prop_kn.nrows(), x_dn.ncols());
 
-                for (i, v) in data_vertices[lb..ub].iter().enumerate() {
-                    if let Some(&j) = vertex_index.get(v) {
-                        p_kn.column_mut(i).copy_from(&prop_kn.column(j));
+                    for (i, v) in data_vertices[lb..ub].iter().enumerate() {
+                        if let Some(&j) = vertex_index.get(v) {
+                            p_kn.column_mut(i).copy_from(&prop_kn.column(j));
+                        }
                     }
-                }
 
-                let n_k = p_kn.column_sum();
-                let sum_dk = x_dn * p_kn.transpose();
-
-                Ok((sum_dk, n_k))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+                    acc_k += p_kn.column_sum();
+                    acc_dk += x_dn * p_kn.transpose();
+                    Ok((acc_dk, acc_k))
+                },
+            )
+            .try_reduce(
+                || (Mat::zeros(genes.len(), prop_kn.nrows()), DVec::zeros(prop_kn.nrows())),
+                |(mut a_dk, mut a_k), (b_dk, b_k)| {
+                    a_dk += b_dk;
+                    a_k += b_k;
+                    Ok((a_dk, a_k))
+                },
+            )?;
         prog_bar.finish_and_clear();
-
-        let mut sum_dk = Mat::zeros(genes.len(), prop_kn.nrows());
-        let mut n_1k = Mat::zeros(1, prop_kn.nrows());
-
-        for (s_dk, n_k1) in partial_stats {
-            sum_dk += s_dk;
-            n_1k += n_k1.transpose();
-        }
+        let n_1k = n_k_sum.transpose();
 
         info!("Applying NB Fisher-info weighting to gene-cluster stats");
         let w = compute_nb_fisher_weights(&data_vec, args.block_size)?;

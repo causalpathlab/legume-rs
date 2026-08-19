@@ -27,27 +27,40 @@ pub fn compute_row_totals(
     let n_cells = data.num_columns();
     let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
 
-    let partials: Vec<Vec<f64>> = jobs
+    // Accumulate with `try_fold` + `try_reduce`, NOT `map().collect()`.
+    //
+    // `collect` materializes one accumulator PER JOB and holds them all until
+    // the sum afterwards, so peak memory scales with the job count. The job count is
+    // set by `default_block_size`, which derives the block from the FEATURE count
+    // to bound read work, and is blind to how much each job allocates. At 18k
+    // genes it hits the 100-cell floor, so half a million cells becomes ~5000
+    // jobs, each carrying a full dense accumulator. Folding bounds the live
+    // accumulators by the worker count instead, which is ~80x fewer here, and the
+    // partials were being summed immediately anyway.
+    let totals = jobs
         .par_iter()
-        .map(|&(lb, ub)| -> anyhow::Result<Vec<f64>> {
-            let x = data.read_columns_csc(lb..ub)?;
-            let mut local = vec![0.0f64; n_genes];
-            for col in 0..x.ncols() {
-                let s = x.col(col);
-                for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
-                    local[row] += val as f64;
+        .try_fold(
+            || vec![0.0f64; n_genes],
+            |mut acc, &(lb, ub)| -> anyhow::Result<Vec<f64>> {
+                let x = data.read_columns_csc(lb..ub)?;
+                for col in 0..x.ncols() {
+                    let s = x.col(col);
+                    for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
+                        acc[row] += f64::from(val);
+                    }
                 }
-            }
-            Ok(local)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let mut totals = vec![0.0f64; n_genes];
-    for local in partials {
-        for g in 0..n_genes {
-            totals[g] += local[g];
-        }
-    }
+                Ok(acc)
+            },
+        )
+        .try_reduce(
+            || vec![0.0f64; n_genes],
+            |mut a, b| {
+                for (x, y) in a.iter_mut().zip(b.iter()) {
+                    *x += *y;
+                }
+                Ok(a)
+            },
+        )?;
     Ok(totals)
 }
 
@@ -120,69 +133,63 @@ pub fn build_projection_profiles_for_edges(
     let m = basis.ncols(); // proj_dim
     let basis_t = basis.transpose(); // shared read-only across chunks
 
+    // A zero-width basis would make the chunk width below zero, and
+    // `par_chunks_mut` panics on that rather than yielding nothing.
+    if m == 0 || n_edges == 0 {
+        return Ok(LinkProfileStore::new(Vec::new(), n_edges, m));
+    }
+
     // Extract this subset's edges once.
     let edges: Vec<(usize, usize)> = edge_indices.iter().map(|&e| all_edges[e]).collect();
 
     let jobs = generate_minibatch_intervals(n_edges, data.num_rows(), block_size);
 
+    // Uniform edge count per job, except the last; `par_chunks_mut` splits the
+    // output the same way, so the zip below pairs each job with exactly the
+    // slice holding its own edges.
+    let edges_per_job = jobs.first().map_or(1, |&(lb, ub)| (ub - lb).max(1));
     let prog_bar = new_progress_bar(jobs.len() as u64).with_message("edge blocks");
 
-    let partial_results: Vec<(usize, Vec<f32>)> = jobs
-        .par_iter()
+    // Each job writes a disjoint, known slice of the output, so it writes there
+    // DIRECTLY rather than building its own buffer for a later copy. Collecting
+    // the per-job buffers first meant the whole `n_edges x m` profile existed
+    // twice at once, and that term is the largest allocation in the command.
+    let mut profiles_em = vec![0.0f32; n_edges * m];
+    profiles_em
+        .par_chunks_mut(edges_per_job * m)
+        .zip(jobs.par_iter())
         .progress_with(prog_bar.clone())
-        .map(|&(lb, ub)| -> anyhow::Result<(usize, Vec<f32>)> {
-            let chunk_edges = &edges[lb..ub];
-            let chunk_size = ub - lb;
+        .try_for_each(|(out_em, &(edge_begin, edge_end))| -> anyhow::Result<()> {
+            let job_edges = &edges[edge_begin..edge_end];
+            let (x_gc, col_of_cell) = read_unique_cells_for_edges(data, job_edges)?;
+            let n_genes = x_gc.nrows();
+            // The pooled endpoint profile `x_u + x_v`, reused across edges.
+            let mut pooled_g = DVec::zeros(n_genes);
 
-            let (x_dn, cell_to_col) = read_unique_cells_for_edges(data, chunk_edges)?;
-
-            let n_genes = x_dn.nrows();
-            let mut chunk_profiles = vec![0.0f32; chunk_size * m];
-            let mut temp_g = DVec::zeros(n_genes);
-
-            for (e_idx, &(ci, cj)) in chunk_edges.iter().enumerate() {
-                let col_i = cell_to_col[&ci];
-                let col_j = cell_to_col[&cj];
-
-                temp_g.fill(0.0);
-
-                let col_slice_i = x_dn.col(col_i);
-                for (&row, &val) in col_slice_i
-                    .row_indices()
-                    .iter()
-                    .zip(col_slice_i.values().iter())
-                {
-                    temp_g[row] += val;
+            for (job_edge, &(cell_u, cell_v)) in job_edges.iter().enumerate() {
+                pooled_g.fill(0.0);
+                for read_col in [col_of_cell[&cell_u], col_of_cell[&cell_v]] {
+                    let cell_counts = x_gc.col(read_col);
+                    for (&gene, &count) in cell_counts
+                        .row_indices()
+                        .iter()
+                        .zip(cell_counts.values().iter())
+                    {
+                        pooled_g[gene] += count;
+                    }
                 }
 
-                let col_slice_j = x_dn.col(col_j);
-                for (&row, &val) in col_slice_j
-                    .row_indices()
-                    .iter()
-                    .zip(col_slice_j.values().iter())
-                {
-                    temp_g[row] += val;
-                }
-
-                let proj = &basis_t * &temp_g;
-                let base = e_idx * m;
-                for (d, &v) in proj.iter().enumerate() {
-                    chunk_profiles[base + d] = v.max(0.0);
+                let projected_m = &basis_t * &pooled_g;
+                let profile_offset = job_edge * m;
+                for (dim, &value) in projected_m.iter().enumerate() {
+                    out_em[profile_offset + dim] = value.max(0.0);
                 }
             }
-
-            Ok((lb, chunk_profiles))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(())
+        })?;
     prog_bar.finish_and_clear();
 
-    let mut profiles = vec![0.0f32; n_edges * m];
-    for (lb, chunk) in partial_results {
-        let base = lb * m;
-        profiles[base..base + chunk.len()].copy_from_slice(&chunk);
-    }
-
-    Ok(LinkProfileStore::new(profiles, n_edges, m))
+    Ok(LinkProfileStore::new(profiles_em, n_edges, m))
 }
 
 /// Coarsen fine-cell raw expression to pb-samples.
@@ -191,43 +198,122 @@ pub fn build_projection_profiles_for_edges(
 /// holds `Σ_{i: cell_labels[i] == c} x_fine[:, i]` — i.e. the total
 /// gene counts pooled across every fine cell assigned to pb-sample `c`.
 ///
-/// Streams fine cells in blocks for memory efficiency. The return buffer
-/// is dense (not sparse) because the pb-sample expression is dense by
-/// construction: any gene expressed in any fine cell within a cluster
-/// contributes to that cluster's column.
+/// The return buffer is dense (not sparse) because the pb-sample expression
+/// is dense by construction: any gene expressed in any fine cell within a
+/// cluster contributes to that cluster's column.
 pub fn coarsen_cell_expression_dense(
     data: &SparseIoVec,
     cell_labels: &[usize],
     n_pb_samples: usize,
-    block_size: Option<usize>,
 ) -> anyhow::Result<Mat> {
     let n_genes = data.num_rows();
-    let n_cells = data.num_columns();
-    debug_assert_eq!(cell_labels.len(), n_cells);
+    // Checked, not `debug_assert`ed. The loop below is driven by `cell_labels`
+    // rather than by the column count, so a short label vector would silently
+    // drop the unlabelled tail in a release build instead of failing. The old
+    // cell-blocked code got that check for free from slice indexing.
+    anyhow::ensure!(
+        cell_labels.len() == data.num_columns(),
+        "coarsening needs one pb-sample label per cell: got {} labels for {} cells",
+        cell_labels.len(),
+        data.num_columns()
+    );
 
-    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
+    // Nothing to coarsen into, and `par_chunks_mut` panics on a zero-width
+    // chunk, so leave before either can bite.
+    if n_genes == 0 || n_pb_samples == 0 {
+        return Ok(Mat::zeros(n_genes, n_pb_samples));
+    }
 
-    let partials: Vec<Mat> = jobs
-        .par_iter()
-        .map(|&(lb, ub)| -> anyhow::Result<Mat> {
-            let x = data.read_columns_csc(lb..ub)?;
-            let mut local = Mat::zeros(n_genes, n_pb_samples);
-            for col in 0..x.ncols() {
-                let sc = cell_labels[lb + col];
-                let s = x.col(col);
-                for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
-                    local[(row, sc)] += val;
+    // One job per CHUNK OF PB SAMPLES, not per slab of cells.
+    //
+    // Blocking by cells is what made this expensive: any cell in a slab can
+    // belong to any pb sample, so every job had to carry the full dense
+    // `[n_genes x n_pb_samples]` accumulator, and holding one per job put a
+    // half-million-cell run past 200 GB by the third cascade level. Keyed by pb
+    // sample, a job owns only the columns it writes, so the accumulator no
+    // longer grows as the cascade coarsens.
+    //
+    // A chunk rather than a single sample only matters at the FINE levels. The
+    // job target is capped at `n_pb_samples`, so once the cascade has coarsened
+    // to fewer samples than that cap the chunk is one sample anyway and the
+    // multiplier below does nothing. Where it does bite — many samples, few
+    // workers — it buys work-stealing granularity, because pb samples differ
+    // widely in cell count and a one-job-per-worker split would let the largest
+    // sample set the level's wall time. It also makes each job's column gather
+    // larger, though not contiguous: a job concatenates several samples' cell
+    // lists, so it reads ascending runs, not one ascending sweep.
+    //
+    // Each cell is still read exactly once in total; only the order changes.
+    let n_workers = rayon::current_num_threads().max(1);
+    let target_jobs = (n_workers * 4).min(n_pb_samples.max(1));
+    let pb_per_job = n_pb_samples.div_ceil(target_jobs.max(1)).max(1);
+
+    // Cells bucketed by pb sample, CSR-style: `cells_by_pb[starts[p]..starts[p+1]]`
+    // lists every fine cell assigned to sample `p`, ascending. Two flat vectors
+    // rather than a `Vec<Vec<_>>`, so bucketing is a counting sort over one
+    // allocation instead of one growing allocation per sample, and a job takes
+    // its cells as a slice rather than rebuilding them.
+    //
+    // An out-of-range label is an error rather than a skip: dropping the cell
+    // would leave a pseudobulk quietly missing counts, and every caller derives
+    // `n_pb_samples` as `max(label) + 1`, so it cannot happen without a bug
+    // upstream. The old code caught this by panicking on the matrix index.
+    let mut starts = vec![0usize; n_pb_samples + 1];
+    for (cell, &pb) in cell_labels.iter().enumerate() {
+        anyhow::ensure!(
+            pb < n_pb_samples,
+            "cell {cell} carries pb-sample label {pb}, but only {n_pb_samples} samples exist"
+        );
+        starts[pb + 1] += 1;
+    }
+    for p in 0..n_pb_samples {
+        starts[p + 1] += starts[p];
+    }
+    let mut cells_by_pb = vec![0usize; cell_labels.len()];
+    let mut cursor = starts.clone();
+    for (cell, &pb) in cell_labels.iter().enumerate() {
+        cells_by_pb[cursor[pb]] = cell;
+        cursor[pb] += 1;
+    }
+
+    let mut super_expr_gp = Mat::zeros(n_genes, n_pb_samples);
+    super_expr_gp
+        .as_mut_slice()
+        .par_chunks_mut(n_genes * pb_per_job)
+        .enumerate()
+        .try_for_each(|(job, out_gp)| -> anyhow::Result<()> {
+            let pb_begin = job * pb_per_job;
+            let pb_end = ((job + 1) * pb_per_job).min(n_pb_samples);
+
+            // This job's cells are already contiguous in `cells_by_pb`, so they
+            // are a slice, and the read columns arrive in that same order.
+            let read_begin = starts[pb_begin];
+            let cells_to_read = &cells_by_pb[read_begin..starts[pb_end]];
+            if cells_to_read.is_empty() {
+                return Ok(());
+            }
+
+            let x_gc = data.read_columns_csc(cells_to_read.iter().copied())?;
+            // Walk the samples this job owns and consume their runs in step, so
+            // the pb id never has to be stored per column.
+            for pb_local in 0..(pb_end - pb_begin) {
+                let col_offset = pb_local * n_genes;
+                let run = (starts[pb_begin + pb_local] - read_begin)
+                    ..(starts[pb_begin + pb_local + 1] - read_begin);
+                for read_col in run {
+                    let cell_counts = x_gc.col(read_col);
+                    for (&gene, &count) in cell_counts
+                        .row_indices()
+                        .iter()
+                        .zip(cell_counts.values().iter())
+                    {
+                        out_gp[col_offset + gene] += count;
+                    }
                 }
             }
-            Ok(local)
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let mut super_expr = Mat::zeros(n_genes, n_pb_samples);
-    for local in partials {
-        super_expr += local;
-    }
-    Ok(super_expr)
+            Ok(())
+        })?;
+    Ok(super_expr_gp)
 }
 
 /// Build projection profiles for super-edges from pre-coarsened pb-sample
@@ -404,29 +490,35 @@ pub fn fit_gene_community_param(
     let jobs = generate_minibatch_intervals(n_cells, n_rows, block_size);
 
     let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-community blocks");
-    let partial_stats: Vec<(Mat, DVec)> = jobs
+    // Folded, not collected: see `compute_row_totals`. Each accumulator here is
+    // `[n_rows x k]`, so the same job-count blowup applies.
+    let (mut sum_gk, n_k_sum) = jobs
         .par_iter()
         .progress_with(prog_bar.clone())
-        .map(|&(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
-            let x_gn = data_vec.read_columns_csc(lb..ub)?;
-            let block_len = ub - lb;
-            let mut p_kn_block = Mat::zeros(k, block_len);
-            for i in 0..block_len {
-                p_kn_block.column_mut(i).copy_from(&prop_kn.column(lb + i));
-            }
-            let n_k = p_kn_block.column_sum();
-            let sum_gk = x_gn * p_kn_block.transpose();
-            Ok((sum_gk, n_k))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .try_fold(
+            || (Mat::zeros(n_rows, k), DVec::zeros(k)),
+            |(mut acc_g, mut acc_k), &(lb, ub)| -> anyhow::Result<(Mat, DVec)> {
+                let x_gn = data_vec.read_columns_csc(lb..ub)?;
+                let block_len = ub - lb;
+                let mut p_kn_block = Mat::zeros(k, block_len);
+                for i in 0..block_len {
+                    p_kn_block.column_mut(i).copy_from(&prop_kn.column(lb + i));
+                }
+                acc_k += p_kn_block.column_sum();
+                acc_g += x_gn * p_kn_block.transpose();
+                Ok((acc_g, acc_k))
+            },
+        )
+        .try_reduce(
+            || (Mat::zeros(n_rows, k), DVec::zeros(k)),
+            |(mut ag, mut ak), (bg, bk)| {
+                ag += bg;
+                ak += bk;
+                Ok((ag, ak))
+            },
+        )?;
     prog_bar.finish_and_clear();
-
-    let mut sum_gk = Mat::zeros(n_rows, k);
-    let mut n_1k = Mat::zeros(1, k);
-    for (s, n) in partial_stats {
-        sum_gk += s;
-        n_1k += n.transpose();
-    }
+    let n_1k = n_k_sum.transpose();
     if let Some(folded) = axis.and_then(|a| a.pool_rows_opt(&sum_gk)) {
         sum_gk = folded;
     }

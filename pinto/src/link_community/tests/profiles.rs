@@ -134,3 +134,172 @@ fn test_module_pair_profiles_residual() {
     assert_eq!(cols.len(), 1);
     assert!((vals[0] - 4.5).abs() < 1e-5, "got y = {}", vals[0]);
 }
+
+use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+use data_beans::sparse_io_vector::SparseIoVec;
+
+/// Build a tiny on-disk backend from triplets, deduplicated by `(row, col)`.
+fn backend_from(
+    dir: &tempfile::TempDir,
+    triplets: Vec<(u64, u64, f32)>,
+    n_rows: usize,
+    n_cols: usize,
+) -> SparseIoVec {
+    let mut merged: HashMap<(u64, u64), f32> = HashMap::default();
+    for (r, c, v) in triplets {
+        *merged.entry((r, c)).or_insert(0.0) += v;
+    }
+    let triplets: Vec<(u64, u64, f32)> = merged.into_iter().map(|((r, c), v)| (r, c, v)).collect();
+
+    let path = dir.path().join("coarsen_alignment.zarr");
+    let mut backend = create_sparse_from_triplets(
+        &triplets,
+        (n_rows, n_cols, triplets.len()),
+        Some(path.to_str().unwrap()),
+        Some(&SparseIoBackend::Zarr),
+    )
+    .unwrap();
+    let rows: Vec<Box<str>> = (0..n_rows).map(|g| format!("GENE{g}").into()).collect();
+    backend.register_row_names_vec(&rows);
+    let cols: Vec<Box<str>> = (0..n_cols).map(|i| format!("c{i}").into()).collect();
+    backend.register_column_names_vec(&cols);
+    let mut data = SparseIoVec::new();
+    data.push(std::sync::Arc::from(backend), None).unwrap();
+    data
+}
+
+/// Jobs are keyed by a chunk of pb-samples while `par_chunks_mut` splits the
+/// output column-major, so the two partitions have to agree exactly. They only
+/// do because `n_genes` divides the chunk width. Break that correspondence —
+/// write to the global pb column rather than the job-local one — and this test
+/// fails.
+///
+/// The label map is deliberately scrambled and the counts deliberately not a
+/// multiple of the chunking, so a cell's pb-sample is unrelated to its position.
+#[test]
+fn coarsening_by_pb_chunks_equals_the_brute_force_pooling() {
+    let (n_genes, n_cells, n_pb) = (30usize, 517usize, 53usize);
+
+    let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+    for c in 0..n_cells {
+        for k in 0..3usize {
+            let g = (c * 7 + k * 11 + 3) % n_genes;
+            // Integer-valued, so summation order cannot introduce rounding.
+            let v = (((c * 13 + g * 3 + k) % 9) + 1) as f32;
+            triplets.push((g as u64, c as u64, v));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = backend_from(&dir, triplets.clone(), n_genes, n_cells);
+    let labels: Vec<usize> = (0..n_cells).map(|c| (c * 17 + 5) % n_pb).collect();
+
+    // The generator never repeats a `(gene, cell)` key, so the triplets can be
+    // accumulated straight into the reference.
+    let mut expected = Mat::zeros(n_genes, n_pb);
+    for &(r, c, v) in &triplets {
+        expected[(r as usize, labels[c as usize])] += v;
+    }
+
+    let actual = coarsen_cell_expression_dense(&data, &labels, n_pb).unwrap();
+    assert_eq!((actual.nrows(), actual.ncols()), (n_genes, n_pb));
+    for g in 0..n_genes {
+        for p in 0..n_pb {
+            assert!(
+                (actual[(g, p)] - expected[(g, p)]).abs() < 1e-3,
+                "gene {g}, pb {p}: {} != {}",
+                actual[(g, p)],
+                expected[(g, p)]
+            );
+        }
+    }
+}
+
+/// A label the coarsener has no column for means the caller and the label
+/// vector disagree, and pooling anyway would drop those counts silently.
+#[test]
+fn coarsening_rejects_a_label_with_no_pb_sample_and_a_short_label_vector() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = backend_from(&dir, vec![(0, 0, 1.0), (0, 1, 2.0)], 2, 2);
+
+    // Label 5 with only 2 samples declared.
+    let err = coarsen_cell_expression_dense(&data, &[0, 5], 2).unwrap_err();
+    assert!(err.to_string().contains("label 5"), "{err}");
+
+    // One label for two cells: the tail would otherwise vanish in release.
+    let err = coarsen_cell_expression_dense(&data, &[0], 1).unwrap_err();
+    assert!(err.to_string().contains("one pb-sample label"), "{err}");
+}
+
+/// `par_chunks_mut` panics on a zero-width chunk rather than yielding nothing,
+/// so both degenerate widths return early instead.
+#[test]
+fn degenerate_widths_return_empty_rather_than_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = backend_from(&dir, vec![(0, 0, 1.0)], 2, 2);
+    let out = coarsen_cell_expression_dense(&data, &[0, 0], 0).unwrap();
+    assert_eq!((out.nrows(), out.ncols()), (2, 0));
+
+    // Zero-width basis: every edge gets an empty profile, no panic.
+    let basis = Mat::zeros(2, 0);
+    let edges = vec![(0usize, 1usize)];
+    let store = build_projection_profiles_for_edges(&data, &[0], &edges, &basis, None).unwrap();
+    assert_eq!(store.n_edges, 1);
+    assert_eq!(store.m, 0);
+}
+
+/// The output is chunked by a width taken from the FIRST job, so a short final
+/// job must still line up. Take the width from the last job instead and the
+/// zip misaligns; this catches that.
+#[test]
+fn edge_profiles_survive_a_short_final_job() {
+    let (n_genes, n_cells, m) = (5usize, 20usize, 4usize);
+
+    let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+    for c in 0..n_cells {
+        for g in 0..n_genes {
+            if (c + g) % 3 != 0 {
+                triplets.push((g as u64, c as u64, (((c * 5 + g * 2) % 7) + 1) as f32));
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = backend_from(&dir, triplets.clone(), n_genes, n_cells);
+
+    let mut dense = Mat::zeros(n_genes, n_cells);
+    for &(r, c, v) in &triplets {
+        dense[(r as usize, c as usize)] = v;
+    }
+
+    // 17 edges at a block of 4 gives jobs of 4,4,4,4,1 — a short final job.
+    let edges: Vec<(usize, usize)> = (0..17).map(|i| (i % n_cells, (i * 3 + 1) % n_cells)).collect();
+    let edge_indices: Vec<usize> = (0..edges.len()).collect();
+
+    let mut basis = Mat::zeros(n_genes, m);
+    for g in 0..n_genes {
+        for d in 0..m {
+            basis[(g, d)] = (((g * 3 + d * 2) % 5) as f32) - 2.0;
+        }
+    }
+
+    let store =
+        build_projection_profiles_for_edges(&data, &edge_indices, &edges, &basis, Some(4)).unwrap();
+    assert_eq!(store.n_edges, edges.len());
+
+    let basis_t = basis.transpose();
+    for (e, &(u, v)) in edges.iter().enumerate() {
+        let expected = &basis_t * (dense.column(u) + dense.column(v));
+        let (cols, vals) = store.row(e);
+        let mut got = vec![0.0f32; m];
+        for (&c, &x) in cols.iter().zip(vals.iter()) {
+            got[c as usize] = x;
+        }
+        for d in 0..m {
+            assert!(
+                (got[d] - expected[d].max(0.0)).abs() < 1e-4,
+                "edge {e}, dim {d}: {} != {}",
+                got[d],
+                expected[d].max(0.0)
+            );
+        }
+    }
+}

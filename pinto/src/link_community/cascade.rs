@@ -150,7 +150,6 @@ pub fn run_cascade(
             mode,
             cell_labels_l,
             n_cell_groups,
-            block_size,
         )?;
 
         let is_first_run_level = prev_fine_to_super.is_none();
@@ -279,7 +278,6 @@ fn build_level_profiles(
     mode: &ProfileMode<'_>,
     cell_labels: &[usize],
     n_pb_samples: usize,
-    block_size: Option<usize>,
 ) -> anyhow::Result<LinkProfileStore> {
     match *mode {
         ProfileMode::ModulePair {
@@ -306,8 +304,7 @@ fn build_level_profiles(
             // passed fine-cell data with cluster-label indices, which read
             // arbitrary fine cells as if they were pb-samples — a bug that
             // made super-edge profiles decoupled from pb-sample biology.
-            let super_expr =
-                coarsen_cell_expression_dense(data, cell_labels, n_pb_samples, block_size)?;
+            let super_expr = coarsen_cell_expression_dense(data, cell_labels, n_pb_samples)?;
             Ok(build_super_edge_projection_profiles(
                 &super_expr,
                 super_edges,
