@@ -276,22 +276,26 @@ pub struct SrtInputArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = KnnExprScope::Within,
+        default_value_t = KnnExprScope::Global,
         help = "Whether expression neighbours may cross disconnected tissue",
         long_help = "Where --knn-expr searches for expression neighbours.\n\
                      \n\
-                     within (default): inside each disconnected piece of the\n\
-                     spatial graph. Separate sections, or the cores of a tissue\n\
-                     microarray, are usually separate samples, and the rest of this\n\
-                     pipeline already treats such a piece as a batch.\n\
+                     global (default): anywhere on the slide. Asking for expression\n\
+                     neighbours at all means wanting a reference for what a cell type\n\
+                     looks like, and the strongest such reference is drawn from every\n\
+                     piece of tissue rather than one. Section effects are handled by\n\
+                     correction rather than by refusing to look: the projection these\n\
+                     neighbours come from is batch-corrected when batches are known,\n\
+                     so pair --auto-batch with this on a multi-section slide.\n\
                      \n\
-                     global: anywhere on the slide. Expression similarity ignores\n\
-                     geometry, so on a microarray nearly every neighbour it finds\n\
-                     will sit in a different core, and therefore a different sample.\n\
-                     Use this when a reference for what a cell type looks like is\n\
-                     wanted from the whole slide rather than one sample, and prefer\n\
-                     it with --auto-batch so the projection has had section effects\n\
-                     removed first."
+                     within: inside each disconnected piece of the\n\
+                     spatial graph. Separate sections, or the cores of a tissue\n\
+                     microarray, are usually separate samples, and this keeps every\n\
+                     pair inside one of them. Choose it when a pair spanning two\n\
+                     samples is not something the model should be shown at all.\n\
+                     \n\
+                     On a microarray the two differ sharply: searching globally,\n\
+                     nearly every neighbour found sits in a different core."
     )]
     pub knn_expr_scope: KnnExprScope,
 
@@ -650,10 +654,6 @@ pub fn read_data_without_coordinates(args: SRTReadArgs) -> anyhow::Result<SRTDat
     })
 }
 
-/// Replace batch membership with connected component labels if the spatial
-/// graph has multiple disconnected components (e.g., tissue microarray cores).
-///
-/// Returns the number of components found.
 /// Where `--knn-expr` looks for expression neighbours.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KnnExprScope {
@@ -663,6 +663,11 @@ pub enum KnnExprScope {
     Global,
 }
 
+/// Label each disconnected piece of the spatial graph as its own batch.
+///
+/// Pieces that are fragments of a larger one are folded into it first, so the
+/// count returned is the number of BATCHES, which is at most the number of
+/// components. Leaves the labels untouched when the graph is connected.
 pub fn auto_batch_from_components(
     graph: &KnnGraph,
     coordinates: &Mat,
@@ -710,17 +715,15 @@ pub fn auto_batch_from_components(
     // sits in rather than any larger box that happens to span it.
     let mut into: Vec<usize> = (0..n_components).collect();
     for c in 0..n_components {
-        let centre: Vec<f64> = (0..dims)
-            .map(|d| sum[c * dims + d] / size[c].max(1) as f64)
-            .collect();
         let mut best: Option<(f64, usize)> = None;
         for other in 0..n_components {
             if other == c || size[other] <= size[c] {
                 continue;
             }
+            let centre = |d: usize| sum[c * dims + d] / size[c].max(1) as f64;
             let inside = (0..dims).all(|d| {
-                centre[d] >= lo[other * dims + d] - slack
-                    && centre[d] <= hi[other * dims + d] + slack
+                centre(d) >= lo[other * dims + d] - slack
+                    && centre(d) <= hi[other * dims + d] + slack
             });
             if !inside {
                 continue;
@@ -754,12 +757,20 @@ pub fn auto_batch_from_components(
         .collect();
     let n_batches = kept.len();
     if n_batches < n_components {
+        // Sizes, not just a count: a run that folded a 4000-cell "fragment"
+        // into its neighbour has merged two samples, and a count alone hides it.
+        let mut folded: Vec<usize> = (0..n_components)
+            .filter(|&c| into[c] != c)
+            .map(|c| size[c])
+            .collect();
+        folded.sort_unstable_by(|a, b| b.cmp(a));
         info!(
             "Auto-detected {} spatial components; {} lie inside another and were \
-             folded into it, giving {} batches",
+             folded into it, giving {} batches. Folded piece sizes, largest first: {:?}",
             n_components,
             n_components - n_batches,
-            n_batches
+            n_batches,
+            &folded[..folded.len().min(10)]
         );
     } else {
         info!(
@@ -789,13 +800,13 @@ fn median_edge_length(graph: &KnnGraph) -> Option<f64> {
 
 /// Read a single coordinate file with a name-then-index fallback.
 ///
-/// Tries to read the requested coordinate columns by name first. When the
-/// caller did NOT pass explicit indices (`user_indices` empty) and the
-/// name-based read either errored or returned fewer than 2 columns, retries
-/// with conventional 0-based indices: `[0, 1]` for zarr (whose
-/// `/cell_summary` array contains only coordinate columns) or `[4, 5]` for
-/// text/parquet files (Visium classic `tissue_positions` layout). Fallback
-/// columns are labeled `x, y`.
+/// Coordinates are the columns the caller named or numbered. Nothing is
+/// inferred: reading by position is a guess about the file, and a wrong guess
+/// does not fail, because any two numeric columns pass as coordinates.
+///
+/// When neither selector resolves, this errors and quotes the file's first
+/// line back, since the caller cannot fix it without seeing what the file
+/// holds.
 pub fn read_one_coord_file(
     coord_file: &str,
     user_indices: &[usize],
@@ -868,6 +879,18 @@ pub fn read_one_coord_file(
         ));
     }
 
+    if let Ok(r) = initial.as_ref() {
+        if r.mat.ncols() > 2 {
+            warn!(
+                "coord file '{}' resolved {} coordinate columns {:?}; the graph will be \
+                 built in that many dimensions. If two naming conventions both matched, \
+                 pass --coord-column-names with just the pair you mean",
+                coord_file,
+                r.mat.ncols(),
+                r.cols,
+            );
+        }
+    }
     initial
 }
 
@@ -905,7 +928,9 @@ fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usi
 fn first_line_fields(path: &str) -> anyhow::Result<Vec<Box<str>>> {
     use std::io::BufRead;
     let mut first = String::new();
-    std::io::BufReader::new(std::fs::File::open(path)?).read_line(&mut first)?;
+    // gz-aware, because a coord file often is; opening it raw would fail here
+    // and quietly drop the one hint this error promises.
+    matrix_util::common_io::open_buf_reader(path)?.read_line(&mut first)?;
     Ok(first
         .trim_end_matches(['\n', '\r'])
         .split(['\t', ',', ' '])
@@ -1124,16 +1149,20 @@ mod tests {
     }
 
     #[test]
-    fn test_read_one_coord_file_zarr_fallback_to_0_1() {
-        // Zarr fixture has cell_centroid_{x,y}; passing only Visium names should
-        // error in the underlying reader and trigger fallback to indices [0, 1].
+    fn zarr_coordinates_that_match_no_requested_name_are_reported() {
+        // This used to assert a fallback to indices [0, 1]. There is no
+        // fallback now, so it asserts the replacement contract. It is skipped
+        // without the fixture, which is why the old version stayed green for
+        // as long as it did after the behaviour under it changed.
         let Some(p) = xenium_zarr_path() else { return };
         let names: Vec<Box<str>> = vec!["pxl_row_in_fullres".into(), "pxl_col_in_fullres".into()];
-        let r = read_one_coord_file(p.to_str().unwrap(), &[], &names, None).unwrap();
-        assert_eq!(r.mat.ncols(), 2);
-        assert!(r.mat.nrows() > 0);
-        assert_eq!(r.cols[0].as_ref(), "x");
-        assert_eq!(r.cols[1].as_ref(), "y");
+        match read_one_coord_file(p.to_str().unwrap(), &[], &names, None) {
+            Ok(_) => panic!("names that match nothing must not be guessed at"),
+            Err(e) => {
+                let m = e.to_string();
+                assert!(m.contains("coordinate columns"), "{m}");
+            }
+        }
     }
 
     #[test]

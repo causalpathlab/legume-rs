@@ -26,6 +26,14 @@ pub fn write_link_communities(
     use parquet::basic::Type as ParquetType;
 
     let n_edges = edges.len();
+    if let Some(kind) = edge_kind {
+        anyhow::ensure!(
+            kind.len() == n_edges,
+            "{} edge kinds for {} edges",
+            kind.len(),
+            n_edges
+        );
+    }
     let left_cells: Vec<Box<str>> = edges.iter().map(|&(i, _)| cell_names[i].clone()).collect();
     let right_cells: Vec<Box<str>> = edges.iter().map(|&(_, j)| cell_names[j].clone()).collect();
     let cluster_f32: Vec<f32> = membership.iter().map(|&k| k as f32).collect();
