@@ -551,7 +551,9 @@ enum Commands {
                       \x20 --n-permutations         number of sample shuffles (default 1000).\n\n\
                       OUTPUTS:\n\n\
                       \x20 {out}.lr_activity.parquet — columns:\n\
-                      \x20   batch, community, ligand, receptor, n_samples,\n\
+                      \x20   batch, community, sender_community,\n\
+                      \x20   receiver_community, homotypic,\n\
+                      \x20   ligand, receptor, n_samples,\n\
                       \x20   stat_obs (weighted covariance of log1p(w·pb)),\n\
                       \x20   null_mean, null_sd, z, p_empirical, p_z, z_re, p_re,\n\
                       \x20   fwer_wy.\n\
@@ -559,7 +561,19 @@ enum Commands {
                       \x20     stat_obs against per-stratum (median, MAD).\n\
                       \x20   fwer_wy — Westfall-Young single-step minP\n\
                       \x20     (joint sample permutation across pairs in a stratum;\n\
-                      \x20     FWER-controlled).\n\n\
+                      \x20     FWER-controlled).\n\
+                      \x20   community — the DIRECTED STRATUM id, not an `lc`\n\
+                      \x20     community. It does NOT join against\n\
+                      \x20     link_community.parquet or propensity.parquet.\n\
+                      \x20     Join on sender_community or receiver_community\n\
+                      \x20     instead, which are real community ids.\n\
+                      \x20   sender_community / receiver_community — the two\n\
+                      \x20     communities the roles were scored in. A stratum\n\
+                      \x20     a->b and its reverse b->a are both tested, and\n\
+                      \x20     the directional finding is the contrast.\n\
+                      \x20   homotypic — both endpoints share a community, so\n\
+                      \x20     the statistic is symmetric by construction and\n\
+                      \x20     no direction may be read off that row.\n\n\
                       \x20 {out}.lr_activity.json — sidecar consumed by `pinto plot`:\n\
                       \x20   summary stats per pair (with `ligand_resolved` /\n\
                       \x20   `receptor_resolved` row-name aliases) PLUS, for each\n\

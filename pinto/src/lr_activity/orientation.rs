@@ -85,10 +85,12 @@ impl DirectedStrata {
             if a == u32::MAX || b == u32::MAX {
                 continue;
             }
+            // A homotypic edge is listed BOTH ways by `oriented`, which is what
+            // makes a self stratum symmetric, so it must be counted both ways
+            // here too. Counting it once would hold self strata to a 2x
+            // stricter sparsity bar than heterotypic ones, for no reason.
             seen.push((a, b));
-            if a != b {
-                seen.push((b, a));
-            }
+            seen.push((b, a));
         }
         let mut pairs: Vec<(u32, u32)> = seen.clone();
         pairs.sort_unstable();

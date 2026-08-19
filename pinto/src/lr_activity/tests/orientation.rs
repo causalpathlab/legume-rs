@@ -126,6 +126,31 @@ fn swapping_the_endpoint_columns_changes_nothing() {
     assert_eq!(ra, rb, "recv memberships");
 }
 
+/// `edges_in` is the sparsity filter's input, so it has to agree with what
+/// `oriented` actually yields. A homotypic edge is listed both ways, and if
+/// `resolve` counted it once the self strata would face a 2x stricter bar.
+#[test]
+fn the_edge_count_matches_what_the_oriented_listing_yields() {
+    let edges = two_block_graph();
+    let d = DirectedStrata::resolve(&edges, 6);
+    for s in 0..d.n_strata() {
+        assert_eq!(
+            d.edges_in(s),
+            d.oriented(s, &edges).len(),
+            "stratum {} ({})",
+            s,
+            d.label(s)
+        );
+    }
+    // And the self strata really are the ones that double up.
+    let self0 = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 0)).unwrap();
+    assert_eq!(
+        d.edges_in(self0),
+        6,
+        "3 within-block edges, listed both ways"
+    );
+}
+
 #[test]
 fn stratum_ids_are_sorted_so_they_are_reproducible() {
     let edges = two_block_graph();

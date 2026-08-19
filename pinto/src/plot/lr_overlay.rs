@@ -114,7 +114,15 @@ pub fn read_lr_activity_parquet(path: &Path) -> anyhow::Result<Vec<LrParquetRow>
             .copied()
             .ok_or_else(|| anyhow::anyhow!("{path:?}: missing column `{name}`"))
     };
-    let i_c = need("community")?;
+    // `community` carries a DIRECTED STRATUM id in current runs and an `lc`
+    // community id in older ones. Everything downstream here compares against
+    // real `lc` community ids from the propensity table, so prefer the sender
+    // community when the file has it. A stratum `a -> b` is about community
+    // `a`: that is the side the ligand was scored on.
+    let i_c = field_idx
+        .get("sender_community")
+        .copied()
+        .map_or_else(|| need("community"), Ok)?;
     let i_l = need("ligand")?;
     let i_r = need("receptor")?;
     let i_z = need("z")?;
@@ -207,7 +215,20 @@ pub struct LrStratum {
 #[derive(Deserialize, Debug)]
 pub struct LrResult {
     pub batch: String,
+    /// The directed stratum's id in current runs, an `lc` community id in
+    /// older ones. Use [`Self::lc_community`] rather than this directly.
     pub community: i32,
+    /// The community the ligand side was scored in. Absent from older
+    /// sidecars, which carried an `lc` community id in `community` instead.
+    #[serde(default)]
+    pub sender_community: Option<i32>,
+    /// The community the receptor side was scored in.
+    #[serde(default)]
+    pub receiver_community: Option<i32>,
+    /// Both endpoints share a community, so the statistic is symmetric there
+    /// and its direction must not be drawn as if it meant something.
+    #[serde(default)]
+    pub homotypic: bool,
     pub ligand: String,
     pub receptor: String,
     /// Backend-row-name versions of ligand/receptor (post gene resolution)
@@ -237,6 +258,41 @@ fn default_true() -> bool {
 }
 
 impl LrResult {
+    /// How the stratum reads in a title or a filename: `C3` when both
+    /// endpoints share a community, `C3-C7` when the test was directional.
+    ///
+    /// A homotypic stratum is symmetric by construction, so writing it with an
+    /// arrow would claim a direction the statistic does not have.
+    #[must_use]
+    pub fn stratum_label(&self) -> String {
+        let a = self.lc_community();
+        let b = self.target_community();
+        if self.homotypic || a == b {
+            format!("C{a}")
+        } else {
+            format!("C{a}-C{b}")
+        }
+    }
+
+    /// The `lc` community this row is about, which is the side the ligand was
+    /// scored on.
+    ///
+    /// Everything here compares against real community ids taken from the
+    /// propensity table, so a directed stratum id would match nothing. Older
+    /// sidecars carried a community id in `community`, so that is the fallback.
+    #[must_use]
+    pub fn lc_community(&self) -> i32 {
+        self.sender_community.unwrap_or(self.community)
+    }
+
+    /// The community the arrow points AT. Equal to [`Self::lc_community`] on a
+    /// homotypic stratum, where no direction is defined.
+    #[must_use]
+    pub fn target_community(&self) -> i32 {
+        self.receiver_community
+            .unwrap_or_else(|| self.lc_community())
+    }
+
     /// Backend-row-name keys for `(ligand, receptor)`, falling back to
     /// the raw symbols when `*_resolved` is absent (older sidecars).
     pub fn keys(&self) -> (&str, &str) {
@@ -347,7 +403,10 @@ pub fn render_lr_overlays_for_core(
                     None => true,
                 }
                 && match kept_communities {
-                    Some(k) => r.community >= 0 && k.contains(&(r.community as usize)),
+                    Some(k) => {
+                        let c = r.lc_community();
+                        c >= 0 && k.contains(&(c as usize))
+                    }
                     None => true,
                 }
         })
@@ -552,7 +611,7 @@ pub fn render_lr_overlays_for_core(
                 &segs,
                 &seg_cells,
                 dominant,
-                r.community as i64,
+                i64::from(r.lc_community()),
                 frame.extent,
                 stroke,
                 head_len,
@@ -566,26 +625,26 @@ pub fn render_lr_overlays_for_core(
         // stratified by batch even though the plot core didn't.
         let leaf = match core_batch {
             Some(_) => format!(
-                "C{}.{}-{}",
-                r.community,
+                "{}.{}-{}",
+                r.stratum_label(),
                 sanitize(&r.ligand),
                 sanitize(&r.receptor),
             ),
             None => format!(
-                "B{}.C{}.{}-{}",
+                "B{}.{}.{}-{}",
                 sanitize(&r.batch),
-                r.community,
+                r.stratum_label(),
                 sanitize(&r.ligand),
                 sanitize(&r.receptor),
             ),
         };
         let stub = core.subdir_in(out_dir).join(leaf);
         let label = format!(
-            "{}->{}; B={}; C{}; z={:.2}; q={:.3}",
+            "{}->{}; B={}; {}; z={:.2}; q={:.3}",
             r.ligand,
             r.receptor,
             r.batch,
-            r.community,
+            r.stratum_label(),
             r.z.unwrap_or(f32::NAN),
             r.fwer_wy.unwrap_or(f32::NAN),
         );
@@ -785,11 +844,11 @@ pub fn emit_lr_summary_global(
             .entry((r.ligand.as_str(), r.receptor.as_str()))
             .and_modify(|v| {
                 if z > v.0 {
-                    *v = (z, r.community);
+                    *v = (z, r.lc_community());
                 }
             })
-            .or_insert((z, r.community));
-        if r.community > k_max {
+            .or_insert((z, r.lc_community()));
+        if r.lc_community() > k_max {
             k_max = r.community;
         }
     }
@@ -1005,11 +1064,11 @@ pub fn emit_lr_bipartite(
         let fwer = r.fwer_wy.unwrap_or(1.0);
         let entry = best
             .entry((r.ligand.as_str(), r.receptor.as_str()))
-            .or_insert((r.community, z, fwer));
+            .or_insert((r.lc_community(), z, fwer));
         if z > entry.1 {
-            *entry = (r.community, z, fwer);
+            *entry = (r.lc_community(), z, fwer);
         }
-        if r.community > k_max {
+        if r.lc_community() > k_max {
             k_max = r.community;
         }
     }

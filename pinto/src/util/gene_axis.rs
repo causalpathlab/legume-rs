@@ -1,36 +1,30 @@
-//! How `cage` reads the feature axis of the input matrix.
+//! What a matrix ROW means, resolved once from the row names.
 //!
-//! A sequencing-based spatial matrix from `faba` carries TWO rows per gene,
-//! `{gene}/count/{spliced,unspliced}`, and `cage` has no concept of that: it
-//! treats every row as a gene. Pointed at such a matrix it runs and produces
-//! plausible output that is silently wrong — a gene's activity vector splits
-//! into two half-evidence copies, the gene axis doubles, and each half is
-//! selected, embedded and reported as if it were its own gene.
+//! A plain matrix has one gene per row. A splice-channelized one (faba's
+//! `{gene}/count/{spliced,unspliced}`) has two rows per gene, and reading one
+//! as the other is silent rather than loud: `n_genes < n_rows` means a per-gene
+//! index into a per-row vector never goes out of bounds, it just reads the
+//! wrong feature.
 //!
-//! [`GeneAxis`] is the one place that decides what a row means, resolved once
-//! from the row names and shared by every consumer that means "gene". The
-//! consumers that mean "row" — the NB-Fisher weights, the random projection the
-//! coarsening hierarchy is cut from, the degree-corrected Poisson refinement —
-//! keep reading the matrix directly and are deliberately left alone: a JL sketch
-//! over `2G` rows is a perfectly good sketch of the same spot.
+//! Consumers split into two kinds, and the split is the whole point:
 //!
-//! # The identity case is the common case
+//! - **Mean GENE.** `cage`'s training loop and pseudobulk selection, `lc`'s
+//!   projection basis, count filter, dictionary and merge cutoff, and `lra`'s
+//!   ligand and receptor lookup. All of these fold through this type.
+//! - **Mean ROW.** Anything that reads the matrix directly and reports what it
+//!   read: the degree-corrected Poisson refinement's blocking dimension, the
+//!   saved per-row NB precisions, `dsvd`'s two stacked channels.
 //!
-//! On a matrix with no channel rows the axis IS the row axis: `gene_of_row` is
-//! the identity, `gene_names` is `row_names`, and every fold below is a
-//! pass-through that returns its argument unmoved. That is what makes this safe
-//! to land ahead of any modelling — a plain matrix takes the same path it always
-//! did.
+//! The NB-Fisher weights need BOTH, and they are the reason
+//! [`Self::broadcast_to_rows`] exists: the weight is a function of abundance
+//! and mean and is not additive, so it is evaluated once per gene on folded
+//! statistics and then spread back over that gene's rows. Folding the weights
+//! afterwards would hand a gene a precision no measurement supports.
 //!
-//! # Why mixed input is fatal rather than absorbed
-//!
-//! `senna`'s gem models meet the same grammar and take the opposite policy
-//! (`auxiliary_data::feature_rows::UnparsedRowPolicy::OwnGene`): they are
-//! gene-keyed, so a stray row can sit on the axis as its own single-track gene
-//! and simply contribute noise. `cage` POOLS the two tracks, and pooling a row
-//! whose track is unknown has no correct answer — every choice silently changes
-//! a gene's counts. So a matrix that mixes channelized and non-channelized rows
-//! is an early hard failure here, naming the rows that caused it.
+//! Resolution is strict by default: a feature axis where only some rows carry
+//! splice channels is an error, because pooling a row whose track is unknown
+//! has no correct answer. [`GeneAxis::resolve_or_identity`] is the fallback for
+//! a consumer that never pools.
 
 use crate::util::common::*;
 use auxiliary_data::feature_rows::{intern_count_rows, UnparsedRowPolicy};
@@ -96,6 +90,34 @@ impl GeneAxis {
         })
     }
 
+    /// As [`Self::resolve`], but a mixed feature axis falls back to the
+    /// identity rather than aborting.
+    ///
+    /// The strict form is right for a consumer that POOLS a gene's tracks: a
+    /// row whose track is unknown has no correct pooled answer, so failing is
+    /// better than guessing. A consumer that only needs a unit axis for
+    /// filtering and reporting has a defined fallback, one unit per row, which
+    /// is exactly what it did before a gene axis existed. Aborting there would
+    /// reject multimodal matrices that used to work.
+    pub fn resolve_or_identity(row_names: &[Box<str>]) -> anyhow::Result<Self> {
+        match Self::resolve(row_names) {
+            Ok(axis) => Ok(axis),
+            Err(e) => {
+                log::warn!(
+                    "{e}\nFalling back to one unit per row, so nothing is pooled and \
+                     every per-gene filter and report is per row instead. Split the \
+                     modalities into their own matrices to get a gene axis."
+                );
+                Ok(Self {
+                    row_to_gene: (0..row_names.len() as u32).collect(),
+                    row_is_nascent: vec![false; row_names.len()],
+                    gene_names: row_names.to_vec(),
+                    channelized: false,
+                })
+            }
+        }
+    }
+
     #[must_use]
     pub fn n_genes(&self) -> usize {
         self.gene_names.len()
@@ -133,21 +155,7 @@ impl GeneAxis {
     ///
     /// Returns the input unchanged on the identity axis.
     #[must_use]
-    pub fn broadcast_to_rows(&self, per_gene: &[f32]) -> Vec<f32> {
-        if !self.channelized {
-            return per_gene.to_vec();
-        }
-        debug_assert_eq!(per_gene.len(), self.n_genes());
-        self.row_to_gene
-            .iter()
-            .map(|&g| per_gene[g as usize])
-            .collect()
-    }
-
-    /// As [`Self::broadcast_to_rows`], for the `f64` totals a count threshold
-    /// is applied to.
-    #[must_use]
-    pub fn broadcast_totals_to_rows(&self, per_gene: &[f64]) -> Vec<f64> {
+    pub fn broadcast_to_rows<T: Copy>(&self, per_gene: &[T]) -> Vec<T> {
         if !self.channelized {
             return per_gene.to_vec();
         }

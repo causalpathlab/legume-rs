@@ -36,19 +36,32 @@ pub struct SrtPreprocessConfig<'a> {
     pub fisher_weights: bool,
     /// Estimate per-batch effects. All current subcommands set this.
     pub batch_effects: bool,
-    /// Resolve the GENE unit axis from the row names, and fold the running
-    /// statistics onto it in the same pass.
-    ///
-    /// `lc` and `cage` both weight and filter per gene, so both want this.
-    /// `svd` never leaves the row axis and passes `false`, which also spares it
-    /// the hard error `GeneAxis::resolve` raises on a mixed feature axis.
-    pub gene_axis: bool,
+    /// Whether, and how strictly, to resolve the GENE unit axis from the row
+    /// names and fold the running statistics onto it in the same pass.
+    pub gene_axis: GeneAxisMode,
     /// Row-name canonicalization strategy. `None` falls back to
     /// `FeatureNameKind::Exact` (strict equality), matching the
     /// historical behaviour of `lc` / `svd`. `cage` passes
     /// `FeatureNameKind::Gene` or an `auto_detect`'d kind so gene
     /// symbols register as aliases of `ENSG..._SYMBOL` row names.
     pub feature_kind: Option<FeatureNameKind>,
+}
+
+/// How a caller wants the feature axis resolved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GeneAxisMode {
+    /// Stay on the matrix rows. `svd` stacks its channels there and never
+    /// folds, so a gene axis would buy it nothing.
+    Rows,
+    /// Resolve a gene axis, and FAIL on a feature axis that only partly parses.
+    /// For a consumer that pools a gene's tracks: a row whose track is unknown
+    /// has no correct pooled answer.
+    Strict,
+    /// Resolve a gene axis, falling back to one unit per row when the axis is
+    /// mixed. For a consumer that only filters and reports per gene, where one
+    /// unit per row is a defined answer and aborting would reject multimodal
+    /// matrices that used to work.
+    Lenient,
 }
 
 pub struct SrtPreprocessed {
@@ -235,10 +248,10 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     };
 
     // What a ROW means, decided once, before anything keyed on a gene runs.
-    let gene_axis = if cfg.gene_axis {
-        Some(GeneAxis::resolve(&data_vec.row_names()?)?)
-    } else {
-        None
+    let gene_axis = match cfg.gene_axis {
+        GeneAxisMode::Rows => None,
+        GeneAxisMode::Strict => Some(GeneAxis::resolve(&data_vec.row_names()?)?),
+        GeneAxisMode::Lenient => Some(GeneAxis::resolve_or_identity(&data_vec.row_names()?)?),
     };
 
     // One streaming pass, up to four consumers. `compute_nb_fisher_weights`
@@ -281,7 +294,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
             log_weights("Gene weights w_g", &gw);
             gene_weights = Some(gw);
             gene_stats = Some(g_stats);
-        } else if cfg.gene_axis {
+        } else if gene_axis.is_some() {
             // Identity axis: a gene IS a row, so the two views are the same
             // numbers. Cloning keeps the contract uniform for callers, which
             // is worth more than the few hundred KB it costs.

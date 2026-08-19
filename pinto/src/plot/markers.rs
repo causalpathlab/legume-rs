@@ -136,6 +136,16 @@ pub fn fetch_gene_rows_aligned(
                     row_ix.entry(canon).or_insert(i);
                 }
             }
+            // A splice-channelized row is `{gene}/count/{track}`, and no
+            // `FeatureNameKind` splits on `/` — it aliases on the gene
+            // delimiter or parses a locus. So a gene-keyed table (which is what
+            // `lc` now writes) would resolve to nothing here and every marker
+            // panel would render blank, with no error. Register the gene key
+            // too. First row wins, which is the mature track in practice and
+            // is the right one to draw.
+            if let Some((gene, _)) = auxiliary_data::feature_rows::split_count_row(n) {
+                row_ix.entry(gene.into()).or_insert(i);
+            }
         }
 
         let mut local_row_per_gene: Vec<Option<usize>> = Vec::with_capacity(n_genes);
