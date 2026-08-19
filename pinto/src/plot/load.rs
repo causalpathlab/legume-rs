@@ -54,6 +54,29 @@ fn stringify_numeric(v: f64) -> Box<str> {
 /// `pinto svd --coord` writes coordinates as FLOAT; coord_pairs files
 /// produced by other paths (R/data.table) come in as DOUBLE. The plot
 /// pipeline is single-precision throughout, so we narrow on read.
+/// Read a column that holds a small integer code, whatever width the writer
+/// chose for it.
+///
+/// pinto writes these from more than one place and the parquet type has not
+/// always agreed: `community` is a float in one table, `edge_kind` an int in
+/// another. Rather than have each reader guess the order to try, they all come
+/// through here.
+pub(crate) fn row_int_like(row: &Row, idx: usize) -> anyhow::Result<i64> {
+    if let Ok(v) = row.get_int(idx) {
+        return Ok(v as i64);
+    }
+    if let Ok(v) = row.get_long(idx) {
+        return Ok(v);
+    }
+    if let Ok(v) = row.get_float(idx) {
+        return Ok(v as i64);
+    }
+    if let Ok(v) = row.get_double(idx) {
+        return Ok(v as i64);
+    }
+    anyhow::bail!("column {idx} is not an integer-like type")
+}
+
 fn row_f32(row: &Row, idx: usize) -> anyhow::Result<f32> {
     if let Ok(v) = row.get_float(idx) {
         return Ok(v);
@@ -412,27 +435,14 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
     for record in reader.get_row_iter(None)? {
         let row = record?;
         if let Some(k) = ki {
-            let kind = row
-                .get_float(k)
-                .map(|v| v as i32)
-                .or_else(|_| row.get_double(k).map(|v| v as i32))
-                .or_else(|_| row.get_long(k).map(|v| v as i32))
-                .or_else(|_| row.get_int(k))?;
-            if kind != crate::util::cell_pairs::EDGE_KIND_SPATIAL {
+            if row_int_like(&row, k)? != crate::util::cell_pairs::EDGE_KIND_SPATIAL as i64 {
                 n_dropped += 1;
                 continue;
             }
         }
         let l = row_label(&row, li)?;
         let r = row_label(&row, ri)?;
-        // Schema may write community as float or int depending on
-        // which pinto variant produced it; try float first.
-        let c: i64 = row
-            .get_float(ci)
-            .map(|v| v as i64)
-            .or_else(|_| row.get_double(ci).map(|v| v as i64))
-            .or_else(|_| row.get_long(ci))
-            .or_else(|_| row.get_int(ci).map(|v| v as i64))?;
+        let c: i64 = row_int_like(&row, ci)?;
         pairs.push((l, r));
         community.push(c);
     }

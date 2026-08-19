@@ -42,6 +42,15 @@ pub fn fit_srt_link_community_etm(args: &SrtLinkCommunityEtmArgs) -> anyhow::Res
     let c = &args.common;
     mkdir_parent(&c.out)?;
 
+    // `--knn-expr` rides on the shared input args, so this command accepts it,
+    // but it builds its own graph rather than going through `preprocess_srt`
+    // and so cannot honour it. Say so instead of quietly doing nothing.
+    anyhow::ensure!(
+        c.knn_expr == 0,
+        "--knn-expr is not supported by this command: it builds its cell-pair \
+         graph directly rather than through the shared pipeline. Drop the flag, \
+         or use lc, cage or dsvd."
+    );
     anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
     anyhow::ensure!(args.context_size > 0, "context_size must be > 0");
     anyhow::ensure!(args.embedding_dim > 0, "embedding_dim must be > 0");

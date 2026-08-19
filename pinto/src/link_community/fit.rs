@@ -189,8 +189,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     let edges = srt_cell_pairs.inner.pairs();
     // Parallel to `edges`, so every per-edge table can carry provenance.
-    let edge_kind: Option<Vec<i32>> = srt_cell_pairs.edge_kind.clone();
-    let edge_kind = edge_kind.as_deref();
+    let edge_kind = srt_cell_pairs.edge_kind.as_deref();
     let n_edges = edges.len();
     info!("{} cells, {} edges", n_cells, n_edges);
 

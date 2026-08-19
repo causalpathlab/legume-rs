@@ -166,15 +166,11 @@ impl KnnGraph {
             .collect();
 
         // Derived state, so rebuild rather than merge.
-        let mut coo = CooMatrix::new(n_nodes, n_nodes);
-        for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
-            coo.push(i, j, v);
-            coo.push(j, i, v);
-        }
+        let adjacency = symmetric_adjacency(n_nodes, &edges, &distances);
 
         Ok((
             KnnGraph {
-                adjacency: CscMatrix::from(&coo),
+                adjacency,
                 edges,
                 distances,
                 n_nodes,
@@ -277,15 +273,8 @@ impl KnnGraph {
         // step 3: construct sparse network backbone //
         ///////////////////////////////////////////////
 
-        let mut coo = CooMatrix::new(nn, nn);
-        for &((i, j), v) in edges.iter() {
-            coo.push(i, j, v);
-            coo.push(j, i, v);
-        }
-
-        let adjacency = CscMatrix::from(&coo);
-
         let (edge_pairs, distances): (Vec<_>, Vec<_>) = edges.into_iter().unzip();
+        let adjacency = symmetric_adjacency(nn, &edge_pairs, &distances);
 
         Ok(KnnGraph {
             adjacency,
@@ -677,6 +666,22 @@ fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests;
+
+/// The `n x n` symmetric adjacency implied by an undirected edge list.
+///
+/// Both constructors need this and the invariant is easy to get subtly wrong:
+/// each edge must be pushed in BOTH directions, and exactly once per
+/// direction, because building a `CscMatrix` from a `CooMatrix` SUMS entries
+/// that share a coordinate rather than rejecting them. A duplicate would
+/// silently double that edge's weight.
+fn symmetric_adjacency(n_nodes: usize, edges: &[(usize, usize)], distances: &[f32]) -> CscMatrix<f32> {
+    let mut coo = CooMatrix::new(n_nodes, n_nodes);
+    for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
+        coo.push(i, j, v);
+        coo.push(j, i, v);
+    }
+    CscMatrix::from(&coo)
+}
 
 /// Each value replaced by its rank among the others, scaled to `[0, 1]`.
 ///

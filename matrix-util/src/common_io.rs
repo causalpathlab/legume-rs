@@ -243,15 +243,28 @@ pub fn read_lines_of_words_delim(
 ) -> anyhow::Result<ReadLinesOut<Box<str>>> {
     let delim = delim.into(); // Convert the input delimiter into the Delimiter enum
 
+    // Outer quotes come off here, once, rather than at each consumer.
+    //
+    // A csv writer that quotes every field yields `"x"` where the caller asked
+    // for `x`, so a name match fails and a reader that falls back to reading by
+    // POSITION then silently takes whichever columns happen to sit there. The
+    // name-list reader in this same file already unquoted; the general reader
+    // did not, which is the inconsistency this removes.
+    //
+    // This splitter cannot honour a quoted field containing the delimiter
+    // anyway, so trimming the outer quotes loses nothing it had.
+    fn unquote(x: &str) -> &str {
+        x.trim().trim_matches('"').trim_matches('\'')
+    }
     let parse_fn = |line: &str| -> Vec<Box<str>> {
         match &delim {
             Delimiter::Str(s) => line
                 .split(s.as_str())
-                .map(|x| x.to_owned().into_boxed_str())
+                .map(|x| unquote(x).to_owned().into_boxed_str())
                 .collect(),
             Delimiter::Chars(chars) => line
                 .split(chars.as_slice())
-                .map(|x| x.to_owned().into_boxed_str())
+                .map(|x| unquote(x).to_owned().into_boxed_str())
                 .collect(),
         }
     };

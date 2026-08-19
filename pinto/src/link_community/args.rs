@@ -14,7 +14,7 @@ pub struct SrtLinkCommunityArgs {
         default_value_t = 50,
         help = "Number of spatial link communities to discover",
         long_help = "Number of link communities (K).\n\
-                     Collapsed Gibbs sampling assigns each spatial edge to one.\n\
+                     Collapsed Gibbs sampling assigns each cell pair to one.\n\
                      Communities capture distinct spatial expression patterns.\n\
                      Cell propensity is the fraction of edges per community.\n\
                      \n\
