@@ -2,7 +2,6 @@ use crate::graph::WeightedGraph;
 use crate::knn_match::{ColumnDict, SearchScratch};
 
 use dashmap::DashMap;
-use std::collections::BTreeMap;
 use indicatif::ParallelProgressIterator;
 use log::info;
 use nalgebra::DMatrix;
@@ -112,37 +111,57 @@ impl KnnGraph {
             }
         };
 
-        // A sorted map keyed on the canonical pair does the dedup, the
-        // canonicalisation and the ordering in one pass. The dedup has to
-        // finish before the COO below, which SUMS duplicates rather than
-        // rejecting them.
+        // Sort then fold, NOT a keyed map. At a few million edges an ordered
+        // map costs a pointer-chasing O(log n) descent and a node allocation
+        // per insert, all of it serial. One flat buffer, one parallel sort and
+        // one linear scan is cheaper on every axis and parallelises.
+        //
+        // The canonical key is what makes this a set operation: a pair stored
+        // one way round in one input and the other way round in the other must
+        // land on the same key. The dedup has to finish before the COO below,
+        // which SUMS duplicate entries rather than rejecting them.
         let canonical = |&(i, j): &(usize, usize)| if i <= j { (i, j) } else { (j, i) };
-        let mut merged: BTreeMap<(usize, usize), (f32, EdgeSource)> = BTreeMap::new();
+        // Source as a bitmask, so folding a run is an OR rather than a case
+        // analysis: 1 = primary, 2 = secondary, 3 = both.
+        let mut tagged: Vec<((usize, usize), f32, u8)> =
+            Vec::with_capacity(self.edges.len() + other.edges.len());
+        tagged.par_extend(
+            self.edges
+                .par_iter()
+                .zip(a_dist.par_iter())
+                .map(|(e, &d)| (canonical(e), d, 1u8)),
+        );
+        tagged.par_extend(
+            other
+                .edges
+                .par_iter()
+                .zip(b_dist.par_iter())
+                .map(|(e, &d)| (canonical(e), d, 2u8)),
+        );
+        tagged.par_sort_unstable_by_key(|&(key, _, _)| key);
 
-        for (edge, &dist) in self.edges.iter().zip(a_dist.iter()) {
-            merged
-                .entry(canonical(edge))
-                .and_modify(|slot| slot.0 = slot.0.min(dist))
-                .or_insert((dist, EdgeSource::Primary));
+        let mut edges = Vec::with_capacity(tagged.len());
+        let mut distances = Vec::with_capacity(tagged.len());
+        let mut source = Vec::with_capacity(tagged.len());
+        for &(key, dist, tag) in tagged.iter() {
+            if edges.last() == Some(&key) {
+                let last = distances.len() - 1;
+                distances[last] = f32::min(distances[last], dist);
+                source[last] |= tag;
+            } else {
+                edges.push(key);
+                distances.push(dist);
+                source.push(tag);
+            }
         }
-        for (edge, &dist) in other.edges.iter().zip(b_dist.iter()) {
-            merged
-                .entry(canonical(edge))
-                .and_modify(|slot| {
-                    slot.0 = slot.0.min(dist);
-                    slot.1 = EdgeSource::Both;
-                })
-                .or_insert((dist, EdgeSource::Secondary));
-        }
-
-        let mut edges = Vec::with_capacity(merged.len());
-        let mut distances = Vec::with_capacity(merged.len());
-        let mut source = Vec::with_capacity(merged.len());
-        for (edge, (dist, src)) in merged {
-            edges.push(edge);
-            distances.push(dist);
-            source.push(src);
-        }
+        let source: Vec<EdgeSource> = source
+            .into_iter()
+            .map(|mask| match mask {
+                1 => EdgeSource::Primary,
+                2 => EdgeSource::Secondary,
+                _ => EdgeSource::Both,
+            })
+            .collect();
 
         // Derived state, so rebuild rather than merge.
         let mut coo = CooMatrix::new(n_nodes, n_nodes);
