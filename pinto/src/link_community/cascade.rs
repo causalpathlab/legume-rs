@@ -94,7 +94,7 @@ pub fn run_cascade(
     sampler: &mut LinkGibbsSampler,
     cell_names: &[Box<str>],
     gene_weights: Option<&[f32]>,
-    gene_axis: Option<&GeneAxis>,
+    gene_axis: &GeneAxis,
 ) -> anyhow::Result<CascadeResult> {
     anyhow::ensure!(
         !level_cell_labels.is_empty(),

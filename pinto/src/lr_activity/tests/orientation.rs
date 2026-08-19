@@ -39,7 +39,7 @@ fn swapped(edges: &[Edge]) -> Vec<Edge> {
 #[test]
 fn a_cell_takes_the_community_of_its_incident_edges() {
     let edges = two_block_graph();
-    let d = DirectedStrata::resolve(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, 6);
     // Cells 2, 3 and 4 also touch the interface, but their own block still
     // dominates, which is what makes the assignment robust to a thin border.
     let hetero: Vec<(u32, u32)> = (0..d.n_strata())
@@ -63,7 +63,7 @@ fn a_cell_takes_the_community_of_its_incident_edges() {
 #[test]
 fn both_directions_of_an_interface_are_offered() {
     let edges = two_block_graph();
-    let d = DirectedStrata::resolve(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, 6);
     let ab = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 1)).unwrap();
     let ba = (0..d.n_strata()).find(|&s| d.pair(s) == (1, 0)).unwrap();
     assert_ne!(ab, ba, "the two directions must be separate strata");
@@ -88,7 +88,7 @@ fn both_directions_of_an_interface_are_offered() {
 #[test]
 fn a_homotypic_stratum_is_marked_and_symmetric() {
     let edges = two_block_graph();
-    let d = DirectedStrata::resolve(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, 6);
     let self0 = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 0)).unwrap();
     assert!(d.is_homotypic(self0));
     assert_eq!(d.label(self0), "C0");
@@ -108,8 +108,8 @@ fn a_homotypic_stratum_is_marked_and_symmetric() {
 fn swapping_the_endpoint_columns_changes_nothing() {
     let edges = two_block_graph();
     let flipped = swapped(&edges);
-    let a = DirectedStrata::resolve(&edges, 6);
-    let b = DirectedStrata::resolve(&flipped, 6);
+    let a = DirectedStrata::from_edge_modes(&edges, 6);
+    let b = DirectedStrata::from_edge_modes(&flipped, 6);
 
     // Same strata, in the same order: ids are assigned by sorting the realized
     // pairs, not by the order edges arrive, so they are joinable across runs.
@@ -132,11 +132,11 @@ fn swapping_the_endpoint_columns_changes_nothing() {
 #[test]
 fn the_edge_count_matches_what_the_oriented_listing_yields() {
     let edges = two_block_graph();
-    let d = DirectedStrata::resolve(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, 6);
     for s in 0..d.n_strata() {
         assert_eq!(
             d.edges_in(s),
-            d.oriented(s, &edges).len(),
+            d.oriented(s).len(),
             "stratum {} ({})",
             s,
             d.label(s)
@@ -154,7 +154,7 @@ fn the_edge_count_matches_what_the_oriented_listing_yields() {
 #[test]
 fn stratum_ids_are_sorted_so_they_are_reproducible() {
     let edges = two_block_graph();
-    let d = DirectedStrata::resolve(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, 6);
     let pairs: Vec<(u32, u32)> = (0..d.n_strata()).map(|s| d.pair(s)).collect();
     let mut sorted = pairs.clone();
     sorted.sort_unstable();
@@ -164,10 +164,10 @@ fn stratum_ids_are_sorted_so_they_are_reproducible() {
 #[test]
 fn an_oriented_listing_puts_the_sender_first() {
     let edges = two_block_graph();
-    let d = DirectedStrata::resolve(&edges, 6);
+    let d = DirectedStrata::from_edge_modes(&edges, 6);
     let ab = (0..d.n_strata()).find(|&s| d.pair(s) == (0, 1)).unwrap();
-    for (e, flipped) in d.oriented(ab, &edges) {
-        let (i, j, _, _) = edges[e];
+    for &(e, flipped) in d.oriented(ab) {
+        let (i, j, _, _) = edges[e as usize];
         let sender = if flipped { j } else { i };
         assert!(
             (0..3).contains(&sender),

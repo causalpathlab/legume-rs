@@ -21,9 +21,7 @@ use crate::util::knn_graph::KnnGraph;
 use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::RandProjOps;
-use data_beans_alg::sparse_streaming::{
-    streaming_sparse_running_stats, streaming_sparse_running_stats_folded,
-};
+use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
 
 ///////////////////////////
 // Config + result types //
@@ -270,39 +268,27 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     let mut gene_stats = None;
     if cfg.fisher_weights {
         info!("Computing NB Fisher-info weights for inference...");
-        let channelized = gene_axis.as_ref().is_some_and(GeneAxis::is_channelized);
-        let (r_stats, g_stats) = if channelized {
-            let axis = gene_axis.as_ref().expect("channelized implies Some");
-            let (r, g) = streaming_sparse_running_stats_folded(
-                &data_vec,
-                c.block_size,
-                "NB-Fisher",
-                axis.row_to_gene(),
-                axis.n_genes(),
-            )?;
-            (r, Some(g))
-        } else {
-            (
-                streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?,
-                None,
-            )
-        };
-        let rw = fisher_weights_from_stats(&r_stats, n_cells);
-        log_weights("Row weights w_r", &rw);
-        if let Some(g_stats) = g_stats {
-            let gw = fisher_weights_from_stats(&g_stats, n_cells);
-            log_weights("Gene weights w_g", &gw);
-            gene_weights = Some(gw);
-            gene_stats = Some(g_stats);
-        } else if gene_axis.is_some() {
-            // Identity axis: a gene IS a row, so the two views are the same
-            // numbers. Cloning keeps the contract uniform for callers, which
-            // is worth more than the few hundred KB it costs.
-            gene_weights = Some(rw.clone());
-            gene_stats = Some(r_stats.clone());
+        match gene_axis.as_ref() {
+            Some(axis) => {
+                let (r_stats, g_stats) =
+                    axis.running_stats(&data_vec, c.block_size, "NB-Fisher")?;
+                let rw = fisher_weights_from_stats(&r_stats, n_cells);
+                let gw = fisher_weights_from_stats(&g_stats, n_cells);
+                log_weights("Row weights w_r", &rw);
+                log_weights("Gene weights w_g", &gw);
+                row_weights = Some(rw);
+                row_stats = Some(r_stats);
+                gene_weights = Some(gw);
+                gene_stats = Some(g_stats);
+            }
+            None => {
+                let stats = streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?;
+                let rw = fisher_weights_from_stats(&stats, n_cells);
+                log_weights("Row weights w_r", &rw);
+                row_weights = Some(rw);
+                row_stats = Some(stats);
+            }
         }
-        row_weights = Some(rw);
-        row_stats = Some(r_stats);
     }
 
     Ok(SrtPreprocessed {

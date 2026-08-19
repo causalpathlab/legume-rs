@@ -81,10 +81,7 @@ fn pooling_two_channels_equals_the_single_channel_matrix() {
     let expect = Mat::from_row_slice(2, 3, &[5.0, 7.0, 9.0, 50.0, 70.0, 90.0]);
     assert_eq!(pooled, expect);
 
-    assert_eq!(
-        axis.pool_totals(vec![1.0, 10.0, 4.0, 40.0]),
-        vec![5.0, 50.0]
-    );
+    assert_eq!(axis.pool_totals(&[1.0, 10.0, 4.0, 40.0]), vec![5.0, 50.0]);
 
     // Same property on a sparse profile: the two rows of GENE1 merge into one
     // entry, and the result is ascending by gene id.
@@ -100,7 +97,7 @@ fn the_identity_axis_folds_are_pass_throughs() {
 
     // `None`, not a copy: the identity axis must not allocate a fold at all.
     assert!(axis.pool_rows_opt(&m).is_none());
-    assert_eq!(axis.pool_totals(vec![1.0, 2.0]), vec![1.0, 2.0]);
+    assert_eq!(axis.pool_totals(&[1.0, 2.0]), vec![1.0, 2.0]);
     // Unsorted input stays untouched — an identity fold must not even reorder.
     assert_eq!(
         axis.pool_profile(vec![(1, 2.0), (0, 1.0)]),
@@ -179,13 +176,15 @@ fn a_per_gene_vector_spreads_back_over_that_gene_s_rows() {
 #[test]
 fn broadcasting_on_the_identity_axis_is_a_pass_through() {
     let axis = GeneAxis::resolve(&names(&["A", "B", "C"])).unwrap();
+    // Both element types, since the broadcast is generic and the count filter
+    // uses the f64 form while the weights use the f32 one.
     assert_eq!(
-        axis.broadcast_to_rows(&[1.0, 2.0, 3.0]),
-        vec![1.0, 2.0, 3.0]
+        axis.broadcast_to_rows(&[1.0f32, 2.0, 3.0]),
+        vec![1.0f32, 2.0, 3.0]
     );
     assert_eq!(
-        axis.broadcast_to_rows(&[1.0, 2.0, 3.0]),
-        vec![1.0, 2.0, 3.0]
+        axis.broadcast_to_rows(&[1.0f64, 2.0, 3.0]),
+        vec![1.0f64, 2.0, 3.0]
     );
 }
 
@@ -197,7 +196,7 @@ fn a_count_threshold_keeps_or_drops_a_gene_as_one_unit() {
     // and GENE3, so it splits one gene down the middle and drops GENE2 even
     // though its total clears the bar.
     let row_totals: Vec<f64> = vec![3.0, 1.0, 1.0, 2.0, 1.0];
-    let per_gene = axis.pool_totals(row_totals.clone());
+    let per_gene = axis.pool_totals(&row_totals);
     assert_eq!(per_gene, vec![4.0, 2.0, 2.0]);
     let spread = axis.broadcast_to_rows(&per_gene);
 

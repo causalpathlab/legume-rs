@@ -256,7 +256,7 @@ pub fn write_partition_outputs(
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
-    axis: Option<&GeneAxis>,
+    axis: &GeneAxis,
     block_size: Option<usize>,
 ) -> anyhow::Result<(Mat, GammaMatrix)> {
     write_link_communities(
@@ -267,10 +267,8 @@ pub fn write_partition_outputs(
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
     let gene_community =
-        fit_gene_community_param(&propensity, data_vec, gene_weights, axis, block_size)?;
-    let row_names = data_vec.row_names()?;
-    let gene_names = axis.map_or(&row_names[..], GeneAxis::gene_names);
-    write_gene_community_param(&gene_community, gene_names, prefix)?;
+        fit_gene_community_param(&propensity, data_vec, gene_weights, Some(axis), block_size)?;
+    write_gene_community_param(&gene_community, axis.gene_names(), prefix)?;
     Ok((propensity, gene_community))
 }
 
@@ -290,7 +288,7 @@ pub fn write_level_outputs(
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
-    axis: Option<&GeneAxis>,
+    axis: &GeneAxis,
     block_size: Option<usize>,
 ) -> anyhow::Result<()> {
     write_partition_outputs(

@@ -225,10 +225,6 @@ pub struct LrResult {
     /// The community the receptor side was scored in.
     #[serde(default)]
     pub receiver_community: Option<i32>,
-    /// Both endpoints share a community, so the statistic is symmetric there
-    /// and its direction must not be drawn as if it meant something.
-    #[serde(default)]
-    pub homotypic: bool,
     pub ligand: String,
     pub receptor: String,
     /// Backend-row-name versions of ligand/receptor (post gene resolution)
@@ -267,10 +263,13 @@ impl LrResult {
     pub fn stratum_label(&self) -> String {
         let a = self.lc_community();
         let b = self.target_community();
-        if self.homotypic || a == b {
+        // Equal communities IS the homotypic case, on a new sidecar and on an
+        // old one alike: without `receiver_community` the target falls back to
+        // the sender, so `a == b` holds there too.
+        if a == b {
             format!("C{a}")
         } else {
-            format!("C{a}-C{b}")
+            format!("C{a}->C{b}")
         }
     }
 
@@ -626,14 +625,14 @@ pub fn render_lr_overlays_for_core(
         let leaf = match core_batch {
             Some(_) => format!(
                 "{}.{}-{}",
-                r.stratum_label(),
+                sanitize(&r.stratum_label()),
                 sanitize(&r.ligand),
                 sanitize(&r.receptor),
             ),
             None => format!(
                 "B{}.{}.{}-{}",
                 sanitize(&r.batch),
-                r.stratum_label(),
+                sanitize(&r.stratum_label()),
                 sanitize(&r.ligand),
                 sanitize(&r.receptor),
             ),
@@ -848,9 +847,7 @@ pub fn emit_lr_summary_global(
                 }
             })
             .or_insert((z, r.lc_community()));
-        if r.lc_community() > k_max {
-            k_max = r.community;
-        }
+        k_max = k_max.max(r.lc_community());
     }
     let mut pairs_ranked: Vec<((&str, &str), PairBest)> = pair_best.into_iter().collect();
     pairs_ranked.sort_by(|a, b| {
@@ -1068,9 +1065,7 @@ pub fn emit_lr_bipartite(
         if z > entry.1 {
             *entry = (r.lc_community(), z, fwer);
         }
-        if r.lc_community() > k_max {
-            k_max = r.community;
-        }
+        k_max = k_max.max(r.lc_community());
     }
     let mut edges: Vec<((&str, &str), EdgeInfo)> = best.into_iter().collect();
     edges.sort_by(|a, b| {

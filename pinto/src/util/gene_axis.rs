@@ -28,6 +28,11 @@
 
 use crate::util::common::*;
 use auxiliary_data::feature_rows::{intern_count_rows, UnparsedRowPolicy};
+use data_beans::sparse_io_vector::SparseIoVec;
+use data_beans_alg::sparse_streaming::{
+    streaming_sparse_running_stats, streaming_sparse_running_stats_folded,
+};
+use matrix_util::sparse_stat::SparseRunningStatistics;
 
 /// The feature axis `cage` fits on: one entry per GENE, with a map back to the
 /// matrix rows that carry it.
@@ -50,12 +55,7 @@ impl GeneAxis {
         let n_rows = row_names.len();
 
         if map.unparsed.len() == n_rows {
-            return Ok(Self {
-                row_to_gene: (0..n_rows as u32).collect(),
-                row_is_nascent: vec![false; n_rows],
-                gene_names: row_names.to_vec(),
-                channelized: false,
-            });
+            return Ok(Self::identity(row_names));
         }
 
         if !map.unparsed.is_empty() {
@@ -108,13 +108,50 @@ impl GeneAxis {
                      every per-gene filter and report is per row instead. Split the \
                      modalities into their own matrices to get a gene axis."
                 );
-                Ok(Self {
-                    row_to_gene: (0..row_names.len() as u32).collect(),
-                    row_is_nascent: vec![false; row_names.len()],
-                    gene_names: row_names.to_vec(),
-                    channelized: false,
-                })
+                Ok(Self::identity(row_names))
             }
+        }
+    }
+
+    /// One unit per row: what a matrix without splice channels means, and the
+    /// fallback for an axis that only partly parses.
+    fn identity(row_names: &[Box<str>]) -> Self {
+        Self {
+            row_to_gene: (0..row_names.len() as u32).collect(),
+            row_is_nascent: vec![false; row_names.len()],
+            gene_names: row_names.to_vec(),
+            channelized: false,
+        }
+    }
+
+    /// One streaming pass, both axes.
+    ///
+    /// Returns `(row_stats, gene_stats)`. On the identity axis a gene IS a row,
+    /// so the two views are the same numbers and the second is a clone rather
+    /// than a second pass. On a channelized axis the fold happens INSIDE the
+    /// pass, because `npos` and `s2` do not survive one applied afterwards: a
+    /// cell detected on both tracks would count twice, and the variance would
+    /// lose its cross term.
+    ///
+    /// This lives here so the "is it channelized" fork is written once. Every
+    /// consumer that needs a per-gene NB precision needs exactly this pair.
+    pub fn running_stats(
+        &self,
+        data: &SparseIoVec,
+        block_size: Option<usize>,
+        label: &str,
+    ) -> anyhow::Result<(SparseRunningStatistics<f32>, SparseRunningStatistics<f32>)> {
+        if self.channelized {
+            streaming_sparse_running_stats_folded(
+                data,
+                block_size,
+                label,
+                self.row_to_gene(),
+                self.n_genes(),
+            )
+        } else {
+            let stats = streaming_sparse_running_stats(data, block_size, label)?;
+            Ok((stats.clone(), stats))
         }
     }
 
@@ -218,16 +255,18 @@ impl GeneAxis {
         })
     }
 
-    /// Sum per-row totals onto the gene axis.
+    /// Fold a per-ROW vector onto genes by summing a gene's rows.
+    ///
+    /// Borrows rather than consuming: every caller needs the row-axis vector
+    /// afterwards, and a by-value signature only forced them all to clone it.
     #[must_use]
-    pub fn pool_totals(&self, per_row: Vec<f64>) -> Vec<f64> {
+    pub fn pool_totals(&self, per_row: &[f64]) -> Vec<f64> {
         if !self.channelized {
-            return per_row;
+            return per_row.to_vec();
         }
-        debug_assert_eq!(per_row.len(), self.n_rows());
         let mut out = vec![0.0f64; self.n_genes()];
-        for (r, v) in per_row.into_iter().enumerate() {
-            out[self.gene_of_row(r)] += v;
+        for (r, &v) in per_row.iter().enumerate() {
+            out[self.row_to_gene[r] as usize] += v;
         }
         out
     }
