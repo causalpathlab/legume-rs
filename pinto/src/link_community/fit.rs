@@ -38,10 +38,9 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{
-    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+    preprocess_srt, topology_graph, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use data_beans::qc::suggest_nnz_cutoff;
-use data_beans_alg::random_projection::RandProjOps;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -66,8 +65,11 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         coordinates,
         coordinate_names,
         batch_membership,
-        batch_effects: batch_db,
+        batch_effects: _,
         graph,
+        spatial_graph,
+        edge_source,
+        cell_proj,
         gene_axis,
         row_weights: _,
         row_stats,
@@ -87,6 +89,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // multimodal matrix must not be rejected outright.
         gene_axis: GeneAxisMode::Lenient,
         feature_kind: None,
+        cell_projection: true,
     })?;
     let has_coords = c.has_coordinates();
     let gene_axis = gene_axis.expect("a gene-axis mode other than Rows must yield Some");
@@ -172,7 +175,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     // Wrap graph with data for pair-level operations
-    let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
+    let srt_cell_pairs = SrtCellPairs::with_graph_and_source(
+        &data_vec,
+        &coordinates,
+        &graph,
+        edge_source.as_deref(),
+    );
 
     srt_cell_pairs.to_parquet(
         &(c.out.to_string() + ".coord_pairs.parquet"),
@@ -191,17 +199,14 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         c.num_levels, c.n_pseudobulk
     );
 
-    let batch_arg: Option<&[Box<str>]> = if batch_db.is_some() {
-        Some(&batch_membership)
-    } else {
-        None
-    };
-
+    // Preprocessing already took this projection, with the same batch
+    // argument, so reuse it rather than paying for a second full pass.
     let cell_proj =
-        data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?;
+        cell_proj.expect("cell_projection = true above must yield a projection");
 
+    let topology = topology_graph(&graph, &spatial_graph);
     let ml = graph_coarsen_multilevel(
-        &graph,
+        topology,
         &mut cell_proj.proj.clone(),
         srt_cell_pairs.inner.pairs(),
         CoarsenConfig {

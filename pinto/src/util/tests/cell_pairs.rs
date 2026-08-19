@@ -30,3 +30,17 @@ fn test_connected_components_isolates() {
     let unique: HashSet<usize> = labels.iter().cloned().collect();
     assert_eq!(unique.len(), 4);
 }
+
+/// `Both` means the pair is physically adjacent AND expression-similar. It
+/// must read as spatial, because every consumer that filters on `spatial` is
+/// asking whether the two cells are neighbours, and for a `Both` edge they
+/// are. Reading it as `expression` would silently drop real adjacencies from
+/// the mesh view and from the directional activity test.
+#[test]
+fn a_pair_in_both_graphs_reads_as_spatial() {
+    use matrix_util::knn_graph::EdgeSource;
+    assert_eq!(edge_kind_code(EdgeSource::Primary), EDGE_KIND_SPATIAL);
+    assert_eq!(edge_kind_code(EdgeSource::Both), EDGE_KIND_SPATIAL);
+    assert_eq!(edge_kind_code(EdgeSource::Secondary), EDGE_KIND_EXPRESSION);
+    assert_ne!(EDGE_KIND_SPATIAL, EDGE_KIND_EXPRESSION);
+}
