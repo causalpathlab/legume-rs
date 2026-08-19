@@ -1,9 +1,9 @@
 //! Compute-device selection, shared by every subcommand that runs a candle
 //! model.
 //!
-//! Lives here rather than in one subcommand's `args.rs` because more than one
-//! command needs it: `cage` defined it first, and `lc-etm` ran CPU-only until
-//! it could reach this.
+//! Lives here rather than in `cage`'s `args.rs`, its only caller today, so a
+//! second command that needs a device can reach it without a cross-subcommand
+//! import.
 
 use clap::ValueEnum;
 

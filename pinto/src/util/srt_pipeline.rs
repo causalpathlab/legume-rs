@@ -7,7 +7,8 @@
 //!
 //! `SrtCellPairs<'a>` borrows the `SparseIoVec` and `Mat`, so this bundle
 //! returns the *owned* data + graph and the caller builds
-//! `SrtCellPairs::with_graph(&pre.data_vec, &pre.coordinates, &pre.graph)`.
+//! `SrtCellPairs::with_graph_and_source(&pre.data_vec, &pre.coordinates,
+//! &pre.graph, pre.edge_source.as_deref())`.
 
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::{

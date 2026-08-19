@@ -4,7 +4,7 @@
 //!
 //! 1. **Filesystem glob** — `{prefix}{.L*,.draft,}.propensity.parquet`
 //!    siblings. This is the convention every subcommand that produces a
-//!    propensity follows (lc / lc-etm / dsvd / prop / cage); each Level
+//!    propensity follows (lc / dsvd / prop / cage); each Level
 //!    gets paths derived from the `infix` field. Sibling paths are
 //!    derived by pattern, so a subcommand that writes the propensity but
 //!    not the edge table (`prop`, which still emits the older
@@ -36,7 +36,7 @@ pub struct Level {
     /// parquet for this level. Always populated.
     pub propensity: PathBuf,
     /// Optional path to the link-community parquet (per-edge community
-    /// labels — lc / lc-etm / dsvd / cage all write one). `None`, or a
+    /// labels — lc / dsvd / cage all write one). `None`, or a
     /// path that does not exist, makes plot skip mesh / edge overlays
     /// for that level rather than fail.
     pub link_community: Option<PathBuf>,

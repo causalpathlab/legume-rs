@@ -10,10 +10,9 @@
 //!
 //! Input is a co-embedded (gene, cell) pair in one inner-product space:
 //! `{prefix}.feature_embedding.parquet` (gene × D) + `{prefix}.cell_embedding.parquet`
-//! (cell × D). `pinto cage` writes these directly; `pinto lc-etm` writes them via
-//! its SIMBA co-embedding of the topic result (`Z = propensity·α`, genes on the
-//! cell manifold) — so both, and any future embedding output, annotate the same
-//! way. Pass a shared `--from` prefix, or point `--feature-embedding` /
+//! (cell × D). `pinto cage` writes these directly, so it and any future
+//! embedding output annotate the same way. Pass a shared `--from` prefix,
+//! or point `--feature-embedding` /
 //! `--cell-embedding` at explicit parquet paths.
 //!
 //! Writes the shared per-cell contract at `{out}.annot.*` (`annot.parquet`,
@@ -36,7 +35,7 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Embedding-run prefix (cage / lc-etm `-o` value),\n\
+        help = "Embedding-run prefix (cage `-o` value),\n\
                 or its `{prefix}.pinto.json`",
         long_help = "Shared output prefix of a pinto embedding run.\n\
                      Reads `{prefix}.feature_embedding.parquet` + `{prefix}.cell_embedding.parquet`.\n\

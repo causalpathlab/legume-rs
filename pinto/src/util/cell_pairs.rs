@@ -51,22 +51,11 @@ pub struct SrtCellPairsArgs {
 }
 
 impl<'a> SrtCellPairs<'a> {
-    /// Wrap a pre-built KNN graph with data and coordinates. The graph is
-    /// borrowed, not consumed — callers keep it for the graph algorithms
-    /// (coarsening, component decomposition) that need its adjacency.
-    pub fn with_graph(
-        data: &'a SparseIoVec,
-        coordinates: &'a Mat,
-        graph: &'a KnnGraph,
-    ) -> SrtCellPairs<'a> {
-        SrtCellPairs {
-            inner: CellPairs::from_graph(data, graph),
-            coordinates,
-            edge_kind: None,
-        }
-    }
-
-    /// As [`Self::with_graph`], recording which graph each pair came from.
+    /// Wrap a pre-built KNN graph with data and coordinates, recording which
+    /// graph each pair came from. The graph is borrowed, not consumed, so
+    /// callers keep it for the graph algorithms (coarsening, component
+    /// decomposition) that need its adjacency. Pass `None` for `edge_source`
+    /// when the graph was not augmented.
     pub fn with_graph_and_source(
         data: &'a SparseIoVec,
         coordinates: &'a Mat,

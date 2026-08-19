@@ -213,7 +213,7 @@ pub struct LevelInfo {
     pub level_index: usize,
     pub propensity: String,
     /// Per-edge community parquet. Every subcommand that clusters cell
-    /// pairs (lc / lc-etm / dsvd / cage) writes one; `None` is kept for
+    /// pairs (lc / dsvd / cage) writes one; `None` is kept for
     /// runs that produce no per-edge table at all, which plot's
     /// `discover_levels` falls back from gracefully.
     #[serde(skip_serializing_if = "Option::is_none")]
