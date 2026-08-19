@@ -187,7 +187,6 @@ pub struct PseudobulkArgs<'a> {
     pub cell_features: &'a Mat,
     /// Latent dimensionality `D` — the number of communities.
     pub embedding_dim: usize,
-    pub block_size: Option<usize>,
     /// How a matrix row maps onto the gene axis.
     ///
     /// The collapsed counts stay on the ROW axis — that is the only place the
@@ -231,17 +230,9 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         .last()
         .expect("non-empty, checked above");
     let n_pb_fine = finest_labels.iter().copied().max().map_or(0, |m| m + 1);
-    // Block size is chosen HERE rather than inherited from `--block-size`:
-    // `coarsen_cell_expression_dense` allocates one full dense
-    // `[n_genes x n_pb]` partial PER JOB and collects them all before reducing,
-    // so peak memory is `n_jobs x n_genes x n_pb x 4B`, not `n_threads x ...`.
-    //
-    // At the default block size of 100 that is ceil(3461/100) = 35 jobs x 205 MB
-    // = 7.2 GB live at once on GBM Visium. One block per thread caps it at
-    // `n_threads x 205 MB` while keeping the parallelism that matters — the
-    // read itself, which is the expensive part.
-    let n_cells = finest_labels.len();
-    let read_block = n_cells.div_ceil(rayon::current_num_threads().max(1)).max(1);
+    // No block-size argument, and no hand-rolled per-thread cap: the callee
+    // now bounds its own accumulator structurally. See the rationale on
+    // `coarsen_cell_expression_dense`.
     // The MATRIX ROW axis, deliberately: the two splice tracks are separable only
     // here, and Stage 1's `delta` block reads them apart. The gene-pooled fold
     // every other consumer wants is derived per level below.
@@ -249,7 +240,6 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         args.data,
         finest_labels,
         n_pb_fine,
-        Some(read_block),
     )?);
 
     // `parent[p_fine] = p_coarse`, or `None` when this level's cut splits a
@@ -314,7 +304,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
                  re-reading it directly (this should not happen — see \
                  graph_coarsen_multilevel's nesting guarantee)"
             );
-            coarsen_cell_expression_dense(args.data, labels, n_pb, args.block_size)?
+            coarsen_cell_expression_dense(args.data, labels, n_pb)?
         };
         collapsed.push((labels.clone(), counts));
     }
