@@ -37,25 +37,37 @@ use crate::util::common::*;
 use rustc_hash::FxHashMap;
 
 /// A directed community pair, and the cell-level assignment it rests on.
+///
+/// Strata are stored CSR-style: `pairs` is sorted and deduplicated, and
+/// `items[offsets[s]..offsets[s + 1]]` lists the edges realizing stratum `s`
+/// with the flag saying whether the stored `(i, j)` has to be swapped so `i`
+/// sends. Bucketing once at resolve costs one pass over the edges; scanning
+/// them per stratum instead would cost one pass per (batch, stratum) pair,
+/// which is where the old shape spent its time.
 pub struct DirectedStrata {
-    /// `dominant[i]` is cell `i`'s most frequent incident-edge community.
-    dominant: Vec<u32>,
-    /// `(sender, receiver)` community per stratum, in first-seen edge order.
+    /// `(sender, receiver)` per stratum, sorted, so the id is a function of
+    /// the partition rather than of the order edges were serialized.
     pairs: Vec<(u32, u32)>,
-    index: FxHashMap<(u32, u32), u32>,
-    /// Edges realizing each stratum, for the sparsity filter and the log.
-    edge_counts: Vec<usize>,
+    offsets: Vec<usize>,
+    items: Vec<(u32, bool)>,
 }
 
 impl DirectedStrata {
-    /// Derive the strata from the edge list.
+    /// Derive the strata from the edge list, taking each cell's community to
+    /// be the mode of its incident edges'.
     ///
-    /// A cell's dominant community is the mode of its incident edges'
-    /// communities, which is the argmax of the propensity row
-    /// `compute_node_membership` builds, without needing to read that file.
+    /// That mode is the argmax of the propensity row `compute_node_membership`
+    /// builds and `lc` writes to `propensity.parquet`. It is recomputed here
+    /// rather than read so `lra` keeps working against an edge list with no
+    /// sibling propensity file; [`Self::new`] takes the assignment directly
+    /// for a caller that would rather supply the artifact.
+    ///
     /// Ties go to the lowest community index, which is arbitrary but stable,
     /// and a tie means the cell sits between two communities in any case.
-    pub fn resolve(edges: &[(usize, usize, u32, Option<Box<str>>)], n_cells: usize) -> Self {
+    pub fn from_edge_modes(
+        edges: &[(usize, usize, u32, Option<Box<str>>)],
+        n_cells: usize,
+    ) -> Self {
         let mut counts: Vec<FxHashMap<u32, usize>> =
             (0..n_cells).map(|_| FxHashMap::default()).collect();
         for &(i, j, k, _) in edges {
@@ -66,49 +78,59 @@ impl DirectedStrata {
             .into_iter()
             .map(|m| {
                 m.into_iter()
-                    // max_by_key keeps the LAST maximum, so negate the
+                    // `max_by_key` keeps the LAST maximum, so negate the
                     // community index to make the lowest one win a tie.
                     .max_by_key(|&(c, n)| (n, std::cmp::Reverse(c)))
                     .map_or(u32::MAX, |(c, _)| c)
             })
             .collect();
+        Self::new(dominant, edges)
+    }
 
-        // Collect the realized pairs, then index them in SORTED order rather
-        // than in the order edges happen to arrive. A stratum id is written to
-        // the manifest and joined on downstream, so it has to be a function of
-        // the partition and not of how the edge list was serialized. Sorting
-        // also makes swapping the two endpoint columns of the input a no-op,
-        // which is the property this whole module exists to provide.
-        let mut seen: Vec<(u32, u32)> = Vec::new();
-        for &(i, j, _, _) in edges {
+    /// Build the strata from a per-cell community assignment.
+    ///
+    /// `dominant[i] == u32::MAX` marks a cell with no community; its edges sit
+    /// out entirely.
+    pub fn new(dominant: Vec<u32>, edges: &[(usize, usize, u32, Option<Box<str>>)]) -> Self {
+        // A heterotypic edge realizes `a -> b` and `b -> a`; a homotypic one
+        // realizes its single self stratum twice, once each way, which is what
+        // makes that stratum symmetric.
+        let realized = |i: usize, j: usize| -> Option<((u32, u32), (u32, u32))> {
             let (a, b) = (dominant[i], dominant[j]);
-            if a == u32::MAX || b == u32::MAX {
-                continue;
+            (a != u32::MAX && b != u32::MAX).then_some(((a, b), (b, a)))
+        };
+
+        let mut counts: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+        for &(i, j, _, _) in edges {
+            if let Some((ab, ba)) = realized(i, j) {
+                *counts.entry(ab).or_insert(0) += 1;
+                *counts.entry(ba).or_insert(0) += 1;
             }
-            // A homotypic edge is listed BOTH ways by `oriented`, which is what
-            // makes a self stratum symmetric, so it must be counted both ways
-            // here too. Counting it once would hold self strata to a 2x
-            // stricter sparsity bar than heterotypic ones, for no reason.
-            seen.push((a, b));
-            seen.push((b, a));
         }
-        let mut pairs: Vec<(u32, u32)> = seen.clone();
+        let mut pairs: Vec<(u32, u32)> = counts.keys().copied().collect();
         pairs.sort_unstable();
-        pairs.dedup();
-        let index: FxHashMap<(u32, u32), u32> = pairs
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| (p, i as u32))
-            .collect();
-        let mut edge_counts = vec![0usize; pairs.len()];
-        for p in seen {
-            edge_counts[index[&p] as usize] += 1;
+        let index: FxHashMap<(u32, u32), usize> =
+            pairs.iter().enumerate().map(|(s, &p)| (p, s)).collect();
+
+        let mut offsets = vec![0usize; pairs.len() + 1];
+        for (s, p) in pairs.iter().enumerate() {
+            offsets[s + 1] = offsets[s] + counts[p];
+        }
+        let mut cursor = offsets.clone();
+        let mut items = vec![(0u32, false); offsets[pairs.len()]];
+        for (e, &(i, j, _, _)) in edges.iter().enumerate() {
+            if let Some((ab, ba)) = realized(i, j) {
+                for (key, flipped) in [(ab, false), (ba, true)] {
+                    let s = index[&key];
+                    items[cursor[s]] = (e as u32, flipped);
+                    cursor[s] += 1;
+                }
+            }
         }
         Self {
-            dominant,
             pairs,
-            index,
-            edge_counts,
+            offsets,
+            items,
         }
     }
 
@@ -133,9 +155,11 @@ impl DirectedStrata {
 
     #[must_use]
     pub fn edges_in(&self, stratum: usize) -> usize {
-        self.edge_counts[stratum]
+        self.offsets[stratum + 1] - self.offsets[stratum]
     }
 
+    /// How the stratum reads in a label: `C3` when both endpoints share a
+    /// community, `C3->C7` when the test was directional.
     #[must_use]
     pub fn label(&self, stratum: usize) -> String {
         let (a, b) = self.pairs[stratum];
@@ -149,77 +173,54 @@ impl DirectedStrata {
     /// Which edges realize a stratum, and whether the stored `(i, j)` has to
     /// be swapped so that `i` is the sender.
     ///
-    /// Returned as indices rather than cells so a caller keeps access to the
-    /// edge's batch label, which it still has to filter on.
+    /// Indices rather than cells, so a caller keeps access to the edge's batch
+    /// label, which it still has to filter on.
     #[must_use]
-    pub fn oriented(
-        &self,
-        stratum: usize,
-        edges: &[(usize, usize, u32, Option<Box<str>>)],
-    ) -> Vec<(usize, bool)> {
-        let (want_a, want_b) = self.pairs[stratum];
-        let mut out = Vec::new();
-        for (e, &(i, j, _, _)) in edges.iter().enumerate() {
-            let (a, b) = (self.dominant[i], self.dominant[j]);
-            if a == u32::MAX || b == u32::MAX {
-                continue;
-            }
-            // Heterotypic: exactly one arm fires, and it decides the swap.
-            // Homotypic (`want_a == want_b`): a same-community edge fires BOTH
-            // arms and is listed once each way, which is what makes the self
-            // stratum symmetric, while an edge leaving the community fires
-            // neither and belongs to another stratum.
-            if a == want_a && b == want_b {
-                out.push((e, false));
-            }
-            if b == want_a && a == want_b {
-                out.push((e, true));
-            }
-        }
-        out
+    pub fn oriented(&self, stratum: usize) -> &[(u32, bool)] {
+        &self.items[self.offsets[stratum]..self.offsets[stratum + 1]]
     }
 
     /// Per-cell soft membership in each role, over the directed strata.
     ///
-    /// A heterotypic edge contributes to both `a -> b` (with the `a` endpoint
-    /// sending) and `b -> a` (with the `b` endpoint sending), so the two
-    /// directions are each estimated on the same edges and can be compared. A
-    /// homotypic edge has one stratum, in which both endpoints take both roles.
+    /// Reads the bucketed strata, so a heterotypic edge lands in `a -> b` with
+    /// its `a` endpoint sending and in `b -> a` with its `b` endpoint sending,
+    /// and a homotypic edge lands in its one stratum both ways.
     #[must_use]
     pub fn role_memberships(
         &self,
         edges: &[(usize, usize, u32, Option<Box<str>>)],
         n_cells: usize,
     ) -> (Mat, Mat) {
-        let s = self.n_strata();
-        let mut p_send = Mat::zeros(n_cells, s);
-        let mut p_recv = Mat::zeros(n_cells, s);
-        for &(i, j, _, _) in edges {
-            let (a, b) = (self.dominant[i], self.dominant[j]);
-            if a == u32::MAX || b == u32::MAX {
-                continue;
-            }
-            let ab = self.index[&(a, b)] as usize;
-            p_send[(i, ab)] += 1.0;
-            p_recv[(j, ab)] += 1.0;
-            if a != b {
-                let ba = self.index[&(b, a)] as usize;
-                p_send[(j, ba)] += 1.0;
-                p_recv[(i, ba)] += 1.0;
-            } else {
-                // One stratum, both roles, so the edge is counted both ways.
-                p_send[(j, ab)] += 1.0;
-                p_recv[(i, ab)] += 1.0;
+        let n = self.n_strata();
+        let mut p_send = Mat::zeros(n_cells, n);
+        let mut p_recv = Mat::zeros(n_cells, n);
+        for s in 0..n {
+            for &(e, flipped) in self.oriented(s) {
+                let (i, j, _, _) = edges[e as usize];
+                let (send, recv) = if flipped { (j, i) } else { (i, j) };
+                p_send[(send, s)] += 1.0;
+                p_recv[(recv, s)] += 1.0;
             }
         }
-        for i in 0..n_cells {
-            let s = p_send.row(i).sum();
-            if s > 0.0 {
-                p_send.row_mut(i).scale_mut(1.0 / s);
+        // Column-outer, because `Mat` is column-major: a row-wise sum-then-scale
+        // strides by `n_cells` and takes a cache miss per element once the
+        // stratum count is in the hundreds.
+        let mut send_tot = vec![0.0f32; n_cells];
+        let mut recv_tot = vec![0.0f32; n_cells];
+        for s in 0..n {
+            for i in 0..n_cells {
+                send_tot[i] += p_send[(i, s)];
+                recv_tot[i] += p_recv[(i, s)];
             }
-            let r = p_recv.row(i).sum();
-            if r > 0.0 {
-                p_recv.row_mut(i).scale_mut(1.0 / r);
+        }
+        for s in 0..n {
+            for i in 0..n_cells {
+                if send_tot[i] > 0.0 {
+                    p_send[(i, s)] /= send_tot[i];
+                }
+                if recv_tot[i] > 0.0 {
+                    p_recv[(i, s)] /= recv_tot[i];
+                }
             }
         }
         (p_send, p_recv)

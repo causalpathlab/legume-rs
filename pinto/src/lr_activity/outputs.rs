@@ -4,6 +4,24 @@ use crate::util::common::{HashMap, HashSet};
 use matrix_util::parquet::*;
 use parquet::basic::Type as ParquetType;
 
+impl LrActivityRow {
+    /// Both endpoints share a community, so the statistic is symmetric by
+    /// construction and NO direction may be read off this row.
+    #[must_use]
+    pub fn homotypic(&self) -> bool {
+        self.sender_community == self.receiver_community
+    }
+}
+
+impl StratumEntry {
+    /// See [`LrActivityRow::homotypic`]. It is the homotypic baseline, kept
+    /// rather than dropped.
+    #[must_use]
+    pub fn homotypic(&self) -> bool {
+        self.sender_community == self.receiver_community
+    }
+}
+
 pub struct LrActivityRow {
     pub batch: Box<str>,
     /// The directed stratum's own index.
@@ -12,8 +30,6 @@ pub struct LrActivityRow {
     /// the contrast between the `a -> b` row and the `b -> a` row.
     pub sender_community: i32,
     pub receiver_community: i32,
-    /// See [`StratumEntry::homotypic`]. Direction is meaningless here.
-    pub homotypic: bool,
     pub ligand: Box<str>,
     pub receptor: Box<str>,
     /// Canonical row name of the ligand gene as it appears in the
@@ -72,7 +88,7 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     let fwer_wy: Vec<f32> = rows.iter().map(|r| r.fwer_wy).collect();
     let send_c: Vec<i32> = rows.iter().map(|r| r.sender_community).collect();
     let recv_c: Vec<i32> = rows.iter().map(|r| r.receiver_community).collect();
-    let homotypic: Vec<i32> = rows.iter().map(|r| i32::from(r.homotypic)).collect();
+    let homotypic: Vec<i32> = rows.iter().map(|r| i32::from(r.homotypic())).collect();
 
     let col_names: Vec<Box<str>> = vec![
         "batch".into(),
@@ -163,10 +179,6 @@ pub struct StratumEntry {
     /// The community the receptor side was scored in. Equal to
     /// `sender_community` on a homotypic stratum.
     pub receiver_community: i32,
-    /// Both endpoints share a community, so the statistic is symmetric by
-    /// construction and NO direction may be read off this stratum. It is the
-    /// homotypic baseline, kept rather than dropped.
-    pub homotypic: bool,
     /// Sender first, receiver second, matching the direction that was tested.
     pub edges: Vec<(Box<str>, Box<str>)>,
 }
@@ -220,7 +232,7 @@ pub fn write_lr_activity_json(
                 "community": s.community,
                 "sender_community": s.sender_community,
                 "receiver_community": s.receiver_community,
-                "homotypic": s.homotypic,
+                "homotypic": s.homotypic(),
                 "n_edges": s.edges.len(),
                 "edges": edges_json,
             })
@@ -240,7 +252,7 @@ pub fn write_lr_activity_json(
                 "community": r.community,
                 "sender_community": r.sender_community,
                 "receiver_community": r.receiver_community,
-                "homotypic": r.homotypic,
+                "homotypic": r.homotypic(),
                 "ligand": r.ligand.as_ref(),
                 "receptor": r.receptor.as_ref(),
                 "ligand_resolved": r.ligand_resolved.as_ref(),

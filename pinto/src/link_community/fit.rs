@@ -89,9 +89,9 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();
-    let gene_axis = gene_axis.expect("gene_axis=true must yield Some");
+    let gene_axis = gene_axis.expect("a gene-axis mode other than Rows must yield Some");
     let gene_weights = gene_weights.expect("fisher_weights=true must yield Some");
-    let gene_stats = gene_stats.expect("fisher_weights + gene_axis must yield Some");
+    let gene_stats = gene_stats.expect("fisher_weights with a gene axis must yield Some");
     let n_genes = gene_axis.n_genes();
     // Per-row totals, taken off the streaming pass rather than paid for again.
     let row_totals: Vec<f64> = row_stats
@@ -100,12 +100,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         .iter()
         .map(|&x| f64::from(x))
         .collect();
-    if gene_axis.is_channelized() {
-        info!(
-            "Feature axis: {} rows carry splice channels over {} genes",
-            n_rows, n_genes
-        );
-    }
 
     /////////////////////////////////////////////
     // 4-pre. Gene network setup (if provided) //
@@ -160,11 +154,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // assignment and the per-gene weights are both spread back over rows.
         // A gene's two tracks therefore land in the same module, which is the
         // only coherent answer: a module is a set of genes, not of tracks.
-        let module_of_row: Vec<Option<usize>> = gene_axis
-            .row_to_gene()
-            .iter()
-            .map(|&g| basis.module_of_gene[g as usize])
-            .collect();
+        let module_of_row = gene_axis.broadcast_to_rows(&basis.module_of_gene);
         let row_weights = gene_axis.broadcast_to_rows(&gene_weights);
         let (module_expr, cell_totals) = build_module_expression(
             &data_vec,
@@ -260,18 +250,16 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // and the projection would then see one gene at two precisions.
         let mut basis = cell_proj.basis.clone();
         if args.min_gene_count > 0.0 {
-            let gene_totals = gene_axis.pool_totals(row_totals.clone());
+            let gene_totals = gene_axis.pool_totals(&row_totals);
             let per_row = gene_axis.broadcast_to_rows(&gene_totals);
-            // Counts basis ROWS, and every row of a gene shares its gene's
-            // total, so the gene count is the row count divided by the rows a
-            // gene owns. Deriving it here rather than re-applying the threshold
-            // keeps one copy of the rule.
+            // Rows kept is what the filter returns; genes kept is counted on
+            // the gene axis, since a gene keeps or loses all of its rows
+            // together.
             let n_rows_kept = filter_basis_by_gene_count(&mut basis, &per_row, args.min_gene_count);
             let n_genes_kept = gene_totals
                 .iter()
                 .filter(|&&t| t >= f64::from(args.min_gene_count))
                 .count();
-            debug_assert!(n_rows_kept >= n_genes_kept);
             info!(
                 "Kept {}/{} genes ({} of {} rows, min_count={:.0})",
                 n_genes_kept, n_genes, n_rows_kept, n_rows, args.min_gene_count
@@ -344,7 +332,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &mut sampler,
         &cell_names,
         Some(&gene_weights),
-        Some(&gene_axis),
+        &gene_axis,
     )?;
 
     let mut current_labels = cascade_result.fine_labels;
@@ -479,7 +467,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &cell_names,
         &data_vec,
         Some(&gene_weights),
-        Some(&gene_axis),
+        &gene_axis,
         c.block_size,
     )?;
 
@@ -587,7 +575,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     &cell_names,
                     &data_vec,
                     Some(&gene_weights),
-                    Some(&gene_axis),
+                    &gene_axis,
                     c.block_size,
                 )?;
                 merge_present_with_consensus = true;

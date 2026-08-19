@@ -65,6 +65,17 @@ fn metadata_roundtrip_lc() {
             ][..]
         )
     );
+
+    // The splice block is what tells a consumer the axis was channelized, so a
+    // round trip that drops it would be silent.
+    let splice = back.splice.as_ref().expect("splice block must survive");
+    assert_eq!(splice.n_rows, 36000);
+    assert_eq!(splice.n_delta_identified, 13000);
+    assert_eq!(splice.delta_base, DELTA_BASE_SPLICED);
+    assert!(
+        splice.delta_from_refresh.is_none(),
+        "lc runs no splice sampler"
+    );
 }
 
 #[test]

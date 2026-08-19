@@ -201,7 +201,7 @@ pub fn fit_cell_activity_graph_embedding(
         gene_axis,
         row_weights: fisher_weights,
         row_stats,
-        gene_weights,
+        gene_weights: gene_fisher_weights,
         gene_stats: _,
         n_cells,
         n_rows,
@@ -222,7 +222,7 @@ pub fn fit_cell_activity_graph_embedding(
     // gene-side below folds through this; on any other matrix the axis is the
     // identity and every fold is a pass-through. The two are NOT interchangeable
     // names for one number, so `n_rows` and `n_genes` stay apart from here on.
-    let gene_axis = gene_axis.expect("gene_axis=true must yield Some");
+    let gene_axis = gene_axis.expect("GeneAxisMode::Strict must yield Some");
     let n_genes = gene_axis.n_genes();
     let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
 
@@ -249,7 +249,6 @@ pub fn fit_cell_activity_graph_embedding(
     // sum is not the sum of `s2`, so a post-hoc fold loses the cross term
     // between a gene's two tracks and hands the dispersion trend a variance
     // that is too small exactly where the two tracks covary most.
-    let gene_fisher_weights: Option<Vec<f32>> = gene_weights;
 
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
     srt_cell_pairs.to_parquet(
@@ -284,7 +283,7 @@ pub fn fit_cell_activity_graph_embedding(
         Some(st) => st.sum().iter().map(|&x| f64::from(x)).collect(),
         None => crate::link_community::profiles::compute_row_totals(&data_vec, c.block_size)?,
     };
-    let gene_totals = gene_axis.pool_totals(row_totals.clone());
+    let gene_totals = gene_axis.pool_totals(&row_totals);
 
     // The go/no-go for everything a velocity contrast would be built on, taken
     // BEFORE the expensive fit so a thin input is caught by reading the log
