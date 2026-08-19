@@ -119,14 +119,21 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         batch_membership,
         batch_effects: batch_db,
         graph,
+        gene_axis: _,
+        row_weights: _,
+        row_stats: _,
         gene_weights: _,
-        n_cells,
-        n_genes,
         gene_stats: _,
+        n_cells,
+        n_rows: n_genes,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: false,
         batch_effects: true,
+        // `dsvd` stacks its two channels on the ROW axis and never folds, so
+        // resolving a gene axis would buy it nothing and would newly reject a
+        // mixed feature axis it currently accepts.
+        gene_axis: false,
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();
@@ -271,6 +278,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &PropensityReportConfig {
             clustering: args.edge_clustering.resolve(c.seed),
             block_size: c.block_size,
+            // `dsvd` never resolves a gene axis (it stacks its two channels on
+            // the row axis), so its gene-community table stays row-keyed.
+            gene_axis: None,
         },
         &c.out,
     )?;

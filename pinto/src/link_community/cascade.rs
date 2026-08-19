@@ -16,6 +16,7 @@ use crate::link_community::model::*;
 use crate::link_community::outputs::{write_level_outputs, ScoreEntry};
 use crate::link_community::profiles::*;
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 
 /// Per-cell module-pair state carried across cascade levels.
 ///
@@ -93,6 +94,7 @@ pub fn run_cascade(
     sampler: &mut LinkGibbsSampler,
     cell_names: &[Box<str>],
     gene_weights: Option<&[f32]>,
+    gene_axis: Option<&GeneAxis>,
 ) -> anyhow::Result<CascadeResult> {
     anyhow::ensure!(
         !level_cell_labels.is_empty(),
@@ -239,6 +241,7 @@ pub fn run_cascade(
                 cell_names,
                 data_vec,
                 gene_weights,
+                gene_axis,
                 block_size,
             )?;
             written_level_indices.push(l);

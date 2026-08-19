@@ -90,8 +90,8 @@
 //! not to widen the engine — the per-node loop below has no pair-specific
 //! arithmetic in it.
 
-use crate::cell_activity_graph_embedding::gene_axis::GeneAxis;
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use matrix_util::utils::generate_minibatch_intervals;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;

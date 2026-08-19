@@ -75,7 +75,6 @@
 //! because a dropout keep-rate is not a coefficient.
 
 use crate::cell_activity_graph_embedding::args::{CellActivityGraphEmbeddingArgs, GateMode};
-use crate::cell_activity_graph_embedding::gene_axis::GeneAxis;
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -197,14 +196,18 @@ pub fn fit_cell_activity_graph_embedding(
         batch_membership,
         batch_effects: batch_db,
         graph,
-        gene_weights: fisher_weights,
+        gene_axis,
+        row_weights: fisher_weights,
+        row_stats: _,
+        gene_weights,
+        gene_stats: _,
         n_cells,
-        n_genes: n_rows,
-        gene_stats,
+        n_rows,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: !args.no_fisher_weights,
         batch_effects: true,
+        gene_axis: true,
         feature_kind: Some(feature_kind),
     })?;
 
@@ -217,7 +220,7 @@ pub fn fit_cell_activity_graph_embedding(
     // gene-side below folds through this; on any other matrix the axis is the
     // identity and every fold is a pass-through. The two are NOT interchangeable
     // names for one number, so `n_rows` and `n_genes` stay apart from here on.
-    let gene_axis = GeneAxis::resolve(&row_names)?;
+    let gene_axis = gene_axis.expect("gene_axis=true must yield Some");
     let n_genes = gene_axis.n_genes();
     let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
 
@@ -235,36 +238,16 @@ pub fn fit_cell_activity_graph_embedding(
     // degree-corrected Poisson refinement both read the matrix. The TRAINING
     // LOOP does not — it weights a per-GENE loss and indexes by gene id — so on
     // a channelized matrix `w[g]` would hand gene `g` an unrelated row's
-    // precision, silently, because `n_genes < n_rows` means it never goes out of
-    // bounds.
+    // precision, silently, because `n_genes < n_rows` means it never goes out
+    // of bounds.
     //
-    // The refold happens on the SUMS AND MEANS rather than on the weights,
-    // because `fisher_weight(relative abundance, avg, mean)` is not additive: a
-    // gene's pooled abundance is the sum of its rows' abundances, and the weight
-    // is evaluated once on that. The dispersion trend is the one fitted over
-    // rows — a global mean-variance relation, so it transfers.
-    let gene_fisher_weights: Option<Vec<f32>> = match (&gene_stats, gene_axis.is_channelized()) {
-        (Some(stats), true) => {
-            use data_beans_alg::nb_dispersion::DispersionTrend;
-            let trend = DispersionTrend::from_sparse_stats(stats);
-            let sums = gene_axis.pool_totals(stats.sum().iter().map(|&x| f64::from(x)).collect());
-            let means = gene_axis.pool_totals(stats.mean().iter().map(|&x| f64::from(x)).collect());
-            let total: f64 = sums.iter().sum();
-            let inv_total = if total > 0.0 { 1.0 / total } else { 0.0 };
-            let avg_s = (total / n_cells.max(1) as f64) as f32;
-            Some(
-                (0..n_genes)
-                    .map(|g| {
-                        trend.fisher_weight((sums[g] * inv_total) as f32, avg_s, means[g] as f32)
-                    })
-                    .collect(),
-            )
-        }
-        // Identity axis: rows ARE genes, so the row weights already are the gene
-        // weights and refolding would only round-trip them.
-        // Last read of the row weights, so it can be moved rather than copied.
-        _ => fisher_weights,
-    };
+    // Both vectors come from one streaming pass, and the gene-axis one is
+    // computed from statistics folded INSIDE that pass rather than from the row
+    // statistics folded afterwards. That distinction is not cosmetic: `s2` of a
+    // sum is not the sum of `s2`, so a post-hoc fold loses the cross term
+    // between a gene's two tracks and hands the dispersion trend a variance
+    // that is too small exactly where the two tracks covary most.
+    let gene_fisher_weights: Option<Vec<f32>> = gene_weights;
 
     let srt_cell_pairs = SrtCellPairs::with_graph(&data_vec, &coordinates, &graph);
     srt_cell_pairs.to_parquet(
@@ -292,7 +275,7 @@ pub fn fit_cell_activity_graph_embedding(
     // partition at the end of the run. The counts do not change in between —
     // batch effects and QC are both already applied — so a second pass would
     // re-read every column of the zarr to rebuild the same vector.
-    let row_totals = crate::link_community::profiles::compute_gene_totals(&data_vec, c.block_size)?;
+    let row_totals = crate::link_community::profiles::compute_row_totals(&data_vec, c.block_size)?;
     let gene_totals = gene_axis.pool_totals(row_totals.clone());
 
     // The go/no-go for everything a velocity contrast would be built on, taken
@@ -1362,6 +1345,12 @@ pub fn fit_cell_activity_graph_embedding(
         &PropensityReportConfig {
             clustering,
             block_size: c.block_size,
+            // Deliberately row-keyed, and documented as such in `pinto cage
+            // --help`: a channelized run lists a gene's two tracks as two rows,
+            // which is the one place the nascent/mature contrast is reportable.
+            // `lc` folds instead, because its dictionary merge has to index the
+            // same axis its gene filter chose on.
+            gene_axis: None,
         },
         &c.out,
     )?;

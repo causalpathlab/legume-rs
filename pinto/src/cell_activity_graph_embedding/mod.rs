@@ -26,7 +26,6 @@
 
 pub mod args;
 pub mod fit;
-pub mod gene_axis;
 pub mod gene_chain_sampler;
 pub mod gene_gating;
 pub mod loss;

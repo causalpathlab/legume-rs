@@ -66,18 +66,41 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         batch_membership,
         batch_effects: batch_db,
         graph,
+        gene_axis,
+        row_weights: _,
+        row_stats,
         gene_weights,
         gene_stats,
         n_cells,
-        n_genes,
+        n_rows,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: true,
         batch_effects: true,
+        // Everything `lc` filters, weights and reports is per GENE. On a
+        // channelized matrix a row is half a gene, and reading one as the other
+        // is what let the merge filter pick its cutoff by splice track.
+        gene_axis: true,
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();
+    let gene_axis = gene_axis.expect("gene_axis=true must yield Some");
     let gene_weights = gene_weights.expect("fisher_weights=true must yield Some");
+    let gene_stats = gene_stats.expect("fisher_weights + gene_axis must yield Some");
+    let n_genes = gene_axis.n_genes();
+    // Per-row totals, taken off the streaming pass rather than paid for again.
+    let row_totals: Vec<f64> = row_stats
+        .expect("fisher_weights=true must yield Some")
+        .sum()
+        .iter()
+        .map(|&x| f64::from(x))
+        .collect();
+    if gene_axis.is_channelized() {
+        info!(
+            "Feature axis: {} rows carry splice channels over {} genes",
+            n_rows, n_genes
+        );
+    }
 
     /////////////////////////////////////////////
     // 4-pre. Gene network setup (if provided) //
@@ -87,7 +110,12 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // ready to feed the V-cycle.
     let mut module_ctx: Option<ModulePairContext> = None;
     if let Some(ref network_file) = args.gene_network {
-        let gene_names = data_vec.row_names()?;
+        // Resolve against GENE names, not row names. The name resolver aliases
+        // only on `--gene-network-delimiter` (default `_`) and never on `/`, so
+        // a channelized row like `GENE1/count/spliced` matches no network entry
+        // and the `num_edges() > 0` check below fires, blaming the user's file
+        // for what is a units mismatch on our side.
+        let gene_names = gene_axis.gene_names().to_vec();
         info!("Loading external gene network from {}...", network_file);
         let mut gene_graph = GenePairGraph::from_edge_list(
             network_file,
@@ -123,11 +151,21 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         );
 
         info!("Computing per-cell module expression (NB Fisher gene-weighted)...");
+        // `build_module_expression` walks matrix rows, so the per-gene module
+        // assignment and the per-gene weights are both spread back over rows.
+        // A gene's two tracks therefore land in the same module, which is the
+        // only coherent answer: a module is a set of genes, not of tracks.
+        let module_of_row: Vec<Option<usize>> = gene_axis
+            .row_to_gene()
+            .iter()
+            .map(|&g| basis.module_of_gene[g as usize])
+            .collect();
+        let row_weights = gene_axis.broadcast_to_rows(&gene_weights);
         let (module_expr, cell_totals) = build_module_expression(
             &data_vec,
-            &basis.module_of_gene,
+            &module_of_row,
             basis.n_modules,
-            Some(&gene_weights),
+            Some(&row_weights),
             c.block_size,
         )?;
 
@@ -193,7 +231,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     ..Default::default()
                 },
                 data: &data_vec,
-                num_genes: n_genes,
+                // Reads the matrix, so this is a row count.
+                num_genes: n_rows,
             }),
         },
     );
@@ -208,17 +247,27 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // projecting w·x instead of x — housekeeping / high-mean-high-
         // dispersion genes get attenuated (w_g → 0), informative genes
         // recover w_g ≈ 1.
+        //
+        // Both the filter and the weights are decided per GENE and then spread
+        // back over that gene's rows. Deciding either per row would split a
+        // gene: the nascent track is sparser, so it lands elsewhere on the
+        // dispersion trend and can fall the other side of a count threshold,
+        // and the projection would then see one gene at two precisions.
         let mut basis = cell_proj.basis.clone();
         if args.min_gene_count > 0.0 {
-            info!("Computing gene totals for filtering...");
-            let gene_totals = compute_gene_totals(&data_vec, c.block_size)?;
-            let n_kept = filter_basis_by_gene_count(&mut basis, &gene_totals, args.min_gene_count);
+            let gene_totals = gene_axis.pool_totals(row_totals.clone());
+            let n_genes_kept = gene_totals
+                .iter()
+                .filter(|&&t| t >= f64::from(args.min_gene_count))
+                .count();
+            let per_row = gene_axis.broadcast_totals_to_rows(&gene_totals);
+            filter_basis_by_gene_count(&mut basis, &per_row, args.min_gene_count);
             info!(
                 "Kept {}/{} genes (min_count={:.0})",
-                n_kept, n_genes, args.min_gene_count
+                n_genes_kept, n_genes, args.min_gene_count
             );
         }
-        apply_gene_weights(&mut basis, &gene_weights);
+        apply_gene_weights(&mut basis, &gene_axis.broadcast_to_rows(&gene_weights));
         Some(basis)
     } else {
         None
@@ -285,6 +334,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &mut sampler,
         &cell_names,
         Some(&gene_weights),
+        Some(&gene_axis),
     )?;
 
     let mut current_labels = cascade_result.fine_labels;
@@ -419,6 +469,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &cell_names,
         &data_vec,
         Some(&gene_weights),
+        Some(&gene_axis),
         c.block_size,
     )?;
 
@@ -438,10 +489,16 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // Score the merge on DETECTED genes only — see `cosine_merge`'s step 0
         // for why undetected genes otherwise decide it. `gene_nnz` rides out of
         // the Fisher-weight pass rather than costing a second full read.
-        let gene_nnz = gene_stats
-            .as_ref()
-            .expect("fisher_weights=true must yield Some")
-            .count_positives();
+        //
+        // Per GENE, not per row, and on a channelized matrix that is the whole
+        // ballgame. `suggest_nnz_cutoff` is an exact 2-means split on
+        // `log1p(nnz)` that assumes the one bimodality it finds is
+        // ambient-vs-real. Row-wise, a channelized matrix carries a STRONGER
+        // second bimodality — the nascent track is detected far less often than
+        // the mature one — so the split lands between the two tracks and
+        // `keep_genes` silently becomes "is this row spliced". On the gene axis
+        // that bimodality does not exist, so the question does not arise.
+        let gene_nnz = gene_stats.count_positives();
         let min_nnz = args
             .merge_min_nnz
             .or_else(|| suggest_nnz_cutoff(&gene_nnz))
@@ -520,6 +577,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     &cell_names,
                     &data_vec,
                     Some(&gene_weights),
+                    Some(&gene_axis),
                     c.block_size,
                 )?;
                 merge_present_with_consensus = true;
@@ -552,11 +610,25 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 coord_file: coord_file_str.as_deref(),
                 coord_columns: &coordinate_names,
                 n_cells,
-                n_genes: data_vec.num_rows(),
+                n_genes,
                 n_edges: edges.len(),
                 k,
             },
             merge_summary,
+            // `lc` runs no splice sampler, so the three `delta_*` fields stay
+            // `None`: what it can report is the structural fact of the axis,
+            // not a fitted contrast.
+            gene_axis
+                .report_delta_identifiability(&row_totals)
+                .map(|r| crate::util::metadata::SpliceTrackInfo {
+                    n_rows,
+                    n_delta_identified: r.n_identified,
+                    nascent_count_fraction: r.nascent_fraction,
+                    delta_base: crate::util::metadata::DELTA_BASE_SPLICED.to_string(),
+                    delta_from_refresh: None,
+                    delta_median_counts: None,
+                    delta_counts_per_pseudobulk: None,
+                }),
             &cascade_level_indices,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
