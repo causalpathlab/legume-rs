@@ -292,6 +292,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             // `dsvd` never resolves a gene axis (it stacks its two channels on
             // the row axis), so its gene-community table stays row-keyed.
             gene_axis: None,
+            edge_kind: srt_cell_pairs.edge_kind.as_deref(),
         },
         &c.out,
     )?;

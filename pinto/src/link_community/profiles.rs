@@ -657,6 +657,10 @@ pub struct PropensityReportConfig<'a> {
     /// one. `None` keeps the table on the matrix's own rows, which is what a
     /// caller wants when a row is already the unit it reports.
     pub gene_axis: Option<&'a GeneAxis>,
+    /// Per-edge provenance, parallel to `edges`, when the pair graph was
+    /// augmented. `None` omits the column, keeping an unaugmented run
+    /// byte-identical.
+    pub edge_kind: Option<&'a [i32]>,
 }
 
 /// Compute propensity and gene-community statistics from latent pair projections.
@@ -682,6 +686,7 @@ pub fn compute_propensity_and_gene_community_stat(
         clustering,
         block_size,
         gene_axis,
+        edge_kind,
     } = *cfg;
 
     // 1. Cluster the latent edge vectors
@@ -737,7 +742,7 @@ pub fn compute_propensity_and_gene_community_stat(
         edges,
         &edge_membership,
         &cell_names,
-        None,
+        edge_kind,
     )?;
 
     // 3. Gene-community stat
