@@ -224,3 +224,143 @@ fn test_create_jobs_helper() {
     let jobs = create_jobs(5, 0);
     assert_eq!(jobs, vec![(0, 5)]);
 }
+
+/// A line of 4 points, so the spatial graph is a path.
+fn line_matrix() -> DMatrix<f32> {
+    DMatrix::from_row_slice(4, 1, &[0.0, 1.0, 2.0, 3.0])
+}
+
+fn path_graph(points: &DMatrix<f32>) -> KnnGraph {
+    KnnGraph::from_rows(
+        points,
+        KnnGraphArgs {
+            knn: 1,
+            block_size: 8,
+            reciprocal: false,
+        },
+    )
+    .unwrap()
+}
+
+/// Two graphs over the same nodes. The union must carry every edge once, tag
+/// each with where it came from, and keep the sorted `i < j` invariant the
+/// rest of the type depends on.
+#[test]
+fn union_merges_edges_and_records_which_graph_each_came_from() {
+    let a = path_graph(&line_matrix());
+    // A second embedding: 0 and 3 are close here, and 1 and 2 again.
+    let b = path_graph(&DMatrix::from_row_slice(4, 1, &[0.0, 10.0, 10.5, 0.5]));
+
+    let a_edges = a.edges.clone();
+    let b_edges = b.edges.clone();
+    let (merged, source) = a.union_with(&b, DistanceMerge::SourceRank).unwrap();
+
+    assert_eq!(merged.edges.len(), source.len(), "one source tag per edge");
+    assert_eq!(merged.distances.len(), merged.edges.len(), "distances parallel");
+    assert_eq!(merged.n_nodes, 4);
+    assert!(
+        merged.edges.windows(2).all(|w| w[0] < w[1]),
+        "sorted and deduplicated"
+    );
+    for &(i, j) in &merged.edges {
+        assert!(i < j, "canonical orientation");
+    }
+
+    for e in &a_edges {
+        let k = merged.edges.iter().position(|x| x == e).expect("kept");
+        let want = if b_edges.contains(e) {
+            EdgeSource::Both
+        } else {
+            EdgeSource::Primary
+        };
+        assert_eq!(source[k], want, "edge {e:?}");
+    }
+    for e in &b_edges {
+        let k = merged.edges.iter().position(|x| x == e).expect("kept");
+        let want = if a_edges.contains(e) {
+            EdgeSource::Both
+        } else {
+            EdgeSource::Secondary
+        };
+        assert_eq!(source[k], want, "edge {e:?}");
+    }
+
+    // The adjacency is derived state and must be rebuilt. A union that merges
+    // the edge list but keeps an input's adjacency passes everything above.
+    for &(i, j) in &merged.edges {
+        assert!(merged.neighbors(i).contains(&j), "adjacency missing {i}->{j}");
+        assert!(merged.neighbors(j).contains(&i), "adjacency missing {j}->{i}");
+    }
+}
+
+/// The two inputs measure different things, so each side is replaced by its
+/// own within-source quantile rank before merging. Without this the
+/// user-facing `distance` column interleaves two incomparable units and a
+/// median-sigma kernel over the result is meaningless.
+#[test]
+fn union_ranks_each_sources_distances_within_that_source() {
+    let a = path_graph(&line_matrix());
+    // Same spacing scaled by 1000, but PERMUTED so `b` contributes edges of
+    // its own. With identical topology every edge would be shared and the
+    // `min` rule would always return the near graph's value, so the fixture
+    // rather than the policy would decide the result.
+    let b = path_graph(&DMatrix::from_row_slice(4, 1, &[0.0, 3000.0, 1000.0, 2000.0]));
+    assert!(
+        b.edges.iter().any(|e| !a.edges.contains(e)),
+        "fixture must give `b` at least one edge of its own"
+    );
+
+    let (ranked, _) = a.union_with(&b, DistanceMerge::SourceRank).unwrap();
+    for &d in &ranked.distances {
+        assert!((0.0..=1.0).contains(&d), "rank out of range: {d}");
+    }
+
+    // Raw must keep the spread, or the assertion above proves nothing about
+    // the policy as opposed to the fixture.
+    let (raw, _) = a.union_with(&b, DistanceMerge::Raw).unwrap();
+    let hi = raw.distances.iter().cloned().fold(f32::MIN, f32::max);
+    assert!(hi > 100.0, "Raw should preserve the original scale, got {hi}");
+}
+
+/// A pair must be counted once however an input happened to store it. Edge
+/// order is a constructor invariant, not a type invariant: `build_super_graph`
+/// in pinto builds a `KnnGraph` by hand from hash-map order.
+#[test]
+fn union_counts_a_pair_once_even_when_an_input_stores_it_reversed() {
+    let a = path_graph(&line_matrix());
+    let mut flipped = path_graph(&line_matrix());
+    for e in flipped.edges.iter_mut() {
+        *e = (e.1, e.0);
+    }
+
+    let (merged, source) = a.union_with(&flipped, DistanceMerge::SourceRank).unwrap();
+
+    assert_eq!(
+        merged.edges.len(),
+        a.edges.len(),
+        "reversed duplicates must collapse, not double"
+    );
+    assert!(
+        source.iter().all(|s| *s == EdgeSource::Both),
+        "every edge is present in both inputs"
+    );
+    for &(i, j) in &merged.edges {
+        assert!(i < j, "canonical orientation restored");
+        assert_eq!(
+            merged.neighbors(i).iter().filter(|&&n| n == j).count(),
+            1,
+            "edge {i}-{j} recorded once in the adjacency"
+        );
+    }
+}
+
+#[test]
+fn union_rejects_graphs_over_different_node_counts() {
+    let a = path_graph(&line_matrix());
+    let b = path_graph(&DMatrix::from_row_slice(3, 1, &[0.0, 1.0, 2.0]));
+    let err = match a.union_with(&b, DistanceMerge::SourceRank) {
+        Ok(_) => panic!("a union over mismatched node counts must not succeed"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("node"), "{err}");
+}

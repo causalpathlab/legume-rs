@@ -2,6 +2,7 @@ use crate::graph::WeightedGraph;
 use crate::knn_match::{ColumnDict, SearchScratch};
 
 use dashmap::DashMap;
+use std::collections::BTreeMap;
 use indicatif::ParallelProgressIterator;
 use log::info;
 use nalgebra::DMatrix;
@@ -19,6 +20,28 @@ pub struct KnnGraph {
     pub distances: Vec<f32>,
     /// Number of nodes
     pub n_nodes: usize,
+}
+
+/// Which input graph an edge of a [`KnnGraph::union_with`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeSource {
+    Primary,
+    Secondary,
+    /// Present in both inputs. Still a primary-graph edge for any consumer
+    /// filtering on the primary relation, since the primary relation holds.
+    Both,
+}
+
+/// How to reconcile two graphs' `distances` when merging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistanceMerge {
+    /// Keep raw values. Correct only when both inputs measure the same thing.
+    Raw,
+    /// Replace each side's distances with its own within-source quantile rank
+    /// in `[0, 1]` before merging. Use this whenever the inputs measure
+    /// different things, so the merged column stays comparable across sources
+    /// and monotone within each.
+    SourceRank,
 }
 
 pub struct KnnGraphArgs {
@@ -50,6 +73,93 @@ impl KnnGraph {
     pub fn from_rows(data: &DMatrix<f32>, args: KnnGraphArgs) -> anyhow::Result<KnnGraph> {
         let transposed = data.transpose();
         Self::from_columns(&transposed, args)
+    }
+
+    /// Merge two graphs over the same nodes, keeping every pair exactly once
+    /// and reporting which input each came from.
+    ///
+    /// Borrows both inputs: a caller that unions a spatial graph with an
+    /// expression one generally still needs the spatial graph afterwards, as
+    /// the topology for anything that reasons about physical adjacency.
+    ///
+    /// Neither input is assumed sorted, nor assumed to store `i < j`. Edge
+    /// order is a constructor invariant here, not a type invariant, and a
+    /// hand-built `KnnGraph` can violate both.
+    ///
+    /// `distances` after a union are NOT a metric. Under
+    /// [`DistanceMerge::SourceRank`] they are within-source quantile ranks,
+    /// which keeps them comparable across sources without pretending the two
+    /// measurements are the same quantity. When an edge is in both inputs the
+    /// smaller value wins, matching the `reciprocal: false` convention in
+    /// `build_from_dict`.
+    pub fn union_with(
+        &self,
+        other: &KnnGraph,
+        policy: DistanceMerge,
+    ) -> anyhow::Result<(KnnGraph, Vec<EdgeSource>)> {
+        anyhow::ensure!(
+            self.n_nodes == other.n_nodes,
+            "cannot union graphs over different node counts: {} vs {}",
+            self.n_nodes,
+            other.n_nodes
+        );
+        let n_nodes = self.n_nodes;
+
+        let (a_dist, b_dist) = match policy {
+            DistanceMerge::Raw => (self.distances.clone(), other.distances.clone()),
+            DistanceMerge::SourceRank => {
+                (within_source_rank(&self.distances), within_source_rank(&other.distances))
+            }
+        };
+
+        // A sorted map keyed on the canonical pair does the dedup, the
+        // canonicalisation and the ordering in one pass. The dedup has to
+        // finish before the COO below, which SUMS duplicates rather than
+        // rejecting them.
+        let canonical = |&(i, j): &(usize, usize)| if i <= j { (i, j) } else { (j, i) };
+        let mut merged: BTreeMap<(usize, usize), (f32, EdgeSource)> = BTreeMap::new();
+
+        for (edge, &dist) in self.edges.iter().zip(a_dist.iter()) {
+            merged
+                .entry(canonical(edge))
+                .and_modify(|slot| slot.0 = slot.0.min(dist))
+                .or_insert((dist, EdgeSource::Primary));
+        }
+        for (edge, &dist) in other.edges.iter().zip(b_dist.iter()) {
+            merged
+                .entry(canonical(edge))
+                .and_modify(|slot| {
+                    slot.0 = slot.0.min(dist);
+                    slot.1 = EdgeSource::Both;
+                })
+                .or_insert((dist, EdgeSource::Secondary));
+        }
+
+        let mut edges = Vec::with_capacity(merged.len());
+        let mut distances = Vec::with_capacity(merged.len());
+        let mut source = Vec::with_capacity(merged.len());
+        for (edge, (dist, src)) in merged {
+            edges.push(edge);
+            distances.push(dist);
+            source.push(src);
+        }
+
+        // Derived state, so rebuild rather than merge.
+        let mut coo = CooMatrix::new(n_nodes, n_nodes);
+        for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
+            coo.push(i, j, v);
+            coo.push(j, i, v);
+        }
+
+        Ok((
+            KnnGraph {
+                adjacency: CscMatrix::from(&coo),
+                edges,
+                distances,
+                n_nodes,
+            },
+            source,
+        ))
     }
 
     fn build_from_dict(
@@ -546,3 +656,22 @@ fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests;
+
+/// Each value replaced by its rank among the others, scaled to `[0, 1]`.
+///
+/// Ties take distinct adjacent ranks, which is harmless: the point is to put
+/// two incomparable distance scales on one axis, not to be a faithful
+/// empirical CDF.
+fn within_source_rank(d: &[f32]) -> Vec<f32> {
+    if d.len() <= 1 {
+        return vec![0.0; d.len()];
+    }
+    let mut order: Vec<usize> = (0..d.len()).collect();
+    order.sort_unstable_by(|&a, &b| d[a].partial_cmp(&d[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out = vec![0.0f32; d.len()];
+    let denom = (d.len() - 1) as f32;
+    for (rank, &idx) in order.iter().enumerate() {
+        out[idx] = rank as f32 / denom;
+    }
+    out
+}
