@@ -1368,6 +1368,7 @@ pub fn fit_cell_activity_graph_embedding(
             // `lc` folds instead, because its dictionary merge has to index the
             // same axis its gene filter chose on.
             gene_axis: None,
+            edge_kind: srt_cell_pairs.edge_kind.as_deref(),
         },
         &c.out,
     )?;
