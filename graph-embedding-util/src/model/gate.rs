@@ -196,7 +196,7 @@ const GATE_PI_EPS: f64 = 1e-6;
 /// `0.5, 0.25, 0.125, …` — a ~11-logit drop by dim 16. Handing that to a
 /// GRADIENT-trained gate does not make it sparse, it makes it small: the tail
 /// multiplier goes to ~0 **and** `dα/dS → 0`, so those dims are frozen at init
-/// before a single gradient arrives. Measured on GBM, `α = 1` put 62.5% of
+/// before a single gradient arrives. Measured on real data, `α = 1` put 62.5% of
 /// entries below 0.5 — and 62.5% were already there AT INIT, with 6 of 16 dims
 /// dead. That is truncation, not selection.
 ///
@@ -298,7 +298,7 @@ pub fn ibp_gate_logit_bias(alpha: f64, h: usize) -> Vec<f64> {
 ///
 /// # The cost, measured — do not rediscover it by surprise
 ///
-/// A 0.5-centred gate halves the dictionary, and on GBM the loading shrank to
+/// A 0.5-centred gate halves the dictionary, and on real data the loading shrank to
 /// match rather than compensating: mean `α` 0.82 → 0.54 and mean `‖e_g‖²`
 /// 1.16 → 0.62, so the effective `‖α·β‖²` fell ~4×. That propagates into the NCE
 /// scale and the phase-2 projection, which is what the previous init was

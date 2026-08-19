@@ -32,7 +32,7 @@
 //! # Sampled, not learned
 //!
 //! cage previously carried a learned variational spike-and-slab gate. It did not
-//! select: measured on Visium mouse brain (32,245 genes x 2,695 spots), a dense
+//! select: measured on a spatial section of roughly 32k genes by 2.7k spots, a dense
 //! init left all 515,920 PIPs inside `[0.9635, 0.9890]` — one homogeneous blob —
 //! and a prior-matched sparse init drove the pair term to underflow at exactly 0
 //! by epoch 4, handing the objective to the ungated cell biases.
@@ -217,7 +217,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     // coarse super-cell was not a union of fine ones and this would have
     // silently produced wrong counts.
     //
-    // Cost: was one full zarr decompression per level (4 passes on GBM), each
+    // Cost: was one full zarr decompression per level (4 passes on a real run), each
     // materializing every block's `[n_genes x n_pb]` partial at once. Now one
     // pass plus `G x P_fine` adds per coarser level.
     //
@@ -332,7 +332,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     // mean across pseudobulks makes cosine on the result equal Pearson on the
     // log-rates — the same reason `dict_merge.rs:47-53` centres before its
     // cosine merge. `scale_columns` alone does NOT fix this: measured on Visium
-    // mouse brain it still left σ₁/σ₂ = 6.2.
+    // that section it still left σ₁/σ₂ = 6.2.
     // Gene means come from the FINEST level and are reused for every level's
     // projection. Centring each level by its OWN means would put each level in
     // a different affine frame while they share one basis and one pooled
@@ -340,7 +340,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     let finest_log = log1p_dense(finest);
     let gene_means = row_means(&finest_log);
     let training = row_center_with(&finest_log, &gene_means).scale_columns();
-    // Fit D+1 components and DROP the first. Measured on Visium mouse brain,
+    // Fit D+1 components and DROP the first. Measured on that same section,
     // component 0 correlates with log library size at r = -0.99 — it is
     // sequencing depth, not community structure, and leaving it in would spend
     // a full dimension on it. `dim_block` would then be asked which genes load
@@ -392,7 +392,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         // Dropping `.scale_columns()` here is not cosmetic. The basis is the
         // Nyström map for standardized columns, so projecting unstandardized
         // ones yields `e_pb[p,:] = sig_p · V[p,:]` — every row rescaled by its
-        // own spread of log counts, a direct depth proxy. Measured on GBM
+        // own spread of log counts, a direct depth proxy. Measured on a real
         // Visium before the fix: corr(row norm, log library size) = 0.452,
         // which the per-dim correlation diagnostic could not see because
         // scaling by a positive factor moves magnitudes, not signs.

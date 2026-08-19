@@ -139,7 +139,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      This flag prices only the sampler.\n\
                      \n\
                      The default of 5 is a budget choice, not a statistical one.\n\
-                     Measured on GBM, the rates settle by epoch 6 and hold.\n\
+                     Measured on real data, the rates settle by epoch 6 and hold.\n\
                      Refreshing every epoch then re-derives a settled answer.\n\
                      Pass 1 to refresh every epoch anyway.\n\
                      Pass 0 to keep the cold rates for the whole run.\n\

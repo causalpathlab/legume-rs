@@ -83,7 +83,7 @@ pub(super) struct TileDraw {
     /// Averaging THIS over sweeps instead of the binary `z` is the Rao-Blackwellized
     /// PIP: it is `E[z | rest of state]`, so it has the same expectation and never
     /// higher variance, dropping the Bernoulli term `p(1-p)` entirely. With 50 kept
-    /// sweeps the binary average lands on a 1/50 grid — measured on GBM Visium, 51
+    /// sweeps the binary average lands on a 1/50 grid — measured on a real run, 51
     /// distinct values and 64% of entries exactly 0, which cannot separate a true PIP
     /// of 1e-6 from 0.01 and zeroes that share of `E[z*beta]` outright.
     pub p_incl: Vec<f32>,

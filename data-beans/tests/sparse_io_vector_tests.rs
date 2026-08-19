@@ -1269,23 +1269,22 @@ fn disjoint_default_preserves_at_basename_suffix() -> anyhow::Result<()> {
 
 #[test]
 fn intra_file_canonicalizer_collisions_sum_into_one_row() -> anyhow::Result<()> {
-    // Cell Ranger 10x HDF5 commonly carries duplicate ENSG records that
-    // resolve to the same gene symbol after canonicalization (TBCE,
-    // HSPA14, TMSB15B in the user's GBM dataset). The canonicalizer
-    // collapses both rows to one global; downstream reads must
-    // (a) admit the merged row to the intersection, (b) sum the
-    // collided locals' counts per cell, not double-emit them.
+    // A 10x HDF5 commonly carries duplicate ENSG records that resolve to the
+    // same gene symbol after canonicalization, which real input does hit. The
+    // canonicalizer collapses both rows to one global; downstream reads must
+    // (a) admit the merged row to the intersection, (b) sum the collided
+    // locals' counts per cell, not double-emit them.
     let rows: Vec<Box<str>> = vec![
-        "ENSG_A_TBCE".into(), // both canon → "TBCE"
-        "ENSG_B_TBCE".into(),
-        "ENSG_C_OTHER".into(),
+        "ENSG_A_GENE1".into(), // both canon → "GENE1"
+        "ENSG_B_GENE1".into(),
+        "ENSG_C_GENE2".into(),
     ];
     let cells = str_vec(4, "cell");
     // Simple values so the sum is checkable by eye:
-    //   row0 (TBCE-A): [1, 0, 3, 0]
-    //   row1 (TBCE-B): [4, 5, 0, 0]
-    //   row2 (OTHER) : [0, 0, 0, 7]
-    // Merged TBCE row should be [5, 5, 3, 0].
+    //   row0 (GENE1-A): [1, 0, 3, 0]
+    //   row1 (GENE1-B): [4, 5, 0, 0]
+    //   row2 (GENE2) : [0, 0, 0, 7]
+    // Merged GENE1 row should be [5, 5, 3, 0].
     let raw = Array2::from_shape_vec(
         (3, 4),
         vec![1.0, 0.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0],
@@ -1302,26 +1301,26 @@ fn intra_file_canonicalizer_collisions_sum_into_one_row() -> anyhow::Result<()> 
         .expect("install canonicalizer on empty vec");
     vec.push(sp, Some("A".into()))?;
 
-    // Two distinct compact rows survive: TBCE (merged) and OTHER.
+    // Two distinct compact rows survive: GENE1 (merged) and GENE2.
     assert_eq!(vec.num_rows(), 2, "intersection must include merged row");
 
-    // Materialize all four cells and verify the merged TBCE column sums.
+    // Materialize all four cells and verify the merged GENE1 column sums.
     let dense = vec.read_columns_ndarray(0..4)?;
     assert_eq!(dense.shape(), &[2, 4]);
 
-    // Find the row index whose name canonicalizes to "TBCE" — it's whichever
-    // compact row is NOT "OTHER".
+    // Find the row index whose name canonicalizes to "GENE1" — it's whichever
+    // compact row is NOT "GENE2".
     let names = vec.row_names()?;
     let tbce_row = names
         .iter()
-        .position(|n| n.as_ref() == "TBCE")
-        .expect("merged row should be named TBCE");
+        .position(|n| n.as_ref() == "GENE1")
+        .expect("merged row should be named GENE1");
     let other_row = 1 - tbce_row;
 
     assert_eq!(
         dense.row(tbce_row).to_vec(),
         vec![5.0, 5.0, 3.0, 0.0],
-        "TBCE row should be the per-cell SUM of the two ENSG records"
+        "GENE1 row should be the per-cell SUM of the two ENSG records"
     );
     assert_eq!(
         dense.row(other_row).to_vec(),
