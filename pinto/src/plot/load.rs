@@ -395,11 +395,34 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
     let ci = *name_to_idx
         .get("community")
         .ok_or_else(|| anyhow::anyhow!("{path:?}: missing community column"))?;
+    // Expression-similar pairs are dropped here, once, rather than at each
+    // consumer. Every plot that reads this list is asking about ADJACENCY: the
+    // mesh draws the pair as a line between two cells, the interface mode
+    // walks 1- and 2-hop neighbourhoods, and the ligand-receptor overlay draws
+    // an arrow along it. A pair whose cells sit at opposite ends of the
+    // section would render as a chord across the whole image and would make
+    // "1-hop" mean nothing.
+    //
+    // Absent on a run that did not augment, where every pair is adjacent.
+    let ki = name_to_idx.get("edge_kind").copied();
 
     let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::new();
     let mut community: Vec<i64> = Vec::new();
+    let mut n_dropped = 0usize;
     for record in reader.get_row_iter(None)? {
         let row = record?;
+        if let Some(k) = ki {
+            let kind = row
+                .get_float(k)
+                .map(|v| v as i32)
+                .or_else(|_| row.get_double(k).map(|v| v as i32))
+                .or_else(|_| row.get_long(k).map(|v| v as i32))
+                .or_else(|_| row.get_int(k))?;
+            if kind != crate::util::cell_pairs::EDGE_KIND_SPATIAL {
+                n_dropped += 1;
+                continue;
+            }
+        }
         let l = row_label(&row, li)?;
         let r = row_label(&row, ri)?;
         // Schema may write community as float or int depending on
@@ -412,6 +435,14 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
             .or_else(|_| row.get_int(ci).map(|v| v as i64))?;
         pairs.push((l, r));
         community.push(c);
+    }
+    if n_dropped > 0 {
+        log::info!(
+            "{}: showing {} adjacent pairs, hiding {} expression-similar ones",
+            path.display(),
+            pairs.len(),
+            n_dropped
+        );
     }
     Ok((pairs, community))
 }
