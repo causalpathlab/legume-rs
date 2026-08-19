@@ -76,8 +76,7 @@ impl<'a> SrtCellPairs<'a> {
         SrtCellPairs {
             inner: CellPairs::from_graph(data, graph),
             coordinates,
-            edge_kind: edge_source
-                .map(|src| src.iter().copied().map(edge_kind_code).collect()),
+            edge_kind: edge_source.map(|src| src.iter().copied().map(edge_kind_code).collect()),
         }
     }
 

@@ -203,8 +203,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
 
     // Preprocessing already took this projection, with the same batch
     // argument, so reuse it rather than paying for a second full pass.
-    let cell_proj =
-        cell_proj.expect("cell_projection = true above must yield a projection");
+    let cell_proj = cell_proj.expect("cell_projection = true above must yield a projection");
 
     let topology = topology_graph(&graph, &spatial_graph);
     let ml = graph_coarsen_multilevel(

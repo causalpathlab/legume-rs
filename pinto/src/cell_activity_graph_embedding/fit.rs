@@ -378,8 +378,7 @@ pub fn fit_cell_activity_graph_embedding(
             drop(shared_cell_proj);
             data_vec.project_columns_weighted(c.proj_dim, c.block_size, batch_arg, w)?
         }
-        None => shared_cell_proj
-            .expect("preprocessing takes the projection whenever HVG is off"),
+        None => shared_cell_proj.expect("preprocessing takes the projection whenever HVG is off"),
     };
     let topology = topology_graph(&graph, &spatial_graph);
     let ml = graph_coarsen_multilevel(

@@ -212,7 +212,9 @@ fn expression_pairs_inform_the_anchor_but_are_never_tested() {
     // counts per stratum, not the stratum labels: the same four strata exist
     // either way, so the labels alone would not notice.
     let spread = |d: &DirectedStrata| -> Vec<((u32, u32), usize)> {
-        (0..d.n_strata()).map(|s| (d.pair(s), d.edges_in(s))).collect()
+        (0..d.n_strata())
+            .map(|s| (d.pair(s), d.edges_in(s)))
+            .collect()
     };
     assert_ne!(
         spread(&with_anchor),
