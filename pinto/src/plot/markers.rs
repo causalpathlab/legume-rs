@@ -139,12 +139,20 @@ pub fn fetch_gene_rows_aligned(
             // A splice-channelized row is `{gene}/count/{track}`, and no
             // `FeatureNameKind` splits on `/` — it aliases on the gene
             // delimiter or parses a locus. So a gene-keyed table (which is what
-            // `lc` now writes) would resolve to nothing here and every marker
-            // panel would render blank, with no error. Register the gene key
-            // too. First row wins, which is the mature track in practice and
-            // is the right one to draw.
-            if let Some((gene, _)) = auxiliary_data::feature_rows::split_count_row(n) {
-                row_ix.entry(gene.into()).or_insert(i);
+            // `lc` writes) would resolve to nothing here and every marker panel
+            // would render blank, with no error.
+            //
+            // Deliberately the SPLICED track alone, not the two summed: a
+            // marker panel is asking about cell identity, and identity is
+            // carried by steady-state message rather than by what was being
+            // transcribed at the moment of capture. The gene-level dictionary
+            // that selected the marker pools both tracks; this panel does not,
+            // and that difference is intended rather than an artifact of which
+            // row happened to come first.
+            if let Some((gene, is_nascent)) = auxiliary_data::feature_rows::split_count_row(n) {
+                if !is_nascent {
+                    row_ix.entry(gene.into()).or_insert(i);
+                }
             }
         }
 
