@@ -134,3 +134,86 @@ fn delta_is_identified_only_where_both_tracks_carry_counts() {
     let flat = GeneAxis::resolve(&names(&["GENE1", "GENE2"])).unwrap();
     assert_eq!(flat.delta_identified(&[1.0, 1.0]), vec![false, false]);
 }
+
+/// Three genes, one of them single-track, and the tracks interleaved.
+///
+/// The asymmetry is deliberate. With two genes perfectly alternating,
+/// `row_to_gene` is `[0,1,0,1]`, which any positional guess such as
+/// `row % n_genes` reproduces by accident, so a broken broadcast still passes.
+/// Here `row_to_gene` is `[0,1,0,2,1]` and `row % 3` is `[0,1,2,0,1]`, so the
+/// coincidence is gone.
+fn lopsided() -> Vec<Box<str>> {
+    names(&[
+        "GENE1/count/spliced",
+        "GENE2/count/unspliced",
+        "GENE1/count/unspliced",
+        "GENE3/count/spliced",
+        "GENE2/count/spliced",
+    ])
+}
+
+#[test]
+fn a_per_gene_vector_spreads_back_over_that_gene_s_rows() {
+    let axis = GeneAxis::resolve(&lopsided()).unwrap();
+    assert_eq!(axis.n_genes(), 3);
+    assert_eq!(axis.n_rows(), 5);
+
+    let by_gene: Vec<f32> = vec![0.25, 0.5, 0.75];
+    let by_row = axis.broadcast_to_rows(&by_gene);
+    assert_eq!(by_row.len(), axis.n_rows());
+    for r in 0..axis.n_rows() {
+        assert_eq!(by_row[r], by_gene[axis.gene_of_row(r)], "row {r}");
+    }
+    // Explicit, so the test states the mapping rather than restating the code.
+    assert_eq!(by_row, vec![0.25, 0.5, 0.25, 0.75, 0.5]);
+
+    // Both tracks of a gene must agree. A projection that weights one track
+    // differently from the other has split the gene.
+    let g1: Vec<f32> = (0..axis.n_rows())
+        .filter(|&r| axis.gene_of_row(r) == 0)
+        .map(|r| by_row[r])
+        .collect();
+    assert_eq!(g1, vec![0.25, 0.25]);
+}
+
+#[test]
+fn broadcasting_on_the_identity_axis_is_a_pass_through() {
+    let axis = GeneAxis::resolve(&names(&["A", "B", "C"])).unwrap();
+    assert_eq!(
+        axis.broadcast_to_rows(&[1.0, 2.0, 3.0]),
+        vec![1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        axis.broadcast_totals_to_rows(&[1.0, 2.0, 3.0]),
+        vec![1.0, 2.0, 3.0]
+    );
+}
+
+#[test]
+fn a_count_threshold_keeps_or_drops_a_gene_as_one_unit() {
+    let axis = GeneAxis::resolve(&lopsided()).unwrap();
+    // Per row: GENE1 splits 3 / 1, GENE2 splits 1 / 1, GENE3 has 2 on its only
+    // track. At a threshold of 2 the row-wise answer keeps GENE1's mature row
+    // and GENE3, so it splits one gene down the middle and drops GENE2 even
+    // though its total clears the bar.
+    let row_totals: Vec<f64> = vec![3.0, 1.0, 1.0, 2.0, 1.0];
+    let per_gene = axis.pool_totals(row_totals.clone());
+    assert_eq!(per_gene, vec![4.0, 2.0, 2.0]);
+    let spread = axis.broadcast_totals_to_rows(&per_gene);
+
+    let kept_rowwise: Vec<usize> = (0..axis.n_rows())
+        .filter(|&r| row_totals[r] >= 2.0)
+        .collect();
+    let kept_pooled: Vec<usize> = (0..axis.n_rows()).filter(|&r| spread[r] >= 2.0).collect();
+    assert_eq!(kept_rowwise, vec![0, 3], "row-wise keeps one lone track");
+    assert_eq!(
+        kept_pooled,
+        vec![0, 1, 2, 3, 4],
+        "pooled keeps every gene whole"
+    );
+
+    // And every row of a gene agrees, so no gene is half-filtered.
+    for r in 0..axis.n_rows() {
+        assert_eq!(spread[r], per_gene[axis.gene_of_row(r)]);
+    }
+}
