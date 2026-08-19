@@ -186,6 +186,12 @@ pub fn build_entity_gene_sums(
     let n_cells = data.num_columns();
     let jobs = generate_minibatch_intervals(n_cells, num_genes, block_size);
 
+    // The fold changes the ORDER these f32 values are added in, since a worker
+    // merges its own run and the runs then combine along a work-stealing split.
+    // That is safe here only because these are integer counts well under 2^24,
+    // where f32 addition is exact and order cannot matter. Do not carry this
+    // pattern to an accumulator that is not exact without checking.
+    //
     // Folded, not collected. A job's buckets hold one entry per nonzero it
     // reads, so collecting every job first holds the whole matrix's nonzeros at
     // once, plus an empty-bucket header per entity per job. Merging into a
