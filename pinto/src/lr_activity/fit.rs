@@ -886,12 +886,18 @@ fn score_pairs_for_stratum(
     // cross-pair dependence and the WY guarantee.
     let t_perm_per_pair: Vec<Vec<f32>> = {
         let mut t_per_pair: Vec<Vec<f32>> = vec![Vec::with_capacity(n_perm); pair_ctx.len()];
-        for sigma in &shared_shuffles {
+        for (k, sigma) in shared_shuffles.iter().enumerate() {
+            // Seeded per (stratum, permutation, role). The shuffles beside this
+            // were already deterministic; the posterior draw was not, so the
+            // null distribution moved every run and `--seed` did not reach it.
+            let draw_seed = base_seed
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(k as u64);
             let mut log_s = collapse.gamma_send[c]
-                .posterior_log_sample()
+                .posterior_log_sample(draw_seed)
                 .expect("posterior_log_sample (send) failed");
             let mut log_r = collapse.gamma_recv[c]
-                .posterior_log_sample()
+                .posterior_log_sample(draw_seed ^ 0xD1B5_4A32_D192_ED03)
                 .expect("posterior_log_sample (recv) failed");
             apply_gene_weights(&mut log_s, fisher_lr);
             apply_gene_weights(&mut log_r, fisher_lr);

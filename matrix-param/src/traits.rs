@@ -16,7 +16,14 @@ pub trait Inference {
     /// posterior_log_sd²)`. Caller must have called
     /// `calibrate_with(CalibrateTarget::All)` first so log_mean / log_sd
     /// are populated.
-    fn posterior_log_sample(&self) -> anyhow::Result<Self::Mat>;
+    ///
+    /// `seed` makes the draw reproducible. It used to come from
+    /// `rand::rng()` inside a `map_init`, which is OS-seeded AND partitioned
+    /// by rayon, so a caller could not reproduce its own null distribution
+    /// even with every other seed pinned. Seeding per CHUNK rather than per
+    /// element keeps the draw parallel and independent of how rayon happens
+    /// to split the work.
+    fn posterior_log_sample(&self, seed: u64) -> anyhow::Result<Self::Mat>;
 
     fn nrows(&self) -> usize;
     fn ncols(&self) -> usize;

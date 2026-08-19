@@ -170,8 +170,14 @@ impl Inference for GammaMatrix {
         )?)
     }
 
-    fn posterior_log_sample(&self) -> anyhow::Result<Self::Mat> {
+    fn posterior_log_sample(&self, seed: u64) -> anyhow::Result<Self::Mat> {
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
         use rand_distr::{Distribution, StandardNormal};
+
+        // Fixed chunk width, so which elements share an RNG is a property of
+        // the data shape and not of the thread pool.
+        const CHUNK: usize = 1024;
 
         let m_slice = self.estimated_log_mean.as_slice().ok_or(anyhow::anyhow!(
             "failed to take slice on estimated_log_mean"
@@ -181,14 +187,19 @@ impl Inference for GammaMatrix {
             .as_slice()
             .ok_or(anyhow::anyhow!("failed to take slice on estimated_log_sd"))?;
 
-        let sampled: Vec<f32> = m_slice
-            .par_iter()
-            .zip(s_slice.par_iter())
-            .map_init(rand::rng, |rng, (&m, &s)| {
-                let z: f32 = StandardNormal.sample(rng);
-                m + s * z
-            })
-            .collect();
+        let mut sampled = vec![0.0f32; m_slice.len()];
+        sampled
+            .par_chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(ci, out)| {
+                let mut rng =
+                    SmallRng::seed_from_u64(seed ^ (ci as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let base = ci * CHUNK;
+                for (k, o) in out.iter_mut().enumerate() {
+                    let z: f32 = StandardNormal.sample(&mut rng);
+                    *o = m_slice[base + k] + s_slice[base + k] * z;
+                }
+            });
 
         Ok(Self::Mat::from_shape_vec(
             (self.nrows(), self.ncols()),
