@@ -142,9 +142,11 @@ enum Commands {
                       - {out}.latent.parquet: per-pair latent codes (E x T)\n\
                       - {out}.propensity.parquet: cell propensity (N x K)\n\
                       \x20 Columns: 0 .. K-1, cluster (argmax), entropy (Shannon, nats).\n\
+                      - {out}.link_community.parquet: per-edge community labels\n\
                       - {out}.gene_community.parquet: gene-community Poisson-Gamma statistics (G x K).\n\
-                      \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
-                      \x20 pass --no-adjust-housekeeping for raw rates\n\
+                      \x20 Rows are scaled by the NB Fisher-info weight\n\
+                      \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g)), which attenuates\n\
+                      \x20 high-mean high-dispersion genes. There is no flag for it.\n\
                       - {out}.pinto.json: information-flow manifest used by\n\
                       \x20 `pinto plot` and `pinto lr-activity` (lists every parquet)."
     )]
@@ -187,8 +189,8 @@ enum Commands {
                       \x20 entropy (Shannon, nats), plus optional coord trailer.\n\
                       - {out}.link_community.parquet: per-edge community labels\n\
                       - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided).\n\
-                      \x20 Housekeeping-adjusted by default (row-scaled by 1/(bg[g]+ε));\n\
-                      \x20 pass --no-adjust-housekeeping for raw rates\n\
+                      \x20 Rows are scaled by the NB Fisher-info weight\n\
+                      \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g)). There is no flag for it.\n\
                       - {out}.pinto.json: information-flow manifest used by\n\
                       \x20 `pinto plot`."
     )]
@@ -220,7 +222,11 @@ enum Commands {
                       \x20                        Omit for expression-only mode.\n\n\
                       EDGE PROFILE MODES:\n\n\
                       \x20 Compressed all-gene profile (default):\n\
-                      \x20   y_e = W^T(x_i + x_j), W = G × --proj-dim Gaussian basis.\n\
+                      \x20   y_e = W^T(x_i + x_j), W = rows × --proj-dim Gaussian basis.\n\
+                      \x20   Rows, not genes: on a {gene}/count/{spliced,unspliced}\n\
+                      \x20   matrix there are two rows per gene, and both carry the\n\
+                      \x20   same gene-level count filter and NB weight so a gene is\n\
+                      \x20   never split across the projection.\n\
                       \x20   Every profile dim is a full linear combination of ALL genes\n\
                       \x20   (no genes dropped); M = proj-dim just compresses the gene axis.\n\
                       \x20   Optionally zero basis rows for genes below --min-gene-count.\n\n\
@@ -246,8 +252,12 @@ enum Commands {
                       \x20                                Columns: 0 .. K-1, plus `entropy`\n\
                       \x20                                (Shannon entropy of each row, nats).\n\
                       \x20 {out}.gene_community.parquet      Gene-community rates [G × K]\n\
-                      \x20                                (housekeeping-adjusted by 1/(bg[g]+ε) by default;\n\
-                      \x20                                 pass --no-adjust-housekeeping for raw)\n\
+                      \x20                                (rows scaled by the NB Fisher-info weight\n\
+                      \x20                                 w_g = 1/(1 + π_g·s̄·φ(μ_g)); no flag)\n\
+                      \x20                                Keyed by the bare GENE name: on a matrix of\n\
+                      \x20                                {gene}/count/{spliced,unspliced} rows the two\n\
+                      \x20                                tracks are pooled. `cage` keeps its own copy of\n\
+                      \x20                                this table on the matrix rows instead.\n\
                       \x20 {out}.link_community.parquet  Edge community assignments [E × 3]\n\
                       \x20 {out}.coord_pairs.parquet     Cell pair coordinates\n\
                       \x20 {out}.scores.parquet          Per-sweep diagnostics (level, sweep,\n\
@@ -356,6 +366,7 @@ enum Commands {
                       \x20 {out}.link_community.parquet  per-edge community\n\
                       \x20 {out}.gene_community.parquet  gene × K Poisson-Gamma rates\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
+                      \x20 {out}.fisher_weights.parquet  per-ROW NB precisions w_r\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
                       \x20 {out}.pinto.json           manifest"
     )]
@@ -481,7 +492,7 @@ enum Commands {
                       \x20     `sqrt(L·R)` minus the per-pair edge mean (centered\n\
                       \x20     on 0 = typical edge of this pair).\n\
                       \x20 Tunables: --lr-top-pairs, --lr-commit-threshold,\n\
-                      \x20            --lr-hull-min-cells, --no-lr-hulls,\n\
+                      \x20            --lr-hull-min-cells,\n\
                       \x20            --no-lr-overlay, --lr-coexpr-bins,\n\
                       \x20            --lr-activity-json (override path).\n\n\
                       Levels are `final`, `L0..Ln` and `draft`.\n\

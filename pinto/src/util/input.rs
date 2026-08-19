@@ -18,7 +18,7 @@ pub struct SrtInputArgs {
                      Accepted formats are .zarr and .h5.\n\
                      Each file is a genes-by-cells sparse matrix.\n\
                      Multiple files are concatenated column-wise, over cells.\n\
-                     Each file is then its own batch unless --batch says otherwise."
+                     Each file is then its own batch unless --batch-files says otherwise."
     )]
     pub data_files: Vec<Box<str>>,
 
