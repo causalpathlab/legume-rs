@@ -138,6 +138,12 @@ impl<'a> CellPairs<'a> {
     }
 
     /// Take a kNN graph's edges and distances. The graph stays with the caller.
+    ///
+    /// Note what `distances` means depends on the graph. Straight from a kNN
+    /// build they are distances in whatever space it searched. After a union of
+    /// two graphs they may be within-source ranks instead, because the two
+    /// sides measured different things and raw values would not be comparable.
+    /// Anything reading the exported column as a length has to know which.
     pub fn from_graph(data: &'a SparseIoVec, graph: &'a KnnGraph) -> Self {
         Self {
             data,

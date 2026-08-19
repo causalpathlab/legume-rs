@@ -411,7 +411,7 @@ pub trait IoOps {
             .iter()
             .map(|w| w.len())
             .min()
-            .unwrap_or_else(|| header.len())
+            .unwrap_or(header.len())
             .max(if lines.is_empty() { header.len() } else { 0 });
         let mut to_check: Vec<usize> = relevant_indices.clone();
         to_check.extend(row_name_index);
