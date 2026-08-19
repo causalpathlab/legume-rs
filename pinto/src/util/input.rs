@@ -242,7 +242,7 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 5,
         help = "KNN: expression-similar neighbours added to the pair graph (0 = off)",
         long_help = "Neighbours per cell in a second, non-spatial KNN graph built on\n\
                      random-projected expression.\n\
@@ -265,11 +265,11 @@ pub struct SrtInputArgs {
                      Ignored without --coord, where the graph already comes from\n\
                      expression.\n\
                      \n\
-                     Off by default. On one high-density section it roughly doubled\n\
-                     both runtime and peak memory, and the communities it separated\n\
-                     tracked annotated tissue boundaries only weakly. Worth trying\n\
-                     when interfaces are the question; not worth paying for otherwise.\n\
-                     Try 5 to 20."
+                     On by default. It roughly doubles runtime and peak memory,\n\
+                     because it roughly doubles the pairs. Set it to 0 for the\n\
+                     spatial pairs alone, which is also the way to reproduce a run\n\
+                     made before this existed. Raising it past --knn makes the\n\
+                     expression pairs the majority of what the model sees."
     )]
     pub knn_expr: usize,
 
@@ -696,7 +696,12 @@ pub fn auto_batch_from_components(
     let spacing = median_edge_length(graph).unwrap_or(0.0);
     let slack = 3.0 * spacing;
 
-    let dims = coordinates.ncols().clamp(1, 2);
+    // Not a clamp: `0.clamp(1, 2)` is 1, and the coordinate lookup below would
+    // then index a column that is not there.
+    if coordinates.ncols() == 0 {
+        return n_components;
+    }
+    let dims = coordinates.ncols().min(2);
     let mut lo = vec![f64::INFINITY; n_components * dims];
     let mut hi = vec![f64::NEG_INFINITY; n_components * dims];
     let mut sum = vec![0.0f64; n_components * dims];
@@ -715,7 +720,7 @@ pub fn auto_batch_from_components(
     // sits in rather than any larger box that happens to span it.
     let mut into: Vec<usize> = (0..n_components).collect();
     for c in 0..n_components {
-        let mut best: Option<(f64, usize)> = None;
+        let mut best: Option<(f64, f64, usize)> = None;
         for other in 0..n_components {
             if other == c || size[other] <= size[c] {
                 continue;
@@ -731,11 +736,14 @@ pub fn auto_batch_from_components(
             let extent: f64 = (0..dims)
                 .map(|d| hi[other * dims + d] - lo[other * dims + d])
                 .sum();
-            if best.is_none_or(|(e, _)| extent < e) {
-                best = Some((extent, other));
+            // Ties break on the candidate's own corner, not on `other`, whose
+            // numbering comes from a parallel union-find and varies per run.
+            let corner = lo[other * dims];
+            if best.is_none_or(|(e, c, _)| (extent, corner) < (e, c)) {
+                best = Some((extent, corner, other));
             }
         }
-        if let Some((_, target)) = best {
+        if let Some((_, _, target)) = best {
             into[c] = target;
         }
     }
@@ -868,8 +876,10 @@ pub fn read_one_coord_file(
                 hint = format!(" The file's first line reads {first:?}.");
             }
         }
+        let matched = initial.as_ref().map_or(0, |r| r.mat.ncols());
         return Err(anyhow::anyhow!(
-            "coord file '{}' has none of the coordinate columns asked for {:?}.{} \
+            "coord file '{}' resolved {matched} of the coordinate columns asked for \
+             {:?}, and two are needed.{} \
              Pass --coord-column-names with the names it does have, or \
              --coord-column-indices with their 0-based positions. For the classic \
              spot layout that is --coord-column-indices 4,5.",
