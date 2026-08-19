@@ -256,7 +256,11 @@ fn union_merges_edges_and_records_which_graph_each_came_from() {
     let (merged, source) = a.union_with(&b, DistanceMerge::SourceRank).unwrap();
 
     assert_eq!(merged.edges.len(), source.len(), "one source tag per edge");
-    assert_eq!(merged.distances.len(), merged.edges.len(), "distances parallel");
+    assert_eq!(
+        merged.distances.len(),
+        merged.edges.len(),
+        "distances parallel"
+    );
     assert_eq!(merged.n_nodes, 4);
     assert!(
         merged.edges.windows(2).all(|w| w[0] < w[1]),
@@ -288,8 +292,14 @@ fn union_merges_edges_and_records_which_graph_each_came_from() {
     // The adjacency is derived state and must be rebuilt. A union that merges
     // the edge list but keeps an input's adjacency passes everything above.
     for &(i, j) in &merged.edges {
-        assert!(merged.neighbors(i).contains(&j), "adjacency missing {i}->{j}");
-        assert!(merged.neighbors(j).contains(&i), "adjacency missing {j}->{i}");
+        assert!(
+            merged.neighbors(i).contains(&j),
+            "adjacency missing {i}->{j}"
+        );
+        assert!(
+            merged.neighbors(j).contains(&i),
+            "adjacency missing {j}->{i}"
+        );
     }
 }
 
@@ -304,7 +314,11 @@ fn union_ranks_each_sources_distances_within_that_source() {
     // its own. With identical topology every edge would be shared and the
     // `min` rule would always return the near graph's value, so the fixture
     // rather than the policy would decide the result.
-    let b = path_graph(&DMatrix::from_row_slice(4, 1, &[0.0, 3000.0, 1000.0, 2000.0]));
+    let b = path_graph(&DMatrix::from_row_slice(
+        4,
+        1,
+        &[0.0, 3000.0, 1000.0, 2000.0],
+    ));
     assert!(
         b.edges.iter().any(|e| !a.edges.contains(e)),
         "fixture must give `b` at least one edge of its own"
@@ -319,7 +333,10 @@ fn union_ranks_each_sources_distances_within_that_source() {
     // the policy as opposed to the fixture.
     let (raw, _) = a.union_with(&b, DistanceMerge::Raw).unwrap();
     let hi = raw.distances.iter().cloned().fold(f32::MIN, f32::max);
-    assert!(hi > 100.0, "Raw should preserve the original scale, got {hi}");
+    assert!(
+        hi > 100.0,
+        "Raw should preserve the original scale, got {hi}"
+    );
 }
 
 /// A pair must be counted once however an input happened to store it. Edge
@@ -404,7 +421,10 @@ fn tied_distances_rank_in_index_order_so_the_result_is_reproducible() {
     let mixed = vec![9.0f32, 1.0, 5.0, 1.0];
     let r = within_source_rank(&mixed);
     assert!(r[1] < r[3], "the earlier of two equal values ranks first");
-    assert!(r[1] < r[2] && r[2] < r[0], "distinct values keep their order");
+    assert!(
+        r[1] < r[2] && r[2] < r[0],
+        "distinct values keep their order"
+    );
     let mut sorted = r.clone();
     sorted.sort_by(f32::total_cmp);
     assert_eq!(sorted, vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
@@ -413,5 +433,9 @@ fn tied_distances_rank_in_index_order_so_the_result_is_reproducible() {
 #[test]
 fn ranking_handles_degenerate_lengths() {
     assert!(within_source_rank(&[]).is_empty());
-    assert_eq!(within_source_rank(&[7.0]), vec![0.0], "no divide by n-1 == 0");
+    assert_eq!(
+        within_source_rank(&[7.0]),
+        vec![0.0],
+        "no divide by n-1 == 0"
+    );
 }

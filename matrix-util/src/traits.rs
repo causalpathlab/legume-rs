@@ -403,8 +403,19 @@ pub trait IoOps {
         // match, so they are not guaranteed to exist in this file. Say which
         // column was asked for and how many the file has, instead of panicking
         // on the subscript several lines later.
-        let n_columns = header.len().max(lines.first().map_or(0, |w| w.len()));
-        if let Some(&bad) = relevant_indices.iter().find(|&&j| j >= n_columns) {
+        // Checked against the NARROWEST row, and before any subscript below,
+        // including the row-name one. Validating against the first row only
+        // leaves a ragged file to panic later in the value loop, and running
+        // after `row_names` leaves that subscript unguarded.
+        let n_columns = lines
+            .iter()
+            .map(|w| w.len())
+            .min()
+            .unwrap_or_else(|| header.len())
+            .max(if lines.is_empty() { header.len() } else { 0 });
+        let mut to_check: Vec<usize> = relevant_indices.clone();
+        to_check.extend(row_name_index);
+        if let Some(&bad) = to_check.iter().find(|&&j| j >= n_columns) {
             return Err(anyhow::anyhow!(
                 "column index {bad} is out of range: the file has {n_columns} column(s). \
                  Name the columns to read, or pass indices within range."
