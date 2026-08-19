@@ -163,6 +163,82 @@ pub fn build_expression_knn(cell_proj: &Mat, args: SrtCellPairsArgs) -> anyhow::
     )
 }
 
+/// Expression KNN restricted to within each spatial component.
+///
+/// Expression similarity ignores geometry, so a global search pairs cells
+/// across whatever the spatial graph left disconnected: separate sections, or
+/// the cores of a tissue microarray. Those are usually separate samples, and
+/// the rest of this pipeline treats a spatial component as a batch, so joining
+/// them silently contradicts that.
+///
+/// Each component is searched on its own, so every cell gets its neighbours
+/// from its own sample. A component smaller than `knn + 1` is skipped: it
+/// cannot supply that many neighbours, and taking whatever it has would give
+/// its cells a denser neighbourhood than everyone else's.
+pub fn build_expression_knn_within(
+    cell_proj: &Mat,
+    component_of_cell: &[usize],
+    n_components: usize,
+    args: SrtCellPairsArgs,
+) -> anyhow::Result<KnnGraph> {
+    let n_cells = cell_proj.ncols();
+    anyhow::ensure!(
+        component_of_cell.len() == n_cells,
+        "one component label per cell: got {} for {} cells",
+        component_of_cell.len(),
+        n_cells
+    );
+
+    let mut cells_in: Vec<Vec<usize>> = vec![Vec::new(); n_components];
+    for (cell, &c) in component_of_cell.iter().enumerate() {
+        if c < n_components {
+            cells_in[c].push(cell);
+        }
+    }
+
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    let mut distances: Vec<f32> = Vec::new();
+    let mut skipped = 0usize;
+    for members in cells_in.iter() {
+        if members.len() <= args.knn {
+            skipped += members.len();
+            continue;
+        }
+        // A component's own sub-projection, columns in `members` order.
+        let sub = Mat::from_fn(cell_proj.nrows(), members.len(), |r, c| {
+            cell_proj[(r, members[c])]
+        });
+        let g = build_expression_knn(&sub, SrtCellPairsArgs { ..args })?;
+        for (&(i, j), &d) in g.edges.iter().zip(g.distances.iter()) {
+            let (a, b) = (members[i], members[j]);
+            edges.push((a.min(b), a.max(b)));
+            distances.push(d);
+        }
+    }
+    if skipped > 0 {
+        info!(
+            "{} cells sit in a spatial component too small for {} expression neighbours; \
+             they get none",
+            skipped, args.knn
+        );
+    }
+
+    let adjacency = {
+        let mut coo = nalgebra_sparse::CooMatrix::new(n_cells, n_cells);
+        for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
+            coo.push(i, j, v);
+            coo.push(j, i, v);
+        }
+        nalgebra_sparse::CscMatrix::from(&coo)
+    };
+    Ok(KnnGraph {
+        adjacency,
+        edges,
+        distances,
+        n_nodes: n_cells,
+    })
+}
+
 /// The expression graph plus a 2D layout to stand in for real coordinates.
 ///
 /// For the graph alone use [`build_expression_knn`]: the layout costs a
