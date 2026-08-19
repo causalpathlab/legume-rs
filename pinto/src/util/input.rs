@@ -227,8 +227,8 @@ pub struct SrtInputArgs {
 
     #[arg(
         long,
-        default_value_t = 5,
-        help = "KNN: expression-similar neighbours added to the pair graph",
+        default_value_t = 0,
+        help = "KNN: expression-similar neighbours added to the pair graph (0 = off)",
         long_help = "Neighbours per cell in a second, non-spatial KNN graph built on\n\
                      random-projected expression.\n\
                      Its edges are added to the spatial ones, so the cell pairs\n\
@@ -248,7 +248,13 @@ pub struct SrtInputArgs {
                      Runtime and peak memory both rise with the resulting pair count.\n\
                      \n\
                      Ignored without --coord, where the graph already comes from\n\
-                     expression. Set to 0 for spatial neighbours only."
+                     expression.\n\
+                     \n\
+                     Off by default. On one high-density section it roughly doubled\n\
+                     both runtime and peak memory, and the communities it separated\n\
+                     tracked annotated tissue boundaries only weakly. Worth trying\n\
+                     when interfaces are the question; not worth paying for otherwise.\n\
+                     Try 5 to 20."
     )]
     pub knn_expr: usize,
 

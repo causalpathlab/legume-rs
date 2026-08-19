@@ -58,7 +58,16 @@ pub fn read_link_community(file_path: &str) -> anyhow::Result<Vec<EdgeRecord>> {
         let row = record?;
         let community_f = row.get_float(ci)?;
         let is_spatial = match ki {
-            Some(k) => row.get_float(k)? as i32 == crate::util::cell_pairs::EDGE_KIND_SPATIAL,
+            // Accept either encoding. The column is INT32 today, but a file
+            // written before the two tables agreed on a type holds a float.
+            Some(k) => {
+                let kind = row
+                    .get_int(k)
+                    .or_else(|_| row.get_long(k).map(|v| v as i32))
+                    .or_else(|_| row.get_float(k).map(|v| v as i32))
+                    .or_else(|_| row.get_double(k).map(|v| v as i32))?;
+                kind == crate::util::cell_pairs::EDGE_KIND_SPATIAL
+            }
             None => true,
         };
         out.push(EdgeRecord {
