@@ -12,6 +12,7 @@
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::{build_expression_graph, build_spatial_graph, SrtCellPairsArgs};
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use crate::util::input::{
     auto_batch_from_components, read_data_with_coordinates, read_data_without_coordinates, SRTData,
     SrtInputArgs,
@@ -20,7 +21,9 @@ use crate::util::knn_graph::KnnGraph;
 use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::RandProjOps;
-use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
+use data_beans_alg::sparse_streaming::{
+    streaming_sparse_running_stats, streaming_sparse_running_stats_folded,
+};
 
 ///////////////////////////
 // Config + result types //
@@ -33,6 +36,13 @@ pub struct SrtPreprocessConfig<'a> {
     pub fisher_weights: bool,
     /// Estimate per-batch effects. All current subcommands set this.
     pub batch_effects: bool,
+    /// Resolve the GENE unit axis from the row names, and fold the running
+    /// statistics onto it in the same pass.
+    ///
+    /// `lc` and `cage` both weight and filter per gene, so both want this.
+    /// `svd` never leaves the row axis and passes `false`, which also spares it
+    /// the hard error `GeneAxis::resolve` raises on a mixed feature axis.
+    pub gene_axis: bool,
     /// Row-name canonicalization strategy. `None` falls back to
     /// `FeatureNameKind::Exact` (strict equality), matching the
     /// historical behaviour of `lc` / `svd`. `cage` passes
@@ -50,24 +60,33 @@ pub struct SrtPreprocessed {
     /// when single-batch.
     pub batch_effects: Option<Mat>,
     pub graph: KnnGraph,
+    /// The gene unit axis. `Some` iff the config asked for it. Identity (one
+    /// gene per row) unless the rows carry splice channels.
+    pub gene_axis: Option<GeneAxis>,
+    /// Per-ROW NB Fisher-info weights. This is the right axis for the
+    /// projection and for anything that reads the matrix directly.
+    pub row_weights: Option<Vec<f32>>,
+    /// The ROW-axis statistics [`Self::row_weights`] came from. Its `sum()` is
+    /// the per-row count total, which spares a caller that needs one a second
+    /// full pass over the data.
+    pub row_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
+    /// Per-GENE NB Fisher-info weights, `Some` iff both `fisher_weights` and
+    /// `gene_axis` were asked for.
+    ///
+    /// These are NOT a fold of [`Self::row_weights`]. A Fisher weight is a
+    /// function of a feature's abundance and mean, and that function is not
+    /// additive, so folding the weights would hand a gene a precision no
+    /// measurement supports. The fold happens on the statistics instead, and it
+    /// happens inside the streaming pass because `npos` and `s2` do not survive
+    /// one applied afterwards.
     pub gene_weights: Option<Vec<f32>>,
-    /// The running statistics [`Self::gene_weights`] was derived from. `Some` iff
-    /// `gene_weights` is.
-    ///
-    /// Carried out for two consumers: `lc` wants the per-feature nonzero counts
-    /// (`count_positives()`) its dictionary merge keys on, and `cage` needs a
-    /// weight per GENE rather than per matrix row.
-    ///
-    /// `gene_weights` is indexed by row, which is right for the projection and
-    /// the Poisson refinement — both read the matrix. It is NOT right for
-    /// `cage`'s training loop, which weights a per-GENE loss, and on a
-    /// splice-channelized matrix the two axes differ. Refolding the WEIGHTS
-    /// would be wrong (they are not additive); the fold has to happen on the
-    /// sums and means the weight is a function of, which is why the stats
-    /// travel rather than a second weight vector.
+    /// The gene-axis statistics [`Self::gene_weights`] came from. Carried out
+    /// because the dictionary merge needs per-gene DETECTION counts, which is
+    /// exactly the statistic a post-hoc fold gets wrong.
     pub gene_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
     pub n_cells: usize,
-    pub n_genes: usize,
+    /// Matrix rows. Equal to the gene count only on a non-channelized axis.
+    pub n_rows: usize,
 }
 
 ////////////////////
@@ -148,7 +167,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         }
     }
 
-    let n_genes = data_vec.num_rows();
+    let n_rows = data_vec.num_rows();
     let n_cells = data_vec.num_columns();
 
     anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
@@ -215,24 +234,63 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         None
     };
 
-    // One streaming pass, two consumers. `compute_nb_fisher_weights` builds
-    // these same stats and returns only the weights, dropping `npos` — which is
-    // exactly the per-gene detection count `lc`'s dictionary merge needs. Taking
-    // the stats here saves a second full read of every column.
-    let (gene_weights, gene_stats) = if cfg.fisher_weights {
-        info!("Computing NB Fisher-info gene weights for inference...");
-        let stats = streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?;
-        let w = fisher_weights_from_stats(&stats, data_vec.num_columns());
-        info!(
-            "Gene weights w_g: min={:.3e}, mean={:.3e}, max={:.3e}",
-            w.iter().cloned().fold(f32::INFINITY, f32::min),
-            w.iter().sum::<f32>() / (w.len().max(1) as f32),
-            w.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
-        );
-        (Some(w), Some(stats))
+    // What a ROW means, decided once, before anything keyed on a gene runs.
+    let gene_axis = if cfg.gene_axis {
+        Some(GeneAxis::resolve(&data_vec.row_names()?)?)
     } else {
-        (None, None)
+        None
     };
+
+    // One streaming pass, up to four consumers. `compute_nb_fisher_weights`
+    // builds these same statistics and returns only the weights, dropping
+    // `npos`, which is exactly the per-gene detection count the dictionary
+    // merge keys on. Taking the statistics here saves a second full read.
+    //
+    // On a channelized axis the pass folds as it goes rather than afterwards,
+    // because `npos` and `s2` do not survive a post-hoc fold: a cell detected
+    // on both tracks would count twice, and the variance would lose its cross
+    // term. Those are the two statistics the merge filter and the dispersion
+    // trend respectively depend on.
+    let mut row_weights = None;
+    let mut row_stats = None;
+    let mut gene_weights = None;
+    let mut gene_stats = None;
+    if cfg.fisher_weights {
+        info!("Computing NB Fisher-info weights for inference...");
+        let channelized = gene_axis.as_ref().is_some_and(GeneAxis::is_channelized);
+        let (r_stats, g_stats) = if channelized {
+            let axis = gene_axis.as_ref().expect("channelized implies Some");
+            let (r, g) = streaming_sparse_running_stats_folded(
+                &data_vec,
+                c.block_size,
+                "NB-Fisher",
+                axis.row_to_gene(),
+                axis.n_genes(),
+            )?;
+            (r, Some(g))
+        } else {
+            (
+                streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?,
+                None,
+            )
+        };
+        let rw = fisher_weights_from_stats(&r_stats, n_cells);
+        log_weights("Row weights w_r", &rw);
+        if let Some(g_stats) = g_stats {
+            let gw = fisher_weights_from_stats(&g_stats, n_cells);
+            log_weights("Gene weights w_g", &gw);
+            gene_weights = Some(gw);
+            gene_stats = Some(g_stats);
+        } else if cfg.gene_axis {
+            // Identity axis: a gene IS a row, so the two views are the same
+            // numbers. Cloning keeps the contract uniform for callers, which
+            // is worth more than the few hundred KB it costs.
+            gene_weights = Some(rw.clone());
+            gene_stats = Some(r_stats.clone());
+        }
+        row_weights = Some(rw);
+        row_stats = Some(r_stats);
+    }
 
     Ok(SrtPreprocessed {
         data_vec,
@@ -241,9 +299,25 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         batch_membership,
         batch_effects,
         graph,
+        gene_axis,
+        row_weights,
+        row_stats,
         gene_weights,
         gene_stats,
         n_cells,
-        n_genes,
+        n_rows,
     })
+}
+
+/// One log line per weight vector, so a channelized run shows both axes and a
+/// reader can see at a glance whether the two disagree.
+fn log_weights(label: &str, w: &[f32]) {
+    info!(
+        "{}: min={:.3e}, mean={:.3e}, max={:.3e} (n={})",
+        label,
+        w.iter().cloned().fold(f32::INFINITY, f32::min),
+        w.iter().sum::<f32>() / (w.len().max(1) as f32),
+        w.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        w.len(),
+    );
 }

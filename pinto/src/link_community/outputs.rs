@@ -7,6 +7,7 @@ use crate::link_community::profiles::{
     write_gene_community_param,
 };
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 /// Write link community assignments to parquet.
@@ -255,6 +256,7 @@ pub fn write_partition_outputs(
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
+    axis: Option<&GeneAxis>,
     block_size: Option<usize>,
 ) -> anyhow::Result<(Mat, GammaMatrix)> {
     write_link_communities(
@@ -264,9 +266,11 @@ pub fn write_partition_outputs(
         cell_names,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
-    let gene_community = fit_gene_community_param(&propensity, data_vec, gene_weights, block_size)?;
-    let gene_names = data_vec.row_names()?;
-    write_gene_community_param(&gene_community, &gene_names, prefix)?;
+    let gene_community =
+        fit_gene_community_param(&propensity, data_vec, gene_weights, axis, block_size)?;
+    let row_names = data_vec.row_names()?;
+    let gene_names = axis.map_or(&row_names[..], GeneAxis::gene_names);
+    write_gene_community_param(&gene_community, gene_names, prefix)?;
     Ok((propensity, gene_community))
 }
 
@@ -286,6 +290,7 @@ pub fn write_level_outputs(
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
+    axis: Option<&GeneAxis>,
     block_size: Option<usize>,
 ) -> anyhow::Result<()> {
     write_partition_outputs(
@@ -297,6 +302,7 @@ pub fn write_level_outputs(
         cell_names,
         data_vec,
         gene_weights,
+        axis,
         block_size,
     )?;
     Ok(())

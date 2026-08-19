@@ -6,9 +6,9 @@
 //! is fixed is an EQUALITY — a two-channel matrix must produce exactly the
 //! activities of the single-channel matrix whose counts are its per-gene sums.
 
-use super::gene_axis::GeneAxis;
 use super::gene_gating::{build_cell_activities, ActivityNorm, CellActivities};
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 
 const N_CELLS: usize = 6;

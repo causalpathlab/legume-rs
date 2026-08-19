@@ -120,6 +120,51 @@ impl GeneAxis {
         &self.gene_names
     }
 
+    /// Spread a per-GENE vector back over the matrix rows, so every row of a
+    /// gene carries its gene's value.
+    ///
+    /// This is how a quantity that is only correct per gene reaches a consumer
+    /// that indexes rows. The projection basis is the case in point: its rows
+    /// are matrix rows, but a Fisher precision computed per row would hand a
+    /// gene's two splice tracks two different precisions, because the nascent
+    /// track is sparser and lands elsewhere on the dispersion trend. Computing
+    /// once per gene and spreading is exact; folding the weights afterwards
+    /// would not be, since the weight is not additive.
+    ///
+    /// Returns the input unchanged on the identity axis.
+    #[must_use]
+    pub fn broadcast_to_rows(&self, per_gene: &[f32]) -> Vec<f32> {
+        if !self.channelized {
+            return per_gene.to_vec();
+        }
+        debug_assert_eq!(per_gene.len(), self.n_genes());
+        self.row_to_gene
+            .iter()
+            .map(|&g| per_gene[g as usize])
+            .collect()
+    }
+
+    /// As [`Self::broadcast_to_rows`], for the `f64` totals a count threshold
+    /// is applied to.
+    #[must_use]
+    pub fn broadcast_totals_to_rows(&self, per_gene: &[f64]) -> Vec<f64> {
+        if !self.channelized {
+            return per_gene.to_vec();
+        }
+        debug_assert_eq!(per_gene.len(), self.n_genes());
+        self.row_to_gene
+            .iter()
+            .map(|&g| per_gene[g as usize])
+            .collect()
+    }
+
+    /// The row -> gene map itself, for callers that need to hand it to a
+    /// folding primitive rather than call `gene_of_row` per row.
+    #[must_use]
+    pub fn row_to_gene(&self) -> &[u32] {
+        &self.row_to_gene
+    }
+
     #[must_use]
     pub fn gene_of_row(&self, row: usize) -> usize {
         self.row_to_gene[row] as usize

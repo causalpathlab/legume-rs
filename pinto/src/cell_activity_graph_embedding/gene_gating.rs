@@ -14,8 +14,8 @@
 //! [`super::selection`]; this module is purely the
 //! data-derived sampling weight and owns no learnable parameters.
 
-use crate::cell_activity_graph_embedding::gene_axis::GeneAxis;
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use clap::ValueEnum;
 use matrix_util::utils::generate_minibatch_intervals;
 use nalgebra_sparse::{CooMatrix, CsrMatrix};

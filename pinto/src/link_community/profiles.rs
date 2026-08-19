@@ -7,16 +7,19 @@
 use crate::gene_network::graph::GenePairGraph;
 use crate::link_community::model::LinkProfileStore;
 use crate::util::common::*;
+use crate::util::gene_axis::GeneAxis;
 use data_beans_alg::cell_pairs::collapse_pairs;
 use matrix_param::io::ParamIo;
 use matrix_util::utils::generate_minibatch_intervals;
 use nalgebra_sparse::csc::CscMatrix;
 use rayon::prelude::*;
 
-/// Compute per-gene total counts from sparse data.
+/// Compute per-ROW total counts from sparse data.
 ///
-/// Returns a vector of length `n_genes` with the sum of all entries per row.
-pub fn compute_gene_totals(
+/// Returns a vector of length `n_rows` with the sum of all entries per row.
+/// A caller that means genes folds this through [`GeneAxis::pool_totals`]: on
+/// a splice-channelized matrix a row is one track of a gene, not a gene.
+pub fn compute_row_totals(
     data: &SparseIoVec,
     block_size: Option<usize>,
 ) -> anyhow::Result<Vec<f64>> {
@@ -48,9 +51,13 @@ pub fn compute_gene_totals(
     Ok(totals)
 }
 
-/// Zero out rows of a basis matrix for genes below a count threshold.
+/// Zero out rows of a basis matrix for features below a count threshold.
 ///
-/// Returns the number of genes that were kept (not zeroed).
+/// `totals` is indexed like the basis rows. When the caller has a gene axis it
+/// passes per-gene totals spread back over the rows, so a gene is kept or
+/// dropped as a unit rather than losing whichever track happens to fall short.
+///
+/// Returns the number of basis rows that were kept (not zeroed).
 pub fn filter_basis_by_gene_count(basis: &mut Mat, gene_totals: &[f64], min_count: f32) -> usize {
     let mut n_kept = 0usize;
     for (g, &total) in gene_totals.iter().enumerate().take(basis.nrows()) {
@@ -356,12 +363,15 @@ pub fn compute_gene_community_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
+    axis: Option<&GeneAxis>,
     block_size: Option<usize>,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let param = fit_gene_community_param(cell_propensity, data_vec, gene_weights, block_size)?;
-    let gene_names = data_vec.row_names()?;
-    write_gene_community_param(&param, &gene_names, out_prefix)
+    let param =
+        fit_gene_community_param(cell_propensity, data_vec, gene_weights, axis, block_size)?;
+    let row_names = data_vec.row_names()?;
+    let names = axis.map_or(&row_names[..], GeneAxis::gene_names);
+    write_gene_community_param(&param, names, out_prefix)
 }
 
 /// Fit the Poisson-Gamma posterior over gene × community without writing to disk.
@@ -375,18 +385,23 @@ pub fn fit_gene_community_param(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
     gene_weights: Option<&[f32]>,
+    axis: Option<&GeneAxis>,
     block_size: Option<usize>,
 ) -> anyhow::Result<matrix_param::dmatrix_gamma::GammaMatrix> {
     use matrix_param::dmatrix_gamma::GammaMatrix;
     use matrix_param::traits::TwoStatParam;
 
-    let n_genes = data_vec.num_rows();
+    let n_rows = data_vec.num_rows();
+    // Folding after the accumulation is exact, not an approximation: the
+    // statistic is linear in the counts and the propensity is per cell, so
+    // summing a gene's rows before or after the multiply gives the same matrix.
+    let n_genes = axis.map_or(n_rows, GeneAxis::n_genes);
     let n_cells = data_vec.num_columns();
     let k = cell_propensity.ncols();
 
     info!("Computing gene-community statistics...");
     let prop_kn = cell_propensity.transpose();
-    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_rows, block_size);
 
     let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-community blocks");
     let partial_stats: Vec<(Mat, DVec)> = jobs
@@ -406,11 +421,14 @@ pub fn fit_gene_community_param(
         .collect::<anyhow::Result<Vec<_>>>()?;
     prog_bar.finish_and_clear();
 
-    let mut sum_gk = Mat::zeros(n_genes, k);
+    let mut sum_gk = Mat::zeros(n_rows, k);
     let mut n_1k = Mat::zeros(1, k);
     for (s, n) in partial_stats {
         sum_gk += s;
         n_1k += n.transpose();
+    }
+    if let Some(folded) = axis.and_then(|a| a.pool_rows_opt(&sum_gk)) {
+        sum_gk = folded;
     }
 
     let owned_w;
@@ -422,6 +440,13 @@ pub fn fit_gene_community_param(
             &owned_w
         }
     };
+    anyhow::ensure!(
+        w.len() == sum_gk.nrows(),
+        "gene-community weights are on the wrong axis: {} weights for {} rows. \
+         Folding the statistic to genes means the weights must be per gene too.",
+        w.len(),
+        sum_gk.nrows()
+    );
     apply_gene_weights(&mut sum_gk, w);
 
     let mut gamma_param = GammaMatrix::new((n_genes, k), 1.0, 1.0);
@@ -533,9 +558,13 @@ pub fn realized_communities(edge_membership: &[usize], n_edges: usize) -> anyhow
 }
 
 /// Config for `compute_propensity_and_gene_community_stat`.
-pub struct PropensityReportConfig {
+pub struct PropensityReportConfig<'a> {
     pub clustering: EdgeClustering,
     pub block_size: Option<usize>,
+    /// The GENE unit axis for the gene-community table, when the caller has
+    /// one. `None` keeps the table on the matrix's own rows, which is what a
+    /// caller wants when a row is already the unit it reports.
+    pub gene_axis: Option<&'a GeneAxis>,
 }
 
 /// Compute propensity and gene-community statistics from latent pair projections.
@@ -560,6 +589,7 @@ pub fn compute_propensity_and_gene_community_stat(
     let PropensityReportConfig {
         clustering,
         block_size,
+        gene_axis,
     } = *cfg;
 
     // 1. Cluster the latent edge vectors
@@ -618,7 +648,14 @@ pub fn compute_propensity_and_gene_community_stat(
     )?;
 
     // 3. Gene-community stat
-    compute_gene_community_stat(&cell_propensity, data_vec, None, block_size, out_prefix)?;
+    compute_gene_community_stat(
+        &cell_propensity,
+        data_vec,
+        None,
+        gene_axis,
+        block_size,
+        out_prefix,
+    )?;
 
     Ok(n_clusters)
 }
