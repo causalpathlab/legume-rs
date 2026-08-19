@@ -4,7 +4,9 @@ use crate::link_community::profiles::{
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
-use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
+use crate::util::srt_pipeline::{
+    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+};
 use data_beans_alg::cell_pairs::CellPairs;
 use data_beans_alg::random_projection::*;
 
@@ -130,10 +132,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         common: c,
         fisher_weights: false,
         batch_effects: true,
-        // `dsvd` stacks its two channels on the ROW axis and never folds, so
-        // resolving a gene axis would buy it nothing and would newly reject a
-        // mixed feature axis it currently accepts.
-        gene_axis: false,
+        gene_axis: GeneAxisMode::Rows,
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();

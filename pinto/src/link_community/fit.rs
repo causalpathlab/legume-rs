@@ -37,7 +37,9 @@ use crate::link_community::profiles::*;
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
-use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
+use crate::util::srt_pipeline::{
+    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+};
 use data_beans::qc::suggest_nnz_cutoff;
 use data_beans_alg::random_projection::RandProjOps;
 use matrix_util::common_io::mkdir_parent;
@@ -80,7 +82,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         // Everything `lc` filters, weights and reports is per GENE. On a
         // channelized matrix a row is half a gene, and reading one as the other
         // is what let the merge filter pick its cutoff by splice track.
-        gene_axis: true,
+        // Lenient, not strict: `lc` does not pool a gene's tracks into one
+        // observation, so one unit per row is a defined fallback and a
+        // multimodal matrix must not be rejected outright.
+        gene_axis: GeneAxisMode::Lenient,
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();
@@ -256,15 +261,20 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         let mut basis = cell_proj.basis.clone();
         if args.min_gene_count > 0.0 {
             let gene_totals = gene_axis.pool_totals(row_totals.clone());
+            let per_row = gene_axis.broadcast_to_rows(&gene_totals);
+            // Counts basis ROWS, and every row of a gene shares its gene's
+            // total, so the gene count is the row count divided by the rows a
+            // gene owns. Deriving it here rather than re-applying the threshold
+            // keeps one copy of the rule.
+            let n_rows_kept = filter_basis_by_gene_count(&mut basis, &per_row, args.min_gene_count);
             let n_genes_kept = gene_totals
                 .iter()
                 .filter(|&&t| t >= f64::from(args.min_gene_count))
                 .count();
-            let per_row = gene_axis.broadcast_totals_to_rows(&gene_totals);
-            filter_basis_by_gene_count(&mut basis, &per_row, args.min_gene_count);
+            debug_assert!(n_rows_kept >= n_genes_kept);
             info!(
-                "Kept {}/{} genes (min_count={:.0})",
-                n_genes_kept, n_genes, args.min_gene_count
+                "Kept {}/{} genes ({} of {} rows, min_count={:.0})",
+                n_genes_kept, n_genes, n_rows_kept, n_rows, args.min_gene_count
             );
         }
         apply_gene_weights(&mut basis, &gene_axis.broadcast_to_rows(&gene_weights));

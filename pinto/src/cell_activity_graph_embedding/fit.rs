@@ -93,7 +93,9 @@ use crate::util::graph_coarsen::{
 };
 use crate::util::metadata::{create_cage_metadata, RunInputs, SpliceTrackInfo, DELTA_BASE_SPLICED};
 use crate::util::score_trace::{write_score_trace, ScoreEntry};
-use crate::util::srt_pipeline::{preprocess_srt, SrtPreprocessConfig, SrtPreprocessed};
+use crate::util::srt_pipeline::{
+    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+};
 
 use candle_util::candle_core::Tensor;
 // `Optimizer` is what puts `AdamW::new` in scope; backward and the step run
@@ -198,7 +200,7 @@ pub fn fit_cell_activity_graph_embedding(
         graph,
         gene_axis,
         row_weights: fisher_weights,
-        row_stats: _,
+        row_stats,
         gene_weights,
         gene_stats: _,
         n_cells,
@@ -207,7 +209,7 @@ pub fn fit_cell_activity_graph_embedding(
         common: c,
         fisher_weights: !args.no_fisher_weights,
         batch_effects: true,
-        gene_axis: true,
+        gene_axis: GeneAxisMode::Strict,
         feature_kind: Some(feature_kind),
     })?;
 
@@ -275,7 +277,13 @@ pub fn fit_cell_activity_graph_embedding(
     // partition at the end of the run. The counts do not change in between —
     // batch effects and QC are both already applied — so a second pass would
     // re-read every column of the zarr to rebuild the same vector.
-    let row_totals = crate::link_community::profiles::compute_row_totals(&data_vec, c.block_size)?;
+    // Off the streaming pass when it ran; `sum()` IS the per-row total. Only
+    // `--no-fisher-weights` leaves it absent, and that is the one case worth a
+    // second read.
+    let row_totals: Vec<f64> = match row_stats {
+        Some(st) => st.sum().iter().map(|&x| f64::from(x)).collect(),
+        None => crate::link_community::profiles::compute_row_totals(&data_vec, c.block_size)?,
+    };
     let gene_totals = gene_axis.pool_totals(row_totals.clone());
 
     // The go/no-go for everything a velocity contrast would be built on, taken

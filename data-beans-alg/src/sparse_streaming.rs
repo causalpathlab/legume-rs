@@ -105,10 +105,19 @@ pub fn streaming_sparse_running_stats_folded(
     // The dense scratch lives in the fold accumulator, so it is allocated once
     // per rayon worker rather than once per block, and it is cleared in
     // O(touched) rather than O(n_folded).
+    // The accumulator carries a `seen` stamp alongside the value buffer. Using
+    // `buf[g] == 0.0` as the "not yet touched" marker would be wrong: a stored
+    // explicit zero leaves the buffer at zero, so the bucket is pushed onto
+    // `touched` a second time when its other row arrives, and that bucket's
+    // npos, s1 and s2 are then all counted twice for that column. Sparse
+    // backends do not promise to prune explicit zeros, and a producer that
+    // emits both splice tracks whenever a gene is detected writes exactly that
+    // pattern.
     type Acc = (
         SparseRunningStatistics<f32>,
         SparseRunningStatistics<f32>,
         Vec<f32>,
+        Vec<bool>,
         Vec<usize>,
         Vec<f32>,
     );
@@ -122,11 +131,12 @@ pub fn streaming_sparse_running_stats_folded(
                     SparseRunningStatistics::<f32>::new(n_features),
                     SparseRunningStatistics::<f32>::new(n_folded),
                     vec![0.0f32; n_folded],
+                    vec![false; n_folded],
                     Vec::<usize>::new(),
                     Vec::<f32>::new(),
                 )
             },
-            |(mut rows, mut folded, mut buf, mut touched, mut vals),
+            |(mut rows, mut folded, mut buf, mut seen, mut touched, mut vals),
              &(lb, ub)|
              -> anyhow::Result<Acc> {
                 let chunk = data_vec.read_columns_csc(lb..ub)?;
@@ -135,7 +145,8 @@ pub fn streaming_sparse_running_stats_folded(
                     touched.clear();
                     for (&r, &v) in col.row_indices().iter().zip(col.values().iter()) {
                         let g = row_to_gene[r] as usize;
-                        if buf[g] == 0.0 {
+                        if !seen[g] {
+                            seen[g] = true;
                             touched.push(g);
                         }
                         buf[g] += v;
@@ -147,9 +158,10 @@ pub fn streaming_sparse_running_stats_folded(
                     folded.add_sparse_column(&touched, &vals);
                     for &g in touched.iter() {
                         buf[g] = 0.0;
+                        seen[g] = false;
                     }
                 }
-                Ok((rows, folded, buf, touched, vals))
+                Ok((rows, folded, buf, seen, touched, vals))
             },
         )
         .map(|acc| acc.map(|(rows, folded, ..)| (rows, folded)))

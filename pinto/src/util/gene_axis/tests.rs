@@ -184,7 +184,7 @@ fn broadcasting_on_the_identity_axis_is_a_pass_through() {
         vec![1.0, 2.0, 3.0]
     );
     assert_eq!(
-        axis.broadcast_totals_to_rows(&[1.0, 2.0, 3.0]),
+        axis.broadcast_to_rows(&[1.0, 2.0, 3.0]),
         vec![1.0, 2.0, 3.0]
     );
 }
@@ -199,7 +199,7 @@ fn a_count_threshold_keeps_or_drops_a_gene_as_one_unit() {
     let row_totals: Vec<f64> = vec![3.0, 1.0, 1.0, 2.0, 1.0];
     let per_gene = axis.pool_totals(row_totals.clone());
     assert_eq!(per_gene, vec![4.0, 2.0, 2.0]);
-    let spread = axis.broadcast_totals_to_rows(&per_gene);
+    let spread = axis.broadcast_to_rows(&per_gene);
 
     let kept_rowwise: Vec<usize> = (0..axis.n_rows())
         .filter(|&r| row_totals[r] >= 2.0)

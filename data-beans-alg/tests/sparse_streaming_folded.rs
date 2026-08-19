@@ -159,6 +159,48 @@ fn no_post_hoc_fold_of_row_statistics_recovers_npos_or_dispersion() -> anyhow::R
     Ok(())
 }
 
+/// A stored explicit zero must not make its bucket look untouched.
+///
+/// The natural implementation uses `buf[g] == 0.0` as the "not yet seen"
+/// marker, which is wrong precisely when a row carries a stored zero: the
+/// bucket is pushed twice and everything about that column is double counted.
+/// Nothing prunes explicit zeros on the way in, and a producer that emits both
+/// splice tracks whenever a gene is detected writes exactly this pattern.
+#[test]
+fn a_stored_explicit_zero_does_not_double_count_its_bucket() -> anyhow::Result<()> {
+    // Gene 0 owns rows 1 and 3. Cell 0 gets an explicit zero on row 1 and a
+    // real count on row 3, so the fold must see ONE detection of value 4.
+    // Build the triplets by hand so the zero is genuinely STORED rather than
+    // dropped by a dense-to-sparse conversion.
+    let rows = [1usize, 3, 5];
+    let cols = [0usize, 0, 1];
+    let vals = [0.0f32, 4.0, 2.0];
+    let trip: Vec<(u64, u64, f32)> = rows
+        .iter()
+        .zip(cols.iter())
+        .zip(vals.iter())
+        .map(|((&r, &c), &v)| (r as u64, c as u64, v))
+        .collect();
+    let mut sp = create_sparse_from_triplets(
+        trip.as_slice(),
+        (7, N_CELLS, trip.len()),
+        None,
+        Some(&SparseIoBackend::Zarr),
+    )?;
+    sp.register_row_names_vec(&names(7, "row"));
+    sp.register_column_names_vec(&names(N_CELLS, "cell"));
+    sp.preload_columns()?;
+    let mut data = SparseIoVec::new();
+    data.push(Arc::from(sp), Some("batch0".into()))?;
+
+    let (_, folded) =
+        streaming_sparse_running_stats_folded(&data, None, "test", &ROW_TO_GENE, N_GENES)?;
+    let (npos, sum, _, _) = folded.to_vecs();
+    assert_eq!(npos[0], 1.0, "one detection, not two");
+    assert_eq!(sum[0], 4.0, "the zero contributes nothing to the sum");
+    Ok(())
+}
+
 #[test]
 fn a_bucket_index_past_the_declared_count_is_an_error() -> anyhow::Result<()> {
     let chan_data = as_data(&channelized(), "row")?;

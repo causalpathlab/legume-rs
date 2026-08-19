@@ -53,7 +53,9 @@ use crate::lr_activity::outputs::{
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use data_beans::convert::try_open_or_convert;
+use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
+use data_beans_alg::sparse_streaming::streaming_sparse_running_stats_folded;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::{CalibrateTarget, Inference, TwoStatParam};
 use matrix_util::common_io::mkdir_parent;
@@ -108,7 +110,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // splice-channelized matrix: the resolver aliases on `--gene-delimiter`
     // (default `_`) and never on `/`, so `GENE1` does not reach
     // `GENE1/count/spliced` and every pair is dropped.
-    let gene_axis = GeneAxis::resolve(&row_names)?;
+    let gene_axis = GeneAxis::resolve_or_identity(&row_names)?;
     let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
     let n_genes = gene_axis.n_genes();
     if gene_axis.is_channelized() {
@@ -219,14 +221,21 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     ////////////////////////////////////////////////
     // 4. Per-gene total counts (filter LR pairs) //
     ////////////////////////////////////////////////
+    // Per GENE, by reading ROWS and folding. The backend is indexed by row, so
+    // iterating `0..n_genes` over it would read an arbitrary prefix of the rows
+    // and credit each to the wrong gene, while never reading the rest of the
+    // matrix at all. That is silent: `--min-gene-count` would still filter, just
+    // on the wrong totals.
     info!("Computing per-gene total counts...");
     const SUM_CHUNK: usize = 512;
+    let n_rows_total = row_names.len();
     let mut gene_sum = vec![0.0f32; n_genes];
-    for start in (0..n_genes).step_by(SUM_CHUNK) {
-        let end = (start + SUM_CHUNK).min(n_genes);
+    for start in (0..n_rows_total).step_by(SUM_CHUNK) {
+        let end = (start + SUM_CHUNK).min(n_rows_total);
         let mat = data_vec.read_rows_ndarray(start..end)?;
         for r in 0..(end - start) {
-            gene_sum[start + r] = mat.row(r).iter().sum();
+            let g = gene_axis.gene_of_row(start + r);
+            gene_sum[g] += mat.row(r).iter().sum::<f32>();
         }
     }
     let pre_filter_n = resolved_pairs.len();
@@ -322,8 +331,11 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     );
     let x_rows = data_vec.read_rows_dmatrix(rows_to_read.iter().copied())?;
     let mut x_lr = DMatrix::<f32>::zeros(lr_genes.len(), n_cells);
-    for (r, &local) in row_owner.iter().enumerate() {
-        for c in 0..n_cells {
+    // Columns outer: both matrices are column-major, so a row-outer walk takes
+    // a cache miss per element on a slab this size. Same argument
+    // `GeneAxis::fold_rows` makes for the same operation.
+    for c in 0..n_cells {
+        for (r, &local) in row_owner.iter().enumerate() {
             x_lr[(local, c)] += x_rows[(r, c)];
         }
     }
@@ -331,23 +343,27 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // Fisher weight is multiplicative on pb_mean *before* log1p — without
     // the non-linear log step it would cancel out of any correlation /
     // covariance and have no effect.
+    // One weight per GENE, evaluated on gene-axis statistics rather than
+    // averaged from the rows'. A Fisher weight is a function of abundance and
+    // mean and is not additive, so no arithmetic on two rows' weights gives the
+    // pooled gene's weight: the sparse nascent row sits at a different point on
+    // the dispersion trend. The fold has to happen on the statistics, and it
+    // has to happen inside the pass, because `npos` and `s2` do not survive one
+    // applied afterwards.
     info!("Computing NB Fisher-info gene weights for LR genes...");
-    let fisher_rows = compute_nb_fisher_weights(&data_vec, c.block_size)?;
-    // One weight per gene. Rows of a gene are averaged rather than summed:
-    // a weight is a precision, not a count, so adding two of them is not a
-    // quantity. Averaging keeps it in range and equals the row weight when a
-    // gene owns one row.
-    let mut fisher_lr = vec![0.0f32; lr_genes.len()];
-    let mut n_rows_of = vec![0.0f32; lr_genes.len()];
-    for (r, &local) in rows_to_read.iter().zip(row_owner.iter()) {
-        fisher_lr[local] += fisher_rows[*r];
-        n_rows_of[local] += 1.0;
-    }
-    for (w, n) in fisher_lr.iter_mut().zip(n_rows_of.iter()) {
-        if *n > 0.0 {
-            *w /= *n;
-        }
-    }
+    let fisher_all: Vec<f32> = if gene_axis.is_channelized() {
+        let (_, gene_stats) = streaming_sparse_running_stats_folded(
+            &data_vec,
+            c.block_size,
+            "NB-Fisher",
+            gene_axis.row_to_gene(),
+            gene_axis.n_genes(),
+        )?;
+        fisher_weights_from_stats(&gene_stats, n_cells)
+    } else {
+        compute_nb_fisher_weights(&data_vec, c.block_size)?
+    };
+    let fisher_lr: Vec<f32> = lr_genes.iter().map(|&g| fisher_all[g]).collect();
     info!(
         "Fisher w (LR genes): min={:.3e}, mean={:.3e}, max={:.3e}",
         fisher_lr.iter().cloned().fold(f32::INFINITY, f32::min),
@@ -371,6 +387,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         &p_recv,
         n_strata_total,
         n_samples,
+        &active_communities,
     );
 
     // Bake Fisher weights into log-mean matrices once (per-gene row scale).
@@ -637,6 +654,7 @@ fn collapse_role_pseudobulk(
     p_recv: &DMatrix<f32>,
     n_communities: usize,
     n_samples: usize,
+    active: &HashSet<u32>,
 ) -> CollapseOut {
     let n_lr = x_lr.nrows();
     let n_cells = x_lr.ncols();
@@ -659,7 +677,12 @@ fn collapse_role_pseudobulk(
             let mut num_r = DMatrix::<f32>::zeros(n_lr, n_samples);
             let mut den_s = vec![0.0f32; n_samples];
             let mut den_r = vec![0.0f32; n_samples];
-            for i in 0..n_cells {
+            // A stratum the sparsity filter already rejected is never scored,
+            // so the per-cell accumulation for it is pure waste. The entry is
+            // still built, at its natural shape, because everything downstream
+            // indexes these vectors by stratum id.
+            let skip = !active.contains(&(c as u32));
+            for i in 0..(if skip { 0 } else { n_cells }) {
                 let s = sample_id[i];
                 let xi = x_lr.column(i);
                 let ps = p_send[(i, c)];
