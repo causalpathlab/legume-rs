@@ -11,22 +11,21 @@
 
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::{
-    build_expression_graph, build_expression_knn, build_expression_knn_within,
-    build_spatial_graph, connected_components, SrtCellPairsArgs,
+    build_expression_graph, build_expression_knn, build_expression_knn_within, build_spatial_graph,
+    connected_components, SrtCellPairsArgs,
 };
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use crate::util::input::{
-    KnnExprScope,
-    auto_batch_from_components, read_data_with_coordinates, read_data_without_coordinates, SRTData,
-    SrtInputArgs,
+    auto_batch_from_components, read_data_with_coordinates, read_data_without_coordinates,
+    KnnExprScope, SRTData, SrtInputArgs,
 };
 use crate::util::knn_graph::KnnGraph;
-use matrix_util::knn_graph::{DistanceMerge, EdgeSource};
 use auxiliary_data::feature_names::FeatureNameKind;
 use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::RandProjOps;
 use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
+use matrix_util::knn_graph::{DistanceMerge, EdgeSource};
 
 ///////////////////////////
 // Config + result types //
@@ -342,12 +341,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
                         n_components
                     );
                 }
-                build_expression_knn_within(
-                    &proj.proj,
-                    &component_of_cell,
-                    n_components,
-                    knn_args,
-                )?
+                build_expression_knn_within(&proj.proj, &component_of_cell, n_components, knn_args)?
             }
         };
         let (merged, source) = graph.union_with(&expr_graph, DistanceMerge::SourceRank)?;

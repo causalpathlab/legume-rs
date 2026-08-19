@@ -89,7 +89,10 @@ fn batches_are_detected_on_the_spatial_graph_not_the_union() {
 
     assert_eq!(n, 2, "topology_graph must hand back the spatial graph");
     assert_eq!(
-        labels.iter().collect::<std::collections::HashSet<_>>().len(),
+        labels
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         2,
         "and the cells must carry two distinct batch labels"
     );
@@ -147,7 +150,10 @@ fn expression_neighbours_stay_inside_their_spatial_component() {
 
     assert!(!within.edges.is_empty(), "the fixture must produce edges");
     for &(i, j) in &within.edges {
-        assert_eq!(component[i], component[j], "edge {i}-{j} left its component");
+        assert_eq!(
+            component[i], component[j],
+            "edge {i}-{j} left its component"
+        );
     }
     // The fixture only means something if an unrestricted search DOES cross,
     // otherwise the assertion above passes for the wrong reason.

@@ -74,14 +74,16 @@ pub struct SrtInputArgs {
                      matches the name x_centroid, and the same holds for the cell\n\
                      names in the first column.\n\
                      \n\
-                     If none of these names is present, the file is read by POSITION\n\
-                     instead, taking columns 4 and 5. That is the tissue_positions\n\
-                     layout, and it is only attempted when the file looks like one,\n\
-                     meaning it also carries in_tissue, array_row and array_col.\n\
-                     Any other named file is rejected with its column list, rather\n\
-                     than read positionally: two numeric columns in those positions\n\
-                     would otherwise be accepted as coordinates without complaint.\n\
-                     Pass this flag with two of the names it printed to resolve it."
+                     If none of these names is present, the run stops and prints the\n\
+                     file's first line, so you can see what it does have. Nothing is\n\
+                     read by position on a guess: any two numeric columns would pass\n\
+                     as coordinates, and a table with counts where the coordinates\n\
+                     were expected would put every cell in one spot without\n\
+                     complaining.\n\
+                     \n\
+                     Say which columns instead. Use this flag for named ones, or\n\
+                     --coord-column-indices for positions. The classic spot layout\n\
+                     has no header, and its coordinates are --coord-column-indices 4,5."
     )]
     pub coord_column_names: Vec<Box<str>>,
 
@@ -730,74 +732,34 @@ pub fn read_one_coord_file(
         };
 
     if needs_fallback {
-        // Zarr's `/cell_summary` is coord-only with no barcode column, so
-        // start at index 0. Text/parquet fall back to Visium classic's
-        // `tissue_positions.{csv,parquet}` layout: barcode, in_tissue,
-        // array_row, array_col, pxl_row_in_fullres, pxl_col_in_fullres —
-        // the pixel coordinates sit at indices 4 and 5.
-        let fallback_indices: Vec<usize> = if is_zarr { vec![0, 1] } else { vec![4, 5] };
-        let fallback_names: Vec<Box<str>> = vec!["x".into(), "y".into()];
-
-        // Taking columns 4 and 5 is not a general guess: it is knowledge of one
-        // specific layout. So check the file IS that layout before applying it.
+        // No guessing. Coordinates are whichever columns the caller named or
+        // numbered; if neither resolves, say so and stop.
         //
-        // Applied blindly it produces a silent wrong answer rather than an
-        // error. A single-cell vendor cell table, for instance, carries
-        // per-cell QC counts at exactly those positions, so every cell would
-        // take the same coordinates and the run would report nothing amiss.
-        //
-        // A file with no header at all is left alone: there are no names to
-        // check, and positional reading is the only thing available.
+        // This used to fall back to columns 4 and 5, the positions they occupy
+        // in one particular vendor layout. That is a guess about the file, and
+        // when it is wrong it does not fail: any two numeric columns are
+        // accepted as coordinates, so a table with per-cell counts in those
+        // positions puts every cell in the same place and the run looks
+        // healthy. A wrong answer that announces nothing is worse than an
+        // error, and the caller already has an exact way to say what it meant.
+        let mut hint = String::new();
         if !is_zarr {
-            if let Ok(found) = peek_delimited_header(coord_file) {
-                let has = |want: &str| {
-                    found
-                        .iter()
-                        .any(|f| f.eq_ignore_ascii_case(want))
-                };
-                // The signature of `tissue_positions.{csv,parquet}`, whose
-                // pixel coordinates sit at 4 and 5 whatever they are called.
-                let is_known_layout =
-                    has("in_tissue") && has("array_row") && has("array_col");
-                if !is_known_layout && found.len() > 1 {
-                    return Err(anyhow::anyhow!(
-                        "coord file '{}' has named columns, but none of them are the \
-                         coordinates asked for {:?} and its layout is not one this \
-                         recognises. Its columns are {:?}. Pass --coord-column-names \
-                         with two of those.",
-                        coord_file,
-                        user_names,
-                        found,
-                    ));
-                }
+            if let Ok(first) = first_line_fields(coord_file) {
+                hint = format!(" The file's first line reads {first:?}.");
             }
         }
-
-        match initial {
-            Err(e) => warn!(
-                "coord file '{}' could not be read by names {:?} ({}); \
-                 falling back to 0-based column indices {:?} as (x, y)",
-                coord_file, user_names, e, fallback_indices,
-            ),
-            Ok(r) => warn!(
-                "coord file '{}' matched {} of the requested column names {:?}; \
-                 falling back to 0-based column indices {:?} as (x, y)",
-                coord_file,
-                r.mat.ncols(),
-                user_names,
-                fallback_indices,
-            ),
-        }
-        let mut r = read_coord(&fallback_indices, &fallback_names)?;
-        // Override column names: the underlying readers use indices when both
-        // are passed and pull names from the file's header/schema, so the
-        // fallback `["x","y"]` hint is otherwise ignored. A stable label is
-        // more useful downstream than whatever the file happened to have.
-        r.cols = fallback_names;
-        Ok(r)
-    } else {
-        initial
+        return Err(anyhow::anyhow!(
+            "coord file '{}' has none of the coordinate columns asked for {:?}.{} \
+             Pass --coord-column-names with the names it does have, or \
+             --coord-column-indices with their 0-based positions. For the classic \
+             spot layout that is --coord-column-indices 4,5.",
+            coord_file,
+            user_names,
+            hint,
+        ));
     }
+
+    initial
 }
 
 /// Detect a header row by checking whether non-zero columns of the first
@@ -827,28 +789,20 @@ fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usi
 
 /// Auto-detect whether the first line of a delimited file is a header row
 /// by checking if it contains any of the requested column names.
-/// The column names on the first line of a delimited file, if it looks like a
-/// header rather than data.
+/// The first line of a delimited file, split into fields.
 ///
-/// Only used to tell a user which columns their file actually has, so a
-/// best-effort read is enough and any failure just means we say nothing.
-fn peek_delimited_header(path: &str) -> anyhow::Result<Vec<Box<str>>> {
+/// Only ever quoted back to the caller in an error, so they can see what the
+/// file actually holds. It makes no claim about whether that line is a header.
+fn first_line_fields(path: &str) -> anyhow::Result<Vec<Box<str>>> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path)?;
     let mut first = String::new();
-    std::io::BufReader::new(file).read_line(&mut first)?;
-    let fields: Vec<Box<str>> = first
+    std::io::BufReader::new(std::fs::File::open(path)?).read_line(&mut first)?;
+    Ok(first
         .trim_end_matches(['\n', '\r'])
         .split(['\t', ',', ' '])
         .map(|f| f.trim().trim_matches('"').to_string().into_boxed_str())
         .filter(|f| !f.is_empty())
-        .collect();
-    // If every field parses as a number this is data, not a header.
-    anyhow::ensure!(
-        fields.iter().any(|f| f.parse::<f64>().is_err()),
-        "first line looks like data, not a header"
-    );
-    Ok(fields)
+        .collect())
 }
 
 fn detect_header_row(
@@ -996,25 +950,46 @@ mod tests {
     }
 
     #[test]
-    fn test_read_one_coord_file_visium_classic_fallback() {
-        // Visium tissue_positions.csv layout: barcode, in_tissue, array_row,
-        // array_col, pxl_row_in_fullres, pxl_col_in_fullres. With unmatched
-        // requested names the fallback must pick indices [4, 5] (the pixel
-        // coords) — NOT [1, 2] (in_tissue, array_row).
+    fn unresolved_coordinate_columns_are_reported_with_the_file_s_own_fields() {
+        // Reading by position is a guess about the file, and a wrong guess does
+        // not fail: any two numeric columns pass as coordinates. So nothing is
+        // guessed. The error quotes the first line back, because the caller
+        // cannot fix this without knowing what the file actually holds.
         let f = write_csv(
             "barcode,in_tissue,array_row,array_col,my_x,my_y\n\
              cell_a,1,0,0,100.5,200.5\n\
              cell_b,1,1,1,300.5,400.5\n",
         );
         let names: Vec<Box<str>> = vec!["pxl_row_in_fullres".into(), "pxl_col_in_fullres".into()];
-        let r = read_one_coord_file(f.path().to_str().unwrap(), &[], &names, None).unwrap();
+        let err = match read_one_coord_file(f.path().to_str().unwrap(), &[], &names, None) {
+            Ok(_) => panic!("columns that resolve to nothing must not be guessed at"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("my_x"),
+            "the file's own fields guide the fix: {err}"
+        );
+        assert!(
+            err.contains("--coord-column-indices"),
+            "and say how to say it: {err}"
+        );
+    }
+
+    #[test]
+    fn a_headerless_positional_file_is_read_when_the_caller_says_which_columns() {
+        // The classic spot layout has no header at all, so there are no names
+        // to match. Naming the positions is the whole answer.
+        let f = write_csv(
+            "cell_a,1,0,0,100.5,200.5\n\
+             cell_b,1,1,1,300.5,400.5\n",
+        );
+        let names: Vec<Box<str>> = vec!["pxl_row_in_fullres".into()];
+        let r = read_one_coord_file(f.path().to_str().unwrap(), &[4, 5], &names, None).unwrap();
         assert_eq!(r.mat.ncols(), 2);
         assert_eq!(r.mat[(0, 0)], 100.5);
         assert_eq!(r.mat[(0, 1)], 200.5);
         assert_eq!(r.mat[(1, 0)], 300.5);
-        assert_eq!(r.mat[(1, 1)], 400.5);
-        assert_eq!(r.cols[0].as_ref(), "x");
-        assert_eq!(r.cols[1].as_ref(), "y");
+        assert_eq!(r.rows[0].as_ref(), "cell_a");
     }
 
     #[test]
