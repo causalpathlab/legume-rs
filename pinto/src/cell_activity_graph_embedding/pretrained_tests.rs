@@ -218,3 +218,30 @@ fn zero_matched_genes_is_a_hard_error() -> anyhow::Result<()> {
     .is_err());
     Ok(())
 }
+
+/// The freeze is a post-step restore, not a gradient mask: after an optimizer
+/// step has moved every row, restoring must put frozen rows back exactly and
+/// leave the trainable rows where the step left them.
+#[test]
+fn restore_puts_frozen_rows_back_and_leaves_trainable_rows_alone() -> anyhow::Result<()> {
+    use super::pretrained::restore_frozen_rows;
+    use candle_util::candle_core::{Device, Tensor, Var};
+
+    let dev = Device::Cpu;
+    let init = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (3, 2), &dev)?;
+    let var = Var::from_tensor(&init)?;
+    let fixed = var.as_tensor().copy()?;
+    // Rows 0 and 2 frozen, row 1 trainable.
+    let mask = Tensor::from_vec(vec![1.0f32, 0.0, 1.0], (3, 1), &dev)?;
+
+    // Simulate an optimizer step that moved every value.
+    let moved = (var.as_tensor() + 10.0)?;
+    var.set(&moved)?;
+
+    restore_frozen_rows(&var, &fixed, &mask)?;
+    let got = var.as_tensor().to_vec2::<f32>()?;
+    assert_eq!(got[0], vec![1.0, 2.0], "frozen row 0 restored");
+    assert_eq!(got[2], vec![5.0, 6.0], "frozen row 2 restored");
+    assert_eq!(got[1], vec![13.0, 14.0], "trainable row 1 keeps its step");
+    Ok(())
+}

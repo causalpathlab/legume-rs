@@ -256,3 +256,24 @@ pub fn write_init_report(
         ],
     )
 }
+
+/// Put the frozen rows of `var` back after an optimizer step.
+///
+/// This exists because per-row gradient masking is NOT freezing under AdamW:
+/// its moment state keeps moving a masked row even at zero gradient. Excluding
+/// the whole Var is no better here, since neighbor-seeded rows must train.
+/// So the optimizer sees every row, and the frozen ones are overwritten from
+/// `frozen` after each step. `keep_mask` is `[n, 1]`, `1.0` = frozen row,
+/// broadcast across the embedding columns.
+pub fn restore_frozen_rows(
+    var: &candle_util::candle_core::Var,
+    frozen: &candle_util::candle_core::Tensor,
+    keep_mask: &candle_util::candle_core::Tensor,
+) -> anyhow::Result<()> {
+    let trainable_mask = keep_mask.affine(-1.0, 1.0)?;
+    let merged = frozen
+        .broadcast_mul(keep_mask)?
+        .add(&var.as_tensor().broadcast_mul(&trainable_mask)?)?;
+    var.set(&merged)?;
+    Ok(())
+}

@@ -615,4 +615,56 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Learned-gate temperature τ; < 1 sharpens toward 0/1 (--gate-mode learned only)"
     )]
     pub feature_gate_temp: f32,
+
+    #[arg(
+        long,
+        help = "Pre-trained gene x H embedding parquet to start the gene side from",
+        long_help = "Path to a pre-trained gene x H embedding parquet.\n\
+                     Row column 0 holds the gene name; value columns are the dimensions.\n\
+                     Feed a RAW dictionary: a topic model's feature_embedding.parquet,\n\
+                     or an embedding run's feature_loading.parquet.\n\
+                     Co-embedding outputs are not dictionaries and are rejected.\n\
+                     Genes are matched under --gene-name-mode.\n\
+                     A gene with no dictionary row is seeded from the matched gene\n\
+                     with the most similar count profile, stays trainable,\n\
+                     and is listed in {out}.gene_embedding_init.parquet."
+    )]
+    pub gene_embedding: Option<Box<str>>,
+
+    #[arg(
+        long,
+        requires = "gene_embedding",
+        help = "Optional per-gene bias parquet ([D, 1]) paired with --gene-embedding;\n\
+                genes without a row get bias 0"
+    )]
+    pub gene_embedding_bias: Option<Box<str>>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = GeneEmbeddingMode::Free,
+        requires = "gene_embedding",
+        help = "What training may do to the pre-trained gene embedding:\n\
+                freeze = keep dictionary rows fixed; free = initialize, then train",
+        long_help = "What training may do to the pre-trained gene embedding.\n\
+                     \n\
+                     freeze keeps every dictionary-matched row fixed at its loaded value.\n\
+                     Neighbor-seeded rows still train, and the selection gate stays live,\n\
+                     so a gated run still ships a gate-scaled table.\n\
+                     Requires the dictionary width to equal --embedding-dim.\n\
+                     The e_feat ridge is skipped: a fixed table needs no shrinkage.\n\
+                     \n\
+                     free initializes from the dictionary and then trains every row.\n\
+                     Also requires the widths to match."
+    )]
+    pub gene_embedding_mode: GeneEmbeddingMode,
+}
+
+/// What training may do to a pre-trained gene embedding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum GeneEmbeddingMode {
+    /// Dictionary-matched rows stay fixed; neighbor-seeded rows train.
+    Freeze,
+    /// Initialize from the dictionary, then train every row.
+    Free,
 }
