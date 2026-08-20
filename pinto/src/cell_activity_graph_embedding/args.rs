@@ -642,11 +642,19 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = GeneEmbeddingMode::Free,
+        default_value_t = GeneEmbeddingMode::Adapt,
         requires = "gene_embedding",
         help = "What training may do to the pre-trained gene embedding:\n\
+                adapt = train one shared map on top of the fixed dictionary (default);\n\
                 freeze = keep dictionary rows fixed; free = initialize, then train",
         long_help = "What training may do to the pre-trained gene embedding.\n\
+                     \n\
+                     adapt (the default) keeps the dictionary fixed and trains one\n\
+                     shared linear map on top of it, so every gene's gradient\n\
+                     updates the same few parameters.\n\
+                     The dictionary width and --embedding-dim may differ.\n\
+                     Add --gene-adapter-residual for a per-gene correction\n\
+                     where the shared map is not enough.\n\
                      \n\
                      freeze keeps every dictionary-matched row fixed at its loaded value.\n\
                      Neighbor-seeded rows still train, and the selection gate stays live,\n\
@@ -655,14 +663,25 @@ pub struct CellActivityGraphEmbeddingArgs {
                      The e_feat ridge is skipped: a fixed table needs no shrinkage.\n\
                      \n\
                      free initializes from the dictionary and then trains every row.\n\
-                     Also requires the widths to match."
+                     Also requires the widths to match. This is the fallback\n\
+                     when the shared map underfits."
     )]
     pub gene_embedding_mode: GeneEmbeddingMode,
+
+    #[arg(
+        long,
+        requires = "gene_embedding",
+        help = "adapt only: add a ridge-shrunk per-gene correction\n\
+                on top of the shared map"
+    )]
+    pub gene_adapter_residual: bool,
 }
 
 /// What training may do to a pre-trained gene embedding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum GeneEmbeddingMode {
+    /// Fixed dictionary + one shared trainable map (the default).
+    Adapt,
     /// Dictionary-matched rows stay fixed; neighbor-seeded rows train.
     Freeze,
     /// Initialize from the dictionary, then train every row.

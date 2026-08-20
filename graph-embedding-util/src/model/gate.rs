@@ -335,7 +335,17 @@ impl JointEmbedModel {
     pub fn materialize_e_feat(&mut self) -> Result<()> {
         // Compute the frozen dictionary first (borrows self immutably), then assign.
         // Uses effect MEANS (no reparam sampling) and bakes the gate(s) in.
-        let gated = if let Some(f) = &self.factor {
+        let gated = if let Some(a) = &self.adapter {
+            // Adapter: recompose from the fixed dictionary and the live map
+            // (idempotent by construction), then bake whatever multiplies a
+            // free model's loading — same policy as the free branch below.
+            let mu = a.compose()?;
+            let w = self.free_feature_multiplier()?;
+            Some(
+                self.gated_rows(&mu, self.e_feat_logstd.as_ref(), w.as_ref(), false)?
+                    .detach(),
+            )
+        } else if let Some(f) = &self.factor {
             // Factored: β̃ + mask·δ̃, each side gated separately (see `factored_feat_rows`).
             let mask = f.splice_delta.as_ref().map(|(_, m)| m.clone());
             Some(

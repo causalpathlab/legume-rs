@@ -113,7 +113,7 @@ use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{build_per_batch_cell_samplers, embedding_ridge, PbChainFilter};
 use graph_embedding_util::model::{
-    FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit,
+    AdapterInit, FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit,
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
@@ -686,14 +686,19 @@ pub fn fit_cell_activity_graph_embedding(
                 name_kind: feature_kind.clone(),
                 gene_profiles: &gene_profiles,
             })?;
-            anyhow::ensure!(
-                pre.h == args.embedding_dim,
-                "--gene-embedding is {} dimensions wide but --embedding-dim is {}; \
-                 set --embedding-dim {} to use this dictionary",
-                pre.h,
-                args.embedding_dim,
-                pre.h
-            );
+            // adapt decouples the two widths; freeze/free install rows verbatim
+            // and so need them equal.
+            if args.gene_embedding_mode != GeneEmbeddingMode::Adapt {
+                anyhow::ensure!(
+                    pre.h == args.embedding_dim,
+                    "--gene-embedding is {} dimensions wide but --embedding-dim is {}; \
+                     set --embedding-dim {}, or use --gene-embedding-mode adapt, \
+                     which allows the widths to differ",
+                    pre.h,
+                    args.embedding_dim,
+                    pre.h
+                );
+            }
             pretrained::write_init_report(&c.out, &pre.records)?;
             info!("Wrote {}.gene_embedding_init.parquet", c.out);
             Some(pre)
@@ -704,22 +709,40 @@ pub fn fit_cell_activity_graph_embedding(
         .map(|p| p.b_gene.clone())
         .unwrap_or_else(|| vec![0.0_f32; n_genes]);
 
-    let mut model = JointEmbedModel::new_with_init(
-        ModelArgs {
-            n_features: n_genes,
-            n_cells,
-            embedding_dim: args.embedding_dim,
-            seed: c.seed,
-        },
-        &ModelInit {
-            e_feat: pretrained_gene.as_ref().map(|p| &p.e_gene),
-            e_cell: None,
-            b_feat: &b_feat_init,
-            b_cell: &vec![0.0_f32; n_cells],
-        },
-        &varmap,
-        &dev,
-    )?;
+    let mut model = match (&pretrained_gene, args.gene_embedding_mode) {
+        // Adapter: the dictionary is a fixed constant and the gene side trains
+        // one shared [h_src x H] map (plus the optional per-gene residual), so
+        // every gene's gradient moves the same few parameters.
+        (Some(p), GeneEmbeddingMode::Adapt) => JointEmbedModel::new_adapted(
+            AdapterInit {
+                n_cells,
+                embedding_dim: args.embedding_dim,
+                rho: &p.e_gene,
+                b_feat: &b_feat_init,
+                b_cell: &vec![0.0_f32; n_cells],
+                seed: c.seed,
+                residual: args.gene_adapter_residual,
+            },
+            &varmap,
+            &dev,
+        )?,
+        _ => JointEmbedModel::new_with_init(
+            ModelArgs {
+                n_features: n_genes,
+                n_cells,
+                embedding_dim: args.embedding_dim,
+                seed: c.seed,
+            },
+            &ModelInit {
+                e_feat: pretrained_gene.as_ref().map(|p| &p.e_gene),
+                e_cell: None,
+                b_feat: &b_feat_init,
+                b_cell: &vec![0.0_f32; n_cells],
+            },
+            &varmap,
+            &dev,
+        )?,
+    };
 
     // Freeze state: the fixed copy, the frozen-row mask, and the registered
     // Var the restore writes through. Captured BEFORE any gate install so the
@@ -1026,9 +1049,21 @@ pub fn fit_cell_activity_graph_embedding(
                 let lam = args.embedding_l2 as f64;
                 total = (total + embedding_ridge(&model.e_cell, lam)?)?;
                 // A frozen gene table needs no shrinkage; the ridge would only
-                // push gradient at rows the restore below reverts anyway.
-                if frozen_gene.is_none() {
-                    total = (total + embedding_ridge(&model.e_feat, lam)?)?;
+                // push gradient at rows the restore below reverts anyway. Under
+                // the adapter, `e_feat` is a detached snapshot with no gradient
+                // path, so the ridge moves to the per-gene residual, the one
+                // adapter parameter that can overfit row by row.
+                match &model.adapter {
+                    Some(a) => {
+                        if let Some(r) = &a.residual {
+                            total = (total + embedding_ridge(r, lam)?)?;
+                        }
+                    }
+                    None => {
+                        if frozen_gene.is_none() {
+                            total = (total + embedding_ridge(&model.e_feat, lam)?)?;
+                        }
+                    }
                 }
             }
             // The learned gate is variational, so its spike-and-slab KL is part
@@ -1271,6 +1306,13 @@ pub fn fit_cell_activity_graph_embedding(
     if sampled_selection.is_none() {
         model.materialize_e_feat()?;
         info!("Baked the learned gate into the shipped feature embedding");
+    } else if let Some(a) = &model.adapter {
+        // Sampled arm ships the RAW loading (the pip is dropout, not a
+        // coefficient), but under the adapter the `e_feat` field is a stale
+        // construction-time snapshot; recompose it from the live map without
+        // baking the pip.
+        model.e_feat = a.compose()?.detach();
+        info!("Recomposed the adapted feature embedding for output");
     }
     let e_gene_out = tensor_to_mat(&model.e_feat)?;
     let b_gene_out = tensor_to_mat_1d(&model.b_feat)?;
