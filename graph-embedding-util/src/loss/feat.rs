@@ -490,6 +490,26 @@ pub fn nce_loss_identity(
 /// learned path, the logits. Ungated with no `pip` it is the plain gather. This is the
 /// single feature-gather point for the bge + gem trainers.
 pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
+    // Adapter: compose the gathered rows from the fixed dictionary and the
+    // shared map, then let the same gate/effect machinery as the free path
+    // apply on top. Mutually exclusive with `factor` by construction.
+    if let Some(a) = &model.adapter {
+        let mut mu = a.rho.index_select(idx, 0)?.matmul(&a.w)?;
+        if let Some(r) = &a.residual {
+            mu = mu.add(&r.index_select(idx, 0)?)?;
+        }
+        let logstd = model
+            .e_feat_logstd
+            .as_ref()
+            .map(|l| l.index_select(idx, 0))
+            .transpose()?;
+        let w = model.gathered_gate_weights(
+            crate::model::GateKind::Identity,
+            model.s_feat.as_ref(),
+            idx,
+        )?;
+        return model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true);
+    }
     match &model.factor {
         Some(f) => {
             let genes = f.row_to_gene.index_select(idx, 0)?;

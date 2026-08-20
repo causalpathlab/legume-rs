@@ -191,6 +191,59 @@ impl FeatFactor {
     }
 }
 
+/// Inputs for [`JointEmbedModel::new_adapted`] — a fixed-dictionary
+/// adapter feature parameterization (see [`FeatAdapter`]).
+pub struct AdapterInit<'a> {
+    pub n_cells: usize,
+    /// Output width `H` (must match the cell side).
+    pub embedding_dim: usize,
+    /// Fixed dictionary `[n_features, h_src]`. Uploaded as a constant tensor,
+    /// never registered as a Var.
+    pub rho: &'a nalgebra::DMatrix<f32>,
+    pub b_feat: &'a [f32],
+    pub b_cell: &'a [f32],
+    /// Base seed for the reproducible randn init of `W` and the cell side.
+    pub seed: u64,
+    /// Allocate the optional per-feature residual (zero-init, so training
+    /// starts exactly at `rho . W`).
+    pub residual: bool,
+}
+
+/// Fixed-dictionary adapter feature side. Instead of a free `e_feat` row per
+/// feature, every row is a linear map of its row in a FIXED dictionary `rho`
+/// (a pre-trained embedding from another run):
+///
+///   `e_feat[g] = rho[g] . W (+ residual[g])`
+///
+/// `W [h_src, H]` is the only mandatory gene-side parameter, so every
+/// feature's gradient trains the same shared map; the optional per-feature
+/// `residual [n_features, H]` restores row-level freedom where the shared map
+/// is not enough (callers ridge it). `rho` is a constant tensor, NOT a Var:
+/// it never trains and the optimizer never sees it. The score/loss path
+/// composes per-batch gathers directly (no full-table materialization per
+/// step); output/co-embed readers use the `e_feat` field after
+/// [`JointEmbedModel::materialize_e_feat`].
+#[derive(Clone)]
+pub struct FeatAdapter {
+    /// Fixed dictionary `[n_features, h_src]` (constant tensor).
+    pub rho: Tensor,
+    /// Learnable map `[h_src, H]` (Var).
+    pub w: Tensor,
+    /// Optional per-feature residual `[n_features, H]` (Var, zero-init).
+    pub residual: Option<Tensor>,
+}
+
+impl FeatAdapter {
+    /// The full composed table `[n_features, H]`, on the live parameters.
+    pub fn compose(&self) -> Result<Tensor> {
+        let base = self.rho.matmul(&self.w)?;
+        match &self.residual {
+            Some(r) => base.add(r),
+            None => Ok(base),
+        }
+    }
+}
+
 pub struct JointEmbedModel {
     /// Unified feature embedding (genes ∪ peaks). When `factor` is `Some`, this
     /// is a materialized snapshot of the per-gene `β` gathered to feature rows —
@@ -203,6 +256,9 @@ pub struct JointEmbedModel {
     pub b_cell: Tensor,
     /// Optional per-gene β-sharing feature parameterization (`None` = free `e_feat`).
     pub factor: Option<FeatFactor>,
+    /// Optional fixed-dictionary adapter parameterization (`None` = free
+    /// `e_feat`). Mutually exclusive with `factor` by construction.
+    pub adapter: Option<FeatAdapter>,
     pub embedding_dim: usize,
     /// Free-model gate logits `[n_features, H]` (see [`FeatureGateSpec`]). `None` for
     /// an ungated model, or for a factored one (its gate lives in `factor.s_beta`).
@@ -324,6 +380,7 @@ impl JointEmbedModel {
             b_feat,
             b_cell,
             factor: None,
+            adapter: None,
             embedding_dim: args.embedding_dim,
             s_feat: None,
             e_feat_raw: None,
@@ -341,6 +398,74 @@ impl JointEmbedModel {
     /// allocate fresh cell-side Vars under `args.var_prefix` so multiple
     /// heads coexist in one `VarMap`. `AdamW` over `varmap.all_vars()` then
     /// updates the shared feature side once and each head's cell side
+    /// Fixed-dictionary adapter constructor: upload `rho` as a constant,
+    /// allocate the `W [h_src, H]` Var (randn, seeded) and optionally the
+    /// zero-init per-feature residual, plus a fresh cell side. The `e_feat`
+    /// field is seeded with the composed table and refreshed after phase 1
+    /// via [`Self::materialize_e_feat`].
+    pub fn new_adapted(args: AdapterInit, varmap: &VarMap, dev: &Device) -> Result<Self> {
+        let n_features = args.rho.nrows();
+        let h_src = args.rho.ncols();
+        if args.b_feat.len() != n_features {
+            candle_util::candle_core::bail!(
+                "new_adapted: b_feat has {} entries but rho has {} rows",
+                args.b_feat.len(),
+                n_features
+            );
+        }
+        if args.b_cell.len() != args.n_cells {
+            candle_util::candle_core::bail!(
+                "new_adapted: b_cell has {} entries but n_cells is {}",
+                args.b_cell.len(),
+                args.n_cells
+            );
+        }
+
+        // Constant upload: row-major, same layout convention as
+        // `register_var_from_mat`, but deliberately NOT a Var.
+        let rho_rm: Vec<f32> = (0..n_features)
+            .flat_map(|r| (0..h_src).map(move |c| args.rho[(r, c)]))
+            .collect();
+        let rho = Tensor::from_vec(rho_rm, (n_features, h_src), dev)?;
+
+        let w = register_randn_seeded(varmap, dev, "adapter_w", h_src, args.embedding_dim, args.seed)?;
+        let residual = if args.residual {
+            let zeros = nalgebra::DMatrix::<f32>::zeros(n_features, args.embedding_dim);
+            Some(register_var_from_mat(varmap, dev, "adapter_residual", &zeros)?)
+        } else {
+            None
+        };
+        let e_cell = register_randn_seeded(
+            varmap,
+            dev,
+            "e_cell",
+            args.n_cells,
+            args.embedding_dim,
+            args.seed,
+        )?;
+        let b_feat = register_var_from_slice(varmap, dev, "b_feat", args.b_feat)?;
+        let b_cell = register_var_from_slice(varmap, dev, "b_cell", args.b_cell)?;
+
+        let adapter = FeatAdapter { rho, w, residual };
+        let e_feat = adapter.compose()?.detach();
+        Ok(Self {
+            e_feat,
+            e_cell,
+            b_feat,
+            b_cell,
+            factor: None,
+            adapter: Some(adapter),
+            embedding_dim: args.embedding_dim,
+            s_feat: None,
+            e_feat_raw: None,
+            e_feat_logstd: None,
+            gate_pip: None,
+            gate_mask: Arc::new(Mutex::new(None)),
+            gate_ibp_bias: None,
+            gate: None,
+        })
+    }
+
     /// independently.
     pub fn new_sharing_features(
         args: ShareFeaturesArgs,
@@ -376,6 +501,7 @@ impl JointEmbedModel {
             b_feat: shared_b_feat,
             b_cell,
             factor: None,
+            adapter: None,
             embedding_dim,
             s_feat: shared_s_feat,
             e_feat_raw: shared_e_feat_raw,
@@ -435,6 +561,7 @@ impl JointEmbedModel {
             b_feat,
             b_cell,
             factor: Some(factor),
+            adapter: None,
             embedding_dim: args.embedding_dim,
             s_feat: None,
             e_feat_raw: None,
@@ -493,3 +620,6 @@ impl JointEmbedModel {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod adapter_tests;
