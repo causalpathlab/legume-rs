@@ -15,9 +15,10 @@
 
 use crate::util::common::Mat;
 use auxiliary_data::feature_names::FeatureNameKind;
+use auxiliary_data::feature_rows::parse_feature_row;
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
+use candle_util::candle_core::{Tensor, Var};
 use log::{info, warn};
-use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 
 /// Where a gene's initial embedding row came from.
@@ -52,15 +53,43 @@ pub struct InitRecord {
 }
 
 /// The aligned, fully populated gene side, `[n_genes x h]`, rows in the run's
-/// gene order.
+/// gene order. `records` is parallel to the gene axis and is the single
+/// source of truth for which rows came from the dictionary.
 pub struct PretrainedGeneEmbedding {
     pub e_gene: Mat,
     pub b_gene: Vec<f32>,
-    pub h: usize,
-    /// `true` where the row came from the dictionary.
-    pub matched: Vec<bool>,
-    /// One record per gene, parallel to the gene axis.
     pub records: Vec<InitRecord>,
+}
+
+impl PretrainedGeneEmbedding {
+    /// The dictionary's embedding width.
+    pub fn h(&self) -> usize {
+        self.e_gene.ncols()
+    }
+
+    /// `1.0` where the row came from the dictionary, `0.0` where it was
+    /// seeded — the freeze mask, derived from `records` so the two can
+    /// never disagree.
+    pub fn frozen_row_mask(&self) -> Vec<f32> {
+        self.records
+            .iter()
+            .map(|r| {
+                if r.init == InitKind::Matched {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    /// How many rows came from the dictionary.
+    pub fn n_matched(&self) -> usize {
+        self.records
+            .iter()
+            .filter(|r| r.init == InitKind::Matched)
+            .count()
+    }
 }
 
 pub struct PretrainedArgs<'a> {
@@ -72,9 +101,10 @@ pub struct PretrainedArgs<'a> {
     pub gene_names: &'a [Box<str>],
     /// Canonicalization applied to both sides before matching.
     pub name_kind: FeatureNameKind,
-    /// `[n_genes x P]` per-gene count profiles (any pooling; only row
-    /// directions matter). Consulted only for unmatched genes.
-    pub gene_profiles: &'a Mat,
+    /// Produces `[n_genes x P]` per-gene count profiles (any pooling; only
+    /// row directions matter). Called at most once, and only when some gene
+    /// has no dictionary row — an all-matched dictionary never pays for it.
+    pub gene_profiles: &'a dyn Fn() -> anyhow::Result<Mat>,
 }
 
 /// Load, align, and fill. See the module doc for the contract; every path
@@ -85,30 +115,26 @@ pub fn load_pretrained_gene_embedding(
 ) -> anyhow::Result<PretrainedGeneEmbedding> {
     let n_genes = args.gene_names.len();
     anyhow::ensure!(n_genes > 0, "empty gene axis");
-    anyhow::ensure!(
-        args.gene_profiles.nrows() == n_genes,
-        "gene_profiles rows ({}) != gene axis ({})",
-        args.gene_profiles.nrows(),
-        n_genes
-    );
 
-    // A `/` in a row name means a channelized or co-embed artifact (e.g. a
-    // track-suffixed `{gene}/count/...` table), which is not a dictionary.
-    // Catch it by name before alignment would quietly match nothing.
-    let dict_rows = Mat::from_parquet(args.dictionary_path)?;
-    let offending: Vec<&str> = dict_rows
-        .rows
+    // A row name in the channelized `{gene}/{modality}/...` grammar means a
+    // channelized or co-embed artifact, which is not a dictionary. Catch it
+    // by name — a names-only column read, not a full matrix decode — before
+    // alignment would quietly match nothing. The grammar itself is
+    // single-sourced in `auxiliary_data::feature_rows`.
+    let dict_names = matrix_util::parquet::read_parquet_string_column(args.dictionary_path, 0)?;
+    let offending: Vec<&str> = dict_names
         .iter()
-        .filter(|r| r.contains('/'))
+        .filter(|r| parse_feature_row(r).is_some())
         .map(|r| r.as_ref())
         .take(3)
         .collect();
     anyhow::ensure!(
         offending.is_empty(),
-        "{} does not look like a gene x H dictionary: row names carry '/' \
-         (e.g. {}). Point --gene-embedding at a raw feature embedding \
-         (a topic model's feature_embedding.parquet or an embedding run's \
-         feature_loading.parquet), not at a co-embedding output.",
+        "{} does not look like a gene x H dictionary: row names carry the \
+         channelized row grammar (e.g. {}). Point --gene-embedding at a raw \
+         feature embedding (a topic model's feature_embedding.parquet or an \
+         embedding run's feature_loading.parquet), not at a co-embedding \
+         output.",
         args.dictionary_path,
         offending.join(", ")
     );
@@ -132,85 +158,100 @@ pub fn load_pretrained_gene_embedding(
         b_gene[g] = host.b_feat[k];
         matched[g] = true;
     }
-
     let matched_idx: Vec<usize> = (0..n_genes).filter(|&g| matched[g]).collect();
     let unmatched_idx: Vec<usize> = (0..n_genes).filter(|&g| !matched[g]).collect();
 
-    // Matched-row mean, the fallback seed for a gene with no usable profile.
-    let mut mean_row = vec![0.0f32; h];
-    for &g in &matched_idx {
-        for c in 0..h {
-            mean_row[c] += e_gene[(g, c)];
-        }
-    }
-    for v in mean_row.iter_mut() {
-        *v /= n_matched as f32;
-    }
+    // Closest matched gene by profile cosine, per unmatched gene. The
+    // profiles (a full pass over the data at the caller) are built only when
+    // this branch is reached at all.
+    let neighbor_of: Vec<Option<(usize, f32)>> = if unmatched_idx.is_empty() {
+        Vec::new()
+    } else {
+        let prof = (args.gene_profiles)()?;
+        anyhow::ensure!(
+            prof.nrows() == n_genes,
+            "gene_profiles rows ({}) != gene axis ({})",
+            prof.nrows(),
+            n_genes
+        );
+        let norm = |g: usize| -> f32 { prof.row(g).iter().map(|v| v * v).sum::<f32>().sqrt() };
+        // Matched norms once, not once per unmatched gene: recomputing them
+        // inside the search doubles its arithmetic.
+        let matched_norms: Vec<f32> = matched_idx.iter().map(|&m| norm(m)).collect();
+        unmatched_idx
+            .par_iter()
+            .map(|&g| {
+                let ng = norm(g);
+                if ng == 0.0 {
+                    return None;
+                }
+                matched_idx
+                    .iter()
+                    .zip(matched_norms.iter())
+                    .filter_map(|(&m, &nm)| {
+                        if nm == 0.0 {
+                            return None;
+                        }
+                        let dot: f32 = prof
+                            .row(g)
+                            .iter()
+                            .zip(prof.row(m).iter())
+                            .map(|(a, b)| a * b)
+                            .sum();
+                        Some((m, dot / (ng * nm)))
+                    })
+                    .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+            })
+            .collect()
+    };
 
-    // Closest matched gene by profile cosine, per unmatched gene.
-    let prof = args.gene_profiles;
-    let norm = |g: usize| -> f32 { prof.row(g).iter().map(|v| v * v).sum::<f32>().sqrt() };
-    let neighbor_of: Vec<Option<(usize, f32)>> = unmatched_idx
-        .par_iter()
-        .map(|&g| {
-            let ng = norm(g);
-            if ng == 0.0 {
-                return None;
-            }
-            matched_idx
-                .iter()
-                .filter_map(|&m| {
-                    let nm = norm(m);
-                    if nm == 0.0 {
-                        return None;
-                    }
-                    let dot: f32 = prof
-                        .row(g)
-                        .iter()
-                        .zip(prof.row(m).iter())
-                        .map(|(a, b)| a * b)
-                        .sum();
-                    Some((m, dot / (ng * nm)))
-                })
-                .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
-        })
-        .collect();
+    // Mean of the matched rows, the fallback seed for a gene with no usable
+    // profile. `host.e_feat` is exactly the matched rows, so its column means
+    // are the answer.
+    let mean_row = host.e_feat.row_mean();
 
-    let mut records: Vec<InitRecord> = args
+    // Fill the seeded rows and build every record where its case is decided,
+    // in one pass over the gene axis.
+    let mut neighbor_at = vec![None; n_genes];
+    for (&g, nb) in unmatched_idx.iter().zip(neighbor_of.iter()) {
+        neighbor_at[g] = Some(*nb);
+    }
+    let mut mean_seeded = 0usize;
+    let records: Vec<InitRecord> = args
         .gene_names
         .iter()
-        .map(|gene| InitRecord {
-            gene: gene.clone(),
-            init: InitKind::Matched,
-            neighbor_gene: None,
-            cosine: f32::NAN,
+        .enumerate()
+        .map(|(g, gene)| match neighbor_at[g] {
+            None => InitRecord {
+                gene: gene.clone(),
+                init: InitKind::Matched,
+                neighbor_gene: None,
+                cosine: f32::NAN,
+            },
+            Some(Some((m, cos))) => {
+                let src = e_gene.row(m).into_owned();
+                e_gene.row_mut(g).copy_from(&src);
+                InitRecord {
+                    gene: gene.clone(),
+                    init: InitKind::Neighbor,
+                    neighbor_gene: Some(args.gene_names[m].clone()),
+                    cosine: cos,
+                }
+            }
+            Some(None) => {
+                e_gene.row_mut(g).copy_from(&mean_row);
+                mean_seeded += 1;
+                InitRecord {
+                    gene: gene.clone(),
+                    init: InitKind::Neighbor,
+                    neighbor_gene: None,
+                    cosine: f32::NAN,
+                }
+            }
         })
         .collect();
 
-    let mut mean_seeded = 0usize;
-    for (&g, nb) in unmatched_idx.iter().zip(neighbor_of.iter()) {
-        match nb {
-            Some((m, cos)) => {
-                let src = e_gene.row(*m).into_owned();
-                e_gene.row_mut(g).copy_from(&src);
-                records[g] = InitRecord {
-                    gene: args.gene_names[g].clone(),
-                    init: InitKind::Neighbor,
-                    neighbor_gene: Some(args.gene_names[*m].clone()),
-                    cosine: *cos,
-                };
-            }
-            None => {
-                for c in 0..h {
-                    e_gene[(g, c)] = mean_row[c];
-                }
-                records[g].init = InitKind::Neighbor;
-                mean_seeded += 1;
-            }
-        }
-    }
-
-    let unused = dict_rows.rows.len().saturating_sub(n_matched);
+    let unused = dict_names.len().saturating_sub(n_matched);
     info!(
         "Pre-trained gene embedding: {} matched, {} neighbor-seeded ({} of those from the matched mean), {} dictionary rows unused",
         n_matched,
@@ -228,8 +269,6 @@ pub fn load_pretrained_gene_embedding(
     Ok(PretrainedGeneEmbedding {
         e_gene,
         b_gene,
-        h,
-        matched,
         records,
     })
 }
@@ -259,23 +298,30 @@ pub fn write_init_report(out_prefix: &str, records: &[InitRecord]) -> anyhow::Re
     )
 }
 
-/// Put the frozen rows of `var` back after an optimizer step.
-///
-/// This exists because per-row gradient masking is NOT freezing under AdamW:
-/// its moment state keeps moving a masked row even at zero gradient. Excluding
-/// the whole Var is no better here, since neighbor-seeded rows must train.
-/// So the optimizer sees every row, and the frozen ones are overwritten from
-/// `frozen` after each step. `keep_mask` is `[n, 1]`, `1.0` = frozen row,
-/// broadcast across the embedding columns.
-pub fn restore_frozen_rows(
-    var: &candle_util::candle_core::Var,
-    frozen: &candle_util::candle_core::Tensor,
-    keep_mask: &candle_util::candle_core::Tensor,
-) -> anyhow::Result<()> {
-    let trainable_mask = keep_mask.affine(-1.0, 1.0)?;
-    let merged = frozen
-        .broadcast_mul(keep_mask)?
-        .add(&var.as_tensor().broadcast_mul(&trainable_mask)?)?;
-    var.set(&merged)?;
-    Ok(())
+/// The freeze state for a run whose dictionary rows must not move: the fixed
+/// copy, the frozen-row mask, and the registered Var the restore writes
+/// through. Bundled so the two same-typed tensors cannot be swapped at a call
+/// site.
+pub struct FrozenGene {
+    fixed: Tensor,
+    keep_mask: Tensor,
+    var: Var,
+}
+
+impl FrozenGene {
+    pub fn new(fixed: Tensor, keep_mask: Tensor, var: Var) -> Self {
+        Self {
+            fixed,
+            keep_mask,
+            var,
+        }
+    }
+
+    /// Put the frozen rows back after an optimizer step. See
+    /// [`candle_util::frozen_features::restore_frozen_rows`] for why a
+    /// post-step restore rather than a gradient mask.
+    pub fn restore(&self) -> anyhow::Result<()> {
+        candle_util::frozen_features::restore_frozen_rows(&self.var, &self.fixed, &self.keep_mask)?;
+        Ok(())
+    }
 }

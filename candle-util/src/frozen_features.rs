@@ -167,6 +167,25 @@ pub fn trainable_only(varmap: &VarMap, keep_names: &[&str]) -> Vec<Var> {
         .collect()
 }
 
+/// Put the frozen rows of `var` back after an optimizer step.
+///
+/// The third freeze mechanism in this module's inventory, for the case the
+/// other two cannot express: some rows of one Var are frozen while the rest
+/// keep training. Per-row gradient masking is NOT freezing under AdamW (its
+/// moment state moves a masked row even at zero gradient), and
+/// [`trainable_vars`] can only exclude whole Vars. So the optimizer sees
+/// every row, and the frozen ones are overwritten from `frozen` after each
+/// step. `keep_mask` is `[n, 1]`, `1.0` = frozen row, broadcast across the
+/// columns.
+pub fn restore_frozen_rows(var: &Var, frozen: &Tensor, keep_mask: &Tensor) -> Result<()> {
+    let trainable_mask = keep_mask.affine(-1.0, 1.0)?;
+    let merged = frozen
+        .broadcast_mul(keep_mask)?
+        .add(&var.as_tensor().broadcast_mul(&trainable_mask)?)?;
+    var.set(&merged)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

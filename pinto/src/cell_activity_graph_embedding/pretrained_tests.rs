@@ -54,12 +54,12 @@ fn rows_follow_the_runs_gene_axis_not_the_dictionarys() -> anyhow::Result<()> {
         bias_path: None,
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &profiles,
+        gene_profiles: &|| Ok(profiles.clone()),
     })?;
 
-    assert_eq!(out.h, 4);
+    assert_eq!(out.h(), 4);
     assert_eq!(out.e_gene.nrows(), 4);
-    assert_eq!(out.matched, vec![false, true, true, true]);
+    assert_eq!(out.frozen_row_mask(), vec![0.0, 1.0, 1.0, 1.0]);
     // Dictionary row for G1 is dictionary-row 1 => values 100 + 10 + col,
     // and it must land on run-axis row 1 (after the unmatched G9), not row 0.
     for c in 0..4 {
@@ -98,10 +98,10 @@ fn unmatched_gene_takes_the_closest_matched_profile_neighbor() -> anyhow::Result
         bias_path: None,
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &profiles,
+        gene_profiles: &|| Ok(profiles.clone()),
     })?;
 
-    assert_eq!(out.matched, vec![true, true, false]);
+    assert_eq!(out.frozen_row_mask(), vec![1.0, 1.0, 0.0]);
     // G9's row equals G2's dictionary row (0 + 10 + col).
     for c in 0..3 {
         assert_eq!(out.e_gene[(2, c)], 10.0 + c as f32, "G9 col {c}");
@@ -131,7 +131,7 @@ fn track_suffixed_rows_are_rejected_with_the_offending_name() -> anyhow::Result<
         bias_path: None,
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &profiles,
+        gene_profiles: &|| Ok(profiles.clone()),
     })
     .err()
     .expect("a co-embed table must be rejected")
@@ -158,7 +158,7 @@ fn zero_profile_gene_takes_the_matched_mean() -> anyhow::Result<()> {
         bias_path: None,
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &profiles,
+        gene_profiles: &|| Ok(profiles.clone()),
     })?;
 
     // Mean of rows (0,1) and (10,11) is (5,6).
@@ -198,7 +198,7 @@ fn bias_loads_for_matched_genes_and_zeros_elsewhere() -> anyhow::Result<()> {
         bias_path: Some(&bias_path),
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &profiles,
+        gene_profiles: &|| Ok(profiles.clone()),
     })?;
 
     assert_eq!(out.b_gene, vec![8.0, 0.0]);
@@ -219,7 +219,7 @@ fn zero_matched_genes_is_a_hard_error() -> anyhow::Result<()> {
         bias_path: None,
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &profiles,
+        gene_profiles: &|| Ok(profiles.clone()),
     })
     .is_err());
     Ok(())
@@ -230,8 +230,8 @@ fn zero_matched_genes_is_a_hard_error() -> anyhow::Result<()> {
 /// leave the trainable rows where the step left them.
 #[test]
 fn restore_puts_frozen_rows_back_and_leaves_trainable_rows_alone() -> anyhow::Result<()> {
-    use super::pretrained::restore_frozen_rows;
     use candle_util::candle_core::{Device, Tensor, Var};
+    use candle_util::frozen_features::restore_frozen_rows;
 
     let dev = Device::Cpu;
     let init = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (3, 2), &dev)?;
