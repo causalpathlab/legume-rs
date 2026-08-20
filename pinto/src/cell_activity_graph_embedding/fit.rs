@@ -74,7 +74,10 @@
 //! ships `E[z*beta]` for downstream use, and the raw embedding ships as-is
 //! because a dropout keep-rate is not a coefficient.
 
-use crate::cell_activity_graph_embedding::args::{CellActivityGraphEmbeddingArgs, GateMode};
+use crate::cell_activity_graph_embedding::args::{
+    CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode,
+};
+use crate::cell_activity_graph_embedding::pretrained;
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -84,7 +87,8 @@ use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, ProjectionArgs,
 };
 use crate::link_community::profiles::{
-    compute_propensity_and_gene_community_stat, PropensityReportConfig,
+    coarsen_cell_expression_dense, compute_propensity_and_gene_community_stat,
+    PropensityReportConfig,
 };
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
@@ -220,7 +224,7 @@ pub fn fit_cell_activity_graph_embedding(
         batch_effects: true,
         gene_axis: GeneAxisMode::Strict,
         cell_projection: !hvg_enabled,
-        feature_kind: Some(feature_kind),
+        feature_kind: Some(feature_kind.clone()),
     })?;
 
     let has_coords = c.has_coordinates();
@@ -659,6 +663,47 @@ pub fn fit_cell_activity_graph_embedding(
     // Deliberately NOT initialized to `E[z·β]`: that already carries the
     // sampler's shrinkage, so gating it would apply the same selection twice.
     // The two are alternatives, not complements.
+    // Pre-trained gene side, when requested. Loaded here, after the gene
+    // axis is final and the coarsening exists (its finest level pools the
+    // per-gene profiles that seed unmatched genes), and before the model so
+    // the init below can consume it.
+    let pretrained_gene = match args.gene_embedding.as_deref() {
+        None => None,
+        Some(dict_path) => {
+            let finest = ml
+                .all_cell_labels
+                .last()
+                .expect("coarsening produced no levels");
+            let n_pb = finest.iter().copied().max().map_or(0, |m| m + 1);
+            let row_profiles = coarsen_cell_expression_dense(&data_vec, finest, n_pb)?;
+            let gene_profiles = gene_axis
+                .pool_rows_opt(&row_profiles)
+                .unwrap_or(row_profiles);
+            let pre = pretrained::load_pretrained_gene_embedding(pretrained::PretrainedArgs {
+                dictionary_path: dict_path,
+                bias_path: args.gene_embedding_bias.as_deref(),
+                gene_names: &gene_names,
+                name_kind: feature_kind.clone(),
+                gene_profiles: &gene_profiles,
+            })?;
+            anyhow::ensure!(
+                pre.h == args.embedding_dim,
+                "--gene-embedding is {} dimensions wide but --embedding-dim is {}; \
+                 set --embedding-dim {} to use this dictionary",
+                pre.h,
+                args.embedding_dim,
+                pre.h
+            );
+            pretrained::write_init_report(&c.out, &pre.records)?;
+            info!("Wrote {}.gene_embedding_init.parquet", c.out);
+            Some(pre)
+        }
+    };
+    let b_feat_init: Vec<f32> = pretrained_gene
+        .as_ref()
+        .map(|p| p.b_gene.clone())
+        .unwrap_or_else(|| vec![0.0_f32; n_genes]);
+
     let mut model = JointEmbedModel::new_with_init(
         ModelArgs {
             n_features: n_genes,
@@ -667,14 +712,43 @@ pub fn fit_cell_activity_graph_embedding(
             seed: c.seed,
         },
         &ModelInit {
-            e_feat: None,
+            e_feat: pretrained_gene.as_ref().map(|p| &p.e_gene),
             e_cell: None,
-            b_feat: &vec![0.0_f32; n_genes],
+            b_feat: &b_feat_init,
             b_cell: &vec![0.0_f32; n_cells],
         },
         &varmap,
         &dev,
     )?;
+
+    // Freeze state: the fixed copy, the frozen-row mask, and the registered
+    // Var the restore writes through. Captured BEFORE any gate install so the
+    // copy is the loaded dictionary, not a gated view.
+    let frozen_gene = match (&pretrained_gene, args.gene_embedding_mode) {
+        (Some(p), GeneEmbeddingMode::Freeze) => {
+            let fixed = model.e_feat.copy()?;
+            let mask_vec: Vec<f32> = p
+                .matched
+                .iter()
+                .map(|&m| if m { 1.0 } else { 0.0 })
+                .collect();
+            let mask = Tensor::from_vec(mask_vec, (n_genes, 1), &dev)?;
+            let var = varmap
+                .data()
+                .lock()
+                .expect("varmap lock")
+                .get("e_feat")
+                .cloned()
+                .expect("e_feat was registered just above");
+            info!(
+                "Gene embedding FROZEN: {} dictionary rows fixed, {} neighbor-seeded rows trainable",
+                p.matched.iter().filter(|&&m| m).count(),
+                p.matched.iter().filter(|&&m| !m).count()
+            );
+            Some((fixed, mask, var))
+        }
+        _ => None,
+    };
     // Install the feature gate. Both arms fill geu's one `GateKind::Identity`
     // slot, and an installed `pip` takes the slot over completely
     // (`model/gate.rs:503-511`), so they are mutually exclusive by construction.
@@ -951,7 +1025,11 @@ pub fn fit_cell_activity_graph_embedding(
                 // content of this penalty and it was wrong here in the same way.
                 let lam = args.embedding_l2 as f64;
                 total = (total + embedding_ridge(&model.e_cell, lam)?)?;
-                total = (total + embedding_ridge(&model.e_feat, lam)?)?;
+                // A frozen gene table needs no shrinkage; the ridge would only
+                // push gradient at rows the restore below reverts anyway.
+                if frozen_gene.is_none() {
+                    total = (total + embedding_ridge(&model.e_feat, lam)?)?;
+                }
             }
             // The learned gate is variational, so its spike-and-slab KL is part
             // of the objective — without it the gate has nothing pulling it
@@ -1003,6 +1081,14 @@ pub fn fit_cell_activity_graph_embedding(
             let stepped = clip_and_step_dense(&mut opt, grads, f64::from(args.grad_clip))?;
             if !stepped {
                 skipped_steps += 1;
+            }
+            // Freezing is a post-step restore, not a gradient mask: AdamW's
+            // moment state moves a row even at zero gradient, so the frozen
+            // rows are put back from the fixed copy after every step.
+            if stepped {
+                if let Some((fixed, mask, var)) = &frozen_gene {
+                    pretrained::restore_frozen_rows(var, fixed, mask)?;
+                }
             }
             timers.optimize += t_opt.elapsed();
             train_bar.inc(1);
