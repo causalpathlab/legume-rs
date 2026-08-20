@@ -268,8 +268,12 @@ pub struct SrtInputArgs {
                      On by default. It roughly doubles runtime and peak memory,\n\
                      because it roughly doubles the pairs. Set it to 0 for the\n\
                      spatial pairs alone, which is also the way to reproduce a run\n\
-                     made before this existed. Raising it past --knn makes the\n\
-                     expression pairs the majority of what the model sees."
+                     made before this existed.\n\
+                     \n\
+                     lc models every pair. cage's chain training only samples pairs\n\
+                     that share a super-cell at each chain level and a batch, so\n\
+                     distant expression pairs reach its pair outputs and propensity\n\
+                     but largely not its chain loss; the dropped counts are logged."
     )]
     pub knn_expr: usize,
 
@@ -672,9 +676,22 @@ pub fn auto_batch_from_components(
     graph: &KnnGraph,
     coordinates: &Mat,
     batch_membership: &mut Vec<Box<str>>,
+    fold_fragments: bool,
 ) -> usize {
     let (labels, n_components) = connected_components(graph);
     if n_components <= 1 {
+        return n_components;
+    }
+    // Folding reasons about physical geometry: box containment in the
+    // coordinate frame, with a slack measured from the graph's own edge
+    // lengths. Without real coordinates both halves of that argument are in
+    // different, arbitrary units (a 2-D layout vs projection-space
+    // distances), so a caller in expression mode asks for no folding and
+    // every component stays its own batch.
+    if !fold_fragments {
+        for (cell, &l) in labels.iter().enumerate() {
+            batch_membership[cell] = format!("component_{l}").into_boxed_str();
+        }
         return n_components;
     }
 
@@ -701,12 +718,18 @@ pub fn auto_batch_from_components(
     if coordinates.ncols() == 0 {
         return n_components;
     }
-    let dims = coordinates.ncols().min(2);
+    // Every coordinate column, deliberately including the per-file batch
+    // pseudo-coordinate a multi-file load appends: it is what separates two
+    // files sharing one (x, y) frame, and judging containment without it
+    // folds them into a single batch and silently skips batch correction.
+    let dims = coordinates.ncols();
     let mut lo = vec![f64::INFINITY; n_components * dims];
     let mut hi = vec![f64::NEG_INFINITY; n_components * dims];
     let mut sum = vec![0.0f64; n_components * dims];
     let mut size = vec![0usize; n_components];
+    let mut rep = vec![usize::MAX; n_components];
     for (cell, &l) in labels.iter().enumerate() {
+        rep[l] = rep[l].min(cell);
         size[l] += 1;
         for d in 0..dims {
             let v = coordinates[(cell, d)] as f64;
@@ -720,7 +743,7 @@ pub fn auto_batch_from_components(
     // sits in rather than any larger box that happens to span it.
     let mut into: Vec<usize> = (0..n_components).collect();
     for c in 0..n_components {
-        let mut best: Option<(f64, f64, usize)> = None;
+        let mut best: Option<(f64, f64, usize, usize)> = None;
         for other in 0..n_components {
             if other == c || size[other] <= size[c] {
                 continue;
@@ -736,14 +759,16 @@ pub fn auto_batch_from_components(
             let extent: f64 = (0..dims)
                 .map(|d| hi[other * dims + d] - lo[other * dims + d])
                 .sum();
-            // Ties break on the candidate's own corner, not on `other`, whose
+            // Ties break on the candidate's own corner, then on its smallest
+            // member cell — a stable identity — never on `other`, whose
             // numbering comes from a parallel union-find and varies per run.
             let corner = lo[other * dims];
-            if best.is_none_or(|(e, c, _)| (extent, corner) < (e, c)) {
-                best = Some((extent, corner, other));
+            let key = (extent, corner, rep[other]);
+            if best.is_none_or(|(e, c, r, _)| (extent, corner, rep[other]) < (e, c, r)) {
+                best = Some((key.0, key.1, key.2, other));
             }
         }
-        if let Some((_, _, target)) = best {
+        if let Some((_, _, _, target)) = best {
             into[c] = target;
         }
     }
@@ -914,9 +939,13 @@ fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usi
     ))
     .next()?
     .ok()?;
+    // Unquote with the tokenizer's own rule first: a fully quoted numeric
+    // field ("100.5") must read as numeric, or a quoted headerless file gets
+    // its first data row swallowed as a header.
     let any_non_numeric_after_col0 = first_line
         .split(delimiters.as_ref())
         .skip(1)
+        .map(matrix_util::common_io::unquote_field)
         .any(|t| !t.is_empty() && t.parse::<f64>().is_err());
     if any_non_numeric_after_col0 {
         info!(

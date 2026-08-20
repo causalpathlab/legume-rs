@@ -43,9 +43,10 @@
 //!
 //! # Why super-cells rather than single spots
 //!
-//! A 55 um Visium spot detects ~5,900 of 32,245 genes, so a zero is mostly
-//! non-detection. Selecting against single spots would mostly measure detection
-//! depth. Super-cells aggregate tens of spots, so a zero means closer to absent.
+//! A single spot detects only a small fraction of the gene axis, so a zero is
+//! mostly non-detection. Selecting against single spots would mostly measure
+//! detection depth. Super-cells aggregate tens of spots, so a zero means
+//! closer to absent.
 //!
 //! Every coarsening level contributes, offset into one global pseudobulk index
 //! space so a gene's evidence spans all resolutions in a single [`dim_block`]
@@ -331,8 +332,8 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     // structure, and it crowds out a dimension. Centring each gene by its own
     // mean across pseudobulks makes cosine on the result equal Pearson on the
     // log-rates — the same reason `dict_merge.rs:47-53` centres before its
-    // cosine merge. `scale_columns` alone does NOT fix this: measured on Visium
-    // that same section it still left σ₁/σ₂ = 6.2.
+    // cosine merge. `scale_columns` alone does NOT fix this: measured, it
+    // still leaves the first singular value several times the second.
     // Gene means come from the FINEST level and are reused for every level's
     // projection. Centring each level by its OWN means would put each level in
     // a different affine frame while they share one basis and one pooled

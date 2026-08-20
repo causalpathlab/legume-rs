@@ -170,6 +170,12 @@ pub fn fit_cell_activity_graph_embedding(
             );
         }
     }
+    anyhow::ensure!(
+        !(args.gene_adapter_residual && args.gene_embedding_mode != GeneEmbeddingMode::Adapt),
+        "--gene-adapter-residual is the adapter's per-gene correction and only \
+         --gene-embedding-mode adapt trains one; under freeze or free the flag \
+         would be read and ignored. Drop it, or use the adapt mode."
+    );
     if let Some(a) = args.gate_ibp_alpha {
         anyhow::ensure!(
             a.is_finite() && a > 0.0,
@@ -756,22 +762,40 @@ pub fn fit_cell_activity_graph_embedding(
             )?;
             let frozen = match (pre, mode) {
                 (Some(p), GeneEmbeddingMode::Freeze) => {
+                    let fetch = |name: &str| {
+                        varmap
+                            .data()
+                            .lock()
+                            .expect("varmap lock")
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| panic!("the free constructor registers {name}"))
+                    };
                     let fixed = model.e_feat.copy()?;
                     let mask = Tensor::from_vec(p.frozen_row_mask(), (n_genes, 1), &dev)?;
-                    let var = varmap
-                        .data()
-                        .lock()
-                        .expect("varmap lock")
-                        .get(graph_embedding_util::model::E_FEAT_VAR_NAME)
-                        .cloned()
-                        .expect("the free constructor registers the feature Var");
+                    let var = fetch(graph_embedding_util::model::E_FEAT_VAR_NAME);
+                    // The per-gene bias is part of the dictionary contract only
+                    // when a bias file was actually given; without one the
+                    // zeros are a default, and freezing them would stop b_feat
+                    // absorbing per-gene rates the way a baseline run does.
+                    let bias = if args.gene_embedding_bias.is_some() {
+                        let b_var = fetch("b_feat");
+                        Some((b_var.as_tensor().copy()?, b_var))
+                    } else {
+                        None
+                    };
                     let n_frozen = p.n_matched();
                     info!(
-                        "Gene embedding FROZEN: {} dictionary rows fixed, {} neighbor-seeded rows trainable",
+                        "Gene embedding FROZEN: {} dictionary rows fixed, {} neighbor-seeded rows trainable{}",
                         n_frozen,
-                        n_genes - n_frozen
+                        n_genes - n_frozen,
+                        if bias.is_some() {
+                            "; loaded bias rows fixed too"
+                        } else {
+                            ""
+                        }
                     );
-                    Some(pretrained::FrozenGene::new(fixed, mask, var))
+                    Some(pretrained::FrozenGene::new(fixed, mask, var, bias))
                 }
                 _ => None,
             };

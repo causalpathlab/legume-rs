@@ -626,8 +626,11 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Co-embedding outputs are not dictionaries and are rejected.\n\
                      Genes are matched under --gene-name-mode.\n\
                      A gene with no dictionary row is seeded from the matched gene\n\
-                     with the most similar count profile, stays trainable,\n\
-                     and is listed in {out}.gene_embedding_init.parquet."
+                     with the most similar count profile and listed in\n\
+                     {out}.gene_embedding_init.parquet. Under freeze and free such\n\
+                     rows train; under adapt a seeded gene follows its seed through\n\
+                     the shared map until --gene-adapter-residual gives it its own\n\
+                     correction."
     )]
     pub gene_embedding: Option<Box<str>>,
 
