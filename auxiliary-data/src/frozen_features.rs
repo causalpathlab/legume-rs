@@ -96,7 +96,10 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
     let mut src_dupes = 0usize;
     for (i, name) in dict.rows.iter().enumerate() {
         let canon = args.name_kind.canonicalize(name);
-        if src_by_canon.insert(canon, i).is_some() {
+        // First occurrence wins, as documented; `insert` would keep the last.
+        if let std::collections::hash_map::Entry::Vacant(e) = src_by_canon.entry(canon) {
+            e.insert(i);
+        } else {
             src_dupes += 1;
         }
     }
@@ -128,6 +131,25 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
     );
 
     let unique_src_used: FxHashSet<usize> = keep_src_indices.iter().copied().collect();
+    // A dictionary is a plain gene table. Source rows carrying the channelized
+    // row grammar ({gene}/{modality}/... ) that matched nothing usually mean
+    // the caller fed a channelized or co-embedding artifact; a PARTIAL match
+    // would otherwise proceed silently on the plain-name subset.
+    let channelized_unmatched = dict
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| {
+            !unique_src_used.contains(i) && crate::feature_rows::parse_feature_row(r).is_some()
+        })
+        .count();
+    if channelized_unmatched > 0 {
+        log::warn!(
+            "{}: {} unmatched source rows carry the channelized row grammar —              is this a raw gene dictionary, or a channelized/co-embedding output?",
+            args.dictionary_path,
+            channelized_unmatched
+        );
+    }
     log::info!(
         "Frozen feature side from {}: {}/{} target features matched (H={}, {} of {} source rows reused, kind={:?})",
         args.dictionary_path,

@@ -193,12 +193,18 @@ impl FeatFactor {
 
 /// Inputs for [`JointEmbedModel::new_adapted`] — a fixed-dictionary
 /// adapter feature parameterization (see [`FeatAdapter`]).
+/// The registered name of the free feature-embedding Var. Public so a caller
+/// that owns the training loop (and therefore the `VarMap`) can fetch the Var
+/// without hard-coding a string this crate chose.
+pub const E_FEAT_VAR_NAME: &str = "e_feat";
+
 pub struct AdapterInit<'a> {
     pub n_cells: usize,
     /// Output width `H` (must match the cell side).
     pub embedding_dim: usize,
     /// Fixed dictionary `[n_features, h_src]`. Uploaded as a constant tensor,
-    /// never registered as a Var.
+    /// never registered as a Var. Row `i` must already be aligned to feature
+    /// `i` of this model's feature axis; alignment is the caller's job.
     pub rho: &'a nalgebra::DMatrix<f32>,
     pub b_feat: &'a [f32],
     pub b_cell: &'a [f32],
@@ -350,11 +356,11 @@ impl JointEmbedModel {
         dev: &Device,
     ) -> Result<Self> {
         let e_feat = match init.e_feat {
-            Some(m) => register_var_from_mat(varmap, dev, "e_feat", m)?,
+            Some(m) => register_var_from_mat(varmap, dev, E_FEAT_VAR_NAME, m)?,
             None => register_randn_seeded(
                 varmap,
                 dev,
-                "e_feat",
+                E_FEAT_VAR_NAME,
                 args.n_features,
                 args.embedding_dim,
                 args.seed,
@@ -392,12 +398,38 @@ impl JointEmbedModel {
         })
     }
 
-    /// Composite-training constructor: reuse pre-existing
-    /// `shared_e_feat` / `shared_b_feat` Tensors (already registered as
-    /// Vars in `varmap` by an earlier call to `new_with_init`) and
-    /// allocate fresh cell-side Vars under `args.var_prefix` so multiple
-    /// heads coexist in one `VarMap`. `AdamW` over `varmap.all_vars()` then
-    /// updates the shared feature side once and each head's cell side
+    /// The L2 term for whichever gene-side table can overfit row by row under
+    /// this parameterization: the free `e_feat` Var, the adapter's per-feature
+    /// residual, or nothing (an adapter without a residual trains only the
+    /// shared map, and a factored model's ridge is the trainer's `delta_l2`).
+    ///
+    /// Owning this here keeps a trainer from ridging `e_feat` on a model where
+    /// that field is a detached snapshot, which is silently inert.
+    pub fn feature_ridge(&self, lam: f64) -> Result<Option<Tensor>> {
+        if let Some(a) = &self.adapter {
+            return match &a.residual {
+                Some(r) => Ok(Some(crate::loss::embedding_ridge(r, lam)?)),
+                None => Ok(None),
+            };
+        }
+        if self.factor.is_some() {
+            return Ok(None);
+        }
+        let table = self.e_feat_raw.as_ref().unwrap_or(&self.e_feat);
+        Ok(Some(crate::loss::embedding_ridge(table, lam)?))
+    }
+
+    /// Refresh the `e_feat` snapshot of an ADAPTED model from the live
+    /// parameters WITHOUT baking any gate: the raw composed table. For the
+    /// gate-baked snapshot use [`Self::materialize_e_feat`]. A no-op for the
+    /// other parameterizations, whose `e_feat` is not adapter-derived.
+    pub fn recompose_e_feat_raw(&mut self) -> Result<()> {
+        if let Some(a) = &self.adapter {
+            self.e_feat = a.compose()?.detach();
+        }
+        Ok(())
+    }
+
     /// Fixed-dictionary adapter constructor: upload `rho` as a constant,
     /// allocate the `W [h_src, H]` Var (randn, seeded) and optionally the
     /// zero-init per-feature residual, plus a fresh cell side. The `e_feat`
@@ -421,12 +453,12 @@ impl JointEmbedModel {
             );
         }
 
-        // Constant upload: row-major, same layout convention as
-        // `register_var_from_mat`, but deliberately NOT a Var.
-        let rho_rm: Vec<f32> = (0..n_features)
-            .flat_map(|r| (0..h_src).map(move |c| args.rho[(r, c)]))
-            .collect();
-        let rho = Tensor::from_vec(rho_rm, (n_features, h_src), dev)?;
+        // Constant upload: same `[rows, cols]` layout as `register_var_from_mat`,
+        // but deliberately NOT a Var. `to_tensor` returns a transposed view,
+        // so make it contiguous for the per-batch index_select/matmul path.
+        let rho = matrix_util::traits::ConvertMatOps::to_tensor(args.rho, dev)
+            .map_err(|e| candle_util::candle_core::Error::Msg(e.to_string()))?
+            .contiguous()?;
 
         let w = register_randn_seeded(
             varmap,
@@ -478,6 +510,12 @@ impl JointEmbedModel {
         })
     }
 
+    /// Composite-training constructor: reuse pre-existing
+    /// `shared_e_feat` / `shared_b_feat` Tensors (already registered as
+    /// Vars in `varmap` by an earlier call to `new_with_init`) and
+    /// allocate fresh cell-side Vars under `args.var_prefix` so multiple
+    /// heads coexist in one `VarMap`. `AdamW` over `varmap.all_vars()` then
+    /// updates the shared feature side once and each head's cell side
     /// independently.
     pub fn new_sharing_features(
         args: ShareFeaturesArgs,

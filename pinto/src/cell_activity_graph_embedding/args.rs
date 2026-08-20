@@ -644,12 +644,10 @@ pub struct CellActivityGraphEmbeddingArgs {
         value_enum,
         default_value_t = GeneEmbeddingMode::Adapt,
         requires = "gene_embedding",
-        help = "What training may do to the pre-trained gene embedding:\n\
-                adapt = train one shared map on top of the fixed dictionary (default);\n\
-                freeze = keep dictionary rows fixed; free = initialize, then train",
+        help = "What training may do to the pre-trained gene embedding",
         long_help = "What training may do to the pre-trained gene embedding.\n\
                      \n\
-                     adapt (the default) keeps the dictionary fixed and trains one\n\
+                     adapt keeps the dictionary fixed and trains one\n\
                      shared linear map on top of it, so every gene's gradient\n\
                      updates the same few parameters.\n\
                      The dictionary width and --embedding-dim may differ.\n\
@@ -680,7 +678,7 @@ pub struct CellActivityGraphEmbeddingArgs {
 /// What training may do to a pre-trained gene embedding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum GeneEmbeddingMode {
-    /// Fixed dictionary + one shared trainable map (the default).
+    /// Fixed dictionary + one shared trainable map.
     Adapt,
     /// Dictionary-matched rows stay fixed; neighbor-seeded rows train.
     Freeze,
