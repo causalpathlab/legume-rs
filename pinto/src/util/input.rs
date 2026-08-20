@@ -849,6 +849,16 @@ pub fn read_one_coord_file(
     let ext = file_ext(coord_file)?;
     let is_zarr = coord_file.contains(".zarr");
 
+    // One index is a typo for two, not a request for 1-D geometry: it also
+    // bypasses the too-few-columns fallback below (which only arms itself when
+    // NO index was given), so a spatial graph would be built on a line with no
+    // error anywhere downstream.
+    anyhow::ensure!(
+        user_indices.is_empty() || user_indices.len() >= 2,
+        "--coord-column-indices selects {} column; coordinates need at least two",
+        user_indices.len()
+    );
+
     let read_coord = |indices: &[usize], names: &[Box<str>]| -> anyhow::Result<MatWithNames<Mat>> {
         if is_zarr {
             data_beans::zarr_io::read_zarr_coordinates(coord_file, indices, names)
