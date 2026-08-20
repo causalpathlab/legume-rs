@@ -72,8 +72,7 @@ fn adapter_gather_matches_the_dense_composition() {
     let w_ref = [[1.0f32, 0.0], [0.0, 1.0], [1.0, 1.0]];
     for (out_row, &g) in got.iter().zip([0usize, 2, 3].iter()) {
         for c in 0..2 {
-            let want: f32 =
-                (0..3).map(|k| rho[(g, k)] * w_ref[k][c]).sum::<f32>() + 10.0;
+            let want: f32 = (0..3).map(|k| rho[(g, k)] * w_ref[k][c]).sum::<f32>() + 10.0;
             assert!(
                 (out_row[c] - want).abs() < 1e-6,
                 "row {g} col {c}: got {} want {want}",
@@ -121,8 +120,8 @@ fn adapter_registers_only_w_and_optionally_the_residual() {
 fn adapter_pip_gate_masks_the_composed_rows() {
     let (mut m, _vm) = build(false);
     // Deterministic mask: pip is exactly 0 or 1 per entry.
-    let pip = Tensor::from_slice(&[1.0f32, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], (4, 2), &dev())
-        .unwrap();
+    let pip =
+        Tensor::from_slice(&[1.0f32, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], (4, 2), &dev()).unwrap();
     m.install_gate_pip(GateKind::Identity, &pip).unwrap();
     m.resample_gate_mask().unwrap();
 

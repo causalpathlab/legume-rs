@@ -428,10 +428,22 @@ impl JointEmbedModel {
             .collect();
         let rho = Tensor::from_vec(rho_rm, (n_features, h_src), dev)?;
 
-        let w = register_randn_seeded(varmap, dev, "adapter_w", h_src, args.embedding_dim, args.seed)?;
+        let w = register_randn_seeded(
+            varmap,
+            dev,
+            "adapter_w",
+            h_src,
+            args.embedding_dim,
+            args.seed,
+        )?;
         let residual = if args.residual {
             let zeros = nalgebra::DMatrix::<f32>::zeros(n_features, args.embedding_dim);
-            Some(register_var_from_mat(varmap, dev, "adapter_residual", &zeros)?)
+            Some(register_var_from_mat(
+                varmap,
+                dev,
+                "adapter_residual",
+                &zeros,
+            )?)
         } else {
             None
         };

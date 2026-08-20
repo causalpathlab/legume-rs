@@ -67,7 +67,10 @@ fn rows_follow_the_runs_gene_axis_not_the_dictionarys() -> anyhow::Result<()> {
         assert_eq!(out.e_gene[(2, c)], 100.0 + 20.0 + c as f32, "G2 col {c}");
         assert_eq!(out.e_gene[(3, c)], 100.0 + c as f32, "G3 col {c}");
     }
-    assert!(out.b_gene.iter().all(|&b| b == 0.0), "no bias file => zeros");
+    assert!(
+        out.b_gene.iter().all(|&b| b == 0.0),
+        "no bias file => zeros"
+    );
     Ok(())
 }
 
@@ -163,7 +166,10 @@ fn zero_profile_gene_takes_the_matched_mean() -> anyhow::Result<()> {
     assert_eq!(out.e_gene[(2, 1)], 6.0);
     let rec = &out.records[2];
     assert_eq!(rec.init, InitKind::Neighbor);
-    assert!(rec.neighbor_gene.is_none(), "mean seeding names no neighbor");
+    assert!(
+        rec.neighbor_gene.is_none(),
+        "mean seeding names no neighbor"
+    );
     Ok(())
 }
 

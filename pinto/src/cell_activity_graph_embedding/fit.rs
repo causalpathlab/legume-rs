@@ -77,7 +77,6 @@
 use crate::cell_activity_graph_embedding::args::{
     CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode,
 };
-use crate::cell_activity_graph_embedding::pretrained;
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_batch_cache, GeneGatedChainSampler,
 };
@@ -86,6 +85,7 @@ use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_level, CageLo
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, ProjectionArgs,
 };
+use crate::cell_activity_graph_embedding::pretrained;
 use crate::link_community::profiles::{
     coarsen_cell_expression_dense, compute_propensity_and_gene_community_stat,
     PropensityReportConfig,
@@ -1322,6 +1322,23 @@ pub fn fit_cell_activity_graph_embedding(
         (Some(&gene_names), Some("feature")),
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
+
+    // The adapter map itself, so the spatial refinement can be applied OUTSIDE
+    // this run: any gene with a row in the source dictionary, panel or not,
+    // maps into this run's frame as `rho_row . W`. Rows follow the source
+    // dictionary's column order. The per-gene residual is deliberately not
+    // exported on its own: it exists only for panel genes and is already part
+    // of feature_embedding.parquet.
+    if let Some(a) = &model.adapter {
+        let w_out = tensor_to_mat(&a.w)?;
+        let src_names: Vec<Box<str>> = (0..w_out.nrows()).map(|i| format!("s{i}").into()).collect();
+        w_out.to_parquet_with_names(
+            &(c.out.to_string() + ".adapter.parquet"),
+            (Some(&src_names), Some("source_dim")),
+            Some(&embedding_col_names(args.embedding_dim)),
+        )?;
+        info!("Wrote {}.adapter.parquet", c.out);
+    }
 
     // The nascent deviation, on a splice-channelized input only, and written HERE
     // rather than beside the cold selection because of which FRAME it is in.

@@ -164,7 +164,12 @@ pub fn load_pretrained_gene_embedding(
                     if nm == 0.0 {
                         return None;
                     }
-                    let dot: f32 = prof.row(g).iter().zip(prof.row(m).iter()).map(|(a, b)| a * b).sum();
+                    let dot: f32 = prof
+                        .row(g)
+                        .iter()
+                        .zip(prof.row(m).iter())
+                        .map(|(a, b)| a * b)
+                        .sum();
                     Some((m, dot / (ng * nm)))
                 })
                 .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
@@ -230,10 +235,7 @@ pub fn load_pretrained_gene_embedding(
 }
 
 /// Write the audit table: one row per gene, in gene-axis order.
-pub fn write_init_report(
-    out_prefix: &str,
-    records: &[InitRecord],
-) -> anyhow::Result<()> {
+pub fn write_init_report(out_prefix: &str, records: &[InitRecord]) -> anyhow::Result<()> {
     let genes: Vec<Box<str>> = records.iter().map(|r| r.gene.clone()).collect();
     let init: Vec<Box<str>> = records.iter().map(|r| r.init.label().into()).collect();
     let neighbor: Vec<Box<str>> = records
