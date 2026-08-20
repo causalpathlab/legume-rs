@@ -30,6 +30,7 @@ pub mod gene_chain_sampler;
 pub mod gene_gating;
 pub mod loss;
 pub mod pair_projection;
+pub mod pretrained;
 pub mod selection;
 
 #[cfg(test)]
@@ -37,6 +38,9 @@ mod gene_gating_tests;
 
 #[cfg(test)]
 mod loss_tests;
+
+#[cfg(test)]
+mod pretrained_tests;
 
 #[cfg(test)]
 mod tests;
