@@ -199,8 +199,8 @@ pub fn write_feature_embedding(
 /// ```
 ///
 /// so `θ·α` is exactly the vector whose inner product with a gene embedding
-/// reproduces what the model predicts for that gene. Same construction pinto's
-/// `lc-etm` uses to co-embed a topic fit.
+/// reproduces what the model predicts for that gene. This is the standard
+/// construction for co-embedding a topic fit.
 ///
 /// **Why this matters beyond plumbing.** Every diagnostic this model reports —
 /// effective rank, θ_max, between-cell variance, the splice-ratio check — is a

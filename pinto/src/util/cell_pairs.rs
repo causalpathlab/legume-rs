@@ -56,7 +56,7 @@ impl<'a> SrtCellPairs<'a> {
     /// callers keep it for the graph algorithms (coarsening, component
     /// decomposition) that need its adjacency. Pass `None` for `edge_source`
     /// when the graph was not augmented.
-    pub fn with_graph_and_source(
+    pub fn with_graph(
         data: &'a SparseIoVec,
         coordinates: &'a Mat,
         graph: &'a KnnGraph,
@@ -71,6 +71,20 @@ impl<'a> SrtCellPairs<'a> {
 
     pub fn num_coordinates(&self) -> usize {
         self.coordinates.ncols()
+    }
+
+    /// Write `{out_prefix}.coord_pairs.parquet`, the per-pair coordinate table
+    /// every pair-building subcommand emits under that name. Keeps the suffix
+    /// in one place rather than re-spelled at each call site.
+    pub fn write_coord_pairs(
+        &self,
+        out_prefix: &str,
+        coordinate_names: &[Box<str>],
+    ) -> anyhow::Result<()> {
+        self.to_parquet(
+            &(out_prefix.to_string() + ".coord_pairs.parquet"),
+            Some(coordinate_names.to_vec()),
+        )
     }
 
     /// Write all the coordinate pairs into `.parquet` file

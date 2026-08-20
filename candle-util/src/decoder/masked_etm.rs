@@ -1,7 +1,7 @@
 //! Embedded topic decoder with **negative-binomial masked imputation**.
 //!
 //! The training head of the masked-imputation topic model. Same ETM
-//! factorization as [`crate::decoder::EmbeddedTopicDecoder`]
+//! factorization as a dense embedded topic decoder
 //! (`β = softmax_d(α·ρᵀ)`, `ρ` shared with the encoder), but instead of a
 //! multinomial reconstruction it scores a **negative-binomial** likelihood on
 //! the **held-out (masked)** genes only:

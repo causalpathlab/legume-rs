@@ -10,9 +10,9 @@
 //!
 //! Input is a co-embedded (gene, cell) pair in one inner-product space:
 //! `{prefix}.feature_embedding.parquet` (gene × D) + `{prefix}.cell_embedding.parquet`
-//! (cell × D). `pinto cage` writes these directly, so it and any future
-//! embedding output annotate the same way. Pass a shared `--from` prefix,
-//! or point `--feature-embedding` /
+//! (cell × D). `pinto cage` writes them directly, and any future embedding
+//! output that follows the same contract annotates the same way. Pass a
+//! shared `--from` prefix, or point `--feature-embedding` and
 //! `--cell-embedding` at explicit parquet paths.
 //!
 //! Writes the shared per-cell contract at `{out}.annot.*` (`annot.parquet`,

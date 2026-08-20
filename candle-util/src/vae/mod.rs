@@ -1,7 +1,7 @@
 //! VAE-style training drivers for topic / link-community models.
 //!
 //! - [`topic`]: dense `EncoderModuleT` + `DecoderModuleT` trainer.
-//! - [`masked_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedTopicDecoder`
+//! - [`masked_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedNbTopicDecoder`
 //!   trainer driven by [`crate::data::indexed::IndexedInMemoryData`].
 //!
 //! Shared utilities (`TrainScores`, `smooth_topics`, `PhaseTimers`,
@@ -200,7 +200,7 @@ pub fn clip_and_step_dense(
 ///
 /// Trainers call this once per minibatch after computing the ELBO loss
 /// and before backward. Senna uses it to inject the anchor-prior cross-
-/// entropy penalty; pinto and other callers pass `None`.
+/// entropy penalty; callers with no penalty pass `None`.
 ///
 /// Signature: `(loss, level) -> extended_loss`.
 pub type LevelLossHook<'a> = dyn Fn(Tensor, usize) -> anyhow::Result<Tensor> + 'a;
