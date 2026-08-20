@@ -236,6 +236,24 @@ pub fn read_lines_of_words(
 /// * `delim` - delimiter
 /// * `hdr_line` - location of a header line (-1 = no header line)
 ///
+/// Trim a field and strip one pair of symmetric quotes.
+///
+/// Only a field quoted at BOTH ends is a quoted field. Trimming either end
+/// on its own corrupts content that merely happens to start or finish with a
+/// quote: a GTF attribute column reads `gene_id "X"; gene_name "Y"`, which
+/// ends in a quote it needs, and losing it leaves the attribute unparseable.
+/// This is the same rule the delimited tokenizer applies to every field, so
+/// any caller inspecting raw lines (header sniffing, previews) can match it.
+pub fn unquote_field(x: &str) -> &str {
+    let t = x.trim();
+    for q in ['"', '\''] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
+            return &t[q.len_utf8()..t.len() - q.len_utf8()];
+        }
+    }
+    t
+}
+
 pub fn read_lines_of_words_delim(
     input_file: &str,
     delim: impl Into<Delimiter>,
@@ -261,24 +279,15 @@ pub fn read_lines_of_words_delim(
     // on its own corrupts content that merely happens to start or finish with a
     // quote: a GTF attribute column reads `gene_id "X"; gene_name "Y"`, which
     // ends in a quote it needs, and losing it leaves the attribute unparseable.
-    fn unquote(x: &str) -> &str {
-        let t = x.trim();
-        for q in ['"', '\''] {
-            if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) {
-                return &t[q.len_utf8()..t.len() - q.len_utf8()];
-            }
-        }
-        t
-    }
     let parse_fn = |line: &str| -> Vec<Box<str>> {
         match &delim {
             Delimiter::Str(s) => line
                 .split(s.as_str())
-                .map(|x| unquote(x).to_owned().into_boxed_str())
+                .map(|x| unquote_field(x).to_owned().into_boxed_str())
                 .collect(),
             Delimiter::Chars(chars) => line
                 .split(chars.as_slice())
-                .map(|x| unquote(x).to_owned().into_boxed_str())
+                .map(|x| unquote_field(x).to_owned().into_boxed_str())
                 .collect(),
         }
     };

@@ -75,13 +75,13 @@ fn the_union_really_does_merge_two_separate_sections() {
 
     let mut labels = vec!["b".into(); 8];
     assert_eq!(
-        auto_batch_from_components(&spatial, &two_section_coords(), &mut labels),
+        auto_batch_from_components(&spatial, &two_section_coords(), &mut labels, true),
         2,
         "the two sections are separate before augmentation"
     );
     let mut labels = vec!["b".into(); 8];
     assert_eq!(
-        auto_batch_from_components(&merged, &two_section_coords(), &mut labels),
+        auto_batch_from_components(&merged, &two_section_coords(), &mut labels, true),
         1,
         "and the union joins them, which is exactly the hazard"
     );
@@ -102,6 +102,7 @@ fn batches_are_detected_on_the_spatial_graph_not_the_union() {
         topology_graph(&merged, &spatial_graph),
         &two_section_coords(),
         &mut labels,
+        true,
     );
 
     assert_eq!(n, 2, "topology_graph must hand back the spatial graph");
@@ -249,7 +250,7 @@ fn a_fragment_inside_a_piece_joins_it_rather_than_becoming_its_own_batch() {
     .unwrap();
 
     let mut labels = vec!["b".into(); 14];
-    let n = auto_batch_from_components(&graph, &coords, &mut labels);
+    let n = auto_batch_from_components(&graph, &coords, &mut labels, true);
 
     assert_eq!(n, 2, "two pieces, not two pieces plus a fragment");
     assert_eq!(labels[6], labels[0], "the fragment takes its piece's label");
@@ -283,7 +284,7 @@ fn separate_pieces_are_left_alone_however_unequal() {
     .unwrap();
 
     let mut labels = vec!["b".into(); 14];
-    let n = auto_batch_from_components(&graph, &coords, &mut labels);
+    let n = auto_batch_from_components(&graph, &coords, &mut labels, true);
     assert_eq!(
         n, 2,
         "two separated pieces stay two batches whatever their sizes"
@@ -292,4 +293,75 @@ fn separate_pieces_are_left_alone_however_unequal() {
         labels[0], labels[8],
         "the small piece is not absorbed by the big one"
     );
+}
+
+/// Two data files can share one (x, y) frame; what separates them is the
+/// batch pseudo-coordinate the multi-file load appends as an extra column.
+/// The fold must judge containment on EVERY coordinate column, or the smaller
+/// file's component sits "inside" the larger's (x, y) box and the two samples
+/// silently collapse into one batch, skipping batch correction.
+#[test]
+fn two_files_sharing_a_frame_stay_two_batches() {
+    use crate::util::input::auto_batch_from_components;
+
+    // File A: 6 cells; file B: 4 cells whose (x, y) lie INSIDE file A's box.
+    // Column 3 is the per-file pseudo-coordinate (0 vs 1000).
+    let coords = Mat::from_row_slice(
+        10,
+        3,
+        &[
+            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 2.0, 1.0, 0.0, // file A
+            0.5, 0.5, 1000.0, 1.5, 0.5, 1000.0, //
+            0.5, 0.6, 1000.0, 1.5, 0.6, 1000.0, // file B, inside A's (x, y) box
+        ],
+    );
+    let graph = KnnGraph::from_rows(
+        &coords,
+        KnnGraphArgs {
+            knn: 2,
+            block_size: 16,
+            reciprocal: true,
+        },
+    )
+    .unwrap();
+
+    let mut labels = vec!["b".into(); 10];
+    let n = auto_batch_from_components(&graph, &coords, &mut labels, true);
+
+    assert_eq!(n, 2, "the pseudo-coordinate must keep the files apart");
+    assert_ne!(labels[6], labels[0], "file B keeps its own batch");
+}
+
+/// Without real coordinates the fold's geometry argument does not exist
+/// (layout units vs projection-space edge lengths), so expression mode asks
+/// for no folding and every component stays its own batch.
+#[test]
+fn expression_mode_never_folds() {
+    use crate::util::input::auto_batch_from_components;
+
+    // A small "fragment" component inside a larger one — the exact shape the
+    // spatial fold would merge.
+    let coords = Mat::from_row_slice(
+        8,
+        2,
+        &[
+            0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0, //
+            1.0, 3.0, 2.0, 3.0,
+        ],
+    );
+    let graph = KnnGraph::from_rows(
+        &coords,
+        KnnGraphArgs {
+            knn: 2,
+            block_size: 16,
+            reciprocal: true,
+        },
+    )
+    .unwrap();
+
+    let mut labels = vec!["b".into(); 8];
+    let n = auto_batch_from_components(&graph, &coords, &mut labels, false);
+    assert_eq!(n, 2, "no folding without coordinates");
+    assert_ne!(labels[6], labels[0], "the small component keeps its label");
 }

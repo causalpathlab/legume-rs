@@ -291,15 +291,13 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             // Drop sparse communities: cells whose dominant community has
             // fewer than --min-edges-per-community edges get dominant = -1
             // and are skipped by hulls / markers / LR overlays downstream.
-            if let Some((_, edge_community)) = lc_pair.as_ref() {
-                let max_c = edge_community.iter().copied().max().unwrap_or(-1);
-                if max_c >= 0 {
-                    let mut counts = vec![0usize; (max_c + 1) as usize];
-                    for &c in edge_community {
-                        if c >= 0 {
-                            counts[c as usize] += 1;
-                        }
-                    }
+            if let Some((_, _, total_counts)) = lc_pair.as_ref() {
+                // Judged on EVERY edge of the community, expression pairs
+                // included: the threshold asks whether the fit considers the
+                // community real, and the drawing filter above must not
+                // shrink that denominator.
+                let counts = total_counts;
+                if !counts.is_empty() {
                     let n_dropped = counts
                         .iter()
                         .filter(|&&n| 0 < n && n < args.min_edges_per_community)
@@ -404,7 +402,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     && !args.no_mesh
                     && matches!(level_kind, LevelKind::Final | LevelKind::Draft)
                 {
-                    if let Some((edges, community)) = &lc_pair {
+                    if let Some((edges, community, _)) = &lc_pair {
                         let core_set: HashSet<usize> = core.cell_ixs.iter().copied().collect();
                         let layers = build_mesh_layers(
                             &frame, &cells, &core_set, edges, community, &colors, MESH_ALPHA,
@@ -427,7 +425,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     match &aligned_entropy {
                         Some(ent) => {
                             let ifc_stub = kind_path(PlotKind::Interfaces, "");
-                            let edges_only = lc_pair.as_ref().map(|(e, _)| e.as_slice());
+                            let edges_only = lc_pair.as_ref().map(|(e, _, _)| e.as_slice());
                             let written = interfaces::render_interfaces(
                                 args,
                                 &frame,
@@ -574,7 +572,8 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     let final_lc_path = PathBuf::from(format!("{prefix}.link_community.parquet"));
                     let final_lc: Option<(Vec<load::EdgePair>, Vec<i64>)> =
                         if final_lc_path.exists() {
-                            Some(load::read_link_community(&final_lc_path)?)
+                            let (pairs, community, _) = load::read_link_community(&final_lc_path)?;
+                            Some((pairs, community))
                         } else {
                             None
                         };

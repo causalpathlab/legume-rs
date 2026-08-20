@@ -896,9 +896,15 @@ impl JointEmbedModel {
         if self.gate.is_none() {
             return Ok(None);
         }
-        let mu = match &self.factor {
-            Some(f) => &f.beta,
-            None => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
+        // The adapted model's `e_feat`/`e_feat_raw` are detached snapshots
+        // taken at construction; the KL's mu^2 shrinkage must see the LIVE
+        // composition or it prices alpha against loadings that no longer
+        // exist and back-propagates nothing into the adapter parameters.
+        let adapter_mu = self.adapter.as_ref().map(|a| a.compose()).transpose()?;
+        let mu = match (&adapter_mu, &self.factor) {
+            (Some(m), _) => m,
+            (None, Some(f)) => &f.beta,
+            (None, None) => self.e_feat_raw.as_ref().unwrap_or(&self.e_feat),
         };
         let mut kl = self.one_gate_kl(GateKind::Identity, self.gate_logits(), mu)?;
         // Independent velocity gate on δ_g (factored + velocity present).

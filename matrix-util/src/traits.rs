@@ -346,29 +346,49 @@ pub trait IoOps {
             None => -1, // no skipping
         };
 
-        let ReadLinesOut { lines, header } =
+        let ReadLinesOut { mut lines, header } =
             crate::common_io::read_lines_of_words_delim(file_path, delim, hdr_line)?;
+
+        // A blank line tokenizes to one empty field, not to zero fields, so it
+        // must be dropped here or it caps the width check below at 1 and then
+        // breaks the value loop. Dropping it up front fixes both at once.
+        lines.retain(|w| !(w.len() == 1 && w[0].is_empty()));
+
+        let data_width = lines.iter().map(|w| w.len()).min().unwrap_or(header.len());
+        // R's write.table omits a name for the row-label column, so the header
+        // is one field short of the data rows and every header position names
+        // the data column one to its RIGHT. Detect that shape once; both the
+        // name matching and the naming lookup below shift through it.
+        let header_offset = usize::from(
+            !header.is_empty() && header.len() + 1 == data_width && row_name_index == Some(0),
+        );
 
         let mut relevant_indices: Vec<usize> = vec![];
 
+        let indices_given = column_indices.is_some_and(|ix| !ix.is_empty());
         if let Some(indices) = column_indices {
             relevant_indices.extend(indices.iter().copied());
         }
 
-        if let Some(names) = column_names {
-            // The tokenizer has already unquoted both sides.
-            let name_indices: Vec<usize> = header
-                .iter()
-                .enumerate()
-                .filter_map(|(i, name)| {
-                    if names.iter().any(|n| n == name) {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            relevant_indices.extend(name_indices);
+        // Explicit indices OVERRIDE names, as the callers' help documents; a
+        // union would quietly widen the selection with every default name that
+        // happens to be present in the header.
+        if !indices_given {
+            if let Some(names) = column_names {
+                // The tokenizer has already unquoted both sides.
+                let name_indices: Vec<usize> = header
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, name)| {
+                        if names.iter().any(|n| n == name) {
+                            Some(i + header_offset)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                relevant_indices.extend(name_indices);
+            }
         }
 
         // Neither selector given: take EVERY column except the row-name one.
@@ -392,12 +412,7 @@ pub trait IoOps {
         // otherwise passes this and panics later in the value loop. The header
         // is checked separately, since it can be one field short of the data
         // rows when a writer omits a name for the row-label column.
-        let n_columns = lines
-            .iter()
-            .map(|w| w.len())
-            .filter(|&n| n > 0)
-            .min()
-            .unwrap_or(header.len());
+        let n_columns = data_width;
         let mut to_check: Vec<usize> = relevant_indices.clone();
         to_check.extend(row_name_index);
         if let Some(&bad) = to_check.iter().find(|&&j| j >= n_columns) {
@@ -435,8 +450,8 @@ pub trait IoOps {
                 // A header can be narrower than the data rows; fall back to the
                 // position rather than panicking on a name that was never written.
                 .map(|&j| {
-                    header
-                        .get(j)
+                    j.checked_sub(header_offset)
+                        .and_then(|k| header.get(k))
                         .cloned()
                         .unwrap_or_else(|| j.to_string().into_boxed_str())
                 })

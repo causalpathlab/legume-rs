@@ -104,6 +104,27 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         &[args.left_name.clone(), args.right_name.clone()],
     )?;
 
+    // Pair provenance, when the source run was augmented. Positionally
+    // parallel to the pair rows, so it can be re-emitted with the re-cut
+    // communities; dropping it would make every expression pair read as
+    // physically adjacent downstream (lr-activity's spatial filter, plot's
+    // mesh) through the missing-column fallback.
+    let edge_kind: Option<Vec<i32>> =
+        if matrix_util::parquet::peek_parquet_field_names(&args.coord_pair_file)?
+            .iter()
+            .any(|c| c.as_ref() == "edge_kind")
+        {
+            let MatWithNames { mat: kind_mat, .. } = Mat::from_parquet_with_indices_names(
+                &args.coord_pair_file,
+                Some(0),
+                None,
+                Some(&["edge_kind".into()]),
+            )?;
+            Some(kind_mat.iter().map(|&v| v as i32).collect())
+        } else {
+            None
+        };
+
     if pair_names.len() != rows.len() {
         anyhow::bail!(
             "pair names length {} != latent matrix rows {}",
@@ -251,7 +272,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             &edges,
             &edge_membership,
             &vertices,
-            None,
+            edge_kind.as_deref(),
         )?;
     }
 

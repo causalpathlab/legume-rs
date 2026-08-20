@@ -106,6 +106,10 @@ pub struct CellPairs<'a> {
     pub data: &'a SparseIoVec,
     pairs: &'a [(usize, usize)],
     weights: Option<&'a [f32]>,
+    /// Name of the exported per-pair weight column. `distance` by default; a
+    /// caller whose weights are NOT lengths (within-source ranks after a graph
+    /// union, say) renames it so a reader can never mistake the unit.
+    pub weight_column: &'static str,
 }
 
 impl<'a> CellPairs<'a> {
@@ -114,6 +118,7 @@ impl<'a> CellPairs<'a> {
             data,
             pairs,
             weights: None,
+            weight_column: "distance",
         }
     }
 
@@ -134,6 +139,7 @@ impl<'a> CellPairs<'a> {
             data,
             pairs,
             weights: Some(weights),
+            weight_column: "distance",
         })
     }
 
@@ -149,6 +155,7 @@ impl<'a> CellPairs<'a> {
             data,
             pairs: &graph.edges,
             weights: Some(&graph.distances),
+            weight_column: "distance",
         }
     }
 
@@ -215,7 +222,8 @@ impl<'a> CellPairs<'a> {
     /// Write all the cell pairs into a `.parquet` file.
     ///
     /// Columns are `left_cell`, `right_cell`, then `extra` in the order
-    /// given, then `distance` when weights were supplied. `extra` lets a
+    /// given, then the weight column (named [`Self::weight_column`], `distance`
+    /// unless the caller renamed it) when weights were supplied. `extra` lets a
     /// caller splice in per-pair values — endpoint coordinates, say — without
     /// this module having to know what they mean; each must carry one value
     /// per pair.
@@ -273,7 +281,7 @@ impl<'a> CellPairs<'a> {
         }
 
         if let Some(w) = self.weights {
-            columns.push(("distance".into(), Column::F32(w)));
+            columns.push((self.weight_column.into(), Column::F32(w)));
         }
 
         let row_names: Vec<Box<str>> = (0..num_pairs)

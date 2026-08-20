@@ -91,14 +91,16 @@ const EPS: f32 = 1e-8;
 const MIN_SAMPLES_PER_STRATUM: usize = 4;
 
 pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
-    // `--knn-expr` rides on the shared input args, so this command accepts it.
-    // It reads a pair list from a previous run rather than building one, so
-    // there is no graph here to augment. Say so instead of ignoring it.
-    anyhow::ensure!(
-        args.common.knn_expr == 0,
-        "--knn-expr does not apply to this command: it reads the cell pairs from \
-         an earlier run rather than building them. Pass it to that run instead."
-    );
+    // `--knn-expr` rides on the shared input args and defaults ON, so this
+    // command accepts it without there being a graph here to augment: it reads
+    // its cell pairs from an earlier run. Refusing would make the command fail
+    // at its own defaults; note the no-op instead.
+    if args.common.knn_expr > 0 {
+        log::info!(
+            "--knn-expr does not apply here: the cell pairs come from the \
+             earlier run's outputs. Pass it to that run instead."
+        );
+    }
     let c = &args.common;
     mkdir_parent(&c.out)?;
 

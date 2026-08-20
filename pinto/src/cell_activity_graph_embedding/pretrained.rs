@@ -306,14 +306,19 @@ pub struct FrozenGene {
     fixed: Tensor,
     keep_mask: Tensor,
     var: Var,
+    /// The loaded per-gene bias and its Var, present only when a bias file
+    /// was given (then its values are part of the dictionary contract and
+    /// must not drift while the rows they were fitted beside are pinned).
+    bias: Option<(Tensor, Var)>,
 }
 
 impl FrozenGene {
-    pub fn new(fixed: Tensor, keep_mask: Tensor, var: Var) -> Self {
+    pub fn new(fixed: Tensor, keep_mask: Tensor, var: Var, bias: Option<(Tensor, Var)>) -> Self {
         Self {
             fixed,
             keep_mask,
             var,
+            bias,
         }
     }
 
@@ -322,6 +327,11 @@ impl FrozenGene {
     /// post-step restore rather than a gradient mask.
     pub fn restore(&self) -> anyhow::Result<()> {
         candle_util::frozen_features::restore_frozen_rows(&self.var, &self.fixed, &self.keep_mask)?;
+        if let Some((fixed_b, var_b)) = &self.bias {
+            // b_feat is 1-D; the [n, 1] row mask squeezes to broadcast over it.
+            let mask_1d = self.keep_mask.squeeze(1)?;
+            candle_util::frozen_features::restore_frozen_rows(var_b, fixed_b, &mask_1d)?;
+        }
         Ok(())
     }
 }

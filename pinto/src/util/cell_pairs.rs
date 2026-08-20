@@ -62,8 +62,15 @@ impl<'a> SrtCellPairs<'a> {
         graph: &'a KnnGraph,
         edge_source: Option<&[matrix_util::knn_graph::EdgeSource]>,
     ) -> SrtCellPairs<'a> {
+        let mut inner = CellPairs::from_graph(data, graph);
+        if edge_source.is_some() {
+            // An augmented graph's distances are within-source quantile ranks
+            // (physical and embedding distances are not one unit), so the
+            // exported column must not be called `distance`.
+            inner.weight_column = "distance_rank";
+        }
         SrtCellPairs {
-            inner: CellPairs::from_graph(data, graph),
+            inner,
             coordinates,
             edge_kind: edge_source.map(|src| src.iter().copied().map(edge_kind_code).collect()),
         }

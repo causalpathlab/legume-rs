@@ -394,8 +394,12 @@ fn argmax_row(mat: &Mat, row: usize, cols: &[usize]) -> i64 {
 pub type EdgePair = (Box<str>, Box<str>);
 
 /// Read a link-community parquet: E rows, each `(left_cell, right_cell,
-/// community)`. Returns `(pairs, community)` with parallel lengths.
-pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i64>)> {
+/// community)`. Returns `(pairs, community, total_counts)`: `pairs` and
+/// `community` are parallel and hold only the ADJACENT pairs (see below),
+/// while `total_counts[c]` counts community `c`'s edges over EVERY pair,
+/// expression-similar ones included — a community's SIZE is a statement
+/// about the fit, not about what is drawable.
+pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i64>, Vec<usize>)> {
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?;
@@ -431,9 +435,18 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
 
     let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::new();
     let mut community: Vec<i64> = Vec::new();
+    let mut total_counts: Vec<usize> = Vec::new();
     let mut n_dropped = 0usize;
     for record in reader.get_row_iter(None)? {
         let row = record?;
+        let c: i64 = row_int_like(&row, ci)?;
+        if c >= 0 {
+            let cu = c as usize;
+            if cu >= total_counts.len() {
+                total_counts.resize(cu + 1, 0);
+            }
+            total_counts[cu] += 1;
+        }
         if let Some(k) = ki {
             if row_int_like(&row, k)? != crate::util::cell_pairs::EDGE_KIND_SPATIAL as i64 {
                 n_dropped += 1;
@@ -442,7 +455,6 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
         }
         let l = row_label(&row, li)?;
         let r = row_label(&row, ri)?;
-        let c: i64 = row_int_like(&row, ci)?;
         pairs.push((l, r));
         community.push(c);
     }
@@ -454,7 +466,7 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
             n_dropped
         );
     }
-    Ok((pairs, community))
+    Ok((pairs, community, total_counts))
 }
 
 /// Read a gene_community parquet: G × K. Returns (mat, gene_names).

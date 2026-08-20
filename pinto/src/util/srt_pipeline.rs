@@ -265,7 +265,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     };
 
     if c.auto_batch && c.batch_files.is_none() {
-        auto_batch_from_components(&graph, &coordinates, &mut batch_membership);
+        auto_batch_from_components(&graph, &coordinates, &mut batch_membership, has_coords);
     }
 
     let batch_effects = if cfg.batch_effects {
@@ -311,10 +311,11 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         (graph, None, None)
     } else if !has_coords {
         // The base graph already IS the expression graph, so a union would be
-        // a self-union. Say so rather than doing nothing quietly.
-        warn!(
-            "--knn-expr {} ignored: without --coord the cell-pair graph is already \
-             built from expression",
+        // a self-union. The flag defaults on, so this fires on every
+        // expression-mode run: an info note, not a warning about user error.
+        info!(
+            "--knn-expr {} has no effect without --coord: the cell-pair graph is \
+             already built from expression",
             c.knn_expr
         );
         (graph, None, None)
