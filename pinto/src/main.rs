@@ -386,9 +386,9 @@ enum Commands {
                       --obo adds optional TreeBH Cell-Ontology calling.\n\
                       \n\
                       Inputs are `{prefix}.feature_embedding.parquet` and `{prefix}.cell_embedding.parquet`.\n\
-                      Any pinto embedding run supplies them, such as `cage`.\n\
-                      To annotate anything else, point\n\
-                      --feature-embedding and --cell-embedding at explicit paths.\n\
+                      Any pinto embedding run supplies them, `cage` among them.\n\
+                      To annotate anything else,\n\
+                      point --feature-embedding and --cell-embedding at explicit paths.\n\
                       \n\
                       Outputs follow the shared per-cell contract:\n\
                       {out}.annot.{parquet,membership.tsv,argmax.tsv}.\n\

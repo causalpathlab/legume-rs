@@ -260,16 +260,9 @@ pub fn fit_cell_activity_graph_embedding(
     // between a gene's two tracks and hands the dispersion trend a variance
     // that is too small exactly where the two tracks covary most.
 
-    let srt_cell_pairs = SrtCellPairs::with_graph_and_source(
-        &data_vec,
-        &coordinates,
-        &graph,
-        edge_source.as_deref(),
-    );
-    srt_cell_pairs.to_parquet(
-        &(c.out.to_string() + ".coord_pairs.parquet"),
-        Some(coordinate_names.clone()),
-    )?;
+    let srt_cell_pairs =
+        SrtCellPairs::with_graph(&data_vec, &coordinates, &graph, edge_source.as_deref());
+    srt_cell_pairs.write_coord_pairs(&c.out, &coordinate_names)?;
     let edges_owned: Vec<(u32, u32)> = srt_cell_pairs
         .inner
         .pairs()

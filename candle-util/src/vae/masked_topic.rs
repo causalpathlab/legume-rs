@@ -1,33 +1,27 @@
-//! Masked-imputation (and ELBO) topic VAE trainer.
+//! Masked-imputation topic VAE trainer.
 //!
-//! Hosts both [`train_masked`] (no-ELBO masked-gene NB imputation; simplex-θ
-//! or Gaussian-z latent) and [`train_mixed`] (the ELBO path used by pinto
-//! `lc-etm`), sharing the indexed top-K data loader and per-level decoders.
+//! Hosts [`train_masked`] (no-ELBO masked-gene NB imputation; simplex-θ or
+//! Gaussian-z latent), sharing the indexed top-K data loader across levels.
 //! Drives the shared [`IndexedEmbeddingEncoder`] + per-level
-//! [`EmbeddedTopicDecoder`] stack against [`IndexedInMemoryData`]
+//! [`EmbeddedNbTopicDecoder`] stack against [`IndexedInMemoryData`]
 //! minibatches. The hot loop never materialises `[N, S]` or `[K, D]`;
 //! all gather/scatter happens at the per-batch gene union.
 
-use super::{clip_and_step_dense, smooth_topics, PhaseTimers, TrainScores};
+use super::{clip_and_step_dense, smooth_topics, TrainScores};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
-use crate::decoder::embedded_topic::EmbeddedTopicDecoder;
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
-use crate::traits::indexed::*;
 use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 use rand::RngExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
 type Mat = DMatrix<f32>;
 
-/// Config bundle passed by reference to [`train_mixed`].
+/// Config bundle passed by reference to [`train_masked`].
 pub struct IndexedTrainConfig<'a> {
     pub parameters: &'a candle_nn::VarMap,
     pub dev: &'a Device,
@@ -82,11 +76,6 @@ pub struct IndexedTrainConfig<'a> {
     pub anchor_penalty: f32,
 }
 
-/// Optional bulk-deconvolution input: `(bulk_full [G, B], deltas_per_level)`.
-/// The trainer uses the finest-level delta to build a corrected bulk loader
-/// and runs an extra mini-batch step against the finest decoder per epoch.
-pub type BulkWithDeltas<'a> = (&'a Mat, &'a [GammaMatrix]);
-
 /// Per-minibatch mask-rate schedule (any-order / absorbing-diffusion style).
 #[derive(Clone, Copy, Debug)]
 pub enum MaskSchedule {
@@ -97,7 +86,7 @@ pub enum MaskSchedule {
 }
 
 /// Options specific to [`train_masked`], kept off the shared
-/// [`IndexedTrainConfig`] so the `train_mixed`/pinto callers are unaffected.
+/// [`IndexedTrainConfig`] so callers that only need the config are unaffected.
 /// [`Default`] reproduces the legacy NB, fixed-rate behavior.
 /// Per-gene likelihood for the masked imputation loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,8 +97,8 @@ pub enum MaskedLikelihood {
     Nb,
     /// Multinomial / categorical — depth-invariant composition, full-vocab
     /// softmax cross-entropy at masked positions (no φ, no library term).
-    /// The likelihood the generative ELBO path (`train_mixed`) also uses, so
-    /// an ELBO-vs-masked comparison under this option isolates the objective.
+    /// The likelihood a generative ELBO path would also use, so a comparison
+    /// under this option isolates the objective rather than the likelihood.
     Multinomial,
 }
 
@@ -293,44 +282,13 @@ pub fn shuffle_and_precompute(
     loader.precompute_all_minibatches()
 }
 
-/// Multinomial ETM decoder exposing its full `α·ρᵀ [K, D]` logits for the
-/// anchor-prior cross-entropy, computed lazily inside [`apply_anchor_ce`] only
-/// when the penalty is active. (The masked NB trainer already holds these
-/// logits for its log-partition, so it calls [`apply_anchor_ce_from_logits`]
-/// directly rather than through this trait.)
-trait AnchorLogitsKd {
-    fn anchor_logits_kd(&self) -> candle_core::Result<Tensor>;
-}
-impl AnchorLogitsKd for EmbeddedTopicDecoder {
-    fn anchor_logits_kd(&self) -> candle_core::Result<Tensor> {
-        self.full_logits_kd()
-    }
-}
-
-/// Cross-entropy penalty `−λ · mean_K Σ_D prior · log_softmax_D(logits)`
-/// added to the loss. Anchors topic indices to the supplied per-topic
-/// gene-prior distribution; breaks the K-way permutation symmetry of
-/// the ETM-factorized β. No-op when `prior` is `None` or `lambda ≤ 0`.
-fn apply_anchor_ce<D: AnchorLogitsKd>(
-    loss: candle_core::Tensor,
-    decoder: &D,
-    prior: Option<&candle_core::Tensor>,
-    lambda: f32,
-) -> candle_core::Result<candle_core::Tensor> {
-    let Some(prior) = prior else {
-        return Ok(loss);
-    };
-    if lambda <= 0.0 {
-        return Ok(loss);
-    }
-    let logits_kd = decoder.anchor_logits_kd()?;
-    apply_anchor_ce_from_logits(loss, &logits_kd, prior, lambda)
-}
-
-/// Anchor-CE core operating on precomputed `[K, D]` logits. Lets a caller that
-/// already has `full_logits_kd` (e.g. the masked trainer, which also needs it
-/// for the NB log-partition) avoid recomputing the `[K, D]` product.
-fn apply_anchor_ce_from_logits(
+/// Cross-entropy penalty `−λ · mean_K Σ_D prior · log_softmax_D(logits)` added
+/// to the loss. Anchors topic indices to the supplied per-topic gene prior,
+/// breaking the K-way permutation symmetry of the ETM-factorized β.
+///
+/// Takes precomputed `[K, D]` logits so the trainer, which already holds them
+/// for the NB log-partition, does not recompute the `[K, D]` product.
+fn apply_anchor_ce(
     loss: candle_core::Tensor,
     logits_kd: &candle_core::Tensor,
     prior: &candle_core::Tensor,
@@ -342,297 +300,6 @@ fn apply_anchor_ce_from_logits(
     loss + pen
 }
 
-/// Apply a per-gene posterior-mean delta correction to `bulk_full`.
-///
-/// `delta_row` is `[1, G]` (a row of per-gene corrections, broadcast across
-/// samples). Output values are clamped at `min_val` to avoid zero rates.
-fn apply_column_delta(bulk_full: &Mat, delta_row: &Mat, min_val: f32) -> Mat {
-    let mut out = bulk_full.clone();
-    let g = bulk_full.nrows();
-    let b = bulk_full.ncols();
-    for j in 0..b {
-        for i in 0..g {
-            let v = bulk_full[(i, j)] - delta_row[(0, i)];
-            out[(i, j)] = v.max(min_val);
-        }
-    }
-    out
-}
-
-/// V-cycle / mini-batch training of the shared indexed encoder + per-level
-/// decoders.
-///
-/// `level_data[i] = (input_i, batch_i, target_i)` — caller's responsibility
-/// to assemble. `decoders[i]` is the per-level decoder; `encoder` is shared
-/// across levels.
-///
-/// `bulk_with_deltas` is the senna-specific bulk-deconvolution input;
-/// callers (e.g. pinto) that don't have bulk just pass `None`.
-pub fn train_mixed(
-    level_data: &[LevelData],
-    encoder: &IndexedEmbeddingEncoder,
-    decoders: &[EmbeddedTopicDecoder],
-    config: &IndexedTrainConfig,
-    bulk_with_deltas: Option<BulkWithDeltas>,
-) -> anyhow::Result<TrainScores> {
-    let num_levels = level_data.len();
-    let total_epochs = config.epochs;
-
-    for (level, (&(mixed, _, _), decoder)) in level_data.iter().zip(decoders.iter()).enumerate() {
-        info!(
-            "Level {}/{}: {} samples, decoder dim {}",
-            level + 1,
-            num_levels,
-            mixed.ncols(),
-            decoder.dim_obs(),
-        );
-    }
-
-    info!("Mixed multi-level training: {num_levels} levels, {total_epochs} epochs");
-
-    let adam_vars: Vec<Var> = match config.frozen_feature_var {
-        None => config.parameters.all_vars(),
-        Some(name) => {
-            let trainable = crate::frozen_features::trainable_vars(config.parameters, &[name]);
-            info!(
-                "Freeze mode: AdamW over {} trainable vars ({} frozen, key='{}')",
-                trainable.len(),
-                config.parameters.all_vars().len() - trainable.len(),
-                name
-            );
-            trainable
-        }
-    };
-    let mut adam = AdamW::new(
-        adam_vars,
-        candle_nn::ParamsAdamW {
-            lr: f64::from(config.learning_rate),
-            weight_decay: f64::from(config.weight_decay),
-            ..Default::default()
-        },
-    )?;
-    let prog_bar = labeled_bar("Epochs", total_epochs as u64);
-
-    let mut llik_trace = Vec::with_capacity(total_epochs);
-    let mut kl_trace = Vec::with_capacity(total_epochs);
-    let mut timers = PhaseTimers::default();
-
-    let mut data_loaders = build_indexed_loaders(level_data, config)?;
-
-    // Bulk loader: corrected matrix uses the posterior mean of the bulk
-    // delta. Built once per training run.
-    let mut bulk_loader: Option<IndexedInMemoryData> =
-        if let Some((bulk_full, bulk_deltas)) = bulk_with_deltas {
-            let finest_idx = num_levels - 1;
-            let bulk_delta = &bulk_deltas[finest_idx];
-            let delta_mean = bulk_delta.posterior_mean().transpose();
-            let corrected = apply_column_delta(bulk_full, &delta_mean, 1e-8);
-            let mut bulk = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
-                input: bulk_full,
-                input_null: None,
-                output: &corrected,
-                input_context_size: config.enc_context_size,
-                output_context_size: config.dec_context_size,
-                input_shortlist_weights: config.shortlist_weights,
-                output_shortlist_weights: config.shortlist_weights,
-                input_mean: Some(config.feature_mean),
-                output_fisher_weights: Some(config.feature_fisher_weights),
-            })?;
-            bulk.set_graph_csr(config.feature_graph.clone());
-            Some(bulk)
-        } else {
-            None
-        };
-
-    for epoch in 0..total_epochs {
-        let t_pre = Instant::now();
-        for loader in data_loaders.iter_mut() {
-            shuffle_and_precompute(loader, config.minibatch_size)?;
-        }
-        if let Some(bulk_loader) = bulk_loader.as_mut() {
-            shuffle_and_precompute(bulk_loader, config.minibatch_size)?;
-        }
-        timers.precompute += t_pre.elapsed();
-
-        let mut llik_tot = 0f32;
-        let mut kl_tot = 0f32;
-        let mut count_tot = 0f32;
-        let mut n_tot = 0usize;
-
-        for (level, loader) in data_loaders.iter().enumerate() {
-            let decoder = &decoders[level];
-            n_tot += loader.num_data();
-            count_tot += loader.total_output_count();
-
-            for b in 0..loader.num_minibatch() {
-                let mb = loader.minibatch_cached(b).to_device(config.dev)?;
-                let sparse_edges = loader.minibatch_sparse_edges(b, config.dev)?;
-
-                let t_enc = Instant::now();
-                let (log_z_nk, kl) = encoder.forward_indexed_t(
-                    &mb.input_indices,
-                    &mb.input_values,
-                    mb.input_values_null.as_ref(),
-                    mb.input_values_mean.as_ref(),
-                    sparse_edges.as_ref(),
-                    true,
-                )?;
-                let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
-                timers.encoder_fwd += t_enc.elapsed();
-
-                let t_dec = Instant::now();
-                let llik = decoder.forward_indexed(
-                    &log_z_nk,
-                    &mb.output_union_indices,
-                    &mb.output_scatter_pos,
-                    &mb.output_values,
-                    mb.output_values_weight.as_ref(),
-                    &mb.output_log_q_s,
-                )?;
-                let mut loss = (&kl - &llik)?.mean_all()?;
-                if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
-                    // `mean_all` (not `sum_all`) so λ stays scale-invariant
-                    // across `D · H`: λ=1 means per-element shrinkage of one
-                    // loss unit, not D·H · mean(ρ²).
-                    let rho_l2 = encoder
-                        .feature_embeddings()
-                        .sqr()?
-                        .mean_all()?
-                        .affine(f64::from(config.feature_embedding_l2), 0.0)?;
-                    loss = (loss + rho_l2)?;
-                }
-                loss = apply_anchor_ce(
-                    loss,
-                    decoder,
-                    config.anchor_prior_per_level.map(|p| &p[level]),
-                    config.anchor_penalty,
-                )?;
-                timers.decoder_fwd += t_dec.elapsed();
-
-                let t_bwd = Instant::now();
-                let grads = loss.backward()?;
-                timers.backward += t_bwd.elapsed();
-
-                let t_opt = Instant::now();
-                clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
-                timers.optimize += t_opt.elapsed();
-
-                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-
-                if config.stop.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        }
-
-        // Bulk training step (if present) — use finest decoder.
-        if let Some(bulk_loader) = bulk_loader.as_ref() {
-            let finest_idx = num_levels - 1;
-            let finest_decoder = &decoders[finest_idx];
-            count_tot += bulk_loader.total_output_count();
-
-            for b in 0..bulk_loader.num_minibatch() {
-                let mb = bulk_loader.minibatch_cached(b).to_device(config.dev)?;
-                let sparse_edges = bulk_loader.minibatch_sparse_edges(b, config.dev)?;
-                let t_enc = Instant::now();
-                let (log_z_nk, kl) = encoder.forward_indexed_t(
-                    &mb.input_indices,
-                    &mb.input_values,
-                    None,
-                    mb.input_values_mean.as_ref(),
-                    sparse_edges.as_ref(),
-                    true,
-                )?;
-                let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
-                timers.encoder_fwd += t_enc.elapsed();
-
-                let t_dec = Instant::now();
-                let llik = finest_decoder.forward_indexed(
-                    &log_z_nk,
-                    &mb.output_union_indices,
-                    &mb.output_scatter_pos,
-                    &mb.output_values,
-                    mb.output_values_weight.as_ref(),
-                    &mb.output_log_q_s,
-                )?;
-                let mut loss = (&kl - &llik)?.mean_all()?;
-                if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
-                    let rho_l2 = encoder
-                        .feature_embeddings()
-                        .sqr()?
-                        .mean_all()?
-                        .affine(f64::from(config.feature_embedding_l2), 0.0)?;
-                    loss = (loss + rho_l2)?;
-                }
-                loss = apply_anchor_ce(
-                    loss,
-                    finest_decoder,
-                    config.anchor_prior_per_level.map(|p| &p[finest_idx]),
-                    config.anchor_penalty,
-                )?;
-                timers.decoder_fwd += t_dec.elapsed();
-
-                let t_bwd = Instant::now();
-                let grads = loss.backward()?;
-                timers.backward += t_bwd.elapsed();
-
-                let t_opt = Instant::now();
-                clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))?;
-                timers.optimize += t_opt.elapsed();
-
-                llik_tot += llik.sum_all()?.to_scalar::<f32>()?;
-                kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-
-                if config.stop.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        }
-
-        let llik_avg = llik_tot / count_tot;
-        llik_trace.push(llik_avg);
-        kl_trace.push(kl_tot / n_tot as f32);
-
-        prog_bar.set_message(format!("llik={llik_avg:.3}"));
-        prog_bar.inc(1);
-
-        if log::log_enabled!(log::Level::Info) {
-            let gamma_str = encoder.gcn_gamma_vec()?.map_or(String::new(), |g| {
-                let l2 = g.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let max_abs = g.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-                let mean = g.iter().sum::<f32>() / (g.len().max(1) as f32);
-                format!(" ‖γ‖={l2:.3e} max|γ|={max_abs:.3e} mean(γ)={mean:+.3e}")
-            });
-            info!(
-                "[epoch {}] llik={} kl={}{}",
-                epoch,
-                llik_trace.last().unwrap(),
-                kl_trace.last().unwrap(),
-                gamma_str,
-            );
-        }
-
-        if config.stop.load(Ordering::SeqCst) {
-            prog_bar.finish_and_clear();
-            info!("Stopping early at epoch {epoch}");
-            timers.log_summary();
-            return Ok(TrainScores {
-                llik: llik_trace,
-                kl: kl_trace,
-            });
-        }
-    }
-
-    prog_bar.finish_and_clear();
-    info!("done mixed multi-level training");
-    timers.log_summary();
-    Ok(TrainScores {
-        llik: llik_trace,
-        kl: kl_trace,
-    })
-}
-
 /// Masked-imputation training (no ELBO / no KL) for the embedded topic model.
 ///
 /// Per minibatch, the cell's top-K genes are randomly split into **visible**
@@ -642,8 +309,6 @@ pub fn train_mixed(
 /// log-likelihood on masked positions only. No posterior, no KL → no
 /// posterior collapse. Pseudobulk masking also simulates the PB→single-cell
 /// sparsity the amortized encoder must handle at inference.
-///
-/// Separate from [`train_mixed`] (the ELBO path, kept for `pinto lc-etm`).
 pub fn train_masked(
     level_data: &[LevelData],
     encoder: &IndexedEmbeddingEncoder,
@@ -787,12 +452,7 @@ pub fn train_masked(
                 }
                 if anchor_active {
                     if let Some(prior) = config.anchor_prior_per_level.map(|p| &p[level]) {
-                        loss = apply_anchor_ce_from_logits(
-                            loss,
-                            &full_kd,
-                            prior,
-                            config.anchor_penalty,
-                        )?;
+                        loss = apply_anchor_ce(loss, &full_kd, prior, config.anchor_penalty)?;
                     }
                 }
 

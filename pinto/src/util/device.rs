@@ -1,9 +1,7 @@
-//! Compute-device selection, shared by every subcommand that runs a candle
-//! model.
+//! Compute-device selection for subcommands that run a candle model.
 //!
-//! Lives here rather than in `cage`'s `args.rs`, its only caller today, so a
-//! second command that needs a device can reach it without a cross-subcommand
-//! import.
+//! `cage` is the only such command today. This lives here rather than in its
+//! `args.rs` so a second one can reach it without a cross-subcommand import.
 
 use clap::ValueEnum;
 

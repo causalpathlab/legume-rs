@@ -1,14 +1,14 @@
 //! Shared SRT preprocessing pipeline.
 //!
-//! `lc`, `svd`, and `cage` all share the same opening sequence:
+//! `lc`, `dsvd`, and `cage` all share the same opening sequence:
 //! load → invariants → spatial-or-expression KNN → optional auto-batch →
 //! optional batch effects → optional NB Fisher gene weights.
 //! `preprocess_srt` extracts that once.
 //!
 //! `SrtCellPairs<'a>` borrows the `SparseIoVec` and `Mat`, so this bundle
-//! returns the *owned* data + graph and the caller builds
-//! `SrtCellPairs::with_graph_and_source(&pre.data_vec, &pre.coordinates,
-//! &pre.graph, pre.edge_source.as_deref())`.
+//! returns the *owned* data + graph, and the caller builds its pairs from
+//! `SrtCellPairs::with_graph`, passing the data, coordinates, graph and edge
+//! source it finds here.
 
 use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
 use crate::util::cell_pairs::{
