@@ -124,10 +124,14 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         default_value_t = 0.05,
-        help = "Westfall-Young FWER cutoff for edge participation in the JSON sidecar",
+        help = "FWER cutoff for the JSON sidecar; gates every LR figure pinto plot draws",
         long_help = "Westfall-Young FWER cutoff for the JSON sidecar.\n\
-                     A pair's edge participation is included below it.",
-        hide = true
+                     A row enters the sidecar when its FWER is below this\n\
+                     AND its restandardized z is positive,\n\
+                     meaning the pair is active in that stratum specifically.\n\
+                     The sidecar is what pinto plot renders,\n\
+                     so this cutoff gates every LR figure.\n\
+                     The parquet always carries the full table regardless."
     )]
     pub json_fwer_threshold: f32,
 }
