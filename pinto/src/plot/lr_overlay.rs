@@ -1460,7 +1460,9 @@ pub fn emit_lr_summary_per_community(
         if !args.lr_keep_homotypic && r.ligand == r.receptor {
             continue;
         }
-        by_c.entry(r.community).or_default().push(r);
+        // `community` is the directed stratum id in current sidecars;
+        // `lc_community()` is the real community (the ligand side).
+        by_c.entry(r.lc_community()).or_default().push(r);
     }
     if by_c.is_empty() {
         return Ok(());
@@ -1575,7 +1577,12 @@ pub fn emit_lr_summary_per_community(
 
         // FWER-survivors get the community's palette colour; the rest
         // fade toward white so they read as "tested but subordinate".
-        let k_max = lr.results.iter().map(|r| r.community).max().unwrap_or(0);
+        let k_max = lr
+            .results
+            .iter()
+            .map(|r| r.lc_community())
+            .max()
+            .unwrap_or(0);
         let k = palette_size_for(k_total, k_max);
         let colors_book = super::render::ColorBook::new(args, k);
         let community_color = if (c as usize) < k {

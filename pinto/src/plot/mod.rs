@@ -672,8 +672,15 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     // colours/labels can't be reconciled by the plot
                     // code in that case, only by the user re-running.
                     if let Some(k) = k_total {
-                        let lr_max =
-                            lr.results.iter().map(|r| r.community).max().unwrap_or(-1) as i64;
+                        // `community` is the directed stratum id in current
+                        // sidecars; compare real community ids or this fires
+                        // on every run with more strata than communities.
+                        let lr_max = lr
+                            .results
+                            .iter()
+                            .map(|r| r.lc_community())
+                            .max()
+                            .unwrap_or(-1) as i64;
                         if lr_max >= k as i64 {
                             log::warn!(
                                 "LR overlay: max community in {} is C{} but final propensity has K={}. \

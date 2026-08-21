@@ -266,6 +266,13 @@ pub struct SrtPlotArgs {
                      Its `outputs.lr_activity` field supplies the path. With neither present,\n\
                      the overlays are skipped silently.\n\
                      \n\
+                     Every LR figure draws only the sidecar's SIGNIFICANT rows:\n\
+                     FWER below the lr-activity run's threshold AND a positive\n\
+                     restandardized z, meaning the pair is active in that stratum\n\
+                     specifically, not tissue-wide. A run with strong but ubiquitous\n\
+                     pairs can therefore have FWER hits yet render nothing;\n\
+                     re-run lr-activity with --json-fwer-threshold to widen the set.\n\
+                     \n\
                      One overlay PDF is written per core and significant pair.\n\
                      --lr-top-pairs caps that by |z| within each stratum."
     )]
