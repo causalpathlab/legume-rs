@@ -408,6 +408,27 @@ pub fn compute_node_membership(
     counts
 }
 
+/// Dominant community per cell: the argmax of each propensity row, as one
+/// `f32` column ready to sit beside the propensity in a parquet. Ties go
+/// to the lowest index, matching `CommunityStrata`; an all-zero row maps
+/// to 0. Every `propensity.parquet` writer derives its `cluster` column
+/// here, so the three subcommands cannot drift apart on tie handling.
+pub fn dominant_cluster_rows(propensity: &Mat) -> Vec<f32> {
+    (0..propensity.nrows())
+        .map(|i| {
+            let mut best = 0usize;
+            let mut best_v = f32::NEG_INFINITY;
+            for (k, &v) in propensity.row(i).iter().enumerate() {
+                if v > best_v {
+                    best = k;
+                    best_v = v;
+                }
+            }
+            best as f32
+        })
+        .collect()
+}
+
 /// Row-wise Shannon entropy in nats: H(i) = -Σ_k p[i,k] · ln p[i,k].
 ///
 /// Treats `0 · ln 0 = 0`. Rows that sum to ~0 (zero-degree vertices, or
@@ -703,24 +724,16 @@ pub fn compute_propensity_and_gene_community_stat(
     let cell_names = data_vec.column_names()?;
 
     // Dominant cluster per cell (argmax of propensity)
-    let cluster_col: Vec<f32> = (0..n_cells)
-        .map(|i| {
-            cell_propensity
-                .row(i)
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .map(|(k, _)| k as f32)
-                .unwrap_or(0.0)
-        })
-        .collect();
+    let cluster_col = dominant_cluster_rows(&cell_propensity);
     let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
 
     let entropy_vec = shannon_entropy_rows(&cell_propensity);
     let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
 
+    // `C{c}` community names, the shared propensity schema. `lc` and
+    // `prop` write the same layout, and plot's reader keys on the names.
     let mut col_names: Vec<Box<str>> = (0..n_clusters)
-        .map(|i| i.to_string().into_boxed_str())
+        .map(|i| format!("C{i}").into_boxed_str())
         .collect();
     col_names.push("cluster".into());
     col_names.push("entropy".into());

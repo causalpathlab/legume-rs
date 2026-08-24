@@ -49,6 +49,22 @@ pub struct SrtLrActivityArgs {
     )]
     pub preload_data: bool,
 
+    // Documentation-only: `--from` is expanded and REMOVED by
+    // `expand_lra_from_metadata` in main.rs before clap parses the
+    // command line, so this field is never populated at runtime. It is
+    // declared so `--help` lists the flag beside the args it fills in.
+    #[arg(
+        long,
+        short = 'f',
+        value_name = "PINTO_JSON",
+        help = "Read the data files, --lc-prefix and --out from a prior run's .pinto.json",
+        long_help = "Read inputs from a prior `pinto lc` run's .pinto.json metadata.\n\
+                     Auto-fills --lc-prefix, --out (= {prefix}.lra),\n\
+                     and the positional data files.\n\
+                     Anything passed explicitly on the command line wins."
+    )]
+    pub from: Option<Box<str>>,
+
     #[arg(
         long,
         required = true,
