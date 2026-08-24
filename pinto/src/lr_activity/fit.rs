@@ -288,43 +288,6 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         args.min_gene_count
     );
 
-    //////////////////////////////////////////
-    // 5. Cell→community soft membership    //
-    //////////////////////////////////////////
-    info!("Building cell→community soft membership...");
-    let p_member = strata_map.memberships(&edges, n_cells);
-
-    ////////////////////////////////////////////////////
-    // 6. Per-cell batch label (modal incident batch) //
-    ////////////////////////////////////////////////////
-    let cell_batch = derive_cell_batch_labels(&edges, n_cells);
-
-    ///////////////////////////////////////////////////
-    // 7. Random projection + propensity binary-sort //
-    ///////////////////////////////////////////////////
-    info!(
-        "Random projection (dim {}) + propensity binary-sort...",
-        args.propensity_dim
-    );
-    let proj = data_vec.project_columns_with_batch_correction(
-        args.propensity_dim,
-        c.block_size,
-        Some(&cell_batch),
-    )?;
-    let propbin = binary_sort_columns(&proj.proj, args.propensity_dim)?;
-    let (sample_id_per_cell, sample_batch_label, sample_propbin) =
-        assign_samples(&cell_batch, &propbin);
-    let n_samples = sample_batch_label.len();
-    info!(
-        "{} pseudobulk samples across {} batches",
-        n_samples,
-        sample_batch_label
-            .iter()
-            .map(|b| b.as_ref())
-            .collect::<HashSet<_>>()
-            .len()
-    );
-
     //////////////////////////////////////////////////
     // 8. Read just the LR-gene rows (dense, small) //
     //////////////////////////////////////////////////
@@ -363,6 +326,93 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             dst[local] += src[r];
         }
     });
+
+    ///////////////////////////////////////////////////////////
+    // Descriptive mode: per-batch edge scores, then done.   //
+    ///////////////////////////////////////////////////////////
+    if args.edge_scores_only {
+        use crate::lr_activity::edge_scores::*;
+
+        let distinct: HashSet<&str> = edges.iter().filter_map(|e| e.3.as_deref()).collect();
+        // A label set that is entirely numeric is the fingerprint of a
+        // coord_pairs table from before batch labels were exported as
+        // strings: the numbers are a spatial offset, not identities, and a
+        // score matrix keyed by them cannot be joined to anything.
+        if !distinct.is_empty() && distinct.iter().all(|b| b.parse::<f64>().is_ok()) {
+            warn!(
+                "batch labels {:?} are all numeric; this looks like a run from \
+                 before batch labels were exported. The scores will be keyed by \
+                 a meaningless offset; re-run `pinto lc` to get identifiable \
+                 batch labels.",
+                distinct
+            );
+        }
+
+        info!("Computing per-cell log1p depth...");
+        let log_depth = per_cell_log1p_depth(&data_vec, c.block_size)?;
+
+        info!(
+            "Scoring {} LR pairs on the edges of {} strata...",
+            real_pairs.len(),
+            strata_map.n_strata()
+        );
+        let (score_rows, n_straddling) = compute_edge_scores(&EdgeScoresInput {
+            edges: &edges,
+            strata: &strata_map,
+            pairs: &real_pairs,
+            gene_to_local: &gene_to_local,
+            x_lr: &x_lr,
+            log_depth: &log_depth,
+        });
+        if n_straddling > 0 {
+            info!(
+                "Dropped {} straddling edges (endpoint batch labels differ); \
+                 a contact belonging to no single batch scores in none",
+                n_straddling
+            );
+        }
+        let out_path = format!("{}.lr_scores.parquet", &c.out);
+        write_edge_scores(&c.out, &score_rows)?;
+        info!("Wrote {} score rows to {}", score_rows.len(), out_path);
+        return Ok(());
+    }
+
+    //////////////////////////////////////////
+    // 5. Cell→community soft membership    //
+    //////////////////////////////////////////
+    info!("Building cell→community soft membership...");
+    let p_member = strata_map.memberships(&edges, n_cells);
+
+    ////////////////////////////////////////////////////
+    // 6. Per-cell batch label (modal incident batch) //
+    ////////////////////////////////////////////////////
+    let cell_batch = derive_cell_batch_labels(&edges, n_cells);
+
+    ///////////////////////////////////////////////////
+    // 7. Random projection + propensity binary-sort //
+    ///////////////////////////////////////////////////
+    info!(
+        "Random projection (dim {}) + propensity binary-sort...",
+        args.propensity_dim
+    );
+    let proj = data_vec.project_columns_with_batch_correction(
+        args.propensity_dim,
+        c.block_size,
+        Some(&cell_batch),
+    )?;
+    let propbin = binary_sort_columns(&proj.proj, args.propensity_dim)?;
+    let (sample_id_per_cell, sample_batch_label, sample_propbin) =
+        assign_samples(&cell_batch, &propbin);
+    let n_samples = sample_batch_label.len();
+    info!(
+        "{} pseudobulk samples across {} batches",
+        n_samples,
+        sample_batch_label
+            .iter()
+            .map(|b| b.as_ref())
+            .collect::<HashSet<_>>()
+            .len()
+    );
 
     // Fisher weight is multiplicative on pb_mean *before* log1p — without
     // the non-linear log step it would cancel out of any correlation /
