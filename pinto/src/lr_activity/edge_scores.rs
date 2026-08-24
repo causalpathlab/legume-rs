@@ -1,26 +1,41 @@
-//! Descriptive per-batch LR edge scores (`pinto lra --edge-scores-only`).
+//! Descriptive per-batch LR contact-association scores
+//! (`pinto lra --edge-scores-only`).
 //!
-//! No test, no null: each row is a summary of what the spatial contacts of
-//! one link community in one batch express, meant to be pivoted into a
-//! batch × (pair, community) phenotype matrix and analyzed elsewhere. With
-//! `ℓ(u) = log1p(x_L(u))`, `r(v) = log1p(x_R(v))`, over BOTH orientations
-//! of the community's spatial edges inside the batch:
+//! The estimand: the probability that a ligand and a receptor are
+//! co-expressed across a physical contact of one link community, BEYOND
+//! each side's independent activity. Per (batch, community, pair), every
+//! contact contributes both orientations, and each instance is classified
+//! by detection at its two endpoints into a 2x2 table:
 //!
 //! ```text
-//! product  = mean ℓ(u)·r(v)
-//! coupling = mean ℓ(u)·r(v) − mean ℓ(u) · mean r(v)
+//!                receptor+ (2nd)   receptor- (2nd)
+//! ligand+ (1st)      n11               n10
+//! ligand- (1st)      n01               n00
 //! ```
 //!
-//! The plain product is abundance-driven, dominated by marginal expression
-//! and collinear across pairs sharing a gene; the centered coupling
-//! isolates contact-level co-variation. Both ship, the analysis picks.
-//! Both-orientation enumeration makes `score(L,R) = score(R,L)` structural.
+//! The score is the posterior log odds ratio under a Jeffreys-style
+//! Dirichlet(1/2) prior (the classic +1/2 in every cell), with its
+//! posterior standard error:
 //!
-//! Deliberately plain `log1p` counts: inference-side precision weights
-//! would make the phenotype opaque. Depth is a COVARIATE instead — each
-//! row carries `n_edges` and the mean per-cell `log1p` depth of its
-//! participating cells, and the downstream analysis should filter or
-//! weight on them (no threshold is applied here, by policy).
+//! ```text
+//! log_or    = ln[(n11+.5)(n00+.5) / ((n10+.5)(n01+.5))]
+//! log_or_se = sqrt(1/(n11+.5) + 1/(n10+.5) + 1/(n01+.5) + 1/(n00+.5))
+//! ```
+//!
+//! Both-orientation enumeration transposes the table under a ligand to
+//! receptor swap, and the odds ratio is transpose-invariant, so
+//! `log_or(L,R) = log_or(R,L)` is structural. The margins ship beside it
+//! as `lig_rate` / `rec_rate`: each side's independent activity at these
+//! contacts, which the downstream analysis needs as covariates to isolate
+//! the interaction, and which are activity phenotypes in their own right.
+//!
+//! Detection (count > 0) deliberately replaces magnitude: on measured
+//! split-half reliability the magnitude-weighted means came out near
+//! noise while the detection log-odds held ~0.9, and ~0.7 after removing
+//! the margins from both halves. A pair with no co-detected contacts
+//! still gets a finite score, but `log_or_se` blows up, which is the
+//! honest flag; filter or precision-weight on it downstream (no
+//! threshold is applied here, by policy).
 
 use crate::lr_activity::fit::BATCH_LABEL_ALL;
 use crate::lr_activity::orientation::CommunityStrata;
@@ -38,8 +53,17 @@ pub struct EdgeScoreRow {
     pub n_edges: u32,
     /// Mean `log1p` total count over the unique cells the edges touch.
     pub mean_log_depth: f32,
-    pub product: f32,
-    pub coupling: f32,
+    /// Fraction of contact instances with the ligand detected at the
+    /// first endpoint.
+    pub lig_rate: f32,
+    /// Fraction of contact instances with the receptor detected at the
+    /// second endpoint.
+    pub rec_rate: f32,
+    /// Posterior log odds ratio of co-detection across a contact.
+    pub log_or: f32,
+    /// Its posterior standard error; large when the pair is unmeasurable
+    /// in this stratum (few or no co-detected contacts).
+    pub log_or_se: f32,
 }
 
 pub struct EdgeScoresInput<'a> {
@@ -72,8 +96,6 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
     // Multi-batch iff any edge carries a label; with none on file the run
     // is single-batch and every edge belongs to the `all` pseudo-batch.
     let multi_batch = edges.iter().any(|e| e.3.is_some());
-
-    let x_log = x_lr.map(|v| v.ln_1p());
 
     let mut rows: Vec<EdgeScoreRow> = Vec::new();
     let mut n_straddling = 0usize;
@@ -117,19 +139,17 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                 .map(|(ligand, receptor, gl, gr)| {
                     let li = gene_to_local[gl];
                     let ri = gene_to_local[gr];
-                    let mut sp = 0f64;
-                    let mut sl = 0f64;
-                    let mut sr = 0f64;
+                    let mut n11 = 0usize;
+                    let mut n_l = 0usize;
+                    let mut n_r = 0usize;
                     for (&u, &v) in us.iter().zip(vs.iter()) {
-                        let l = x_log[(li, u)] as f64;
-                        let r = x_log[(ri, v)] as f64;
-                        sp += l * r;
-                        sl += l;
-                        sr += r;
+                        let lp = x_lr[(li, u)] > 0.0;
+                        let rp = x_lr[(ri, v)] > 0.0;
+                        n_l += lp as usize;
+                        n_r += rp as usize;
+                        n11 += (lp && rp) as usize;
                     }
-                    let nf = n as f64;
-                    let product = sp / nf;
-                    let coupling = product - (sl / nf) * (sr / nf);
+                    let (log_or, log_or_se) = jeffreys_log_odds(n, n11, n_l, n_r);
                     EdgeScoreRow {
                         batch: batch.clone(),
                         community,
@@ -137,8 +157,10 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                         receptor: receptor.clone(),
                         n_edges: (n / 2) as u32,
                         mean_log_depth,
-                        product: product as f32,
-                        coupling: coupling as f32,
+                        lig_rate: n_l as f32 / n as f32,
+                        rec_rate: n_r as f32 / n as f32,
+                        log_or,
+                        log_or_se,
                     }
                 })
                 .collect();
@@ -146,6 +168,24 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
         }
     }
     (rows, n_straddling)
+}
+
+/// Posterior log odds ratio of the 2x2 contact table and its posterior
+/// standard error, under a Dirichlet(1/2) prior (+1/2 in every cell).
+///
+/// The +1/2 is a PRIOR, not a convenience floor: it makes the estimate a
+/// posterior mean, finite for empty cells, while the SE grows to say how
+/// little the data constrained it.
+pub(crate) fn jeffreys_log_odds(n: usize, n11: usize, n_l: usize, n_r: usize) -> (f32, f32) {
+    let a = n11 as f64 + 0.5;
+    let b = (n_l - n11) as f64 + 0.5; // ligand only
+    let c = (n_r - n11) as f64 + 0.5; // receptor only
+                                      // Sum before subtracting: n + n11 >= n_l + n_r always (n00 >= 0),
+                                      // but the left-to-right order would underflow usize.
+    let d = (n + n11 - n_l - n_r) as f64 + 0.5; // neither
+    let log_or = ((a * d) / (b * c)).ln();
+    let se = (1.0 / a + 1.0 / b + 1.0 / c + 1.0 / d).sqrt();
+    (log_or as f32, se as f32)
 }
 
 /// Write `{out}.lr_scores.parquet`, long format: one row per
@@ -159,8 +199,10 @@ pub fn write_edge_scores(out_prefix: &str, rows: &[EdgeScoreRow]) -> anyhow::Res
     let receptor: Vec<Box<str>> = rows.iter().map(|r| r.receptor.clone()).collect();
     let n_edges: Vec<i32> = rows.iter().map(|r| r.n_edges as i32).collect();
     let mean_log_depth: Vec<f32> = rows.iter().map(|r| r.mean_log_depth).collect();
-    let product: Vec<f32> = rows.iter().map(|r| r.product).collect();
-    let coupling: Vec<f32> = rows.iter().map(|r| r.coupling).collect();
+    let lig_rate: Vec<f32> = rows.iter().map(|r| r.lig_rate).collect();
+    let rec_rate: Vec<f32> = rows.iter().map(|r| r.rec_rate).collect();
+    let log_or: Vec<f32> = rows.iter().map(|r| r.log_or).collect();
+    let log_or_se: Vec<f32> = rows.iter().map(|r| r.log_or_se).collect();
     let row_names: Vec<Box<str>> = (0..rows.len())
         .map(|i| i.to_string().into_boxed_str())
         .collect();
@@ -176,8 +218,10 @@ pub fn write_edge_scores(out_prefix: &str, rows: &[EdgeScoreRow]) -> anyhow::Res
             ("receptor".into(), Column::Str(&receptor)),
             ("n_edges".into(), Column::I32(&n_edges)),
             ("mean_log_depth".into(), Column::F32(&mean_log_depth)),
-            ("product".into(), Column::F32(&product)),
-            ("coupling".into(), Column::F32(&coupling)),
+            ("lig_rate".into(), Column::F32(&lig_rate)),
+            ("rec_rate".into(), Column::F32(&rec_rate)),
+            ("log_or".into(), Column::F32(&log_or)),
+            ("log_or_se".into(), Column::F32(&log_or_se)),
         ],
     )
 }
