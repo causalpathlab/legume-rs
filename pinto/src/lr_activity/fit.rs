@@ -775,7 +775,7 @@ fn stratum_present(collapse: &CollapseOut, c: usize, samples: &[usize]) -> bool 
 /// (2) tied-zero samples (zero-inflated pseudobulks) contribute 0 to the
 /// running sum instead of the spurious ±1 inflation that correlation
 /// suffers when zero-patterns co-occur. Returns NaN when weights sum to 0.
-fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
+pub(crate) fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
     let mut sw = 0.0f32;
     let mut sl = 0.0f32;
     let mut sr = 0.0f32;
@@ -794,6 +794,79 @@ fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
         cov += w[k] * (l[k] - ml) * (r[k] - mr);
     }
     cov / sw
+}
+
+/// Whether a pair carries no testable hypothesis in this stratum.
+///
+/// [`weighted_cov`] is identically zero when either side has no weighted
+/// variance, so the pair cannot reject at any threshold no matter what the
+/// other side does. Such a pair must not be scored: it would pay multiplicity
+/// in the Westfall-Young family, drag the MAD that scales every other pair's
+/// `z_re`, and ship a row that reads as a measured null.
+///
+/// Keys on the OBSERVED side only, where degeneracy is decidable. The older
+/// guard keyed on `t_obs == 0 && null_sd == 0`, which never fired: the null is
+/// built from fresh posterior draws that fluctuate even where the observed
+/// posterior mean is flat, so `null_sd` was comfortably positive.
+///
+/// Exact absence of variance, deliberately, not a magnitude threshold — a
+/// small real signal is still a hypothesis, and shrinking it away here would
+/// be a silent power cut rather than an exclusion of the untestable.
+pub(crate) fn is_degenerate_pair(l: &[f32], r: &[f32], w: &[f32]) -> bool {
+    let mut sw = 0.0f32;
+    let mut sl = 0.0f32;
+    let mut sr = 0.0f32;
+    for k in 0..l.len() {
+        sw += w[k];
+        sl += w[k] * l[k];
+        sr += w[k] * r[k];
+    }
+    if sw <= EPS {
+        // No weight at all: `weighted_cov` returns NaN, not a measured zero.
+        return true;
+    }
+    let (ml, mr) = (sl / sw, sr / sw);
+    // Weighted variance of each side. A side with none forces cov = 0, and a
+    // sample carrying zero weight cannot supply variation.
+    let mut vl = 0.0f32;
+    let mut vr = 0.0f32;
+    // Whether ANY weighted sample deviates from the mean on BOTH sides at
+    // once. Marginal variance is not enough: two genes detected in disjoint
+    // samples each vary, yet every term of the covariance sum carries a zero
+    // factor, so no sample can contribute evidence about the pair. That case
+    // is common in sparse strata and is an absent measurement, not a null.
+    let mut any_contributes = false;
+    for k in 0..l.len() {
+        let (dl, dr) = (l[k] - ml, r[k] - mr);
+        vl += w[k] * dl * dl;
+        vr += w[k] * dr * dr;
+        if w[k] > 0.0 && dl != 0.0 && dr != 0.0 {
+            any_contributes = true;
+        }
+    }
+    vl <= 0.0 || vr <= 0.0 || !any_contributes
+}
+
+/// Whether a pair carries no testable hypothesis, structurally or numerically.
+///
+/// Wraps [`is_degenerate_pair`] with the case that predicate cannot see: a
+/// near-floor gene can leave both sides varying and samples co-deviating,
+/// while the few real contributions cancel to bit-exact zero. Measured on a
+/// full-database run, this is what every surviving zero statistic was. A genuine effect never lands
+/// on exactly `0.0` — it lands near it — so an exactly-zero statistic means
+/// no measurable signal either way.
+///
+/// Accepted trade-off: an exactly-orthogonal pair, whose contributions cancel
+/// to the last bit, is also dropped. That is a measured null rather than an
+/// absent measurement, but it has probability ~0 on real `f32` data (it shows
+/// up only in hand-built fixtures), and admitting it would mean keeping every
+/// underflowed pair instead.
+pub(crate) fn pair_is_untestable(l: &[f32], r: &[f32], w: &[f32]) -> bool {
+    if is_degenerate_pair(l, r, w) {
+        return true;
+    }
+    let t = weighted_cov(l, r, w);
+    !t.is_finite() || t == 0.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -904,10 +977,14 @@ fn score_pairs_for_stratum(
                 .iter()
                 .map(|&s| collapse.log_mean_recv[c][(r_local, s)])
                 .collect();
-            let t_obs = weighted_cov(&l_vec, &r_vec, &w_pair);
-            if !t_obs.is_finite() {
+            // A side with no weighted variance makes the covariance
+            // identically zero: not a null result, an absent measurement.
+            // Dropping it here keeps it out of the scored rows, the WY family
+            // and the restandardization moments in one place.
+            if pair_is_untestable(&l_vec, &r_vec, &w_pair) {
                 return None;
             }
+            let t_obs = weighted_cov(&l_vec, &r_vec, &w_pair);
             Some(PairCtx {
                 l_local,
                 r_local,
