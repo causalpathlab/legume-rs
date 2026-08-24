@@ -209,7 +209,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      \n\
                      Set this to sample the two gates independently.\n\
                      It is an A/B arm, not a tuning knob.\n\
-                     `senna gem` nests by default for the same reason."
+                     `senna gem` nests by default for the same reason.",
+        hide = true
     )]
     pub independent_delta_gate: bool,
 
@@ -313,7 +314,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      step, that sets how many steps an epoch takes.\n\
                      \n\
                      --genes-per-epoch is the coarse alternative:\n\
-                     it drops genes rather than sampling each one less."
+                     it drops genes rather than sampling each one less.",
+        hide = true
     )]
     pub positives_per_epoch: Option<usize>,
 
@@ -468,7 +470,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Gradients are scaled to this norm when they exceed it,\n\
                      which bounds the update without turning it.\n\
                      A step whose global norm is not finite is skipped.\n\
-                     Pass 0 to disable clipping."
+                     Pass 0 to disable clipping.",
+        hide = true
     )]
     pub grad_clip: f32,
 
@@ -531,7 +534,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      SGNS is a sum of per-pair decisions, with no logsumexp.\n\
                      geu makes the same pairing a hard error under --posterior.\n\
                      cage permits it, because its pip is a dropout rate rather\n\
-                     than a reported posterior, but it is the off-label choice."
+                     than a reported posterior, but it is the off-label choice.",
+        hide = true
     )]
     pub nce_objective: NceObjectiveArg,
 
@@ -605,14 +609,16 @@ pub struct CellActivityGraphEmbeddingArgs {
                      multiplier, where Gibbs resurrects one from a likelihood ratio.\n\
                      \n\
                      Rejected under --gate-mode sampled, where the sampler draws the\n\
-                     mask from its own IBP and no learned gate exists to tilt."
+                     mask from its own IBP and no learned gate exists to tilt.",
+        hide = true
     )]
     pub gate_ibp_alpha: Option<f64>,
 
     #[arg(
         long = "feature-gate-temp",
         default_value_t = 1.0,
-        help = "Learned-gate temperature τ; < 1 sharpens toward 0/1 (--gate-mode learned only)"
+        help = "Learned-gate temperature τ; < 1 sharpens toward 0/1 (--gate-mode learned only)",
+        hide = true
     )]
     pub feature_gate_temp: f32,
 

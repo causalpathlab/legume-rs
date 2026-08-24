@@ -211,7 +211,8 @@ pub struct SrtLinkCommunityArgs {
                      \n\
                      Raising N past the community count is refused:\n\
                      below that the dictionary is rank-deficient\n\
-                     and every pair looks identical."
+                     and every pair looks identical.",
+        hide = true
     )]
     pub merge_min_nnz: Option<usize>,
 
