@@ -3,7 +3,7 @@
 
 use crate::link_community::dict_merge::BhcMerge;
 use crate::link_community::profiles::{
-    compute_node_membership, fit_gene_community_param, shannon_entropy_rows,
+    compute_node_membership, dominant_cluster_rows, fit_gene_community_param, shannon_entropy_rows,
     write_gene_community_param,
 };
 use crate::util::common::*;
@@ -246,16 +246,22 @@ pub fn write_propensity_parquet(
 ) -> anyhow::Result<Mat> {
     let propensity = compute_node_membership(edges, fine_labels, n_cells, k);
 
+    let cluster_col = dominant_cluster_rows(&propensity);
+    let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
+
     let entropy_vec = shannon_entropy_rows(&propensity);
     let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
 
     // `C{c}` prefix names the community axis explicitly, so the reader
     // can identify community columns by name pattern instead of by
     // exclusion (a coord column named "0" would otherwise be misread).
+    // `cell, C0.., cluster, entropy` is the one propensity schema all
+    // three writers (lc, cage, prop) share.
     let mut col_names: Vec<Box<str>> = (0..k).map(|i| format!("C{i}").into_boxed_str()).collect();
+    col_names.push("cluster".into());
     col_names.push("entropy".into());
 
-    let combined = concatenate_horizontal(&[propensity.clone(), entropy_mat])?;
+    let combined = concatenate_horizontal(&[propensity.clone(), cluster_mat, entropy_mat])?;
     combined.to_parquet_with_names(
         &format!("{}.propensity.parquet", prefix),
         (Some(cell_names), Some("cell")),

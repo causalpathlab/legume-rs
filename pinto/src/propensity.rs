@@ -176,14 +176,12 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
 
     prop_kn.sum_to_one_columns_inplace();
 
-    // Dominant cluster per vertex (argmax of propensity)
-    let cluster_col: Vec<f32> = (0..nvertices)
-        .map(|j| prop_kn.column(j).iamax() as f32)
-        .collect();
-    let cluster_mat = Mat::from_column_slice(nvertices, 1, &cluster_col);
-
     // Propensity output (optionally with coordinates)
     let prop_nk = prop_kn.transpose();
+
+    // Dominant cluster per vertex (argmax of propensity)
+    let cluster_col = crate::link_community::profiles::dominant_cluster_rows(&prop_nk);
+    let cluster_mat = Mat::from_column_slice(nvertices, 1, &cluster_col);
 
     // Per-vertex Shannon entropy of the propensity distribution.
     let entropy_vec = crate::link_community::profiles::shannon_entropy_rows(&prop_nk);

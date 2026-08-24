@@ -177,16 +177,16 @@ enum Commands {
                       \x20 5. dominant_cluster[i] = argmax_k p_i[k]\n\
                       \x20 6. If expression data provided:\n\
                       \x20    weighted gene sums per cluster -> Poisson-Gamma\n\n\
-                      Inputs:\n\
-                      - .latent.parquet (from cage or delta-svd)\n\
-                      - .coord_pairs.parquet (cell pair names)\n\
-                      - Optionally, expression data (.zarr or .h5)\n\n\
+                      Inputs (all passed by flag; there is no positional arg):\n\
+                      - -z/--latent-data-file: .latent.parquet (from cage or delta-svd)\n\
+                      - -e/--coord-pair-file: .coord_pairs.parquet (cell pair names)\n\
+                      - -d/--expr-data-files: expression data (.zarr or .h5), optional\n\n\
                       Outputs:\n\
                       - {out}.propensity.parquet: per-vertex propensity (N x K)\n\
                       \x20 Columns: C0 .. C{K-1}, cluster (argmax),\n\
                       \x20 entropy (Shannon, nats), plus optional coord trailer.\n\
                       - {out}.link_community.parquet: per-edge community labels\n\
-                      - {out}.genes.parquet: cluster-specific gene expression (when expr_data_files provided).\n\
+                      - {out}.genes.parquet: cluster-specific gene expression (with -d/--expr-data-files).\n\
                       \x20 Rows are scaled by the NB Fisher-info weight\n\
                       \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g)). There is no flag for it.\n\
                       - {out}.pinto.json: information-flow manifest used by\n\
