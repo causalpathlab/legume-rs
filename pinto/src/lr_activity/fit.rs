@@ -757,6 +757,44 @@ pub(crate) fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
     cov / sw
 }
 
+/// Robust median of a slice; `None` when empty. NaN-tolerant ordering.
+fn robust_median(v: &[f32]) -> Option<f32> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut buf = v.to_vec();
+    let mid = buf.len() / 2;
+    let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    let (_, m, _) = buf.select_nth_unstable_by(mid, cmp);
+    Some(*m)
+}
+
+/// The Efron-Tibshirani restandardization scale for a stratum, or `None`
+/// when the stratum cannot calibrate one.
+///
+/// `z_re` asks whether a pair stands out against the OTHER pairs in its
+/// stratum, so the cross-pair spread must be commensurate with a single
+/// pair's own permutation noise. When every pair sits in one tight clump the
+/// clump's width is a shared noise floor, and dividing by it manufactures
+/// astronomical significance for trivial values: a real run produced
+/// `z_re = 12.3, p_re = 1e-34` on a pair whose own permutation p was 0.42.
+///
+/// The guard is scale-RELATIVE — `1.4826 * MAD >= 0.1 * median(null_sd)` —
+/// never an absolute floor, which its predecessor was: an absolute floor
+/// both passes the failure above (its MAD sat just over the constant) and
+/// wrongly flags healthy strata measured in small units. The 0.1 sits an
+/// order of magnitude below every healthy stratum measured (0.32-1.98 on
+/// the reference run) and an order above the failure case (~0.02).
+pub(crate) fn restandardization_scale(stats: &[f32], null_sds: &[f32]) -> Option<f32> {
+    let med = robust_median(stats)?;
+    let abs_dev: Vec<f32> = stats.iter().map(|&v| (v - med).abs()).collect();
+    let mad = robust_median(&abs_dev)?;
+    // 1.4826 is the standard normal-consistent MAD scaling.
+    let sigma_emp = 1.4826 * mad;
+    let noise = robust_median(null_sds)?;
+    (sigma_emp.is_finite() && noise.is_finite() && sigma_emp >= 0.1 * noise).then_some(sigma_emp)
+}
+
 /// The weighted covariance, or `None` when the pair carries no testable
 /// hypothesis in this stratum.
 ///
@@ -1072,34 +1110,19 @@ fn score_pairs_for_stratum(
         pair_results.into_iter().unzip();
 
     // Efron-Tibshirani restandardization: re-center / re-scale stat_obs
-    // against the across-pair empirical null bulk in this stratum, using
-    // robust moments (median, MAD). Bypasses the per-pair permutation σ
-    // calibration issues. Degenerate pairs (constant L or R → t_obs = 0,
-    // null_sd = 0; flagged via NaN `z` upstream) are excluded both from
-    // moment estimation (else MAD collapses to 0 and σ_emp pegs at the
-    // floor) and from receiving z_re / p_re.
-    let mut stats: Vec<f32> = rows
+    // against the across-pair empirical bulk in this stratum, using robust
+    // moments (median, MAD). Untestable pairs never got a row, so every row
+    // with a finite z participates. The scale is guarded relative to the
+    // pairs' own permutation noise — see `restandardization_scale`.
+    let finite: Vec<&LrActivityRow> = rows
         .iter()
-        .filter(|r: &&LrActivityRow| r.stat_obs.is_finite() && r.z.is_finite())
-        .map(|r| r.stat_obs)
+        .filter(|r| r.stat_obs.is_finite() && r.z.is_finite())
         .collect();
-    if !stats.is_empty() {
-        let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-        let mid = stats.len() / 2;
-        let (_, med_ref, _) = stats.select_nth_unstable_by(mid, cmp);
-        let med = *med_ref;
-        let mut abs_dev: Vec<f32> = stats.iter().map(|&v| (v - med).abs()).collect();
-        let mid = abs_dev.len() / 2;
-        let (_, mad_ref, _) = abs_dev.select_nth_unstable_by(mid, cmp);
-        let mad = *mad_ref;
-        // If MAD is too small, the empirical null has insufficient spread
-        // to calibrate against — σ_emp would shrink toward the floor and
-        // tiny |stat_obs - med| differences produce extreme z_re values.
-        // Common in sparse/small communities where most pairs collapse to
-        // stat_obs ≈ 0. Leave the stratum's z_re / p_re NaN; WY skips it.
-        if mad > 1e-4 {
-            // 1.4826 is the standard normal-consistent MAD scaling.
-            let sigma_emp = 1.4826 * mad;
+    let stats: Vec<f32> = finite.iter().map(|r| r.stat_obs).collect();
+    let null_sds: Vec<f32> = finite.iter().map(|r| r.null_sd).collect();
+    match restandardization_scale(&stats, &null_sds) {
+        Some(sigma_emp) => {
+            let med = robust_median(&stats).expect("stats nonempty when scale exists");
             for r in rows.iter_mut() {
                 if r.stat_obs.is_finite() && r.z.is_finite() {
                     let zr = (r.stat_obs - med) / sigma_emp;
@@ -1112,6 +1135,17 @@ fn score_pairs_for_stratum(
                     let p_two = 2.0 * one_sided_p_z(zr.abs());
                     r.p_re = p_two.min(1.0);
                 }
+            }
+        }
+        None => {
+            if !stats.is_empty() {
+                warn!(
+                    "stratum {}: cross-pair spread is too small against the pairs' own \
+                     permutation noise to calibrate restandardization; z_re and p_re \
+                     withheld (NaN) for its {} pairs",
+                    stratum_id,
+                    stats.len()
+                );
             }
         }
     }
