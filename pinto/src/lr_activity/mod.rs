@@ -51,6 +51,7 @@
 //! Dimitrov 2022 *Nat Commun* 13:3224 for the field benchmark.
 
 pub mod args;
+pub mod edge_scores;
 pub mod fit;
 pub mod io;
 pub mod orientation;

@@ -181,6 +181,22 @@ pub struct SrtLrActivityArgs {
 
     #[arg(
         long,
+        default_value_t = false,
+        help = "Skip the permutation test; write descriptive per-batch edge scores instead",
+        long_help = "Skip the permutation machinery entirely.\n\
+                     Instead, write {out}.lr_scores.parquet:\n\
+                     one row per (batch, community, ligand, receptor),\n\
+                     scoring the LR pair on the spatial contacts of that\n\
+                     link community inside that batch.\n\
+                     No test and no null is attached; the table is meant to be\n\
+                     pivoted into a batch x (pair, community) phenotype matrix.\n\
+                     Test-only flags (--n-permutations and friends) are unused\n\
+                     in this mode."
+    )]
+    pub edge_scores_only: bool,
+
+    #[arg(
+        long,
         default_value_t = 0.05,
         help = "FWER cutoff for the JSON sidecar; gates every LR figure pinto plot draws",
         long_help = "Westfall-Young FWER cutoff for the JSON sidecar.\n\
