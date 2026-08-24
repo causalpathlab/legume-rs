@@ -796,6 +796,21 @@ pub(crate) fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
     cov / sw
 }
 
+/// Map a permuted POSITION within a stratum's sample list back to the global
+/// sample id the rate matrices are indexed by.
+///
+/// The two index spaces coincide only when a stratum holds every sample in
+/// order — the single-batch case. A per-batch stratum holds a filtered subset,
+/// where treating a global id as a position reads out of bounds, or silently
+/// permutes the wrong samples when it happens to stay in range.
+pub(crate) fn permuted_global_id(
+    samples_in_stratum: &[usize],
+    sigma: &[usize],
+    position: usize,
+) -> usize {
+    samples_in_stratum[sigma[position]]
+}
+
 /// Whether a pair carries no testable hypothesis in this stratum.
 ///
 /// [`weighted_cov`] is identically zero when either side has no weighted
@@ -1047,9 +1062,20 @@ fn score_pairs_for_stratum(
                     .map(|pc_opt| match pc_opt {
                         None => f32::NAN,
                         Some(pc) => {
-                            let l_perm: Vec<f32> = samples_in_stratum
-                                .iter()
-                                .map(|&s| log_s[(pc.l_local, sigma[s])])
+                            // `sigma` permutes POSITIONS within this stratum's
+                            // sample list, while the rate matrices are indexed
+                            // by GLOBAL sample id, so the permuted position has
+                            // to be mapped back through `samples_in_stratum`.
+                            // Indexing `sigma` with the global id instead only
+                            // coincided with the right answer when a stratum
+                            // held every sample in order, which is exactly the
+                            // single-batch case; with a per-batch subset it read
+                            // out of bounds.
+                            let l_perm: Vec<f32> = (0..n_s)
+                                .map(|k| {
+                                    let g = permuted_global_id(samples_in_stratum, sigma, k);
+                                    log_s[(pc.l_local, g)]
+                                })
                                 .collect();
                             let r_perm: Vec<f32> = samples_in_stratum
                                 .iter()

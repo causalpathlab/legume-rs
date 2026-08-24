@@ -150,3 +150,37 @@ fn exact_cancellation_is_untestable() {
     assert!(weighted_cov(&l, &r2, &w) > 0.5);
     assert!(!pair_is_untestable(&l, &r2, &w));
 }
+
+/// A stratum's samples are POSITIONS into its own list; the rate matrices are
+/// indexed by GLOBAL sample id. The two coincide only when a stratum holds
+/// every sample in order, which is the single-batch case — so a per-batch
+/// stratum, holding a filtered subset, is where conflating them breaks.
+#[test]
+fn a_permuted_position_maps_back_to_a_global_sample_id() {
+    use crate::lr_activity::fit::permuted_global_id;
+
+    // A second batch's samples: a subset, and deliberately none of them small
+    // enough to be mistaken for a valid position into a 4-long list.
+    let samples_in_stratum = [900usize, 901, 902, 903];
+    // Identity permutation: position k must map to that stratum's k-th sample.
+    let identity = [0usize, 1, 2, 3];
+    for k in 0..4 {
+        assert_eq!(
+            permuted_global_id(&samples_in_stratum, &identity, k),
+            samples_in_stratum[k]
+        );
+    }
+
+    // A real permutation reorders WITHIN the subset and never leaves it.
+    let sigma = [2usize, 0, 3, 1];
+    let got: Vec<usize> = (0..4)
+        .map(|k| permuted_global_id(&samples_in_stratum, &sigma, k))
+        .collect();
+    assert_eq!(got, vec![902, 900, 903, 901]);
+    for g in &got {
+        assert!(
+            samples_in_stratum.contains(g),
+            "a permutation must stay inside the stratum"
+        );
+    }
+}
