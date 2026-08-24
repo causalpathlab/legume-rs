@@ -175,8 +175,13 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     }
 
     // Wrap graph with data for pair-level operations
-    let srt_cell_pairs =
-        SrtCellPairs::with_graph(&data_vec, &coordinates, &graph, edge_source.as_deref());
+    let srt_cell_pairs = SrtCellPairs::with_graph(
+        &data_vec,
+        &coordinates,
+        &graph,
+        edge_source.as_deref(),
+        Some(&batch_membership),
+    );
 
     srt_cell_pairs.write_coord_pairs(&c.out, &coordinate_names)?;
 

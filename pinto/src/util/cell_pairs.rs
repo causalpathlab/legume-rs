@@ -32,6 +32,9 @@ pub fn edge_kind_code(source: matrix_util::knn_graph::EdgeSource) -> i32 {
     }
 }
 
+/// Per-endpoint label columns: one entry per pair, left then right.
+type PairLabels = (Vec<Box<str>>, Vec<Box<str>>);
+
 pub struct SrtCellPairs<'a> {
     /// The coordinate-free core: counts + the graph whose edges are the pairs.
     pub inner: CellPairs<'a>,
@@ -42,6 +45,11 @@ pub struct SrtCellPairs<'a> {
     /// graph was not augmented, in which case the column is not written at
     /// all and an unaugmented run stays byte-identical.
     pub edge_kind: Option<Vec<i32>>,
+    /// Per-cell batch membership labels (user-supplied, or component labels
+    /// from `--auto-batch`). Exported as string `left_batch` / `right_batch`
+    /// columns when more than one distinct label exists, so a downstream
+    /// consumer can identify which sample a pair belongs to by name.
+    pub batch_labels: Option<&'a [Box<str>]>,
 }
 
 pub struct SrtCellPairsArgs {
@@ -61,6 +69,7 @@ impl<'a> SrtCellPairs<'a> {
         coordinates: &'a Mat,
         graph: &'a KnnGraph,
         edge_source: Option<&[matrix_util::knn_graph::EdgeSource]>,
+        batch_labels: Option<&'a [Box<str>]>,
     ) -> SrtCellPairs<'a> {
         let mut inner = CellPairs::from_graph(data, graph);
         if edge_source.is_some() {
@@ -73,6 +82,7 @@ impl<'a> SrtCellPairs<'a> {
             inner,
             coordinates,
             edge_kind: edge_source.map(|src| src.iter().copied().map(edge_kind_code).collect()),
+            batch_labels,
         }
     }
 
@@ -112,11 +122,41 @@ impl<'a> SrtCellPairs<'a> {
             return Err(anyhow::anyhow!("invalid coordinate names"));
         }
 
-        let coords = self.pair_coordinate_columns(&coordinate_names);
+        // The `batch` pseudo-coordinate is internal scaffolding: it puts
+        // batches far apart in the spatial KNN search and lets the
+        // auto-batch fragment fold judge containment. It stays in
+        // `self.coordinates` for those jobs, but it must not be exported:
+        // writing the numeric offset as `left_batch` published junk under
+        // the very name readers use for the batch LABEL. The string label
+        // columns below carry the batch identity instead.
+        let exported: Vec<usize> = (0..coordinate_names.len())
+            .filter(|&j| coordinate_names[j].as_ref() != "batch")
+            .collect();
+
+        let coords = self.pair_coordinate_columns(&coordinate_names, &exported);
         let mut columns: Vec<(Box<str>, Column<'_>)> = coords
             .iter()
             .map(|(name, values)| (name.clone(), Column::F32(values)))
             .collect();
+
+        // Batch labels export as STRINGS, one per endpoint, so a core keeps
+        // the name the user (or --auto-batch) gave it. Written only when a
+        // second label exists; a single-batch table stays as it always was.
+        let pairs = self.inner.pairs();
+        let batch_cols: Option<PairLabels> = self.batch_labels.and_then(|labels| {
+            let uniq: HashSet<&str> = labels.iter().map(|b| b.as_ref()).collect();
+            (uniq.len() > 1).then(|| {
+                (
+                    pairs.iter().map(|&(l, _)| labels[l].clone()).collect(),
+                    pairs.iter().map(|&(_, r)| labels[r].clone()).collect(),
+                )
+            })
+        });
+        if let Some((lb, rb)) = batch_cols.as_ref() {
+            columns.push(("left_batch".into(), Column::Str(lb)));
+            columns.push(("right_batch".into(), Column::Str(rb)));
+        }
+
         // Unprefixed on purpose: the plot layer discovers coordinates by
         // scanning for a `left_` prefix, so `left_edge_kind` would be read
         // back as a coordinate.
@@ -124,21 +164,66 @@ impl<'a> SrtCellPairs<'a> {
             columns.push(("edge_kind".into(), Column::I32(kind)));
         }
 
+        // An augmented graph's weight column is `distance_rank` (physical
+        // and embedding distances are not one unit, so the union keeps
+        // within-source quantile ranks). The rank keeps kernels safe, but
+        // it destroyed the measurement users filter on, so the physical
+        // length returns beside it, recomputed from the coordinates.
+        let physical: Option<Vec<f32>> = (self.inner.weight_column == "distance_rank")
+            .then(|| self.physical_distances(&exported));
+        if let Some(d) = physical.as_ref() {
+            columns.push(("distance".into(), Column::F32(d)));
+        }
+
         self.inner.to_parquet(file_path, &columns)
+    }
+
+    /// Euclidean length of each pair over the given coordinate columns.
+    /// `NaN` for expression pairs: their endpoints are not adjacent, so any
+    /// number here would be a layout artifact rather than a distance.
+    fn physical_distances(&self, coord_cols: &[usize]) -> Vec<f32> {
+        let pairs = self.inner.pairs();
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(e, &(l, r))| {
+                let spatial = self
+                    .edge_kind
+                    .as_ref()
+                    .is_none_or(|k| k[e] == EDGE_KIND_SPATIAL);
+                if !spatial {
+                    return f32::NAN;
+                }
+                coord_cols
+                    .iter()
+                    .map(|&j| {
+                        let d = self.coordinates[(l, j)] - self.coordinates[(r, j)];
+                        d * d
+                    })
+                    .sum::<f32>()
+                    .sqrt()
+            })
+            .collect()
     }
 
     /// Per-pair endpoint coordinates, named and ordered the way the pair
     /// table wants them: every `left_{dim}`, then every `right_{dim}`.
-    fn pair_coordinate_columns(&self, names: &[Box<str>]) -> Vec<(Box<str>, Vec<f32>)> {
+    /// `keep` selects which coordinate columns are exported at all.
+    fn pair_coordinate_columns(
+        &self,
+        names: &[Box<str>],
+        keep: &[usize],
+    ) -> Vec<(Box<str>, Vec<f32>)> {
         let pairs = self.inner.pairs();
-        let mut out = Vec::with_capacity(names.len() * 2);
+        let mut out = Vec::with_capacity(keep.len() * 2);
         for (prefix, take_left) in [("left", true), ("right", false)] {
-            for (name, coord) in names.iter().zip(self.coordinates.column_iter()) {
+            for &j in keep {
+                let coord = self.coordinates.column(j);
                 let values = pairs
                     .iter()
                     .map(|&(l, r)| coord[if take_left { l } else { r }])
                     .collect();
-                out.push((format!("{prefix}_{name}").into_boxed_str(), values));
+                out.push((format!("{prefix}_{}", names[j]).into_boxed_str(), values));
             }
         }
         out
