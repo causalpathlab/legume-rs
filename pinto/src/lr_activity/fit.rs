@@ -997,45 +997,74 @@ fn score_pairs_for_stratum(
         })
         .collect();
 
-    // Build per-pair null vectors `t_perm[i]`. Per shuffle (sequential),
-    // draw a fresh log-rate sample (delta method) for both roles, apply
-    // Fisher, then compute t_perm for all pairs in parallel against the
-    // same draw + same shuffle. Sharing the draw across pairs preserves
-    // cross-pair dependence and the WY guarantee.
+    // Build per-pair null vectors `t_perm[i]`.
+    //
+    // Parallel over PERMUTATIONS, sequential over pairs within each. The
+    // Westfall-Young guarantee constrains sharing WITHIN a permutation —
+    // every pair must see the same shuffle and the same posterior draw — and
+    // says nothing about the order permutations are computed in. Successive
+    // permutations carry no state either: the draw seed is a pure function of
+    // `k`, and the shuffles were all materialised up front.
+    //
+    // This is the better axis to parallelise on. There are far more
+    // permutations than cores, so the granularity is coarse, whereas the old
+    // shape re-entered a parallel region once per permutation and left every
+    // core idle during that permutation's two posterior draws. Memory is
+    // bounded by the worker count rather than by `n_perm`, since only the
+    // in-flight draws are alive.
+    //
+    // `collect` on an indexed parallel iterator preserves order, which the WY
+    // step below relies on: `min_p[k]` must refer to the same permutation for
+    // every pair.
+    //
+    // The strata loop above stays sequential deliberately. Measured on a
+    // full-database run this shape already holds the machine at ~83% of all
+    // cores; nesting a second parallel axis would chase the remainder while
+    // multiplying the in-flight posterior draws, which are what set peak
+    // memory.
     let t_perm_per_pair: Vec<Vec<f32>> = {
+        let t_per_k: Vec<Vec<f32>> = shared_shuffles
+            .par_iter()
+            .enumerate()
+            .map(|(k, sigma)| {
+                // Seeded per (stratum, permutation, role). The shuffles beside
+                // this were already deterministic; the posterior draw was not,
+                // so the null distribution moved every run and `--seed` did not
+                // reach it.
+                let draw_seed = base_seed
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add(k as u64);
+                let mut log_s = collapse.gamma_send[c]
+                    .posterior_log_sample(draw_seed)
+                    .expect("posterior_log_sample (send) failed");
+                let mut log_r = collapse.gamma_recv[c]
+                    .posterior_log_sample(draw_seed ^ 0xD1B5_4A32_D192_ED03)
+                    .expect("posterior_log_sample (recv) failed");
+                apply_gene_weights(&mut log_s, fisher_lr);
+                apply_gene_weights(&mut log_r, fisher_lr);
+                pair_ctx
+                    .iter()
+                    .map(|pc_opt| match pc_opt {
+                        None => f32::NAN,
+                        Some(pc) => {
+                            let l_perm: Vec<f32> = samples_in_stratum
+                                .iter()
+                                .map(|&s| log_s[(pc.l_local, sigma[s])])
+                                .collect();
+                            let r_perm: Vec<f32> = samples_in_stratum
+                                .iter()
+                                .map(|&s| log_r[(pc.r_local, s)])
+                                .collect();
+                            weighted_cov(&l_perm, &r_perm, &w_pair)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        // Transpose [k][pair] -> [pair][k]; the k order is what `min_p`
+        // indexes, so it must survive.
         let mut t_per_pair: Vec<Vec<f32>> = vec![Vec::with_capacity(n_perm); pair_ctx.len()];
-        for (k, sigma) in shared_shuffles.iter().enumerate() {
-            // Seeded per (stratum, permutation, role). The shuffles beside this
-            // were already deterministic; the posterior draw was not, so the
-            // null distribution moved every run and `--seed` did not reach it.
-            let draw_seed = base_seed
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add(k as u64);
-            let mut log_s = collapse.gamma_send[c]
-                .posterior_log_sample(draw_seed)
-                .expect("posterior_log_sample (send) failed");
-            let mut log_r = collapse.gamma_recv[c]
-                .posterior_log_sample(draw_seed ^ 0xD1B5_4A32_D192_ED03)
-                .expect("posterior_log_sample (recv) failed");
-            apply_gene_weights(&mut log_s, fisher_lr);
-            apply_gene_weights(&mut log_r, fisher_lr);
-            let t_k: Vec<f32> = pair_ctx
-                .par_iter()
-                .map(|pc_opt| match pc_opt {
-                    None => f32::NAN,
-                    Some(pc) => {
-                        let l_perm: Vec<f32> = samples_in_stratum
-                            .iter()
-                            .map(|&s| log_s[(pc.l_local, sigma[s])])
-                            .collect();
-                        let r_perm: Vec<f32> = samples_in_stratum
-                            .iter()
-                            .map(|&s| log_r[(pc.r_local, s)])
-                            .collect();
-                        weighted_cov(&l_perm, &r_perm, &w_pair)
-                    }
-                })
-                .collect();
+        for t_k in t_per_k {
             for (i, t) in t_k.into_iter().enumerate() {
                 t_per_pair[i].push(t);
             }
