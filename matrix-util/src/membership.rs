@@ -368,6 +368,10 @@ pub fn detect_delimiter(file_path: &str) -> &'static str {
 pub struct GeneIndexResolver {
     mem: Membership,
     n_genes: usize,
+    /// Alias keys registered by more than one gene (see the ambiguity note
+    /// above: the last one silently wins). Exposed so a caller can tell its
+    /// user that some queries resolve arbitrarily.
+    n_alias_collisions: usize,
 }
 
 impl GeneIndexResolver {
@@ -376,12 +380,20 @@ impl GeneIndexResolver {
     /// `None` disables aliasing and only the full name is indexed.
     pub fn build(gene_names: &[Box<str>], delimiter: Option<char>, allow_prefix: bool) -> Self {
         let mut pairs: Vec<(Box<str>, Box<str>)> = Vec::with_capacity(gene_names.len() * 2);
+        let mut seen: std::collections::HashSet<Box<str>> = std::collections::HashSet::new();
+        let mut n_alias_collisions = 0usize;
         for (i, name) in gene_names.iter().enumerate() {
             let idx_str: Box<str> = i.to_string().into_boxed_str();
+            if !seen.insert(name.clone()) {
+                n_alias_collisions += 1;
+            }
             pairs.push((name.clone(), idx_str.clone()));
             if let Some(d) = delimiter {
                 for part in name.split(d) {
                     if !part.is_empty() && part != name.as_ref() {
+                        if !seen.insert(part.into()) {
+                            n_alias_collisions += 1;
+                        }
                         pairs.push((part.into(), idx_str.clone()));
                     }
                 }
@@ -390,6 +402,7 @@ impl GeneIndexResolver {
         Self {
             mem: Membership::from_pairs(pairs, allow_prefix),
             n_genes: gene_names.len(),
+            n_alias_collisions,
         }
     }
 
@@ -401,6 +414,13 @@ impl GeneIndexResolver {
     /// Number of genes registered.
     pub fn n_genes(&self) -> usize {
         self.n_genes
+    }
+
+    /// How many alias keys were registered by more than one gene. Queries on
+    /// such a key resolve to the LAST registrant, silently; a caller taking
+    /// user-supplied names should surface this count.
+    pub fn alias_collisions(&self) -> usize {
+        self.n_alias_collisions
     }
 }
 

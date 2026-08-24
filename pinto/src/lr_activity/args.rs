@@ -4,8 +4,50 @@ use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtLrActivityArgs {
-    #[command(flatten)]
-    pub common: crate::util::input::SrtInputArgs,
+    // Deliberately NOT the shared `SrtInputArgs`: this command reads its cell
+    // pairs from a prior run, so the graph, coordinate, batch and QC options
+    // that struct carries would all parse and do nothing here. Twice that
+    // shape produced a command that failed or lied at its own defaults, so
+    // lra declares exactly what it consumes, the way `prop` does.
+    #[arg(
+        required = true,
+        value_delimiter(','),
+        help = "Spatial gene expression data files (.zarr or .h5)",
+        long_help = "Spatial gene expression data files, comma separated.\n\
+                     Accepted formats are .zarr and .h5.\n\
+                     Each file is a genes-by-cells sparse matrix.\n\
+                     Multiple files are concatenated column-wise, over cells.\n\
+                     Cells must match the prior run the pairs are read from."
+    )]
+    pub data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        short,
+        required = true,
+        help = "Output file prefix (e.g., results/my_run)"
+    )]
+    pub out: Box<str>,
+
+    #[arg(long, default_value_t = 42, help = "Random seed for reproducibility")]
+    pub seed: u64,
+
+    #[arg(
+        long,
+        help = "Cells per parallel block (omit for auto-scaling by feature count)",
+        hide = true
+    )]
+    pub block_size: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Preload all sparse data into memory",
+        long_help = "Preload all sparse column data into memory up front.\n\
+                     Faster when the data fits in RAM.\n\
+                     Some parallel access patterns require it. It raises peak memory usage."
+    )]
+    pub preload_data: bool,
 
     #[arg(
         long,

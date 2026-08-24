@@ -91,17 +91,7 @@ const EPS: f32 = 1e-8;
 const MIN_SAMPLES_PER_STRATUM: usize = 4;
 
 pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
-    // `--knn-expr` rides on the shared input args and defaults ON, so this
-    // command accepts it without there being a graph here to augment: it reads
-    // its cell pairs from an earlier run. Refusing would make the command fail
-    // at its own defaults; note the no-op instead.
-    if args.common.knn_expr > 0 {
-        log::info!(
-            "--knn-expr does not apply here: the cell pairs come from the \
-             earlier run's outputs. Pass it to that run instead."
-        );
-    }
-    let c = &args.common;
+    let c = args;
     mkdir_parent(&c.out)?;
 
     /////////////////////////////////////////////////
@@ -133,6 +123,14 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
 
     let gene_resolver =
         GeneIndexResolver::build(&gene_names, args.gene_delimiter, args.gene_allow_prefix);
+    if gene_resolver.alias_collisions() > 0 {
+        warn!(
+            "{} gene-name aliases are shared by more than one row (duplicated \
+             symbols, most likely); an LR pair naming one resolves to a single \
+             arbitrary row. Name genes by their full row name to disambiguate.",
+            gene_resolver.alias_collisions()
+        );
+    }
     let cell_to_col: HashMap<Box<str>, usize> = cell_names
         .iter()
         .enumerate()
@@ -153,7 +151,16 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         }
     }
     if missing > 0 {
-        info!("Skipped {} LR pairs with unresolved gene names", missing);
+        // warn, not info: at the default log level an info line is invisible,
+        // and a pairs file in the wrong naming convention would silently run
+        // on whatever fraction happened to match.
+        warn!(
+            "Skipped {} of {} LR pairs with unresolved gene names; \
+             check the pair file's naming against the matrix row names \
+             (--gene-delimiter aliases compound names)",
+            missing,
+            missing + resolved_pairs.len()
+        );
     }
     anyhow::ensure!(
         !resolved_pairs.is_empty(),
@@ -560,7 +567,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_expr_data(c: &crate::util::input::SrtInputArgs) -> anyhow::Result<SparseIoVec> {
+fn load_expr_data(c: &SrtLrActivityArgs) -> anyhow::Result<SparseIoVec> {
     anyhow::ensure!(!c.data_files.is_empty(), "empty data files");
     let attach_data_name = c.data_files.len() > 1;
     let mut data_vec = SparseIoVec::new();

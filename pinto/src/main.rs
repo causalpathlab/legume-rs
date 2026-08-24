@@ -492,10 +492,10 @@ enum Commands {
                       \x20 # Shortest form, reading inputs from a prior pinto lc .pinto.json:\n\
                       \x20 pinto lra --from out/run1.pinto.json --lr-pairs cellchat_pairs.tsv\n\n\
                       \x20   `--from <.pinto.json>` auto-fills `--lc-prefix`, `--out` (=\n\
-                      \x20   `<prefix>.lra`), `--coord`, and the positional data files from\n\
+                      \x20   `<prefix>.lra`), and the positional data files from\n\
                       \x20   the metadata. Any of those passed explicitly on the CLI win.\n\n\
                       \x20 # Long form, same effect, fully explicit:\n\
-                      \x20 pinto lr-activity data.h5 -c coords.csv -o out/run1.lr \\\n\
+                      \x20 pinto lr-activity data.h5 -o out/run1.lr \\\n\
                       \x20   --lc-prefix out/run1 --lr-pairs cellchat_pairs.tsv\n\n\
                       INPUTS:\n\n\
                       \x20 --lc-prefix   prefix of a prior `pinto lc` run (reads its\n\
@@ -563,8 +563,8 @@ enum Commands {
 /// friends) stays unchanged. When `--from foo.pinto.json` is detected
 /// after the `lra` / `lr-activity` / `test-lr` subcommand:
 ///
-///   - `--lc-prefix`, `--out`, `--coord`, and the positional `data_files`
-///     are injected from the metadata when not already on the CLI;
+///   - `--lc-prefix`, `--out`, and the positional `data_files` are
+///     injected from the metadata when not already on the CLI;
 ///   - `--from <path>` is removed before clap sees it.
 ///
 /// Anything the user explicitly passed wins: only missing fields are filled.
@@ -600,7 +600,7 @@ fn expand_lra_from_metadata(mut args: Vec<String>) -> anyhow::Result<Vec<String>
 
     // Inspect what's already on the CLI (post-drain) so we don't clobber
     // explicit user overrides.
-    let (has_lc_prefix, has_out, has_coord, has_positional) = {
+    let (has_lc_prefix, has_out, has_positional) = {
         let tail = &args[lra_pos + 1..];
         let has_flag = |needles: &[&str]| -> bool {
             tail.iter().any(|a| {
@@ -628,7 +628,6 @@ fn expand_lra_from_metadata(mut args: Vec<String>) -> anyhow::Result<Vec<String>
         (
             has_flag(&["--lc-prefix"]),
             has_flag(&["--out", "-o"]),
-            has_flag(&["--coord", "-c"]),
             positional,
         )
     };
@@ -640,12 +639,6 @@ fn expand_lra_from_metadata(mut args: Vec<String>) -> anyhow::Result<Vec<String>
     if !has_out {
         args.push("--out".to_string());
         args.push(format!("{}.lra", meta.prefix));
-    }
-    if !has_coord {
-        if let Some(coord) = meta.coord_file.as_deref() {
-            args.push("--coord".to_string());
-            args.push(coord.to_string());
-        }
     }
     if !has_positional {
         match meta.data_files.as_ref() {
