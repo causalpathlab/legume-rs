@@ -59,6 +59,7 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::{CalibrateTarget, Inference, TwoStatParam};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::membership::GeneIndexResolver;
+use matrix_util::rand_util::{mix_seed, name_seed};
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -476,6 +477,11 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         args.n_permutations
     );
 
+    // Sequential deliberately. `score_pairs_for_stratum` parallelises over
+    // permutations and, measured on a full-database run, already holds ~83%
+    // of all cores; a second parallel axis here would chase the remainder
+    // while multiplying the in-flight posterior draws, which are what set
+    // peak memory.
     for (k, (batch_label, stratum, samples, is_meta)) in plan.into_iter().enumerate() {
         let stratum_id = strata.len();
         strata.push(stratum_entry(
@@ -796,92 +802,33 @@ pub(crate) fn weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> f32 {
     cov / sw
 }
 
-/// Map a permuted POSITION within a stratum's sample list back to the global
-/// sample id the rate matrices are indexed by.
+/// The weighted covariance, or `None` when the pair carries no testable
+/// hypothesis in this stratum.
 ///
-/// The two index spaces coincide only when a stratum holds every sample in
-/// order — the single-batch case. A per-batch stratum holds a filtered subset,
-/// where treating a global id as a position reads out of bounds, or silently
-/// permutes the wrong samples when it happens to stay in range.
-pub(crate) fn permuted_global_id(
-    samples_in_stratum: &[usize],
-    sigma: &[usize],
-    position: usize,
-) -> usize {
-    samples_in_stratum[sigma[position]]
-}
-
-/// Whether a pair carries no testable hypothesis in this stratum.
+/// `None` when the statistic is non-finite (no usable weight at all) or lands
+/// on bit-exact zero. Exact zero is not a measured null: it means no weighted
+/// sample deviated on both sides at once (a constant side, or two genes
+/// detected in disjoint samples), or the few real contributions cancelled to
+/// the last bit, which is what near-floor genes produce in practice. Such a
+/// pair cannot reject at any threshold, so scoring it would pay multiplicity
+/// in the Westfall-Young family, drag the robust spread that scales every
+/// other pair's `z_re`, and ship a row that reads as a measured null rather
+/// than as an absent measurement.
 ///
-/// [`weighted_cov`] is identically zero when either side has no weighted
-/// variance, so the pair cannot reject at any threshold no matter what the
-/// other side does. Such a pair must not be scored: it would pay multiplicity
-/// in the Westfall-Young family, drag the MAD that scales every other pair's
-/// `z_re`, and ship a row that reads as a measured null.
+/// An earlier guard keyed on the observed statistic AND the null spread both
+/// being zero, which never fired: the null is built from fresh posterior
+/// draws that fluctuate even where the observed posterior mean is flat.
 ///
-/// Keys on the OBSERVED side only, where degeneracy is decidable. The older
-/// guard keyed on `t_obs == 0 && null_sd == 0`, which never fired: the null is
-/// built from fresh posterior draws that fluctuate even where the observed
-/// posterior mean is flat, so `null_sd` was comfortably positive.
-///
-/// Exact absence of variance, deliberately, not a magnitude threshold — a
-/// small real signal is still a hypothesis, and shrinking it away here would
-/// be a silent power cut rather than an exclusion of the untestable.
-pub(crate) fn is_degenerate_pair(l: &[f32], r: &[f32], w: &[f32]) -> bool {
-    let mut sw = 0.0f32;
-    let mut sl = 0.0f32;
-    let mut sr = 0.0f32;
-    for k in 0..l.len() {
-        sw += w[k];
-        sl += w[k] * l[k];
-        sr += w[k] * r[k];
-    }
-    if sw <= EPS {
-        // No weight at all: `weighted_cov` returns NaN, not a measured zero.
-        return true;
-    }
-    let (ml, mr) = (sl / sw, sr / sw);
-    // Weighted variance of each side. A side with none forces cov = 0, and a
-    // sample carrying zero weight cannot supply variation.
-    let mut vl = 0.0f32;
-    let mut vr = 0.0f32;
-    // Whether ANY weighted sample deviates from the mean on BOTH sides at
-    // once. Marginal variance is not enough: two genes detected in disjoint
-    // samples each vary, yet every term of the covariance sum carries a zero
-    // factor, so no sample can contribute evidence about the pair. That case
-    // is common in sparse strata and is an absent measurement, not a null.
-    let mut any_contributes = false;
-    for k in 0..l.len() {
-        let (dl, dr) = (l[k] - ml, r[k] - mr);
-        vl += w[k] * dl * dl;
-        vr += w[k] * dr * dr;
-        if w[k] > 0.0 && dl != 0.0 && dr != 0.0 {
-            any_contributes = true;
-        }
-    }
-    vl <= 0.0 || vr <= 0.0 || !any_contributes
-}
-
-/// Whether a pair carries no testable hypothesis, structurally or numerically.
-///
-/// Wraps [`is_degenerate_pair`] with the case that predicate cannot see: a
-/// near-floor gene can leave both sides varying and samples co-deviating,
-/// while the few real contributions cancel to bit-exact zero. Measured on a
-/// full-database run, this is what every surviving zero statistic was. A genuine effect never lands
-/// on exactly `0.0` — it lands near it — so an exactly-zero statistic means
-/// no measurable signal either way.
-///
-/// Accepted trade-off: an exactly-orthogonal pair, whose contributions cancel
-/// to the last bit, is also dropped. That is a measured null rather than an
-/// absent measurement, but it has probability ~0 on real `f32` data (it shows
-/// up only in hand-built fixtures), and admitting it would mean keeping every
-/// underflowed pair instead.
-pub(crate) fn pair_is_untestable(l: &[f32], r: &[f32], w: &[f32]) -> bool {
-    if is_degenerate_pair(l, r, w) {
-        return true;
-    }
+/// A merely SMALL statistic stays in, deliberately — that is a magnitude
+/// question, and a threshold here would be a silent power cut rather than an
+/// exclusion of the untestable.
+pub(crate) fn testable_weighted_cov(l: &[f32], r: &[f32], w: &[f32]) -> Option<f32> {
     let t = weighted_cov(l, r, w);
-    !t.is_finite() || t == 0.0
+    if t.is_finite() && t != 0.0 {
+        Some(t)
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -949,6 +896,11 @@ fn score_pairs_for_stratum(
     // shuffle σ_k applied to every pair → preserves cross-pair dependence
     // (shared genes, batch confounders) for Westfall-Young joint
     // inference. Single seeded RNG for determinism.
+    // Each stored shuffle is a permutation of GLOBAL sample ids, in stratum
+    // position order. The buckets shuffle positions, and the final map takes
+    // every position through `samples_in_stratum`, so consumers gather from
+    // the rate matrices directly and no position-space index survives to be
+    // confused with a global one (which has been a live bug here once).
     let shared_shuffles: Vec<Vec<usize>> = {
         let mut rng = SmallRng::seed_from_u64(base_seed);
         (0..n_perm)
@@ -964,12 +916,15 @@ fn score_pairs_for_stratum(
                         perm[out_pos] = vals[slot_pos];
                     }
                 }
-                perm
+                perm.into_iter().map(|p| samples_in_stratum[p]).collect()
             })
             .collect()
     };
 
-    // Per-pair fixed quantities (l_local, r_local, t_obs).
+    // Per-pair fixed quantities. Untestable pairs (see
+    // `testable_weighted_cov`) are compacted away here, so nothing downstream
+    // carries a placeholder for them: not the permutation loop, not the WY
+    // family, not the restandardization moments.
     struct PairCtx {
         l_local: usize,
         r_local: usize,
@@ -978,10 +933,16 @@ fn score_pairs_for_stratum(
         li: usize,
         ri: usize,
         t_obs: f32,
+        /// Product of the two per-gene Fisher weights. The observed side has
+        /// them baked into the log-mean matrices; under the bilinear
+        /// `weighted_cov` the same scaling reaches a permuted statistic as
+        /// this one multiply, instead of rescaling a whole draw matrix per
+        /// permutation.
+        w_lr: f32,
     }
-    let pair_ctx: Vec<Option<PairCtx>> = real_pairs
+    let pair_ctx: Vec<PairCtx> = real_pairs
         .par_iter()
-        .map(|(lname, rname, li, ri)| -> Option<PairCtx> {
+        .filter_map(|(lname, rname, li, ri)| -> Option<PairCtx> {
             let l_local = *gene_to_local.get(li)?;
             let r_local = *gene_to_local.get(ri)?;
             let l_vec: Vec<f32> = samples_in_stratum
@@ -992,14 +953,8 @@ fn score_pairs_for_stratum(
                 .iter()
                 .map(|&s| collapse.log_mean_recv[c][(r_local, s)])
                 .collect();
-            // A side with no weighted variance makes the covariance
-            // identically zero: not a null result, an absent measurement.
-            // Dropping it here keeps it out of the scored rows, the WY family
-            // and the restandardization moments in one place.
-            if pair_is_untestable(&l_vec, &r_vec, &w_pair) {
-                return None;
-            }
-            let t_obs = weighted_cov(&l_vec, &r_vec, &w_pair);
+            let t_obs = testable_weighted_cov(&l_vec, &r_vec, &w_pair)?;
+            let w_lr = fisher_lr[l_local] * fisher_lr[r_local];
             Some(PairCtx {
                 l_local,
                 r_local,
@@ -1008,6 +963,7 @@ fn score_pairs_for_stratum(
                 li: *li,
                 ri: *ri,
                 t_obs,
+                w_lr,
             })
         })
         .collect();
@@ -1021,75 +977,60 @@ fn score_pairs_for_stratum(
     // permutations carry no state either: the draw seed is a pure function of
     // `k`, and the shuffles were all materialised up front.
     //
-    // This is the better axis to parallelise on. There are far more
-    // permutations than cores, so the granularity is coarse, whereas the old
-    // shape re-entered a parallel region once per permutation and left every
-    // core idle during that permutation's two posterior draws. Memory is
-    // bounded by the worker count rather than by `n_perm`, since only the
-    // in-flight draws are alive.
+    // This is the better axis to parallelise on: far more permutations than
+    // cores, so the granularity is coarse, where the old shape re-entered a
+    // parallel region once per permutation (the draws themselves were
+    // internally parallel, so the win is fewer region entries and coarser
+    // work items, not idle cores recovered). Draw memory is bounded by the
+    // worker count, since only in-flight draws are alive.
     //
     // `collect` on an indexed parallel iterator preserves order, which the WY
     // step below relies on: `min_p[k]` must refer to the same permutation for
     // every pair.
-    //
-    // The strata loop above stays sequential deliberately. Measured on a
-    // full-database run this shape already holds the machine at ~83% of all
-    // cores; nesting a second parallel axis would chase the remainder while
-    // multiplying the in-flight posterior draws, which are what set peak
-    // memory.
+
     let t_perm_per_pair: Vec<Vec<f32>> = {
         let t_per_k: Vec<Vec<f32>> = shared_shuffles
             .par_iter()
             .enumerate()
             .map(|(k, sigma)| {
-                // Seeded per (stratum, permutation, role). The shuffles beside
-                // this were already deterministic; the posterior draw was not,
-                // so the null distribution moved every run and `--seed` did not
-                // reach it.
-                let draw_seed = base_seed
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .wrapping_add(k as u64);
-                let mut log_s = collapse.gamma_send[c]
-                    .posterior_log_sample(draw_seed)
+                // Seeded per (stratum, permutation, role) through the shared
+                // avalanche mixer, so nearby permutation indices map to
+                // well-separated streams. (The shuffles beside this were
+                // already deterministic; the posterior draw once was not, and
+                // `--seed` did not reach the null.)
+                let draw_seed = mix_seed(base_seed, k as u64);
+                let log_s = collapse.gamma_send[c]
+                    .posterior_log_sample(name_seed(draw_seed, "send"))
                     .expect("posterior_log_sample (send) failed");
-                let mut log_r = collapse.gamma_recv[c]
-                    .posterior_log_sample(draw_seed ^ 0xD1B5_4A32_D192_ED03)
+                let log_r = collapse.gamma_recv[c]
+                    .posterior_log_sample(name_seed(draw_seed, "recv"))
                     .expect("posterior_log_sample (recv) failed");
-                apply_gene_weights(&mut log_s, fisher_lr);
-                apply_gene_weights(&mut log_r, fisher_lr);
+                // No Fisher rescale of the draw matrices here: `weighted_cov`
+                // is bilinear, so the per-gene weights reach each statistic as
+                // the precomputed `w_lr` scalar below — the same algebra the
+                // observed side uses by baking the weights into the log-means.
                 pair_ctx
                     .iter()
-                    .map(|pc_opt| match pc_opt {
-                        None => f32::NAN,
-                        Some(pc) => {
-                            // `sigma` permutes POSITIONS within this stratum's
-                            // sample list, while the rate matrices are indexed
-                            // by GLOBAL sample id, so the permuted position has
-                            // to be mapped back through `samples_in_stratum`.
-                            // Indexing `sigma` with the global id instead only
-                            // coincided with the right answer when a stratum
-                            // held every sample in order, which is exactly the
-                            // single-batch case; with a per-batch subset it read
-                            // out of bounds.
-                            let l_perm: Vec<f32> = (0..n_s)
-                                .map(|k| {
-                                    let g = permuted_global_id(samples_in_stratum, sigma, k);
-                                    log_s[(pc.l_local, g)]
-                                })
-                                .collect();
-                            let r_perm: Vec<f32> = samples_in_stratum
-                                .iter()
-                                .map(|&s| log_r[(pc.r_local, s)])
-                                .collect();
-                            weighted_cov(&l_perm, &r_perm, &w_pair)
-                        }
+                    .map(|pc| {
+                        let l_perm: Vec<f32> =
+                            sigma.iter().map(|&g| log_s[(pc.l_local, g)]).collect();
+                        let r_obs: Vec<f32> = samples_in_stratum
+                            .iter()
+                            .map(|&s| log_r[(pc.r_local, s)])
+                            .collect();
+                        pc.w_lr * weighted_cov(&l_perm, &r_obs, &w_pair)
                     })
                     .collect()
             })
             .collect();
         // Transpose [k][pair] -> [pair][k]; the k order is what `min_p`
         // indexes, so it must survive.
-        let mut t_per_pair: Vec<Vec<f32>> = vec![Vec::with_capacity(n_perm); pair_ctx.len()];
+        // NOT `vec![Vec::with_capacity(..); n]`: that clones the prototype,
+        // and a Vec clone copies contents (none) rather than capacity, so
+        // every slot but the last would start at zero and regrow ~10 times.
+        let mut t_per_pair: Vec<Vec<f32>> = (0..pair_ctx.len())
+            .map(|_| Vec::with_capacity(n_perm))
+            .collect();
         for t_k in t_per_k {
             for (i, t) in t_k.into_iter().enumerate() {
                 t_per_pair[i].push(t);
@@ -1102,8 +1043,7 @@ fn score_pairs_for_stratum(
     let pair_results: Vec<(LrActivityRow, Vec<f32>)> = pair_ctx
         .into_par_iter()
         .zip(t_perm_per_pair.into_par_iter())
-        .filter_map(|(pc_opt, t_perm)| {
-            let pc = pc_opt?;
+        .filter_map(|(pc, t_perm)| {
             // Single pass over t_perm collects all per-pair null moments.
             let mut n_finite = 0usize;
             let mut sum = 0.0f32;
@@ -1131,10 +1071,14 @@ fn score_pairs_for_stratum(
             let var = (sumsq - n_f * mu * mu) / (n_f - 1.0).max(1.0);
             let sd_raw = var.max(0.0).sqrt();
 
-            // Degenerate null: shuffles produce a (near-)constant statistic.
-            // Flag NaN for per-pair stats; t_perm stays so this pair can
-            // still (not) contribute to the WY min-p downstream.
-            let degenerate = !sd_raw.is_finite() || sd_raw < 1e-6;
+            // A null with no spread cannot standardize anything: flag NaN
+            // for the per-pair stats rather than divide by (near-)zero.
+            // This guards the NULL axis only — an untestable OBSERVED
+            // statistic never gets this far (`testable_weighted_cov`
+            // compacted those pairs away before the permutation loop). No
+            // magnitude floor here for the same reason as there: a small
+            // real spread is still a distribution.
+            let degenerate = !sd_raw.is_finite() || sd_raw <= 0.0;
 
             let p_emp = if degenerate {
                 f32::NAN
