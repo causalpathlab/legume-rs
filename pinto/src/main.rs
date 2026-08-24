@@ -462,25 +462,27 @@ enum Commands {
 
     #[command(
         aliases = ["lra", "test-lr"],
-        about = "Posthoc directional ligand→receptor activity test per link community",
-        long_about = "Tests a user-supplied directional ligand→receptor list.\n\
-                      It asks whether that list acts coherently.\n\
-                      Coherence is judged per community of a prior lc run.\n\n\
+        about = "Posthoc ligand-receptor co-activity test per link community",
+        long_about = "Tests a user-supplied ligand-receptor list.\n\
+                      It asks whether each pair is co-active along the contacts of a\n\
+                      link community from a prior lc run, one community at a time.\n\
+                      The statistic is symmetric in the pair: both orientations of\n\
+                      every within-community edge are counted, so no endpoint plays a\n\
+                      privileged role, and edges bridging two communities sit out.\n\n\
                       DESIGN:\n\
                       \x20 1. Cells are collapsed into pseudobulk samples =\n\
                       \x20    (batch × propensity-bin), where the propensity bin is the\n\
                       \x20    sign-LSH binary code of an SVD'd random projection of gene\n\
                       \x20    expression (data-beans-alg::binary_sort_columns).\n\
-                      \x20 2. Each cell carries soft community membership in two roles:\n\
-                      \x20    p_send[i, c] = fraction of i's incident edges in community c\n\
-                      \x20    on which i is sender; p_recv[i, c] is the receiver analogue.\n\
-                      \x20 3. Per (community, sample) we accumulate role-weighted gene\n\
-                      \x20    sums for the LR genes, giving sender and receiver pseudobulk\n\
-                      \x20    profiles per sample with weights w_send / w_recv.\n\
+                      \x20 2. Each cell carries soft membership over the link communities:\n\
+                      \x20    the fraction of its within-community edge instances in each.\n\
+                      \x20 3. Per (community, sample) we accumulate membership-weighted\n\
+                      \x20    gene sums for the LR genes: one pseudobulk profile per\n\
+                      \x20    sample per community, with weight w = membership mass.\n\
                       \x20 4. Statistic per (batch, community, LR pair): weighted covariance\n\
-                      \x20    of `log1p(w_g · pb_mean)` between L_send and R_recv across\n\
-                      \x20    samples, sample-weighted by sqrt(w_send · w_recv). Per-gene\n\
-                      \x20    `w_g` are NB-Fisher-info weights (same as propensity / lc).\n\
+                      \x20    of `log1p(w_g · pb_mean)` between L and R across samples,\n\
+                      \x20    sample-weighted by w. Per-gene `w_g` are NB-Fisher-info\n\
+                      \x20    weights (same as propensity / lc).\n\
                       \x20 5. Null: sample-level permutation of L within propensity-stratified\n\
                       \x20    buckets (top --shuffle-stratify-dim bits of the propensity\n\
                       \x20    code). The same shuffle σ_k is applied to every pair so\n\
@@ -516,9 +518,7 @@ enum Commands {
                       \x20 --n-permutations         number of sample shuffles (default 1000).\n\n\
                       OUTPUTS:\n\n\
                       \x20 {out}.lr_activity.parquet, columns:\n\
-                      \x20   batch, community, sender_community,\n\
-                      \x20   receiver_community, homotypic,\n\
-                      \x20   ligand, receptor, n_samples,\n\
+                      \x20   batch, community, ligand, receptor, n_samples,\n\
                       \x20   stat_obs (weighted covariance of log1p(w·pb)),\n\
                       \x20   null_mean, null_sd, z, p_empirical, p_z, z_re, p_re,\n\
                       \x20   fwer_wy.\n\
@@ -527,18 +527,11 @@ enum Commands {
                       \x20   fwer_wy: Westfall-Young single-step minP\n\
                       \x20     (joint sample permutation across pairs in a stratum;\n\
                       \x20     FWER-controlled).\n\
-                      \x20   community: the DIRECTED STRATUM id, not an `lc`\n\
-                      \x20     community. It does NOT join against\n\
-                      \x20     link_community.parquet or propensity.parquet.\n\
-                      \x20     Join on sender_community or receiver_community\n\
-                      \x20     instead, which are real community ids.\n\
-                      \x20   sender_community / receiver_community: the two\n\
-                      \x20     communities the roles were scored in. A stratum\n\
-                      \x20     a->b and its reverse b->a are both tested, and\n\
-                      \x20     the directional finding is the contrast.\n\
-                      \x20   homotypic: both endpoints share a community, so\n\
-                      \x20     the statistic is symmetric by construction and\n\
-                      \x20     no direction may be read off that row.\n\n\
+                      \x20   community: the link community id. It joins directly\n\
+                      \x20     against link_community.parquet and\n\
+                      \x20     propensity.parquet.\n\
+                      \x20   The statistic is symmetric in the pair; no direction\n\
+                      \x20     may be read off any row.\n\n\
                       \x20 {out}.lr_activity.json, the sidecar consumed by `pinto plot`:\n\
                       \x20   summary stats per pair (with `ligand_resolved` /\n\
                       \x20   `receptor_resolved` row-name aliases) PLUS, for each\n\

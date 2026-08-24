@@ -64,8 +64,8 @@ pub struct SrtLrActivityArgs {
     #[arg(
         long,
         required = true,
-        help = "Two-column TSV of directional ligand→receptor pairs",
-        long_help = "Directional ligand→receptor pair file, one pair per line.\n\
+        help = "Two-column TSV of ligand-receptor pairs",
+        long_help = "Ligand-receptor pair file, one pair per line.\n\
                      Each line holds two columns: ligand gene, then receptor gene.\n\
                      They may be separated by whitespace, tab or comma.\n\
                      The delimiter is auto-detected: comma for .csv, else tab.\n\
