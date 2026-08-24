@@ -546,20 +546,29 @@ enum Commands {
                       \x20             still bucketed per (batch, propensity-bin).\n\n\
                       EDGE SCORES (--edge-scores-only):\n\n\
                       \x20 Skips the test entirely and writes {out}.lr_scores.parquet,\n\
-                      \x20 one row per (batch, community, ligand, receptor):\n\
-                      \x20   product  = mean l(u)*r(v)\n\
-                      \x20   coupling = mean l(u)*r(v) - mean l(u) * mean r(v)\n\
-                      \x20 with l = log1p ligand count, r = log1p receptor count,\n\
-                      \x20 averaged over BOTH orientations of the community's spatial\n\
-                      \x20 edges inside the batch. The product is abundance-driven;\n\
-                      \x20 the centered coupling isolates contact-level co-variation.\n\
+                      \x20 one row per (batch, community, ligand, receptor).\n\
+                      \x20 The estimand: the probability that ligand and receptor are\n\
+                      \x20 co-detected across a physical contact of that community,\n\
+                      \x20 BEYOND each side's independent activity. Every contact\n\
+                      \x20 contributes both orientations; each instance is classified\n\
+                      \x20 by endpoint detection into a 2x2 table, and the score is\n\
+                      \x20 the posterior log odds ratio under a Jeffreys +1/2 prior:\n\
+                      \x20   log_or    = ln[(n11+.5)(n00+.5)/((n10+.5)(n01+.5))]\n\
+                      \x20   log_or_se = sqrt(sum of 1/(cell+.5))\n\
+                      \x20 log_or is symmetric in the pair by construction.\n\
+                      \x20 The margins ship beside it: lig_rate and rec_rate are each\n\
+                      \x20 side's detection rate at these contacts. Use them as\n\
+                      \x20 covariates to isolate the interaction;\n\
+                      \x20 they are activity phenotypes in their own right.\n\
                       \x20 No test and no null: these are descriptive phenotypes.\n\n\
                       \x20 Pivot to a batch x (pair, community) matrix in R:\n\
                       \x20   dcast(dt, batch ~ ligand + receptor + community,\n\
-                      \x20         value.var = \"coupling\")\n\n\
-                      \x20 Caveats. Rows with small n_edges carry large sampling\n\
-                      \x20 variance; filter or weight on n_edges and mean_log_depth\n\
-                      \x20 downstream (no threshold is applied here).\n\
+                      \x20         value.var = \"log_or\")\n\n\
+                      \x20 Caveats. A pair with no co-detected contacts still gets a\n\
+                      \x20 finite log_or; log_or_se is what flags it as unmeasurable.\n\
+                      \x20 Filter or precision-weight on log_or_se and n_edges\n\
+                      \x20 downstream (no threshold is applied here),\n\
+                      \x20 and keep mean_log_depth in the covariate set.\n\
                       \x20 Community ids come from the `pinto lc` fit,\n\
                       \x20 so the lc artifacts are part of the phenotype definition.\n\
                       \x20 Freeze them alongside any analysis of these scores."

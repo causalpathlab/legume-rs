@@ -1,8 +1,8 @@
-//! Contract of the descriptive edge-score mode: instances are BOTH
+//! Contract of the contact-association score: instances are BOTH
 //! orientations of every within-community spatial edge, grouped by batch;
-//! bridging edges never realize a stratum, straddling edges (endpoint
-//! batch labels differ) score in no batch, and the two score columns match
-//! a hand enumeration of those instances.
+//! each instance is classified by endpoint detection into a 2x2 table,
+//! and the score is the Jeffreys (+1/2) posterior log odds ratio with its
+//! posterior SE. Tables here are small enough to enumerate by hand.
 
 use crate::lr_activity::edge_scores::{compute_edge_scores, EdgeScoresInput};
 use crate::lr_activity::orientation::CommunityStrata;
@@ -23,7 +23,8 @@ fn fixture_edges() -> Vec<Edge> {
     ]
 }
 
-/// L is global gene 10 (row 0 of x_lr), R is global gene 11 (row 1).
+/// L is global gene 10 (row 0 of x_lr), R is global gene 11 (row 1),
+/// and gene 12 (row 2) is never detected anywhere.
 fn fixture_genes() -> (
     Vec<(Box<str>, Box<str>, usize, usize)>,
     HashMap<usize, usize>,
@@ -33,20 +34,25 @@ fn fixture_genes() -> (
     let mut gene_to_local: HashMap<usize, usize> = HashMap::default();
     gene_to_local.insert(10, 0);
     gene_to_local.insert(11, 1);
-    // Counts per cell: L row then R row (column = cell).
+    gene_to_local.insert(12, 2);
+    // Counts per cell (column = cell); only detection (> 0) matters.
     let x_lr = Mat::from_row_slice(
-        2,
+        3,
         6,
         &[
-            2.0, 5.0, 0.0, 1.0, 3.0, 4.0, // ligand
-            1.0, 0.0, 7.0, 2.0, 6.0, 0.0, // receptor
+            2.0, 5.0, 0.0, 1.0, 3.0, 4.0, // ligand:   + + - + + +
+            1.0, 0.0, 7.0, 2.0, 6.0, 0.0, // receptor: + - + + + -
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // never detected
         ],
     );
     (pairs, gene_to_local, x_lr)
 }
 
-fn run(edges: &[Edge]) -> (Vec<crate::lr_activity::edge_scores::EdgeScoreRow>, usize) {
-    let (pairs, gene_to_local, x_lr) = fixture_genes();
+fn run_pairs(
+    edges: &[Edge],
+    pairs: Vec<(Box<str>, Box<str>, usize, usize)>,
+) -> (Vec<crate::lr_activity::edge_scores::EdgeScoreRow>, usize) {
+    let (_, gene_to_local, x_lr) = fixture_genes();
     let strata = CommunityStrata::from_edge_modes(edges, edges, 6);
     let log_depth: Vec<f32> = (0..6).map(|i| (10 + i) as f32).collect();
     compute_edge_scores(&EdgeScoresInput {
@@ -57,6 +63,11 @@ fn run(edges: &[Edge]) -> (Vec<crate::lr_activity::edge_scores::EdgeScoreRow>, u
         x_lr: &x_lr,
         log_depth: &log_depth,
     })
+}
+
+fn run(edges: &[Edge]) -> (Vec<crate::lr_activity::edge_scores::EdgeScoreRow>, usize) {
+    let (pairs, _, _) = fixture_genes();
+    run_pairs(edges, pairs)
 }
 
 /// The (batch, community) groups are exactly the ones with edges; a
@@ -80,87 +91,107 @@ fn a_zero_edge_batch_community_gets_no_row() {
     );
 }
 
-/// Hand enumeration of the (a, C0) group: one edge (0,1), two orientations
-/// (0,1) and (1,0). With l(k) = ln1p(x_L(k)), r(k) = ln1p(x_R(k)):
-/// product  = (l0*r1 + l1*r0) / 2
-/// coupling = product - ((l0+l1)/2) * ((r0+r1)/2)
+/// Hand-enumerated tables.
+///
+/// (a, C0): one edge (0,1), instances (0,1) and (1,0).
+///   (0,1): L+ at 0, R- at 1;  (1,0): L+ at 1, R+ at 0.
+///   n=2, n11=1, nL=2, nR=1 -> cells +1/2: a=1.5 b=1.5 c=0.5 d=0.5
+///   log_or = ln(1.5*0.5 / (1.5*0.5)) = 0
+///   se     = sqrt(1/1.5 + 1/1.5 + 1/0.5 + 1/0.5) = sqrt(16/3)
+///
+/// (a, C1): edges (3,4),(4,5), both ways.
+///   L+ at 3,4,5; R+ at 3,4 only. n=4, n11=3, nL=4, nR=3
+///   -> a=3.5 b=1.5 c=0.5 d=0.5
+///   log_or = ln(3.5*0.5 / (1.5*0.5)) = ln(7/3)
+///   se     = sqrt(1/3.5 + 1/1.5 + 2 + 2)
 #[test]
-fn scores_match_a_hand_enumeration() {
+fn scores_match_hand_built_tables() {
     let (rows, _) = run(&fixture_edges());
+
     let row = rows
         .iter()
         .find(|r| r.batch.as_ref() == "a" && r.community == 0)
         .expect("(a, C0) row");
-
-    let l = |v: f32| v.ln_1p();
-    let (l0, l1) = (l(2.0), l(5.0));
-    let (r0, r1) = (l(1.0), l(0.0));
-    let product = (l0 * r1 + l1 * r0) / 2.0;
-    let coupling = product - ((l0 + l1) / 2.0) * ((r0 + r1) / 2.0);
-
-    assert_eq!(row.n_edges, 1, "one physical edge behind two orientations");
-    assert!((row.product - product).abs() < 1e-6, "got {}", row.product);
+    assert_eq!(row.n_edges, 1);
+    assert_eq!(row.lig_rate, 1.0, "ligand detected at both endpoints");
+    assert_eq!(row.rec_rate, 0.5);
     assert!(
-        (row.coupling - coupling).abs() < 1e-6,
-        "got {}",
-        row.coupling
+        row.log_or.abs() < 1e-6,
+        "balanced table, got {}",
+        row.log_or
     );
-    // Unique cells of the group are 0 and 1; depth fixture is 10 + cell.
+    let se = (16.0f32 / 3.0).sqrt();
+    assert!((row.log_or_se - se).abs() < 1e-5, "got {}", row.log_or_se);
+    // Unique first-endpoint cells are 0 and 1; depth fixture is 10 + cell.
     assert!((row.mean_log_depth - 10.5).abs() < 1e-6);
 
-    // The 2-edge (a, C1) group, same enumeration across both edges.
     let row = rows
         .iter()
         .find(|r| r.batch.as_ref() == "a" && r.community == 1)
         .expect("(a, C1) row");
-    let (l3, l4, l5) = (l(1.0), l(3.0), l(4.0));
-    let (r3, r4, r5) = (l(2.0), l(6.0), l(0.0));
-    // Edges (3,4) and (4,5), both ways each: instances (3,4),(4,3),(4,5),(5,4).
-    let product = (l3 * r4 + l4 * r3 + l4 * r5 + l5 * r4) / 4.0;
-    let mean_l = (l3 + l4 + l4 + l5) / 4.0;
-    let mean_r = (r4 + r3 + r5 + r4) / 4.0;
-    let coupling = product - mean_l * mean_r;
     assert_eq!(row.n_edges, 2);
-    assert!((row.product - product).abs() < 1e-6, "got {}", row.product);
-    assert!(
-        (row.coupling - coupling).abs() < 1e-6,
-        "got {}",
-        row.coupling
-    );
+    assert_eq!(row.lig_rate, 1.0);
+    assert_eq!(row.rec_rate, 0.75);
+    let lor = (7.0f32 / 3.0).ln();
+    assert!((row.log_or - lor).abs() < 1e-5, "got {}", row.log_or);
+    let se = (1.0f32 / 3.5 + 1.0 / 1.5 + 2.0 + 2.0).sqrt();
+    assert!((row.log_or_se - se).abs() < 1e-5, "got {}", row.log_or_se);
 }
 
-/// Both-orientation enumeration makes the score symmetric in the pair as a
-/// structural fact; this guards the enumeration.
+/// Both-orientation enumeration transposes the 2x2 under a ligand to
+/// receptor swap, and the odds ratio is transpose-invariant: the score is
+/// symmetric structurally, while the margins swap roles.
 #[test]
-fn swapping_ligand_and_receptor_changes_nothing() {
-    let edges = fixture_edges();
-    let (mut pairs, gene_to_local, x_lr) = fixture_genes();
+fn swapping_ligand_and_receptor_transposes_but_scores_agree() {
+    let (mut pairs, _, _) = fixture_genes();
     pairs.push(("REC1".into(), "LIG1".into(), 11, 10));
-    let strata = CommunityStrata::from_edge_modes(&edges, &edges, 6);
-    let log_depth = vec![0.0f32; 6];
-    let (rows, _) = compute_edge_scores(&EdgeScoresInput {
-        edges: &edges,
-        strata: &strata,
-        pairs: &pairs,
-        gene_to_local: &gene_to_local,
-        x_lr: &x_lr,
-        log_depth: &log_depth,
-    });
+    let (rows, _) = run_pairs(&fixture_edges(), pairs);
     for key in [("a", 0u32), ("b", 0), ("a", 1)] {
         let group: Vec<_> = rows
             .iter()
             .filter(|r| r.batch.as_ref() == key.0 && r.community == key.1)
             .collect();
         assert_eq!(group.len(), 2, "both pair orders scored");
+        let (fwd, rev) = (group[0], group[1]);
         assert!(
-            (group[0].product - group[1].product).abs() < 1e-6,
-            "{key:?}: product must be symmetric"
+            (fwd.log_or - rev.log_or).abs() < 1e-6,
+            "{key:?}: log_or must be symmetric"
         );
         assert!(
-            (group[0].coupling - group[1].coupling).abs() < 1e-6,
-            "{key:?}: coupling must be symmetric"
+            (fwd.log_or_se - rev.log_or_se).abs() < 1e-6,
+            "{key:?}: its SE must be symmetric"
         );
+        assert_eq!(fwd.lig_rate, rev.rec_rate, "{key:?}: margins swap roles");
+        assert_eq!(fwd.rec_rate, rev.lig_rate, "{key:?}: margins swap roles");
     }
+}
+
+/// A pair with no co-detected contact still gets a FINITE score (the +1/2
+/// is a prior, not a floor), and its SE exceeds a supported pair's: the
+/// uncertainty column is what says "unmeasurable here".
+#[test]
+fn an_undetected_pair_is_finite_with_a_larger_se() {
+    let (_, _, _) = fixture_genes();
+    let pairs = vec![
+        ("LIG1".into(), "REC1".into(), 10usize, 11usize),
+        ("LIG1".into(), "REC2".into(), 10, 12),
+    ];
+    let (rows, _) = run_pairs(&fixture_edges(), pairs);
+    let c1: Vec<_> = rows
+        .iter()
+        .filter(|r| r.batch.as_ref() == "a" && r.community == 1)
+        .collect();
+    let supported = c1.iter().find(|r| r.receptor.as_ref() == "REC1").unwrap();
+    let empty = c1.iter().find(|r| r.receptor.as_ref() == "REC2").unwrap();
+    assert_eq!(empty.rec_rate, 0.0);
+    assert!(empty.log_or.is_finite());
+    assert!(empty.log_or_se.is_finite());
+    assert!(
+        empty.log_or_se > supported.log_or_se,
+        "no co-detection must read as HIGHER uncertainty ({} vs {})",
+        empty.log_or_se,
+        supported.log_or_se
+    );
 }
 
 /// A straddling edge (labels exist, but this edge's endpoints disagree so

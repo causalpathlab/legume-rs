@@ -186,8 +186,9 @@ pub struct SrtLrActivityArgs {
         long_help = "Skip the permutation machinery entirely.\n\
                      Instead, write {out}.lr_scores.parquet:\n\
                      one row per (batch, community, ligand, receptor),\n\
-                     scoring the LR pair on the spatial contacts of that\n\
-                     link community inside that batch.\n\
+                     holding the posterior log odds ratio of co-detection\n\
+                     across that community's spatial contacts in that batch,\n\
+                     its posterior SE, and each side's marginal detection rate.\n\
                      No test and no null is attached; the table is meant to be\n\
                      pivoted into a batch x (pair, community) phenotype matrix.\n\
                      Test-only flags (--n-permutations and friends) are unused\n\
