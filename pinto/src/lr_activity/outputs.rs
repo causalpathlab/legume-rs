@@ -4,32 +4,12 @@ use crate::util::common::{HashMap, HashSet};
 use matrix_util::parquet::*;
 use parquet::basic::Type as ParquetType;
 
-impl LrActivityRow {
-    /// Both endpoints share a community, so the statistic is symmetric by
-    /// construction and NO direction may be read off this row.
-    #[must_use]
-    pub fn homotypic(&self) -> bool {
-        self.sender_community == self.receiver_community
-    }
-}
-
-impl StratumEntry {
-    /// See [`LrActivityRow::homotypic`]. It is the homotypic baseline, kept
-    /// rather than dropped.
-    #[must_use]
-    pub fn homotypic(&self) -> bool {
-        self.sender_community == self.receiver_community
-    }
-}
-
 pub struct LrActivityRow {
     pub batch: Box<str>,
-    /// The directed stratum's own index.
+    /// The link community this stratum measures. Strata ARE communities:
+    /// every edge contributes both orientations, so the statistic is
+    /// symmetric in the pair and no direction may be read off a row.
     pub community: i32,
-    /// Communities the two roles were scored in. The directional finding is
-    /// the contrast between the `a -> b` row and the `b -> a` row.
-    pub sender_community: i32,
-    pub receiver_community: i32,
     pub ligand: Box<str>,
     pub receptor: Box<str>,
     /// Canonical row name of the ligand gene as it appears in the
@@ -86,16 +66,10 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     let z_re: Vec<f32> = rows.iter().map(|r| r.z_re).collect();
     let p_re: Vec<f32> = rows.iter().map(|r| r.p_re).collect();
     let fwer_wy: Vec<f32> = rows.iter().map(|r| r.fwer_wy).collect();
-    let send_c: Vec<i32> = rows.iter().map(|r| r.sender_community).collect();
-    let recv_c: Vec<i32> = rows.iter().map(|r| r.receiver_community).collect();
-    let homotypic: Vec<i32> = rows.iter().map(|r| i32::from(r.homotypic())).collect();
 
     let col_names: Vec<Box<str>> = vec![
         "batch".into(),
         "community".into(),
-        "sender_community".into(),
-        "receiver_community".into(),
-        "homotypic".into(),
         "ligand".into(),
         "receptor".into(),
         "n_samples".into(),
@@ -111,9 +85,6 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     ];
     let col_types = vec![
         ParquetType::BYTE_ARRAY,
-        ParquetType::INT32,
-        ParquetType::INT32,
-        ParquetType::INT32,
         ParquetType::INT32,
         ParquetType::BYTE_ARRAY,
         ParquetType::BYTE_ARRAY,
@@ -144,9 +115,6 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
     parquet_add_bytearray(&mut row_group, row_names)?;
     parquet_add_string_column(&mut row_group, &batches)?;
     parquet_add_numeric_column(&mut row_group, &communities)?;
-    parquet_add_numeric_column(&mut row_group, &send_c)?;
-    parquet_add_numeric_column(&mut row_group, &recv_c)?;
-    parquet_add_numeric_column(&mut row_group, &homotypic)?;
     parquet_add_string_column(&mut row_group, &ligands)?;
     parquet_add_string_column(&mut row_group, &receptors)?;
     parquet_add_numeric_column(&mut row_group, &n_samples)?;
@@ -171,15 +139,9 @@ pub fn write_lr_activity(file_path: &str, rows: &[LrActivityRow]) -> anyhow::Res
 /// them against `coord_pairs.parquet` without depending on edge ordering.
 pub struct StratumEntry {
     pub batch: Box<str>,
-    /// The directed stratum's own index. Kept under the historical name so a
-    /// consumer that only groups by it keeps working.
+    /// The link community this stratum measures (a real community id).
     pub community: i32,
-    /// The community the ligand side was scored in.
-    pub sender_community: i32,
-    /// The community the receptor side was scored in. Equal to
-    /// `sender_community` on a homotypic stratum.
-    pub receiver_community: i32,
-    /// Sender first, receiver second, matching the direction that was tested.
+    /// Each participating pair once, no direction claimed.
     pub edges: Vec<(Box<str>, Box<str>)>,
 }
 
@@ -230,9 +192,6 @@ pub fn write_lr_activity_json(
                 "stratum_id": new_idx,
                 "batch": s.batch.as_ref(),
                 "community": s.community,
-                "sender_community": s.sender_community,
-                "receiver_community": s.receiver_community,
-                "homotypic": s.homotypic(),
                 "n_edges": s.edges.len(),
                 "edges": edges_json,
             })
@@ -250,9 +209,6 @@ pub fn write_lr_activity_json(
             json!({
                 "batch": r.batch.as_ref(),
                 "community": r.community,
-                "sender_community": r.sender_community,
-                "receiver_community": r.receiver_community,
-                "homotypic": r.homotypic(),
                 "ligand": r.ligand.as_ref(),
                 "receptor": r.receptor.as_ref(),
                 "ligand_resolved": r.ligand_resolved.as_ref(),

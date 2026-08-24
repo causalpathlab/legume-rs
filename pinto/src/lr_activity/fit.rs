@@ -3,11 +3,16 @@
 //! Cells are collapsed into pseudobulk samples = (batch × propensity-bin),
 //! where the propensity bin is the sign-LSH binary-sort code from an
 //! SVD'd random projection of gene expression (within-batch centred).
-//! Each cell carries soft community membership in two roles: `p_send[i, c]`
-//! is the fraction of i's incident edges in community c on which i acts
-//! as sender; `p_recv[i, c]` is the receiver-side analogue. Per (community,
-//! sample) we accumulate role-weighted gene sums for the LR genes, giving
-//! sender and receiver pseudobulk profiles per sample.
+//! Each cell carries soft membership over the link communities (the
+//! fraction of its within-community edge instances falling in each), and
+//! per (community, sample) we accumulate membership-weighted gene sums for
+//! the LR genes, giving one pseudobulk profile per sample per community.
+//! Strata ARE link communities: every within-community edge is enumerated
+//! in both orientations, so every statistic here is symmetric in the pair
+//! and no endpoint plays a privileged role. (An earlier directional design
+//! paired communities into a -> b strata; it was removed after its arm
+//! measured statistically inert and its roles proved to descend from the
+//! edge list's arbitrary serialization order — see `orientation`.)
 //!
 //! Per-(community, sample) gene rates are estimated as `Gamma(num + a0,
 //! denom + b0)` posteriors with a `Gamma(1, 1)` prior, calibrated via
@@ -19,21 +24,20 @@
 //! these log-mean matrices once at the collapse boundary.
 //!
 //! For each (batch, community, LR pair) the statistic is a **weighted
-//! covariance** between the sender-pseudobulk log-mean of L and the
-//! receiver-pseudobulk log-mean of R across samples (sample weight =
-//! sqrt(send_weight · recv_weight)). Covariance (rather than correlation)
-//! preserves L-R magnitude information so pairs separate cleanly under
-//! restandardization.
+//! covariance** between the pseudobulk log-mean of L and of R across
+//! samples (sample weight = the membership mass behind the sample).
+//! Covariance (rather than correlation) preserves L-R magnitude
+//! information so pairs separate cleanly under restandardization.
 //!
 //! The null is sample-level permutation of L within propensity-stratified
 //! buckets — shuffles are restricted to samples sharing the top
 //! `shuffle_stratify_dim` bits of the propensity code, so the cell-type
 //! marginal is preserved across permutations. Per shuffle, a *fresh*
 //! log-posterior sample (delta method: `Normal(ψ(a) − log(b), ψ'(a))`) is
-//! drawn for both L and R rates and used as the per-permutation log
-//! expression. The same draw is shared across all pairs in a given
-//! shuffle so cross-pair dependence (and the WY guarantee) is preserved;
-//! sparse pseudobulks correctly contribute a wider null than dense ones.
+//! drawn and used as the per-permutation log expression for both genes.
+//! The same draw is shared across all pairs in a given shuffle so
+//! cross-pair dependence (and the WY guarantee) is preserved; sparse
+//! pseudobulks correctly contribute a wider null than dense ones.
 //!
 //! Inference layers (per stratum):
 //! - `p_empirical` / `p_z` — per-pair permutation diagnostics.
@@ -46,7 +50,7 @@
 
 use crate::lr_activity::args::SrtLrActivityArgs;
 use crate::lr_activity::io::*;
-use crate::lr_activity::orientation::DirectedStrata;
+use crate::lr_activity::orientation::CommunityStrata;
 use crate::lr_activity::outputs::{
     pvalue_histogram, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
 };
@@ -59,7 +63,7 @@ use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::traits::{CalibrateTarget, Inference, TwoStatParam};
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::membership::GeneIndexResolver;
-use matrix_util::rand_util::{mix_seed, name_seed};
+use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -227,34 +231,28 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // still has to be a valid stratum label.
     let n_communities = (anchor_edges.iter().map(|e| e.2).max().unwrap_or(0) as usize) + 1;
 
-    // Direction comes from community identity, never from the edge list's own
-    // ordering and never from the ligand-receptor pair under test. See
-    // `orientation` for why both of those are wrong.
-    let directed = DirectedStrata::from_edge_modes(&anchor_edges, &edges, n_cells);
-    let n_strata_total = directed.n_strata();
-    let n_hetero = (0..n_strata_total)
-        .filter(|&s| !directed.is_homotypic(s))
-        .count();
+    // One stratum per link community; edges bridging two communities sit
+    // out. See `orientation` for why the directional design was removed.
+    let strata_map = CommunityStrata::from_edge_modes(&anchor_edges, &edges, n_cells);
+    let n_strata_total = strata_map.n_strata();
     info!(
-        "{} cells, {} edges, {} communities -> {} directed strata ({} between communities, {} within)",
+        "{} cells, {} edges, {} communities -> {} within-community strata",
         n_cells,
         edges.len(),
         n_communities,
         n_strata_total,
-        n_hetero,
-        n_strata_total - n_hetero
     );
 
     // Sparse-stratum filter: strata with too few edges can't calibrate (most
     // pseudobulk samples will be empty / have constant L or R, collapsing
     // stat_obs to 0 and breaking restandardization).
     let active_strata: HashSet<u32> = (0..n_strata_total as u32)
-        .filter(|&s| directed.edges_in(s as usize) >= args.min_edges_per_community)
+        .filter(|&s| strata_map.edges_in(s as usize) >= args.min_edges_per_community)
         .collect();
     let n_skipped = n_strata_total - active_strata.len();
     if n_skipped > 0 {
         info!(
-            "Skipping {} sparse directed strata (< {} edges each)",
+            "Skipping {} sparse strata (< {} edge instances each)",
             n_skipped, args.min_edges_per_community
         );
     }
@@ -290,11 +288,11 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         args.min_gene_count
     );
 
-    ///////////////////////////////////////////////////////////
-    // 5. Cell→community soft membership (sender / receiver) //
-    ///////////////////////////////////////////////////////////
+    //////////////////////////////////////////
+    // 5. Cell→community soft membership    //
+    //////////////////////////////////////////
     info!("Building cell→community soft membership...");
-    let (p_send, p_recv) = directed.role_memberships(&edges, n_cells);
+    let p_member = strata_map.memberships(&edges, n_cells);
 
     ////////////////////////////////////////////////////
     // 6. Per-cell batch label (modal incident batch) //
@@ -389,11 +387,10 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         n_samples,
         lr_genes.len()
     );
-    let mut collapse = collapse_role_pseudobulk(
+    let mut collapse = collapse_pseudobulk(
         &x_lr,
         &sample_id_per_cell,
-        &p_send,
-        &p_recv,
+        &p_member,
         n_strata_total,
         n_samples,
         &active_strata,
@@ -407,8 +404,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         if !active_strata.contains(&(c as u32)) {
             continue;
         }
-        apply_gene_weights(&mut collapse.log_mean_send[c], &fisher_lr);
-        apply_gene_weights(&mut collapse.log_mean_recv[c], &fisher_lr);
+        apply_gene_weights(&mut collapse.log_mean[c], &fisher_lr);
     }
 
     ////////////////////////////////////////////////////
@@ -487,7 +483,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         strata.push(stratum_entry(
             &batch_label,
             stratum as usize,
-            &directed,
+            &strata_map,
             &edges,
             &cell_names,
             if is_meta {
@@ -520,14 +516,14 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
             /*shuffle_within_batch=*/ is_meta,
             &sample_batch_label,
             args.shuffle_stratify_dim,
-            &directed,
+            &strata_map,
         );
         info!(
             "  [{}/{}] batch={} stratum={} n_samples={} → {} rows ({:.1}s)",
             k + 1,
             n_strata,
             batch_label,
-            directed.label(stratum as usize),
+            strata_map.label(stratum as usize),
             samples.len(),
             br.len(),
             t0.elapsed().as_secs_f32()
@@ -646,29 +642,29 @@ fn assign_samples(
 }
 
 /// Per-(community, sample) role-weighted pseudobulk for the LR genes,
-/// stored as Gamma posterior log-means: `log_mean_send[c][(g, s)] =
+/// Per-stratum pseudobulk of the LR genes over (batch, propensity-bin)
+/// samples, weighted by each cell's soft membership in the stratum's link
+/// community, stored as Gamma posterior log-means: `log_mean[c][(g, s)] =
 /// E[log λ | data] = ψ(num + a0) - log(denom + b0)`. Using the variational
 /// log-mean instead of `log1p(num/(denom+1))` breaks the zero-count tie
 /// pile-up: a sample with `num = 0` and small `denom` lands far above one
 /// with `num = 0` and large `denom` (correctly less confident in λ ≈ 0).
+///
+/// One plane per stratum: with both orientations of every within-community
+/// edge enumerated, the old sender/receiver roles coincide exactly.
 struct CollapseOut {
-    log_mean_send: Vec<DMatrix<f32>>,
-    log_mean_recv: Vec<DMatrix<f32>>,
-    denom_send: Vec<Vec<f32>>,
-    denom_recv: Vec<Vec<f32>>,
-    /// Calibrated Gamma posteriors per (community, role) used by the
-    /// per-permutation log-posterior draw inside `score_pairs_for_stratum`.
-    /// Fisher weights are NOT pre-applied here (gene-row scaling is
-    /// stacked on top of each draw inside the perm loop).
-    gamma_send: Vec<GammaMatrix>,
-    gamma_recv: Vec<GammaMatrix>,
+    log_mean: Vec<DMatrix<f32>>,
+    denom: Vec<Vec<f32>>,
+    /// Calibrated Gamma posteriors per community used by the per-permutation
+    /// log-posterior draw inside `score_pairs_for_stratum`. Fisher weights
+    /// are NOT pre-applied here.
+    gamma: Vec<GammaMatrix>,
 }
 
-fn collapse_role_pseudobulk(
+fn collapse_pseudobulk(
     x_lr: &DMatrix<f32>,
     sample_id: &[usize],
-    p_send: &DMatrix<f32>,
-    p_recv: &DMatrix<f32>,
+    p_member: &DMatrix<f32>,
     n_strata: usize,
     n_samples: usize,
     active: &HashSet<u32>,
@@ -677,101 +673,60 @@ fn collapse_role_pseudobulk(
     let n_cells = x_lr.ncols();
 
     // Communities are independent — accumulate each one in its own thread.
-    // Inverting the loop order (community-outer, cell-inner) lets axpy run
-    // without inter-thread races.
-    type StratumCollapse = (
-        DMatrix<f32>,
-        DMatrix<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        GammaMatrix,
-        GammaMatrix,
-    );
+    type StratumCollapse = (DMatrix<f32>, Vec<f32>, GammaMatrix);
     let per_stratum: Vec<StratumCollapse> = (0..n_strata)
         .into_par_iter()
         .map(|c| {
-            let mut num_s = DMatrix::<f32>::zeros(n_lr, n_samples);
-            let mut num_r = DMatrix::<f32>::zeros(n_lr, n_samples);
-            let mut den_s = vec![0.0f32; n_samples];
-            let mut den_r = vec![0.0f32; n_samples];
-            // A stratum the sparsity filter already rejected is never scored:
-            // both plan loops `continue` on it before anything reads `collapse`.
-            // Building its entry anyway costs two dense planes, six Gamma
-            // planes and a full digamma/trigamma calibration per rejected
-            // stratum, all retained for the whole run. Return an empty entry
-            // and keep the vectors indexed by stratum id.
+            // A stratum the sparsity filter already rejected is never scored;
+            // building its entry anyway would retain dense planes and a full
+            // digamma/trigamma calibration for the whole run. Return an empty
+            // entry and keep the vectors indexed by stratum id.
             if !active.contains(&(c as u32)) {
                 return (
                     DMatrix::zeros(0, 0),
-                    DMatrix::zeros(0, 0),
                     Vec::new(),
-                    Vec::new(),
-                    GammaMatrix::new((0, 0), GAMMA_A0, GAMMA_B0),
                     GammaMatrix::new((0, 0), GAMMA_A0, GAMMA_B0),
                 );
             }
+            let mut num = DMatrix::<f32>::zeros(n_lr, n_samples);
+            let mut den = vec![0.0f32; n_samples];
             for i in 0..n_cells {
                 let s = sample_id[i];
-                let xi = x_lr.column(i);
-                let ps = p_send[(i, c)];
-                if ps > 0.0 {
-                    num_s.column_mut(s).axpy(ps, &xi, 1.0);
-                    den_s[s] += ps;
-                }
-                let pr = p_recv[(i, c)];
-                if pr > 0.0 {
-                    num_r.column_mut(s).axpy(pr, &xi, 1.0);
-                    den_r[s] += pr;
+                let pm = p_member[(i, c)];
+                if pm > 0.0 {
+                    num.column_mut(s).axpy(pm, &x_lr.column(i), 1.0);
+                    den[s] += pm;
                 }
             }
             let ones_col = nalgebra::DVector::<f32>::from_element(n_lr, 1.0);
-            let den_s_mat = &ones_col
-                * nalgebra::RowDVector::<f32>::from_iterator(n_samples, den_s.iter().copied());
-            let den_r_mat = &ones_col
-                * nalgebra::RowDVector::<f32>::from_iterator(n_samples, den_r.iter().copied());
+            let den_mat = &ones_col
+                * nalgebra::RowDVector::<f32>::from_iterator(n_samples, den.iter().copied());
 
-            let mut g_s = GammaMatrix::new((n_lr, n_samples), GAMMA_A0, GAMMA_B0);
-            g_s.update_stat(&num_s, &den_s_mat);
-            g_s.calibrate_with(CalibrateTarget::All);
-            let log_mean_s = g_s.posterior_log_mean().clone();
-
-            let mut g_r = GammaMatrix::new((n_lr, n_samples), GAMMA_A0, GAMMA_B0);
-            g_r.update_stat(&num_r, &den_r_mat);
-            g_r.calibrate_with(CalibrateTarget::All);
-            let log_mean_r = g_r.posterior_log_mean().clone();
-
-            (log_mean_s, log_mean_r, den_s, den_r, g_s, g_r)
+            let mut g = GammaMatrix::new((n_lr, n_samples), GAMMA_A0, GAMMA_B0);
+            g.update_stat(&num, &den_mat);
+            g.calibrate_with(CalibrateTarget::All);
+            let log_mean = g.posterior_log_mean().clone();
+            (log_mean, den, g)
         })
         .collect();
 
-    let mut log_mean_send = Vec::with_capacity(n_strata);
-    let mut log_mean_recv = Vec::with_capacity(n_strata);
-    let mut denom_send = Vec::with_capacity(n_strata);
-    let mut denom_recv = Vec::with_capacity(n_strata);
-    let mut gamma_send = Vec::with_capacity(n_strata);
-    let mut gamma_recv = Vec::with_capacity(n_strata);
-    for (ls, lr, ds, dr, gs, gr) in per_stratum {
-        log_mean_send.push(ls);
-        log_mean_recv.push(lr);
-        denom_send.push(ds);
-        denom_recv.push(dr);
-        gamma_send.push(gs);
-        gamma_recv.push(gr);
+    let mut log_mean = Vec::with_capacity(n_strata);
+    let mut denom = Vec::with_capacity(n_strata);
+    let mut gamma = Vec::with_capacity(n_strata);
+    for (lm, d, g) in per_stratum {
+        log_mean.push(lm);
+        denom.push(d);
+        gamma.push(g);
     }
     CollapseOut {
-        log_mean_send,
-        log_mean_recv,
-        denom_send,
-        denom_recv,
-        gamma_send,
-        gamma_recv,
+        log_mean,
+        denom,
+        gamma,
     }
 }
 
 fn stratum_present(collapse: &CollapseOut, c: usize, samples: &[usize]) -> bool {
-    samples
-        .iter()
-        .any(|&s| collapse.denom_send[c][s] > 0.0 && collapse.denom_recv[c][s] > 0.0)
+    samples.iter().any(|&s| collapse.denom[c][s] > 0.0)
 }
 
 /// Weighted covariance between `l` and `r` using sample weights `w`.
@@ -848,7 +803,7 @@ fn score_pairs_for_stratum(
     shuffle_within_batch: bool,
     sample_batch_label: &[Box<str>],
     shuffle_stratify_dim: usize,
-    directed: &DirectedStrata,
+    strata_map: &CommunityStrata,
 ) -> Vec<LrActivityRow> {
     let c = stratum as usize;
     let n_s = samples_in_stratum.len();
@@ -856,15 +811,10 @@ fn score_pairs_for_stratum(
         return Vec::new();
     }
 
-    let w_send: Vec<f32> = samples_in_stratum
+    let w_pair: Vec<f32> = samples_in_stratum
         .iter()
-        .map(|&s| collapse.denom_send[c][s])
+        .map(|&s| collapse.denom[c][s])
         .collect();
-    let w_recv: Vec<f32> = samples_in_stratum
-        .iter()
-        .map(|&s| collapse.denom_recv[c][s])
-        .collect();
-    let w_pair: Vec<f32> = (0..n_s).map(|k| (w_send[k] * w_recv[k]).sqrt()).collect();
 
     // Permutation buckets: rows of `bucket_idx` give the position-indices
     // (into the stratum's sample list) that may be shuffled together.
@@ -947,11 +897,11 @@ fn score_pairs_for_stratum(
             let r_local = *gene_to_local.get(ri)?;
             let l_vec: Vec<f32> = samples_in_stratum
                 .iter()
-                .map(|&s| collapse.log_mean_send[c][(l_local, s)])
+                .map(|&s| collapse.log_mean[c][(l_local, s)])
                 .collect();
             let r_vec: Vec<f32> = samples_in_stratum
                 .iter()
-                .map(|&s| collapse.log_mean_recv[c][(r_local, s)])
+                .map(|&s| collapse.log_mean[c][(r_local, s)])
                 .collect();
             let t_obs = testable_weighted_cov(&l_vec, &r_vec, &w_pair)?;
             let w_lr = fisher_lr[l_local] * fisher_lr[r_local];
@@ -999,12 +949,12 @@ fn score_pairs_for_stratum(
                 // already deterministic; the posterior draw once was not, and
                 // `--seed` did not reach the null.)
                 let draw_seed = mix_seed(base_seed, k as u64);
-                let log_s = collapse.gamma_send[c]
-                    .posterior_log_sample(name_seed(draw_seed, "send"))
-                    .expect("posterior_log_sample (send) failed");
-                let log_r = collapse.gamma_recv[c]
-                    .posterior_log_sample(name_seed(draw_seed, "recv"))
-                    .expect("posterior_log_sample (recv) failed");
+                // One draw serves both genes: entries of the posterior sample
+                // are independent across (gene, sample) cells, so the ligand
+                // and receptor rows carry independent noise from one matrix.
+                let log_draw = collapse.gamma[c]
+                    .posterior_log_sample(draw_seed)
+                    .expect("posterior_log_sample failed");
                 // No Fisher rescale of the draw matrices here: `weighted_cov`
                 // is bilinear, so the per-gene weights reach each statistic as
                 // the precomputed `w_lr` scalar below — the same algebra the
@@ -1013,10 +963,10 @@ fn score_pairs_for_stratum(
                     .iter()
                     .map(|pc| {
                         let l_perm: Vec<f32> =
-                            sigma.iter().map(|&g| log_s[(pc.l_local, g)]).collect();
+                            sigma.iter().map(|&g| log_draw[(pc.l_local, g)]).collect();
                         let r_obs: Vec<f32> = samples_in_stratum
                             .iter()
-                            .map(|&s| log_r[(pc.r_local, s)])
+                            .map(|&s| log_draw[(pc.r_local, s)])
                             .collect();
                         pc.w_lr * weighted_cov(&l_perm, &r_obs, &w_pair)
                     })
@@ -1093,12 +1043,11 @@ fn score_pairs_for_stratum(
                 (zv, one_sided_p_z(zv))
             };
 
-            let (send_c, recv_c) = directed.pair(c);
             let row = LrActivityRow {
                 batch: Box::from(batch_label),
-                community: stratum as i32,
-                sender_community: send_c as i32,
-                receiver_community: recv_c as i32,
+                // The REAL link community id — no longer a stratum index
+                // hiding under this name.
+                community: strata_map.community(c) as i32,
                 ligand: pc.lname.clone(),
                 receptor: pc.rname.clone(),
                 ligand_resolved: gene_names[pc.li].clone(),
@@ -1215,7 +1164,7 @@ fn score_pairs_for_stratum(
 fn stratum_entry(
     batch_label: &str,
     stratum: usize,
-    directed: &DirectedStrata,
+    strata_map: &CommunityStrata,
     edges: &[(usize, usize, u32, Option<Box<str>>)],
     cell_names: &[Box<str>],
     batch_filter: Option<&str>,
@@ -1226,11 +1175,13 @@ fn stratum_entry(
             .cloned()
             .unwrap_or_else(|| format!("cell_{c}").into_boxed_str())
     };
-    // Listed sender first, so a consumer drawing an arrow does not have to
-    // re-derive the direction the test actually used.
-    let edges_named: Vec<(Box<str>, Box<str>)> = directed
+    // Each edge appears once per orientation in the stratum; keep the
+    // un-flipped instances so the sidecar lists every participating pair
+    // exactly once, with no direction claimed.
+    let edges_named: Vec<(Box<str>, Box<str>)> = strata_map
         .oriented(stratum)
         .iter()
+        .filter(|&&(_, flipped)| !flipped)
         .filter(|&&(e, _)| {
             let b = &edges[e as usize].3;
             match batch_filter {
@@ -1245,18 +1196,14 @@ fn stratum_entry(
                 None => true,
             }
         })
-        .map(|&(e, flipped)| {
+        .map(|&(e, _)| {
             let (i, j, _, _) = edges[e as usize];
-            let (send, recv) = if flipped { (j, i) } else { (i, j) };
-            (name_of(send), name_of(recv))
+            (name_of(i), name_of(j))
         })
         .collect();
-    let (a, b) = directed.pair(stratum);
     StratumEntry {
         batch: Box::from(batch_label),
-        community: stratum as i32,
-        sender_community: a as i32,
-        receiver_community: b as i32,
+        community: strata_map.community(stratum) as i32,
         edges: edges_named,
     }
 }
