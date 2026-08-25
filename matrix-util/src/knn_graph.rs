@@ -198,8 +198,13 @@ impl KnnGraph {
 
         let triplets: DashMap<(usize, usize), f32> = DashMap::new();
 
-        jobs.into_par_iter().progress_count(njobs).try_for_each(
-            |(lb, ub)| -> anyhow::Result<()> {
+        // Every bar draws through `crate::progress` so it shares the one
+        // `MultiProgress` the log bridge writes above; a bar built straight
+        // from indicatif registers with neither and corrupts the log.
+        let search_bar = crate::progress::new_progress_bar(njobs).with_message("kNN blocks");
+        jobs.into_par_iter()
+            .progress_with(search_bar.clone())
+            .try_for_each(|(lb, ub)| -> anyhow::Result<()> {
                 // One scratch per block, reused across the block's queries to
                 // avoid re-growing the approximate index's visited set each call.
                 let mut scratch = SearchScratch::default();
@@ -211,8 +216,8 @@ impl KnnGraph {
                     }
                 }
                 Ok(())
-            },
-        )?;
+            })?;
+        search_bar.finish_and_clear();
 
         info!("{} triplets by kNN matching", triplets.len());
 
@@ -224,10 +229,16 @@ impl KnnGraph {
         // step 2: edge filtering (reciprocal or union) //
         //////////////////////////////////////////////////
 
+        // Filtering and the sort below ran silent, which on a large pair
+        // graph is a half-minute of nothing between the search bar and the
+        // next log line, and reads as a hang.
+        let filter_bar =
+            crate::progress::new_progress_bar(triplets.len() as u64).with_message("edge filtering");
         let mut edges: Vec<((usize, usize), f32)> = if args.reciprocal {
             // Intersection: keep (i,j) only if both i→j and j→i exist
             triplets
                 .par_iter()
+                .progress_with(filter_bar.clone())
                 .filter_map(|entry| {
                     let &(i, j) = entry.key();
                     if i < j && triplets.contains_key(&(j, i)) {
@@ -241,6 +252,7 @@ impl KnnGraph {
             // Union: keep (i,j) if either i→j or j→i exists, min distance
             triplets
                 .par_iter()
+                .progress_with(filter_bar.clone())
                 .filter_map(|entry| {
                     let &(i, j) = entry.key();
                     if i < j {
@@ -257,8 +269,15 @@ impl KnnGraph {
                 .collect()
         };
 
+        filter_bar.finish_and_clear();
+
+        // A parallel sort cannot report position, so this is a spinner:
+        // unbounded work, but visibly alive.
+        let sort_spin = crate::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
+            .with_message("sorting and deduplicating edges");
         edges.par_sort_by_key(|&(ij, _)| ij);
         edges.dedup();
+        sort_spin.finish_and_clear();
 
         info!(
             "{} edges after {} matching",
