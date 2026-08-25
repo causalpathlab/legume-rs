@@ -274,9 +274,13 @@ pub struct CellActivityGraphEmbeddingArgs {
                      \n\
                      Unset, the default is 2048 on CPU.\n\
                      On CUDA the size is chosen automatically:\n\
-                     a short probe measures the memory one step retains\n\
-                     and grows the chunk while it fits\n\
-                     --gpu-mem-fraction of free device memory.\n\
+                     a short probe measures the memory one step retains,\n\
+                     and grows the chunk\n\
+                     while it fits --gpu-mem-fraction of free device memory,\n\
+                     never past 2048.\n\
+                     The coherence result above was validated at 2048;\n\
+                     a memory-constrained device that resolves lower\n\
+                     trades some of that benefit for fitting at all.\n\
                      Passing a value disables the probe and always wins.",
         hide = true
     )]
@@ -287,8 +291,9 @@ pub struct CellActivityGraphEmbeddingArgs {
         default_value_t = 0.6,
         help = "Fraction of free GPU memory the training chunk may target",
         long_help = "Ceiling for the automatic chunk sizing on CUDA.\n\
-                     The probe grows the chunk while one step's retained\n\
-                     memory, with half reserved for the backward pass,\n\
+                     The probe grows the chunk\n\
+                     while one step's retained memory,\n\
+                     with half reserved for the backward pass,\n\
                      fits this fraction of the device memory free at start.\n\
                      Ignored on CPU and when --gene-batch-size is set.",
         hide = true

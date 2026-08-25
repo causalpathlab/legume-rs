@@ -34,7 +34,7 @@ pub struct SrtDeltaSvdArgs {
     edge_clustering: crate::util::edge_clustering::EdgeClusterArgs,
 }
 
-/// Input for fused multi-level pair delta visitor.
+/// Input for the pair-delta visitor (finest coarsening level only).
 struct FusedDeltaInput<'a> {
     batch_effect: Option<&'a Mat>,
     pair_to_sample: &'a [usize],
@@ -54,6 +54,21 @@ pub(crate) struct PairDeltaCollapsedStat {
 }
 
 impl PairDeltaCollapsedStat {
+    /// Both accumulator columns of one sample, borrowed together so the
+    /// scatter writes shared and diff in a single pass.
+    fn columns_mut(
+        &mut self,
+        sample: usize,
+    ) -> (
+        nalgebra::DVectorViewMut<'_, f32>,
+        nalgebra::DVectorViewMut<'_, f32>,
+    ) {
+        (
+            self.shared_ds.column_mut(sample),
+            self.diff_ds.column_mut(sample),
+        )
+    }
+
     pub(crate) fn new(n_genes: usize, n_samples: usize) -> Self {
         Self {
             shared_ds: Mat::zeros(n_genes, n_samples),
@@ -337,7 +352,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fused block-based visitor: read pair data once, accumulate into all levels' stats.
+/// Block visitor: read each pair's two columns once, merge their sparse
+/// gene sets, and scatter the touched genes into the finest level's stats.
 fn fused_pair_delta_visitor(
     bound: (usize, usize),
     data: &CellPairs,
@@ -371,10 +387,9 @@ fn fused_pair_delta_visitor(
     // Per-pair SPARSE contributions: a pair touches its nonzero genes, not
     // all of them, and the lock below only pays for what it touches.
     // The two CSC columns arrive with sorted, unique row indices, so the
-    // union is a two-pointer merge with no map and no allocation.
-    let mut genes: Vec<u32> = Vec::new();
-    let mut shared: Vec<f32> = Vec::new();
-    let mut diff: Vec<f32> = Vec::new();
+    // union is a two-pointer merge with no map and no per-pair allocation
+    // (the union is at most nnz(left) + nnz(right) entries, reserved once).
+    let mut entries: Vec<(u32, f32, f32)> = Vec::with_capacity(y_left.nnz() + y_right.nnz());
     let mut offsets: Vec<usize> = Vec::with_capacity(n_pairs + 1);
     offsets.push(0);
 
@@ -382,32 +397,41 @@ fn fused_pair_delta_visitor(
         let (li, lv) = (lc.row_indices(), lc.values());
         let (ri, rv) = (rc.row_indices(), rc.values());
         let (mut a, mut b) = (0usize, 0usize);
-        while a < li.len() || b < ri.len() {
-            let take_left = b >= ri.len() || (a < li.len() && li[a] < ri[b]);
-            let take_right = a >= li.len() || (b < ri.len() && ri[b] < li[a]);
-            if take_left {
-                let l = lv[a].ln_1p();
-                genes.push(li[a] as u32);
-                shared.push(l);
-                diff.push(l);
-                a += 1;
-            } else if take_right {
-                let r = rv[b].ln_1p();
-                genes.push(ri[b] as u32);
-                shared.push(r);
-                diff.push(r);
-                b += 1;
-            } else {
-                let l = lv[a].ln_1p();
-                let r = rv[b].ln_1p();
-                genes.push(li[a] as u32);
-                shared.push(l + r);
-                diff.push((l - r).abs());
-                a += 1;
-                b += 1;
+        loop {
+            match (li.get(a), ri.get(b)) {
+                (Some(&lg), Some(&rg)) => match lg.cmp(&rg) {
+                    std::cmp::Ordering::Less => {
+                        let l = lv[a].ln_1p();
+                        entries.push((lg as u32, l, l));
+                        a += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        let r = rv[b].ln_1p();
+                        entries.push((rg as u32, r, r));
+                        b += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        let l = lv[a].ln_1p();
+                        let r = rv[b].ln_1p();
+                        entries.push((lg as u32, l + r, (l - r).abs()));
+                        a += 1;
+                        b += 1;
+                    }
+                },
+                (Some(&lg), None) => {
+                    let l = lv[a].ln_1p();
+                    entries.push((lg as u32, l, l));
+                    a += 1;
+                }
+                (None, Some(&rg)) => {
+                    let r = rv[b].ln_1p();
+                    entries.push((rg as u32, r, r));
+                    b += 1;
+                }
+                (None, None) => break,
             }
         }
-        offsets.push(genes.len());
+        offsets.push(entries.len());
     }
 
     // Scatter under the lock. Held only for the touched genes of one
@@ -415,13 +439,10 @@ fn fused_pair_delta_visitor(
     let mut stats = arc_stats.lock().expect("lock fused delta stats");
     for local_idx in 0..n_pairs {
         let sample = input.pair_to_sample[lb + local_idx];
-        let mut col_shared = stats.shared_ds.column_mut(sample);
-        for k in offsets[local_idx]..offsets[local_idx + 1] {
-            col_shared[genes[k] as usize] += shared[k];
-        }
-        let mut col_diff = stats.diff_ds.column_mut(sample);
-        for k in offsets[local_idx]..offsets[local_idx + 1] {
-            col_diff[genes[k] as usize] += diff[k];
+        let (mut col_shared, mut col_diff) = stats.columns_mut(sample);
+        for &(g, sh, df) in &entries[offsets[local_idx]..offsets[local_idx + 1]] {
+            col_shared[g as usize] += sh;
+            col_diff[g as usize] += df;
         }
         stats.size_s[sample] += 1.0;
     }

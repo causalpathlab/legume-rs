@@ -238,9 +238,14 @@ impl Membership {
         use rayon::prelude::*;
 
         // Match type: 1 = exact, 2 = base-key, 3 = prefix
+        // Through `crate::progress`, per that module's contract: a bar
+        // built straight from indicatif misses the shared MultiProgress
+        // and corrupts interleaved log output.
+        let bar = crate::progress::new_progress_bar(query_keys.len() as u64)
+            .with_message("matching keys");
         let matches: Vec<_> = query_keys
             .par_iter()
-            .progress_count(query_keys.len() as u64)
+            .progress_with(bar.clone())
             .map(|key| {
                 // Try exact match first
                 if let Some(value) = self.map.get(key) {
@@ -280,6 +285,7 @@ impl Membership {
                 None
             })
             .collect();
+        bar.finish_and_clear();
 
         // Aggregate results
         let mut result = HashMap::default();

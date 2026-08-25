@@ -13,6 +13,7 @@ use super::load::CellTable;
 use super::markers;
 use super::partition::{sanitize, CoreSpec};
 use super::render::{emit_figure, Frame};
+use crate::lr_activity::edge_scores::{classify_contact, ContactConfig};
 use crate::util::common::*;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
@@ -605,11 +606,11 @@ pub fn render_lr_overlays_for_core(
                     let r_li = re.get(li).copied().unwrap_or(0.0);
                     // A fully silent contact carries no magnitude to draw,
                     // so the magnitude modes skip it. Under co-detection
-                    // coloring it is the OPPOSITE of skippable: neither
-                    // gene detected is the score's own n00 cell, the most
-                    // confidently discordant contact there is, and
-                    // dropping it would under-represent exactly the blue
-                    // class the ramp exists to show.
+                    // coloring it must render: every contact that is not
+                    // co-detected either way round — from partial
+                    // detection down to nothing at all — is the discordant
+                    // class, and dropping any of it would under-represent
+                    // exactly the blue the ramp exists to show.
                     if l_li + r_ri == 0.0
                         && l_ri + r_li == 0.0
                         && args.lr_color_mode != LrColorMode::Coexpr
@@ -638,7 +639,6 @@ pub fn render_lr_overlays_for_core(
                     // has no side and keeps the display-only magnitude
                     // orientation (`use_canon` above), as do silent
                     // contacts, whose arrows are blue anyway.
-                    use crate::lr_activity::edge_scores::{classify_contact, ContactConfig};
                     let cfg = classify_contact(l_li > 0.0, r_li > 0.0, l_ri > 0.0, r_ri > 0.0);
                     match cfg {
                         ContactConfig::OneWay { ligand_first: true } => (li, ri, 1.0),

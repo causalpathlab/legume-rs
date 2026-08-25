@@ -44,13 +44,20 @@ pub fn gpu_mem_info(dev: &Device) -> Option<(usize, usize)> {
 /// `forward_at(n)` must run ONE representative forward at chunk size
 /// `n` and return its (un-backwarded) loss tensor; this function
 /// measures free memory while that tensor is alive, drops it, and
-/// doubles `n` from `floor` while the projected footprint of the next
-/// doubling stays inside `target_frac` of the initially free memory,
-/// with half the budget reserved for `backward`'s gradient copies.
+/// doubles `n` from `floor`. Each go/no-go decision delegates to
+/// [`chunk_from_measurements`], so there is exactly one stopping rule
+/// and it is the tested one. The first extrapolation is skipped: the
+/// smallest probe's measurement carries the one-time first-touch cost
+/// (context, workspaces) and would otherwise strand the chunk at the
+/// floor on exactly the memory-constrained devices this exists for, so
+/// the second rung is always attempted and the (amortized) later
+/// measurements make the calls.
 ///
-/// Returns `None` when the device cannot report memory (see
-/// [`gpu_mem_info`]); the caller keeps its configured default. The
-/// result is clamped to `[floor, cap]`.
+/// Returns `None` when the device cannot report memory, and also when
+/// no probe ever ran successfully: `Some(n)` always names a size whose
+/// forward was actually executed. A probe or driver failure after a
+/// success keeps the last verified size. The result is clamped to
+/// `[floor, cap]`.
 pub fn auto_chunk_size(
     dev: &Device,
     cap: usize,
@@ -59,36 +66,44 @@ pub fn auto_chunk_size(
     mut forward_at: impl FnMut(usize) -> CandleResult<Tensor>,
 ) -> Option<usize> {
     let (free0, total) = gpu_mem_info(dev)?;
+    let cap = cap.max(1);
     let floor = floor.max(1).min(cap);
-    // Half for the forward graph, half for backward's gradients.
-    let budget = (free0 as f64 * f64::from(target_frac.clamp(0.05, 0.95)) * 0.5) as usize;
 
     let mut n = floor;
-    let mut chosen = floor;
+    let mut verified: Option<usize> = None;
     let mut per_item = 0usize;
     loop {
         let loss = match forward_at(n) {
             Ok(t) => t,
             // A failed probe (often an allocation failure at this n) is
-            // an answer, not an error: the previous size stood.
+            // an answer, not an error: the previous verified size, if
+            // any, stands.
             Err(_) => break,
         };
-        let (free_alive, _) = gpu_mem_info(dev)?;
+        // A transient driver-query failure mid-ladder must not discard
+        // an already-verified size, so no `?` here.
+        let Some((free_alive, _)) = gpu_mem_info(dev) else {
+            drop(loss);
+            verified = verified.or(Some(n));
+            break;
+        };
         drop(loss);
         let used = free0.saturating_sub(free_alive);
-        per_item = (used / n.max(1)).max(1);
-        chosen = n;
+        per_item = (used / n).max(1);
+        verified = Some(n);
         if n >= cap {
             break;
         }
-        // Would the next doubling still fit the halved budget?
         let next = (n * 2).min(cap);
-        if next * per_item > budget {
+        // First rung's measurement is fixed-cost inflated: attempt the
+        // second rung unconditionally rather than extrapolating from it.
+        if n > floor && chunk_from_measurements(free0, per_item, next, n, target_frac) == n {
             break;
         }
         n = next;
     }
 
+    let chosen = verified?;
     info!(
         "auto chunk: {} (cap {}, floor {}) from {:.2} GiB free of {:.2} GiB, \
          ~{} KiB per item, {:.0}% target",

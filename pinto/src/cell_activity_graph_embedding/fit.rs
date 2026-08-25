@@ -122,6 +122,53 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::sync::atomic::Ordering;
 
+/// Classic SGD chunk over genes: the validated fixed default on CPU and
+/// the CAP of the CUDA auto-probe (auto-sizing only ever shrinks it).
+/// The args long_help describes this value; keep the two in step.
+const GENE_BATCH_DEFAULT: usize = 2048;
+/// The probe cycles this many times the requested count of genes before
+/// giving up on filling a pilot minibatch: `sample` can miss per
+/// (gene, batch), so some slack is needed, and the bound keeps a sparse
+/// sampler from turning the probe into a long scan.
+const PROBE_OVERSAMPLE: usize = 4;
+
+/// One forward-only pilot minibatch of ~`n` gene batches for the GPU
+/// memory probe: sample through the REAL sampler, score with the REAL
+/// loss, return the un-backwarded loss tensor. Never steps the
+/// optimizer, so no parameter moves before epoch 0.
+#[allow(clippy::too_many_arguments)]
+fn probe_forward(
+    n: usize,
+    trainable_genes: &[usize],
+    n_batches: usize,
+    sampler: &GeneGatedChainSampler,
+    probe_rng: &mut SmallRng,
+    model: &JointEmbedModel,
+    objective: graph_embedding_util::loss::NceObjective,
+    dev: &candle_util::candle_core::Device,
+) -> candle_util::candle_core::Result<candle_util::candle_core::Tensor> {
+    let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> = Vec::with_capacity(n);
+    'fill: for &g in trainable_genes.iter().cycle().take(PROBE_OVERSAMPLE * n) {
+        for b in 0..n_batches {
+            if let Some((cb, _)) = sampler.sample(g, b, probe_rng) {
+                mini.push((g, cb));
+                if mini.len() >= n {
+                    break 'fill;
+                }
+            }
+        }
+    }
+    if mini.is_empty() {
+        return Err(candle_util::candle_core::Error::Msg(
+            "probe sampled nothing".into(),
+        ));
+    }
+    let (gene_ids, cbs): (Vec<usize>, Vec<_>) = mini.into_iter().unzip();
+    let gene_ids_u32: Vec<u32> = gene_ids.iter().map(|&g| g as u32).collect();
+    let out = cage_nce_loss_per_level(model, cbs, &gene_ids_u32, objective, dev)?;
+    out.per_level.sum_all()
+}
+
 pub fn fit_cell_activity_graph_embedding(
     args: &CellActivityGraphEmbeddingArgs,
 ) -> anyhow::Result<()> {
@@ -870,47 +917,29 @@ pub fn fit_cell_activity_graph_embedding(
     // growing while the next doubling fits --gpu-mem-fraction of free
     // memory (half held back for backward). The probe never calls
     // backward, so no parameter moves before epoch 0.
-    const GENE_BATCH_DEFAULT: usize = 2048;
     let gene_batch_size = match args.gene_batch_size {
         Some(explicit) => explicit,
         None => {
             let mut probe_rng = SmallRng::seed_from_u64(c.seed ^ 0x9e37_79b9);
-            let probed = candle_util::device::auto_chunk_size(
+            candle_util::device::auto_chunk_size(
                 &dev,
                 GENE_BATCH_DEFAULT,
                 16.min(trainable_genes.len().max(1)),
                 args.gpu_mem_fraction,
                 |n| {
-                    let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> =
-                        Vec::new();
-                    'fill: for &g in trainable_genes.iter().cycle().take(4 * n) {
-                        for b in 0..n_batches {
-                            if let Some((cb, _)) = sampler.sample(g, b, &mut probe_rng) {
-                                mini.push((g, cb));
-                                if mini.len() >= n {
-                                    break 'fill;
-                                }
-                            }
-                        }
-                    }
-                    if mini.is_empty() {
-                        return Err(candle_util::candle_core::Error::Msg(
-                            "probe sampled nothing".into(),
-                        ));
-                    }
-                    let (gene_ids, cbs): (Vec<usize>, Vec<_>) = mini.into_iter().unzip();
-                    let gene_ids_u32: Vec<u32> = gene_ids.iter().map(|&g| g as u32).collect();
-                    let out = cage_nce_loss_per_level(
+                    probe_forward(
+                        n,
+                        &trainable_genes,
+                        n_batches,
+                        &sampler,
+                        &mut probe_rng,
                         &model,
-                        cbs,
-                        &gene_ids_u32,
                         args.nce_objective.to_ge(),
                         &dev,
-                    )?;
-                    out.per_level.sum_all()
+                    )
                 },
-            );
-            probed.unwrap_or(GENE_BATCH_DEFAULT)
+            )
+            .unwrap_or(GENE_BATCH_DEFAULT)
         }
     };
 
