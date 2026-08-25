@@ -17,6 +17,7 @@
 
 pub mod args;
 pub mod discover;
+pub mod gradient_field;
 pub mod interfaces;
 pub mod load;
 pub mod lr_overlay;
@@ -24,6 +25,9 @@ pub mod markers;
 pub mod partition;
 pub mod render;
 pub mod viridis;
+
+#[cfg(test)]
+mod tests;
 
 pub use args::SrtPlotArgs;
 
@@ -581,6 +585,14 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
                     let lr_dir = plot_dir.join(PlotKind::Lr.subdir());
                     std::fs::create_dir_all(&lr_dir)?;
+                    // Per-cell top propensity: the radius rule the
+                    // propensity figure uses, reused for the region-tinted
+                    // background under the LR field summaries.
+                    let prop_top: Option<Vec<f32>> = final_aligned_prop.as_ref().map(|m| {
+                        (0..m.nrows())
+                            .map(|i| m.row(i).iter().cloned().fold(0.0f32, f32::max))
+                            .collect()
+                    });
                     let per_core: Vec<Vec<PathBuf>> = cores
                         .par_iter()
                         .map(|core| -> anyhow::Result<Vec<PathBuf>> {
@@ -651,6 +663,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 lr_expr.as_ref(),
                                 focal_set.as_ref(),
                                 final_dominant.as_deref(),
+                                prop_top.as_deref(),
                                 kept.as_ref(),
                                 &lr_dir,
                             )
