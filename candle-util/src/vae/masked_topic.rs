@@ -480,10 +480,12 @@ pub fn train_masked(
     let minibatch_size = match (config.gpu_mem_fraction, data_loaders.first()) {
         (Some(frac), Some(loader)) => {
             let cap = config.minibatch_size;
-            let n_data = loader.num_data();
             crate::device::auto_chunk_size(config.dev, cap, 16.min(cap), frac, |n| {
+                // Cycled, not truncated: training bootstrap-pads every
+                // batch to the full minibatch size, so the probe must
+                // measure `n` real rows even when the level holds fewer.
                 let mb = loader
-                    .minibatch_ordered(0, n.min(n_data), config.dev)
+                    .minibatch_cycled(n, config.dev)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 let fwd = masked_minibatch_loss(
                     encoder,

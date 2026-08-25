@@ -439,6 +439,22 @@ impl IndexedInMemoryData {
         self.build_minibatch(sample_indices, target_device)
     }
 
+    /// Build an indexed minibatch of exactly `n` rows, cycling over the
+    /// data when `n` exceeds the row count. Training pads every batch to
+    /// the full minibatch size by bootstrap (`bootstrap_indices`), so a
+    /// memory probe must measure full-size batches too; a truncated
+    /// probe batch would under-measure the per-row cost.
+    pub fn minibatch_cycled(
+        &self,
+        n: usize,
+        target_device: &Device,
+    ) -> anyhow::Result<IndexedMinibatchData> {
+        let n_data = self.num_data();
+        anyhow::ensure!(n_data > 0, "minibatch_cycled on an empty loader");
+        let sample_indices: Vec<usize> = (0..n).map(|i| i % n_data).collect();
+        self.build_minibatch(&sample_indices, target_device)
+    }
+
     /// Build an indexed minibatch from an ordered (non-shuffled) range.
     pub fn minibatch_ordered(
         &self,

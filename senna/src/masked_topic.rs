@@ -248,6 +248,7 @@ pub struct MaskedTopicArgs {
                      while one step's retained memory,\n\
                      with half reserved for the backward pass,\n\
                      fits this fraction of the device memory free at start.\n\
+                     Fractions outside 0.05 to 0.95 are clamped to that range.\n\
                      Ignored on CPU and when --minibatch-size is set."
     )]
     gpu_mem_fraction: f32,

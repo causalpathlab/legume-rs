@@ -281,8 +281,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      The coherence result above was validated at 2048;\n\
                      a memory-constrained device that resolves lower\n\
                      trades some of that benefit for fitting at all.\n\
-                     Passing a value disables the probe and always wins.",
-        hide = true
+                     Passing a value disables the probe and always wins."
     )]
     pub gene_batch_size: Option<usize>,
 
@@ -295,6 +294,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      while one step's retained memory,\n\
                      with half reserved for the backward pass,\n\
                      fits this fraction of the device memory free at start.\n\
+                     Fractions outside 0.05 to 0.95 are clamped to that range.\n\
                      Ignored on CPU and when --gene-batch-size is set."
     )]
     pub gpu_mem_fraction: f32,
