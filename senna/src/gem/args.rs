@@ -373,8 +373,11 @@ pub struct TrainArgs {
         default_value_t = 0.6,
         help = "Fraction of free GPU memory the training batch may target",
         long_help = "Ceiling for the automatic batch sizing on CUDA.\n\
-                     Ignored on CPU and when --batch-size is set.",
-        hide = true
+                     The probe grows the batch\n\
+                     while one step's retained memory,\n\
+                     with half reserved for the backward pass,\n\
+                     fits this fraction of the device memory free at start.\n\
+                     Ignored on CPU and when --batch-size is set."
     )]
     pub gpu_mem_fraction: f32,
 
