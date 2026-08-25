@@ -1,21 +1,5 @@
 use super::*;
 
-/// Build a level with known counts. Column `p` of `counts` is filled with
-/// `p + 1`, so any mis-summing shows up as a wrong integer rather than a
-/// plausible-looking float. Super-edge structure lives in the training
-/// frame (`pb_frame`), not here; the selection keeps only the
-/// internal-edge count for its diagnostic.
-fn level(n_pb: usize, n_genes: usize) -> LevelPseudobulk {
-    let counts = Mat::from_fn(n_genes, n_pb, |_, p| (p + 1) as f32);
-    LevelPseudobulk {
-        cell_labels: Vec::new(),
-        counts,
-        n_internal_fine_edges: 0,
-        e_pb: Mat::zeros(n_pb, 1),
-        pb_offset: 0,
-    }
-}
-
 /////////////////////////////////////
 // the two-block splice alternation //
 /////////////////////////////////////
