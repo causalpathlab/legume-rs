@@ -37,7 +37,7 @@ pub struct SrtDeltaSvdArgs {
 /// Input for fused multi-level pair delta visitor.
 struct FusedDeltaInput<'a> {
     batch_effect: Option<&'a Mat>,
-    all_pair_to_sample: Vec<Vec<usize>>,
+    pair_to_sample: &'a [usize],
 }
 
 /// Accumulated shared/difference statistics per gene per sample.
@@ -196,27 +196,40 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         },
     );
 
-    let mut all_stats: Vec<PairDeltaCollapsedStat> = ml
+    // Only the FINEST level is ever read (the Poisson-Gamma fit below),
+    // so only that one is accumulated. The coarser levels cost
+    // `n_genes x n_samples` dense accumulators EACH, and every one of
+    // them also multiplied the work done while the pass below holds its
+    // lock; they were built and dropped unused.
+    let finest_samples = *ml
         .all_num_samples
-        .iter()
-        .map(|&n| PairDeltaCollapsedStat::new(n_genes, n))
-        .collect();
+        .last()
+        .ok_or(anyhow::anyhow!("no levels"))?;
+    let finest_pair_to_sample = ml
+        .all_pair_to_sample
+        .last()
+        .ok_or(anyhow::anyhow!("no levels"))?;
+    info!(
+        "Accumulating pair-delta statistics at the finest level ({} samples of {:?})",
+        finest_samples, ml.all_num_samples
+    );
+    let mut collapsed = PairDeltaCollapsedStat::new(n_genes, finest_samples);
 
     let fused_input = FusedDeltaInput {
         batch_effect: batch_ref,
-        all_pair_to_sample: ml.all_pair_to_sample,
+        pair_to_sample: finest_pair_to_sample,
     };
 
     srt_cell_pairs.inner.visit_pairs_by_block(
         &fused_pair_delta_visitor,
         &fused_input,
-        &mut all_stats,
+        &mut collapsed,
         c.block_size,
     )?;
 
     // 6. Fit Poisson-Gamma (finest level)
     info!("Fitting Poisson-Gamma model...");
-    let collapsed_stat = all_stats.last().ok_or(anyhow::anyhow!("no levels"))?;
+    let collapsed_stat = &collapsed;
     let params = collapsed_stat.optimize(None)?;
 
     // 7. SVD on [shared; diff] posterior log means
@@ -329,15 +342,19 @@ fn fused_pair_delta_visitor(
     bound: (usize, usize),
     data: &CellPairs,
     input: &FusedDeltaInput,
-    arc_stats: Arc<Mutex<&mut Vec<PairDeltaCollapsedStat>>>,
+    arc_stats: Arc<Mutex<&mut PairDeltaCollapsedStat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = bound;
     let pairs = &data.pairs()[lb..ub];
     let n_pairs = ub - lb;
 
+    // Two sequential reads, deliberately NOT deduplicated. Endpoints do
+    // repeat within a block, but a deduplicated read forces a per-pair
+    // index lookup and scattered column access afterwards, and measured
+    // slower on a large pair graph than simply reading both sides in
+    // order and zipping them.
     let left = pairs.iter().map(|x| x.0);
     let right = pairs.iter().map(|x| x.1);
-
     let mut y_left = data.data.read_columns_csc(left)?;
     let mut y_right = data.data.read_columns_csc(right)?;
 
@@ -351,54 +368,62 @@ fn fused_pair_delta_visitor(
         y_right.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
     }
 
-    let n_genes = y_left.nrows();
+    // Per-pair SPARSE contributions: a pair touches its nonzero genes, not
+    // all of them, and the lock below only pays for what it touches.
+    // The two CSC columns arrive with sorted, unique row indices, so the
+    // union is a two-pointer merge with no map and no allocation.
+    let mut genes: Vec<u32> = Vec::new();
+    let mut shared: Vec<f32> = Vec::new();
+    let mut diff: Vec<f32> = Vec::new();
+    let mut offsets: Vec<usize> = Vec::with_capacity(n_pairs + 1);
+    offsets.push(0);
 
-    // Compute per-pair shared/diff into dense block matrices
-    let mut block_shared = Mat::zeros(n_genes, n_pairs);
-    let mut block_diff = Mat::zeros(n_genes, n_pairs);
-
-    for (pair_idx, (left_col, right_col)) in y_left.col_iter().zip(y_right.col_iter()).enumerate() {
-        let right_log: HashMap<usize, f32> = right_col
-            .row_indices()
-            .iter()
-            .zip(right_col.values().iter())
-            .map(|(&g, &v)| (g, v.ln_1p()))
-            .collect();
-
-        let mut left_visited: HashSet<usize> = Default::default();
-
-        for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
-            let log_left = val.ln_1p();
-            let log_right = right_log.get(&gene).copied().unwrap_or(0.0);
-            block_shared[(gene, pair_idx)] += log_left + log_right;
-            block_diff[(gene, pair_idx)] += (log_left - log_right).abs();
-            left_visited.insert(gene);
-        }
-
-        for (&gene, &val) in right_col
-            .row_indices()
-            .iter()
-            .zip(right_col.values().iter())
-        {
-            if !left_visited.contains(&gene) {
-                let log_right = val.ln_1p();
-                block_shared[(gene, pair_idx)] += log_right;
-                block_diff[(gene, pair_idx)] += log_right;
+    for (lc, rc) in y_left.col_iter().zip(y_right.col_iter()) {
+        let (li, lv) = (lc.row_indices(), lc.values());
+        let (ri, rv) = (rc.row_indices(), rc.values());
+        let (mut a, mut b) = (0usize, 0usize);
+        while a < li.len() || b < ri.len() {
+            let take_left = b >= ri.len() || (a < li.len() && li[a] < ri[b]);
+            let take_right = a >= li.len() || (b < ri.len() && ri[b] < li[a]);
+            if take_left {
+                let l = lv[a].ln_1p();
+                genes.push(li[a] as u32);
+                shared.push(l);
+                diff.push(l);
+                a += 1;
+            } else if take_right {
+                let r = rv[b].ln_1p();
+                genes.push(ri[b] as u32);
+                shared.push(r);
+                diff.push(r);
+                b += 1;
+            } else {
+                let l = lv[a].ln_1p();
+                let r = rv[b].ln_1p();
+                genes.push(li[a] as u32);
+                shared.push(l + r);
+                diff.push((l - r).abs());
+                a += 1;
+                b += 1;
             }
         }
+        offsets.push(genes.len());
     }
 
-    // Single lock: distribute to all levels' stats
+    // Scatter under the lock. Held only for the touched genes of one
+    // level, where it used to cover every gene row of every level.
     let mut stats = arc_stats.lock().expect("lock fused delta stats");
-    for (level, pair_to_sample) in input.all_pair_to_sample.iter().enumerate() {
-        for local_idx in 0..n_pairs {
-            let sample = pair_to_sample[lb + local_idx];
-            let mut col_shared = stats[level].shared_ds.column_mut(sample);
-            col_shared += &block_shared.column(local_idx);
-            let mut col_diff = stats[level].diff_ds.column_mut(sample);
-            col_diff += &block_diff.column(local_idx);
-            stats[level].size_s[sample] += 1.0;
+    for local_idx in 0..n_pairs {
+        let sample = input.pair_to_sample[lb + local_idx];
+        let mut col_shared = stats.shared_ds.column_mut(sample);
+        for k in offsets[local_idx]..offsets[local_idx + 1] {
+            col_shared[genes[k] as usize] += shared[k];
         }
+        let mut col_diff = stats.diff_ds.column_mut(sample);
+        for k in offsets[local_idx]..offsets[local_idx + 1] {
+            col_diff[genes[k] as usize] += diff[k];
+        }
+        stats.size_s[sample] += 1.0;
     }
 
     Ok(())
