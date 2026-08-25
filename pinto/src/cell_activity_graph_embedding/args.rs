@@ -254,7 +254,6 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 2048,
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
         help = "Genes per outer parallel sampling chunk",
         long_help = "The outer loop samples this many genes in parallel via rayon.\n\
@@ -272,10 +271,29 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Below ~this many trainable genes an epoch is ONE step,\n\
                      so a small panel may want a smaller value here\n\
                      or more --epochs.\n\
-                     Lower it under memory pressure.",
+                     \n\
+                     Unset, the default is 2048 on CPU.\n\
+                     On CUDA the size is chosen automatically:\n\
+                     a short probe measures the memory one step retains\n\
+                     and grows the chunk while it fits\n\
+                     --gpu-mem-fraction of free device memory.\n\
+                     Passing a value disables the probe and always wins.",
         hide = true
     )]
-    pub gene_batch_size: usize,
+    pub gene_batch_size: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 0.6,
+        help = "Fraction of free GPU memory the training chunk may target",
+        long_help = "Ceiling for the automatic chunk sizing on CUDA.\n\
+                     The probe grows the chunk while one step's retained\n\
+                     memory, with half reserved for the backward pass,\n\
+                     fits this fraction of the device memory free at start.\n\
+                     Ignored on CPU and when --gene-batch-size is set.",
+        hide = true
+    )]
+    pub gpu_mem_fraction: f32,
 
     #[arg(
         long,

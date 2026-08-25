@@ -863,6 +863,57 @@ pub fn fit_cell_activity_graph_embedding(
         n_negatives: args.n_negatives,
     };
 
+    // Chunk ("SGD minibatch over genes") resolution. An explicit
+    // --gene-batch-size always wins. Otherwise CPU keeps the classic
+    // 2048, and CUDA probes: one forward per candidate size through the
+    // REAL sampler and loss, measuring what the retained graph costs,
+    // growing while the next doubling fits --gpu-mem-fraction of free
+    // memory (half held back for backward). The probe never calls
+    // backward, so no parameter moves before epoch 0.
+    const GENE_BATCH_DEFAULT: usize = 2048;
+    let gene_batch_size = match args.gene_batch_size {
+        Some(explicit) => explicit,
+        None => {
+            let mut probe_rng = SmallRng::seed_from_u64(c.seed ^ 0x9e37_79b9);
+            let probed = candle_util::device::auto_chunk_size(
+                &dev,
+                GENE_BATCH_DEFAULT,
+                16.min(trainable_genes.len().max(1)),
+                args.gpu_mem_fraction,
+                |n| {
+                    let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> =
+                        Vec::new();
+                    'fill: for &g in trainable_genes.iter().cycle().take(4 * n) {
+                        for b in 0..n_batches {
+                            if let Some((cb, _)) = sampler.sample(g, b, &mut probe_rng) {
+                                mini.push((g, cb));
+                                if mini.len() >= n {
+                                    break 'fill;
+                                }
+                            }
+                        }
+                    }
+                    if mini.is_empty() {
+                        return Err(candle_util::candle_core::Error::Msg(
+                            "probe sampled nothing".into(),
+                        ));
+                    }
+                    let (gene_ids, cbs): (Vec<usize>, Vec<_>) = mini.into_iter().unzip();
+                    let gene_ids_u32: Vec<u32> = gene_ids.iter().map(|&g| g as u32).collect();
+                    let out = cage_nce_loss_per_level(
+                        &model,
+                        cbs,
+                        &gene_ids_u32,
+                        args.nce_objective.to_ge(),
+                        &dev,
+                    )?;
+                    out.per_level.sum_all()
+                },
+            );
+            probed.unwrap_or(GENE_BATCH_DEFAULT)
+        }
+    };
+
     let mut score_trace: Vec<ScoreEntry> = Vec::new();
     let mut rng_master = SmallRng::seed_from_u64(c.seed);
     // Wall-clock split of the SGD loop, to rank optimization work by evidence
@@ -884,7 +935,7 @@ pub fn fit_cell_activity_graph_embedding(
     } else {
         trainable_genes.len()
     };
-    let steps_per_epoch = genes_per_epoch_actual.div_ceil(args.gene_batch_size);
+    let steps_per_epoch = genes_per_epoch_actual.div_ceil(gene_batch_size);
     let total_steps = args.epochs * steps_per_epoch.max(1);
     let train_bar = new_progress_bar(total_steps as u64).with_message("training steps");
 
@@ -1005,7 +1056,7 @@ pub fn fit_cell_activity_graph_embedding(
                 .max(1e-12),
             None => genes_per_epoch_actual as f64,
         };
-        for chunk in perm.chunks(args.gene_batch_size) {
+        for chunk in perm.chunks(gene_batch_size) {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
