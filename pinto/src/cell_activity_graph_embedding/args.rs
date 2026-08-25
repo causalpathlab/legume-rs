@@ -295,8 +295,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      while one step's retained memory,\n\
                      with half reserved for the backward pass,\n\
                      fits this fraction of the device memory free at start.\n\
-                     Ignored on CPU and when --gene-batch-size is set.",
-        hide = true
+                     Ignored on CPU and when --gene-batch-size is set."
     )]
     pub gpu_mem_fraction: f32,
 

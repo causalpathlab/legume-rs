@@ -129,8 +129,11 @@ pub struct VaeArgs {
         default_value_t = 0.6,
         help = "Fraction of free GPU memory the training minibatch may target",
         long_help = "Ceiling for the automatic minibatch sizing on CUDA.\n\
-                     Ignored on CPU and when --minibatch-size is set.",
-        hide = true
+                     The probe grows the minibatch\n\
+                     while one step's retained memory,\n\
+                     with half reserved for the backward pass,\n\
+                     fits this fraction of the device memory free at start.\n\
+                     Ignored on CPU and when --minibatch-size is set."
     )]
     pub(crate) gpu_mem_fraction: f32,
 
