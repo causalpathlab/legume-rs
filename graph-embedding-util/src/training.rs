@@ -89,6 +89,7 @@ impl AxisSampler<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct TrainingParams {
     pub epochs: usize,
     /// `None` = auto: one weighted pass over the largest axis
@@ -109,6 +110,13 @@ pub struct TrainingParams {
     /// Global-norm gradient clip per `AdamW` step (`0.0` = off). Bounds the
     /// update magnitude so embeddings don't inflate on NCE loss spikes.
     pub max_grad_norm: f32,
+    /// `Some(frac)`: on a CUDA device, probe one forward per candidate
+    /// size through [`candle_util::device::auto_chunk_size`] and SHRINK
+    /// `batch_size` from its configured value when free device memory
+    /// says so (never grow past it: batch size is not fit-neutral).
+    /// `None`, a CPU device, or an unavailable memory query all keep
+    /// `batch_size` exactly as configured.
+    pub gpu_mem_fraction: Option<f32>,
     /// L2 (ridge) penalty `λ · mean(δ_g²)` on the per-gene splice offset (factored
     /// β-sharing only). Shrinks `δ_g` toward 0 so the splice signal is explained
     /// on the cell axis unless a gene's nascent deviation genuinely lowers the
@@ -247,6 +255,36 @@ pub fn train_composite(
         .map(|a| a.sampler.n_units())
         .max()
         .unwrap_or(0);
+    // Memory-aware batch size, resolved BEFORE the per-epoch budget so
+    // the step count matches the size actually trained with. The probe
+    // runs the same `sum_step` forward the loop uses, never backward.
+    let params = &{
+        let mut resolved = params.clone();
+        if let Some(frac) = params.gpu_mem_fraction {
+            let mut probe_rng = StdRng::seed_from_u64(params.seed ^ 0x9e37_79b9);
+            if let Some(n) = candle_util::device::auto_chunk_size(
+                ctx.dev,
+                params.batch_size,
+                16.min(params.batch_size),
+                frac,
+                |n| {
+                    let mut probe_params = params.clone();
+                    probe_params.batch_size = n;
+                    match sum_step(ctx, &mut probe_rng, &probe_params) {
+                        Ok(Some(loss)) => Ok(loss),
+                        Ok(None) => Err(candle_util::candle_core::Error::Msg(
+                            "probe sampled nothing".into(),
+                        )),
+                        Err(e) => Err(candle_util::candle_core::Error::Msg(e.to_string())),
+                    }
+                },
+            ) {
+                resolved.batch_size = n;
+            }
+        }
+        resolved
+    };
+
     let batches_per_epoch = resolve_batches_per_epoch(params, max_axis_units);
     // The gate KL used to be `λ/batch_size`; it is now pinned to the reference
     // so a throughput knob stops retuning feature sparsity. At the default that

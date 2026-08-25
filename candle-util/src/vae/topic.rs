@@ -29,6 +29,11 @@ pub struct TrainConfig<'a> {
     pub parameters: &'a candle_nn::VarMap,
     pub dev: &'a Device,
     pub epochs: usize,
+    /// `Some(frac)`: on CUDA, probe one forward per candidate size and
+    /// SHRINK `minibatch_size` when free device memory says so (never
+    /// grow past it). `None`, CPU, or an unavailable query keep the
+    /// configured size exactly.
+    pub gpu_mem_fraction: Option<f32>,
     pub minibatch_size: usize,
     pub learning_rate: f32,
     pub topic_smoothing: f64,
@@ -103,9 +108,33 @@ where
 
     let mut data_loaders = build_device_loaders(level_data, config.dev)?;
 
+    // On CUDA, optionally shrink the minibatch size to fit free device
+    // memory. The probe mirrors the loop's forward with the loss held
+    // un-backwarded; `auto_chunk_size` reserves half the measured budget
+    // for backward's gradient copies.
+    let minibatch_size = match (config.gpu_mem_fraction, data_loaders.first_mut()) {
+        (Some(frac), Some(loader)) => {
+            let cap = config.minibatch_size;
+            crate::device::auto_chunk_size(config.dev, cap, 16.min(cap), frac, |n| {
+                loader
+                    .shuffle_minibatch_on_device(n)
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                let mb = loader.minibatch_cached(0);
+                let (log_z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
+                let y_nd = mb.output.as_ref().unwrap_or(&mb.input);
+                let (_, llik) =
+                    decoders[0].forward_with_llik(&log_z_nk, y_nd, &topic_likelihood)?;
+                (&kl - &llik)?.mean_all()
+            })
+            .unwrap_or(cap)
+        }
+        _ => config.minibatch_size,
+    };
+
     for epoch in 0..total_epochs {
         for loader in data_loaders.iter_mut() {
-            loader.shuffle_minibatch_on_device(config.minibatch_size)?;
+            loader.shuffle_minibatch_on_device(minibatch_size)?;
         }
 
         let mut llik_tot = 0f32;
@@ -219,9 +248,34 @@ pub fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
 
     let mut data_loaders = build_device_loaders(level_data, config.dev)?;
 
+    // Same CUDA sizing probe as `train_mixed`, over the first level's
+    // full decoder set.
+    let minibatch_size = match (config.gpu_mem_fraction, data_loaders.first_mut()) {
+        (Some(frac), Some(loader)) => {
+            let cap = config.minibatch_size;
+            crate::device::auto_chunk_size(config.dev, cap, 16.min(cap), frac, |n| {
+                loader
+                    .shuffle_minibatch_on_device(n)
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                let mb = loader.minibatch_cached(0);
+                let (log_z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
+                let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
+                let y_nd = mb.output.as_ref().unwrap_or(&mb.input);
+                let mut weighted_llik = Tensor::zeros_like(&kl)?;
+                for (dec, &w) in decoders_per_level[0].iter().zip(decoder_weights) {
+                    let (_, llik) = dec.forward_llik(&log_z_nk, y_nd)?;
+                    weighted_llik = (weighted_llik + llik * w)?;
+                }
+                (&kl - &weighted_llik)?.mean_all()
+            })
+            .unwrap_or(cap)
+        }
+        _ => config.minibatch_size,
+    };
+
     for epoch in 0..total_epochs {
         for loader in data_loaders.iter_mut() {
-            loader.shuffle_minibatch_on_device(config.minibatch_size)?;
+            loader.shuffle_minibatch_on_device(minibatch_size)?;
         }
 
         let mut llik_tot = 0f32;

@@ -73,6 +73,9 @@ pub struct FitConfig {
     /// `Some(n)` = fixed step budget.
     pub batches_per_epoch: Option<usize>,
     pub batch_size: usize,
+    /// See [`crate::training::TrainingParams::gpu_mem_fraction`]:
+    /// `Some(frac)` lets a CUDA run shrink `batch_size` to fit memory.
+    pub gpu_mem_fraction: Option<f32>,
     pub num_negatives: usize,
     pub learning_rate: f64,
     pub seed: u64,
@@ -263,6 +266,7 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         epochs: config.epochs,
         batches_per_epoch: config.batches_per_epoch,
         batch_size: config.batch_size,
+        gpu_mem_fraction: config.gpu_mem_fraction,
         num_negatives: config.num_negatives,
         seed: config.seed,
         // bge is two-phase: phase 1 (pb axes, no cell axis) and phase 2

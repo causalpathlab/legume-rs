@@ -80,6 +80,8 @@ fn make_candle_config<'a>(
         parameters: config.parameters,
         dev: config.dev,
         epochs: config.args.epochs,
+        // The topic CLIs keep their configured size: no CUDA sizing probe.
+        gpu_mem_fraction: None,
         minibatch_size: config.args.minibatch_size,
         learning_rate: config.args.learning_rate,
         topic_smoothing: config.args.topic_smoothing,
