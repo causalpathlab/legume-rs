@@ -588,11 +588,27 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     // Per-cell top propensity: the radius rule the
                     // propensity figure uses, reused for the region-tinted
                     // background under the LR field summaries.
-                    let prop_top: Option<Vec<f32>> = final_aligned_prop.as_ref().map(|m| {
-                        (0..m.nrows())
-                            .map(|i| m.row(i).iter().cloned().fold(0.0f32, f32::max))
-                            .collect()
-                    });
+                    // Read the DOMINANT column rather than re-deriving a
+                    // row max: `final_dominant` is that argmax already, so
+                    // taking the value there makes the overlay background
+                    // agree with the propensity figure by construction
+                    // instead of by two formulas happening to match.
+                    let prop_top: Option<Vec<f32>> =
+                        match (final_aligned_prop.as_ref(), final_dominant.as_deref()) {
+                            (Some(m), Some(dom)) => Some(
+                                (0..m.nrows())
+                                    .map(|i| {
+                                        let k = dom.get(i).copied().unwrap_or(-1);
+                                        if k >= 0 && (k as usize) < m.ncols() {
+                                            m[(i, k as usize)]
+                                        } else {
+                                            f32::NAN
+                                        }
+                                    })
+                                    .collect(),
+                            ),
+                            _ => None,
+                        };
                     let per_core: Vec<Vec<PathBuf>> = cores
                         .par_iter()
                         .map(|core| -> anyhow::Result<Vec<PathBuf>> {
@@ -664,6 +680,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 focal_set.as_ref(),
                                 final_dominant.as_deref(),
                                 prop_top.as_deref(),
+                                final_aligned_prop.as_ref().map(|m| m.ncols()),
                                 kept.as_ref(),
                                 &lr_dir,
                             )

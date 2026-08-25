@@ -388,14 +388,10 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         // its JSON sidecar, so a downstream reader can find this table
         // from the prefix alone rather than guessing the name.
         let upstream_meta_path = format!("{}.pinto.json", &args.lc_prefix);
-        if let Ok(mut meta) =
-            crate::util::metadata::PintoMetadata::read(std::path::Path::new(&upstream_meta_path))
-        {
-            meta.outputs.lr_scores = Some(out_path.clone());
-            if let Err(e) = meta.write(std::path::Path::new(&upstream_meta_path)) {
-                warn!("could not record the score table in {upstream_meta_path}: {e}");
-            }
-        }
+        crate::util::metadata::PintoMetadata::backfill_output(
+            std::path::Path::new(&upstream_meta_path),
+            |o| o.lr_scores = Some(out_path.clone()),
+        );
         return Ok(());
     }
 
@@ -632,10 +628,10 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         )?;
         info!("Wrote {}", json_path);
 
-        if let Some(mut meta) = upstream_meta {
-            meta.outputs.lr_activity = Some(json_path.clone());
-            let _ = meta.write(std::path::Path::new(&upstream_meta_path));
-        }
+        crate::util::metadata::PintoMetadata::backfill_output(
+            std::path::Path::new(&upstream_meta_path),
+            |o| o.lr_activity = Some(json_path.clone()),
+        );
     }
 
     Ok(())

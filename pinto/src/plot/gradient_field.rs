@@ -321,6 +321,11 @@ pub fn field_lines(field: &GradientField, args: &FieldLineArgs) -> FieldLines {
     let mask_ny = ((30.0 * args.density * h / long).round() as usize).max(4);
     let (mcw, mch) = (w / mask_nx as f32, h / mask_ny as f32);
     let mut mask = vec![false; mask_nx * mask_ny];
+    // Which line claimed each cell, by 1-based line number: membership in
+    // the CURRENT trajectory is a stamp compare, not a scan of a growing
+    // Vec (that was quadratic in trajectory length).
+    let mut stamp = vec![0u32; mask_nx * mask_ny];
+    let mut line_no: u32 = 0;
     let mask_at = |p: Pt| -> Option<usize> {
         let ix = (p.0 / mcw) as usize;
         let iy = (p.1 / mch) as usize;
@@ -355,15 +360,21 @@ pub fn field_lines(field: &GradientField, args: &FieldLineArgs) -> FieldLines {
                 continue;
             }
 
+            line_no += 1;
             let mut claimed: Vec<usize> = Vec::new();
-            let claim = |p: Pt, claimed: &mut Vec<usize>, mask: &mut Vec<bool>| -> bool {
+            let claim = |p: Pt,
+                         claimed: &mut Vec<usize>,
+                         mask: &mut Vec<bool>,
+                         stamp: &mut Vec<u32>|
+             -> bool {
                 match mask_at(p) {
                     Some(k) => {
-                        if mask[k] && !claimed.contains(&k) {
+                        if mask[k] && stamp[k] != line_no {
                             return false; // collision with another line
                         }
                         if !mask[k] {
                             mask[k] = true;
+                            stamp[k] = line_no;
                             claimed.push(k);
                         }
                         true
@@ -371,9 +382,19 @@ pub fn field_lines(field: &GradientField, args: &FieldLineArgs) -> FieldLines {
                     None => false,
                 }
             };
-            claim(seed, &mut claimed, &mut mask);
+            claim(seed, &mut claimed, &mut mask, &mut stamp);
 
             let mut total_len = 0.0f32;
+            // Accumulated as the line is walked: its mean field value
+            // needs no second pass over the points afterwards.
+            let mut sval = 0.0f32;
+            let mut nval = 0.0f32;
+            if let Some((_, _, v, _)) = field.sample_bilinear(seed) {
+                if v.is_finite() {
+                    sval += v;
+                    nval += 1.0;
+                }
+            }
             let mut halves: [Vec<Pt>; 2] = [vec![seed], vec![seed]];
             for (half, sign) in halves.iter_mut().zip([-1.0f32, 1.0]) {
                 let mut p = seed;
@@ -400,8 +421,21 @@ pub fn field_lines(field: &GradientField, args: &FieldLineArgs) -> FieldLines {
                         p.0 + sign * (d1.0 + d2.0) * 0.5 * ds * long,
                         p.1 + sign * (d1.1 + d2.1) * 0.5 * ds * long,
                     );
-                    if dir(q).is_none() || !claim(q, &mut claimed, &mut mask) {
+                    // One sample at `q` serves the floor check AND the
+                    // running value mean, where `dir(q)` would discard
+                    // the value and re-sample the same point.
+                    let Some((_, coh_q, val_q, c_q)) = field.sample_bilinear(q) else {
                         break;
+                    };
+                    if coh_q < args.min_coherence || c_q < args.min_count {
+                        break;
+                    }
+                    if !claim(q, &mut claimed, &mut mask, &mut stamp) {
+                        break;
+                    }
+                    if val_q.is_finite() {
+                        sval += val_q;
+                        nval += 1.0;
                     }
                     half.push(q);
                     p = q;
@@ -415,6 +449,7 @@ pub fn field_lines(field: &GradientField, args: &FieldLineArgs) -> FieldLines {
             if total_len < args.min_length {
                 for k in claimed {
                     mask[k] = false;
+                    stamp[k] = 0;
                 }
                 continue;
             }
@@ -424,16 +459,6 @@ pub fn field_lines(field: &GradientField, args: &FieldLineArgs) -> FieldLines {
             line.extend(fwd.into_iter().skip(1));
             if line.len() < 2 {
                 continue;
-            }
-            let mut sval = 0.0f32;
-            let mut nval = 0.0f32;
-            for p in &line {
-                if let Some((_, _, v, _)) = field.sample_bilinear(*p) {
-                    if v.is_finite() {
-                        sval += v;
-                        nval += 1.0;
-                    }
-                }
             }
             out.values
                 .push(if nval > 0.0 { sval / nval } else { f32::NAN });

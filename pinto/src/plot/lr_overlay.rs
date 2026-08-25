@@ -8,6 +8,7 @@
 //! z, fwer_wy`.
 
 use super::args::SrtPlotArgs;
+use super::args::{LrArrows, LrColorMode};
 use super::load::CellTable;
 use super::markers;
 use super::partition::{sanitize, CoreSpec};
@@ -16,7 +17,9 @@ use crate::util::common::*;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use plot_utils::hull::Pt;
-use plot_utils::rasterize::{rasterize_arrow_layer_png, rasterize_group_png, RadiusSpec};
+use plot_utils::rasterize::{
+    rasterize_arrow_layer_png, rasterize_group_png, rasterize_segment_layer_png, RadiusSpec,
+};
 
 /// Grid resolution (bins along the longer frame axis) for the gridded /
 /// field-line arrow summaries.
@@ -31,6 +34,17 @@ const GRADIENT_MIN_COUNT: f32 = 0.5;
 /// one net contact's worth of direction; a cell whose contacts cancel
 /// has nothing to say and must not be normalized into a claim.
 const CELL_MIN_RESULTANT: f32 = 1.0;
+
+/// Gridded-arrow glyph scale, relative to the per-edge quiver.
+const GRID_STROKE_SCALE: f32 = 1.8;
+const GRID_HEAD_SCALE: f32 = 0.8;
+/// Field-line styling: uniform dark lines over the coloured tissue, with
+/// one enlarged head per line so direction reads at slide scale.
+const FIELDLINE_STROKE_SCALE: f32 = 2.2;
+const FIELDLINE_HEAD_SCALE: f32 = 1.4;
+const FIELDLINE_COLOR: plot_utils::Rgb = (45, 45, 45);
+const FIELDLINE_SHAFT_ALPHA: f32 = 0.88;
+const FIELDLINE_HEAD_ALPHA: f32 = 0.92;
 use plot_utils::svg_emit::TopicLayer;
 use serde::Deserialize;
 use std::fs::File;
@@ -374,6 +388,7 @@ pub fn render_lr_overlays_for_core(
     focal_cells: Option<&HashSet<usize>>,
     dominant: Option<&[i64]>,
     propensity_top: Option<&[f32]>,
+    k_total: Option<usize>,
     kept_communities: Option<&HashSet<usize>>,
     out_dir: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
@@ -487,25 +502,28 @@ pub fn render_lr_overlays_for_core(
     };
     let bg_regions: Vec<TopicLayer> = match dominant {
         Some(dom) => {
-            let k = dom
-                .iter()
-                .filter(|&&c| c >= 0)
-                .map(|&c| c as usize + 1)
-                .max()
-                .unwrap_or(1);
+            // Palette width comes from the LEVEL, not from this core: the
+            // table `palette::resolve` picks changes at K = 11, so a core
+            // that happens to miss the high communities would otherwise
+            // colour the same community differently than the propensity
+            // figure it is meant to sit under.
+            let k_max = dom.iter().copied().max().unwrap_or(-1) as i32;
+            let k = palette_size_for(k_total, k_max);
             let colors = super::render::ColorBook::new(args, k);
             let mut by_comm: std::collections::BTreeMap<i64, (Vec<Pt>, Vec<f32>)> =
                 Default::default();
             for &i in core.cell_ixs.iter() {
                 let c = dom.get(i).copied().unwrap_or(-1);
+                // The propensity figure's rule exactly: radius = base x p,
+                // and a cell with no finite propensity draws at radius 0
+                // rather than at full size. Diverging from it here would
+                // make the same cell a different size in two figures.
                 let p = propensity_top
                     .and_then(|v| v.get(i).copied())
                     .filter(|p| p.is_finite())
-                    .unwrap_or(1.0);
+                    .unwrap_or(0.0);
                 let e = by_comm.entry(c).or_default();
                 e.0.push(frame.bounds.to_pixel(cells.coords[i], frame.extent));
-                // Same rule as the propensity figure: radius = base x p,
-                // so uncommitted cells shrink instead of shouting.
                 e.1.push(frame.radius_px_base * p.clamp(0.0, 1.0));
             }
             let mut tls = Vec::with_capacity(by_comm.len());
@@ -594,7 +612,7 @@ pub fn render_lr_overlays_for_core(
                     // class the ramp exists to show.
                     if l_li + r_ri == 0.0
                         && l_ri + r_li == 0.0
-                        && args.lr_color_mode != crate::plot::args::LrColorMode::Coexpr
+                        && args.lr_color_mode != LrColorMode::Coexpr
                     {
                         continue;
                     }
@@ -606,27 +624,22 @@ pub fn render_lr_overlays_for_core(
                         Some(&v) => v,
                         None => (l_li + r_ri) >= (l_ri + r_li),
                     };
-                    // The COLOR encodes detection, not magnitude: the
-                    // co-detection score counts a contact when both genes
-                    // are detected across it, so an edge reads as
-                    // concordant (+1, both detected in the drawn
-                    // orientation) or discordant (-1, at most one side).
+                    // The COLOR encodes detection, not magnitude, and it
+                    // pools BOTH orientations exactly as the score does:
+                    // a contact counts as concordant when the pair is
+                    // co-detected either way round. Reading concordance
+                    // off only the drawn orientation would contradict
+                    // the symmetric estimand this figure illustrates.
                     // The arrow's DIRECTION is a separate display
                     // heuristic and still magnitude-based (`use_canon`
                     // above: pooled orientation, else per-edge L+R
-                    // argmax); the estimand itself is symmetric and
-                    // carries no direction.
-                    let concordance = |l: f32, r: f32| -> f32 {
-                        if l > 0.0 && r > 0.0 {
-                            1.0
-                        } else {
-                            -1.0
-                        }
-                    };
+                    // argmax); the estimand carries no direction.
+                    let codetected = (l_li > 0.0 && r_ri > 0.0) || (l_ri > 0.0 && r_li > 0.0);
+                    let concordance = if codetected { 1.0 } else { -1.0 };
                     if use_canon {
-                        (li, ri, concordance(l_li, r_ri))
+                        (li, ri, concordance)
                     } else {
-                        (ri, li, concordance(l_ri, r_li))
+                        (ri, li, concordance)
                     }
                 }
                 _ => (li, ri, f32::NAN),
@@ -673,7 +686,7 @@ pub fn render_lr_overlays_for_core(
         // is what the gridded / field-line summaries average; the
         // categorical direction mode has no scalar and stays per-edge.
         let per_edge_vals: Option<Vec<f32>> = match args.lr_color_mode {
-            crate::plot::args::LrColorMode::LogRatio => {
+            LrColorMode::LogRatio => {
                 // log((R + 1) / (L + 1)) — receptor over ligand.
                 // Positive (red): R ≫ L → ligand-limited regime; signal
                 //   scales ~linearly with ligand, the "activating" /
@@ -697,8 +710,8 @@ pub fn render_lr_overlays_for_core(
                         .collect(),
                 )
             }
-            crate::plot::args::LrColorMode::Coexpr => Some(coexpr.clone()),
-            crate::plot::args::LrColorMode::Direction => None,
+            LrColorMode::Coexpr => Some(coexpr.clone()),
+            LrColorMode::Direction => None,
         };
         // Which arrow styles this figure family gets. `all` writes the
         // field-lines figure under the bare pair name plus `.edges` and
@@ -707,11 +720,11 @@ pub fn render_lr_overlays_for_core(
         // average, so it renders per-edge only.
         let modes: Vec<(crate::plot::args::LrArrows, &str)> = match (args.lr_arrows, &per_edge_vals)
         {
-            (_, None) => vec![(crate::plot::args::LrArrows::Edges, "")],
-            (crate::plot::args::LrArrows::All, Some(_)) => vec![
-                (crate::plot::args::LrArrows::FieldLines, ""),
-                (crate::plot::args::LrArrows::Edges, ".edges"),
-                (crate::plot::args::LrArrows::Grid, ".grid"),
+            (_, None) => vec![(LrArrows::Edges, "")],
+            (LrArrows::All, Some(_)) => vec![
+                (LrArrows::FieldLines, ""),
+                (LrArrows::Edges, ".edges"),
+                (LrArrows::Grid, ".grid"),
             ],
             (m, Some(_)) => vec![(m, "")],
         };
@@ -746,9 +759,28 @@ pub fn render_lr_overlays_for_core(
             r.fwer_wy.unwrap_or(f32::NAN),
         );
 
+        // Built once per pair, not once per mode: `all` renders both
+        // Grid and FieldLines from the SAME field, and the per-cell
+        // aggregation behind it is O(contacts).
+        let shared_field = match &per_edge_vals {
+            Some(vals) if modes.iter().any(|(m, _)| *m != LrArrows::Edges) => {
+                let (pts, vecs, pvals) = per_cell_field_inputs(&segs, vals);
+                let mut f = crate::plot::gradient_field::build_gradient_field(
+                    &pts,
+                    &vecs,
+                    &pvals,
+                    frame.extent,
+                    GRADIENT_FIELD_BINS,
+                );
+                f.smooth(GRADIENT_SMOOTH_PASSES);
+                Some(f)
+            }
+            _ => None,
+        };
+
         for (mode, suffix) in modes {
             let arrow_layers = match (mode, &per_edge_vals) {
-                (crate::plot::args::LrArrows::Edges, Some(vals)) => build_diverging_arrow_layers(
+                (LrArrows::Edges, Some(vals)) => build_diverging_arrow_layers(
                     &segs,
                     vals,
                     frame.extent,
@@ -756,83 +788,44 @@ pub fn render_lr_overlays_for_core(
                     head_len,
                     args.lr_coexpr_bins,
                 )?,
-                (crate::plot::args::LrArrows::Grid, Some(vals)) => {
-                    let (pts, vecs, pvals) = per_cell_field_inputs(&segs, vals);
-                    let mut field = crate::plot::gradient_field::build_gradient_field(
-                        &pts,
-                        &vecs,
-                        &pvals,
-                        frame.extent,
-                        GRADIENT_FIELD_BINS,
-                    );
-                    field.smooth(GRADIENT_SMOOTH_PASSES);
+                (LrArrows::Grid, Some(_)) => {
+                    let field = shared_field.as_ref().expect("built for non-edge modes");
                     let (gsegs, gvals) =
                         field.gridded_arrows(GRADIENT_MIN_COHERENCE, GRADIENT_MIN_COUNT);
                     build_diverging_arrow_layers(
                         &gsegs,
                         &gvals,
                         frame.extent,
-                        stroke * 1.8,
-                        head_len * 0.8,
+                        stroke * GRID_STROKE_SCALE,
+                        head_len * GRID_HEAD_SCALE,
                         args.lr_coexpr_bins,
                     )?
                 }
-                (crate::plot::args::LrArrows::FieldLines, Some(vals)) => {
-                    let (pts, vecs, pvals) = per_cell_field_inputs(&segs, vals);
-                    let mut field = crate::plot::gradient_field::build_gradient_field(
-                        &pts,
-                        &vecs,
-                        &pvals,
-                        frame.extent,
-                        GRADIENT_FIELD_BINS,
-                    );
-                    field.smooth(GRADIENT_SMOOTH_PASSES);
+                (LrArrows::FieldLines, Some(_)) => {
+                    let field = shared_field.as_ref().expect("built for non-edge modes");
                     let fl = crate::plot::gradient_field::field_lines(
-                        &field,
+                        field,
                         &crate::plot::gradient_field::FieldLineArgs::default(),
                     );
-                    // scVelo styling: uniform dark continuous lines over
-                    // the coloured tissue, one arrowhead per line at its
-                    // mid-arc point, the streamplot way.
-                    let mut shafts: Vec<(Pt, Pt)> = Vec::new();
-                    let mut heads: Vec<(Pt, Pt)> = Vec::new();
-                    for line in &fl.lines {
-                        for pair in line.windows(2) {
-                            shafts.push((pair[0], pair[1]));
-                        }
-                        let seg_len: Vec<f32> = line
-                            .windows(2)
-                            .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
-                            .collect();
-                        let half: f32 = seg_len.iter().sum::<f32>() * 0.5;
-                        let mut arc = 0.0f32;
-                        for (pair, l) in line.windows(2).zip(&seg_len) {
-                            arc += l;
-                            if arc >= half {
-                                heads.push((pair[0], pair[1]));
-                                break;
-                            }
-                        }
-                    }
-                    let mut layers = build_uniform_arrow_layer(
+                    let (shafts, heads) = shafts_and_heads(&fl.lines);
+                    let mut layers = build_segment_layer(
                         &shafts,
                         frame.extent,
-                        stroke * 2.2,
-                        1.0,
-                        (45, 45, 45),
-                        0.88,
+                        stroke * FIELDLINE_STROKE_SCALE,
+                        FIELDLINE_COLOR,
+                        FIELDLINE_SHAFT_ALPHA,
                     )?;
                     layers.extend(build_uniform_arrow_layer(
                         &heads,
                         frame.extent,
-                        stroke * 2.2,
-                        head_len * 1.4,
-                        (45, 45, 45),
-                        0.92,
+                        stroke * FIELDLINE_STROKE_SCALE,
+                        head_len * FIELDLINE_HEAD_SCALE,
+                        FIELDLINE_COLOR,
+                        FIELDLINE_HEAD_ALPHA,
                     )?);
                     layers
                 }
-                (crate::plot::args::LrArrows::All, Some(_)) => unreachable!("expanded above"),
+                (LrArrows::All, Some(_)) => unreachable!("expanded above"),
                 (_, None) => build_direction_arrow_layers(
                     &segs,
                     &seg_cells,
@@ -844,7 +837,7 @@ pub fn render_lr_overlays_for_core(
                 )?,
             };
 
-            let bg = if mode == crate::plot::args::LrArrows::Edges {
+            let bg = if mode == LrArrows::Edges {
                 &bg_gray
             } else {
                 &bg_regions
@@ -1999,6 +1992,35 @@ fn per_cell_field_inputs(
     (points, vectors, vals)
 }
 
+/// Shaft segments and head segments of a rendered field-line set.
+type ShaftsAndHeads = (Vec<(Pt, Pt)>, Vec<(Pt, Pt)>);
+
+/// Split integrated field lines into shaft segments and the single
+/// mid-arc segment of each line that carries its arrowhead.
+fn shafts_and_heads(lines: &[Vec<Pt>]) -> ShaftsAndHeads {
+    let mut shafts = Vec::new();
+    let mut heads = Vec::new();
+    for line in lines {
+        for pair in line.windows(2) {
+            shafts.push((pair[0], pair[1]));
+        }
+        let seg_len: Vec<f32> = line
+            .windows(2)
+            .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+            .collect();
+        let half: f32 = seg_len.iter().sum::<f32>() * 0.5;
+        let mut arc = 0.0f32;
+        for (pair, l) in line.windows(2).zip(&seg_len) {
+            arc += l;
+            if arc >= half {
+                heads.push((pair[0], pair[1]));
+                break;
+            }
+        }
+    }
+    (shafts, heads)
+}
+
 /// A single uniform-colour arrow layer (the scVelo-style field lines are
 /// dark and let the tissue underneath carry the colour).
 fn build_uniform_arrow_layer(
@@ -2013,6 +2035,29 @@ fn build_uniform_arrow_layer(
         return Ok(Vec::new());
     }
     let png = rasterize_arrow_layer_png(segs, ext, stroke_px, head_len_px, color, alpha)?;
+    Ok(vec![TopicLayer {
+        label: String::new(),
+        png,
+        hull_px: Vec::new(),
+        label_xy_px: (f32::NAN, f32::NAN),
+        color,
+    }])
+}
+
+/// One stroked-polyline layer. `rasterize_segment_layer_png` is the
+/// purpose-built path for this; the arrow rasterizer would build a
+/// throwaway head triangle per RK12 sub-step.
+fn build_segment_layer(
+    segs: &[(Pt, Pt)],
+    ext: plot_utils::rasterize::Extent,
+    stroke_px: f32,
+    color: plot_utils::Rgb,
+    alpha: f32,
+) -> anyhow::Result<Vec<TopicLayer>> {
+    if segs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let png = rasterize_segment_layer_png(segs, ext, stroke_px, color, alpha)?;
     Ok(vec![TopicLayer {
         label: String::new(),
         png,
