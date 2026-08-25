@@ -42,6 +42,23 @@ pub enum LrColorMode {
     Coexpr,
 }
 
+/// How the LR overlay renders its arrows.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum LrArrows {
+    /// Every style: the field-lines figure under the bare pair name,
+    /// plus `.edges` and `.grid` variants beside it (default).
+    All,
+    /// One arrow per contact.
+    Edges,
+    /// One arrow per grid bin: mean direction of the bin's cells,
+    /// length scaled by their coherence; incoherent bins draw nothing.
+    Grid,
+    /// streamplot-style field lines through the smoothed per-cell
+    /// gradient, over the propensity-coloured tissue; lines stop where
+    /// the cells disagree.
+    FieldLines,
+}
+
 #[derive(Args, Debug)]
 pub struct SrtPlotArgs {
     #[arg(
@@ -385,6 +402,36 @@ pub struct SrtPlotArgs {
         hide = true
     )]
     pub lr_coexpr_bins: usize,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = LrArrows::All,
+        help = "LR arrow rendering: all styles, or one of edges, grid, field-lines",
+        long_help = "How the LR overlay renders its arrows.\n\
+                     \n\
+                     `all` (the default) writes every style per pair:\n\
+                     the field-lines figure under the bare pair name,\n\
+                     with `.edges` and `.grid` variants beside it.\n\
+                     `edges` draws one arrow per contact.\n\
+                     `grid` bins the cells' net contact directions\n\
+                     and draws one arrow per bin,\n\
+                     with length scaled by how much its cells agree.\n\
+                     `field-lines` integrates streamplot-style lines\n\
+                     through the smoothed field,\n\
+                     drawn over the propensity-coloured tissue,\n\
+                     with one arrowhead at each line's midpoint.\n\
+                     \n\
+                     The summaries are STATIC gradient views of the same\n\
+                     per-contact directions, never a flow:\n\
+                     the estimand is symmetric, and direction on an arrow\n\
+                     is a display heuristic.\n\
+                     Bins whose cells disagree draw nothing, by design.\n\
+                     The direction colour mode stays per-edge;\n\
+                     it has no scalar to average.",
+        hide = true,
+    )]
+    pub lr_arrows: LrArrows,
 
     #[arg(
         long,
