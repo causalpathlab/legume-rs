@@ -302,13 +302,15 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 12,
-        help = "Positive edges drawn per (gene, batch) sample",
-        long_help = "Every gene draws this many positives per batch each epoch.\n\
-                     \n\
-                     The default was 256, and that was far too high.\n\
-                     Over-sampling does not merely cost time here,\n\
-                     it DEGRADES the fit: cutting the epoch budget ~20x\n\
-                     raised spatial coherence several fold on the test set.\n\
+        help = "Positive super-edge draws per (gene, batch) sample",
+        long_help = "Every gene draws this many positive SUPER EDGES\n\
+                     per experimental batch each epoch, with replacement:\n\
+                     a batch's per-gene pool is tens of super edges,\n\
+                     so repeated draws are by design.\n\
+                     Over-sampling does not merely cost time,\n\
+                     it can DEGRADE the fit\n\
+                     (measured under the former cell-level trainer:\n\
+                     cutting the budget ~20x raised spatial coherence).\n\
                      Raise it only if the fit looks under-trained,\n\
                      and check the coherence rather than the loss.\n\
                      \n\
@@ -321,13 +323,13 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         value_name = "N",
         help = "Total positive edges drawn per epoch, across all genes (unset = auto)",
-        long_help = "The epoch's total sampling budget.\n\
+        long_help = "The epoch's total SUPER-EDGE sampling budget.\n\
                      \n\
                      Divided evenly: each gene draws\n\
                      N / (trainable genes x batches) positives per batch.\n\
                      Unset keeps the historical --per-gene-batch instead.\n\
-                     On a 17k-gene run the default is ~4.4M positives an epoch,\n\
-                     each carrying 1 + --n-negatives x --chain-levels scores.\n\
+                     Each positive carries\n\
+                     1 + --n-negatives x --chain-levels scores.\n\
                      \n\
                      This is the knob for how much data an epoch sees,\n\
                      and it is the one that moved the fit.\n\
@@ -343,7 +345,7 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 8,
-        help = "Sibling negatives drawn per positive edge per chain level",
+        help = "Sibling-PB negatives drawn per positive super edge per chain level",
         hide = true
     )]
     pub n_negatives: usize,
@@ -414,7 +416,7 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = 0.0625,
         help = "L2 penalty λ on the shared cell and gene embeddings; 0 = off",
-        long_help = "L2 penalty λ on E_cell ∈ ℝ^{N×D} and E_gene ∈ ℝ^{G×D}.\n\
+        long_help = "L2 penalty λ on E_pb ∈ ℝ^{P×D} and E_gene ∈ ℝ^{G×D}.\n\
                      It adds λ · (mean_n ‖e_n‖² + mean_g ‖e_g‖²) to the loss:\n\
                      a sum over the D latent dims, averaged over rows.\n\
                      The row-mean keeps λ scale-invariant across N and G, and\n\
@@ -437,7 +439,7 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         value_delimiter(','),
         default_value = "0,1,2",
-        help = "Chain levels (coarsest → finest) drawn from the coarsening hierarchy"
+        help = "Chain levels from the coarsening hierarchy;\nmust all be coarser than the finest level,\nwhich is the trained unit itself"
     )]
     pub chain_levels: Vec<usize>,
 

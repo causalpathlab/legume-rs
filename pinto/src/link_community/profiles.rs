@@ -684,6 +684,42 @@ pub struct PropensityReportConfig<'a> {
     pub edge_kind: Option<&'a [i32]>,
 }
 
+/// What the propensity pass hands back to its caller, beyond the files
+/// it writes itself: enough to build derived readouts (see
+/// [`propensity_weighted_cell_embedding`]) without re-clustering.
+pub struct PropensityOutputs {
+    /// Realized number of edge communities.
+    pub n_clusters: usize,
+    /// `[n_cells x K]` per-cell propensity over edge communities (also
+    /// written to `.propensity.parquet`).
+    pub cell_propensity: Mat,
+    /// Per-edge community label, parallel to `edges`.
+    pub edge_membership: Vec<usize>,
+}
+
+/// A per-cell embedding as a READOUT of the propensity structure: each
+/// cell is its propensity-weighted average of link-community centroids
+/// in the pair-latent space, `e_cell[c] = Σ_k prop[c,k] · μ_k` with
+/// `μ_k` the mean latent of community k's edges. Same width as the
+/// latent (and therefore the gene dictionary it was projected against).
+/// Nothing here is trained; callers decide whether and where to ship it.
+#[must_use]
+pub fn propensity_weighted_cell_embedding(proj_ne: &Mat, out: &PropensityOutputs) -> Mat {
+    let k = out.n_clusters;
+    let d = proj_ne.ncols();
+    let mut centroids = Mat::zeros(k, d);
+    let mut counts = vec![0f32; k];
+    for (e, &kc) in out.edge_membership.iter().enumerate() {
+        counts[kc] += 1.0;
+        let mut row = centroids.row_mut(kc);
+        row += proj_ne.row(e);
+    }
+    for (kc, cnt) in counts.iter().enumerate() {
+        centroids.row_mut(kc).scale_mut(1.0 / cnt.max(1.0));
+    }
+    &out.cell_propensity * &centroids
+}
+
 /// Compute propensity and gene-community statistics from latent pair projections.
 ///
 /// 1. Cluster `proj_kn` (K_latent × N_pairs) → edge cluster labels
@@ -691,10 +727,10 @@ pub struct PropensityReportConfig<'a> {
 /// 3. Gene-community stat: Poisson-Gamma gene expression rates per community [G × K_clusters]
 ///
 /// Writes `{out_prefix}.propensity.parquet`, `{out_prefix}.link_community.parquet`
-/// and `{out_prefix}.gene_community.parquet`. Returns the number of communities
-/// actually realized — which is what Leiden discovers, and what k-means gives
-/// when it leaves a cluster empty. Callers should report THAT in their manifest
-/// rather than the count they asked for.
+/// and `{out_prefix}.gene_community.parquet`. Returns [`PropensityOutputs`]; its
+/// `n_clusters` is the count actually realized — what Leiden discovers, and what
+/// k-means gives when it leaves a cluster empty. Callers should report THAT in
+/// their manifest rather than the count they asked for.
 pub fn compute_propensity_and_gene_community_stat(
     proj_ne: &Mat,
     edges: &[(usize, usize)],
@@ -702,7 +738,7 @@ pub fn compute_propensity_and_gene_community_stat(
     n_cells: usize,
     cfg: &PropensityReportConfig,
     out_prefix: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<PropensityOutputs> {
     let PropensityReportConfig {
         clustering,
         block_size,
@@ -768,7 +804,11 @@ pub fn compute_propensity_and_gene_community_stat(
         out_prefix,
     )?;
 
-    Ok(n_clusters)
+    Ok(PropensityOutputs {
+        n_clusters,
+        cell_propensity,
+        edge_membership,
+    })
 }
 
 /// Gene-network-derived module-pair basis for per-cell-edge features.

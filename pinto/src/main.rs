@@ -289,10 +289,14 @@ enum Commands {
     #[command(
         alias = "cge",
         about = "Activity-gated cell-graph embedding (cage)",
-        long_about = "Learn per-cell embeddings on the spatial cell-cell graph.\n\
+        long_about = "Learn per-SUPER-CELL embeddings on the coarsened spatial graph.\n\
+                      The trained unit is a finest-level super-cell (PB).\n\
+                      Cell-cell KNN edges fold into PB super edges up front;\n\
+                      no cell and no cell pair is ever trained on.\n\
                       cage visits one gene at a time.\n\
-                      Each gene defines a per-cell activity vector.\n\
-                      That vector gates a shared multi-scale cell-cell hierarchy.\n\n\
+                      Each gene defines a per-cell activity vector,\n\
+                      folded onto the super edges it touches.\n\
+                      That gates a shared multi-scale PB hierarchy.\n\n\
                       A per-gene per-dim selection is SAMPLED by block Gibbs.\n\
                       It runs against a pseudobulk Poisson.\n\
                       The resulting inclusion probabilities become DROP RATES.\n\
@@ -333,7 +337,8 @@ enum Commands {
                       Genes that do not are written NaN, never a number.\n\
                       The manifest reports how many qualified.\n\
                       See --independent-delta-gate for the un-nested arm.\n\n\
-                      After training, every CELL PAIR is projected.\n\
+                      After training, cells return in EVALUATION only.\n\
+                      Every CELL PAIR is projected:\n\
                       The target is the frozen gene embedding.\n\
                       Its pooled counts x_gu + x_gv are fit by Poisson MAP.\n\
                       That gives a per-pair latent e_uv.\n\
@@ -346,9 +351,15 @@ enum Commands {
                       leiden is the default,\n\
                       deciding the count from --leiden-resolution.\n\
                       kmeans instead uses a fixed --n-edge-clusters.\n\n\
+                      A cell's embedding is a propensity-weighted average\n\
+                      of link-community centroids in the pair-latent space,\n\
+                      written for `pinto annotate`; it is a readout,\n\
+                      never a trained table.\n\n\
                       Outputs:\n\
-                      \x20 {out}.cell_embedding.parquet  cell × embedding_dim\n\
-                      \x20 {out}.cell_bias.parquet       per-cell scalar\n\
+                      \x20 {out}.pb_embedding.parquet    super-cell × embedding_dim (trained)\n\
+                      \x20 {out}.pb_bias.parquet         per-super-cell scalar (trained)\n\
+                      \x20 {out}.cell_pb.parquet         cell → finest super-cell id\n\
+                      \x20 {out}.cell_embedding.parquet  cell × embedding_dim (readout)\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
                       \x20 {out}.feature_posterior_mean.parquet  feature × dim (E[z*beta])\n\
                       \x20 {out}.delta_feature_embedding.parquet gene × dim (E[z*delta])\n\

@@ -34,7 +34,9 @@ pub enum ActivityNorm {
 
 pub struct CellActivities {
     /// `gene_active_edges[g]`: global edge ids where both endpoints have
-    /// non-zero activity for gene `g`. Sorted ascending.
+    /// non-zero activity for gene `g`. Sorted ascending. The struct is
+    /// used at TWO levels: fine cell-cell edge ids as built here, then
+    /// PB super-edge ids after `fold_activities_to_super_edges`.
     pub gene_active_edges: Vec<Vec<u32>>,
     /// `gene_active_edge_weights[g][i]`: weight = `a_g[u] * a_g[v]` for
     /// edge `gene_active_edges[g][i]` (same length).
@@ -187,5 +189,40 @@ fn normalize_rows_inplace(csr: &mut CsrMatrix<f32>, norm: ActivityNorm) {
                 *v *= scale;
             }
         }
+    }
+}
+
+/// Fold per-gene ACTIVE FINE EDGES onto PB-PB super edges: each fine
+/// edge's endpoint-product weight is summed into the super edge it maps
+/// to, and intra-PB fine edges (`fine_to_super[e] == None`) are dropped
+/// — they fold into the node, matching `build_super_graph` semantics.
+///
+/// Returns the same `CellActivities` shape one level up, so the
+/// existing `(gene, batch)` cache builder consumes it unchanged: edge
+/// ids are super-edge ids, sorted ascending per gene, weights parallel.
+pub fn fold_activities_to_super_edges(
+    activities: CellActivities,
+    fine_to_super: &[Option<usize>],
+) -> CellActivities {
+    use rayon::prelude::*;
+    let folded: Vec<(Vec<u32>, Vec<f32>)> = activities
+        .gene_active_edges
+        .into_par_iter()
+        .zip(activities.gene_active_edge_weights.into_par_iter())
+        .map(|(edges, weights)| {
+            let mut acc: std::collections::BTreeMap<u32, f32> = std::collections::BTreeMap::new();
+            for (&e, &w) in edges.iter().zip(weights.iter()) {
+                if let Some(s) = fine_to_super[e as usize] {
+                    *acc.entry(s as u32).or_insert(0.0) += w;
+                }
+            }
+            acc.into_iter().unzip()
+        })
+        .collect();
+    let (gene_active_edges, gene_active_edge_weights): (Vec<_>, Vec<_>) =
+        folded.into_iter().unzip();
+    CellActivities {
+        gene_active_edges,
+        gene_active_edge_weights,
     }
 }

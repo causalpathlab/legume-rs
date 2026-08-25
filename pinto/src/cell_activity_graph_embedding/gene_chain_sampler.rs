@@ -1,12 +1,18 @@
 //! Per-gene gated wrapper around `graph_embedding_util`'s chain sampler.
 //!
+//! The sampled UNIT is a finest-level super-cell (PB): edge ids here are
+//! PB-PB super-edge ids, weights are per-gene activity sums folded onto
+//! those super edges, and the chain's group maps are PB->parent labels.
+//! The machinery is id-agnostic, so nothing below cares — but every
+//! "edge" in this module is a super edge, never a cell pair.
+//!
 //! Precompute the per-(gene, batch) positive distribution once at start
-//! (sorted-intersection of gene-active edges with the batch's retained
-//! edges, plus a `WeightedIndex` weighted by `a_g[u]·a_g[v]`), then on
-//! every sample call just look up the cached entry and delegate to
-//! `loss::sample_cell_chain_batch_with_pos`. The chain-aware sibling
-//! negative pools live on the underlying `PerBatchCellSampler` and are
-//! reused unchanged.
+//! (sorted-intersection of gene-active super edges with the batch's
+//! retained super edges, plus a `WeightedIndex` weighted by the folded
+//! activity), then on every sample call just look up the cached entry
+//! and delegate to `loss::sample_cell_chain_batch_with_pos`. The
+//! chain-aware sibling negative pools live on the underlying
+//! `PerBatchCellSampler` and are reused unchanged.
 
 use graph_embedding_util::loss::{
     sample_cell_chain_batch_with_pos, CellChainBatch, CellChainBatchArgs, CellChainBatchStats,
@@ -24,11 +30,12 @@ use crate::cell_activity_graph_embedding::gene_gating::CellActivities;
 
 /// Precomputed positive distribution for one `(gene, batch)` pair.
 pub struct GeneBatchEntry {
-    /// `WeightedIndex` over the gene-batch intersected edge list. Weights
-    /// are `a_g[u] · a_g[v]` (or uniform when the product would underflow).
+    /// `WeightedIndex` over the gene-batch intersected super-edge list.
+    /// Weights are per-super-edge SUMS of the fine endpoint products
+    /// `a_g[u] · a_g[v]` (or uniform when the sum would underflow).
     pub pos: WeightedIndex<f32>,
-    /// Maps each local index in `pos` back to the global edge id in
-    /// `srt_cell_pairs.inner.pairs()`. Required by
+    /// Maps each local index in `pos` back to the global SUPER-EDGE id
+    /// in `PbFrame::super_edges`. Required by
     /// `sample_cell_chain_batch_with_pos`.
     pub local_to_global: Vec<u32>,
 }

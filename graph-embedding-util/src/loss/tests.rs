@@ -53,12 +53,12 @@ fn chain_pools_prune_parents_without_siblings() {
     // has a true sibling. The map should drop both parents.
     let edges = vec![(0u32, 1), (2, 3)];
     let batch_membership = vec![0u32; 4];
-    let cell_to_pb_per_level: Vec<Vec<usize>> = vec![
+    let unit_to_group_per_level: Vec<Vec<usize>> = vec![
         vec![0, 0, 1, 1], // L=0 parent
         vec![0, 0, 1, 1], // L=1 self — same partition as parent
     ];
     let filter = PbChainFilter {
-        cell_to_pb_per_level: &cell_to_pb_per_level,
+        unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0, 1],
     };
     let (samplers, _) =
@@ -80,12 +80,12 @@ fn chain_pools_group_by_parent_pb() {
     // share parent pb_0=0; [4,5] and [6,7] share parent pb_0=1).
     let edges = vec![(0u32, 1), (2, 3), (4, 5), (6, 7)];
     let batch_membership = vec![0u32; 8];
-    let cell_to_pb_per_level: Vec<Vec<usize>> = vec![
+    let unit_to_group_per_level: Vec<Vec<usize>> = vec![
         vec![0, 0, 0, 0, 1, 1, 1, 1], // L=0 coarse: {0..3} ↦ 0; {4..7} ↦ 1
         vec![0, 0, 1, 1, 2, 2, 3, 3], // L=1 fine
     ];
     let filter = PbChainFilter {
-        cell_to_pb_per_level: &cell_to_pb_per_level,
+        unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0, 1],
     };
     let (samplers, _stats) =
@@ -117,18 +117,18 @@ fn sibling_negative_draws_share_parent_differ_at_self() {
     use rand::SeedableRng;
     let edges = vec![(0u32, 1), (4, 5)];
     let batch_membership = vec![0u32; 8];
-    let cell_to_pb_per_level: Vec<Vec<usize>> =
+    let unit_to_group_per_level: Vec<Vec<usize>> =
         vec![vec![0, 0, 0, 0, 1, 1, 1, 1], vec![0, 0, 1, 1, 2, 2, 3, 3]];
     let filter = PbChainFilter {
-        cell_to_pb_per_level: &cell_to_pb_per_level,
+        unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0, 1],
     };
     let (samplers, _) =
         build_per_batch_cell_samplers(&edges, &batch_membership, 1, 8, 0.75, Some(filter));
     let s = samplers[0].as_ref().unwrap();
 
-    let pb_l0: &[usize] = &cell_to_pb_per_level[0];
-    let pb_l1: &[usize] = &cell_to_pb_per_level[1];
+    let pb_l0: &[usize] = &unit_to_group_per_level[0];
+    let pb_l1: &[usize] = &unit_to_group_per_level[1];
     let pb_maps: Vec<&[usize]> = vec![pb_l0, pb_l1];
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -172,9 +172,9 @@ fn cell_cell_sampler_filters_pb_mismatched_edges() {
     // pb at L0, (0,2) different pb at L0 — should drop the last.
     let edges = vec![(0u32, 1), (2, 3), (0, 2)];
     let batch_membership = vec![0u32; 4];
-    let cell_to_pb_per_level: Vec<Vec<usize>> = vec![vec![0, 0, 1, 1]];
+    let unit_to_group_per_level: Vec<Vec<usize>> = vec![vec![0, 0, 1, 1]];
     let filter = PbChainFilter {
-        cell_to_pb_per_level: &cell_to_pb_per_level,
+        unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0],
     };
     let (samplers, stats) =

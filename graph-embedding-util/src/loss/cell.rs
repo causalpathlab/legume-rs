@@ -54,10 +54,10 @@ pub(crate) enum LevelSiblingPool {
 /// When `Some`, edges whose two endpoints disagree on pb id at *any*
 /// listed level are dropped during sampler construction; in addition,
 /// per-chain-position sibling pools are precomputed for the
-/// hard-negative draw at sample time. The same `cell_to_pb_per_level`
+/// hard-negative draw at sample time. The same `unit_to_group_per_level`
 /// reference is read at sample time, so it must outlive the sampler.
 pub struct PbChainFilter<'a> {
-    pub cell_to_pb_per_level: &'a [Vec<usize>],
+    pub unit_to_group_per_level: &'a [Vec<usize>],
     pub levels: &'a [usize],
 }
 
@@ -82,14 +82,14 @@ pub fn build_per_batch_cell_samplers(
     edges: &[(u32, u32)],
     batch_membership: &[u32],
     n_batches: usize,
-    n_cells: usize,
+    n_units: usize,
     alpha_neg: f32,
     pb_filter: Option<PbChainFilter<'_>>,
 ) -> (Vec<Option<PerBatchCellSampler>>, CellCellSamplerStats) {
     // First pass: bucket retained edges by batch + accumulate per-cell degree
     // (within retained edges) for the negative weight.
     let mut per_batch_edge_indices: Vec<Vec<u32>> = vec![Vec::new(); n_batches];
-    let mut degree: Vec<f32> = vec![0.0; n_cells];
+    let mut degree: Vec<f32> = vec![0.0; n_units];
     let mut stats = CellCellSamplerStats::default();
 
     for (i, &(u, v)) in edges.iter().enumerate() {
@@ -102,7 +102,7 @@ pub fn build_per_batch_cell_samplers(
         if let Some(filter) = pb_filter.as_ref() {
             let mut keep = true;
             for &lvl in filter.levels {
-                let pb = &filter.cell_to_pb_per_level[lvl];
+                let pb = &filter.unit_to_group_per_level[lvl];
                 if pb[u as usize] != pb[v as usize] {
                     keep = false;
                     break;
@@ -147,7 +147,7 @@ pub fn build_per_batch_cell_samplers(
 
             let chain_pools = pb_filter
                 .as_ref()
-                .map(|f| build_chain_pools(&cell_pool, f.cell_to_pb_per_level, f.levels))
+                .map(|f| build_chain_pools(&cell_pool, f.unit_to_group_per_level, f.levels))
                 .unwrap_or_default();
 
             Some(PerBatchCellSampler {
@@ -177,7 +177,7 @@ pub fn build_per_batch_cell_samplers(
 /// instead of a per-anchor linear scan of the pool.
 fn build_chain_pools(
     cells_in_batch: &[u32],
-    cell_to_pb_per_level: &[Vec<usize>],
+    unit_to_group_per_level: &[Vec<usize>],
     chain_levels: &[usize],
 ) -> Vec<LevelSiblingPool> {
     let mut pools: Vec<LevelSiblingPool> = Vec::with_capacity(chain_levels.len());
@@ -186,8 +186,8 @@ fn build_chain_pools(
             pools.push(LevelSiblingPool::Root);
             continue;
         }
-        let parent_pb = &cell_to_pb_per_level[chain_levels[i - 1]];
-        let self_pb = &cell_to_pb_per_level[chain_levels[i]];
+        let parent_pb = &unit_to_group_per_level[chain_levels[i - 1]];
+        let self_pb = &unit_to_group_per_level[chain_levels[i]];
         let mut by_parent: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         // `seen_self` tracks the first-seen child pb per parent; once a
         // second distinct child appears we flip to `u32::MAX` to mark

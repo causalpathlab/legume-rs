@@ -36,10 +36,10 @@ pub struct CellChainBatchArgs<'a> {
     /// footprint.
     pub n_positives: usize,
     pub n_negatives: usize,
-    /// Pb assignment per chain level (coarsest-first, one entry per chain
-    /// position). Each slice is length `n_cells`. Drawn from
-    /// `MultilevelCollapseOut::cell_to_pb_per_level` after the
-    /// coarsest-first reverse in `fit()`.
+    /// Group assignment per chain level (coarsest-first, one entry per
+    /// chain position). Each slice holds one label per sampled UNIT —
+    /// pinto cage's units are finest-level pseudobulks and its maps are
+    /// PB-to-parent labels per coarsening level.
     pub pb_maps: &'a [&'a [usize]],
 }
 

@@ -314,7 +314,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // variance to keep, which is no reason for the pairs to fall into exactly
     // that many interaction regimes. `pinto prop` still re-cuts the same latent
     // at a fixed K when you want one.
-    let n_clusters = compute_propensity_and_gene_community_stat(
+    let n_clusters_out = compute_propensity_and_gene_community_stat(
         &proj_ne,
         edges,
         &data_vec,
@@ -341,7 +341,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             n_cells,
             n_genes: data_vec.num_rows(),
             n_edges: edges.len(),
-            k: n_clusters,
+            k: n_clusters_out.n_clusters,
         });
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
