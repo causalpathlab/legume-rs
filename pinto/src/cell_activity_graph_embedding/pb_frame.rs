@@ -15,7 +15,7 @@ use matrix_util::knn_graph::KnnGraph;
 #[derive(Debug)]
 pub struct PbFrame {
     /// Cell -> finest-level PB label, `[n_cells]`.
-    pub finest_labels: Vec<usize>,
+    pub cell_to_finest_pb: Vec<usize>,
     /// Number of finest-level PBs (the trained unit count).
     pub n_pb: usize,
     /// PB-PB super edges at the finest level, `(min, max)` deduped.
@@ -26,7 +26,7 @@ pub struct PbFrame {
     /// (the finest level IS the trained unit).
     pub pb_parent_maps: Vec<Vec<usize>>,
     /// Finest-PB -> experimental batch id (majority over member cells).
-    pub pb_batch: Vec<u32>,
+    pub pb_exp_batch: Vec<u32>,
 }
 
 /// Build the frame from the multilevel coarsening, the pair graph, and
@@ -61,8 +61,43 @@ pub fn build_pb_frame(
         n_cells
     );
     let n_pb = finest.iter().max().map(|&m| m + 1).unwrap_or(0);
+    // Dense labels are load-bearing: a gap would create a phantom PB with
+    // a usize::MAX parent (colliding with the sampler's sentinel space)
+    // and an untrained random row in the trained table.
+    {
+        let mut seen = vec![false; n_pb];
+        for &p in &finest {
+            seen[p] = true;
+        }
+        if let Some(gap) = seen.iter().position(|&s| !s) {
+            anyhow::bail!(
+                "finest coarsening labels are not dense: pb {} of {} has no member cell",
+                gap,
+                n_pb
+            );
+        }
+    }
 
-    let (super_edges_usize, fine_to_super) = fold_edges_to_super(&finest, &graph.edges);
+    // Cross-batch fine edges may neither FORM a super edge nor feed
+    // activity into one: the old cell-level sampler dropped them by
+    // construction, and folding them through an impure PB would train
+    // on cross-section co-activity. They map to `None` like intra-PB
+    // edges, so the activity fold drops them for free.
+    let same_batch: Vec<bool> = graph
+        .edges
+        .iter()
+        .map(|&(i, j)| batch_membership[i] == batch_membership[j])
+        .collect();
+    let n_cross_batch = same_batch.iter().filter(|&&k| !k).count();
+    if n_cross_batch > 0 {
+        info!(
+            "{} of {} fine edges are cross-batch and fold into no super edge",
+            n_cross_batch,
+            graph.edges.len()
+        );
+    }
+    let (super_edges_usize, fine_to_super) =
+        fold_edges_to_super(&finest, &graph.edges, Some(&same_batch));
     let super_edges: Vec<(u32, u32)> = super_edges_usize
         .into_iter()
         .map(|(a, b)| (a as u32, b as u32))
@@ -112,7 +147,7 @@ pub fn build_pb_frame(
         batch_counts[p * n_batches.max(1) + batch_membership[cell] as usize] += 1;
     }
     let mut impure = 0usize;
-    let pb_batch: Vec<u32> = (0..n_pb)
+    let pb_exp_batch: Vec<u32> = (0..n_pb)
         .map(|p| {
             let row = &batch_counts[p * n_batches.max(1)..(p + 1) * n_batches.max(1)];
             if row.iter().filter(|&&n| n > 0).count() > 1 {
@@ -142,11 +177,11 @@ pub fn build_pb_frame(
 
     Ok((
         PbFrame {
-            finest_labels: finest,
+            cell_to_finest_pb: finest,
             n_pb,
             super_edges,
             pb_parent_maps,
-            pb_batch,
+            pb_exp_batch,
         },
         fine_to_super,
     ))

@@ -278,7 +278,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // 8. Nystrom projection
     info!("Nystrom projection...");
 
-    let mut proj_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.inner.num_pairs());
+    let mut pair_latent_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.inner.num_pairs());
 
     let nystrom_input = NystromPairInput {
         basis_shared: basis_dk.rows(0, n_genes).clone_owned(),
@@ -289,19 +289,19 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     srt_cell_pairs.inner.visit_pairs_by_block(
         &nystrom_pair_delta_visitor,
         &nystrom_input,
-        &mut proj_kn,
+        &mut pair_latent_kn,
         c.block_size,
     )?;
 
     // 9. Export
     // L2-normalize each pair's latent vector so downstream clustering
     // is driven by direction rather than magnitude.
-    proj_kn.normalize_columns_inplace();
+    pair_latent_kn.normalize_columns_inplace();
 
     // One `[E × T]` copy, written out and then clustered — the shared routine
     // takes pairs as rows, so this is the same buffer both times.
-    let proj_ne = proj_kn.transpose();
-    proj_ne.to_parquet_with_names(
+    let pair_latent_nk = pair_latent_kn.transpose();
+    pair_latent_nk.to_parquet_with_names(
         &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
         None,
@@ -314,8 +314,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // variance to keep, which is no reason for the pairs to fall into exactly
     // that many interaction regimes. `pinto prop` still re-cuts the same latent
     // at a fixed K when you want one.
-    let n_clusters_out = compute_propensity_and_gene_community_stat(
-        &proj_ne,
+    let n_clusters = compute_propensity_and_gene_community_stat(
+        &pair_latent_nk,
         edges,
         &data_vec,
         n_cells,
@@ -328,7 +328,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             edge_kind: srt_cell_pairs.edge_kind.as_deref(),
         },
         &c.out,
-    )?;
+    )?
+    .n_clusters;
 
     {
         use crate::util::metadata::{create_dsvd_metadata, RunInputs};
@@ -341,7 +342,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             n_cells,
             n_genes: data_vec.num_rows(),
             n_edges: edges.len(),
-            k: n_clusters_out.n_clusters,
+            k: n_clusters,
         });
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;

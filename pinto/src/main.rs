@@ -313,7 +313,10 @@ enum Commands {
                       It weights the random projection instead.\n\
                       That projection builds the coarsening hierarchy.\n\
                       senna bge and senna gem do the same.\n\
-                      Every gene is trained and present in every output table.\n\
+                      Every gene is present in every output table; a gene\n\
+                      TRAINS only if it is active on a super edge.\n\
+                      A gene whose activity sits entirely inside super-cells\n\
+                      keeps its initialization; the log counts them.\n\
                       Use --genes-per-epoch to cap per-epoch cost instead.\n\n\
                       SPLICE CHANNELS are recognised on the feature axis.\n\
                       Rows named {gene}/count/spliced pair with their\n\
@@ -351,10 +354,11 @@ enum Commands {
                       leiden is the default,\n\
                       deciding the count from --leiden-resolution.\n\
                       kmeans instead uses a fixed --n-edge-clusters.\n\n\
-                      A cell's embedding is a propensity-weighted average\n\
-                      of link-community centroids in the pair-latent space,\n\
-                      written for `pinto annotate`; it is a readout,\n\
-                      never a trained table.\n\n\
+                      A cell's embedding is a readout, never a trained table:\n\
+                      the propensity-weighted average of its link communities'\n\
+                      centroids in the pair-latent space,\n\
+                      written for `pinto annotate`.\n\
+                      A cell with no pairs gets a zero row.\n\n\
                       Outputs:\n\
                       \x20 {out}.pb_embedding.parquet    super-cell × embedding_dim (trained)\n\
                       \x20 {out}.pb_bias.parquet         per-super-cell scalar (trained)\n\

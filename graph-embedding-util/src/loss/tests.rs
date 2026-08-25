@@ -5,7 +5,7 @@
 
 use crate::loss::cell::LevelSiblingPool;
 use crate::loss::{
-    build_per_batch_cell_samplers, sample_cell_chain_batch, CellChainBatchArgs, PbChainFilter,
+    build_per_batch_unit_samplers, sample_unit_chain_batch, ChainGroupFilter, UnitChainBatchArgs,
 };
 
 #[test]
@@ -15,13 +15,13 @@ fn cell_cell_sampler_skips_cross_batch_edges() {
     let edges = vec![(0u32, 1), (2, 3), (1, 2)];
     let batch_membership = vec![0u32, 0, 1, 1];
     let (samplers, stats) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 2, 4, 0.75, None);
+        build_per_batch_unit_samplers(&edges, &batch_membership, 2, 4, 0.75, None);
 
     assert_eq!(
         stats.cross_batch_dropped, 1,
         "expected one cross-batch edge dropped"
     );
-    assert_eq!(stats.pb_mismatch_dropped, 0);
+    assert_eq!(stats.group_mismatch_dropped, 0);
     let s0 = samplers[0]
         .as_ref()
         .expect("batch 0 has within-batch edges");
@@ -30,8 +30,8 @@ fn cell_cell_sampler_skips_cross_batch_edges() {
         .expect("batch 1 has within-batch edges");
     assert_eq!(s0.edge_indices, vec![0]);
     assert_eq!(s1.edge_indices, vec![1]);
-    assert_eq!(s0.cell_pool, vec![0, 1]);
-    assert_eq!(s1.cell_pool, vec![2, 3]);
+    assert_eq!(s0.unit_pool, vec![0, 1]);
+    assert_eq!(s1.unit_pool, vec![2, 3]);
 }
 
 #[test]
@@ -39,9 +39,9 @@ fn cell_cell_sampler_empty_batch_returns_none() {
     let edges = vec![(0u32, 1)];
     let batch_membership = vec![0u32, 0, 1, 1];
     let (samplers, stats) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 2, 4, 0.75, None);
+        build_per_batch_unit_samplers(&edges, &batch_membership, 2, 4, 0.75, None);
     assert_eq!(stats.cross_batch_dropped, 0);
-    assert_eq!(stats.pb_mismatch_dropped, 0);
+    assert_eq!(stats.group_mismatch_dropped, 0);
     assert!(samplers[0].is_some());
     assert!(samplers[1].is_none(), "batch 1 has no edges → None");
 }
@@ -57,12 +57,12 @@ fn chain_pools_prune_parents_without_siblings() {
         vec![0, 0, 1, 1], // L=0 parent
         vec![0, 0, 1, 1], // L=1 self — same partition as parent
     ];
-    let filter = PbChainFilter {
+    let filter = ChainGroupFilter {
         unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0, 1],
     };
     let (samplers, _) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 1, 4, 0.75, Some(filter));
+        build_per_batch_unit_samplers(&edges, &batch_membership, 1, 4, 0.75, Some(filter));
     let s = samplers[0].as_ref().unwrap();
     let LevelSiblingPool::ByParent(by_parent) = &s.chain_pools[1] else {
         panic!("expected ByParent at chain position 1");
@@ -84,12 +84,12 @@ fn chain_pools_group_by_parent_pb() {
         vec![0, 0, 0, 0, 1, 1, 1, 1], // L=0 coarse: {0..3} ↦ 0; {4..7} ↦ 1
         vec![0, 0, 1, 1, 2, 2, 3, 3], // L=1 fine
     ];
-    let filter = PbChainFilter {
+    let filter = ChainGroupFilter {
         unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0, 1],
     };
     let (samplers, _stats) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 1, 8, 0.75, Some(filter));
+        build_per_batch_unit_samplers(&edges, &batch_membership, 1, 8, 0.75, Some(filter));
     let s = samplers[0]
         .as_ref()
         .expect("batch 0 has within-pb edges at every chain level");
@@ -119,12 +119,12 @@ fn sibling_negative_draws_share_parent_differ_at_self() {
     let batch_membership = vec![0u32; 8];
     let unit_to_group_per_level: Vec<Vec<usize>> =
         vec![vec![0, 0, 0, 0, 1, 1, 1, 1], vec![0, 0, 1, 1, 2, 2, 3, 3]];
-    let filter = PbChainFilter {
+    let filter = ChainGroupFilter {
         unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0, 1],
     };
     let (samplers, _) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 1, 8, 0.75, Some(filter));
+        build_per_batch_unit_samplers(&edges, &batch_membership, 1, 8, 0.75, Some(filter));
     let s = samplers[0].as_ref().unwrap();
 
     let pb_l0: &[usize] = &unit_to_group_per_level[0];
@@ -132,13 +132,13 @@ fn sibling_negative_draws_share_parent_differ_at_self() {
     let pb_maps: Vec<&[usize]> = vec![pb_l0, pb_l1];
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-    let (batch, stats) = sample_cell_chain_batch(
-        CellChainBatchArgs {
+    let (batch, stats) = sample_unit_chain_batch(
+        UnitChainBatchArgs {
             edges: &edges,
             batch_sampler: s,
             n_positives: 128, // exercise both positives many times
             n_negatives: 4,
-            pb_maps: &pb_maps,
+            unit_to_group_per_level: &pb_maps,
         },
         &mut rng,
     );
@@ -148,8 +148,8 @@ fn sibling_negative_draws_share_parent_differ_at_self() {
     // Fine-level negatives must agree with anchor at L=0 (sibling) and
     // disagree at L=1.
     let k = 4;
-    for b in 0..batch.left_cells.len() {
-        let u = batch.left_cells[b];
+    for b in 0..batch.left_units.len() {
+        let u = batch.left_units[b];
         let pu_l0 = pb_l0[u as usize];
         let pu_l1 = pb_l1[u as usize];
         for kk in 0..k {
@@ -173,14 +173,14 @@ fn cell_cell_sampler_filters_pb_mismatched_edges() {
     let edges = vec![(0u32, 1), (2, 3), (0, 2)];
     let batch_membership = vec![0u32; 4];
     let unit_to_group_per_level: Vec<Vec<usize>> = vec![vec![0, 0, 1, 1]];
-    let filter = PbChainFilter {
+    let filter = ChainGroupFilter {
         unit_to_group_per_level: &unit_to_group_per_level,
         levels: &[0],
     };
     let (samplers, stats) =
-        build_per_batch_cell_samplers(&edges, &batch_membership, 1, 4, 0.75, Some(filter));
+        build_per_batch_unit_samplers(&edges, &batch_membership, 1, 4, 0.75, Some(filter));
     assert_eq!(stats.cross_batch_dropped, 0);
-    assert_eq!(stats.pb_mismatch_dropped, 1);
+    assert_eq!(stats.group_mismatch_dropped, 1);
     let s0 = samplers[0]
         .as_ref()
         .expect("batch 0 has within-batch within-pb edges");

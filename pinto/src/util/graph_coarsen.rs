@@ -453,22 +453,19 @@ pub(super) fn spatial_seed_labels(
     (labels, num_super)
 }
 
-/// Coarsen the cell graph onto super-nodes: Louvain / METIS semantics.
-///
-/// An intra-group edge (`si == sj`) is NOT an edge of the coarse graph — it
-/// folds into the super-NODE. Callers that aggregate member counts onto the
-/// node already hold that mass; emitting a `(a, a)` self-loop as well would
-/// count it twice.
-///
-/// Returns the super-graph, per-super-node mean features, and `fine_to_super`:
 /// Fold a fine edge list by node labels into deduped `(min, max)` super
 /// edges plus the fine-edge -> super-edge map (`None` = both endpoints in
-/// one group; the edge folds into the node). Louvain/METIS semantics; the
+/// one group; the edge folds into the node — Louvain / METIS semantics,
+/// so callers that aggregate member counts onto the node already hold
+/// that mass and a `(a, a)` self-loop would count it twice). The
 /// edges-only core of [`build_super_graph`], callable without paying for
-/// feature aggregation or the CSC adjacency.
+/// feature aggregation or the CSC adjacency. `keep`, when given, marks
+/// fine edges that may NOT form or feed a super edge (cage: cross-batch
+/// edges) — they map to `None` exactly like intra-group edges.
 pub(crate) fn fold_edges_to_super(
     labels: &[usize],
     edges: &[(usize, usize)],
+    keep: Option<&[bool]>,
 ) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {
     // Keyed by INDEX, not just membership, so the fine->super map falls out
     // of the same pass instead of needing a second one.
@@ -476,10 +473,11 @@ pub(crate) fn fold_edges_to_super(
         HashMap::with_capacity_and_hasher(edges.len(), Default::default());
     let mut super_edges: Vec<(usize, usize)> = Vec::with_capacity(edges.len());
     let mut fine_to_super: Vec<Option<usize>> = Vec::with_capacity(edges.len());
-    for &(i, j) in edges {
+    for (e, &(i, j)) in edges.iter().enumerate() {
         let si = labels[i];
         let sj = labels[j];
-        if si == sj {
+        let dropped = keep.map(|k| !k[e]).unwrap_or(false);
+        if si == sj || dropped {
             fine_to_super.push(None);
         } else {
             let key = (si.min(sj), si.max(sj));
@@ -493,8 +491,11 @@ pub(crate) fn fold_edges_to_super(
     (super_edges, fine_to_super)
 }
 
-/// for each input edge, the index of its super-edge, or `None` when the edge is
-/// internal to one super-node.
+/// Coarsen the cell graph onto super-nodes: [`fold_edges_to_super`] for
+/// the edge structure, plus per-super-node MEAN features and a CSC
+/// adjacency. Returns `(super_graph, super_features, fine_to_super)`;
+/// `fine_to_super[i]` is the super-edge index of input edge `i`, or
+/// `None` when the edge is internal to one super-node.
 pub(crate) fn build_super_graph(
     seed_labels: &[usize],
     num_super: usize,
@@ -517,7 +518,7 @@ pub(crate) fn build_super_graph(
         }
     }
 
-    let (super_edges, fine_to_super) = fold_edges_to_super(seed_labels, &graph.edges);
+    let (super_edges, fine_to_super) = fold_edges_to_super(seed_labels, &graph.edges, None);
 
     let distances = vec![1.0f32; super_edges.len()];
 

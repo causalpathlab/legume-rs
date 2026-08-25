@@ -10,33 +10,33 @@
 //! (sorted-intersection of gene-active super edges with the batch's
 //! retained super edges, plus a `WeightedIndex` weighted by the folded
 //! activity), then on every sample call just look up the cached entry
-//! and delegate to `loss::sample_cell_chain_batch_with_pos`. The
+//! and delegate to `loss::sample_unit_chain_batch_with_pos`. The
 //! chain-aware sibling negative pools live on the underlying
-//! `PerBatchCellSampler` and are reused unchanged.
+//! `PerBatchUnitSampler` and are reused unchanged.
 
 use graph_embedding_util::loss::{
-    sample_cell_chain_batch_with_pos, CellChainBatch, CellChainBatchArgs, CellChainBatchStats,
-    PerBatchCellSampler,
+    sample_unit_chain_batch_with_pos, PerBatchUnitSampler, UnitChainBatch, UnitChainBatchArgs,
+    UnitChainBatchStats,
 };
 use rand::Rng;
 use rand_distr::weighted::WeightedIndex;
 use rayon::prelude::*;
 
-use crate::cell_activity_graph_embedding::gene_gating::CellActivities;
+use crate::cell_activity_graph_embedding::gene_gating::GeneActiveEdges;
 
 ////////////////////
-// GeneBatchCache //
+// GeneExpBatchCache //
 ////////////////////
 
 /// Precomputed positive distribution for one `(gene, batch)` pair.
-pub struct GeneBatchEntry {
+pub struct GeneExpBatchEntry {
     /// `WeightedIndex` over the gene-batch intersected super-edge list.
     /// Weights are per-super-edge SUMS of the fine endpoint products
     /// `a_g[u] · a_g[v]` (or uniform when the sum would underflow).
     pub pos: WeightedIndex<f32>,
     /// Maps each local index in `pos` back to the global SUPER-EDGE id
     /// in `PbFrame::super_edges`. Required by
-    /// `sample_cell_chain_batch_with_pos`.
+    /// `sample_unit_chain_batch_with_pos`.
     pub local_to_global: Vec<u32>,
 }
 
@@ -46,24 +46,24 @@ pub struct GeneBatchEntry {
 /// Memory: O(n_genes · n_batches · mean_active_edges_per_gene), typically
 /// 50-300 MB for an 18k-gene Visium dataset with one batch. Released
 /// after training completes.
-pub struct GeneBatchCache {
+pub struct GeneExpBatchCache {
     /// `entries[gene][batch_idx]` — `None` when the gene has no active
     /// edges within that batch (sampling skips this pair).
-    pub entries: Vec<Vec<Option<GeneBatchEntry>>>,
+    pub entries: Vec<Vec<Option<GeneExpBatchEntry>>>,
 }
 
 /// Build the per-(gene, batch) cache by intersecting each gene's
 /// active-edge list with each batch's retained-edge list (both sorted
 /// ascending → linear merge). Rayon over genes; per-gene cost is
 /// O(n_batches · (|gene_active_edges| + |batch_edges|)).
-pub fn build_gene_batch_cache(
-    activities: &CellActivities,
-    per_batch: &[Option<PerBatchCellSampler>],
+pub fn build_gene_exp_batch_cache(
+    activities: &GeneActiveEdges,
+    samplers_per_exp_batch: &[Option<PerBatchUnitSampler>],
     activity_alpha: f32,
-) -> GeneBatchCache {
+) -> GeneExpBatchCache {
     let n_genes = activities.gene_active_edges.len();
-    let n_batches = per_batch.len();
-    let entries: Vec<Vec<Option<GeneBatchEntry>>> = (0..n_genes)
+    let n_batches = samplers_per_exp_batch.len();
+    let entries: Vec<Vec<Option<GeneExpBatchEntry>>> = (0..n_genes)
         .into_par_iter()
         .map(|g| {
             let gene_edges = &activities.gene_active_edges[g];
@@ -73,22 +73,22 @@ pub fn build_gene_batch_cache(
                     build_entry(
                         gene_edges,
                         gene_weights,
-                        per_batch[b].as_ref(),
+                        samplers_per_exp_batch[b].as_ref(),
                         activity_alpha,
                     )
                 })
                 .collect()
         })
         .collect();
-    GeneBatchCache { entries }
+    GeneExpBatchCache { entries }
 }
 
 fn build_entry(
     gene_edges: &[u32],
     gene_weights: &[f32],
-    batch_sampler: Option<&PerBatchCellSampler>,
+    batch_sampler: Option<&PerBatchUnitSampler>,
     activity_alpha: f32,
-) -> Option<GeneBatchEntry> {
+) -> Option<GeneExpBatchEntry> {
     let bs = batch_sampler?;
     if gene_edges.is_empty() {
         return None;
@@ -131,13 +131,13 @@ fn build_entry(
         local_weights.fill(1.0);
     }
     let pos = WeightedIndex::new(local_weights).ok()?;
-    Some(GeneBatchEntry {
+    Some(GeneExpBatchEntry {
         pos,
         local_to_global: local_edges,
     })
 }
 
-impl GeneBatchCache {
+impl GeneExpBatchCache {
     /// Diagnostic: count of `(gene, batch)` cells with a non-empty
     /// active-edge intersection. Useful for an early sanity log.
     pub fn n_active_pairs(&self) -> usize {
@@ -154,10 +154,10 @@ impl GeneBatchCache {
 ///////////////////////////
 
 pub struct GeneGatedChainSampler<'a> {
-    pub edges: &'a [(u32, u32)],
-    pub per_batch: &'a [Option<PerBatchCellSampler>],
-    pub cache: &'a GeneBatchCache,
-    pub pb_maps: &'a [&'a [usize]],
+    pub super_edges: &'a [(u32, u32)],
+    pub samplers_per_exp_batch: &'a [Option<PerBatchUnitSampler>],
+    pub cache: &'a GeneExpBatchCache,
+    pub unit_to_group_per_level: &'a [&'a [usize]],
     /// Positives drawn per `(gene, batch)`, the same for every gene.
     ///
     /// Deliberately ONE scalar. A per-gene budget was tried, on the theory that
@@ -170,7 +170,7 @@ pub struct GeneGatedChainSampler<'a> {
     /// steps it gets, which is a different axis entirely. If that is wanted
     /// here, repeat genes in the epoch's visit order rather than varying this.
     /// Positive edges drawn per (gene, EXPERIMENTAL batch) draw.
-    /// Not an SGD minibatch size: see `CellChainBatchArgs::n_positives`.
+    /// Not an SGD minibatch size: see `UnitChainBatchArgs::n_positives`.
     pub positives_per_draw: usize,
     pub n_negatives: usize,
 }
@@ -185,18 +185,18 @@ impl<'a> GeneGatedChainSampler<'a> {
         gene: usize,
         batch_idx: usize,
         rng: &mut R,
-    ) -> Option<(CellChainBatch, CellChainBatchStats)> {
+    ) -> Option<(UnitChainBatch, UnitChainBatchStats)> {
         let entry = self.cache.entries.get(gene)?.get(batch_idx)?.as_ref()?;
-        let batch_sampler = self.per_batch.get(batch_idx)?.as_ref()?;
+        let batch_sampler = self.samplers_per_exp_batch.get(batch_idx)?.as_ref()?;
 
-        let args = CellChainBatchArgs {
-            edges: self.edges,
+        let args = UnitChainBatchArgs {
+            edges: self.super_edges,
             batch_sampler,
             n_positives: self.positives_per_draw,
             n_negatives: self.n_negatives,
-            pb_maps: self.pb_maps,
+            unit_to_group_per_level: self.unit_to_group_per_level,
         };
-        Some(sample_cell_chain_batch_with_pos(
+        Some(sample_unit_chain_batch_with_pos(
             args,
             &entry.pos,
             &entry.local_to_global,

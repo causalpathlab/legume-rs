@@ -11,7 +11,7 @@
 //! ```text
 //! load -> spatial KNN -> batch effects                  util::srt_pipeline
 //! HVG-weighted projection -> graph_coarsen_multilevel   nested super-cell levels
-//! build_cell_activities                                 per-gene activity, active edges
+//! build_gene_active_fine_edges                                 per-gene activity, active edges
 //! collapse + SVD + block Gibbs (sampled arm only)       selection::select_features -> pip
 //! training loop                                         the only SGD
 //! parquet outputs + .pinto.json
@@ -85,10 +85,10 @@ use crate::cell_activity_graph_embedding::args::{
     CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
-    build_gene_batch_cache, GeneGatedChainSampler,
+    build_gene_exp_batch_cache, GeneGatedChainSampler,
 };
-use crate::cell_activity_graph_embedding::gene_gating::build_cell_activities;
-use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_level, CageLossOut};
+use crate::cell_activity_graph_embedding::gene_gating::build_gene_active_fine_edges;
+use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_gene_level, CageLossOut};
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, ProjectionArgs,
 };
@@ -118,7 +118,9 @@ use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
-use graph_embedding_util::loss::{build_per_batch_cell_samplers, embedding_ridge, PbChainFilter};
+use graph_embedding_util::loss::{
+    build_per_batch_unit_samplers, embedding_ridge, ChainGroupFilter,
+};
 use graph_embedding_util::model::{
     AdapterInit, FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit,
 };
@@ -150,7 +152,7 @@ const PROBE_OVERSAMPLE: usize = 4;
 /// parameter moves before epoch 0.
 #[allow(clippy::too_many_arguments)]
 fn probe_forward(
-    n_genes: usize,
+    n_probe_genes: usize,
     trainable_genes: &[usize],
     n_exp_batches: usize,
     sampler: &GeneGatedChainSampler,
@@ -159,13 +161,13 @@ fn probe_forward(
     objective: graph_embedding_util::loss::NceObjective,
     dev: &candle_util::candle_core::Device,
 ) -> candle_util::candle_core::Result<candle_util::candle_core::Tensor> {
-    let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> =
-        Vec::with_capacity(n_genes);
+    let mut mini: Vec<(usize, graph_embedding_util::loss::UnitChainBatch)> =
+        Vec::with_capacity(n_probe_genes);
     let mut genes_sampled = 0usize;
     'fill: for &g in trainable_genes
         .iter()
         .cycle()
-        .take(PROBE_OVERSAMPLE * n_genes)
+        .take(PROBE_OVERSAMPLE * n_probe_genes)
     {
         let before = mini.len();
         for b in 0..n_exp_batches {
@@ -175,7 +177,7 @@ fn probe_forward(
         }
         if mini.len() > before {
             genes_sampled += 1;
-            if genes_sampled >= n_genes {
+            if genes_sampled >= n_probe_genes {
                 break 'fill;
             }
         }
@@ -187,8 +189,8 @@ fn probe_forward(
     }
     let (gene_ids, cbs): (Vec<usize>, Vec<_>) = mini.into_iter().unzip();
     let gene_ids_u32: Vec<u32> = gene_ids.iter().map(|&g| g as u32).collect();
-    let out = cage_nce_loss_per_level(model, cbs, &gene_ids_u32, objective, dev)?;
-    out.per_level.sum_all()
+    let out = cage_nce_loss_per_gene_level(model, cbs, &gene_ids_u32, objective, dev)?;
+    out.per_gene_level.sum_all()
 }
 
 pub fn fit_cell_activity_graph_embedding(
@@ -198,11 +200,40 @@ pub fn fit_cell_activity_graph_embedding(
     mkdir_parent(&c.out)?;
 
     anyhow::ensure!(args.embedding_dim > 0, "embedding-dim must be > 0");
-    anyhow::ensure!(args.epochs > 0, "epochs must be > 0");
-    anyhow::ensure!(
-        !args.chain_levels.is_empty(),
-        "chain-levels must be non-empty"
+    // Chain levels, resolved and validated BEFORE any data is loaded: the
+    // trained unit is the finest coarsening level, so chain entries must
+    // be strictly coarser. Unset adapts to the hierarchy depth (up to
+    // three coarser levels); explicit values are checked here, where a
+    // mistake costs milliseconds rather than a full collapse.
+    let chain_levels: Vec<usize> = match &args.chain_levels {
+        Some(levels) => {
+            for &lvl in levels {
+                anyhow::ensure!(
+                    lvl + 1 < c.num_levels,
+                    "--chain-levels entry {} must be coarser than the finest level \
+                     (num_levels = {}; the finest level is the trained unit)",
+                    lvl,
+                    c.num_levels
+                );
+            }
+            levels.clone()
+        }
+        None => {
+            anyhow::ensure!(
+                c.num_levels >= 2,
+                "--num-levels {} leaves no level coarser than the finest; \
+                 the chain needs at least 2 levels",
+                c.num_levels
+            );
+            (0..(c.num_levels - 1).min(3)).collect()
+        }
+    };
+    info!(
+        "Chain levels: {:?} of {} coarsening levels (finest = trained unit)",
+        chain_levels, c.num_levels
     );
+    anyhow::ensure!(args.epochs > 0, "epochs must be > 0");
+    anyhow::ensure!(!chain_levels.is_empty(), "chain-levels must be non-empty");
     // Each gate arm has knobs the other one cannot act on. Setting one for the
     // wrong arm is a mistake worth reporting, not silently absorbing — a flag
     // that is read and ignored is indistinguishable from one that did not work.
@@ -347,20 +378,23 @@ pub fn fit_cell_activity_graph_embedding(
         Some(&batch_membership),
     );
     srt_cell_pairs.write_coord_pairs(&c.out, &coordinate_names)?;
-    let edges_owned: Vec<(u32, u32)> = srt_cell_pairs
+    let fine_edges: Vec<(u32, u32)> = srt_cell_pairs
         .inner
         .pairs()
         .iter()
         .map(|&(i, j)| (i as u32, j as u32))
         .collect();
-    let n_edges = edges_owned.len();
+    let n_fine_edges = fine_edges.len();
     if gene_axis.is_channelized() {
         info!(
             "{} cells, {} genes ({} channel rows), {} edges",
-            n_cells, n_genes, n_rows, n_edges
+            n_cells, n_genes, n_rows, n_fine_edges
         );
     } else {
-        info!("{} cells, {} genes, {} edges", n_cells, n_genes, n_edges);
+        info!(
+            "{} cells, {} genes, {} edges",
+            n_cells, n_genes, n_fine_edges
+        );
     }
 
     // Per-ROW count totals, streamed ONCE. Two consumers need them and both are
@@ -500,6 +534,32 @@ pub fn fit_cell_activity_graph_embedding(
         },
     );
 
+    // Batch ids + the PB TRAINING FRAME, built BEFORE the selection block:
+    // its nesting / density / batch checks are cheap, and failing them
+    // here costs milliseconds instead of a full collapse and cold Gibbs.
+    let batch_id_of: HashMap<Box<str>, u32> = {
+        let mut uniq: Vec<Box<str>> = batch_membership.to_vec();
+        uniq.sort();
+        uniq.dedup();
+        uniq.into_iter()
+            .enumerate()
+            .map(|(i, b)| (b, i as u32))
+            .collect()
+    };
+    let n_exp_batches = batch_id_of.len().max(1);
+    let batch_membership_u32: Vec<u32> = batch_membership
+        .iter()
+        .map(|b| *batch_id_of.get(b).expect("batch id"))
+        .collect();
+
+    let (pb_frame, fine_to_super) = crate::cell_activity_graph_embedding::pb_frame::build_pb_frame(
+        &ml,
+        &graph,
+        &batch_membership_u32,
+        n_exp_batches,
+    )?;
+    let n_pb = pb_frame.n_pb;
+
     // Collapse cells into super-cells, then fit the gene selection against
     // them — the whole stage runs on the SAMPLED arm only.
     //
@@ -510,8 +570,9 @@ pub fn fit_cell_activity_graph_embedding(
     // `pinto cage --help` says so.
     // The most recent refreshed selection, kept because its `delta` is the only
     // one commensurate with the shipped gene embedding — see the refresh below.
-    let mut latest_refreshed: Option<crate::cell_activity_graph_embedding::selection::Selection> =
-        None;
+    let mut latest_refreshed_selection: Option<
+        crate::cell_activity_graph_embedding::selection::Selection,
+    > = None;
     // Finest-level collapse SVD, retained as the WARM START of the trained
     // PB table (sampled arm only; the learned arm never builds the collapse
     // and keeps random init, exactly as the old cell table did).
@@ -532,8 +593,8 @@ pub fn fit_cell_activity_graph_embedding(
         // super-cell id, and that super-cell's embedding. Lets the basis be
         // inspected as a UMAP and as a spatial map before anything is built on it.
         if let Some(fine) = pb.levels.last() {
-            e_pb_warm = Some(fine.e_pb.clone());
-            let d = fine.e_pb.ncols();
+            e_pb_warm = Some(fine.e_pb_svd.clone());
+            let d = fine.e_pb_svd.ncols();
             let mut out = Mat::zeros(n_cells, 3 + d);
             for i in 0..n_cells {
                 let p = fine.cell_labels[i];
@@ -541,7 +602,7 @@ pub fn fit_cell_activity_graph_embedding(
                 out[(i, 1)] = coordinates[(i, 1)];
                 out[(i, 2)] = p as f32;
                 for h in 0..d {
-                    out[(i, 3 + h)] = fine.e_pb[(p, h)];
+                    out[(i, 3 + h)] = fine.e_pb_svd[(p, h)];
                 }
             }
             let mut cols: Vec<Box<str>> = vec![Box::from("x"), Box::from("y"), Box::from("pb")];
@@ -597,25 +658,11 @@ pub fn fit_cell_activity_graph_embedding(
         }
     };
 
-    // Chain levels must be valid indices into all_cell_labels, and must be
-    // strictly COARSER than the finest level: the trained unit IS a
-    // finest-level super-cell, so a chain entry at the finest level would
-    // require two distinct PBs to share their own label and every positive
-    // would be dropped.
-    for &lvl in &args.chain_levels {
-        anyhow::ensure!(
-            lvl + 1 < ml.all_cell_labels.len(),
-            "--chain-levels entry {} must be coarser than the finest level \
-             (num_levels = {}; the finest level is the trained unit)",
-            lvl,
-            ml.all_cell_labels.len()
-        );
-    }
-    let n_chain_levels = args.chain_levels.len();
+    let n_chain_levels = chain_levels.len();
 
-    ////////////////////////////////////////////
-    // 5. The PB training frame + its samplers //
-    ////////////////////////////////////////////
+    ///////////////////////////////
+    // 5. The super-edge samplers //
+    ///////////////////////////////
     //
     // From here on the trained unit is a FINEST-LEVEL SUPER-CELL (PB),
     // never a cell: cell-cell edges are folded into PB-PB super edges
@@ -632,47 +679,27 @@ pub fn fit_cell_activity_graph_embedding(
     //
     // All of it is a deterministic function of the coarsening labels and
     // the edge list — no RNG here; randomness enters only at draw time.
-    let batch_id_of: HashMap<Box<str>, u32> = {
-        let mut uniq: Vec<Box<str>> = batch_membership.to_vec();
-        uniq.sort();
-        uniq.dedup();
-        uniq.into_iter()
-            .enumerate()
-            .map(|(i, b)| (b, i as u32))
-            .collect()
-    };
-    let n_batches = batch_id_of.len().max(1);
-    let batch_membership_u32: Vec<u32> = batch_membership
-        .iter()
-        .map(|b| *batch_id_of.get(b).expect("batch id"))
-        .collect();
-
-    let (pb_frame, fine_to_super) = crate::cell_activity_graph_embedding::pb_frame::build_pb_frame(
-        &ml,
-        &graph,
-        &batch_membership_u32,
-        n_batches,
-    )?;
-    let n_units = pb_frame.n_pb;
-
-    let pb_filter = PbChainFilter {
+    let pb_filter = ChainGroupFilter {
         unit_to_group_per_level: &pb_frame.pb_parent_maps,
-        levels: &args.chain_levels,
+        levels: &chain_levels,
     };
-    let (per_batch, sampler_stats) = build_per_batch_cell_samplers(
+    let (samplers_per_exp_batch, sampler_stats) = build_per_batch_unit_samplers(
         &pb_frame.super_edges,
-        &pb_frame.pb_batch,
-        n_batches,
-        n_units,
+        &pb_frame.pb_exp_batch,
+        n_exp_batches,
+        n_pb,
         args.alpha_neg,
         Some(pb_filter),
     );
     info!(
         "PB super-edge data: {} batches; dropped {} cross-batch, {} straddling a chain-level boundary",
-        n_batches, sampler_stats.cross_batch_dropped, sampler_stats.pb_mismatch_dropped
+        n_exp_batches, sampler_stats.cross_batch_dropped, sampler_stats.group_mismatch_dropped
     );
 
-    let active_batch_count = per_batch.iter().filter(|s| s.is_some()).count();
+    let active_batch_count = samplers_per_exp_batch
+        .iter()
+        .filter(|s| s.is_some())
+        .count();
     anyhow::ensure!(
         active_batch_count > 0,
         "no batch retained any within-batch super edges; consider --chain-levels or --reciprocal"
@@ -682,9 +709,9 @@ pub fn fit_cell_activity_graph_embedding(
     // 6. Per-gene activities + (gene, batch) cache //
     //////////////////////////////////////////////////
     info!("Computing per-gene cell activities...");
-    let activities = build_cell_activities(
+    let fine_edge_activities = build_gene_active_fine_edges(
         &data_vec,
-        &edges_owned,
+        &fine_edges,
         c.block_size,
         args.activity_norm,
         &gene_axis,
@@ -694,13 +721,23 @@ pub fn fit_cell_activity_graph_embedding(
     // structure and nothing needs them past this line). Genes whose
     // activity is entirely INSIDE super-cells cannot inform a PB-PB
     // contrast and drop out of training here.
-    let activities =
-        crate::cell_activity_graph_embedding::gene_gating::fold_activities_to_super_edges(
-            activities,
+    // `activities` indexes `fine_edges`; `fine_to_super` indexes
+    // `graph.edges`. They are the same list today only because
+    // `CellPairs::from_graph` aliases the graph's edges — pin that
+    // invariant before folding through it.
+    anyhow::ensure!(
+        fine_to_super.len() == fine_edges.len(),
+        "edge index spaces diverged: {} fine-to-super entries vs {} pair-list edges",
+        fine_to_super.len(),
+        fine_edges.len()
+    );
+    let super_edge_activities =
+        crate::cell_activity_graph_embedding::gene_gating::fold_active_edges_to_super(
+            fine_edge_activities,
             &fine_to_super,
         );
     drop(fine_to_super);
-    let nonzero_genes = activities
+    let nonzero_genes = super_edge_activities
         .gene_active_edges
         .iter()
         .filter(|v| !v.is_empty())
@@ -711,7 +748,11 @@ pub fn fit_cell_activity_graph_embedding(
     );
 
     info!("Precomputing per-(gene, batch) positive distributions...");
-    let cache = build_gene_batch_cache(&activities, &per_batch, args.activity_alpha);
+    let cache = build_gene_exp_batch_cache(
+        &super_edge_activities,
+        &samplers_per_exp_batch,
+        args.activity_alpha,
+    );
     info!(
         "Gene-batch cache: {} active (gene, batch) pairs",
         cache.n_active_pairs()
@@ -731,16 +772,16 @@ pub fn fit_cell_activity_graph_embedding(
     // `--positives-per-epoch` overrides `--per-gene-batch` with an absolute
     // total. See `GeneGatedChainSampler::batch_size` for why the budget is not
     // split per-gene.
-    let positives_per_gene = match args.positives_per_epoch {
-        Some(total) => (total / (trainable_genes.len() * n_batches).max(1)).max(1),
+    let positives_per_gene_exp_batch = match args.positives_per_epoch {
+        Some(total) => (total / (trainable_genes.len() * n_exp_batches).max(1)).max(1),
         None => args.per_gene_batch,
     };
     info!(
         "Positive budget: {} super-edge draws per (gene, batch), {} genes x {} batch(es) = {} per epoch{}",
-        positives_per_gene,
+        positives_per_gene_exp_batch,
         trainable_genes.len(),
-        n_batches,
-        positives_per_gene * trainable_genes.len() * n_batches,
+        n_exp_batches,
+        positives_per_gene_exp_batch * trainable_genes.len() * n_exp_batches,
         if args.positives_per_epoch.is_some() {
             " (--positives-per-epoch)"
         } else {
@@ -750,7 +791,7 @@ pub fn fit_cell_activity_graph_embedding(
 
     // Activities can be dropped now — the cache owns everything the
     // sampler needs for v1.
-    drop(activities);
+    drop(super_edge_activities);
 
     anyhow::ensure!(
         !trainable_genes.is_empty(),
@@ -832,7 +873,7 @@ pub fn fit_cell_activity_graph_embedding(
     // One match constructs the model AND, on the Freeze arm, the freeze state
     // in sequence — the fixed copy is taken directly after registration, so it
     // is structurally the loaded dictionary and never a gated view.
-    let b_unit_init = vec![0.0_f32; n_units];
+    let b_pb_init = vec![0.0_f32; n_pb];
     // Warm start from the collapse SVD (sampled arm): the frozen basis the
     // Gibbs conditioned on becomes the INIT of the trained PB table instead
     // of dead weight. Both shapes derive from the same finest labels and
@@ -840,15 +881,31 @@ pub fn fit_cell_activity_graph_embedding(
     // fall back from. The adapter arm has no table init and ignores it.
     if let Some(w) = &e_pb_warm {
         anyhow::ensure!(
-            w.nrows() == n_units && w.ncols() == args.embedding_dim,
+            w.nrows() == n_pb && w.ncols() == args.embedding_dim,
             "collapse SVD [{} x {}] does not match the trained PB table [{} x {}]",
             w.nrows(),
             w.ncols(),
-            n_units,
+            n_pb,
             args.embedding_dim
         );
     }
-    let e_unit_init: Option<&Mat> = e_pb_warm.as_ref();
+    let e_pb_init: Option<&Mat> = e_pb_warm.as_ref();
+    match (&e_pb_init, args.gene_embedding_mode) {
+        (Some(w), GeneEmbeddingMode::Adapt) => {
+            let _ = w;
+            info!(
+                "Warm start SKIPPED: the adapter arm has no PB-table init; \
+                 the trained table starts random as on the learned arm"
+            );
+        }
+        (Some(w), _) => info!(
+            "PB table warm-started from the collapse SVD [{} x {}], |E| = {:.4}",
+            w.nrows(),
+            w.ncols(),
+            w.norm() / (w.nrows() as f32).sqrt()
+        ),
+        (None, _) => info!("PB table starts from seeded random init (no collapse SVD)"),
+    }
     let (mut model, frozen_gene) = match (&pretrained_gene, args.gene_embedding_mode) {
         // Adapter: the dictionary is a fixed constant and the gene side trains
         // one shared [h_src x H] map (plus the optional per-gene residual), so
@@ -856,11 +913,11 @@ pub fn fit_cell_activity_graph_embedding(
         (Some(p), GeneEmbeddingMode::Adapt) => (
             JointEmbedModel::new_adapted(
                 AdapterInit {
-                    n_cells: n_units,
+                    n_cells: n_pb,
                     embedding_dim: args.embedding_dim,
                     rho: &p.e_gene,
                     b_feat: &b_feat_init,
-                    b_cell: &b_unit_init,
+                    b_cell: &b_pb_init,
                     seed: c.seed,
                     residual: args.gene_adapter_residual,
                 },
@@ -873,15 +930,15 @@ pub fn fit_cell_activity_graph_embedding(
             let model = JointEmbedModel::new_with_init(
                 ModelArgs {
                     n_features: n_genes,
-                    n_cells: n_units,
+                    n_cells: n_pb,
                     embedding_dim: args.embedding_dim,
                     seed: c.seed,
                 },
                 &ModelInit {
                     e_feat: pre.as_ref().map(|p| &p.e_gene),
-                    e_cell: e_unit_init,
+                    e_cell: e_pb_init,
                     b_feat: &b_feat_init,
-                    b_cell: &b_unit_init,
+                    b_cell: &b_pb_init,
                 },
                 &varmap,
                 &dev,
@@ -969,18 +1026,17 @@ pub fn fit_cell_activity_graph_embedding(
     //////////////////////
     // 8. Training loop //
     //////////////////////
-    let pb_maps: Vec<&[usize]> = args
-        .chain_levels
+    let pb_to_parent_per_level: Vec<&[usize]> = chain_levels
         .iter()
         .map(|&lvl| pb_frame.pb_parent_maps[lvl].as_slice())
         .collect();
 
     let sampler = GeneGatedChainSampler {
-        edges: &pb_frame.super_edges,
-        per_batch: &per_batch,
+        super_edges: &pb_frame.super_edges,
+        samplers_per_exp_batch: &samplers_per_exp_batch,
         cache: &cache,
-        pb_maps: &pb_maps,
-        positives_per_draw: positives_per_gene,
+        unit_to_group_per_level: &pb_to_parent_per_level,
+        positives_per_draw: positives_per_gene_exp_batch,
         n_negatives: args.n_negatives,
     };
 
@@ -1004,7 +1060,7 @@ pub fn fit_cell_activity_graph_embedding(
                     probe_forward(
                         n_probe_genes,
                         &trainable_genes,
-                        n_batches,
+                        n_exp_batches,
                         &sampler,
                         &mut probe_rng,
                         &model,
@@ -1091,8 +1147,8 @@ pub fn fit_cell_activity_graph_embedding(
                 // cell-level view through the finest labels so the existing
                 // per-level fold applies unchanged (same cell-count-weighted
                 // means as before the redesign).
-                let e_unit_now = tensor_to_mat(&model.e_cell)?;
-                let e_cell_view = e_unit_now.select_rows(pb_frame.finest_labels.iter());
+                let e_pb_now = tensor_to_mat(&model.e_cell)?;
+                let e_cell_view = e_pb_now.select_rows(pb_frame.cell_to_finest_pb.iter());
                 let e_flat = sel_state.frozen_e_from_cells(&e_cell_view);
                 let (sel_new, warm_new) = sel_state.sample(
                     &e_flat,
@@ -1111,7 +1167,7 @@ pub fn fit_cell_activity_graph_embedding(
                 // was fit against an SVD of pseudobulk log-counts, a frame the
                 // model never uses — so a delta dictionary read off the cold run
                 // would be mixed into `e_feat`'s frame and mean nothing.
-                let sel_new = latest_refreshed.insert(sel_new);
+                let sel_new = latest_refreshed_selection.insert(sel_new);
                 let pip_t =
                     Tensor::from_vec(sel_new.pip.clone(), (n_genes, args.embedding_dim), &dev)?;
                 model.install_gate_pip(GateKind::Identity, &pip_t)?;
@@ -1179,7 +1235,7 @@ pub fn fit_cell_activity_graph_embedding(
                         .wrapping_add(g as u64)
                         .wrapping_add((epoch as u64).wrapping_mul(1_000_003));
                     let mut rng = SmallRng::seed_from_u64(seed);
-                    (0..n_batches)
+                    (0..n_exp_batches)
                         .filter_map(move |b| {
                             sampler_ref.sample(g, b, &mut rng).map(|(cb, _st)| (g, cb))
                         })
@@ -1194,7 +1250,7 @@ pub fn fit_cell_activity_graph_embedding(
             // chunk steps) leaves it short and the ETA running long.
             timers.precompute += t_sample.elapsed();
             if mini.is_empty() {
-                skip_count += chunk.len() * n_batches;
+                skip_count += chunk.len() * n_exp_batches;
                 train_bar.inc(1);
                 continue;
             }
@@ -1210,9 +1266,9 @@ pub fn fit_cell_activity_graph_embedding(
 
             // (b) ONE forward / backward over the whole chunk.
             let CageLossOut {
-                per_level: per_level_gl,
+                per_gene_level: per_level_gl,
                 mean_abs_pair,
-            } = cage_nce_loss_per_level(
+            } = cage_nce_loss_per_gene_level(
                 &model,
                 cb_batches,
                 &gene_ids_u32,
@@ -1461,30 +1517,36 @@ pub fn fit_cell_activity_graph_embedding(
     // the propensity pass below.
     // Bare integer row keys (the writer's default), so pb_embedding,
     // pb_bias, and cell_pb's `pb` column all join directly on the id.
-    let e_unit_mat = tensor_to_mat(&model.e_cell)?;
-    e_unit_mat.to_parquet_with_names(
+    let e_pb_mat = tensor_to_mat(&model.e_cell)?;
+    e_pb_mat.to_parquet_with_names(
         &(c.out.to_string() + ".pb_embedding.parquet"),
         (None, Some("pb")),
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
 
-    let b_unit_mat = tensor_to_mat_1d(&model.b_cell)?;
-    b_unit_mat.to_parquet_with_names(
+    let b_pb_mat = tensor_to_mat_1d(&model.b_cell)?;
+    b_pb_mat.to_parquet_with_names(
         &(c.out.to_string() + ".pb_bias.parquet"),
         (None, Some("pb")),
         Some(&[Box::from("b_pb")]),
     )?;
 
-    // Typed INT32 id column, not a float measurement: readers should get
-    // `3`, never `3.0`, and exactness must not depend on f32's 2^24 span.
-    let cell_pb_col: Vec<i32> = pb_frame.finest_labels.iter().map(|&p| p as i32).collect();
+    // The pb id ships as the SAME bare-integer STRING the parquet writer
+    // uses for pb_embedding / pb_bias row keys (the row-name column is
+    // BYTE_ARRAY by construction), so the three files join directly with
+    // no cast; an INT32 column here would type-mismatch that join.
+    let cell_pb_col: Vec<Box<str>> = pb_frame
+        .cell_to_finest_pb
+        .iter()
+        .map(|&p| p.to_string().into_boxed_str())
+        .collect();
     matrix_util::parquet::write_named_table(
         &(c.out.to_string() + ".cell_pb.parquet"),
         "cell",
         &cell_names,
         &[(
             Box::from("pb"),
-            matrix_util::parquet::Column::I32(&cell_pb_col),
+            matrix_util::parquet::Column::Str(&cell_pb_col),
         )],
     )?;
 
@@ -1559,8 +1621,8 @@ pub fn fit_cell_activity_graph_embedding(
     // first: this is HOW MUCH an unspliced row loads on top of the identity,
     // `delta_selection` is WHETHER it loads at all. Genes whose delta is not
     // identified are NaN in both.
-    let delta_from_refresh = latest_refreshed.is_some();
-    let delta_source = latest_refreshed
+    let delta_from_refresh = latest_refreshed_selection.is_some();
+    let delta_source = latest_refreshed_selection
         .as_ref()
         .or_else(|| sampled_selection.as_ref().map(|(sel, _, _)| sel));
     if let Some(delta) = delta_source.and_then(|s| s.delta.as_ref()) {
@@ -1647,7 +1709,7 @@ pub fn fit_cell_activity_graph_embedding(
         bias: pair_bias,
     } = project_pairs(
         &data_vec,
-        &edges_owned,
+        &fine_edges,
         &e_gene_out,
         pair_batch,
         &PairProjectionArgs {
@@ -1677,7 +1739,7 @@ pub fn fit_cell_activity_graph_embedding(
         }
     }
 
-    let edges_usize: Vec<(usize, usize)> = edges_owned
+    let fine_edges_usize: Vec<(usize, usize)> = fine_edges
         .iter()
         .map(|&(u, v)| (u as usize, v as usize))
         .collect();
@@ -1685,13 +1747,13 @@ pub fn fit_cell_activity_graph_embedding(
     // `[D × E]` with every pair L2-normalized — the exact shape and
     // normalization `pinto dsvd` hands the shared routine, so edge k-means
     // clusters on composition and not on pooled depth.
-    let mut proj_kn = pair_latent.transpose();
-    proj_kn.normalize_columns_inplace();
+    let mut pair_latent_kn = pair_latent.transpose();
+    pair_latent_kn.normalize_columns_inplace();
 
     // One `[E × D]` copy, written out and then clustered — the shared routine
     // takes pairs as rows, so this is the same buffer both times.
-    let proj_ne = proj_kn.transpose();
-    proj_ne.to_parquet_with_names(
+    let pair_latent_nk = pair_latent_kn.transpose();
+    pair_latent_nk.to_parquet_with_names(
         &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
         Some(&embedding_col_names(args.embedding_dim)),
@@ -1707,8 +1769,8 @@ pub fn fit_cell_activity_graph_embedding(
     // k-means the requested count IS the count.
     let clustering = args.edge_clustering.resolve(c.seed);
     let prop_out = compute_propensity_and_gene_community_stat(
-        &proj_ne,
-        &edges_usize,
+        &pair_latent_nk,
+        &fine_edges_usize,
         &data_vec,
         n_cells,
         &PropensityReportConfig {
@@ -1733,12 +1795,13 @@ pub fn fit_cell_activity_graph_embedding(
     // embedding, since the latents are projections against it).
     {
         let e_cell_readout = crate::link_community::profiles::propensity_weighted_cell_embedding(
-            &proj_ne, &prop_out,
+            &pair_latent_nk,
+            &prop_out,
         );
         e_cell_readout.to_parquet_with_names(
             &(c.out.to_string() + ".cell_embedding.parquet"),
             (Some(&cell_names), Some("cell")),
-            Some(&embedding_col_names(proj_ne.ncols())),
+            Some(&embedding_col_names(pair_latent_nk.ncols())),
         )?;
         info!(
             "Wrote {}.cell_embedding.parquet (propensity readout)",
@@ -1767,7 +1830,7 @@ pub fn fit_cell_activity_graph_embedding(
                 coord_columns: &coordinate_names,
                 n_cells,
                 n_genes,
-                n_edges,
+                n_edges: n_fine_edges,
                 k: n_edge_clusters,
             },
             batch_db.is_some(),
