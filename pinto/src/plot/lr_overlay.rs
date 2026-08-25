@@ -624,22 +624,41 @@ pub fn render_lr_overlays_for_core(
                         Some(&v) => v,
                         None => (l_li + r_ri) >= (l_ri + r_li),
                     };
-                    // The COLOR encodes detection, not magnitude, and it
-                    // pools BOTH orientations exactly as the score does:
-                    // a contact counts as concordant when the pair is
-                    // co-detected either way round. Reading concordance
-                    // off only the drawn orientation would contradict
-                    // the symmetric estimand this figure illustrates.
-                    // The arrow's DIRECTION is a separate display
-                    // heuristic and still magnitude-based (`use_canon`
-                    // above: pooled orientation, else per-edge L+R
-                    // argmax); the estimand carries no direction.
-                    let codetected = (l_li > 0.0 && r_ri > 0.0) || (l_ri > 0.0 && r_li > 0.0);
-                    let concordance = if codetected { 1.0 } else { -1.0 };
-                    if use_canon {
-                        (li, ri, concordance)
-                    } else {
-                        (ri, li, concordance)
+                    // The COLOR encodes detection, pooling BOTH
+                    // orientations exactly as the score does: concordant
+                    // when the pair is co-detected either way round.
+                    //
+                    // The DIRECTION, in this mode, is the ANNOTATED role
+                    // wherever the contact realizes exactly one: the pair
+                    // file names the ligand, so a one-way contact
+                    // identifies its ligand-carrying cell outright, and
+                    // the arrow runs ligand cell -> receptor cell. That
+                    // is bookkeeping, not inference, and it is what the
+                    // per-cell gradient field inherits. A MUTUAL contact
+                    // has no side and keeps the display-only magnitude
+                    // orientation (`use_canon` above), as do silent
+                    // contacts, whose arrows are blue anyway.
+                    use crate::lr_activity::edge_scores::{classify_contact, ContactConfig};
+                    let cfg = classify_contact(l_li > 0.0, r_li > 0.0, l_ri > 0.0, r_ri > 0.0);
+                    match cfg {
+                        ContactConfig::OneWay { ligand_first: true } => (li, ri, 1.0),
+                        ContactConfig::OneWay {
+                            ligand_first: false,
+                        } => (ri, li, 1.0),
+                        ContactConfig::Mutual => {
+                            if use_canon {
+                                (li, ri, 1.0)
+                            } else {
+                                (ri, li, 1.0)
+                            }
+                        }
+                        ContactConfig::Silent => {
+                            if use_canon {
+                                (li, ri, -1.0)
+                            } else {
+                                (ri, li, -1.0)
+                            }
+                        }
                     }
                 }
                 _ => (li, ri, f32::NAN),
