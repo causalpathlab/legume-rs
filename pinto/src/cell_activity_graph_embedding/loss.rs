@@ -1,6 +1,7 @@
-//! cage's batched gene-modulated cell-cell chain NCE.
+//! cage's batched gene-modulated PB-PB chain NCE (no cell is ever
+//! scored here: `u`, `v` are finest-level super-cells).
 //!
-//! Scores `G` independent [`CellChainBatch`]es — one per gene in the current
+//! Scores `G` independent [`UnitChainBatch`]es — one per gene in the current
 //! chunk — in a single forward pass, returning `[G, L]` per-(gene, level)
 //! losses. Collapses ~18k tiny device forwards per epoch into ~600 big ones.
 //!
@@ -23,13 +24,13 @@
 
 use candle_util::candle_core::{Device, Result as CResult, Tensor};
 use graph_embedding_util::loss::{
-    gather_feature_rows, logistic_nce, softmax_nce, CellChainBatch, NceObjective,
+    gather_feature_rows, logistic_nce, softmax_nce, NceObjective, UnitChainBatch,
 };
 use graph_embedding_util::model::JointEmbedModel;
 
 pub struct CageLossOut {
     /// Per-(gene, level) NCE loss, `[G, L]`.
-    pub per_level: Tensor,
+    pub per_gene_level: Tensor,
     /// Mean `|θ_g · (e_u ⊙ e_v)|`, detached — the collapse detector.
     /// Watch it against the loss: if this decays toward zero while the loss
     /// still falls, the ungated cell biases have taken over the objective and
@@ -48,9 +49,9 @@ pub struct CageLossOut {
 /// (`graph_embedding_util::loss::feat`). Prefer `Softmax` under a sampled mask:
 /// the sampler's profiled-Poisson normalizer is the sampled-softmax estimand,
 /// so the gate and the loss then optimize the same thing.
-pub fn cage_nce_loss_per_level(
+pub fn cage_nce_loss_per_gene_level(
     model: &JointEmbedModel,
-    batches: Vec<CellChainBatch>,
+    batches: Vec<UnitChainBatch>,
     gene_ids: &[u32],
     objective: NceObjective,
     dev: &Device,
@@ -64,18 +65,18 @@ pub fn cage_nce_loss_per_level(
         gene_ids.len(),
         g
     );
-    let b = batches[0].left_cells.len();
+    let b = batches[0].left_units.len();
     let l = batches[0].per_level_neg.len();
     let k = batches[0].n_negatives;
     for cb in &batches {
-        assert_eq!(cb.left_cells.len(), b, "cage loss: B mismatch");
+        assert_eq!(cb.left_units.len(), b, "cage loss: B mismatch");
         assert_eq!(cb.per_level_neg.len(), l, "cage loss: L mismatch");
         assert_eq!(cb.n_negatives, k, "cage loss: K mismatch");
     }
     if b == 0 {
         let zero = Tensor::zeros((), candle_util::candle_core::DType::F32, dev)?;
         return Ok(CageLossOut {
-            per_level: Tensor::zeros((g, l), candle_util::candle_core::DType::F32, dev)?,
+            per_gene_level: Tensor::zeros((g, l), candle_util::candle_core::DType::F32, dev)?,
             mean_abs_pair: zero,
         });
     }
@@ -91,8 +92,8 @@ pub fn cage_nce_loss_per_level(
     // row-for-row with the [G*B] cell-side gather.
     let mut gene_repeat: Vec<u32> = Vec::with_capacity(total_b);
     for (cb, &gid) in batches.into_iter().zip(gene_ids.iter()) {
-        all_left.extend(cb.left_cells);
-        all_right.extend(cb.right_cells);
+        all_left.extend(cb.left_units);
+        all_right.extend(cb.right_units);
         for _ in 0..b {
             gene_repeat.push(gid);
         }
@@ -180,7 +181,7 @@ pub fn cage_nce_loss_per_level(
         per_gene_per_level.push(per_edge_gb.mean(1)?); // [G]
     }
     Ok(CageLossOut {
-        per_level: Tensor::stack(&per_gene_per_level, 1)?,
+        per_gene_level: Tensor::stack(&per_gene_per_level, 1)?,
         mean_abs_pair,
     })
 }

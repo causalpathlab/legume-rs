@@ -16,7 +16,7 @@ fn splice_state() -> SelectionState {
             .map(|p| (p, 1.0 + ((p as usize * 7 + seed) % 5) as f32))
             .collect()
     };
-    let tracks = TrackPos {
+    let tracks = TrackPbCounts {
         spliced: vec![counts(0), counts(1), Vec::new()],
         unspliced: vec![counts(2), Vec::new(), counts(3)],
     };
@@ -36,7 +36,7 @@ fn splice_state() -> SelectionState {
         },
         partition: (0..N_PB as u32).collect(),
         b_flat: vec![0.0; N_PB],
-        level_maps: Vec::new(),
+        cell_to_pb_per_level: Vec::new(),
         total_pb: N_PB,
         n_genes: 3,
         dim: H,
@@ -130,7 +130,7 @@ fn the_independent_gate_runs_and_keeps_the_same_identifiability() {
     let (sel, warm) = run(false);
     let d = sel.delta.as_ref().expect("delta");
     assert_eq!(d.identified, vec![true, false, false]);
-    assert!(warm.z_delta.is_some() && warm.e_delta.is_some());
+    assert!(warm.z_delta.is_some() && warm.mean_delta.is_some());
     // The hyper-chains are per OUTER sweep, so they carry the retained draws
     // rather than one value — without that, mixing is unreportable.
     assert_eq!(d.sigma_diag.len(), H);
@@ -158,9 +158,12 @@ fn a_warm_start_is_carried_rather_than_discarded() {
         nested_delta: true,
     };
     let (_, warm1) = state.sample_two_block(&side, &args, ChainWarm::default());
-    let e_delta_in = warm1.e_delta.clone().expect("delta loadings");
+    let mean_delta_in = warm1.mean_delta.clone().expect("delta loadings");
     let (_, warm2) = state.sample_two_block(&side, &args, warm1);
 
-    assert_eq!(warm2.e_delta.as_ref().unwrap().len(), e_delta_in.len());
+    assert_eq!(
+        warm2.mean_delta.as_ref().unwrap().len(),
+        mean_delta_in.len()
+    );
     assert!(warm2.z_beta.is_some() && warm2.z_delta.is_some());
 }

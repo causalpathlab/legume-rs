@@ -438,10 +438,17 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         value_delimiter(','),
-        default_value = "0,1,2",
-        help = "Chain levels from the coarsening hierarchy;\nmust all be coarser than the finest level,\nwhich is the trained unit itself"
+        help = "Chain levels from the coarsening hierarchy.\nUnset: every level coarser than the finest, up to three.\nExplicit levels must all be coarser than the finest,\nwhich is the trained unit itself.",
+        long_help = "Chain levels from the coarsening hierarchy,\n\
+                     coarsest first.\n\
+                     Unset, the default takes every level coarser than\n\
+                     the finest, up to three of them,\n\
+                     so it adapts to --num-levels.\n\
+                     Explicit levels must all be coarser than the finest\n\
+                     level: the finest IS the trained unit,\n\
+                     so no positive super edge can share one."
     )]
-    pub chain_levels: Vec<usize>,
+    pub chain_levels: Option<Vec<usize>>,
 
     /// HVG selection: senna-style shared CLI (`--n-hvg`,
     /// `--feature-list-file`). cage **weights the random projection** with it,

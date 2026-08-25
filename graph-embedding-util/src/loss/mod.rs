@@ -33,11 +33,11 @@ pub(crate) mod feat;
 mod tests;
 
 pub use cell::{
-    build_per_batch_cell_samplers, CellCellSamplerStats, PbChainFilter, PerBatchCellSampler,
+    build_per_batch_unit_samplers, ChainGroupFilter, PerBatchUnitSampler, UnitPairSamplerStats,
 };
 pub use chain::{
-    sample_cell_chain_batch, sample_cell_chain_batch_with_pos, CellChainBatch, CellChainBatchArgs,
-    CellChainBatchStats,
+    sample_unit_chain_batch, sample_unit_chain_batch_with_pos, UnitChainBatch, UnitChainBatchArgs,
+    UnitChainBatchStats,
 };
 pub use feat::{
     build_stratified_sampler, gather_feature_rows, nce_loss, nce_loss_identity,

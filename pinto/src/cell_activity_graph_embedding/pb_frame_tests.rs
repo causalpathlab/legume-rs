@@ -1,5 +1,5 @@
 use crate::cell_activity_graph_embedding::gene_gating::{
-    fold_activities_to_super_edges, CellActivities,
+    fold_active_edges_to_super, GeneActiveEdges,
 };
 
 /// Weights of fine edges landing on the same super edge must SUM; the
@@ -9,11 +9,11 @@ fn fold_sums_weights_and_drops_intra_pb_edges() {
     // 4 fine edges; edges 0 and 2 map to super edge 1, edge 1 to super
     // edge 0, edge 3 is intra-PB.
     let fine_to_super = vec![Some(1usize), Some(0), Some(1), None];
-    let activities = CellActivities {
+    let activities = GeneActiveEdges {
         gene_active_edges: vec![vec![0u32, 1, 2, 3], vec![1, 3]],
         gene_active_edge_weights: vec![vec![0.5f32, 2.0, 0.25, 9.0], vec![4.0, 9.0]],
     };
-    let folded = fold_activities_to_super_edges(activities, &fine_to_super);
+    let folded = fold_active_edges_to_super(activities, &fine_to_super);
     assert_eq!(folded.gene_active_edges[0], vec![0u32, 1]);
     assert_eq!(folded.gene_active_edge_weights[0], vec![2.0f32, 0.75]);
     // Gene 1: only edge 1 survives (edge 3 is intra-PB).
@@ -27,11 +27,11 @@ fn fold_sums_weights_and_drops_intra_pb_edges() {
 #[test]
 fn fully_internal_gene_folds_to_empty() {
     let fine_to_super = vec![None, None];
-    let activities = CellActivities {
+    let activities = GeneActiveEdges {
         gene_active_edges: vec![vec![0u32, 1]],
         gene_active_edge_weights: vec![vec![1.0f32, 1.0]],
     };
-    let folded = fold_activities_to_super_edges(activities, &fine_to_super);
+    let folded = fold_active_edges_to_super(activities, &fine_to_super);
     assert!(folded.gene_active_edges[0].is_empty());
     assert!(folded.gene_active_edge_weights[0].is_empty());
 }
@@ -69,14 +69,18 @@ fn frame_folds_edges_and_nests_parents() {
     let (ml, graph, batches) = toy_inputs();
     let (frame, fine_to_super) = build_pb_frame(&ml, &graph, &batches, 2).unwrap();
     assert_eq!(frame.n_pb, 4);
-    // Super edges (canonical min,max): pb0-pb1, pb1-pb2, pb2-pb3.
+    // Super edges (canonical min,max): pb0-pb1 and pb2-pb3. The fine
+    // edge (c2, c3) crosses the batch boundary, so pb1-pb2 must NOT
+    // exist: cross-batch fine edges neither form nor feed super edges.
     let mut se = frame.super_edges.clone();
     se.sort();
-    assert_eq!(se, vec![(0u32, 1u32), (1, 2), (2, 3)]);
-    // Intra-PB fine edges (0,1) and (3,4) fold into their nodes.
+    assert_eq!(se, vec![(0u32, 1u32), (2, 3)]);
+    // Intra-PB fine edges (0,1) and (3,4), and the cross-batch edge
+    // (2,3), all fold into no super edge.
     assert!(fine_to_super[0].is_none());
+    assert!(fine_to_super[2].is_none());
     assert!(fine_to_super[3].is_none());
-    for e in [1usize, 2, 4] {
+    for e in [1usize, 4] {
         let s = fine_to_super[e].unwrap();
         assert!(s < frame.super_edges.len());
     }
@@ -85,7 +89,7 @@ fn frame_folds_edges_and_nests_parents() {
     assert_eq!(frame.pb_parent_maps.len(), 1);
     assert_eq!(frame.pb_parent_maps[0], vec![0, 0, 1, 1]);
     // Pure batches: pbs 0,1 in batch 0; pbs 2,3 in batch 1.
-    assert_eq!(frame.pb_batch, vec![0u32, 0, 1, 1]);
+    assert_eq!(frame.pb_exp_batch, vec![0u32, 0, 1, 1]);
 }
 
 #[test]

@@ -1,12 +1,12 @@
 //! Per-gene cell activity: which edges each gene is active on, and how
 //! strongly.
 //!
-//! - `CellActivities.gene_active_edges[g]` is the precomputed list of
+//! - `GeneActiveEdges.gene_active_edges[g]` is the precomputed list of
 //!   global edge ids where gene `g` is active at *both* endpoints.
 //!   Built via an edge-driven merge of per-cell sorted gene lists, so
 //!   the cost is O(n_edges × avg_genes_per_cell) instead of the
 //!   per-gene scan over all edges (O(n_genes × n_edges)).
-//! - `CellActivities.gene_active_edge_weights[g][i]` = `a_g[u] * a_g[v]`
+//! - `GeneActiveEdges.gene_active_edge_weights[g][i]` = `a_g[u] * a_g[v]`
 //!   for the corresponding edge. The gene-gated sampler rebuilds a
 //!   per-call `WeightedIndex` only over this small list.
 //!
@@ -29,14 +29,14 @@ pub enum ActivityNorm {
 }
 
 ////////////////////
-// CellActivities //
+// GeneActiveEdges //
 ////////////////////
 
-pub struct CellActivities {
+pub struct GeneActiveEdges {
     /// `gene_active_edges[g]`: global edge ids where both endpoints have
     /// non-zero activity for gene `g`. Sorted ascending. The struct is
     /// used at TWO levels: fine cell-cell edge ids as built here, then
-    /// PB super-edge ids after `fold_activities_to_super_edges`.
+    /// PB super-edge ids after `fold_active_edges_to_super`.
     pub gene_active_edges: Vec<Vec<u32>>,
     /// `gene_active_edge_weights[g][i]`: weight = `a_g[u] * a_g[v]` for
     /// edge `gene_active_edges[g][i]` (same length).
@@ -52,13 +52,13 @@ pub struct CellActivities {
 /// evidence rather than two half-evidence copies competing for the same
 /// positives. `log1p(s) + log1p(u) != log1p(s + u)`, so the order matters and
 /// the summing cannot be moved after the transform.
-pub fn build_cell_activities(
+pub fn build_gene_active_fine_edges(
     data: &SparseIoVec,
     edges: &[(u32, u32)],
     block_size: Option<usize>,
     norm: ActivityNorm,
     axis: &GeneAxis,
-) -> anyhow::Result<CellActivities> {
+) -> anyhow::Result<GeneActiveEdges> {
     let n_cells = data.num_columns();
     let n_rows = data.num_rows();
     let n_genes = axis.n_genes();
@@ -100,21 +100,21 @@ pub fn build_cell_activities(
             coo.push(g, c, a);
         }
     }
-    let mut cell_csr = CsrMatrix::from(&coo);
+    let mut gene_by_cell_csr = CsrMatrix::from(&coo);
     // Over every nonzero of the matrix, so it is worth the rayon hop: this used to
     // ride along inside the parallel block read, and moving it after the sum (which
     // it has to be) would otherwise have made it the one serial pass.
-    cell_csr.values_mut().par_iter_mut().for_each(|x| {
+    gene_by_cell_csr.values_mut().par_iter_mut().for_each(|x| {
         *x = x.ln_1p();
     });
-    normalize_rows_inplace(&mut cell_csr, norm);
+    normalize_rows_inplace(&mut gene_by_cell_csr, norm);
 
     // Step 2: invert to per-cell sorted (gene, activity) lists.
     // Iterating CSR rows in gene order gives each cell's gene-list
     // already sorted ascending, which is what the edge-merge needs.
     let mut cell_to_genes: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
     for g in 0..n_genes {
-        let row = cell_csr.row(g);
+        let row = gene_by_cell_csr.row(g);
         for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
             cell_to_genes[c].push((g as u32, v));
         }
@@ -145,7 +145,7 @@ pub fn build_cell_activities(
         }
     }
 
-    Ok(CellActivities {
+    Ok(GeneActiveEdges {
         gene_active_edges,
         gene_active_edge_weights,
     })
@@ -197,13 +197,13 @@ fn normalize_rows_inplace(csr: &mut CsrMatrix<f32>, norm: ActivityNorm) {
 /// to, and intra-PB fine edges (`fine_to_super[e] == None`) are dropped
 /// — they fold into the node, matching `build_super_graph` semantics.
 ///
-/// Returns the same `CellActivities` shape one level up, so the
+/// Returns the same `GeneActiveEdges` shape one level up, so the
 /// existing `(gene, batch)` cache builder consumes it unchanged: edge
 /// ids are super-edge ids, sorted ascending per gene, weights parallel.
-pub fn fold_activities_to_super_edges(
-    activities: CellActivities,
+pub fn fold_active_edges_to_super(
+    activities: GeneActiveEdges,
     fine_to_super: &[Option<usize>],
-) -> CellActivities {
+) -> GeneActiveEdges {
     use rayon::prelude::*;
     let folded: Vec<(Vec<u32>, Vec<f32>)> = activities
         .gene_active_edges
@@ -221,7 +221,7 @@ pub fn fold_activities_to_super_edges(
         .collect();
     let (gene_active_edges, gene_active_edge_weights): (Vec<_>, Vec<_>) =
         folded.into_iter().unzip();
-    CellActivities {
+    GeneActiveEdges {
         gene_active_edges,
         gene_active_edge_weights,
     }

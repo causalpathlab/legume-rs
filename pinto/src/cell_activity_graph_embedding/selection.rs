@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! collapse cells -> super-cell counts Y[g,p]      (coarsening gives the groups)
-//! one shared SVD -> e_pb, a D-dim cell side to condition on
+//! one shared SVD -> e_pb_svd, a D-dim cell side to condition on
 //! block Gibbs    -> pip = P(z_gh = 1), and E[z*beta]
 //! ```
 //!
@@ -23,7 +23,7 @@
 //! cell->super-cell map) and collapsing counts against it is one call to
 //! [`coarsen_cell_expression_dense`]. Neither is reimplemented here.
 //!
-//! What coarsening does NOT produce is `e_pb`: the super-cells expressed in the
+//! What coarsening does NOT produce is `e_pb_svd`: the super-cells expressed in the
 //! same `D` dims the gene loadings live in. [`dim_block`] is a CONDITIONAL
 //! sampler — it draws `z_gh` given a frozen `FrozenSide { e, b, h }` — so
 //! without a `D`-dim cell side there is nothing to condition on. Coarsening
@@ -56,7 +56,7 @@
 //!
 //! # Re-sampled during training
 //!
-//! [`select_features`] is the COLD run, against `e_pb`. It also returns a
+//! [`select_features`] is the COLD run, against `e_pb_svd`. It also returns a
 //! [`SelectionState`] so the training loop can re-estimate `pip` against the
 //! embedding SGD is actually learning — see [`SelectionState::sample`] and
 //! [`SelectionState::frozen_e_from_cells`].
@@ -101,7 +101,7 @@ pub struct LevelPseudobulk {
     /// keeps only this internal-edge count for its resolution diagnostic.
     pub n_internal_fine_edges: usize,
     /// This level's super-cells projected into the SHARED basis, `[n_pb × D]`.
-    pub e_pb: Mat,
+    pub e_pb_svd: Mat,
     /// Offset of this level's super-cells in the global pseudobulk index space.
     pub pb_offset: usize,
 }
@@ -117,7 +117,7 @@ impl LevelPseudobulk {
 pub struct Pseudobulks {
     pub levels: Vec<LevelPseudobulk>,
     // The shared gene→community basis it was all projected through is NOT kept:
-    // it is scaffolding for `e_pb`, and the gene-side quantity anything
+    // it is scaffolding for `e_pb_svd`, and the gene-side quantity anything
     // downstream wants is the sampler's `mean_beta`, not this.
     /// Total super-cells across all levels — the size of the global index space.
     pub total_pb: usize,
@@ -149,7 +149,7 @@ impl Pseudobulks {
         for lvl in &self.levels {
             for p in 0..lvl.n_pb() {
                 for h in 0..dim {
-                    out.push(lvl.e_pb[(p, h)]);
+                    out.push(lvl.e_pb_svd[(p, h)]);
                 }
             }
         }
@@ -161,7 +161,9 @@ pub struct PseudobulkArgs<'a> {
     pub data: &'a SparseIoVec,
     /// `ml.all_cell_labels`, coarsest → finest.
     pub all_cell_labels: &'a [Vec<usize>],
-    /// The fine cell graph, coarsened per level by `build_super_graph`.
+    /// The fine cell graph; read per level only to count internal fine
+    /// edges for the resolution diagnostic (the super-edge fold itself
+    /// lives in the training frame, `pb_frame`).
     pub graph: &'a crate::util::knn_graph::KnnGraph,
     /// Latent dimensionality `D` — the number of communities.
     pub embedding_dim: usize,
@@ -170,7 +172,7 @@ pub struct PseudobulkArgs<'a> {
     /// The collapsed counts stay on the ROW axis — that is the only place the
     /// two splice tracks are separable, and the delta block reads them apart —
     /// so this is NOT used to fold them. It is used for the gene-axis views the
-    /// basis and `e_pb` need, which are built per level and dropped.
+    /// basis and `e_pb_svd` need, which are built per level and dropped.
     pub gene_axis: &'a GeneAxis,
 }
 
@@ -299,7 +301,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         .last()
         .expect("non-empty after the ensure above")
         .1;
-    // The basis, and the `e_pb` it produces, live on the GENE axis: `e_pb` is the
+    // The basis, and the `e_pb_svd` it produces, live on the GENE axis: `e_pb_svd` is the
     // frozen side the gene-anchored blocks score against, so it has to be
     // commensurate with a per-gene loading, not with a per-row one.
     let finest_pooled = args.gene_axis.pool_rows_opt(finest_rows);
@@ -363,7 +365,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         //
         // Dropping `.scale_columns()` here is not cosmetic. The basis is the
         // Nyström map for standardized columns, so projecting unstandardized
-        // ones yields `e_pb[p,:] = sig_p · V[p,:]` — every row rescaled by its
+        // ones yields `e_pb_svd[p,:] = sig_p · V[p,:]` — every row rescaled by its
         // own spread of log counts, a direct depth proxy. Measured before the fix: corr(row norm, log library size) = 0.452,
         // which the per-dim correlation diagnostic could not see because
         // scaling by a positive factor moves magnitudes, not signs.
@@ -371,11 +373,11 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         // `.transpose()` it replaces allocated a full `[n_pb x n_genes]` copy
         // (205 MB at the finest level) and read it across rows of a
         // column-major matrix.
-        // The basis and `e_pb` live on the GENE axis (see the basis fit above), so
-        // the fold happens here and is dropped: nothing downstream of `e_pb` wants
+        // The basis and `e_pb_svd` live on the GENE axis (see the basis fit above), so
+        // the fold happens here and is dropped: nothing downstream of `e_pb_svd` wants
         // pooled counts, and keeping a copy per level would double the pyramid.
         let pooled_counts = args.gene_axis.pool_rows_opt(&counts);
-        let e_pb = row_center_with(
+        let e_pb_svd = row_center_with(
             &log1p_dense(pooled_counts.as_ref().unwrap_or(&counts)),
             &gene_means,
         )
@@ -386,7 +388,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
             cell_labels,
             counts,
             n_internal_fine_edges,
-            e_pb,
+            e_pb_svd,
             pb_offset,
         });
         pb_offset += n_pb;
@@ -414,9 +416,9 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
                 sxy / (sxx * syy).sqrt()
             }
         };
-        let rs: Vec<String> = (0..fine.e_pb.ncols())
+        let rs: Vec<String> = (0..fine.e_pb_svd.ncols())
             .map(|h| {
-                let col: Vec<f32> = (0..fine.n_pb()).map(|p| fine.e_pb[(p, h)]).collect();
+                let col: Vec<f32> = (0..fine.n_pb()).map(|p| fine.e_pb_svd[(p, h)]).collect();
                 format!("{:.2}", corr(&col, &sizes))
             })
             .collect();
@@ -424,14 +426,16 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         // Row NORM vs depth. The per-dim correlation above CANNOT catch a
         // projection that rescales each row by a positive depth-proxy: that
         // changes magnitudes, not signs. This one can.
-        let norms: Vec<f32> = (0..fine.n_pb()).map(|p| fine.e_pb.row(p).norm()).collect();
+        let norms: Vec<f32> = (0..fine.n_pb())
+            .map(|p| fine.e_pb_svd.row(p).norm())
+            .collect();
         info!(
-            "  corr(|e_pb| row norm, log library size) = {:.3}",
+            "  corr(|e_pb_svd| row norm, log library size) = {:.3}",
             corr(&norms, &sizes)
         );
     }
     for (i, lvl) in levels.iter().enumerate() {
-        let e_norm = lvl.e_pb.norm() / (lvl.n_pb() as f32).sqrt();
+        let e_norm = lvl.e_pb_svd.norm() / (lvl.n_pb() as f32).sqrt();
         // Internal fine edges are folded into the super-NODE (their mass is
         // already in `counts`), so this is how much of the fine graph stops
         // being adjacency at this resolution — expected to grow toward the
@@ -440,7 +444,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         let n_fine = args.graph.edges.len();
         info!(
             "  level {i}: {} super-cells, {} of {} fine edges internal \
-             ({:.1}%), |e_pb|/sqrt(P) = {:.4}",
+             ({:.1}%), |e_pb_svd|/sqrt(P) = {:.4}",
             lvl.n_pb(),
             internal,
             n_fine,
@@ -616,8 +620,8 @@ pub struct SelectArgs {
 pub struct ChainWarm {
     pub z_beta: Option<Vec<bool>>,
     pub z_delta: Option<Vec<bool>>,
-    pub e_beta: Option<Vec<f32>>,
-    pub e_delta: Option<Vec<f32>>,
+    pub mean_beta: Option<Vec<f32>>,
+    pub mean_delta: Option<Vec<f32>>,
     /// Each block's slab variance and half-Cauchy auxiliary. Carried for the same
     /// reason as `z`: the blocks run one sweep at a time, so these only form a
     /// chain if the driver hands them back.
@@ -630,7 +634,7 @@ pub struct ChainWarm {
 /// `unspliced` is entirely empty on a non-channelized input, and `spliced` is
 /// then the whole gene — which is why that case takes the single-block path
 /// unchanged rather than a two-block one whose second block sees nothing.
-struct TrackPos {
+struct TrackPbCounts {
     spliced: Vec<Vec<(u32, f32)>>,
     unspliced: Vec<Vec<(u32, f32)>>,
 }
@@ -701,7 +705,7 @@ impl Acc {
 /// frozen cell side `e` changes, because it is rebuilt from the embedding SGD is
 /// currently learning.
 pub struct SelectionState {
-    tracks: TrackPos,
+    tracks: TrackPbCounts,
 
     delta_identified: Vec<bool>,
     strength: DeltaStrength,
@@ -710,7 +714,7 @@ pub struct SelectionState {
     b_flat: Vec<f32>,
     /// Per level: `(cell_labels, pb_offset)`, for folding a per-CELL embedding up
     /// into the per-pseudobulk frozen side.
-    level_maps: Vec<(Vec<usize>, usize)>,
+    cell_to_pb_per_level: Vec<(Vec<usize>, usize)>,
     pub total_pb: usize,
     pub n_genes: usize,
     pub dim: usize,
@@ -732,7 +736,7 @@ impl SelectionState {
     /// Fold a `[n_cells × D]` embedding into the `[total_pb × D]` frozen side,
     /// row-major, by averaging each super-cell's member cells.
     ///
-    /// This is what makes the refresh MEAN anything: the initial `e_pb` came from
+    /// This is what makes the refresh MEAN anything: the initial `e_pb_svd` came from
     /// an SVD of pseudobulk log-counts and is fixed forever, so re-sampling
     /// against it would redraw the same posterior. Folding the LIVE `e_cell` up
     /// instead is what lets the selection track what SGD has learned.
@@ -741,7 +745,7 @@ impl SelectionState {
         let d = self.dim;
         let mut out = vec![0.0f32; self.total_pb * d];
         let mut n = vec![0.0f32; self.total_pb];
-        for (labels, off) in &self.level_maps {
+        for (labels, off) in &self.cell_to_pb_per_level {
             for (cell, &p) in labels.iter().enumerate() {
                 let gp = off + p;
                 n[gp] += 1.0;
@@ -837,8 +841,8 @@ impl SelectionState {
         warm: ChainWarm,
     ) -> (Selection, ChainWarm) {
         let (h, n_genes) = (self.dim, self.n_genes);
-        let mut e_beta = warm.e_beta.unwrap_or_else(|| vec![0f32; n_genes * h]);
-        let mut e_delta = warm.e_delta.unwrap_or_else(|| vec![0f32; n_genes * h]);
+        let mut mean_beta = warm.mean_beta.unwrap_or_else(|| vec![0f32; n_genes * h]);
+        let mut mean_delta = warm.mean_delta.unwrap_or_else(|| vec![0f32; n_genes * h]);
         let (mut z_beta, mut z_delta) = (warm.z_beta, warm.z_delta);
         // Each block's slab variance and its half-Cauchy auxiliary carry across
         // the outer sweeps. Without this every entry restarts them at the prior
@@ -860,12 +864,12 @@ impl SelectionState {
                     let spliced = NodeTerm::new(&self.tracks.spliced[g], &self.partition, 1.0);
                     let mut unspliced =
                         NodeTerm::new(&self.tracks.unspliced[g], &self.partition, 1.0);
-                    unspliced.offset = Some(&e_delta[g * h..(g + 1) * h]);
+                    unspliced.offset = Some(&mean_delta[g * h..(g + 1) * h]);
                     vec![spliced, unspliced]
                 })
                 .collect();
             let mut bcfg = DimBlockConfig::new(1, 0, block_seed(args.seed, 0xB37A, sweep))
-                .with_init_beta(e_beta.clone())
+                .with_init_beta(mean_beta.clone())
                 .with_label("beta|delta")
                 .quiet();
             if let Some(z) = z_beta.clone() {
@@ -877,7 +881,7 @@ impl SelectionState {
             let b = dim_block_multi(&beta_terms, side, &bcfg);
             hyper_beta = Some(b.final_hyper.clone());
             drop(beta_terms);
-            e_beta.copy_from_slice(&b.mean_beta);
+            mean_beta.copy_from_slice(&b.mean_beta);
             z_beta = Some(b.final_z.clone());
 
             // δ | β, on the unspliced rows, with β carried as the per-anchor
@@ -887,12 +891,12 @@ impl SelectionState {
             let delta_nodes: Vec<NodeTerm<'_>> = (0..n_genes)
                 .map(|g| {
                     let mut n = NodeTerm::new(&self.tracks.unspliced[g], &self.partition, 1.0);
-                    n.offset = Some(&e_beta[g * h..(g + 1) * h]);
+                    n.offset = Some(&mean_beta[g * h..(g + 1) * h]);
                     n
                 })
                 .collect();
             let mut dcfg = DimBlockConfig::new(1, 0, block_seed(args.seed, 0xD317, sweep))
-                .with_init_beta(e_delta.clone())
+                .with_init_beta(mean_delta.clone())
                 .with_label("delta|beta")
                 .quiet();
             if args.nested_delta {
@@ -907,7 +911,7 @@ impl SelectionState {
             let d = dim_block(&delta_nodes, side, &dcfg);
             hyper_delta = Some(d.final_hyper.clone());
             drop(delta_nodes);
-            e_delta.copy_from_slice(&d.mean_beta);
+            mean_delta.copy_from_slice(&d.mean_beta);
             z_delta = Some(d.final_z.clone());
 
             if sweep >= args.burnin {
@@ -967,8 +971,8 @@ impl SelectionState {
             ChainWarm {
                 z_beta,
                 z_delta,
-                e_beta: Some(e_beta),
-                e_delta: Some(e_delta),
+                mean_beta: Some(mean_beta),
+                mean_delta: Some(mean_delta),
                 hyper_beta,
                 hyper_delta,
             },
@@ -1005,7 +1009,7 @@ pub fn select_features(
     // stops a caller pairing an axis with counts it was not resolved from. The
     // row loop below indexes the axis by pseudobulk row, so a mismatch is either
     // a raw slice panic or, worse, a silent mis-mapping. Both sibling consumers
-    // guard this — `build_cell_activities` and `project_pairs` — so this one does
+    // guard this — `build_gene_active_fine_edges` and `project_pairs` — so this one does
     // too rather than relying on the caller.
     anyhow::ensure!(
         pb.levels
@@ -1033,7 +1037,7 @@ pub fn select_features(
     // One `pos` list per (gene, track): its counts at every level's super-cells,
     // indexed globally. The counts are on the MATRIX ROW axis, which is the only
     // place the tracks are separable.
-    let mut tracks = TrackPos {
+    let mut tracks = TrackPbCounts {
         spliced: vec![Vec::new(); n_genes],
         unspliced: vec![Vec::new(); n_genes],
     };
@@ -1127,7 +1131,7 @@ pub fn select_features(
         strength,
         partition,
         b_flat,
-        level_maps: pb
+        cell_to_pb_per_level: pb
             .levels
             .iter()
             .map(|l| (l.cell_labels.clone(), l.pb_offset))

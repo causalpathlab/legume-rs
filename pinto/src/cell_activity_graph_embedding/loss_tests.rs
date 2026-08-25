@@ -1,7 +1,7 @@
-use super::loss::cage_nce_loss_per_level;
+use super::loss::cage_nce_loss_per_gene_level;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
-use graph_embedding_util::loss::{CellChainBatch, NceObjective};
+use graph_embedding_util::loss::{NceObjective, UnitChainBatch};
 use graph_embedding_util::model::{JointEmbedModel, ModelArgs, ModelInit};
 use nalgebra::DMatrix;
 
@@ -47,7 +47,7 @@ fn model(varmap: &VarMap, dev: &Device) -> JointEmbedModel {
 
 /// One deterministic batch per gene. Cells are picked by a fixed stride so the
 /// batches differ from each other without needing an RNG.
-fn batches() -> (Vec<CellChainBatch>, Vec<u32>) {
+fn batches() -> (Vec<UnitChainBatch>, Vec<u32>) {
     let mut out = Vec::new();
     for g in 0..N_GENES {
         let left: Vec<u32> = (0..B).map(|b| ((g * 7 + b * 3) % N_CELLS) as u32).collect();
@@ -61,9 +61,9 @@ fn batches() -> (Vec<CellChainBatch>, Vec<u32>) {
                     .collect()
             })
             .collect();
-        out.push(CellChainBatch {
-            left_cells: left,
-            right_cells: right,
+        out.push(UnitChainBatch {
+            left_units: left,
+            right_units: right,
             per_level_neg,
             n_negatives: K,
         });
@@ -78,8 +78,8 @@ fn returns_one_loss_per_gene_and_level() {
     let m = model(&varmap, &dev);
     let (bs, ids) = batches();
 
-    let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
-    assert_eq!(out.per_level.dims(), &[N_GENES, L]);
+    let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    assert_eq!(out.per_gene_level.dims(), &[N_GENES, L]);
     assert_eq!(
         out.mean_abs_pair.dims().len(),
         0,
@@ -99,7 +99,8 @@ fn pair_magnitude_reports_a_dead_gene_embedding() {
     let vm_live = VarMap::new();
     let live_m = model(&vm_live, &dev);
     let (bs, ids) = batches();
-    let live = cage_nce_loss_per_level(&live_m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    let live =
+        cage_nce_loss_per_gene_level(&live_m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let live_pair: f32 = live.mean_abs_pair.to_scalar().unwrap();
     assert!(
         live_pair > 0.0,
@@ -110,7 +111,8 @@ fn pair_magnitude_reports_a_dead_gene_embedding() {
     let zeros = DMatrix::<f32>::zeros(N_GENES, DIM);
     let dead_m = model_with_e_feat(&vm_dead, &dev, Some(&zeros));
     let (bs2, ids2) = batches();
-    let dead = cage_nce_loss_per_level(&dead_m, bs2, &ids2, NceObjective::Logistic, &dev).unwrap();
+    let dead =
+        cage_nce_loss_per_gene_level(&dead_m, bs2, &ids2, NceObjective::Logistic, &dev).unwrap();
     let dead_pair: f32 = dead.mean_abs_pair.to_scalar().unwrap();
     assert_eq!(dead_pair, 0.0, "a zeroed e_feat must kill the pair term");
     assert!(live_pair > dead_pair);
@@ -143,8 +145,8 @@ fn score_is_exactly_the_raw_gene_embedding() {
     let mut n = 0_usize;
     for (cb, &gid) in bs.iter().zip(ids.iter()) {
         for b in 0..B {
-            let u = cb.left_cells[b] as usize;
-            let v = cb.right_cells[b] as usize;
+            let u = cb.left_units[b] as usize;
+            let v = cb.right_units[b] as usize;
             let s: f32 = (0..DIM)
                 .map(|d| ef[gid as usize][d] * ec[u][d] * ec[v][d])
                 .sum();
@@ -154,7 +156,7 @@ fn score_is_exactly_the_raw_gene_embedding() {
     }
     let expected = (acc / n as f64) as f32;
 
-    let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let got: f32 = out.mean_abs_pair.to_scalar().unwrap();
     assert!(
         (got - expected).abs() <= 1e-5 * expected.abs().max(1e-6),
@@ -171,8 +173,8 @@ fn backward_reaches_the_gene_embedding() {
     let m = model(&varmap, &dev);
     let (bs, ids) = batches();
 
-    let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
-    let grads = out.per_level.sum_all().unwrap().backward().unwrap();
+    let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    let grads = out.per_gene_level.sum_all().unwrap().backward().unwrap();
 
     let g = grads
         .get(&m.e_feat)
@@ -194,7 +196,7 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     let mut m = model(&varmap, &dev);
 
     let (bs, ids) = batches();
-    let ungated: f32 = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Logistic, &dev)
+    let ungated: f32 = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev)
         .unwrap()
         .mean_abs_pair
         .to_scalar()
@@ -211,7 +213,7 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     m.install_gate_pip(GateKind::Identity, &pip).unwrap();
 
     let (bs2, ids2) = batches();
-    let gated: f32 = cage_nce_loss_per_level(&m, bs2, &ids2, NceObjective::Logistic, &dev)
+    let gated: f32 = cage_nce_loss_per_gene_level(&m, bs2, &ids2, NceObjective::Logistic, &dev)
         .unwrap()
         .mean_abs_pair
         .to_scalar()
@@ -225,7 +227,7 @@ fn installed_pip_gates_the_score_and_resampling_moves_it() {
     // score must match the frozen-pip score rather than drift.
     m.resample_gate_mask().unwrap();
     let (bs3, ids3) = batches();
-    let drawn: f32 = cage_nce_loss_per_level(&m, bs3, &ids3, NceObjective::Logistic, &dev)
+    let drawn: f32 = cage_nce_loss_per_gene_level(&m, bs3, &ids3, NceObjective::Logistic, &dev)
         .unwrap()
         .mean_abs_pair
         .to_scalar()
@@ -251,9 +253,9 @@ fn objective_selects_a_different_loss() {
 
     let mean_per_level = |obj| {
         let (bs, ids) = batches();
-        cage_nce_loss_per_level(&m, bs, &ids, obj, &dev)
+        cage_nce_loss_per_gene_level(&m, bs, &ids, obj, &dev)
             .unwrap()
-            .per_level
+            .per_gene_level
             .mean_all()
             .unwrap()
             .to_scalar::<f32>()
@@ -298,9 +300,9 @@ fn per_level_shape_tracks_genes_and_levels() {
         for cb in &mut bs {
             cb.per_level_neg.truncate(n_levels);
         }
-        let out = cage_nce_loss_per_level(&m, bs, &ids, NceObjective::Softmax, &dev).unwrap();
+        let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Softmax, &dev).unwrap();
         assert_eq!(
-            out.per_level.dims(),
+            out.per_gene_level.dims(),
             &[ids.len(), n_levels],
             "per-level loss must be [genes, levels] so the KL weight can track it"
         );

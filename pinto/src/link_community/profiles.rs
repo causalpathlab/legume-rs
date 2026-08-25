@@ -614,7 +614,7 @@ pub enum EdgeClustering {
 }
 
 impl EdgeClustering {
-    /// Cut `proj_ne` (`[N_pairs × K_latent]`, pairs as ROWS) into one community
+    /// Cut `pair_latent_nk` (`[N_pairs × K_latent]`, pairs as ROWS) into one community
     /// label per pair. Every pinto subcommand that turns a pair latent into
     /// link communities goes through here, so `cage`, `dsvd` and `prop` cannot
     /// disagree about what a community is.
@@ -623,15 +623,15 @@ impl EdgeClustering {
     /// has: it is how the latent is written to parquet, how `prop` reads it
     /// back, and what Leiden wants. Only k-means needs the transpose, and it is
     /// no longer the default.
-    pub fn cluster(&self, proj_ne: &Mat) -> anyhow::Result<Vec<usize>> {
+    pub fn cluster(&self, pair_latent_nk: &Mat) -> anyhow::Result<Vec<usize>> {
         Ok(match *self {
             Self::Kmeans {
                 n_clusters,
                 max_iter,
             } => {
-                let num_clusters = n_clusters.unwrap_or(proj_ne.ncols());
+                let num_clusters = n_clusters.unwrap_or(pair_latent_nk.ncols());
                 info!("K-means clustering edges (k={num_clusters})...");
-                proj_ne.transpose().kmeans_columns(KmeansArgs {
+                pair_latent_nk.transpose().kmeans_columns(KmeansArgs {
                     num_clusters,
                     max_iter,
                 })
@@ -648,7 +648,7 @@ impl EdgeClustering {
                 // Cosine, because the pair latent is a direction (it was
                 // L2-normalized before it got here).
                 matrix_util::clustering::leiden_clustering(
-                    proj_ne,
+                    pair_latent_nk,
                     knn,
                     resolution,
                     target,
@@ -704,25 +704,27 @@ pub struct PropensityOutputs {
 /// latent (and therefore the gene dictionary it was projected against).
 /// Nothing here is trained; callers decide whether and where to ship it.
 #[must_use]
-pub fn propensity_weighted_cell_embedding(proj_ne: &Mat, out: &PropensityOutputs) -> Mat {
+pub fn propensity_weighted_cell_embedding(pair_latent_nk: &Mat, out: &PropensityOutputs) -> Mat {
     let k = out.n_clusters;
-    let d = proj_ne.ncols();
+    let d = pair_latent_nk.ncols();
     let mut centroids = Mat::zeros(k, d);
-    let mut counts = vec![0f32; k];
+    // usize counts: an f32 accumulator stops incrementing at 2^24 edges
+    // in one community and would silently inflate that centroid.
+    let mut counts = vec![0usize; k];
     for (e, &kc) in out.edge_membership.iter().enumerate() {
-        counts[kc] += 1.0;
+        counts[kc] += 1;
         let mut row = centroids.row_mut(kc);
-        row += proj_ne.row(e);
+        row += pair_latent_nk.row(e);
     }
-    for (kc, cnt) in counts.iter().enumerate() {
-        centroids.row_mut(kc).scale_mut(1.0 / cnt.max(1.0));
+    for (kc, &cnt) in counts.iter().enumerate() {
+        centroids.row_mut(kc).scale_mut(1.0 / cnt.max(1) as f32);
     }
     &out.cell_propensity * &centroids
 }
 
 /// Compute propensity and gene-community statistics from latent pair projections.
 ///
-/// 1. Cluster `proj_kn` (K_latent × N_pairs) → edge cluster labels
+/// 1. Cluster `pair_latent_kn` (K_latent × N_pairs) → edge cluster labels
 /// 2. Propensity: soft cell membership from edge clusters [N_cells × K_clusters]
 /// 3. Gene-community stat: Poisson-Gamma gene expression rates per community [G × K_clusters]
 ///
@@ -732,7 +734,7 @@ pub fn propensity_weighted_cell_embedding(proj_ne: &Mat, out: &PropensityOutputs
 /// k-means gives when it leaves a cluster empty. Callers should report THAT in
 /// their manifest rather than the count they asked for.
 pub fn compute_propensity_and_gene_community_stat(
-    proj_ne: &Mat,
+    pair_latent_nk: &Mat,
     edges: &[(usize, usize)],
     data_vec: &SparseIoVec,
     n_cells: usize,
@@ -747,7 +749,7 @@ pub fn compute_propensity_and_gene_community_stat(
     } = *cfg;
 
     // 1. Cluster the latent edge vectors
-    let edge_membership = clustering.cluster(proj_ne)?;
+    let edge_membership = clustering.cluster(pair_latent_nk)?;
 
     // Everything downstream — propensity width, the gene × community stat, the
     // manifest — keys on the realized count.

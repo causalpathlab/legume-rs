@@ -80,17 +80,21 @@ pub fn estimate_batch(
         Some(batch_membership),
     )?;
 
-    let proj_kn = proj_out.proj;
-    info!("Proj: {} x {} ...", proj_kn.nrows(), proj_kn.ncols());
+    let cell_proj_kn = proj_out.proj;
+    info!(
+        "Proj: {} x {} ...",
+        cell_proj_kn.nrows(),
+        cell_proj_kn.ncols()
+    );
 
     let collapse_out = data_vec.collapse_columns_multilevel(
-        &proj_kn,
+        &cell_proj_kn,
         batch_membership,
         &MultilevelParams {
             knn_pb_samples: args.batch_knn,
             sort_dim: args.sort_dim,
             num_levels: args.num_levels,
-            ..MultilevelParams::new(proj_kn.nrows())
+            ..MultilevelParams::new(cell_proj_kn.nrows())
         },
     )?;
 

@@ -6,7 +6,7 @@
 //! is fixed is an EQUALITY — a two-channel matrix must produce exactly the
 //! activities of the single-channel matrix whose counts are its per-gene sums.
 
-use super::gene_gating::{build_cell_activities, ActivityNorm, CellActivities};
+use super::gene_gating::{build_gene_active_fine_edges, ActivityNorm, GeneActiveEdges};
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
@@ -83,9 +83,9 @@ fn channelized_input(dir: &tempfile::TempDir) -> anyhow::Result<SparseIoVec> {
     write(dir, "channelized", &rows, &triplets)
 }
 
-fn activities(data: &SparseIoVec, norm: ActivityNorm) -> anyhow::Result<CellActivities> {
+fn activities(data: &SparseIoVec, norm: ActivityNorm) -> anyhow::Result<GeneActiveEdges> {
     let axis = GeneAxis::resolve(&data.row_names()?)?;
-    build_cell_activities(data, &EDGES, None, norm, &axis)
+    build_gene_active_fine_edges(data, &EDGES, None, norm, &axis)
 }
 
 /// Break it by indexing `gene_active_edges` with the row instead of the gene and
