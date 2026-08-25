@@ -313,8 +313,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      and check the coherence rather than the loss.\n\
                      \n\
                      Kept per-gene so the budget tracks the gene axis.\n\
-                     --positives-per-epoch overrides it with an absolute total.",
-        hide = true
+                     --positives-per-epoch overrides it with an absolute total."
     )]
     pub per_gene_batch: usize,
 

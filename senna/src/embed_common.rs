@@ -107,6 +107,16 @@ pub enum ComputeDevice {
     Metal,
 }
 
+impl std::fmt::Display for ComputeDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ComputeDevice::Cpu => "cpu",
+            ComputeDevice::Cuda => "cuda",
+            ComputeDevice::Metal => "metal",
+        })
+    }
+}
+
 impl ComputeDevice {
     pub fn to_device(&self, device_no: usize) -> anyhow::Result<candle_core::Device> {
         Ok(match self {

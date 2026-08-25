@@ -136,7 +136,7 @@ fn sibling_negative_draws_share_parent_differ_at_self() {
         CellChainBatchArgs {
             edges: &edges,
             batch_sampler: s,
-            batch_size: 128, // exercise both positives many times
+            n_positives: 128, // exercise both positives many times
             n_negatives: 4,
             pb_maps: &pb_maps,
         },
@@ -185,4 +185,54 @@ fn cell_cell_sampler_filters_pb_mismatched_edges() {
         .as_ref()
         .expect("batch 0 has within-batch within-pb edges");
     assert_eq!(s0.edge_indices, vec![0, 1]);
+}
+
+/// The Gram-trace `embedding_ridge` must equal the elementwise
+/// `λ·mean_n‖x_n‖²` it replaced, in value AND in the gradient it sends
+/// to the table (the reformulation is a memory fix, not a model change).
+#[test]
+fn embedding_ridge_matches_elementwise_form() {
+    use candle_util::candle_core::{DType, Device, Var};
+    let dev = Device::Cpu;
+    let var = Var::rand(-1.0f32, 1.0, (7, 5), &dev).unwrap();
+    let x = var.as_tensor();
+    let lambda = 0.25;
+
+    let ridge = crate::loss::embedding_ridge(x, lambda).unwrap();
+    let reference = x
+        .sqr()
+        .unwrap()
+        .sum(1)
+        .unwrap()
+        .mean_all()
+        .unwrap()
+        .affine(lambda, 0.0)
+        .unwrap();
+    let a = ridge.to_scalar::<f32>().unwrap();
+    let b = reference.to_scalar::<f32>().unwrap();
+    assert!((a - b).abs() < 1e-5, "value: {a} vs {b}");
+
+    let g_new = ridge
+        .backward()
+        .unwrap()
+        .get(x)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let g_ref = reference
+        .backward()
+        .unwrap()
+        .get(x)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    assert_eq!(g_new.len(), g_ref.len());
+    for (i, (gn, gr)) in g_new.iter().zip(g_ref.iter()).enumerate() {
+        assert!((gn - gr).abs() < 1e-5, "grad[{i}]: {gn} vs {gr}");
+    }
+    let _ = DType::F32;
 }

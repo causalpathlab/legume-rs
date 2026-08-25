@@ -162,7 +162,9 @@ pub struct GeneGatedChainSampler<'a> {
     /// weighting changes how OFTEN a gene is drawn, i.e. how many gradient
     /// steps it gets, which is a different axis entirely. If that is wanted
     /// here, repeat genes in the epoch's visit order rather than varying this.
-    pub batch_size: usize,
+    /// Positive edges drawn per (gene, EXPERIMENTAL batch) draw.
+    /// Not an SGD minibatch size: see `CellChainBatchArgs::n_positives`.
+    pub positives_per_draw: usize,
     pub n_negatives: usize,
 }
 
@@ -183,7 +185,7 @@ impl<'a> GeneGatedChainSampler<'a> {
         let args = CellChainBatchArgs {
             edges: self.edges,
             batch_sampler,
-            batch_size: self.batch_size,
+            n_positives: self.positives_per_draw,
             n_negatives: self.n_negatives,
             pb_maps: self.pb_maps,
         };

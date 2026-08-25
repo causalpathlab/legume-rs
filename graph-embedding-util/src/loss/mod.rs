@@ -81,7 +81,28 @@ pub(super) use candle_util::loss::log_sigmoid;
 /// whose β-sharing means the ridge must point at `f.beta` rather than a free
 /// `E_feat`. `table` is `[rows, H]`; the result is a scalar.
 pub fn embedding_ridge(table: &Tensor, lambda: f64) -> Result<Tensor> {
-    table.sqr()?.sum(1)?.mean_all()?.affine(lambda, 0.0)
+    // `λ · mean_n ‖x_n‖² = λ · trace(XᵀX)/N` through one [D, D] gemm.
+    // The elementwise form (`sqr().sum(1).mean_all()`) retained a full
+    // [N, D] squared copy in the autograd graph until backward — the
+    // largest fixed per-step allocation on the tables this penalizes
+    // every step (cage's per-cell E_cell, the gene tables), and one no
+    // batch-size knob could shrink. Here matmul's backward reads only
+    // its inputs, which are views of the Var's own storage: nothing
+    // N-sized is retained. Same quantity, same gradient `2λX/N`.
+    //
+    // Only the Gram's diagonal (the D squared column norms) is needed,
+    // and a batched dot would cost N·D instead of N·D² — but candle's
+    // matmul accepts only contiguous-or-transposed 2D sub-layouts, and
+    // every batched 3D view of Xᵀ's columns violates that, forcing an
+    // N-sized `.contiguous()` copy that gets RETAINED for backward.
+    // `X.t()` alone is exactly the transposed layout matmul supports
+    // natively, so the full Gram is the one copy-free form; the wasted
+    // off-diagonal flops are negligible at D ≤ 128.
+    let n = table.dim(0)? as f64;
+    let d = table.dim(1)?;
+    let gram = table.t()?.matmul(table)?;
+    let eye = Tensor::eye(d, gram.dtype(), gram.device())?;
+    (gram * eye)?.sum_all()?.affine(lambda / n.max(1.0), 0.0)
 }
 
 /// Per-positive logistic (SGNS) NCE loss, shared by the geu embedders gbe
