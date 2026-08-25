@@ -34,6 +34,16 @@
 //! noise while the detection log-odds held up, raw and with the margins
 //! regressed out of both halves (numbers in the local record).
 //!
+//! Direction is reported as CONFIGURATION, never inferred: the pair
+//! file names the ligand, so each physical contact classifies from its
+//! four detection facts into one-way (the ligand sits on exactly one
+//! side, identifying its carrier cell), mutual (co-detected both ways,
+//! no side to name), or silent. Per row that yields `n_oneway`,
+//! `n_mutual` (the 2x2's `n11` counts oriented instances, so
+//! `n11 = 2*n_mutual + n_oneway`), and `role_purity`, the mean over
+//! cells touching a co-detected contact of
+//! `|sent - received| / (sent + received)`.
+//!
 //! Two honesty rules shape the outputs. A PRIOR-DOMINATED pair, with no
 //! co-detection observed and less than half a co-detection expected
 //! under independence, is NaN in both columns: such a table carries no
@@ -163,40 +173,35 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
     for s in 0..strata.n_strata() {
         let community = strata.community(s);
 
-        // Oriented instance endpoints, grouped by batch. BTreeMap so row
-        // order is a function of the labels, not of hashing.
-        type Group = (Vec<usize>, Vec<usize>, Vec<(usize, usize)>);
-        let mut by_batch: std::collections::BTreeMap<Box<str>, Group> = Default::default();
+        // PHYSICAL contacts, grouped by batch (BTreeMap so row order is
+        // a function of the labels, not of hashing). The oriented
+        // instance list is fully derivable — each contact contributes
+        // exactly its two orientations — so storing endpoints per
+        // instance would be two parallel copies of this list.
+        let mut by_batch: std::collections::BTreeMap<Box<str>, Vec<(usize, usize)>> =
+            Default::default();
         for &(e, flipped) in strata.oriented(s) {
+            if flipped {
+                continue; // one entry per PHYSICAL contact
+            }
             let (i, j, _, ref b) = edges[e as usize];
             let label: Box<str> = if multi_batch {
                 match b {
                     Some(b) => b.clone(),
                     None => {
-                        // Once per edge, not per orientation.
-                        if !flipped {
-                            n_straddling += 1;
-                        }
+                        n_straddling += 1;
                         continue;
                     }
                 }
             } else {
                 BATCH_LABEL_ALL.into()
             };
-            let (u, v) = if flipped { (j, i) } else { (i, j) };
-            let slot = by_batch.entry(label).or_default();
-            slot.0.push(u);
-            slot.1.push(v);
-            // The PHYSICAL contact once, for the configuration counts;
-            // the oriented instances above serve the symmetric 2x2.
-            if !flipped {
-                slot.2.push((i, j));
-            }
+            by_batch.entry(label).or_default().push((i, j));
         }
 
-        for (batch, (us, vs, contacts)) in by_batch {
-            let n = us.len();
-            let unique: HashSet<usize> = us.iter().copied().collect();
+        for (batch, contacts) in by_batch {
+            let n = 2 * contacts.len(); // oriented instances
+            let unique: HashSet<usize> = contacts.iter().flat_map(|&(a, b)| [a, b]).collect();
             let mean_log_depth =
                 unique.iter().map(|&c| log_depth[c]).sum::<f32>() / unique.len().max(1) as f32;
 
@@ -205,33 +210,28 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                 .map(|(ligand, receptor, gl, gr)| {
                     let li = gene_to_local[gl];
                     let ri = gene_to_local[gr];
+                    // ONE pass over the physical contacts: the four
+                    // detection facts of a contact feed both the
+                    // symmetric 2x2 (its two oriented instances) and the
+                    // configuration counts. The role is annotated, so a
+                    // one-way contact identifies its ligand-carrying
+                    // cell outright; mutual contacts have no side.
                     let mut n11 = 0usize;
                     let mut n_l = 0usize;
                     let mut n_r = 0usize;
-                    for (&u, &v) in us.iter().zip(vs.iter()) {
-                        let lp = x_lr[(li, u)] > 0.0;
-                        let rp = x_lr[(ri, v)] > 0.0;
-                        n_l += lp as usize;
-                        n_r += rp as usize;
-                        n11 += (lp && rp) as usize;
-                    }
-                    let (log_or, log_or_se) = jeffreys_log_odds(n, n11, n_l, n_r);
-
-                    // Configuration facts per PHYSICAL contact. The role
-                    // is annotated, so a one-way contact identifies its
-                    // ligand-carrying cell outright; mutual contacts have
-                    // no side. Per-cell tallies feed the purity summary.
                     let mut n_mutual = 0u32;
                     let mut n_oneway = 0u32;
                     let mut role: HashMap<usize, (u32, u32)> = HashMap::default();
                     for &(a, b) in contacts.iter() {
-                        let cfg = classify_contact(
-                            x_lr[(li, a)] > 0.0,
-                            x_lr[(ri, a)] > 0.0,
-                            x_lr[(li, b)] > 0.0,
-                            x_lr[(ri, b)] > 0.0,
-                        );
-                        match cfg {
+                        let l_a = x_lr[(li, a)] > 0.0;
+                        let r_a = x_lr[(ri, a)] > 0.0;
+                        let l_b = x_lr[(li, b)] > 0.0;
+                        let r_b = x_lr[(ri, b)] > 0.0;
+                        // Instance (a -> b) and instance (b -> a).
+                        n_l += l_a as usize + l_b as usize;
+                        n_r += r_b as usize + r_a as usize;
+                        n11 += (l_a && r_b) as usize + (l_b && r_a) as usize;
+                        match classify_contact(l_a, r_a, l_b, r_b) {
                             ContactConfig::Mutual => {
                                 n_mutual += 1;
                                 for c in [a, b] {
@@ -249,6 +249,9 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                             ContactConfig::Silent => {}
                         }
                     }
+                    // The count identity is structural; keep it checked.
+                    debug_assert_eq!(n11, 2 * n_mutual as usize + n_oneway as usize);
+                    let (log_or, log_or_se) = jeffreys_log_odds(n, n11, n_l, n_r);
                     let role_purity = if role.is_empty() {
                         f32::NAN
                     } else {
@@ -262,7 +265,7 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                         community,
                         ligand: ligand.clone(),
                         receptor: receptor.clone(),
-                        n_edges: (n / 2) as u32,
+                        n_edges: contacts.len() as u32,
                         mean_log_depth,
                         lig_rate: n_l as f32 / n as f32,
                         rec_rate: n_r as f32 / n as f32,

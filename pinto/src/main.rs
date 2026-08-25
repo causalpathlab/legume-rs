@@ -441,12 +441,14 @@ enum Commands {
                       \x20     for the pair's community only\n\
                       \x20   - Quiver of L→R arrows along edges incident to a\n\
                       \x20     boundary cell (1-hop expanded).\n\
-                      \x20     With --lr-color-mode=coexpr, arrow direction is the\n\
-                      \x20     ANNOTATED role wherever a contact realizes exactly\n\
-                      \x20     one: it runs from the ligand-carrying cell to the\n\
-                      \x20     receptor-carrying cell (bookkeeping, not inference;\n\
-                      \x20     mutual contacts have no side and keep the display\n\
-                      \x20     heuristic below). In the other colour modes,\n\
+                      \x20     With --lr-color-mode=coexpr,\n\
+                      \x20     arrow direction is the ANNOTATED role\n\
+                      \x20     wherever a contact realizes exactly one:\n\
+                      \x20     it runs from the ligand-carrying cell\n\
+                      \x20     to the receptor-carrying cell\n\
+                      \x20     (bookkeeping, not inference; mutual contacts\n\
+                      \x20     have no side and keep the display heuristic below).\n\
+                      \x20     In the other colour modes,\n\
                       \x20     direction comes from per-edge L+R expression argmax\n\
                       \x20     (needs --data), a display heuristic only.\n\
                       \x20   - Color: the default --lr-color-mode=log-ratio maps\n\
@@ -569,24 +571,29 @@ enum Commands {
                       \x20   log_or_se = sqrt(sum of 1/(cell+.5))\n\
                       \x20 log_or is symmetric in the pair by construction.\n\n\
                       \x20 Direction is reported as CONFIGURATION, not inferred:\n\
-                      \x20 the pair file names the ligand, so a contact where the\n\
-                      \x20 roles sit on opposite cells identifies its ligand side\n\
-                      \x20 outright. Per row:\n\
+                      \x20 the pair file names the ligand,\n\
+                      \x20 so a contact whose roles sit on opposite cells\n\
+                      \x20 identifies its ligand side outright. Per row:\n\
                       \x20   n_oneway  contacts with the ligand on exactly one side\n\
                       \x20   n_mutual  contacts co-detected both ways (no side)\n\
                       \x20   (the 2x2's n11 counts oriented instances,\n\
                       \x20    so n11 = 2*n_mutual + n_oneway)\n\
-                      \x20   role_purity  mean over active cells of\n\
-                      \x20     |sent - received| / (sent + received):\n\
+                      \x20   role_purity  the mean of\n\
+                      \x20     |sent - received| / (sent + received)\n\
+                      \x20     over cells touching a co-detected contact:\n\
                       \x20     1 = cells specialize as sender or receiver here,\n\
                       \x20     0 = every cell plays both roles equally.\n\
                       \x20 These are configuration facts from annotated roles.\n\
                       \x20 They say which cells carry which side,\n\
-                      \x20 never that signalling flowed, and a static snapshot\n\
-                      \x20 cannot say more. Spot-level platforms mix cells within\n\
-                      \x20 a spot and deflate role_purity by construction;\n\
+                      \x20 never that signalling flowed;\n\
+                      \x20 a static snapshot cannot say more.\n\
+                      \x20 Spot-level platforms mix cells within a spot\n\
+                      \x20 and deflate role_purity by construction;\n\
                       \x20 compare it across cores of one platform,\n\
-                      \x20 never across platforms.\n\n\
+                      \x20 never across platforms.\n\
+                      \x20 Below a handful of co-detected contacts\n\
+                      \x20 role_purity is forced to an extreme;\n\
+                      \x20 filter on n_oneway + n_mutual downstream.\n\n\
                       \x20 The margins ship beside it:\n\
                       \x20 lig_rate and rec_rate are the detection rates\n\
                       \x20 of each side over the contact instances.\n\
