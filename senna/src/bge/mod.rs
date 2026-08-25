@@ -230,8 +230,30 @@ pub struct BgeArgs {
     )]
     batches_per_epoch: Option<usize>,
 
-    #[arg(long, default_value_t = 1024, help = "Positive edges per batch")]
-    batch_size: usize,
+    #[arg(
+        long,
+        help = "Positive edges per batch (unset: 1024, shrunk to fit GPU memory on CUDA)",
+        long_help = "Positive edges per SGD batch.\n\
+                     Unset, the default is 1024 on CPU.\n\
+                     On CUDA the size is chosen automatically:\n\
+                     a short probe measures the memory one step retains,\n\
+                     and shrinks the batch from 1024\n\
+                     when --gpu-mem-fraction of free device memory\n\
+                     cannot hold it (it never grows past 1024:\n\
+                     batch size is not fit-neutral).\n\
+                     Passing a value disables the probe and always wins."
+    )]
+    batch_size: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 0.6,
+        help = "Fraction of free GPU memory the training batch may target",
+        long_help = "Ceiling for the automatic batch sizing on CUDA.\n\
+                     Ignored on CPU and when --batch-size is set.",
+        hide = true
+    )]
+    gpu_mem_fraction: f32,
 
     #[arg(long, default_value_t = 4, help = "Negative samples per positive")]
     num_negatives: usize,
@@ -706,7 +728,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             refine: refine.clone(),
             epochs: args.epochs,
             batches_per_epoch: args.batches_per_epoch,
-            batch_size: args.batch_size,
+            batch_size: args.batch_size.unwrap_or(1024),
+            gpu_mem_fraction: args.batch_size.is_none().then_some(args.gpu_mem_fraction),
             num_negatives: args.num_negatives,
             learning_rate: args.learning_rate,
             seed: args.seed,

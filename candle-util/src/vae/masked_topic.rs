@@ -9,6 +9,7 @@
 
 use super::{clip_and_step_dense, smooth_topics, TrainScores};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
+use crate::data::IndexedMinibatchData;
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use candle_core::{Device, Tensor, Var};
@@ -26,6 +27,11 @@ pub struct IndexedTrainConfig<'a> {
     pub parameters: &'a candle_nn::VarMap,
     pub dev: &'a Device,
     pub epochs: usize,
+    /// `Some(frac)`: on CUDA, probe one forward per candidate size and
+    /// SHRINK `minibatch_size` when free device memory says so (never
+    /// grow past it). `None`, CPU, or an unavailable query keep the
+    /// configured size exactly.
+    pub gpu_mem_fraction: Option<f32>,
     pub minibatch_size: usize,
     pub learning_rate: f32,
     pub topic_smoothing: f64,
@@ -300,6 +306,120 @@ fn apply_anchor_ce(
     loss + pen
 }
 
+/// What one minibatch's forward reports back to the epoch loop.
+struct MaskedMinibatchLoss {
+    loss: Tensor,
+    /// Masked log-likelihood sum and its normalizer.
+    metric_sum: f32,
+    metric_count: f32,
+    /// `Some((sum, count))` when the Gaussian head's KL is active.
+    kl_sums: Option<(f32, f32)>,
+}
+
+/// One minibatch's full forward loss, shared by the epoch loop and the
+/// GPU memory probe so the probe measures exactly the forward a real
+/// step retains. Returns the loss plus the report scalars the loop
+/// accumulates (masked llik sum/count, and the KL sum/count when the
+/// Gaussian head is active).
+#[allow(clippy::too_many_arguments)]
+fn masked_minibatch_loss(
+    encoder: &IndexedEmbeddingEncoder,
+    decoder: &EmbeddedNbTopicDecoder,
+    config: &IndexedTrainConfig,
+    opts: &MaskedTrainOpts,
+    mask_fraction: f64,
+    level: usize,
+    mb: &IndexedMinibatchData,
+) -> anyhow::Result<MaskedMinibatchLoss> {
+    // Visible/masked split over the cell's real (value>0) top-K.
+    // Pads (value==0) are neither visible (no ρ₀ contamination)
+    // nor scored.
+    let real = mb.input_values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
+    let rate = match opts.mask_schedule {
+        MaskSchedule::Fixed => mask_fraction,
+        MaskSchedule::Uniform { lo, hi } => lo + rand::rng().random::<f64>() * (hi - lo),
+    };
+    let rnd = Tensor::rand(0f32, 1f32, mb.input_values.shape(), config.dev)?;
+    let drop = rnd.lt(rate)?.to_dtype(candle_core::DType::F32)?;
+    let masked = real.mul(&drop)?;
+    let visible = (&real - &masked)?;
+
+    // Masked-VAE: reparameterized Gaussian `z` (no softmax) + KL.
+    // Masked-topic: deterministic simplex `log θ` (softmax or
+    // stick-breaking), no KL. In all cases the NB head reads this as
+    // its per-topic intensity log — `exp(z)` for the VAE, `θ` for
+    // the topic models.
+    let (raw_z, kl_opt) = masked_encode(
+        encoder,
+        opts.latent,
+        &MaskedEncoderInput {
+            indices: &mb.input_indices,
+            values: &mb.input_values,
+            values_null: mb.input_values_null.as_ref(),
+            values_mean: mb.input_values_mean.as_ref(),
+            visible_mask: &visible,
+        },
+        true,
+    )?;
+    // Every head reaches the decoder as a smoothed log-simplex; the
+    // Gaussian `z` is projected with `log_softmax` first. See
+    // [`decoder_log_theta`].
+    let log_z = decoder_log_theta(raw_z, opts.latent, config.topic_smoothing)?;
+
+    // full_kd (α·ρᵀ [K,D]) — the per-topic log-partition for the NB
+    // head, and (when active) the anchor-prior CE.
+    let anchor_active = config.anchor_penalty > 0.0 && config.anchor_prior_per_level.is_some();
+    let full_kd = decoder.full_logits_kd()?;
+
+    let (mut loss, batch_metric, batch_count) = {
+        let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
+        let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
+        let target = MaskedNbTarget {
+            indices: &mb.input_indices,
+            residual: mb.input_values_null.as_ref(),
+            values: &mb.input_values,
+            lib: &lib_n1,
+            mask: &masked,
+        };
+        let llik = match opts.likelihood {
+            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &logz_11k)?,
+            MaskedLikelihood::Multinomial => {
+                decoder.impute_masked_multinomial(&log_z, &target, &logz_11k)?
+            }
+        };
+        let m = llik.sum_all()?.to_scalar::<f32>()?;
+        let c = masked.sum_all()?.to_scalar::<f32>()?;
+        (llik.mean_all()?.neg()?, m, c)
+    };
+    // Masked-VAE KL bottleneck: β · mean_N KL(z ‖ N(0, I)). `kl_opt`
+    // is `Some` only on the Gaussian head, so no head re-check needed.
+    let mut kl_sums: Option<(f32, f32)> = None;
+    if let Some(kl) = kl_opt {
+        kl_sums = Some((kl.sum_all()?.to_scalar::<f32>()?, kl.dim(0)? as f32));
+        loss = (loss + kl.mean_all()?.affine(opts.kl_weight, 0.0)?)?;
+    }
+    if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
+        let rho_l2 = encoder
+            .feature_embeddings()
+            .sqr()?
+            .mean_all()?
+            .affine(f64::from(config.feature_embedding_l2), 0.0)?;
+        loss = (loss + rho_l2)?;
+    }
+    if anchor_active {
+        if let Some(prior) = config.anchor_prior_per_level.map(|p| &p[level]) {
+            loss = apply_anchor_ce(loss, &full_kd, prior, config.anchor_penalty)?;
+        }
+    }
+
+    Ok(MaskedMinibatchLoss {
+        loss,
+        metric_sum: batch_metric,
+        metric_count: batch_count,
+        kl_sums,
+    })
+}
+
 /// Masked-imputation training (no ELBO / no KL) for the embedded topic model.
 ///
 /// Per minibatch, the cell's top-K genes are randomly split into **visible**
@@ -353,9 +473,38 @@ pub fn train_masked(
     let mut kl_trace = Vec::with_capacity(total_epochs);
     let mut data_loaders = build_indexed_loaders(level_data, config)?;
 
+    // On CUDA, optionally shrink the minibatch size to fit free device
+    // memory. The probe runs the exact forward a training step retains
+    // (loss held un-backwarded); `auto_chunk_size` reserves half the
+    // measured budget for backward's gradient copies.
+    let minibatch_size = match (config.gpu_mem_fraction, data_loaders.first()) {
+        (Some(frac), Some(loader)) => {
+            let cap = config.minibatch_size;
+            let n_data = loader.num_data();
+            crate::device::auto_chunk_size(config.dev, cap, 16.min(cap), frac, |n| {
+                let mb = loader
+                    .minibatch_ordered(0, n.min(n_data), config.dev)
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                let fwd = masked_minibatch_loss(
+                    encoder,
+                    &decoders[0],
+                    config,
+                    opts,
+                    mask_fraction,
+                    0,
+                    &mb,
+                )
+                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                Ok(fwd.loss)
+            })
+            .unwrap_or(cap)
+        }
+        _ => config.minibatch_size,
+    };
+
     for epoch in 0..total_epochs {
         for loader in data_loaders.iter_mut() {
-            shuffle_and_precompute(loader, config.minibatch_size)?;
+            shuffle_and_precompute(loader, minibatch_size)?;
         }
 
         let mut metric_tot = 0f32;
@@ -370,99 +519,27 @@ pub fn train_masked(
             for b in 0..loader.num_minibatch() {
                 let mb = loader.minibatch_cached(b).to_device(config.dev)?;
 
-                // Visible/masked split over the cell's real (value>0) top-K.
-                // Pads (value==0) are neither visible (no ρ₀ contamination)
-                // nor scored.
-                let real = mb.input_values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-                let rate = match opts.mask_schedule {
-                    MaskSchedule::Fixed => mask_fraction,
-                    MaskSchedule::Uniform { lo, hi } => {
-                        lo + rand::rng().random::<f64>() * (hi - lo)
-                    }
-                };
-                let rnd = Tensor::rand(0f32, 1f32, mb.input_values.shape(), config.dev)?;
-                let drop = rnd.lt(rate)?.to_dtype(candle_core::DType::F32)?;
-                let masked = real.mul(&drop)?;
-                let visible = (&real - &masked)?;
-
-                // Masked-VAE: reparameterized Gaussian `z` (no softmax) + KL.
-                // Masked-topic: deterministic simplex `log θ` (softmax or
-                // stick-breaking), no KL. In all cases the NB head reads this as
-                // its per-topic intensity log — `exp(z)` for the VAE, `θ` for
-                // the topic models.
-                let (raw_z, kl_opt) = masked_encode(
+                let fwd = masked_minibatch_loss(
                     encoder,
-                    opts.latent,
-                    &MaskedEncoderInput {
-                        indices: &mb.input_indices,
-                        values: &mb.input_values,
-                        values_null: mb.input_values_null.as_ref(),
-                        values_mean: mb.input_values_mean.as_ref(),
-                        visible_mask: &visible,
-                    },
-                    true,
+                    decoder,
+                    config,
+                    opts,
+                    mask_fraction,
+                    level,
+                    &mb,
                 )?;
-                // Every head reaches the decoder as a smoothed log-simplex; the
-                // Gaussian `z` is projected with `log_softmax` first. See
-                // [`decoder_log_theta`].
-                let log_z = decoder_log_theta(raw_z, opts.latent, config.topic_smoothing)?;
-
-                // full_kd (α·ρᵀ [K,D]) — the per-topic log-partition for the NB
-                // head, and (when active) the anchor-prior CE.
-                let anchor_active =
-                    config.anchor_penalty > 0.0 && config.anchor_prior_per_level.is_some();
-                let full_kd = decoder.full_logits_kd()?;
-
-                let (mut loss, batch_metric, batch_count) = {
-                    let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
-                    let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
-                    let target = MaskedNbTarget {
-                        indices: &mb.input_indices,
-                        residual: mb.input_values_null.as_ref(),
-                        values: &mb.input_values,
-                        lib: &lib_n1,
-                        mask: &masked,
-                    };
-                    let llik = match opts.likelihood {
-                        MaskedLikelihood::Nb => {
-                            decoder.impute_masked_nb(&log_z, &target, &logz_11k)?
-                        }
-                        MaskedLikelihood::Multinomial => {
-                            decoder.impute_masked_multinomial(&log_z, &target, &logz_11k)?
-                        }
-                    };
-                    let m = llik.sum_all()?.to_scalar::<f32>()?;
-                    let c = masked.sum_all()?.to_scalar::<f32>()?;
-                    (llik.mean_all()?.neg()?, m, c)
-                };
-                // Masked-VAE KL bottleneck: β · mean_N KL(z ‖ N(0, I)). `kl_opt`
-                // is `Some` only on the Gaussian head, so no head re-check needed.
-                if let Some(kl) = kl_opt {
-                    kl_tot += kl.sum_all()?.to_scalar::<f32>()?;
-                    kl_cnt += kl.dim(0)? as f32;
-                    loss = (loss + kl.mean_all()?.affine(opts.kl_weight, 0.0)?)?;
+                if let Some((ks, kc)) = fwd.kl_sums {
+                    kl_tot += ks;
+                    kl_cnt += kc;
                 }
-                if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
-                    let rho_l2 = encoder
-                        .feature_embeddings()
-                        .sqr()?
-                        .mean_all()?
-                        .affine(f64::from(config.feature_embedding_l2), 0.0)?;
-                    loss = (loss + rho_l2)?;
-                }
-                if anchor_active {
-                    if let Some(prior) = config.anchor_prior_per_level.map(|p| &p[level]) {
-                        loss = apply_anchor_ce(loss, &full_kd, prior, config.anchor_penalty)?;
-                    }
-                }
-
+                let loss = fwd.loss;
                 let grads = loss.backward()?;
                 if !clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))? {
                     skipped_steps += 1;
                 }
 
-                metric_tot += batch_metric;
-                metric_cnt += batch_count;
+                metric_tot += fwd.metric_sum;
+                metric_cnt += fwd.metric_count;
 
                 if config.stop.load(Ordering::Relaxed) {
                     break;

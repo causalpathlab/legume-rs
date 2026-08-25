@@ -224,8 +224,30 @@ pub struct MaskedTopicArgs {
     #[arg(long, short = 'i', default_value_t = 1000, help = "Training epochs")]
     epochs: usize,
 
-    #[arg(long, default_value_t = 100, help = "Training minibatch size")]
-    minibatch_size: usize,
+    #[arg(
+        long,
+        help = "Training minibatch size (unset: 100, shrunk to fit GPU memory on CUDA)",
+        long_help = "Cells per training minibatch.\n\
+                     Unset, the default is 100 on CPU.\n\
+                     On CUDA the size is chosen automatically:\n\
+                     a short probe measures the memory one step retains,\n\
+                     and shrinks the minibatch from 100\n\
+                     when --gpu-mem-fraction of free device memory\n\
+                     cannot hold it (it never grows past 100:\n\
+                     minibatch size is not fit-neutral).\n\
+                     Passing a value disables the probe and always wins."
+    )]
+    minibatch_size: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = 0.6,
+        help = "Fraction of free GPU memory the training minibatch may target",
+        long_help = "Ceiling for the automatic minibatch sizing on CUDA.\n\
+                     Ignored on CPU and when --minibatch-size is set.",
+        hide = true
+    )]
+    gpu_mem_fraction: f32,
 
     #[arg(
         long,
@@ -1010,7 +1032,11 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         parameters: &parameters,
         dev: &dev,
         epochs: args.epochs,
-        minibatch_size: args.minibatch_size,
+        gpu_mem_fraction: args
+            .minibatch_size
+            .is_none()
+            .then_some(args.gpu_mem_fraction),
+        minibatch_size: args.minibatch_size.unwrap_or(100),
         learning_rate: args.learning_rate,
         topic_smoothing: args.topic_smoothing,
         enc_context_size: args.context_size,
@@ -1083,7 +1109,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         let holdout_cfg = HoldoutEvalConfig {
             dev: &dev,
             adj_method: &args.adj_method,
-            minibatch_size: args.minibatch_size,
+            minibatch_size: args.minibatch_size.unwrap_or(100),
             enc_context_size: args.context_size,
             shortlist_weights: &shortlist_weights,
             feature_mean: &feature_mean,
@@ -1181,7 +1207,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let eval_config = EvaluateLatentMaskedConfig {
         dev: &cpu_dev,
         adj_method: &args.adj_method,
-        minibatch_size: args.minibatch_size,
+        minibatch_size: args.minibatch_size.unwrap_or(100),
         enc_context_size: args.context_size,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,

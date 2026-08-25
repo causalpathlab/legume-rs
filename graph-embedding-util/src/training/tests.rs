@@ -148,6 +148,7 @@ fn batches_per_epoch_resolves_auto_and_explicit() {
         feature_embedding_l2: 0.0,
         max_grad_norm: 0.0,
         delta_l2: 0.0,
+        gpu_mem_fraction: None,
     };
 
     assert_eq!(resolve_batches_per_epoch(&params(1024, None), 8_192), 8);

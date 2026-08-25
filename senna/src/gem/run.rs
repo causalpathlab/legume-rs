@@ -393,7 +393,12 @@ fn run_gem_genes_bge(
             refine: Some(ge::RefineParams::default()),
             epochs: args.train.epochs,
             batches_per_epoch: args.train.batches_per_epoch,
-            batch_size: args.train.batch_size,
+            batch_size: args.train.batch_size.unwrap_or(1024),
+            gpu_mem_fraction: args
+                .train
+                .batch_size
+                .is_none()
+                .then_some(args.train.gpu_mem_fraction),
             num_negatives: 4,
             learning_rate: args.train.learning_rate,
             seed: args.runtime.seed,
