@@ -111,7 +111,10 @@ where
     // On CUDA, optionally shrink the minibatch size to fit free device
     // memory. The probe mirrors the loop's forward with the loss held
     // un-backwarded; `auto_chunk_size` reserves half the measured budget
-    // for backward's gradient copies.
+    // for backward's gradient copies. It probes level 0 only: callers
+    // enabling this must keep every level's per-row footprint at or
+    // below level 0's (true for the full-D-decoder vae path; senna
+    // topic's coarse-to-fine decoders pin this to `None` instead).
     let minibatch_size = match (config.gpu_mem_fraction, data_loaders.first_mut()) {
         (Some(frac), Some(loader)) => {
             let cap = config.minibatch_size;
@@ -119,6 +122,9 @@ where
                 loader
                     .shuffle_minibatch_on_device(n)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                if loader.num_minibatch() == 0 {
+                    return Err(candle_core::Error::Msg("probe loader is empty".into()));
+                }
                 let mb = loader.minibatch_cached(0);
                 let (log_z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
                 let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;
@@ -257,6 +263,9 @@ pub fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
                 loader
                     .shuffle_minibatch_on_device(n)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                if loader.num_minibatch() == 0 {
+                    return Err(candle_core::Error::Msg("probe loader is empty".into()));
+                }
                 let mb = loader.minibatch_cached(0);
                 let (log_z_nk, kl) = encoder.forward_t(&mb.input, mb.input_null.as_ref(), true)?;
                 let log_z_nk = smooth_topics(log_z_nk, config.topic_smoothing)?;

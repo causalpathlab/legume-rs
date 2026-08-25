@@ -132,10 +132,15 @@ const GENE_BATCH_DEFAULT: usize = 2048;
 /// sampler from turning the probe into a long scan.
 const PROBE_OVERSAMPLE: usize = 4;
 
-/// One forward-only pilot minibatch of ~`n` gene batches for the GPU
-/// memory probe: sample through the REAL sampler, score with the REAL
-/// loss, return the un-backwarded loss tensor. Never steps the
-/// optimizer, so no parameter moves before epoch 0.
+/// One forward-only pilot minibatch of `n` GENES for the GPU memory
+/// probe, each gene expanded to every batch label that samples, exactly
+/// as a real training chunk expands (`perm.chunks(gene_batch_size)`
+/// then per-gene, per-batch sampling). The unit measured must be the
+/// unit the chunk size is spent in: counting (gene, batch) pairs here
+/// would under-measure a multi-batch run by the mean batches per gene.
+/// Samples through the REAL sampler, scores with the REAL loss, returns
+/// the un-backwarded loss tensor. Never steps the optimizer, so no
+/// parameter moves before epoch 0.
 #[allow(clippy::too_many_arguments)]
 fn probe_forward(
     n: usize,
@@ -148,13 +153,18 @@ fn probe_forward(
     dev: &candle_util::candle_core::Device,
 ) -> candle_util::candle_core::Result<candle_util::candle_core::Tensor> {
     let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> = Vec::with_capacity(n);
+    let mut genes_sampled = 0usize;
     'fill: for &g in trainable_genes.iter().cycle().take(PROBE_OVERSAMPLE * n) {
+        let before = mini.len();
         for b in 0..n_batches {
             if let Some((cb, _)) = sampler.sample(g, b, probe_rng) {
                 mini.push((g, cb));
-                if mini.len() >= n {
-                    break 'fill;
-                }
+            }
+        }
+        if mini.len() > before {
+            genes_sampled += 1;
+            if genes_sampled >= n {
+                break 'fill;
             }
         }
     }
