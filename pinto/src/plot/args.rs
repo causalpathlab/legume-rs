@@ -35,9 +35,10 @@ pub enum LrColorMode {
     /// Outgoing/incoming/internal/external vs. community hull.
     Direction,
     /// Pair-centered co-detection deviation: is this contact one where
-    /// both genes are detected, relative to how often that happens on
-    /// this pair's contacts. Matches what `lra --edge-scores-only`
-    /// measures.
+    /// both genes are detected, relative to how often that happens
+    /// on this pair's contacts. The same co-detection notion as
+    /// `lra --edge-scores-only`, computed per edge for display
+    /// (plot does not read that table).
     Coexpr,
 }
 
@@ -400,9 +401,11 @@ pub struct SrtPlotArgs {
                      `direction` colours by in, out and internal classes.\n\
                      `coexpr` colours by pair-centred co-detection deviation:\n\
                      red where both genes are detected across the contact,\n\
-                     blue where only one side is, centred on how often this\n\
-                     pair co-occurs at all. That is the per-edge view of what\n\
-                     `lra --edge-scores-only` aggregates per core.",
+                     blue where at most one side is,\n\
+                     centred on how often this pair co-occurs at all.\n\
+                     It shares the co-detection notion\n\
+                     of `lra --edge-scores-only`,\n\
+                     computed per edge rather than per core.",
         hide = true,
     )]
     pub lr_color_mode: LrColorMode,
