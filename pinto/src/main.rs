@@ -442,9 +442,12 @@ enum Commands {
                       \x20   - Quiver of L→R arrows along edges incident to a\n\
                       \x20     boundary cell (1-hop expanded). Arrow direction\n\
                       \x20     comes from per-edge L+R expression argmax (needs --data).\n\
-                      \x20   - Color = diverging blue↔red on edge coexpression\n\
-                      \x20     `sqrt(L·R)` minus the per-pair edge mean (centered\n\
-                      \x20     on 0 = typical edge of this pair).\n\
+                      \x20   - Color = diverging blue↔red on edge co-detection\n\
+                      \x20     minus the per-pair edge mean: red where both genes\n\
+                      \x20     are detected across the contact, blue where only one\n\
+                      \x20     side is, centered on 0 = typical edge of this pair.\n\
+                      \x20     This is the per-edge view of what\n\
+                      \x20     `lra --edge-scores-only` aggregates per core.\n\
                       \x20 Tunables: --lr-top-pairs, --lr-commit-threshold,\n\
                       \x20            --lr-hull-min-cells,\n\
                       \x20            --no-lr-overlay, --lr-coexpr-bins,\n\

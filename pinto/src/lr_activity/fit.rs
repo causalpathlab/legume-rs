@@ -374,6 +374,19 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         let out_path = format!("{}.lr_scores.parquet", &c.out);
         write_edge_scores(&c.out, &score_rows)?;
         info!("Wrote {} score rows to {}", score_rows.len(), out_path);
+
+        // Back-fill the upstream manifest, the way the test path does for
+        // its JSON sidecar, so a downstream reader can find this table
+        // from the prefix alone rather than guessing the name.
+        let upstream_meta_path = format!("{}.pinto.json", &args.lc_prefix);
+        if let Ok(mut meta) =
+            crate::util::metadata::PintoMetadata::read(std::path::Path::new(&upstream_meta_path))
+        {
+            meta.outputs.lr_scores = Some(out_path.clone());
+            if let Err(e) = meta.write(std::path::Path::new(&upstream_meta_path)) {
+                warn!("could not record the score table in {upstream_meta_path}: {e}");
+            }
+        }
         return Ok(());
     }
 
