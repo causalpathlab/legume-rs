@@ -31,11 +31,19 @@
 //!
 //! Detection (count > 0) deliberately replaces magnitude: on measured
 //! split-half reliability the magnitude-weighted means came out near
-//! noise while the detection log-odds held ~0.9, and ~0.7 after removing
-//! the margins from both halves. A pair with no co-detected contacts
-//! still gets a finite score, but `log_or_se` blows up, which is the
-//! honest flag; filter or precision-weight on it downstream (no
-//! threshold is applied here, by policy).
+//! noise while the detection log-odds held up, raw and with the margins
+//! regressed out of both halves (numbers in the local record).
+//!
+//! Two honesty rules shape the outputs. A PRIOR-DOMINATED pair, with no
+//! co-detection observed and less than half a co-detection expected
+//! under independence, is NaN in both columns: such a table carries no
+//! information about association, and the +1/2 prior alone would
+//! otherwise push the estimate toward `ln(2n)` while the SE plateaus
+//! instead of growing. And the SE takes the physical contact, not the
+//! oriented instance, as its sampling unit; contacts sharing a cell are
+//! still correlated, so `log_or_se` is a relative precision weight for
+//! filtering and weighting, not a calibrated interval. No thresholds are
+//! applied here, by policy.
 
 use crate::lr_activity::fit::BATCH_LABEL_ALL;
 use crate::lr_activity::orientation::CommunityStrata;
@@ -59,10 +67,14 @@ pub struct EdgeScoreRow {
     /// Fraction of contact instances with the receptor detected at the
     /// second endpoint.
     pub rec_rate: f32,
-    /// Posterior log odds ratio of co-detection across a contact.
+    /// Posterior log odds ratio of co-detection across a contact. NaN
+    /// when the table is prior dominated (no co-detection observed and
+    /// none expected): such a row is unmeasurable, not zero.
     pub log_or: f32,
-    /// Its posterior standard error; large when the pair is unmeasurable
-    /// in this stratum (few or no co-detected contacts).
+    /// Its posterior standard error, with the physical contact as the
+    /// sampling unit. NaN exactly when `log_or` is. A relative precision
+    /// weight, not a calibrated interval: contacts sharing a cell are
+    /// correlated.
     pub log_or_se: f32,
 }
 
@@ -174,9 +186,24 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
 /// standard error, under a Dirichlet(1/2) prior (+1/2 in every cell).
 ///
 /// The +1/2 is a PRIOR, not a convenience floor: it makes the estimate a
-/// posterior mean, finite for empty cells, while the SE grows to say how
-/// little the data constrained it.
+/// posterior mean, finite for empty cells. That cuts both ways, so a
+/// prior-dominated table is refused instead of scored: with `n11 == 0`
+/// and fewer than half a co-detection expected under independence
+/// (`2 * n_l * n_r < n`), the likelihood never touches the association
+/// dimension, and the +1/2 cells alone would push the estimate toward
+/// `ln(2n)` while the SE plateaus near `sqrt(12)` rather than growing.
+/// NaN is the honest value there. A zero-`n11` table that EXPECTED
+/// co-detections stays scored, and comes out negative, which is correct.
+///
+/// The SE takes the physical contact as its sampling unit: `n` counts
+/// oriented instances, two per contact, so the Woolf variance
+/// `sum 1/(cell+1/2)` is doubled. Contacts sharing a cell remain
+/// correlated beyond that, which is why the SE is documented as a
+/// relative weight rather than a calibrated interval.
 pub(crate) fn jeffreys_log_odds(n: usize, n11: usize, n_l: usize, n_r: usize) -> (f32, f32) {
+    if n11 == 0 && 2 * n_l * n_r < n {
+        return (f32::NAN, f32::NAN);
+    }
     let a = n11 as f64 + 0.5;
     let b = (n_l - n11) as f64 + 0.5; // ligand only
     let c = (n_r - n11) as f64 + 0.5; // receptor only
@@ -184,7 +211,7 @@ pub(crate) fn jeffreys_log_odds(n: usize, n11: usize, n_l: usize, n_r: usize) ->
                                       // but the left-to-right order would underflow usize.
     let d = (n + n11 - n_l - n_r) as f64 + 0.5; // neither
     let log_or = ((a * d) / (b * c)).ln();
-    let se = (1.0 / a + 1.0 / b + 1.0 / c + 1.0 / d).sqrt();
+    let se = (2.0 * (1.0 / a + 1.0 / b + 1.0 / c + 1.0 / d)).sqrt();
     (log_or as f32, se as f32)
 }
 

@@ -442,14 +442,16 @@ enum Commands {
                       \x20   - Quiver of L→R arrows along edges incident to a\n\
                       \x20     boundary cell (1-hop expanded). Arrow direction\n\
                       \x20     comes from per-edge L+R expression argmax (needs --data).\n\
-                      \x20   - Color = diverging blue↔red on edge co-detection\n\
-                      \x20     minus the per-pair edge mean: red where both genes\n\
-                      \x20     are detected across the contact, blue where only one\n\
-                      \x20     side is, centered on 0 = typical edge of this pair.\n\
-                      \x20     This is the per-edge view of what\n\
-                      \x20     `lra --edge-scores-only` aggregates per core.\n\
+                      \x20   - Color: the default --lr-color-mode=log-ratio maps\n\
+                      \x20     log((R+1)/(L+1)) on a red↔blue ramp.\n\
+                      \x20     With --lr-color-mode=coexpr, the ramp shows co-detection\n\
+                      \x20     instead, centered on the per-pair edge mean:\n\
+                      \x20     red where both genes are detected across the contact,\n\
+                      \x20     blue where only one side is.\n\
+                      \x20     That is the same co-detection notion\n\
+                      \x20     the `lra --edge-scores-only` table is built on\n\
+                      \x20     (a shared concept; plot does not read that table).\n\
                       \x20 Tunables: --lr-top-pairs, --lr-commit-threshold,\n\
-                      \x20            --lr-hull-min-cells,\n\
                       \x20            --no-lr-overlay, --lr-coexpr-bins,\n\
                       \x20            --lr-activity-json (override path).\n\n\
                       Levels are `final`, `L0..Ln` and `draft`.\n\
@@ -559,16 +561,26 @@ enum Commands {
                       \x20   log_or    = ln[(n11+.5)(n00+.5)/((n10+.5)(n01+.5))]\n\
                       \x20   log_or_se = sqrt(sum of 1/(cell+.5))\n\
                       \x20 log_or is symmetric in the pair by construction.\n\
-                      \x20 The margins ship beside it: lig_rate and rec_rate are each\n\
-                      \x20 side's detection rate at these contacts. Use them as\n\
-                      \x20 covariates to isolate the interaction;\n\
+                      \x20 The margins ship beside it:\n\
+                      \x20 lig_rate and rec_rate are the detection rates\n\
+                      \x20 of each side over the contact instances.\n\
+                      \x20 They are rates over contacts, not cell fractions:\n\
+                      \x20 a cell counts once per contact it participates in.\n\
+                      \x20 Use them as covariates to isolate the interaction;\n\
                       \x20 they are activity phenotypes in their own right.\n\
                       \x20 No test and no null: these are descriptive phenotypes.\n\n\
                       \x20 Pivot to a batch x (pair, community) matrix in R:\n\
                       \x20   dcast(dt, batch ~ ligand + receptor + community,\n\
                       \x20         value.var = \"log_or\")\n\n\
-                      \x20 Caveats. A pair with no co-detected contacts still gets a\n\
-                      \x20 finite log_or; log_or_se is what flags it as unmeasurable.\n\
+                      \x20 Caveats. A prior-dominated pair is NaN in both columns:\n\
+                      \x20 no co-detection observed and none expected\n\
+                      \x20 means the row is unmeasurable, not zero.\n\
+                      \x20 The SE counts each physical contact once,\n\
+                      \x20 but contacts sharing a cell are still correlated,\n\
+                      \x20 so treat log_or_se as a relative precision weight,\n\
+                      \x20 not a calibrated interval.\n\
+                      \x20 A fully saturated table grows with the contact count;\n\
+                      \x20 compare such rows through their SE, never by magnitude.\n\
                       \x20 Filter or precision-weight on log_or_se and n_edges\n\
                       \x20 downstream (no threshold is applied here),\n\
                       \x20 and keep mean_log_depth in the covariate set.\n\

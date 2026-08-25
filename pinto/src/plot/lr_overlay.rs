@@ -513,7 +513,17 @@ pub fn render_lr_overlays_for_core(
                     let r_ri = re.get(ri).copied().unwrap_or(0.0);
                     let l_ri = le.get(ri).copied().unwrap_or(0.0);
                     let r_li = re.get(li).copied().unwrap_or(0.0);
-                    if l_li + r_ri == 0.0 && l_ri + r_li == 0.0 {
+                    // A fully silent contact carries no magnitude to draw,
+                    // so the magnitude modes skip it. Under co-detection
+                    // coloring it is the OPPOSITE of skippable: neither
+                    // gene detected is the score's own n00 cell, the most
+                    // confidently discordant contact there is, and
+                    // dropping it would under-represent exactly the blue
+                    // class the ramp exists to show.
+                    if l_li + r_ri == 0.0
+                        && l_ri + r_li == 0.0
+                        && args.lr_color_mode != crate::plot::args::LrColorMode::Coexpr
+                    {
                         continue;
                     }
                     // Use the pooled per-stratum direction when we have
@@ -524,15 +534,16 @@ pub fn render_lr_overlays_for_core(
                         Some(&v) => v,
                         None => (l_li + r_ri) >= (l_ri + r_li),
                     };
-                    // DETECTION, not magnitude: the score this figure
-                    // illustrates counts a contact when both genes are
-                    // detected across it, so an edge reads as concordant
-                    // (+1, both detected in the drawn orientation) or
-                    // discordant (-1, only one side). Colouring by
-                    // `sqrt(L·R)` instead would draw a quantity the score
-                    // deliberately does not use: on measured split-half
-                    // reliability the magnitude-weighted statistics came
-                    // out near noise where detection held up.
+                    // The COLOR encodes detection, not magnitude: the
+                    // co-detection score counts a contact when both genes
+                    // are detected across it, so an edge reads as
+                    // concordant (+1, both detected in the drawn
+                    // orientation) or discordant (-1, at most one side).
+                    // The arrow's DIRECTION is a separate display
+                    // heuristic and still magnitude-based (`use_canon`
+                    // above: pooled orientation, else per-edge L+R
+                    // argmax); the estimand itself is symmetric and
+                    // carries no direction.
                     let concordance = |l: f32, r: f32| -> f32 {
                         if l > 0.0 && r > 0.0 {
                             1.0

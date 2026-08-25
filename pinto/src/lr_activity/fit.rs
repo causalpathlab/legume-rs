@@ -371,6 +371,15 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
                 n_straddling
             );
         }
+        let n_unmeasurable = score_rows.iter().filter(|r| r.log_or.is_nan()).count();
+        if n_unmeasurable > 0 {
+            info!(
+                "{} of {} rows are prior dominated (no co-detection observed, \
+                 none expected): log_or and log_or_se are NaN there, not zero",
+                n_unmeasurable,
+                score_rows.len()
+            );
+        }
         let out_path = format!("{}.lr_scores.parquet", &c.out);
         write_edge_scores(&c.out, &score_rows)?;
         info!("Wrote {} score rows to {}", score_rows.len(), out_path);

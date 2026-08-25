@@ -4,7 +4,7 @@
 //! and the score is the Jeffreys (+1/2) posterior log odds ratio with its
 //! posterior SE. Tables here are small enough to enumerate by hand.
 
-use crate::lr_activity::edge_scores::{compute_edge_scores, EdgeScoresInput};
+use crate::lr_activity::edge_scores::{compute_edge_scores, jeffreys_log_odds, EdgeScoresInput};
 use crate::lr_activity::orientation::CommunityStrata;
 use crate::util::common::*;
 
@@ -91,19 +91,20 @@ fn a_zero_edge_batch_community_gets_no_row() {
     );
 }
 
-/// Hand-enumerated tables.
+/// Hand-enumerated tables. The SE doubles the Woolf variance because the
+/// physical contact, not the oriented instance, is the sampling unit.
 ///
 /// (a, C0): one edge (0,1), instances (0,1) and (1,0).
 ///   (0,1): L+ at 0, R- at 1;  (1,0): L+ at 1, R+ at 0.
 ///   n=2, n11=1, nL=2, nR=1 -> cells +1/2: a=1.5 b=1.5 c=0.5 d=0.5
 ///   log_or = ln(1.5*0.5 / (1.5*0.5)) = 0
-///   se     = sqrt(1/1.5 + 1/1.5 + 1/0.5 + 1/0.5) = sqrt(16/3)
+///   se     = sqrt(2 * (1/1.5 + 1/1.5 + 1/0.5 + 1/0.5)) = sqrt(32/3)
 ///
 /// (a, C1): edges (3,4),(4,5), both ways.
 ///   L+ at 3,4,5; R+ at 3,4 only. n=4, n11=3, nL=4, nR=3
 ///   -> a=3.5 b=1.5 c=0.5 d=0.5
 ///   log_or = ln(3.5*0.5 / (1.5*0.5)) = ln(7/3)
-///   se     = sqrt(1/3.5 + 1/1.5 + 2 + 2)
+///   se     = sqrt(2 * (1/3.5 + 1/1.5 + 2 + 2))
 #[test]
 fn scores_match_hand_built_tables() {
     let (rows, _) = run(&fixture_edges());
@@ -120,7 +121,7 @@ fn scores_match_hand_built_tables() {
         "balanced table, got {}",
         row.log_or
     );
-    let se = (16.0f32 / 3.0).sqrt();
+    let se = (32.0f32 / 3.0).sqrt();
     assert!((row.log_or_se - se).abs() < 1e-5, "got {}", row.log_or_se);
     // Unique first-endpoint cells are 0 and 1; depth fixture is 10 + cell.
     assert!((row.mean_log_depth - 10.5).abs() < 1e-6);
@@ -134,7 +135,7 @@ fn scores_match_hand_built_tables() {
     assert_eq!(row.rec_rate, 0.75);
     let lor = (7.0f32 / 3.0).ln();
     assert!((row.log_or - lor).abs() < 1e-5, "got {}", row.log_or);
-    let se = (1.0f32 / 3.5 + 1.0 / 1.5 + 2.0 + 2.0).sqrt();
+    let se = (2.0 * (1.0f32 / 3.5 + 1.0 / 1.5 + 2.0 + 2.0)).sqrt();
     assert!((row.log_or_se - se).abs() < 1e-5, "got {}", row.log_or_se);
 }
 
@@ -166,12 +167,13 @@ fn swapping_ligand_and_receptor_transposes_but_scores_agree() {
     }
 }
 
-/// A pair with no co-detected contact still gets a FINITE score (the +1/2
-/// is a prior, not a floor), and its SE exceeds a supported pair's: the
-/// uncertainty column is what says "unmeasurable here".
+/// A pair whose table is prior dominated (no co-detection observed, and
+/// none expected under independence) is NaN in both columns: the +1/2
+/// prior alone would otherwise push the estimate toward ln(2n), which
+/// reads as strong POSITIVE association for a pair the stratum never
+/// measured at all.
 #[test]
-fn an_undetected_pair_is_finite_with_a_larger_se() {
-    let (_, _, _) = fixture_genes();
+fn a_prior_dominated_pair_is_nan_not_scored() {
     let pairs = vec![
         ("LIG1".into(), "REC1".into(), 10usize, 11usize),
         ("LIG1".into(), "REC2".into(), 10, 12),
@@ -184,14 +186,45 @@ fn an_undetected_pair_is_finite_with_a_larger_se() {
     let supported = c1.iter().find(|r| r.receptor.as_ref() == "REC1").unwrap();
     let empty = c1.iter().find(|r| r.receptor.as_ref() == "REC2").unwrap();
     assert_eq!(empty.rec_rate, 0.0);
-    assert!(empty.log_or.is_finite());
-    assert!(empty.log_or_se.is_finite());
+    assert!(empty.log_or.is_nan(), "unmeasurable, not a number");
+    assert!(empty.log_or_se.is_nan(), "the SE must not pretend either");
     assert!(
-        empty.log_or_se > supported.log_or_se,
-        "no co-detection must read as HIGHER uncertainty ({} vs {})",
-        empty.log_or_se,
-        supported.log_or_se
+        supported.log_or.is_finite(),
+        "the measured pair still scores"
     );
+    // The margins still report: the row says WHY it is unmeasurable.
+    assert_eq!(empty.lig_rate, 1.0);
+}
+
+/// The degenerate 2x2 tables, pinned at the estimator itself.
+///
+/// Both margins empty was the reachable untested gap: the plug-in
+/// formula would return ln(2n+1) with a plateaued SE, a large positive
+/// "association" for a silent pair. Tiny margins with n11 = 0 are the
+/// same pathology. But a zero-count table whose margins EXPECTED
+/// co-detections is informative, and must stay scored, negative:
+/// jeffreys(4, 0, 2, 1) has a=0.5 b=2.5 c=1.5 d=1.5
+/// -> log_or = ln(0.5*1.5 / (2.5*1.5)) = ln(1/5).
+#[test]
+fn degenerate_tables_are_refused_or_scored_by_information() {
+    let (lor, se) = jeffreys_log_odds(100, 0, 0, 0);
+    assert!(
+        lor.is_nan() && se.is_nan(),
+        "silent stratum: no information"
+    );
+
+    let (lor, se) = jeffreys_log_odds(1000, 0, 1, 1);
+    assert!(
+        lor.is_nan() && se.is_nan(),
+        "prior dominated: no information"
+    );
+
+    let (lor, se) = jeffreys_log_odds(4, 0, 2, 1);
+    assert!(
+        (lor - 0.2f32.ln()).abs() < 1e-6,
+        "expected co-detections, saw none: negative, got {lor}"
+    );
+    assert!(se.is_finite());
 }
 
 /// A straddling edge (labels exist, but this edge's endpoints disagree so
