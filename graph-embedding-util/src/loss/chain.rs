@@ -24,8 +24,17 @@ pub struct CellChainBatch {
 
 pub struct CellChainBatchArgs<'a> {
     pub edges: &'a [(u32, u32)],
+    /// Sampler for one EXPERIMENTAL batch (sample / core / section). The
+    /// word "batch" means that throughout this module, never an SGD
+    /// minibatch.
     pub batch_sampler: &'a PerBatchCellSampler,
-    pub batch_size: usize,
+    /// Positive cell pairs drawn per call. This is NOT an SGD minibatch
+    /// size: one call yields the positives for a single
+    /// (gene, experimental batch), and a caller's optimizer step covers
+    /// many such calls. Sizing a step by this number instead of by the
+    /// caller's own unit is how cage once under-measured its GPU
+    /// footprint.
+    pub n_positives: usize,
     pub n_negatives: usize,
     /// Pb assignment per chain level (coarsest-first, one entry per chain
     /// position). Each slice is length `n_cells`. Drawn from
@@ -43,7 +52,7 @@ pub struct CellChainBatchStats {
     pub per_level_fallback: Vec<usize>,
 }
 
-/// Draw `batch_size` positive cell pairs from `batch_sampler`, then for
+/// Draw `n_positives` positive cell pairs from `batch_sampler`, then for
 /// each chain position draw K *sibling* negatives per positive — cells
 /// that share the anchor's pb at the previous chain level (siblings in
 /// the pb tree) but differ at the current chain level. Coarsest
@@ -83,10 +92,10 @@ pub fn sample_cell_chain_batch_with_pos(
     rng: &mut impl Rng,
 ) -> (CellChainBatch, CellChainBatchStats) {
     let s = args.batch_sampler;
-    let mut left_cells = Vec::with_capacity(args.batch_size);
-    let mut right_cells = Vec::with_capacity(args.batch_size);
+    let mut left_cells = Vec::with_capacity(args.n_positives);
+    let mut right_cells = Vec::with_capacity(args.n_positives);
 
-    for _ in 0..args.batch_size {
+    for _ in 0..args.n_positives {
         let local = pos_override.sample(rng);
         let global = pos_to_global_edge[local] as usize;
         let (i, j) = args.edges[global];
@@ -100,7 +109,7 @@ pub fn sample_cell_chain_batch_with_pos(
 
     for (chain_pos, pb_self) in args.pb_maps.iter().enumerate() {
         let pool_for_pos = s.chain_pools.get(chain_pos);
-        let mut neg = Vec::with_capacity(args.batch_size * args.n_negatives);
+        let mut neg = Vec::with_capacity(args.n_positives * args.n_negatives);
 
         for &u in &left_cells {
             let pivot_self = pb_self[u as usize];

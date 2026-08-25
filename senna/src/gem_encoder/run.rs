@@ -273,7 +273,11 @@ fn init_runtime(args: &GemEncoderArgs) -> anyhow::Result<Device> {
         .device
         .to_device(args.runtime.device_no)
         .context("compute device init")?;
-    info!("compute device = {dev:?}");
+    // candle's Debug DeviceId is a creation counter, not the ordinal.
+    info!(
+        "compute device = {} (ordinal {})",
+        args.runtime.device, args.runtime.device_no
+    );
     Ok(dev)
 }
 

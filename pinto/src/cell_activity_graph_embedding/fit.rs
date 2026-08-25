@@ -143,27 +143,32 @@ const PROBE_OVERSAMPLE: usize = 4;
 /// parameter moves before epoch 0.
 #[allow(clippy::too_many_arguments)]
 fn probe_forward(
-    n: usize,
+    n_genes: usize,
     trainable_genes: &[usize],
-    n_batches: usize,
+    n_exp_batches: usize,
     sampler: &GeneGatedChainSampler,
     probe_rng: &mut SmallRng,
     model: &JointEmbedModel,
     objective: graph_embedding_util::loss::NceObjective,
     dev: &candle_util::candle_core::Device,
 ) -> candle_util::candle_core::Result<candle_util::candle_core::Tensor> {
-    let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> = Vec::with_capacity(n);
+    let mut mini: Vec<(usize, graph_embedding_util::loss::CellChainBatch)> =
+        Vec::with_capacity(n_genes);
     let mut genes_sampled = 0usize;
-    'fill: for &g in trainable_genes.iter().cycle().take(PROBE_OVERSAMPLE * n) {
+    'fill: for &g in trainable_genes
+        .iter()
+        .cycle()
+        .take(PROBE_OVERSAMPLE * n_genes)
+    {
         let before = mini.len();
-        for b in 0..n_batches {
+        for b in 0..n_exp_batches {
             if let Some((cb, _)) = sampler.sample(g, b, probe_rng) {
                 mini.push((g, cb));
             }
         }
         if mini.len() > before {
             genes_sampled += 1;
-            if genes_sampled >= n {
+            if genes_sampled >= n_genes {
                 break 'fill;
             }
         }
@@ -716,7 +721,10 @@ pub fn fit_cell_activity_graph_embedding(
     // 7. Model + optimizer //
     //////////////////////////
     let dev = args.device.to_device(args.device_no)?;
-    info!("Using device: {:?}", dev);
+    // Never `{:?}` the Device: candle's DeviceId is a process-global
+    // creation counter (always 1 for a one-GPU run), not the CUDA
+    // ordinal, and logging it made --device-no look ignored.
+    info!("Using device: {} (ordinal {})", args.device, args.device_no);
     let varmap = VarMap::new();
     // `JointEmbedModel.e_feat` / `b_feat` ARE the gene embedding
     // (cells and genes share the same D-dim space). `n_features =
@@ -916,7 +924,7 @@ pub fn fit_cell_activity_graph_embedding(
         per_batch: &per_batch,
         cache: &cache,
         pb_maps: &pb_maps,
-        batch_size: positives_per_gene,
+        positives_per_draw: positives_per_gene,
         n_negatives: args.n_negatives,
     };
 
@@ -936,9 +944,9 @@ pub fn fit_cell_activity_graph_embedding(
                 GENE_BATCH_DEFAULT,
                 16.min(trainable_genes.len().max(1)),
                 args.gpu_mem_fraction,
-                |n| {
+                |n_probe_genes| {
                     probe_forward(
-                        n,
+                        n_probe_genes,
                         &trainable_genes,
                         n_batches,
                         &sampler,

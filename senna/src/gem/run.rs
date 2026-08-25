@@ -332,7 +332,11 @@ fn run_gem_genes_bge(
         .device
         .to_device(args.runtime.device_no)
         .context("candle device init")?;
-    info!("compute device = {:?}", dev);
+    // candle's Debug DeviceId is a creation counter, not the ordinal.
+    info!(
+        "compute device = {} (ordinal {})",
+        args.runtime.device, args.runtime.device_no
+    );
 
     // Build a `FitConfig` for the CURRENT feature axis of `unified`: the per-gene
     // β-sharing factor is derived from the live feature names, and the δ_g ridge /
