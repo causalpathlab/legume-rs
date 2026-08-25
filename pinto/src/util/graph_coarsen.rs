@@ -461,6 +461,38 @@ pub(super) fn spatial_seed_labels(
 /// count it twice.
 ///
 /// Returns the super-graph, per-super-node mean features, and `fine_to_super`:
+/// Fold a fine edge list by node labels into deduped `(min, max)` super
+/// edges plus the fine-edge -> super-edge map (`None` = both endpoints in
+/// one group; the edge folds into the node). Louvain/METIS semantics; the
+/// edges-only core of [`build_super_graph`], callable without paying for
+/// feature aggregation or the CSC adjacency.
+pub(crate) fn fold_edges_to_super(
+    labels: &[usize],
+    edges: &[(usize, usize)],
+) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {
+    // Keyed by INDEX, not just membership, so the fine->super map falls out
+    // of the same pass instead of needing a second one.
+    let mut edge_set: HashMap<(usize, usize), usize> =
+        HashMap::with_capacity_and_hasher(edges.len(), Default::default());
+    let mut super_edges: Vec<(usize, usize)> = Vec::with_capacity(edges.len());
+    let mut fine_to_super: Vec<Option<usize>> = Vec::with_capacity(edges.len());
+    for &(i, j) in edges {
+        let si = labels[i];
+        let sj = labels[j];
+        if si == sj {
+            fine_to_super.push(None);
+        } else {
+            let key = (si.min(sj), si.max(sj));
+            let idx = *edge_set.entry(key).or_insert_with(|| {
+                super_edges.push(key);
+                super_edges.len() - 1
+            });
+            fine_to_super.push(Some(idx));
+        }
+    }
+    (super_edges, fine_to_super)
+}
+
 /// for each input edge, the index of its super-edge, or `None` when the edge is
 /// internal to one super-node.
 pub(crate) fn build_super_graph(
@@ -485,27 +517,7 @@ pub(crate) fn build_super_graph(
         }
     }
 
-    let est_edges = graph.edges.len();
-    // Keyed by INDEX, not just membership, so the fine->super map falls out of
-    // the same pass instead of needing a second one.
-    let mut edge_set: HashMap<(usize, usize), usize> =
-        HashMap::with_capacity_and_hasher(est_edges, Default::default());
-    let mut super_edges: Vec<(usize, usize)> = Vec::with_capacity(est_edges);
-    let mut fine_to_super: Vec<Option<usize>> = Vec::with_capacity(est_edges);
-    for &(i, j) in &graph.edges {
-        let si = seed_labels[i];
-        let sj = seed_labels[j];
-        if si == sj {
-            fine_to_super.push(None);
-        } else {
-            let key = (si.min(sj), si.max(sj));
-            let idx = *edge_set.entry(key).or_insert_with(|| {
-                super_edges.push(key);
-                super_edges.len() - 1
-            });
-            fine_to_super.push(Some(idx));
-        }
-    }
+    let (super_edges, fine_to_super) = fold_edges_to_super(seed_labels, &graph.edges);
 
     let distances = vec![1.0f32; super_edges.len()];
 

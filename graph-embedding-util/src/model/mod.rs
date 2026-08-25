@@ -257,6 +257,8 @@ pub struct JointEmbedModel {
     /// outputs read a fixed dictionary; the training loss never reads this field
     /// for a factored model — it gathers each batch's rows straight from `β`.
     pub e_feat: Tensor,
+    /// The "cell" axis is the CALLER'S trained unit: senna bge/gem pass
+    /// cells here; pinto cage passes finest-level pseudobulks.
     pub e_cell: Tensor,
     pub b_feat: Tensor,
     pub b_cell: Tensor,

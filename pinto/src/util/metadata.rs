@@ -162,6 +162,19 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_bias: Option<String>,
 
+    /// Trained PB (finest-level super-cell) embedding table. cage's
+    /// trained unit is the PB, not the cell; `cell_embedding` above is a
+    /// propensity-weighted readout, not a trained table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pb_embedding: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pb_bias: Option<String>,
+
+    /// Cell -> finest-level PB id map.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell_pb: Option<String>,
+
     /// `pinto cage` per-gene per-dim posterior mean EFFECTIVE loading
     /// `E[z·β]` `[G × D]` — `pip` multiplied in already, so do NOT gate it
     /// again. Not consumed by training; shipped for downstream use.
@@ -372,16 +385,8 @@ pub fn create_lc_metadata(
             link_community: Some(format!("{prefix}.link_community.parquet")),
             gene_community: Some(format!("{prefix}.gene_community.parquet")),
             scores: Some(format!("{prefix}.scores.parquet")),
-            batch_effects: None,
             dict_merge,
-            lr_activity: None,
-            lr_scores: None,
-            cell_embedding: None,
-            cell_bias: None,
-            feature_posterior_mean: None,
-            feature_embedding: None,
-            gene_bias: None,
-            clusters: None,
+            ..Default::default()
         },
         levels: Some(levels),
     }
@@ -417,19 +422,9 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
             coord_columns: coord_columns_field(inputs.coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
-            link_community: None,
             gene_community: Some(format!("{prefix}.gene_community.parquet")),
-            scores: None,
             batch_effects: Some(format!("{prefix}.delta.parquet")),
-            dict_merge: None,
-            lr_activity: None,
-            lr_scores: None,
-            cell_embedding: None,
-            cell_bias: None,
-            feature_posterior_mean: None,
-            feature_embedding: None,
-            gene_bias: None,
-            clusters: None,
+            ..Default::default()
         },
         levels: Some(levels),
     }
@@ -474,15 +469,14 @@ pub fn create_cage_metadata(
             gene_community: Some(format!("{prefix}.gene_community.parquet")),
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
-            dict_merge: None,
-            lr_activity: None,
-            lr_scores: None,
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
-            cell_bias: Some(format!("{prefix}.cell_bias.parquet")),
+            pb_embedding: Some(format!("{prefix}.pb_embedding.parquet")),
+            pb_bias: Some(format!("{prefix}.pb_bias.parquet")),
+            cell_pb: Some(format!("{prefix}.cell_pb.parquet")),
             feature_posterior_mean: Some(format!("{prefix}.feature_posterior_mean.parquet")),
             feature_embedding: Some(format!("{prefix}.feature_embedding.parquet")),
             gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
-            clusters: None,
+            ..Default::default()
         },
         levels: Some(levels),
     }
@@ -521,21 +515,8 @@ pub fn create_prop_metadata(
         splice: None,
         outputs: OutputFiles {
             coord_pairs: coord_pair_file.map(|s| s.to_string()),
-            coord_columns: None,
             propensity: Some(format!("{prefix}.propensity.parquet")),
-            link_community: None,
-            gene_community: None,
-            scores: None,
-            batch_effects: None,
-            dict_merge: None,
-            lr_activity: None,
-            lr_scores: None,
-            cell_embedding: None,
-            cell_bias: None,
-            feature_posterior_mean: None,
-            feature_embedding: None,
-            gene_bias: None,
-            clusters: None,
+            ..Default::default()
         },
         levels: Some(levels),
     }

@@ -113,7 +113,12 @@ fn metadata_roundtrip_cage() {
     assert_eq!(back.n_cells, 1000);
     assert_eq!(back.n_communities, Some(16));
     assert!(back.outputs.cell_embedding.is_some());
-    assert!(back.outputs.cell_bias.is_some());
+    // The trained unit is the PB: pb tables + the cell->pb map ship,
+    // and there is no per-cell bias to report.
+    assert!(back.outputs.cell_bias.is_none());
+    assert!(back.outputs.pb_embedding.is_some());
+    assert!(back.outputs.pb_bias.is_some());
+    assert!(back.outputs.cell_pb.is_some());
     assert_eq!(
         back.outputs.feature_posterior_mean,
         Some(format!("{prefix}.feature_posterior_mean.parquet"))

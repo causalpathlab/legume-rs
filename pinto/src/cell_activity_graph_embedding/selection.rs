@@ -94,20 +94,12 @@ pub struct LevelPseudobulk {
     /// Louvain / METIS semantics, matching [`build_super_graph`]'s `si != sj`
     /// rule. An intra-group fine edge is NOT an edge of the coarse graph — it
     /// folds into the super-NODE, and here that has already happened: `counts`
-    /// aggregates the member cells. Emitting it as a `(a, a)` edge as well
-    /// would count that mass twice, once on the node and once on the loop.
+    /// aggregates the member cells.
     ///
-    /// Because the levels nest, a super-edge maps to exactly one super-edge at
-    /// the next coarser level (`(parent(a), parent(b))`) — unless both
-    /// endpoints share a parent, in which case it stops being an edge there and
-    /// becomes part of that parent's internal mass.
-    pub super_edges: Vec<(usize, usize)>,
-    /// Fine edge index → index into [`Self::super_edges`], or `None` when the
-    /// fine edge is INTERNAL to one super-cell and so has no coarse edge.
-    ///
-    /// Needed to carry per-super-edge results back down to fine edges; an
-    /// internal edge takes its endpoints' super-cell, not an edge label.
-    pub fine_to_super: Vec<Option<usize>>,
+    /// The super-edge lists themselves live in the TRAINING frame
+    /// (`pb_frame::PbFrame`, finest level, arm-independent); the selection
+    /// keeps only this internal-edge count for its resolution diagnostic.
+    pub n_internal_fine_edges: usize,
     /// This level's super-cells projected into the SHARED basis, `[n_pb × D]`.
     pub e_pb: Mat,
     /// Offset of this level's super-cells in the global pseudobulk index space.
@@ -118,17 +110,6 @@ impl LevelPseudobulk {
     #[must_use]
     pub fn n_pb(&self) -> usize {
         self.counts.ncols()
-    }
-
-    #[must_use]
-    pub fn n_super_edges(&self) -> usize {
-        self.super_edges.len()
-    }
-
-    /// Fine edges internal to one super-cell — folded into the node, not edges.
-    #[must_use]
-    pub fn n_internal_fine_edges(&self) -> usize {
-        self.fine_to_super.iter().filter(|e| e.is_none()).count()
     }
 }
 
@@ -182,10 +163,6 @@ pub struct PseudobulkArgs<'a> {
     pub all_cell_labels: &'a [Vec<usize>],
     /// The fine cell graph, coarsened per level by `build_super_graph`.
     pub graph: &'a crate::util::knn_graph::KnnGraph,
-    /// `[proj_dim × n_cells]` cell features. `build_super_graph` aggregates
-    /// them per super-node in the same call — that aggregation is the
-    /// super-cell embedding init an edge-level fit needs.
-    pub cell_features: &'a Mat,
     /// Latent dimensionality `D` — the number of communities.
     pub embedding_dim: usize,
     /// How a matrix row maps onto the gene axis.
@@ -371,22 +348,16 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     let mut levels = Vec::with_capacity(collapsed.len());
     let mut pb_offset = 0usize;
     for (cell_labels, counts) in collapsed {
-        // Coarsen the cell-graph ADJACENCY with the SHARED implementation.
-        // `build_super_graph` is the repo's Louvain/METIS collapse: `si != sj`,
-        // deduped, with intra-group edges reported as `None` because they fold
-        // into the super-NODE — whose mass `counts` already carries.
-        //
-        // NOT `collapse_pairs` / `build_super_edges`: those keep `(a, a)`
-        // because the link-community path needs every fine edge to map
-        // somewhere for label transfer. Different job, and using it here
-        // double-counted internal mass as a self-loop edge.
-        let (super_graph, _, fine_to_super) = crate::util::graph_coarsen::build_super_graph(
-            &cell_labels,
-            counts.ncols(),
-            args.graph,
-            args.cell_features,
-        );
-        let super_edges = super_graph.edges;
+        // Internal-edge count for the resolution diagnostic: one label
+        // compare per fine edge. The full super-edge fold used to happen
+        // here too; it now lives ONLY in the training frame (`pb_frame`),
+        // so there is a single source of super edges.
+        let n_internal_fine_edges = args
+            .graph
+            .edges
+            .iter()
+            .filter(|&&(i, j)| cell_labels[i] == cell_labels[j])
+            .count();
         // Project under the SAME transform the basis was fit with: centre by
         // the finest level's gene means, THEN standardize columns.
         //
@@ -414,8 +385,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         levels.push(LevelPseudobulk {
             cell_labels,
             counts,
-            super_edges,
-            fine_to_super,
+            n_internal_fine_edges,
             e_pb,
             pb_offset,
         });
@@ -466,15 +436,15 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         // already in `counts`), so this is how much of the fine graph stops
         // being adjacency at this resolution — expected to grow toward the
         // coarse end as groups get bigger.
-        let internal = lvl.n_internal_fine_edges();
+        let internal = lvl.n_internal_fine_edges;
+        let n_fine = args.graph.edges.len();
         info!(
-            "  level {i}: {} super-cells, {} super-edges, {} of {} fine edges internal \
+            "  level {i}: {} super-cells, {} of {} fine edges internal \
              ({:.1}%), |e_pb|/sqrt(P) = {:.4}",
             lvl.n_pb(),
-            lvl.n_super_edges(),
             internal,
-            lvl.fine_to_super.len(),
-            100.0 * internal as f64 / lvl.fine_to_super.len().max(1) as f64,
+            n_fine,
+            100.0 * internal as f64 / n_fine.max(1) as f64,
             e_norm
         );
     }

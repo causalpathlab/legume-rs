@@ -39,6 +39,9 @@ pub struct AnnotateArgs {
                 or its `{prefix}.pinto.json`",
         long_help = "Shared output prefix of a pinto embedding run.\n\
                      Reads `{prefix}.feature_embedding.parquet` + `{prefix}.cell_embedding.parquet`.\n\
+                     From a cage run the cell embedding is a propensity-weighted\n\
+                     readout, not a trained table; pass --cell-embedding\n\
+                     {prefix}.pb_embedding.parquet to annotate super-cells instead.\n\
                      A `{prefix}.pinto.json` path is also accepted (suffix stripped).\n\
                      Override either side explicitly with --feature-embedding /\n\
                      --cell-embedding (both required together when --from is omitted)."
