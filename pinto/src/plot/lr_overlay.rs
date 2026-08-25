@@ -524,10 +524,26 @@ pub fn render_lr_overlays_for_core(
                         Some(&v) => v,
                         None => (l_li + r_ri) >= (l_ri + r_li),
                     };
+                    // DETECTION, not magnitude: the score this figure
+                    // illustrates counts a contact when both genes are
+                    // detected across it, so an edge reads as concordant
+                    // (+1, both detected in the drawn orientation) or
+                    // discordant (-1, only one side). Colouring by
+                    // `sqrt(L·R)` instead would draw a quantity the score
+                    // deliberately does not use: on measured split-half
+                    // reliability the magnitude-weighted statistics came
+                    // out near noise where detection held up.
+                    let concordance = |l: f32, r: f32| -> f32 {
+                        if l > 0.0 && r > 0.0 {
+                            1.0
+                        } else {
+                            -1.0
+                        }
+                    };
                     if use_canon {
-                        (li, ri, (l_li.max(0.0) * r_ri.max(0.0)).sqrt())
+                        (li, ri, concordance(l_li, r_ri))
                     } else {
-                        (ri, li, (l_ri.max(0.0) * r_li.max(0.0)).sqrt())
+                        (ri, li, concordance(l_ri, r_li))
                     }
                 }
                 _ => (li, ri, f32::NAN),
@@ -543,8 +559,11 @@ pub fn render_lr_overlays_for_core(
             continue;
         }
         // Center on the per-pair empirical mean over edges so the
-        // diverging color ramp encodes "above / below typical edge of
-        // this pair" — Jensen-clean, no marginal-mean artifact.
+        // diverging color ramp encodes "co-detected where that is rare"
+        // rather than the raw indicator: in a stratum where most contacts
+        // already co-express, a co-detected edge is unremarkable, and the
+        // centering says so. This is the per-edge analogue of the score's
+        // margin adjustment.
         let mut s = 0.0f32;
         let mut n_finite = 0u32;
         for &v in &coexpr {

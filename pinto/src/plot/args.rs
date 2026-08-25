@@ -20,8 +20,8 @@
 //! - LR-activity overlay (auto when an `lr_activity.json` sidecar is
 //!   linked in the metadata): per significant LR pair, a quiver of
 //!   directional arrows along edges incident to a boundary cell, color
-//!   = diverging blue↔red on per-edge coexpression `sqrt(L·R)` minus
-//!   the per-pair edge mean, plus thin per-community CC convex hulls.
+//!   = diverging blue↔red on per-edge co-detection minus the per-pair
+//!   edge mean, plus thin per-community CC convex hulls.
 
 use clap::{Args, ValueEnum};
 use plot_utils::palette::Palette;
@@ -34,7 +34,10 @@ pub enum LrColorMode {
     LogRatio,
     /// Outgoing/incoming/internal/external vs. community hull.
     Direction,
-    /// Pair-centered sqrt(L·R) coexpression deviation.
+    /// Pair-centered co-detection deviation: is this contact one where
+    /// both genes are detected, relative to how often that happens on
+    /// this pair's contacts. Matches what `lra --edge-scores-only`
+    /// measures.
     Coexpr,
 }
 
@@ -375,8 +378,8 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 8,
-        help = "Bins for the diverging coexpression ramp (--lr-color-mode=coexpr only)",
-        long_help = "Bins in the diverging blue↔red coexpression ramp on LR arrows.\n\
+        help = "Bins for the diverging co-detection ramp (--lr-color-mode=coexpr only)",
+        long_help = "Bins in the diverging blue↔red co-detection ramp on LR arrows.\n\
                      This is used only with --lr-color-mode=coexpr.",
         hide = true
     )]
@@ -395,7 +398,11 @@ pub struct SrtPlotArgs {
                      so receptor-saturated and at plateau.\n\
                      \n\
                      `direction` colours by in, out and internal classes.\n\
-                     `coexpr` colours by pair-centred sqrt(L·R) deviation.",
+                     `coexpr` colours by pair-centred co-detection deviation:\n\
+                     red where both genes are detected across the contact,\n\
+                     blue where only one side is, centred on how often this\n\
+                     pair co-occurs at all. That is the per-edge view of what\n\
+                     `lra --edge-scores-only` aggregates per core.",
         hide = true,
     )]
     pub lr_color_mode: LrColorMode,

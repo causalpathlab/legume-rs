@@ -147,6 +147,13 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lr_activity: Option<String>,
 
+    /// Per-batch contact-association score table from
+    /// `pinto lr-activity --edge-scores-only`. Optional; written only when
+    /// that mode is run against this prefix. Descriptive phenotypes, not a
+    /// test, so it is a separate slot from `lr_activity`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lr_scores: Option<String>,
+
     /// `pinto cage` cell embedding `[N × D]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_embedding: Option<String>,
@@ -349,6 +356,7 @@ pub fn create_lc_metadata(
             batch_effects: None,
             dict_merge,
             lr_activity: None,
+            lr_scores: None,
             cell_embedding: None,
             cell_bias: None,
             feature_posterior_mean: None,
@@ -396,6 +404,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             batch_effects: Some(format!("{prefix}.delta.parquet")),
             dict_merge: None,
             lr_activity: None,
+            lr_scores: None,
             cell_embedding: None,
             cell_bias: None,
             feature_posterior_mean: None,
@@ -448,6 +457,7 @@ pub fn create_cage_metadata(
             batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
             dict_merge: None,
             lr_activity: None,
+            lr_scores: None,
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
             cell_bias: Some(format!("{prefix}.cell_bias.parquet")),
             feature_posterior_mean: Some(format!("{prefix}.feature_posterior_mean.parquet")),
@@ -500,6 +510,7 @@ pub fn create_prop_metadata(
             batch_effects: None,
             dict_merge: None,
             lr_activity: None,
+            lr_scores: None,
             cell_embedding: None,
             cell_bias: None,
             feature_posterior_mean: None,
