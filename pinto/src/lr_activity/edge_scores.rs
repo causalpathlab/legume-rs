@@ -51,6 +51,39 @@ use crate::util::common::*;
 use matrix_util::utils::generate_minibatch_intervals;
 use rayon::prelude::*;
 
+/// How one physical contact reads for one pair, by detection.
+///
+/// The ligand is ANNOTATED (the pair file names it), so orientation on a
+/// contact is bookkeeping, not inference: a one-way contact identifies
+/// its ligand-carrying cell outright. What a static snapshot cannot do
+/// is turn that into causation; these are configuration facts.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum ContactConfig {
+    /// Ligand detected on exactly one side, receptor on the other.
+    OneWay {
+        /// True when the ligand sits on the edge's FIRST endpoint.
+        ligand_first: bool,
+    },
+    /// Both orientations co-detected: no side to name.
+    Mutual,
+    /// Fewer than both roles present anywhere on the contact.
+    Silent,
+}
+
+/// Classify a contact from the four detection facts.
+pub fn classify_contact(l_u: bool, r_u: bool, l_v: bool, r_v: bool) -> ContactConfig {
+    let fwd = l_u && r_v;
+    let rev = l_v && r_u;
+    match (fwd, rev) {
+        (true, true) => ContactConfig::Mutual,
+        (true, false) => ContactConfig::OneWay { ligand_first: true },
+        (false, true) => ContactConfig::OneWay {
+            ligand_first: false,
+        },
+        (false, false) => ContactConfig::Silent,
+    }
+}
+
 /// One (batch, community, pair) score row.
 pub struct EdgeScoreRow {
     pub batch: Box<str>,
@@ -67,6 +100,22 @@ pub struct EdgeScoreRow {
     /// Fraction of contact instances with the receptor detected at the
     /// second endpoint.
     pub rec_rate: f32,
+    /// Co-detected contacts where BOTH orientations hold: no side to
+    /// name. `n_mutual + n_oneway` is the physical co-detected contact
+    /// count (the 2x2's `n11` counts oriented instances, so
+    /// `n11 = 2 * n_mutual + n_oneway`).
+    pub n_mutual: u32,
+    /// Co-detected contacts with the ligand on exactly one side: each
+    /// identifies its ligand-carrying cell outright, since the role is
+    /// annotated, not inferred.
+    pub n_oneway: u32,
+    /// How much this pair's active cells specialize into sender or
+    /// receiver here: mean over cells touching a co-detected contact of
+    /// `|sent - received| / (sent + received)`. 1 = every cell plays one
+    /// role; 0 = every cell plays both equally. NaN when nothing is
+    /// co-detected. Spot-level data mixes cells and deflates this by
+    /// construction; compare across cores, not across platforms.
+    pub role_purity: f32,
     /// Posterior log odds ratio of co-detection across a contact. NaN
     /// when the table is prior dominated (no co-detection observed and
     /// none expected): such a row is unmeasurable, not zero.
@@ -116,8 +165,8 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
 
         // Oriented instance endpoints, grouped by batch. BTreeMap so row
         // order is a function of the labels, not of hashing.
-        let mut by_batch: std::collections::BTreeMap<Box<str>, (Vec<usize>, Vec<usize>)> =
-            Default::default();
+        type Group = (Vec<usize>, Vec<usize>, Vec<(usize, usize)>);
+        let mut by_batch: std::collections::BTreeMap<Box<str>, Group> = Default::default();
         for &(e, flipped) in strata.oriented(s) {
             let (i, j, _, ref b) = edges[e as usize];
             let label: Box<str> = if multi_batch {
@@ -138,9 +187,14 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
             let slot = by_batch.entry(label).or_default();
             slot.0.push(u);
             slot.1.push(v);
+            // The PHYSICAL contact once, for the configuration counts;
+            // the oriented instances above serve the symmetric 2x2.
+            if !flipped {
+                slot.2.push((i, j));
+            }
         }
 
-        for (batch, (us, vs)) in by_batch {
+        for (batch, (us, vs, contacts)) in by_batch {
             let n = us.len();
             let unique: HashSet<usize> = us.iter().copied().collect();
             let mean_log_depth =
@@ -162,6 +216,47 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                         n11 += (lp && rp) as usize;
                     }
                     let (log_or, log_or_se) = jeffreys_log_odds(n, n11, n_l, n_r);
+
+                    // Configuration facts per PHYSICAL contact. The role
+                    // is annotated, so a one-way contact identifies its
+                    // ligand-carrying cell outright; mutual contacts have
+                    // no side. Per-cell tallies feed the purity summary.
+                    let mut n_mutual = 0u32;
+                    let mut n_oneway = 0u32;
+                    let mut role: HashMap<usize, (u32, u32)> = HashMap::default();
+                    for &(a, b) in contacts.iter() {
+                        let cfg = classify_contact(
+                            x_lr[(li, a)] > 0.0,
+                            x_lr[(ri, a)] > 0.0,
+                            x_lr[(li, b)] > 0.0,
+                            x_lr[(ri, b)] > 0.0,
+                        );
+                        match cfg {
+                            ContactConfig::Mutual => {
+                                n_mutual += 1;
+                                for c in [a, b] {
+                                    let e = role.entry(c).or_default();
+                                    e.0 += 1;
+                                    e.1 += 1;
+                                }
+                            }
+                            ContactConfig::OneWay { ligand_first } => {
+                                n_oneway += 1;
+                                let (snd, rcv) = if ligand_first { (a, b) } else { (b, a) };
+                                role.entry(snd).or_default().0 += 1;
+                                role.entry(rcv).or_default().1 += 1;
+                            }
+                            ContactConfig::Silent => {}
+                        }
+                    }
+                    let role_purity = if role.is_empty() {
+                        f32::NAN
+                    } else {
+                        role.values()
+                            .map(|&(snd, rcv)| (snd as f32 - rcv as f32).abs() / (snd + rcv) as f32)
+                            .sum::<f32>()
+                            / role.len() as f32
+                    };
                     EdgeScoreRow {
                         batch: batch.clone(),
                         community,
@@ -171,6 +266,9 @@ pub fn compute_edge_scores(input: &EdgeScoresInput<'_>) -> (Vec<EdgeScoreRow>, u
                         mean_log_depth,
                         lig_rate: n_l as f32 / n as f32,
                         rec_rate: n_r as f32 / n as f32,
+                        n_mutual,
+                        n_oneway,
+                        role_purity,
                         log_or,
                         log_or_se,
                     }
@@ -228,6 +326,9 @@ pub fn write_edge_scores(out_prefix: &str, rows: &[EdgeScoreRow]) -> anyhow::Res
     let mean_log_depth: Vec<f32> = rows.iter().map(|r| r.mean_log_depth).collect();
     let lig_rate: Vec<f32> = rows.iter().map(|r| r.lig_rate).collect();
     let rec_rate: Vec<f32> = rows.iter().map(|r| r.rec_rate).collect();
+    let n_mutual: Vec<i32> = rows.iter().map(|r| r.n_mutual as i32).collect();
+    let n_oneway: Vec<i32> = rows.iter().map(|r| r.n_oneway as i32).collect();
+    let role_purity: Vec<f32> = rows.iter().map(|r| r.role_purity).collect();
     let log_or: Vec<f32> = rows.iter().map(|r| r.log_or).collect();
     let log_or_se: Vec<f32> = rows.iter().map(|r| r.log_or_se).collect();
     let row_names: Vec<Box<str>> = (0..rows.len())
@@ -247,6 +348,9 @@ pub fn write_edge_scores(out_prefix: &str, rows: &[EdgeScoreRow]) -> anyhow::Res
             ("mean_log_depth".into(), Column::F32(&mean_log_depth)),
             ("lig_rate".into(), Column::F32(&lig_rate)),
             ("rec_rate".into(), Column::F32(&rec_rate)),
+            ("n_mutual".into(), Column::I32(&n_mutual)),
+            ("n_oneway".into(), Column::I32(&n_oneway)),
+            ("role_purity".into(), Column::F32(&role_purity)),
             ("log_or".into(), Column::F32(&log_or)),
             ("log_or_se".into(), Column::F32(&log_or_se)),
         ],

@@ -4,7 +4,9 @@
 //! and the score is the Jeffreys (+1/2) posterior log odds ratio with its
 //! posterior SE. Tables here are small enough to enumerate by hand.
 
-use crate::lr_activity::edge_scores::{compute_edge_scores, jeffreys_log_odds, EdgeScoresInput};
+use crate::lr_activity::edge_scores::{
+    classify_contact, compute_edge_scores, jeffreys_log_odds, ContactConfig, EdgeScoresInput,
+};
 use crate::lr_activity::orientation::CommunityStrata;
 use crate::util::common::*;
 
@@ -256,4 +258,85 @@ fn unlabeled_runs_score_one_all_batch() {
     assert!(rows.iter().all(|r| r.batch.as_ref() == "all"));
     let n_edges: Vec<u32> = rows.iter().map(|r| r.n_edges).collect();
     assert_eq!(n_edges, vec![2, 2], "C0 and C1, batches pooled");
+}
+
+/// The four contact configurations, from the four detection facts. The
+/// ligand is annotated, so `ligand_first` is a statement about which
+/// endpoint CARRIES it, and inverting it would silently flip every
+/// arrow the overlay draws from roles.
+#[test]
+fn contact_configurations_classify_by_annotated_role() {
+    assert_eq!(
+        classify_contact(true, false, false, true),
+        ContactConfig::OneWay { ligand_first: true },
+        "ligand at the first endpoint, receptor at the second"
+    );
+    assert_eq!(
+        classify_contact(false, true, true, false),
+        ContactConfig::OneWay {
+            ligand_first: false
+        },
+        "roles swapped ends"
+    );
+    assert_eq!(
+        classify_contact(true, true, true, true),
+        ContactConfig::Mutual
+    );
+    assert_eq!(
+        classify_contact(true, false, true, false),
+        ContactConfig::Silent,
+        "two ligand carriers and no receptor is not an interaction"
+    );
+    assert_eq!(
+        classify_contact(false, false, false, false),
+        ContactConfig::Silent
+    );
+}
+
+/// Configuration counts and role purity on the hand-built fixture.
+///
+/// (a, C0): edge (0,1). L+ at 0 and 1; R+ at 0 only. Forward (L0, R1)
+/// fails, reverse (L1, R0) holds: one one-way contact, ligand at cell 1.
+/// Purity: cell 1 sent once (1.0), cell 0 received once (1.0) -> 1.0.
+///
+/// (a, C1): edges (3,4), (4,5). L+ at 3,4,5; R+ at 3,4.
+/// (3,4): both orientations hold -> mutual. (4,5): only (L5, R4) holds
+/// -> one-way, ligand at 5. Identity: pooled n11 = 2*mutual + oneway
+/// = 3, matching the 2x2 test above. Purity: cell 3 (1,1) -> 0,
+/// cell 4 (1,2) -> 1/3, cell 5 (1,0) -> 1; mean = 4/9.
+#[test]
+fn configuration_counts_and_purity_match_hand_enumeration() {
+    let (rows, _) = run(&fixture_edges());
+    let row = rows
+        .iter()
+        .find(|r| r.batch.as_ref() == "a" && r.community == 0)
+        .unwrap();
+    assert_eq!((row.n_mutual, row.n_oneway), (0, 1));
+    assert!(
+        (row.role_purity - 1.0).abs() < 1e-6,
+        "got {}",
+        row.role_purity
+    );
+
+    let row = rows
+        .iter()
+        .find(|r| r.batch.as_ref() == "a" && r.community == 1)
+        .unwrap();
+    assert_eq!((row.n_mutual, row.n_oneway), (1, 1));
+    assert!(
+        (row.role_purity - 4.0 / 9.0).abs() < 1e-6,
+        "got {}",
+        row.role_purity
+    );
+    // A pair with no co-detected contact reports NaN purity, not zero.
+    let (rows, _) = run_pairs(
+        &fixture_edges(),
+        vec![("LIG1".into(), "REC2".into(), 10, 12)],
+    );
+    let empty = rows
+        .iter()
+        .find(|r| r.batch.as_ref() == "a" && r.community == 1)
+        .unwrap();
+    assert_eq!((empty.n_mutual, empty.n_oneway), (0, 0));
+    assert!(empty.role_purity.is_nan());
 }
