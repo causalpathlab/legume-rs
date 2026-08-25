@@ -234,6 +234,25 @@ pub struct LevelInfo {
 }
 
 impl PintoMetadata {
+    /// Read a run's manifest, set one output slot, write it back.
+    ///
+    /// Both `lr-activity` modes back-fill the upstream manifest this way;
+    /// keeping it in one place stops the two call sites from drifting on
+    /// error handling (one used to swallow write failures silently).
+    pub fn backfill_output(path: &std::path::Path, set: impl FnOnce(&mut OutputFiles)) {
+        match Self::read(path) {
+            Ok(mut meta) => {
+                set(&mut meta.outputs);
+                if let Err(e) = meta.write(path) {
+                    log::warn!("could not update {}: {e}", path.display());
+                }
+            }
+            Err(e) => {
+                log::debug!("no upstream manifest at {} to update: {e}", path.display());
+            }
+        }
+    }
+
     pub fn write(&self, path: &Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
