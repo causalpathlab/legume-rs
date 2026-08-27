@@ -314,6 +314,7 @@ pub fn fit_cell_activity_graph_embedding(
         batch_membership,
         batch_effects: batch_db,
         graph,
+        knn,
         spatial_graph,
         edge_source,
         cell_proj: shared_cell_proj,
@@ -481,10 +482,11 @@ pub fn fit_cell_activity_graph_embedding(
 
     let cell_proj = match hvg_weights.as_deref() {
         // HVG weighting makes this a genuinely different projection, so the
-        // shared one cannot stand in for it. Preprocessing skips taking one
-        // in this case, but `--knn-expr` needs an unweighted projection for
-        // its own graph and takes one anyway, so drop it rather than carry a
-        // second full matrix through training.
+        // shared one cannot stand in for it. Preprocessing skips taking one in
+        // this case, and with `--knn-expr` off there is nothing to drop. When
+        // it IS asked for, preprocessing takes an unweighted projection for the
+        // expression graph, and this drops it rather than carry a second full
+        // matrix through training.
         Some(w) => {
             drop(shared_cell_proj);
             data_vec.project_columns_weighted(c.proj_dim, c.block_size, batch_arg, w)?
@@ -1831,6 +1833,7 @@ pub fn fit_cell_activity_graph_embedding(
                 n_cells,
                 n_genes,
                 n_edges: n_fine_edges,
+                graph: (&knn).into(),
                 k: n_edge_clusters,
             },
             batch_db.is_some(),

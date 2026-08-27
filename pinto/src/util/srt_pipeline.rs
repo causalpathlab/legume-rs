@@ -19,7 +19,7 @@ use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use crate::util::input::{
     auto_batch_from_components, read_data_with_coordinates, read_data_without_coordinates,
-    KnnExprScope, SRTData, SrtInputArgs,
+    KnnExprScope, ResolvedKnn, SRTData, SrtInputArgs,
 };
 use crate::util::knn_graph::KnnGraph;
 use auxiliary_data::feature_names::FeatureNameKind;
@@ -80,8 +80,12 @@ pub struct SrtPreprocessed {
     /// when single-batch.
     pub batch_effects: Option<Mat>,
     pub graph: KnnGraph,
+    /// The k's [`Self::graph`] was actually built with. Carried rather than
+    /// re-derived from the args, so a manifest cannot describe a graph the run
+    /// did not build.
+    pub knn: ResolvedKnn,
     /// The pre-augmentation SPATIAL graph, `Some` only when `--knn-expr`
-    /// added expression edges. Prefer [`Self::topology_graph`] over reaching
+    /// added expression edges. Prefer [`topology_graph`] over reaching
     /// for this directly.
     pub spatial_graph: Option<KnnGraph>,
     /// Which graph each edge of [`Self::graph`] came from, parallel to
@@ -131,6 +135,10 @@ pub struct SrtPreprocessed {
 /// depends on `--knn-expr` and on the data; the point is that neither question
 /// is being asked about adjacency any more. Both take the spatial graph.
 ///
+/// In expression mode this hands back the expression graph, because that is
+/// the only graph there is. Nothing is lost: a run without `--coord` has no
+/// adjacency to preserve, so there is no distinction for this to draw.
+///
 /// A free function rather than a method because every caller destructures
 /// [`SrtPreprocessed`] field by field, which is deliberate: adding a field
 /// should force each call site to say what it wants.
@@ -154,6 +162,12 @@ pub fn topology_graph<'a>(
 /// correction (batch effects haven't been estimated yet at this point).
 pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreprocessed> {
     let c = cfg.common;
+
+    // Argv-only, so it runs BEFORE anything is read. A typo like a
+    // `--knn-expr-scope` without `--coord` needs no data to judge, and making
+    // the user wait through a load, a possible zarr conversion and a full QC
+    // pass to hear about it is time spent on an answer already known.
+    c.validate_knn_flags()?;
 
     info!("Loading data files...");
     let has_coords = c.has_coordinates();
@@ -223,28 +237,26 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     let n_cells = data_vec.num_columns();
 
     anyhow::ensure!(c.proj_dim > 0, "proj_dim must be > 0");
-    anyhow::ensure!(c.knn_spatial > 0, "knn_spatial must be > 0");
-    anyhow::ensure!(
-        c.knn_spatial < n_cells,
-        "knn_spatial ({}) must be < number of cells ({})",
-        c.knn_spatial,
-        n_cells
-    );
+    // Both k's resolve here, before either graph is built. The KNN builder
+    // floors k at 1 and clamps it to n_cells-1 rather than rejecting either
+    // extreme, so nothing downstream would catch a 0 or an over-large k.
+    let knn = c.resolve_knn(n_cells)?;
+    let base_knn = knn.base;
 
     let graph = if has_coords {
-        info!("Building spatial KNN graph (k={})...", c.knn_spatial);
+        info!("Building spatial KNN graph (k={})...", base_knn);
         build_spatial_graph(
             &coordinates,
             SrtCellPairsArgs {
-                knn: c.knn_spatial,
+                knn: base_knn,
                 block_size: c.block_size,
-                reciprocal: c.reciprocal,
+                reciprocal: knn.reciprocal,
             },
         )?
     } else {
         info!(
             "Building expression KNN graph (k={}, proj_dim={})...",
-            c.knn_spatial, c.proj_dim
+            base_knn, c.proj_dim
         );
         let cell_proj_pre = data_vec.project_columns_with_batch_correction(
             c.proj_dim,
@@ -254,9 +266,9 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         let (g, embedding) = build_expression_graph(
             &cell_proj_pre.proj,
             SrtCellPairsArgs {
-                knn: c.knn_spatial,
+                knn: base_knn,
                 block_size: c.block_size,
-                reciprocal: c.reciprocal,
+                reciprocal: knn.reciprocal,
             },
         )?;
         coordinates = embedding;
@@ -295,44 +307,44 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     // skipped, and every tissue core lands in one frame downstream. That
     // failure is silent, which is why the ordering here is load-bearing.
     //
+    // That argument is about the UNION, and so about spatial runs. In
+    // expression mode the base graph is itself an expression graph and
+    // auto-batch sees it by construction — there a component is not a section
+    // and was never claimed to be, which is why that path folds no fragments.
+    //
     // And the expression graph should be built on a batch-corrected
     // projection, or its neighbours match batch rather than cell type.
     let batch_arg: Option<&[Box<str>]> = batch_effects
         .is_some()
         .then_some(batch_membership.as_slice());
 
-    let cell_proj = if cfg.cell_projection || (c.knn_expr > 0 && has_coords) {
+    // `ResolvedKnn::augment` is already 0 without coordinates, so these two
+    // tests stay in step by construction rather than by both remembering to
+    // say `&& has_coords`. That agreement is what the `expect` below rests on.
+    let augment_knn = knn.augment;
+
+    let cell_proj = if cfg.cell_projection || augment_knn > 0 {
         Some(data_vec.project_columns_with_batch_correction(c.proj_dim, c.block_size, batch_arg)?)
     } else {
         None
     };
 
-    let (graph, spatial_graph, edge_source) = if c.knn_expr == 0 {
-        (graph, None, None)
-    } else if !has_coords {
-        // The base graph already IS the expression graph, so a union would be
-        // a self-union. The flag defaults on, so this fires on every
-        // expression-mode run: an info note, not a warning about user error.
-        info!(
-            "--knn-expr {} has no effect without --coord: the cell-pair graph is \
-             already built from expression",
-            c.knn_expr
-        );
+    let (graph, spatial_graph, edge_source) = if augment_knn == 0 {
         (graph, None, None)
     } else {
         info!(
             "Adding expression KNN edges (k={}, proj_dim={})...",
-            c.knn_expr, c.proj_dim
+            augment_knn, c.proj_dim
         );
         let proj = cell_proj
             .as_ref()
-            .expect("a projection is taken whenever knn_expr > 0 and coordinates exist");
+            .expect("the projection above is taken whenever augment_knn() > 0");
         let knn_args = SrtCellPairsArgs {
-            knn: c.knn_expr,
+            knn: augment_knn,
             block_size: c.block_size,
-            reciprocal: c.reciprocal,
+            reciprocal: knn.reciprocal,
         };
-        let expr_graph = match c.knn_expr_scope {
+        let expr_graph = match knn.scope {
             KnnExprScope::Global => build_expression_knn(&proj.proj, knn_args)?,
             KnnExprScope::Within => {
                 let (component_of_cell, n_components) = connected_components(&graph);
@@ -418,6 +430,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         batch_membership,
         batch_effects,
         graph,
+        knn,
         spatial_graph,
         edge_source,
         cell_proj,
