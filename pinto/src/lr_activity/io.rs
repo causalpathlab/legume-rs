@@ -50,7 +50,13 @@ pub fn read_link_community(file_path: &str) -> anyhow::Result<Vec<EdgeRecord>> {
         .get("community")
         .ok_or_else(|| anyhow::anyhow!("community missing in {file_path}"))?;
     // Absent on a run that predates pair-graph augmentation, and on any run
-    // that did not augment. Both mean every pair is a spatial one.
+    // that did not augment — which, with `--knn-expr` defaulting off, is the
+    // common case rather than the exception. Both mean every pair is spatial.
+    //
+    // On an expression-mode run there is no adjacency at all, and every pair
+    // still reads as spatial here. That is deliberate: the coordinates such a
+    // run carries ARE the layout its pairs are adjacent in, and treating them
+    // as expression pairs would drop all of them from the test.
     let ki = name_to_idx.get("edge_kind").copied();
 
     let mut out = Vec::new();

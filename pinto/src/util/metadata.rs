@@ -31,6 +31,11 @@ pub struct PintoMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n_communities: Option<usize>,
 
+    /// Which graph the pairs came from. Absent on manifests written before
+    /// this was recorded, and on runs that build no graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphParams>,
+
     /// Present only when the input's feature axis carried
     /// `{gene}/count/{spliced,unspliced}` rows. Absent means "no channels",
     /// which is not the same as "no genes identified" — see
@@ -42,6 +47,78 @@ pub struct PintoMetadata {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub levels: Option<Vec<LevelInfo>>,
+}
+
+/// The k's that decided the cell-pair graph.
+///
+/// `n_edges` says how many pairs a run produced; this says why. Without it the
+/// only way to tell a spatial-only run from an augmented one is to open
+/// `coord_pairs.parquet` and notice that `edge_kind` is missing — the column is
+/// written only when a union happened. Recording the inputs makes a run
+/// reproducible from its manifest alone.
+///
+/// To replay: `knn_base` is `-k` when the run had `coord_file`, and
+/// `--knn-expr` when it did not — those are the same graph either way, since
+/// without coordinates the expression graph IS the base graph. `knn_expr` is
+/// the augmentation, and is meaningful only alongside a `coord_file`.
+///
+/// Every field is `#[serde(default)]`: this block gains fields over time, and
+/// a manifest written by an older build must stay readable rather than
+/// failing the WHOLE file — `PintoMetadata::backfill_output` swallows a read
+/// error at debug level, so a hard failure here is silent.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(default)]
+pub struct GraphParams {
+    /// Neighbours per cell in the base graph: spatial under `--coord`,
+    /// expression without it.
+    ///
+    /// `0` only ever means "an older writer omitted this" — no run builds a
+    /// 0-NN graph, and `resolve_knn` refuses one.
+    pub knn_base: usize,
+    /// Neighbours per cell in the expression graph unioned in. `0` means none,
+    /// which is the default under `--coord` and always the case without it.
+    /// So `knn_expr > 0` is the test for "this run was augmented" — there is
+    /// no second field saying so, because a stored copy could contradict this
+    /// one under `#[serde(default)]`.
+    ///
+    /// This is what was ASKED FOR, not what the union yielded: a scoped search
+    /// whose every component is smaller than k contributes no edges and still
+    /// reports a positive k here. Read `n_edges` against an unaugmented
+    /// control to learn what the union actually added.
+    pub knn_expr: usize,
+    /// `--knn-expr-scope`, as its CLI spelling. Absent when no expression
+    /// search ran — recording it there would assert a scoping decision the run
+    /// never made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knn_expr_scope: Option<String>,
+    /// `--reciprocal`: mutual-KNN instead of union-KNN. Applies to every graph
+    /// the run builds and changes the edge set, so two runs differing only in
+    /// this would otherwise emit identical blocks with different `n_edges`.
+    pub reciprocal: bool,
+}
+
+impl From<&crate::util::input::ResolvedKnn> for GraphParams {
+    /// Built from the RESOLVED spec, not the raw flags, so the manifest records
+    /// what the run did rather than what was typed. Those differ on every
+    /// defaulted run, which is most of them.
+    fn from(knn: &crate::util::input::ResolvedKnn) -> Self {
+        use clap::ValueEnum;
+        Self {
+            knn_base: knn.base,
+            knn_expr: knn.augment,
+            // Only recorded when a search actually ran. Writing it
+            // unconditionally would assert a scoping decision the run never
+            // made, which is the whole failure this struct exists to prevent.
+            knn_expr_scope: (knn.augment > 0).then(|| {
+                knn.scope
+                    .to_possible_value()
+                    .expect("KnnExprScope has no skipped variants")
+                    .get_name()
+                    .to_string()
+            }),
+            reciprocal: knn.reciprocal,
+        }
+    }
 }
 
 /// The base track for `delta` — see [`SpliceTrackInfo::delta_base`].
@@ -331,6 +408,10 @@ pub struct RunInputs<'a> {
     pub n_edges: usize,
     /// Number of communities (lc) / clusters (dsvd) — same K dim either way.
     pub k: usize,
+    /// Which graph produced `n_edges`. Not optional: every builder taking
+    /// `RunInputs` builds a graph. `pinto prop` re-cuts an existing pair table
+    /// and has none, but it does not go through here.
+    pub graph: GraphParams,
 }
 
 /// Helper to create metadata for `pinto lc` runs.
@@ -377,6 +458,7 @@ pub fn create_lc_metadata(
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
+        graph: Some(inputs.graph.clone()),
         splice,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
@@ -417,6 +499,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
+        graph: Some(inputs.graph.clone()),
         splice: None,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
@@ -460,6 +543,7 @@ pub fn create_cage_metadata(
         n_genes: inputs.n_genes,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
+        graph: Some(inputs.graph.clone()),
         splice,
         outputs: OutputFiles {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
@@ -511,6 +595,7 @@ pub fn create_prop_metadata(
         n_cells: n_vertices,
         n_genes: 0,
         n_edges: None,
+        graph: None,
         n_communities: Some(n_clusters),
         splice: None,
         outputs: OutputFiles {

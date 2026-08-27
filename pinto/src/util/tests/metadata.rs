@@ -22,6 +22,7 @@ fn metadata_roundtrip_lc() {
             n_genes: 18000,
             n_edges: 55555,
             k: 12,
+            graph: GraphParams::default(),
         },
         Some(DictMergeSummary {
             min_nnz: 1,
@@ -94,6 +95,7 @@ fn metadata_roundtrip_cage() {
             n_genes: 20000,
             n_edges: 5000,
             k: 16, // edge clusters
+            graph: GraphParams::default(),
         },
         true,
         Some(SpliceTrackInfo {
@@ -175,6 +177,7 @@ fn metadata_roundtrip_cage_no_batch() {
             n_genes: 200,
             n_edges: 300,
             k: 8,
+            graph: GraphParams::default(),
         },
         false,
         None,
@@ -203,6 +206,7 @@ fn metadata_roundtrip_lc_merge_no_collapse() {
             n_genes: 200,
             n_edges: 300,
             k: 8,
+            graph: GraphParams::default(),
         },
         None,
         None,
@@ -216,4 +220,100 @@ fn metadata_roundtrip_lc_merge_no_collapse() {
     assert_eq!(levels.len(), 1);
     assert_eq!(levels[0].tag, "final");
     assert!(back.outputs.dict_merge.is_none());
+}
+
+/// Round-trip one `GraphParams` through `create_lc_metadata` and the JSON.
+///
+/// The `TempDir` comes back with it: dropping it would delete the file the
+/// read went through, and the two tests below differ only in the block and the
+/// assertions, not the scaffolding.
+fn roundtrip_graph(graph: GraphParams) -> (tempfile::TempDir, GraphParams) {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path().join("run").to_string_lossy().to_string();
+    let data_files: Vec<Box<str>> = vec!["a.h5".into()];
+    let coord_cols: Vec<Box<str>> = vec!["x".into(), "y".into()];
+    let meta = create_lc_metadata(
+        &RunInputs {
+            prefix: &prefix,
+            data_files: &data_files,
+            coord_file: Some("a.tsv"),
+            coord_columns: &coord_cols,
+            n_cells: 1234,
+            n_genes: 18000,
+            n_edges: 55555,
+            k: 12,
+            graph,
+        },
+        None,
+        None,
+        &[0],
+    );
+    let path = dir.path().join("run.pinto.json");
+    meta.write(&path).unwrap();
+    let back = PintoMetadata::read(&path)
+        .unwrap()
+        .graph
+        .expect("graph parameters must round-trip");
+    (dir, back)
+}
+
+/// Which graph produced the pairs must survive into the manifest.
+///
+/// Without this the flipped `--knn-expr` default is unreproducible from
+/// artifacts: a run's pair count is recorded, but not the two k's that decided
+/// it, so the only way to tell an augmented run from a spatial-only one is to
+/// open the parquet and notice a missing column.
+#[test]
+fn metadata_records_the_graph_parameters() {
+    let (_dir, g) = roundtrip_graph(GraphParams {
+        knn_base: 5,
+        knn_expr: 7,
+        knn_expr_scope: Some("global".to_string()),
+        reciprocal: false,
+    });
+    assert_eq!(g.knn_base, 5);
+    assert_eq!(g.knn_expr, 7);
+    assert_eq!(g.knn_expr_scope.as_deref(), Some("global"));
+    assert!(g.knn_expr > 0, "this run unioned expression pairs in");
+}
+
+/// The default spatial run is the one that must be distinguishable. Its
+/// omitted scope has to survive `skip_serializing_if` and come back `None`
+/// rather than defaulting to a scope no search used.
+#[test]
+fn metadata_records_an_unaugmented_run_as_such() {
+    let (_dir, g) = roundtrip_graph(GraphParams {
+        knn_base: 5,
+        knn_expr: 0,
+        knn_expr_scope: None,
+        reciprocal: false,
+    });
+    assert_eq!(g.knn_expr, 0);
+    assert_eq!(g.knn_expr, 0, "and no union is recorded");
+    assert_eq!(g.knn_expr_scope, None, "no search ran, so no scope is claimed");
+}
+
+/// A `graph` block written by an older build must not sink the whole manifest.
+///
+/// This block gains fields over time, and `PintoMetadata::backfill_output`
+/// swallows a read error at debug level — so a missing-field failure here is
+/// silent, and `pinto plot --from` / `pinto lra --from` abort outright on a
+/// manifest they should have read.
+#[test]
+fn an_older_graph_block_still_deserializes() {
+    let json = r#"{
+        "command": "lc",
+        "version": "0.6.9",
+        "timestamp": "0",
+        "prefix": "run",
+        "n_cells": 10,
+        "n_genes": 10,
+        "graph": {"knn_base": 5, "knn_expr": 0, "augmented": false},
+        "outputs": {}
+    }"#;
+    let back: PintoMetadata = serde_json::from_str(json).expect("must stay readable");
+    let g = back.graph.expect("the block that was present must survive");
+    assert_eq!(g.knn_base, 5);
+    assert!(!g.reciprocal, "a field the writer never knew about defaults");
+    assert_eq!(g.knn_expr, 0, "no union, however the block was written");
 }

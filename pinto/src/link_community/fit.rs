@@ -67,6 +67,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         batch_membership,
         batch_effects: _,
         graph,
+        knn,
         spatial_graph,
         edge_source,
         cell_proj,
@@ -618,6 +619,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 n_genes,
                 n_edges: edges.len(),
                 k,
+                graph: (&knn).into(),
             },
             merge_summary,
             // `lc` runs no splice sampler, so the three `delta_*` fields stay
