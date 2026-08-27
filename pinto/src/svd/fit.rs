@@ -136,6 +136,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         batch_membership,
         batch_effects: batch_db,
         graph,
+        knn,
         spatial_graph,
         edge_source,
         cell_proj: _,
@@ -158,8 +159,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         //
         // Note this is a request, not a contract: preprocessing still takes one
         // when `--knn-expr` needs it for the expression graph, and that one is
-        // dropped here. Combining `--knn-expr` with coordinates therefore costs
-        // two projection passes.
+        // dropped here. Asking for `--knn-expr` alongside coordinates therefore
+        // costs two projection passes — but it is off by default, so the
+        // default path pays for one.
         cell_projection: false,
         feature_kind: None,
     })?;
@@ -342,6 +344,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             n_cells,
             n_genes: data_vec.num_rows(),
             n_edges: edges.len(),
+            graph: (&knn).into(),
             k: n_clusters,
         });
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
