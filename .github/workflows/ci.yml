@@ -12,12 +12,19 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Both fmt and clippy are PINNED, not floating on `stable`. A new rustfmt
+  # can reformat code it used to accept and a new clippy can add a lint, so
+  # `--check` / `-D warnings` on a floating toolchain turns main red with no
+  # code change -- which is exactly what happened on this workflow's first
+  # run, when clippy 1.98 introduced `chunks_exact_to_as_chunks`. Bumping
+  # these is a deliberate PR that also carries whatever fixes the new
+  # version demands.
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -28,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/system-deps
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
