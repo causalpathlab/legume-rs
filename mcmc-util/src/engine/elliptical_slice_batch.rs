@@ -110,7 +110,7 @@ pub fn elliptical_slice_batch<R: Rng>(
             break;
         }
         // Build this round's candidates for the items still searching.
-        x.truncate(0);
+        x.clear();
         for &i in &active {
             let i = i as usize;
             let a = angle[i];

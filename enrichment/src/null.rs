@@ -25,7 +25,7 @@ pub fn permute_indices(p: usize, batch_labels: Option<&[u32]>, rng: &mut SmallRn
             for (i, &b) in labels.iter().enumerate() {
                 by_batch.entry(b).or_default().push(i);
             }
-            for (_, idxs) in by_batch.iter_mut() {
+            for idxs in by_batch.values_mut() {
                 let mut shuffled = idxs.clone();
                 shuffled.shuffle(rng);
                 for (orig, new) in idxs.iter().zip(shuffled.iter()) {
