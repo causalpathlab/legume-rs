@@ -2,7 +2,7 @@
 name = "leiden"
 authors = ["10x Genomics"]
 license-file = "LICENSE"
-edition = "2021"
+edition.workspace = true
 include = ["src/**/*", "LICENSE", "README.md"]
 
 version = "0.1.1"

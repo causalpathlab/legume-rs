@@ -42,6 +42,7 @@ temp*
 *.zip
 *.gguf
 *.json
+*.safetensors
 
 # reference genome files
 *.fa
