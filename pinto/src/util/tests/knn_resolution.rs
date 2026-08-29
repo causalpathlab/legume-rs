@@ -229,7 +229,10 @@ fn graph_params_record_what_the_run_did() {
     ]);
     assert_eq!(augmented.knn_base, 5);
     assert_eq!(augmented.knn_expr, 7);
-    assert!(augmented.knn_expr > 0, "this run unioned expression pairs in");
+    assert!(
+        augmented.knn_expr > 0,
+        "this run unioned expression pairs in"
+    );
     assert_eq!(
         augmented.knn_expr_scope.as_deref(),
         Some("within"),
@@ -249,7 +252,6 @@ fn graph_params_record_what_the_run_did() {
     let expression = params(&["--knn-expr", "20"]);
     assert_eq!(expression.knn_base, 20);
     assert_eq!(expression.knn_expr, 0);
-
 
     assert!(params(&["-c", "coords.csv", "--reciprocal"]).reciprocal);
 }
