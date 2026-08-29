@@ -76,7 +76,7 @@ impl<P: EssParamSummary> McmcChain<P> {
         }
 
         for i in 0..d {
-            vals[i].sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+            vals[i].sort_unstable_by(|a, b| a.total_cmp(b));
             let idx = (q * (n - 1) as f32).clamp(0.0, (n - 1) as f32);
             let lo = idx.floor() as usize;
             let hi = idx.ceil() as usize;

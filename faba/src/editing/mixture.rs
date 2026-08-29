@@ -112,7 +112,7 @@ pub fn fit_gene_mixture(
         return None;
     }
     let mut sites: Vec<(f32, f32)> = by_pos.iter().map(|(&p, &w)| (p as f32, w)).collect();
-    sites.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    sites.sort_by(|a, b| a.0.total_cmp(&b.0));
     let xs: Vec<f32> = sites.iter().map(|&(p, _)| p).collect();
     let ys: Vec<f32> = sites.iter().map(|&(_, w)| w).collect();
 
@@ -155,9 +155,9 @@ pub fn fit_gene_mixture(
 
     // Optional safety cap: keep the highest-density centres.
     if params.max_k > 0 && centers.len() > params.max_k {
-        centers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        centers.sort_by(|a, b| b.1.total_cmp(&a.1));
         centers.truncate(params.max_k);
-        centers.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        centers.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
 
     let centers: Vec<f32> = centers.into_iter().map(|(p, _)| p).collect();
@@ -201,7 +201,7 @@ pub fn fit_gene_mixture(
         let best = row
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(c, _)| c)
             .unwrap_or(0);
         *counts.entry((o.cell_idx, best)).or_insert(0.0) += o.count;
@@ -247,7 +247,7 @@ fn fallback_bandwidth(sorted_positions: &[f32]) -> f32 {
         return 25.0;
     }
     let mut gaps: Vec<f32> = sorted_positions.windows(2).map(|w| w[1] - w[0]).collect();
-    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    gaps.sort_by(|a, b| a.total_cmp(b));
     let median = gaps[gaps.len() / 2];
     median.clamp(10.0, 200.0)
 }

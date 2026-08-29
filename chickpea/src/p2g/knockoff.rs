@@ -81,7 +81,7 @@ pub fn knockoff_threshold(w: &[f32], q: f64) -> f32 {
         .map(|x| x.abs())
         .filter(|&x| x > 0.0)
         .collect();
-    cands.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    cands.sort_by(|a, b| a.total_cmp(b));
     cands.dedup();
     for &t in &cands {
         let pos = w.iter().filter(|&&x| x.is_finite() && x >= t).count();

@@ -288,9 +288,11 @@ fn metadata_records_an_unaugmented_run_as_such() {
         knn_expr_scope: None,
         reciprocal: false,
     });
-    assert_eq!(g.knn_expr, 0);
     assert_eq!(g.knn_expr, 0, "and no union is recorded");
-    assert_eq!(g.knn_expr_scope, None, "no search ran, so no scope is claimed");
+    assert_eq!(
+        g.knn_expr_scope, None,
+        "no search ran, so no scope is claimed"
+    );
 }
 
 /// A `graph` block written by an older build must not sink the whole manifest.
@@ -314,6 +316,9 @@ fn an_older_graph_block_still_deserializes() {
     let back: PintoMetadata = serde_json::from_str(json).expect("must stay readable");
     let g = back.graph.expect("the block that was present must survive");
     assert_eq!(g.knn_base, 5);
-    assert!(!g.reciprocal, "a field the writer never knew about defaults");
+    assert!(
+        !g.reciprocal,
+        "a field the writer never knew about defaults"
+    );
     assert_eq!(g.knn_expr, 0, "no union, however the block was written");
 }

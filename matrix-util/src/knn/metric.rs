@@ -20,13 +20,12 @@ pub(super) fn l2_sq_kernel(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "L2 distance on mismatched dimensions");
 
     let mut acc = [0.0f32; LANES];
-    let mut a_chunks = a.chunks_exact(LANES);
-    let mut b_chunks = b.chunks_exact(LANES);
-    for (ac, bc) in a_chunks.by_ref().zip(b_chunks.by_ref()) {
-        // chunks_exact yields exactly LANES elements; the array cast lets LLVM
-        // drop per-index bounds checks and vectorise the lane loop.
-        let ac: &[f32; LANES] = ac.try_into().unwrap();
-        let bc: &[f32; LANES] = bc.try_into().unwrap();
+    // `as_chunks` hands back `&[[f32; LANES]]` plus the remainder directly, so
+    // LLVM sees fixed-size arrays -- no per-index bounds checks -- without the
+    // `chunks_exact` + `try_into().unwrap()` dance this replaced.
+    let (a_chunks, a_rest) = a.as_chunks::<LANES>();
+    let (b_chunks, b_rest) = b.as_chunks::<LANES>();
+    for (ac, bc) in a_chunks.iter().zip(b_chunks) {
         for l in 0..LANES {
             let d = ac[l] - bc[l];
             acc[l] += d * d;
@@ -36,7 +35,7 @@ pub(super) fn l2_sq_kernel(a: &[f32], b: &[f32]) -> f32 {
     // Horizontal reduction of the lanes; folds left, so the sum order (and the
     // f32 result) matches the hand-rolled index loop this replaced.
     let mut sum: f32 = acc.iter().sum();
-    for (x, y) in a_chunks.remainder().iter().zip(b_chunks.remainder()) {
+    for (x, y) in a_rest.iter().zip(b_rest) {
         let d = x - y;
         sum += d * d;
     }
