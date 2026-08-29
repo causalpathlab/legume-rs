@@ -147,7 +147,7 @@ fn select_best_prior(detailed: &BlockFitResultDetailed) -> BlockFitResult {
         .per_prior_elbos
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(i, _)| i)
         .unwrap_or(0);
     BlockFitResult {

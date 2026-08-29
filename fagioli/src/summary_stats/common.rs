@@ -698,7 +698,7 @@ pub fn report_top_hits(
             }
         }
         if !hits.is_empty() {
-            hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            hits.sort_by(|a, b| b.0.total_cmp(&a.0));
             let n_show = hits.len().min(5);
             for &(pip, snp_j, trait_k) in &hits[..n_show] {
                 let global_snp = block.snp_start + snp_j;

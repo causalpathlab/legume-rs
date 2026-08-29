@@ -31,7 +31,7 @@ pub fn fit_block_cavi(
         0.2
     } else {
         let mut sorted = prior_vars.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.total_cmp(b));
         sorted[sorted.len() / 2] as f64
     };
 

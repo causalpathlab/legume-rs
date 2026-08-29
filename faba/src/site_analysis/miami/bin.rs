@@ -77,8 +77,7 @@ pub fn robust_max(values: impl Iterator<Item = f64>) -> f64 {
         return 0.0;
     }
     let idx = (((v.len() - 1) as f64) * 0.99).round() as usize;
-    *v.select_nth_unstable_by(idx, |a, b| a.partial_cmp(b).unwrap())
-        .1
+    *v.select_nth_unstable_by(idx, |a, b| a.total_cmp(b)).1
 }
 
 #[cfg(test)]
