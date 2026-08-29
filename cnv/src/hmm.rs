@@ -120,7 +120,7 @@ impl CnvHmmParams {
                 all_vals.push(v);
             }
         }
-        all_vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        all_vals.sort_unstable_by(|a, b| a.total_cmp(b));
 
         let n = all_vals.len();
         let quantile = |p: f32| -> f32 {
@@ -141,7 +141,7 @@ impl CnvHmmParams {
         // Per-sample variance: MAD^2 scaled by 1/n_cells
         let median = quantile(0.5);
         let mut abs_devs: Vec<f32> = all_vals.iter().map(|&v| (v - median).abs()).collect();
-        abs_devs.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        abs_devs.sort_unstable_by(|a, b| a.total_cmp(b));
         let mad = if abs_devs.is_empty() {
             1.0
         } else {
@@ -337,7 +337,7 @@ pub fn viterbi_with_emit(params: &CnvHmmParams, log_emit: &DMatrix<f32>) -> Vec<
 
     let mut path = vec![0usize; n];
     path[n - 1] = (0..k)
-        .max_by(|&a, &b| delta[(n - 1, a)].partial_cmp(&delta[(n - 1, b)]).unwrap())
+        .max_by(|&a, &b| delta[(n - 1, a)].total_cmp(&delta[(n - 1, b)]))
         .unwrap();
     for t in (0..n - 1).rev() {
         path[t] = psi[t + 1][path[t + 1]];

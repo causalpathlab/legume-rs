@@ -6,6 +6,9 @@ use matrix_param::traits::*;
 use rayon::prelude::*;
 use special::Error;
 
+#[cfg(test)]
+mod tests;
+
 pub struct CocoaStat {
     y1_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample
     y0_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample

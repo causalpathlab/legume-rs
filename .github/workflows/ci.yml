@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep CI output readable and builds reproducible.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Both fmt and clippy are PINNED, not floating on `stable`, and pinned to
+  # 1.94 -- the toolchain this workspace is actually developed on. A new
+  # rustfmt can reformat code it used to accept and a new clippy can add
+  # lints, so `--check` / `-D warnings` on a floating toolchain turns main
+  # red with no code change. That is not hypothetical: this workflow's first
+  # run picked up clippy 1.98 and failed on lints no developer machine here
+  # can even see.
+  #
+  # Pinning to the local toolchain means CI reproduces exactly what
+  # `cargo clippy` shows you before you push. Bumping the pin is then a
+  # deliberate PR that carries the new version's lint fixes with it -- the
+  # 1.94 -> 1.98 delta is real work (useless_borrows_in_formatting,
+  # unnecessary_sort_by, for_kv_map, manual_clear, useless_conversion, and
+  # more in crates clippy never reached because it stops at the first
+  # failing one), and it deserves its own review rather than riding along
+  # with unrelated changes.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - uses: dtolnay/rust-toolchain@1.94
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --all-targets so test and bench code is linted too: the one warning
+      # this workspace had when the job was written lived in a test fixture,
+      # which a bare `cargo clippy` never looks at.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  # The Makefile builds every binary with optional `hdf5` / `cuda` / `metal`
+  # features, and a plain `cargo check` never touches those code paths -- so
+  # a `#[cfg(feature = "hdf5")]` block can rot indefinitely. This job checks
+  # the one feature a hosted runner can actually satisfy.
+  features:
+    name: check --features hdf5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+        with:
+          hdf5: 'true'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every installable binary forwards data-beans/hdf5; check them all.
+      - run: |
+          for crate in data-beans data-beans-sim faba senna pinto cocoa chickpea fagioli; do
+            echo "::group::$crate --features hdf5"
+            cargo check -p "$crate" --features hdf5
+            echo "::endgroup::"
+          done
+
+  # `rust-version` is the highest `rust-version` among resolved dependencies
+  # (1.91, from the zarrs stack). That is the floor the dependency graph
+  # imposes; this job checks whether the workspace's own sources also build
+  # there. Still non-blocking for one run -- when it goes green, delete the
+  # `continue-on-error` line to make it a real gate.
+  msrv:
+    name: MSRV (discovery, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace

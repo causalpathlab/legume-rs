@@ -33,7 +33,22 @@ description = "Library for Exploring Genomics Using Machine learning Essentials 
 repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
-version = "0.3.2"
+
+# Measured, not guessed: the highest `rust-version` among all resolved
+# dependencies. 1.91 comes from the zarrs stack that data-beans' .zarr
+# backend pulls in (zarrs, zarrs_codec, zarrs_chunk_grid, zarrs_data_type)
+# and from blusc. Recompute with:
+#
+#   cargo metadata --format-version 1 | jq -r '.packages[].rust_version'
+#
+# This is the floor the dependency graph imposes. Whether this workspace's
+# own sources need more is what the `msrv` CI job checks.
+rust-version = "1.91"
+
+# NOTE: there is deliberately no `version` key here. Every crate in this
+# workspace carries its own hand-maintained version (they range from 0.1.0 to
+# 0.13.x), and none use `version.workspace = true`. A workspace-wide version
+# would be dead config that reads as authoritative.
 
 [workspace.dependencies]
 
@@ -69,6 +84,8 @@ rustc-hash = "2.1"
 
 # Serialization / IO
 flate2 = "1.0.34"
+# arrow and parquet ship as one release train -- bump them together.
+arrow = "59"
 parquet = "59"
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }

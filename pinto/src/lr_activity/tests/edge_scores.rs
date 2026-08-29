@@ -12,6 +12,14 @@ use crate::util::common::*;
 
 type Edge = (usize, usize, u32, Option<Box<str>>);
 
+/// One ligand-receptor pair: (ligand name, receptor name, global ligand
+/// row, global receptor row).
+type LrPair = (Box<str>, Box<str>, usize, usize);
+
+/// What [`fixture_genes`] hands back: the pairs, the global-to-local gene
+/// row map, and the ligand/receptor count block.
+type GeneFixture = (Vec<LrPair>, HashMap<usize, usize>, Mat);
+
 /// Cells 0-2 sit in community 0, cells 3-5 in community 1. One bridging
 /// edge (2,3) sits out by construction.
 fn fixture_edges() -> Vec<Edge> {
@@ -27,11 +35,7 @@ fn fixture_edges() -> Vec<Edge> {
 
 /// L is global gene 10 (row 0 of x_lr), R is global gene 11 (row 1),
 /// and gene 12 (row 2) is never detected anywhere.
-fn fixture_genes() -> (
-    Vec<(Box<str>, Box<str>, usize, usize)>,
-    HashMap<usize, usize>,
-    Mat,
-) {
+fn fixture_genes() -> GeneFixture {
     let pairs = vec![("LIG1".into(), "REC1".into(), 10usize, 11usize)];
     let mut gene_to_local: HashMap<usize, usize> = HashMap::default();
     gene_to_local.insert(10, 0);
@@ -52,7 +56,7 @@ fn fixture_genes() -> (
 
 fn run_pairs(
     edges: &[Edge],
-    pairs: Vec<(Box<str>, Box<str>, usize, usize)>,
+    pairs: Vec<LrPair>,
 ) -> (Vec<crate::lr_activity::edge_scores::EdgeScoreRow>, usize) {
     let (_, gene_to_local, x_lr) = fixture_genes();
     let strata = CommunityStrata::from_edge_modes(edges, edges, 6);

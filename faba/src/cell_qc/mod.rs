@@ -308,7 +308,7 @@ fn ordmag_cutoff(counts: &CellCounts, p: &CellCallParams) -> f64 {
         return f64::INFINITY;
     }
     let mut totals: Vec<f64> = counts.cells.iter().map(|c| c.total).collect();
-    totals.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap()); // descending
+    totals.sort_unstable_by(|a, b| b.total_cmp(a)); // descending
 
     let top = p.expected_cells.min(totals.len());
     let idx = ((p.expected_cells as f64) * (1.0 - p.ordmag_quantile)).floor() as usize;
@@ -460,7 +460,7 @@ fn empty_drops_extend(
     }
     null_by_total
         .par_iter_mut()
-        .for_each(|v| v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap()));
+        .for_each(|v| v.sort_unstable_by(|a, b| a.total_cmp(b)));
 
     // p-value = (1 + #{null_LL <= obs_LL}) / (n_sims + 1): a real cell's profile
     // is unlike ambient, so its observed LL falls in the lower tail.

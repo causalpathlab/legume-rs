@@ -586,7 +586,7 @@ fn summarize(assignments: &[Assignment]) {
         *counts.entry(a.assigned_name.clone()).or_default() += 1;
     }
     let mut rows: Vec<(Box<str>, usize)> = counts.into_iter().collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (name, c) in rows {
         eprintln!("  {name:32} {c}");
     }

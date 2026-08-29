@@ -53,9 +53,9 @@ coitrees = { workspace = true }
 parquet = { workspace = true }
 
 rustc-hash = { workspace = true }
-dashmap = { version = "6.1.0", features = ["rayon"] }
+dashmap = { workspace = true }
 rust-htslib = { workspace = true }
-arrow = "59"
+arrow = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

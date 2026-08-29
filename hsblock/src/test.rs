@@ -348,7 +348,7 @@ fn test_diagnostic_fractional_weights() {
             }
         }
     }
-    all_weights.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all_weights.sort_by(|a, b| a.total_cmp(b));
     let min_w = all_weights.first().copied().unwrap_or(0.0);
     let max_w = all_weights.last().copied().unwrap_or(0.0);
     let mean_w = all_weights.iter().sum::<f64>() / all_weights.len().max(1) as f64;

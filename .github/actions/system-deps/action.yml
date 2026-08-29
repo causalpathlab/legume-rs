@@ -1,0 +1,44 @@
+name: System dependencies
+description: >
+  Install the C libraries this workspace links against. Kept in one place so
+  every job agrees on the list.
+
+inputs:
+  hdf5:
+    description: Also install libhdf5-dev (only the `hdf5` feature needs it).
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+
+        # Why each of these:
+        #   libopenblas-dev  ndarray is built with its `blas` feature, which
+        #                    pulls cblas-sys but NO blas-src -- nothing in the
+        #                    dependency graph declares the linkage, so a BLAS
+        #                    must be present on the host or the link fails.
+        #   rust-htslib      needs clang/libclang for bindgen plus the codec
+        #                    libraries htslib itself links (z, bz2, lzma) and
+        #                    curl/ssl for remote CRAM/BAM.
+        #   libz-sys         data-beans links zlib directly.
+        sudo apt-get install -y --no-install-recommends \
+          build-essential pkg-config cmake \
+          clang libclang-dev \
+          libopenblas-dev \
+          zlib1g-dev libbz2-dev liblzma-dev \
+          libcurl4-openssl-dev libssl-dev
+
+    - shell: bash
+      if: inputs.hdf5 == 'true'
+      run: |
+        set -euo pipefail
+        sudo apt-get install -y --no-install-recommends libhdf5-dev
+        # Debian splits HDF5 across prefixes, so HDF5_DIR can't be set to one
+        # directory. hdf5-metno-sys finds it via pkg-config instead -- exactly
+        # the "stage 2" path the Makefile documents.
+        pkg-config --exists hdf5-serial || pkg-config --exists hdf5
