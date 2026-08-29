@@ -1088,7 +1088,7 @@ pub fn apply_mito_filter(
     if fracs.is_empty() {
         return passing_cells;
     }
-    fracs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    fracs.sort_by(|a, b| a.total_cmp(b));
     let median = fracs[fracs.len() / 2];
     let mean = fracs.iter().sum::<f64>() / fracs.len() as f64;
     info!(

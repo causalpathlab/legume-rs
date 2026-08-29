@@ -73,7 +73,7 @@ impl SparseResult {
                 }
 
                 let mut order: Vec<usize> = (0..p).collect();
-                order.sort_unstable_by(|&a, &b| alpha_bar[b].partial_cmp(&alpha_bar[a]).unwrap());
+                order.sort_unstable_by(|&a, &b| alpha_bar[b].total_cmp(&alpha_bar[a]));
 
                 let mut cum = 0.0f32;
                 let mut indices = Vec::new();
@@ -220,7 +220,7 @@ mod tests {
             .pip
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .unwrap()
             .0;
 
@@ -267,7 +267,7 @@ mod tests {
             .pip
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .unwrap()
             .0;
 
@@ -314,7 +314,7 @@ mod tests {
 
         // Top 5 PIPs should include all causal SNPs
         let mut pip_order: Vec<(usize, f32)> = result.pip.iter().cloned().enumerate().collect();
-        pip_order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        pip_order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         let top5: Vec<usize> = pip_order.iter().take(5).map(|&(i, _)| i).collect();
         for &j in &causals {
             assert!(
@@ -470,7 +470,7 @@ mod tests {
             .pip
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .unwrap()
             .0;
 

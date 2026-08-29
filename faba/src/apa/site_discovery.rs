@@ -23,7 +23,7 @@ pub fn discover_sites_from_junctions(
         .map(|(pos, _)| pos as f32)
         .collect();
 
-    sites.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sites.sort_by(|a, b| a.total_cmp(b));
     sites
 }
 
@@ -59,7 +59,7 @@ pub fn discover_sites_from_coverage(
         .map(|i| hist_x[i])
         .collect();
 
-    sites.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sites.sort_by(|a, b| a.total_cmp(b));
     sites
 }
 

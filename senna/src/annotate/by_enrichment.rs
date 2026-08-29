@@ -754,7 +754,7 @@ fn display_annotation_histogram(annot: &Mat, annot_names: &[Box<str>]) {
             let (idx, val) = row
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
                 .unwrap();
             (*val, Some(idx))
         })

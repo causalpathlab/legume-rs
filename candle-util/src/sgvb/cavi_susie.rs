@@ -245,7 +245,7 @@ pub fn cavi_susie(x: &Tensor, y: &Tensor, params: &CaviSusieParams) -> Result<Ca
         if iter % 10 == 0 || iter == params.max_iter - 1 {
             let pip = compute_pip(&alpha, p);
             let mut top: Vec<(usize, f64)> = pip.iter().enumerate().map(|(j, &v)| (j, v)).collect();
-            top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            top.sort_by(|a, b| b.1.total_cmp(&a.1));
             let top_str: Vec<String> = top
                 .iter()
                 .take(5)

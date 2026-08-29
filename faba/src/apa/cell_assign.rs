@@ -78,7 +78,7 @@ pub fn assign_fragments_to_sites(
         let (best_k, _) = gamma
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .unwrap();
 
         // Skip noise component (k=0)

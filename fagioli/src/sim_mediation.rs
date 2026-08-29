@@ -554,7 +554,7 @@ pub fn sim_mediation(args: &SimMediationArgs) -> Result<()> {
         let mut scratch: Vec<f32> = liability.iter().copied().collect();
         let threshold_idx = (args.collider_selection_quantile * n as f64).floor() as usize;
         let threshold_idx = threshold_idx.min(n - 1);
-        scratch.select_nth_unstable_by(threshold_idx, |a, b| a.partial_cmp(b).unwrap());
+        scratch.select_nth_unstable_by(threshold_idx, |a, b| a.total_cmp(b));
         let threshold = scratch[threshold_idx];
 
         let selected_idx: Vec<usize> = (0..n).filter(|&i| liability[i] >= threshold).collect();

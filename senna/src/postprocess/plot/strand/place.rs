@@ -261,8 +261,7 @@ pub(super) fn robust_max(values: impl Iterator<Item = f32>) -> f32 {
         return 0.0;
     }
     let idx = (((v.len() - 1) as f32) * 0.99).round() as usize;
-    *v.select_nth_unstable_by(idx, |a, b| a.partial_cmp(b).unwrap())
-        .1
+    *v.select_nth_unstable_by(idx, |a, b| a.total_cmp(b)).1
 }
 
 /// Height of the bin a placement falls into, on its own strand.

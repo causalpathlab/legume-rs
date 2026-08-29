@@ -892,7 +892,7 @@ fn process_utr(
             .enumerate()
             .map(|(i, s)| (s, i))
             .collect();
-        sorted_cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        sorted_cands.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut counts = vec![0u32; candidate_sites.len()];
         for cl in &clusters {
             if let Some(pa) = cl.pa_site {

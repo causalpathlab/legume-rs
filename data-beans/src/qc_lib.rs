@@ -108,7 +108,7 @@ impl Default for QcConfig {
 /// Median of a non-empty slice via `O(n)` quickselect (reorders in place).
 fn median_in_place(xs: &mut [f32]) -> f32 {
     let mid = xs.len() / 2;
-    xs.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap());
+    xs.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
     xs[mid]
 }
 

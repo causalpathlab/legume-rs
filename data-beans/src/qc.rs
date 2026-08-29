@@ -459,7 +459,7 @@ pub fn print_nnz_summary(
 
     // Calculate median
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let median = if total > 0 {
         if total.is_multiple_of(2) {
             (sorted[total / 2 - 1] + sorted[total / 2]) / 2.0
