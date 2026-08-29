@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep CI output readable and builds reproducible.
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --all-targets so test and bench code is linted too: the one warning
+      # this workspace had when the job was written lived in a test fixture,
+      # which a bare `cargo clippy` never looks at.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  # The Makefile builds every binary with optional `hdf5` / `cuda` / `metal`
+  # features, and a plain `cargo check` never touches those code paths -- so
+  # a `#[cfg(feature = "hdf5")]` block can rot indefinitely. This job checks
+  # the one feature a hosted runner can actually satisfy.
+  features:
+    name: check --features hdf5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+        with:
+          hdf5: 'true'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every installable binary forwards data-beans/hdf5; check them all.
+      - run: |
+          for crate in data-beans data-beans-sim faba senna pinto cocoa chickpea fagioli; do
+            echo "::group::$crate --features hdf5"
+            cargo check -p "$crate" --features hdf5
+            echo "::endgroup::"
+          done
+
+  # `rust-version` in the workspace manifest is currently the floor implied by
+  # `resolver = "3"` (Cargo 1.84), NOT a verified MSRV -- nothing here has ever
+  # been built against it. This job exists to find the real number. It is
+  # non-blocking on purpose: when it goes green, raise `rust-version` to match
+  # and delete the `continue-on-error` line to make it a real gate.
+  msrv:
+    name: MSRV (discovery, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/system-deps
+      - uses: dtolnay/rust-toolchain@1.84
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace
