@@ -34,11 +34,16 @@ repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
 
-# Lower bound only: `resolver = "3"` below requires Cargo 1.84. No crate here
-# has been built against 1.84, so this is the floor we can prove, not a
-# verified workspace MSRV -- the `msrv` CI job exists to discover the real
-# number. Raise this to whatever that job reports, then make the job blocking.
-rust-version = "1.84"
+# Measured, not guessed: the highest `rust-version` among all resolved
+# dependencies. 1.91 comes from the zarrs stack that data-beans' .zarr
+# backend pulls in (zarrs, zarrs_codec, zarrs_chunk_grid, zarrs_data_type)
+# and from blusc. Recompute with:
+#
+#   cargo metadata --format-version 1 | jq -r '.packages[].rust_version'
+#
+# This is the floor the dependency graph imposes. Whether this workspace's
+# own sources need more is what the `msrv` CI job checks.
+rust-version = "1.91"
 
 # NOTE: there is deliberately no `version` key here. Every crate in this
 # workspace carries its own hand-maintained version (they range from 0.1.0 to
