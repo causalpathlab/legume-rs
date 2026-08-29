@@ -33,7 +33,17 @@ description = "Library for Exploring Genomics Using Machine learning Essentials 
 repository = "https://github.com/causalpathlab/legume-rs"
 homepage = "https://github.com/causalpathlab/legume-rs"
 edition = "2021"
-version = "0.3.2"
+
+# Lower bound only: `resolver = "3"` below requires Cargo 1.84. No crate here
+# has been built against 1.84, so this is the floor we can prove, not a
+# verified workspace MSRV -- the `msrv` CI job exists to discover the real
+# number. Raise this to whatever that job reports, then make the job blocking.
+rust-version = "1.84"
+
+# NOTE: there is deliberately no `version` key here. Every crate in this
+# workspace carries its own hand-maintained version (they range from 0.1.0 to
+# 0.13.x), and none use `version.workspace = true`. A workspace-wide version
+# would be dead config that reads as authoritative.
 
 [workspace.dependencies]
 
@@ -69,6 +79,8 @@ rustc-hash = "2.1"
 
 # Serialization / IO
 flate2 = "1.0.34"
+# arrow and parquet ship as one release train -- bump them together.
+arrow = "59"
 parquet = "59"
 regex = "1"
 serde = { version = "1.0", features = ["derive"] }
