@@ -158,17 +158,84 @@ pub(crate) fn evaluate_latent_masked(
     delta: Option<&Tensor>,
     gene_remap: Option<&[Option<usize>]>,
 ) -> anyhow::Result<Mat> {
-    let ntot = data_vec.num_columns();
+    evaluate_latent_masked_blocks(
+        data_vec.num_columns(),
+        encoder,
+        config,
+        gene_remap,
+        |(lb, ub)| {
+            let x_dn = data_vec.read_columns_csc(lb..ub)?;
+            let x0_nd = delta
+                .map(|delta_bm| {
+                    expand_delta_for_block(
+                        data_vec,
+                        delta_bm,
+                        config.adj_method,
+                        lb,
+                        ub,
+                        config.dev,
+                    )
+                })
+                .transpose()?;
+            Ok((x_dn, x0_nd))
+        },
+    )
+}
+
+/// [`evaluate_latent_masked`] on **dense rate rows** — the pseudobulk matrix the
+/// model was trained on, `[D × P]` with an optional per-row null `[P × D]`.
+///
+/// This is the diagnostic that separates a collapsed latent from a saturated
+/// encoder. Training rows are pseudobulk rates; inference rows are single-cell
+/// counts. If the same encoder is multi-topic on the rows it trained on and
+/// one-hot on cells, the model is fine and the *input* is out of distribution
+/// (see `--poisson-thin`); if it is one-hot on both, training collapsed and the
+/// anchor penalty is the lever.
+pub(crate) fn evaluate_latent_masked_rows(
+    x_dp: &Mat,
+    null_pd: Option<&Mat>,
+    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    config: &EvaluateLatentMaskedConfig,
+) -> anyhow::Result<Mat> {
+    if let Some(n) = null_pd {
+        anyhow::ensure!(
+            n.nrows() == x_dp.ncols() && n.ncols() == x_dp.nrows(),
+            "row null is {}×{}, expected {}×{} (rows × genes)",
+            n.nrows(),
+            n.ncols(),
+            x_dp.ncols(),
+            x_dp.nrows()
+        );
+    }
+    evaluate_latent_masked_blocks(x_dp.ncols(), encoder, config, None, |(lb, ub)| {
+        let block = x_dp.columns(lb, ub - lb).into_owned();
+        let x_dn = nalgebra_sparse::CscMatrix::from(&block);
+        let x0_nd = null_pd
+            .map(|n| n.rows(lb, ub - lb).into_owned().to_tensor(config.dev))
+            .transpose()?;
+        Ok((x_dn, x0_nd))
+    })
+}
+
+/// The shared block loop: `read` yields each block's `[D, n]` counts and its
+/// optional `[n, D]` null; everything after that is identical for every source.
+fn evaluate_latent_masked_blocks<R>(
+    ntot: usize,
+    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    config: &EvaluateLatentMaskedConfig,
+    gene_remap: Option<&[Option<usize>]>,
+    read: R,
+) -> anyhow::Result<Mat>
+where
+    R: Fn((usize, usize)) -> anyhow::Result<(nalgebra_sparse::CscMatrix<f32>, Option<Tensor>)>
+        + Send
+        + Sync,
+{
     let kk = IndexedEncoderT::dim_latent(encoder);
 
     process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
-        let (lb, ub) = block;
-        let x_dn = data_vec.read_columns_csc(lb..ub)?;
-        let x0_nd = delta
-            .map(|delta_bm| {
-                expand_delta_for_block(data_vec, delta_bm, config.adj_method, lb, ub, config.dev)
-            })
-            .transpose()?;
+        let (lb, _ub) = block;
+        let (x_dn, x0_nd) = read(block)?;
 
         let ctx = PerGeneContext {
             feature_mean: Some(config.feature_mean),

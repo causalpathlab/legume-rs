@@ -512,6 +512,42 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
+        help = "Train on Poisson draws from the pseudobulk rates, redrawn each epoch",
+        long_help = "Train on Poisson draws from the pseudobulk rates, not the rates themselves.\n\
+                     A fresh draw is taken every epoch.\n\
+                     The encoder then trains on rows shaped like the counts it sees at inference.\n\
+                     \n\
+                     In an A/B on a targeted panel the held-out imputation\n\
+                     likelihood improved, while the cell latent became SHARPER,\n\
+                     not softer.\n\
+                     \n\
+                     So this is a likelihood lever, not a fix for a one-hot latent.\n\
+                     The encoder is one-hot on whichever distribution it trained on.\n\
+                     Read the \"latent sharpness\" line after training either way.\n\
+                     \n\
+                     Off by default. Use --seed to reproduce a draw."
+    )]
+    poisson_thin: bool,
+
+    #[arg(
+        long,
+        default_value_t = 42,
+        value_name = "N",
+        help = "Seed for --poisson-thin's per-epoch draw",
+        long_help = "Seed for the stochastic training choices this subcommand owns.\n\
+                     Today that is exactly one: --poisson-thin's per-epoch draw.\n\
+                     \n\
+                     That draw is keyed on (seed, epoch, level, column),\n\
+                     so it is reproducible whatever the thread count.\n\
+                     \n\
+                     It does NOT make a run bit-reproducible on its own.\n\
+                     Parameter initialization and minibatch order come from the device RNG.\n\
+                     That sits outside this stream."
+    )]
+    seed: u64,
+
+    #[arg(
+        long,
         default_value_t = 512,
         help = "Encoder context window (top-K features per cell)",
         long_help = "Each cell keeps its top-K features by value.\n\
@@ -1074,6 +1110,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         likelihood: args.masked_likelihood.to_lib(),
         latent: head,
         kl_weight: args.kl_weight,
+        poisson_thin: args.poisson_thin,
+        seed: args.seed,
     };
 
     let scores = train_masked(
@@ -1222,6 +1260,44 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // Per-cell topic proportions. Every θ consumer below reads this rather
     // than re-deriving it, so the head's latent semantics are applied once.
     let theta_nk = crate::topic::model_metadata::latent_to_theta(&z_nk, head);
+
+    // Sharpness on the cells vs. on the pseudobulk rows the encoder was trained on.
+    // Same encoder, same weights; only the input distribution differs. In an A/B
+    // the encoder came out near one-hot on the rows it TRAINED on and softer on
+    // cells, and under `--poisson-thin` the pattern flipped with the training
+    // distribution. So a one-hot latent is a property of the trained model, not
+    // of feeding it single-cell counts — this line is what showed that, and it
+    // stays so the next hypothesis is tested the same way.
+    {
+        use crate::topic::eval_indexed::evaluate_latent_masked_rows;
+        let (eff_cells, max_cells) = latent_sharpness(&theta_nk);
+        let null_pd = finest_collapsed
+            .mu_residual
+            .as_ref()
+            .map(|r| r.posterior_mean().transpose());
+        let z_pk = evaluate_latent_masked_rows(
+            finest_collapsed.mu_observed.posterior_mean(),
+            null_pd.as_ref(),
+            &cpu_encoder,
+            &eval_config,
+        )?;
+        let theta_pk = crate::topic::model_metadata::latent_to_theta(&z_pk, head);
+        let (eff_pb, max_pb) = latent_sharpness(&theta_pk);
+        info!(
+            "Latent sharpness — cells: {eff_cells:.2} effective topics, mean max θ {max_cells:.3}; \
+             pseudobulk rows: {eff_pb:.2} effective topics, mean max θ {max_pb:.3} (K = {})",
+            theta_nk.ncols()
+        );
+        if (eff_pb - eff_cells).abs() > 0.5 * eff_pb.max(eff_cells) {
+            info!(
+                "the encoder's sharpness differs between the rows it trained on and single \
+                 cells; it is one-hot on whichever distribution it was trained on and softer \
+                 off it. A near one-hot latent on BOTH is a training-side property of the \
+                 masked objective, not an input mismatch — see --anchor-penalty, K, and the \
+                 head's KL weight."
+            );
+        }
+    }
 
     metadata.populate_theta_mean_and_save(&theta_nk, &args.out)?;
 

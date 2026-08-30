@@ -5,6 +5,7 @@
 //! both share — the ridge, the batch divisor, and the per-cell edge fold the
 //! engine calls back into.
 
+use candle_util::candle_core::Device;
 use matrix_util::dmatrix_util::adjust_by_poisson_ratio;
 use nalgebra::DMatrix;
 
@@ -23,7 +24,7 @@ pub use pseudobulk::PbLevelVelocity;
 /// identifies `θ`. The held-out-gene solve in [`crate::cell_projection`] still
 /// fits observed features only, and there this same λ *is* the only thing standing
 /// in for the partition.
-pub(crate) const PHASE2_RIDGE: f32 = 1.0;
+pub const PHASE2_RIDGE: f32 = 1.0;
 
 /// Phase-2 batch correction, mirroring `senna svd`/`topic`: divide each cell's
 /// counts by its finest-pseudobulk `μ_residual` fold-factor before the
@@ -68,4 +69,70 @@ pub(crate) fn cell_edges(
         Some(bd) => adjust_cell_edges(feats, counts, bd.cell_to_pb[cell as usize], bd.mu_residual),
         None => feats.iter().copied().zip(counts.iter().copied()).collect(),
     }
+}
+
+/////////////////////////////////////////
+// Projecting onto a frozen dictionary //
+/////////////////////////////////////////
+
+/// Inputs for [`project_onto_frozen`].
+pub struct FrozenProjectionArgs<'a> {
+    /// Frozen dictionary, row-major `[n_features × h]`.
+    pub feat: &'a [f32],
+    /// Frozen per-feature bias, `[n_features]`.
+    pub b_feat: &'a [f32],
+    pub h: usize,
+    /// Ridge on the node latent. Pass [`PHASE2_RIDGE`] to match training.
+    pub lambda: f64,
+    pub dev: &'a Device,
+}
+
+/// `(θ [n × h] row-major, b_node [n])`.
+pub struct FrozenProjection {
+    pub theta: Vec<f32>,
+    pub b_node: Vec<f32>,
+}
+
+/// Project nodes onto a **frozen** feature side with the same block SGD phase 2
+/// uses, for callers outside the fit — `senna predict` on a bge model.
+///
+/// # Why not the Newton solver in [`crate::cell_projection`]
+///
+/// A run's own `cell_embedding.parquet` comes from `project_cells_phase2`, i.e.
+/// this solver: Adam over cell blocks against the **full** log-partition. The
+/// Newton/IRLS path fits a node's observed features only and lets a ridge stand
+/// in for the partition, which is why the per-cell phase 2 was moved off it —
+/// `‖θ‖` runs away. Projecting held-out cells with the other solver would put
+/// train and test latents in different spaces and quietly confound any
+/// train/test comparison built on them. One estimator, both halves.
+///
+/// `gauge_fix` is **off** here, unlike training: the gauge shift is a
+/// (θ, b_feat) pair, and `b_feat` is frozen at predict time — re-centring θ
+/// alone would break its correspondence with the dictionary it is scored
+/// against.
+pub fn project_onto_frozen(
+    args: &FrozenProjectionArgs<'_>,
+    nodes: &[(u32, &[u32], &[f32])],
+    n_nodes: usize,
+) -> anyhow::Result<FrozenProjection> {
+    let out = block_sgd::project_cells(
+        &block_sgd::Phase2Input {
+            feat: args.feat,
+            b_feat: args.b_feat,
+            h: args.h,
+            n_cells: n_nodes,
+            lambda: args.lambda,
+            dev: args.dev,
+            label: "Projection",
+            gauge_fix: false,
+            joint: false,
+        },
+        nodes,
+        None,
+        None,
+    )?;
+    Ok(FrozenProjection {
+        theta: out.theta,
+        b_node: out.b_cell,
+    })
 }

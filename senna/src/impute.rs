@@ -116,7 +116,23 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     // 1. Run senna-predict on the new data → writes {out}.predict_tmp.latent.parquet
     let predict_prefix: Box<str> = format!("{}.predict_tmp", args.out).into();
     info!("Step 1/4: projecting new data through encoder (predict → {predict_prefix})");
+    // `predict` gained a bge arm, and a bge run's `{out}.latent.parquet` is an H-space
+    // embedding, not log θ — step 2 below would `softmax` it and match cells on a
+    // quantity that is not a proportion. Before that arm existed this failed loudly in
+    // `TopicModelMetadata::load`; keep it loud.
+    anyhow::ensure!(
+        crate::topic::model_metadata::resolve_run_kind(&args.model)?
+            != crate::run_manifest::RunKind::Bge,
+        "impute needs a topic-family model: {} is a `senna bge` run, whose latent is an \
+         H-dimensional embedding rather than topic proportions. Chain \
+         `bge --skip-etm` → `masked-topic --init-feature-embedding` and impute from that.",
+        args.model
+    );
+
     let predict_args = PredictArgs {
+        null_from: None,
+        ablate_features: None,
+        eval_features: None,
         data_files: args.data_files.clone(),
         model: args.model.clone(),
         out: predict_prefix.clone(),

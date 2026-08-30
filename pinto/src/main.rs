@@ -4,6 +4,7 @@ mod gene_network;
 mod link_community;
 mod lr_activity;
 mod plot;
+mod predict;
 mod propensity;
 mod svd;
 mod util;
@@ -20,6 +21,7 @@ use colored::Colorize;
 use link_community::fit::*;
 use lr_activity::{fit_srt_lr_activity, SrtLrActivityArgs};
 use plot::{make_srt_plot, SrtPlotArgs};
+use predict::{predict_cage, PredictArgs};
 use propensity::*;
 use svd::fit::*;
 
@@ -91,6 +93,12 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+// Measured, not assumed: this fires only since `cage` gained `--eval-block-file` — removing
+// the attribute reproduces the warning, and it did not fire before that flag. The variants
+// are clap arg structs, exactly one is constructed per process at startup, and clap's
+// `Subcommand` derive cannot take a boxed payload, so the layout cost the lint is about
+// does not exist here.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     #[command(
         alias = "dsvd",
@@ -410,6 +418,68 @@ enum Commands {
                       The cluster × term p/q/Q matrices ship alongside."
     )]
     Annotate(AnnotateArgs),
+
+    #[command(
+        about = "Apply a trained cage run to a new sample",
+        long_about = "Apply a trained `pinto cage` run to a new sample.\n\
+                      The gene side and the community dictionary transfer;\n\
+                      the geometry is rebuilt from the new sample's own coordinates.\n\n\
+                      TYPICAL USE -- score a trained run on a held-out half:\n\
+                      \x20 data-beans split data.zarr -o cv --test-frac 0.2 \\\n\
+                      \x20     --coord positions.csv --coord-columns 4,5 --grid 8\n\
+                      \x20 pinto cage cv.train.zarr.zip -o model -c positions.csv\n\
+                      \x20 pinto predict cv.test.zarr.zip --model model -o pred \\\n\
+                      \x20     -c positions.csv --null-from cv.train.zarr.zip \\\n\
+                      \x20     --eval-features panel.txt\n\n\
+                      ALWAYS pass --null-from the TRAINING half. Those per-gene\n\
+                      totals are not only the null: they are b_g, half of the\n\
+                      pair log-rate b_g + <e_g, e_uv>. Taken from the query the\n\
+                      prediction is anchored on the data being scored, and llik\n\
+                      is not held out at all. Same flag, same meaning as\n\
+                      `senna predict --null-from`; pass the same half to both.\n\n\
+                      Split by REGION (--coord/--grid), not at random: adjacent\n\
+                      cells are near-duplicates, so a random split leaves every\n\
+                      test cell ringed by training cells.\n\n\
+                      Pass the same --eval-features file to every arm, and to\n\
+                      `senna predict`, or the arms are graded on different genes.\n\n\
+                      Steps:\n\
+                      \x20 1. Preprocess the new data as cage does (graph, batches)\n\
+                      \x20 2. Align {model}.feature_embedding.parquet to its gene axis by name.\n\
+                      \x20    Genes without a model row are dropped, never seeded.\n\
+                      \x20 3. Project every cell pair onto the frozen dictionary, by Poisson MAP.\n\
+                      \x20 4. Assign each pair to the nearest trained link community.\n\
+                      \x20    The centroids are recomputed from {model}.latent\n\
+                      \x20    and {model}.link_community; a pair that matches none abstains.\n\
+                      \x20 5. Propensity is the incident-edge fraction, per community.\n\
+                      \x20    The cell embedding is the propensity-weighted centroid readout.\n\n\
+                      Outputs:\n\
+                      \x20 {out}.coord_pairs.parquet, {out}.latent.parquet,\n\
+                      \x20 {out}.link_community.parquet, {out}.propensity.parquet,\n\
+                      \x20 {out}.gene_community.parquet, {out}.cell_embedding.parquet,\n\
+                      \x20 {out}.pinto.json (command = predict), readable by\n\
+                      \x20 `pinto plot` and `pinto annotate` like a fitted run,\n\
+                      \x20 {out}.predictive.parquet, one row per cell PAIR.\n\n\
+                      SCORING. predictive.parquet holds llik, total,\n\
+                      llik_per_count, null_llik_per_count and, with\n\
+                      --eval-features, spearman and pearson_log1p.\n\n\
+                      The likelihood is a multinomial over the scored genes, so\n\
+                      llik_per_count is nats per observed count -- the SAME scale\n\
+                      `senna predict` puts in eval_llik_per_count. A pair pools\n\
+                      two cells, but nats per count does not care how many cells\n\
+                      went in. Rank on llik_per_count MINUS null_llik_per_count;\n\
+                      the null is gene abundance with no pair embedding.\n\n\
+                      Rows are PAIRS here and CELLS in senna, so the two tables\n\
+                      compare in aggregate, not row by row -- do not join them.\n\
+                      A pair with no counts carries NaN; filter total > 0 before\n\
+                      averaging a *_per_count column.\n\n\
+                      --eval-features restricts the likelihood AND the\n\
+                      correlations to those genes, which is what makes the number\n\
+                      comparable with senna's. It is off by default because a\n\
+                      pair-level correlation sorts the gene axis once per pair,\n\
+                      and a sample has far more pairs than cells. Pass the same\n\
+                      file to both commands."
+    )]
+    Predict(PredictArgs),
 
     #[command(
         alias = "p",
@@ -766,6 +836,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Annotate(args) => {
             run_annotate(args)?;
+        }
+        Commands::Predict(args) => {
+            predict_cage(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;
