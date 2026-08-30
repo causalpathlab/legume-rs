@@ -1,11 +1,13 @@
 use clap::Args;
 
 mod convert;
+mod split;
 mod squeeze;
 mod subsample;
 mod subset;
 
 pub use convert::*;
+pub use split::*;
 pub use squeeze::*;
 pub use subsample::*;
 pub use subset::*;

@@ -399,6 +399,31 @@ pub type EdgePair = (Box<str>, Box<str>);
 /// while `total_counts[c]` counts community `c`'s edges over EVERY pair,
 /// expression-similar ones included — a community's SIZE is a statement
 /// about the fit, not about what is drawable.
+/// Every pair's `community`, in file order, with **no filtering**.
+///
+/// [`read_link_community`] exists for plotting and keeps only spatial edges; anything
+/// that zips this table against `{prefix}.latent.parquet` positionally needs all of
+/// them, because that file has one row per pair regardless of edge kind.
+pub fn read_link_community_labels(path: &Path) -> anyhow::Result<Vec<i64>> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?;
+    let file = File::open(path_str)?;
+    let reader = SerializedFileReader::new(file)?;
+    let ci = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .iter()
+        .position(|f| f.name() == "community")
+        .ok_or_else(|| anyhow::anyhow!("{path:?}: missing community column"))?;
+    reader
+        .get_row_iter(None)?
+        .map(|row| row_int_like(&row?, ci))
+        .collect()
+}
+
 pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i64>, Vec<usize>)> {
     let path_str = path
         .to_str()

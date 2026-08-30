@@ -33,8 +33,9 @@ use crate::handlers::merging::{
     align_backends, run_merge_backend, run_merge_mtx, AlignDataArgs, MergeBackendArgs, MergeMtxArgs,
 };
 use crate::handlers::transformation::{
-    reorder_rows, run_convert, run_squeeze, run_subsample, subset_columns, subset_rows,
-    ConvertArgs, ReorderRowsArgs, RunSqueezeArgs, SubsampleArgs, SubsetColumnsArgs, SubsetRowsArgs,
+    reorder_rows, run_convert, run_split, run_squeeze, run_subsample, subset_columns, subset_rows,
+    ConvertArgs, ReorderRowsArgs, RunSqueezeArgs, SplitArgs, SubsampleArgs, SubsetColumnsArgs,
+    SubsetRowsArgs,
 };
 
 use clap::{Parser, Subcommand};
@@ -111,6 +112,9 @@ fn run(cli: &Cli) -> anyhow::Result<()> {
         }
         Commands::Subsample(args) => {
             run_subsample(args)?;
+        }
+        Commands::Split(args) => {
+            run_split(args)?;
         }
         Commands::Convert(args) => {
             run_convert(args)?;
@@ -413,6 +417,58 @@ enum Commands {
         visible_alias = "downsample"
     )]
     Subsample(SubsampleArgs),
+
+    #[command(
+        about = "Split cells into train/test halves, or into K cross-validation folds",
+        long_about = "Split a backend by CELL into disjoint halves, or into K folds.\n\
+                      \n\
+                      Every cell lands on exactly one side, and the halves together\n\
+                      cover the input. Only the selected columns are read,\n\
+                      so the cost scales with the output, not the input.\n\
+                      \n\
+                      On spatial data, split by REGION, not by cell.\n\
+                      A random cell split leaves each test cell ringed by training cells,\n\
+                      and adjacent cells are near-duplicates,\n\
+                      so the model has effectively seen the test cell already.\n\
+                      \x20 --coord positions.csv --coord-columns 4,5 --grid 8\n\
+                      tiles the coordinate bounding box 8x8 and assigns whole tiles,\n\
+                      so a test region gets a training boundary, not a training interior.\n\
+                      \n\
+                      --groups is the escape hatch for a non-geometric grouping:\n\
+                      donor, sample, slide. Two columns: cell name, group label.\n\
+                      Cells sharing a label stay on the same side.\n\
+                      \n\
+                      Outputs:\n\
+                      \x20 {out}.train.zarr.zip and {out}.test.zarr.zip\n\
+                      \x20 or {out}.fold{k}.train / .test under --folds\n\
+                      \n\
+                      THE WHOLE SCHEME, end to end:\n\
+                      \x20 1. data-beans split data.zarr -o cv --test-frac 0.2\n\
+                      \x20    (add --coord/--grid on spatial data; --folds K for CV)\n\
+                      \x20 2. train each method on cv.train.zarr.zip\n\
+                      \x20 3. senna predict cv.test.zarr.zip --model M -o pred\n\
+                      \x20    pinto predict  cv.test.zarr.zip --model M -o pred\n\
+                      \x20 4. compare pred.predictive.parquet across methods, on\n\
+                      \x20    eval_llik_per_count minus eval_null_llik_per_count\n\
+                      \x20    (pinto: llik_per_count minus null_llik_per_count).\n\
+                      \x20    NOT on the plain llik column -- that one is the\n\
+                      \x20    backend's own and differs by decoder. Filter the\n\
+                      \x20    count column > 0 first; empty rows carry NaN.\n\
+                      \n\
+                      To ablate features, do it at PREDICT, not here:\n\
+                      \x20 senna predict ... --ablate-features hide.txt\n\
+                      hides those genes from the encoder and scores on them, so\n\
+                      the score is a prediction rather than a reconstruction.\n\
+                      Ablating the TRAINING half instead (subsample --gene-frac)\n\
+                      answers a different question -- how much the dictionary\n\
+                      needed those genes -- and does NOT remove the advantage a\n\
+                      larger latent has when it is fitted on the cell it scores.\n\
+                      \n\
+                      Selection: with 10+ arms on one test half, the winner's\n\
+                      score is biased upward by the max over arms. Use --folds,\n\
+                      pick the arm on one fold, and report on another."
+    )]
+    Split(SplitArgs),
 
     #[command(
         about = "Convert a backend between on-disk formats (zarr <-> h5)",

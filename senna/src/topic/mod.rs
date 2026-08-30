@@ -8,6 +8,7 @@ pub(crate) mod freeze;
 pub(crate) mod masked_artifact;
 pub(crate) mod model_metadata;
 pub(crate) mod predict_common;
+pub(crate) mod predict_eval;
 pub(crate) mod train;
 pub(crate) mod train_joint;
 pub(crate) mod train_masked;

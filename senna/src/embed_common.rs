@@ -429,6 +429,45 @@ pub fn latent_to_theta(z_nk: &Mat, head: candle_util::vae::masked_topic::LatentH
     }
 }
 
+/// How concentrated a `[N, K]` proportion matrix is: `(mean effective topics,
+/// mean max weight)`. Effective topics is `exp(H(θ_row))` — `K` for a flat row,
+/// `1` for a one-hot one — so the pair reads directly: a mean near 1 with a max
+/// near 1 is a latent that has collapsed every cell onto a single topic.
+///
+/// Rows are renormalized before the entropy so a caller may pass unnormalized
+/// weights; a zero row contributes `(1, 0)`.
+#[must_use]
+pub fn latent_sharpness(theta_nk: &Mat) -> (f32, f32) {
+    let n = theta_nk.nrows();
+    if n == 0 {
+        return (f32::NAN, f32::NAN);
+    }
+    let (mut eff_sum, mut max_sum) = (0f64, 0f64);
+    for row in theta_nk.row_iter() {
+        // `f32::max` DISCARDS a NaN operand, so `NaN.max(1e-12)` is 1e-12 and one
+        // non-finite entry would turn the mean into `+inf` while still printing a
+        // plausible max-θ beside it. This is the diagnostic that distinguishes a
+        // collapsed latent from a diverged one, so a diverged one must say NaN.
+        let raw: f32 = row.iter().sum();
+        if !raw.is_finite() {
+            return (f32::NAN, f32::NAN);
+        }
+        let z: f32 = raw.max(1e-12);
+        let mut h = 0f64;
+        let mut m = 0f32;
+        for &v in row.iter() {
+            let p = v / z;
+            if p > 0.0 {
+                h -= f64::from(p) * f64::from(p).ln();
+            }
+            m = m.max(p);
+        }
+        eff_sum += h.exp();
+        max_sum += f64::from(m);
+    }
+    ((eff_sum / n as f64) as f32, (max_sum / n as f64) as f32)
+}
+
 /// In-place numerically-stable per-row softmax on a host matrix (`[N, K]` →
 /// each row `softmax`ed over K): subtract the row max, `exp`, then divide by
 /// the row sum. A degenerate row — all `-inf`, or carrying a `NaN` — has no
@@ -459,3 +498,7 @@ pub fn softmax_rows_inplace(m: &mut Mat) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "embed_common_tests.rs"]
+mod embed_common_tests;

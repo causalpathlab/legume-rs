@@ -55,7 +55,7 @@
 //!    which needs no partition *value*, only a normalized weight — so nothing
 //!    overflows and the ridge is the only thing setting scale.
 //! 2. **The partition is sampled.** Summing `Σ_{g ∈ G} μ_g` exactly costs
-//!    `E × steps × G × D` flops (~3.4 TFLOP on a Visium run); instead each step
+//!    `E × steps × G × D` flops, which is prohibitive at scale; instead each step
 //!    draws [`PairProjectionArgs::gene_sample`] genes ∝ `exp(b_g)`, the
 //!    empirical abundance. Because `exp(b_g)/q_g` is then constant, the
 //!    importance weights cancel and the estimator is exact at `e_uv = 0`,
@@ -101,6 +101,9 @@ use rand_distr::Distribution;
 /// Clamp on the linear predictor before `exp`. f32 overflows at 88; the same
 /// bound geu puts on every Poisson fit in the workspace.
 const SCORE_CLAMP: f32 = 30.0;
+
+mod scoring;
+pub use scoring::PairScore;
 
 /// Target per-step movement of the linear predictor `s`, used to auto-scale the
 /// learning rate. Adam's per-coordinate step is ≈ `lr`, so `Δs ≈ lr · D · rms(e)`
@@ -154,6 +157,11 @@ pub struct PairProjectionArgs {
     /// Pairs per read block. Bounds the count slab held at once: a block reads
     /// the columns of its ≤ `2 × pair_block` distinct endpoints.
     pub pair_block: usize,
+    /// Feature names the agreement correlations are computed over, from
+    /// `--eval-features`. `None` leaves them `NaN`: correlating over the whole
+    /// active axis means a sort per pair, and pairs outnumber cells by an order
+    /// of magnitude, so it is opt-in rather than a silent cost.
+    pub eval_features: Option<Vec<Box<str>>>,
 }
 
 impl Default for PairProjectionArgs {
@@ -162,6 +170,7 @@ impl Default for PairProjectionArgs {
             projection: ProjectionArgs::default(),
             seed: 42,
             pair_block: 8192,
+            eval_features: None,
         }
     }
 }
@@ -186,6 +195,8 @@ pub struct PairLatent {
     /// (clustering is on the composition), but it is the pair's log pooled
     /// depth and worth keeping for diagnostics.
     pub bias: Vec<f32>,
+    /// Held-out predictive score per pair, against the model's own abundance null.
+    pub scores: Vec<PairScore>,
 }
 
 /// The frozen side of the projection, flattened once for the inner loop.
@@ -291,9 +302,21 @@ impl PairDictionary {
         self.b.len()
     }
 
+    /// Map a `(global gene id, count)` profile onto the active-list positions the
+    /// solver and the scorer both index by. Genes with no counts anywhere are dropped:
+    /// they carry no information and are not on the partition axis.
+    #[must_use]
+    fn to_local(&self, obs: &[(u32, f32)]) -> Vec<(u32, f32)> {
+        obs.iter()
+            .filter_map(|&(g, n)| {
+                let l = *self.local_of_gene.get(g as usize)?;
+                (l != u32::MAX && n > 0.0).then_some((l, n))
+            })
+            .collect()
+    }
+
     /// Project one pair from its `(global gene id, pooled count)` profile.
-    /// Genes with no counts anywhere are dropped (they carry no information and
-    /// are not on the partition axis). Returns `(e_uv, β_uv)`.
+    /// Returns `(e_uv, β_uv)`.
     #[must_use]
     pub fn project(
         &self,
@@ -301,14 +324,7 @@ impl PairDictionary {
         args: &ProjectionArgs,
         rng: &mut SmallRng,
     ) -> (Vec<f32>, f32) {
-        let local: Vec<(u32, f32)> = obs
-            .iter()
-            .filter_map(|&(g, n)| {
-                let l = *self.local_of_gene.get(g as usize)?;
-                (l != u32::MAX && n > 0.0).then_some((l, n))
-            })
-            .collect();
-        solve_pair(&local, self, args, rng)
+        solve_pair(&self.to_local(obs), self, args, rng)
     }
 }
 
@@ -360,10 +376,25 @@ pub fn project_pairs(
         return Ok(PairLatent {
             latent: Mat::zeros(0, d),
             bias: Vec::new(),
+            scores: Vec::new(),
         });
     }
 
     let dict = PairDictionary::new(e_feat, gene_totals, n_cells)?;
+    let eval_axis: Option<Vec<u32>> = args.eval_features.as_ref().map(|names| {
+        let wanted: std::collections::HashSet<&str> =
+            names.iter().map(std::convert::AsRef::as_ref).collect();
+        let axis = dict.eval_axis(axis.gene_names(), &wanted);
+        info!(
+            "Agreement axis: {} of {} named features carry counts here",
+            axis.len(),
+            names.len()
+        );
+        axis
+    });
+    if eval_axis.as_ref().is_some_and(Vec::is_empty) {
+        anyhow::bail!("--eval-features matched no gene that carries counts in this sample");
+    }
     if dict.n_active() < n_genes {
         info!(
             "Pair projection: {} of {n_genes} genes carry counts; the rest sit out the partition",
@@ -387,6 +418,10 @@ pub fn project_pairs(
 
     let mut latent = Mat::zeros(n_pairs, d);
     let mut bias = vec![0f32; n_pairs];
+    // Scored in the same closure as the fit: the pooled profile and the θ it
+    // implies are both already in hand there, so this costs one exhaustive pass
+    // over the active axis and no extra column reads.
+    let mut scores = vec![PairScore::default(); n_pairs];
 
     let bar = new_progress_bar(n_pairs as u64).with_message("pair projection");
     for (lb, ub) in generate_minibatch_intervals(n_pairs, n_genes, Some(args.pair_block.max(1))) {
@@ -412,7 +447,7 @@ pub fn project_pairs(
             .map(|(local, &glob)| (glob, local))
             .collect();
 
-        let solved: Vec<(Vec<f32>, f32)> = chunk
+        let solved: Vec<((Vec<f32>, f32), PairScore)> = chunk
             .par_iter()
             .enumerate()
             .map(|(i, &(u, v))| {
@@ -432,21 +467,28 @@ pub fn project_pairs(
                 let mut rng = SmallRng::seed_from_u64(
                     args.seed ^ ((lb + i) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
-                dict.project(&obs, &args.projection, &mut rng)
+                let fit = dict.project(&obs, &args.projection, &mut rng);
+                let score = dict.score(&obs, &fit.0, eval_axis.as_deref());
+                (fit, score)
             })
             .collect();
         bar.inc(chunk.len() as u64);
 
-        for (i, (theta, beta)) in solved.into_iter().enumerate() {
+        for (i, ((theta, beta), score)) in solved.into_iter().enumerate() {
             for (j, &t) in theta.iter().enumerate() {
                 latent[(lb + i, j)] = t;
             }
             bias[lb + i] = beta;
+            scores[lb + i] = score;
         }
     }
     bar.finish_and_clear();
 
-    Ok(PairLatent { latent, bias })
+    Ok(PairLatent {
+        latent,
+        bias,
+        scores,
+    })
 }
 
 /// One block's count slab, as the CSC arrays themselves plus the cell → column
@@ -454,12 +496,15 @@ pub fn project_pairs(
 /// slice of them: `CscMatrix::col` hands back a view that owns the borrow, so
 /// slices taken from it cannot outlive the view.
 #[derive(Copy, Clone)]
-struct SlabCols<'a> {
-    offsets: &'a [usize],
-    rows: &'a [usize],
-    vals: &'a [f32],
-    col_of: &'a HashMap<usize, usize>,
+pub(crate) struct SlabCols<'a> {
+    pub offsets: &'a [usize],
+    pub rows: &'a [usize],
+    pub vals: &'a [f32],
+    pub col_of: &'a HashMap<usize, usize>,
 }
+
+/// One pair's `(index, count)` profile — row-keyed before pooling, gene-keyed after.
+type Profile = Vec<(u32, f32)>;
 
 /// Pooled `(row, count)` profile for one pair, sorted by row index.
 ///
@@ -478,6 +523,27 @@ fn pooled_profile(
     v: u32,
     batch: Option<PairBatchDivisor<'_>>,
 ) -> Vec<(u32, f32)> {
+    pooled_profile_routed(slab, u, v, batch, &|_, _| false).0
+}
+
+/// Pooled profile split into `(visible, held_out)` by a per-`(cell, row)` predicate.
+///
+/// The generalization of [`pooled_profile`], which is this with a predicate that never
+/// holds anything out. The split has to happen HERE, mid-merge, rather than on the pooled
+/// result: once the two endpoints' counts are summed there is no longer a cell to ask the
+/// predicate about, and `n_uv,g = x_gu + x_gv` may well be visible on one endpoint and held
+/// out on the other. Poisson counts are additive, so routing each endpoint's contribution
+/// independently leaves `visible + held == pooled` exactly.
+///
+/// Both outputs come out sorted by row with no duplicate row, the same contract
+/// [`pooled_profile`] has, so [`GeneAxis::pool_profile`] can fold either one.
+pub(crate) fn pooled_profile_routed(
+    slab: SlabCols<'_>,
+    u: u32,
+    v: u32,
+    batch: Option<PairBatchDivisor<'_>>,
+    is_held: &dyn Fn(u32, usize) -> bool,
+) -> (Profile, Profile) {
     // Both slices are borrowed straight out of the slab; only the batch-divided
     // path needs an owned copy of the values, and nothing ever needs to own the
     // row indices.
@@ -499,39 +565,71 @@ fn pooled_profile(
     let (lr, lv) = endpoint(u);
     let (rr, rv) = endpoint(v);
 
-    let mut out: Vec<(u32, f32)> = Vec::with_capacity(lr.len() + rr.len());
-    let mut push = |g: usize, x: f32| {
+    let mut visible: Vec<(u32, f32)> = Vec::with_capacity(lr.len() + rr.len());
+    let mut held: Vec<(u32, f32)> = Vec::new();
+    let push = |bucket: &mut Vec<(u32, f32)>, g: usize, x: f32| {
         if x > 0.0 {
-            out.push((g as u32, x));
+            bucket.push((g as u32, x));
         }
     };
     let (mut i, mut j) = (0usize, 0usize);
     while i < lr.len() && j < rr.len() {
         match lr[i].cmp(&rr[j]) {
             std::cmp::Ordering::Less => {
-                push(lr[i], lv[i]);
+                let b = if is_held(u, lr[i]) {
+                    &mut held
+                } else {
+                    &mut visible
+                };
+                push(b, lr[i], lv[i]);
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                push(rr[j], rv[j]);
+                let b = if is_held(v, rr[j]) {
+                    &mut held
+                } else {
+                    &mut visible
+                };
+                push(b, rr[j], rv[j]);
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
-                push(lr[i], lv[i] + rv[j]);
+                // The two endpoints are routed independently, so a row shared by both
+                // can land split across the buckets. Summing first and routing after
+                // would leak the held-out endpoint's count into the visible profile.
+                let (hu, hv) = (is_held(u, lr[i]), is_held(v, rr[j]));
+                if hu == hv {
+                    let b = if hu { &mut held } else { &mut visible };
+                    push(b, lr[i], lv[i] + rv[j]);
+                } else {
+                    let (held_val, vis_val) = if hu { (lv[i], rv[j]) } else { (rv[j], lv[i]) };
+                    push(&mut held, lr[i], held_val);
+                    push(&mut visible, lr[i], vis_val);
+                }
                 i += 1;
                 j += 1;
             }
         }
     }
     while i < lr.len() {
-        push(lr[i], lv[i]);
+        let b = if is_held(u, lr[i]) {
+            &mut held
+        } else {
+            &mut visible
+        };
+        push(b, lr[i], lv[i]);
         i += 1;
     }
     while j < rr.len() {
-        push(rr[j], rv[j]);
+        let b = if is_held(v, rr[j]) {
+            &mut held
+        } else {
+            &mut visible
+        };
+        push(b, rr[j], rv[j]);
         j += 1;
     }
-    out
+    (visible, held)
 }
 
 /// Adam on one pair's `e_uv`, with `β_uv` profiled out each step.

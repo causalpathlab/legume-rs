@@ -15,6 +15,7 @@ use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
+use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
 use rand::RngExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -144,6 +145,24 @@ pub struct MaskedTrainOpts {
     pub latent: LatentHead,
     /// KL weight `β` for the Gaussian latent. Ignored unless `latent == Gaussian`.
     pub kl_weight: f64,
+    /// Train on **Poisson draws** from the pseudobulk rate rows, redrawn every
+    /// epoch, instead of the rates themselves.
+    ///
+    /// The rows this trainer is handed are per-pseudobulk mean rates: dense and
+    /// smooth. What the encoder is fed at inference is a single cell's raw
+    /// counts: sparse integers. Drawing `x_pg ~ Poisson(μ_pg)` — a synthetic
+    /// cell at the pseudobulk's own average depth — makes the training rows
+    /// look like the inference rows, at the cost of one top-K repack per epoch.
+    ///
+    /// In an A/B on a targeted panel the cell-level held-out imputation
+    /// likelihood improved, while the cell latent became *sharper*. The encoder
+    /// is near one-hot on whatever distribution it trained on and softer off it,
+    /// so this is a likelihood lever, not a remedy for a one-hot latent.
+    pub poisson_thin: bool,
+    /// Seed for [`MaskedTrainOpts::poisson_thin`]'s per-epoch draw. Ignored
+    /// when thinning is off. The draw is keyed on `(seed, epoch, level,
+    /// column)`, so it is reproducible independently of the thread count.
+    pub seed: u64,
 }
 
 impl Default for MaskedTrainOpts {
@@ -153,8 +172,42 @@ impl Default for MaskedTrainOpts {
             likelihood: MaskedLikelihood::Nb,
             latent: LatentHead::Softmax,
             kl_weight: 1.0,
+            poisson_thin: false,
+            seed: 42,
         }
     }
+}
+
+/// One Poisson draw per entry of a rate matrix. Zero (or non-finite) rates draw 0.
+///
+/// Column-parallel with a thread-local RNG: this runs once per epoch over the
+/// whole `[P × D]` pseudobulk table, so it has to be a few milliseconds, not a
+/// second.
+fn poisson_draw(rates: &Mat, seed: u64) -> Mat {
+    use rand::{rngs::SmallRng, SeedableRng};
+    use rand_distr::{Distribution, Poisson};
+    use rayon::prelude::*;
+    let nrows = rates.nrows();
+    let mut out = rates.clone();
+    out.as_mut_slice()
+        .par_chunks_mut(nrows.max(1))
+        .enumerate()
+        .for_each(|(col_idx, col): (usize, &mut [f32])| {
+            // Seeded PER COLUMN, not per worker: rayon assigns chunks to threads in
+            // a scheduling-dependent order, so a thread-local `rand::rng()` would
+            // make the draw depend on the thread count and on nothing the user sets.
+            // Keying on the column index pins the output to `seed` alone.
+            let mut rng =
+                SmallRng::seed_from_u64(matrix_util::rand_util::mix_seed(seed, col_idx as u64));
+            for v in col.iter_mut() {
+                *v = if *v > 0.0 && v.is_finite() {
+                    Poisson::new(f64::from(*v)).map_or(0.0, |p| p.sample(&mut rng) as f32)
+                } else {
+                    0.0
+                };
+            }
+        });
+    out
 }
 
 /// Borrowed masked-encoder inputs: the per-cell packed top-K plus the
@@ -505,6 +558,35 @@ pub fn train_masked(
     };
 
     for epoch in 0..total_epochs {
+        // A fresh synthetic-cell draw per epoch, so no row is ever the same
+        // twice — the same role the Gamma jitter plays for the dense trainers,
+        // one level down (counts around the rate, not rates around the
+        // posterior). The null is the level's own and is not redrawn.
+        if opts.poisson_thin {
+            // Draw the INPUT and the TARGET separately, each from its own rates.
+            // They are not the same matrix: `sample_collapsed_data` sets the target
+            // to `mu_adjusted` — the batch-FREE rates — whenever a batch-aware
+            // collapse ran, and reusing the input draw for both would train the
+            // decoder to reproduce the batch effect the collapse just removed.
+            let thinned: Vec<(Mat, Option<&Mat>, Mat)> = level_data
+                .iter()
+                .enumerate()
+                .map(|(level, &(mixed, batch, target))| {
+                    let epoch_salt = (epoch as u64) << 32 | level as u64;
+                    let x = poisson_draw(mixed, mix_seed(opts.seed, epoch_salt));
+                    // A distinct salt, or input and target would be the same draw
+                    // wherever `mu_adjusted` is absent and both point at `mixed`.
+                    let y = if std::ptr::eq(mixed, target) {
+                        x.clone()
+                    } else {
+                        poisson_draw(target, mix_seed(opts.seed, !epoch_salt))
+                    };
+                    (x, batch, y)
+                })
+                .collect();
+            let refs: Vec<LevelData> = thinned.iter().map(|(x, b, y)| (x, *b, y)).collect();
+            data_loaders = build_indexed_loaders(&refs, config)?;
+        }
         for loader in data_loaders.iter_mut() {
             shuffle_and_precompute(loader, minibatch_size)?;
         }
@@ -595,3 +677,7 @@ pub fn train_masked(
         kl: kl_trace,
     })
 }
+
+#[cfg(test)]
+#[path = "masked_topic_tests.rs"]
+mod masked_topic_tests;
