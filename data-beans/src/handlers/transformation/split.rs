@@ -368,6 +368,9 @@ fn write_half(
         .num_rows()
         .ok_or_else(|| anyhow::anyhow!("backend has no `nrow`"))?;
 
+    // The slow step of the whole subcommand, and it is one opaque call — say what
+    // is happening before it, or a large half looks like a hang.
+    info!("Reading {} columns for {output}", selected_columns.len());
     let (_, _, triplets) = data.read_triplets_by_columns(selected_columns.to_vec())?;
     let nnz = triplets.len();
     let kept_column_names: Vec<Box<str>> = selected_columns

@@ -28,6 +28,7 @@
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
 use matrix_util::agreement::{pearson_log1p, spearman, CellAgreement};
+use rayon::prelude::*;
 
 /// Streaming accumulator: fed one cell at a time, over the evaluation genes.
 ///
@@ -42,7 +43,6 @@ pub(crate) struct PredictEval {
     keep_values: bool,
     obs: Vec<Vec<f32>>,
     pred: Vec<Vec<f32>>,
-    n_cells: usize,
 }
 
 impl PredictEval {
@@ -53,7 +53,6 @@ impl PredictEval {
             keep_values,
             obs: vec![Vec::new(); if keep_values { g } else { 0 }],
             pred: vec![Vec::new(); if keep_values { g } else { 0 }],
-            n_cells: 0,
         }
     }
 
@@ -63,23 +62,17 @@ impl PredictEval {
     }
 
     /// Score one cell. `obs_of` and `pred_of` read a value by MODEL gene index.
-    pub fn push_cell(
-        &mut self,
-        obs_of: impl Fn(usize) -> f32,
-        pred_of: impl Fn(usize) -> f32,
-    ) -> CellAgreement {
-        let o: Vec<f32> = self.eval_genes.iter().map(|&g| obs_of(g)).collect();
-        let p: Vec<f32> = self.eval_genes.iter().map(|&g| pred_of(g)).collect();
-        if self.keep_values {
-            for (i, (&a, &b)) in o.iter().zip(&p).enumerate() {
-                self.obs[i].push(a);
-                self.pred[i].push(b);
-            }
+    /// Store one cell's observed and predicted values for the across-cell axis.
+    ///
+    /// The correlations themselves are computed by the caller, in parallel — this
+    /// only folds the result in, so it stays a `&mut self` step in column order.
+    pub fn keep(&mut self, o: &[f32], p: &[f32]) {
+        if !self.keep_values {
+            return;
         }
-        self.n_cells += 1;
-        CellAgreement {
-            spearman: spearman(&o, &p),
-            pearson_log1p: pearson_log1p(&o, &p),
+        for (i, (&a, &b)) in o.iter().zip(p).enumerate() {
+            self.obs[i].push(a);
+            self.pred[i].push(b);
         }
     }
 
@@ -108,9 +101,16 @@ impl PredictEval {
 
 /// Resolve `--eval-features` to model-axis gene indices.
 ///
-/// A name absent from the model is skipped with a count, not an error: the
-/// whole point of a fixed evaluation set is that it is shared by methods whose
-/// axes differ, so some misses are expected.
+/// A name absent from the model is skipped with a count, not an error: the whole
+/// point of a fixed evaluation set is that it is shared by methods whose axes
+/// differ, so some misses are expected.
+///
+/// Parsing goes through [`read_name_list`] rather than a local `lines()` split,
+/// because this file is contractually the SAME file across every arm and both
+/// commands. Three hand-rolled parsers had already diverged — and since
+/// `--ablate-features` implies `--eval-features` on its own path, a file the two
+/// read differently would hide fewer genes from the encoder than the scorer
+/// grades on, which is the one direction that flatters a model.
 pub(crate) fn resolve_eval_genes(
     path: Option<&str>,
     gene_names: &[Box<str>],
@@ -118,21 +118,17 @@ pub(crate) fn resolve_eval_genes(
     let Some(path) = path else {
         return Ok((0..gene_names.len()).collect());
     };
-    let wanted = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?;
     let index: std::collections::HashMap<&str, usize> = gene_names
         .iter()
         .enumerate()
         .map(|(i, n)| (n.as_ref(), i))
         .collect();
-    let mut out = Vec::new();
+    let wanted = matrix_util::common_io::read_name_list(path)
+        .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?;
+    let mut out = Vec::with_capacity(wanted.len());
     let mut missing = 0usize;
-    for line in wanted.lines() {
-        let name = line.split(['\t', ',']).next().unwrap_or("").trim();
-        if name.is_empty() {
-            continue;
-        }
-        match index.get(name) {
+    for name in &wanted {
+        match index.get(name.as_ref()) {
             Some(&i) => out.push(i),
             None => missing += 1,
         }
@@ -141,15 +137,16 @@ pub(crate) fn resolve_eval_genes(
         !out.is_empty(),
         "{path}: none of the listed features are in this model's gene axis"
     );
+    if missing > 0 {
+        info!(
+            "{path}: {missing} of {} names are not in this model",
+            wanted.len()
+        );
+    }
     info!(
-        "Evaluating on {} of the model's {} genes from {path}{}",
+        "Scoring {} of {} model features",
         out.len(),
-        gene_names.len(),
-        if missing > 0 {
-            format!(" ({missing} listed names absent from this model)")
-        } else {
-            String::new()
-        }
+        gene_names.len()
     );
     Ok(out)
 }
@@ -281,18 +278,36 @@ pub(crate) fn empirical_composition(
         .with_message("null composition");
     for (lb, ub) in create_jobs(ntot, 0, Some(minibatch_size)) {
         let csc = data_vec.read_columns_csc(lb..ub)?;
-        for j in 0..csc.ncols() {
-            let col = csc.col(j);
-            for (&row_new, &val) in col.row_indices().iter().zip(col.values()) {
-                let row_train = match gene_remap {
-                    Some(rm) => rm.new_to_train[row_new],
-                    None => Some(row_new),
-                };
-                if let Some(r) = row_train {
-                    totals[r] += f64::from(val);
-                }
-            }
-        }
+        // Per-thread partial totals, summed at the end. A `[D_train]` f64 vector
+        // is a few hundred KB, so the fold's per-thread copy is cheap next to
+        // walking every non-zero of the block — and this pass runs twice per
+        // `predict` (the test-half ceiling and the training-half null).
+        let block: Vec<f64> = (0..csc.ncols())
+            .into_par_iter()
+            .fold(
+                || vec![0f64; d_train],
+                |mut acc, j| {
+                    let col = csc.col(j);
+                    for (&row_new, &val) in col.row_indices().iter().zip(col.values()) {
+                        let row_train = match gene_remap {
+                            Some(rm) => rm.new_to_train[row_new],
+                            None => Some(row_new),
+                        };
+                        if let Some(r) = row_train {
+                            acc[r] += f64::from(val);
+                        }
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0f64; d_train],
+                |mut a, b| {
+                    a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            );
+        totals.iter_mut().zip(&block).for_each(|(t, b)| *t += b);
         bar.inc(1);
     }
     bar.finish_and_clear();
@@ -319,6 +334,10 @@ pub(crate) fn normalize_over(totals: &[f64], eval_genes: &[usize], d_train: usiz
     }
     out
 }
+
+/// One cell's scored result: agreement, likelihood, its ceiling contribution,
+/// and the observed/predicted vectors the across-cell axis keeps.
+type ScoredCell = (CellAgreement, CellLlik, f64, Vec<f32>, Vec<f32>);
 
 pub(crate) struct EvalArgs<'a> {
     pub data_vec: &'a SparseIoVec,
@@ -364,74 +383,105 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
     // a null or compared across families. These two can.
     let (mut model_llik, mut null_llik, mut eval_count) = (0f64, 0f64, 0f64);
     let mut ceiling_llik = 0f64;
-    let partition = |c: &[f32]| -> f32 {
-        eval.genes()
-            .iter()
-            .map(|&g| c.get(g).copied().unwrap_or(0.0))
-            .sum::<f32>()
-            .max(1e-12)
-    };
-    let null_z = partition(&null_comp);
-    let ceiling_z = partition(&ceiling_comp);
-
     let bar = new_progress_bar(ntot.div_ceil(minibatch_size.max(1)) as u64)
         .with_message("scoring predictions");
+
+    // Per-gene log-probabilities, formed once. Both compositions are fixed for
+    // the run, so recomputing `ln(p/z)` inside the cell loop spent two divides
+    // and two transcendentals per (cell, expressed gene) on a value that never
+    // changes. Indexed by position within `eval.genes()`.
+    let log_table = |comp: &[f32]| -> Vec<f64> {
+        let z = eval
+            .genes()
+            .iter()
+            .map(|&g| comp.get(g).copied().unwrap_or(0.0))
+            .sum::<f32>()
+            .max(1e-12);
+        eval.genes()
+            .iter()
+            .map(|&g| f64::from((comp.get(g).copied().unwrap_or(0.0) / z).max(1e-12)).ln())
+            .collect()
+    };
+    let log_null = log_table(&null_comp);
+    let log_ceiling = log_table(&ceiling_comp);
+    let genes = eval.genes().to_vec();
+
     for (lb, ub) in create_jobs(ntot, 0, Some(minibatch_size)) {
         let csc = data_vec.read_columns_csc(lb..ub)?;
         let n_block = csc.ncols();
         let recon_dn = recon.block(data_vec, lb, n_block);
-        // Observed, densified onto the MODEL's gene axis so both sides are
-        // indexed the same way. Genes the model lacks are simply not evaluated.
-        let mut obs = vec![0f32; d_train];
-        for j in 0..n_block {
-            obs.iter_mut().for_each(|v| *v = 0.0);
-            let col = csc.col(j);
-            for (&row_new, &val) in col.row_indices().iter().zip(col.values()) {
-                let row_train = match gene_remap {
-                    Some(rm) => rm.new_to_train[row_new],
-                    None => Some(row_new),
-                };
-                if let Some(r) = row_train {
-                    obs[r] += val;
-                }
-            }
-            let recon_z: f32 = eval
-                .genes()
-                .iter()
-                .map(|&g| recon_dn[(g, j)])
-                .sum::<f32>()
-                .max(1e-12);
-            let (mut cell_count, mut cell_model, mut cell_null) = (0f64, 0f64, 0f64);
-            for &g in eval.genes() {
-                let x = f64::from(obs[g]);
-                if x <= 0.0 {
-                    continue;
-                }
-                cell_count += x;
-                cell_model += x * f64::from((recon_dn[(g, j)] / recon_z).max(1e-12)).ln();
-                let p0 = null_comp.get(g).copied().unwrap_or(0.0) / null_z;
-                cell_null += x * f64::from(p0.max(1e-12)).ln();
-                let pc = ceiling_comp.get(g).copied().unwrap_or(0.0) / ceiling_z;
-                ceiling_llik += x * f64::from(pc.max(1e-12)).ln();
-            }
-            eval_count += cell_count;
-            model_llik += cell_model;
-            null_llik += cell_null;
-            per_cell_llik.push(CellLlik {
-                model: cell_model as f32,
-                null: cell_null as f32,
-                count: cell_count as f32,
-            });
 
-            // Predicted COUNTS, not the raw rate: the composition over the
-            // evaluation genes, put back on the cell's own depth. `pearson_log1p`
-            // is not scale-invariant — log1p(c·p) is not an affine function of
-            // log1p(p), and the zeros anchor the low end — so feeding it a rate
-            // understates a good prediction and, worse, understates it by a
-            // different amount per family, since each one's rate carries its own
-            // arbitrary scale. On the count scale a perfect prediction scores 1.
-            let scale = cell_count as f32 / recon_z;
-            per_cell.push(eval.push_cell(|g| obs[g], |g| recon_dn[(g, j)] * scale));
+        // Scored in parallel across the block. Each cell is independent and the
+        // dominant term is two rank sorts over the evaluation axis — which by
+        // default is every model feature. The shared accumulators are folded
+        // afterwards in column order, so the result does not depend on how rayon
+        // schedules the work.
+        let scored: Vec<ScoredCell> = (0..n_block)
+            .into_par_iter()
+            .map(|j| {
+                // Observed, densified onto the MODEL's gene axis so both sides
+                // are indexed the same way. Genes the model lacks are not scored.
+                let mut obs = vec![0f32; d_train];
+                let col = csc.col(j);
+                for (&row_new, &val) in col.row_indices().iter().zip(col.values()) {
+                    let row_train = match gene_remap {
+                        Some(rm) => rm.new_to_train[row_new],
+                        None => Some(row_new),
+                    };
+                    if let Some(r) = row_train {
+                        obs[r] += val;
+                    }
+                }
+                let recon_z: f32 = genes
+                    .iter()
+                    .map(|&g| recon_dn[(g, j)])
+                    .sum::<f32>()
+                    .max(1e-12);
+
+                let (mut count, mut model, mut null, mut ceiling) = (0f64, 0f64, 0f64, 0f64);
+                for (i, &g) in genes.iter().enumerate() {
+                    let x = f64::from(obs[g]);
+                    if x <= 0.0 {
+                        continue;
+                    }
+                    count += x;
+                    model += x * f64::from((recon_dn[(g, j)] / recon_z).max(1e-12)).ln();
+                    null += x * log_null[i];
+                    ceiling += x * log_ceiling[i];
+                }
+
+                // Predicted COUNTS, not the raw rate: the composition over the
+                // evaluation genes, put back on the cell's own depth.
+                // `pearson_log1p` is not scale-invariant — log1p(c·p) is not an
+                // affine function of log1p(p), and the zeros anchor the low end —
+                // so feeding it a rate understates a good prediction and, worse,
+                // understates it by a different amount per family, since each
+                // one's rate carries its own arbitrary scale. On the count scale
+                // a perfect prediction scores 1.
+                let scale = count as f32 / recon_z;
+                let o: Vec<f32> = genes.iter().map(|&g| obs[g]).collect();
+                let p: Vec<f32> = genes.iter().map(|&g| recon_dn[(g, j)] * scale).collect();
+                let agree = CellAgreement {
+                    spearman: spearman(&o, &p),
+                    pearson_log1p: pearson_log1p(&o, &p),
+                };
+                let llik = CellLlik {
+                    model: model as f32,
+                    null: null as f32,
+                    count: count as f32,
+                };
+                (agree, llik, ceiling, o, p)
+            })
+            .collect();
+
+        for (agree, llik, ceiling, o, p) in scored {
+            eval_count += f64::from(llik.count);
+            model_llik += f64::from(llik.model);
+            null_llik += f64::from(llik.null);
+            ceiling_llik += ceiling;
+            per_cell.push(agree);
+            per_cell_llik.push(llik);
+            eval.keep(&o, &p);
         }
         bar.inc(1);
     }

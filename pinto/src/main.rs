@@ -459,15 +459,16 @@ enum Commands {
                       \x20 {out}.pinto.json (command = predict), readable by\n\
                       \x20 `pinto plot` and `pinto annotate` like a fitted run,\n\
                       \x20 {out}.predictive.parquet, one row per cell PAIR.\n\n\
-                      SCORING. predictive.parquet holds llik, total,\n\
-                      llik_per_count, null_llik_per_count and, with\n\
-                      --eval-features, spearman and pearson_log1p.\n\n\
+                      SCORING. predictive.parquet holds eval_llik, eval_count,\n\
+                      eval_llik_per_count, eval_null_llik_per_count and, with\n\
+                      --eval-features, spearman and pearson_log1p -- the same\n\
+                      column names `senna predict` uses for the same quantities,\n\
+                      so one script reads both.\n\n\
                       The likelihood is a multinomial over the scored genes, so\n\
-                      llik_per_count is nats per observed count -- the SAME scale\n\
-                      `senna predict` puts in eval_llik_per_count. A pair pools\n\
+                      eval_llik_per_count is nats per observed count. A pair pools\n\
                       two cells, but nats per count does not care how many cells\n\
-                      went in. Rank on llik_per_count MINUS null_llik_per_count;\n\
-                      the null is gene abundance with no pair embedding.\n\n\
+                      went in. Rank on eval_llik_per_count MINUS\n\
+                      eval_null_llik_per_count.\n\n\
                       Rows are PAIRS here and CELLS in senna, so the two tables\n\
                       compare in aggregate, not row by row -- do not join them.\n\
                       A pair with no counts carries NaN; filter total > 0 before\n\
