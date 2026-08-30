@@ -63,6 +63,7 @@ where
 }
 
 /// Mapping from new-data row indices to training gene positions.
+#[derive(Clone)]
 pub(crate) struct GeneRemap {
     /// For each new-data compact row, the training gene position (or None).
     pub new_to_train: Vec<Option<usize>>,

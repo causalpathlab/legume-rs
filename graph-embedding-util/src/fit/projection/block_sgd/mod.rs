@@ -264,7 +264,7 @@ pub(crate) struct GaugeShift {
 /// it (gem β-sharing) there are two: identity `θ` from the spliced edges with the
 /// partition over spliced rows, then — holding `θ` fixed — the velocity increment
 /// `δ` from the unspliced edges with the partition over unspliced rows. That
-/// mirrors [`crate::cell_projection::solve_cell_increment`]'s semantics exactly:
+/// mirrors the retired analytical increment's semantics exactly:
 /// `δ` is a directed residual in `θ`'s own frame, with its own throwaway
 /// intercept, not a second independent projection.
 pub(crate) fn project_cells(

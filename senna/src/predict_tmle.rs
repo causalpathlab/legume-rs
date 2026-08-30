@@ -17,7 +17,11 @@
 use crate::embed_common::*;
 use crate::topic::common::expand_delta_for_block;
 use crate::topic::eval::GeneRemap;
+use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
+use crate::topic::model_metadata::latent_to_theta;
 use crate::topic::predict_common::{nb_fisher_weight, solve_delta_from_sums, DeltaSums};
+use candle_util::encoder::IndexedEmbeddingEncoder;
+use candle_util::vae::masked_topic::LatentHead;
 
 use crate::logging::new_progress_bar;
 use candle_core::{Device, Tensor};
@@ -195,6 +199,128 @@ pub fn iterate_delta_dense(
             .fold(0.0_f32, f32::max);
         info!(
             "delta-iter {}/{n_iters}: max |Δδ| = {max_change:.4}, mean δ = {:.3}",
+            iter + 1,
+            delta_new.iter().sum::<f32>() / (delta_new.nrows() * n_batches) as f32,
+        );
+        delta = delta_new;
+    }
+    Ok(delta)
+}
+
+/// Per-batch obs / pred sums for one block, from an already-computed `θ` — the
+/// encoder-free half of [`accumulate_block_dense`].
+///
+/// Split out because the masked encoder cannot be run one block at a time from
+/// here: its inference entry point ([`evaluate_latent_masked`]) owns the packing of
+/// each block's top-K and streams the whole backend itself. So the masked
+/// iteration encodes everything once per round and then reduces the sums from the
+/// resulting `[N, K]`, rather than interleaving the two per block as the dense path
+/// does. Same estimator either way.
+fn accumulate_block_from_theta(
+    block: (usize, usize),
+    data_vec: &SparseIoVec,
+    theta_nk: &Mat,
+    gene_remap: Option<&GeneRemap>,
+    exp_beta_dk: &Mat,
+    phi: Option<&[f32]>,
+    n_batches: usize,
+) -> anyhow::Result<DeltaSums> {
+    let (lb, ub) = block;
+    let d_train = exp_beta_dk.nrows();
+    let csc = data_vec.read_columns_csc(lb..ub)?;
+    let x_dn_full = remap_csc_to_dense_full(&csc, gene_remap, d_train);
+    let n_block = x_dn_full.ncols();
+
+    let pred_dn: Mat = exp_beta_dk * theta_nk.rows(lb, n_block).transpose();
+    let lib_per_cell: Vec<f32> = (0..n_block)
+        .map(|j| csc.col(j).values().iter().sum())
+        .collect();
+    let batch_ids = data_vec.get_batch_membership(lb..ub);
+
+    let mut sums = DeltaSums::zeros(d_train, n_batches);
+    for j in 0..n_block {
+        let b = batch_ids[j];
+        let lib_j = lib_per_cell[j];
+        for d in 0..d_train {
+            let mu = lib_j * pred_dn[(d, j)];
+            let w = nb_fisher_weight(phi, mu, d);
+            sums.pb_obs[(d, b)] += w * x_dn_full[(d, j)];
+            sums.pb_pred[(d, b)] += w * mu;
+        }
+    }
+    Ok(sums)
+}
+
+/// Iterative held-out δ for the masked / indexed families — the counterpart of
+/// [`iterate_delta_dense`].
+///
+/// Per round: encode every query cell with the current δ as the encoder's batch
+/// null (exactly how the fit-time latent write feeds it, so the two agree), map
+/// the latent to proportions per `head`, and refit `δ[d,b] = Σ_obs / Σ_pred` per
+/// batch. `δ` is `[D_train, B]` in and out; the encoder wants `[B, D_train]`, which
+/// is the transpose taken here.
+///
+/// Before this existed the masked path passed no null at all, so a multi-batch
+/// masked model was fed `x / μ̄` at predict where training fed it `x / (null · μ̄)`
+/// — a second train/inference shift on top of the scale one, and one that
+/// `--batch-files` looked like it was correcting.
+#[allow(clippy::too_many_arguments)]
+pub fn iterate_delta_masked(
+    n_iters: usize,
+    initial_delta: Mat,
+    data_vec: &SparseIoVec,
+    encoder: &IndexedEmbeddingEncoder,
+    eval_config: &EvaluateLatentMaskedConfig<'_>,
+    head: LatentHead,
+    gene_remap: Option<&GeneRemap>,
+    beta_dk_full: &Mat,
+    phi: Option<&[f32]>,
+) -> anyhow::Result<Mat> {
+    let mut delta = initial_delta;
+    let n_batches = delta.ncols();
+    let exp_beta_dk = beta_dk_full.map(f32::exp);
+    let ntot = data_vec.num_columns();
+    let remap_slice = gene_remap.map(|r| r.new_to_train.as_slice());
+
+    for iter in 0..n_iters {
+        let delta_bd = delta
+            .to_tensor(eval_config.dev)?
+            .transpose(0, 1)?
+            .contiguous()?;
+        let z_nk =
+            evaluate_latent_masked(data_vec, encoder, eval_config, Some(&delta_bd), remap_slice)?;
+        let theta_nk = latent_to_theta(&z_nk, head);
+
+        let jobs = create_jobs(ntot, 0, Some(eval_config.minibatch_size));
+        let njobs = jobs.len() as u64;
+        let chunk_sums: Vec<DeltaSums> = jobs
+            .par_iter()
+            .progress_with(new_progress_bar(njobs))
+            .map(|&block| {
+                accumulate_block_from_theta(
+                    block,
+                    data_vec,
+                    &theta_nk,
+                    gene_remap,
+                    &exp_beta_dk,
+                    phi,
+                    n_batches,
+                )
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut total = DeltaSums::zeros(beta_dk_full.nrows(), n_batches);
+        for s in &chunk_sums {
+            total.merge_into(s);
+        }
+        let delta_new = solve_delta_from_sums(&total);
+
+        let max_change = delta_new
+            .iter()
+            .zip(delta.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        info!(
+            "delta-iter {}/{n_iters} (masked): max |Δδ| = {max_change:.4}, mean δ = {:.3}",
             iter + 1,
             delta_new.iter().sum::<f32>() / (delta_new.nrows() * n_batches) as f32,
         );
