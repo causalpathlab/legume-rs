@@ -566,14 +566,77 @@ enum Commands {
     #[command(
         about = "Apply a trained topic / masked-topic / vae model to held-out data.",
         long_about = "Latent inference on a separate backend file.\n\
-                      It also reports per-cell predictive log-likelihood.\n\
+                      \n\
+                      TYPICAL USE -- score a trained model on a held-out half:\n\
+                      \x20 data-beans split data.zarr -o cv --test-frac 0.2 \\\n\
+                      \x20     --coord positions.csv --coord-columns 4,5 --grid 8\n\
+                      \x20 senna topic cv.train.zarr.zip -o model --adj-method batch\n\
+                      \x20 senna predict cv.test.zarr.zip --model model -o pred \\\n\
+                      \x20     --null-from cv.train.zarr.zip --eval-features panel.txt\n\
+                      \n\
+                      Three rules make runs comparable to each other:\n\
+                      \x20 1. --null-from takes the TRAINING half. It defines the floor\n\
+                      \x20    every arm is scored against. Without it the null is built\n\
+                      \x20    from the test half, which knows that half's own marginal\n\
+                      \x20    and is an upper reference rather than a floor.\n\
+                      \x20 2. --eval-features must be the SAME file for every arm, or\n\
+                      \x20    each model is graded on its own curriculum.\n\
+                      \x20 3. Train with --adj-method batch. Under the default (residual)\n\
+                      \x20    predict warns and the latent may be biased.\n\
                       \n\
                       Dense and indexed models are auto-dispatched via model.json.\n\
                       Gene-set misalignment is handled by flexible name matching.\n\
                       Per-batch delta is re-estimated from the frozen dictionary.\n\
                       \n\
                       Latent modes are encoder-only (the default), encoder+refine,\n\
-                      and decoder-only."
+                      and decoder-only.\n\
+                      \n\
+                      SCORING. {out}.predictive.parquet holds, per cell:\n\
+                      \x20 llik, total, llik_per_count   the backend's OWN likelihood.\n\
+                      \x20    Its scale is decoder-dependent (multinom is Fisher-weighted,\n\
+                      \x20    nb is a density). Do NOT compare it across families.\n\
+                      \x20 spearman, pearson_log1p       observed vs predicted, per cell\n\
+                      \x20    across genes.\n\
+                      \x20 eval_count                    counts on the scored genes\n\
+                      \x20 eval_llik_per_count           multinomial nats/count\n\
+                      \x20 eval_null_llik_per_count      the same, for a null that gives\n\
+                      \x20    every cell the test half's OBSERVED composition.\n\
+                      \x20    It does not depend on the model, so every arm scored\n\
+                      \x20    on the same test half and genes shares one floor.\n\
+                      The last four are the comparable ones. Rank methods on\n\
+                      eval_llik_per_count MINUS eval_null_llik_per_count: the absolute\n\
+                      value is set by how many genes the multinomial spreads over, so\n\
+                      only the gain over the null means anything on its own.\n\
+                      \n\
+                      A cell with no counts on the scored genes has no per-count score\n\
+                      and carries NaN. Filter eval_count > 0 (or total > 0) before\n\
+                      averaging any *_per_count column -- some engines skip NaN, others\n\
+                      propagate it through the mean.\n\
+                      \n\
+                      IMPORTANT. By default the test cell's latent is fitted from that\n\
+                      same cell's counts, so the score measures reconstruction with K\n\
+                      free parameters per cell, and a model with a bigger latent wins on\n\
+                      capacity rather than on the quality of its dictionary. To compare\n\
+                      models of different latent size, use --ablate-features: the named\n\
+                      genes are hidden from the encoder and scored on. They never enter\n\
+                      the fit, so extra dimensions stop buying accuracy.\n\
+                      \n\
+                      \x20 # hide a random 30% of the model's genes, once, for every arm\n\
+                      \x20 shuf -n $(( $(wc -l < genes.txt) * 3 / 10 )) genes.txt > hide.txt\n\
+                      \x20 senna predict cv.test.zarr.zip --model m --ablate-features hide.txt -o p\n\
+                      \x20\n\
+                      Use the SAME hide.txt for every arm, or they are not comparable.\n\
+                      \n\
+                      --eval-features pins the scored gene set without hiding anything.\n\
+                      Pass the same file to every arm so models trained on different\n\
+                      gene axes are graded on the same genes; it also enables\n\
+                      {out}.gene_agreement.parquet, the per-gene correlation ACROSS cells.\n\
+                      \n\
+                      All families are scored the same way, including bge: only the\n\
+                      rate differs (a topic model mixes dictionaries, bge takes\n\
+                      exp(b + rho.theta)), and everything after it -- the null, both\n\
+                      correlation axes, the nats/count -- is one shared formula.\n\
+                      The backend llik column is NOT shared; use the Agreement line."
     )]
     Predict(PredictArgs),
 

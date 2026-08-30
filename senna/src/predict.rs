@@ -22,6 +22,9 @@ use crate::topic::model_metadata::{
 use crate::topic::predict_common::{
     decoder_only_inference_dense, estimate_delta, predictive_llik_dense, LatentMode,
 };
+use crate::topic::predict_eval::{
+    evaluate_predictions, resolve_eval_genes, EvalArgs, EvalOutcome, Reconstruction,
+};
 
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
@@ -147,7 +150,8 @@ pub struct PredictArgs {
         help = "Iterative TMLE rounds for held-out batch δ (0 = legacy single-pass plug-in)",
         long_help = "Per iteration: encode all cells with current δ → θ̂;\n\
                      refit δ as Σ_obs / Σ_pred per batch.\n\
-                     NB-Fisher-weighted for nb / nbmixture decoders,\n\
+                     Applies to the dense topic family and to every masked head.\n\
+                     NB-Fisher-weighted for nb / nbmixture / masked decoders,\n\
                      using the saved {model}.dispersion.parquet when present.\n\
                      Default 3 typically converges;\n\
                      0 reverts to the legacy 1/K-marginal plug-in."
@@ -207,6 +211,53 @@ pub struct PredictArgs {
     )]
     pub(crate) residual_threshold: f32,
 
+    /// Restrict the agreement metrics to these features (one name per line).
+    ///
+    /// Without it every gene the model knows is scored, which makes two models
+    /// trained on different gene axes incomparable — each is graded on its own
+    /// curriculum. Pass the same file to every arm of a benchmark and the
+    /// correlations become comparable numbers. It is also what makes the
+    /// per-gene table affordable: that table has to hold every scored gene's
+    /// values across all cells, so it is written only when this is given.
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Score the agreement metrics on these features only (one name per line)"
+    )]
+    pub(crate) eval_features: Option<Box<str>>,
+
+    /// Hide these features from the encoder, then score on exactly them.
+    ///
+    /// Without it the test cell's latent is fitted from that same cell's counts,
+    /// so the score measures reconstruction with K free parameters per cell —
+    /// and a model with a larger latent wins on capacity rather than on the
+    /// quality of its dictionary. Hiding a slice of the features breaks that:
+    /// the scored genes never enter the fit, so extra latent dimensions stop
+    /// buying accuracy and the number becomes a genuine prediction. Implies
+    /// `--eval-features` on the same file unless that is given separately.
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Hide these features from the encoder and score on exactly them (one name per line)"
+    )]
+    pub(crate) ablate_features: Option<Box<str>>,
+
+    /// Training data, read once to build the null every arm is scored against.
+    ///
+    /// The floor is the count-weighted gene composition of this data — what a
+    /// predictor with no cell-specific information would say. It has to come from
+    /// the TRAINING half: a null built from the test half knows that half's exact
+    /// marginal and is an oracle, not a floor. Without this flag the test half is
+    /// used and a warning says so, because a silently different floor makes two
+    /// runs quietly incomparable.
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 1..,
+        help = "Training data whose gene composition is the null (pass the train half)"
+    )]
+    pub(crate) null_from: Option<Vec<Box<str>>>,
+
     #[arg(
         long,
         value_enum,
@@ -258,6 +309,16 @@ impl PredictArgs {
 pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
+    // Resolve the family BEFORE reaching for `{model}.model.json`. A `senna bge` run never
+    // writes one (`has_model: false`), so opening it first turned "predict on a bge run"
+    // into a bare file-not-found naming a path the user never typed — the same confusion
+    // `BgeEmbedding::open` exists to prevent, reintroduced one level up.
+    if crate::topic::model_metadata::resolve_run_kind(&args.model)?
+        == crate::run_manifest::RunKind::Bge
+    {
+        return predict_bge(args);
+    }
+
     let metadata = TopicModelMetadata::load(&args.model)?;
     info!(
         "Loaded model metadata: type={}, K={}, D_full={}, D_enc={}",
@@ -300,6 +361,76 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Score a held-out backend against a `senna bge` run.
+///
+/// bge's whole gene-side model is `(ρ, b_feat)` — there is no checkpoint, no encoder and no
+/// decoder — so this is the projection path and nothing else: fit each query cell against
+/// the frozen ρ by Poisson MAP, then score it with the profile (multinomial) likelihood.
+/// `--decoder-only` and `--refine-steps` have nothing to act on here and are rejected
+/// rather than silently ignored, so a command line that asks for refinement does not come
+/// back looking like it got it. `--delta-iters` and `--batch-files` are inert here too:
+/// bge has no per-batch δ, and its projection is per cell.
+///
+/// ⚠️ Read `.predictive.parquet` from a bge model as a FLOOR on novelty, not a verdict —
+/// see [`crate::bge::score::BgeEmbedding::score`] for the measurement. `--eval-mask-fraction`
+/// on the training run, or `senna probe`, answer "has the model seen this biology" better
+/// than a per-cell fit with H free parameters can.
+fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !args.decoder_only && args.refine_steps == 0,
+        "--decoder-only / --refine-steps are for the topic families; {} is a `senna bge` run, \
+         whose only inference is the Poisson-MAP projection onto the frozen ρ.",
+        args.model
+    );
+    if args.batch_files.is_some() {
+        log::warn!(
+            "--batch-files has no effect on a bge run: the projection is per cell against a \
+             frozen ρ, with no per-batch δ to estimate"
+        );
+    }
+    if args.residual_out.is_some() {
+        log::warn!(
+            "--residual-out is not available for a bge run (no count decoder to regress out); \
+             ignoring it"
+        );
+    }
+
+    let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
+    let qopts = args.query_name_opts();
+    let fit = model.score(
+        &args.data_files,
+        args.preload_data,
+        args.minibatch_size,
+        &qopts,
+        args.ablate_features.as_deref(),
+    )?;
+
+    // ρ is held row-major `[D, H]` for the projection; the eval pass wants it as
+    // a matrix, so it is reshaped once here rather than per block.
+    let rho_dh = Mat::from_row_slice(model.gene_names.len(), model.h, &model.rho);
+    let agreement = evaluate_agreement(AgreementInputs {
+        args,
+        training_genes: &model.gene_names,
+        data_vec: &fit.data_vec,
+        recon: Reconstruction::Embedding {
+            rho_dh,
+            b_feat: &model.b_feat,
+            theta_nh: &fit.latent,
+        },
+    })?;
+
+    write_outputs(
+        args,
+        &fit.data_vec,
+        &fit.latent,
+        &fit.llik,
+        &fit.total,
+        agreement.as_ref(),
+    )?;
+
+    Ok(())
+}
+
 fn resolve_mode(args: &PredictArgs) -> LatentMode {
     if args.decoder_only {
         LatentMode::DecoderOnly
@@ -310,6 +441,59 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
+/// Drop the named features from the encoder's view of the query.
+///
+/// Implemented by pointing their rows at `None` in the gene remap, which is the
+/// gate every backend already reads to decide what reaches the model — so a
+/// hidden gene is hidden everywhere, through a path that is already exercised
+/// by ordinary axis mismatches. When the axes match exactly the remap is `None`,
+/// so an identity one is materialised first; the ablated rows are the only
+/// entries that then differ from the identity.
+pub(crate) fn apply_ablation(
+    remap: Option<GeneRemap>,
+    new_genes: &[Box<str>],
+    path: &str,
+) -> anyhow::Result<Option<GeneRemap>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("reading --ablate-features {path}: {e}"))?;
+    let hide: std::collections::HashSet<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut remap = remap.unwrap_or_else(|| GeneRemap {
+        new_to_train: (0..new_genes.len()).map(Some).collect(),
+        d_train: new_genes.len(),
+        n_mapped: new_genes.len(),
+    });
+
+    let mut hidden = 0usize;
+    for (row, name) in new_genes.iter().enumerate() {
+        if hide.contains(name.as_ref()) && remap.new_to_train[row].take().is_some() {
+            hidden += 1;
+        }
+    }
+    remap.n_mapped = remap.new_to_train.iter().filter(|o| o.is_some()).count();
+    anyhow::ensure!(
+        hidden > 0,
+        "--ablate-features {path} matched no feature in the query; \
+         nothing would be hidden and the scores would be a plain reconstruction"
+    );
+    anyhow::ensure!(
+        remap.n_mapped > 0,
+        "--ablate-features {path} hid every mapped feature; nothing is left to encode from"
+    );
+    info!(
+        "Ablation: hid {hidden} features from the encoder, {} remain as input",
+        remap.n_mapped
+    );
+    Ok(Some(remap))
+}
+
 /// Align query genes onto the model's axis, or `None` when the axes already
 /// match. Coverage is logged and gated by
 /// [`crate::topic::eval::ensure_gene_coverage`].
@@ -317,6 +501,7 @@ fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
     opts: &QueryNameOpts,
+    ablate: Option<&str>,
 ) -> anyhow::Result<Option<GeneRemap>> {
     let gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
     crate::topic::eval::ensure_gene_coverage(&gene_remap, opts.min_overlap, "--feature-name-kind")?;
@@ -334,8 +519,14 @@ fn build_remap(
             new_genes.len(),
             training_genes.len()
         );
+        if let Some(path) = ablate {
+            return apply_ablation(Some(gene_remap), new_genes, path);
+        }
         Ok(Some(gene_remap))
     } else {
+        if let Some(path) = ablate {
+            return apply_ablation(None, new_genes, path);
+        }
         info!("Genes match training — no remapping needed");
         Ok(None)
     }
@@ -391,6 +582,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
     };
 
     let s = score_dense_backend(DenseScoreArgs {
+        ablate_features: args.ablate_features.as_deref(),
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
@@ -406,6 +598,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
 
     finalize_predict(FinalizePredict {
         args,
+        training_genes: &s.training_genes,
         data_vec: &s.data_vec,
         z_nk: &s.z_nk,
         llik: &s.llik,
@@ -430,6 +623,8 @@ pub(crate) struct DenseScoreArgs<'a> {
     pub metadata: &'a TopicModelMetadata,
     pub mode: LatentMode,
     pub refine_config: &'a TopicRefinementConfig,
+    /// Features to hide from the encoder (see `PredictArgs::ablate_features`).
+    pub ablate_features: Option<&'a str>,
 }
 
 /// What the dense scoring pass produces.
@@ -444,6 +639,8 @@ pub(crate) struct DenseScoreArgs<'a> {
 /// unaffected — but these numbers are not comparable to the masked path's nats/count.
 pub(crate) struct DenseScored {
     pub data_vec: SparseIoVec,
+    /// The model's feature axis — the space `beta_dk` and the agreement pass index in.
+    pub training_genes: Vec<Box<str>>,
     pub z_nk: Mat,
     pub llik: Vec<f32>,
     pub total: Vec<f32>,
@@ -487,7 +684,12 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
+    let gene_remap = build_remap(
+        &training_genes,
+        &new_genes,
+        a.query_name_opts,
+        a.ablate_features,
+    )?;
 
     let delta_db = estimate_delta(
         &data_vec,
@@ -549,6 +751,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
     };
 
     Ok(DenseScored {
+        training_genes,
         data_vec,
         z_nk,
         llik,
@@ -837,6 +1040,7 @@ fn predict_masked(
     use crate::topic::model_metadata::masked_head_label;
 
     let scored = score_masked_backend(MaskedScoreArgs {
+        ablate_features: args.ablate_features.as_deref(),
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
@@ -846,6 +1050,21 @@ fn predict_masked(
         metadata,
         head,
         need_llik: true,
+        block_size: args.block_size,
+        delta_iters: args.delta_iters,
+        estimate_batch_delta: true,
+    })?;
+    let (masked_training_genes, masked_beta_dk) = load_dictionary(&args.model)?;
+    let agreement = topic_agreement(&FinalizePredict {
+        args,
+        training_genes: &masked_training_genes,
+        data_vec: &scored.data_vec,
+        z_nk: &scored.z_nk,
+        llik: &scored.llik,
+        total: &scored.total,
+        beta_dk: &masked_beta_dk,
+        delta_db: scored.delta_db.as_ref(),
+        gene_remap: scored.gene_remap.as_ref(),
     })?;
     write_outputs(
         args,
@@ -853,7 +1072,20 @@ fn predict_masked(
         &scored.z_nk,
         &scored.llik,
         &scored.total,
+        agreement.as_ref(),
     )?;
+    if let Some(delta) = scored.delta_db.as_ref() {
+        // The dense path writes δ into the residual backend; the masked path has no
+        // residual output, so this line is the only record of what the encoder was
+        // fed. A mean far from 1 says the query batches sit well off the training
+        // marginal — read the latent with that in mind.
+        info!(
+            "held-out δ: {} genes × {} batches, mean {:.3}",
+            delta.nrows(),
+            delta.ncols(),
+            delta.iter().sum::<f32>() / (delta.nrows() * delta.ncols()).max(1) as f32
+        );
+    }
     info!(
         "predict complete ({}, encoder-only latent + full-cell predictive llik)",
         masked_head_label(head)
@@ -874,6 +1106,9 @@ pub(crate) struct MaskedScored {
     /// Query→training gene mapping used for the scores; `probe` reuses it for
     /// the influence/gradient pass.
     pub gene_remap: Option<GeneRemap>,
+    /// Per-batch δ `[D_train, B]` the latent was encoded under — `None` for a
+    /// single-batch query.
+    pub delta_db: Option<Mat>,
 }
 
 pub(crate) struct MaskedScoreArgs<'a> {
@@ -890,6 +1125,22 @@ pub(crate) struct MaskedScoreArgs<'a> {
     /// since the score costs a second full pass over every column plus a dense
     /// `[D, minibatch]` reconstruction per block.
     pub need_llik: bool,
+    /// Cells per δ-estimation block (`None` = auto).
+    pub block_size: Option<usize>,
+    /// TMLE rounds for the held-out δ; `0` keeps the plug-in estimate.
+    pub delta_iters: usize,
+    /// Estimate a per-batch δ from the query and apply it to the encoder null
+    /// and the predictive likelihood.
+    ///
+    /// **Opt-in, because δ is fitted from the query's own gene marginal.** That
+    /// is what `predict` wants — it is the held-out batch effect — and exactly
+    /// what `probe` must not have: δ absorbs compositional novelty, which is
+    /// the signal probe exists to detect, and a query's batch count depends on
+    /// how many files the user happened to pass, so leaving it implicit made
+    /// probe's calibration and query arms score under different models.
+    pub estimate_batch_delta: bool,
+    /// Features to hide from the encoder (see `PredictArgs::ablate_features`).
+    pub ablate_features: Option<&'a str>,
 }
 
 /// Rebuild the indexed encoder from a trained masked model, run encoder-only
@@ -939,7 +1190,28 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
+    let gene_remap = build_remap(
+        &training_genes,
+        &new_genes,
+        a.query_name_opts,
+        a.ablate_features,
+    )?;
+
+    // Held-out batch effect, the same contrast the dense path takes: query pseudobulk
+    // per batch against the training-implied gene marginal `Σ_k θ̄_k·exp(β_dk)`. The
+    // masked path used to skip this and pass NO null to the encoder — see
+    // `iterate_delta_masked` for what that cost.
+    let delta_db = if a.estimate_batch_delta {
+        estimate_delta(
+            &data_vec,
+            &beta_dk,
+            a.metadata.theta_mean.as_deref(),
+            gene_remap.as_ref(),
+            a.block_size,
+        )?
+    } else {
+        None
+    };
 
     let cpu_dev = Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
@@ -973,13 +1245,53 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         feature_mean: &feature_mean,
         head: a.head,
     };
+    // Refine δ against the encoder, if asked. The masked decoder is NB (its
+    // `dispersion.parquet` is always written), so the Fisher weights use the saved φ
+    // when it is there; a multinomial-trained masked model carries an untrained φ, and
+    // the weighting is then merely uninformative rather than wrong.
+    let delta_db = match (delta_db, a.delta_iters) {
+        (Some(initial), n) if n > 0 => {
+            let phi = crate::topic::model_metadata::load_dispersion(a.model)?;
+            Some(crate::predict_tmle::iterate_delta_masked(
+                n,
+                initial,
+                &data_vec,
+                &encoder,
+                &eval_config,
+                a.head,
+                gene_remap.as_ref(),
+                &beta_dk,
+                phi.as_deref(),
+            )?)
+        }
+        (d, _) => d,
+    };
+    // `[B, D_train]` for the encoder null — the orientation the fit-time latent write
+    // uses (`masked_topic.rs`), so predict and fit encode a batch the same way.
+    let delta_bd = delta_db
+        .as_ref()
+        .map(|db| -> anyhow::Result<Tensor> {
+            Ok(db.to_tensor(&cpu_dev)?.transpose(0, 1)?.contiguous()?)
+        })
+        .transpose()?;
+
     let z_nk = evaluate_latent_masked(
         &data_vec,
         &encoder,
         &eval_config,
-        None,
+        delta_bd.as_ref(),
         gene_remap.as_ref().map(|r| r.new_to_train.as_slice()),
     )?;
+
+    {
+        let (eff, mx) = latent_sharpness(&crate::topic::model_metadata::latent_to_theta(
+            &z_nk, a.head,
+        ));
+        info!(
+            "Latent sharpness on the query: {eff:.2} effective topics of {}, mean max θ {mx:.3}",
+            z_nk.ncols()
+        );
+    }
 
     // The stored latent stays raw (`z` for the Gaussian head); scoring needs
     // proportions, so convert per the head rather than assuming `exp`.
@@ -989,6 +1301,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             &data_vec,
             &theta_nk,
             &beta_dk,
+            delta_db.as_ref(),
             gene_remap.as_ref(),
             a.minibatch_size,
         )?
@@ -1002,6 +1315,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         llik,
         total,
         gene_remap,
+        delta_db,
     })
 }
 
@@ -1020,10 +1334,16 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 /// The score is head-agnostic only once that conversion has happened: the
 /// simplex heads reach it with `exp(log θ)` and the Gaussian masked-VAE head
 /// with `softmax(z)`. See `crate::topic::model_metadata::latent_to_theta`.
+///
+/// With a per-batch `delta_db` the composition is `δ_{d,b} · Σ_k θ_k·exp(β_dk)`,
+/// renormalized over genes per cell — the multinomial analogue of the NB head's
+/// `μ = θβ · residual · lib`, so a batch's held-out score is taken against the same
+/// batch-adjusted rate its latent was encoded from.
 fn predictive_llik_masked(
     data_vec: &SparseIoVec,
     theta_nk: &Mat,
     beta_dk: &Mat,
+    delta_db: Option<&Mat>,
     gene_remap: Option<&GeneRemap>,
     minibatch_size: usize,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
@@ -1039,7 +1359,16 @@ fn predictive_llik_masked(
             let csc = data_vec.read_columns_csc(lb..ub)?;
             let n_block = csc.ncols();
             let theta_kn = theta_nk.rows(lb, n_block).transpose();
-            let recon_dn = &exp_beta_dk * theta_kn; // [D_train, n_block]
+            let mut recon_dn = &exp_beta_dk * theta_kn; // [D_train, n_block]
+            if let Some(delta) = delta_db {
+                let batch_ids = data_vec.get_batch_membership(lb..ub);
+                for (j, &b) in batch_ids.iter().enumerate() {
+                    let mut col = recon_dn.column_mut(j);
+                    col.component_mul_assign(&delta.column(b));
+                    let z = col.sum().max(1e-12);
+                    col /= z;
+                }
+            }
 
             let mut llik = vec![0f32; n_block];
             let mut total = vec![0f32; n_block];
@@ -1094,6 +1423,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     // `need_llik: false` keeps `predict`'s vae output exactly as it was — latent only,
     // no `.predictive.parquet`, and no decoder rebuilt. `probe` asks for the score.
     let s = score_vae_backend(VaeScoreArgs {
+        ablate_features: args.ablate_features.as_deref(),
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
@@ -1123,6 +1453,8 @@ pub(crate) struct VaeScoreArgs<'a> {
     /// `predict` wants the latent only and passes `false`, which also skips rebuilding the
     /// decoder entirely. `probe` needs the per-cell score and passes `true`.
     pub need_llik: bool,
+    /// Features to hide from the encoder (see `PredictArgs::ablate_features`).
+    pub ablate_features: Option<&'a str>,
 }
 
 pub(crate) struct VaeScored {
@@ -1172,7 +1504,12 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
+    let gene_remap = build_remap(
+        &training_genes,
+        &new_genes,
+        a.query_name_opts,
+        a.ablate_features,
+    )?;
 
     let cpu_dev = Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
@@ -1286,6 +1623,7 @@ where
 /// here rather than duplicating the two write calls.
 struct FinalizePredict<'a> {
     args: &'a PredictArgs,
+    training_genes: &'a [Box<str>],
     data_vec: &'a SparseIoVec,
     z_nk: &'a Mat,
     llik: &'a [f32],
@@ -1296,7 +1634,15 @@ struct FinalizePredict<'a> {
 }
 
 fn finalize_predict(f: FinalizePredict<'_>) -> anyhow::Result<()> {
-    write_outputs(f.args, f.data_vec, f.z_nk, f.llik, f.total)?;
+    let agreement = topic_agreement(&f)?;
+    write_outputs(
+        f.args,
+        f.data_vec,
+        f.z_nk,
+        f.llik,
+        f.total,
+        agreement.as_ref(),
+    )?;
     write_residual_backend(
         f.args,
         f.data_vec,
@@ -1307,12 +1653,151 @@ fn finalize_predict(f: FinalizePredict<'_>) -> anyhow::Result<()> {
     )
 }
 
+/// Everything the agreement pass needs, independent of which family produced it.
+struct AgreementInputs<'a> {
+    args: &'a PredictArgs,
+    /// The model's feature axis — what `recon` and the eval indices live on.
+    training_genes: &'a [Box<str>],
+    data_vec: &'a SparseIoVec,
+    recon: Reconstruction<'a>,
+}
+
+/// Score the reconstruction against the observed test counts.
+///
+/// A separate streaming pass rather than a hook inside each backend's likelihood
+/// loop. It duplicates one matrix product per block — but it buys one formula in
+/// one place for every family, and the test half is the small side of a split by
+/// construction.
+fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutcome>> {
+    // Training axis, not query axis: the pass densifies the observed counts onto
+    // the model's features before scoring, so an index that came from the query's
+    // row names would point at the wrong gene whenever the two axes differ.
+    let restrict = a
+        .args
+        .eval_features
+        .as_deref()
+        .or(a.args.ablate_features.as_deref());
+    let eval_genes = resolve_eval_genes(restrict, a.training_genes)?;
+    if eval_genes.is_empty() {
+        info!("No evaluation features matched; skipping agreement metrics");
+        return Ok(None);
+    }
+
+    // Built here rather than taken from the caller, and always without the
+    // ablation. The backend's remap has the hidden genes pointing at `None`,
+    // which is right for the encoder and wrong here: densifying the *observed*
+    // counts through it would read the scored genes as zero and grade every model
+    // against a blank. Rebuilding costs one name-matching pass and removes the
+    // chance of a caller handing over the encoder's view by mistake.
+    let score_remap = build_remap(
+        a.training_genes,
+        &a.data_vec.row_names()?,
+        &a.args.query_name_opts(),
+        None,
+    )?;
+
+    let mut out = evaluate_predictions(EvalArgs {
+        data_vec: a.data_vec,
+        null_comp: training_marginal(a.args, a.training_genes, &eval_genes)?,
+        recon: a.recon,
+        gene_remap: score_remap.as_ref(),
+        eval_genes,
+        minibatch_size: a.args.minibatch_size,
+        keep_per_gene: restrict.is_some(),
+    })?;
+    out.train_gene_names = a.training_genes.to_vec();
+    info!("Agreement: {}", out.summary().line());
+    Ok(Some(out))
+}
+
+/// The training composition over the scored genes — the null every arm shares.
+///
+/// A count-weighted marginal over the training cells: `Σ_cells x_g`, normalised
+/// over the scored genes. Two properties earn it the job. It does not depend on
+/// the model, so every arm scored on the same training half and genes is measured
+/// against one identical floor. And it is not fitted on the test half, so it is a
+/// baseline a model could actually have matched.
+///
+/// Deliberately NOT `{model}.feature_mean.parquet`, which was the first thing
+/// tried here. That file is a per-gene *rate the encoder divides by*, formed as a
+/// Gamma posterior mean averaged over pseudobulk groups — so its prior floors
+/// every gene unseen in training at the same positive value, and a third of the
+/// axis ends up sharing it. As a composition it therefore spends real probability
+/// mass on genes that carry almost none, which measured 0.49 nats/count weaker
+/// than the count-weighted marginal on the same genes. A weak floor flatters every
+/// model, which is the one direction a null must not err in.
+fn training_marginal(
+    args: &PredictArgs,
+    training_genes: &[Box<str>],
+    eval_genes: &[usize],
+) -> anyhow::Result<Option<Vec<f32>>> {
+    let Some(files) = args.null_from.as_deref() else {
+        log::warn!(
+            "no --null-from: the null falls back to the TEST half's own composition, which \
+             is fitted on the data being scored and is an upper reference rather than a \
+             floor. Pass the training half to make gains comparable across runs"
+        );
+        return Ok(None);
+    };
+    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: files.to_vec(),
+        preload: args.preload_data,
+        ..Default::default()
+    })?;
+    // The training half is aligned onto the model's axis the same way the query
+    // is, so a name-kind difference between the two files cannot silently drop
+    // genes from the floor that the model is being scored on.
+    let remap = build_remap(
+        training_genes,
+        &loaded.data.row_names()?,
+        &args.query_name_opts(),
+        None,
+    )?;
+    let comp = crate::topic::predict_eval::empirical_composition(
+        &loaded.data,
+        remap.as_ref(),
+        eval_genes,
+        training_genes.len(),
+        args.minibatch_size,
+    )?;
+    anyhow::ensure!(
+        comp.iter().any(|&v| v > 0.0),
+        "--null-from carries no counts on the scored genes; the null would be empty"
+    );
+    info!(
+        "Null: gene composition of {} training cells from {}",
+        loaded.data.num_columns(),
+        files.join(", ")
+    );
+    Ok(Some(comp))
+}
+
+/// The topic families' reconstruction inputs, in the shape the eval pass wants.
+///
+/// The latent is stored on the log scale and every consumer exponentiates it;
+/// doing that here once keeps the two callers from disagreeing about which scale
+/// they hold.
+fn topic_agreement(f: &FinalizePredict<'_>) -> anyhow::Result<Option<EvalOutcome>> {
+    let theta_nk = f.z_nk.map(f32::exp);
+    evaluate_agreement(AgreementInputs {
+        args: f.args,
+        training_genes: f.training_genes,
+        data_vec: f.data_vec,
+        recon: Reconstruction::Topic {
+            exp_beta_dk: f.beta_dk.map(f32::exp),
+            theta_nk: &theta_nk,
+            delta_db: f.delta_db,
+        },
+    })
+}
+
 fn write_outputs(
     args: &PredictArgs,
     data_vec: &SparseIoVec,
     z_nk: &Mat,
     llik: &[f32],
     total: &[f32],
+    agreement: Option<&EvalOutcome>,
 ) -> anyhow::Result<()> {
     let cell_names = data_vec.column_names()?;
 
@@ -1329,18 +1814,80 @@ fn write_outputs(
     for i in 0..n {
         pred[(i, 0)] = llik[i];
         pred[(i, 1)] = total[i];
+        // NaN, not 0: a cell with no counts has no per-count score, and 0 nats
+        // per count reads as a PERFECT prediction to anything that averages this
+        // column. Ablation makes the case common — a cell can easily carry
+        // nothing in the hidden gene set.
         pred[(i, 2)] = if total[i] > 0.0 {
             llik[i] / total[i]
         } else {
-            0.0
+            f32::NAN
         };
     }
-    let pred_cols: Vec<Box<str>> = vec!["llik".into(), "total".into(), "llik_per_count".into()];
+    let mut pred_cols: Vec<Box<str>> = vec!["llik".into(), "total".into(), "llik_per_count".into()];
+    if let Some(a) = agreement {
+        anyhow::ensure!(
+            a.per_cell.len() == n && a.per_cell_llik.len() == n,
+            "agreement pass scored {} cells, likelihood pass scored {n}",
+            a.per_cell.len()
+        );
+        pred = pred.insert_columns(3, 5, 0.0);
+        for (i, c) in a.per_cell.iter().enumerate() {
+            pred[(i, 3)] = c.spearman;
+            pred[(i, 4)] = c.pearson_log1p;
+        }
+        // The cross-family likelihood. Written per cell, not just summarised in
+        // the log, because a benchmark reads this file: the `llik` column above
+        // is the backend's own and is not comparable between decoders, so these
+        // are the only columns two families may be ranked on.
+        for (i, l) in a.per_cell_llik.iter().enumerate() {
+            pred[(i, 5)] = l.count;
+            let per_count = |v: f32| if l.count > 0.0 { v / l.count } else { f32::NAN };
+            pred[(i, 6)] = per_count(l.model);
+            pred[(i, 7)] = per_count(l.null);
+        }
+        pred_cols.push("spearman".into());
+        pred_cols.push("pearson_log1p".into());
+        pred_cols.push("eval_count".into());
+        pred_cols.push("eval_llik_per_count".into());
+        pred_cols.push("eval_null_llik_per_count".into());
+    }
     pred.to_parquet_with_names(
         &(args.out.to_string() + ".predictive.parquet"),
         (Some(&cell_names), Some("cell")),
         Some(&pred_cols),
     )?;
+
+    if let Some(a) = agreement.filter(|a| !a.per_gene.is_empty()) {
+        // The other axis: each gene's agreement *across* cells. A model can score
+        // well per cell — every cell's genes ranked about right — while getting a
+        // gene's variation across cells backwards, which is the direction that
+        // matters for anything downstream that compares cells.
+        let mut gm = Mat::zeros(a.per_gene.len(), 3);
+        let mut rows: Vec<Box<str>> = Vec::with_capacity(a.per_gene.len());
+        for (i, &(g, sp, pe, mean_obs)) in a.per_gene.iter().enumerate() {
+            gm[(i, 0)] = sp;
+            gm[(i, 1)] = pe;
+            gm[(i, 2)] = mean_obs;
+            rows.push(
+                a.train_gene_names
+                    .get(g)
+                    .cloned()
+                    .unwrap_or_else(|| "?".into()),
+            );
+        }
+        let cols: Vec<Box<str>> = vec![
+            "spearman".into(),
+            "pearson_log1p".into(),
+            "mean_observed".into(),
+        ];
+        gm.to_parquet_with_names(
+            &(args.out.to_string() + ".gene_agreement.parquet"),
+            (Some(&rows), Some("gene")),
+            Some(&cols),
+        )?;
+        info!("Wrote {}.gene_agreement.parquet", args.out);
+    }
     info!("Wrote {}.predictive.parquet", args.out);
     Ok(())
 }

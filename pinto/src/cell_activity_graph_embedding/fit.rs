@@ -1709,6 +1709,7 @@ pub fn fit_cell_activity_graph_embedding(
     let PairLatent {
         latent: pair_latent,
         bias: pair_bias,
+        scores: _,
     } = project_pairs(
         &data_vec,
         &fine_edges,
@@ -1722,10 +1723,15 @@ pub fn fit_cell_activity_graph_embedding(
             },
             seed: c.seed,
             pair_block: args.pair_block,
+            eval_features: None,
         },
         &gene_axis,
         &gene_totals,
     )?;
+    // Held-out gene evaluation, against the SAME frozen dictionary the projection above
+    // just used. Placed here rather than after clustering because it tests the projection,
+    // not the cut: a link community is a downstream choice, and folding it in would confuse
+    // "does the embedding predict expression" with "did k-means pick a good k".
     {
         // `β_uv` is the pair's log pooled depth; it never leaves this function,
         // but its spread is the cheapest check that the projection saw real data.

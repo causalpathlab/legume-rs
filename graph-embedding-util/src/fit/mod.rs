@@ -29,6 +29,10 @@ use nalgebra::DMatrix;
 
 use config::{stage_params, LINEAGE_WARMUP_FRAC};
 use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
+pub use projection::{
+    project_onto_frozen, FrozenProjection, FrozenProjectionArgs,
+    PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
+};
 use selection::{install_selection, run_selection_pass, SelectionPassInput};
 
 /// Composite-objective gbe fit — trained in **two phases**.

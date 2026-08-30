@@ -62,3 +62,4 @@ faba/smoke_out/
 
 # session scratch: experiment outputs (parquets, logs, plots, analysis scripts)
 scratch/
+target-cuda/

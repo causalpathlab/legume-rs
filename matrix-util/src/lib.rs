@@ -1,3 +1,4 @@
+pub mod agreement;
 pub mod archetypal;
 pub mod branching;
 pub mod clap_defaults;

@@ -172,3 +172,101 @@ fn empty_profile_stays_at_the_origin() {
     let (theta, _) = dict.project(&[(0, 12.0)], &args(100, 0), &mut rng);
     assert_eq!(theta, vec![0.0; DIM]);
 }
+
+//////////////////////////////
+// Hold-out split of a pair //
+//////////////////////////////
+
+use crate::cell_activity_graph_embedding::pair_projection::{pooled_profile_routed, SlabCols};
+
+/// Two cells as a CSC slab, given each one's `(row, count)` column.
+fn slab_of(u: &[(usize, f32)], v: &[(usize, f32)]) -> (Vec<usize>, Vec<usize>, Vec<f32>) {
+    let offsets = vec![0, u.len(), u.len() + v.len()];
+    let rows: Vec<usize> = u.iter().chain(v).map(|&(r, _)| r).collect();
+    let vals: Vec<f32> = u.iter().chain(v).map(|&(_, x)| x).collect();
+    (offsets, rows, vals)
+}
+
+/// The property the whole cage hold-out rests on: Poisson counts are additive, so
+/// routing each endpoint's contribution independently must leave
+/// `visible + held == pooled`, entry for entry. If it does not, the metric is either
+/// scoring counts the model already saw or silently dropping mass.
+#[test]
+fn the_routed_split_is_exactly_additive() {
+    // Overlapping rows (2, 5, 9 in both), plus rows unique to each endpoint.
+    let u = [(0usize, 3.0f32), (2, 7.0), (5, 1.0), (9, 4.0), (11, 2.0)];
+    let v = [(2usize, 5.0f32), (3, 6.0), (5, 8.0), (9, 1.0), (14, 9.0)];
+    let (offsets, rows, vals) = slab_of(&u, &v);
+    let col_of: HashMap<usize, usize> = [(100usize, 0usize), (200, 1)].into_iter().collect();
+    let slab = SlabCols {
+        offsets: &offsets,
+        rows: &rows,
+        vals: &vals,
+        col_of: &col_of,
+    };
+
+    let (pooled, empty) = pooled_profile_routed(slab, 100, 200, None, &|_, _| false);
+    assert!(
+        empty.is_empty(),
+        "nothing held out ⇒ nothing in the held bucket"
+    );
+
+    // Route on parity of (cell + row) so the shared rows land on BOTH sides of the
+    // split — the case that a route-after-pooling implementation gets wrong.
+    let route = |cell: u32, row: usize| (cell as usize / 100 + row).is_multiple_of(2);
+    let (visible, held) = pooled_profile_routed(slab, 100, 200, None, &route);
+
+    let total = |p: &[(u32, f32)]| p.iter().map(|&(_, x)| x).sum::<f32>();
+    assert!(
+        (total(&visible) + total(&held) - total(&pooled)).abs() < 1e-5,
+        "mass must be conserved: {} + {} vs {}",
+        total(&visible),
+        total(&held),
+        total(&pooled)
+    );
+
+    // Per row, too — a conserved total could still shuffle mass between rows.
+    let mut merged: HashMap<u32, f32> = HashMap::default();
+    for &(g, x) in visible.iter().chain(&held) {
+        *merged.entry(g).or_default() += x;
+    }
+    for &(g, x) in &pooled {
+        let got = merged.remove(&g).unwrap_or(0.0);
+        assert!((got - x).abs() < 1e-5, "row {g}: {got} vs {x}");
+    }
+    assert!(merged.is_empty(), "the split invented rows: {merged:?}");
+
+    // And the shared rows really did split, or the test proves nothing.
+    let shared_in_both = [2u32, 5, 9]
+        .iter()
+        .filter(|g| visible.iter().any(|&(x, _)| x == **g) && held.iter().any(|&(x, _)| x == **g))
+        .count();
+    assert!(
+        shared_in_both > 0,
+        "no shared row landed on both sides — the fixture is not exercising the split"
+    );
+}
+
+/// Each bucket must keep the sorted, no-duplicate-row contract `pool_profile` relies on.
+#[test]
+fn each_bucket_stays_sorted_and_deduped() {
+    let u = [(1usize, 2.0f32), (4, 3.0), (7, 5.0), (8, 1.0)];
+    let v = [(1usize, 4.0f32), (2, 6.0), (7, 2.0), (12, 3.0)];
+    let (offsets, rows, vals) = slab_of(&u, &v);
+    let col_of: HashMap<usize, usize> = [(100usize, 0usize), (200, 1)].into_iter().collect();
+    let slab = SlabCols {
+        offsets: &offsets,
+        rows: &rows,
+        vals: &vals,
+        col_of: &col_of,
+    };
+    let route = |cell: u32, row: usize| (cell as usize / 100 + row).is_multiple_of(2);
+    let (visible, held) = pooled_profile_routed(slab, 100, 200, None, &route);
+
+    for bucket in [&visible, &held] {
+        for w in bucket.windows(2) {
+            assert!(w[0].0 < w[1].0, "not strictly increasing: {bucket:?}");
+        }
+        assert!(bucket.iter().all(|&(_, x)| x > 0.0), "zero entry kept");
+    }
+}
