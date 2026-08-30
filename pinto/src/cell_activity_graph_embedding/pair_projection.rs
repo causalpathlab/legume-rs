@@ -381,20 +381,27 @@ pub fn project_pairs(
     }
 
     let dict = PairDictionary::new(e_feat, gene_totals, n_cells)?;
-    let eval_axis: Option<Vec<u32>> = args.eval_features.as_ref().map(|names| {
-        let wanted: std::collections::HashSet<&str> =
-            names.iter().map(std::convert::AsRef::as_ref).collect();
-        let axis = dict.eval_axis(axis.gene_names(), &wanted);
-        info!(
-            "Agreement axis: {} of {} named features carry counts here",
-            axis.len(),
-            names.len()
-        );
-        axis
-    });
-    if eval_axis.as_ref().is_some_and(Vec::is_empty) {
-        anyhow::bail!("--eval-features matched no gene that carries counts in this sample");
-    }
+    let scored_positions: Option<Vec<u32>> = match args.eval_features.as_ref() {
+        Some(names) => {
+            let wanted: std::collections::HashSet<&str> =
+                names.iter().map(std::convert::AsRef::as_ref).collect();
+            let positions = dict.eval_positions(axis.gene_names(), &wanted);
+            anyhow::ensure!(
+                !positions.is_empty(),
+                "--eval-features matched no gene that carries counts in this sample"
+            );
+            info!(
+                "Agreement axis: {} of {} named features carry counts here",
+                positions.len(),
+                names.len()
+            );
+            Some(positions)
+        }
+        None => None,
+    };
+    // Resolved once for the whole run: the membership bitmap and the null's
+    // log-partition are the same for every pair.
+    let eval_axis = dict.eval_axis(scored_positions);
     if dict.n_active() < n_genes {
         info!(
             "Pair projection: {} of {n_genes} genes carry counts; the rest sit out the partition",
@@ -468,7 +475,7 @@ pub fn project_pairs(
                     args.seed ^ ((lb + i) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
                 let fit = dict.project(&obs, &args.projection, &mut rng);
-                let score = dict.score(&obs, &fit.0, eval_axis.as_deref());
+                let score = dict.score(&obs, &fit.0, &eval_axis);
                 (fit, score)
             })
             .collect();

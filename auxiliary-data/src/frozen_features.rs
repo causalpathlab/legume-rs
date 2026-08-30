@@ -37,6 +37,13 @@ pub struct FrozenFeatureHost {
     /// Indices into the *target* feature axis that matched a source row.
     /// Length equals `e_feat.nrows()`.
     pub keep_target_indices: Vec<usize>,
+    /// Rows in the dictionary file, i.e. how many features the MODEL has.
+    ///
+    /// The only field that survives the intersection unfiltered, and the reason
+    /// it exists: `e_feat` and `keep_target_indices` are both already restricted
+    /// to the matched features, so a coverage fraction built from them is
+    /// identically 1 and tells a caller nothing. This is the denominator.
+    pub n_src: usize,
     pub h: usize,
 }
 
@@ -175,6 +182,7 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
         e_feat,
         b_feat,
         keep_target_indices,
+        n_src,
         h,
     })
 }

@@ -11,7 +11,7 @@ fn the_per_gene_axis_is_across_cells() {
     let mut ev = PredictEval::new(vec![0, 1], true);
     // Two cells; gene 0 rises with the prediction, gene 1 moves against it.
     for (o, p) in [([1.0f32, 9.0], [1.0f32, 1.0]), ([5.0, 1.0], [5.0, 9.0])] {
-        ev.push_cell(|g| o[g], |g| p[g]);
+        ev.keep(&o, &p);
     }
     let per_gene = ev.per_gene();
     assert_eq!(per_gene.len(), 2);
@@ -31,7 +31,7 @@ fn the_per_gene_axis_is_across_cells() {
 #[test]
 fn without_kept_values_there_is_no_per_gene_table() {
     let mut ev = PredictEval::new(vec![0, 1], false);
-    ev.push_cell(|_| 1.0, |_| 1.0);
+    ev.keep(&[1.0, 1.0], &[1.0, 1.0]);
     assert!(ev.per_gene().is_empty());
 }
 

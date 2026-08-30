@@ -320,10 +320,14 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<()> {
         name_kind: feature_kind.clone(),
     })?;
     let n_matched = host.keep_target_indices.len();
-    let n_model = host.e_feat.nrows().max(n_matched);
-    // The share of the MODEL's genes that this sample carries — the same denominator
-    // senna's identically-named flag uses. Dividing by the query's gene count instead
-    // would refuse a whole-transcriptome sample that contains every panel gene.
+    // The MODEL's full feature count, from the dictionary file. NOT
+    // `e_feat.nrows()`, which is the count AFTER the intersection and therefore
+    // always equals `n_matched` — a coverage built from it is identically 1 and
+    // `--min-gene-overlap` can never fire.
+    let n_model = host.n_src;
+    // The share of the MODEL's genes this sample carries — the same denominator
+    // senna's identically-named flag uses. Dividing by the query's gene count
+    // instead would refuse a whole-transcriptome sample containing every panel gene.
     let coverage = n_matched as f32 / n_model.max(1) as f32;
     info!(
         "Gene alignment: {n_matched} of the model's {n_model} genes are present here \
@@ -379,17 +383,14 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<()> {
     }
 
     let eval_features: Option<Vec<Box<str>>> = match args.eval_features.as_deref() {
-        Some(path) => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?;
-            Some(
-                text.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(Box::from)
-                    .collect(),
-            )
-        }
+        // The same reader `senna predict --eval-features` uses. The help on both
+        // commands tells the user to pass ONE file to both; parsing it two ways
+        // meant a two-column panel scored senna on the right genes and matched
+        // nothing here.
+        Some(path) => Some(
+            matrix_util::common_io::read_name_list(path)
+                .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?,
+        ),
         None => None,
     };
 
@@ -555,14 +556,21 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Per-pair held-out scores, in the columns `senna predict` writes for cells.
+/// Per-pair held-out scores, under the same column names `senna predict` uses
+/// for the same quantities.
 ///
-/// `llik_per_count` is the comparable number: nats per observed count is
-/// invariant to how many cells were pooled into the profile, so a pair's score
-/// sits on the same axis as a cell's. `null_llik_per_count` is the same
-/// likelihood under gene abundance alone — without it the first column is
-/// unreadable, since its absolute value is set by how many genes the multinomial
-/// spreads over rather than by how well the model did.
+/// The `eval_` prefix is not decoration. senna's `predictive.parquet` also has a
+/// bare `llik` / `llik_per_count`, and those are the *backend's own*
+/// decoder-dependent likelihood, which must not be compared across families. The
+/// `eval_` columns are the multinomial over the scored genes, which is what both
+/// commands agree on. Writing pinto's comparable number under the bare name
+/// would put two different estimands in one column of two files that share a
+/// filename — a benchmark reading `llik_per_count` from both would rank an NB
+/// density against multinomial nats/count and get a plausible wrong answer.
+///
+/// `eval_llik_per_count` is nats per observed count, invariant to how many cells
+/// were pooled into the profile, so a pair's value sits on the same axis as a
+/// cell's.
 fn write_predictive(out: &str, scores: &[PairScore]) -> anyhow::Result<()> {
     let n = scores.len();
     let mut pred = Mat::zeros(n, 6);
@@ -591,12 +599,12 @@ fn write_predictive(out: &str, scores: &[PairScore]) -> anyhow::Result<()> {
         count += f64::from(s.total);
     }
     let cols: Vec<Box<str>> = vec![
-        "llik".into(),
-        "total".into(),
-        "llik_per_count".into(),
+        "eval_llik".into(),
+        "eval_count".into(),
+        "eval_llik_per_count".into(),
         "spearman".into(),
         "pearson_log1p".into(),
-        "null_llik_per_count".into(),
+        "eval_null_llik_per_count".into(),
     ];
     pred.to_parquet_with_names(
         &(out.to_string() + ".predictive.parquet"),

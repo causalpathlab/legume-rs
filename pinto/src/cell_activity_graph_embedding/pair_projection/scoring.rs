@@ -9,6 +9,47 @@
 use super::{PairDictionary, SCORE_CLAMP};
 use matrix_util::agreement::{pearson_log1p, spearman, CellAgreement};
 
+/// The gene axis a run scores over, resolved once.
+pub struct EvalAxis {
+    /// Positions the CORRELATIONS run over; `None` leaves them `NaN`. Also the
+    /// marker for "the user restricted the axis" — when absent, everything active
+    /// is scored by the likelihood but nothing is correlated, because a sort per
+    /// pair is not a cost to pay by default.
+    correlated: Option<Vec<u32>>,
+    /// Positions the likelihood normalises over.
+    over: Vec<u32>,
+    /// Membership by active-list position — a bitmap, not a hash set.
+    is_scored: Vec<bool>,
+    /// `ln Σ exp(b_g)` over `over`; constant for the run.
+    z_null: f32,
+}
+
+impl EvalAxis {
+    #[must_use]
+    fn scores(&self, local: usize) -> bool {
+        self.is_scored.get(local).copied().unwrap_or(false)
+    }
+
+    /// Streaming log-sum-exp of `f` over the scored positions.
+    fn log_partition(&self, f: impl Fn(usize) -> f32) -> f32 {
+        log_sum_exp(self.over.iter().map(|&g| f(g as usize)))
+    }
+}
+
+/// One-pass log-sum-exp: rescales the accumulator when a new maximum arrives,
+/// so nothing overflows and the input is walked once.
+fn log_sum_exp(values: impl Iterator<Item = f32>) -> f32 {
+    let (mut max, mut acc) = (f32::NEG_INFINITY, 0f32);
+    for v in values {
+        if v > max {
+            acc *= (max - v).exp();
+            max = v;
+        }
+        acc += (v - max).exp();
+    }
+    max + acc.ln()
+}
+
 /// One pair's held-out score, on the same multinomial nats/count scale senna's
 /// `predictive.parquet` reports — which is the point: a cell pair pools two
 /// cells, but nats per observed count does not care how many cells went in, so
@@ -49,56 +90,32 @@ impl PairDictionary {
     /// commands answering the same question is worth more here than each
     /// answering its own.
     #[must_use]
-    pub fn score(&self, obs: &[(u32, f32)], theta: &[f32], eval: Option<&[u32]>) -> PairScore {
+    pub fn score(&self, obs: &[(u32, f32)], theta: &[f32], axis: &EvalAxis) -> PairScore {
         let local = self.to_local(obs);
         if local.is_empty() {
             return PairScore::default();
         }
 
         let d = self.d;
-        let n_active = self.b.len();
-        let mut log_rate = vec![0f32; n_active];
+        let mut log_rate = vec![0f32; self.b.len()];
         for (g, lr) in log_rate.iter_mut().enumerate() {
             let row = &self.feat[g * d..(g + 1) * d];
             let dot: f32 = row.iter().zip(theta).map(|(&e, &t)| e * t).sum();
             *lr = (dot + self.b[g]).clamp(-SCORE_CLAMP, SCORE_CLAMP);
         }
-
-        // The scored axis, and the two partitions over it. `scored` doubles as the
-        // membership test for which observed counts count toward the total.
-        let scored: Option<std::collections::HashSet<u32>> =
-            eval.map(|e| e.iter().copied().collect());
-        let lse = |f: &dyn Fn(usize) -> f32| -> f32 {
-            let mut m = f32::NEG_INFINITY;
-            let mut acc = 0f32;
-            let each = |g: usize, m: &mut f32, acc: &mut f32| {
-                let v = f(g);
-                if v > *m {
-                    *acc *= (*m - v).exp();
-                    *m = v;
-                }
-                *acc += (v - *m).exp();
-            };
-            match eval {
-                Some(e) => e.iter().for_each(|&g| each(g as usize, &mut m, &mut acc)),
-                None => (0..n_active).for_each(|g| each(g, &mut m, &mut acc)),
-            }
-            m + acc.ln()
-        };
-        let z_model = lse(&|g| log_rate[g]);
-        let z_null = lse(&|g| self.b[g]);
+        let z_model = axis.log_partition(|g| log_rate[g]);
 
         let mut llik = 0f64;
         let mut null_llik = 0f64;
         let mut total = 0f32;
         for &(l, x) in &local {
             let l = l as usize;
-            if scored.as_ref().is_some_and(|s| !s.contains(&(l as u32))) {
+            if !axis.scores(l) {
                 continue;
             }
             total += x;
             llik += f64::from(x) * f64::from(log_rate[l] - z_model);
-            null_llik += f64::from(x) * f64::from(self.b[l] - z_null);
+            null_llik += f64::from(x) * f64::from(self.b[l] - axis.z_null);
         }
         if !total.is_finite() || total <= 0.0 {
             return PairScore::default();
@@ -108,7 +125,7 @@ impl PairDictionary {
             llik: llik as f32,
             null_llik: null_llik as f32,
             total,
-            agreement: self.agreement(&local, &log_rate, z_model, total, eval),
+            agreement: self.agreement(&local, &log_rate, z_model, total, axis),
         }
     }
 
@@ -124,16 +141,13 @@ impl PairDictionary {
         log_rate: &[f32],
         z_model: f32,
         total: f32,
-        eval: Option<&[u32]>,
+        axis: &EvalAxis,
     ) -> CellAgreement {
-        let axis: &[u32] = match eval {
-            Some(e) => e,
-            None => {
-                return CellAgreement {
-                    spearman: f32::NAN,
-                    pearson_log1p: f32::NAN,
-                }
-            }
+        let Some(axis) = axis.correlated.as_deref() else {
+            return CellAgreement {
+                spearman: f32::NAN,
+                pearson_log1p: f32::NAN,
+            };
         };
         let mut obs = vec![0f32; self.b.len()];
         for &(l, x) in local {
@@ -150,9 +164,40 @@ impl PairDictionary {
         }
     }
 
+    /// Build the scoring axis once for a whole run.
+    ///
+    /// Everything here was previously rebuilt inside every pair's `score`: the
+    /// membership set (a SipHash `HashSet` per pair), and the null's
+    /// log-partition, which depends only on `b` and the axis. With hundreds of
+    /// thousands of pairs that was `|eval|` hashed inserts and `n_active`
+    /// `exp()` calls per pair, for two values that never change.
+    #[must_use]
+    pub fn eval_axis(&self, positions: Option<Vec<u32>>) -> EvalAxis {
+        let n_active = self.b.len();
+        let mut is_scored = vec![positions.is_none(); n_active];
+        if let Some(p) = positions.as_deref() {
+            for &g in p {
+                if let Some(slot) = is_scored.get_mut(g as usize) {
+                    *slot = true;
+                }
+            }
+        }
+        let over: Vec<u32> = match positions.as_deref() {
+            Some(p) => p.to_vec(),
+            None => (0..n_active as u32).collect(),
+        };
+        let z_null = log_sum_exp(over.iter().map(|&g| self.b[g as usize]));
+        EvalAxis {
+            correlated: positions,
+            over,
+            is_scored,
+            z_null,
+        }
+    }
+
     /// Map feature names to active-list positions for `--eval-features`.
     #[must_use]
-    pub fn eval_axis(
+    pub fn eval_positions(
         &self,
         gene_names: &[Box<str>],
         wanted: &std::collections::HashSet<&str>,
