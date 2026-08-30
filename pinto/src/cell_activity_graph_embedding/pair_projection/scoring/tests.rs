@@ -21,7 +21,7 @@ fn a_zero_latent_scores_exactly_the_abundance_null() {
     // reported gain is meaningless.
     let dict = fixture();
     let obs = [(0u32, 7.0f32), (2, 3.0)];
-    let s = dict.score(&obs, &[0.0, 0.0], None);
+    let s = dict.score(&obs, &[0.0, 0.0], &dict.eval_axis(None));
     assert!(
         (s.llik - s.null_llik).abs() < 1e-4,
         "llik {} vs null {}",
@@ -36,8 +36,8 @@ fn a_latent_aimed_at_the_observed_gene_beats_the_null() {
     let dict = fixture();
     // Everything observed on gene 0, and θ points at gene 0's dimension.
     let obs = [(0u32, 10.0f32)];
-    let good = dict.score(&obs, &[2.0, 0.0], None);
-    let bad = dict.score(&obs, &[-2.0, 0.0], None);
+    let good = dict.score(&obs, &[2.0, 0.0], &dict.eval_axis(None));
+    let bad = dict.score(&obs, &[-2.0, 0.0], &dict.eval_axis(None));
     assert!(good.llik > good.null_llik, "aligned latent must gain");
     assert!(bad.llik < bad.null_llik, "opposed latent must lose");
 }
@@ -48,7 +48,7 @@ fn the_likelihood_is_a_proper_multinomial() {
     let dict = fixture();
     let obs = [(0u32, 4.0f32), (1, 6.0)];
     for theta in [[0.0, 0.0], [3.0, -1.0], [-5.0, 5.0]] {
-        let s = dict.score(&obs, &theta, None);
+        let s = dict.score(&obs, &theta, &dict.eval_axis(None));
         assert!(s.llik <= 0.0, "llik {} must be ≤ 0", s.llik);
         assert!(s.null_llik <= 0.0);
     }
@@ -57,7 +57,7 @@ fn the_likelihood_is_a_proper_multinomial() {
 #[test]
 fn an_empty_profile_scores_nothing_rather_than_nan_likelihood() {
     let dict = fixture();
-    let s = dict.score(&[], &[1.0, 1.0], None);
+    let s = dict.score(&[], &[1.0, 1.0], &dict.eval_axis(None));
     assert_eq!(s.total, 0.0);
     assert_eq!(s.llik, 0.0);
     assert!(s.agreement.spearman.is_nan());
@@ -68,14 +68,14 @@ fn agreement_needs_an_evaluation_axis() {
     let dict = fixture();
     let obs = [(0u32, 9.0f32), (1, 1.0)];
     assert!(dict
-        .score(&obs, &[1.0, 0.0], None)
+        .score(&obs, &[1.0, 0.0], &dict.eval_axis(None))
         .agreement
         .spearman
         .is_nan());
 
     // Given one, the correlation is over that axis with the zeros densified in.
     let axis: Vec<u32> = vec![0, 1, 2];
-    let s = dict.score(&obs, &[3.0, -3.0], Some(&axis));
+    let s = dict.score(&obs, &[3.0, -3.0], &dict.eval_axis(Some(axis.clone())));
     assert!(
         s.agreement.spearman.is_finite(),
         "an eval axis must yield a real correlation"
@@ -90,7 +90,7 @@ fn eval_axis_drops_names_that_carry_no_counts() {
     let dict = PairDictionary::new(&e_feat, &[300.0, 200.0, 500.0, 0.0], 100).expect("dictionary");
     let names: Vec<Box<str>> = vec!["a".into(), "b".into(), "c".into(), "dead".into()];
     let wanted: std::collections::HashSet<&str> = ["a", "dead"].into_iter().collect();
-    assert_eq!(dict.eval_axis(&names, &wanted), vec![0]);
+    assert_eq!(dict.eval_positions(&names, &wanted), vec![0]);
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn an_eval_axis_restricts_the_likelihood_and_the_total() {
     let obs = [(0u32, 4.0f32), (1, 6.0), (2, 90.0)];
     let axis: Vec<u32> = vec![0, 1];
 
-    let s = dict.score(&obs, &[1.0, -1.0], Some(&axis));
+    let s = dict.score(&obs, &[1.0, -1.0], &dict.eval_axis(Some(axis.clone())));
     assert_eq!(s.total, 10.0, "gene 2's counts are outside the scored set");
     assert!(
         (s.llik / s.total - -1.529_661_8).abs() < 1e-4,
@@ -126,9 +126,10 @@ fn the_restricted_score_ignores_everything_off_its_axis() {
     let axis: Vec<u32> = vec![0, 1];
     let theta = [0.6f32, -0.2];
 
-    let a = dict.score(&[(0, 4.0), (1, 6.0), (2, 1.0)], &theta, Some(&axis));
-    let b = dict.score(&[(0, 4.0), (1, 6.0), (2, 9_000.0)], &theta, Some(&axis));
-    let c = dict.score(&[(0, 4.0), (1, 6.0)], &theta, Some(&axis));
+    let ax = dict.eval_axis(Some(axis.clone()));
+    let a = dict.score(&[(0, 4.0), (1, 6.0), (2, 1.0)], &theta, &ax);
+    let b = dict.score(&[(0, 4.0), (1, 6.0), (2, 9_000.0)], &theta, &ax);
+    let c = dict.score(&[(0, 4.0), (1, 6.0)], &theta, &ax);
 
     for other in [&b, &c] {
         assert_eq!(a.total, other.total);
@@ -145,7 +146,7 @@ fn the_restricted_null_normalises_over_the_same_genes_as_the_model() {
     let dict = fixture();
     let obs = [(0u32, 5.0f32), (1, 5.0)];
     let axis: Vec<u32> = vec![0, 1];
-    let s = dict.score(&obs, &[0.0, 0.0], Some(&axis));
+    let s = dict.score(&obs, &[0.0, 0.0], &dict.eval_axis(Some(axis.clone())));
     assert!(
         (s.llik - s.null_llik).abs() < 1e-4,
         "at theta = 0 the model IS the null, on any axis: {} vs {}",
