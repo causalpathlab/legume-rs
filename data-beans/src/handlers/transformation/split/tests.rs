@@ -127,3 +127,73 @@ fn a_cell_with_no_label_is_an_error_not_a_singleton() {
     let cols: Vec<Box<str>> = ["c1", "c2"].iter().map(|s| Box::from(*s)).collect();
     assert!(column_groups_from_table(p.to_str().expect("utf8"), &cols).is_err());
 }
+
+/// The write side of `split`, pinned before its streaming rewrite. Coverage:
+/// the two halves partition the cells exactly (no loss, no duplication), each
+/// kept column is untouched, and names travel with their columns.
+#[test]
+fn the_halves_partition_the_cells_and_keep_their_values() -> anyhow::Result<()> {
+    use crate::sparse_io::*;
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("in.zarr");
+    {
+        let mut arr = ndarray::Array2::<f32>::zeros((3, 8));
+        for r in 0..3 {
+            for c in 0..8 {
+                arr[(r, c)] = (r * 100 + c + 1) as f32;
+            }
+        }
+        let mut data = create_sparse_from_ndarray(
+            &arr,
+            Some(input.to_str().expect("utf8")),
+            Some(&SparseIoBackend::Zarr),
+        )?;
+        let rows: Vec<Box<str>> = (0..3).map(|r| format!("g{r}").into()).collect();
+        let cols: Vec<Box<str>> = (0..8).map(|c| format!("cell{c}").into()).collect();
+        data.register_row_names_vec(&rows);
+        data.register_column_names_vec(&cols);
+    }
+
+    let out = dir.path().join("cv");
+    run_split(&SplitArgs {
+        data_file: input.to_str().expect("utf8").into(),
+        test_frac: Some(0.25),
+        folds: None,
+        coord: None,
+        coord_columns: None,
+        grid: 8,
+        groups: None,
+        seed: 7,
+        backend: SparseIoBackend::Zarr,
+        output: out.to_str().expect("utf8").into(),
+        zip: false,
+    })?;
+
+    let src = open_sparse_matrix(input.to_str().expect("utf8"), &SparseIoBackend::Zarr)?;
+    let src_dense = src.read_columns_dmatrix((0..8).collect())?;
+    let src_cols = src.column_names()?;
+
+    let mut seen: Vec<Box<str>> = Vec::new();
+    for half in ["train", "test"] {
+        let path = format!("{}.{half}.zarr", out.to_str().expect("utf8"));
+        let h = open_sparse_matrix(&path, &SparseIoBackend::Zarr)?;
+        assert_eq!(h.num_rows(), Some(3), "{half}: full gene axis");
+        let ncol = h.num_columns().expect("ncol");
+        let dense = h.read_columns_dmatrix((0..ncol).collect())?;
+        for (k, name) in h.column_names()?.iter().enumerate() {
+            let orig = src_cols
+                .iter()
+                .position(|n| n == name)
+                .expect("cell exists");
+            for r in 0..3 {
+                assert_eq!(dense[(r, k)], src_dense[(r, orig)], "{half} {name} row {r}");
+            }
+            seen.push(name.clone());
+        }
+    }
+    seen.sort();
+    let mut all: Vec<Box<str>> = src_cols.to_vec();
+    all.sort();
+    assert_eq!(seen, all, "the halves tile the cells exactly once");
+    Ok(())
+}
