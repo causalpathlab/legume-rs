@@ -117,10 +117,16 @@ pub(crate) fn hide_features(
     remap: &mut GeneRemap,
     new_genes: &[Box<str>],
     hide: &std::collections::HashSet<Box<str>>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<()> {
+    // Lowercased on BOTH sides, matching the remap's own key. The panel file and
+    // the data may disagree on case while naming the same genes; an exact match
+    // here would hide nothing and then error with "matched no feature", which
+    // points at the wrong cause.
+    let hide_lower: std::collections::HashSet<String> =
+        hide.iter().map(|n| n.to_lowercase()).collect();
     let mut hidden = 0usize;
     for (row, name) in new_genes.iter().enumerate() {
-        if hide.contains(name) && remap.new_to_train[row].take().is_some() {
+        if hide_lower.contains(&name.to_lowercase()) && remap.new_to_train[row].take().is_some() {
             hidden += 1;
         }
     }
@@ -138,7 +144,7 @@ pub(crate) fn hide_features(
         "Ablation: hid {hidden} features from the encoder, {} remain as input",
         remap.n_mapped
     );
-    Ok(hidden)
+    Ok(())
 }
 
 /// Build a gene remap from training gene names and new-data gene names.

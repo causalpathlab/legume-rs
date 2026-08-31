@@ -89,7 +89,9 @@ fn eval_axis_drops_names_that_carry_no_counts() {
     let e_feat = Mat::from_row_slice(4, 2, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
     let dict = PairDictionary::new(&e_feat, &[300.0, 200.0, 500.0, 0.0], 100).expect("dictionary");
     let names: Vec<Box<str>> = vec!["a".into(), "b".into(), "c".into(), "dead".into()];
-    let wanted: std::collections::HashSet<&str> = ["a", "dead"].into_iter().collect();
+    // Deliberately cased differently from the data: the panel and the data may
+    // disagree on case while naming the same genes.
+    let wanted: Vec<Box<str>> = vec!["A".into(), "DEAD".into()];
     assert_eq!(dict.eval_positions(&names, &wanted), vec![0]);
 }
 
@@ -152,5 +154,24 @@ fn the_restricted_null_normalises_over_the_same_genes_as_the_model() {
         "at theta = 0 the model IS the null, on any axis: {} vs {}",
         s.llik,
         s.null_llik
+    );
+}
+
+/// A model that puts ~no mass on an observed gene must be charged the same
+/// penalty in both engines. senna floors the probability at LOG_PROB_FLOOR
+/// nats; before this test, pinto's logit clamp let the charge run to roughly
+/// twice that, so `eval_llik_per_count` — the documented cross-engine ranking
+/// column — punished the same event differently depending on the binary.
+#[test]
+fn a_starved_gene_is_charged_the_shared_floor() {
+    let dict = fixture();
+    // theta drives gene 0's logit to the clamp floor while gene 1 takes all the
+    // mass; every observed count sits on the starved gene.
+    let s = dict.score(&[(0u32, 10.0f32)], &[-100.0, 100.0], &dict.eval_axis(None));
+    let per_count = f64::from(s.llik) / f64::from(s.total);
+    assert!(
+        (per_count - matrix_util::agreement::LOG_PROB_FLOOR).abs() < 1e-3,
+        "starved-gene charge {per_count} nats/count; the shared floor is {}",
+        matrix_util::agreement::LOG_PROB_FLOOR
     );
 }

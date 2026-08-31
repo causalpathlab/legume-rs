@@ -70,6 +70,8 @@ pub struct SparseMtxData {
     max_row_name_idx: usize,
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
+    /// Streaming-write cursor: entries appended so far (see `note_streamed_nnz`).
+    streamed_nnz: u64,
     by_row_indptr: Vec<u64>,
     by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
@@ -139,6 +141,7 @@ impl SparseMtxData {
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
+            streamed_nnz: 0,
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
@@ -254,6 +257,7 @@ impl SparseMtxData {
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
+            streamed_nnz: 0,
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
@@ -553,6 +557,41 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read column index pointers
+    fn column_indptr(&self) -> &[u64] {
+        &self.by_column_indptr
+    }
+
+    fn reopen_backend(&mut self) -> anyhow::Result<()> {
+        // Path-addressed store: rebuild it, refresh the resident indptrs — and
+        // DROP the decoded-chunk LRU caches, which pin arrays of the store they
+        // were built on. Keeping them served pre-swap chunk contents against
+        // post-swap indptrs: a matrix that read back with row indices past its
+        // own nrow, from a file that was byte-for-byte correct on disk.
+        let store = Arc::new(FilesystemStore::new(&self.file_name)?);
+        self.read_store = store.clone();
+        self.write_store = Some(store);
+        self.by_column_data_cache = Arc::new(OnceLock::new());
+        self.by_column_indices_cache = Arc::new(OnceLock::new());
+        self.by_row_data_cache = Arc::new(OnceLock::new());
+        self.by_row_indices_cache = Arc::new(OnceLock::new());
+        self.streamed_nnz = 0;
+        self.read_column_indptr()?;
+        self.read_row_indptr()?;
+        Ok(())
+    }
+
+    fn note_streamed_nnz(&mut self, n: u64) {
+        self.streamed_nnz += n;
+    }
+
+    fn streamed_nnz(&self) -> u64 {
+        self.streamed_nnz
+    }
+
+    fn reset_streamed_nnz(&mut self) {
+        self.streamed_nnz = 0;
+    }
+
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as ZArray;
         let key = "/by_column/indptr";
@@ -571,6 +610,11 @@ impl SparseIo for SparseMtxData {
 
     /// preload columns' values and indices
     fn preload_columns(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "column") {
+                return Ok(());
+            }
+        }
         use zarrs::array::Array as ZArray;
 
         let key = "/by_column/data";
@@ -593,6 +637,11 @@ impl SparseIo for SparseMtxData {
 
     /// preload rows' values and indices
     fn preload_rows(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "row") {
+                return Ok(());
+            }
+        }
         use zarrs::array::Array as ZArray;
 
         let data = ZArray::open(self.read_store.clone(), KEY_BY_ROW_DATA)?;
