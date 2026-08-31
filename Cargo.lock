@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.3.17"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -4274,7 +4274,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -4994,7 +4994,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.10.5"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "approx",
