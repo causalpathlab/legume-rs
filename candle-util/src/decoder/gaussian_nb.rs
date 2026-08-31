@@ -53,6 +53,52 @@ impl GaussianNbDecoder {
         self.decoder.bias().cloned()
     }
 
+    /// `log π_nd = log_softmax_d(z·W + b)`.
+    fn log_pi(&self, z_nk: &Tensor) -> Result<Tensor> {
+        let logits_nd = self.decoder.forward(z_nk)?; // [N, D]
+        ops::log_softmax(&logits_nd, logits_nd.rank() - 1)
+    }
+}
+
+impl NewDecoder for GaussianNbDecoder {
+    fn new(n_features: usize, n_latent: usize, vs: VarBuilder) -> Result<Self> {
+        GaussianNbDecoder::new(n_features, n_latent, vs)
+    }
+}
+
+impl DecoderModuleT for GaussianNbDecoder {
+    fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
+        self.log_pi(z_nk)?.exp()
+    }
+
+    /// Factor loadings `[D, n_latent]` — the analogue of the topic dictionary.
+    fn get_dictionary(&self) -> Result<Tensor> {
+        Ok(self.decoder.weight().clone())
+    }
+
+    fn forward_with_llik<LlikFn>(
+        &self,
+        z_nk: &Tensor,
+        x_nd: &Tensor,
+        _llik: &LlikFn,
+    ) -> Result<(Tensor, Tensor)>
+    where
+        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
+    {
+        let last = x_nd.rank() - 1;
+        // `softmax` directly — no need to `log_softmax` then `exp` back.
+        let logits_nd = self.decoder.forward(z_nk)?; // [N, D]
+        let pi_nd = ops::softmax(&logits_nd, last)?;
+        let lib_n1 = x_nd.sum_keepdim(last)?; // [N, 1]
+        let mu_nd = pi_nd.broadcast_mul(&lib_n1)?;
+        let llik = nb_log_likelihood(x_nd, &mu_nd, &self.log_phi_1d)?;
+        Ok((pi_nd, llik))
+    }
+
+    fn llik_is_gene_chunked(&self) -> bool {
+        true
+    }
+
     /// Per-cell NB log-likelihood **without ever holding an `[N, D]` tensor**.
     ///
     /// [`forward_with_llik`](DecoderModuleT::forward_with_llik) has to return
@@ -70,12 +116,7 @@ impl GaussianNbDecoder {
     /// streaming max/sumexp form, the second the likelihood terms. The
     /// logits are recomputed rather than stored — that is the trade being
     /// made, compute for memory.
-    pub fn llik_gene_chunked(
-        &self,
-        z_nk: &Tensor,
-        x_nd: &Tensor,
-        gene_chunk: usize,
-    ) -> Result<Tensor> {
+    fn llik_gene_chunked(&self, z_nk: &Tensor, x_nd: &Tensor, gene_chunk: usize) -> Result<Tensor> {
         let chunk = gene_chunk.max(1).min(self.n_features);
         let last = x_nd.rank() - 1;
         let lib_n1 = x_nd.sum_keepdim(last)?; // [N, 1]
@@ -144,48 +185,6 @@ impl GaussianNbDecoder {
             start += len;
         }
         llik.ok_or_else(|| candle_core::Error::Msg("no gene slices to score".into()))
-    }
-
-    /// `log π_nd = log_softmax_d(z·W + b)`.
-    fn log_pi(&self, z_nk: &Tensor) -> Result<Tensor> {
-        let logits_nd = self.decoder.forward(z_nk)?; // [N, D]
-        ops::log_softmax(&logits_nd, logits_nd.rank() - 1)
-    }
-}
-
-impl NewDecoder for GaussianNbDecoder {
-    fn new(n_features: usize, n_latent: usize, vs: VarBuilder) -> Result<Self> {
-        GaussianNbDecoder::new(n_features, n_latent, vs)
-    }
-}
-
-impl DecoderModuleT for GaussianNbDecoder {
-    fn forward(&self, z_nk: &Tensor) -> Result<Tensor> {
-        self.log_pi(z_nk)?.exp()
-    }
-
-    /// Factor loadings `[D, n_latent]` — the analogue of the topic dictionary.
-    fn get_dictionary(&self) -> Result<Tensor> {
-        Ok(self.decoder.weight().clone())
-    }
-
-    fn forward_with_llik<LlikFn>(
-        &self,
-        z_nk: &Tensor,
-        x_nd: &Tensor,
-        _llik: &LlikFn,
-    ) -> Result<(Tensor, Tensor)>
-    where
-        LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>,
-    {
-        let last = x_nd.rank() - 1;
-        // `softmax` directly — no need to `log_softmax` then `exp` back.
-        let logits_nd = self.decoder.forward(z_nk)?; // [N, D]
-        let pi_nd = ops::softmax(&logits_nd, last)?;
-        let lib_n1 = x_nd.sum_keepdim(last)?; // [N, 1]
-        let mu_nd = pi_nd.broadcast_mul(&lib_n1)?;
-        let llik = nb_log_likelihood(x_nd, &mu_nd, &self.log_phi_1d)?;
-        Ok((pi_nd, llik))
     }
 
     fn dim_obs(&self) -> usize {

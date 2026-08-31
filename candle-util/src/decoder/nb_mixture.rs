@@ -193,6 +193,76 @@ impl DecoderModuleT for NbMixtureTopicDecoder {
         Ok((pi_nd, llik))
     }
 
+    fn llik_is_gene_chunked(&self) -> bool {
+        true
+    }
+
+    /// The same likelihood as [`Self::forward_with_llik`], taken a gene slice
+    /// at a time and never holding `[N, D]`.
+    ///
+    /// One pass is enough here, unlike the Gaussian head: `pi_d` mixes the
+    /// topic rate with the ambient profile per gene, and the topic rate is a
+    /// `logsumexp` over TOPICS, so a gene's rate needs no other gene's. Only
+    /// the library size and `rho` are global, and both are `[N, 1]` — read off
+    /// `x` up front and shared by every slice. The `rho` prior is per cell, so
+    /// it is added once at the end rather than per slice.
+    fn llik_gene_chunked(&self, z_nk: &Tensor, x_nd: &Tensor, gene_chunk: usize) -> Result<Tensor> {
+        let last = x_nd.rank() - 1;
+        let chunk = gene_chunk.max(1).min(self.n_features);
+        let lib_n1 = x_nd.sum(last)?.unsqueeze(1)?; // [N, 1]
+        let rho_n1 = self.rho_from_lib(&lib_n1)?;
+        let one_minus_rho = rho_n1.affine(-1.0, 1.0)?;
+        let alpha_1d = {
+            let r = self.log_alpha_1d.rank();
+            ops::log_softmax(&self.log_alpha_1d, r - 1)?.exp()?
+        };
+        let ambient_1d = alpha_1d.broadcast_mul(&rho_n1)?;
+        let log_w_kd = self.dictionary.log_weight_kd()?;
+
+        let mut data_llik: Option<Tensor> = None;
+        let mut start = 0;
+        while start < self.n_features {
+            let len = chunk.min(self.n_features - start);
+            // The topic rate for this slice only: the weights are already
+            // normalised over the full gene axis, so narrowing them gives the
+            // same numbers the full forward would.
+            let topic =
+                crate::nn::linear::logsumexp_forward(z_nk, &log_w_kd.narrow(1, start, len)?)?
+                    .exp()?;
+            let pi = topic
+                .broadcast_mul(&one_minus_rho)?
+                .broadcast_add(&ambient_1d.narrow(last, start, len)?)?;
+            let mu = pi.broadcast_mul(&lib_n1)?;
+            let x = x_nd.narrow(last, start, len)?;
+            let log_phi = self
+                .log_phi_1d
+                .narrow(1, start, len)?
+                .broadcast_as(x.shape())?;
+            let part = crate::loss::nb_log_likelihood_elem(&x, &mu, &log_phi)?.sum(last)?;
+            data_llik = Some(match data_llik.take() {
+                Some(acc) => acc.add(&part)?,
+                None => part,
+            });
+            start += len;
+        }
+        let data_llik =
+            data_llik.ok_or_else(|| candle_core::Error::Msg("no gene slices to score".into()))?;
+
+        if self.rho_prior_weight > 0.0 {
+            let eps = 1e-6f64;
+            let log_rho = (&rho_n1 + eps)?.log()?;
+            let log_1m_rho = (&one_minus_rho + eps)?.log()?;
+            let coeff_a = f64::from(self.rho_prior_alpha - 1.0);
+            let coeff_b = f64::from(self.rho_prior_beta - 1.0);
+            let term = ((log_rho * coeff_a)? + (log_1m_rho * coeff_b)?)?;
+            let log_prior_n = term.squeeze(1)?;
+            let scaled = (log_prior_n * f64::from(self.rho_prior_weight))?;
+            data_llik + scaled
+        } else {
+            Ok(data_llik)
+        }
+    }
+
     fn dim_obs(&self) -> usize {
         self.n_features
     }
@@ -236,5 +306,81 @@ impl DecoderModuleT for NbMixtureTopicDecoder {
             let mu = pi.broadcast_mul(&lib_n1)?;
             nb_log_likelihood(x_nd, &mu, &log_phi)
         }))
+    }
+}
+
+#[cfg(test)]
+mod chunked_llik_tests {
+    use super::*;
+    use crate::traits::model::DecoderModuleT;
+    use candle_core::{DType, Device};
+    use candle_nn::{VarBuilder, VarMap};
+
+    /// `senna topic`'s default decoder. Its chunked likelihood exists purely
+    /// to save memory, so it must agree with the dense path at every chunk
+    /// width — including ones that do not divide the gene count.
+    #[test]
+    fn chunked_llik_matches_the_dense_path() {
+        let dev = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+        let (n, d, k) = (6usize, 29usize, 4usize);
+        let dec = NbMixtureTopicDecoder::new(d, k, vb.pp("dec")).unwrap();
+
+        // The topic decoders take log-simplex z, not a raw Gaussian.
+        let raw = Tensor::rand(-1f32, 1f32, (n, k), &dev).unwrap();
+        let log_z = candle_nn::ops::log_softmax(&raw, 1).unwrap();
+        let x = Tensor::rand(0f32, 7f32, (n, d), &dev).unwrap();
+
+        let (_, dense) = dec
+            .forward_with_llik(&log_z, &x, &|_, _| unreachable!())
+            .unwrap();
+        let dense: Vec<f32> = dense.to_vec1().unwrap();
+
+        for chunk in [1usize, 5, 29, 64] {
+            let got: Vec<f32> = dec
+                .llik_gene_chunked(&log_z, &x, chunk)
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            for (i, (g, e)) in got.iter().zip(&dense).enumerate() {
+                assert!(
+                    (g - e).abs() <= 1e-3 * e.abs().max(1.0),
+                    "chunk {chunk}, cell {i}: chunked {g} vs dense {e}"
+                );
+            }
+        }
+    }
+
+    /// The ambient/rho mixing and its prior are per cell, not per gene, so
+    /// they must be applied exactly once however the genes are sliced.
+    #[test]
+    fn the_rho_prior_is_added_once_not_per_slice() {
+        let dev = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+        let (n, d, k) = (3usize, 16usize, 2usize);
+        let mut dec = NbMixtureTopicDecoder::new(d, k, vb.pp("dec")).unwrap();
+        dec.rho_prior_weight = 2.5;
+        let raw = Tensor::rand(-1f32, 1f32, (n, k), &dev).unwrap();
+        let log_z = candle_nn::ops::log_softmax(&raw, 1).unwrap();
+        let x = Tensor::rand(0f32, 5f32, (n, d), &dev).unwrap();
+
+        let one: Vec<f32> = dec
+            .llik_gene_chunked(&log_z, &x, d)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let many: Vec<f32> = dec
+            .llik_gene_chunked(&log_z, &x, 3)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        for (a, b) in one.iter().zip(&many) {
+            assert!(
+                (a - b).abs() <= 1e-3 * a.abs().max(1.0),
+                "slicing changed the prior: {a} vs {b}"
+            );
+        }
     }
 }

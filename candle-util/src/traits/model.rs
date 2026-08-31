@@ -68,6 +68,38 @@ pub trait DecoderModuleT {
     where
         LlikFn: Fn(&Tensor, &Tensor) -> Result<Tensor>;
 
+    /// Whether [`Self::llik_gene_chunked`] actually slices, or falls back to
+    /// the dense path. Callers size their memory budget from this, so a
+    /// decoder that overrides one must override the other.
+    fn llik_is_gene_chunked(&self) -> bool {
+        false
+    }
+
+    /// Per-cell log-likelihood computed in slices of `gene_chunk` features,
+    /// so nothing wider than `[N, gene_chunk]` is ever allocated.
+    ///
+    /// [`forward_with_llik`](Self::forward_with_llik) must also return the
+    /// reconstruction, which is `[N, D]` by construction — training needs it
+    /// for the gradient. Inference wants only the scalar per cell, and paying
+    /// for a full dense matrix (plus the temporaries behind it) to get one is
+    /// what makes whole-transcriptome scoring an OOM.
+    ///
+    /// The default IS that dense path, so every decoder keeps working
+    /// unchanged; a decoder whose rate is separable over genes overrides this
+    /// and the memory disappears. Overriding is possible when a gene's rate
+    /// does not depend on the other genes' — true of the topic decoders,
+    /// whose `logsumexp` reduces over TOPICS so a gene slice is
+    /// self-contained, and arranged with a two-pass denominator for the
+    /// Gaussian head, whose softmax spans the gene axis.
+    fn llik_gene_chunked(&self, z_nk: &Tensor, x_nd: &Tensor, gene_chunk: usize) -> Result<Tensor> {
+        let _ = gene_chunk;
+        let dense = |_: &Tensor, _: &Tensor| -> Result<Tensor> {
+            candle_core::bail!("the dense fallback needs no likelihood closure")
+        };
+        let (_, llik) = self.forward_with_llik(z_nk, x_nd, &dense)?;
+        Ok(llik)
+    }
+
     fn dim_obs(&self) -> usize;
 
     fn dim_latent(&self) -> usize;
