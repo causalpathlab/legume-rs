@@ -14,7 +14,9 @@
 //! than reading the stored latent.
 
 use crate::embed_common::*;
-use crate::topic::eval::{build_gene_remap_with, ensure_gene_coverage, QueryNameOpts};
+use crate::topic::eval::{
+    build_gene_remap_with, ensure_gene_coverage, hide_features, QueryNameOpts,
+};
 
 /// The training-time normalization scale, replayed from the manifest's
 /// recorded fit arguments through the typed [`crate::run_manifest::RunManifest::train_args_as`]
@@ -87,26 +89,73 @@ struct SvdProjParam<'a> {
 /// remap rows by name onto the training axis, then the training run's own
 /// per-chunk transform ([`super::nystrom_preprocess_columns`]), and
 /// multiply through `u`.
-pub(crate) fn project_onto_dictionary(
+///
+/// `opts` carries the caller's query-axis rules and is NOT optional in
+/// spirit: this used to build its own `QueryNameOpts::default()`, which made
+/// the projection deaf to `--feature-name-kind` and — worse — to
+/// `--ablate-features`, so a latent was fitted on the very genes it was then
+/// scored against. Hiding is applied AFTER the coverage gate, because the
+/// hidden features are withheld on purpose and counting them as missing would
+/// refuse every ablated run.
+pub(crate) fn projection_remap(
     data: &SparseIoVec,
     train_genes: &[Box<str>],
-    u_dk: &Mat,
-    column_sum_norm: f32,
-    block_size: Option<usize>,
+    opts: &QueryNameOpts,
     what: &str,
-) -> anyhow::Result<Mat> {
+) -> anyhow::Result<crate::topic::eval::GeneRemap> {
     let data_genes = data.row_names()?;
-    // Defaults reproduce the exact-then-flexible name matching `predict`
-    // applies when `--feature-name-kind` is left at `exact`.
-    let opts = QueryNameOpts::default();
-    let remap = build_gene_remap_with(train_genes, &data_genes, &opts);
-    ensure_gene_coverage(&remap, 0.0, "--feature-name-kind")?;
+    let mut remap = build_gene_remap_with(train_genes, &data_genes, opts);
+    ensure_gene_coverage(&remap, opts.min_overlap, "--feature-name-kind")?;
+    if let Some(hide) = opts.hide.as_deref() {
+        hide_features(&mut remap, &data_genes, hide)?;
+    }
     info!(
         "{what}: {} of the model's {} genes present across {} cells",
         remap.n_mapped,
         train_genes.len(),
         data.num_columns()
     );
+    Ok(remap)
+}
+
+/// Project one already-read block onto the dictionary, `[K, n_block]`.
+///
+/// The transform lives HERE and only here, so a caller that has the block's
+/// CSC in hand (and wants to do something else with it) reuses the same
+/// arithmetic instead of streaming the data a second time.
+pub(crate) fn project_block(
+    csc_in: &nalgebra_sparse::CscMatrix<f32>,
+    remap: &[Option<usize>],
+    u_dk: &Mat,
+    column_sum_norm: f32,
+) -> Mat {
+    let d_train = u_dk.nrows();
+    // Remap onto the training gene axis, staying sparse for the reasons on
+    // `nystrom_preprocess_columns`.
+    let mut coo = nalgebra_sparse::CooMatrix::new(d_train, csc_in.ncols());
+    for c_local in 0..csc_in.ncols() {
+        let col = csc_in.col(c_local);
+        for (&row_id, &v) in col.row_indices().iter().zip(col.values().iter()) {
+            if let Some(t) = remap[row_id] {
+                coo.push(t, c_local, v);
+            }
+        }
+    }
+    let mut x_dn = nalgebra_sparse::CscMatrix::from(&coo);
+    super::nystrom_preprocess_columns(&mut x_dn, column_sum_norm, None);
+    (x_dn.transpose() * u_dk).transpose()
+}
+
+pub(crate) fn project_onto_dictionary(
+    data: &SparseIoVec,
+    train_genes: &[Box<str>],
+    u_dk: &Mat,
+    column_sum_norm: f32,
+    opts: &QueryNameOpts,
+    block_size: Option<usize>,
+    what: &str,
+) -> anyhow::Result<Mat> {
+    let remap = projection_remap(data, train_genes, opts, what)?;
 
     let n = data.num_columns();
     let k = u_dk.ncols();
@@ -128,24 +177,12 @@ fn proj_visitor(
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let csc_in = data.read_columns_csc(lb..ub)?;
-    let d_train = param.u_dk.nrows();
-
-    // Remap onto the training gene axis, staying sparse for the reasons on
-    // `nystrom_preprocess_columns`.
-    let mut coo = nalgebra_sparse::CooMatrix::new(d_train, ub - lb);
-    for c_local in 0..csc_in.ncols() {
-        let col = csc_in.col(c_local);
-        for (&row_id, &v) in col.row_indices().iter().zip(col.values().iter()) {
-            if let Some(t) = param.remap[row_id] {
-                coo.push(t, c_local, v);
-            }
-        }
-    }
-    let mut x_dn = nalgebra_sparse::CscMatrix::from(&coo);
-    super::nystrom_preprocess_columns(&mut x_dn, param.column_sum_norm, None);
-
-    let chunk = (x_dn.transpose() * param.u_dk).transpose();
+    let chunk = project_block(&csc_in, param.remap, param.u_dk, param.column_sum_norm);
     let mut proj_kn = arc_proj_kn.lock().expect("lock proj in svd projection");
     proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "project_tests.rs"]
+mod tests;
