@@ -7,7 +7,7 @@
 //! noise straight into the number being reported.
 
 use super::{PairDictionary, SCORE_CLAMP};
-use matrix_util::agreement::{pearson_log1p, spearman, CellAgreement};
+use matrix_util::agreement::{agreement_from_log_rate, CellAgreement};
 
 /// The gene axis a run scores over, resolved once.
 pub struct EvalAxis {
@@ -16,8 +16,9 @@ pub struct EvalAxis {
     /// is scored by the likelihood but nothing is correlated, because a sort per
     /// pair is not a cost to pay by default.
     correlated: Option<Vec<u32>>,
-    /// Positions the likelihood normalises over.
-    over: Vec<u32>,
+    /// Positions the likelihood normalises over — every active gene when the
+    /// user did not restrict the axis.
+    normalised_over: Vec<u32>,
     /// Membership by active-list position — a bitmap, not a hash set.
     is_scored: Vec<bool>,
     /// `ln Σ exp(b_g)` over `over`; constant for the run.
@@ -26,13 +27,13 @@ pub struct EvalAxis {
 
 impl EvalAxis {
     #[must_use]
-    fn scores(&self, local: usize) -> bool {
-        self.is_scored.get(local).copied().unwrap_or(false)
+    fn scores(&self, gene: usize) -> bool {
+        self.is_scored.get(gene).copied().unwrap_or(false)
     }
 
     /// Streaming log-sum-exp of `f` over the scored positions.
     fn log_partition(&self, f: impl Fn(usize) -> f32) -> f32 {
-        log_sum_exp(self.over.iter().map(|&g| f(g as usize)))
+        log_sum_exp(self.normalised_over.iter().map(|&g| f(g as usize)))
     }
 }
 
@@ -108,14 +109,14 @@ impl PairDictionary {
         let mut llik = 0f64;
         let mut null_llik = 0f64;
         let mut total = 0f32;
-        for &(l, x) in &local {
-            let l = l as usize;
-            if !axis.scores(l) {
+        for &(gene, x) in &local {
+            let gene = gene as usize;
+            if !axis.scores(gene) {
                 continue;
             }
             total += x;
-            llik += f64::from(x) * f64::from(log_rate[l] - z_model);
-            null_llik += f64::from(x) * f64::from(self.b[l] - axis.z_null);
+            llik += f64::from(x) * f64::from(log_rate[gene] - z_model);
+            null_llik += f64::from(x) * f64::from(self.b[gene] - axis.z_null);
         }
         if !total.is_finite() || total <= 0.0 {
             return PairScore::default();
@@ -125,7 +126,7 @@ impl PairDictionary {
             llik: llik as f32,
             null_llik: null_llik as f32,
             total,
-            agreement: self.agreement(&local, &log_rate, z_model, total, axis),
+            agreement: self.agreement(&local, &log_rate, axis),
         }
     }
 
@@ -135,33 +136,23 @@ impl PairDictionary {
     /// profile being correlated directly: a held-out profile is mostly zeros, and
     /// those zeros are data — a model that puts mass on an unobserved gene has to
     /// be charged for it.
-    fn agreement(
-        &self,
-        local: &[(u32, f32)],
-        log_rate: &[f32],
-        z_model: f32,
-        total: f32,
-        axis: &EvalAxis,
-    ) -> CellAgreement {
+    ///
+    /// The log-rate is handed over as-is; `agreement_from_log_rate` renormalises
+    /// it and puts it on the count scale, the same rule senna's cells go through.
+    fn agreement(&self, local: &[(u32, f32)], log_rate: &[f32], axis: &EvalAxis) -> CellAgreement {
         let Some(axis) = axis.correlated.as_deref() else {
             return CellAgreement {
                 spearman: f32::NAN,
                 pearson_log1p: f32::NAN,
             };
         };
-        let mut obs = vec![0f32; self.b.len()];
-        for &(l, x) in local {
-            obs[l as usize] += x;
+        let mut dense_obs = vec![0f32; self.b.len()];
+        for &(gene, x) in local {
+            dense_obs[gene as usize] += x;
         }
-        let o: Vec<f32> = axis.iter().map(|&g| obs[g as usize]).collect();
-        let p: Vec<f32> = axis
-            .iter()
-            .map(|&g| (log_rate[g as usize] - z_model).exp() * total)
-            .collect();
-        CellAgreement {
-            spearman: spearman(&o, &p),
-            pearson_log1p: pearson_log1p(&o, &p),
-        }
+        let observed: Vec<f32> = axis.iter().map(|&g| dense_obs[g as usize]).collect();
+        let log_rate_on_axis: Vec<f32> = axis.iter().map(|&g| log_rate[g as usize]).collect();
+        agreement_from_log_rate(&observed, &log_rate_on_axis)
     }
 
     /// Build the scoring axis once for a whole run.
@@ -182,14 +173,14 @@ impl PairDictionary {
                 }
             }
         }
-        let over: Vec<u32> = match positions.as_deref() {
+        let normalised_over: Vec<u32> = match positions.as_deref() {
             Some(p) => p.to_vec(),
             None => (0..n_active as u32).collect(),
         };
-        let z_null = log_sum_exp(over.iter().map(|&g| self.b[g as usize]));
+        let z_null = log_sum_exp(normalised_over.iter().map(|&g| self.b[g as usize]));
         EvalAxis {
             correlated: positions,
-            over,
+            normalised_over,
             is_scored,
             z_null,
         }
@@ -206,9 +197,9 @@ impl PairDictionary {
             .iter()
             .enumerate()
             .filter(|(_, n)| wanted.contains(n.as_ref()))
-            .filter_map(|(g, _)| {
-                let l = *self.local_of_gene.get(g)?;
-                (l != u32::MAX).then_some(l)
+            .filter_map(|(gene, _)| {
+                let position = *self.local_of_gene.get(gene)?;
+                (position != u32::MAX).then_some(position)
             })
             .collect()
     }

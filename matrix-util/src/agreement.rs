@@ -12,53 +12,94 @@ pub struct CellAgreement {
     pub pearson_log1p: f32,
 }
 
+/// Observed counts against a predicted RATE, put on the count scale first.
+///
+/// The rate is renormalised over the slice it is given and multiplied by the
+/// observed total, because [`pearson_log1p`] is not scale-invariant: `log1p(c·p)`
+/// is not an affine function of `log1p(p)`, and a held-out profile's many zeros
+/// anchor the low end. Feeding it a raw rate understates a good prediction — and
+/// understates it by a different amount per engine, since each one's rate carries
+/// its own arbitrary scale.
+///
+/// This lives here, rather than in either caller, for the same reason the
+/// correlations do: senna scores cells from a linear reconstruction and pinto
+/// scores pairs from a clamped log-rate, and the two numbers are only comparable
+/// if the rule that puts them on a common scale is one piece of code. It was
+/// written twice before, and one copy was wrong.
+#[must_use]
+pub fn agreement_from_rate(observed: &[f32], rate: &[f32]) -> CellAgreement {
+    let count: f32 = observed.iter().sum();
+    let z: f32 = rate.iter().sum::<f32>().max(1e-12);
+    let scale = count / z;
+    let predicted_counts: Vec<f32> = rate.iter().map(|r| r * scale).collect();
+    CellAgreement {
+        spearman: spearman(observed, &predicted_counts),
+        pearson_log1p: pearson_log1p(observed, &predicted_counts),
+    }
+}
+
+/// As [`agreement_from_rate`], for an engine that holds its rate in log space.
+///
+/// Shifted by the maximum before exponentiating, which is exact once the column
+/// is normalised and is what keeps an unbounded logit from overflowing.
+#[must_use]
+pub fn agreement_from_log_rate(observed: &[f32], log_rate: &[f32]) -> CellAgreement {
+    let max_logit = log_rate.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let rate: Vec<f32> = log_rate.iter().map(|l| (l - max_logit).exp()).collect();
+    agreement_from_rate(observed, &rate)
+}
+
 /// Pearson correlation of `log1p(a)` against `log1p(b)`.
 ///
 /// `log1p` because counts span orders of magnitude and a raw Pearson would be
 /// decided by the few highest-expressed genes; `NaN` when either side is
 /// constant, which is the honest answer rather than 0.
 #[must_use]
-pub fn pearson_log1p(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() < 2 || a.len() != b.len() {
+pub fn pearson_log1p(observed: &[f32], predicted: &[f32]) -> f32 {
+    if observed.len() < 2 || observed.len() != predicted.len() {
         return f32::NAN;
     }
-    let la: Vec<f64> = a.iter().map(|v| f64::from(v.max(0.0)).ln_1p()).collect();
-    let lb: Vec<f64> = b.iter().map(|v| f64::from(v.max(0.0)).ln_1p()).collect();
-    pearson(&la, &lb)
+    let log1p =
+        |v: &[f32]| -> Vec<f64> { v.iter().map(|x| f64::from(x.max(0.0)).ln_1p()).collect() };
+    pearson(&log1p(observed), &log1p(predicted))
 }
 
 /// Spearman: Pearson on average ranks. Ties get their mean rank, which matters
 /// here because a held-out profile is mostly zeros and they are all tied.
 #[must_use]
-pub fn spearman(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() < 2 || a.len() != b.len() {
+pub fn spearman(observed: &[f32], predicted: &[f32]) -> f32 {
+    if observed.len() < 2 || observed.len() != predicted.len() {
         return f32::NAN;
     }
-    pearson(&average_ranks(a), &average_ranks(b))
+    pearson(&average_ranks(observed), &average_ranks(predicted))
 }
 
 /// 1-based ranks with ties averaged.
 ///
 /// Not public: the two correlations above are the API, and they guarantee the
 /// length and finiteness this assumes.
-fn average_ranks(v: &[f32]) -> Vec<f64> {
-    let mut idx: Vec<usize> = (0..v.len()).collect();
-    idx.sort_by(|&i, &j| v[i].partial_cmp(&v[j]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut out = vec![0f64; v.len()];
-    let mut i = 0;
-    while i < idx.len() {
-        let mut j = i + 1;
-        while j < idx.len() && v[idx[j]] == v[idx[i]] {
-            j += 1;
+fn average_ranks(values: &[f32]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&i, &j| {
+        values[i]
+            .partial_cmp(&values[j])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut ranks = vec![0f64; values.len()];
+    let mut run_start = 0;
+    while run_start < order.len() {
+        let mut run_end = run_start + 1;
+        while run_end < order.len() && values[order[run_end]] == values[order[run_start]] {
+            run_end += 1;
         }
         // Mean of the 1-based ranks this tied run spans.
-        let r = (i + 1 + j) as f64 / 2.0;
-        for &k in &idx[i..j] {
-            out[k] = r;
+        let shared = (run_start + 1 + run_end) as f64 / 2.0;
+        for &position in &order[run_start..run_end] {
+            ranks[position] = shared;
         }
-        i = j;
+        run_start = run_end;
     }
-    out
+    ranks
 }
 
 /// Pearson on two equal-length slices; `NaN` when either is constant.
@@ -75,9 +116,11 @@ fn pearson(a: &[f64], b: &[f64]) -> f32 {
         saa += dx * dx;
         sbb += dy * dy;
     }
-    let d = (saa * sbb).sqrt();
-    if d > 0.0 {
-        (sab / d) as f32
+    // `denom`, not `d` — `d` is the feature-axis size everywhere else in this
+    // workspace, and a reader should not have to check which one this is.
+    let denom = (saa * sbb).sqrt();
+    if denom > 0.0 {
+        (sab / denom) as f32
     } else {
         f32::NAN
     }

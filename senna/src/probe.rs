@@ -279,14 +279,12 @@ fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
         args.preload_data,
         args.minibatch_size,
         &qopts,
-        None,
     )?;
     let query = model.score(
         &args.data_files,
         args.preload_data,
         args.minibatch_size,
         &qopts,
-        None,
     )?;
 
     write_verdict(Verdict {
@@ -395,7 +393,6 @@ fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyho
     let (cal_fit, q_fit, q_names) = match kind {
         RunKind::Vae => cal_and_query(args, |files| {
             score_vae_backend(VaeScoreArgs {
-                ablate_features: None,
                 model: &args.model,
                 data_files: files,
                 batch_files: None,
@@ -416,7 +413,6 @@ fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyho
         // end of that trade; the masked path has no δ at all.
         RunKind::Topic => cal_and_query(args, |files| {
             score_dense_backend(DenseScoreArgs {
-                ablate_features: None,
                 model: &args.model,
                 data_files: files,
                 batch_files: None,

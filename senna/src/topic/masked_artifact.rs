@@ -117,7 +117,6 @@ impl<'a> MaskedModel<'a> {
     ) -> anyhow::Result<MaskedScored> {
         let qopts = QueryNameOpts::default();
         score_masked_backend(MaskedScoreArgs {
-            ablate_features: None,
             model: self.prefix,
             data_files: files,
             batch_files: None,

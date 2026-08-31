@@ -94,6 +94,51 @@ pub(crate) struct QueryNameOpts {
     /// `Default`, and what every caller but `predict` wants — reports coverage
     /// without gating on it.
     pub min_overlap: f32,
+    /// Features to withhold from the model (`--ablate-features`), resolved once
+    /// at argument time.
+    ///
+    /// It belongs here because this struct already IS "how the query's feature
+    /// axis is interpreted", and hiding is one more rule of that kind. Carried as
+    /// an `Arc` so the struct stays cheap to clone, and resolved up front so a
+    /// mistyped path fails before the backend is read rather than minutes into a
+    /// `--preload-data` load.
+    pub hide: Option<std::sync::Arc<std::collections::HashSet<Box<str>>>>,
+}
+
+/// Point the named features at `None` in a remap, hiding them from the model.
+///
+/// Applied to the remap because that is the gate every backend already reads to
+/// decide what reaches the model — so a hidden feature is hidden everywhere,
+/// through a path already exercised by ordinary axis mismatches.
+///
+/// Call this AFTER [`ensure_gene_coverage`]: the hidden features are withheld on
+/// purpose, so counting them as missing coverage would refuse every ablated run.
+pub(crate) fn hide_features(
+    remap: &mut GeneRemap,
+    new_genes: &[Box<str>],
+    hide: &std::collections::HashSet<Box<str>>,
+) -> anyhow::Result<usize> {
+    let mut hidden = 0usize;
+    for (row, name) in new_genes.iter().enumerate() {
+        if hide.contains(name) && remap.new_to_train[row].take().is_some() {
+            hidden += 1;
+        }
+    }
+    remap.n_mapped = remap.new_to_train.iter().filter(|o| o.is_some()).count();
+    anyhow::ensure!(
+        hidden > 0,
+        "--ablate-features matched no feature in the query; nothing would be hidden \
+         and the scores would be a plain reconstruction"
+    );
+    anyhow::ensure!(
+        remap.n_mapped > 0,
+        "--ablate-features hid every mapped feature; nothing is left to encode from"
+    );
+    log::info!(
+        "Ablation: hid {hidden} features from the encoder, {} remain as input",
+        remap.n_mapped
+    );
+    Ok(hidden)
 }
 
 /// Build a gene remap from training gene names and new-data gene names.

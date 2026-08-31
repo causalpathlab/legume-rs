@@ -130,8 +130,8 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     );
 
     let predict_args = PredictArgs {
-        null_from: None,
         ablate_features: None,
+        null_from: None,
         eval_features: None,
         data_files: args.data_files.clone(),
         model: args.model.clone(),

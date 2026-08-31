@@ -104,3 +104,40 @@ fn pearson_log1p_is_not_scale_invariant() {
     // Pearson column needed the fix.
     assert!((spearman(&obs, &comp) - 1.0).abs() < 1e-6);
 }
+
+#[test]
+fn agreement_from_rate_puts_a_proportional_prediction_at_one() {
+    // The rule that was written twice and got wrong once: a rate proportional to
+    // truth is a perfect prediction, whatever its scale.
+    let obs = [0.0f32, 0.0, 1.0, 2.0, 5.0, 40.0];
+    for scale in [1.0f32, 1e-4, 7.0, 1e5] {
+        let rate: Vec<f32> = obs.iter().map(|o| o * scale + 1e-9).collect();
+        let a = agreement_from_rate(&obs, &rate);
+        assert!(
+            (a.pearson_log1p - 1.0).abs() < 1e-3,
+            "scale {scale}: {}",
+            a.pearson_log1p
+        );
+    }
+}
+
+#[test]
+fn the_log_rate_entry_point_agrees_with_the_linear_one() {
+    // Same profile, same answer, whichever space the engine happens to hold its
+    // rate in — otherwise senna's cells and pinto's pairs are not comparable.
+    let obs = [0.0f32, 3.0, 1.0, 9.0];
+    let rate = [0.5f32, 4.0, 1.0, 12.0];
+    let log_rate: Vec<f32> = rate.iter().map(|r| r.ln()).collect();
+    let a = agreement_from_rate(&obs, &rate);
+    let b = agreement_from_log_rate(&obs, &log_rate);
+    assert!((a.pearson_log1p - b.pearson_log1p).abs() < 1e-4);
+    assert!((a.spearman - b.spearman).abs() < 1e-6);
+}
+
+#[test]
+fn a_huge_log_rate_does_not_overflow() {
+    // Unbounded logits are the reason the log entry point shifts by the max.
+    let obs = [1.0f32, 2.0, 3.0];
+    let a = agreement_from_log_rate(&obs, &[300.0, 301.0, 302.0]);
+    assert!(a.pearson_log1p.is_finite() && a.spearman.is_finite());
+}
