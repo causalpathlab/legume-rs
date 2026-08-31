@@ -28,10 +28,8 @@
 use crate::embed_common::*;
 use crate::predict::{predict_model, PredictArgs};
 use crate::run_manifest::{self, RunKind};
-use crate::topic::eval::{build_gene_remap_with, ensure_gene_coverage, QueryNameOpts};
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::Args;
-use data_beans::sparse_data_visitors::VisitColumnsOps;
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans_alg::retrieval_impute::{retrieval_impute, RetrievalImputeConfig};
 use log::info;
@@ -477,8 +475,11 @@ fn svd_matching_latents(
     ref_data: &SparseIoVec,
 ) -> anyhow::Result<(Vec<Box<str>>, Mat, Mat)> {
     let (train_genes, u_dk) = crate::topic::model_metadata::load_dictionary(&args.model)?;
-    let column_sum_norm = svd_column_sum_norm(&args.model);
-    warn_if_batch_corrected(args);
+    let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
+    crate::svd::project::warn_if_batch_corrected(
+        &args.model,
+        args.batch_files.is_some() || args.reference_batch_files.is_some(),
+    );
 
     info!("Loading new data for the dictionary projection");
     let new_loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
@@ -490,7 +491,7 @@ fn svd_matching_latents(
     let new_data: SparseIoVec = new_loaded.data;
     let new_cell_names = new_data.column_names()?;
 
-    let mut theta_new = project_onto_svd_dictionary(
+    let mut theta_new = crate::svd::project::project_onto_dictionary(
         &new_data,
         &train_genes,
         &u_dk,
@@ -498,7 +499,7 @@ fn svd_matching_latents(
         args.block_size,
         "query",
     )?;
-    let mut theta_ref = project_onto_svd_dictionary(
+    let mut theta_ref = crate::svd::project::project_onto_dictionary(
         ref_data,
         &train_genes,
         &u_dk,
@@ -513,148 +514,6 @@ fn svd_matching_latents(
     l2_normalize_rows_inplace(&mut theta_ref);
 
     Ok((new_cell_names, theta_new, theta_ref))
-}
-
-/// The training-time normalization scale, replayed from the manifest's
-/// recorded fit arguments through the typed [`RunManifest::train_args_as`]
-/// reader. Runs predating the manifest (or the `train_args` record) take the
-/// fit's long-standing default.
-///
-/// A blob this senna cannot deserialize warns and falls back rather than
-/// failing the run: `run_manifest`'s header reserves blob PARSING for
-/// `update` precisely so that a senna which gained a flag can still OPEN a
-/// run, and turning that into a hard error here would make `impute` the
-/// second command a renamed `SvdArgs` field can break — for one `f32` it
-/// does not otherwise need.
-fn svd_column_sum_norm(model: &str) -> f32 {
-    const DEFAULT: f32 = 1e4;
-    let Ok((manifest, _)) = run_manifest::load_for(model) else {
-        info!("no manifest for {model}; using the default normalization scale");
-        return DEFAULT;
-    };
-    if manifest.train_args.is_none() {
-        info!("manifest for {model} predates train_args; using the default normalization scale");
-        return DEFAULT;
-    }
-    match manifest.train_args_as::<crate::svd::SvdArgs>(model) {
-        Ok(recorded) => recorded.column_sum_norm,
-        Err(e) => {
-            log::warn!(
-                "{model}: cannot replay the recorded fit configuration ({e}); falling back to \
-                 the default normalization scale. If the run was trained with a non-default \
-                 --column-sum-norm, the matching space here differs from its training space."
-            );
-            DEFAULT
-        }
-    }
-}
-
-/// Say so when an svd model carries a batch correction this path cannot replay.
-///
-/// Training divides each column by `mu_residual`, a per-PSEUDOBULK-group
-/// residual, before fitting the dictionary. That matrix is never written to
-/// disk — `{model}.delta.parquet` holds the per-BATCH `delta`, a different
-/// object — and a new cell has no training pseudobulk membership to index it
-/// by even if it were. So the correction cannot be reproduced from the run's
-/// outputs, and both sides are projected without it: consistent with each
-/// other, but not with the space the dictionary was fitted in. Residual
-/// batch structure can therefore drive the retrieval.
-///
-/// Warned rather than refused, because the query may legitimately carry no
-/// batch structure worth correcting, and the same projection is applied to
-/// both sides. The fix is on the training side — persist the projection
-/// state — and is tracked in `plans/impute-all-models.md`.
-fn warn_if_batch_corrected(args: &ImputeArgs) {
-    if std::path::Path::new(&format!("{}.delta.parquet", args.model)).is_file() {
-        log::warn!(
-            "{}: this svd run was fitted with a batch correction, which impute cannot \
-             replay (the per-pseudobulk residual it used is not persisted). Query and \
-             reference are projected without it, so retrieval may match on residual \
-             batch structure rather than biology.",
-            args.model
-        );
-    }
-    if args.batch_files.is_some() || args.reference_batch_files.is_some() {
-        log::warn!(
-            "--batch-files / --reference-batch-files have no effect on an svd model: the \
-             projection is per cell against a frozen dictionary, with no per-batch term \
-             to estimate"
-        );
-    }
-}
-
-struct SvdProjParam<'a> {
-    u_dk: &'a Mat,
-    /// data row → dictionary row, by name.
-    remap: &'a [Option<usize>],
-    column_sum_norm: f32,
-}
-
-/// `[N, K]` projection of every column of `data` onto the dictionary:
-/// remap rows by name onto the training axis, then the training run's own
-/// per-chunk transform ([`crate::svd::nystrom_preprocess_columns`]), and
-/// multiply through `u`.
-fn project_onto_svd_dictionary(
-    data: &SparseIoVec,
-    train_genes: &[Box<str>],
-    u_dk: &Mat,
-    column_sum_norm: f32,
-    block_size: Option<usize>,
-    what: &str,
-) -> anyhow::Result<Mat> {
-    let data_genes = data.row_names()?;
-    // Defaults reproduce the exact-then-flexible name matching `predict`
-    // applies when `--feature-name-kind` is left at `exact`.
-    let opts = QueryNameOpts::default();
-    let remap = build_gene_remap_with(train_genes, &data_genes, &opts);
-    ensure_gene_coverage(&remap, 0.0, "--feature-name-kind")?;
-    info!(
-        "{what}: {} of the model's {} genes present across {} cells",
-        remap.n_mapped,
-        train_genes.len(),
-        data.num_columns()
-    );
-
-    let n = data.num_columns();
-    let k = u_dk.ncols();
-    let param = SvdProjParam {
-        u_dk,
-        remap: &remap.new_to_train,
-        column_sum_norm,
-    };
-    let mut proj_kn = Mat::zeros(k, n);
-    data.visit_columns_by_block(&svd_proj_visitor, &param, &mut proj_kn, block_size)?;
-    Ok(proj_kn.transpose())
-}
-
-fn svd_proj_visitor(
-    job: (usize, usize),
-    data: &SparseIoVec,
-    param: &SvdProjParam,
-    arc_proj_kn: Arc<Mutex<&mut Mat>>,
-) -> anyhow::Result<()> {
-    let (lb, ub) = job;
-    let csc_in = data.read_columns_csc(lb..ub)?;
-    let d_train = param.u_dk.nrows();
-
-    // Remap onto the training gene axis, staying sparse for the reasons on
-    // `nystrom_preprocess_columns`.
-    let mut coo = nalgebra_sparse::CooMatrix::new(d_train, ub - lb);
-    for c_local in 0..csc_in.ncols() {
-        let col = csc_in.col(c_local);
-        for (&row_id, &v) in col.row_indices().iter().zip(col.values().iter()) {
-            if let Some(t) = param.remap[row_id] {
-                coo.push(t, c_local, v);
-            }
-        }
-    }
-    let mut x_dn = nalgebra_sparse::CscMatrix::from(&coo);
-    crate::svd::nystrom_preprocess_columns(&mut x_dn, param.column_sum_norm, None);
-
-    let chunk = (x_dn.transpose() * param.u_dk).transpose();
-    let mut proj_kn = arc_proj_kn.lock().expect("lock proj in svd impute");
-    proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
-    Ok(())
 }
 
 #[cfg(test)]

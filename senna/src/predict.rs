@@ -331,10 +331,12 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     // writes one (`has_model: false`), so opening it first turned "predict on a bge run"
     // into a bare file-not-found naming a path the user never typed — the same confusion
     // `BgeEmbedding::open` exists to prevent, reintroduced one level up.
-    if crate::topic::model_metadata::resolve_run_kind(&args.model)?
-        == crate::run_manifest::RunKind::Bge
-    {
-        return predict_bge(args);
+    match crate::topic::model_metadata::resolve_run_kind(&args.model)? {
+        crate::run_manifest::RunKind::Bge => return predict_bge(args),
+        // svd writes no checkpoint either; its query side is the Nyström
+        // projection onto the frozen dictionary.
+        crate::run_manifest::RunKind::Svd => return predict_svd(args),
+        _ => {}
     }
 
     let metadata = TopicModelMetadata::load(&args.model)?;
@@ -446,6 +448,199 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Score a held-out backend against a `senna svd` run.
+///
+/// svd writes no checkpoint, so there is no encoder to run; the query side is
+/// the Nyström projection onto the frozen dictionary
+/// ([`crate::svd::project::project_onto_dictionary`]), the same map `impute`
+/// uses.
+///
+/// **What the columns mean here, because svd is not a count model.**
+/// `spearman` / `pearson_log1p` come from the same
+/// [`matrix_util::agreement::agreement_from_rate`] every other family is
+/// graded by, on predicted COUNTS, so they are directly comparable across
+/// families — that is the axis to compare svd on. `llik` is a GAUSSIAN
+/// log-likelihood in `log1p` space, which is the loss svd actually minimises,
+/// at the per-cell ML σ̂; like every other family's `llik` it is the backend's
+/// own and must NOT be compared against another family's. The multinomial
+/// `eval_llik_*` columns are deliberately absent rather than filled with a
+/// differently-scaled number: svd has no count likelihood to put there.
+fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
+    use matrix_util::agreement::agreement_from_rate;
+
+    anyhow::ensure!(
+        !args.decoder_only && args.refine_steps == 0,
+        "--decoder-only / --refine-steps are for the topic families; {} is a `senna svd` run, \
+         whose only inference is the projection onto the frozen dictionary.",
+        args.model
+    );
+    if args.residual_out.is_some() {
+        log::warn!("--residual-out is not available for an svd run (no count decoder); ignoring");
+    }
+    crate::svd::project::warn_if_batch_corrected(&args.model, args.batch_files.is_some());
+
+    let (training_genes, u_dk) = load_dictionary(&args.model)?;
+    let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
+
+    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: args.data_files.to_vec(),
+        preload: args.preload_data,
+        ..Default::default()
+    })?;
+    let data_vec = loaded.data;
+    let z_nk = crate::svd::project::project_onto_dictionary(
+        &data_vec,
+        &training_genes,
+        &u_dk,
+        column_sum_norm,
+        args.block_size,
+        "query",
+    )?;
+
+    // Restrict to the scored genes exactly as the other families do, so a
+    // benchmark passing one --eval-features file grades every arm on the
+    // same curriculum.
+    let restrict = args
+        .eval_features
+        .as_deref()
+        .or(args.ablate_features.as_deref());
+    let eval_genes = resolve_eval_genes(restrict, &training_genes)?;
+    anyhow::ensure!(
+        !eval_genes.is_empty(),
+        "no evaluation features matched the model's genes"
+    );
+    let mut opts = args.query_name_opts()?;
+    opts.hide = None;
+    let remap = build_remap(&training_genes, &data_vec.row_names()?, &opts)?;
+
+    let ntot = data_vec.num_columns();
+    let d_train = training_genes.len();
+    let mut per_cell: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(ntot);
+    for (lb, ub) in create_jobs(ntot, 0, Some(args.minibatch_size)) {
+        let csc = data_vec.read_columns_csc(lb..ub)?;
+        let block: Vec<(f32, f32, f32, f32)> = (0..csc.ncols())
+            .into_par_iter()
+            .map(|j| {
+                // Observed counts on the model's gene axis.
+                let mut obs_full = vec![0f32; d_train];
+                let col = csc.col(j);
+                for (&row_new, &v) in col.row_indices().iter().zip(col.values()) {
+                    let row_train = match remap.as_ref() {
+                        Some(rm) => rm.new_to_train[row_new],
+                        None => Some(row_new),
+                    };
+                    if let Some(r) = row_train {
+                        obs_full[r] += v;
+                    }
+                }
+
+                // The training chain's own per-cell view: L2-normalise to the
+                // recorded scale, then log1p. This is the space svd fits in,
+                // and `u·z` reconstructs its STANDARDISED form.
+                let l2 = obs_full.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
+                let obs_log1p: Vec<f32> = obs_full
+                    .iter()
+                    .map(|v| (v / l2 * column_sum_norm).ln_1p())
+                    .collect();
+                // Mean/sd over the stored (non-zero) entries, matching how the
+                // sparse standardisation was computed at training time.
+                let nz: Vec<f32> = obs_log1p
+                    .iter()
+                    .zip(&obs_full)
+                    .filter(|(_, &c)| c > 0.0)
+                    .map(|(&l, _)| l)
+                    .collect();
+                let (mu, sd) = mean_sd(&nz);
+
+                // Reconstruct, then undo the standardisation to land back in
+                // log1p space; `expm1` gives a predicted count profile, which
+                // `agreement_from_rate` renormalises to the observed depth.
+                let z_row = z_nk.row(lb + j);
+                let mut pred_counts = vec![0f32; eval_genes.len()];
+                let mut obs_eval = vec![0f32; eval_genes.len()];
+                let mut sq_resid = 0f64;
+                for (slot, &g) in eval_genes.iter().enumerate() {
+                    let recon_std: f32 = u_dk.row(g).dot(&z_row);
+                    let pred_log1p = recon_std * sd + mu;
+                    pred_counts[slot] = pred_log1p.exp_m1().max(0.0);
+                    obs_eval[slot] = obs_full[g];
+                    let r = f64::from(obs_log1p[g] - pred_log1p);
+                    sq_resid += r * r;
+                }
+                let agree = agreement_from_rate(&obs_eval, &pred_counts);
+
+                // Gaussian log-likelihood in log1p space at the ML σ̂:
+                // `-0.5·Σ[r²/σ̂² + ln(2πσ̂²)]`, which at σ̂² = mean(r²) reduces
+                // to `-0.5·D·(1 + ln(2πσ̂²))`.
+                let d = eval_genes.len() as f64;
+                let sigma2 = (sq_resid / d).max(1e-12);
+                let llik = -0.5 * d * (1.0 + (std::f64::consts::TAU * sigma2).ln());
+                let total: f32 = obs_eval.iter().sum();
+                (llik as f32, total, agree.spearman, agree.pearson_log1p)
+            })
+            .collect();
+        per_cell.extend(block);
+    }
+
+    let cell_names = data_vec.column_names()?;
+    z_nk.to_parquet_with_names(
+        &(args.out.to_string() + ".latent.parquet"),
+        (Some(&cell_names), Some("cell")),
+        Some(&axis_id_names("T", z_nk.ncols())),
+    )?;
+    info!("Wrote {}.latent.parquet", args.out);
+
+    let mut pred = Mat::zeros(per_cell.len(), 5);
+    for (i, &(llik, total, sp, pe)) in per_cell.iter().enumerate() {
+        pred[(i, 0)] = llik;
+        pred[(i, 1)] = total;
+        pred[(i, 2)] = if total > 0.0 { llik / total } else { f32::NAN };
+        pred[(i, 3)] = sp;
+        pred[(i, 4)] = pe;
+    }
+    let cols: Vec<Box<str>> = vec![
+        "llik".into(),
+        "total".into(),
+        "llik_per_count".into(),
+        "spearman".into(),
+        "pearson_log1p".into(),
+    ];
+    pred.to_parquet_with_names(
+        &(args.out.to_string() + ".predictive.parquet"),
+        (Some(&cell_names), Some("cell")),
+        Some(&cols),
+    )?;
+    fn mean_finite(v: impl Iterator<Item = f32>) -> f32 {
+        let v: Vec<f32> = v.filter(|x| x.is_finite()).collect();
+        if v.is_empty() {
+            f32::NAN
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
+    }
+    info!(
+        "Agreement (svd, Gaussian log1p llik — compare families on the correlations): \
+         per-cell spearman {:.3}, pearson(log1p) {:.3}; {} genes scored",
+        mean_finite(per_cell.iter().map(|c| c.2)),
+        mean_finite(per_cell.iter().map(|c| c.3)),
+        eval_genes.len(),
+    );
+    info!("Wrote {}.predictive.parquet", args.out);
+    Ok(())
+}
+
+/// Mean and (population) standard deviation, with a floor so a constant slice
+/// cannot divide by zero.
+fn mean_sd(v: &[f32]) -> (f32, f32) {
+    if v.is_empty() {
+        return (0.0, 1.0);
+    }
+    let n = v.len() as f32;
+    let mu = v.iter().sum::<f32>() / n;
+    let var = v.iter().map(|x| (x - mu) * (x - mu)).sum::<f32>() / n;
+    (mu, var.sqrt().max(1e-8))
 }
 
 fn resolve_mode(args: &PredictArgs) -> LatentMode {

@@ -130,7 +130,7 @@ fn the_joint_families_are_refused_before_predict_is_reached() {
 
 #[test]
 fn missing_manifest_falls_back_to_the_default_scale() {
-    assert_eq!(svd_column_sum_norm("no/such/prefix"), 1e4);
+    assert_eq!(crate::svd::project::column_sum_norm("no/such/prefix"), 1e4);
 }
 
 fn make_backend(
@@ -193,10 +193,22 @@ fn svd_projection_is_keyed_by_gene_name_not_row_order() -> anyhow::Result<()> {
         3,
     )?;
 
-    let proj_aligned =
-        project_onto_svd_dictionary(&aligned, &train_genes, &u_dk, 1e4, None, "test")?;
-    let proj_permuted =
-        project_onto_svd_dictionary(&permuted, &train_genes, &u_dk, 1e4, None, "test")?;
+    let proj_aligned = crate::svd::project::project_onto_dictionary(
+        &aligned,
+        &train_genes,
+        &u_dk,
+        1e4,
+        None,
+        "test",
+    )?;
+    let proj_permuted = crate::svd::project::project_onto_dictionary(
+        &permuted,
+        &train_genes,
+        &u_dk,
+        1e4,
+        None,
+        "test",
+    )?;
 
     assert_eq!(proj_aligned.nrows(), 3);
     assert_eq!(proj_aligned.ncols(), 2);
@@ -211,6 +223,14 @@ fn svd_projection_refuses_a_query_sharing_no_gene() -> anyhow::Result<()> {
     let train_genes: Vec<Box<str>> = vec!["a".into(), "b".into()];
     let u_dk = Mat::from_row_slice(2, 1, &[1.0, 1.0]);
     let query = make_backend(&dir, "query.zarr", &["x", "y"], &[(0, 0, 1.0)], 1)?;
-    assert!(project_onto_svd_dictionary(&query, &train_genes, &u_dk, 1e4, None, "test").is_err());
+    assert!(crate::svd::project::project_onto_dictionary(
+        &query,
+        &train_genes,
+        &u_dk,
+        1e4,
+        None,
+        "test"
+    )
+    .is_err());
     Ok(())
 }
