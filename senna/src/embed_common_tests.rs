@@ -47,3 +47,11 @@ fn a_non_finite_latent_is_nan_not_infinity() {
     assert!(eff.is_nan(), "effective topics was {eff}");
     assert!(mx.is_nan(), "mean max theta was {mx}");
 }
+
+#[test]
+fn zero_rows_survive_l2_normalization_untouched() {
+    let mut m = Mat::from_row_slice(2, 2, &[3.0, 4.0, 0.0, 0.0]);
+    super::l2_normalize_rows_inplace(&mut m);
+    assert!((m.row(0).norm() - 1.0).abs() < 1e-6);
+    assert!(m.row(1).iter().all(|&x| x == 0.0));
+}

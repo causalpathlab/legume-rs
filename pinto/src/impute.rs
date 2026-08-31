@@ -105,7 +105,12 @@ pub fn run_impute(args: &ImputeArgs) -> anyhow::Result<()> {
     // model with a misplaced file — or a `pinto predict` output prefix —
     // onto the profile path with different semantics. The probe survives
     // only as a fallback for pre-manifest runs.
-    let meta = PintoMetadata::read(Path::new(&format!("{model}.pinto.json"))).ok();
+    let meta = PintoMetadata::read(Path::new(&format!("{model}.pinto.json")))
+        // Pre-unification lc / dsvd runs wrote the same schema under
+        // `{prefix}.metadata.json`; prefer their recorded command over the
+        // artifact probe below.
+        .or_else(|_| PintoMetadata::read(Path::new(&format!("{model}.metadata.json"))))
+        .ok();
     let is_cage = match meta.as_ref().map(|m| m.command.as_str()) {
         Some("cage") => true,
         Some("lc" | "dsvd") => false,
@@ -196,11 +201,11 @@ fn resolve_reference_data(
     Ok(files)
 }
 
-/// Open the reference backends. The multi-file `@basename` cell-name
+/// Open a set of sparse backends. The multi-file `@basename` cell-name
 /// suffixing matches what training wrote into its propensity table, so the
 /// cage path's name check compares like with like.
-fn open_reference(files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
-    info!("Opening reference data ({} file(s))", files.len());
+fn open_backends(what: &str, files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
+    info!("Opening {what} data ({} file(s))", files.len());
     let loaded = auxiliary_data::data_loading::read_data_on_shared_rows(
         auxiliary_data::data_loading::ReadSharedRowsArgs {
             data_files: files.to_vec(),
@@ -228,7 +233,11 @@ fn cage_propensities(
     info!("cage model: projecting the query sample through `pinto predict`");
     let (query_prop, query_cells) = predict_cage(&args.predict)?;
 
-    let ref_data = open_reference(reference_files, args.predict.common.preload_data)?;
+    let ref_data = open_backends(
+        "reference",
+        reference_files,
+        args.predict.common.preload_data,
+    )?;
     let ref_prop_path = args
         .reference_propensity
         .clone()
@@ -284,7 +293,7 @@ fn profile_propensities(
     );
 
     anyhow::ensure!(!c.data_files.is_empty(), "impute: no data files given");
-    let query_data = open_reference(&c.data_files, c.preload_data)?;
+    let query_data = open_backends("query", &c.data_files, c.preload_data)?;
     let feature_kind = args
         .predict
         .gene_name_mode
@@ -301,10 +310,14 @@ fn profile_propensities(
     )?;
     write_propensity_matrix(&c.out, &query_prop, &query_cells)?;
     info!("Wrote {}.propensity.parquet (profile-projected)", c.out);
+    // Everything needed from the query is extracted; release it before the
+    // reference opens so two (possibly preloaded) datasets never coexist —
+    // preload budgets are per backend, per call.
+    drop(query_data);
 
     // The reference goes through the SAME map — not through the training
     // run's edge-based propensity — so the kNN compares like with like.
-    let ref_data = open_reference(reference_files, c.preload_data)?;
+    let ref_data = open_backends("reference", reference_files, c.preload_data)?;
     let ref_prop = project_profile_propensity(
         &ref_data,
         &profiles,

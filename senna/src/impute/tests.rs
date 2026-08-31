@@ -45,7 +45,7 @@ fn explicit_reference_flags_bypass_the_manifest() -> anyhow::Result<()> {
     let mut args = base_args("no/such/model".into(), "out".into());
     args.reference_latent = Some("ref.latent.parquet".into());
     args.reference_data = Some(vec!["ref.zarr".into()]);
-    let spec = resolve_reference(&args, RunKind::Topic, MatchingPlan::SoftmaxSimplex)?;
+    let spec = resolve_reference(&args, RunKind::Topic)?;
     assert_eq!(spec.latent.as_deref(), Some("ref.latent.parquet"));
     assert_eq!(spec.data_files, vec![Box::<str>::from("ref.zarr")]);
     Ok(())
@@ -55,7 +55,7 @@ fn explicit_reference_flags_bypass_the_manifest() -> anyhow::Result<()> {
 fn an_svd_model_needs_no_reference_latent() -> anyhow::Result<()> {
     let mut args = base_args("no/such/model".into(), "out".into());
     args.reference_data = Some(vec!["ref.zarr".into()]);
-    let spec = resolve_reference(&args, RunKind::Svd, MatchingPlan::DictionaryProjection)?;
+    let spec = resolve_reference(&args, RunKind::Svd)?;
     assert!(spec.latent.is_none());
     Ok(())
 }
@@ -66,7 +66,7 @@ fn a_missing_manifest_names_the_explicit_flags_as_the_way_out() {
     // (absent) manifest and fail with actionable guidance.
     let mut args = base_args("no/such/model".into(), "out".into());
     args.reference_data = Some(vec!["ref.zarr".into()]);
-    let err = resolve_reference(&args, RunKind::Topic, MatchingPlan::SoftmaxSimplex).unwrap_err();
+    let err = resolve_reference(&args, RunKind::Topic).unwrap_err();
     assert!(err.to_string().contains("--reference-latent"));
 }
 
@@ -77,8 +77,24 @@ fn a_reference_in_a_different_cell_space_is_refused() {
     let mut args = base_args("model".into(), "out".into());
     args.reference = Some(bge_prefix);
     // A topic model matched against a bge reference: simplex vs embedding.
-    let err = resolve_reference(&args, RunKind::Topic, MatchingPlan::SoftmaxSimplex).unwrap_err();
+    let err = resolve_reference(&args, RunKind::Topic).unwrap_err();
     assert!(err.to_string().contains("different"), "{err}");
+}
+
+#[test]
+fn a_reference_with_a_different_matching_plan_is_refused() {
+    // vae and svd share a Signed cell space, but NOT a matching plan: the
+    // svd latent is whitened by a scale that is not persisted, so plan
+    // equality — not cell-space equality — is the gate.
+    let dir = tempfile::tempdir().unwrap();
+    let svd_prefix = write_manifest(&dir, "svd_run", RunKind::Svd);
+    let mut args = base_args("model".into(), "out".into());
+    args.reference = Some(svd_prefix);
+    let err = resolve_reference(&args, RunKind::Vae).unwrap_err();
+    assert!(
+        err.to_string().contains("different matching space"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -93,14 +109,6 @@ fn kinds_without_a_projection_are_refused_up_front() {
             "{kind}: {err}"
         );
     }
-}
-
-#[test]
-fn zero_rows_survive_normalization_untouched() {
-    let mut m = Mat::from_row_slice(2, 2, &[3.0, 4.0, 0.0, 0.0]);
-    l2_normalize_rows_inplace(&mut m);
-    assert!((m.row(0).norm() - 1.0).abs() < 1e-6);
-    assert!(m.row(1).iter().all(|&x| x == 0.0));
 }
 
 #[test]

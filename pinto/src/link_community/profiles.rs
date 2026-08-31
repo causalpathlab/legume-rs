@@ -760,27 +760,10 @@ pub fn compute_propensity_and_gene_community_stat(
     let cell_propensity = compute_node_membership(edges, &edge_membership, n_cells, n_clusters);
 
     let cell_names = data_vec.column_names()?;
-
-    // Dominant cluster per cell (argmax of propensity)
-    let cluster_col = dominant_cluster_rows(&cell_propensity);
-    let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
-
-    let entropy_vec = shannon_entropy_rows(&cell_propensity);
-    let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
-
-    // `C{c}` community names, the shared propensity schema. `lc` and
-    // `prop` write the same layout, and plot's reader keys on the names.
-    let mut col_names: Vec<Box<str>> = (0..n_clusters)
-        .map(|i| format!("C{i}").into_boxed_str())
-        .collect();
-    col_names.push("cluster".into());
-    col_names.push("entropy".into());
-
-    let combined = concatenate_horizontal(&[cell_propensity.clone(), cluster_mat, entropy_mat])?;
-    combined.to_parquet_with_names(
-        &(out_prefix.to_string() + ".propensity.parquet"),
-        (Some(&cell_names), Some("cell")),
-        Some(&col_names),
+    crate::link_community::outputs::write_propensity_matrix(
+        out_prefix,
+        &cell_propensity,
+        &cell_names,
     )?;
 
     // Per-edge community labels, in the ONE edge-table schema pinto reads

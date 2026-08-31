@@ -863,7 +863,9 @@ fn main() -> anyhow::Result<()> {
             run_annotate(args)?;
         }
         Commands::Predict(args) => {
-            predict_cage(args)?;
+            // The return value serves `pinto impute`; the CLI path only wants
+            // the files predict writes.
+            let (_propensity, _cell_names) = predict_cage(args)?;
         }
         Commands::Impute(args) => {
             run_impute(args)?;
