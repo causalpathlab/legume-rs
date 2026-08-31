@@ -115,8 +115,14 @@ impl PairDictionary {
                 continue;
             }
             total += x;
-            llik += f64::from(x) * f64::from(log_rate[gene] - z_model);
-            null_llik += f64::from(x) * f64::from(self.b[gene] - axis.z_null);
+            // Floored at the SHARED constant, not left to the logit clamp: the
+            // clamp bounds the un-normalised score, so after subtracting the
+            // partition a starved gene could be charged roughly twice senna's
+            // floor, and the cross-engine ranking column would punish the same
+            // event differently per binary.
+            let floor = matrix_util::agreement::LOG_PROB_FLOOR;
+            llik += f64::from(x) * f64::from(log_rate[gene] - z_model).max(floor);
+            null_llik += f64::from(x) * f64::from(self.b[gene] - axis.z_null).max(floor);
         }
         if !total.is_finite() || total <= 0.0 {
             return PairScore::default();
@@ -188,15 +194,17 @@ impl PairDictionary {
 
     /// Map feature names to active-list positions for `--eval-features`.
     #[must_use]
-    pub fn eval_positions(
-        &self,
-        gene_names: &[Box<str>],
-        wanted: &std::collections::HashSet<&str>,
-    ) -> Vec<u32> {
+    pub fn eval_positions(&self, gene_names: &[Box<str>], wanted: &[Box<str>]) -> Vec<u32> {
+        // Lowercased on both sides HERE, not by the caller — splitting the rule
+        // across two sites is how one side forgets it. Same key senna's resolver
+        // and the gene remap use: a panel that differs from the data only in
+        // case names the same genes.
+        let wanted_lower: std::collections::HashSet<String> =
+            wanted.iter().map(|n| n.to_lowercase()).collect();
         gene_names
             .iter()
             .enumerate()
-            .filter(|(_, n)| wanted.contains(n.as_ref()))
+            .filter(|(_, n)| wanted_lower.contains(&n.to_lowercase()))
             .filter_map(|(gene, _)| {
                 let position = *self.local_of_gene.get(gene)?;
                 (position != u32::MAX).then_some(position)

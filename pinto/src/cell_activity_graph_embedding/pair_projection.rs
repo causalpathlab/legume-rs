@@ -383,9 +383,7 @@ pub fn project_pairs(
     let dict = PairDictionary::new(e_feat, gene_totals, n_cells)?;
     let scored_positions: Option<Vec<u32>> = match args.eval_features.as_ref() {
         Some(names) => {
-            let wanted: std::collections::HashSet<&str> =
-                names.iter().map(std::convert::AsRef::as_ref).collect();
-            let positions = dict.eval_positions(axis.gene_names(), &wanted);
+            let positions = dict.eval_positions(axis.gene_names(), names);
             anyhow::ensure!(
                 !positions.is_empty(),
                 "--eval-features matched no gene that carries counts in this sample"
