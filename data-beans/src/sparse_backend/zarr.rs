@@ -562,11 +562,18 @@ impl SparseIo for SparseMtxData {
     }
 
     fn reopen_backend(&mut self) -> anyhow::Result<()> {
-        // Path-addressed store: rebuild it so nothing cached survives the swap,
-        // then refresh the resident indptrs from the new contents.
+        // Path-addressed store: rebuild it, refresh the resident indptrs — and
+        // DROP the decoded-chunk LRU caches, which pin arrays of the store they
+        // were built on. Keeping them served pre-swap chunk contents against
+        // post-swap indptrs: a matrix that read back with row indices past its
+        // own nrow, from a file that was byte-for-byte correct on disk.
         let store = Arc::new(FilesystemStore::new(&self.file_name)?);
         self.read_store = store.clone();
         self.write_store = Some(store);
+        self.by_column_data_cache = Arc::new(OnceLock::new());
+        self.by_column_indices_cache = Arc::new(OnceLock::new());
+        self.by_row_data_cache = Arc::new(OnceLock::new());
+        self.by_row_indices_cache = Arc::new(OnceLock::new());
         self.streamed_nnz = 0;
         self.read_column_indptr()?;
         self.read_row_indptr()?;
@@ -579,6 +586,10 @@ impl SparseIo for SparseMtxData {
 
     fn streamed_nnz(&self) -> u64 {
         self.streamed_nnz
+    }
+
+    fn reset_streamed_nnz(&mut self) {
+        self.streamed_nnz = 0;
     }
 
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
@@ -626,6 +637,11 @@ impl SparseIo for SparseMtxData {
 
     /// preload rows' values and indices
     fn preload_rows(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "row") {
+                return Ok(());
+            }
+        }
         use zarrs::array::Array as ZArray;
 
         let data = ZArray::open(self.read_store.clone(), KEY_BY_ROW_DATA)?;

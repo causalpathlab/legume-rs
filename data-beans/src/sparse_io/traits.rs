@@ -281,6 +281,10 @@ pub trait SparseIo: Sync + Send {
     /// open file handle that would otherwise point at the deleted inode.
     fn reopen_backend(&mut self) -> anyhow::Result<()>;
 
+    /// Maintained by [`append_csc_slab`](Self::append_csc_slab) — never call
+    /// this yourself: padding the cursor masks exactly the under-append the
+    /// finalize audit exists to catch.
+    #[doc(hidden)]
     /// Advance the streaming-write cursor by `n` entries. Called by
     /// [`append_csc_slab`](Self::append_csc_slab); backends keep the count so
     /// [`finalize_streaming_csc`](Self::finalize_streaming_csc) can audit the
@@ -291,7 +295,12 @@ pub trait SparseIo: Sync + Send {
     fn note_streamed_nnz(&mut self, n: u64);
 
     /// Entries appended so far in this streaming build.
+    #[doc(hidden)]
     fn streamed_nnz(&self) -> u64;
+
+    /// Zero the cursor. Called by [`begin_streaming_csc`](Self::begin_streaming_csc).
+    #[doc(hidden)]
+    fn reset_streamed_nnz(&mut self);
 
     /// The resident by-column indptr, loaded at `open()`. Empty when the
     /// backend carries no `/by_column/indptr` array — `read_column_indptr`
@@ -309,20 +318,6 @@ pub trait SparseIo: Sync + Send {
         let hi = *indptr.get(col + 1)?;
         let lo = *indptr.get(col)?;
         hi.checked_sub(lo)
-    }
-
-    /// Exact total nnz over a column selection, in any order.
-    ///
-    /// `None` — poisoning the whole sum — when ANY column is out of range or the
-    /// indptr is absent. A silent zero for a bad column would understate the
-    /// declared nnz of a streaming write, and an under-declared CSC reads back
-    /// cleanly while carrying fill values where real entries should be.
-    fn columns_nnz(&self, cols: &[usize]) -> Option<u64> {
-        let mut total = 0u64;
-        for &col in cols {
-            total = total.checked_add(self.column_nnz(col)?)?;
-        }
-        Some(total)
     }
 
     /// Set row names for the matrix
@@ -389,11 +384,29 @@ pub trait SparseIo: Sync + Send {
         // An empty selection is refused, not honoured: this method DESTROYS the
         // original backend, and writing a zero-column husk over real data is
         // almost certainly a caller mistake rather than an intention.
+        // Empty and duplicated selections are refused, not honoured: this
+        // method DESTROYS the original, and a duplicate collapses in the
+        // old→new map while still counting toward the new shape — slabs then
+        // land at wrong offsets and the finalize audit rejects the build with a
+        // message about nnz tiling that names nothing the caller did.
+        let distinct = |sel: &[usize], what: &str| -> anyhow::Result<()> {
+            anyhow::ensure!(!sel.is_empty(), "subset: empty {what} selection");
+            let mut seen = sel.to_vec();
+            seen.sort_unstable();
+            seen.dedup();
+            anyhow::ensure!(
+                seen.len() == sel.len(),
+                "subset: the {what} selection repeats an index ({} of {} are distinct)",
+                seen.len(),
+                sel.len()
+            );
+            Ok(())
+        };
         if let Some(cols) = columns {
-            anyhow::ensure!(!cols.is_empty(), "subset: empty column selection");
+            distinct(cols, "column")?;
         }
         if let Some(rs) = rows {
-            anyhow::ensure!(!rs.is_empty(), "subset: empty row selection");
+            distinct(rs, "row")?;
         }
 
         //////////////////////////////////////////////////////
@@ -421,14 +434,7 @@ pub trait SparseIo: Sync + Send {
         for (&old, &new) in &old2new_rows {
             row_map[old as usize] = Some(new);
         }
-        let monotone_rows = row_map
-            .iter()
-            .flatten()
-            .try_fold(None::<u64>, |prev, &n| match prev {
-                Some(p) if p >= n => None,
-                _ => Some(Some(n)),
-            })
-            .is_some();
+        let monotone_rows = row_map.iter().flatten().is_sorted_by(|a, b| a < b);
 
         ///////////////////////////////////////////////////////
         // 1. Exact per-new-column nnz, without materialising //
@@ -447,15 +453,28 @@ pub trait SparseIo: Sync + Send {
                 })
                 .collect::<anyhow::Result<_>>()?
         } else {
-            let mut counts = Vec::with_capacity(cols_new_order.len());
-            for &(_, old) in &cols_new_order {
-                let (_, _, triplets) = self.read_triplets_by_single_column(old as usize)?;
-                counts.push(
-                    triplets
-                        .iter()
-                        .filter(|&&(i, _, _)| row_map[i as usize].is_some())
-                        .count() as u64,
-                );
+            // Block reads, never one column at a time: a single-column read
+            // pays the cached-subset machinery per call, which measured two
+            // orders of magnitude slower at imaging scale. Counts only, never
+            // entries.
+            let mut counts = vec![0u64; cols_new_order.len()];
+            let coarse = matrix_util::utils::generate_minibatch_intervals(
+                cols_new_order.len(),
+                0,
+                Some(8192),
+            );
+            for (lb, ub) in coarse {
+                let old_cols: Vec<usize> = cols_new_order[lb..ub]
+                    .iter()
+                    .map(|&(_, o)| o as usize)
+                    .collect();
+                let (_, _, triplets) =
+                    self.read_triplets_by_columns(old_cols.into_iter().collect())?;
+                for (i, c_local, _) in triplets {
+                    if row_map[i as usize].is_some() {
+                        counts[lb + c_local as usize] += 1;
+                    }
+                }
             }
             counts
         };
@@ -470,7 +489,20 @@ pub trait SparseIo: Sync + Send {
         // deleted the original FIRST and rewrote it from a RAM buffer, so a
         // crash mid-write lost the data outright — and that buffer held every
         // surviving triplet, which is the memory wall this replaces.
+        // CONTRACT of the swap: the original is untouched until the temporary
+        // sibling is complete and finalized; a failure mid-stream leaves the
+        // original intact plus a `{path}.subset_tmp` leftover (cleaned on the
+        // next attempt); the unrecoverable window is only remove→rename below.
+        // A zip-archived backend is refused up front — streaming to a sibling
+        // DIRECTORY and renaming it over the `.zip` name would silently change
+        // the on-disk format under the old extension, and the old code's
+        // "store is read-only" failure was at least loud.
         let final_path = self.get_backend_file_name().to_string();
+        anyhow::ensure!(
+            !final_path.ends_with(".zip"),
+            "subset: {final_path} is a zip archive; convert it to a directory \
+             backend first (data-beans convert)"
+        );
         let temp_path = format!("{final_path}.subset_tmp");
         if std::path::Path::new(&temp_path).exists() {
             crate::sparse_io::remove_backend_path(&temp_path)?;
@@ -486,38 +518,44 @@ pub trait SparseIo: Sync + Send {
 
             // Blocks bounded by bytes of surviving triplets, from the measured
             // per-column counts — not by a fixed column count.
-            const SLAB_BUDGET_BYTES: usize = 256 << 20;
-            let blocks =
-                matrix_util::utils::byte_budget_intervals(&per_col_nnz, SLAB_BUDGET_BYTES, 24);
+            let blocks = matrix_util::utils::byte_budget_intervals(
+                &per_col_nnz,
+                crate::sparse_io::SLAB_BUDGET_BYTES,
+                crate::sparse_io::TRIPLET_BYTES,
+            );
 
             let mut nnz_offset = 0u64;
             for (lb, ub) in blocks {
-                let mut local_colptr = Vec::with_capacity(ub - lb);
+                // ONE block read per slab (see the counting pass above for why).
+                // The read returns LOCAL column ids in the requested order, rows
+                // ascending within each column.
+                let old_cols: Vec<usize> = cols_new_order[lb..ub]
+                    .iter()
+                    .map(|&(_, o)| o as usize)
+                    .collect();
+                let (_, _, triplets) =
+                    self.read_triplets_by_columns(old_cols.into_iter().collect())?;
+
+                let n_block = ub - lb;
+                let mut per_col: Vec<Vec<(u64, f32)>> = vec![Vec::new(); n_block];
+                for (i, c_local, x) in triplets {
+                    if let Some(new_row) = row_map[i as usize] {
+                        per_col[c_local as usize].push((new_row, x));
+                    }
+                }
+                let mut local_colptr = Vec::with_capacity(n_block);
                 let mut row_indices = Vec::new();
                 let mut values = Vec::new();
-                for &(_, old) in &cols_new_order[lb..ub] {
-                    local_colptr.push(row_indices.len() as u64);
-                    let (_, _, triplets) = self.read_triplets_by_single_column(old as usize)?;
-                    let start = row_indices.len();
-                    for (i, _, x) in triplets {
-                        if let Some(new_row) = row_map[i as usize] {
-                            row_indices.push(new_row);
-                            values.push(x);
-                        }
-                    }
+                for entries in &mut per_col {
                     if !monotone_rows {
                         // Renumbering scrambled this column's order; restore the
                         // ascending-rows invariant the writer enforces.
-                        let mut paired: Vec<(u64, f32)> = row_indices[start..]
-                            .iter()
-                            .copied()
-                            .zip(values[start..].iter().copied())
-                            .collect();
-                        paired.sort_unstable_by_key(|&(r, _)| r);
-                        for (k, (r, v)) in paired.into_iter().enumerate() {
-                            row_indices[start + k] = r;
-                            values[start + k] = v;
-                        }
+                        entries.sort_unstable_by_key(|&(r, _)| r);
+                    }
+                    local_colptr.push(row_indices.len() as u64);
+                    for &(r, x) in entries.iter() {
+                        row_indices.push(r);
+                        values.push(x);
                     }
                 }
                 out.append_csc_slab(lb as u64, nnz_offset, &local_colptr, &row_indices, &values)?;
@@ -784,6 +822,10 @@ pub trait SparseIo: Sync + Send {
     /// so subsequent [`append_csc_slab`](Self::append_csc_slab) calls write
     /// into disjoint hyperslabs without further allocation.
     fn begin_streaming_csc(&mut self, shape: (usize, usize, usize)) -> anyhow::Result<()> {
+        // A reused handle must not inherit a previous build's cursor: the
+        // finalize audit compares appended-vs-declared, and a stale count turns
+        // a correct build into a false accusation.
+        self.reset_streamed_nnz();
         let (_, ncol, nnz) = shape;
         self.record_mtx_shape(Some(shape))?;
         self.cs_create(CsKey::CscData, nnz)?;
@@ -851,7 +893,9 @@ pub trait SparseIo: Sync + Send {
                     .windows(2)
                     .all(|w| w[0] < w[1]),
                 "append_csc_slab: rows within column {} of this band must be \
-                 strictly ascending",
+                 strictly ascending — repeated rows usually mean duplicate \
+                 (row, col) coordinates in the source (an MTX with repeated \
+                 entries, or a union remap folding rows together)",
                 col_offset as usize + c
             );
         }
@@ -903,21 +947,11 @@ pub trait SparseIo: Sync + Send {
                  were appended with a gap or overlap in their nnz offsets"
             );
         }
-        // An over-declared nnz shows up as the last WRITTEN pointer falling
-        // short of the sentinel: the tail between them is fill, and the final
-        // column would absorb it as phantom entries.
-        if ncol >= 1 {
-            anyhow::ensure!(
-                indptr[ncol - 1] <= nnz as u64,
-                "finalize_streaming_csc: indptr overruns the declared nnz"
-            );
-        }
-        let written: u64 = indptr[ncol];
-        anyhow::ensure!(
-            written == nnz as u64,
-            "finalize_streaming_csc: wrote {written} entries but declared {nnz}"
-        );
-        // The appended count is the ground truth the indptr cannot carry.
+        // The appended count is the ground truth the indptr cannot carry: an
+        // over-declared nnz leaves the written indptr perfectly monotone with
+        // the phantom tail hiding between the last written pointer and the
+        // sentinel — and the sentinel itself was written by this function, so
+        // comparing against it can only ever agree.
         let appended = self.streamed_nnz();
         anyhow::ensure!(
             appended == nnz as u64,

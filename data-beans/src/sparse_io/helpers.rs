@@ -120,3 +120,11 @@ pub fn preload_within_budget(nnz: usize, what: &str) -> bool {
         true
     }
 }
+
+/// Bytes of `(u64, u64, f32)` triplets a streaming-write slab may hold, and the
+/// padded size of one such triplet. One definition, because the two streaming
+/// pipelines (the subset trait method and the handlers' column-selection
+/// writer) each carried their own copy and two memory ceilings drift apart.
+pub const SLAB_BUDGET_BYTES: usize = 256 << 20;
+/// `(u64, u64, f32)` padded.
+pub const TRIPLET_BYTES: usize = 24;
