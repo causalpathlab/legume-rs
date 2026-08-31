@@ -390,7 +390,11 @@ fn run_merge_then_squeeze(
 
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
         let mut data = open_sparse_matrix(&data_file, &backend)?;
-        data.preload_columns()?;
+        // Honours the flag it always ignored: this path preloaded once per
+        // input file unconditionally, and `--preload` had no off switch anyway.
+        if cmd_args.preload {
+            data.preload_columns()?;
+        }
 
         let file_row_names = data.row_names()?;
         let ncols = data.num_columns().unwrap_or(0);

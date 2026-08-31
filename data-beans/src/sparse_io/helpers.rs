@@ -90,3 +90,33 @@ pub fn remove_backend_path(path: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Whether a preload of `nnz` entries fits the budget.
+///
+/// Preloading costs 12 bytes per non-zero (a `u64` index and an `f32` value),
+/// there was no size check anywhere in front of it, and no consumer ever
+/// releases it — so at imaging scale a `--preload-data` was an OOM order, not a
+/// request. The budget turns that into a logged skip: every read path already
+/// handles the not-preloaded state, it is just slower.
+///
+/// `LEGUME_PRELOAD_BUDGET_BYTES` overrides the default, following the
+/// `LEGUME_ZARR_CACHE_CAP` precedent for memory knobs.
+pub fn preload_within_budget(nnz: usize, what: &str) -> bool {
+    const BYTES_PER_NNZ: usize = 12;
+    const DEFAULT_BUDGET_BYTES: usize = 8 << 30;
+    let budget = std::env::var("LEGUME_PRELOAD_BUDGET_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BUDGET_BYTES);
+    let cost = nnz.saturating_mul(BYTES_PER_NNZ);
+    if cost > budget {
+        log::warn!(
+            "skipping {what} preload: {cost} bytes ({nnz} nnz x {BYTES_PER_NNZ}) exceeds the \
+             {budget}-byte budget (LEGUME_PRELOAD_BUDGET_BYTES to raise); reads stay on the \
+             streaming path"
+        );
+        false
+    } else {
+        true
+    }
+}

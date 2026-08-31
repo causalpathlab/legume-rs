@@ -121,14 +121,20 @@ pub struct RunSqueezeArgs {
     #[arg(long)]
     pub block_size: Option<usize>,
 
-    /// preload data into memory for faster processing
+    /// keep data on the streaming read path instead of preloading it
+    ///
+    /// `default_value_t = true` with no `SetFalse` action used to make this
+    /// flag decorative: there was no way to turn preloading off at all.
     #[arg(
-        long,
-        alias = "preload-data",
+        long = "no-preload",
+        alias = "no-preload-data",
         default_value_t = true,
-        help = "Preload data into memory for faster processing",
-        long_help = "Preload all column data into memory before squeezing.\n\
-                     This can significantly speed up processing but requires more memory."
+        action = clap::ArgAction::SetFalse,
+        help = "Skip preloading; stream reads instead (preloading is the default)",
+        long_help = "Skip preloading column data into memory before squeezing.\n\
+                     Preloading (the default) is faster but costs 12 bytes per\n\
+                     non-zero, and is skipped automatically over the\n\
+                     LEGUME_PRELOAD_BUDGET_BYTES budget."
     )]
     pub preload: bool,
 
