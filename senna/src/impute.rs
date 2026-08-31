@@ -145,18 +145,26 @@ pub struct ImputeArgs {
 /// one place and forgotten in another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatchingPlan {
-    /// `predict` → softmax rows onto the simplex. For a `log θ` latent the
-    /// renormalization is a no-op; for a Gaussian `z` (vae / masked-vae)
-    /// it is exactly the `softmax(z)` proportions the head would read out.
-    /// Bare `exp` would leave those rows matched on library-scale-like
-    /// magnitude.
+    /// `predict` → softmax rows onto the simplex.
+    ///
+    /// For a `log θ` latent the renormalization is a no-op. For `masked-vae`
+    /// it is what the head itself does — that decoder log-softmaxes `z` over
+    /// K before the dictionary. For plain `vae` it is neither: the
+    /// `GaussianNbDecoder` softmaxes `z·W` over the GENE axis and never over
+    /// `z`'s own coordinates, so this is a projection chosen to make the
+    /// unconstrained latent comparable under L2, not a readout of the head.
+    /// It is still the right matching map — bare `exp` would leave rows
+    /// matched on library-scale-like magnitude — but do not read a vae
+    /// impute's neighbours as topic proportions.
     SoftmaxSimplex,
     /// `predict` → L2-normalized embedding rows: magnitude carries depth,
     /// not identity, so the index's L2 becomes cosine on the unit sphere.
     CosineEmbedding,
     /// No reusable stored latent — the training whitening scale is not
     /// persisted — so BOTH sides are re-projected through the frozen
-    /// dictionary with the training-time transform.
+    /// dictionary with the training-time transform. The batch correction
+    /// that transform applied at training is not recoverable either; see
+    /// [`warn_if_batch_corrected`].
     DictionaryProjection,
 }
 
@@ -462,7 +470,8 @@ fn svd_matching_latents(
     ref_data: &SparseIoVec,
 ) -> anyhow::Result<(Vec<Box<str>>, Mat, Mat)> {
     let (train_genes, u_dk) = crate::topic::model_metadata::load_dictionary(&args.model)?;
-    let column_sum_norm = svd_column_sum_norm(&args.model)?;
+    let column_sum_norm = svd_column_sum_norm(&args.model);
+    warn_if_batch_corrected(args);
 
     info!("Loading new data for the dictionary projection");
     let new_loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
@@ -501,21 +510,70 @@ fn svd_matching_latents(
 
 /// The training-time normalization scale, replayed from the manifest's
 /// recorded fit arguments through the typed [`RunManifest::train_args_as`]
-/// reader — so a renamed or retyped field fails loudly instead of silently
-/// changing the matching space. Runs predating the manifest (or the
-/// `train_args` record) take the fit's long-standing default.
-fn svd_column_sum_norm(model: &str) -> anyhow::Result<f32> {
+/// reader. Runs predating the manifest (or the `train_args` record) take the
+/// fit's long-standing default.
+///
+/// A blob this senna cannot deserialize warns and falls back rather than
+/// failing the run: `run_manifest`'s header reserves blob PARSING for
+/// `update` precisely so that a senna which gained a flag can still OPEN a
+/// run, and turning that into a hard error here would make `impute` the
+/// second command a renamed `SvdArgs` field can break — for one `f32` it
+/// does not otherwise need.
+fn svd_column_sum_norm(model: &str) -> f32 {
     const DEFAULT: f32 = 1e4;
     let Ok((manifest, _)) = run_manifest::load_for(model) else {
         info!("no manifest for {model}; using the default normalization scale");
-        return Ok(DEFAULT);
+        return DEFAULT;
     };
     if manifest.train_args.is_none() {
         info!("manifest for {model} predates train_args; using the default normalization scale");
-        return Ok(DEFAULT);
+        return DEFAULT;
     }
-    let recorded: crate::svd::SvdArgs = manifest.train_args_as(model)?;
-    Ok(recorded.column_sum_norm)
+    match manifest.train_args_as::<crate::svd::SvdArgs>(model) {
+        Ok(recorded) => recorded.column_sum_norm,
+        Err(e) => {
+            log::warn!(
+                "{model}: cannot replay the recorded fit configuration ({e}); falling back to \
+                 the default normalization scale. If the run was trained with a non-default \
+                 --column-sum-norm, the matching space here differs from its training space."
+            );
+            DEFAULT
+        }
+    }
+}
+
+/// Say so when an svd model carries a batch correction this path cannot replay.
+///
+/// Training divides each column by `mu_residual`, a per-PSEUDOBULK-group
+/// residual, before fitting the dictionary. That matrix is never written to
+/// disk — `{model}.delta.parquet` holds the per-BATCH `delta`, a different
+/// object — and a new cell has no training pseudobulk membership to index it
+/// by even if it were. So the correction cannot be reproduced from the run's
+/// outputs, and both sides are projected without it: consistent with each
+/// other, but not with the space the dictionary was fitted in. Residual
+/// batch structure can therefore drive the retrieval.
+///
+/// Warned rather than refused, because the query may legitimately carry no
+/// batch structure worth correcting, and the same projection is applied to
+/// both sides. The fix is on the training side — persist the projection
+/// state — and is tracked in `plans/impute-all-models.md`.
+fn warn_if_batch_corrected(args: &ImputeArgs) {
+    if std::path::Path::new(&format!("{}.delta.parquet", args.model)).is_file() {
+        log::warn!(
+            "{}: this svd run was fitted with a batch correction, which impute cannot \
+             replay (the per-pseudobulk residual it used is not persisted). Query and \
+             reference are projected without it, so retrieval may match on residual \
+             batch structure rather than biology.",
+            args.model
+        );
+    }
+    if args.batch_files.is_some() || args.reference_batch_files.is_some() {
+        log::warn!(
+            "--batch-files / --reference-batch-files have no effect on an svd model: the \
+             projection is per cell against a frozen dictionary, with no per-batch term \
+             to estimate"
+        );
+    }
 }
 
 struct SvdProjParam<'a> {
