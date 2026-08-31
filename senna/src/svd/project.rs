@@ -15,9 +15,6 @@
 
 use crate::embed_common::*;
 use crate::topic::eval::{build_gene_remap_with, ensure_gene_coverage, QueryNameOpts};
-use data_beans::sparse_data_visitors::VisitColumnsOps;
-use data_beans::sparse_io_vector::SparseIoVec;
-use log::info;
 
 /// The training-time normalization scale, replayed from the manifest's
 /// recorded fit arguments through the typed [`crate::run_manifest::RunManifest::train_args_as`]
