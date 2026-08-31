@@ -13,8 +13,9 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let (h, dev) = (a.input.h, a.input.dev);
     let bc = a.end - a.start;
     let d = h + 1; // [Θ | c]
-    let f_live = a.b_row.dim(1)?;
-    let (e_aug, e_aug_t, intercept_mask) = (a.e_aug, a.e_aug_t, a.intercept_mask);
+    let dict = a.dict;
+    let f_live = dict.b_row.dim(1)?;
+    let (e_aug, e_aug_t, intercept_mask) = (&dict.e_aug, &dict.e_aug_t, &dict.intercept_mask);
 
     ///////////////////////////////////////
     // Gather the block's observed edges //
@@ -35,8 +36,8 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
         let (feats, counts) = a.spec.edges.cell_slice(i);
         for (&f_pass, &n) in feats.iter().zip(counts) {
             // `edges` are indexed on the pass partition; map to the live subset.
-            let g = a.spec.rows[f_pass as usize];
-            let l = a.to_live[g as usize];
+            let g = dict.rows()[f_pass as usize];
+            let l = dict.to_live[g as usize];
             n_tot[local] += f64::from(n);
             if l == u32::MAX {
                 n_dead[local] += n;
@@ -73,9 +74,9 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
             // Only the latent rows of `Ẽᵀ` — the ones row is the intercept's, and
             // the fixed identity carries no intercept of its own.
             t.matmul(&e_aug.narrow(0, 0, h)?.contiguous()?)?
-                .broadcast_add(a.b_row)?
+                .broadcast_add(&dict.b_row)?
         }
-        None => a.b_row.clone(),
+        None => dict.b_row.clone(),
     };
 
     ///////////////////////////////
@@ -99,7 +100,7 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
             .collect(),
         // Identity pass: Θ = 0 ⇒ every row shares the same Σ_f exp(β_f), hoisted to
         // the pass rather than re-summed over every live feature in every block.
-        None => vec![a.null_log_norm; bc],
+        None => vec![dict.null_log_norm; bc],
     };
     // Θ̃ = [Θ | c] — the latent and its intercept in ONE `[Bc, H+1]` parameter, with
     // the intercept initialised at the null model and the latent at zero.
@@ -125,7 +126,7 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let ne = {
         let mut ne = n_t.matmul(e_aug_t)?; // [Bc, H+1]
                                            // Folded rows still owe `−n_dead·c`, which lands on the intercept column.
-        if a.dead_mass > 0.0 {
+        if dict.dead_mass > 0.0 {
             ne = (ne + n_dead_t.reshape((bc, 1))?.broadcast_mul(intercept_mask)?)?;
         }
         ne
@@ -174,7 +175,7 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     for step in 0..MAX_STEPS {
         // Linear decay to a floor so the block settles rather than dithers.
         let frac = step as f64 / MAX_STEPS as f64;
-        let lr = a.lr0 * (1.0 - frac * (1.0 - LR_FLOOR_FRAC));
+        let lr = dict.lr0 * (1.0 - frac * (1.0 - LR_FLOOR_FRAC));
 
         // Upper bound only. `exp` overflows f32 at 88 so the ceiling is a real
         // guard; the floor is not, since `exp(−large)` underflowing to 0 is the
@@ -192,8 +193,8 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
         // intercept column comes out of the same matmul via `Ẽ`'s ones row, and
         // picks up the gate-folded partition mass `exp(c)·Σ_dead exp(β_f)`.
         let mut g = ((mu.matmul(e_aug_t)? - &ne)? + theta.broadcast_mul(&lam_row)?)?;
-        if a.dead_mass > 0.0 {
-            let dead = theta.narrow(1, h, 1)?.exp()?.affine(a.dead_mass, 0.0)?;
+        if dict.dead_mass > 0.0 {
+            let dead = theta.narrow(1, h, 1)?.exp()?.affine(dict.dead_mass, 0.0)?;
             g = (g + dead.broadcast_mul(intercept_mask)?)?;
         }
 
