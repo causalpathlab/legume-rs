@@ -122,6 +122,23 @@ pub struct PredictArgs {
 
     #[arg(
         long,
+        default_value_t = ComputeDevice::Cpu,
+        value_enum,
+        help = "Compute device",
+        long_help = "Compute device. `cuda` / `metal` require the matching cargo feature.\n\
+                     \n\
+                     Matters most for a bge model. Every other family infers with one\n\
+                     encoder forward pass, but bge has no encoder — prediction re-runs\n\
+                     the same per-cell Poisson SGD the training did, so it belongs on\n\
+                     the device that trained it."
+    )]
+    pub(crate) device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    pub(crate) device_no: usize,
+
+    #[arg(
+        long,
         default_value_t = 0,
         help = "Decoder-side gradient steps on θ at inference (0 = encoder forward only)",
         long_help = "If --decoder-only is set,\n\
@@ -306,6 +323,11 @@ pub struct PredictArgs {
 }
 
 impl PredictArgs {
+    /// The compute device this run asks for, resolved once.
+    fn resolve_device(&self) -> anyhow::Result<Device> {
+        self.device.to_device(self.device_no)
+    }
+
     /// Resolve every query-axis rule, including `--ablate-features`.
     ///
     /// Fallible now because the ablation list is read here rather than at the
@@ -432,6 +454,7 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
         args.preload_data,
         args.minibatch_size,
         &qopts,
+        &args.resolve_device()?,
     )?;
 
     // ρ is held row-major `[D, H]` for the projection; the eval pass wants it as
@@ -809,6 +832,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         metadata,
         mode,
         refine_config: &refine_config,
+        dev: &args.resolve_device()?,
     })?;
 
     finalize_predict(FinalizePredict {
@@ -838,6 +862,8 @@ pub(crate) struct DenseScoreArgs<'a> {
     pub metadata: &'a TopicModelMetadata,
     pub mode: LatentMode,
     pub refine_config: &'a TopicRefinementConfig,
+    /// Where the encoder and decoder run.
+    pub dev: &'a Device,
 }
 
 /// What the dense scoring pass produces.
@@ -907,9 +933,9 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
         a.block_size,
     )?;
 
-    let cpu_dev = Device::Cpu;
+    let dev = a.dev;
     let mut parameters = candle_nn::VarMap::new();
-    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
 
     let encoder = LogSoftmaxEncoder::new(
         LogSoftmaxEncoderArgs {
@@ -942,7 +968,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
         coarsening: coarsening.as_ref(),
         beta_dk: &beta_dk,
         delta_iters: a.delta_iters,
-        cpu_dev: &cpu_dev,
+        dev,
         adj_method: AdjMethod::Batch,
         minibatch_size: a.minibatch_size,
         mode: a.mode,
@@ -982,7 +1008,7 @@ struct DensePredictInputs<'a> {
     coarsening: Option<&'a FeatureCoarsening>,
     beta_dk: &'a Mat,
     delta_iters: usize,
-    cpu_dev: &'a Device,
+    dev: &'a Device,
     adj_method: AdjMethod,
     minibatch_size: usize,
     mode: LatentMode,
@@ -1010,7 +1036,7 @@ where
         coarsening,
         beta_dk,
         delta_iters,
-        cpu_dev,
+        dev,
         adj_method,
         minibatch_size,
         mode,
@@ -1035,7 +1061,7 @@ where
         data_beans_alg::gene_weighting::load_fisher_weights_coarse(model_prefix)?
     {
         if let Some(finest) = decoders.last_mut() {
-            finest.attach_feature_weights(&coarse_w, cpu_dev)?;
+            finest.attach_feature_weights(&coarse_w, dev)?;
         }
     }
     let decoder = decoders.last().expect("at least one decoder level");
@@ -1064,7 +1090,7 @@ where
                 beta_dk,
                 phi_for_iter,
                 minibatch_size,
-                cpu_dev,
+                dev,
                 &adj_method,
             )?;
             Some(refined)
@@ -1084,7 +1110,7 @@ where
             if let Some(fc) = coarsening {
                 db = fc.aggregate_rows_ds(&db);
             }
-            let t = db.to_tensor(cpu_dev)?.transpose(0, 1)?.contiguous()?;
+            let t = db.to_tensor(dev)?.transpose(0, 1)?.contiguous()?;
             Ok(t)
         })
         .transpose()?;
@@ -1126,7 +1152,7 @@ where
                 delta_tensor: delta_tensor.as_ref(),
                 gene_remap,
                 coarsening,
-                dev: cpu_dev,
+                dev,
                 adj_method: &adj_method,
                 mode,
                 refine_config,
@@ -1284,6 +1310,7 @@ fn predict_masked(
         block_size: args.block_size,
         delta_iters: args.delta_iters,
         estimate_batch_delta: true,
+        dev: &args.resolve_device()?,
     })?;
     let (masked_training_genes, masked_beta_dk) = load_dictionary(&args.model)?;
     let agreement = topic_agreement(&FinalizePredict {
@@ -1370,6 +1397,8 @@ pub(crate) struct MaskedScoreArgs<'a> {
     /// how many files the user happened to pass, so leaving it implicit made
     /// probe's calibration and query arms score under different models.
     pub estimate_batch_delta: bool,
+    /// Where the encoder and decoder run.
+    pub dev: &'a Device,
 }
 
 /// Rebuild the indexed encoder from a trained masked model, run encoder-only
@@ -1437,9 +1466,9 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         None
     };
 
-    let cpu_dev = Device::Cpu;
+    let dev = a.dev;
     let mut parameters = candle_nn::VarMap::new();
-    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
     let encoder = IndexedEmbeddingEncoder::new(
         IndexedEmbeddingEncoderArgs {
             n_features: a.metadata.n_features_full,
@@ -1461,7 +1490,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
 
     let adj_method = AdjMethod::Batch;
     let eval_config = EvaluateLatentMaskedConfig {
-        dev: &cpu_dev,
+        dev,
         adj_method: &adj_method,
         minibatch_size: a.minibatch_size,
         enc_context_size,
@@ -1495,7 +1524,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     let delta_bd = delta_db
         .as_ref()
         .map(|db| -> anyhow::Result<Tensor> {
-            Ok(db.to_tensor(&cpu_dev)?.transpose(0, 1)?.contiguous()?)
+            Ok(db.to_tensor(dev)?.transpose(0, 1)?.contiguous()?)
         })
         .transpose()?;
 
@@ -1656,6 +1685,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         query_name_opts: &args.query_name_opts()?,
         metadata,
         need_llik: true,
+        dev: &args.resolve_device()?,
     })?;
 
     // `π = softmax_d(z·W + b)` is `exp(b + ρ·θ)` normalised over genes — the
@@ -1708,6 +1738,8 @@ pub(crate) struct VaeScoreArgs<'a> {
     /// `predict` wants the latent only and passes `false`, which also skips rebuilding the
     /// decoder entirely. `probe` needs the per-cell score and passes `true`.
     pub need_llik: bool,
+    /// Where the encoder and decoder run.
+    pub dev: &'a Device,
 }
 
 pub(crate) struct VaeScored {
@@ -1807,9 +1839,9 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     let new_genes = data_vec.row_names()?;
     let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
-    let cpu_dev = Device::Cpu;
+    let dev = a.dev;
     let mut parameters = candle_nn::VarMap::new();
-    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
     let encoder = GaussianEncoder::new(
         GaussianEncoderArgs {
             n_features: metadata.n_features_encoder,
@@ -1882,7 +1914,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
             let csc = data_vec.read_columns_csc(lb..ub)?;
-            let x_nd = remap_and_coarsen_dense(&csc, gene_remap.as_ref(), None, &cpu_dev)?;
+            let x_nd = remap_and_coarsen_dense(&csc, gene_remap.as_ref(), None, dev)?;
             let (z, _) = encoder.forward_t(&x_nd, None, false)?;
             let z_mat = Mat::from_tensor(&z.to_device(&Device::Cpu)?)?;
             let Some(dec) = decoder else {

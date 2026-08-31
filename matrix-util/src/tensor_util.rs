@@ -1,7 +1,8 @@
 use crate::rand_util::{collect_f32_seeded, entropy_seed};
 use crate::traits::*;
-use candle_core::{Device, Tensor};
+use candle_core::{CpuStorage, DType, Device, InplaceOp2, Layout, Tensor};
 use rand_distr::{Gamma, StandardNormal, Uniform};
+use rayon::prelude::*;
 
 impl SampleOps for Tensor {
     type Mat = Self;
@@ -101,3 +102,133 @@ impl MatTriplets for Tensor {
 //         idx_data.into_iter().map(|(_, t)| t).collect()
 //     }
 // }
+
+///////////////////////////////////
+// Fused elementwise CPU kernels //
+///////////////////////////////////
+
+impl FusedTensorOps for Tensor {
+    fn clamped_exp_add_inplace(self, offset: &Tensor, ceiling: f64) -> anyhow::Result<Self> {
+        // One eligibility test, not a shape test: contiguity and dtype are this
+        // kernel's requirements, not the math's, so anything it cannot walk flatly
+        // takes the op chain rather than silently reading the wrong elements.
+        let broadcast = match (self.dims(), offset.dims()) {
+            (&[n, f], &[n_off, f_off]) => Broadcast::of(n, f, n_off, f_off),
+            _ => None,
+        };
+        let fused = matches!(self.device(), Device::Cpu)
+            && self.dtype() == DType::F32
+            && offset.dtype() == DType::F32
+            && self.is_contiguous()
+            && offset.is_contiguous();
+
+        let (Some(broadcast), true) = (broadcast, fused) else {
+            return Ok(self.broadcast_add(offset)?.minimum(ceiling)?.exp()?);
+        };
+
+        self.inplace_op2(
+            offset,
+            &ClampedExpAdd {
+                broadcast,
+                // f64 → f32 once here rather than per element, by the same cast
+                // `Tensor::minimum` applies to a scalar bound — so the fused path and
+                // the op chain agree bitwise.
+                ceiling: ceiling as f32,
+            },
+        )?;
+        Ok(self)
+    }
+}
+
+/// How the `[N, F]` receiver reads its offset. The three shapes
+/// `Tensor::broadcast_add` accepts here, resolved once outside the row loop.
+#[derive(Clone, Copy)]
+enum Broadcast {
+    /// `[N, F]` — each row reads its own.
+    Element,
+    /// `[1, F]` — every row reads the same one.
+    Column,
+    /// `[N, 1]` — each row reads a single scalar.
+    Row,
+}
+
+impl Broadcast {
+    fn of(n: usize, f: usize, n_off: usize, f_off: usize) -> Option<Self> {
+        match (n_off, f_off) {
+            _ if n_off == n && f_off == f => Some(Self::Element),
+            (1, _) if f_off == f => Some(Self::Column),
+            (_, 1) if n_off == n => Some(Self::Row),
+            _ => None,
+        }
+    }
+}
+
+/// The fused kernel behind [`FusedTensorOps::clamped_exp_add_inplace`]. CPU only by
+/// construction: the device forwards `InplaceOp2` supplies default to an error, and the
+/// caller never reaches them.
+struct ClampedExpAdd {
+    broadcast: Broadcast,
+    ceiling: f32,
+}
+
+/// Elements a rayon task should carry at minimum. Rows are the natural unit — each is
+/// a contiguous run — but a thin panel (`probe` against a few hundred genes) makes a
+/// row too small to pay for a `join`, so short rows are batched up to this.
+const MIN_FUSED_TASK_ELEMS: usize = 4096;
+
+impl InplaceOp2 for ClampedExpAdd {
+    fn name(&self) -> &'static str {
+        "clamped-exp-add"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s1: &mut CpuStorage,
+        l1: &Layout,
+        s2: &CpuStorage,
+        l2: &Layout,
+    ) -> candle_core::Result<()> {
+        let (CpuStorage::F32(lhs), CpuStorage::F32(rhs)) = (s1, s2) else {
+            candle_core::bail!("clamped-exp-add: expected f32 storage on both operands");
+        };
+        let (n, f) = l1.shape().dims2()?;
+
+        // Both layouts were checked contiguous, so a slice from the start offset is the
+        // whole logical tensor in row-major order.
+        let lhs = &mut lhs[l1.start_offset()..l1.start_offset() + n * f];
+        let rhs = &rhs[l2.start_offset()..l2.start_offset() + l2.shape().elem_count()];
+
+        let (ceiling, broadcast) = (self.ceiling, self.broadcast);
+        let rows_per_task = MIN_FUSED_TASK_ELEMS.div_ceil(f.max(1)).max(1);
+        lhs.par_chunks_mut(rows_per_task * f)
+            .enumerate()
+            .for_each(|(t, block)| {
+                for (r, row) in block.chunks_mut(f).enumerate() {
+                    let i = t * rows_per_task + r;
+                    match broadcast {
+                        Broadcast::Element => apply(row, &rhs[i * f..(i + 1) * f], ceiling),
+                        Broadcast::Column => apply(row, rhs, ceiling),
+                        Broadcast::Row => {
+                            let b = rhs[i];
+                            for x in row.iter_mut() {
+                                *x = (*x + b).min(ceiling).exp();
+                            }
+                        }
+                    }
+                }
+            });
+        Ok(())
+    }
+}
+
+/// `row[j] <- exp(min(row[j] + off[j], ceiling))`.
+#[inline]
+fn apply(row: &mut [f32], off: &[f32], ceiling: f32) {
+    for (x, &b) in row.iter_mut().zip(off) {
+        *x = (*x + b).min(ceiling).exp();
+    }
+}
+
+#[cfg(test)]
+#[path = "tensor_util_tests.rs"]
+mod tests;

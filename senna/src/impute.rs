@@ -408,6 +408,10 @@ fn predict_matching_latents(
         minibatch_size: args.minibatch_size,
         block_size: args.block_size,
         preload_data: args.preload_data,
+        // impute is topic-family only (the bge arm is refused above), so its inner
+        // predict is one encoder forward pass — no device knob to be worth exposing.
+        device: crate::embed_common::ComputeDevice::Cpu,
+        device_no: 0,
         refine_steps: 0,
         refine_lr: 0.01,
         refine_reg: 1.0,

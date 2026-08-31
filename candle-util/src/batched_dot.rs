@@ -21,9 +21,16 @@
 //! wins, so these are unconditional replacements.
 //!
 //! Both helpers live here rather than in a model type because the callers span
-//! `candle-util`, `graph-embedding-util` and `pinto`, and the dependency
-//! direction (geu → candle-util → matrix-util) means only this crate is
-//! reachable from all of them.
+//! `candle-util`, `graph-embedding-util` and `pinto`, and every one of them can
+//! reach this crate.
+//!
+//! `matrix-util` would serve those callers too — it is a strict dependency-order
+//! improvement, and `matrix_util::traits::FusedTensorOps` is a candle perf helper
+//! that lives there. The split is by what the helper does, not by what it can
+//! reach: these two REPLACE a shape with a better one, so they belong beside the
+//! `Tensor`-shaped model code that picks shapes. A fused elementwise kernel keeps
+//! the shape and only changes how the elements are walked, which is
+//! `matrix-util`'s business, next to its other `impl … for Tensor` blocks.
 
 use candle_core::{Result, Tensor};
 
