@@ -275,6 +275,18 @@ pub trait SparseIo: Sync + Send {
     /// Number of non-zero elements
     fn num_non_zeros(&self) -> Option<usize>;
 
+    /// Advance the streaming-write cursor by `n` entries. Called by
+    /// [`append_csc_slab`](Self::append_csc_slab); backends keep the count so
+    /// [`finalize_streaming_csc`](Self::finalize_streaming_csc) can audit the
+    /// declared nnz against what was actually appended — the one violation the
+    /// written indptr cannot reveal, because an over-declared tail leaves it
+    /// perfectly monotone with the phantom hiding between the last written
+    /// pointer and the sentinel.
+    fn note_streamed_nnz(&mut self, n: u64);
+
+    /// Entries appended so far in this streaming build.
+    fn streamed_nnz(&self) -> u64;
+
     /// The resident by-column indptr, loaded at `open()`. Empty when the
     /// backend carries no `/by_column/indptr` array — `read_column_indptr`
     /// silently does nothing on that failure, and the accessors below must
@@ -734,11 +746,59 @@ pub trait SparseIo: Sync + Send {
         row_indices: &[u64],
         values: &[f32],
     ) -> anyhow::Result<()> {
-        debug_assert_eq!(row_indices.len(), values.len());
+        // These checks exist because a violation does NOT fail loudly on its
+        // own: unwritten regions read back as the zarr fill value, so a bad
+        // slab yields a backend that opens and reads cleanly while carrying
+        // poisoned or duplicated entries. Cheap (one pass over the slab, no
+        // I/O) next to the compressed writes below.
+        anyhow::ensure!(
+            row_indices.len() == values.len(),
+            "append_csc_slab: {} row indices vs {} values",
+            row_indices.len(),
+            values.len()
+        );
+        anyhow::ensure!(
+            local_colptr.first().copied() == Some(0) || local_colptr.is_empty(),
+            "append_csc_slab: local_colptr must start at 0"
+        );
+        anyhow::ensure!(
+            local_colptr.windows(2).all(|w| w[0] <= w[1]),
+            "append_csc_slab: local_colptr must be monotone non-decreasing"
+        );
+        if let Some(&last) = local_colptr.last() {
+            anyhow::ensure!(
+                last <= values.len() as u64,
+                "append_csc_slab: colptr claims {last} entries, slab holds {}",
+                values.len()
+            );
+        }
+        if let Some(nrow) = self.num_rows() {
+            if let Some(&bad) = row_indices.iter().find(|&&r| r >= nrow as u64) {
+                anyhow::bail!("append_csc_slab: row index {bad} outside the {nrow}-row matrix");
+            }
+        }
+        // Ascending rows within each column: readers document it as an
+        // invariant, and the h5ad export hands the arrays to scipy as-is.
+        for (c, &start) in local_colptr.iter().enumerate() {
+            let end = local_colptr
+                .get(c + 1)
+                .copied()
+                .unwrap_or(values.len() as u64) as usize;
+            anyhow::ensure!(
+                row_indices[start as usize..end]
+                    .windows(2)
+                    .all(|w| w[0] < w[1]),
+                "append_csc_slab: rows within column {} of this band must be \
+                 strictly ascending",
+                col_offset as usize + c
+            );
+        }
+
         let shifted: Vec<u64> = local_colptr.iter().map(|&p| p + nnz_offset).collect();
         self.cs_write_u64(CsKey::CscIndptr, col_offset, &shifted)?;
         self.cs_write_u64(CsKey::CscIndices, nnz_offset, row_indices)?;
         self.cs_write_f32(CsKey::CscData, nnz_offset, values)?;
+        self.note_streamed_nnz(values.len() as u64);
         Ok(())
     }
 
@@ -753,6 +813,56 @@ pub trait SparseIo: Sync + Send {
             .ok_or_else(|| anyhow::anyhow!("nnz not set before finalize_streaming_csc"))?;
         self.cs_write_u64(CsKey::CscIndptr, ncol as u64, &[nnz as u64])?;
         self.read_column_indptr()?;
+
+        // The tiling check the per-slab guards cannot do. A gap or overlap in
+        // the nnz offsets, or an over-declared total, leaves the WRITTEN
+        // indptr non-monotone or short of the declared nnz — and unwritten
+        // indptr slots read back as the fill value 0, so column j would claim
+        // the whole array prefix. `indptr[ncol] - indptr[0]` equals the
+        // declaration by construction, which is why the old debug_assert on it
+        // could never fire; the shape of the vector between the endpoints is
+        // what carries the truth.
+        let indptr = self.column_indptr();
+        anyhow::ensure!(
+            indptr.len() == ncol + 1,
+            "finalize_streaming_csc: indptr has {} entries, expected {}",
+            indptr.len(),
+            ncol + 1
+        );
+        anyhow::ensure!(
+            indptr.first().copied() == Some(0),
+            "finalize_streaming_csc: indptr[0] = {:?}, expected 0 — the first \
+             slab was never appended",
+            indptr.first()
+        );
+        if let Some(w) = indptr.windows(2).position(|w| w[0] > w[1]) {
+            anyhow::bail!(
+                "finalize_streaming_csc: indptr decreases at column {w} — slabs \
+                 were appended with a gap or overlap in their nnz offsets"
+            );
+        }
+        // An over-declared nnz shows up as the last WRITTEN pointer falling
+        // short of the sentinel: the tail between them is fill, and the final
+        // column would absorb it as phantom entries.
+        if ncol >= 1 {
+            anyhow::ensure!(
+                indptr[ncol - 1] <= nnz as u64,
+                "finalize_streaming_csc: indptr overruns the declared nnz"
+            );
+        }
+        let written: u64 = indptr[ncol];
+        anyhow::ensure!(
+            written == nnz as u64,
+            "finalize_streaming_csc: wrote {written} entries but declared {nnz}"
+        );
+        // The appended count is the ground truth the indptr cannot carry.
+        let appended = self.streamed_nnz();
+        anyhow::ensure!(
+            appended == nnz as u64,
+            "finalize_streaming_csc: {appended} entries appended but {nnz} \
+             declared — the difference reads back as fill values wearing real \
+             entries' positions"
+        );
         Ok(())
     }
 

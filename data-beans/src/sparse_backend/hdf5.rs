@@ -37,6 +37,8 @@ pub struct SparseMtxData {
     max_row_name_idx: usize,
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
+    /// Streaming-write cursor: entries appended so far (see `note_streamed_nnz`).
+    streamed_nnz: u64,
     by_row_indptr: Vec<u64>,
     by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
@@ -81,6 +83,7 @@ impl SparseMtxData {
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
+            streamed_nnz: 0,
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
@@ -240,6 +243,7 @@ impl SparseMtxData {
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
+            streamed_nnz: 0,
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
@@ -279,6 +283,14 @@ impl SparseIo for SparseMtxData {
     /// Read column index pointers
     fn column_indptr(&self) -> &[u64] {
         &self.by_column_indptr
+    }
+
+    fn note_streamed_nnz(&mut self, n: u64) {
+        self.streamed_nnz += n;
+    }
+
+    fn streamed_nnz(&self) -> u64 {
+        self.streamed_nnz
     }
 
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
