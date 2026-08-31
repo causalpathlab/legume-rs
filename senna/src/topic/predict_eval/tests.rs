@@ -9,9 +9,13 @@ use super::*;
 #[test]
 fn the_per_gene_axis_is_across_cells() {
     let mut ev = PredictEval::new(vec![0, 1], true);
-    // Two cells; gene 0 rises with the prediction, gene 1 moves against it.
-    for (o, p) in [([1.0f32, 9.0], [1.0f32, 1.0]), ([5.0, 1.0], [5.0, 9.0])] {
-        ev.keep(&o, &p);
+    // Predictions go in as RATES; `keep` puts them on each cell's own depth.
+    // Cell A: 10 counts, predicted counts (1, 9). Cell B: 20 counts, predicted
+    // (6, 14). Gene 0's prediction rises with its observations (+1); gene 1's
+    // rises while its observations fall (-1). A per-CELL reading of the same
+    // numbers would see nothing of the kind — that distinction is the test.
+    for (observed, rate) in [([1.0f32, 9.0], [0.1f32, 0.9]), ([15.0, 5.0], [0.3, 0.7])] {
+        ev.keep(&observed, &rate);
     }
     let per_gene = ev.per_gene();
     assert_eq!(per_gene.len(), 2);
@@ -25,7 +29,7 @@ fn the_per_gene_axis_is_across_cells() {
         "gene 1 anti-tracks: {:?}",
         per_gene[1]
     );
-    assert!((per_gene[0].3 - 3.0).abs() < 1e-5, "mean observed");
+    assert!((per_gene[0].3 - 8.0).abs() < 1e-5, "mean observed");
 }
 
 #[test]
@@ -125,4 +129,34 @@ fn a_null_over_genes_with_no_counts_is_all_zero_rather_than_nan() {
     let out = normalize_over(&[0.0, 0.0, 5.0], &[0, 1], 3);
     assert!(out.iter().all(|v| v.is_finite()));
     assert_eq!(out, vec![0.0, 0.0, 0.0]);
+}
+
+/// The per-gene axis correlates ACROSS cells, so what it stores must be on the
+/// count scale — the depth factor is per-cell, and dropping it is not a uniform
+/// rescale of the series.
+///
+/// Two cells with opposite compositions and very different depths. On the count
+/// scale each gene's observed and predicted series move together, so both genes
+/// score +1. Handed raw rates instead, gene 0's observed counts rise while its
+/// rate falls, and the correlation inverts. That inversion is the regression
+/// this guards.
+#[test]
+fn the_per_gene_axis_needs_counts_not_rates() {
+    let mut store = PredictEval::new(vec![0, 1], true);
+    // Cell A: 10 counts, mostly gene 0.   Cell B: 100 counts, mostly gene 1.
+    for (observed, rate) in [([9.0f32, 1.0], [0.9f32, 0.1]), ([10.0, 90.0], [0.1, 0.9])] {
+        store.keep(&observed, &rate);
+    }
+    let per_gene = store.per_gene();
+    assert_eq!(per_gene.len(), 2);
+    for (gene, spearman, pearson, _) in per_gene {
+        assert!(
+            (spearman - 1.0).abs() < 1e-5,
+            "gene {gene} spearman {spearman}: a rate stored unscaled inverts this to -1"
+        );
+        assert!(
+            (pearson - 1.0).abs() < 1e-3,
+            "gene {gene} pearson {pearson}"
+        );
+    }
 }

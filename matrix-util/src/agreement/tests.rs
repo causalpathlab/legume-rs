@@ -141,3 +141,11 @@ fn a_huge_log_rate_does_not_overflow() {
     let a = agreement_from_log_rate(&obs, &[300.0, 301.0, 302.0]);
     assert!(a.pearson_log1p.is_finite() && a.spearman.is_finite());
 }
+
+/// The two constants must stay one fact expressed twice: engines that floor a
+/// probability and engines that floor a log-probability have to land on the
+/// same penalty, or the cross-engine likelihood column ranks by binary.
+#[test]
+fn the_probability_floor_and_the_log_floor_agree() {
+    assert!((f64::from(PROB_FLOOR).ln() - LOG_PROB_FLOOR).abs() < 1e-6);
+}

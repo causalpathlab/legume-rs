@@ -5,11 +5,42 @@
 //! numbers to come from the same arithmetic — down to the tie handling, which is
 //! what decides the answer on profiles that are mostly zeros.
 
+/// Smallest probability a scored likelihood may assign to an observed event.
+///
+/// One constant, shared by every engine that writes the cross-engine
+/// `eval_llik_per_count` column. senna floors probabilities (`p.max(PROB_FLOOR)`
+/// before the log); pinto floors log-probabilities (`lp.max(LOG_PROB_FLOOR)`
+/// after its clamp-and-normalise). Before this existed the two used unrelated
+/// bounds, so a model putting ~no mass on an observed gene was charged a
+/// different penalty depending on which binary produced the number — in the one
+/// column whose reason to exist is cross-engine comparability.
+pub const PROB_FLOOR: f32 = 1e-12;
+
+/// `ln(PROB_FLOOR)` — the same floor for engines that work in log space.
+/// A test pins the two to each other.
+pub const LOG_PROB_FLOOR: f64 = -27.631_021_115_928_547;
+
 /// Per-cell agreement between a cell's observed counts and its prediction.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CellAgreement {
     pub spearman: f32,
     pub pearson_log1p: f32,
+}
+
+/// Renormalise a rate over the slice it is given and put it on the observed
+/// depth, yielding predicted COUNTS.
+///
+/// Exposed rather than kept inside [`agreement_from_rate`] because a caller that
+/// stores the prediction — for a correlation taken later, across profiles rather
+/// than within one — needs the same vector. Hiding it produced exactly that bug:
+/// the stored series was raw rates, and since the depth factor is per-profile,
+/// dropping it inverted correlations rather than merely rescaling them.
+#[must_use]
+pub fn rate_to_counts(observed: &[f32], rate: &[f32]) -> Vec<f32> {
+    let count: f32 = observed.iter().sum();
+    let z: f32 = rate.iter().sum::<f32>().max(1e-12);
+    let scale = count / z;
+    rate.iter().map(|r| r * scale).collect()
 }
 
 /// Observed counts against a predicted RATE, put on the count scale first.
@@ -28,10 +59,7 @@ pub struct CellAgreement {
 /// written twice before, and one copy was wrong.
 #[must_use]
 pub fn agreement_from_rate(observed: &[f32], rate: &[f32]) -> CellAgreement {
-    let count: f32 = observed.iter().sum();
-    let z: f32 = rate.iter().sum::<f32>().max(1e-12);
-    let scale = count / z;
-    let predicted_counts: Vec<f32> = rate.iter().map(|r| r * scale).collect();
+    let predicted_counts = rate_to_counts(observed, rate);
     CellAgreement {
         spearman: spearman(observed, &predicted_counts),
         pearson_log1p: pearson_log1p(observed, &predicted_counts),

@@ -295,7 +295,6 @@ pub struct PredictArgs {
 }
 
 impl PredictArgs {
-    /// Assemble the query-row-name transforms from the CLI flags.
     /// Resolve every query-axis rule, including `--ablate-features`.
     ///
     /// Fallible now because the ablation list is read here rather than at the
@@ -1631,10 +1630,6 @@ fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutco
     // counts through it would read the scored genes as zero and grade every model
     // against a blank. Rebuilding costs one name-matching pass and removes the
     // chance of a caller handing over the encoder's view by mistake.
-    // Built without the ablation: the backend's remap has the hidden genes
-    // pointing at `None`, which is right for the encoder and wrong here —
-    // densifying observed truth through it would read the scored genes as zero
-    // and grade every model against a blank.
     let mut scoring_opts = a.args.query_name_opts()?;
     scoring_opts.hide = None;
     let score_remap = build_remap(a.training_genes, &a.data_vec.row_names()?, &scoring_opts)?;
