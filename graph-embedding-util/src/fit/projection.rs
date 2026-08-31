@@ -75,7 +75,7 @@ pub(crate) fn cell_edges(
 // Projecting onto a frozen dictionary //
 /////////////////////////////////////////
 
-/// Inputs for [`project_onto_frozen`].
+/// Inputs for [`FrozenProjector::new`].
 pub struct FrozenProjectionArgs<'a> {
     /// Frozen dictionary, row-major `[n_features × h]`.
     pub feat: &'a [f32],
@@ -93,46 +93,129 @@ pub struct FrozenProjection {
     pub b_node: Vec<f32>,
 }
 
-/// Project nodes onto a **frozen** feature side with the same block SGD phase 2
-/// uses, for callers outside the fit — `senna predict` on a bge model.
+/// A frozen feature side with its projection design already built — the entry
+/// point for projecting nodes that are not part of a fit (`senna predict` on a bge
+/// model, and any future streaming caller).
 ///
-/// # Why not the Newton solver in [`crate::cell_projection`]
+/// # Why a projector and not a function
+///
+/// Everything the block SGD needs that depends only on `(feat, b_feat)` — the
+/// augmented design in both orientations, the live-feature scan and gate fold, the
+/// null normalizer, the auto-scaled learning rate — is built by [`Self::new`] and
+/// reused by every [`Self::project`] call. A per-call function rebuilt all of it
+/// per call, which pushed the cost of a small call onto the *caller*: it had to
+/// hand over enough nodes to hide the setup, and the only way to know "enough" was
+/// to guess against constants inside the engine it could not see. There is nothing
+/// left to hide, so a caller sizes its groups for its own memory — and can ask
+/// [`Self::group_nodes`] for a size derived from the block budget rather than
+/// guessing at it.
+///
+/// # Why this solver
 ///
 /// A run's own `cell_embedding.parquet` comes from `project_cells_phase2`, i.e.
-/// this solver: Adam over cell blocks against the **full** log-partition. The
-/// Newton/IRLS path fits a node's observed features only and lets a ridge stand
-/// in for the partition, which is why the per-cell phase 2 was moved off it —
-/// `‖θ‖` runs away. Projecting held-out cells with the other solver would put
-/// train and test latents in different spaces and quietly confound any
-/// train/test comparison built on them. One estimator, both halves.
+/// this same block SGD: Adam over cell blocks against the **full** log-partition.
+/// The Newton/IRLS path in [`crate::cell_projection`] fits a node's observed
+/// features only and lets a ridge stand in for the partition, which is why the
+/// per-cell phase 2 was moved off it — `‖θ‖` runs away. Projecting held-out cells
+/// with the other solver would put train and test latents in different spaces and
+/// quietly confound any train/test comparison built on them. One estimator, both
+/// halves.
 ///
 /// `gauge_fix` is **off** here, unlike training: the gauge shift is a
-/// (θ, b_feat) pair, and `b_feat` is frozen at predict time — re-centring θ
-/// alone would break its correspondence with the dictionary it is scored
-/// against.
-pub fn project_onto_frozen(
-    args: &FrozenProjectionArgs<'_>,
-    nodes: &[(u32, &[u32], &[f32])],
-    n_nodes: usize,
-) -> anyhow::Result<FrozenProjection> {
-    let out = block_sgd::project_cells(
-        &block_sgd::Phase2Input {
+/// (θ, b_feat) pair, and `b_feat` is frozen at predict time — re-centring θ alone
+/// would break its correspondence with the dictionary it is scored against.
+pub struct FrozenProjector<'a> {
+    feat: &'a [f32],
+    b_feat: &'a [f32],
+    h: usize,
+    lambda: f64,
+    dev: &'a Device,
+    dict: block_sgd::PassDict,
+}
+
+impl<'a> FrozenProjector<'a> {
+    /// Build the projection design for a frozen dictionary. Does the whole
+    /// per-dictionary setup once; [`Self::project`] then costs only what its own
+    /// nodes cost.
+    pub fn new(args: &FrozenProjectionArgs<'a>) -> anyhow::Result<Self> {
+        let n_features = args.b_feat.len();
+        anyhow::ensure!(
+            args.feat.len() == n_features * args.h,
+            "frozen projection: the dictionary has {} entries, expected {n_features} × {}",
+            args.feat.len(),
+            args.h
+        );
+        // The exact normalizer: every feature of the frozen side is in the partition.
+        let rows: Vec<u32> = (0..n_features as u32).collect();
+        let dict = block_sgd::PassDict::build(
+            &block_sgd::DictSpec {
+                feat: args.feat,
+                b_feat: args.b_feat,
+                h: args.h,
+                lambda: args.lambda,
+                dev: args.dev,
+                label: "Projection",
+                pass: "nodes",
+            },
+            rows,
+        )?;
+        Ok(Self {
             feat: args.feat,
             b_feat: args.b_feat,
             h: args.h,
-            n_cells: n_nodes,
             lambda: args.lambda,
             dev: args.dev,
-            label: "Projection",
-            gauge_fix: false,
-            joint: false,
-        },
-        nodes,
-        None,
-        None,
-    )?;
-    Ok(FrozenProjection {
-        theta: out.theta,
-        b_node: out.b_cell,
-    })
+            dict,
+        })
+    }
+
+    /// Nodes to hand one [`Self::project`] call.
+    ///
+    /// A whole number of solver blocks, derived from the activation budget this
+    /// crate owns — so a streaming caller that cuts its groups here fills every
+    /// block exactly instead of guessing a size in a currency the engine never
+    /// sees. It bounds host memory too: a node carries at most `F` nonzeros, and
+    /// `block_cells × F` is what the activation budget caps, so a group's nonzero
+    /// count does not grow with the feature axis.
+    pub fn group_nodes(&self) -> usize {
+        self.dict.group_nodes()
+    }
+
+    /// Project one group of nodes, advancing `bar` by one tick per node as the
+    /// blocks step.
+    ///
+    /// `nodes` is `(group-local id, feature ids, counts)` and `n_nodes` bounds that
+    /// local axis; ids are positions in the returned `[n_nodes × h]` θ, so a caller
+    /// streaming groups re-bases them per group and stitches the results itself.
+    ///
+    /// The bar is the **caller's**, not one per call: a streaming caller already has
+    /// a bar over the whole query, and a second one underneath it would either nest
+    /// or fight it for the terminal.
+    pub fn project(
+        &self,
+        nodes: &[(u32, &[u32], &[f32])],
+        n_nodes: usize,
+        bar: &indicatif::ProgressBar,
+    ) -> anyhow::Result<FrozenProjection> {
+        let out = block_sgd::project_prepared(
+            &block_sgd::Phase2Input {
+                feat: self.feat,
+                b_feat: self.b_feat,
+                h: self.h,
+                n_cells: n_nodes,
+                lambda: self.lambda,
+                dev: self.dev,
+                label: "Projection",
+                gauge_fix: false,
+                joint: false,
+            },
+            &self.dict,
+            nodes,
+            bar,
+        )?;
+        Ok(FrozenProjection {
+            theta: out.theta,
+            b_node: out.b_cell,
+        })
+    }
 }

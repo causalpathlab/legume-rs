@@ -2,6 +2,10 @@
 //! counts restricted to one pass's feature partition, flattened once, plus the `Bc`
 //! that keeps a block's `[Bc, F]` activations inside the budget. Both are pure host
 //! bookkeeping the device loop reads but never rebuilds.
+//!
+//! The two have different lifetimes, which is why they are separate calls: `Bc`
+//! belongs to the frozen dictionary and is held by [`super::PassDict`], while the
+//! edge table belongs to the nodes and is rebuilt for every group of them.
 
 use super::{BLOCK_ACTIVATION_BYTES, LIVE_BLOCK_TENSORS, MAX_BLOCK_CELLS};
 use crate::fit::projection::{cell_edges, CellBatchDivisor};
@@ -64,27 +68,11 @@ impl EdgeTable {
     }
 }
 
-//////////////////////
-// Block partition //
-//////////////////////
+//////////////////
+// Block sizing //
+//////////////////
 
-pub(super) struct BlockPlan {
-    pub(super) block_cells_a: usize,
-    pub(super) block_cells_b: usize,
-    pub(super) two_pass: bool,
-}
-
-/// Size `Bc` per pass so a block's `[Bc, F_pass]` activations stay inside
-/// [`BLOCK_ACTIVATION_BYTES`].
-pub(super) fn block_partition(rows_a: &[u32], rows_b: &[u32]) -> BlockPlan {
-    BlockPlan {
-        block_cells_a: block_cells(rows_a.len()),
-        block_cells_b: block_cells(rows_b.len()),
-        two_pass: !rows_b.is_empty(),
-    }
-}
-
-/// Cells per block for a pass over `f` live features.
+/// Cells per block for a pass over `f` features.
 pub(super) fn block_cells(f: usize) -> usize {
     if f == 0 {
         return 1;

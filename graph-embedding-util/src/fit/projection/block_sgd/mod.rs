@@ -83,10 +83,17 @@
 //! # Layout
 //!
 //! [`edges`] flattens the sampler's edges once per pass and sizes the blocks;
-//! [`pass`] drives one pass (θ, or δ with θ fixed) block by block and owns the
-//! per-block argument/result types; [`solve`] is the Adam loop for one block;
-//! [`joint`] is the alternative single-solve θ+δ path. The tuning constants, the
-//! caller-facing types and the entry point stay here.
+//! [`pass`] holds the frozen per-pass design ([`pass::PassDict`]) apart from the
+//! block loop that runs nodes against it, and owns the per-block argument/result
+//! types; [`solve`] is the Adam loop for one block; [`joint`] is the alternative
+//! single-solve θ+δ path. The tuning constants, the caller-facing types and the
+//! entry points stay here.
+//!
+//! There are two entry points, differing only in who owns the dictionary.
+//! [`project_cells`] takes a whole node set and builds the design for it;
+//! [`project_prepared`] takes a design the caller already built and one group of
+//! nodes, so a caller with more nodes than it wants resident can stream them past
+//! the same dictionary.
 
 use super::CellBatchDivisor;
 use crate::progress::new_progress_bar;
@@ -98,9 +105,11 @@ mod joint;
 mod pass;
 mod solve;
 
-use edges::{block_partition, EdgeTable};
+use edges::EdgeTable;
 use joint::run_joint_pass;
-use pass::{run_pass, PassSpec};
+use pass::{run_pass, PassOut, PassSpec};
+
+pub(crate) use pass::{DictSpec, PassDict};
 
 /////////////////////////
 // Schedule / tolerance //
@@ -160,6 +169,24 @@ const LIVE_BLOCK_TENSORS: usize = 8;
 /// per-block convergence report.
 const MAX_BLOCK_CELLS: usize = 4096;
 
+/// Blocks a streaming caller should ask for in one [`project_prepared`] call, via
+/// [`PassDict::group_nodes`].
+///
+/// Now that the pass design is built once ([`PassDict`]) rather than per call, a
+/// group buys very little: the flatten, the scatter and the result allocations
+/// either side of the solve are all O(nodes) whatever the group size, so all that
+/// is left to amortize is one log line and the block loop's own bookkeeping. A
+/// small multiple is enough, and it keeps the caller's resident edges bounded —
+/// a node carries at most `F` nonzeros and `Bc·F` is itself capped by
+/// [`BLOCK_ACTIVATION_BYTES`], so a group's nonzeros cannot grow with the feature
+/// axis.
+///
+/// What it must NOT be is a number the caller guesses. That was the previous
+/// arrangement — a caller-side byte budget, in a currency (nonzeros) the engine
+/// never sees, tuned to clear a block size it could not read — and it silently
+/// reverted to one short block per call whenever anything here moved.
+const GROUP_BLOCKS: usize = 4;
+
 /// A feature whose frozen `‖e_f‖` is at or below this contributes `exp(β_f + c)`
 /// independent of `Θ`, so it is folded into a scalar partition mass and dropped
 /// from the matmul entirely.
@@ -200,6 +227,21 @@ pub(crate) struct Phase2Input<'a> {
     /// spliced and unspliced tracks — instead of the default sequential θ-then-δ (δ with
     /// θ held fixed). Ignored without `unspliced_rows`.
     pub joint: bool,
+}
+
+impl Phase2Input<'_> {
+    /// The dictionary side of this input, for building one pass's [`PassDict`].
+    fn dict_spec(&self, pass: &'static str) -> DictSpec<'_> {
+        DictSpec {
+            feat: self.feat,
+            b_feat: self.b_feat,
+            h: self.h,
+            lambda: self.lambda,
+            dev: self.dev,
+            label: self.label,
+            pass,
+        }
+    }
 }
 
 /// Phase-2 result on the host, in global cell-id order.
@@ -310,12 +352,12 @@ pub(crate) fn project_cells(
     let edges_b =
         (!rows_b.is_empty()).then(|| EdgeTable::build(cells, &rows_b, n_features, batch_divisor));
 
-    let blocks = block_partition(&rows_a, &rows_b);
     // The bar counts **cells**, across both passes, and advances *within* a block
     // in proportion to that block's Adam steps. Counting whole blocks would tick
     // maybe 16 times for an entire phase — and the better `Bc` gets for speed, the
     // coarser that becomes. Cells stay meaningful and the bar keeps moving.
-    let bar = new_progress_bar((cells.len() * (1 + usize::from(blocks.two_pass))) as u64);
+    let two_pass = !rows_b.is_empty();
+    let bar = new_progress_bar((cells.len() * (1 + usize::from(two_pass))) as u64);
     bar.enable_steady_tick(std::time::Duration::from_millis(200));
 
     // Estimate θ (and, on the splice path, δ). Two modes:
@@ -330,39 +372,92 @@ pub(crate) fn project_cells(
         }
         _ => {
             // Pass 1 — identity θ (and the kept per-cell intercept).
+            let dict_a = PassDict::build(&input.dict_spec("identity"), rows_a)?;
             let pass_a = run_pass(
                 input,
+                &dict_a,
                 &PassSpec {
-                    label: "identity",
-                    rows: &rows_a,
                     edges: &edges_a,
                     base_theta: None,
-                    block_cells: blocks.block_cells_a,
                 },
                 cells,
                 &bar,
             )?;
             // Pass 2 — velocity increment δ, with θ held fixed.
             let pass_b = match &edges_b {
-                Some(eb) => Some(run_pass(
-                    input,
-                    &PassSpec {
-                        label: "velocity",
-                        rows: &rows_b,
-                        edges: eb,
-                        base_theta: Some(&pass_a.latent),
-                        block_cells: blocks.block_cells_b,
-                    },
-                    cells,
-                    &bar,
-                )?),
+                Some(eb) => {
+                    let dict_b = PassDict::build(&input.dict_spec("velocity"), rows_b)?;
+                    Some(run_pass(
+                        input,
+                        &dict_b,
+                        &PassSpec {
+                            edges: eb,
+                            base_theta: Some(&pass_a.latent),
+                        },
+                        cells,
+                        &bar,
+                    )?)
+                }
                 None => None,
             };
             (pass_a, pass_b)
         }
     };
     bar.finish_and_clear();
+    Ok(finish(input, cells, pass_a, pass_b))
+}
 
+/// Project one group of nodes against a dictionary the caller has **already**
+/// built — the streaming counterpart of [`project_cells`].
+///
+/// One feature partition (every row of the dictionary), no batch divisor and no
+/// splice pass, on the caller's own progress bar: the shape
+/// [`super::FrozenProjector`] needs to walk a query past a frozen side group by
+/// group.
+///
+/// # Grouping does not change the answer, provided the groups are block-aligned
+///
+/// A block is an independent problem (see the module docs) but not a *per-node*
+/// one: its cells share a convergence test and a step cap, so which cells land in
+/// a block together is observable in the result. Blocks are cut at multiples of
+/// `Bc` from the start of each group, so a caller that cuts its groups at
+/// [`PassDict::group_nodes`] — a whole number of blocks — produces exactly the
+/// block partition one single call over the whole query would, and therefore
+/// exactly its numbers — byte-identical, not merely close.
+///
+/// A caller that groups on some other rhythm still gets a correct projection; it
+/// just gets a different (and, for a ragged group, short-block-padded) partition.
+///
+/// `input.n_cells` bounds the returned axis, so node ids must be group-local.
+pub(crate) fn project_prepared(
+    input: &Phase2Input,
+    dict: &PassDict,
+    nodes: &[(u32, &[u32], &[f32])],
+    bar: &indicatif::ProgressBar,
+) -> anyhow::Result<Phase2Out> {
+    let edges = EdgeTable::build(nodes, dict.rows(), input.b_feat.len(), None);
+    let pass = run_pass(
+        input,
+        dict,
+        &PassSpec {
+            edges: &edges,
+            base_theta: None,
+        },
+        nodes,
+        bar,
+    )?;
+    Ok(finish(input, nodes, pass, None))
+}
+
+/// Re-gauge the pass results and scatter them onto the global node axis — the tail
+/// both entry points share.
+fn finish(
+    input: &Phase2Input,
+    cells: &[(u32, &[u32], &[f32])],
+    pass_a: PassOut,
+    pass_b: Option<PassOut>,
+) -> Phase2Out {
+    let h = input.h;
     // Fix the gauge (see `GaugeShift`): remove the population mean from each
     // latent. Taken over the SOLVED cells only — a cell with no edges was never
     // placed by the likelihood, and after centring the origin is the population
@@ -408,7 +503,7 @@ pub(crate) fn project_cells(
         }
     }
 
-    Ok(Phase2Out {
+    Phase2Out {
         theta,
         b_cell,
         velocity,
@@ -416,7 +511,7 @@ pub(crate) fn project_cells(
             theta_mean,
             delta_mean,
         },
-    })
+    }
 }
 
 /// Column means of a row-major `[n × h]` buffer.

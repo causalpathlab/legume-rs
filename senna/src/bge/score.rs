@@ -12,7 +12,7 @@
 //! [`crate::run_manifest::resolve_feature_loading_for`] exists because three consumers each
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
-//! `(ρ, b_feat)` is exactly the frozen side that `project_onto_frozen` and
+//! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
 //! [`graph_embedding_util::posterior::multinomial_ll`] consume.
 //!
 //! `--skip-etm` is **not** required. It used to be, before `feature_loading.parquet` always
@@ -24,7 +24,7 @@ use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
-use graph_embedding_util::fit::{project_onto_frozen, FrozenProjectionArgs, PROJECTION_RIDGE_SGD};
+use graph_embedding_util::fit::{FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD};
 // `multinomial_ll` is not in `posterior`'s re-export list (only `poisson_ll` is), so it comes
 // from the module directly. It is the one we want — see `BgeModel::score`.
 use crate::embed_common::Mat;
@@ -37,23 +37,6 @@ use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 use std::path::Path;
-
-/// Host memory a projection group may hold in its remapped edges before it is handed to
-/// the SGD. Not a device bound — the engine does its own activation-budget blocking
-/// underneath — but a bound on what this side keeps resident.
-///
-/// Generous on purpose: it has to clear the engine's own block size by a wide margin, or
-/// there is only ever one block per call and the setup cost is paid per handful of cells.
-///
-/// Not [`matrix_util::utils::byte_budget_intervals`], which cuts the same kind of block
-/// from a budget but needs every column's nnz up front — `SparseIoVec` exposes only a
-/// total, so the count is only known here as the columns are read.
-const PROJECTION_GROUP_BYTES: usize = 512 << 20;
-
-/// Bytes a single nonzero costs while a group is in flight: 8 in [`EdgeGroup`]'s split
-/// `feat` / `count`, and 8 again in the `EdgeTable` the SGD builds from them, which is
-/// live at the same time.
-const GROUP_BYTES_PER_NNZ: usize = 16;
 
 /// An opened `senna bge` model: the frozen feature side, and the gene axis it lives on.
 pub struct BgeEmbedding {
@@ -203,33 +186,47 @@ impl BgeEmbedding {
             h: self.h,
         };
 
+        // The whole per-dictionary setup — the transposed design, the live-feature scan,
+        // the null normalizer, the learning rate — happens once, here, instead of on
+        // every projection call.
+        let projector = FrozenProjector::new(&FrozenProjectionArgs {
+            feat: &self.rho,
+            b_feat: &self.b_feat,
+            h: self.h,
+            lambda: f64::from(PROJECTION_RIDGE_SGD),
+            dev,
+        })?;
+
         let ntot = data_vec.num_columns();
         let mut llik = Vec::with_capacity(ntot);
         let mut total = Vec::with_capacity(ntot);
         let mut latent = Mat::zeros(ntot, self.h);
+        // ONE bar for the query. The projector advances it as its blocks step, so this
+        // side never increments it: nesting a second bar under it (one per projection
+        // call) is what the group loop used to do.
         let bar = new_progress_bar(ntot as u64).with_message("scoring");
 
         // Columns are READ in `block`-sized slabs — that bound is the reader's — but they
-        // are PROJECTED in groups accumulated up to [`PROJECTION_GROUP_BYTES`].
+        // are PROJECTED in groups the engine sizes.
         //
-        // The two sizes are not the same thing and used to be conflated. `block` is
-        // `--minibatch-size`, default 500; the projection engine sizes its own internal
-        // blocks from its activation budget and takes thousands of cells at a time. Handing
-        // it 500 gave it exactly one under-sized block per call, so its per-step matmul ran
-        // on a short `M` and every call re-paid the whole per-pass setup: the transposed
-        // dictionary, the live-feature scan, a progress bar and a log line, ~70 times over
-        // for a query of a few tens of thousands of cells.
-        let nnz_budget = PROJECTION_GROUP_BYTES / GROUP_BYTES_PER_NNZ;
+        // The two are not the same thing and used to be conflated. `block` is
+        // `--minibatch-size`, default 500; the projection engine sizes its internal blocks
+        // from an activation budget of its own and takes thousands of cells at a time.
+        // Handing it 500 gave it exactly one under-sized block per call, so its per-step
+        // matmul ran on a short `M`. The fix used to be a byte budget guessed here, in
+        // nonzeros — a currency the engine never sees, aimed at a block size this crate
+        // cannot read. [`FrozenProjector::group_nodes`] is that number in the engine's own
+        // terms, and cutting the group EXACTLY there is what keeps every block full.
+        let group_nodes = projector.group_nodes();
         let mut group = EdgeGroup::default();
 
         let mut lb = 0usize;
         while lb < ntot {
             let group_lb = lb;
-            // Accumulate slabs until the group is worth projecting. The inner loop's
-            // exit condition IS the flush condition, so a part-group at the end needs
-            // no special case.
-            while lb < ntot && group.nnz() < nnz_budget {
-                let ub = (lb + block).min(ntot);
+            // Accumulate slabs until the group is full. The inner loop's exit condition
+            // IS the flush condition, so a part-group at the end needs no special case.
+            while lb < ntot && group.len() < group_nodes {
+                let ub = (lb + block).min(group_lb + group_nodes).min(ntot);
                 let csc = data_vec.read_columns_csc(lb..ub)?;
                 // One walk per cell yields both the remapped entries and the cell's
                 // total; the total used to be a third pass over the same nonzeros.
@@ -257,7 +254,7 @@ impl BgeEmbedding {
             }
 
             let n_group = group.len();
-            let e_cell = self.project_group(&group, dev)?;
+            let e_cell = project_group(&projector, &group, &bar)?;
             // `multinomial_ll` walks the whole gene axis twice per cell for the
             // normalizer, which makes it the dominant cost here — and it sat serial
             // directly below `project_cells`, which is already rayon-parallel. Everything
@@ -279,7 +276,6 @@ impl BgeEmbedding {
                     latent[(group_lb + c, j)] = e_cell[c * self.h + j];
                 }
             }
-            bar.inc(n_group as u64);
             group.clear();
         }
         bar.finish_and_clear();
@@ -291,33 +287,26 @@ impl BgeEmbedding {
             latent,
         })
     }
+}
 
-    /// Project one group of cells onto the frozen side, returning `θ` row-major `[n, H]`.
-    ///
-    /// The SAME block SGD the training run used for its own phase 2. The Newton/IRLS
-    /// alternative fits a cell's observed features only and lets a ridge stand in for the
-    /// log-partition, so it lands in a different space — and a train/test comparison whose
-    /// two halves were projected differently measures the estimator gap as much as the model.
-    fn project_group(&self, group: &EdgeGroup, dev: &Device) -> anyhow::Result<Vec<f32>> {
-        let nodes: Vec<(u32, &[u32], &[f32])> = (0..group.len())
-            .map(|j| {
-                let (feat, count) = group.cell(j);
-                (j as u32, feat, count)
-            })
-            .collect();
-        let fit = project_onto_frozen(
-            &FrozenProjectionArgs {
-                feat: &self.rho,
-                b_feat: &self.b_feat,
-                h: self.h,
-                lambda: f64::from(PROJECTION_RIDGE_SGD),
-                dev,
-            },
-            &nodes,
-            group.len(),
-        )?;
-        Ok(fit.theta)
-    }
+/// Project one group of cells onto the frozen side, returning `θ` row-major `[n, H]`.
+///
+/// The SAME block SGD the training run used for its own phase 2. The Newton/IRLS
+/// alternative fits a cell's observed features only and lets a ridge stand in for the
+/// log-partition, so it lands in a different space — and a train/test comparison whose
+/// two halves were projected differently measures the estimator gap as much as the model.
+fn project_group(
+    projector: &FrozenProjector,
+    group: &EdgeGroup,
+    bar: &indicatif::ProgressBar,
+) -> anyhow::Result<Vec<f32>> {
+    let nodes: Vec<(u32, &[u32], &[f32])> = (0..group.len())
+        .map(|j| {
+            let (feat, count) = group.cell(j);
+            (j as u32, feat, count)
+        })
+        .collect();
+    Ok(projector.project(&nodes, group.len(), bar)?.theta)
 }
 
 /// One projection group's remapped edges, flat and split.
@@ -337,10 +326,6 @@ struct EdgeGroup {
 impl EdgeGroup {
     fn len(&self) -> usize {
         self.offsets.len().saturating_sub(1)
-    }
-
-    fn nnz(&self) -> usize {
-        self.feat.len()
     }
 
     fn cell(&self, i: usize) -> (&[u32], &[f32]) {
