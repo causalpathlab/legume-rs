@@ -23,7 +23,7 @@ use crate::topic::predict_common::{
     decoder_only_inference_dense, estimate_delta, predictive_llik_dense, LatentMode,
 };
 use crate::topic::predict_eval::{
-    evaluate_predictions, resolve_eval_genes, EvalArgs, EvalOutcome, Reconstruction,
+    evaluate_predictions, mean_finite, resolve_eval_genes, EvalArgs, EvalOutcome, Reconstruction,
 };
 
 use crate::logging::new_progress_bar;
@@ -479,6 +479,13 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     if args.residual_out.is_some() {
         log::warn!("--residual-out is not available for an svd run (no count decoder); ignoring");
     }
+    if args.null_from.is_some() {
+        log::warn!(
+            "--null-from has no effect on an svd run: the null it builds is a count \
+             composition for the multinomial columns, which this path does not write \
+             (svd is scored on the correlations and a Gaussian log1p llik)"
+        );
+    }
     crate::svd::project::warn_if_batch_corrected(&args.model, args.batch_files.is_some());
 
     let (training_genes, u_dk) = load_dictionary(&args.model)?;
@@ -517,10 +524,21 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
 
     let ntot = data_vec.num_columns();
     let d_train = training_genes.len();
-    let mut per_cell: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(ntot);
+    // The scored slice of the dictionary, transposed once: `[K, n_eval]`, so
+    // a block's reconstruction is one matmul rather than a strided scalar dot
+    // per (cell, gene). `Mat` is column-major, so `u_dk.row(g)` is a strided
+    // view and the per-cell form was O(N x n_eval x K) of unvectorisable loads.
+    let u_eval_t = Mat::from_fn(u_dk.ncols(), eval_genes.len(), |c, i| {
+        u_dk[(eval_genes[i], c)]
+    });
+
+    let mut per_cell: Vec<CellScore> = Vec::with_capacity(ntot);
     for (lb, ub) in create_jobs(ntot, 0, Some(args.minibatch_size)) {
         let csc = data_vec.read_columns_csc(lb..ub)?;
-        let block: Vec<(f32, f32, f32, f32)> = (0..csc.ncols())
+        // `[n, n_eval]` for this block only; the block loop is sequential, so
+        // one of these is live at a time.
+        let recon_std_block = z_nk.rows(lb, ub - lb) * &u_eval_t;
+        let block: Vec<CellScore> = (0..csc.ncols())
             .into_par_iter()
             .map(|j| {
                 // Observed counts on the model's gene axis.
@@ -557,13 +575,11 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
                 // Reconstruct, then undo the standardisation to land back in
                 // log1p space; `expm1` gives a predicted count profile, which
                 // `agreement_from_rate` renormalises to the observed depth.
-                let z_row = z_nk.row(lb + j);
                 let mut pred_counts = vec![0f32; eval_genes.len()];
                 let mut obs_eval = vec![0f32; eval_genes.len()];
                 let mut sq_resid = 0f64;
                 for (slot, &g) in eval_genes.iter().enumerate() {
-                    let recon_std: f32 = u_dk.row(g).dot(&z_row);
-                    let pred_log1p = recon_std * sd + mu;
+                    let pred_log1p = recon_std_block[(j, slot)] * sd + mu;
                     pred_counts[slot] = pred_log1p.exp_m1().max(0.0);
                     obs_eval[slot] = obs_full[g];
                     let r = f64::from(obs_log1p[g] - pred_log1p);
@@ -577,28 +593,31 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
                 let d = eval_genes.len() as f64;
                 let sigma2 = (sq_resid / d).max(1e-12);
                 let llik = -0.5 * d * (1.0 + (std::f64::consts::TAU * sigma2).ln());
-                let total: f32 = obs_eval.iter().sum();
-                (llik as f32, total, agree.spearman, agree.pearson_log1p)
+                CellScore {
+                    llik: llik as f32,
+                    total: obs_eval.iter().sum(),
+                    spearman: agree.spearman,
+                    pearson_log1p: agree.pearson_log1p,
+                }
             })
             .collect();
         per_cell.extend(block);
     }
 
     let cell_names = data_vec.column_names()?;
-    z_nk.to_parquet_with_names(
-        &(args.out.to_string() + ".latent.parquet"),
-        (Some(&cell_names), Some("cell")),
-        Some(&axis_id_names("T", z_nk.ncols())),
-    )?;
-    info!("Wrote {}.latent.parquet", args.out);
+    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
 
     let mut pred = Mat::zeros(per_cell.len(), 5);
-    for (i, &(llik, total, sp, pe)) in per_cell.iter().enumerate() {
-        pred[(i, 0)] = llik;
-        pred[(i, 1)] = total;
-        pred[(i, 2)] = if total > 0.0 { llik / total } else { f32::NAN };
-        pred[(i, 3)] = sp;
-        pred[(i, 4)] = pe;
+    for (i, c) in per_cell.iter().enumerate() {
+        pred[(i, 0)] = c.llik;
+        pred[(i, 1)] = c.total;
+        pred[(i, 2)] = if c.total > 0.0 {
+            c.llik / c.total
+        } else {
+            f32::NAN
+        };
+        pred[(i, 3)] = c.spearman;
+        pred[(i, 4)] = c.pearson_log1p;
     }
     let cols: Vec<Box<str>> = vec![
         "llik".into(),
@@ -612,23 +631,24 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         (Some(&cell_names), Some("cell")),
         Some(&cols),
     )?;
-    fn mean_finite(v: impl Iterator<Item = f32>) -> f32 {
-        let v: Vec<f32> = v.filter(|x| x.is_finite()).collect();
-        if v.is_empty() {
-            f32::NAN
-        } else {
-            v.iter().sum::<f32>() / v.len() as f32
-        }
-    }
     info!(
         "Agreement (svd, Gaussian log1p llik — compare families on the correlations): \
          per-cell spearman {:.3}, pearson(log1p) {:.3}; {} genes scored",
-        mean_finite(per_cell.iter().map(|c| c.2)),
-        mean_finite(per_cell.iter().map(|c| c.3)),
+        mean_finite(per_cell.iter().map(|c| c.spearman)),
+        mean_finite(per_cell.iter().map(|c| c.pearson_log1p)),
         eval_genes.len(),
     );
     info!("Wrote {}.predictive.parquet", args.out);
     Ok(())
+}
+
+/// One scored cell on the svd path. Named rather than a positional 4-tuple
+/// because the aggregate log reads two of the fields by name.
+struct CellScore {
+    llik: f32,
+    total: f32,
+    spearman: f32,
+    pearson_log1p: f32,
 }
 
 /// Mean and (population) standard deviation, with a floor so a constant slice
@@ -1047,12 +1067,9 @@ where
         .copied()
         .unwrap_or(metadata.n_features_full);
     // This path still scores through `forward_with_llik`, which materialises
-    // pi plus the NB chain's temporaries at full decoder width.
-    const DENSE_TENSORS_PER_BLOCK: usize = 16;
-    let bytes_per_block = minibatch_size
-        .saturating_mul(d_dense)
-        .saturating_mul(std::mem::size_of::<f32>())
-        .saturating_mul(DENSE_TENSORS_PER_BLOCK);
+    // pi plus the NB chain's temporaries at FULL decoder width — it has not
+    // been given the gene-chunked treatment the vae path has.
+    let bytes_per_block = dense_bytes(minibatch_size, d_dense, NB_CHAIN_TENSORS);
 
     let (z_nk, llik, total) =
         run_predict_blocks(ntot, kk, minibatch_size, bytes_per_block, |(lb, ub)| {
@@ -1591,7 +1608,7 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
         preload: args.preload_data,
-        minibatch_size: args.minibatch_size,
+        minibatch_size: vae_training_minibatch(&args.model, args.minibatch_size),
         query_name_opts: &args.query_name_opts()?,
         metadata,
         need_llik: true,
@@ -1672,6 +1689,50 @@ pub(crate) struct VaeScored {
 /// model is `π = softmax_d(z·W + b)`, a per-cell softmax over the gene axis, not a mixture of
 /// per-topic simplices. So the parquet shortcut the masked path uses is invalid here and the
 /// score must go through the rebuilt decoder.
+/// The block size the run was TRAINED with, which is the one to score it at.
+///
+/// `GaussianEncoder` carries a `BatchNorm`, so its output depends on the block
+/// a cell is scored in — `senna vae`'s own `--minibatch-size` help says as
+/// much ("minibatch size is not fit-neutral"). Scoring at predict's default
+/// while the model was fitted at vae's puts the encoder on batch statistics it
+/// never saw, and the latent moves. Taking the training value removes that
+/// systematic mismatch.
+///
+/// It is the DECLARED value: training may shrink the block further to fit
+/// device memory, and that effective size is not recorded, so this narrows the
+/// gap rather than closing it. A manifest that cannot be read falls back to
+/// what the caller asked for.
+fn vae_training_minibatch(model: &str, requested: usize) -> usize {
+    /// `VaeArgs::minibatch_size.unwrap_or(100)` — the fit's own default when
+    /// the flag was left unset.
+    const VAE_TRAIN_DEFAULT: usize = 100;
+    let Ok((manifest, _)) = crate::run_manifest::load_for(model) else {
+        return requested;
+    };
+    if manifest.train_args.is_none() {
+        return requested;
+    }
+    match manifest.train_args_as::<crate::vae::VaeArgs>(model) {
+        Ok(recorded) => {
+            let trained_at = recorded.minibatch_size.unwrap_or(VAE_TRAIN_DEFAULT);
+            if trained_at != requested {
+                info!(
+                    "Scoring at the training block size ({trained_at}, not {requested}): the \
+                     encoder's batch norm makes the latent block-dependent"
+                );
+            }
+            trained_at
+        }
+        Err(e) => {
+            log::warn!(
+                "{model}: cannot read the recorded fit configuration ({e}); scoring at \
+                 {requested}, which may differ from the block size the encoder was fitted at"
+            );
+            requested
+        }
+    }
+}
+
 /// Genes per slice when scoring a vae block. Sets the width of the only dense
 /// tensors the likelihood allocates, so it trades memory against how many
 /// times the logits are recomputed; a few thousand keeps the slice in the
@@ -1771,7 +1832,11 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         ntot,
         metadata.n_topics,
         a.minibatch_size,
-        training_genes.len(),
+        // The encoder input is the only full-width tensor left; the likelihood
+        // works one `VAE_SCORE_GENE_CHUNK` slice at a time, so the chain's
+        // temporaries are counted at slice width, not at D.
+        dense_bytes(a.minibatch_size, training_genes.len(), 1)
+            + dense_bytes(a.minibatch_size, VAE_SCORE_GENE_CHUNK, NB_CHAIN_TENSORS),
         |(lb, ub)| {
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
@@ -1809,9 +1874,24 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     })
 }
 
-/// Run `block_fn` over `[0, ntot)` in `minibatch_size` blocks, concatenating
-/// results into `(z_nk [ntot, kk], llik [ntot], total [ntot])`. Shared by the
-/// dense predict drivers.
+/// Dense `[rows × width]` f32 tensors the NB likelihood chain holds at peak —
+/// counted off `candle_util::loss::nb_log_likelihood_elem` (phi, mu, phi+mu,
+/// three logs, two terms, x+phi, the lgammas) plus the decoder's logits,
+/// softmax and mu. Rounded up: under-counting is an OOM, over-counting is
+/// only slower.
+pub(crate) const NB_CHAIN_TENSORS: usize = 16;
+
+/// Bytes of dense f32 one block holds, as a shape rather than a number the
+/// caller multiplied out — the callers and the tests all go through this, so
+/// there is one formula instead of three that can drift apart. Mirrors
+/// `data_beans::sparse_io::helpers::preload_within_budget`, which likewise
+/// takes the raw shape and computes the cost itself.
+pub(crate) fn dense_bytes(rows: usize, width: usize, tensors: usize) -> usize {
+    rows.saturating_mul(width)
+        .saturating_mul(std::mem::size_of::<f32>())
+        .saturating_mul(tensors)
+}
+
 /// How many dense blocks may be in flight at once, given the working set one
 /// block costs.
 ///
@@ -1833,6 +1913,9 @@ fn dense_block_concurrency(bytes_per_block: usize) -> usize {
     (budget / bytes_per_block.max(1)).clamp(1, rayon::current_num_threads())
 }
 
+/// Run `block_fn` over `[0, ntot)` in `minibatch_size` blocks, concatenating
+/// results into `(z_nk [ntot, kk], llik [ntot], total [ntot])`. Shared by the
+/// dense predict drivers.
 fn run_predict_blocks<F>(
     ntot: usize,
     kk: usize,
@@ -1856,18 +1939,19 @@ where
         );
     }
     let bar = new_progress_bar(njobs);
-    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = Vec::with_capacity(jobs.len());
-    // Waves rather than one `par_iter`: the cap has to bound how many blocks
-    // hold their dense tensors simultaneously, and rayon has no built-in way
-    // to limit in-flight items of a parallel iterator.
-    for wave in jobs.chunks(max_conc) {
-        let done: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = wave
-            .par_iter()
+    // A pool sized to the cap rather than waves of `par_iter`: the cap has to
+    // bound how many blocks hold their dense tensors at once, and a wave stalls
+    // on its slowest block before the next starts. Sizing the pool keeps rayon
+    // work-stealing continuously under the same ceiling.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(max_conc)
+        .build()?;
+    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = pool.install(|| {
+        jobs.par_iter()
             .progress_with(bar.clone())
             .map(|&block| block_fn(block))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        chunks.extend(done);
-    }
+            .collect::<anyhow::Result<Vec<_>>>()
+    })?;
     bar.finish_and_clear();
     chunks.sort_by_key(|c| c.0);
 

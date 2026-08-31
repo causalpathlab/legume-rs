@@ -95,17 +95,12 @@ fn hiding_matches_case_insensitively_like_the_remap_does() {
 /// and stay out of the way at the coarsened widths the topic paths score on,
 /// which have never had a memory problem.
 mod block_concurrency {
-    use super::super::dense_block_concurrency;
-
-    /// The dense topic path's estimate: full decoder width, ~16 tensors.
-    fn dense_bytes(minibatch: usize, width: usize) -> usize {
-        minibatch * width * 4 * 16
-    }
+    use super::super::{dense_block_concurrency, dense_bytes, NB_CHAIN_TENSORS};
 
     #[test]
     fn a_whole_transcriptome_dense_block_is_capped_well_below_the_thread_count() {
         // The reported OOM's shape: ~58k genes at the default minibatch.
-        let conc = dense_block_concurrency(dense_bytes(500, 57_843));
+        let conc = dense_block_concurrency(dense_bytes(500, 57_843, NB_CHAIN_TENSORS));
         assert!(
             conc <= 8,
             "58k-gene dense blocks must not run wide open; got {conc}"
@@ -118,7 +113,7 @@ mod block_concurrency {
         // What a dense topic model actually scores on after coarsening: the
         // cap must return the full thread count, i.e. change nothing.
         assert_eq!(
-            dense_block_concurrency(dense_bytes(500, 2_000)),
+            dense_block_concurrency(dense_bytes(500, 2_000, NB_CHAIN_TENSORS)),
             rayon::current_num_threads()
         );
     }
@@ -128,7 +123,9 @@ mod block_concurrency {
     /// throttled once the likelihood stops materialising `[N, D]`.
     #[test]
     fn the_chunked_vae_path_is_not_throttled_at_the_same_width() {
-        let bytes = 500 * (57_843 + 16 * super::super::VAE_SCORE_GENE_CHUNK) * 4;
+        // The same shape `score_vae_backend` hands the cap.
+        let bytes = dense_bytes(500, 57_843, 1)
+            + dense_bytes(500, super::super::VAE_SCORE_GENE_CHUNK, NB_CHAIN_TENSORS);
         assert_eq!(
             dense_block_concurrency(bytes),
             rayon::current_num_threads(),
