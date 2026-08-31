@@ -478,6 +478,19 @@ pub fn latent_sharpness(theta_nk: &Mat) -> (f32, f32) {
 /// reads a bare parquet). Applied to a genuine `log θ` latent, the `exp`
 /// recovers `θ` and the subsequent renormalization is a no-op (rows already
 /// sum to 1).
+/// Row-wise L2 normalization in place: Euclidean distance on the result
+/// equals cosine distance on the input. A ~zero row is left unchanged —
+/// normalizing it would blow it up to an arbitrary unit direction (and the
+/// retrieval core reads an all-zero row as "no evidence").
+pub fn l2_normalize_rows_inplace(m: &mut Mat) {
+    for mut row in m.row_iter_mut() {
+        let norm = row.norm();
+        if norm > 1e-9 {
+            row /= norm;
+        }
+    }
+}
+
 pub fn softmax_rows_inplace(m: &mut Mat) {
     for mut row in m.row_iter_mut() {
         let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);

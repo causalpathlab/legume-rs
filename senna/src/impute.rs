@@ -17,18 +17,7 @@
 //!
 //! Steps 3–5 are model-agnostic and live in
 //! [`data_beans_alg::retrieval_impute`]; this module owns step 1–2's
-//! per-family latent semantics:
-//!
-//! - topic family (`topic`, `masked-topic`, `masked-sbp`, `joint-topic`):
-//!   `log θ` rows, mapped to the simplex by softmax.
-//! - `vae` / `masked-vae`: a Gaussian `z`; the same softmax mapping is a
-//!   deliberate choice — it is exactly `softmax(z)`, the proportions the
-//!   head would read out, and for `log θ` rows it is a no-op.
-//! - `bge`: an H-dimensional embedding where magnitude carries depth, not
-//!   identity — rows are L2-normalized so L2 ≈ cosine.
-//! - `svd`: the saved latent's whitening scale is not persisted, so BOTH
-//!   sides are re-projected through the frozen `dictionary.parquet`
-//!   with the training-time transform, then row-normalized.
+//! per-family latent semantics, encoded once in [`matching_plan`].
 //!
 //! Information-theoretic note (per the rag-augmentation memory): the
 //! imputed expression is a function of the query latent through the
@@ -148,6 +137,55 @@ pub struct ImputeArgs {
     pub verbose: bool,
 }
 
+/// How a run kind's cells reach the matching space.
+///
+/// This is the ONE authority every per-kind decision in this module
+/// consults — the admission gate, the reference negotiation, and the
+/// latent transform all derive from it, so a kind cannot be admitted in
+/// one place and forgotten in another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchingPlan {
+    /// `predict` → softmax rows onto the simplex. For a `log θ` latent the
+    /// renormalization is a no-op; for a Gaussian `z` (vae / masked-vae)
+    /// it is exactly the `softmax(z)` proportions the head would read out.
+    /// Bare `exp` would leave those rows matched on library-scale-like
+    /// magnitude.
+    SoftmaxSimplex,
+    /// `predict` → L2-normalized embedding rows: magnitude carries depth,
+    /// not identity, so the index's L2 becomes cosine on the unit sphere.
+    CosineEmbedding,
+    /// No reusable stored latent — the training whitening scale is not
+    /// persisted — so BOTH sides are re-projected through the frozen
+    /// dictionary with the training-time transform.
+    DictionaryProjection,
+}
+
+/// The impute policy per run kind. Deliberately a full `match` with no
+/// `_` arm, for the same reason as [`RunKind::cell_space`]: a new kind
+/// must say how it imputes (or that it cannot) before this compiles.
+fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
+    match kind {
+        RunKind::Topic
+        | RunKind::Itopic
+        | RunKind::JointTopic
+        | RunKind::MaskedVae
+        | RunKind::Vae => Ok(MatchingPlan::SoftmaxSimplex),
+        RunKind::Bge => Ok(MatchingPlan::CosineEmbedding),
+        RunKind::Svd => Ok(MatchingPlan::DictionaryProjection),
+        // joint-svd stacks modalities, so a single-modality panel has no
+        // defined projection; the graph/embedding kinds have no query-side
+        // projection at all.
+        RunKind::JointSvd
+        | RunKind::Fne
+        | RunKind::ResolveEmbeddingSpace
+        | RunKind::Gem
+        | RunKind::GemEncoder => anyhow::bail!(
+            "impute needs a run with a transferable per-cell latent; `{kind}` runs \
+             have no query-side projection here"
+        ),
+    }
+}
+
 /// The reference side, after the manifest/flag negotiation: where the
 /// latent lives (`None` for svd, which re-projects), and which backends
 /// hold the reference counts.
@@ -155,7 +193,6 @@ pub struct ImputeArgs {
 struct ReferenceSpec {
     latent: Option<Box<str>>,
     data_files: Vec<Box<str>>,
-    batch_files: Option<Vec<Box<str>>>,
 }
 
 /// Resolve the reference from `--reference` / the model's own manifest,
@@ -164,8 +201,12 @@ struct ReferenceSpec {
 /// The manifest is consulted unless every needed piece was given
 /// explicitly — so the legacy invocation (`--reference-latent` +
 /// `--reference-data`, no manifest anywhere) keeps working unchanged.
-fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<ReferenceSpec> {
-    let needs_latent = !matches!(model_kind, RunKind::Svd | RunKind::JointSvd);
+fn resolve_reference(
+    args: &ImputeArgs,
+    model_kind: RunKind,
+    plan: MatchingPlan,
+) -> anyhow::Result<ReferenceSpec> {
+    let needs_latent = plan != MatchingPlan::DictionaryProjection;
     if args.reference_latent.is_some() && !needs_latent {
         log::warn!(
             "--reference-latent is ignored for a {model_kind} model: its matching latent \
@@ -175,12 +216,10 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
     }
 
     let latent_settled = !needs_latent || args.reference_latent.is_some();
-    let data_settled = args.reference_data.is_some();
-    if args.reference.is_none() && latent_settled && data_settled {
+    if args.reference.is_none() && latent_settled && args.reference_data.is_some() {
         return Ok(ReferenceSpec {
             latent: args.reference_latent.clone(),
-            data_files: args.reference_data.clone().expect("data_settled"),
-            batch_files: args.reference_batch_files.clone(),
+            data_files: args.reference_data.clone().expect("checked above"),
         });
     }
 
@@ -251,64 +290,46 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
             files
         }
     };
-    let batch_files = match args.reference_batch_files.clone() {
-        Some(files) => Some(files),
-        None => {
-            let files: Vec<Box<str>> = manifest.data.batch.iter().map(|s| to_box(s)).collect();
-            (!files.is_empty()).then_some(files)
-        }
-    };
 
-    Ok(ReferenceSpec {
-        latent,
-        data_files,
-        batch_files,
-    })
+    Ok(ReferenceSpec { latent, data_files })
 }
 
 pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
 
     let kind = crate::topic::model_metadata::resolve_run_kind(&args.model)?;
-    match kind {
-        RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::JointTopic
-        | RunKind::MaskedVae
-        | RunKind::Vae
-        | RunKind::Bge
-        | RunKind::Svd => {}
-        RunKind::JointSvd => anyhow::bail!(
-            "impute does not support joint-svd runs yet: the joint dictionary spans \
-             stacked modalities and the query-side projection is not defined for a \
-             single-modality panel. Impute against the per-modality `senna svd` run."
-        ),
-        other => anyhow::bail!(
-            "impute needs a run with a transferable per-cell latent; `{other}` runs \
-             have no query-side projection. Supported: topic, masked-topic, \
-             masked-sbp, masked-vae, joint-topic, vae, bge, svd."
-        ),
-    }
+    let plan = matching_plan(kind)?;
+    let reference = resolve_reference(args, kind, plan)?;
 
-    let reference = resolve_reference(args, kind)?;
+    let open_reference = || -> anyhow::Result<SparseIoVec> {
+        info!(
+            "Opening reference data ({} file(s))",
+            reference.data_files.len()
+        );
+        let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
+            data_files: reference.data_files.clone(),
+            batch_files: args.reference_batch_files.clone(),
+            preload: args.preload_data,
+            ..Default::default()
+        })?;
+        Ok(loaded.data)
+    };
 
-    // Reference counts — needed by every arm (they are the imputation
-    // payload), and by the svd arm for its reference-side projection too.
-    info!(
-        "Opening reference data ({} file(s))",
-        reference.data_files.len()
-    );
-    let ref_loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: reference.data_files.clone(),
-        batch_files: reference.batch_files.clone(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?;
-    let ref_data: SparseIoVec = ref_loaded.data;
-
-    let (new_cell_names, theta_new, theta_ref) = match kind {
-        RunKind::Svd => svd_matching_latents(args, &ref_data)?,
-        _ => predict_matching_latents(args, kind, &reference)?,
+    let (new_cell_names, theta_new, theta_ref, ref_data) = match plan {
+        // The dictionary projection consumes the reference counts itself.
+        MatchingPlan::DictionaryProjection => {
+            let ref_data = open_reference()?;
+            let (names, theta_new, theta_ref) = svd_matching_latents(args, &ref_data)?;
+            (names, theta_new, theta_ref, ref_data)
+        }
+        // The predict families never touch the reference counts before the
+        // retrieval step, so the (potentially preloaded, multi-GB) reference
+        // opens only after predict has succeeded.
+        _ => {
+            let (names, theta_new, theta_ref) = predict_matching_latents(args, plan, &reference)?;
+            let ref_data = open_reference()?;
+            (names, theta_new, theta_ref, ref_data)
+        }
     };
     let n_new = theta_new.nrows();
 
@@ -344,7 +365,7 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
 /// run's parquet, both mapped onto the model's matching space.
 fn predict_matching_latents(
     args: &ImputeArgs,
-    kind: RunKind,
+    plan: MatchingPlan,
     reference: &ReferenceSpec,
 ) -> anyhow::Result<(Vec<Box<str>>, Mat, Mat)> {
     // 1. Run senna-predict on the new data → writes {out}.predict_tmp.latent.parquet
@@ -398,30 +419,13 @@ fn predict_matching_latents(
     );
     info!("  θ_new: {n_new} cells × {k_new}; θ_ref: {n_ref} cells × {k_ref}");
 
-    match kind {
-        // Map both latents onto the simplex. L2 there correlates with cosine
-        // for the cell-cell matching the L2-backed kNN index supports.
-        //
-        // exp + per-row renorm rather than bare exp: for a log-θ latent the
-        // renorm is a no-op (rows already sum to 1), and for a Gaussian `z`
-        // (vae / masked-vae) it is exactly the `softmax(z)` that gives its
-        // proportions. Bare `exp` left those rows unnormalized, so cells were
-        // matched on library-scale-like magnitude.
-        RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::JointTopic
-        | RunKind::MaskedVae
-        | RunKind::Vae => {
-            crate::embed_common::softmax_rows_inplace(&mut theta_new);
-            crate::embed_common::softmax_rows_inplace(&mut theta_ref);
-        }
-        // An embedding's magnitude carries depth, not identity: L2-normalize
-        // so the index's L2 becomes cosine on the unit sphere.
-        RunKind::Bge => {
-            l2_normalize_rows_inplace(&mut theta_new);
-            l2_normalize_rows_inplace(&mut theta_ref);
-        }
-        other => unreachable!("impute_model admits no other predict-backed kind: {other}"),
+    // The transform each plan calls for is documented on `MatchingPlan`.
+    if plan == MatchingPlan::CosineEmbedding {
+        l2_normalize_rows_inplace(&mut theta_new);
+        l2_normalize_rows_inplace(&mut theta_ref);
+    } else {
+        softmax_rows_inplace(&mut theta_new);
+        softmax_rows_inplace(&mut theta_ref);
     }
 
     Ok((new_cell_names, theta_new, theta_ref))
@@ -445,7 +449,7 @@ fn svd_matching_latents(
     ref_data: &SparseIoVec,
 ) -> anyhow::Result<(Vec<Box<str>>, Mat, Mat)> {
     let (train_genes, u_dk) = crate::topic::model_metadata::load_dictionary(&args.model)?;
-    let column_sum_norm = svd_column_sum_norm(&args.model);
+    let column_sum_norm = svd_column_sum_norm(&args.model)?;
 
     info!("Loading new data for the dictionary projection");
     let new_loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
@@ -482,26 +486,23 @@ fn svd_matching_latents(
     Ok((new_cell_names, theta_new, theta_ref))
 }
 
-/// The training-time normalization scale, from the run manifest's recorded
-/// fit arguments when available.
-fn svd_column_sum_norm(model: &str) -> f32 {
+/// The training-time normalization scale, replayed from the manifest's
+/// recorded fit arguments through the typed [`RunManifest::train_args_as`]
+/// reader — so a renamed or retyped field fails loudly instead of silently
+/// changing the matching space. Runs predating the manifest (or the
+/// `train_args` record) take the fit's long-standing default.
+fn svd_column_sum_norm(model: &str) -> anyhow::Result<f32> {
     const DEFAULT: f32 = 1e4;
     let Ok((manifest, _)) = run_manifest::load_for(model) else {
         info!("no manifest for {model}; using the default normalization scale");
-        return DEFAULT;
+        return Ok(DEFAULT);
     };
-    let recorded = manifest
-        .train_args
-        .as_ref()
-        .and_then(|t| t.args.get("column_sum_norm"))
-        .and_then(serde_json::Value::as_f64);
-    match recorded {
-        Some(c) if c > 0.0 => c as f32,
-        _ => {
-            info!("manifest for {model} records no column_sum_norm; using the default");
-            DEFAULT
-        }
+    if manifest.train_args.is_none() {
+        info!("manifest for {model} predates train_args; using the default normalization scale");
+        return Ok(DEFAULT);
     }
+    let recorded: crate::svd::SvdArgs = manifest.train_args_as(model)?;
+    Ok(recorded.column_sum_norm)
 }
 
 struct SvdProjParam<'a> {
@@ -512,9 +513,9 @@ struct SvdProjParam<'a> {
 }
 
 /// `[N, K]` projection of every column of `data` onto the dictionary:
-/// remap rows by name onto the training axis, then the same transform the
-/// training run applied per cell — L2-normalize to the recorded scale,
-/// `log1p`, standardize — and multiply through `u`.
+/// remap rows by name onto the training axis, then the training run's own
+/// per-chunk transform ([`crate::svd::nystrom_preprocess_columns`]), and
+/// multiply through `u`.
 fn project_onto_svd_dictionary(
     data: &SparseIoVec,
     train_genes: &[Box<str>],
@@ -558,10 +559,8 @@ fn svd_proj_visitor(
     let csc_in = data.read_columns_csc(lb..ub)?;
     let d_train = param.u_dk.nrows();
 
-    // Remap onto the training gene axis but STAY SPARSE: the training-time
-    // `scale_columns_inplace` standardizes over a column's stored entries
-    // only, so running the same chain on a densified copy would standardize
-    // against the zeros too and land in a different space.
+    // Remap onto the training gene axis, staying sparse for the reasons on
+    // `nystrom_preprocess_columns`.
     let mut coo = nalgebra_sparse::CooMatrix::new(d_train, ub - lb);
     for c_local in 0..csc_in.ncols() {
         let col = csc_in.col(c_local);
@@ -572,27 +571,12 @@ fn svd_proj_visitor(
         }
     }
     let mut x_dn = nalgebra_sparse::CscMatrix::from(&coo);
-
-    x_dn.normalize_columns_inplace();
-    x_dn *= param.column_sum_norm;
-    x_dn.log1p_inplace();
-    x_dn.scale_columns_inplace();
+    crate::svd::nystrom_preprocess_columns(&mut x_dn, param.column_sum_norm, None);
 
     let chunk = (x_dn.transpose() * param.u_dk).transpose();
     let mut proj_kn = arc_proj_kn.lock().expect("lock proj in svd impute");
     proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
     Ok(())
-}
-
-/// Unit-norm rows in place; an all-zero row stays zero (and is later
-/// skipped by the retrieval core rather than matched arbitrarily).
-fn l2_normalize_rows_inplace(m: &mut Mat) {
-    for mut row in m.row_iter_mut() {
-        let norm = row.norm();
-        if norm > 0.0 {
-            row /= norm;
-        }
-    }
 }
 
 #[cfg(test)]

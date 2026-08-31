@@ -255,19 +255,7 @@ pub(super) fn project_onto_cells(
 /// PHATE layout.
 pub(super) fn l2_normalize_rows(m: &DMatrix<f32>) -> DMatrix<f32> {
     let mut out = m.clone();
-    for i in 0..out.nrows() {
-        let norm = (0..out.ncols())
-            .map(|j| out[(i, j)] * out[(i, j)])
-            .sum::<f32>()
-            .sqrt();
-        // Leave a ~zero row unchanged: normalizing it would blow it up to an
-        // arbitrary unit direction (e.g. a centroid of near-antipodal points).
-        if norm > 1e-9 {
-            for j in 0..out.ncols() {
-                out[(i, j)] /= norm;
-            }
-        }
-    }
+    crate::embed_common::l2_normalize_rows_inplace(&mut out);
     out
 }
 

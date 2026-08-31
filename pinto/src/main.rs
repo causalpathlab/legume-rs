@@ -499,6 +499,8 @@ enum Commands {
                       \n\
                       The reference data defaults to the files recorded in\n\
                       {model}.pinto.json; --reference-data overrides.\n\
+                      Predict-stage flags (coordinates, -k, pair tuning,\n\
+                      eval flags) apply to cage models only.\n\
                       \n\
                       Writes {out}.imputed.parquet (N_query × n_ref_features)."
     )]

@@ -74,7 +74,9 @@ pub struct SvdArgs {
         help = "Column-sum normalization scale",
         long_help = "Target library size after per-cell normalization."
     )]
-    column_sum_norm: f32,
+    // pub(crate) for `impute`, which replays this scale from the recorded
+    // train_args to reproduce the projection transform.
+    pub(crate) column_sum_norm: f32,
 
     #[arg(
         short = 't',
@@ -439,23 +441,19 @@ fn nystrom_proj_visitor(
     arc_proj_kn: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
-    // let proj_dk = proj_basis.dictionary_dk;
     let basis_dk = proj_basis.basis_dk;
-    let delta_dp = proj_basis.delta_dp;
-    let column_sum_norm = proj_basis.column_sum_norm;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
-    x_dn.normalize_columns_inplace();
-    x_dn *= column_sum_norm;
-
-    if let Some(delta_dp) = delta_dp {
-        let pseudobulk = full_data_vec.get_group_membership(lb..ub)?;
-        x_dn.adjust_by_division_of_selected_inplace(delta_dp, &pseudobulk);
-    }
-
-    x_dn.log1p_inplace();
-    x_dn.scale_columns_inplace();
+    let pseudobulk = match proj_basis.delta_dp {
+        Some(_) => Some(full_data_vec.get_group_membership(lb..ub)?),
+        None => None,
+    };
+    nystrom_preprocess_columns(
+        &mut x_dn,
+        proj_basis.column_sum_norm,
+        proj_basis.delta_dp.zip(pseudobulk.as_deref()),
+    );
 
     let chunk = (x_dn.transpose() * basis_dk).transpose();
 
@@ -463,6 +461,28 @@ fn nystrom_proj_visitor(
 
     proj_kn.columns_range_mut(lb..ub).copy_from(&chunk);
     Ok(())
+}
+
+/// The per-chunk transform every column passes through before hitting the
+/// Nyström basis. Shared with `senna impute`'s dictionary projection so the
+/// training and query-side chains cannot drift.
+///
+/// The chunk must STAY SPARSE: `scale_columns_inplace` on a CSC standardizes
+/// over a column's stored entries only, so running the same chain on a
+/// densified copy would standardize against the zeros too and land in a
+/// different space.
+pub(crate) fn nystrom_preprocess_columns(
+    x_dn: &mut nalgebra_sparse::CscMatrix<f32>,
+    column_sum_norm: f32,
+    delta: Option<(&Mat, &[usize])>,
+) {
+    x_dn.normalize_columns_inplace();
+    *x_dn *= column_sum_norm;
+    if let Some((delta_dp, pseudobulk)) = delta {
+        x_dn.adjust_by_division_of_selected_inplace(delta_dp, pseudobulk);
+    }
+    x_dn.log1p_inplace();
+    x_dn.scale_columns_inplace();
 }
 
 /// Adjust the original data by eliminating batch effects `delta_db`

@@ -6,10 +6,16 @@
 use super::*;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 
-fn write_manifest(dir: &tempfile::TempDir, name: &str, kind: &str) -> Box<str> {
+/// A minimal manifest through the real writer, so the fixture tracks the
+/// manifest schema instead of a hand-formatted JSON string.
+fn write_manifest(dir: &tempfile::TempDir, name: &str, kind: RunKind) -> Box<str> {
     let prefix = dir.path().join(name);
-    let manifest = format!(r#"{{"version": 1, "kind": "{kind}", "prefix": "{name}"}}"#);
-    std::fs::write(format!("{}.senna.json", prefix.display()), manifest).unwrap();
+    run_manifest::RunManifest::new(kind, name)
+        .save(std::path::Path::new(&format!(
+            "{}.senna.json",
+            prefix.display()
+        )))
+        .unwrap();
     prefix.to_str().unwrap().into()
 }
 
@@ -39,7 +45,7 @@ fn explicit_reference_flags_bypass_the_manifest() -> anyhow::Result<()> {
     let mut args = base_args("no/such/model".into(), "out".into());
     args.reference_latent = Some("ref.latent.parquet".into());
     args.reference_data = Some(vec!["ref.zarr".into()]);
-    let spec = resolve_reference(&args, RunKind::Topic)?;
+    let spec = resolve_reference(&args, RunKind::Topic, MatchingPlan::SoftmaxSimplex)?;
     assert_eq!(spec.latent.as_deref(), Some("ref.latent.parquet"));
     assert_eq!(spec.data_files, vec![Box::<str>::from("ref.zarr")]);
     Ok(())
@@ -49,7 +55,7 @@ fn explicit_reference_flags_bypass_the_manifest() -> anyhow::Result<()> {
 fn an_svd_model_needs_no_reference_latent() -> anyhow::Result<()> {
     let mut args = base_args("no/such/model".into(), "out".into());
     args.reference_data = Some(vec!["ref.zarr".into()]);
-    let spec = resolve_reference(&args, RunKind::Svd)?;
+    let spec = resolve_reference(&args, RunKind::Svd, MatchingPlan::DictionaryProjection)?;
     assert!(spec.latent.is_none());
     Ok(())
 }
@@ -60,40 +66,33 @@ fn a_missing_manifest_names_the_explicit_flags_as_the_way_out() {
     // (absent) manifest and fail with actionable guidance.
     let mut args = base_args("no/such/model".into(), "out".into());
     args.reference_data = Some(vec!["ref.zarr".into()]);
-    let err = resolve_reference(&args, RunKind::Topic).unwrap_err();
+    let err = resolve_reference(&args, RunKind::Topic, MatchingPlan::SoftmaxSimplex).unwrap_err();
     assert!(err.to_string().contains("--reference-latent"));
 }
 
 #[test]
 fn a_reference_in_a_different_cell_space_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let bge_prefix = write_manifest(&dir, "embed_run", "bge");
+    let bge_prefix = write_manifest(&dir, "embed_run", RunKind::Bge);
     let mut args = base_args("model".into(), "out".into());
     args.reference = Some(bge_prefix);
     // A topic model matched against a bge reference: simplex vs embedding.
-    let err = resolve_reference(&args, RunKind::Topic).unwrap_err();
+    let err = resolve_reference(&args, RunKind::Topic, MatchingPlan::SoftmaxSimplex).unwrap_err();
     assert!(err.to_string().contains("different"), "{err}");
 }
 
 #[test]
 fn kinds_without_a_projection_are_refused_up_front() {
     let dir = tempfile::tempdir().unwrap();
-    let prefix = write_manifest(&dir, "graph_run", "fne");
-    let args = base_args(prefix, "out".into());
-    let err = impute_model(&args).unwrap_err();
-    assert!(
-        err.to_string().contains("no query-side projection"),
-        "{err}"
-    );
-}
-
-#[test]
-fn joint_svd_is_refused_with_the_per_modality_hint() {
-    let dir = tempfile::tempdir().unwrap();
-    let prefix = write_manifest(&dir, "joint_run", "joint-svd");
-    let args = base_args(prefix, "out".into());
-    let err = impute_model(&args).unwrap_err();
-    assert!(err.to_string().contains("joint-svd"), "{err}");
+    for kind in [RunKind::Fne, RunKind::JointSvd] {
+        let prefix = write_manifest(&dir, &format!("run_{kind}"), kind);
+        let args = base_args(prefix, "out".into());
+        let err = impute_model(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("no query-side projection"),
+            "{kind}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -106,7 +105,7 @@ fn zero_rows_survive_normalization_untouched() {
 
 #[test]
 fn missing_manifest_falls_back_to_the_default_scale() {
-    assert_eq!(svd_column_sum_norm("no/such/prefix"), 1e4);
+    assert_eq!(svd_column_sum_norm("no/such/prefix").unwrap(), 1e4);
 }
 
 fn make_backend(

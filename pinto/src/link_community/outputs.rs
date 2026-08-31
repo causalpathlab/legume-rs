@@ -262,10 +262,7 @@ pub fn write_propensity_matrix(
     let n_cells = propensity.nrows();
     let k = propensity.ncols();
     let cluster_col = dominant_cluster_rows(propensity);
-    let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
-
     let entropy_vec = shannon_entropy_rows(propensity);
-    let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
 
     // `C{c}` prefix names the community axis explicitly, so the reader
     // can identify community columns by name pattern instead of by
@@ -276,7 +273,12 @@ pub fn write_propensity_matrix(
     col_names.push("cluster".into());
     col_names.push("entropy".into());
 
-    let combined = concatenate_horizontal(&[propensity.clone(), cluster_mat, entropy_mat])?;
+    let mut combined = Mat::zeros(n_cells, k + 2);
+    combined.columns_range_mut(0..k).copy_from(propensity);
+    combined.column_mut(k).copy_from_slice(&cluster_col);
+    combined
+        .column_mut(k + 1)
+        .copy_from_slice(entropy_vec.as_slice());
     combined.to_parquet_with_names(
         &format!("{}.propensity.parquet", prefix),
         (Some(cell_names), Some("cell")),
