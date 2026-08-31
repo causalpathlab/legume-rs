@@ -277,6 +277,10 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read column index pointers
+    fn column_indptr(&self) -> &[u64] {
+        &self.by_column_indptr
+    }
+
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         if let Ok(by_column) = self.backend.group("/by_column") {
             let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
