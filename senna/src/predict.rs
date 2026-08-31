@@ -1046,23 +1046,31 @@ where
         .last()
         .copied()
         .unwrap_or(metadata.n_features_full);
+    // This path still scores through `forward_with_llik`, which materialises
+    // pi plus the NB chain's temporaries at full decoder width.
+    const DENSE_TENSORS_PER_BLOCK: usize = 16;
+    let bytes_per_block = minibatch_size
+        .saturating_mul(d_dense)
+        .saturating_mul(std::mem::size_of::<f32>())
+        .saturating_mul(DENSE_TENSORS_PER_BLOCK);
 
-    let (z_nk, llik, total) = run_predict_blocks(ntot, kk, minibatch_size, d_dense, |(lb, ub)| {
-        predict_block_dense::<Dec>(PredictBlockDenseArgs {
-            lb,
-            ub,
-            data_vec,
-            encoder,
-            decoder,
-            delta_tensor: delta_tensor.as_ref(),
-            gene_remap,
-            coarsening,
-            dev: cpu_dev,
-            adj_method: &adj_method,
-            mode,
-            refine_config,
-        })
-    })?;
+    let (z_nk, llik, total) =
+        run_predict_blocks(ntot, kk, minibatch_size, bytes_per_block, |(lb, ub)| {
+            predict_block_dense::<Dec>(PredictBlockDenseArgs {
+                lb,
+                ub,
+                data_vec,
+                encoder,
+                decoder,
+                delta_tensor: delta_tensor.as_ref(),
+                gene_remap,
+                coarsening,
+                dev: cpu_dev,
+                adj_method: &adj_method,
+                mode,
+                refine_config,
+            })
+        })?;
     // Return the finalized (TMLE-refined) δ so the caller can regress it
     // out when writing the residual backend.
     Ok((z_nk, llik, total, delta_db))
@@ -1664,6 +1672,13 @@ pub(crate) struct VaeScored {
 /// model is `π = softmax_d(z·W + b)`, a per-cell softmax over the gene axis, not a mixture of
 /// per-topic simplices. So the parquet shortcut the masked path uses is invalid here and the
 /// score must go through the rebuilt decoder.
+/// Genes per slice when scoring a vae block. Sets the width of the only dense
+/// tensors the likelihood allocates, so it trades memory against how many
+/// times the logits are recomputed; a few thousand keeps the slice in the
+/// hundreds of KB per cell while leaving the matmuls large enough to be worth
+/// dispatching.
+const VAE_SCORE_GENE_CHUNK: usize = 4096;
+
 pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored> {
     use crate::topic::model_metadata::load_feature_mean;
 
@@ -1769,7 +1784,15 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
             };
             // `GaussianNbDecoder` takes the **raw** `z` — it applies its own softmax over the
             // gene axis — unlike the topic decoders, which are handed log θ.
-            let llik: Vec<f32> = predictive_llik_dense(dec, &z, &x_nd)?
+            //
+            // Gene-chunked, not `forward_with_llik`: that returns `(π, llik)`
+            // and π is `[N, D]` by construction — training needs it for the
+            // gradient, inference throws it away. Paying for a full dense
+            // matrix (and the dozen more inside the NB chain) to get one
+            // scalar per cell is what made this path an OOM kill at
+            // whole-transcriptome width.
+            let llik: Vec<f32> = dec
+                .llik_gene_chunked(&z, &x_nd, VAE_SCORE_GENE_CHUNK)?
                 .to_device(&Device::Cpu)?
                 .to_vec1()?;
             let total: Vec<f32> = x_nd.sum(1)?.to_device(&Device::Cpu)?.to_vec1()?;
@@ -1801,32 +1824,21 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
 ///
 /// `LEGUME_PREDICT_BUDGET_BYTES` overrides the default, following the
 /// `LEGUME_PRELOAD_BUDGET_BYTES` precedent for memory knobs.
-fn dense_block_concurrency(minibatch_size: usize, dense_width: usize) -> usize {
-    /// Dense `[minibatch × D]` f32 temporaries a block holds at peak. Counted
-    /// off the NB chain in `candle_util::loss::nb_log_likelihood_elem` (phi,
-    /// mu, phi+mu, three logs, two terms, x+phi, the lgammas) plus the
-    /// encoder input, decoder logits, softmax and mu — rounded up, because
-    /// under-counting here is an OOM and over-counting is only slower.
-    const DENSE_TENSORS_PER_BLOCK: usize = 16;
+fn dense_block_concurrency(bytes_per_block: usize) -> usize {
     const DEFAULT_BUDGET_BYTES: usize = 8 << 30;
     let budget = std::env::var("LEGUME_PREDICT_BUDGET_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_BUDGET_BYTES);
-    let per_block = minibatch_size
-        .saturating_mul(dense_width)
-        .saturating_mul(std::mem::size_of::<f32>())
-        .saturating_mul(DENSE_TENSORS_PER_BLOCK)
-        .max(1);
-    (budget / per_block).clamp(1, rayon::current_num_threads())
+    (budget / bytes_per_block.max(1)).clamp(1, rayon::current_num_threads())
 }
 
 fn run_predict_blocks<F>(
     ntot: usize,
     kk: usize,
     minibatch_size: usize,
-    // Feature count the likelihood chain runs on, for the memory cap.
-    dense_width: usize,
+    // Peak dense bytes ONE block holds, for the concurrency cap.
+    bytes_per_block: usize,
     block_fn: F,
 ) -> anyhow::Result<(Mat, Vec<f32>, Vec<f32>)>
 where
@@ -1834,12 +1846,13 @@ where
 {
     let jobs = create_jobs(ntot, 0, Some(minibatch_size));
     let njobs = jobs.len() as u64;
-    let max_conc = dense_block_concurrency(minibatch_size, dense_width);
+    let max_conc = dense_block_concurrency(bytes_per_block);
     if max_conc < rayon::current_num_threads() {
         info!(
-            "Scoring {njobs} blocks at most {max_conc} at a time: one dense \
-             [{minibatch_size} x {dense_width}] block's working set would otherwise be \
-             multiplied by every thread (LEGUME_PREDICT_BUDGET_BYTES to raise)"
+            "Scoring {njobs} blocks at most {max_conc} at a time: one block's ~{} MB dense \
+             working set would otherwise be multiplied by every thread \
+             (LEGUME_PREDICT_BUDGET_BYTES to raise)",
+            bytes_per_block >> 20
         );
     }
     let bar = new_progress_bar(njobs);

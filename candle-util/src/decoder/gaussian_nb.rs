@@ -53,6 +53,99 @@ impl GaussianNbDecoder {
         self.decoder.bias().cloned()
     }
 
+    /// Per-cell NB log-likelihood **without ever holding an `[N, D]` tensor**.
+    ///
+    /// [`forward_with_llik`](DecoderModuleT::forward_with_llik) has to return
+    /// `π` itself, so training legitimately materialises `[N, D]`. Inference
+    /// only wants the scalar per cell, and the whole chain behind it —
+    /// logits, softmax, μ, and the dozen temporaries inside
+    /// [`crate::loss::nb_log_likelihood_elem`] — is a sum over genes. So it
+    /// is taken in gene slices: the weight is narrowed to `[chunk, K]` and
+    /// nothing wider than `[N, chunk]` is ever allocated. At
+    /// whole-transcriptome D that is the difference between a couple of
+    /// hundred MB and tens of GB per block.
+    ///
+    /// Two passes over the slices, because the softmax denominator is over
+    /// ALL genes: the first accumulates `log Σ_d exp(logit_d)` in the
+    /// streaming max/sumexp form, the second the likelihood terms. The
+    /// logits are recomputed rather than stored — that is the trade being
+    /// made, compute for memory.
+    pub fn llik_gene_chunked(
+        &self,
+        z_nk: &Tensor,
+        x_nd: &Tensor,
+        gene_chunk: usize,
+    ) -> Result<Tensor> {
+        let chunk = gene_chunk.max(1).min(self.n_features);
+        let last = x_nd.rank() - 1;
+        let lib_n1 = x_nd.sum_keepdim(last)?; // [N, 1]
+        let w_dk = self.decoder.weight();
+        let bias_d = self.decoder.bias();
+
+        // Logits for one gene slice, as `[N, chunk]`.
+        let logits_of = |start: usize, len: usize| -> Result<Tensor> {
+            let w = w_dk.narrow(0, start, len)?; // [chunk, K]
+            let l = z_nk.matmul(&w.t()?)?; // [N, chunk]
+            match bias_d {
+                Some(b) => l.broadcast_add(&b.narrow(0, start, len)?.unsqueeze(0)?),
+                None => Ok(l),
+            }
+        };
+
+        // Pass 1: running max and Σexp, so the denominator never needs the
+        // full logit row in memory.
+        let mut running_max: Option<Tensor> = None;
+        let mut running_sum: Option<Tensor> = None;
+        let mut start = 0;
+        while start < self.n_features {
+            let len = chunk.min(self.n_features - start);
+            let logits = logits_of(start, len)?;
+            let m = logits.max_keepdim(last)?; // [N, 1]
+            let (new_max, sum) = match (running_max.take(), running_sum.take()) {
+                (Some(pm), Some(ps)) => {
+                    let new_max = pm.maximum(&m)?;
+                    let rescaled = ps.mul(&pm.sub(&new_max)?.exp()?)?;
+                    let add = logits.broadcast_sub(&new_max)?.exp()?.sum_keepdim(last)?;
+                    (new_max, rescaled.add(&add)?)
+                }
+                _ => {
+                    let sum = logits.broadcast_sub(&m)?.exp()?.sum_keepdim(last)?;
+                    (m, sum)
+                }
+            };
+            running_max = Some(new_max);
+            running_sum = Some(sum);
+            start += len;
+        }
+        let max_n1 = running_max.expect("at least one gene slice");
+        let log_denom = running_sum
+            .expect("at least one gene slice")
+            .log()?
+            .add(&max_n1)?; // [N, 1]
+
+        // Pass 2: the likelihood terms, one slice at a time.
+        let mut llik: Option<Tensor> = None;
+        let mut start = 0;
+        while start < self.n_features {
+            let len = chunk.min(self.n_features - start);
+            let logits = logits_of(start, len)?;
+            let pi = logits.broadcast_sub(&log_denom)?.exp()?; // [N, chunk]
+            let mu = pi.broadcast_mul(&lib_n1)?;
+            let x = x_nd.narrow(last, start, len)?;
+            let log_phi = self
+                .log_phi_1d
+                .narrow(1, start, len)?
+                .broadcast_as(x.shape())?;
+            let part = crate::loss::nb_log_likelihood_elem(&x, &mu, &log_phi)?.sum(last)?;
+            llik = Some(match llik.take() {
+                Some(acc) => acc.add(&part)?,
+                None => part,
+            });
+            start += len;
+        }
+        llik.ok_or_else(|| candle_core::Error::Msg("no gene slices to score".into()))
+    }
+
     /// `log π_nd = log_softmax_d(z·W + b)`.
     fn log_pi(&self, z_nk: &Tensor) -> Result<Tensor> {
         let logits_nd = self.decoder.forward(z_nk)?; // [N, D]
@@ -173,6 +266,92 @@ mod tests {
         // NB likelihood is finite.
         for v in llik.to_vec1::<f32>().unwrap() {
             assert!(v.is_finite(), "llik {v} not finite");
+        }
+    }
+}
+
+#[cfg(test)]
+mod chunked_llik_tests {
+    use super::*;
+    use crate::loss::nb_log_likelihood;
+    use candle_core::{DType, Device};
+    use candle_nn::{VarBuilder, VarMap};
+
+    /// The chunked scorer exists only to save memory, so it has to agree with
+    /// the dense path it replaces — for every chunk width, including ones that
+    /// do not divide the gene count evenly.
+    #[test]
+    fn chunked_llik_matches_the_dense_path() {
+        let dev = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+        let (n, d, k) = (5usize, 23usize, 4usize);
+        let dec = GaussianNbDecoder::new(d, k, vb.pp("dec")).unwrap();
+
+        let z = Tensor::rand(-1f32, 1f32, (n, k), &dev).unwrap();
+        let x = Tensor::rand(0f32, 9f32, (n, d), &dev).unwrap();
+
+        // The dense reference: exactly what `forward_with_llik` computes.
+        let (_, dense) = dec
+            .forward_with_llik(&z, &x, &|_, _| unreachable!())
+            .unwrap();
+        let dense: Vec<f32> = dense.to_vec1().unwrap();
+
+        for chunk in [1usize, 2, 7, 23, 100] {
+            let got: Vec<f32> = dec
+                .llik_gene_chunked(&z, &x, chunk)
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+            assert_eq!(got.len(), n, "chunk {chunk}");
+            for (i, (g, e)) in got.iter().zip(&dense).enumerate() {
+                assert!(
+                    (g - e).abs() <= 1e-3 * e.abs().max(1.0),
+                    "chunk {chunk}, cell {i}: chunked {g} vs dense {e}"
+                );
+            }
+        }
+    }
+
+    /// A cell with no counts still has a well-defined score, and the streaming
+    /// max/sumexp must not produce NaN for it.
+    #[test]
+    fn an_empty_cell_scores_finitely() {
+        let dev = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+        let (n, d, k) = (2usize, 9usize, 3usize);
+        let dec = GaussianNbDecoder::new(d, k, vb.pp("dec")).unwrap();
+        let z = Tensor::rand(-1f32, 1f32, (n, k), &dev).unwrap();
+        let x = Tensor::zeros((n, d), DType::F32, &dev).unwrap();
+        let got: Vec<f32> = dec.llik_gene_chunked(&z, &x, 4).unwrap().to_vec1().unwrap();
+        assert!(got.iter().all(|v| v.is_finite()), "got {got:?}");
+    }
+
+    /// The reference against which the dense path itself is defined, so a
+    /// change to either is caught rather than silently agreed upon.
+    #[test]
+    fn the_dense_path_is_the_nb_likelihood_of_its_own_rate() {
+        let dev = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
+        let (n, d, k) = (3usize, 11usize, 2usize);
+        let dec = GaussianNbDecoder::new(d, k, vb.pp("dec")).unwrap();
+        let z = Tensor::rand(-1f32, 1f32, (n, k), &dev).unwrap();
+        let x = Tensor::rand(0f32, 4f32, (n, d), &dev).unwrap();
+
+        let (pi, llik) = dec
+            .forward_with_llik(&z, &x, &|_, _| unreachable!())
+            .unwrap();
+        let lib = x.sum_keepdim(1).unwrap();
+        let mu = pi.broadcast_mul(&lib).unwrap();
+        let want: Vec<f32> = nb_log_likelihood(&x, &mu, &dec.log_phi_1d)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let got: Vec<f32> = llik.to_vec1().unwrap();
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "{g} vs {w}");
         }
     }
 }
