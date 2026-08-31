@@ -1,27 +1,233 @@
-//! One pass over one feature partition: the frozen augmented design `Ẽ` built once,
-//! the block loop that solves every node against it, and the running stats and
-//! progress the pass reports. Also the [`BlockArgs`]/[`BlockOut`] pair that is the
-//! whole interface to [`super::solve`] — built here, filled there.
+//! One pass over one feature partition: the frozen augmented design `Ẽ`, the block
+//! loop that solves every node against it, and the running stats and progress the
+//! pass reports. Also the [`BlockArgs`]/[`BlockOut`] pair that is the whole
+//! interface to [`super::solve`] — built here, filled there.
+//!
+//! The split between [`PassDict`] and [`run_pass`] is the load-bearing one. The
+//! design matrix, the live/gate-folded split, the null normalizer, the learning
+//! rate and the block size depend **only on the frozen dictionary** — not on which
+//! nodes are being projected against it. Holding them apart is what lets a caller
+//! stream nodes past one dictionary group by group
+//! ([`crate::fit::projection::FrozenProjector`]) and size those groups for its own
+//! memory, instead of large enough to hide a per-call setup.
 
-use super::edges::EdgeTable;
+use super::edges::{block_cells, EdgeTable};
 use super::solve::solve_block;
-use super::{Phase2Input, GATE_FOLD_EPS, MAX_STEPS, TARGET_DELTA_S};
-use candle_util::candle_core::Tensor;
+use super::{Phase2Input, GATE_FOLD_EPS, GROUP_BLOCKS, MAX_STEPS, TARGET_DELTA_S};
+use candle_util::candle_core::{Device, Tensor};
 use log::info;
 
-/////////////////////
-// One phase-2 pass //
-/////////////////////
+////////////////////////////////////
+// The frozen design for one pass //
+////////////////////////////////////
 
+/// The dictionary side of a pass: what [`PassDict::build`] reads, and how the pass
+/// names itself in the log.
+pub(crate) struct DictSpec<'a> {
+    /// Frozen dictionary, row-major `[n_features × h]`.
+    pub(crate) feat: &'a [f32],
+    /// Frozen feature bias, `[n_features]`.
+    pub(crate) b_feat: &'a [f32],
+    pub(crate) h: usize,
+    /// Ridge `λ`. Reported here; *applied* per block from [`Phase2Input`], which is
+    /// where the solve reads it.
+    pub(crate) lambda: f64,
+    pub(crate) dev: &'a Device,
+    /// Log prefix — `"Phase 2"`, `"Projection"`, `"pb velocity readout"`.
+    pub(crate) label: &'static str,
+    /// This pass's own name within that: `"identity"`, `"velocity"`, `"nodes"`.
+    pub(crate) pass: &'static str,
+}
+
+/// Everything a pass needs that depends **only** on the frozen dictionary and the
+/// feature partition it runs over.
+///
+/// Every field below used to be rebuilt inside `run_pass`. That was free while the
+/// only callers projected a whole run's cells in one go, and a per-group tax the
+/// moment one started streaming: the transposed dictionary, the live-feature scan,
+/// the `Σ exp(β)` reduction, the learning-rate estimate and an info line, once per
+/// handful of cells. Built once here, a group is sized by what the *caller* can
+/// hold rather than by what it has to amortize.
+pub(crate) struct PassDict {
+    /// The pass's feature partition on the global feature axis. **Owned**: the dict
+    /// outlives the call that built it, so it cannot borrow the caller's rows.
+    rows: Vec<u32>,
+    /// Global → live-local feature id; `u32::MAX` for a gate-folded row.
+    pub(super) to_live: Vec<u32>,
+    /// Augmented dictionary `Ẽᵀ [H+1, F_live]` — the live rows transposed, with a
+    /// **row of ones** appended so the per-cell intercept rides in as the last
+    /// column of the parameter matrix rather than as a separate broadcast add. That
+    /// removes a whole `[Bc, F]` op and, more to the point, makes the intercept's
+    /// gradient fall out of the same matmul as the latent's (the ones row sums `μ`
+    /// over features, which is exactly `∂/∂c`).
+    pub(super) e_aug: Tensor,
+    /// `Ẽ [F_live, H+1]`. Both orientations are needed every step — `Θ̃·Ẽᵀ` forward
+    /// and `μ·Ẽ` for the gradient — so the transpose is materialized once here.
+    pub(super) e_aug_t: Tensor,
+    /// Frozen feature bias over the live rows, `[1, F_live]`.
+    pub(super) b_row: Tensor,
+    /// `[1, H+1]` selector with 1.0 in the intercept slot, for the terms that land
+    /// on the intercept alone.
+    pub(super) intercept_mask: Tensor,
+    /// `ln(Σ_f exp(β_f) + dead_mass)` over this pass's rows — a per-pass constant,
+    /// so it is summed here rather than over every live feature in every block.
+    pub(super) null_log_norm: f64,
+    /// Gate-folded partition mass `Σ_dead exp(β_f)`; 0 at the default
+    /// [`GATE_FOLD_EPS`], where nothing is folded.
+    pub(super) dead_mass: f64,
+    /// Auto-scaled initial learning rate — a property of the dictionary's scale (see
+    /// [`TARGET_DELTA_S`]), not of the nodes.
+    pub(super) lr0: f64,
+    /// Cells per block, from the activation budget and this pass's feature count.
+    block_cells: usize,
+    /// Carried so the block loop and any streaming caller report the same pass the
+    /// dictionary was built for.
+    label: &'static str,
+    pass: &'static str,
+}
+
+impl PassDict {
+    /// Build the frozen design for one pass over `rows`.
+    pub(crate) fn build(spec: &DictSpec, rows: Vec<u32>) -> anyhow::Result<Self> {
+        let (h, dev) = (spec.h, spec.dev);
+
+        // Split the partition into the live rows (which go into the matmul) and the
+        // gate-folded rows (whose partition mass is a constant).
+        let mut live: Vec<u32> = Vec::with_capacity(rows.len());
+        let mut dead_mass = 0f64;
+        for &g in &rows {
+            let e = &spec.feat[g as usize * h..(g as usize + 1) * h];
+            if e.iter().map(|x| x * x).sum::<f32>().sqrt() > GATE_FOLD_EPS {
+                live.push(g);
+            } else {
+                dead_mass += f64::from(spec.b_feat[g as usize]).exp();
+            }
+        }
+        anyhow::ensure!(
+            !live.is_empty(),
+            "phase-2 {}: every feature in this pass is gate-folded — the frozen \
+             dictionary carries no signal to project onto",
+            spec.pass
+        );
+
+        let f_live = live.len();
+        let d = h + 1;
+        let mut e_aug = vec![0f32; d * f_live];
+        let mut b_live = vec![0f32; f_live];
+        for (l, &g) in live.iter().enumerate() {
+            let row = &spec.feat[g as usize * h..(g as usize + 1) * h];
+            for (k, &v) in row.iter().enumerate() {
+                e_aug[k * f_live + l] = v;
+            }
+            e_aug[h * f_live + l] = 1.0; // intercept row
+            b_live[l] = spec.b_feat[g as usize];
+        }
+        let e_aug = Tensor::from_vec(e_aug, (d, f_live), dev)?;
+        let e_aug_t = e_aug.t()?.contiguous()?;
+        let b_row = Tensor::from_vec(b_live, (1, f_live), dev)?;
+
+        let null_log_norm = (f64::from(b_row.exp()?.sum_all()?.to_scalar::<f32>()?) + dead_mass)
+            .max(f64::MIN_POSITIVE)
+            .ln();
+
+        let intercept_mask = {
+            let mut v = vec![0f32; d];
+            v[h] = 1.0;
+            Tensor::from_vec(v, (1, d), dev)?
+        };
+
+        // Global → live-local feature id, for remapping the pass's edges.
+        let mut to_live = vec![u32::MAX; spec.b_feat.len()];
+        for (l, &g) in live.iter().enumerate() {
+            to_live[g as usize] = l as u32;
+        }
+
+        // Auto-scale the learning rate to the dictionary. Adam's per-coordinate step
+        // is ≈ lr, so a step moves the linear predictor by `Δs ≈ lr · H · rms(e)`;
+        // pinning `Δs` makes the schedule invariant to the `β ↔ θ` scale duality that
+        // otherwise leaves `lr` either useless or divergent.
+        // `ẽ` is the ARITHMETIC mean |e|, not the RMS. A step `Δθ` moves gene `f`'s score
+        // by `Δs_f = ⟨e_f, Δθ⟩ ≈ lr·h·E|e|`, so inverting THAT is what pins `Δs` at the
+        // target. Using `√E[e²]` instead delivers `TARGET_DELTA_S/κ` with
+        // `κ = √E[e²]/E|e| ≥ 1` — it calibrates on the loudest genes while most of a
+        // cell's likelihood rides on the median one. Measured on real fits `κ` ran
+        // 2.8–66, i.e. 2–35% of the intended step, and `cor(log κ, kNN purity) = −0.93`
+        // over 12 fits: large `κ` ⇒ blocks hit the step cap ⇒ under-converged `θ`.
+        // Both estimators are scale-free (a uniform `E → αE` cancels), so this is about
+        // the TAIL, not the magnitude.
+        let e_mean = {
+            let sa: f64 = live
+                .iter()
+                .flat_map(|&g| &spec.feat[g as usize * h..(g as usize + 1) * h])
+                .map(|x| f64::from(*x).abs())
+                .sum();
+            (sa / (f_live * h) as f64).max(1e-12)
+        };
+        let lr0 = TARGET_DELTA_S / (h as f64 * e_mean);
+
+        // Sized from the WHOLE partition, not the live subset: the gate fold shrinks
+        // the matmul but the budget it is bounding is the block's, and a dictionary
+        // whose fold is disabled must land on the same `Bc`.
+        let block_cells = block_cells(rows.len());
+
+        info!(
+            "{} [{}] — {f_live} live features (of {}; {} gate-folded), blocks of \
+             {block_cells}, lr {:.4} (auto: Δs≈{TARGET_DELTA_S}), ≤{MAX_STEPS} steps, \
+             ridge λ={}",
+            spec.label,
+            spec.pass,
+            rows.len(),
+            rows.len() - f_live,
+            lr0,
+            spec.lambda,
+        );
+
+        Ok(Self {
+            rows,
+            to_live,
+            e_aug,
+            e_aug_t,
+            b_row,
+            intercept_mask,
+            null_log_norm,
+            dead_mass,
+            lr0,
+            block_cells,
+            label: spec.label,
+            pass: spec.pass,
+        })
+    }
+
+    /// The feature partition this dictionary was built over — what an [`EdgeTable`]
+    /// must be flattened against for its local ids to line up.
+    pub(crate) fn rows(&self) -> &[u32] {
+        &self.rows
+    }
+
+    /// Nodes a streaming caller should hand one [`super::project_prepared`] call.
+    ///
+    /// A whole number of blocks, so a caller that cuts its groups here never leaves
+    /// the engine a short trailing block; [`GROUP_BLOCKS`] of them, so the per-call
+    /// host work either side of the solve is spread over a run of blocks rather than
+    /// one. Both bounds live here because both derive from `Bc`, which is derived in
+    /// turn from an activation budget only this module can see — a caller guessing
+    /// at it in its own currency is guessing against numbers it cannot read.
+    pub(crate) fn group_nodes(&self) -> usize {
+        self.block_cells * GROUP_BLOCKS
+    }
+}
+
+//////////////////////
+// One phase-2 pass //
+//////////////////////
+
+/// The per-call half of a pass: which nodes' edges, and what they are solved
+/// against. The dictionary half is [`PassDict`].
 pub(super) struct PassSpec<'a> {
-    pub(super) label: &'static str,
-    /// This pass's feature partition on the global feature axis.
-    pub(super) rows: &'a [u32],
     pub(super) edges: &'a EdgeTable,
     /// Fixed identity `θ` (host, `[n_kept × h]`) folded into the per-edge offset —
     /// `Some` only on the velocity pass.
     pub(super) base_theta: Option<&'a [f32]>,
-    pub(super) block_cells: usize,
 }
 
 /// One pass's per-cell result, indexed by position in `cells` (not by global id).
@@ -32,135 +238,32 @@ pub(super) struct PassOut {
 
 pub(super) fn run_pass(
     input: &Phase2Input,
+    dict: &PassDict,
     spec: &PassSpec,
     cells: &[(u32, &[u32], &[f32])],
     bar: &indicatif::ProgressBar,
 ) -> anyhow::Result<PassOut> {
-    let (h, dev) = (input.h, input.dev);
+    let h = input.h;
     let n_kept = cells.len();
-
-    // Split this pass's partition into the live rows (which go into the matmul)
-    // and the gate-folded rows (whose partition mass is a constant).
-    let mut live: Vec<u32> = Vec::with_capacity(spec.rows.len());
-    let mut dead_mass = 0f64;
-    for &g in spec.rows {
-        let e = &input.feat[g as usize * h..(g as usize + 1) * h];
-        if e.iter().map(|x| x * x).sum::<f32>().sqrt() > GATE_FOLD_EPS {
-            live.push(g);
-        } else {
-            dead_mass += f64::from(input.b_feat[g as usize]).exp();
-        }
-    }
-    anyhow::ensure!(
-        !live.is_empty(),
-        "phase-2 {}: every feature in this pass is gate-folded — the frozen \
-         dictionary carries no signal to project onto",
-        spec.label
-    );
-
-    // Frozen, shared by every block: the transposed live dictionary, and its bias.
-    //
-    // **Augmented with a row of ones**, `Ẽᵀ = [Eᵀ ; 1]` of shape `[H+1, F]`, so the
-    // per-cell intercept rides in as the last column of the parameter matrix rather
-    // than as a separate broadcast add. That removes a whole `[Bc, F]` op (and, more
-    // to the point, makes the intercept's gradient fall out of the same matmul as
-    // the latent's — the ones row sums `μ` over features, which is exactly `∂/∂c`).
-    let f_live = live.len();
-    let d = h + 1;
-    let mut e_aug = vec![0f32; d * f_live];
-    let mut b_live = vec![0f32; f_live];
-    for (l, &g) in live.iter().enumerate() {
-        let row = &input.feat[g as usize * h..(g as usize + 1) * h];
-        for (k, &v) in row.iter().enumerate() {
-            e_aug[k * f_live + l] = v;
-        }
-        e_aug[h * f_live + l] = 1.0; // intercept row
-        b_live[l] = input.b_feat[g as usize];
-    }
-    // Both orientations are needed every step — `Θ̃·Ẽᵀ` forward and `μ·Ẽ` for the
-    // gradient — so materialize the transpose once here rather than per step.
-    let e_aug = Tensor::from_vec(e_aug, (d, f_live), dev)?;
-    let e_aug_t = e_aug.t()?.contiguous()?;
-    let b_row = Tensor::from_vec(b_live, (1, f_live), dev)?;
-
-    // `Σ_f exp(β_f)` over the live rows: a per-PASS constant, so it is summed here
-    // rather than over every live feature in every block.
-    let null_log_norm = (f64::from(b_row.exp()?.sum_all()?.to_scalar::<f32>()?) + dead_mass)
-        .max(f64::MIN_POSITIVE)
-        .ln();
-
-    // `[1, H+1]` selector for the intercept slot.
-    let intercept_mask = {
-        let mut v = vec![0f32; d];
-        v[h] = 1.0;
-        Tensor::from_vec(v, (1, d), dev)?
-    };
-
-    // Global → live-local feature id, for remapping the pass's edges.
-    let mut to_live = vec![u32::MAX; input.b_feat.len()];
-    for (l, &g) in live.iter().enumerate() {
-        to_live[g as usize] = l as u32;
-    }
-
-    // Auto-scale the learning rate to the dictionary. Adam's per-coordinate step
-    // is ≈ lr, so a step moves the linear predictor by `Δs ≈ lr · H · rms(e)`;
-    // pinning `Δs` makes the schedule invariant to the `β ↔ θ` scale duality that
-    // otherwise leaves `lr` either useless or divergent.
-    // `ẽ` is the ARITHMETIC mean |e|, not the RMS. A step `Δθ` moves gene `f`'s score
-    // by `Δs_f = ⟨e_f, Δθ⟩ ≈ lr·h·E|e|`, so inverting THAT is what pins `Δs` at the
-    // target. Using `√E[e²]` instead delivers `TARGET_DELTA_S/κ` with
-    // `κ = √E[e²]/E|e| ≥ 1` — it calibrates on the loudest genes while most of a
-    // cell's likelihood rides on the median one. Measured on real fits `κ` ran
-    // 2.8–66, i.e. 2–35% of the intended step, and `cor(log κ, kNN purity) = −0.93`
-    // over 12 fits: large `κ` ⇒ blocks hit the step cap ⇒ under-converged `θ`.
-    // Both estimators are scale-free (a uniform `E → αE` cancels), so this is about
-    // the TAIL, not the magnitude.
-    let e_mean = {
-        let sa: f64 = live
-            .iter()
-            .flat_map(|&g| &input.feat[g as usize * h..(g as usize + 1) * h])
-            .map(|x| f64::from(*x).abs())
-            .sum();
-        (sa / (f_live * h) as f64).max(1e-12)
-    };
-    let lr0 = TARGET_DELTA_S / (h as f64 * e_mean);
-
-    info!(
-        "{} [{}] — {n_kept} node(s) × {f_live} live features (of {}; {} gate-folded), \
-         blocks of {}, lr {:.4} (auto: Δs≈{TARGET_DELTA_S}), ≤{MAX_STEPS} steps, ridge λ={}",
-        input.label,
-        spec.label,
-        spec.rows.len(),
-        spec.rows.len() - f_live,
-        spec.block_cells,
-        lr0,
-        input.lambda,
-    );
+    let bc = dict.block_cells;
 
     let mut latent = vec![0f32; n_kept * h];
     let mut intercept = vec![0f32; n_kept];
     let mut stats = PassStats::default();
-    let n_blocks = n_kept.div_ceil(spec.block_cells);
+    let n_blocks = n_kept.div_ceil(bc);
 
-    for (b, start) in (0..n_kept).step_by(spec.block_cells).enumerate() {
-        let end = (start + spec.block_cells).min(n_kept);
+    for (b, start) in (0..n_kept).step_by(bc).enumerate() {
+        let end = (start + bc).min(n_kept);
         let block = solve_block(BlockArgs {
             input,
+            dict,
             spec,
-            to_live: &to_live,
-            e_aug: &e_aug,
-            e_aug_t: &e_aug_t,
-            b_row: &b_row,
-            intercept_mask: &intercept_mask,
-            null_log_norm,
-            dead_mass,
-            lr0,
             start,
             end,
             progress: &BlockProgress {
                 bar,
                 stats: &stats,
-                label: spec.label,
+                label: dict.pass,
                 block: b + 1,
                 n_blocks,
             },
@@ -171,10 +274,10 @@ pub(super) fn run_pass(
     }
 
     info!(
-        "{} [{}] — done: ⌀{:.0} steps/block, {} of {} block(s) hit the {MAX_STEPS}-step cap, \
-         mean per-edge deviance {:.4}, {:.0}s total ({:.1} ms/step){}",
-        input.label,
-        spec.label,
+        "{} [{}] — {n_kept} node(s) done: ⌀{:.0} steps/block, {} of {} block(s) hit the \
+         {MAX_STEPS}-step cap, mean per-edge deviance {:.4}, {:.0}s total ({:.1} ms/step){}",
+        dict.label,
+        dict.pass,
         stats.mean_steps(),
         stats.at_cap,
         stats.blocks,
@@ -227,11 +330,12 @@ impl PassStats {
 
 /// The shared progress bar plus what the in-flight block needs to describe itself.
 ///
-/// The bar counts **cells** across both passes. A block advances it *as it steps*,
-/// pro-rata on its step budget, so the bar keeps moving through a block that takes
-/// hundreds of Adam steps instead of jumping once per block — with `Bc` sized for
-/// speed a whole pass is only a handful of blocks, and per-block ticks would be
-/// nearly no feedback at all.
+/// The bar counts **cells** across every pass that shares it — including, on the
+/// streaming path, the caller's own bar across every group. A block advances it *as
+/// it steps*, pro-rata on its step budget, so the bar keeps moving through a block
+/// that takes hundreds of Adam steps instead of jumping once per block — with `Bc`
+/// sized for speed a whole pass is only a handful of blocks, and per-block ticks
+/// would be nearly no feedback at all.
 pub(super) struct BlockProgress<'a> {
     pub(super) bar: &'a indicatif::ProgressBar,
     /// Stats from the blocks already finished in this pass.
@@ -273,27 +377,15 @@ impl BlockProgress<'_> {
     }
 }
 
-//////////////////
+///////////////
 // One block //
-//////////////////
+///////////////
 
 pub(super) struct BlockArgs<'a> {
     pub(super) input: &'a Phase2Input<'a>,
+    /// The frozen design every block of this pass shares.
+    pub(super) dict: &'a PassDict,
     pub(super) spec: &'a PassSpec<'a>,
-    pub(super) to_live: &'a [u32],
-    /// Augmented dictionary `Ẽᵀ [H+1, F]` (ones row last) and its transpose
-    /// `Ẽ [F, H+1]` — both built once per pass, shared by every block.
-    pub(super) e_aug: &'a Tensor,
-    pub(super) e_aug_t: &'a Tensor,
-    /// Frozen feature bias as a `[1, F]` row, shared by every block.
-    pub(super) b_row: &'a Tensor,
-    /// `[1, H+1]` selector with 1.0 in the intercept slot, for the terms that land
-    /// on the intercept alone.
-    pub(super) intercept_mask: &'a Tensor,
-    /// `ln(Σ_f exp(β_f) + dead_mass)` — a per-pass constant.
-    pub(super) null_log_norm: f64,
-    pub(super) dead_mass: f64,
-    pub(super) lr0: f64,
     pub(super) start: usize,
     pub(super) end: usize,
     pub(super) progress: &'a BlockProgress<'a>,
