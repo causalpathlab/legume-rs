@@ -32,3 +32,16 @@ pub use masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 pub use nb_mixture::NbMixtureTopicDecoder;
 pub use poisson::PoissonDecoder;
 pub use topic::{MultinomTopicDecoder, NbTopicDecoder};
+
+/// `(start, len)` pairs tiling `n_features` in slices of at most `chunk`.
+///
+/// The gene-slicing loop every chunked `llik_gene_chunked` runs, in one place:
+/// four decoders had begun to hand-roll the same offset bookkeeping. Yields
+/// nothing for an empty feature axis, so a caller folding over it is left with
+/// its own "no slices" case rather than a division by zero.
+pub(crate) fn gene_slices(n_features: usize, chunk: usize) -> impl Iterator<Item = (usize, usize)> {
+    let chunk = chunk.max(1);
+    (0..n_features)
+        .step_by(chunk)
+        .map(move |start| (start, chunk.min(n_features - start)))
+}

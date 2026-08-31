@@ -1069,10 +1069,7 @@ where
     // Ask the decoder rather than assume: one that slices holds the block's
     // input plus a chunk's temporaries, one that does not still materialises
     // the reconstruction and the whole chain at full decoder width.
-    let bytes_per_block = if decoders
-        .last()
-        .is_some_and(candle_util::traits::DecoderModuleT::llik_is_gene_chunked)
-    {
+    let bytes_per_block = if decoder.llik_is_gene_chunked() {
         dense_bytes(minibatch_size, d_dense, 1)
             + dense_bytes(
                 minibatch_size,
@@ -1745,13 +1742,6 @@ fn vae_training_minibatch(model: &str, requested: usize) -> usize {
     }
 }
 
-/// Genes per slice when scoring a vae block. Sets the width of the only dense
-/// tensors the likelihood allocates, so it trades memory against how many
-/// times the logits are recomputed; a few thousand keeps the slice in the
-/// hundreds of KB per cell while leaving the matmuls large enough to be worth
-/// dispatching.
-const VAE_SCORE_GENE_CHUNK: usize = 4096;
-
 pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored> {
     use crate::topic::model_metadata::load_feature_mean;
 
@@ -1845,10 +1835,14 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         metadata.n_topics,
         a.minibatch_size,
         // The encoder input is the only full-width tensor left; the likelihood
-        // works one `VAE_SCORE_GENE_CHUNK` slice at a time, so the chain's
+        // works one `crate::topic::predict_common::SCORE_GENE_CHUNK` slice at a time, so the chain's
         // temporaries are counted at slice width, not at D.
         dense_bytes(a.minibatch_size, training_genes.len(), 1)
-            + dense_bytes(a.minibatch_size, VAE_SCORE_GENE_CHUNK, NB_CHAIN_TENSORS),
+            + dense_bytes(
+                a.minibatch_size,
+                crate::topic::predict_common::SCORE_GENE_CHUNK,
+                NB_CHAIN_TENSORS,
+            ),
         |(lb, ub)| {
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
@@ -1869,7 +1863,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
             // scalar per cell is what made this path an OOM kill at
             // whole-transcriptome width.
             let llik: Vec<f32> = dec
-                .llik_gene_chunked(&z, &x_nd, VAE_SCORE_GENE_CHUNK)?
+                .llik_gene_chunked(&z, &x_nd, crate::topic::predict_common::SCORE_GENE_CHUNK)?
                 .to_device(&Device::Cpu)?
                 .to_vec1()?;
             let total: Vec<f32> = x_nd.sum(1)?.to_device(&Device::Cpu)?.to_vec1()?;
