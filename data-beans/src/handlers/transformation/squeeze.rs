@@ -403,23 +403,23 @@ fn run_merge_then_squeeze(
 
         // Read triplets and remap
         let jobs = create_jobs(ncols, data.num_rows().unwrap_or(0), cmd_args.block_size);
+        // A failed block read PROPAGATES rather than silently shrinking the
+        // union matrix — this path has no post-hoc audit, so the swallow here
+        // was pure data loss with a clean exit code.
         let triplets_curr: Vec<(u64, u64, f32)> = jobs
             .par_iter()
-            .filter_map(|(lb, ub)| {
-                if let Ok((_, _, triplets)) = data.read_triplets_by_columns((*lb..*ub).collect()) {
-                    Some(
-                        triplets
-                            .iter()
-                            .map(|&(i, j, x_ij)| {
-                                let union_row = file_row_to_union[i as usize];
-                                (union_row, j + col_offset, x_ij)
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    None
-                }
+            .map(|(lb, ub)| -> anyhow::Result<Vec<(u64, u64, f32)>> {
+                let (_, _, triplets) = data.read_triplets_by_columns((*lb..*ub).collect())?;
+                Ok(triplets
+                    .iter()
+                    .map(|&(i, j, x_ij)| {
+                        let union_row = file_row_to_union[i as usize];
+                        (union_row, j + col_offset, x_ij)
+                    })
+                    .collect())
             })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
             .flatten()
             .collect();
 
