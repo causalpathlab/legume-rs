@@ -95,11 +95,22 @@ pub fn run_export_to_h5ad(args: &ToH5adArgs) -> anyhow::Result<()> {
     }
 
     // Load the CSC (`/by_column`) arrays; they map directly onto X = CSR.
+    //
+    // This export is BUILT on the preloaded arrays — there is no streaming
+    // variant yet — so the preload budget does not get a vote here: a skipped
+    // preload would surface as a baffling "failed to access preloaded CSC
+    // arrays" three lines down. Refuse up front with the actual reason and the
+    // knob to turn instead.
     info!("preloading columns ({} cells, {} non-zeros)...", ncol, nnz);
     data.preload_columns()?;
-    let (indptr, indices, values) = data
-        .csc_column_arrays()
-        .ok_or_else(|| anyhow::anyhow!("failed to access preloaded CSC arrays"))?;
+    let (indptr, indices, values) = data.csc_column_arrays().ok_or_else(|| {
+        anyhow::anyhow!(
+            "to-h5ad needs the whole CSC resident ({} non-zeros x 12 bytes) and the preload \
+             was declined by the memory budget; raise LEGUME_PRELOAD_BUDGET_BYTES to export \
+             this matrix",
+            nnz
+        )
+    })?;
     debug_assert_eq!(indptr.len(), ncol + 1);
     debug_assert_eq!(indices.len(), values.len());
 
