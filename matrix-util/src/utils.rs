@@ -113,3 +113,43 @@ pub fn generate_minibatch_intervals(
         })
         .collect::<Vec<_>>()
 }
+
+/// Column blocks bounded by BYTES of triplets, not by column count.
+///
+/// [`default_block_size`] bounds *work* — columns × features — which says
+/// nothing about residency: a block of 100 dense columns and a block of 100
+/// empty ones cost the same under it, and the sparse cost that actually OOMs is
+/// the nnz a block materialises. This takes the measured per-column nnz (from
+/// the backend's resident indptr) and cuts blocks so each stays under
+/// `budget_bytes` at `bytes_per_nnz` — 24 for a `(u64, u64, f32)` triplet.
+///
+/// A single column heavier than the whole budget still becomes its own block:
+/// it cannot be split at this layer, so the bound is `max(budget, heaviest
+/// single column)` and the caller sees that in the block rather than an error.
+/// Empty trailing columns still land in a block, so every column is covered.
+pub fn byte_budget_intervals(
+    nnz_per_col: &[u64],
+    budget_bytes: usize,
+    bytes_per_nnz: usize,
+) -> Vec<(usize, usize)> {
+    let budget_nnz = (budget_bytes / bytes_per_nnz.max(1)).max(1) as u64;
+    let mut intervals = Vec::new();
+    let mut lb = 0usize;
+    let mut acc = 0u64;
+    for (col, &nnz) in nnz_per_col.iter().enumerate() {
+        if acc > 0 && acc + nnz > budget_nnz {
+            intervals.push((lb, col));
+            lb = col;
+            acc = 0;
+        }
+        acc += nnz;
+    }
+    if lb < nnz_per_col.len() {
+        intervals.push((lb, nnz_per_col.len()));
+    }
+    intervals
+}
+
+#[cfg(test)]
+#[path = "utils_tests.rs"]
+mod tests;

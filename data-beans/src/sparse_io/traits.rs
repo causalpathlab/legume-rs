@@ -275,6 +275,38 @@ pub trait SparseIo: Sync + Send {
     /// Number of non-zero elements
     fn num_non_zeros(&self) -> Option<usize>;
 
+    /// The resident by-column indptr, loaded at `open()`. Empty when the
+    /// backend carries no `/by_column/indptr` array — `read_column_indptr`
+    /// silently does nothing on that failure, and the accessors below must
+    /// report that absence rather than read zeros out of it.
+    fn column_indptr(&self) -> &[u64];
+
+    /// Exact nnz of one column, from the resident indptr — no I/O.
+    ///
+    /// `None` for an out-of-range column or when the indptr is absent. This is
+    /// what lets a streaming writer declare a column subset's total nnz up
+    /// front without a counting pass over the data.
+    fn column_nnz(&self, col: usize) -> Option<u64> {
+        let indptr = self.column_indptr();
+        let hi = *indptr.get(col + 1)?;
+        let lo = *indptr.get(col)?;
+        hi.checked_sub(lo)
+    }
+
+    /// Exact total nnz over a column selection, in any order.
+    ///
+    /// `None` — poisoning the whole sum — when ANY column is out of range or the
+    /// indptr is absent. A silent zero for a bad column would understate the
+    /// declared nnz of a streaming write, and an under-declared CSC reads back
+    /// cleanly while carrying fill values where real entries should be.
+    fn columns_nnz(&self, cols: &[usize]) -> Option<u64> {
+        let mut total = 0u64;
+        for &col in cols {
+            total = total.checked_add(self.column_nnz(col)?)?;
+        }
+        Some(total)
+    }
+
     /// Set row names for the matrix
     /// * `row_name_file`: a file each line contains row name words
     fn register_row_names_file(&mut self, row_name_file: &str);

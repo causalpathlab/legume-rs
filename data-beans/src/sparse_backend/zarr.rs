@@ -553,6 +553,10 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read column index pointers
+    fn column_indptr(&self) -> &[u64] {
+        &self.by_column_indptr
+    }
+
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         use zarrs::array::Array as ZArray;
         let key = "/by_column/indptr";
