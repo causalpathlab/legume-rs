@@ -496,6 +496,10 @@ fn svd_matching_latents(
         &train_genes,
         &u_dk,
         column_sum_norm,
+        // impute exposes no query-axis flags; the defaults reproduce the
+        // exact-then-flexible matching `predict` uses at `--feature-name-kind
+        // exact`, and nothing is hidden.
+        &crate::topic::eval::QueryNameOpts::default(),
         args.block_size,
         "query",
     )?;
@@ -504,6 +508,7 @@ fn svd_matching_latents(
         &train_genes,
         &u_dk,
         column_sum_norm,
+        &crate::topic::eval::QueryNameOpts::default(),
         args.block_size,
         "reference",
     )?;

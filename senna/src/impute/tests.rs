@@ -198,6 +198,7 @@ fn svd_projection_is_keyed_by_gene_name_not_row_order() -> anyhow::Result<()> {
         &train_genes,
         &u_dk,
         1e4,
+        &crate::topic::eval::QueryNameOpts::default(),
         None,
         "test",
     )?;
@@ -206,6 +207,7 @@ fn svd_projection_is_keyed_by_gene_name_not_row_order() -> anyhow::Result<()> {
         &train_genes,
         &u_dk,
         1e4,
+        &crate::topic::eval::QueryNameOpts::default(),
         None,
         "test",
     )?;
@@ -228,6 +230,7 @@ fn svd_projection_refuses_a_query_sharing_no_gene() -> anyhow::Result<()> {
         &train_genes,
         &u_dk,
         1e4,
+        &crate::topic::eval::QueryNameOpts::default(),
         None,
         "test"
     )

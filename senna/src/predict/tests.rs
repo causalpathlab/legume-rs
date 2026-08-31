@@ -125,7 +125,11 @@ mod block_concurrency {
     fn the_chunked_vae_path_is_not_throttled_at_the_same_width() {
         // The same shape `score_vae_backend` hands the cap.
         let bytes = dense_bytes(500, 57_843, 1)
-            + dense_bytes(500, super::super::VAE_SCORE_GENE_CHUNK, NB_CHAIN_TENSORS);
+            + dense_bytes(
+                500,
+                crate::topic::predict_common::SCORE_GENE_CHUNK,
+                NB_CHAIN_TENSORS,
+            );
         assert_eq!(
             dense_block_concurrency(bytes),
             rayon::current_num_threads(),

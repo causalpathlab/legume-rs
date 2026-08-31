@@ -93,7 +93,17 @@ pub struct PredictArgs {
     )]
     pub(crate) batch_files: Option<Vec<Box<str>>>,
 
-    #[arg(long, default_value_t = 500, help = "Evaluation minibatch size")]
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "Evaluation minibatch size",
+        long_help = "Cells per scored block.\n\
+                     \n\
+                     IGNORED for vae models, which are scored at the block size\n\
+                     they were TRAINED at: that encoder carries a batch norm, so\n\
+                     its latent depends on how cells are grouped, and scoring at\n\
+                     a different size would move it. The substitution is logged."
+    )]
     pub(crate) minibatch_size: usize,
 
     #[arg(
@@ -464,7 +474,10 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
 /// families — that is the axis to compare svd on. `llik` is a GAUSSIAN
 /// log-likelihood in `log1p` space, which is the loss svd actually minimises,
 /// at the per-cell ML σ̂; like every other family's `llik` it is the backend's
-/// own and must NOT be compared against another family's. The multinomial
+/// own and must NOT be compared against another family's. It is normalised as
+/// `llik_per_gene`, not `llik_per_count`: it sums over the scored gene axis
+/// and does not scale with library size, so it does not belong in a column
+/// that means nats-per-count everywhere else. The multinomial
 /// `eval_llik_*` columns are deliberately absent rather than filled with a
 /// differently-scaled number: svd has no count likelihood to put there.
 fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
@@ -497,12 +510,15 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         ..Default::default()
     })?;
     let data_vec = loaded.data;
-    let z_nk = crate::svd::project::project_onto_dictionary(
+    // The projection sees the caller's query-axis rules, INCLUDING
+    // `--ablate-features`: without that the latent is fitted on the genes it
+    // is about to be scored on, which is a reconstruction, not a prediction.
+    // Only the remap is built here — the projection itself happens inside the
+    // scoring loop, off the same block read, so the data is streamed once.
+    let proj_remap = crate::svd::project::projection_remap(
         &data_vec,
         &training_genes,
-        &u_dk,
-        column_sum_norm,
-        args.block_size,
+        &args.query_name_opts()?,
         "query",
     )?;
 
@@ -518,6 +534,8 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         !eval_genes.is_empty(),
         "no evaluation features matched the model's genes"
     );
+    // Scoring reads the OBSERVED counts, hidden genes included — that is the
+    // point of hiding them from the projection above.
     let mut opts = args.query_name_opts()?;
     opts.hide = None;
     let remap = build_remap(&training_genes, &data_vec.row_names()?, &opts)?;
@@ -532,12 +550,24 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         u_dk[(eval_genes[i], c)]
     });
 
+    let mut z_nk = Mat::zeros(ntot, u_dk.ncols());
     let mut per_cell: Vec<CellScore> = Vec::with_capacity(ntot);
     for (lb, ub) in create_jobs(ntot, 0, Some(args.minibatch_size)) {
+        // ONE read per block: the latent and the observed counts both come off
+        // it. Projecting up front and re-reading to score doubled the pass
+        // over the backend.
         let csc = data_vec.read_columns_csc(lb..ub)?;
+        let z_block = crate::svd::project::project_block(
+            &csc,
+            &proj_remap.new_to_train,
+            &u_dk,
+            column_sum_norm,
+        )
+        .transpose();
+        z_nk.rows_range_mut(lb..ub).copy_from(&z_block);
         // `[n, n_eval]` for this block only; the block loop is sequential, so
         // one of these is live at a time.
-        let recon_std_block = z_nk.rows(lb, ub - lb) * &u_eval_t;
+        let recon_std_block = &z_block * &u_eval_t;
         let block: Vec<CellScore> = (0..csc.ncols())
             .into_par_iter()
             .map(|j| {
@@ -580,7 +610,11 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
                 let mut sq_resid = 0f64;
                 for (slot, &g) in eval_genes.iter().enumerate() {
                     let pred_log1p = recon_std_block[(j, slot)] * sd + mu;
-                    pred_counts[slot] = pred_log1p.exp_m1().max(0.0);
+                    // Clamped before `exp_m1`: one overflowing gene would make
+                    // the profile's sum infinite, and `rate_to_counts` divides
+                    // by that sum — zeroing the whole cell and turning both
+                    // correlations into NaN. `ln(f32::MAX)` is ~88.
+                    pred_counts[slot] = pred_log1p.min(80.0).exp_m1().max(0.0);
                     obs_eval[slot] = obs_full[g];
                     let r = f64::from(obs_log1p[g] - pred_log1p);
                     sq_resid += r * r;
@@ -607,22 +641,23 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     let cell_names = data_vec.column_names()?;
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
 
+    let n_eval = eval_genes.len() as f32;
     let mut pred = Mat::zeros(per_cell.len(), 5);
     for (i, c) in per_cell.iter().enumerate() {
         pred[(i, 0)] = c.llik;
         pred[(i, 1)] = c.total;
-        pred[(i, 2)] = if c.total > 0.0 {
-            c.llik / c.total
-        } else {
-            f32::NAN
-        };
+        // Per GENE, not per count: this llik is a Gaussian over the scored
+        // gene axis and does not scale with library size, so dividing it by
+        // counts would put a different estimand under a column name that means
+        // nats-per-count for every other family.
+        pred[(i, 2)] = c.llik / n_eval;
         pred[(i, 3)] = c.spearman;
         pred[(i, 4)] = c.pearson_log1p;
     }
     let cols: Vec<Box<str>> = vec![
         "llik".into(),
         "total".into(),
-        "llik_per_count".into(),
+        "llik_per_gene".into(),
         "spearman".into(),
         "pearson_log1p".into(),
     ];
