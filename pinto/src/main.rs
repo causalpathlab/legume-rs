@@ -1,6 +1,7 @@
 mod annotate;
 mod cell_activity_graph_embedding;
 mod gene_network;
+mod impute;
 mod link_community;
 mod lr_activity;
 mod plot;
@@ -18,6 +19,7 @@ use cell_activity_graph_embedding::{
 };
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use impute::{run_impute, ImputeArgs};
 use link_community::fit::*;
 use lr_activity::{fit_srt_lr_activity, SrtLrActivityArgs};
 use plot::{make_srt_plot, SrtPlotArgs};
@@ -483,6 +485,26 @@ enum Commands {
     Predict(PredictArgs),
 
     #[command(
+        about = "Impute full-feature counts for a new sample by kNN over community propensities.",
+        long_about = "Retrieval-based imputation against a trained run's cells:\n  \
+                      1. Place the query cells on the model's community propensity.\n  \
+                      \x20  A cage model runs the full `pinto predict` pipeline\n  \
+                      \x20  (its usual outputs land under {out}); lc / dsvd models\n  \
+                      \x20  project each cell onto the gene_community profiles\n  \
+                      \x20  by a per-cell EM fit — and project the reference\n  \
+                      \x20  cells the same way, so both sides come from one map.\n  \
+                      2. For each query cell, find its nearest reference cells\n  \
+                      \x20  in propensity space, softmax-weight the distances,\n  \
+                      \x20  and accumulate those cells' full-feature counts.\n\
+                      \n\
+                      The reference data defaults to the files recorded in\n\
+                      {model}.pinto.json; --reference-data overrides.\n\
+                      \n\
+                      Writes {out}.imputed.parquet (N_query × n_ref_features)."
+    )]
+    Impute(ImputeArgs),
+
+    #[command(
         alias = "p",
         about = "Plot spatial scatter from pinto lc/dsvd/prop outputs",
         long_about = "Render publication-quality PDFs, and SVG or PNG.\n\
@@ -840,6 +862,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Predict(args) => {
             predict_cage(args)?;
+        }
+        Commands::Impute(args) => {
+            run_impute(args)?;
         }
         Commands::Plot(args) => {
             make_srt_plot(args)?;

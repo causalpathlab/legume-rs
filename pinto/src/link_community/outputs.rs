@@ -245,11 +245,26 @@ pub fn write_propensity_parquet(
     cell_names: &[Box<str>],
 ) -> anyhow::Result<Mat> {
     let propensity = compute_node_membership(edges, fine_labels, n_cells, k);
+    write_propensity_matrix(prefix, &propensity, cell_names)?;
+    Ok(propensity)
+}
 
-    let cluster_col = dominant_cluster_rows(&propensity);
+/// Write an already-computed `[N × K]` propensity under the shared schema.
+///
+/// Split out of [`write_propensity_parquet`] for callers whose propensity
+/// does not come from an edge partition (e.g. the profile-projected
+/// propensity `pinto impute` computes for a new sample).
+pub fn write_propensity_matrix(
+    prefix: &str,
+    propensity: &Mat,
+    cell_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    let n_cells = propensity.nrows();
+    let k = propensity.ncols();
+    let cluster_col = dominant_cluster_rows(propensity);
     let cluster_mat = Mat::from_column_slice(n_cells, 1, &cluster_col);
 
-    let entropy_vec = shannon_entropy_rows(&propensity);
+    let entropy_vec = shannon_entropy_rows(propensity);
     let entropy_mat = Mat::from_column_slice(n_cells, 1, entropy_vec.as_slice());
 
     // `C{c}` prefix names the community axis explicitly, so the reader
@@ -267,7 +282,7 @@ pub fn write_propensity_parquet(
         (Some(cell_names), Some("cell")),
         Some(&col_names),
     )?;
-    Ok(propensity)
+    Ok(())
 }
 
 /// Write the full per-partition output triple (link community edges,
