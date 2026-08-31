@@ -113,7 +113,7 @@ fn kinds_without_a_projection_are_refused_up_front() {
 
 #[test]
 fn missing_manifest_falls_back_to_the_default_scale() {
-    assert_eq!(svd_column_sum_norm("no/such/prefix").unwrap(), 1e4);
+    assert_eq!(svd_column_sum_norm("no/such/prefix"), 1e4);
 }
 
 fn make_backend(
