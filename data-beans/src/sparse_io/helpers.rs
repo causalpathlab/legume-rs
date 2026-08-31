@@ -76,3 +76,17 @@ pub fn dmatrix_to_triplets(matrix: &DMatrix<f32>) -> Vec<(u64, u64, f32)> {
         })
         .collect::<Vec<(u64, u64, f32)>>()
 }
+
+/// Remove a backend at `path`, whether it is a file (`.h5`, `.zarr.zip`) or a
+/// directory (`.zarr`). Nothing happens when the path does not exist.
+pub fn remove_backend_path(path: &str) -> anyhow::Result<()> {
+    let p = std::path::Path::new(path);
+    if p.exists() {
+        if p.is_file() {
+            std::fs::remove_file(p)?;
+        } else {
+            std::fs::remove_dir_all(p)?;
+        }
+    }
+    Ok(())
+}

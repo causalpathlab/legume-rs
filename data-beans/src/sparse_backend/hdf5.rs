@@ -285,6 +285,16 @@ impl SparseIo for SparseMtxData {
         &self.by_column_indptr
     }
 
+    fn reopen_backend(&mut self) -> anyhow::Result<()> {
+        // The open handle points at the deleted inode after the swap; reopen on
+        // the path and refresh the resident indptrs.
+        self.backend = hdf5::File::open_rw(&self.file_name)?.into();
+        self.streamed_nnz = 0;
+        self.read_column_indptr()?;
+        self.read_row_indptr()?;
+        Ok(())
+    }
+
     fn note_streamed_nnz(&mut self, n: u64) {
         self.streamed_nnz += n;
     }
