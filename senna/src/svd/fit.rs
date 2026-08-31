@@ -362,9 +362,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 struct NystromParam<'a> {
-    dictionary_dk: &'a Mat,
     basis_dk: &'a Mat,
     delta_dp: Option<&'a Mat>,
     column_sum_norm: f32,
@@ -411,7 +409,6 @@ fn do_nystrom_proj(
     let kk = rank;
 
     let nystrom_param = NystromParam {
-        dictionary_dk: &u_dk,
         basis_dk: &basis_dk,
         delta_dp,
         column_sum_norm,
@@ -471,6 +468,10 @@ fn nystrom_proj_visitor(
 /// over a column's stored entries only, so running the same chain on a
 /// densified copy would standardize against the zeros too and land in a
 /// different space.
+///
+/// `delta` pairs the per-group divisor with the GROUP membership of exactly
+/// `x_dn`'s columns (it indexes the divisor's columns) — build it with
+/// `delta_dp.zip(membership.as_deref())` so both come or neither does.
 pub(crate) fn nystrom_preprocess_columns(
     x_dn: &mut nalgebra_sparse::CscMatrix<f32>,
     column_sum_norm: f32,

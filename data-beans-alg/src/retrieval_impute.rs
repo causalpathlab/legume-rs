@@ -92,28 +92,36 @@ pub fn retrieval_impute(
         cfg.knn,
         cfg.temperature
     );
+    // One allocation for the [K, n_live] point set the dict copies from;
+    // `transpose().select_columns(&live)` would build the same thing through
+    // an intermediate full-matrix copy.
     let ref_dict = ColumnDict::<u32>::from_dmatrix(
-        ref_latent.transpose().select_columns(&live),
+        Mat::from_fn(k_ref, live.len(), |r, c| ref_latent[(live[c], r)]),
         live.iter().map(|&i| i as u32).collect(),
     );
 
     let knn = cfg.knn.min(live.len());
     let neighbours: Vec<QueryNeighbours> = (0..n_query)
         .into_par_iter()
-        .map(|i| {
-            let query: Vec<f32> = query_latent.row(i).iter().copied().collect();
-            if query.iter().all(|&x| x == 0.0) {
-                return Ok(QueryNeighbours {
-                    ids: Vec::new(),
-                    weights: Vec::new(),
-                });
-            }
-            let (ids, distances) = ref_dict
-                .search_by_query_data(&query, knn)
-                .map_err(|e| anyhow::anyhow!("kNN search for query row {i}: {e}"))?;
-            let weights = dist_to_softmax_weights(&distances, cfg.temperature);
-            Ok(QueryNeighbours { ids, weights })
-        })
+        // One search scratch per rayon worker: re-growing the backend's
+        // visited set is O(n_ref) per query otherwise.
+        .map_init(
+            matrix_util::knn_match::SearchScratch::default,
+            |scratch, i| {
+                let query: Vec<f32> = query_latent.row(i).iter().copied().collect();
+                if query.iter().all(|&x| x == 0.0) {
+                    return Ok(QueryNeighbours {
+                        ids: Vec::new(),
+                        weights: Vec::new(),
+                    });
+                }
+                let (ids, distances) = ref_dict
+                    .search_by_query_data_reuse(&query, knn, scratch)
+                    .map_err(|e| anyhow::anyhow!("kNN search for query row {i}: {e}"))?;
+                let weights = dist_to_softmax_weights(&distances, cfg.temperature);
+                Ok(QueryNeighbours { ids, weights })
+            },
+        )
         .collect::<anyhow::Result<_>>()?;
     let n_skipped = neighbours.iter().filter(|n| n.ids.is_empty()).count();
     if n_skipped > 0 {
@@ -153,9 +161,8 @@ pub fn retrieval_impute(
     // at the end pays a single O(N×G) pass for a cache-friendly hot loop.
     let mut imputed_t = Mat::zeros(g_ref, n_query);
     // Per-chunk (reference-local column, weight) work lists, indexed by
-    // query; allocated once and cleared per chunk via `touched`.
+    // query; allocated once, cleared inside the parallel pass below.
     let mut groups: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_query];
-    let mut touched: Vec<u32> = Vec::new();
     let chunk_size = cfg.chunk.max(64);
     let mut col_lb = 0;
     while col_lb < n_ref {
@@ -171,33 +178,28 @@ pub fn retrieval_impute(
         }
         let csc = ref_data.read_columns_csc(col_lb..col_ub)?;
 
-        touched.clear();
         for c_local in 0..(col_ub - col_lb) {
             for &(query_id, w) in &cell_to_consumers[col_lb + c_local] {
-                let grp = &mut groups[query_id as usize];
-                if grp.is_empty() {
-                    touched.push(query_id);
-                }
-                grp.push((c_local as u32, w));
+                groups[query_id as usize].push((c_local as u32, w));
             }
         }
 
         imputed_t
             .as_mut_slice()
             .par_chunks_mut(g_ref)
-            .zip(groups.par_iter())
+            .zip(groups.par_iter_mut())
             .for_each(|(query_col, grp)| {
-                for &(c_local, w) in grp {
+                for &(c_local, w) in grp.iter() {
                     let col = csc.col(c_local as usize);
                     for (&row_id, &v) in col.row_indices().iter().zip(col.values().iter()) {
                         query_col[row_id] += w * v;
                     }
                 }
+                // Cleared here (in parallel, capacity kept) so the next
+                // chunk's regroup starts from empty lists.
+                grp.clear();
             });
 
-        for &q in &touched {
-            groups[q as usize].clear();
-        }
         col_lb = col_ub;
     }
 

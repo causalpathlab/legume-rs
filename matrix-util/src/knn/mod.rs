@@ -221,6 +221,27 @@ where
         Ok((self.names_of(&indices), distances))
     }
 
+    /// Like [`search_by_query_data`](Self::search_by_query_data) but reuses a
+    /// caller-owned [`SearchScratch`] across many queries — same rationale as
+    /// [`search_others_reuse`](Self::search_others_reuse): re-growing the
+    /// backend's visited set is O(n) per query. Hold one scratch per rayon
+    /// worker.
+    pub fn search_by_query_data_reuse(
+        &self,
+        query: &[f32],
+        knn: usize,
+        scratch: &mut SearchScratch,
+    ) -> anyhow::Result<(Vec<K>, Vec<f32>)> {
+        if self.dim().unwrap_or(0) != query.len() {
+            return Err(anyhow::anyhow!("query's dim does not match"));
+        }
+        let query = VecPoint {
+            data: Arc::from(query),
+        };
+        let (indices, distances) = self.search_indices(&query, knn, None, &mut scratch.0);
+        Ok((self.names_of(&indices), distances))
+    }
+
     /// k-nearest-neighbour match by name against *another* dictionary, returning
     /// names from that dictionary.
     ///

@@ -333,23 +333,19 @@ fn nystrom_proj_visitor(
     arc_proj_kn: Arc<Mutex<&mut Mat>>,
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
-    // let proj_dk = proj_basis.dictionary_dk;
     let basis_dk = proj_basis.basis_dk;
-    let delta_dp = proj_basis.delta_dp;
-    let column_sum_norm = proj_basis.column_sum_norm;
 
     let mut x_dn = full_data_vec.read_columns_csc(lb..ub)?;
 
-    x_dn.normalize_columns_inplace();
-    x_dn *= column_sum_norm;
-
-    if let Some(delta_dp) = delta_dp {
-        let pseudobulk = full_data_vec.get_group_membership(lb..ub)?;
-        x_dn.adjust_by_division_of_selected_inplace(delta_dp, &pseudobulk);
-    }
-
-    x_dn.log1p_inplace();
-    x_dn.scale_columns_inplace();
+    let pseudobulk = match proj_basis.delta_dp {
+        Some(_) => Some(full_data_vec.get_group_membership(lb..ub)?),
+        None => None,
+    };
+    crate::svd::nystrom_preprocess_columns(
+        &mut x_dn,
+        proj_basis.column_sum_norm,
+        proj_basis.delta_dp.zip(pseudobulk.as_deref()),
+    );
 
     let chunk = (x_dn.transpose() * basis_dk).transpose();
 

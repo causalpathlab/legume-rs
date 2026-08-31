@@ -201,11 +201,10 @@ struct ReferenceSpec {
 /// The manifest is consulted unless every needed piece was given
 /// explicitly — so the legacy invocation (`--reference-latent` +
 /// `--reference-data`, no manifest anywhere) keeps working unchanged.
-fn resolve_reference(
-    args: &ImputeArgs,
-    model_kind: RunKind,
-    plan: MatchingPlan,
-) -> anyhow::Result<ReferenceSpec> {
+fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<ReferenceSpec> {
+    // Re-derived rather than passed in: a (kind, plan) pair in the signature
+    // could be constructed inconsistently, and the call is pure and cheap.
+    let plan = matching_plan(model_kind)?;
     let needs_latent = plan != MatchingPlan::DictionaryProjection;
     if args.reference_latent.is_some() && !needs_latent {
         log::warn!(
@@ -218,7 +217,11 @@ fn resolve_reference(
     let latent_settled = !needs_latent || args.reference_latent.is_some();
     if args.reference.is_none() && latent_settled && args.reference_data.is_some() {
         return Ok(ReferenceSpec {
-            latent: args.reference_latent.clone(),
+            // `None` for the dictionary plan on every path, even when the
+            // (just-warned-as-ignored) flag was passed.
+            latent: needs_latent
+                .then(|| args.reference_latent.clone())
+                .flatten(),
             data_files: args.reference_data.clone().expect("checked above"),
         });
     }
@@ -232,14 +235,23 @@ fn resolve_reference(
         )
     })?;
 
-    // The matching space comes from the MODEL; a reference whose cells live
-    // in a different space cannot be matched against, however plausible the
-    // dimensions look.
+    // The reference must share the MODEL's matching plan, not merely its
+    // cell space: `Signed` covers both a vae (softmaxed z) and an svd run —
+    // whose stored latent this module refuses to reuse even for svd itself,
+    // because the whitening scale is not persisted. Plan equality is the
+    // real invariant.
+    let ref_plan = matching_plan(manifest.kind).map_err(|_| {
+        anyhow::anyhow!(
+            "reference run `{prefix}` is a `{}` run, which has no matching \
+             latent to serve as an impute reference",
+            manifest.kind
+        )
+    })?;
     anyhow::ensure!(
-        manifest.kind.cell_space() == model_kind.cell_space(),
+        ref_plan == plan,
         "reference run `{prefix}` is a `{}` run whose cells live in a different \
-         space than the `{model_kind}` model's; match against a reference of the \
-         same family",
+         matching space than the `{model_kind}` model's; match against a \
+         reference of the same family",
         manifest.kind,
     );
     if manifest.kind != model_kind {
@@ -266,9 +278,10 @@ fn resolve_reference(
         // bge and its embedding kin keep log θ in `latent` (when resolved) and
         // their H-space Z in `cell_embedding`; `geometry_latent` prefers the
         // latter, which is the space `predict` projects a query into.
-        let rel = match model_kind.cell_space() {
-            run_manifest::CellSpace::Embedding => manifest.outputs.geometry_latent(),
-            _ => manifest.outputs.latent.as_deref(),
+        let rel = if plan == MatchingPlan::CosineEmbedding {
+            manifest.outputs.geometry_latent()
+        } else {
+            manifest.outputs.latent.as_deref()
         };
         let rel = rel.ok_or_else(|| {
             anyhow::anyhow!(
@@ -299,7 +312,7 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
 
     let kind = crate::topic::model_metadata::resolve_run_kind(&args.model)?;
     let plan = matching_plan(kind)?;
-    let reference = resolve_reference(args, kind, plan)?;
+    let reference = resolve_reference(args, kind)?;
 
     let open_reference = || -> anyhow::Result<SparseIoVec> {
         info!(

@@ -233,7 +233,6 @@ pub fn link_community_histogram(membership: &[usize], k: usize, max_width: usize
 // imports keep working.
 pub use crate::util::score_trace::{write_score_trace, ScoreEntry};
 
-/// Write one cascade level's outputs: `.L{l}.link_community.parquet`,
 /// Write `<prefix>.propensity.parquet` from cell-edge labels and return
 /// the propensity matrix (reused to compute gene-community stats).
 pub fn write_propensity_parquet(

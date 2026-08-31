@@ -468,16 +468,6 @@ pub fn latent_sharpness(theta_nk: &Mat) -> (f32, f32) {
     ((eff_sum / n as f64) as f32, (max_sum / n as f64) as f32)
 }
 
-/// In-place numerically-stable per-row softmax on a host matrix (`[N, K]` →
-/// each row `softmax`ed over K): subtract the row max, `exp`, then divide by
-/// the row sum. A degenerate row — all `-inf`, or carrying a `NaN` — has no
-/// valid softmax, so it is zeroed rather than left holding `NaN`.
-///
-/// Shared by [`latent_to_theta`]'s Gaussian arm and any caller that must map a
-/// latent onto the simplex without a `LatentHead` in hand (e.g. `impute`, which
-/// reads a bare parquet). Applied to a genuine `log θ` latent, the `exp`
-/// recovers `θ` and the subsequent renormalization is a no-op (rows already
-/// sum to 1).
 /// Row-wise L2 normalization in place: Euclidean distance on the result
 /// equals cosine distance on the input. A ~zero row is left unchanged —
 /// normalizing it would blow it up to an arbitrary unit direction (and the
@@ -491,6 +481,16 @@ pub fn l2_normalize_rows_inplace(m: &mut Mat) {
     }
 }
 
+/// In-place numerically-stable per-row softmax on a host matrix (`[N, K]` →
+/// each row `softmax`ed over K): subtract the row max, `exp`, then divide by
+/// the row sum. A degenerate row — all `-inf`, or carrying a `NaN` — has no
+/// valid softmax, so it is zeroed rather than left holding `NaN`.
+///
+/// Shared by [`latent_to_theta`]'s Gaussian arm and any caller that must map a
+/// latent onto the simplex without a `LatentHead` in hand (e.g. `impute`, which
+/// reads a bare parquet). Applied to a genuine `log θ` latent, the `exp`
+/// recovers `θ` and the subsequent renormalization is a no-op (rows already
+/// sum to 1).
 pub fn softmax_rows_inplace(m: &mut Mat) {
     for mut row in m.row_iter_mut() {
         let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
