@@ -173,24 +173,31 @@ enum MatchingPlan {
 /// must say how it imputes (or that it cannot) before this compiles.
 fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
     match kind {
-        RunKind::Topic
-        | RunKind::Itopic
-        | RunKind::JointTopic
-        | RunKind::MaskedVae
-        | RunKind::Vae => Ok(MatchingPlan::SoftmaxSimplex),
+        RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::Vae => {
+            Ok(MatchingPlan::SoftmaxSimplex)
+        }
         RunKind::Bge => Ok(MatchingPlan::CosineEmbedding),
         RunKind::Svd => Ok(MatchingPlan::DictionaryProjection),
-        // joint-svd stacks modalities, so a single-modality panel has no
-        // defined projection; the graph/embedding kinds have no query-side
-        // projection at all.
-        RunKind::JointSvd
-        | RunKind::Fne
-        | RunKind::ResolveEmbeddingSpace
-        | RunKind::Gem
-        | RunKind::GemEncoder => anyhow::bail!(
-            "impute needs a run with a transferable per-cell latent; `{kind}` runs \
-             have no query-side projection here"
+        // The joint families write no encoder checkpoint (`has_model: false`),
+        // so `predict` cannot load one and the simplex arm would fail deep
+        // inside it rather than here. Refuse up front and name the way out.
+        RunKind::JointTopic | RunKind::JointSvd => anyhow::bail!(
+            "impute does not support `{kind}` runs: they write no encoder checkpoint, \
+             so there is no query-side projection. Impute against the per-modality \
+             `senna {}` run instead.",
+            if kind == RunKind::JointTopic {
+                "topic"
+            } else {
+                "svd"
+            }
         ),
+        // The graph / co-embedding kinds have no query-side projection at all.
+        RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Gem | RunKind::GemEncoder => {
+            anyhow::bail!(
+                "impute needs a run with a transferable per-cell latent; `{kind}` runs \
+                 have no query-side projection here"
+            )
+        }
     }
 }
 
