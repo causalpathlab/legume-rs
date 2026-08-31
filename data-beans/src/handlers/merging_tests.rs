@@ -10,7 +10,6 @@
 //! a confusing post-hoc audit failure into the actual cause.
 
 use super::*;
-use crate::sparse_io::*;
 
 fn write_fixture(path: &str, cols: usize, seed_val: f32) -> anyhow::Result<()> {
     let mut arr = ndarray::Array2::<f32>::zeros((3, cols));
