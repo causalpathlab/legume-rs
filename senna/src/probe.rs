@@ -95,6 +95,22 @@ pub struct ProbeArgs {
 
     #[arg(
         long,
+        default_value_t = ComputeDevice::Cpu,
+        value_enum,
+        help = "Compute device",
+        long_help = "Compute device. `cuda` / `metal` require the matching cargo feature.\n\
+                     \n\
+                     Matters most for a bge model, which has no encoder: probe fits every\n\
+                     cell by Poisson SGD, and it does so TWICE — once for the calibration\n\
+                     arm and once for the query."
+    )]
+    device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    device_no: usize,
+
+    #[arg(
+        long,
         help = "Estimate first-order benefit / forgetting (no training)",
         long_help = "The fit score above is the potential outcome Y(0).\n\
                      This instead estimates the effect of updating,\n\
@@ -123,6 +139,13 @@ pub struct ProbeArgs {
         help = "Seed for the --counterfactual role assignment"
     )]
     cf_seed: u64,
+}
+
+impl ProbeArgs {
+    /// The compute device this run asks for, resolved once.
+    fn resolve_device(&self) -> anyhow::Result<candle_util::candle_core::Device> {
+        self.device.to_device(self.device_no)
+    }
 }
 
 /// Standard normal upper tail `P(Z > z)` via the Abramowitz-Stegun erf.
@@ -274,17 +297,20 @@ fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
     let model = BgeEmbedding::open(&args.model)?;
     // No coverage floor: a thin panel is exactly what probe exists to score.
     let qopts = crate::topic::eval::QueryNameOpts::default();
+    let dev = args.resolve_device()?;
     let cal = model.score(
         std::slice::from_ref(&args.calibration),
         args.preload_data,
         args.minibatch_size,
         &qopts,
+        &dev,
     )?;
     let query = model.score(
         &args.data_files,
         args.preload_data,
         args.minibatch_size,
         &qopts,
+        &dev,
     )?;
 
     write_verdict(Verdict {
@@ -298,8 +324,9 @@ fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
 
 fn probe_masked(args: &ProbeArgs) -> anyhow::Result<()> {
     let model = MaskedModel::open(&args.model)?;
+    let dev = args.resolve_device()?;
     let scored =
-        |files: &[Box<str>]| model.score(files, args.preload_data, args.minibatch_size, true);
+        |files: &[Box<str>]| model.score(files, args.preload_data, args.minibatch_size, true, &dev);
 
     let cal = scored(std::slice::from_ref(&args.calibration))?;
     let query = scored(&args.data_files)?;
@@ -390,6 +417,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyho
     );
 
     let qopts = QueryNameOpts::default();
+    let dev = args.resolve_device()?;
     let (cal_fit, q_fit, q_names) = match kind {
         RunKind::Vae => cal_and_query(args, |files| {
             score_vae_backend(VaeScoreArgs {
@@ -401,6 +429,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyho
                 query_name_opts: &qopts,
                 metadata: &metadata,
                 need_llik: true,
+                dev: &dev,
             })
         })?,
         // `LatentMode::Encoder` mirrors the masked path (encoder-only, no per-cell refinement),
@@ -424,6 +453,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyho
                 metadata: &metadata,
                 mode: LatentMode::Encoder,
                 refine_config: &TopicRefinementConfig::default(),
+                dev: &dev,
             })
         })?,
         // `run_probe` routes every other kind elsewhere or rejects it.

@@ -21,6 +21,7 @@ use crate::topic::eval::QueryNameOpts;
 use crate::topic::model_metadata::{
     load_feature_mean, load_shortlist_weights, masked_head_from_model_type, TopicModelMetadata,
 };
+use candle_util::candle_core::Device;
 use candle_util::vae::masked_topic::LatentHead;
 
 /// Every file a masked model must have for *all* of its consumers to work.
@@ -114,6 +115,7 @@ impl<'a> MaskedModel<'a> {
         preload: bool,
         minibatch_size: usize,
         need_llik: bool,
+        dev: &Device,
     ) -> anyhow::Result<MaskedScored> {
         let qopts = QueryNameOpts::default();
         score_masked_backend(MaskedScoreArgs {
@@ -135,6 +137,7 @@ impl<'a> MaskedModel<'a> {
             metadata: &self.metadata,
             head: self.head,
             need_llik,
+            dev,
         })
     }
 }

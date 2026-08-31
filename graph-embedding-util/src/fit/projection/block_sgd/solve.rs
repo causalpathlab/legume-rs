@@ -7,6 +7,7 @@ use super::pass::{BlockArgs, BlockOut};
 use super::{CHECK_EVERY, LR_FLOOR_FRAC, MAX_STEPS, TOL};
 use crate::cell_projection::SCORE_CLAMP;
 use candle_util::candle_core::{DType, Tensor};
+use matrix_util::traits::FusedTensorOps;
 
 pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let (h, dev) = (a.input.h, a.input.dev);
@@ -178,11 +179,14 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
         // Upper bound only. `exp` overflows f32 at 88 so the ceiling is a real
         // guard; the floor is not, since `exp(−large)` underflowing to 0 is the
         // right answer for a feature the cell does not express.
-        let s = theta
+        //
+        // Fused rather than `broadcast_add` → `minimum` → `exp`, which is the only
+        // `[Bc, F]` work between two rayon-parallel gemms and would otherwise run on
+        // one core — see [`FusedTensorOps`] for why. The matmul result is fresh and
+        // unaliased, which is what lets the fused path consume it in place.
+        let mu = theta
             .matmul(e_aug)?
-            .broadcast_add(&offset)?
-            .minimum(SCORE_CLAMP)?;
-        let mu = s.exp()?;
+            .clamped_exp_add_inplace(&offset, SCORE_CLAMP)?;
 
         // ∂L/∂Θ̃ = (μ − N)·Ẽ + λΘ̃, with the constant `N·Ẽ` hoisted above. The
         // intercept column comes out of the same matmul via `Ẽ`'s ones row, and

@@ -148,6 +148,48 @@ pub trait MatElemOps {
     fn log1p(&self) -> Self::Mat;
 }
 
+/// Elementwise chains fused into ONE pass, because candle's CPU backend runs them
+/// one core at a time.
+///
+/// Only matmul reaches `gemm`, which candle drives with `Parallelism::Rayon`;
+/// `unary_map` and `binary_map` are plain serial iterators, and the vectorized
+/// `f32_vec` path is `#[cfg(feature = "mkl" / "accelerate")]` — SIMD, still one
+/// core. So a loop whose matmuls scale across every core stalls on the
+/// elementwise ops between them, and any chain over a large tensor is worth
+/// collapsing into a single rayon pass.
+///
+/// Implemented for `Tensor` on CPU only. Off CPU the device's own kernels are
+/// already parallel, and each method falls back to the op chain it stands in for
+/// — same numbers either way, which the tests assert bitwise.
+pub trait FusedTensorOps: Sized {
+    /// `exp(min(self + offset, ceiling))`, i.e. the Poisson rate from a linear
+    /// predictor with the overflow guard `exp` needs (f32 overflows at 88).
+    ///
+    /// Replaces `self.broadcast_add(offset)?.minimum(ceiling)?.exp()`. `self` is
+    /// `[N, F]`; `offset` is any shape that chain broadcasts against it — `[N, F]`,
+    /// `[1, F]` or `[N, 1]`.
+    ///
+    /// # The receiver must be unaliased
+    ///
+    /// On CPU this overwrites `self`'s storage and hands it back, so the whole
+    /// chain costs one buffer instead of three. `Tensor` is an `Arc`, so taking
+    /// `self` by value does **not** prove exclusivity — `x.reshape(..)` yields a
+    /// contiguous tensor sharing `x`'s storage and would pass every guard here,
+    /// silently overwriting `x`. Pass a freshly computed tensor (a `matmul`
+    /// result), never a `clone`, `narrow` or `reshape` of one still in use.
+    ///
+    /// Back-prop is unsupported by construction (candle's in-place custom ops
+    /// carry no backward), which is why the callers take their gradients in
+    /// closed form.
+    ///
+    /// Deliberately single-offset. A chain carrying **two** offsets — a `[N, 1]`
+    /// column and a `[1, F]` row, as the joint velocity solver in
+    /// `graph-embedding-util` does — needs its own method rather than a caller
+    /// pre-broadcasting one of them, which would cost the full-size op this
+    /// exists to remove.
+    fn clamped_exp_add_inplace(self, offset: &Tensor, ceiling: f64) -> anyhow::Result<Self>;
+}
+
 /// TF-IDF (Term Frequency–Inverse Document Frequency) transformation
 ///
 /// A numerical statistic reflecting how important a word (term) is to a document

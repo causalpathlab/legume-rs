@@ -29,6 +29,7 @@ use graph_embedding_util::fit::{project_onto_frozen, FrozenProjectionArgs, PROJE
 // from the module directly. It is the one we want — see `BgeModel::score`.
 use crate::embed_common::Mat;
 use crate::logging::new_progress_bar;
+use candle_util::candle_core::Device;
 use graph_embedding_util::posterior::lnpdf::multinomial_ll;
 use graph_embedding_util::posterior::{FrozenSide, NodeTerm};
 use log::info;
@@ -36,6 +37,23 @@ use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 use std::path::Path;
+
+/// Host memory a projection group may hold in its remapped edges before it is handed to
+/// the SGD. Not a device bound — the engine does its own activation-budget blocking
+/// underneath — but a bound on what this side keeps resident.
+///
+/// Generous on purpose: it has to clear the engine's own block size by a wide margin, or
+/// there is only ever one block per call and the setup cost is paid per handful of cells.
+///
+/// Not [`matrix_util::utils::byte_budget_intervals`], which cuts the same kind of block
+/// from a budget but needs every column's nnz up front — `SparseIoVec` exposes only a
+/// total, so the count is only known here as the columns are read.
+const PROJECTION_GROUP_BYTES: usize = 512 << 20;
+
+/// Bytes a single nonzero costs while a group is in flight: 8 in [`EdgeGroup`]'s split
+/// `feat` / `count`, and 8 again in the `EdgeTable` the SGD builds from them, which is
+/// live at the same time.
+const GROUP_BYTES_PER_NNZ: usize = 16;
 
 /// An opened `senna bge` model: the frozen feature side, and the gene axis it lives on.
 pub struct BgeEmbedding {
@@ -148,6 +166,7 @@ impl BgeEmbedding {
         preload: bool,
         block: usize,
         qopts: &QueryNameOpts,
+        dev: &Device,
     ) -> anyhow::Result<BgeFit> {
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
             data_files: files.to_vec(),
@@ -188,74 +207,80 @@ impl BgeEmbedding {
         let mut llik = Vec::with_capacity(ntot);
         let mut total = Vec::with_capacity(ntot);
         let mut latent = Mat::zeros(ntot, self.h);
-        let bar = new_progress_bar(ntot.div_ceil(block.max(1)) as u64).with_message("scoring");
-        // Blocked because the projection takes every cell at once; unblocked, a large query
-        // would hold its whole sparse matrix in `per_cell` on top of the backend.
-        for lb in (0..ntot).step_by(block) {
-            let ub = (lb + block).min(ntot);
-            let csc = data_vec.read_columns_csc(lb..ub)?;
-            // One walk per cell yields both the remapped entries and the cell's total; the
-            // total used to be a third pass over the same nonzeros.
-            let (per_cell, totals): (Vec<Vec<(u32, f32)>>, Vec<f32>) = (0..csc.ncols())
-                .map(|j| {
-                    let col = csc.col(j);
-                    let pos: Vec<(u32, f32)> = col
-                        .row_indices()
-                        .iter()
-                        .zip(col.values())
-                        .filter_map(|(&i, &v)| remap.new_to_train[i].map(|t| (t as u32, v)))
-                        .collect();
-                    let tot = pos.iter().map(|&(_, v)| v).sum::<f32>();
-                    (pos, tot)
-                })
-                .unzip();
-            // ~12 B/nnz, and `per_cell` now holds everything downstream needs.
-            drop(csc);
-            // The SGD entry point wants features and counts as separate slices.
-            let packed: Vec<(Vec<u32>, Vec<f32>)> = per_cell
-                .iter()
-                .map(|pos| pos.iter().copied().unzip())
-                .collect();
+        let bar = new_progress_bar(ntot as u64).with_message("scoring");
 
-            // The SAME block SGD the training run used for its own phase 2. The
-            // Newton/IRLS alternative fits a cell's observed features only and lets a
-            // ridge stand in for the log-partition, so it lands in a different space —
-            // and a train/test comparison whose two halves were projected differently
-            // measures the estimator gap as much as the model.
-            let nodes: Vec<(u32, &[u32], &[f32])> = packed
-                .iter()
-                .enumerate()
-                .map(|(j, (f, c))| (j as u32, f.as_slice(), c.as_slice()))
-                .collect();
-            let fit = project_onto_frozen(
-                &FrozenProjectionArgs {
-                    feat: &self.rho,
-                    b_feat: &self.b_feat,
-                    h: self.h,
-                    lambda: f64::from(PROJECTION_RIDGE_SGD),
-                    dev: &candle_util::candle_core::Device::Cpu,
-                },
-                &nodes,
-                per_cell.len(),
-            )?;
-            let e_cell = fit.theta;
-            // `multinomial_ll` walks the whole gene axis twice per cell for the normalizer,
-            // which makes it the dominant cost here — and it sat serial directly below
-            // `project_cells`, which is already rayon-parallel. Everything it reads is shared
-            // and immutable, so the map parallelizes as-is and stays in order.
-            llik.par_extend(per_cell.par_iter().enumerate().map(|(c, pos)| {
-                let node = NodeTerm::new(pos, &partition, 1.0);
+        // Columns are READ in `block`-sized slabs — that bound is the reader's — but they
+        // are PROJECTED in groups accumulated up to [`PROJECTION_GROUP_BYTES`].
+        //
+        // The two sizes are not the same thing and used to be conflated. `block` is
+        // `--minibatch-size`, default 500; the projection engine sizes its own internal
+        // blocks from its activation budget and takes thousands of cells at a time. Handing
+        // it 500 gave it exactly one under-sized block per call, so its per-step matmul ran
+        // on a short `M` and every call re-paid the whole per-pass setup: the transposed
+        // dictionary, the live-feature scan, a progress bar and a log line, ~70 times over
+        // for a query of a few tens of thousands of cells.
+        let nnz_budget = PROJECTION_GROUP_BYTES / GROUP_BYTES_PER_NNZ;
+        let mut group = EdgeGroup::default();
+
+        let mut lb = 0usize;
+        while lb < ntot {
+            let group_lb = lb;
+            // Accumulate slabs until the group is worth projecting. The inner loop's
+            // exit condition IS the flush condition, so a part-group at the end needs
+            // no special case.
+            while lb < ntot && group.nnz() < nnz_budget {
+                let ub = (lb + block).min(ntot);
+                let csc = data_vec.read_columns_csc(lb..ub)?;
+                // One walk per cell yields both the remapped entries and the cell's
+                // total; the total used to be a third pass over the same nonzeros.
+                // Parallel per cell, matching the `multinomial_ll` pass below — the
+                // walks are independent, and an indexed range keeps them in cell order.
+                let (per_cell, totals): (Vec<Vec<(u32, f32)>>, Vec<f32>) = (0..csc.ncols())
+                    .into_par_iter()
+                    .map(|j| {
+                        let col = csc.col(j);
+                        let pos: Vec<(u32, f32)> = col
+                            .row_indices()
+                            .iter()
+                            .zip(col.values())
+                            .filter_map(|(&i, &v)| remap.new_to_train[i].map(|t| (t as u32, v)))
+                            .collect();
+                        let tot = pos.iter().map(|&(_, v)| v).sum::<f32>();
+                        (pos, tot)
+                    })
+                    .unzip();
+                drop(csc);
+
+                group.extend(&per_cell);
+                total.extend(totals);
+                lb = ub;
+            }
+
+            let n_group = group.len();
+            let e_cell = self.project_group(&group, dev)?;
+            // `multinomial_ll` walks the whole gene axis twice per cell for the
+            // normalizer, which makes it the dominant cost here — and it sat serial
+            // directly below `project_cells`, which is already rayon-parallel. Everything
+            // it reads is shared and immutable, so the map parallelizes as-is and stays in
+            // order. `NodeTerm` borrows an interleaved slice, so the split arrays are
+            // re-zipped into a per-cell temporary — a few thousand entries against a
+            // normalizer that touches the whole gene axis twice.
+            llik.par_extend((0..n_group).into_par_iter().map(|c| {
+                let (feat, count) = group.cell(c);
+                let pos: Vec<(u32, f32)> =
+                    feat.iter().copied().zip(count.iter().copied()).collect();
+                let node = NodeTerm::new(&pos, &partition, 1.0);
                 multinomial_ll(&e_cell[c * self.h..(c + 1) * self.h], &node, &side)
             }));
-            // `e_cell` is row-major `[block, H]`; `Mat` is column-major, so this is a
+            // `e_cell` is row-major `[n_group, H]`; `Mat` is column-major, so this is a
             // transposing copy rather than a memcpy.
-            for c in 0..(ub - lb) {
+            for c in 0..n_group {
                 for j in 0..self.h {
-                    latent[(lb + c, j)] = e_cell[c * self.h + j];
+                    latent[(group_lb + c, j)] = e_cell[c * self.h + j];
                 }
             }
-            total.extend(totals);
-            bar.inc(1);
+            bar.inc(n_group as u64);
+            group.clear();
         }
         bar.finish_and_clear();
 
@@ -265,5 +290,78 @@ impl BgeEmbedding {
             total,
             latent,
         })
+    }
+
+    /// Project one group of cells onto the frozen side, returning `θ` row-major `[n, H]`.
+    ///
+    /// The SAME block SGD the training run used for its own phase 2. The Newton/IRLS
+    /// alternative fits a cell's observed features only and lets a ridge stand in for the
+    /// log-partition, so it lands in a different space — and a train/test comparison whose
+    /// two halves were projected differently measures the estimator gap as much as the model.
+    fn project_group(&self, group: &EdgeGroup, dev: &Device) -> anyhow::Result<Vec<f32>> {
+        let nodes: Vec<(u32, &[u32], &[f32])> = (0..group.len())
+            .map(|j| {
+                let (feat, count) = group.cell(j);
+                (j as u32, feat, count)
+            })
+            .collect();
+        let fit = project_onto_frozen(
+            &FrozenProjectionArgs {
+                feat: &self.rho,
+                b_feat: &self.b_feat,
+                h: self.h,
+                lambda: f64::from(PROJECTION_RIDGE_SGD),
+                dev,
+            },
+            &nodes,
+            group.len(),
+        )?;
+        Ok(fit.theta)
+    }
+}
+
+/// One projection group's remapped edges, flat and split.
+///
+/// Flat because the SGD entry point wants `(&[u32], &[f32])` per cell: held as a
+/// `Vec` per cell it would be two allocations per cell and a whole second copy of the
+/// group's nonzeros, which mattered little when a "group" was one `--minibatch-size`
+/// slab and does not when it is tens of thousands of cells.
+#[derive(Default)]
+struct EdgeGroup {
+    /// `offsets[i]..offsets[i + 1]` bounds cell `i`; always starts with one `0`.
+    offsets: Vec<usize>,
+    feat: Vec<u32>,
+    count: Vec<f32>,
+}
+
+impl EdgeGroup {
+    fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    fn nnz(&self) -> usize {
+        self.feat.len()
+    }
+
+    fn cell(&self, i: usize) -> (&[u32], &[f32]) {
+        let (s, e) = (self.offsets[i], self.offsets[i + 1]);
+        (&self.feat[s..e], &self.count[s..e])
+    }
+
+    fn extend(&mut self, per_cell: &[Vec<(u32, f32)>]) {
+        if self.offsets.is_empty() {
+            self.offsets.push(0);
+        }
+        for pos in per_cell {
+            self.feat.extend(pos.iter().map(|&(f, _)| f));
+            self.count.extend(pos.iter().map(|&(_, c)| c));
+            self.offsets.push(self.feat.len());
+        }
+    }
+
+    fn clear(&mut self) {
+        self.offsets.clear();
+        self.feat.clear();
+        self.count.clear();
     }
 }
