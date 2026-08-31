@@ -13,6 +13,11 @@
 //!    accumulate each query row's weighted average of its neighbours'
 //!    counts into a dense `[N_query, G_ref]` matrix.
 //!
+//! An all-zero row means "no evidence" on BOTH sides: a zero query row
+//! is skipped (its imputed row stays zero), and a zero reference row is
+//! excluded from the index — left in, it would sit at one fixed
+//! coordinate capturing every otherwise-distant query.
+//!
 //! The information-theoretic point of retrieval over a decoder readout:
 //! the imputed expression inherits the reference's full-rank gene–gene
 //! covariance through the retrieved cells, rather than being confined to
@@ -34,16 +39,19 @@ pub struct RetrievalImputeConfig {
     pub chunk: usize,
 }
 
+/// A query row's matched reference rows and their pooling weights.
+/// Empty for a zero-latent query row.
+struct QueryNeighbours {
+    ids: Vec<u32>,
+    weights: Vec<f32>,
+}
+
 /// Weighted-kNN imputation of `ref_data`'s features onto the query rows.
 ///
 /// `query_latent` is `[N_query, K]` and `ref_latent` is `[N_ref, K]`, in
 /// the same (caller-established) matching space; `ref_data` holds the
 /// reference counts with one column per `ref_latent` row. Returns the
 /// dense imputed `[N_query, G_ref]` matrix.
-///
-/// A query row with zero norm carries no matching evidence (an
-/// unassignable cell, an empty propensity row); it is skipped — its
-/// imputed row stays zero — and the count of such rows is logged.
 pub fn retrieval_impute(
     query_latent: &Mat,
     ref_latent: &Mat,
@@ -63,42 +71,57 @@ pub fn retrieval_impute(
          the data files don't match the latent",
         ref_data.num_columns(),
     );
+    let g_ref = ref_data.num_rows();
+    anyhow::ensure!(g_ref > 0, "reference data has no features");
 
+    // Index only the reference rows that carry evidence.
+    let live: Vec<usize> = (0..n_ref)
+        .filter(|&i| ref_latent.row(i).iter().any(|&x| x != 0.0))
+        .collect();
+    anyhow::ensure!(!live.is_empty(), "every reference latent row is zero");
+    if live.len() < n_ref {
+        warn!(
+            "{} of {n_ref} reference rows have a zero latent and are excluded \
+             from the index",
+            n_ref - live.len()
+        );
+    }
     info!(
-        "Building kNN index over {n_ref} reference rows (k={}, τ={})",
-        cfg.knn, cfg.temperature
+        "Building kNN index over {} reference rows (k={}, τ={})",
+        live.len(),
+        cfg.knn,
+        cfg.temperature
     );
-    // Transpose once so reference rows become columns; `from_dvector_views`
-    // then borrows column views directly — no per-row owned copy.
-    let ref_latent_t = ref_latent.transpose();
-    let ref_dict = ColumnDict::<u32>::from_dvector_views(
-        ref_latent_t.column_iter().collect(),
-        (0..n_ref as u32).collect(),
+    let ref_dict = ColumnDict::<u32>::from_dmatrix(
+        ref_latent.transpose().select_columns(&live),
+        live.iter().map(|&i| i as u32).collect(),
     );
 
-    let knn = cfg.knn.min(n_ref);
-    let neighbours: Vec<Option<(Vec<u32>, Vec<f32>)>> = (0..n_query)
+    let knn = cfg.knn.min(live.len());
+    let neighbours: Vec<QueryNeighbours> = (0..n_query)
         .into_par_iter()
         .map(|i| {
             let query: Vec<f32> = query_latent.row(i).iter().copied().collect();
             if query.iter().all(|&x| x == 0.0) {
-                return Ok(None);
+                return Ok(QueryNeighbours {
+                    ids: Vec::new(),
+                    weights: Vec::new(),
+                });
             }
-            ref_dict
+            let (ids, distances) = ref_dict
                 .search_by_query_data(&query, knn)
-                .map(Some)
-                .map_err(|e| anyhow::anyhow!("kNN search for query row {i}: {e}"))
+                .map_err(|e| anyhow::anyhow!("kNN search for query row {i}: {e}"))?;
+            let weights = dist_to_softmax_weights(&distances, cfg.temperature);
+            Ok(QueryNeighbours { ids, weights })
         })
         .collect::<anyhow::Result<_>>()?;
-    let n_skipped = neighbours.iter().filter(|n| n.is_none()).count();
+    let n_skipped = neighbours.iter().filter(|n| n.ids.is_empty()).count();
     if n_skipped > 0 {
         warn!(
             "{n_skipped} of {n_query} query rows have a zero latent and were skipped; \
              their imputed rows stay zero"
         );
     }
-
-    let g_ref = ref_data.num_rows();
 
     // Heads-up before the big allocation: dense [N_query, G_ref] f32 grows
     // fast. Streaming-sparse output is a future optimization; for now we
@@ -113,28 +136,26 @@ pub fn retrieval_impute(
         );
     }
 
-    // Pre-compute softmax weights per query row.
-    let weights: Vec<Vec<f32>> = neighbours
-        .par_iter()
-        .map(|nbr| match nbr {
-            Some((_, d)) => dist_to_softmax_weights(d, cfg.temperature),
-            None => Vec::new(),
-        })
-        .collect();
-
     // Invert the (query row → neighbours) map so column-streaming the
     // reference can do `consumers[ref_id]` lookups in O(1) and skip whole
     // chunks where no consumer touches any of the chunk's cells.
     let mut cell_to_consumers: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_ref];
     for (query_id, nbr) in neighbours.iter().enumerate() {
-        if let Some((nbrs, _)) = nbr {
-            for (k, &c) in nbrs.iter().enumerate() {
-                cell_to_consumers[c as usize].push((query_id as u32, weights[query_id][k]));
-            }
+        for (&c, &w) in nbr.ids.iter().zip(nbr.weights.iter()) {
+            cell_to_consumers[c as usize].push((query_id as u32, w));
         }
     }
 
-    let mut imputed = Mat::zeros(n_query, g_ref);
+    // Accumulate TRANSPOSED, [G_ref, N_query]: each query row is then one
+    // contiguous column, so a reference column's ascending row indices write
+    // ascending contiguous addresses, and disjoint query rows let the
+    // per-chunk accumulation run in parallel with no locking. One transpose
+    // at the end pays a single O(N×G) pass for a cache-friendly hot loop.
+    let mut imputed_t = Mat::zeros(g_ref, n_query);
+    // Per-chunk (reference-local column, weight) work lists, indexed by
+    // query; allocated once and cleared per chunk via `touched`.
+    let mut groups: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_query];
+    let mut touched: Vec<u32> = Vec::new();
     let chunk_size = cfg.chunk.max(64);
     let mut col_lb = 0;
     while col_lb < n_ref {
@@ -149,28 +170,43 @@ pub fn retrieval_impute(
             continue;
         }
         let csc = ref_data.read_columns_csc(col_lb..col_ub)?;
-        for c_local in 0..csc.ncols() {
-            let consumers = &cell_to_consumers[col_lb + c_local];
-            if consumers.is_empty() {
-                continue;
-            }
-            let col = csc.col(c_local);
-            for (&row_id, &v) in col.row_indices().iter().zip(col.values().iter()) {
-                for &(query_id, w) in consumers {
-                    imputed[(query_id as usize, row_id)] += w * v;
+
+        touched.clear();
+        for c_local in 0..(col_ub - col_lb) {
+            for &(query_id, w) in &cell_to_consumers[col_lb + c_local] {
+                let grp = &mut groups[query_id as usize];
+                if grp.is_empty() {
+                    touched.push(query_id);
                 }
+                grp.push((c_local as u32, w));
             }
+        }
+
+        imputed_t
+            .as_mut_slice()
+            .par_chunks_mut(g_ref)
+            .zip(groups.par_iter())
+            .for_each(|(query_col, grp)| {
+                for &(c_local, w) in grp {
+                    let col = csc.col(c_local as usize);
+                    for (&row_id, &v) in col.row_indices().iter().zip(col.values().iter()) {
+                        query_col[row_id] += w * v;
+                    }
+                }
+            });
+
+        for &q in &touched {
+            groups[q as usize].clear();
         }
         col_lb = col_ub;
     }
 
-    Ok(imputed)
+    Ok(imputed_t.transpose())
 }
 
 /// Convert kNN L2 distances to a positive-weight simplex via
 /// `w_k ∝ exp(-d_k² / (2 τ²))`, normalised to sum to 1.
-#[must_use]
-pub fn dist_to_softmax_weights(distances: &[f32], temperature: f32) -> Vec<f32> {
+fn dist_to_softmax_weights(distances: &[f32], temperature: f32) -> Vec<f32> {
     if distances.is_empty() {
         return Vec::new();
     }

@@ -119,6 +119,35 @@ fn zero_latent_query_rows_stay_zero() -> anyhow::Result<()> {
 }
 
 #[test]
+fn zero_latent_reference_rows_are_never_retrieved() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    // cell_1's latent is zero but its counts are not; with k=2 it would be
+    // every query's second neighbour if it were indexed.
+    let ref_latent = Mat::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 0.0]);
+    let triplets: Vec<(u64, u64, f32)> = vec![(0, 0, 4.0), (1, 1, 9.0)];
+    let ref_data = make_ref_data(&dir, &triplets, 2, 2)?;
+
+    let query_latent = Mat::from_row_slice(1, 2, &[1.0, 0.0]);
+    let imputed = retrieval_impute(
+        &query_latent,
+        &ref_latent,
+        &ref_data,
+        &RetrievalImputeConfig {
+            knn: 2,
+            temperature: 1.0,
+            chunk: 64,
+        },
+    )?;
+    assert!((imputed[(0, 0)] - 4.0).abs() < 1e-4, "only cell_0 pooled");
+    assert!(
+        imputed[(0, 1)].abs() < 1e-6,
+        "the zero-latent cell's counts must not leak in: {}",
+        imputed[(0, 1)]
+    );
+    Ok(())
+}
+
+#[test]
 fn dimension_and_count_mismatches_are_refused() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let triplets: Vec<(u64, u64, f32)> = vec![(0, 0, 1.0), (1, 1, 1.0)];

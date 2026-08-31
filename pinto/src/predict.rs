@@ -274,7 +274,10 @@ fn assign_to_centroids(latent_nk: &Mat, centroids_kd: &Mat, counts: &[f32]) -> V
         .collect()
 }
 
-pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<()> {
+/// Returns the per-cell propensity and the cell names — the same table
+/// written to `{out}.propensity.parquet` — so a caller that consumes the
+/// prediction (`pinto impute`) need not round-trip it through parquet.
+pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
     let c = &args.common;
     mkdir_parent(&c.out)?;
     anyhow::ensure!(!c.data_files.is_empty(), "predict: no data files given");
@@ -553,7 +556,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<()> {
     meta.write(&meta_path)?;
     info!("Wrote {}", meta_path.display());
     info!("Done");
-    Ok(())
+    Ok((propensity, cell_names))
 }
 
 /// Per-pair held-out scores, under the same column names `senna predict` uses

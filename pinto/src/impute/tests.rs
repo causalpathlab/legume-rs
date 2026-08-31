@@ -156,15 +156,19 @@ fn no_shared_gene_is_an_error_not_a_uniform_guess() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn explicit_reference_data_bypasses_the_manifest() -> anyhow::Result<()> {
+fn parse_impute(argv: &[&str]) -> anyhow::Result<ImputeArgs> {
     use clap::Parser;
     #[derive(Parser)]
     struct Wrap {
         #[command(flatten)]
         args: ImputeArgs,
     }
-    let wrap = Wrap::try_parse_from([
+    Ok(Wrap::try_parse_from(argv)?.args)
+}
+
+#[test]
+fn explicit_reference_data_bypasses_the_manifest() -> anyhow::Result<()> {
+    let args = parse_impute(&[
         "impute",
         "q.zarr",
         "--model",
@@ -174,21 +178,15 @@ fn explicit_reference_data_bypasses_the_manifest() -> anyhow::Result<()> {
         "--reference-data",
         "ref.zarr",
     ])?;
-    let files = resolve_reference_data(&wrap.args)?;
+    let files = resolve_reference_data(&args, None)?;
     assert_eq!(files, vec![Box::<str>::from("ref.zarr")]);
     Ok(())
 }
 
 #[test]
 fn a_missing_manifest_names_the_flag_as_the_way_out() -> anyhow::Result<()> {
-    use clap::Parser;
-    #[derive(Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        args: ImputeArgs,
-    }
-    let wrap = Wrap::try_parse_from(["impute", "q.zarr", "--model", "no/such/model", "-o", "out"])?;
-    let err = resolve_reference_data(&wrap.args).unwrap_err();
+    let args = parse_impute(&["impute", "q.zarr", "--model", "no/such/model", "-o", "out"])?;
+    let err = resolve_reference_data(&args, None).unwrap_err();
     assert!(err.to_string().contains("--reference-data"), "{err}");
     Ok(())
 }

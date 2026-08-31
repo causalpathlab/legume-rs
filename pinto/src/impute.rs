@@ -4,11 +4,10 @@
 //! The matching space is the per-cell community propensity — the one
 //! partition-level cell representation every pinto model (`cage`, `lc`,
 //! `dsvd`) publishes — so the retrieval step is uniform while the
-//! query-side projection dispatches on what the model saved:
+//! query-side projection dispatches on the manifest's `command`:
 //!
-//! - **cage** (`{model}.feature_embedding.parquet` exists): the full
-//!   `pinto predict` pipeline runs first, writing its usual outputs under
-//!   `{out}`; the query propensity is its `{out}.propensity.parquet`, and
+//! - **cage**: the full `pinto predict` pipeline runs first, writing its
+//!   usual outputs under `{out}`; the query propensity is its result, and
 //!   the reference propensity is the training run's own
 //!   `{model}.propensity.parquet`. Both sides are incident-edge fractions
 //!   over the same trained communities.
@@ -34,6 +33,7 @@
 use crate::link_community::outputs::write_propensity_matrix;
 use crate::predict::{predict_cage, PredictArgs};
 use crate::util::common::*;
+use crate::util::metadata::PintoMetadata;
 use clap::Args;
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -100,15 +100,34 @@ pub fn run_impute(args: &ImputeArgs) -> anyhow::Result<()> {
     let model = args.predict.model.as_ref();
     mkdir_parent(&c.out)?;
 
-    let reference_files = resolve_reference_data(args)?;
-    info!("Opening reference data ({} file(s))", reference_files.len());
-    let ref_data = load_backends(&reference_files, c.preload_data)?;
+    // The manifest is the authority on what the model IS; artifact probing
+    // (e.g. for feature_embedding.parquet) would silently reroute a cage
+    // model with a misplaced file — or a `pinto predict` output prefix —
+    // onto the profile path with different semantics. The probe survives
+    // only as a fallback for pre-manifest runs.
+    let meta = PintoMetadata::read(Path::new(&format!("{model}.pinto.json"))).ok();
+    let is_cage = match meta.as_ref().map(|m| m.command.as_str()) {
+        Some("cage") => true,
+        Some("lc" | "dsvd") => false,
+        Some(other) => anyhow::bail!(
+            "{model} is a `{other}` run; impute needs a trained cage, lc, or dsvd model"
+        ),
+        None => {
+            let probe = Path::new(&format!("{model}.feature_embedding.parquet")).is_file();
+            log::warn!(
+                "{model}.pinto.json not found; dispatching by artifact probe \
+                 ({} path)",
+                if probe { "cage" } else { "lc/dsvd profile" }
+            );
+            probe
+        }
+    };
 
-    let is_cage = Path::new(&format!("{model}.feature_embedding.parquet")).is_file();
-    let (query_prop, query_cells, ref_prop) = if is_cage {
-        cage_propensities(args, &ref_data)?
+    let reference_files = resolve_reference_data(args, meta.as_ref())?;
+    let (query_prop, query_cells, ref_prop, ref_data) = if is_cage {
+        cage_propensities(args, &reference_files)?
     } else {
-        profile_propensities(args, &ref_data)?
+        profile_propensities(args, &reference_files)?
     };
     anyhow::ensure!(
         query_prop.ncols() == ref_prop.ncols(),
@@ -145,45 +164,51 @@ pub fn run_impute(args: &ImputeArgs) -> anyhow::Result<()> {
 }
 
 /// Reference data files: the explicit flag, else the model's manifest.
-fn resolve_reference_data(args: &ImputeArgs) -> anyhow::Result<Vec<Box<str>>> {
+fn resolve_reference_data(
+    args: &ImputeArgs,
+    meta: Option<&PintoMetadata>,
+) -> anyhow::Result<Vec<Box<str>>> {
     if let Some(files) = args.reference_data.clone() {
         return Ok(files);
     }
     let model = args.predict.model.as_ref();
-    let meta_path = format!("{model}.pinto.json");
-    let meta = crate::util::metadata::PintoMetadata::read(Path::new(&meta_path)).map_err(|e| {
-        anyhow::anyhow!("reading {meta_path}: {e}\nPass --reference-data explicitly.")
+    let meta = meta.ok_or_else(|| {
+        anyhow::anyhow!("cannot read {model}.pinto.json. Pass --reference-data explicitly.")
     })?;
     let files: Vec<Box<str>> = meta
         .data_files
+        .clone()
         .unwrap_or_default()
         .into_iter()
         .map(Into::into)
         .collect();
     anyhow::ensure!(
         !files.is_empty(),
-        "{meta_path} records no data files; pass --reference-data explicitly"
+        "{model}.pinto.json records no data files; pass --reference-data explicitly"
     );
     for f in &files {
         anyhow::ensure!(
             Path::new(f.as_ref()).exists(),
-            "reference data file {f} (recorded in {meta_path}) does not exist; \
+            "reference data file {f} (recorded in {model}.pinto.json) does not exist; \
              pass --reference-data with the current location"
         );
     }
     Ok(files)
 }
 
-fn load_backends(files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
-    let mut loaded = SparseIoVec::new();
-    for f in files {
-        let mut data = data_beans::convert::try_open_or_convert(f)?;
-        if preload {
-            data.preload_columns()?;
-        }
-        loaded.push(std::sync::Arc::from(data), None)?;
-    }
-    Ok(loaded)
+/// Open the reference backends. The multi-file `@basename` cell-name
+/// suffixing matches what training wrote into its propensity table, so the
+/// cage path's name check compares like with like.
+fn open_reference(files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
+    info!("Opening reference data ({} file(s))", files.len());
+    let loaded = auxiliary_data::data_loading::read_data_on_shared_rows(
+        auxiliary_data::data_loading::ReadSharedRowsArgs {
+            data_files: files.to_vec(),
+            preload,
+            ..Default::default()
+        },
+    )?;
+    Ok(loaded.data)
 }
 
 //////////////////////////////////
@@ -191,26 +216,24 @@ fn load_backends(files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVe
 //////////////////////////////////
 
 /// Run `pinto predict` for the query propensity; read the training run's
-/// propensity for the reference side.
+/// propensity for the reference side. The reference opens only after
+/// predict has succeeded, so a preloaded atlas is not held in memory
+/// through the whole predict pass.
 fn cage_propensities(
     args: &ImputeArgs,
-    ref_data: &SparseIoVec,
-) -> anyhow::Result<(Mat, Vec<Box<str>>, Mat)> {
-    let c = &args.predict.common;
+    reference_files: &[Box<str>],
+) -> anyhow::Result<(Mat, Vec<Box<str>>, Mat, SparseIoVec)> {
     let model = args.predict.model.as_ref();
 
     info!("cage model: projecting the query sample through `pinto predict`");
-    predict_cage(&args.predict)?;
-    let none = HashSet::default();
-    let (query_prop, _, _, query_cells) = crate::plot::load::read_propensity(
-        Path::new(&format!("{}.propensity.parquet", c.out)),
-        &none,
-    )?;
+    let (query_prop, query_cells) = predict_cage(&args.predict)?;
 
+    let ref_data = open_reference(reference_files, args.predict.common.preload_data)?;
     let ref_prop_path = args
         .reference_propensity
         .clone()
         .unwrap_or_else(|| format!("{model}.propensity.parquet").into());
+    let none = HashSet::default();
     let (ref_prop, _, _, ref_cells) =
         crate::plot::load::read_propensity(Path::new(ref_prop_path.as_ref()), &none)?;
 
@@ -225,7 +248,7 @@ fn cage_propensities(
         ref_cells.len(),
         data_cells.len()
     );
-    Ok((query_prop, query_cells, ref_prop))
+    Ok((query_prop, query_cells, ref_prop, ref_data))
 }
 
 ///////////////////////////////////////
@@ -236,16 +259,22 @@ fn cage_propensities(
 /// profiles, one EM per cell, then write the query's under `{out}`.
 fn profile_propensities(
     args: &ImputeArgs,
-    ref_data: &SparseIoVec,
-) -> anyhow::Result<(Mat, Vec<Box<str>>, Mat)> {
+    reference_files: &[Box<str>],
+) -> anyhow::Result<(Mat, Vec<Box<str>>, Mat, SparseIoVec)> {
     let c = &args.predict.common;
     let model = args.predict.model.as_ref();
+    if args.reference_propensity.is_some() {
+        log::warn!(
+            "--reference-propensity is ignored for an lc / dsvd model: the reference \
+             propensity is re-estimated from the reference data so both sides come \
+             from the same profile projection"
+        );
+    }
 
     let gc_path = format!("{model}.gene_community.parquet");
     anyhow::ensure!(
         Path::new(&gc_path).is_file(),
-        "{model}: neither feature_embedding.parquet (cage) nor \
-         gene_community.parquet (lc / dsvd) exists — not a pinto model prefix"
+        "{model}: gene_community.parquet does not exist — not an lc / dsvd model prefix"
     );
     let (profiles, model_genes) = crate::plot::load::read_gene_community(Path::new(&gc_path))?;
     info!(
@@ -255,10 +284,11 @@ fn profile_propensities(
     );
 
     anyhow::ensure!(!c.data_files.is_empty(), "impute: no data files given");
-    let peek_names = data_beans::convert::try_open_or_convert(&c.data_files[0])?.row_names()?;
-    let feature_kind = args.predict.gene_name_mode.resolve_kind(&peek_names);
-
-    let query_data = load_backends(&c.data_files, c.preload_data)?;
+    let query_data = open_reference(&c.data_files, c.preload_data)?;
+    let feature_kind = args
+        .predict
+        .gene_name_mode
+        .resolve_kind(&query_data.row_names()?);
     let query_cells = query_data.column_names()?;
     let query_prop = project_profile_propensity(
         &query_data,
@@ -274,8 +304,9 @@ fn profile_propensities(
 
     // The reference goes through the SAME map — not through the training
     // run's edge-based propensity — so the kNN compares like with like.
+    let ref_data = open_reference(reference_files, c.preload_data)?;
     let ref_prop = project_profile_propensity(
-        ref_data,
+        &ref_data,
         &profiles,
         &model_genes,
         &feature_kind,
@@ -283,15 +314,17 @@ fn profile_propensities(
         c.block_size,
         "reference",
     )?;
-    Ok((query_prop, query_cells, ref_prop))
+    Ok((query_prop, query_cells, ref_prop, ref_data))
 }
 
 struct ProfileEmParam {
-    /// `[G_matched, K]` per-community gene probabilities, renormalized over
-    /// the matched genes (f64 for the per-cell EM accumulators).
-    p: nalgebra::DMatrix<f64>,
-    /// data row → matched-profile row.
+    /// `[K, G_matched]` per-community gene probabilities, TRANSPOSED so a
+    /// gene's K values are one contiguous column, renormalized over the
+    /// matched genes (f64 for the per-cell EM accumulators).
+    p_t: nalgebra::DMatrix<f64>,
+    /// data row → matched-profile column.
     row_to_matched: Vec<Option<usize>>,
+    /// Already clamped to ≥ 1.
     iters: usize,
 }
 
@@ -314,7 +347,6 @@ fn project_profile_propensity(
     let data_genes = data.row_names()?;
 
     // Model gene → profile row, on canonicalized names.
-    let canon = |name: &str| -> Box<str> { feature_kind.canonicalize(name) };
     let model_idx: HashMap<Box<str>, usize> = model_genes
         .iter()
         .enumerate()
@@ -324,7 +356,7 @@ fn project_profile_propensity(
     let mut row_to_matched: Vec<Option<usize>> = vec![None; data_genes.len()];
     let mut seen: HashMap<usize, usize> = HashMap::default();
     for (row, name) in data_genes.iter().enumerate() {
-        let key = canon(name);
+        let key = feature_kind.canonicalize(name);
         if let Some(&g) = model_idx.get(&key) {
             let slot = *seen.entry(g).or_insert_with(|| {
                 matched_profile_rows.push(g);
@@ -347,25 +379,27 @@ fn project_profile_propensity(
     );
 
     // Condition each community's profile on the matched window and drop the
-    // rest: `p̃_k(g) = λ_gk / Σ_{g∈matched} λ_gk`.
+    // rest: `p̃_k(g) = λ_gk / Σ_{g∈matched} λ_gk`. Stored [K, G_matched] so
+    // the EM's per-gene access is one contiguous column.
     let g_m = matched_profile_rows.len();
-    let mut p = nalgebra::DMatrix::<f64>::zeros(g_m, k);
+    let mut p_t = nalgebra::DMatrix::<f64>::zeros(k, g_m);
     for (slot, &g) in matched_profile_rows.iter().enumerate() {
         for c in 0..k {
-            p[(slot, c)] = f64::from(profiles[(g, c)]).max(0.0);
+            p_t[(c, slot)] = f64::from(profiles[(g, c)]).max(0.0);
         }
     }
-    for mut col in p.column_iter_mut() {
-        let total: f64 = col.iter().sum();
+    for c in 0..k {
+        let total: f64 = p_t.row(c).iter().sum();
         if total > 0.0 {
-            col /= total;
+            let mut row = p_t.row_mut(c);
+            row /= total;
         }
     }
 
     let param = ProfileEmParam {
-        p,
+        p_t,
         row_to_matched,
-        iters,
+        iters: iters.max(1),
     };
     let n = data.num_columns();
     let mut prop_kn = Mat::zeros(k, n);
@@ -381,42 +415,56 @@ fn profile_em_visitor(
 ) -> anyhow::Result<()> {
     let (lb, ub) = job;
     let csc = data.read_columns_csc(lb..ub)?;
-    let k = param.p.ncols();
+    let k = param.p_t.nrows();
     let mut chunk = Mat::zeros(k, ub - lb);
+
+    // One set of buffers for the whole block; the per-cell loop below only
+    // clears and refills them.
+    let mut obs: Vec<(usize, f64)> = Vec::new();
+    let mut pi = vec![0.0f64; k];
+    let mut num = vec![0.0f64; k];
+    let mut resp = vec![0.0f64; k];
 
     for c_local in 0..csc.ncols() {
         let col = csc.col(c_local);
         // The cell's counts on the matched window.
-        let obs: Vec<(usize, f64)> = col
-            .row_indices()
-            .iter()
-            .zip(col.values().iter())
-            .filter_map(|(&row, &v)| param.row_to_matched[row].map(|slot| (slot, f64::from(v))))
-            .collect();
-        let total: f64 = obs.iter().map(|&(_, x)| x).sum();
-        if total <= 0.0 {
+        obs.clear();
+        obs.extend(
+            col.row_indices()
+                .iter()
+                .zip(col.values().iter())
+                .filter_map(|(&row, &v)| {
+                    param.row_to_matched[row].map(|slot| (slot, f64::from(v)))
+                }),
+        );
+        if obs.iter().map(|&(_, x)| x).sum::<f64>() <= 0.0 {
             continue; // zero row → skipped downstream
         }
 
-        let mut pi = vec![1.0f64 / k as f64; k];
-        let mut num = vec![0.0f64; k];
-        for _ in 0..param.iters.max(1) {
-            num.iter_mut().for_each(|x| *x = 0.0);
+        pi.fill(1.0 / k as f64);
+        for _ in 0..param.iters {
+            num.fill(0.0);
             for &(slot, x) in &obs {
+                // `resp_c = π_c · p̃_c(g)`, computed once for both the
+                // denominator and the numerator; the profile column is
+                // contiguous, so this is a straight cache-line scan.
+                let p_col = param.p_t.column(slot);
                 let mut denom = 0.0f64;
-                for (c, &pi_c) in pi.iter().enumerate() {
-                    denom += pi_c * param.p[(slot, c)];
+                for c in 0..k {
+                    resp[c] = pi[c] * p_col[c];
+                    denom += resp[c];
                 }
                 if denom <= 0.0 {
                     continue; // gene absent from every community
                 }
-                for (c, &pi_c) in pi.iter().enumerate() {
-                    num[c] += x * pi_c * param.p[(slot, c)] / denom;
+                let f = x / denom;
+                for c in 0..k {
+                    num[c] += resp[c] * f;
                 }
             }
             let assigned: f64 = num.iter().sum();
             if assigned <= 0.0 {
-                pi.iter_mut().for_each(|x| *x = 0.0);
+                pi.fill(0.0);
                 break;
             }
             let mut delta = 0.0f64;
