@@ -283,15 +283,17 @@ pub(crate) fn stream_column_selection(
             })
             .collect::<anyhow::Result<_>>()?,
         Some(map) => {
-            let mut counts = Vec::with_capacity(out_ncol);
-            for &c in selected_columns {
-                let (_, _, triplets) = data.read_triplets_by_single_column(c)?;
-                counts.push(
-                    triplets
-                        .iter()
-                        .filter(|&&(r, _, _)| map[r as usize].is_some())
-                        .count() as u64,
-                );
+            // Block reads here too; counts only, never entries.
+            let mut counts = vec![0u64; out_ncol];
+            let coarse = matrix_util::utils::generate_minibatch_intervals(out_ncol, 0, Some(8192));
+            for (lb, ub) in coarse {
+                let (_, _, triplets) =
+                    data.read_triplets_by_columns(selected_columns[lb..ub].to_vec())?;
+                for (r, c_local, _) in triplets {
+                    if map[r as usize].is_some() {
+                        counts[lb + c_local as usize] += 1;
+                    }
+                }
             }
             counts
         }
@@ -304,35 +306,53 @@ pub(crate) fn stream_column_selection(
     const SLAB_BUDGET_BYTES: usize = 256 << 20;
     let blocks = matrix_util::utils::byte_budget_intervals(&per_col_nnz, SLAB_BUDGET_BYTES, 24);
 
+    let t_stream = std::time::Instant::now();
     let mut nnz_offset = 0u64;
     for (lb, ub) in blocks {
-        let mut local_colptr = Vec::with_capacity(ub - lb);
+        // ONE block read per slab, never a read per column: a single-column
+        // read pays the cached-subset machinery per call, and at hundreds of
+        // thousands of columns that made this path slower than the memory wall
+        // it replaced. The block read returns LOCAL column ids for the
+        // requested set, rows ascending within each column — the writer's
+        // invariant already.
+        log::info!(
+            "slab {lb}..{ub}: reading (t={:.0}s)",
+            t_stream.elapsed().as_secs_f32()
+        );
+        let (_, _, triplets) = data.read_triplets_by_columns(selected_columns[lb..ub].to_vec())?;
+
+        let n_block = ub - lb;
+        let mut per_col: Vec<Vec<(u64, f32)>> = vec![Vec::new(); n_block];
+        for (r, c_local, x) in triplets {
+            let kept = match &row_map {
+                None => Some(r),
+                Some(map) => map[r as usize],
+            };
+            if let Some(new_r) = kept {
+                per_col[c_local as usize].push((new_r, x));
+            }
+        }
+        let mut local_colptr = Vec::with_capacity(n_block);
         let mut row_indices = Vec::new();
         let mut values = Vec::new();
-        for &c in &selected_columns[lb..ub] {
+        for entries in &per_col {
             local_colptr.push(row_indices.len() as u64);
-            let (_, _, triplets) = data.read_triplets_by_single_column(c)?;
-            for (r, _, x) in triplets {
-                match &row_map {
-                    None => {
-                        row_indices.push(r);
-                        values.push(x);
-                    }
-                    Some(map) => {
-                        if let Some(new_r) = map[r as usize] {
-                            row_indices.push(new_r);
-                            values.push(x);
-                        }
-                    }
-                }
+            for &(r, x) in entries {
+                row_indices.push(r);
+                values.push(x);
             }
         }
         out.append_csc_slab(lb as u64, nnz_offset, &local_colptr, &row_indices, &values)?;
         nnz_offset += values.len() as u64;
     }
+    log::info!("slabs done (t={:.0}s)", t_stream.elapsed().as_secs_f32());
 
     out.finalize_streaming_csc()?;
     out.build_csr_from_csc_streaming()?;
+    log::info!(
+        "transpose done (t={:.0}s)",
+        t_stream.elapsed().as_secs_f32()
+    );
     out.register_row_names_vec(out_row_names);
     out.register_column_names_vec(out_col_names);
     Ok((out_nrow, out_ncol, nnz as usize))

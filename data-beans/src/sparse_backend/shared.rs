@@ -45,12 +45,26 @@ where
     let total: u64 = tagged.iter().map(|&(_, s, e)| e - s).sum();
     let mut ret: Vec<(u64, u64, f32)> = Vec::with_capacity(total as usize);
 
+    // Fuse across SMALL gaps, not only across abutting ranges. A column subset
+    // that keeps every other column produces ranges that never abut, and
+    // abutting-only merging degenerated into one retrieve per range — several
+    // hundred thousand cache round-trips (each with subset math and two Vec
+    // allocations) where a few dozen block reads carry the same bytes. Reading
+    // a skipped gap costs its decode; a separate retrieve costs far more, so
+    // gaps up to `GAP_FUSE` fuse. `MERGED_SPAN_CAP` bounds the retrieve buffer
+    // so fusion cannot grow one read without limit (~48 MB across both arrays).
+    const GAP_FUSE: u64 = 65_536;
+    const MERGED_SPAN_CAP: u64 = 4_000_000;
+
     let mut i = 0;
     while i < tagged.len() {
         let merged_start = tagged[i].1;
         let mut merged_end = tagged[i].2;
         let mut j = i + 1;
-        while j < tagged.len() && tagged[j].1 <= merged_end {
+        while j < tagged.len()
+            && tagged[j].1 <= merged_end.saturating_add(GAP_FUSE)
+            && tagged[j].2.max(merged_end) - merged_start <= MERGED_SPAN_CAP
+        {
             merged_end = merged_end.max(tagged[j].2);
             j += 1;
         }
@@ -86,3 +100,7 @@ pub(crate) fn write_mtx_header<W: Write>(
     writeln!(buf, "{}\t{}\t{}", nrow, ncol, nnz)?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "shared_tests.rs"]
+mod tests;

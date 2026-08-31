@@ -84,6 +84,7 @@ pub fn run_subsample(args: &SubsampleArgs) -> anyhow::Result<()> {
     let out_nrow = gene_idx.len();
     let out_ncol = cell_idx.len();
 
+    info!("stage: reading names");
     let row_names_all = data.row_names()?;
     let col_names_all = data.column_names()?;
     let out_row_names: Vec<Box<str>> = gene_idx.iter().map(|&i| row_names_all[i].clone()).collect();
@@ -95,6 +96,7 @@ pub fn run_subsample(args: &SubsampleArgs) -> anyhow::Result<()> {
     // Streamed: the survivors never sit in memory at once. `sample_sorted`
     // returns ascending indices, which is what lets the row renumbering stay
     // monotone and the columns keep their order without a per-column sort.
+    info!("stage: names done, streaming");
     let row_filter = (gene_idx.len() < nrow).then_some(gene_idx.as_slice());
     let (_, _, nnz) = crate::handlers::transformation::stream_column_selection(
         &*data,
