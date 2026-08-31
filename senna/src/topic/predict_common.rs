@@ -63,14 +63,25 @@ pub fn decoder_only_inference_dense<Dec: DecoderModuleT>(
     ops::log_softmax(z_var.as_tensor(), 1)
 }
 
+/// Genes per slice when scoring a dense block. Only the width of the
+/// likelihood's temporaries; decoders that cannot slice ignore it and take the
+/// dense path they always did.
+pub const SCORE_GENE_CHUNK: usize = 4096;
+
 /// Per-cell predictive log-likelihood for the dense topic model.
+///
+/// Goes through [`DecoderModuleT::llik_gene_chunked`] rather than
+/// `forward_with_llik`: inference wants the scalar, not the `[N, D]`
+/// reconstruction that comes with it, and at whole-transcriptome width
+/// holding that reconstruction (plus the likelihood chain's temporaries) is
+/// what turns scoring into an OOM. Decoders that have not been taught to
+/// slice fall back to exactly the previous behaviour.
 pub fn predictive_llik_dense<Dec: DecoderModuleT>(
     decoder: &Dec,
     log_z_nk: &Tensor,
     x_nd: &Tensor,
 ) -> CandleResult<Tensor> {
-    let (_, llik) = decoder.forward_with_llik(log_z_nk, x_nd, &|_, _| unreachable!())?;
-    Ok(llik)
+    decoder.llik_gene_chunked(log_z_nk, x_nd, SCORE_GENE_CHUNK)
 }
 
 /// Per-batch sums accumulated across blocks during one TMLE iteration.

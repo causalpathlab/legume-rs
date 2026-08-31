@@ -1066,10 +1066,22 @@ where
         .last()
         .copied()
         .unwrap_or(metadata.n_features_full);
-    // This path still scores through `forward_with_llik`, which materialises
-    // pi plus the NB chain's temporaries at FULL decoder width — it has not
-    // been given the gene-chunked treatment the vae path has.
-    let bytes_per_block = dense_bytes(minibatch_size, d_dense, NB_CHAIN_TENSORS);
+    // Ask the decoder rather than assume: one that slices holds the block's
+    // input plus a chunk's temporaries, one that does not still materialises
+    // the reconstruction and the whole chain at full decoder width.
+    let bytes_per_block = if decoders
+        .last()
+        .is_some_and(candle_util::traits::DecoderModuleT::llik_is_gene_chunked)
+    {
+        dense_bytes(minibatch_size, d_dense, 1)
+            + dense_bytes(
+                minibatch_size,
+                crate::topic::predict_common::SCORE_GENE_CHUNK,
+                NB_CHAIN_TENSORS,
+            )
+    } else {
+        dense_bytes(minibatch_size, d_dense, NB_CHAIN_TENSORS)
+    };
 
     let (z_nk, llik, total) =
         run_predict_blocks(ntot, kk, minibatch_size, bytes_per_block, |(lb, ub)| {

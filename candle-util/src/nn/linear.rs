@@ -238,6 +238,16 @@ impl SoftmaxLinear {
     pub fn forward_log(&self, log_h_nk: &Tensor) -> Result<Tensor> {
         logsumexp_forward(log_h_nk, &self.biased_weight_kd()?)
     }
+
+    /// The `[K, D]` log-simplex weights `forward_log` reduces over.
+    ///
+    /// Exposed so a gene-sliced forward can narrow them once instead of
+    /// re-normalising per slice: the softmax is over the gene axis, so a
+    /// narrowed slice of the normalised weights is exactly the same numbers
+    /// the full forward would produce for those genes.
+    pub fn log_weight_kd(&self) -> Result<Tensor> {
+        self.biased_weight_kd()
+    }
 }
 
 impl Module for SoftmaxLinear {
