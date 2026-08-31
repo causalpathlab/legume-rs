@@ -406,3 +406,119 @@ fn joint_recovers_theta_and_delta() {
         );
     }
 }
+
+/// The streaming entry point must agree with the one-shot one **exactly**, not
+/// approximately. `project_prepared` skips `project_cells`'s partition/edge setup in
+/// favour of a `PassDict` the caller already holds, so this is the test that the
+/// dictionary carries the same feature partition, the edge remap still lands on the
+/// same live ids, and the scatter still writes the same rows.
+#[test]
+fn streaming_entry_matches_the_one_shot_one() {
+    let (h, n_feat) = (6, 240);
+    let (e, b) = dictionary(n_feat, h, 0.4);
+    let planted = [
+        [0.7f32, -0.5, 0.4, 0.2, -0.3, 0.1],
+        [-0.3f32, 0.6, -0.2, 0.5, 0.1, -0.4],
+        [0.2f32, 0.1, 0.5, -0.3, 0.4, 0.2],
+    ];
+    let per_cell: Vec<_> = planted
+        .iter()
+        .enumerate()
+        .map(|(i, t)| rates(&e, &b, h, t, 0.2 + 0.1 * i as f32))
+        .collect();
+    let feats: Vec<Vec<u32>> = per_cell
+        .iter()
+        .map(|c| c.iter().map(|&(f, _)| f).collect())
+        .collect();
+    let counts: Vec<Vec<f32>> = per_cell
+        .iter()
+        .map(|c| c.iter().map(|&(_, n)| n).collect())
+        .collect();
+    let nodes: Vec<(u32, &[u32], &[f32])> = (0..3)
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+
+    // `gauge_fix: false` — the frozen projection never re-centres (`b_feat` is frozen,
+    // so re-gauging θ alone would break its correspondence with the dictionary).
+    let input = Phase2Input {
+        feat: &e,
+        b_feat: &b,
+        h,
+        n_cells: 3,
+        lambda: 1e-3,
+        dev: &Device::Cpu,
+        label: "Projection",
+        gauge_fix: false,
+        joint: false,
+    };
+
+    let one_shot = project_cells(&input, &nodes, None, None).expect("one-shot");
+
+    let dict = PassDict::build(
+        &DictSpec {
+            feat: &e,
+            b_feat: &b,
+            h,
+            lambda: 1e-3,
+            dev: &Device::Cpu,
+            label: "Projection",
+            pass: "nodes",
+        },
+        (0..n_feat as u32).collect(),
+    )
+    .expect("dict");
+    let streamed = project_prepared(&input, &dict, &nodes, &indicatif::ProgressBar::hidden())
+        .expect("streamed");
+
+    assert_eq!(
+        one_shot.theta, streamed.theta,
+        "θ differs between entry points"
+    );
+    assert_eq!(
+        one_shot.b_cell, streamed.b_cell,
+        "b_node differs between entry points"
+    );
+}
+
+/// The group size a streaming caller is handed must be a whole number of blocks.
+///
+/// That is the whole reason it is the engine's number and not the caller's: blocks
+/// are cut at multiples of `Bc` from the start of each group, so a group cut here
+/// reproduces the block partition of a single call over the whole query — and
+/// therefore its numbers exactly. A group size that is *not* a multiple leaves a
+/// short block at the end of every group, which both wastes steps and moves the
+/// answer.
+#[test]
+fn the_offered_group_size_is_a_whole_number_of_blocks() {
+    for f in [1usize, 100, 5_000, 58_651] {
+        let (h, n_feat) = (4, f.min(400));
+        let (e, b) = dictionary(n_feat, h, 0.4);
+        // The dict's own partition is what sizes its blocks, so vary that rather than
+        // building an enormous dictionary just to move `Bc`.
+        let rows: Vec<u32> = (0..n_feat as u32).collect();
+        let dict = PassDict::build(
+            &DictSpec {
+                feat: &e,
+                b_feat: &b,
+                h,
+                lambda: 1.0,
+                dev: &Device::Cpu,
+                label: "Projection",
+                pass: "nodes",
+            },
+            rows,
+        )
+        .unwrap();
+        let bc = block_cells(n_feat);
+        let g = dict.group_nodes();
+        assert!(
+            g >= bc,
+            "F={n_feat}: group of {g} is under one block of {bc}"
+        );
+        assert_eq!(
+            g % bc,
+            0,
+            "F={n_feat}: group of {g} is not whole blocks of {bc}"
+        );
+    }
+}
