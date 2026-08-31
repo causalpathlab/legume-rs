@@ -681,13 +681,20 @@ enum Commands {
     #[command(
         about = "Impute full-feature counts on new cells by kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
-                      1. Project new sparse-panel data through the trained\n  \
-                      \x20  masked-topic encoder, giving θ_new [N_new, K].\n  \
-                      \x20  This runs the predict pipeline internally.\n  \
+                      1. Place new sparse-panel data in the model's latent space.\n  \
+                      \x20  Topic-family, vae, and bge models run the predict\n  \
+                      \x20  pipeline internally; svd models are projected\n  \
+                      \x20  through the frozen dictionary.\n  \
                       2. For each new cell, find its K nearest reference cells\n  \
-                      \x20  in θ-space, by L2 over the topic simplex.\n  \
-                      \x20  Softmax-weight their distances, then accumulate\n  \
-                      \x20  those reference cells' full-feature counts.\n\
+                      \x20  in that space — L2 over the topic simplex, cosine\n  \
+                      \x20  for embeddings. Softmax-weight their distances,\n  \
+                      \x20  then accumulate those reference cells'\n  \
+                      \x20  full-feature counts.\n\
+                      \n\
+                      The reference defaults to the model's own training run:\n\
+                      its manifest supplies the latent and the data files.\n\
+                      Pass --reference (or the explicit --reference-* flags)\n\
+                      to impute against a different reference.\n\
                       \n\
                       Writes {out}.imputed.parquet (N_new × n_ref_features)."
     )]
