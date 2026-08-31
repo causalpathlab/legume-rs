@@ -158,3 +158,44 @@ fn a_reordering_row_selection_keeps_columns_sorted() -> anyhow::Result<()> {
     assert_eq!(data.num_non_zeros(), Some(4));
     Ok(())
 }
+
+/// The regression the block-read rewrite exposed: reads before the swap warm
+/// the zarr decoded-chunk caches, and a reopen that kept them served pre-swap
+/// chunk contents against post-swap indptrs — row indices past the matrix's
+/// own nrow, from a file that was byte-for-byte correct on disk. The exact
+/// sequence: subset with a row filter (warms the cache on the source), then a
+/// cold read of the swapped-in result.
+#[test]
+fn a_cold_read_after_the_swap_serves_the_new_contents() -> anyhow::Result<()> {
+    let mut data = named_fixture();
+    data.subset_columns_rows(None, Some(&vec![2usize, 3]))?;
+    let (_, _, triplets) = data.read_triplets_by_columns((0..5).collect())?;
+    let nrow = data.num_rows().expect("nrow") as u64;
+    assert!(
+        triplets.iter().all(|&(r, _, _)| r < nrow),
+        "a stale chunk cache leaks pre-swap rows: {triplets:?}"
+    );
+    assert_eq!(triplets.len(), 4);
+    Ok(())
+}
+
+/// A duplicated index collapses in the old-to-new map while still counting
+/// toward the new shape, so slabs land at wrong offsets and the build fails
+/// with an nnz-tiling message that names nothing the caller did. Refuse it up
+/// front with the actual cause — this method destroys the original.
+#[test]
+fn a_duplicated_selection_is_refused_by_name() -> anyhow::Result<()> {
+    let mut data = named_fixture();
+    let err = data
+        .subset_columns_rows(Some(&vec![0usize, 3, 0]), None)
+        .expect_err("duplicates must be refused");
+    assert!(
+        err.to_string().contains("repeats an index"),
+        "the error must name the cause, got: {err}"
+    );
+    let mut data = named_fixture();
+    assert!(data
+        .subset_columns_rows(None, Some(&vec![1usize, 1]))
+        .is_err());
+    Ok(())
+}

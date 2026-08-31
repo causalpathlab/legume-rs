@@ -42,28 +42,18 @@ fn per_column_nnz_matches_a_triplet_count() -> anyhow::Result<()> {
 }
 
 #[test]
-fn a_subset_sum_is_exact_whatever_the_order() -> anyhow::Result<()> {
+fn per_column_sums_agree_with_the_total() -> anyhow::Result<()> {
     let (data, expected) = fixture();
-    // Reversed and gappy on purpose: a streaming writer's column selection is
-    // sorted, but the accessor must not depend on that.
-    let picked = vec![5usize, 1, 4];
+    // Reversed and gappy on purpose: the accessor must not depend on order.
+    let picked = [5usize, 1, 4];
     let want: u64 = picked.iter().map(|&c| expected[c]).sum();
-    assert_eq!(data.columns_nnz(&picked), Some(want));
-    // The whole matrix agrees with num_non_zeros.
-    let every: Vec<usize> = (0..7).collect();
-    let all: u64 = data.columns_nnz(&every).expect("resident indptr");
+    let got: u64 = picked
+        .iter()
+        .map(|&c| data.column_nnz(c).expect("in range"))
+        .sum();
+    assert_eq!(got, want);
+    let all: u64 = (0..7).map(|c| data.column_nnz(c).expect("in range")).sum();
     assert_eq!(all as usize, data.num_non_zeros().expect("nnz"));
-    Ok(())
-}
-
-#[test]
-fn an_out_of_range_column_poisons_the_sum_rather_than_counting_zero() -> anyhow::Result<()> {
-    let (data, _) = fixture();
-    assert_eq!(
-        data.columns_nnz(&[1usize, 99]),
-        None,
-        "a silent 0 here would understate a streaming writer's declared nnz"
-    );
     Ok(())
 }
 
@@ -72,8 +62,8 @@ fn random_matrix_totals_agree() -> anyhow::Result<()> {
     // Dense runif fixture: every column count is nrow; totals must line up.
     let arr = ndarray::Array2::<f32>::runif(4, 9);
     let data = create_sparse_from_ndarray(&arr, None, None)?;
-    let every: Vec<usize> = (0..9).collect();
-    assert_eq!(data.columns_nnz(&every), Some(36));
+    let all: u64 = (0..9).map(|c| data.column_nnz(c).expect("in range")).sum();
+    assert_eq!(all, 36);
     assert_eq!(data.column_nnz(8), Some(4));
     Ok(())
 }

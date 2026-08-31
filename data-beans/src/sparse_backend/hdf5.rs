@@ -303,6 +303,10 @@ impl SparseIo for SparseMtxData {
         self.streamed_nnz
     }
 
+    fn reset_streamed_nnz(&mut self) {
+        self.streamed_nnz = 0;
+    }
+
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         if let Ok(by_column) = self.backend.group("/by_column") {
             let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
@@ -343,6 +347,11 @@ impl SparseIo for SparseMtxData {
     }
 
     fn preload_rows(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "row") {
+                return Ok(());
+            }
+        }
         let by_row = self.backend.group("/by_row")?;
         let data = by_row.dataset("data")?.read_1d::<f32>()?.to_vec();
         let indices = by_row.dataset("indices")?.read_1d::<u64>()?.to_vec();

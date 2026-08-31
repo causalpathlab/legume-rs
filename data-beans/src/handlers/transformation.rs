@@ -303,8 +303,11 @@ pub(crate) fn stream_column_selection(
     let mut out = create_sparse_streaming_empty(Some(file_out), Some(backend_out))?;
     out.begin_streaming_csc((out_nrow, out_ncol, nnz as usize))?;
 
-    const SLAB_BUDGET_BYTES: usize = 256 << 20;
-    let blocks = matrix_util::utils::byte_budget_intervals(&per_col_nnz, SLAB_BUDGET_BYTES, 24);
+    let blocks = matrix_util::utils::byte_budget_intervals(
+        &per_col_nnz,
+        crate::sparse_io::SLAB_BUDGET_BYTES,
+        crate::sparse_io::TRIPLET_BYTES,
+    );
 
     let t_stream = std::time::Instant::now();
     let mut nnz_offset = 0u64;
@@ -315,10 +318,6 @@ pub(crate) fn stream_column_selection(
         // it replaced. The block read returns LOCAL column ids for the
         // requested set, rows ascending within each column — the writer's
         // invariant already.
-        log::info!(
-            "slab {lb}..{ub}: reading (t={:.0}s)",
-            t_stream.elapsed().as_secs_f32()
-        );
         let (_, _, triplets) = data.read_triplets_by_columns(selected_columns[lb..ub].to_vec())?;
 
         let n_block = ub - lb;
@@ -345,12 +344,11 @@ pub(crate) fn stream_column_selection(
         out.append_csc_slab(lb as u64, nnz_offset, &local_colptr, &row_indices, &values)?;
         nnz_offset += values.len() as u64;
     }
-    log::info!("slabs done (t={:.0}s)", t_stream.elapsed().as_secs_f32());
 
     out.finalize_streaming_csc()?;
     out.build_csr_from_csc_streaming()?;
     log::info!(
-        "transpose done (t={:.0}s)",
+        "streamed {nnz} entries in {out_ncol} columns ({:.1}s)",
         t_stream.elapsed().as_secs_f32()
     );
     out.register_row_names_vec(out_row_names);
