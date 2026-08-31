@@ -561,6 +561,18 @@ impl SparseIo for SparseMtxData {
         &self.by_column_indptr
     }
 
+    fn reopen_backend(&mut self) -> anyhow::Result<()> {
+        // Path-addressed store: rebuild it so nothing cached survives the swap,
+        // then refresh the resident indptrs from the new contents.
+        let store = Arc::new(FilesystemStore::new(&self.file_name)?);
+        self.read_store = store.clone();
+        self.write_store = Some(store);
+        self.streamed_nnz = 0;
+        self.read_column_indptr()?;
+        self.read_row_indptr()?;
+        Ok(())
+    }
+
     fn note_streamed_nnz(&mut self, n: u64) {
         self.streamed_nnz += n;
     }

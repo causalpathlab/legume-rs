@@ -275,6 +275,12 @@ pub trait SparseIo: Sync + Send {
     /// Number of non-zero elements
     fn num_non_zeros(&self) -> Option<usize>;
 
+    /// Re-open handles on the CURRENT backend path after its contents were
+    /// replaced from outside (a finished temp file renamed into place). The
+    /// zarr store is path-addressed so this is a cache refresh; hdf5 holds an
+    /// open file handle that would otherwise point at the deleted inode.
+    fn reopen_backend(&mut self) -> anyhow::Result<()>;
+
     /// Advance the streaming-write cursor by `n` entries. Called by
     /// [`append_csc_slab`](Self::append_csc_slab); backends keep the count so
     /// [`finalize_streaming_csc`](Self::finalize_streaming_csc) can audit the
@@ -373,111 +379,167 @@ pub trait SparseIo: Sync + Send {
         columns: Option<&Vec<usize>>,
         rows: Option<&Vec<usize>>,
     ) -> anyhow::Result<()> {
-        if let (Some(ncol), Some(nrow), Some(nnz)) =
-            (self.num_columns(), self.num_rows(), self.num_non_zeros())
-        {
-            let (nrow_data, ncol_data, nnz) = (nrow, ncol, nnz);
+        let ncol_data = self
+            .num_columns()
+            .ok_or_else(|| anyhow::anyhow!("missing shape information"))?;
+        let nrow_data = self
+            .num_rows()
+            .ok_or_else(|| anyhow::anyhow!("missing shape information"))?;
 
-            //////////////////////////////////////////////////////
-            // 0. Create a mapping from old to new columns/rows //
-            //////////////////////////////////////////////////////
-
-            let (old2new_cols, new_col_names) =
-                take_subset_indices_names_if_needed(columns, Some(ncol_data), self.column_names()?);
-
-            let (old2new_rows, new_row_names) =
-                take_subset_indices_names_if_needed(rows, Some(nrow_data), self.row_names()?);
-
-            let (new_ncol, new_nrow) = (new_col_names.len(), new_row_names.len());
-
-            /////////////////////////////////////////////////////////
-            // 1. Create remapped Mtx only taking a subset of rows //
-            /////////////////////////////////////////////////////////
-
-            let arc_triplets = Arc::new(Mutex::new(vec![]));
-            let block_size = 100;
-            let nblock = ncol_data.div_ceil(block_size);
-
-            info!("remapping triplets ...");
-
-            (0..nblock)
-                .into_par_iter()
-                .progress_with(styled_progress_bar(nblock as u64, "blocks"))
-                .map(|b| {
-                    let lb: u64 = (b * block_size) as u64;
-                    let ub: u64 = ((b + 1) * block_size).min(ncol) as u64;
-                    (lb, ub)
-                })
-                .for_each(|(lb, ub)| {
-                    let mut record = vec![];
-
-                    (lb..ub)
-                        .filter_map(|j| {
-                            if let Some(&j_new) = old2new_cols.get(&j) {
-                                Some((j, j_new))
-                            } else {
-                                None
-                            }
-                        })
-                        .for_each(|(j, j_new)| {
-                            let (_, _, _triplets_j) = self
-                                .read_triplets_by_single_column(j as usize)
-                                .expect("failed to read a single column");
-
-                            record.extend(_triplets_j.into_iter().filter_map(|(i, _, x)| {
-                                old2new_rows.get(&i).map(|&i_new| (i_new, j_new, x))
-                            }));
-                        });
-                    {
-                        arc_triplets
-                            .lock()
-                            .expect("failed to lock triplets")
-                            .extend(record);
-                    }
-                });
-
-            /////////////////////////////////////
-            // 2. Remove previous backend file //
-            /////////////////////////////////////
-            self.remove_backend_file()?;
-
-            info!(
-                "removing and recreating the backend {}",
-                self.get_backend_file_name()
-            );
-
-            ///////////////////////////////
-            // 3. populate a new backend //
-            ///////////////////////////////
-            self.initialize_backend()?;
-
-            // populate data from mtx triplets
-            {
-                let mut row_col_val_triplets =
-                    arc_triplets.lock().expect("failed to lock triplets");
-
-                debug_assert!(row_col_val_triplets.len() <= nnz); // subset
-                let nnz = row_col_val_triplets.len();
-                let mtx_shape = (new_nrow, new_ncol, nnz);
-
-                info!("sorting triplets ...");
-
-                self.record_mtx_shape(Some(mtx_shape))?;
-                self.record_triplets_by_col(&mut row_col_val_triplets)?;
-                self.record_triplets_by_row(&mut row_col_val_triplets)?;
-            }
-            self.read_column_indptr()?;
-            self.read_row_indptr()?;
-
-            self.register_row_names_vec(&new_row_names);
-            self.register_column_names_vec(&new_col_names);
-            info!("registered new data to {}", self.get_backend_file_name());
-        } else {
-            return Err(anyhow::anyhow!("missing shape information"));
+        // An empty selection is refused, not honoured: this method DESTROYS the
+        // original backend, and writing a zero-column husk over real data is
+        // almost certainly a caller mistake rather than an intention.
+        if let Some(cols) = columns {
+            anyhow::ensure!(!cols.is_empty(), "subset: empty column selection");
+        }
+        if let Some(rs) = rows {
+            anyhow::ensure!(!rs.is_empty(), "subset: empty row selection");
         }
 
+        //////////////////////////////////////////////////////
+        // 0. Create a mapping from old to new columns/rows //
+        //////////////////////////////////////////////////////
+
+        let (old2new_cols, new_col_names) =
+            take_subset_indices_names_if_needed(columns, Some(ncol_data), self.column_names()?);
+        let (old2new_rows, new_row_names) =
+            take_subset_indices_names_if_needed(rows, Some(nrow_data), self.row_names()?);
+        let (new_ncol, new_nrow) = (new_col_names.len(), new_row_names.len());
+        anyhow::ensure!(new_ncol > 0, "subset: no column survived the selection");
+        anyhow::ensure!(new_nrow > 0, "subset: no row survived the selection");
+
+        // Old columns in NEW order — the selection's order is the output order.
+        let mut cols_new_order: Vec<(u64, u64)> =
+            old2new_cols.iter().map(|(&o, &n)| (n, o)).collect();
+        cols_new_order.sort_unstable();
+
+        // Dense old-row → new-row map, and whether it preserves order. A
+        // monotone map keeps within-column rows ascending after renumbering, so
+        // no per-column sort is needed; a reordering map costs one small sort
+        // per column.
+        let mut row_map: Vec<Option<u64>> = vec![None; nrow_data];
+        for (&old, &new) in &old2new_rows {
+            row_map[old as usize] = Some(new);
+        }
+        let monotone_rows = row_map
+            .iter()
+            .flatten()
+            .try_fold(None::<u64>, |prev, &n| match prev {
+                Some(p) if p >= n => None,
+                _ => Some(Some(n)),
+            })
+            .is_some();
+
+        ///////////////////////////////////////////////////////
+        // 1. Exact per-new-column nnz, without materialising //
+        ///////////////////////////////////////////////////////
+
+        // No row filter: straight off the resident indptr, zero I/O. With one:
+        // a counting pass — reads every selected column once and keeps counts,
+        // never entries.
+        let full_rows = rows.is_none();
+        let per_col_nnz: Vec<u64> = if full_rows {
+            cols_new_order
+                .iter()
+                .map(|&(_, old)| {
+                    self.column_nnz(old as usize)
+                        .ok_or_else(|| anyhow::anyhow!("subset: no indptr for column {old}"))
+                })
+                .collect::<anyhow::Result<_>>()?
+        } else {
+            let mut counts = Vec::with_capacity(cols_new_order.len());
+            for &(_, old) in &cols_new_order {
+                let (_, _, triplets) = self.read_triplets_by_single_column(old as usize)?;
+                counts.push(
+                    triplets
+                        .iter()
+                        .filter(|&&(i, _, _)| row_map[i as usize].is_some())
+                        .count() as u64,
+                );
+            }
+            counts
+        };
+        let new_nnz: u64 = per_col_nnz.iter().sum();
+
+        ///////////////////////////////////////////////////////////
+        // 2. Stream the survivors into a TEMPORARY sibling file //
+        ///////////////////////////////////////////////////////////
+
+        // Written beside the original (same filesystem, so the final rename is
+        // atomic) and swapped in only when complete. The old implementation
+        // deleted the original FIRST and rewrote it from a RAM buffer, so a
+        // crash mid-write lost the data outright — and that buffer held every
+        // surviving triplet, which is the memory wall this replaces.
+        let final_path = self.get_backend_file_name().to_string();
+        let temp_path = format!("{final_path}.subset_tmp");
+        if std::path::Path::new(&temp_path).exists() {
+            crate::sparse_io::remove_backend_path(&temp_path)?;
+        }
+
+        {
+            let backend_kind = self.backend_type();
+            let mut out = crate::sparse_io::create_sparse_streaming_empty(
+                Some(&temp_path),
+                Some(&backend_kind),
+            )?;
+            out.begin_streaming_csc((new_nrow, new_ncol, new_nnz as usize))?;
+
+            // Blocks bounded by bytes of surviving triplets, from the measured
+            // per-column counts — not by a fixed column count.
+            const SLAB_BUDGET_BYTES: usize = 256 << 20;
+            let blocks =
+                matrix_util::utils::byte_budget_intervals(&per_col_nnz, SLAB_BUDGET_BYTES, 24);
+
+            let mut nnz_offset = 0u64;
+            for (lb, ub) in blocks {
+                let mut local_colptr = Vec::with_capacity(ub - lb);
+                let mut row_indices = Vec::new();
+                let mut values = Vec::new();
+                for &(_, old) in &cols_new_order[lb..ub] {
+                    local_colptr.push(row_indices.len() as u64);
+                    let (_, _, triplets) = self.read_triplets_by_single_column(old as usize)?;
+                    let start = row_indices.len();
+                    for (i, _, x) in triplets {
+                        if let Some(new_row) = row_map[i as usize] {
+                            row_indices.push(new_row);
+                            values.push(x);
+                        }
+                    }
+                    if !monotone_rows {
+                        // Renumbering scrambled this column's order; restore the
+                        // ascending-rows invariant the writer enforces.
+                        let mut paired: Vec<(u64, f32)> = row_indices[start..]
+                            .iter()
+                            .copied()
+                            .zip(values[start..].iter().copied())
+                            .collect();
+                        paired.sort_unstable_by_key(|&(r, _)| r);
+                        for (k, (r, v)) in paired.into_iter().enumerate() {
+                            row_indices[start + k] = r;
+                            values[start + k] = v;
+                        }
+                    }
+                }
+                out.append_csc_slab(lb as u64, nnz_offset, &local_colptr, &row_indices, &values)?;
+                nnz_offset += values.len() as u64;
+            }
+
+            out.finalize_streaming_csc()?;
+            out.build_csr_from_csc_streaming()?;
+            out.register_row_names_vec(&new_row_names);
+            out.register_column_names_vec(&new_col_names);
+        }
+
+        ////////////////////////////////////
+        // 3. Swap the finished file in  //
+        ////////////////////////////////////
+
+        self.remove_backend_file()?;
+        std::fs::rename(&temp_path, &final_path)?;
+        self.reopen_backend()?;
         self.clean_preloaded_columns();
         self.clean_preloaded_rows();
+        info!("registered new data to {}", self.get_backend_file_name());
         Ok(())
     }
 
