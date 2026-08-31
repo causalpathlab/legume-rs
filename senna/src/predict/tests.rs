@@ -97,13 +97,18 @@ fn hiding_matches_case_insensitively_like_the_remap_does() {
 mod block_concurrency {
     use super::super::dense_block_concurrency;
 
+    /// The dense topic path's estimate: full decoder width, ~16 tensors.
+    fn dense_bytes(minibatch: usize, width: usize) -> usize {
+        minibatch * width * 4 * 16
+    }
+
     #[test]
-    fn a_whole_transcriptome_block_is_capped_well_below_the_thread_count() {
+    fn a_whole_transcriptome_dense_block_is_capped_well_below_the_thread_count() {
         // The reported OOM's shape: ~58k genes at the default minibatch.
-        let conc = dense_block_concurrency(500, 57_843);
+        let conc = dense_block_concurrency(dense_bytes(500, 57_843));
         assert!(
             conc <= 8,
-            "58k-gene blocks must not run wide open; got {conc}"
+            "58k-gene dense blocks must not run wide open; got {conc}"
         );
         assert!(conc >= 1, "the cap must always admit at least one block");
     }
@@ -112,12 +117,27 @@ mod block_concurrency {
     fn a_coarsened_block_is_not_throttled() {
         // What a dense topic model actually scores on after coarsening: the
         // cap must return the full thread count, i.e. change nothing.
-        let conc = dense_block_concurrency(500, 2_000);
-        assert_eq!(conc, rayon::current_num_threads());
+        assert_eq!(
+            dense_block_concurrency(dense_bytes(500, 2_000)),
+            rayon::current_num_threads()
+        );
+    }
+
+    /// The gene-chunked vae scorer holds the encoder input plus one slice, so
+    /// the same 58k-gene query that pinned the dense path must NOT be
+    /// throttled once the likelihood stops materialising `[N, D]`.
+    #[test]
+    fn the_chunked_vae_path_is_not_throttled_at_the_same_width() {
+        let bytes = 500 * (57_843 + 16 * super::super::VAE_SCORE_GENE_CHUNK) * 4;
+        assert_eq!(
+            dense_block_concurrency(bytes),
+            rayon::current_num_threads(),
+            "chunked scoring should not need the cap at all"
+        );
     }
 
     #[test]
-    fn an_absurd_width_still_admits_one_block() {
-        assert_eq!(dense_block_concurrency(usize::MAX, usize::MAX), 1);
+    fn an_absurd_block_still_admits_one() {
+        assert_eq!(dense_block_concurrency(usize::MAX), 1);
     }
 }
