@@ -296,13 +296,31 @@ pub struct PredictArgs {
 
 impl PredictArgs {
     /// Assemble the query-row-name transforms from the CLI flags.
-    fn query_name_opts(&self) -> QueryNameOpts {
-        QueryNameOpts {
+    /// Resolve every query-axis rule, including `--ablate-features`.
+    ///
+    /// Fallible now because the ablation list is read here rather than at the
+    /// bottom of the score path — which is the point: a mistyped path fails
+    /// immediately instead of after the whole backend has been loaded.
+    fn query_name_opts(&self) -> anyhow::Result<QueryNameOpts> {
+        let hide = match self.ablate_features.as_deref() {
+            // The SAME reader `--eval-features` uses. These two flags name the
+            // same file by contract, so parsing them differently would hide a
+            // different gene set than the one being scored.
+            Some(path) => Some(std::sync::Arc::new(
+                matrix_util::common_io::read_name_list(path)
+                    .map_err(|e| anyhow::anyhow!("reading --ablate-features {path}: {e}"))?
+                    .into_iter()
+                    .collect::<std::collections::HashSet<Box<str>>>(),
+            )),
+            None => None,
+        };
+        Ok(QueryNameOpts {
             kind: self.feature_name_kind.clone().resolve_or_gene(),
             suffix_delim: self.feature_name_suffix_delim,
             keep_suffix: self.keep_feature_suffix.clone(),
             min_overlap: self.min_gene_overlap,
-        }
+            hide,
+        })
     }
 }
 
@@ -396,13 +414,12 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
     }
 
     let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
-    let qopts = args.query_name_opts();
+    let qopts = args.query_name_opts()?;
     let fit = model.score(
         &args.data_files,
         args.preload_data,
         args.minibatch_size,
         &qopts,
-        args.ablate_features.as_deref(),
     )?;
 
     // ρ is held row-major `[D, H]` for the projection; the eval pass wants it as
@@ -444,56 +461,6 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
 #[cfg(test)]
 mod tests;
 
-/// Drop the named features from the encoder's view of the query.
-///
-/// Implemented by pointing their rows at `None` in the gene remap, which is the
-/// gate every backend already reads to decide what reaches the model — so a
-/// hidden gene is hidden everywhere, through a path that is already exercised
-/// by ordinary axis mismatches. When the axes match exactly the remap is `None`,
-/// so an identity one is materialised first; the ablated rows are the only
-/// entries that then differ from the identity.
-pub(crate) fn apply_ablation(
-    remap: Option<GeneRemap>,
-    new_genes: &[Box<str>],
-    path: &str,
-) -> anyhow::Result<Option<GeneRemap>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("reading --ablate-features {path}: {e}"))?;
-    let hide: std::collections::HashSet<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    let mut remap = remap.unwrap_or_else(|| GeneRemap {
-        new_to_train: (0..new_genes.len()).map(Some).collect(),
-        d_train: new_genes.len(),
-        n_mapped: new_genes.len(),
-    });
-
-    let mut hidden = 0usize;
-    for (row, name) in new_genes.iter().enumerate() {
-        if hide.contains(name.as_ref()) && remap.new_to_train[row].take().is_some() {
-            hidden += 1;
-        }
-    }
-    remap.n_mapped = remap.new_to_train.iter().filter(|o| o.is_some()).count();
-    anyhow::ensure!(
-        hidden > 0,
-        "--ablate-features {path} matched no feature in the query; \
-         nothing would be hidden and the scores would be a plain reconstruction"
-    );
-    anyhow::ensure!(
-        remap.n_mapped > 0,
-        "--ablate-features {path} hid every mapped feature; nothing is left to encode from"
-    );
-    info!(
-        "Ablation: hid {hidden} features from the encoder, {} remain as input",
-        remap.n_mapped
-    );
-    Ok(Some(remap))
-}
-
 /// Align query genes onto the model's axis, or `None` when the axes already
 /// match. Coverage is logged and gated by
 /// [`crate::topic::eval::ensure_gene_coverage`].
@@ -501,10 +468,15 @@ fn build_remap(
     training_genes: &[Box<str>],
     new_genes: &[Box<str>],
     opts: &QueryNameOpts,
-    ablate: Option<&str>,
 ) -> anyhow::Result<Option<GeneRemap>> {
-    let gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
+    let mut gene_remap = build_gene_remap_with(training_genes, new_genes, opts);
     crate::topic::eval::ensure_gene_coverage(&gene_remap, opts.min_overlap, "--feature-name-kind")?;
+    // After the coverage gate, never before: hidden features are withheld on
+    // purpose, so counting them as missing would refuse every ablated run.
+    if let Some(hide) = opts.hide.as_deref() {
+        crate::topic::eval::hide_features(&mut gene_remap, new_genes, hide)?;
+        return Ok(Some(gene_remap));
+    }
 
     let needs_remap = gene_remap
         .new_to_train
@@ -519,14 +491,8 @@ fn build_remap(
             new_genes.len(),
             training_genes.len()
         );
-        if let Some(path) = ablate {
-            return apply_ablation(Some(gene_remap), new_genes, path);
-        }
         Ok(Some(gene_remap))
     } else {
-        if let Some(path) = ablate {
-            return apply_ablation(None, new_genes, path);
-        }
         info!("Genes match training — no remapping needed");
         Ok(None)
     }
@@ -582,7 +548,6 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
     };
 
     let s = score_dense_backend(DenseScoreArgs {
-        ablate_features: args.ablate_features.as_deref(),
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
@@ -590,7 +555,7 @@ fn predict_dense(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::R
         minibatch_size: args.minibatch_size,
         block_size: args.block_size,
         delta_iters: args.delta_iters,
-        query_name_opts: &args.query_name_opts(),
+        query_name_opts: &args.query_name_opts()?,
         metadata,
         mode,
         refine_config: &refine_config,
@@ -623,8 +588,6 @@ pub(crate) struct DenseScoreArgs<'a> {
     pub metadata: &'a TopicModelMetadata,
     pub mode: LatentMode,
     pub refine_config: &'a TopicRefinementConfig,
-    /// Features to hide from the encoder (see `PredictArgs::ablate_features`).
-    pub ablate_features: Option<&'a str>,
 }
 
 /// What the dense scoring pass produces.
@@ -684,12 +647,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(
-        &training_genes,
-        &new_genes,
-        a.query_name_opts,
-        a.ablate_features,
-    )?;
+    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     let delta_db = estimate_delta(
         &data_vec,
@@ -1040,13 +998,12 @@ fn predict_masked(
     use crate::topic::model_metadata::masked_head_label;
 
     let scored = score_masked_backend(MaskedScoreArgs {
-        ablate_features: args.ablate_features.as_deref(),
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
         preload: args.preload_data,
         minibatch_size: args.minibatch_size,
-        query_name_opts: &args.query_name_opts(),
+        query_name_opts: &args.query_name_opts()?,
         metadata,
         head,
         need_llik: true,
@@ -1139,8 +1096,6 @@ pub(crate) struct MaskedScoreArgs<'a> {
     /// how many files the user happened to pass, so leaving it implicit made
     /// probe's calibration and query arms score under different models.
     pub estimate_batch_delta: bool,
-    /// Features to hide from the encoder (see `PredictArgs::ablate_features`).
-    pub ablate_features: Option<&'a str>,
 }
 
 /// Rebuild the indexed encoder from a trained masked model, run encoder-only
@@ -1190,12 +1145,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(
-        &training_genes,
-        &new_genes,
-        a.query_name_opts,
-        a.ablate_features,
-    )?;
+    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     // Held-out batch effect, the same contrast the dense path takes: query pseudobulk
     // per batch against the training-implied gene marginal `Σ_k θ̄_k·exp(β_dk)`. The
@@ -1423,13 +1373,12 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
     // `need_llik: false` keeps `predict`'s vae output exactly as it was — latent only,
     // no `.predictive.parquet`, and no decoder rebuilt. `probe` asks for the score.
     let s = score_vae_backend(VaeScoreArgs {
-        ablate_features: args.ablate_features.as_deref(),
         model: &args.model,
         data_files: &args.data_files,
         batch_files: args.batch_files.as_deref(),
         preload: args.preload_data,
         minibatch_size: args.minibatch_size,
-        query_name_opts: &args.query_name_opts(),
+        query_name_opts: &args.query_name_opts()?,
         metadata,
         need_llik: false,
     })?;
@@ -1453,8 +1402,6 @@ pub(crate) struct VaeScoreArgs<'a> {
     /// `predict` wants the latent only and passes `false`, which also skips rebuilding the
     /// decoder entirely. `probe` needs the per-cell score and passes `true`.
     pub need_llik: bool,
-    /// Features to hide from the encoder (see `PredictArgs::ablate_features`).
-    pub ablate_features: Option<&'a str>,
 }
 
 pub(crate) struct VaeScored {
@@ -1504,12 +1451,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     );
 
     let new_genes = data_vec.row_names()?;
-    let gene_remap = build_remap(
-        &training_genes,
-        &new_genes,
-        a.query_name_opts,
-        a.ablate_features,
-    )?;
+    let gene_remap = build_remap(&training_genes, &new_genes, a.query_name_opts)?;
 
     let cpu_dev = Device::Cpu;
     let mut parameters = candle_nn::VarMap::new();
@@ -1689,12 +1631,13 @@ fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutco
     // counts through it would read the scored genes as zero and grade every model
     // against a blank. Rebuilding costs one name-matching pass and removes the
     // chance of a caller handing over the encoder's view by mistake.
-    let score_remap = build_remap(
-        a.training_genes,
-        &a.data_vec.row_names()?,
-        &a.args.query_name_opts(),
-        None,
-    )?;
+    // Built without the ablation: the backend's remap has the hidden genes
+    // pointing at `None`, which is right for the encoder and wrong here —
+    // densifying observed truth through it would read the scored genes as zero
+    // and grade every model against a blank.
+    let mut scoring_opts = a.args.query_name_opts()?;
+    scoring_opts.hide = None;
+    let score_remap = build_remap(a.training_genes, &a.data_vec.row_names()?, &scoring_opts)?;
 
     let mut out = evaluate_predictions(EvalArgs {
         data_vec: a.data_vec,
@@ -1747,12 +1690,9 @@ fn training_marginal(
     // The training half is aligned onto the model's axis the same way the query
     // is, so a name-kind difference between the two files cannot silently drop
     // genes from the floor that the model is being scored on.
-    let remap = build_remap(
-        training_genes,
-        &loaded.data.row_names()?,
-        &args.query_name_opts(),
-        None,
-    )?;
+    let mut opts = args.query_name_opts()?;
+    opts.hide = None;
+    let remap = build_remap(training_genes, &loaded.data.row_names()?, &opts)?;
     let comp = crate::topic::predict_eval::empirical_composition(
         &loaded.data,
         remap.as_ref(),

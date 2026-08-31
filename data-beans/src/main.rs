@@ -435,8 +435,11 @@ enum Commands {
                       so a test region gets a training boundary, not a training interior.\n\
                       \n\
                       --groups is the escape hatch for a non-geometric grouping:\n\
-                      donor, sample, slide. Two columns: cell name, group label.\n\
-                      Cells sharing a label stay on the same side.\n\
+                      donor, sample, slide. Two columns: cell name, group label,\n\
+                      as .parquet or delimited text (.tsv/.csv, optionally .gz).\n\
+                      Cells sharing a label stay on the same side. Names must\n\
+                      match EXACTLY -- a fuzzy match would put a cell in the\n\
+                      wrong half with nothing downstream able to detect it.\n\
                       \n\
                       Outputs:\n\
                       \x20 {out}.train.zarr.zip and {out}.test.zarr.zip\n\

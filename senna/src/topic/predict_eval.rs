@@ -27,7 +27,7 @@
 
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
-use matrix_util::agreement::{pearson_log1p, spearman, CellAgreement};
+use matrix_util::agreement::{agreement_from_rate, pearson_log1p, spearman, CellAgreement};
 use rayon::prelude::*;
 
 /// Streaming accumulator: fed one cell at a time, over the evaluation genes.
@@ -47,12 +47,12 @@ pub(crate) struct PredictEval {
 
 impl PredictEval {
     pub fn new(eval_genes: Vec<usize>, keep_values: bool) -> Self {
-        let g = eval_genes.len();
+        let n_genes = eval_genes.len();
         Self {
             eval_genes,
             keep_values,
-            obs: vec![Vec::new(); if keep_values { g } else { 0 }],
-            pred: vec![Vec::new(); if keep_values { g } else { 0 }],
+            obs: vec![Vec::new(); if keep_values { n_genes } else { 0 }],
+            pred: vec![Vec::new(); if keep_values { n_genes } else { 0 }],
         }
     }
 
@@ -373,7 +373,7 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
         empirical_composition(data_vec, gene_remap, &eval_genes, d_train, minibatch_size)?;
     let null_comp = null_comp.unwrap_or_else(|| ceiling_comp.clone());
     let ntot = data_vec.num_columns();
-    let mut eval = PredictEval::new(eval_genes, keep_per_gene);
+    let mut per_gene_store = PredictEval::new(eval_genes, keep_per_gene);
     let mut per_cell = Vec::with_capacity(ntot);
     let mut per_cell_llik: Vec<CellLlik> = Vec::with_capacity(ntot);
     // Model and null likelihood accumulate here, both as a multinomial over the
@@ -390,21 +390,23 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
     // the run, so recomputing `ln(p/z)` inside the cell loop spent two divides
     // and two transcendentals per (cell, expressed gene) on a value that never
     // changes. Indexed by position within `eval.genes()`.
-    let log_table = |comp: &[f32]| -> Vec<f64> {
-        let z = eval
+    let log_table = |composition: &[f32]| -> Vec<f64> {
+        let at = |g: usize| composition.get(g).copied().unwrap_or(0.0);
+        let z = per_gene_store
             .genes()
             .iter()
-            .map(|&g| comp.get(g).copied().unwrap_or(0.0))
+            .map(|&g| at(g))
             .sum::<f32>()
             .max(1e-12);
-        eval.genes()
+        per_gene_store
+            .genes()
             .iter()
-            .map(|&g| f64::from((comp.get(g).copied().unwrap_or(0.0) / z).max(1e-12)).ln())
+            .map(|&g| f64::from((at(g) / z).max(1e-12)).ln())
             .collect()
     };
     let log_null = log_table(&null_comp);
     let log_ceiling = log_table(&ceiling_comp);
-    let genes = eval.genes().to_vec();
+    let scored_genes = per_gene_store.genes().to_vec();
 
     for (lb, ub) in create_jobs(ntot, 0, Some(minibatch_size)) {
         let csc = data_vec.read_columns_csc(lb..ub)?;
@@ -432,62 +434,54 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
                         obs[r] += val;
                     }
                 }
-                let recon_z: f32 = genes
+                let recon_z: f32 = scored_genes
                     .iter()
                     .map(|&g| recon_dn[(g, j)])
                     .sum::<f32>()
                     .max(1e-12);
 
                 let (mut count, mut model, mut null, mut ceiling) = (0f64, 0f64, 0f64, 0f64);
-                for (i, &g) in genes.iter().enumerate() {
+                for (slot, &g) in scored_genes.iter().enumerate() {
                     let x = f64::from(obs[g]);
                     if x <= 0.0 {
                         continue;
                     }
                     count += x;
                     model += x * f64::from((recon_dn[(g, j)] / recon_z).max(1e-12)).ln();
-                    null += x * log_null[i];
-                    ceiling += x * log_ceiling[i];
+                    null += x * log_null[slot];
+                    ceiling += x * log_ceiling[slot];
                 }
 
-                // Predicted COUNTS, not the raw rate: the composition over the
-                // evaluation genes, put back on the cell's own depth.
-                // `pearson_log1p` is not scale-invariant — log1p(c·p) is not an
-                // affine function of log1p(p), and the zeros anchor the low end —
-                // so feeding it a rate understates a good prediction and, worse,
-                // understates it by a different amount per family, since each
-                // one's rate carries its own arbitrary scale. On the count scale
-                // a perfect prediction scores 1.
-                let scale = count as f32 / recon_z;
-                let o: Vec<f32> = genes.iter().map(|&g| obs[g]).collect();
-                let p: Vec<f32> = genes.iter().map(|&g| recon_dn[(g, j)] * scale).collect();
-                let agree = CellAgreement {
-                    spearman: spearman(&o, &p),
-                    pearson_log1p: pearson_log1p(&o, &p),
-                };
+                // The rate goes in as a rate; putting it on the count scale is
+                // `agreement_from_rate`'s job, and it is pinto's too, so the rule
+                // that makes the two engines' numbers comparable is one piece of
+                // code rather than two.
+                let observed: Vec<f32> = scored_genes.iter().map(|&g| obs[g]).collect();
+                let rate: Vec<f32> = scored_genes.iter().map(|&g| recon_dn[(g, j)]).collect();
+                let agree = agreement_from_rate(&observed, &rate);
                 let llik = CellLlik {
                     model: model as f32,
                     null: null as f32,
                     count: count as f32,
                 };
-                (agree, llik, ceiling, o, p)
+                (agree, llik, ceiling, observed, rate)
             })
             .collect();
 
-        for (agree, llik, ceiling, o, p) in scored {
+        for (agree, llik, ceiling, observed, rate) in scored {
             eval_count += f64::from(llik.count);
             model_llik += f64::from(llik.model);
             null_llik += f64::from(llik.null);
             ceiling_llik += ceiling;
             per_cell.push(agree);
             per_cell_llik.push(llik);
-            eval.keep(&o, &p);
+            per_gene_store.keep(&observed, &rate);
         }
         bar.inc(1);
     }
     bar.finish_and_clear();
-    let n_eval_genes = eval.genes().len();
-    let per_gene = eval.per_gene();
+    let n_eval_genes = per_gene_store.genes().len();
+    let per_gene = per_gene_store.per_gene();
     Ok(EvalOutcome {
         ceiling_llik,
         train_gene_names: Vec::new(),

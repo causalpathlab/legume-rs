@@ -312,8 +312,7 @@ fn column_groups_from_table(
     path: &str,
     column_names: &[Box<str>],
 ) -> anyhow::Result<Vec<Vec<usize>>> {
-    let table_names = matrix_util::parquet::read_parquet_string_column(path, 0)?;
-    let table_labels = matrix_util::parquet::read_parquet_string_column(path, 1)?;
+    let (table_names, table_labels) = read_group_table(path)?;
     anyhow::ensure!(
         table_names.len() == table_labels.len(),
         "{path}: {} names but {} group labels",
@@ -322,8 +321,8 @@ fn column_groups_from_table(
     );
     let label_of_column: HashMap<&str, &str> = table_names
         .iter()
-        .zip(&table_labels)
-        .map(|(k, v)| (k.as_ref(), v.as_ref()))
+        .map(std::convert::AsRef::as_ref)
+        .zip(table_labels.iter().map(std::convert::AsRef::as_ref))
         .collect();
 
     let mut group_of_label: HashMap<&str, usize> = HashMap::default();
@@ -352,6 +351,49 @@ fn column_groups_from_table(
         column_groups.len()
     );
     Ok(column_groups)
+}
+
+/// The `(name, label)` columns of a group table.
+type GroupTable = (Vec<Box<str>>, Vec<Box<str>>);
+
+/// The `(name, label)` columns of a group table, from parquet or delimited text.
+///
+/// Both, because the flag says `TABLE` and the help says "two-column table" —
+/// reading only parquet meant the TSV a user would naturally write failed with a
+/// parquet decode error. The text path goes through the workspace reader, so it
+/// sniffs the delimiter and handles `.gz` like every other list this tool takes.
+///
+/// Matching stays EXACT (see the caller). `Membership` offers base-key and prefix
+/// fallbacks, which are right for joining annotations and wrong here: a split
+/// that fuzzy-matches puts a cell in the wrong half, and nothing downstream can
+/// detect it.
+fn read_group_table(path: &str) -> anyhow::Result<GroupTable> {
+    let is_parquet = std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+    if is_parquet {
+        return Ok((
+            matrix_util::parquet::read_parquet_string_column(path, 0)?,
+            matrix_util::parquet::read_parquet_string_column(path, 1)?,
+        ));
+    }
+
+    let delim = matrix_util::membership::detect_delimiter(path);
+    let out = matrix_util::common_io::read_lines_of_words_delim(path, delim, -1)?;
+    let mut names = Vec::with_capacity(out.lines.len());
+    let mut labels = Vec::with_capacity(out.lines.len());
+    for (row, fields) in out.lines.iter().enumerate() {
+        anyhow::ensure!(
+            fields.len() >= 2,
+            "{path}:{}: {} column(s), need a cell name and a group label",
+            row + 1,
+            fields.len()
+        );
+        names.push(fields[0].clone());
+        labels.push(fields[1].clone());
+    }
+    Ok((names, labels))
 }
 
 /// Write one half as a new backend. Only the selected columns are read, so the

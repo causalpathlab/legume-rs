@@ -148,7 +148,6 @@ impl BgeEmbedding {
         preload: bool,
         block: usize,
         qopts: &QueryNameOpts,
-        ablate: Option<&str>,
     ) -> anyhow::Result<BgeFit> {
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
             data_files: files.to_vec(),
@@ -169,12 +168,12 @@ impl BgeEmbedding {
         // it exists to score — while `predict` passes `--min-gene-overlap`, which used to
         // be dropped here along with every `--feature-name-*` flag.
         crate::topic::eval::ensure_gene_coverage(&remap, qopts.min_overlap, "--feature-name-kind")?;
-        // Ablation is applied after the coverage gate, not before: the hidden
-        // genes are deliberately withheld, so counting them as missing coverage
-        // would refuse every ablated run.
-        if let Some(path) = ablate {
-            remap = crate::predict::apply_ablation(Some(remap), &new_genes, path)?
-                .expect("ablation always yields a remap");
+        // After the coverage gate, not before: the hidden genes are deliberately
+        // withheld, so counting them as missing coverage would refuse every
+        // ablated run. Driven from `qopts` rather than a separate parameter, so
+        // this module no longer reaches back into the `predict` subcommand.
+        if let Some(hide) = qopts.hide.as_deref() {
+            crate::topic::eval::hide_features(&mut remap, &new_genes, hide)?;
         }
 
         // The exact normalizer: every model gene, so `partition_scale = 1`.
