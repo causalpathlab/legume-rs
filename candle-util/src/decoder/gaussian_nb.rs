@@ -42,6 +42,17 @@ impl GaussianNbDecoder {
         })
     }
 
+    /// The per-gene logit offset `b` in `π = softmax_d(z·W + b)`.
+    ///
+    /// Exposed so a scorer can rebuild the same rate outside the module: the
+    /// loadings already ship as `dictionary.parquet`, but `b` lives only in
+    /// the checkpoint, and without it the reconstruction is off by a per-gene
+    /// factor.
+    #[must_use]
+    pub fn feature_bias(&self) -> Option<Tensor> {
+        self.decoder.bias().cloned()
+    }
+
     /// `log π_nd = log_softmax_d(z·W + b)`.
     fn log_pi(&self, z_nk: &Tensor) -> Result<Tensor> {
         let logits_nd = self.decoder.forward(z_nk)?; // [N, D]

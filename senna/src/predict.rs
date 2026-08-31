@@ -78,9 +78,10 @@ pub struct PredictArgs {
                      Gaussian-head masked models\n  \
                      {out}.predictive.parquet  per-cell [llik, total, llik_per_count]\n\
                      \n\
-                     vae models emit the latent only, encoder-only.\n\
-                     They write no predictive.parquet.\n\
-                     --decoder-only and --refine-* do not apply to them."
+                     vae inference is encoder-only, so --decoder-only and\n\
+                     --refine-* do not apply to it. It is still scored:\n\
+                     its decoder is rebuilt to grade the same columns\n\
+                     every other family is graded on."
     )]
     pub(crate) out: Box<str>,
 
@@ -1369,8 +1370,9 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         );
     }
 
-    // `need_llik: false` keeps `predict`'s vae output exactly as it was — latent only,
-    // no `.predictive.parquet`, and no decoder rebuilt. `probe` asks for the score.
+    // The decoder is rebuilt so a vae run is scorable like every other family.
+    // It used to be skipped (latent only, no `.predictive.parquet`), which left
+    // vae the one family a benchmark could not grade on the shared columns.
     let s = score_vae_backend(VaeScoreArgs {
         model: &args.model,
         data_files: &args.data_files,
@@ -1379,13 +1381,44 @@ fn predict_vae(args: &PredictArgs, metadata: &TopicModelMetadata) -> anyhow::Res
         minibatch_size: args.minibatch_size,
         query_name_opts: &args.query_name_opts()?,
         metadata,
-        need_llik: false,
+        need_llik: true,
     })?;
 
-    let cell_names = s.data_vec.column_names()?;
-    // Inference: emit a row per query cell (no QC dropping).
-    crate::output_helpers::save_latent(&args.out, &s.z_nk, &cell_names, None)?;
-    info!("Wrote {}.latent.parquet (vae, encoder-only)", args.out);
+    // `π = softmax_d(z·W + b)` is `exp(b + ρ·θ)` normalised over genes — the
+    // same arithmetic `Reconstruction::Embedding` already grades bge by, so
+    // the two families land on one comparable axis. The bare `llik` column
+    // stays the backend's own NB density and is NOT comparable across
+    // families; `eval_llik_per_count` is.
+    let (training_genes, _) = load_dictionary(&args.model)?;
+    let agreement = match s.recon.as_ref() {
+        Some((rho_dh, b_feat)) => evaluate_agreement(AgreementInputs {
+            args,
+            training_genes: &training_genes,
+            data_vec: &s.data_vec,
+            recon: Reconstruction::Embedding {
+                rho_dh: rho_dh.clone(),
+                b_feat,
+                theta_nh: &s.z_nk,
+            },
+        })?,
+        None => {
+            log::warn!(
+                "no decoder bias recovered from {}.safetensors; writing the latent and \
+                 the backend likelihood without the agreement metrics",
+                args.model
+            );
+            None
+        }
+    };
+
+    write_outputs(
+        args,
+        &s.data_vec,
+        &s.z_nk,
+        &s.llik,
+        &s.total,
+        agreement.as_ref(),
+    )?;
     Ok(())
 }
 
@@ -1410,6 +1443,10 @@ pub(crate) struct VaeScored {
     pub llik: Vec<f32>,
     /// Empty when `need_llik` was `false`.
     pub total: Vec<f32>,
+    /// The gene side of the rate, `(loadings [D,K], feature bias [D])`, on the
+    /// dictionary's gene axis. `None` when `need_llik` was `false` (no decoder
+    /// was rebuilt) or when the checkpoint carries no decoder bias.
+    pub recon: Option<(Mat, Vec<f32>)>,
 }
 
 /// Encoder pass for a `senna vae` model, optionally with the NB predictive score.
@@ -1426,7 +1463,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     use crate::topic::model_metadata::load_feature_mean;
 
     let metadata = a.metadata;
-    let (training_genes, _loadings) = load_dictionary(a.model)?;
+    let (training_genes, loadings_dk) = load_dictionary(a.model)?;
     let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
     anyhow::ensure!(
         feature_mean.len() == training_genes.len(),
@@ -1490,6 +1527,25 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     parameters.load(&safetensors_path)?;
     let decoder = decoder.as_ref();
 
+    // Read the gene side AFTER the load, or it is the initialization rather
+    // than the fit. The loadings come from `dictionary.parquet` rather than
+    // the checkpoint's weight so they are guaranteed to sit on the same gene
+    // axis as `training_genes`; only `b` has no parquet of its own.
+    let recon = decoder.and_then(|dec| {
+        let bias = dec.feature_bias()?;
+        let bias: Vec<f32> = bias.flatten_all().ok()?.to_vec1().ok()?;
+        if bias.len() != loadings_dk.nrows() {
+            log::warn!(
+                "vae decoder bias has {} entries but the dictionary has {} genes; \
+                 skipping the agreement metrics for this run",
+                bias.len(),
+                loadings_dk.nrows()
+            );
+            return None;
+        }
+        Some((loadings_dk.clone(), bias))
+    });
+
     let ntot = data_vec.num_columns();
     let (z_nk, llik, total) =
         run_predict_blocks(ntot, metadata.n_topics, a.minibatch_size, |(lb, ub)| {
@@ -1516,6 +1572,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         z_nk,
         llik,
         total,
+        recon,
     })
 }
 
