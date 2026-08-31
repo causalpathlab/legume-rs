@@ -1036,8 +1036,18 @@ where
 
     let ntot = data_vec.num_columns();
     let kk = metadata.n_topics;
+    // The finest DECODER's width, not `n_features_full`: the dozen-odd dense
+    // temporaries live in the likelihood chain, which runs on the decoder's
+    // axis. A coarsened dense model densifies briefly at full width but scores
+    // at the coarsened one, so sizing the cap off the full axis would throttle
+    // the topic paths that have never had a memory problem.
+    let d_dense = metadata
+        .level_decoder_dims
+        .last()
+        .copied()
+        .unwrap_or(metadata.n_features_full);
 
-    let (z_nk, llik, total) = run_predict_blocks(ntot, kk, minibatch_size, |(lb, ub)| {
+    let (z_nk, llik, total) = run_predict_blocks(ntot, kk, minibatch_size, d_dense, |(lb, ub)| {
         predict_block_dense::<Dec>(PredictBlockDenseArgs {
             lb,
             ub,
@@ -1742,8 +1752,12 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     });
 
     let ntot = data_vec.num_columns();
-    let (z_nk, llik, total) =
-        run_predict_blocks(ntot, metadata.n_topics, a.minibatch_size, |(lb, ub)| {
+    let (z_nk, llik, total) = run_predict_blocks(
+        ntot,
+        metadata.n_topics,
+        a.minibatch_size,
+        training_genes.len(),
+        |(lb, ub)| {
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
             let csc = data_vec.read_columns_csc(lb..ub)?;
@@ -1760,7 +1774,8 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
                 .to_vec1()?;
             let total: Vec<f32> = x_nd.sum(1)?.to_device(&Device::Cpu)?.to_vec1()?;
             Ok((lb, z_mat, llik, total))
-        })?;
+        },
+    )?;
 
     Ok(VaeScored {
         data_vec,
@@ -1774,10 +1789,44 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
 /// Run `block_fn` over `[0, ntot)` in `minibatch_size` blocks, concatenating
 /// results into `(z_nk [ntot, kk], llik [ntot], total [ntot])`. Shared by the
 /// dense predict drivers.
+/// How many dense blocks may be in flight at once, given the working set one
+/// block costs.
+///
+/// The dense drivers densify each block to `[minibatch × D]` and then run a
+/// decoder over it; the NB likelihood chain alone allocates a dozen-odd
+/// tensors of that shape. Left to `par_iter`, EVERY block runs at once, so the
+/// peak is `threads × per-block` — which at whole-transcriptome D is tens of
+/// gigabytes and was an OOM kill, silently, with only a SIGKILL to show for
+/// it. The work per block is unchanged; only how many run together is capped.
+///
+/// `LEGUME_PREDICT_BUDGET_BYTES` overrides the default, following the
+/// `LEGUME_PRELOAD_BUDGET_BYTES` precedent for memory knobs.
+fn dense_block_concurrency(minibatch_size: usize, dense_width: usize) -> usize {
+    /// Dense `[minibatch × D]` f32 temporaries a block holds at peak. Counted
+    /// off the NB chain in `candle_util::loss::nb_log_likelihood_elem` (phi,
+    /// mu, phi+mu, three logs, two terms, x+phi, the lgammas) plus the
+    /// encoder input, decoder logits, softmax and mu — rounded up, because
+    /// under-counting here is an OOM and over-counting is only slower.
+    const DENSE_TENSORS_PER_BLOCK: usize = 16;
+    const DEFAULT_BUDGET_BYTES: usize = 8 << 30;
+    let budget = std::env::var("LEGUME_PREDICT_BUDGET_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BUDGET_BYTES);
+    let per_block = minibatch_size
+        .saturating_mul(dense_width)
+        .saturating_mul(std::mem::size_of::<f32>())
+        .saturating_mul(DENSE_TENSORS_PER_BLOCK)
+        .max(1);
+    (budget / per_block).clamp(1, rayon::current_num_threads())
+}
+
 fn run_predict_blocks<F>(
     ntot: usize,
     kk: usize,
     minibatch_size: usize,
+    // Feature count the likelihood chain runs on, for the memory cap.
+    dense_width: usize,
     block_fn: F,
 ) -> anyhow::Result<(Mat, Vec<f32>, Vec<f32>)>
 where
@@ -1785,11 +1834,28 @@ where
 {
     let jobs = create_jobs(ntot, 0, Some(minibatch_size));
     let njobs = jobs.len() as u64;
-    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = jobs
-        .par_iter()
-        .progress_with(new_progress_bar(njobs))
-        .map(|&block| block_fn(block))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let max_conc = dense_block_concurrency(minibatch_size, dense_width);
+    if max_conc < rayon::current_num_threads() {
+        info!(
+            "Scoring {njobs} blocks at most {max_conc} at a time: one dense \
+             [{minibatch_size} x {dense_width}] block's working set would otherwise be \
+             multiplied by every thread (LEGUME_PREDICT_BUDGET_BYTES to raise)"
+        );
+    }
+    let bar = new_progress_bar(njobs);
+    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = Vec::with_capacity(jobs.len());
+    // Waves rather than one `par_iter`: the cap has to bound how many blocks
+    // hold their dense tensors simultaneously, and rayon has no built-in way
+    // to limit in-flight items of a parallel iterator.
+    for wave in jobs.chunks(max_conc) {
+        let done: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = wave
+            .par_iter()
+            .progress_with(bar.clone())
+            .map(|&block| block_fn(block))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        chunks.extend(done);
+    }
+    bar.finish_and_clear();
     chunks.sort_by_key(|c| c.0);
 
     let mut z_nk = Mat::zeros(ntot, kk);

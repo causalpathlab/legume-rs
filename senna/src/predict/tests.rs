@@ -89,3 +89,35 @@ fn hiding_matches_case_insensitively_like_the_remap_does() {
         .expect("hiding always yields a remap");
     assert_eq!(out.new_to_train, vec![None, Some(1), None]);
 }
+
+/// The scoring cap exists for one reason: a dense block's working set must not
+/// be multiplied by every thread. It has to bite at whole-transcriptome width
+/// and stay out of the way at the coarsened widths the topic paths score on,
+/// which have never had a memory problem.
+mod block_concurrency {
+    use super::super::dense_block_concurrency;
+
+    #[test]
+    fn a_whole_transcriptome_block_is_capped_well_below_the_thread_count() {
+        // The reported OOM's shape: ~58k genes at the default minibatch.
+        let conc = dense_block_concurrency(500, 57_843);
+        assert!(
+            conc <= 8,
+            "58k-gene blocks must not run wide open; got {conc}"
+        );
+        assert!(conc >= 1, "the cap must always admit at least one block");
+    }
+
+    #[test]
+    fn a_coarsened_block_is_not_throttled() {
+        // What a dense topic model actually scores on after coarsening: the
+        // cap must return the full thread count, i.e. change nothing.
+        let conc = dense_block_concurrency(500, 2_000);
+        assert_eq!(conc, rayon::current_num_threads());
+    }
+
+    #[test]
+    fn an_absurd_width_still_admits_one_block() {
+        assert_eq!(dense_block_concurrency(usize::MAX, usize::MAX), 1);
+    }
+}
