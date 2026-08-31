@@ -323,6 +323,11 @@ impl SparseIo for SparseMtxData {
     }
 
     fn preload_columns(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "column") {
+                return Ok(());
+            }
+        }
         let by_column = self.backend.group("/by_column")?;
         let data = by_column.dataset("data")?.read_1d::<f32>()?.to_vec();
         let indices = by_column.dataset("indices")?.read_1d::<u64>()?.to_vec();

@@ -113,3 +113,20 @@ fn walk(root: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
     }
     Ok(out)
 }
+
+/// `--no-preload` must actually reach the field: the flag was declared
+/// `default_value_t = true` with clap's inferred SetTrue, which made it
+/// decorative — no invocation could turn preloading off.
+#[test]
+fn no_preload_reaches_the_squeeze_args() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        a: crate::handlers::transformation::RunSqueezeArgs,
+    }
+    let on = Wrap::parse_from(["x", "-o", "out", "in.zarr"]);
+    assert!(on.a.preload, "default stays preload-on");
+    let off = Wrap::parse_from(["x", "-o", "out", "in.zarr", "--no-preload"]);
+    assert!(!off.a.preload, "--no-preload must disable it");
+}

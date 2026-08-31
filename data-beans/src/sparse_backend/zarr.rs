@@ -599,6 +599,11 @@ impl SparseIo for SparseMtxData {
 
     /// preload columns' values and indices
     fn preload_columns(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "column") {
+                return Ok(());
+            }
+        }
         use zarrs::array::Array as ZArray;
 
         let key = "/by_column/data";

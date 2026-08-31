@@ -77,3 +77,32 @@ fn random_matrix_totals_agree() -> anyhow::Result<()> {
     assert_eq!(data.column_nnz(8), Some(4));
     Ok(())
 }
+
+/// `--preload-data` is a request, not a command: preloading is 12 bytes per
+/// non-zero with no size check anywhere, and no consumer ever releases it. The
+/// budget turns an OOM into a warning plus the cold read path, which every
+/// reader already handles — `csc_column_arrays()` returning `None` IS the
+/// documented "not preloaded" state.
+#[test]
+fn a_preload_over_budget_is_skipped_not_obeyed() -> anyhow::Result<()> {
+    let arr = ndarray::Array2::<f32>::from_elem((50, 40), 1.0);
+    let mut data = create_sparse_from_ndarray(&arr, None, None)?;
+
+    // 2000 nnz x 12 B = 24 kB; a 1 kB budget must refuse.
+    std::env::set_var("LEGUME_PRELOAD_BUDGET_BYTES", "1024");
+    let result = data.preload_columns();
+    std::env::remove_var("LEGUME_PRELOAD_BUDGET_BYTES");
+    result?;
+    assert!(
+        data.csc_column_arrays().is_none(),
+        "over budget: the arrays must not be resident"
+    );
+    // and the cold path still serves reads
+    let (_, _, t) = data.read_triplets_by_columns((0..40).collect())?;
+    assert_eq!(t.len(), 2000);
+
+    // under budget (default): the request is honoured
+    data.preload_columns()?;
+    assert!(data.csc_column_arrays().is_some(), "under budget: loaded");
+    Ok(())
+}
