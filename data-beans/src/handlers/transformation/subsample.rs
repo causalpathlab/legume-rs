@@ -7,7 +7,6 @@ use log::info;
 use rand::rngs::SmallRng;
 use rand::seq::index::sample;
 use rand::SeedableRng;
-use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Args, Debug)]
 pub struct SubsampleArgs {
@@ -82,26 +81,8 @@ pub fn run_subsample(args: &SubsampleArgs) -> anyhow::Result<()> {
         args.seed
     );
 
-    // Read only the selected columns; rows come back as global indices.
-    let (_, _, raw) = data.read_triplets_by_columns(cell_idx.clone())?;
-
-    let subset_genes = gene_idx.len() < nrow;
-    let triplets: Vec<(u64, u64, f32)> = if subset_genes {
-        let old2new: HashMap<u64, u64> = gene_idx
-            .iter()
-            .enumerate()
-            .map(|(new, &old)| (old as u64, new as u64))
-            .collect();
-        raw.into_iter()
-            .filter_map(|(r, c, v)| old2new.get(&r).map(|&nr| (nr, c, v)))
-            .collect()
-    } else {
-        raw
-    };
-
     let out_nrow = gene_idx.len();
     let out_ncol = cell_idx.len();
-    let nnz = triplets.len();
 
     let row_names_all = data.row_names()?;
     let col_names_all = data.column_names()?;
@@ -111,15 +92,19 @@ pub fn run_subsample(args: &SubsampleArgs) -> anyhow::Result<()> {
     let (effective_output, backend_out, file_out) =
         prepare_output(&args.output, args.backend.clone(), args.zip)?;
 
-    let mut out = create_sparse_from_triplets_owned(
-        triplets,
-        (out_nrow, out_ncol, nnz),
-        Some(file_out.as_ref()),
-        Some(&backend_out),
+    // Streamed: the survivors never sit in memory at once. `sample_sorted`
+    // returns ascending indices, which is what lets the row renumbering stay
+    // monotone and the columns keep their order without a per-column sort.
+    let row_filter = (gene_idx.len() < nrow).then_some(gene_idx.as_slice());
+    let (_, _, nnz) = crate::handlers::transformation::stream_column_selection(
+        &*data,
+        &cell_idx,
+        row_filter,
+        &out_row_names,
+        &out_col_names,
+        file_out.as_ref(),
+        &backend_out,
     )?;
-    out.register_row_names_vec(&out_row_names);
-    out.register_column_names_vec(&out_col_names);
-    drop(out);
 
     let final_path = finalize_output(&file_out, &effective_output)?;
     info!(
@@ -165,3 +150,6 @@ fn sample_sorted(rng: &mut SmallRng, total: usize, target: Option<usize>) -> Vec
         _ => (0..total).collect(),
     }
 }
+
+#[cfg(test)]
+mod tests;
