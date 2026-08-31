@@ -104,6 +104,37 @@ impl DecoderModuleT for MultinomTopicDecoder {
         Ok((recon_nd, llik))
     }
 
+    fn llik_is_gene_chunked(&self) -> bool {
+        true
+    }
+
+    /// The same weighted multinomial as [`Self::forward_with_llik`], summed a
+    /// gene slice at a time so no `[N, D]` tensor is built.
+    ///
+    /// One pass: `log_recon_d` is a `logsumexp` over TOPICS, so a gene's value
+    /// needs no other gene's, and the likelihood is a plain sum over genes.
+    fn llik_gene_chunked(&self, z_nk: &Tensor, x_nd: &Tensor, gene_chunk: usize) -> Result<Tensor> {
+        let last = x_nd.rank() - 1;
+        let log_w_kd = self.dictionary.log_weight_kd()?;
+        let mut llik: Option<Tensor> = None;
+        for (start, len) in super::gene_slices(self.n_features, gene_chunk) {
+            let log_recon = self
+                .dictionary
+                .forward_log_slice(z_nk, Some(&log_w_kd), start, len)?;
+            let x = x_nd.narrow(last, start, len)?;
+            let weighted = match &self.feature_weights {
+                Some(w) => x.broadcast_mul(&w.narrow(last, start, len)?)?,
+                None => x,
+            };
+            let part = weighted.mul(&log_recon)?.sum(last)?;
+            llik = Some(match llik.take() {
+                Some(acc) => acc.add(&part)?,
+                None => part,
+            });
+        }
+        llik.ok_or_else(|| candle_core::Error::Msg("no gene slices to score".into()))
+    }
+
     fn dim_obs(&self) -> usize {
         self.n_features
     }
@@ -205,6 +236,41 @@ impl DecoderModuleT for NbTopicDecoder {
         Ok((log_recon_nd.exp()?, llik))
     }
 
+    fn llik_is_gene_chunked(&self) -> bool {
+        true
+    }
+
+    /// The same NB likelihood as [`Self::forward_with_llik`], summed a gene
+    /// slice at a time so no `[N, D]` tensor is built.
+    ///
+    /// One pass, for the same reason as the multinomial head: the rate is a
+    /// `logsumexp` over TOPICS. Only the library size is global, and it is
+    /// `[N, 1]`, read off `x` once and shared by every slice.
+    fn llik_gene_chunked(&self, z_nk: &Tensor, x_nd: &Tensor, gene_chunk: usize) -> Result<Tensor> {
+        let last = x_nd.rank() - 1;
+        let lib_size = x_nd.sum(last)?.unsqueeze(1)?; // [N, 1]
+        let log_w_kd = self.dictionary.log_weight_kd()?;
+        let mut llik: Option<Tensor> = None;
+        for (start, len) in super::gene_slices(self.n_features, gene_chunk) {
+            let recon = self
+                .dictionary
+                .forward_log_slice(z_nk, Some(&log_w_kd), start, len)?
+                .exp()?;
+            let mu = recon.broadcast_mul(&lib_size)?;
+            let x = x_nd.narrow(last, start, len)?;
+            let log_phi = self
+                .log_phi_1d
+                .narrow(1, start, len)?
+                .broadcast_as(x.shape())?;
+            let part = crate::loss::nb_log_likelihood_elem(&x, &mu, &log_phi)?.sum(last)?;
+            llik = Some(match llik.take() {
+                Some(acc) => acc.add(&part)?,
+                None => part,
+            });
+        }
+        llik.ok_or_else(|| candle_core::Error::Msg("no gene slices to score".into()))
+    }
+
     fn dim_obs(&self) -> usize {
         self.n_features
     }
@@ -234,3 +300,7 @@ impl DecoderModuleT for NbTopicDecoder {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "topic_tests.rs"]
+mod tests;

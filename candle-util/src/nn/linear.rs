@@ -239,12 +239,34 @@ impl SoftmaxLinear {
         logsumexp_forward(log_h_nk, &self.biased_weight_kd()?)
     }
 
-    /// The `[K, D]` log-simplex weights `forward_log` reduces over.
+    /// [`forward_log`](Self::forward_log) restricted to features
+    /// `[start, start + len)`, for callers scoring one gene slice at a time.
     ///
-    /// Exposed so a gene-sliced forward can narrow them once instead of
-    /// re-normalising per slice: the softmax is over the gene axis, so a
-    /// narrowed slice of the normalised weights is exactly the same numbers
-    /// the full forward would produce for those genes.
+    /// Correct because the softmax normalises over the FEATURE axis and is
+    /// computed at full width before the narrow, so a slice of the normalised
+    /// weights holds exactly the numbers the full forward would produce for
+    /// those features. Narrowing first would renormalise over the slice and
+    /// silently change the model — which is why this is a method here rather
+    /// than a raw weight accessor each decoder narrows for itself.
+    ///
+    /// Pass `log_w_kd` from [`Self::log_weight_kd`] to hoist the full-width
+    /// softmax out of a slicing loop; `None` recomputes it per call.
+    pub fn forward_log_slice(
+        &self,
+        log_h_nk: &Tensor,
+        log_w_kd: Option<&Tensor>,
+        start: usize,
+        len: usize,
+    ) -> Result<Tensor> {
+        match log_w_kd {
+            Some(w) => logsumexp_forward(log_h_nk, &w.narrow(1, start, len)?),
+            None => logsumexp_forward(log_h_nk, &self.biased_weight_kd()?.narrow(1, start, len)?),
+        }
+    }
+
+    /// The `[K, D]` log-simplex weights [`forward_log`](Self::forward_log)
+    /// reduces over, so a slicing loop can compute the full-width softmax once
+    /// and hand it to [`Self::forward_log_slice`].
     pub fn log_weight_kd(&self) -> Result<Tensor> {
         self.biased_weight_kd()
     }
