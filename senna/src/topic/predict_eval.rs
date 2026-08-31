@@ -27,7 +27,9 @@
 
 use crate::embed_common::*;
 use crate::logging::new_progress_bar;
-use matrix_util::agreement::{agreement_from_rate, pearson_log1p, spearman, CellAgreement};
+use matrix_util::agreement::{
+    agreement_from_rate, pearson_log1p, rate_to_counts, spearman, CellAgreement,
+};
 use rayon::prelude::*;
 
 /// Streaming accumulator: fed one cell at a time, over the evaluation genes.
@@ -62,17 +64,24 @@ impl PredictEval {
     }
 
     /// Score one cell. `obs_of` and `pred_of` read a value by MODEL gene index.
-    /// Store one cell's observed and predicted values for the across-cell axis.
+    /// Store one cell's observed counts and predicted RATE for the across-cell axis.
     ///
-    /// The correlations themselves are computed by the caller, in parallel — this
-    /// only folds the result in, so it stays a `&mut self` step in column order.
-    pub fn keep(&mut self, o: &[f32], p: &[f32]) {
+    /// The rate is converted to counts here rather than by the caller. That axis
+    /// correlates across cells, and the depth factor is per-cell, so storing a
+    /// raw rate does not rescale the per-gene series — it distorts it, and can
+    /// inverse its sign. Doing the conversion at the one place the values are
+    /// stored means no caller can get it wrong.
+    ///
+    /// The per-cell correlations are computed by the caller, in parallel; this is
+    /// only the fold-in, so it stays a `&mut self` step in column order.
+    pub fn keep(&mut self, observed: &[f32], rate: &[f32]) {
         if !self.keep_values {
             return;
         }
-        for (i, (&a, &b)) in o.iter().zip(p).enumerate() {
-            self.obs[i].push(a);
-            self.pred[i].push(b);
+        let predicted = rate_to_counts(observed, rate);
+        for (i, (&o, &p)) in observed.iter().zip(&predicted).enumerate() {
+            self.obs[i].push(o);
+            self.pred[i].push(p);
         }
     }
 
@@ -118,17 +127,19 @@ pub(crate) fn resolve_eval_genes(
     let Some(path) = path else {
         return Ok((0..gene_names.len()).collect());
     };
-    let index: std::collections::HashMap<&str, usize> = gene_names
+    // Lowercased on both sides — the same key the gene remap matches on, so a
+    // panel that resolves for the model also resolves here regardless of case.
+    let index: std::collections::HashMap<String, usize> = gene_names
         .iter()
         .enumerate()
-        .map(|(i, n)| (n.as_ref(), i))
+        .map(|(i, n)| (n.to_lowercase(), i))
         .collect();
     let wanted = matrix_util::common_io::read_name_list(path)
         .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?;
     let mut out = Vec::with_capacity(wanted.len());
     let mut missing = 0usize;
     for name in &wanted {
-        match index.get(name.as_ref()) {
+        match index.get(&name.to_lowercase()) {
             Some(&i) => out.push(i),
             None => missing += 1,
         }
@@ -401,7 +412,7 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
         per_gene_store
             .genes()
             .iter()
-            .map(|&g| f64::from((at(g) / z).max(1e-12)).ln())
+            .map(|&g| f64::from((at(g) / z).max(matrix_util::agreement::PROB_FLOOR)).ln())
             .collect()
     };
     let log_null = log_table(&null_comp);
@@ -447,7 +458,10 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
                         continue;
                     }
                     count += x;
-                    model += x * f64::from((recon_dn[(g, j)] / recon_z).max(1e-12)).ln();
+                    model += x * f64::from(
+                        (recon_dn[(g, j)] / recon_z).max(matrix_util::agreement::PROB_FLOOR),
+                    )
+                    .ln();
                     null += x * log_null[slot];
                     ceiling += x * log_ceiling[slot];
                 }

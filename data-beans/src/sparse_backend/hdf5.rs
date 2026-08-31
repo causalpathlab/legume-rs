@@ -37,6 +37,8 @@ pub struct SparseMtxData {
     max_row_name_idx: usize,
     max_column_name_idx: usize,
     by_column_indptr: Vec<u64>,
+    /// Streaming-write cursor: entries appended so far (see `note_streamed_nnz`).
+    streamed_nnz: u64,
     by_row_indptr: Vec<u64>,
     by_column_indices: Option<Vec<u64>>,
     by_column_data: Option<Vec<f32>>,
@@ -81,6 +83,7 @@ impl SparseMtxData {
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
+            streamed_nnz: 0,
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
@@ -240,6 +243,7 @@ impl SparseMtxData {
             max_row_name_idx: MAX_ROW_NAME_IDX,
             max_column_name_idx: MAX_COLUMN_NAME_IDX,
             by_column_indptr: vec![],
+            streamed_nnz: 0,
             by_row_indptr: vec![],
             by_column_indices: None,
             by_column_data: None,
@@ -277,6 +281,32 @@ impl SparseIo for SparseMtxData {
     }
 
     /// Read column index pointers
+    fn column_indptr(&self) -> &[u64] {
+        &self.by_column_indptr
+    }
+
+    fn reopen_backend(&mut self) -> anyhow::Result<()> {
+        // The open handle points at the deleted inode after the swap; reopen on
+        // the path and refresh the resident indptrs.
+        self.backend = hdf5::File::open_rw(&self.file_name)?.into();
+        self.streamed_nnz = 0;
+        self.read_column_indptr()?;
+        self.read_row_indptr()?;
+        Ok(())
+    }
+
+    fn note_streamed_nnz(&mut self, n: u64) {
+        self.streamed_nnz += n;
+    }
+
+    fn streamed_nnz(&self) -> u64 {
+        self.streamed_nnz
+    }
+
+    fn reset_streamed_nnz(&mut self) {
+        self.streamed_nnz = 0;
+    }
+
     fn read_column_indptr(&mut self) -> anyhow::Result<()> {
         if let Ok(by_column) = self.backend.group("/by_column") {
             let indptr = by_column.dataset("indptr")?.read_1d::<u64>()?;
@@ -297,6 +327,11 @@ impl SparseIo for SparseMtxData {
     }
 
     fn preload_columns(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "column") {
+                return Ok(());
+            }
+        }
         let by_column = self.backend.group("/by_column")?;
         let data = by_column.dataset("data")?.read_1d::<f32>()?.to_vec();
         let indices = by_column.dataset("indices")?.read_1d::<u64>()?.to_vec();
@@ -312,6 +347,11 @@ impl SparseIo for SparseMtxData {
     }
 
     fn preload_rows(&mut self) -> anyhow::Result<()> {
+        if let Some(nnz) = self.num_non_zeros() {
+            if !crate::sparse_io::preload_within_budget(nnz, "row") {
+                return Ok(());
+            }
+        }
         let by_row = self.backend.group("/by_row")?;
         let data = by_row.dataset("data")?.read_1d::<f32>()?.to_vec();
         let indices = by_row.dataset("indices")?.read_1d::<u64>()?.to_vec();

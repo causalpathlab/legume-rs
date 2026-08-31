@@ -396,23 +396,13 @@ fn read_group_table(path: &str) -> anyhow::Result<GroupTable> {
     Ok((names, labels))
 }
 
-/// Write one half as a new backend. Only the selected columns are read, so the
-/// I/O scales with the half rather than the input.
+/// Write one half as a new backend, streamed.
 ///
-/// MEMORY, which is a different story: `read_triplets_by_columns` returns every
-/// non-zero of the half at once, and `create_sparse_from_triplets_owned` then
-/// builds a second copy. At `(u64, u64, f32)` padded to 24 bytes that is a few
-/// hundred MB for a slide-scale half and tens of GB for an imaging-scale one, so
-/// the upper end OOMs rather than merely being slow.
-///
-/// The streaming writer next door (`handlers::merging`: `begin_streaming_csc` +
-/// `append_csc_slab`) is the shape this wants, but it needs the total nnz up
-/// front and the `SparseIo` trait exposes only whole-matrix `num_non_zeros()` —
-/// no per-column indptr — so a half's nnz is not knowable without either a
-/// counting pass or a new trait method on every backend. `subsample` has the
-/// identical shape, so the two should move together. Left as-is deliberately:
-/// it is a redesign of a write path whose output has to stay byte-equivalent,
-/// not a cleanup.
+/// The selected columns' exact nnz comes off the resident indptr and the
+/// survivors flow through the validated streaming writer in byte-budgeted
+/// slabs, so peak residency is bounded by the slab budget rather than scaling
+/// with the half — the wall the old triplet-materialising version hit at
+/// imaging scale is gone, and so is the doc comment that described it.
 fn write_half(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     selected_columns: &[usize],
@@ -421,15 +411,6 @@ fn write_half(
 ) -> anyhow::Result<()> {
     let row_names = data.row_names()?;
     let all_column_names = data.column_names()?;
-    let n_rows = data
-        .num_rows()
-        .ok_or_else(|| anyhow::anyhow!("backend has no `nrow`"))?;
-
-    // The slow step of the whole subcommand, and it is one opaque call — say what
-    // is happening before it, or a large half looks like a hang.
-    info!("Reading {} columns for {output}", selected_columns.len());
-    let (_, _, triplets) = data.read_triplets_by_columns(selected_columns.to_vec())?;
-    let nnz = triplets.len();
     let kept_column_names: Vec<Box<str>> = selected_columns
         .iter()
         .map(|&c| all_column_names[c].clone())
@@ -437,21 +418,19 @@ fn write_half(
 
     let (effective_output, backend_out, file_out) =
         prepare_output(output, args.backend.clone(), args.zip)?;
-    let mut out = create_sparse_from_triplets_owned(
-        triplets,
-        (n_rows, selected_columns.len(), nnz),
-        Some(file_out.as_ref()),
-        Some(&backend_out),
+    info!("Streaming {} columns to {output}", selected_columns.len());
+    let (n_rows, n_cols, nnz) = crate::handlers::transformation::stream_column_selection(
+        data,
+        selected_columns,
+        None,
+        &row_names,
+        &kept_column_names,
+        file_out.as_ref(),
+        &backend_out,
     )?;
-    out.register_row_names_vec(&row_names);
-    out.register_column_names_vec(&kept_column_names);
-    drop(out);
 
     let final_path = finalize_output(&file_out, &effective_output)?;
-    info!(
-        "wrote {final_path} ({n_rows} genes x {} cells, {nnz} non-zeros)",
-        selected_columns.len()
-    );
+    info!("wrote {final_path} ({n_rows} genes x {n_cols} cells, {nnz} non-zeros)");
     Ok(())
 }
 

@@ -75,3 +75,17 @@ fn coverage_is_gated_before_hiding_not_after() {
         .expect("hiding always yields a remap");
     assert_eq!(out.n_mapped, 2);
 }
+
+/// The panel file and the data may disagree on case while naming the same
+/// genes. The remap matches lowercased, so the model resolves fine — but the
+/// hide set used to match exactly, so a lowercase panel against uppercase rows
+/// hid nothing and errored with "matched no feature", pointing at the wrong
+/// cause entirely.
+#[test]
+fn hiding_matches_case_insensitively_like_the_remap_does() {
+    let genes = names(&["Cd8a", "GZMB", "ms4a1"]);
+    let out = build_remap(&genes, &genes, &opts_hiding(&["CD8A", "Ms4a1"], 0.0))
+        .expect("case must not defeat the hide")
+        .expect("hiding always yields a remap");
+    assert_eq!(out.new_to_train, vec![None, Some(1), None]);
+}

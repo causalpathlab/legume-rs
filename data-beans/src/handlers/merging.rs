@@ -352,18 +352,22 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     for h in &batches {
         let src = open_sparse_matrix(&h.path, &h.backend)?;
         let jobs = create_jobs(h.ncol, total_nrow, args.block_size);
+        // A failed block read PROPAGATES. It used to be swallowed (`.ok()`),
+        // and since the output nnz is precomputed from the file headers, the
+        // dropped block left a gap of fill values in the CSC arrays — silent
+        // corruption the finalize audit now catches post hoc; erroring here
+        // names the actual cause instead.
         let triplets_batch: Vec<(u64, u64, f32)> = jobs
             .par_iter()
-            .filter_map(|(lb, ub)| {
-                src.read_triplets_by_columns((*lb..*ub).collect())
-                    .ok()
-                    .map(|(_, _, t)| {
-                        let lb_u64 = *lb as u64;
-                        t.into_iter()
-                            .map(move |(i, j_local, x)| (i, j_local + lb_u64, x))
-                            .collect::<Vec<_>>()
-                    })
+            .map(|(lb, ub)| -> anyhow::Result<Vec<(u64, u64, f32)>> {
+                let (_, _, t) = src.read_triplets_by_columns((*lb..*ub).collect())?;
+                let lb_u64 = *lb as u64;
+                Ok(t.into_iter()
+                    .map(move |(i, j_local, x)| (i, j_local + lb_u64, x))
+                    .collect())
             })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
             .flatten()
             .collect();
 
@@ -978,3 +982,7 @@ pub fn align_backends(args: &AlignDataArgs) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "merging_tests.rs"]
+mod tests;
