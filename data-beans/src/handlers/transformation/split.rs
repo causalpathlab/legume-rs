@@ -397,7 +397,22 @@ fn read_group_table(path: &str) -> anyhow::Result<GroupTable> {
 }
 
 /// Write one half as a new backend. Only the selected columns are read, so the
-/// cost scales with the half rather than the input.
+/// I/O scales with the half rather than the input.
+///
+/// MEMORY, which is a different story: `read_triplets_by_columns` returns every
+/// non-zero of the half at once, and `create_sparse_from_triplets_owned` then
+/// builds a second copy. At `(u64, u64, f32)` padded to 24 bytes that is a few
+/// hundred MB for a slide-scale half and tens of GB for an imaging-scale one, so
+/// the upper end OOMs rather than merely being slow.
+///
+/// The streaming writer next door (`handlers::merging`: `begin_streaming_csc` +
+/// `append_csc_slab`) is the shape this wants, but it needs the total nnz up
+/// front and the `SparseIo` trait exposes only whole-matrix `num_non_zeros()` —
+/// no per-column indptr — so a half's nnz is not knowable without either a
+/// counting pass or a new trait method on every backend. `subsample` has the
+/// identical shape, so the two should move together. Left as-is deliberately:
+/// it is a redesign of a write path whose output has to stay byte-equivalent,
+/// not a cleanup.
 fn write_half(
     data: &dyn SparseIo<IndexIter = Vec<usize>>,
     selected_columns: &[usize],
