@@ -148,15 +148,6 @@ impl DispersionTrend {
         let phi = self.phi_at(mu);
         1.0 / (1.0 + pi * avg_s * phi)
     }
-
-    /// Evaluate [`fisher_weight`] over feature-parallel vectors in one pass.
-    pub fn fisher_weights(&self, pi: &[f32], means: &[f32], avg_s: f32) -> Vec<f32> {
-        assert_eq!(pi.len(), means.len());
-        pi.iter()
-            .zip(means.iter())
-            .map(|(&p, &m)| self.fisher_weight(p, avg_s, m))
-            .collect()
-    }
 }
 
 #[cfg(test)]
