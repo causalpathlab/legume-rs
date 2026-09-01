@@ -89,7 +89,9 @@ pub struct RefineParams {
     /// snapshot of the sufficient stats (rayon `par_iter`); proposals are
     /// then applied sequentially with the move guard. Per-entity RNG seeds
     /// are derived from `(sweep_seed, entity_idx)`, so the result is
-    /// deterministic given `seed` and independent of thread count.
+    /// deterministic given `seed` and independent of thread count (per
+    /// `rand` release — `SmallRng`'s stream is not guaranteed stable across
+    /// `rand` versions).
     ///
     /// When `false`, runs the classic Gauss–Seidel loop: each entity scores
     /// against the live stats (updated by every accepted move so far in the
@@ -161,6 +163,10 @@ impl Profiles {
     /// `basis` is `proj_dim × num_cells`; each entity profile is the sum of
     /// basis columns over the cells constituting it. Gene weighting is not
     /// applied — projection dims aren't gene-aligned.
+    ///
+    /// The Poisson score needs nonnegative profiles, so the accumulated
+    /// per-dimension sums must be `>= 0` — a signed basis (e.g. a raw random
+    /// projection) is rejected loudly rather than silently truncated.
     pub fn from_projection(basis: &DMatrix<f32>, entity_to_cells: &[Vec<usize>]) -> Self {
         let num_features = basis.nrows();
         let num_entities = entity_to_cells.len();
@@ -176,6 +182,11 @@ impl Profiles {
                 let mut out = Vec::with_capacity(num_features);
                 let mut sf = 0f32;
                 for (d, &v) in acc.iter().enumerate() {
+                    assert!(
+                        v >= 0.0,
+                        "projection profile is negative at dim {d} ({v}); \
+                         DC-Poisson requires a nonnegative basis"
+                    );
                     if v > 0.0 {
                         out.push((d as u32, v));
                         sf += v;
@@ -195,7 +206,11 @@ impl Profiles {
     /// In-place reweighting by a caller-supplied per-feature weight vector.
     /// Used by [`Profiles::apply_feature_weighting`] for the NB Fisher-info path.
     pub fn weight_by_vec(&mut self, w: &[f32]) {
-        debug_assert_eq!(w.len(), self.num_features);
+        assert_eq!(
+            w.len(),
+            self.num_features,
+            "weight vector length must match num_features"
+        );
         self.rows
             .par_iter_mut()
             .zip(self.size_factor.par_iter_mut())
@@ -321,7 +336,7 @@ impl DcPoissonStats {
         let mut size_sum = vec![0f64; k];
         for (e, row) in profiles.rows.iter().enumerate() {
             let z = membership[e];
-            debug_assert!(z < k, "membership[{}]={} out of range 0..{}", e, z, k);
+            assert!(z < k, "membership[{}]={} out of range 0..{}", e, z, k);
             let base = z * m;
             for &(g, v) in row {
                 gene_sum[base + g as usize] += v as f64;
@@ -358,15 +373,19 @@ impl DcPoissonStats {
 
         let base_from = k_from * m;
         let base_to = k_to * m;
+        // Subtractions clamp at zero: the running sums accumulate rounding
+        // residues, and a block drained back to (true) zero can otherwise be
+        // left with a negative residue larger than LOG_EPS — feeding
+        // `ln(negative) = NaN` into the log caches.
         for &(g, v) in &profiles.rows[e] {
             let gi = g as usize;
-            self.gene_sum[base_from + gi] -= v as f64;
+            self.gene_sum[base_from + gi] = (self.gene_sum[base_from + gi] - v as f64).max(0.0);
             self.gene_sum[base_to + gi] += v as f64;
             self.log_gene[base_from + gi] = (self.gene_sum[base_from + gi] + LOG_EPS).ln() as f32;
             self.log_gene[base_to + gi] = (self.gene_sum[base_to + gi] + LOG_EPS).ln() as f32;
         }
         let sf = profiles.size_factor[e] as f64;
-        self.size_sum[k_from] -= sf;
+        self.size_sum[k_from] = (self.size_sum[k_from] - sf).max(0.0);
         self.size_sum[k_to] += sf;
         self.log_size_offset[k_from] = -((self.size_sum[k_from] + m_eps).ln()) as f32;
         self.log_size_offset[k_to] = -((self.size_sum[k_to] + m_eps).ln()) as f32;
@@ -403,13 +422,47 @@ impl DcPoissonStats {
 // Scoring kernels //
 /////////////////////
 
+/// Score entity `e` for destination `k` (Poisson plug-in MAP, up to a common
+/// constant):
+/// `  s(e, k) = Σ_{g : y_eg > 0} y_eg · ln(gene_sum⁻ᵉ[k, g] + ε) − size_factor[e] · ln(size_sum⁻ᵉ[k] + Mε)`
+///
+/// where `⁻ᵉ` means entity `e`'s own contribution is excluded. Candidate
+/// blocks never contain `e`, so they read straight from the log caches; the
+/// entity's *current* block subtracts `e`'s row before taking logs
+/// (leave-one-out). Scoring the current block with `e` included would give
+/// "stay put" a self-inclusion bonus that grows with the entity's size
+/// factor and shrinks with block mass — anchoring large entities in place.
+#[inline]
+fn score_move(e: usize, k: usize, stats: &DcPoissonStats, profiles: &Profiles) -> f64 {
+    let m = stats.num_features;
+    let sf = profiles.size_factor[e] as f64;
+    let row = &profiles.rows[e];
+    let base = k * m;
+    if stats.membership[e] == k {
+        let m_eps = m as f64 * LOG_EPS;
+        let loo_size = (stats.size_sum[k] - sf).max(0.0);
+        let mut acc = -sf * (loo_size + m_eps).ln();
+        for &(g, v) in row {
+            let vg = v as f64;
+            let loo = (stats.gene_sum[base + g as usize] - vg).max(0.0);
+            acc += vg * (loo + LOG_EPS).ln();
+        }
+        acc
+    } else {
+        let mut acc = sf * stats.log_size_offset[k] as f64;
+        for &(g, v) in row {
+            acc += v as f64 * stats.log_gene[base + g as usize] as f64;
+        }
+        acc
+    }
+}
+
 /// Log-probability of placing entity `e` into each of the `allowed` blocks.
 ///
-/// Slots outside `allowed` are set to `f64::NEG_INFINITY`. The caller reuses
-/// the same `log_probs` buffer across sweeps to avoid allocation.
-///
-/// Score (Poisson plug-in MAP, up to a common constant):
-/// `  s(e, k) = Σ_{g : y_eg > 0} y_eg · log_gene[k, g] + size_factor[e] · log_size_offset[k]`
+/// Only the `allowed` slots of `log_probs` are written; the rest keep
+/// whatever stale values a previous call left (the caller reuses one buffer
+/// across sweeps). Downstream consumers ([`sample_categorical_log_restricted`],
+/// [`argmax_log_restricted`]) read the `allowed` slots exclusively.
 pub fn compute_log_probs_restricted(
     e: usize,
     stats: &DcPoissonStats,
@@ -417,55 +470,43 @@ pub fn compute_log_probs_restricted(
     allowed: &[usize],
     log_probs: &mut [f64],
 ) {
-    log_probs.iter_mut().for_each(|x| *x = f64::NEG_INFINITY);
-    let m = stats.num_features;
-    let sf = profiles.size_factor[e] as f64;
-    let row = &profiles.rows[e];
     for &k in allowed {
-        let base = k * m;
-        let mut acc = sf * stats.log_size_offset[k] as f64;
-        for &(g, v) in row {
-            acc += v as f64 * stats.log_gene[base + g as usize] as f64;
-        }
-        log_probs[k] = acc;
+        log_probs[k] = score_move(e, k, stats, profiles);
     }
 }
 
 /// Unrestricted variant used only from tests.
 #[cfg(test)]
 fn compute_log_probs(e: usize, stats: &DcPoissonStats, profiles: &Profiles, log_probs: &mut [f64]) {
-    let m = stats.num_features;
-    let sf = profiles.size_factor[e] as f64;
-    let row = &profiles.rows[e];
     for (k, slot) in log_probs.iter_mut().enumerate().take(stats.k) {
-        let base = k * m;
-        let mut acc = sf * stats.log_size_offset[k] as f64;
-        for &(g, v) in row {
-            acc += v as f64 * stats.log_gene[base + g as usize] as f64;
-        }
-        *slot = acc;
+        *slot = score_move(e, k, stats, profiles);
     }
 }
 
-/// Gumbel-max categorical sampling restricted to finite-valued slots.
-pub fn sample_categorical_log(log_probs: &[f64], rng: &mut SmallRng) -> usize {
+/// Gumbel-max categorical sampling over the `allowed` slots of `log_probs`,
+/// skipping non-finite entries. Falls back to `current` (the entity's
+/// present label — always a legal "move") when no allowed slot is finite,
+/// so a degenerate score vector can never produce an out-of-range label.
+pub fn sample_categorical_log_restricted(
+    log_probs: &[f64],
+    allowed: &[usize],
+    current: usize,
+    rng: &mut SmallRng,
+) -> usize {
     let mut best_key = f64::NEG_INFINITY;
-    let mut best_idx = usize::MAX;
-    for (i, &lp) in log_probs.iter().enumerate() {
+    let mut best_idx = current;
+    for &k in allowed {
+        let lp = log_probs[k];
         if lp.is_finite() {
             let u: f64 = rng.random_range(1e-12..1.0_f64);
             let g = -(-u.ln()).ln();
             let key = lp + g;
             if key > best_key {
                 best_key = key;
-                best_idx = i;
+                best_idx = k;
             }
         }
     }
-    debug_assert!(
-        best_idx != usize::MAX,
-        "sample_categorical_log: no finite slot"
-    );
     best_idx
 }
 
@@ -682,9 +723,9 @@ fn apply_proposals<G: MoveGuard>(
 
 /// Gauss–Seidel sequential sweep. For each entity visited in `order`, scores
 /// the candidate destinations under the live (mutated) stats, picks one via
-/// `pick(log_probs, candidates)`, and applies the move through the guard.
-/// Gibbs callers shuffle `order` and pass a categorical-sampling closure;
-/// greedy callers pass `0..n` and an argmax closure.
+/// `pick(log_probs, candidates, current_label)`, and applies the move through
+/// the guard. Gibbs callers shuffle `order` and pass a categorical-sampling
+/// closure; greedy callers pass `0..n` and an argmax closure.
 fn sweep_sequential<G, F, I>(
     candidates: &[Vec<usize>],
     stats: &mut DcPoissonStats,
@@ -696,7 +737,7 @@ fn sweep_sequential<G, F, I>(
 ) -> SweepCounts
 where
     G: MoveGuard,
-    F: FnMut(&[f64], &[usize]) -> usize,
+    F: FnMut(&[f64], &[usize], usize) -> usize,
     I: IntoIterator<Item = usize>,
 {
     let mut sc = SweepCounts::default();
@@ -706,8 +747,8 @@ where
             continue;
         }
         compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
-        let new = pick(log_probs, cand);
         let old = stats.membership[e];
+        let new = pick(log_probs, cand, old);
         if new == old {
             continue;
         }
@@ -725,9 +766,10 @@ where
 /// snapshot of `stats` (rayon `par_iter`); proposals are then applied
 /// sequentially with the move guard.
 ///
-/// `pick(log_probs, cand, e)` chooses the destination given the restricted
-/// log-likelihoods. For Gibbs it derives a per-entity RNG from `(sweep_seed,
-/// e)` and samples categorically; for greedy it ignores `e` and argmaxes.
+/// `pick(log_probs, cand, e, current)` chooses the destination given the
+/// restricted log-likelihoods. For Gibbs it derives a per-entity RNG from
+/// `(sweep_seed, e)` and samples categorically; for greedy it ignores `e`
+/// and argmaxes.
 /// `proposals` is a reusable scratch buffer of length `candidates.len()` —
 /// hoisted by the driver across sweeps to avoid re-allocating.
 fn sweep_jacobi<G: MoveGuard, F>(
@@ -740,7 +782,7 @@ fn sweep_jacobi<G: MoveGuard, F>(
     pick: F,
 ) -> SweepCounts
 where
-    F: Fn(&[f64], &[usize], usize) -> usize + Sync,
+    F: Fn(&[f64], &[usize], usize, usize) -> usize + Sync,
 {
     debug_assert_eq!(proposals.len(), candidates.len());
     {
@@ -755,12 +797,13 @@ where
                 || vec![f64::NEG_INFINITY; k],
                 |log_probs, (e, prop)| {
                     let cand = &candidates[e];
+                    let current = stats.membership[e];
                     if cand.len() < 2 {
-                        *prop = stats.membership[e];
+                        *prop = current;
                         return;
                     }
                     compute_log_probs_restricted(e, stats, profiles, cand, log_probs);
-                    *prop = pick(log_probs, cand, e);
+                    *prop = pick(log_probs, cand, e, current);
                 },
             );
     }
@@ -835,10 +878,10 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                     guard,
                     k,
                     &mut proposals,
-                    |log_probs, _cand, e| {
+                    |log_probs, cand, e, current| {
                         let vertex_seed = sweep_seed ^ (e as u64).wrapping_mul(2654435761);
                         let mut rng = SmallRng::seed_from_u64(vertex_seed);
-                        sample_categorical_log(log_probs, &mut rng)
+                        sample_categorical_log_restricted(log_probs, cand, current, &mut rng)
                     },
                 )
             } else {
@@ -850,7 +893,9 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                     guard,
                     &mut log_probs,
                     order.iter().copied(),
-                    |log_probs, _cand| sample_categorical_log(log_probs, rng),
+                    |log_probs, cand, current| {
+                        sample_categorical_log_restricted(log_probs, cand, current, rng)
+                    },
                 )
             };
             total_moves += sc.moves;
@@ -878,7 +923,7 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                 guard,
                 k,
                 &mut proposals,
-                |log_probs, cand, _e| argmax_log_restricted(log_probs, cand),
+                |log_probs, cand, _e, _current| argmax_log_restricted(log_probs, cand),
             )
         } else {
             sweep_sequential(
@@ -888,7 +933,7 @@ pub fn refine_with_candidates_guarded<G: MoveGuard>(
                 guard,
                 &mut log_probs,
                 0..num_entities,
-                argmax_log_restricted,
+                |log_probs, cand, _current| argmax_log_restricted(log_probs, cand),
             )
         };
         total_moves += sc.moves;
