@@ -231,6 +231,8 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("raw_feature_embedding.parquet"),
+        module_membership_suffix: None,
+        module_dictionary_suffix: None,
         velocity_suffix: Some("velocity.parquet"),
         velocity_factor_suffix: Some("velocity_factor.parquet"),
         delta_feature_embedding_suffix: Some("delta_feature_embedding.parquet"),
