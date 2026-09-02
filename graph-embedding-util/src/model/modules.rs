@@ -176,9 +176,19 @@ impl JointEmbedModel {
         }
         let kappa = module_logit_for_own_mass(args.init_own_mass, m);
         let mut logits_host = nalgebra::DMatrix::<f32>::zeros(d, m);
+        if let Some(l) = args.init_logits {
+            if l.nrows() != d || l.ncols() != m {
+                candle_util::candle_core::bail!(
+                    "new_with_modules: init_logits is {}×{} but the model is {d}×{m}",
+                    l.nrows(),
+                    l.ncols()
+                );
+            }
+            logits_host.copy_from(l);
+        }
         // No warm start leaves every module in the support with equal mass, so
-        // the data alone decides the partition.
-        if let Some(labels) = args.init_labels {
+        // the data alone decides the partition. Explicit logits win over labels.
+        if let (Some(labels), None) = (args.init_labels, args.init_logits) {
             {
                 if labels.len() != d {
                     candle_util::candle_core::bail!(
@@ -198,7 +208,19 @@ impl JointEmbedModel {
             }
         }
         let logits = register_var_from_mat(varmap, dev, MODULE_LOGITS_VAR_NAME, &logits_host)?;
-        let mu = register_randn_seeded(varmap, dev, MODULE_MU_VAR_NAME, m, h, args.seed)?;
+        let mu = match args.init_mu {
+            Some(parent) => {
+                if parent.nrows() != m || parent.ncols() != h {
+                    candle_util::candle_core::bail!(
+                        "new_with_modules: init_mu is {}×{} but the model needs {m}×{h}",
+                        parent.nrows(),
+                        parent.ncols()
+                    );
+                }
+                register_var_from_mat(varmap, dev, MODULE_MU_VAR_NAME, parent)?
+            }
+            None => register_randn_seeded(varmap, dev, MODULE_MU_VAR_NAME, m, h, args.seed)?,
+        };
         let residual = register_var_from_mat(
             varmap,
             dev,
