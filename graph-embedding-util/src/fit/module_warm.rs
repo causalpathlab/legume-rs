@@ -34,20 +34,42 @@ pub fn warm_start_module_labels(profile: &DMatrix<f32>, n_modules: usize, seed: 
         return vec![0u32; d];
     }
     let unit = crate::transfer::unit_log_profile_rows(profile);
-    let mut z = DMatrix::<f32>::from_fn(d, s, |i, j| unit[i][j]);
+    // A gene with no profile (never expressed in any pseudobulk) is the zero
+    // vector after normalization. Thousands of them would pile into one cluster
+    // and starve the rest with seeds, so they go to ONE explicit background
+    // module and only the expressed genes are clustered.
+    let expressed: Vec<usize> = (0..d)
+        .filter(|&i| unit[i].iter().any(|&x| x != 0.0))
+        .collect();
+    let n_zero = d - expressed.len();
+    let (k, background) = if n_zero > 0 && n_modules > 2 {
+        (n_modules - 1, Some(n_modules - 1))
+    } else {
+        (n_modules, None)
+    };
+    let mut z = DMatrix::<f32>::from_fn(expressed.len(), s, |r, j| unit[expressed[r]][j]);
     if s > WARM_PROFILE_MAX_DIM {
         let basis =
             DMatrix::<f32>::rnorm_seeded(s, WARM_SKETCH_DIM, name_seed(seed, "module_warm"));
         z = (&z * basis) / (WARM_SKETCH_DIM as f32).sqrt();
     }
-    let (_, labels) = kmeans_centroids_seeded(&z, n_modules, WARM_KMEANS_ITER, seed);
+    let (_, cluster) = kmeans_centroids_seeded(&z, k, WARM_KMEANS_ITER, seed);
+    let mut labels = vec![background.unwrap_or(0) as u32; d];
+    for (r, &i) in expressed.iter().enumerate() {
+        labels[i] = cluster[r].min(k - 1) as u32;
+    }
     let mut sizes = vec![0usize; n_modules];
     for &l in &labels {
-        sizes[l.min(n_modules - 1)] += 1;
+        sizes[l as usize] += 1;
     }
     info!(
-        "module warm start: k-means over {d} feature profiles × {s} pseudobulk(s) → {n_modules} \
-         modules, sizes min {} / median {} / max {}",
+        "module warm start: k-means over {} expressed feature profiles × {s} pseudobulk(s) → {k} \
+         modules{}, sizes min {} / median {} / max {}",
+        expressed.len(),
+        match background {
+            Some(b) => format!(" + module {b} for the {n_zero} features with no profile"),
+            None => String::new(),
+        },
         sizes.iter().min().copied().unwrap_or(0),
         {
             let mut v = sizes.clone();
@@ -56,7 +78,7 @@ pub fn warm_start_module_labels(profile: &DMatrix<f32>, n_modules: usize, seed: 
         },
         sizes.iter().max().copied().unwrap_or(0),
     );
-    labels.into_iter().map(|l| l as u32).collect()
+    labels
 }
 
 /// Membership logits `[D × M]` for a fit warm-started from a parent: a matched

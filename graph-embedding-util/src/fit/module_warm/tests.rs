@@ -129,10 +129,15 @@ fn zero_profile_genes_take_the_background_module() {
     }
     let labels = warm_start_module_labels(&m, 3, 11);
     let bg = labels[20];
-    assert!(labels[20..].iter().all(|&l| l == bg), "zero rows share one module: {labels:?}");
-    assert!(labels[..20].iter().all(|&l| l != bg), "expressed genes stay out of it: {labels:?}");
+    assert!(
+        labels[20..].iter().all(|&l| l == bg),
+        "zero rows share one module: {labels:?}"
+    );
+    assert!(
+        labels[..20].iter().all(|&l| l != bg),
+        "expressed genes stay out of it: {labels:?}"
+    );
     assert!(labels[..10].iter().all(|&l| l == labels[0]));
     assert!(labels[10..20].iter().all(|&l| l == labels[10]));
     assert_ne!(labels[0], labels[10]);
 }
-
