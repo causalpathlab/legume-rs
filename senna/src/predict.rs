@@ -282,7 +282,7 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
         value_name = "K",
         help = "bge: matched genes whose memberships are averaged to initialize an unseen gene"
     )]
@@ -290,7 +290,7 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        default_value_t = 0.2,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
         value_name = "S",
         help = "bge: below this best profile similarity an unseen gene takes the diffuse prior"
     )]
@@ -496,9 +496,10 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
         args.minibatch_size,
         &qopts,
         crate::bge::score::InitOpts {
-            enabled: !args.no_init_genes,
-            k: args.init_neighbours,
-            similarity_floor: args.init_similarity_floor,
+            align: (!args.no_init_genes).then_some(graph_embedding_util::transfer::AlignKnobs {
+                k: args.init_neighbours,
+                similarity_floor: args.init_similarity_floor,
+            }),
             in_fit: args.init_genes_in_fit,
         },
         &args.resolve_device()?,

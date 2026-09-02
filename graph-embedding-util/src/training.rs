@@ -18,11 +18,11 @@ use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
 use crate::fit::lineage::PbLineageLevel;
 use crate::loss::{
-    dense_count_block, draw_gene_keep_mask, masked_membership, membership_diagnostics,
-    membership_rows_host, module_balance_prior, module_row_entropy, module_softmax_loss, nce_loss,
-    nce_loss_identity, pool_module_counts, sample_per_batch_stratified_edge_batch,
-    sample_stratified_edge_batch, EdgeBatch, ModulePools, PerBatchStratifiedCellSampler,
-    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
+    dense_count_block, draw_gene_keep_mask, log_membership_diagnostics, masked_membership,
+    membership_rows_host, module_priors, module_step_loss, nce_loss, nce_loss_identity,
+    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, EdgeBatch, ModulePools,
+    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
+    StratifiedSampler,
 };
 use crate::model::{FeatModules, JointEmbedModel, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT};
 use crate::progress::new_progress_bar;
@@ -31,6 +31,7 @@ use candle_util::candle_nn::AdamW;
 use log::info;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use rand_distr::Distribution;
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -111,13 +112,12 @@ pub struct ModuleTrainParams {
     pub units_per_step: usize,
     pub lambda_module: f32,
     pub lambda_balance: f32,
-    pub lambda_entropy: f32,
     pub residual_l2: f32,
 }
 
 /// Per-run state of the module layer that lives with the training loop rather
 /// than the model: the host-side negative pools per axis and sampler, refreshed
-/// from the membership once per epoch, and the fallback tally.
+/// from the membership once per epoch.
 struct ModuleState<'a> {
     modules: &'a FeatModules,
     params: &'a ModuleTrainParams,
@@ -125,8 +125,6 @@ struct ModuleState<'a> {
     pools: Vec<Vec<ModulePools>>,
     /// The host copy of `π` the pools were built from; also feeds the diagnostics.
     pi_host: Vec<f32>,
-    n_features: usize,
-    n_fallback: usize,
 }
 
 impl<'a> ModuleState<'a> {
@@ -135,14 +133,11 @@ impl<'a> ModuleState<'a> {
         params: &'a ModuleTrainParams,
         ctx: &CompositeTrainContext,
     ) -> anyhow::Result<Self> {
-        let n_features = modules.logits.dim(0)?;
         let mut st = Self {
             modules,
             params,
             pools: Vec::new(),
             pi_host: Vec::new(),
-            n_features,
-            n_fallback: 0,
         };
         st.refresh(ctx)?;
         Ok(st)
@@ -152,10 +147,11 @@ impl<'a> ModuleState<'a> {
     fn refresh(&mut self, ctx: &CompositeTrainContext) -> anyhow::Result<()> {
         let pi = candle_util::nn::sparsemax(&self.modules.logits.detach())?;
         self.pi_host = pi.flatten_all()?.to_vec1::<f32>()?;
-        let rows = membership_rows_host(&self.pi_host, self.n_features, self.modules.n_modules);
+        let n_features = self.modules.logits.dim(0)?;
+        let rows = membership_rows_host(&self.pi_host, n_features, self.modules.n_modules);
         self.pools = ctx
             .axes
-            .iter()
+            .par_iter()
             .map(|axis| {
                 axis.sampler
                     .feature_pools()
@@ -167,57 +163,17 @@ impl<'a> ModuleState<'a> {
         Ok(())
     }
 
-    /// One `info` line per epoch on the membership: occupancy, dead modules, row
-    /// entropy and support, the residual's share of the row norm, and how many
-    /// positives fell back to global negatives. Collapse shows up here long before
-    /// it shows up in the loss.
-    fn log_diagnostics(&mut self, epoch: usize, epochs: usize) -> anyhow::Result<()> {
-        let m = self.modules.n_modules;
-        let dg = membership_diagnostics(&self.pi_host, self.n_features, m, MODULE_SMALL_FLOOR);
-        let r2: f32 = self
-            .modules
-            .residual
-            .detach()
-            .sqr()?
-            .sum(1)?
-            .mean_all()?
-            .to_scalar()?;
-        let rho2: f32 = self
-            .modules
-            .compose()?
-            .detach()
-            .sqr()?
-            .sum(1)?
-            .mean_all()?
-            .to_scalar()?;
-        info!(
-            "epoch {}/{} modules{}: max occupancy {:.2}x uniform, {} of {} modules below {} \
-             features, row entropy {:.3} nats, {:.2} modules/feature, mean ‖r‖² {:.3} vs \
-             ‖ρ‖² {:.3}, {} positives fell back to global negatives",
-            epoch + 1,
-            epochs,
-            if self.modules.is_frozen() {
-                " (frozen)"
-            } else {
-                ""
-            },
-            dg.max_occupancy_ratio,
-            dg.n_small_modules,
-            m,
-            MODULE_SMALL_FLOOR,
-            dg.mean_row_entropy,
-            dg.mean_row_support,
-            r2,
-            rho2,
-            self.n_fallback,
-        );
-        self.n_fallback = 0;
+    fn log_diagnostics(&self, epoch: usize, epochs: usize) -> anyhow::Result<()> {
+        let fallbacks: usize = self
+            .pools
+            .iter()
+            .flatten()
+            .map(ModulePools::take_fallbacks)
+            .sum();
+        log_membership_diagnostics(self.modules, &self.pi_host, epoch, epochs, fallbacks)?;
         Ok(())
     }
 }
-
-/// A module with fewer argmax features than this is reported as small.
-const MODULE_SMALL_FLOOR: usize = 5;
 
 #[derive(Clone)]
 pub struct TrainingParams {
@@ -489,7 +445,7 @@ pub fn train_composite(
         let mut n_steps = 0usize;
 
         for _ in 0..batches_per_epoch {
-            let loss = sum_step(ctx, &mut rng, params, module_state.as_mut())?;
+            let loss = sum_step(ctx, &mut rng, params, module_state.as_ref())?;
             let Some(mut loss) = loss else { continue };
             if ridge_lambda > 0.0 {
                 // `λ · mean_g ‖e_g‖²` on whichever per-row table this parameterization
@@ -630,52 +586,51 @@ fn sum_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,
     params: &TrainingParams,
-    mut module_state: Option<&mut ModuleState>,
+    module_state: Option<&ModuleState>,
 ) -> anyhow::Result<Option<Tensor>> {
-    // The full membership once per step: every axis's exact term and the priors
-    // read the same `π`, and it is detached while frozen.
-    let pi: Option<Tensor> = match &module_state {
-        Some(st) => Some(st.modules.membership()?),
+    // The module layer's per-step tensors, once for every axis: the live
+    // membership (detached while frozen), and — when dropout is on — one keep mask
+    // and its renormalized membership, shared so every axis pools under the same
+    // hidden genes this step.
+    let per_step: Option<(Tensor, Tensor)> = match module_state {
+        Some(st) => {
+            let pi = st.modules.membership()?;
+            let pi_masked = if st.params.gene_dropout > 0.0 {
+                let n_features = pi.dim(0)?;
+                let keep = draw_gene_keep_mask(n_features, st.params.gene_dropout, rng, ctx.dev)?;
+                masked_membership(&pi, &keep)?
+            } else {
+                pi.detach()
+            };
+            Some((pi, pi_masked))
+        }
         None => None,
     };
     let mut total_loss: Option<Tensor> = None;
     for (axis_idx, axis) in ctx.axes.iter().enumerate() {
-        let step_modules = match (&module_state, &pi) {
-            (Some(st), Some(pi)) => Some(AxisModuleStep {
+        let step_modules = match (module_state, &per_step) {
+            (Some(st), Some((_, pi_masked))) => Some(AxisModuleStep {
+                modules: st.modules,
                 params: st.params,
                 pools: &st.pools[axis_idx],
-                pi,
+                pi_masked,
             }),
             _ => None,
         };
-        let Some((loss, n_fallback)) =
-            single_axis_step(axis, rng, params, ctx.dev, step_modules.as_ref())?
+        let Some(loss) = single_axis_step(axis, rng, params, ctx.dev, step_modules.as_ref())?
         else {
             continue;
         };
-        if let Some(st) = module_state.as_deref_mut() {
-            st.n_fallback += n_fallback;
-        }
         let scaled = (loss * f64::from(axis.lambda))?;
         total_loss = Some(match total_loss {
             Some(prev) => (prev + scaled)?,
             None => scaled,
         });
     }
-    // Membership priors, once per step (not per axis), and only once the
-    // membership trains — while frozen `π` is detached and they would be constants.
-    if let (Some(st), Some(pi), Some(loss)) = (&module_state, &pi, total_loss.as_mut()) {
-        if !st.modules.is_frozen() {
-            if st.params.lambda_balance > 0.0 {
-                let bal =
-                    module_balance_prior(pi)?.affine(f64::from(st.params.lambda_balance), 0.0)?;
-                *loss = (&*loss + bal)?;
-            }
-            if st.params.lambda_entropy > 0.0 {
-                let ent =
-                    module_row_entropy(pi)?.affine(f64::from(st.params.lambda_entropy), 0.0)?;
-                *loss = (&*loss + ent)?;
-            }
+    // Membership priors, once per step (not per axis); `None` while frozen.
+    if let (Some(st), Some((pi, _)), Some(loss)) = (module_state, &per_step, total_loss.as_mut()) {
+        if let Some(prior) = module_priors(st.modules, pi, st.params.lambda_balance)? {
+            *loss = (&*loss + prior)?;
         }
     }
     Ok(total_loss)
@@ -683,16 +638,17 @@ fn sum_step(
 
 /// What one axis step needs from the module layer.
 struct AxisModuleStep<'a> {
+    modules: &'a FeatModules,
     params: &'a ModuleTrainParams,
     /// This axis's pools, one per sampler.
     pools: &'a [ModulePools],
-    /// The full live membership for this step.
-    pi: &'a Tensor,
+    /// This step's (dropout-masked, detached) membership `[D, M]`.
+    pi_masked: &'a Tensor,
 }
 
 /// The exact module term for one axis step: draw `units_per_step` units from the
 /// axis's own picker (the same `degree^α` weighting the positives use, so the two
-/// levels weight units alike), pool their count rows through the (dropout-masked)
+/// levels weight units alike), pool their count rows through the masked
 /// membership, and score every module with a full softmax. The pooled target is
 /// detached inside the loss, so this term trains `μ`, the module bias and the
 /// cell side; the membership trains through the within-module NCE and the priors.
@@ -730,42 +686,32 @@ fn module_term(
         }
     }
     let x = dense_count_block(&rows, n_features, dev)?;
-    // Gene dropout on the membership side: a hidden feature's row is exactly zero
-    // and its modules' survivors are scaled up to keep the module's mass.
-    let pi_masked = if step.params.gene_dropout > 0.0 {
-        let keep = draw_gene_keep_mask(n_features, step.params.gene_dropout, rng, dev)?;
-        masked_membership(step.pi, &keep)?
-    } else {
-        step.pi.clone()
-    };
-    let x_cm = pool_module_counts(&x, &pi_masked)?;
     let e_units = if axis.cell_axis.is_identity {
         let idx = Tensor::from_vec(coarse, u, dev)?;
         axis.model.e_cell.index_select(&idx, 0)?
     } else {
         axis.model.pool_cells(&coarse, &cc.coarse_to_fine, dev)?.0
     };
-    let m = axis
-        .model
-        .modules
-        .as_ref()
-        .expect("module step on a model without modules");
-    let term = module_softmax_loss(&e_units, &m.mu, &m.b_module, &x_cm)?;
-    Ok(Some(
-        term.affine(f64::from(step.params.lambda_module), 0.0)?,
-    ))
+    Ok(Some(module_step_loss(
+        step.modules,
+        step.pi_masked,
+        &x,
+        &e_units,
+        step.params.lambda_module,
+    )?))
 }
 
 /// Sample a minibatch from a single axis and compute its bipartite NCE
 /// loss (taking the identity fast path when the axis has identity
-/// coarsening). Returns `None` when the axis has no positives to sample.
+/// coarsening), plus the exact module term when the model has modules.
+/// Returns `None` when the axis has no positives to sample.
 fn single_axis_step(
     axis: &CompositeAxis,
     rng: &mut StdRng,
     params: &TrainingParams,
     dev: &Device,
     modules: Option<&AxisModuleStep>,
-) -> anyhow::Result<Option<(Tensor, usize)>> {
+) -> anyhow::Result<Option<Tensor>> {
     if axis.sampler.is_empty() {
         return Ok(None);
     }
@@ -805,7 +751,6 @@ fn single_axis_step(
             rng,
         ),
     };
-    let n_fallback = batch.n_module_fallback;
 
     let mut loss = if axis.cell_axis.is_identity {
         nce_loss_identity(axis.model, batch, params.objective, dev)?
@@ -817,7 +762,7 @@ fn single_axis_step(
             loss = (loss + term)?;
         }
     }
-    Ok(Some((loss, n_fallback)))
+    Ok(Some(loss))
 }
 
 #[cfg(test)]

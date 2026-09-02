@@ -41,6 +41,11 @@ pub struct FrozenFeatureHost {
     /// `keep_target_indices` — what a caller needs to look up any other table
     /// keyed on the dictionary's rows (a module membership, say).
     pub keep_src_indices: Vec<usize>,
+    /// The whole source table `[n_src, H]` and its row names, as read — so a
+    /// caller that needs the unmatched rows too (to place a gene by its
+    /// neighbours' rows) does not decode the file a second time.
+    pub src_e_feat: DMatrix<f32>,
+    pub src_names: Vec<Box<str>>,
     /// Rows in the dictionary file, i.e. how many features the MODEL has.
     ///
     /// The only field that survives the intersection unfiltered, and the reason
@@ -187,6 +192,8 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
         b_feat,
         keep_target_indices,
         keep_src_indices,
+        src_e_feat: dict.mat,
+        src_names: dict.rows,
         n_src,
         h,
     })

@@ -264,7 +264,7 @@ fn restore_puts_frozen_rows_back_and_leaves_trainable_rows_alone() -> anyhow::Re
 /// initialized row equals its neighbour's row exactly, and the record says how.
 #[test]
 fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyhow::Result<()> {
-    use super::pretrained::MembershipInit;
+    use graph_embedding_util::transfer::AlignKnobs;
     let dir = tempfile::tempdir()?;
     let dict_genes = names(&["G1", "G2"]);
     // π: G1 → module 0, G2 → module 1; μ: two distinct rows; ρ = π μ.
@@ -312,7 +312,7 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
-        membership_init: Some(MembershipInit {
+        membership_init: Some(AlignKnobs {
             k: 1,
             similarity_floor: 0.5,
         }),
@@ -336,7 +336,7 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
 /// beside it: fall back to the neighbour rule and say so in the record.
 #[test]
 fn membership_init_without_tables_falls_back_to_the_neighbour_rule() -> anyhow::Result<()> {
-    use super::pretrained::MembershipInit;
+    use graph_embedding_util::transfer::AlignKnobs;
     let dir = tempfile::tempdir()?;
     let dict_genes = names(&["G1", "G2"]);
     let path = write_dictionary(&dir, "dict", &dict_genes, 3, 0.0)?;
@@ -348,7 +348,7 @@ fn membership_init_without_tables_falls_back_to_the_neighbour_rule() -> anyhow::
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
-        membership_init: Some(MembershipInit {
+        membership_init: Some(AlignKnobs {
             k: 3,
             similarity_floor: 0.5,
         }),

@@ -6,23 +6,18 @@
 
 use super::config::GeneModuleConfig;
 
-/// Module count a CLI that turns modules on by default uses when `--gene-modules`
-/// is not given. `senna bge` passes it to [`GeneModuleArgs::resolve`]; `pinto cage`
-/// passes `None` (its default sampled gate is exclusive with modules).
-pub const DEFAULT_GENE_MODULES: usize = 128;
-
 #[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct GeneModuleArgs {
     #[arg(
         long = "gene-modules",
         value_name = "M",
-        help = "Learn M gene modules and embed genes THROUGH them (senna bge: on by default, M=128)",
+        help = "Learn M gene modules and embed genes THROUGH them",
         long_help = "Put a learned mixed-membership module layer in front of the feature embedding.\n\
                      Each gene's row becomes a sparse mixture of M shared module vectors,\n\
                      plus a small ridge-shrunk residual of its own.\n\
-                     senna bge turns this on by default with M=128; --no-gene-modules turns it off.\n\
-                     pinto cage leaves it off unless M is given.\n\
+                     Whether it is on without this flag is the command's own choice — see its\n\
+                     help; --no-gene-modules turns it off either way.\n\
                      \n\
                      WHY. A free row receives gradient only on the steps that draw its gene.\n\
                      A rare gene, or one absent from a later dataset, has nothing standing in for it.\n\
@@ -104,15 +99,6 @@ pub struct GeneModuleArgs {
     pub module_weight: f32,
 
     #[arg(
-        long = "module-entropy",
-        value_name = "LAMBDA",
-        default_value_t = 0.0,
-        help = "Row-entropy penalty on the membership (0 = off)",
-        hide = true
-    )]
-    pub module_entropy: f32,
-
-    #[arg(
         long = "module-residual-l2",
         value_name = "LAMBDA",
         default_value_t = 0.1,
@@ -168,7 +154,6 @@ impl GeneModuleArgs {
             gene_dropout: self.gene_dropout,
             lambda_module: self.module_weight,
             lambda_balance: self.module_balance,
-            lambda_entropy: self.module_entropy,
             residual_l2: self.module_residual_l2,
             units_per_step: self.module_units_per_step,
             init_own_mass: self.module_init_mass,

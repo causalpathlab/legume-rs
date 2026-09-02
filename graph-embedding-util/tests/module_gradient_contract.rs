@@ -10,8 +10,8 @@ use graph_embedding_util::loss::{
     NceObjective,
 };
 use graph_embedding_util::model::{
-    FeatureGateSpec, JointEmbedModel, ModuleInit, MODULE_BIAS_VAR_NAME, MODULE_LOGITS_VAR_NAME,
-    MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
+    FeatureGateSpec, JointEmbedModel, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME,
+    MODULE_LOGITS_VAR_NAME, MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
 };
 
 const D: usize = 8;
@@ -32,10 +32,10 @@ fn model(own_mass: f32, vm: &VarMap) -> JointEmbedModel {
             n_cells: N,
             embedding_dim: H,
             n_modules: M,
-            init_labels: Some(&labels),
-            init_own_mass: own_mass,
-            init_logits: None,
-            init_mu: None,
+            warm: ModuleWarmStart::Labels {
+                labels: &labels,
+                own_mass,
+            },
             b_feat: &[0f32; D],
             b_cell: &[0f32; N],
             seed: 1,
@@ -75,7 +75,6 @@ fn within_module_nce_reaches_residual_and_cells_but_not_mu() {
         fine_feats: vec![0],
         neg_feats: vec![3, 6],
         n_negatives: 2,
-        n_module_fallback: 0,
     };
     // Perturb the residual so rows differ (zero-init would make the loss flat).
     let r = var(&vm, MODULE_RESIDUAL_VAR_NAME);
@@ -116,7 +115,6 @@ fn identical_membership_rows_cancel_mu_even_when_mixed() {
         fine_feats: vec![0],
         neg_feats: vec![3, 6],
         n_negatives: 2,
-        n_module_fallback: 0,
     };
     let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
     let grads = loss.backward().unwrap();
@@ -136,7 +134,6 @@ fn within_module_nce_reaches_mu_and_logits_under_mixed_membership() {
         fine_feats: vec![0],
         neg_feats: vec![1, 2],
         n_negatives: 2,
-        n_module_fallback: 0,
     };
     let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
     let grads = loss.backward().unwrap();
@@ -149,7 +146,6 @@ fn within_module_nce_reaches_mu_and_logits_under_mixed_membership() {
         fine_feats: vec![0],
         neg_feats: vec![1, 2],
         n_negatives: 2,
-        n_module_fallback: 0,
     };
     let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
     let grads = loss.backward().unwrap();

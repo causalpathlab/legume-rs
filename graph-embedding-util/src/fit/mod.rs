@@ -20,8 +20,8 @@ pub use config::{
     FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned,
 };
 pub use lift::{CellLineage, LineageQc};
-pub use module_args::{GeneModuleArgs, DEFAULT_GENE_MODULES};
-pub use module_warm::{parent_module_logits, warm_start_module_labels, ParentModules};
+pub use module_args::GeneModuleArgs;
+pub use module_warm::{parent_module_logits, warm_start_module_labels};
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
@@ -109,17 +109,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
         match &g.parent {
             Some(parent) => models::ModuleWarm::Parent {
-                logits: module_warm::parent_module_logits(
-                    &module_warm::ParentModules {
-                        rho: &parent.rho,
-                        pi: &parent.pi,
-                        mu: &parent.mu,
-                        row_to_parent: &parent.row_to_parent,
-                    },
-                    &profile,
-                    parent.k,
-                    parent.similarity_floor,
-                ),
+                logits: module_warm::parent_module_logits(parent, &profile),
                 mu: parent.mu.clone(),
             },
             None => models::ModuleWarm::Labels(module_warm::warm_start_module_labels(

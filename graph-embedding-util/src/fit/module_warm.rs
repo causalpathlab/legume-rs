@@ -8,12 +8,12 @@
 //! batch-corrected pseudobulk count matrix the fit already built, so this costs
 //! nothing extra.
 
+use super::config::ParentModulesOwned;
 use log::info;
 use matrix_util::principal_graph::kmeans_centroids_seeded;
 use matrix_util::rand_util::name_seed;
 use matrix_util::traits::SampleOps;
 use nalgebra::DMatrix;
-use rayon::prelude::*;
 
 /// Widest profile k-means runs on directly; a pseudobulk axis longer than this is
 /// sketched down to [`WARM_SKETCH_DIM`] with a seeded Gaussian first.
@@ -33,32 +33,8 @@ pub fn warm_start_module_labels(profile: &DMatrix<f32>, n_modules: usize, seed: 
     if d == 0 || n_modules < 2 {
         return vec![0u32; d];
     }
-    // Column depth normalization to a common scale, then log1p.
-    let col_tot: Vec<f32> = (0..s)
-        .map(|j| profile.column(j).iter().sum::<f32>().max(1e-8))
-        .collect();
-    let mean_tot = col_tot.iter().sum::<f32>() / s.max(1) as f32;
-    let mut z = DMatrix::<f32>::zeros(d, s);
-    // nalgebra is column-major: fill by column.
-    for j in 0..s {
-        let scale = mean_tot / col_tot[j];
-        for i in 0..d {
-            z[(i, j)] = (profile[(i, j)] * scale).ln_1p();
-        }
-    }
-    // Row centre + unit norm, in parallel over rows via a row-major scratch.
-    let mut rows: Vec<Vec<f32>> = (0..d).map(|i| z.row(i).iter().copied().collect()).collect();
-    rows.par_iter_mut().for_each(|r| {
-        let mean = r.iter().sum::<f32>() / s.max(1) as f32;
-        for x in r.iter_mut() {
-            *x -= mean;
-        }
-        let norm = r.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-        for x in r.iter_mut() {
-            *x /= norm;
-        }
-    });
-    let mut z = DMatrix::<f32>::from_fn(d, s, |i, j| rows[i][j]);
+    let unit = crate::transfer::unit_log_profile_rows(profile);
+    let mut z = DMatrix::<f32>::from_fn(d, s, |i, j| unit[i][j]);
     if s > WARM_PROFILE_MAX_DIM {
         let basis =
             DMatrix::<f32>::rnorm_seeded(s, WARM_SKETCH_DIM, name_seed(seed, "module_warm"));
@@ -83,77 +59,47 @@ pub fn warm_start_module_labels(profile: &DMatrix<f32>, n_modules: usize, seed: 
     labels.into_iter().map(|l| l as u32).collect()
 }
 
-/// A parent run's module tables, for a warm start that carries them.
-pub struct ParentModules<'a> {
-    /// Parent composed rows `[D_parent × H]` (needed only to place unmatched
-    /// features, through [`crate::transfer::align_gene_axis`]).
-    pub rho: &'a DMatrix<f32>,
-    /// Parent membership `[D_parent × M]`.
-    pub pi: &'a DMatrix<f32>,
-    /// Parent module dictionary `[M × H]`.
-    pub mu: &'a DMatrix<f32>,
-    /// For each feature of THIS fit's axis, the parent row it matched, or `None`.
-    pub row_to_parent: &'a [Option<usize>],
-}
-
 /// Membership logits `[D × M]` for a fit warm-started from a parent: a matched
 /// feature takes the parent's membership row verbatim (a simplex point, which
 /// sparsemax reproduces exactly), an unmatched one is initialized through the
-/// parent's modules from its `k` nearest matched neighbours by profile, or the
+/// parent's modules from its nearest matched neighbours by profile, or the
 /// parent's module-average membership below the similarity floor.
 #[must_use]
-pub fn parent_module_logits(
-    parent: &ParentModules,
-    profiles: &DMatrix<f32>,
-    k: usize,
-    similarity_floor: f32,
-) -> DMatrix<f32> {
-    use crate::transfer::{align_gene_axis, AlignInputs, GeneStatus, ModuleTables};
+pub fn parent_module_logits(parent: &ParentModulesOwned, profiles: &DMatrix<f32>) -> DMatrix<f32> {
+    use crate::transfer::{align_gene_axis, AlignInputs, ModuleTables};
     let d = parent.row_to_parent.len();
     let m = parent.pi.ncols();
-    let zeros = vec![0f32; parent.rho.nrows()];
     let al = align_gene_axis(&AlignInputs {
-        rho: parent.rho,
-        b_feat: &zeros,
+        rho: &parent.rho,
+        b_feat: None,
         modules: Some(ModuleTables {
-            pi: parent.pi,
-            mu: parent.mu,
+            pi: &parent.pi,
+            mu: &parent.mu,
         }),
-        new_to_train: parent.row_to_parent,
+        new_to_train: &parent.row_to_parent,
         profiles_new: Some(profiles),
-        k,
-        similarity_floor,
+        knobs: parent.knobs,
     });
     let membership = al
         .membership
         .as_ref()
         .expect("module tables given ⇒ membership present");
     let mut logits = DMatrix::<f32>::zeros(d, m);
-    let mut next_unmatched = parent.rho.nrows();
-    let (mut n_matched, mut n_init, mut n_diffuse) = (0usize, 0usize, 0usize);
+    let (mut n_init, mut n_diffuse) = (0usize, 0usize);
     for g in 0..d {
-        let union = match parent.row_to_parent[g] {
-            Some(t) => {
-                n_matched += 1;
-                t
-            }
-            None => {
-                let u = next_unmatched;
-                next_unmatched += 1;
-                debug_assert_eq!(al.union_to_new[u], Some(g));
-                debug_assert_eq!(al.status[u], GeneStatus::Initialized);
-                n_init += 1;
-                if al.provenance[u].as_ref().is_some_and(|p| p.diffuse) {
-                    n_diffuse += 1;
-                }
-                u
-            }
-        };
+        let union = al.new_to_union[g].expect("every feature is matched or initialized");
         logits.set_row(g, &membership.row(union));
+        if !al.is_scored(union) {
+            n_init += 1;
+            if al.provenance[union].as_ref().is_some_and(|p| p.diffuse) {
+                n_diffuse += 1;
+            }
+        }
     }
     info!(
-        "module warm start from a parent: {n_matched} features carry the parent's membership, \
-         {n_init} initialized through its modules ({n_diffuse} on the diffuse prior)"
+        "module warm start from a parent: {} features carry the parent's membership, \
+         {n_init} initialized through its modules ({n_diffuse} on the diffuse prior)",
+        d - n_init
     );
     logits
 }

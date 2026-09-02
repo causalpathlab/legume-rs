@@ -10,16 +10,17 @@ fn dev() -> Device {
 
 fn build(labels: Option<&[u32]>, own_mass: f32) -> (JointEmbedModel, VarMap) {
     let vm = VarMap::new();
+    let warm = match labels {
+        Some(labels) => ModuleWarmStart::Labels { labels, own_mass },
+        None => ModuleWarmStart::Uniform,
+    };
     let m = JointEmbedModel::new_with_modules(
         ModuleInit {
             n_features: 6,
             n_cells: 3,
             embedding_dim: 4,
             n_modules: 3,
-            init_labels: labels,
-            init_own_mass: own_mass,
-            init_logits: None,
-            init_mu: None,
+            warm,
             b_feat: &[0f32; 6],
             b_cell: &[0f32; 3],
             seed: 9,
@@ -299,10 +300,10 @@ fn explicit_logits_and_mu_reproduce_the_parent() {
             n_cells: 3,
             embedding_dim: 4,
             n_modules: 3,
-            init_labels: None,
-            init_own_mass: 0.9,
-            init_logits: Some(&pi),
-            init_mu: Some(&mu),
+            warm: ModuleWarmStart::Explicit {
+                logits: &pi,
+                mu: Some(&mu),
+            },
             b_feat: &[0f32; 6],
             b_cell: &[0f32; 3],
             seed: 9,

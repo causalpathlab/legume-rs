@@ -49,12 +49,14 @@ fn align(k: usize, floor: f32) -> GeneAlignment {
     let (n2t, p) = new_data();
     align_gene_axis(&AlignInputs {
         rho: &rho,
-        b_feat: &b,
+        b_feat: Some(&b),
         modules: Some(ModuleTables { pi: &pi, mu: &mu }),
         new_to_train: &n2t,
         profiles_new: Some(&p),
-        k,
-        similarity_floor: floor,
+        knobs: AlignKnobs {
+            k,
+            similarity_floor: floor,
+        },
     })
 }
 
@@ -62,8 +64,8 @@ fn align(k: usize, floor: f32) -> GeneAlignment {
 fn union_axis_is_training_genes_then_new_only_genes() {
     let a = align(1, 0.5);
     assert_eq!(a.n_union(), 4 + 2);
-    assert_eq!(a.union_to_train[..4], [Some(0), Some(1), Some(2), Some(3)]);
-    assert_eq!(a.union_to_train[4..], [None, None]);
+    assert_eq!(a.n_train, 4);
+    assert!(a.is_scored(3) && !a.is_scored(4));
     assert_eq!(
         a.union_to_new,
         vec![Some(2), Some(0), None, Some(1), Some(3), Some(4)]
@@ -156,15 +158,18 @@ fn without_profiles_unseen_genes_are_dropped() {
     let (n2t, _) = new_data();
     let a = align_gene_axis(&AlignInputs {
         rho: &rho,
-        b_feat: &b,
+        b_feat: Some(&b),
         modules: Some(ModuleTables { pi: &pi, mu: &mu }),
         new_to_train: &n2t,
         profiles_new: None,
-        k: 3,
-        similarity_floor: 0.5,
+        knobs: AlignKnobs {
+            k: 3,
+            similarity_floor: 0.5,
+        },
     });
     assert_eq!(a.status[4], GeneStatus::Dropped);
     assert_eq!(a.status[5], GeneStatus::Dropped);
+    assert_eq!(a.new_to_union[3], None);
     assert!(a.rows.row(4).iter().all(|&v| v == 0.0));
     assert_eq!(a.with_status(GeneStatus::Matched).len(), 3);
 }
@@ -175,12 +180,14 @@ fn without_modules_an_unseen_gene_takes_its_neighbours_row() {
     let (n2t, p) = new_data();
     let a = align_gene_axis(&AlignInputs {
         rho: &rho,
-        b_feat: &b,
+        b_feat: Some(&b),
         modules: None,
         new_to_train: &n2t,
         profiles_new: Some(&p),
-        k: 1,
-        similarity_floor: 0.5,
+        knobs: AlignKnobs {
+            k: 1,
+            similarity_floor: 0.5,
+        },
     });
     assert!(a.membership.is_none());
     let g = 4;
@@ -217,4 +224,40 @@ fn moment_matching_recovers_a_planted_bias() {
     }
     let none = moment_matched_bias(&rows, &theta, &b_cell, &[0.0, 0.0], -9.0);
     assert_eq!(none, vec![-9.0, -9.0]);
+}
+
+#[test]
+fn status_round_trips_through_its_wire_spelling() {
+    for s in [
+        GeneStatus::Matched,
+        GeneStatus::Missing,
+        GeneStatus::Initialized,
+        GeneStatus::Dropped,
+    ] {
+        assert_eq!(GeneStatus::parse(s.as_str()), Some(s));
+    }
+    assert_eq!(GeneStatus::parse("other"), None);
+}
+
+#[test]
+fn module_table_paths_strip_every_dictionary_slot() {
+    for dict in [
+        "run.feature_loading.parquet",
+        "run.dictionary.parquet",
+        "run.feature_embedding.parquet",
+        "run.parquet",
+    ] {
+        let (pi, mu) = module_table_paths(dict);
+        assert_eq!(pi, "run.module_membership.parquet", "{dict}");
+        assert_eq!(mu, "run.module_dictionary.parquet", "{dict}");
+    }
+}
+
+#[test]
+fn log_rates_is_the_bilinear_score_plus_both_biases() {
+    let theta = DMatrix::<f32>::from_row_slice(2, 2, &[1.0, 0.0, 0.5, 0.5]);
+    let rows = DMatrix::<f32>::from_row_slice(1, 2, &[2.0, 4.0]);
+    let s = log_rates(&theta, &rows, &[0.1], &[1.0, -1.0]);
+    assert!((s[(0, 0)] - (2.0 + 0.1 + 1.0)).abs() < 1e-6);
+    assert!((s[(1, 0)] - (3.0 + 0.1 - 1.0)).abs() < 1e-6);
 }

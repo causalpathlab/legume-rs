@@ -13,17 +13,14 @@ fn parse(args: &[&str]) -> GeneModuleArgs {
 
 #[test]
 fn default_on_cli_trains_modules_unless_told_otherwise() {
-    let cfg = parse(&[])
-        .resolve(Some(DEFAULT_GENE_MODULES))
-        .unwrap()
-        .unwrap();
-    assert_eq!(cfg.n_modules, DEFAULT_GENE_MODULES);
+    let cfg = parse(&[]).resolve(Some(128)).unwrap().unwrap();
+    assert_eq!(cfg.n_modules, 128);
     assert!(parse(&["--no-gene-modules"])
-        .resolve(Some(DEFAULT_GENE_MODULES))
+        .resolve(Some(128))
         .unwrap()
         .is_none());
     let cfg = parse(&["--gene-modules", "32"])
-        .resolve(Some(DEFAULT_GENE_MODULES))
+        .resolve(Some(128))
         .unwrap()
         .unwrap();
     assert_eq!(cfg.n_modules, 32);

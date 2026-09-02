@@ -369,7 +369,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // gain over the training-marginal null from negative to zero, raised the
             // per-cell rank agreement, and lost less under gene ablation.
             // Under `senna update` the parent's modules are carried as the warm start.
-            gene_modules: match args.modules.resolve(Some(ge::DEFAULT_GENE_MODULES))? {
+            gene_modules: match args.modules.resolve(Some(DEFAULT_GENE_MODULES))? {
                 Some(mut gm) => {
                     gm.parent = parent_modules(args.init_from.as_deref(), &unified.feature_names)?;
                     Some(gm)
@@ -534,8 +534,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 qc_keep_idx.as_deref(),
                 &cell_labels,
             )?;
-            // The --skip-etm branch writes these inside `save_outputs_named`.
-            ge::write_module_tables(&args.out, &out.model, &unified.feature_names)?;
         } else {
             ge::save_outputs_named(
                 &out.model,
@@ -548,6 +546,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 ge::EmbeddingFileNames::SENNA_EMBEDDING,
             )?;
         }
+        // The learned-module tables, on both paths; the composed ρ above already
+        // carries them for every reader that does not care.
+        ge::write_module_tables(&args.out, &out.model, &unified.feature_names)?;
     }
 
     let input: Vec<String> = data_files
@@ -588,8 +589,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         feature_loading_suffix: Some("feature_loading.parquet"),
         // Learned gene modules, when the run trained them; the composed row still
         // lives in `feature_loading`, so these are additive.
-        module_membership_suffix: has_modules.then_some("module_membership.parquet"),
-        module_dictionary_suffix: has_modules.then_some("module_dictionary.parquet"),
+        module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),
+        module_dictionary_suffix: has_modules.then_some(ge::transfer::MODULE_DICTIONARY_SUFFIX),
         // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
         softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
@@ -690,6 +691,7 @@ fn parent_modules(
         return Ok(None);
     };
     let parent = crate::bge::score::BgeEmbedding::open(prefix)?;
+    let rho = parent.rho_matrix();
     let Some((pi, mu)) = parent.modules else {
         info!(
             "update: parent {prefix} trained no gene modules; warm-starting from this fit's own \
@@ -697,30 +699,29 @@ fn parent_modules(
         );
         return Ok(None);
     };
-    let by_name: std::collections::HashMap<&str, usize> = parent
-        .gene_names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.as_ref(), i))
-        .collect();
-    let row_to_parent: Vec<Option<usize>> = feature_names
-        .iter()
-        .map(|n| by_name.get(n.as_ref()).copied())
-        .collect();
-    let n_matched = row_to_parent.iter().filter(|r| r.is_some()).count();
+    // The same flexible matcher `predict` aligns a query with, so a parent whose
+    // names differ by case or suffix still matches.
+    let remap = crate::topic::eval::build_gene_remap_with(
+        &parent.gene_names,
+        feature_names,
+        &crate::topic::eval::QueryNameOpts::default(),
+    );
+    let n_matched = remap.new_to_train.iter().filter(|r| r.is_some()).count();
     info!(
-        "update: carrying {} gene modules from {prefix}; {} of {} features match the parent by name",
+        "update: carrying {} gene modules from {prefix}; {} of {} features match the parent",
         mu.nrows(),
         n_matched,
         feature_names.len()
     );
-    let rho = Mat::from_row_slice(parent.gene_names.len(), parent.h, &parent.rho);
     Ok(Some(ge::ParentModulesOwned {
         rho,
         pi,
         mu,
-        row_to_parent,
-        k: 10,
-        similarity_floor: 0.2,
+        row_to_parent: remap.new_to_train,
+        knobs: ge::transfer::AlignKnobs::default(),
     }))
 }
+
+/// Module count `senna bge` trains unless told otherwise — the policy is this
+/// command's, so it lives here rather than in the shared flag group.
+const DEFAULT_GENE_MODULES: usize = 128;
