@@ -10,11 +10,157 @@ fn toy_stat(num_genes: usize, num_samples: usize, num_batches: usize) -> Collaps
     let f = |a: usize, b: usize| -> f32 { 1.0 + ((a * 7 + b * 13) % 11) as f32 };
     s.observed_sum_ds = DMatrix::from_fn(num_genes, num_samples, &f);
     s.imputed_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| 0.5 * f(g + 1, c + 2));
-    s.residual_sum_ds = DMatrix::from_fn(num_genes, num_samples, |g, c| 0.3 * f(g + 2, c + 1));
     s.size_s = DVector::from_fn(num_samples, |c, _| 2.0 + (c % 3) as f32);
     s.observed_sum_db = DMatrix::from_fn(num_genes, num_batches, |g, b| f(g, b) + 0.7);
     s.n_bs = DMatrix::from_fn(num_batches, num_samples, |b, c| 1.0 + ((b + c) % 4) as f32);
+    s.matched_bs = DMatrix::from_fn(num_batches, num_samples, |b, c| {
+        0.5 + ((b + 2 * c) % 3) as f32
+    });
     s
+}
+
+/// Two batch-pure pseudobulks of ONE cell type: pb 0 in batch 0 (frame `a`),
+/// pb 1 in batch 1 (frame `b`), each matched to the other. `n` cells each, so the
+/// unit priors are negligible.
+fn two_pure_pbs(a: &[f32], b: &[f32], n: f32) -> CollapsedStat {
+    let g = a.len();
+    let mut s = CollapsedStat::new(g, 2, 2);
+    for i in 0..g {
+        s.observed_sum_ds[(i, 0)] = a[i] * n;
+        s.imputed_sum_ds[(i, 0)] = b[i] * n;
+        s.observed_sum_ds[(i, 1)] = b[i] * n;
+        s.imputed_sum_ds[(i, 1)] = a[i] * n;
+        s.observed_sum_db[(i, 0)] = a[i] * n;
+        s.observed_sum_db[(i, 1)] = b[i] * n;
+    }
+    s.size_s = DVector::from_element(2, n);
+    s.n_bs = DMatrix::from_row_slice(2, 2, &[n, 0.0, 0.0, n]);
+    // pb 0's counterfactual comes from batch 1 and vice versa
+    s.matched_bs = DMatrix::from_row_slice(2, 2, &[0.0, n, n, 0.0]);
+    s
+}
+
+fn assert_rel(got: f32, want: f32, tol: f32, tag: &str) {
+    assert!(
+        (got / want - 1.0).abs() < tol,
+        "{tag}: got {got}, want {want} (rel tol {tol})"
+    );
+}
+
+/// Pooled adjustment: both pseudobulks land in ONE frame — the per-gene
+/// geometric mean of the two batch frames — with `δ` carrying the whole
+/// batch ratio, normalised to geometric mean 1 across batches. The per-pb
+/// outputs keep their documented meaning: `mu_residual` is the own-batch fold
+/// `E[y]/E[μ]`, `gamma` the counterfactual's `E[ŷ]/E[μ]`.
+#[test]
+#[allow(clippy::needless_range_loop)] // `g` indexes four parallel tables
+fn pooled_two_pure_batches_share_one_frame() {
+    let a = [8.0f32, 2.0, 12.0, 1.0];
+    let b = [2.0f32, 8.0, 3.0, 4.0];
+    let stat = two_pure_pbs(&a, &b, 2000.0);
+    let out = optimize_block(&stat, (1.0, 1.0), 60, CalibrateTarget::All, None).unwrap();
+    let mu = out.mu_adjusted.as_ref().unwrap().posterior_mean();
+    let delta = out.delta.as_ref().unwrap().posterior_mean();
+    let resid = out.mu_residual.as_ref().unwrap().posterior_mean();
+    let gamma = out.gamma.as_ref().unwrap().posterior_mean();
+    for g in 0..a.len() {
+        let common = (a[g] * b[g]).sqrt();
+        assert_rel(mu[(g, 0)], common, 0.02, &format!("gene {g} mu pb0"));
+        assert_rel(mu[(g, 1)], common, 0.02, &format!("gene {g} mu pb1"));
+        assert_rel(
+            delta[(g, 0)] / delta[(g, 1)],
+            a[g] / b[g],
+            0.02,
+            &format!("gene {g} delta ratio"),
+        );
+        assert_rel(
+            delta[(g, 0)] * delta[(g, 1)],
+            1.0,
+            0.02,
+            &format!("gene {g} delta geometric mean"),
+        );
+        assert_rel(
+            resid[(g, 0)],
+            delta[(g, 0)],
+            0.02,
+            &format!("gene {g} mu_residual pb0 = own delta"),
+        );
+        assert_rel(
+            resid[(g, 1)],
+            delta[(g, 1)],
+            0.02,
+            &format!("gene {g} mu_residual pb1 = own delta"),
+        );
+        assert_rel(
+            gamma[(g, 0)],
+            delta[(g, 1)],
+            0.02,
+            &format!("gene {g} gamma pb0 = source delta"),
+        );
+    }
+}
+
+/// Anchored: the anchor batch's frame is the frame. Its pseudobulk self-matches
+/// (counterfactual = its own profile), the other batch is matched to it. Then
+/// `δ_anchor = 1`, both `μ` equal the anchor profile, and the new batch's `δ` is
+/// its fold relative to the anchor.
+#[test]
+fn anchored_frame_is_the_anchor_batch() {
+    let a = [8.0f32, 2.0, 12.0, 1.0];
+    let b = [2.0f32, 8.0, 3.0, 4.0];
+    let n = 2000.0;
+    let mut stat = two_pure_pbs(&a, &b, n);
+    // pb 1 (batch 1) is the anchor: it self-matches.
+    for (g, &bg) in b.iter().enumerate() {
+        stat.imputed_sum_ds[(g, 1)] = bg * n;
+    }
+    stat.matched_bs = DMatrix::from_row_slice(2, 2, &[0.0, 0.0, n, n]);
+    stat.anchor_batches = vec![1];
+    let out = optimize_block(&stat, (1.0, 1.0), 60, CalibrateTarget::All, None).unwrap();
+    let mu = out.mu_adjusted.as_ref().unwrap().posterior_mean();
+    let delta = out.delta.as_ref().unwrap().posterior_mean();
+    for g in 0..a.len() {
+        assert_rel(delta[(g, 1)], 1.0, 0.02, &format!("gene {g} anchor delta"));
+        assert_rel(
+            delta[(g, 0)],
+            a[g] / b[g],
+            0.03,
+            &format!("gene {g} new-batch delta"),
+        );
+        assert_rel(
+            mu[(g, 0)],
+            b[g],
+            0.03,
+            &format!("gene {g} mu pb0 in the anchor frame"),
+        );
+        assert_rel(mu[(g, 1)], b[g], 0.02, &format!("gene {g} mu pb1"));
+    }
+}
+
+/// Coarsening adds the counterfactual source mass like every other per-sample
+/// statistic, and carries the anchor set.
+#[test]
+fn merge_stat_sums_matched_mass_and_keeps_anchors() {
+    let mut fine = toy_stat(3, 4, 2);
+    fine.anchor_batches = vec![0];
+    let coarse = merge_stat(&fine, &[0, 1, 0, 1], 2);
+    for b in 0..2 {
+        assert_eq!(
+            coarse.matched_bs[(b, 0)],
+            fine.matched_bs[(b, 0)] + fine.matched_bs[(b, 2)]
+        );
+        assert_eq!(
+            coarse.matched_bs[(b, 1)],
+            fine.matched_bs[(b, 1)] + fine.matched_bs[(b, 3)]
+        );
+    }
+    assert_eq!(coarse.anchor_batches, vec![0]);
+    let sub = fine.select_rows(1, 2);
+    assert_eq!(sub.matched_bs, fine.matched_bs);
+    assert_eq!(sub.anchor_batches, vec![0]);
+    let cols = fine.select_columns(&[3, 1]);
+    assert_eq!(cols.matched_bs.column(0), fine.matched_bs.column(3));
+    assert_eq!(cols.anchor_batches, vec![0]);
 }
 
 fn assert_mat_close(a: &DMatrix<f32>, b: &DMatrix<f32>, tag: &str) {

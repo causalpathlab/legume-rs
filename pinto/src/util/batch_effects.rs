@@ -24,12 +24,15 @@
 //!    "what would this group look like in another batch?" estimate.
 //!    - `imputed_sum[g,s]` = weighted average of matched neighbors'
 //!      per-cell gene expression, scaled by cell count
-//!    - `residual_sum[g,s]` = observed / imputed ratio
+//!    - `matched_bs[b,s]` = how much of that counterfactual came from
+//!      each source batch
 //!
-//! 5. **EM-style optimization**: iteratively refine four Gamma
-//!    parameters (μ, μ_resid, γ, δ) to decompose observed expression
-//!    into true signal (μ), batch effect (δ), and cross-batch
-//!    correction terms (γ, μ_resid).
+//! 5. **EM-style optimization**: one batch-free rate μ per (gene, group)
+//!    with both the observed and the counterfactual side Poisson at that
+//!    rate, and a per-(gene, batch) fold δ identified by the counterfactual
+//!    side and pinned to geometric mean 1 over the frame batches. The
+//!    per-group readouts μ_resid (own fold) and γ (source fold) are derived
+//!    from μ afterwards.
 //!
 //! 6. **Multilevel refinement**: repeat steps 1-5 at each level with
 //!    increasing `sort_dim` (coarse → fine). Coarser levels capture

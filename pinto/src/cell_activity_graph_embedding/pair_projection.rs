@@ -74,7 +74,7 @@
 //! are:
 //!
 //! - Its entry point is `pub(crate)`, and its batch divisor is wired to bge /
-//!   gem's pseudobulk hierarchy (`μ_residual` indexed by `cell_to_pb`), which a
+//!   gem's pseudobulk hierarchy (the per-batch gene fold `δ` indexed by each cell's batch), which a
 //!   spatial pair — batch-divided per endpoint, before pooling — does not have.
 //!   Reaching it means widening another crate's API and generalizing that
 //!   abstraction for one caller.
@@ -176,7 +176,7 @@ impl Default for PairProjectionArgs {
 }
 
 /// Per-endpoint batch division, applied to each cell's counts *before* they are
-/// pooled — the same `μ_residual` divide `senna bge` applies in phase 2, so a
+/// pooled — the same per-batch fold divide `senna bge` applies in phase 2, so a
 /// pair's latent reflects de-batched composition. Without it a multi-batch run
 /// clusters edges by batch, since every edge is within-batch by construction.
 #[derive(Copy, Clone)]

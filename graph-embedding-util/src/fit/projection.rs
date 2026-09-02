@@ -2,12 +2,11 @@
 //! Poisson-MAP SGD engine ([`block_sgd`]) is shared by two callers, split by what
 //! they project: [`cells`] (per-cell Phase 2 → `e_cell`) and [`pseudobulk`]
 //! (per-pb velocity readout → `θ_pb`/`δ_pb` landmarks). This root holds only what
-//! both share — the ridge, the batch divisor, and the per-cell edge fold the
+//! both share — the ridge, the per-batch fold, and the per-cell edge divide the
 //! engine calls back into.
 
+use super::batch_fold::BatchGeneFold;
 use candle_util::candle_core::Device;
-use matrix_util::dmatrix_util::adjust_by_poisson_ratio;
-use nalgebra::DMatrix;
 
 mod block_sgd;
 mod cells;
@@ -26,49 +25,44 @@ pub use pseudobulk::PbLevelVelocity;
 /// in for the partition.
 pub const PHASE2_RIDGE: f32 = 1.0;
 
-/// Phase-2 batch correction, mirroring `senna svd`/`topic`: divide each cell's
-/// counts by its finest-pseudobulk `μ_residual` fold-factor before the
-/// Poisson-MAP projection, so `e_cell` fits the de-batched signal. Built only
-/// when the collapse fit a `μ_residual` (>1 batch); a no-op otherwise.
+/// Phase-2 batch correction: each cell's counts are divided by its batch's
+/// per-gene fold `δ_gb` before the Poisson-MAP projection, so `θ_c` is solved in
+/// the batch-free frame the dictionary was trained in (see
+/// [`crate::fit::batch_fold`] for why a divide and not a rate offset). Built only
+/// when the collapse fit a `δ` (>1 batch); absent otherwise.
 #[derive(Clone, Copy)]
-pub(crate) struct CellBatchDivisor<'a> {
-    /// `[n_features × n_pb]` batch fold-factor on the **unified** feature axis,
-    /// so a cell's feature id indexes a row directly (no remap).
-    pub mu_residual: &'a DMatrix<f32>,
-    /// Cell id → finest-pseudobulk id (the `μ_residual` column to divide by).
-    pub cell_to_pb: &'a [usize],
+pub(crate) struct CellBatchFold<'a> {
+    /// The fold table on the unified axes.
+    pub fold: &'a BatchGeneFold,
+    /// Cell id → unified batch id (the table row to divide by).
+    pub cell_to_batch: &'a [u32],
 }
 
-/// Divide one cell's `(feature, count)` edges by its pseudobulk batch fold-factor,
-/// reusing matrix-util's [`adjust_by_poisson_ratio`] — the same self-normalizing
-/// divide (`λ = Σx/Σd`, depth preserved for `b_cell`) `senna svd`/`topic` apply via
-/// the `CscMatrix` trait, here straight on the cell's counts (no per-cell CSC).
-/// `feats` index `μ_residual` rows directly.
-fn adjust_cell_edges(
-    feats: &[u32],
-    counts: &[f32],
-    pb: usize,
-    mu_residual: &DMatrix<f32>,
-) -> Vec<(u32, f32)> {
-    let mut vals = counts.to_vec();
-    adjust_by_poisson_ratio(&mut vals, |k| mu_residual[(feats[k] as usize, pb)]);
-    feats.iter().copied().zip(vals).collect()
-}
-
-/// One node's `(feature, count)` edges, batch-divided by its pseudobulk
-/// fold-factor when correction is on, else the raw edges. Called back by the block
-/// SGD ([`block_sgd`]) as it flattens each node's edges. (The pb readout passes no
-/// divisor — its aggregates are already batch-corrected.)
-pub(crate) fn cell_edges(
-    cell: u32,
-    feats: &[u32],
-    counts: &[f32],
-    batch_divisor: Option<CellBatchDivisor>,
-) -> Vec<(u32, f32)> {
-    match batch_divisor {
-        Some(bd) => adjust_cell_edges(feats, counts, bd.cell_to_pb[cell as usize], bd.mu_residual),
-        None => feats.iter().copied().zip(counts.iter().copied()).collect(),
+impl<'a> CellBatchFold<'a> {
+    /// The fold row for `cell`'s batch. Takes `self` by value (the struct is
+    /// `Copy`) so the row borrows the table, not this handle.
+    pub(crate) fn row_for(self, cell: u32) -> &'a [f32] {
+        self.fold.row(self.cell_to_batch[cell as usize] as usize)
     }
+}
+
+/// One cell's `(feature, count)` edges, divided by its batch's fold when
+/// correction is on, else the raw edges. Plain division — no depth rescale — so
+/// a cell whose counts are exactly a batch's fold of another cell's solves to the
+/// identical latent and intercept. Called by the block SGD as it flattens each
+/// cell's edges. (The pb readout passes no fold — its aggregates are already
+/// batch-free.)
+pub(crate) fn cell_edges<'a>(
+    cell: u32,
+    feats: &'a [u32],
+    counts: &'a [f32],
+    fold: Option<CellBatchFold<'a>>,
+) -> impl Iterator<Item = (u32, f32)> + 'a {
+    let row = fold.map(|f| f.row_for(cell));
+    feats.iter().zip(counts).map(move |(&f, &c)| match row {
+        Some(d) => (f, c / d[f as usize]),
+        None => (f, c),
+    })
 }
 
 /////////////////////////////////////////

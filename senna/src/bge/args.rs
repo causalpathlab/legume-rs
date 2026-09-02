@@ -44,10 +44,10 @@ pub struct BgeArgs {
     #[serde(skip)]
     pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
 
-    /// The parent run this one continues, set by `senna update`. Like `svd`,
-    /// bge has no weights to warm-start (its ETM is re-derived by archetypal
-    /// analysis each run), so this only chains the emitted reference's
-    /// generation counter.
+    /// The parent run this one continues, set by `senna update`. bge carries
+    /// the parent's learned gene modules as its warm start (see
+    /// `parent_modules`); the ETM is re-derived by archetypal analysis each run,
+    /// and the emitted reference's generation counter is chained through here.
     #[arg(skip)]
     #[serde(skip)]
     pub(crate) init_from: Option<Box<str>>,
@@ -395,6 +395,11 @@ pub struct BgeArgs {
     #[command(flatten)]
     pub(crate) posterior: ge::posterior::PosteriorArgs,
 
+    /// The `--gene-modules` flag group (see `ge::GeneModuleArgs`); on by default
+    /// here, resolved in `build_config`.
+    #[command(flatten)]
+    pub(crate) modules: ge::GeneModuleArgs,
+
     #[arg(
         long,
         short,
@@ -415,10 +420,9 @@ impl crate::update::Updatable for BgeArgs {
         self.batch_files = r.batch_files;
         self.out = r.out;
         self.pb_reference = r.reference;
-        // Like `svd`, bge has no weights to warm-start: `update` re-fits on
-        // the union with the recorded configuration, and the carried
-        // reference (when used) is what keeps that O(new). `init_from` only
-        // chains the emitted reference's generation counter.
+        // `update` re-fits on the union with the recorded configuration; the
+        // carried reference (when used) keeps that O(new), and `init_from` is
+        // where `build_config` finds the parent's modules to warm-start from.
         self.init_from = Some(r.init_from);
         if let Some(e) = r.epochs {
             self.epochs = e;

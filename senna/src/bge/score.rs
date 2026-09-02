@@ -46,6 +46,40 @@ pub struct BgeEmbedding {
     pub b_feat: Vec<f32>,
     pub gene_names: Vec<Box<str>>,
     pub h: usize,
+    /// The learned-module tables `(π [D × M], μ [M × H])` when the run trained them —
+    /// what lets an unseen gene be initialized through its co-expression rather than
+    /// dropped. `None` for a plain run, where an unseen gene falls back to its
+    /// neighbours' row average.
+    pub modules: Option<(DMatrix<f32>, DMatrix<f32>)>,
+}
+
+/// How `predict` treats the new data's genes the model never saw.
+#[derive(Clone, Copy, Debug)]
+pub struct InitOpts {
+    /// `None` drops unseen genes, the pre-alignment behaviour; `Some` places
+    /// them through the modules with this neighbourhood.
+    pub align: Option<graph_embedding_util::transfer::AlignKnobs>,
+    /// Re-project every cell with the initialized genes as observations (pass 2).
+    /// Off, they are scored from the pass-1 latent and never move it.
+    pub in_fit: bool,
+}
+
+impl InitOpts {
+    pub const OFF: Self = Self {
+        align: None,
+        in_fit: false,
+    };
+}
+
+/// What the alignment produced, for the writers.
+pub struct InitOutcome {
+    pub alignment: graph_embedding_util::transfer::GeneAlignment,
+    /// Per-cell score on the initialized genes.
+    pub scores: Vec<super::transfer::InitScore>,
+    /// Pseudobulks the profiles were formed over.
+    pub n_clusters: usize,
+    /// Whether pass 2 ran, i.e. whether `latent` saw the initialized genes.
+    pub in_fit: bool,
 }
 
 pub struct BgeFit {
@@ -59,9 +93,19 @@ pub struct BgeFit {
     /// wanting held-out coordinates had to re-run the whole projection itself. It is the
     /// same object `{prefix}.cell_embedding.parquet` holds for the training cells.
     pub latent: Mat,
+    /// `[N]` per-cell intercept fitted alongside the latent.
+    pub b_cell: Vec<f32>,
+    /// The gene-axis alignment, when the query carried genes the model never saw
+    /// and initialization was on.
+    pub init: Option<InitOutcome>,
 }
 
 impl BgeEmbedding {
+    /// ρ as a `[D, H]` matrix (the row-major buffer read back as columns).
+    pub fn rho_matrix(&self) -> DMatrix<f32> {
+        DMatrix::from_row_slice(self.gene_names.len(), self.h, &self.rho)
+    }
+
     /// Open from a run prefix or a `{run}.senna.json` path.
     ///
     /// Both, because the two callers disagree: `probe --model` is documented as a run
@@ -118,11 +162,30 @@ impl BgeEmbedding {
         let rho_rm = rho.mat.transpose().as_slice().to_vec();
         info!("bge model: {d} genes, H={h} (ρ {rho_path})");
 
+        // Module tables, when the run trained them.
+        let modules = match (
+            manifest.outputs.module_membership.as_deref(),
+            manifest.outputs.module_dictionary.as_deref(),
+        ) {
+            (Some(pi_rel), Some(mu_rel)) => {
+                let (pi, mu) = graph_embedding_util::transfer::read_module_tables(
+                    &run_manifest::resolve(&dir, pi_rel).to_string_lossy(),
+                    &run_manifest::resolve(&dir, mu_rel).to_string_lossy(),
+                    &rho.rows,
+                    h,
+                )?;
+                info!("bge model carries {} learned gene modules", pi.ncols());
+                Some((pi, mu))
+            }
+            _ => None,
+        };
+
         Ok(Self {
             rho: rho_rm,
             b_feat: bias.mat.column(0).iter().copied().collect(),
             gene_names: rho.rows,
             h,
+            modules,
         })
     }
 
@@ -151,6 +214,28 @@ impl BgeEmbedding {
         qopts: &QueryNameOpts,
         dev: &Device,
     ) -> anyhow::Result<BgeFit> {
+        self.score_with_init(files, preload, block, qopts, InitOpts::OFF, dev)
+    }
+
+    /// [`Self::score`] with the gene-axis alignment: genes the model never saw are
+    /// initialized through the modules (see `super::transfer`) instead of dropped.
+    /// With `init.enabled == false`, or a query with no unseen genes, this is
+    /// byte-identical to [`Self::score`].
+    pub fn score_with_init(
+        &self,
+        files: &[Box<str>],
+        preload: bool,
+        block: usize,
+        qopts: &QueryNameOpts,
+        init: InitOpts,
+        dev: &Device,
+    ) -> anyhow::Result<BgeFit> {
+        use super::transfer::{profiles_by_cluster, score_initialized, union_remap};
+        use graph_embedding_util::transfer::{
+            align_gene_axis, moment_matched_bias, pseudobulk_count, AlignInputs, GeneStatus,
+            ModuleTables,
+        };
+
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload,
@@ -170,6 +255,10 @@ impl BgeEmbedding {
         // it exists to score — while `predict` passes `--min-gene-overlap`, which used to
         // be dropped here along with every `--feature-name-*` flag.
         crate::topic::eval::ensure_gene_coverage(&remap, qopts.min_overlap, "--feature-name-kind")?;
+        // The remap BEFORE the hide pass: the alignment must see a withheld model gene as
+        // matched (its row is kept, its counts are not), never as unseen. The unseen
+        // genes are exactly the rows that matched nothing here.
+        let before_hide = remap.new_to_train.clone();
         // After the coverage gate, not before: the hidden genes are deliberately
         // withheld, so counting them as missing coverage would refuse every
         // ablated run. Driven from `qopts` rather than a separate parameter, so
@@ -177,9 +266,13 @@ impl BgeEmbedding {
         if let Some(hide) = qopts.hide.as_deref() {
             crate::topic::eval::hide_features(&mut remap, &new_genes, hide)?;
         }
+        let unseen: Vec<usize> = match init.align {
+            Some(_) => (0..new_genes.len())
+                .filter(|&r| before_hide[r].is_none())
+                .collect(),
+            None => Vec::new(),
+        };
 
-        // The exact normalizer: every model gene, so `partition_scale = 1`.
-        let partition: Vec<u32> = (0..n_model as u32).collect();
         let side = FrozenSide {
             e: &self.rho,
             b: &self.b_feat,
@@ -197,116 +290,303 @@ impl BgeEmbedding {
             dev,
         })?;
 
-        let ntot = data_vec.num_columns();
-        let mut llik = Vec::with_capacity(ntot);
-        let mut total = Vec::with_capacity(ntot);
-        let mut latent = Mat::zeros(ntot, self.h);
-        // ONE bar for the query. The projector advances it as its blocks step, so this
-        // side never increments it: nesting a second bar under it (one per projection
-        // call) is what the group loop used to do.
-        let bar = new_progress_bar(ntot as u64).with_message("scoring");
+        // Pass 1: every cell on the matched genes.
+        let mut pass = project_all(ProjectAll {
+            data_vec: &data_vec,
+            remap: &remap.new_to_train,
+            projector: &projector,
+            side: &side,
+            n_model,
+            block,
+        })?;
 
-        // Columns are READ in `block`-sized slabs — that bound is the reader's — but they
-        // are PROJECTED in groups the engine sizes.
-        //
-        // The two are not the same thing and used to be conflated. `block` is
-        // `--minibatch-size`, default 500; the projection engine sizes its internal blocks
-        // from an activation budget of its own and takes thousands of cells at a time.
-        // Handing it 500 gave it exactly one under-sized block per call, so its per-step
-        // matmul ran on a short `M`. The fix used to be a byte budget guessed here, in
-        // nonzeros — a currency the engine never sees, aimed at a block size this crate
-        // cannot read. [`FrozenProjector::group_nodes`] is that number in the engine's own
-        // terms, and cutting the group EXACTLY there is what keeps every block full.
-        let group_nodes = projector.group_nodes();
-        let mut group = EdgeGroup::default();
-
-        let mut lb = 0usize;
-        while lb < ntot {
-            let group_lb = lb;
-            // Accumulate slabs until the group is full. The inner loop's exit condition
-            // IS the flush condition, so a part-group at the end needs no special case.
-            while lb < ntot && group.len() < group_nodes {
-                let ub = (lb + block).min(group_lb + group_nodes).min(ntot);
+        let mut init_out: Option<InitOutcome> = None;
+        if let (Some(knobs), false) = (init.align, unseen.is_empty()) {
+            let n_cells = pass.latent.nrows();
+            let n_new = new_genes.len();
+            // Pseudobulks for the profiles: a clustering of the pass-1 latents, so a
+            // profile is a gene's expression across the cell states this model sees.
+            let n_clusters = pseudobulk_count(n_cells);
+            let (_, labels) = matrix_util::principal_graph::kmeans_centroids_seeded(
+                &pass.latent,
+                n_clusters,
+                20,
+                0,
+            );
+            // One more pass over the columns: profiles over ALL new rows, plus each
+            // cell's counts on the unseen genes for the bias and the score.
+            let mut unseen_local = vec![u32::MAX; n_new];
+            for (i, &r) in unseen.iter().enumerate() {
+                unseen_local[r] = i as u32;
+            }
+            let mut obs: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
+            let mut profiles = DMatrix::<f32>::zeros(n_new, n_clusters);
+            let mut lb = 0usize;
+            while lb < n_cells {
+                let ub = (lb + block).min(n_cells);
                 let csc = data_vec.read_columns_csc(lb..ub)?;
-                // One walk per cell yields both the remapped entries and the cell's
-                // total; the total used to be a third pass over the same nonzeros.
-                // Parallel per cell, matching the `multinomial_ll` pass below — the
-                // walks are independent, and an indexed range keeps them in cell order.
-                let (per_cell, totals): (Vec<Vec<(u32, f32)>>, Vec<f32>) = (0..csc.ncols())
-                    .into_par_iter()
-                    .map(|j| {
-                        let col = csc.col(j);
-                        let pos: Vec<(u32, f32)> = col
-                            .row_indices()
-                            .iter()
-                            .zip(col.values())
-                            .filter_map(|(&i, &v)| remap.new_to_train[i].map(|t| (t as u32, v)))
-                            .collect();
-                        let tot = pos.iter().map(|&(_, v)| v).sum::<f32>();
-                        (pos, tot)
-                    })
-                    .unzip();
-                drop(csc);
-
-                group.extend(&per_cell);
-                total.extend(totals);
+                // Raw CSC arrays sliced by offset: a column view would borrow a local.
+                let (offsets, rows_all, vals_all) =
+                    (csc.col_offsets(), csc.row_indices(), csc.values());
+                for j in 0..csc.ncols() {
+                    let (s0, s1) = (offsets[j], offsets[j + 1]);
+                    let (rows, vals) = (&rows_all[s0..s1], &vals_all[s0..s1]);
+                    profiles_by_cluster(
+                        &mut profiles,
+                        &labels,
+                        std::iter::once((lb + j, rows, vals)),
+                    );
+                    for (&row, &v) in rows.iter().zip(vals) {
+                        let li = unseen_local[row];
+                        if li != u32::MAX {
+                            obs[lb + j].push((li, v));
+                        }
+                    }
+                }
                 lb = ub;
             }
+            let totals: Vec<f32> = unseen
+                .iter()
+                .map(|&r| profiles.row(r).iter().sum::<f32>())
+                .collect();
 
-            let n_group = group.len();
-            let e_cell = project_group(&projector, &group, &bar)?;
-            // `multinomial_ll` walks the whole gene axis twice per cell for the
-            // normalizer, which makes it the dominant cost here — and it sat serial
-            // directly below `project_cells`, which is already rayon-parallel. Everything
-            // it reads is shared and immutable, so the map parallelizes as-is and stays in
-            // order. `NodeTerm` borrows an interleaved slice, so the split arrays are
-            // re-zipped into a per-cell temporary — a few thousand entries against a
-            // normalizer that touches the whole gene axis twice.
-            llik.par_extend((0..n_group).into_par_iter().map(|c| {
-                let (feat, count) = group.cell(c);
-                let pos: Vec<(u32, f32)> =
-                    feat.iter().copied().zip(count.iter().copied()).collect();
-                let node = NodeTerm::new(&pos, &partition, 1.0);
-                multinomial_ll(&e_cell[c * self.h..(c + 1) * self.h], &node, &side)
-            }));
-            // `e_cell` is row-major `[n_group, H]`; `Mat` is column-major, so this is a
-            // transposing copy rather than a memcpy.
-            for c in 0..n_group {
-                for j in 0..self.h {
-                    latent[(group_lb + c, j)] = e_cell[c * self.h + j];
-                }
+            let rho_dm = self.rho_matrix();
+            let modules = self
+                .modules
+                .as_ref()
+                .map(|(pi, mu)| ModuleTables { pi, mu });
+            let mut alignment = align_gene_axis(&AlignInputs {
+                rho: &rho_dm,
+                b_feat: Some(&self.b_feat),
+                modules,
+                new_to_train: &before_hide,
+                profiles_new: Some(&profiles),
+                knobs,
+            });
+            let init_idx: Vec<usize> = unseen
+                .iter()
+                .map(|&r| alignment.new_to_union[r].expect("an unseen gene is initialized"))
+                .collect();
+            let init_rows = alignment.rows.select_rows(init_idx.iter());
+            // A gene the query never expresses has no scale to match; give it the
+            // smallest trained bias rather than 0, which would make it the most
+            // abundant gene in the partition.
+            let fallback = self.b_feat.iter().copied().fold(f32::INFINITY, f32::min);
+            let init_bias =
+                moment_matched_bias(&init_rows, &pass.latent, &pass.b_cell, &totals, fallback);
+            for (i, &g) in init_idx.iter().enumerate() {
+                alignment.bias[g] = init_bias[i];
             }
-            group.clear();
+            let n_diffuse = init_idx
+                .iter()
+                .filter(|&&g| alignment.provenance[g].as_ref().is_some_and(|p| p.diffuse))
+                .count();
+            info!(
+                "gene-axis alignment: {} matched, {} missing, {} initialized ({} diffuse) over \
+                 {n_clusters} pseudobulks, k={} floor={}",
+                alignment.with_status(GeneStatus::Matched).len(),
+                alignment.with_status(GeneStatus::Missing).len(),
+                init_idx.len(),
+                n_diffuse,
+                knobs.k,
+                knobs.similarity_floor
+            );
+
+            // Pass 2: the initialized genes become observations. The comparable score
+            // still normalizes over the model's genes only.
+            if init.in_fit {
+                let union_rm = alignment.rows.transpose().as_slice().to_vec();
+                let projector2 = FrozenProjector::new(&FrozenProjectionArgs {
+                    feat: &union_rm,
+                    b_feat: &alignment.bias,
+                    h: self.h,
+                    lambda: f64::from(PROJECTION_RIDGE_SGD),
+                    dev,
+                })?;
+                let remap2 = union_remap(&remap.new_to_train, &unseen, n_model);
+                info!(
+                    "pass 2: re-projecting every cell with the {} initialized genes observed",
+                    unseen.len()
+                );
+                pass = project_all(ProjectAll {
+                    data_vec: &data_vec,
+                    remap: &remap2,
+                    projector: &projector2,
+                    side: &side,
+                    n_model,
+                    block,
+                })?;
+            }
+
+            // The null for the initialized genes is the query's own composition over
+            // them: there is no training marginal for a gene the model never saw.
+            let tot: f32 = totals.iter().sum::<f32>().max(1e-12);
+            let null_comp: Vec<f32> = totals.iter().map(|&t| t / tot).collect();
+            let scores = score_initialized(
+                &init_rows,
+                &init_bias,
+                &pass.latent,
+                &pass.b_cell,
+                &obs,
+                &null_comp,
+            );
+            init_out = Some(InitOutcome {
+                alignment,
+                scores,
+                n_clusters,
+                in_fit: init.in_fit,
+            });
         }
-        bar.finish_and_clear();
 
         Ok(BgeFit {
             data_vec,
-            llik,
-            total,
-            latent,
+            llik: pass.llik,
+            total: pass.total,
+            latent: pass.latent,
+            b_cell: pass.b_cell,
+            init: init_out,
         })
     }
 }
 
-/// Project one group of cells onto the frozen side, returning `θ` row-major `[n, H]`.
-///
-/// The SAME block SGD the training run used for its own phase 2. The Newton/IRLS
-/// alternative fits a cell's observed features only and lets a ridge stand in for the
-/// log-partition, so it lands in a different space — and a train/test comparison whose
-/// two halves were projected differently measures the estimator gap as much as the model.
+/// One projection sweep over the query: every cell placed against `projector`
+/// through `remap`, scored by [`multinomial_ll`] on the model's own genes.
+struct ProjectAll<'a> {
+    data_vec: &'a SparseIoVec,
+    /// New-data row → row of `projector`'s dictionary.
+    remap: &'a [Option<usize>],
+    projector: &'a FrozenProjector<'a>,
+    side: &'a FrozenSide<'a>,
+    /// Rows below this belong to the model's own genes and enter the score;
+    /// rows at or above it are initialized genes, observed by the projector but
+    /// not scored here.
+    n_model: usize,
+    block: usize,
+}
+
+struct ProjectAllOut {
+    latent: Mat,
+    b_cell: Vec<f32>,
+    llik: Vec<f32>,
+    total: Vec<f32>,
+}
+
+fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
+    let ntot = a.data_vec.num_columns();
+    let h = a.side.h;
+    // The exact normalizer: every model gene, so `partition_scale = 1`.
+    let partition: Vec<u32> = (0..a.n_model as u32).collect();
+    let mut llik = Vec::with_capacity(ntot);
+    let mut total = Vec::with_capacity(ntot);
+    let mut b_cell = Vec::with_capacity(ntot);
+    let mut latent = Mat::zeros(ntot, h);
+    // ONE bar for the query. The projector advances it as its blocks step, so this
+    // side never increments it: nesting a second bar under it (one per projection
+    // call) is what the group loop used to do.
+    let bar = new_progress_bar(ntot as u64).with_message("scoring");
+
+    // Columns are READ in `block`-sized slabs — that bound is the reader's — but they
+    // are PROJECTED in groups the engine sizes.
+    //
+    // The two are not the same thing and used to be conflated. `block` is
+    // `--minibatch-size`, default 500; the projection engine sizes its internal blocks
+    // from an activation budget of its own and takes thousands of cells at a time.
+    // Handing it 500 gave it exactly one under-sized block per call, so its per-step
+    // matmul ran on a short `M`. The fix used to be a byte budget guessed here, in
+    // nonzeros — a currency the engine never sees, aimed at a block size this crate
+    // cannot read. [`FrozenProjector::group_nodes`] is that number in the engine's own
+    // terms, and cutting the group EXACTLY there is what keeps every block full.
+    let group_nodes = a.projector.group_nodes();
+    let mut group = EdgeGroup::default();
+
+    let mut lb = 0usize;
+    while lb < ntot {
+        let group_lb = lb;
+        // Accumulate slabs until the group is full. The inner loop's exit condition
+        // IS the flush condition, so a part-group at the end needs no special case.
+        while lb < ntot && group.len() < group_nodes {
+            let ub = (lb + a.block).min(group_lb + group_nodes).min(ntot);
+            let csc = a.data_vec.read_columns_csc(lb..ub)?;
+            // One walk per cell yields both the remapped entries and the cell's
+            // total; the total used to be a third pass over the same nonzeros.
+            // Parallel per cell, matching the `multinomial_ll` pass below — the
+            // walks are independent, and an indexed range keeps them in cell order.
+            let (per_cell, totals): (Vec<Vec<(u32, f32)>>, Vec<f32>) = (0..csc.ncols())
+                .into_par_iter()
+                .map(|j| {
+                    let col = csc.col(j);
+                    let pos: Vec<(u32, f32)> = col
+                        .row_indices()
+                        .iter()
+                        .zip(col.values())
+                        .filter_map(|(&i, &v)| a.remap[i].map(|t| (t as u32, v)))
+                        .collect();
+                    let tot = pos.iter().map(|&(_, v)| v).sum::<f32>();
+                    (pos, tot)
+                })
+                .unzip();
+            drop(csc);
+
+            group.extend(&per_cell);
+            total.extend(totals);
+            lb = ub;
+        }
+
+        let n_group = group.len();
+        let proj = project_group(a.projector, &group, &bar)?;
+        let e_cell = proj.theta;
+        b_cell.extend_from_slice(&proj.b_node);
+        // `multinomial_ll` walks the whole gene axis twice per cell for the
+        // normalizer, which makes it the dominant cost here — and it sat serial
+        // directly below `project_cells`, which is already rayon-parallel. Everything
+        // it reads is shared and immutable, so the map parallelizes as-is and stays in
+        // order. `NodeTerm` borrows an interleaved slice, so the split arrays are
+        // re-zipped into a per-cell temporary — a few thousand entries against a
+        // normalizer that touches the whole gene axis twice. Initialized genes (rows at
+        // or past `n_model`) are left out of the score: it stays over the model's genes.
+        let n_model = a.n_model as u32;
+        llik.par_extend((0..n_group).into_par_iter().map(|c| {
+            let (feat, count) = group.cell(c);
+            let pos: Vec<(u32, f32)> = feat
+                .iter()
+                .copied()
+                .zip(count.iter().copied())
+                .filter(|&(f, _)| f < n_model)
+                .collect();
+            let node = NodeTerm::new(&pos, &partition, 1.0);
+            multinomial_ll(&e_cell[c * h..(c + 1) * h], &node, a.side)
+        }));
+        // `e_cell` is row-major `[n_group, H]`; `Mat` is column-major, so this is a
+        // transposing copy rather than a memcpy.
+        for c in 0..n_group {
+            for j in 0..h {
+                latent[(group_lb + c, j)] = e_cell[c * h + j];
+            }
+        }
+        group.clear();
+    }
+    bar.finish_and_clear();
+
+    Ok(ProjectAllOut {
+        latent,
+        b_cell,
+        llik,
+        total,
+    })
+}
+
 fn project_group(
     projector: &FrozenProjector,
     group: &EdgeGroup,
     bar: &indicatif::ProgressBar,
-) -> anyhow::Result<Vec<f32>> {
+) -> anyhow::Result<graph_embedding_util::fit::FrozenProjection> {
     let nodes: Vec<(u32, &[u32], &[f32])> = (0..group.len())
         .map(|j| {
             let (feat, count) = group.cell(j);
             (j as u32, feat, count)
         })
         .collect();
-    Ok(projector.project(&nodes, group.len(), bar)?.theta)
+    projector.project(&nodes, group.len(), bar)
 }
 
 /// One projection group's remapped edges, flat and split.

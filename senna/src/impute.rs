@@ -379,6 +379,7 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
         Some(&ref_gene_names),
     )?;
     info!("Wrote imputed {n_new}× {g_ref} matrix to {imputed_path}");
+    write_model_imputed_genes(args, &new_cell_names)?;
 
     Ok(())
 }
@@ -399,6 +400,15 @@ fn predict_matching_latents(
     info!("Projecting new data through the model (predict → {predict_prefix})");
     let predict_args = PredictArgs {
         ablate_features: None,
+        // bge: the latent comes from pass 1 on the matched genes (unchanged), and
+        // predict also initializes the genes the model never saw and writes their
+        // per-cell rates, which become the model-imputed table below — retrieval
+        // cannot reach a gene the reference has no counts for.
+        no_init_genes: false,
+        init_neighbours: graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
+        init_similarity_floor: graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
+        init_genes_in_fit: false,
+        emit_gene_rates: true,
         null_from: None,
         eval_features: None,
         data_files: args.data_files.clone(),
@@ -523,6 +533,76 @@ fn svd_matching_latents(
     l2_normalize_rows_inplace(&mut theta_ref);
 
     Ok((new_cell_names, theta_new, theta_ref))
+}
+
+/// The genes the model never saw, imputed by the MODEL rather than retrieved:
+/// read back predict's alignment and rate tables (written under the
+/// `predict_tmp` prefix when the query carried unseen genes), keep the
+/// initialized columns, and write `{out}.imputed_model_genes.parquet`. Absent
+/// tables — a plain run, or no unseen gene — write nothing.
+fn write_model_imputed_genes(args: &ImputeArgs, new_cell_names: &[Box<str>]) -> anyhow::Result<()> {
+    let prefix = format!("{}.predict_tmp", args.out);
+    let al_path = format!("{prefix}.gene_alignment.parquet");
+    let rates_path = format!("{prefix}.gene_rates.parquet");
+    if !(std::path::Path::new(&al_path).exists() && std::path::Path::new(&rates_path).exists()) {
+        return Ok(());
+    }
+    let mut cols =
+        matrix_util::parquet::read_parquet_string_columns_by_name(&al_path, &["gene", "status"])?;
+    let al_status = cols.pop().expect("status column");
+    let al_genes = cols.pop().expect("gene column");
+    let rates = <Mat as IoOps>::from_parquet(&rates_path)?;
+    anyhow::ensure!(
+        rates.mat.nrows() == new_cell_names.len(),
+        "{rates_path}: {} rows for {} query cells",
+        rates.mat.nrows(),
+        new_cell_names.len()
+    );
+    let (names, m) = model_imputed_columns(&al_genes, &al_status, &rates.cols, &rates.mat);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let path = format!("{}.imputed_model_genes.parquet", args.out);
+    m.to_parquet_with_names(&path, (Some(new_cell_names), Some("cell")), Some(&names))?;
+    info!(
+        "Wrote {path}: {} genes the model never saw, imputed from their initialized rows \
+         (provenance in {al_path}); they are NOT in the retrieved matrix",
+        names.len()
+    );
+    Ok(())
+}
+
+/// The model-imputed columns for the genes the model never saw: from predict's
+/// `gene_alignment` (status per union gene) and `gene_rates` (per-cell rates of
+/// the missing and initialized genes), keep exactly the `initialized` columns, in
+/// the alignment's order. Retrieval cannot impute these genes — the reference has
+/// no counts for them — so they are written as their own table with their own
+/// provenance rather than mixed into the retrieved matrix.
+pub(crate) fn model_imputed_columns(
+    alignment_genes: &[Box<str>],
+    alignment_status: &[Box<str>],
+    rate_genes: &[Box<str>],
+    rates: &Mat,
+) -> (Vec<Box<str>>, Mat) {
+    let col_of: std::collections::HashMap<&str, usize> = rate_genes
+        .iter()
+        .enumerate()
+        .map(|(j, g)| (g.as_ref(), j))
+        .collect();
+    let keep: Vec<(Box<str>, usize)> = alignment_genes
+        .iter()
+        .zip(alignment_status)
+        .filter(|(_, st)| {
+            graph_embedding_util::transfer::GeneStatus::parse(st)
+                == Some(graph_embedding_util::transfer::GeneStatus::Initialized)
+        })
+        .filter_map(|(g, _)| col_of.get(g.as_ref()).map(|&j| (g.clone(), j)))
+        .collect();
+    let mut out = Mat::zeros(rates.nrows(), keep.len());
+    for (k, (_, j)) in keep.iter().enumerate() {
+        out.set_column(k, &rates.column(*j));
+    }
+    (keep.into_iter().map(|(g, _)| g).collect(), out)
 }
 
 #[cfg(test)]
