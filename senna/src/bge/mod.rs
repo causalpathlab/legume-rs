@@ -22,8 +22,8 @@ use graph_embedding_util as ge;
 
 pub(crate) mod args;
 mod resolve_etm;
-pub(crate) mod transfer;
 pub(crate) mod score;
+pub(crate) mod transfer;
 
 pub use args::BgeArgs;
 use args::MultiomeFile;

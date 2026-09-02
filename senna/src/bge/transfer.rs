@@ -32,23 +32,22 @@ pub(crate) fn unseen_rows(
         .collect()
 }
 
-/// Per-gene count profiles over pseudobulks defined by a cell clustering:
-/// `profiles[g, s] = Σ_{c: labels[c] = s} x_cg`, `[n_genes × n_clusters]`.
-/// `cells` yields `(cell, feature rows, counts)` on the NEW data's row axis.
+/// Accumulate per-gene count profiles over pseudobulks defined by a cell
+/// clustering into `profiles` (`[n_genes × n_clusters]`):
+/// `profiles[g, s] += Σ_{c: labels[c] = s} x_cg`. `cells` yields
+/// `(cell, feature rows, counts)` on the NEW data's row axis; call once per
+/// column block.
 pub(crate) fn profiles_by_cluster<'a>(
-    n_genes: usize,
-    n_clusters: usize,
+    profiles: &mut DMatrix<f32>,
     labels: &[usize],
-    cells: impl Iterator<Item = (usize, &'a [u32], &'a [f32])>,
-) -> DMatrix<f32> {
-    let mut p = DMatrix::<f32>::zeros(n_genes, n_clusters);
+    cells: impl Iterator<Item = (usize, &'a [usize], &'a [f32])>,
+) {
     for (c, feats, counts) in cells {
         let s = labels[c];
         for (&f, &x) in feats.iter().zip(counts) {
-            p[(f as usize, s)] += x;
+            profiles[(f, s)] += x;
         }
     }
-    p
 }
 
 /// New-data row → union-axis index: a matched row keeps its training position,
@@ -132,6 +131,154 @@ pub(crate) fn score_initialized(
             }
         })
         .collect()
+}
+
+/// The alignment outputs of a bge `predict`, written only when the query carried
+/// genes the model never saw:
+///
+/// * `{out}.gene_alignment.parquet` — one row per union gene: status, best
+///   profile similarity, whether the diffuse prior was used, the neighbours' names,
+///   and the bias (trained or moment-matched). This is the provenance every reader
+///   of an initialized row is entitled to.
+/// * `{out}.init_genes.parquet` — per cell: counts on the initialized genes and
+///   their multinomial nats per count against the query's own composition, in
+///   their own columns, never mixed into `predictive.parquet`.
+/// * `{out}.gene_rates.parquet` (opt-in) — per cell, the predicted Poisson rate of
+///   every missing and initialized gene, `exp(ρ_g·θ_c + a_g + b_c)`.
+pub(crate) fn write_init_outputs(
+    out: &str,
+    model: &super::score::BgeEmbedding,
+    fit: &super::score::BgeFit,
+    emit_rates: bool,
+) -> anyhow::Result<()> {
+    use graph_embedding_util::transfer::GeneStatus;
+    use log::info;
+    use matrix_util::parquet::{write_named_table, Column};
+    use matrix_util::traits::IoOps;
+
+    let Some(init) = fit.init.as_ref() else {
+        return Ok(());
+    };
+    let al = &init.alignment;
+    let n_union = al.n_union();
+    let names: Vec<Box<str>> = (0..n_union)
+        .map(|g| match (al.union_to_train[g], al.union_to_new[g]) {
+            (Some(t), _) => model.gene_names[t].clone(),
+            (None, Some(n)) => init.new_gene_names[n].clone(),
+            (None, None) => Box::from("?"),
+        })
+        .collect();
+    let status: Vec<Box<str>> = al
+        .status
+        .iter()
+        .map(|s| {
+            Box::from(match s {
+                GeneStatus::Matched => "matched",
+                GeneStatus::Missing => "missing",
+                GeneStatus::Initialized => "initialized",
+                GeneStatus::Dropped => "dropped",
+            })
+        })
+        .collect();
+    let similarity: Vec<f32> = al
+        .provenance
+        .iter()
+        .map(|p| p.as_ref().map_or(f32::NAN, |p| p.best_similarity))
+        .collect();
+    let diffuse: Vec<i32> = al
+        .provenance
+        .iter()
+        .map(|p| i32::from(p.as_ref().is_some_and(|p| p.diffuse)))
+        .collect();
+    let neighbours: Vec<Box<str>> = al
+        .provenance
+        .iter()
+        .map(|p| {
+            Box::from(
+                p.as_ref()
+                    .map(|p| {
+                        p.neighbours
+                            .iter()
+                            .map(|&t| model.gene_names[t].to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default()
+                    .as_str(),
+            )
+        })
+        .collect();
+    let path = format!("{out}.gene_alignment.parquet");
+    write_named_table(
+        &path,
+        "gene",
+        &names,
+        &[
+            (Box::from("status"), Column::Str(&status)),
+            (Box::from("best_similarity"), Column::F32(&similarity)),
+            (Box::from("diffuse"), Column::I32(&diffuse)),
+            (Box::from("neighbours"), Column::Str(&neighbours)),
+            (Box::from("bias"), Column::F32(&al.bias)),
+        ],
+    )?;
+    info!("Wrote {path}");
+
+    let cells = fit.data_vec.column_names()?;
+    let n = init.scores.len();
+    let mut sc = Mat::zeros(n, 3);
+    for (i, s) in init.scores.iter().enumerate() {
+        sc[(i, 0)] = s.count;
+        sc[(i, 1)] = s.llik_per_count;
+        sc[(i, 2)] = s.null_llik_per_count;
+    }
+    let path = format!("{out}.init_genes.parquet");
+    sc.to_parquet_with_names(
+        &path,
+        (Some(&cells), Some("cell")),
+        Some(&[
+            Box::from("init_count"),
+            Box::from("init_llik_per_count"),
+            Box::from("init_null_llik_per_count"),
+        ]),
+    )?;
+    let scored: Vec<&super::transfer::InitScore> =
+        init.scores.iter().filter(|s| s.count > 0.0).collect();
+    let mean = |f: &dyn Fn(&InitScore) -> f32| {
+        scored.iter().map(|s| f(s)).sum::<f32>() / scored.len().max(1) as f32
+    };
+    info!(
+        "Wrote {path}: {} initialized genes over {} pseudobulks{}, {} cells scored, llik/count {:.4} vs query-composition null {:.4} (gain {:+.4})",
+        init.unseen_rows.len(),
+        init.n_clusters,
+        if init.in_fit { " (observed in pass 2)" } else { "" },
+        scored.len(),
+        mean(&|s| s.llik_per_count),
+        mean(&|s| s.null_llik_per_count),
+        mean(&|s| s.llik_per_count - s.null_llik_per_count),
+    );
+
+    if emit_rates {
+        let genes: Vec<usize> = (0..n_union)
+            .filter(|&g| matches!(al.status[g], GeneStatus::Missing | GeneStatus::Initialized))
+            .collect();
+        let h = al.rows.ncols();
+        let mut rates = Mat::zeros(n, genes.len());
+        for (j, &g) in genes.iter().enumerate() {
+            for c in 0..n {
+                let s: f32 = (0..h)
+                    .map(|k| al.rows[(g, k)] * fit.latent[(c, k)])
+                    .sum::<f32>()
+                    + al.bias[g]
+                    + fit.b_cell[c];
+                rates[(c, j)] = s.exp();
+            }
+        }
+        let cols: Vec<Box<str>> = genes.iter().map(|&g| names[g].clone()).collect();
+        let path = format!("{out}.gene_rates.parquet");
+        rates.to_parquet_with_names(&path, (Some(&cells), Some("cell")), Some(&cols))?;
+        info!("Wrote {path} ({} missing + initialized genes)", genes.len());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -399,6 +399,13 @@ fn predict_matching_latents(
     info!("Projecting new data through the model (predict → {predict_prefix})");
     let predict_args = PredictArgs {
         ablate_features: None,
+        // impute takes bge's latent from pass 1 on the matched genes; unseen genes are
+        // scored and rate-imputed by predict's own outputs, not through the retrieval.
+        no_init_genes: true,
+        init_neighbours: 10,
+        init_similarity_floor: 0.2,
+        init_genes_in_fit: false,
+        emit_gene_rates: false,
         null_from: None,
         eval_features: None,
         data_files: args.data_files.clone(),
