@@ -93,7 +93,8 @@ fn dense_block_scatters_rows() {
     assert_eq!(v, vec![vec![1.0, 0.0, 3.0], vec![0.0, 7.0, 0.0]]);
 }
 
-/// Central finite differences on every parameter of the exact term.
+/// Central finite differences on every parameter the exact term trains; the
+/// membership logits must receive NO gradient from it (the target is detached).
 #[test]
 fn module_softmax_gradient_matches_finite_difference() {
     let d = dev();
@@ -150,10 +151,6 @@ fn module_softmax_gradient_matches_finite_difference() {
             let tu = Tensor::from_vec(up, shape.clone(), &d).unwrap();
             let td = Tensor::from_vec(dn, shape.clone(), &d).unwrap();
             let (lu, ld) = match name {
-                "logits" => (
-                    loss_fn(&tu, mu.as_tensor(), b.as_tensor(), e.as_tensor()),
-                    loss_fn(&td, mu.as_tensor(), b.as_tensor(), e.as_tensor()),
-                ),
                 "mu" => (
                     loss_fn(logits.as_tensor(), &tu, b.as_tensor(), e.as_tensor()),
                     loss_fn(logits.as_tensor(), &td, b.as_tensor(), e.as_tensor()),
@@ -176,7 +173,10 @@ fn module_softmax_gradient_matches_finite_difference() {
             );
         }
     };
-    check(&logits, "logits");
+    assert!(
+        grads.get(logits.as_tensor()).is_none(),
+        "the exact term must not reach the membership logits"
+    );
     check(&mu, "mu");
     check(&b, "b");
     check(&e, "e");

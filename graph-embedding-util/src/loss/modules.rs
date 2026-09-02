@@ -62,8 +62,8 @@ pub fn masked_membership(pi: &Tensor, keep: &Tensor) -> Result<Tensor> {
     kept.broadcast_mul(&scale)
 }
 
-/// Module-pooled counts `x̃ = X · π̃`, `[U, M]`. One matmul, with autograd into
-/// the membership.
+/// Module-pooled counts `x̃ = X · π̃`, `[U, M]`. One matmul; the exact term
+/// detaches it, so the membership sees no gradient from the pooled target.
 pub fn pool_module_counts(x_dense: &Tensor, pi_masked: &Tensor) -> Result<Tensor> {
     x_dense.matmul(pi_masked)
 }
@@ -104,6 +104,16 @@ pub fn dense_count_block(
 /// gives it (a mean over positives drawn per unit), so the two levels are
 /// commensurate at `λ = 1`. The cell bias cancels in the softmax and is not
 /// scored. A unit with no counts on the surviving features contributes zero.
+///
+/// The target `x̃` is DETACHED: this term trains `μ`, `b` and the cell side
+/// given the partition, and never the partition itself. Letting the gradient
+/// reach `π` through the target turns the term into a cross-entropy against a
+/// target it may reshape, and the cheapest reshaping is to put every expressed
+/// feature into one module — the target is then the same one-hot for every unit
+/// and the module bias fits it at zero loss. Measured on real marrow data: every
+/// marker gene at weight 1.0 in one module, with the identity pushed into the
+/// residual. The membership learns from the within-module NCE, which is
+/// discriminative and indifferent to a merge, and from the priors.
 pub fn module_softmax_loss(
     e_units: &Tensor,
     mu: &Tensor,
@@ -112,6 +122,7 @@ pub fn module_softmax_loss(
 ) -> Result<Tensor> {
     let s = e_units.matmul(&mu.t()?)?.broadcast_add(b_module)?; // [U, M]
     let log_q = log_softmax(&s, 1)?;
+    let x_cm = x_cm.detach();
     let total = x_cm.sum_keepdim(1)?; // [U, 1]
     let p = x_cm.broadcast_div(&total.clamp(EPS, f64::INFINITY)?)?;
     p.mul(&log_q)?.sum(1)?.neg()?.mean(0)

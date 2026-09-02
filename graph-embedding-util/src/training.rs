@@ -693,7 +693,9 @@ struct AxisModuleStep<'a> {
 /// The exact module term for one axis step: draw `units_per_step` units from the
 /// axis's own picker (the same `degree^α` weighting the positives use, so the two
 /// levels weight units alike), pool their count rows through the (dropout-masked)
-/// membership, and score every module with a full softmax.
+/// membership, and score every module with a full softmax. The pooled target is
+/// detached inside the loss, so this term trains `μ`, the module bias and the
+/// cell side; the membership trains through the within-module NCE and the priors.
 fn module_term(
     axis: &CompositeAxis,
     cc: &data_beans_alg::feature_coarsening::FeatureCoarsening,
