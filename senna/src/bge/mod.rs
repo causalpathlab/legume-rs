@@ -363,8 +363,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             pb_posterior_nested_delta: true,
             pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
             nce_objective: args.nce_objective.to_ge(),
-            // `--gene-modules M`: learned mixed-membership modules in front of ρ.
-            gene_modules: args.modules.to_config()?,
+            // Learned mixed-membership modules in front of ρ — ON by default for bge
+            // (`--no-gene-modules` opts out): on held-out marrow cells they turned the
+            // gain over the training-marginal null from negative to zero, raised the
+            // per-cell rank agreement, and lost less under gene ablation.
+            gene_modules: args.modules.resolve(Some(ge::DEFAULT_GENE_MODULES))?,
             // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
             // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
             // internal weight). There is no null absorber and no simplex — that was the

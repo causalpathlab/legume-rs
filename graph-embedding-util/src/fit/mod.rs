@@ -18,7 +18,7 @@ pub(crate) mod stacked_pb;
 
 pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig};
 pub use lift::{CellLineage, LineageQc};
-pub use module_args::GeneModuleArgs;
+pub use module_args::{GeneModuleArgs, DEFAULT_GENE_MODULES};
 pub use module_warm::warm_start_module_labels;
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
