@@ -3,6 +3,7 @@
 //! [`UnifiedData`] (so this crate stays free of file/path concerns).
 
 mod axes;
+pub mod batch_fold;
 mod config;
 pub mod lift;
 pub mod lineage;
@@ -17,6 +18,7 @@ mod selection;
 mod setup;
 pub(crate) mod stacked_pb;
 
+pub use batch_fold::BatchGeneFold;
 pub use config::{
     FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned,
 };
@@ -36,7 +38,8 @@ use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
 use config::{stage_params, LINEAGE_WARMUP_FRAC};
-use projection::{project_cells_phase2, project_pbs_phase2, CellBatchDivisor, PHASE2_RIDGE};
+use matrix_util::traits::ConvertMatOps;
+use projection::{project_cells_phase2, project_pbs_phase2, CellBatchFold, PHASE2_RIDGE};
 pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
@@ -80,6 +83,26 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_to_pb_per_level,
         blobs: pb_blobs,
     } = pb;
+    // Per-batch gene fold for phase 2, from the finest collapse's `δ`. The count
+    // backend numbers batches by sorted name; the unified data by first appearance
+    // — matched by name inside.
+    let batch_gene_fold: Option<BatchGeneFold> =
+        match collapsed_levels.last().and_then(|c| c.delta.as_ref()) {
+            Some(delta) => {
+                let collapse_batch_names =
+                    unified.count_backend().batch_names().ok_or_else(|| {
+                        anyhow::anyhow!("collapse fit a δ but the backend has no batch names")
+                    })?;
+                batch_fold::batch_gene_fold(batch_fold::FoldSource {
+                    delta: delta.posterior_mean(),
+                    collapse_batch_names: &collapse_batch_names,
+                    unified_batch_names: &unified.batch_names,
+                    n_features,
+                    feature_to_backend: &feature_to_backend,
+                })?
+            }
+            None => None,
+        };
     // Levels run coarsest..finest here, so the finest is `.last()`. Cloned
     // rather than moved: the level list feeds training below. The clone is
     // cheap relative to the fit and only happens when a reference is emitted.
@@ -271,10 +294,10 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         .zip(&cell_to_pb_per_level)
         .map(
             |(m, c2pb)| -> anyhow::Result<pb_readout::PbLevelEmbedding> {
-                let n_pb = m.e_cell.dim(0)?;
-                let flat: Vec<f32> = m.e_cell.detach().flatten_all()?.to_vec1()?;
+                let e_pb = DMatrix::<f32>::from_tensor(&m.e_cell)?;
+                let n_pb = e_pb.nrows();
                 Ok(pb_readout::PbLevelEmbedding {
-                    e_pb: DMatrix::from_row_slice(n_pb, h, &flat),
+                    e_pb,
                     batch: pb_readout::majority_batch_per_pb(c2pb, &unified.batch_membership, n_pb),
                 })
             },
@@ -434,26 +457,13 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // `projection::project_cells_phase2`. The per-cell intercept `b_cell` is fitted
     // and kept.
     let phase2 = {
-        // Phase-2 batch correction (mirrors senna svd/topic): divide each cell's
-        // counts by its finest-pb μ_residual fold-factor. μ_residual is gathered
-        // onto the unified feature axis so a feature id indexes a row directly;
-        // built only when the collapse fit one (>1 batch).
-        let phase2_mu_residual: Option<DMatrix<f32>> = collapsed_levels
-            .last()
-            .and_then(|c| c.mu_residual.as_ref())
-            .map(|mr| {
-                setup::gather_to_unified_axis(mr.posterior_mean(), n_features, &feature_to_backend)
-            });
-        let batch_divisor = phase2_mu_residual.as_ref().map(|mu| CellBatchDivisor {
-            mu_residual: mu,
-            // `.last()` is always `Some` here: the divisor only exists when the
-            // collapse produced a μ_residual, i.e. ≥1 level (num_levels.max(1)),
-            // and `cell_to_pb_per_level` has the same length.
-            cell_to_pb: cell_to_pb_per_level
-                .last()
-                .map(Vec::as_slice)
-                .expect("collapse always produces ≥1 level"),
-        });
+        // Phase-2 batch correction: divide each cell's counts by its batch's
+        // per-gene fold `δ` from the finest collapse (see `batch_fold`), so the
+        // solve runs in the batch-free frame the dictionary was trained in. `None`
+        // on single-batch data.
+        let batch_fold: Option<CellBatchFold> = batch_gene_fold
+            .as_ref()
+            .map(|f| f.cell_fold(&unified.batch_membership));
 
         // β-sharing (gem): identity is resolved by the SPLICED edges (stored raw),
         // and a second pass emits the raw velocity increment δ on the cell axis.
@@ -470,7 +480,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             n_cells,
             f64::from(PHASE2_RIDGE),
             &config.device,
-            batch_divisor,
+            batch_fold,
             unspliced,
             config.joint_velocity,
         )?
@@ -543,6 +553,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     };
 
     Ok(FitOutput {
+        batch_gene_fold,
         model: cell_model,
         finest_collapse,
         varmap,

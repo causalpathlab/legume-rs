@@ -8,7 +8,7 @@
 //! edge table belongs to the nodes and is rebuilt for every group of them.
 
 use super::{BLOCK_ACTIVATION_BYTES, LIVE_BLOCK_TENSORS, MAX_BLOCK_CELLS};
-use crate::fit::projection::{cell_edges, CellBatchDivisor};
+use crate::fit::projection::{cell_edges, CellBatchFold};
 
 ////////////////////////////
 // Edge table (host, once) //
@@ -17,8 +17,8 @@ use crate::fit::projection::{cell_edges, CellBatchDivisor};
 /// Every cell's edges restricted to one pass's feature partition, remapped to that
 /// pass's local feature ids, grouped by cell position and flattened.
 ///
-/// Built once per pass. A block takes a *slice* of these — no per-block copy, and
-/// no per-cell `Vec` churn of the kind `cell_edges` does on the Newton path.
+/// Built once per pass. A block takes a *slice* of these — no per-block copy and
+/// no per-cell `Vec` churn.
 pub(super) struct EdgeTable {
     /// `offsets[i]..offsets[i + 1]` is cell `i`'s slice of `feat`/`count`.
     offsets: Vec<usize>,
@@ -32,7 +32,7 @@ impl EdgeTable {
         cells: &[(u32, &[u32], &[f32])],
         rows: &[u32],
         n_features: usize,
-        batch_divisor: Option<CellBatchDivisor>,
+        fold: Option<CellBatchFold>,
     ) -> Self {
         // Global feature id → pass-local id, or `u32::MAX` when the feature is not
         // in this pass's partition.
@@ -45,8 +45,8 @@ impl EdgeTable {
         let mut count = Vec::new();
         offsets.push(0);
         for &(cell, feats, counts) in cells {
-            // The `μ_residual` divide happens here, once, instead of per solve.
-            for (f, c) in cell_edges(cell, feats, counts, batch_divisor) {
+            // The batch divide happens here, once, instead of per solve.
+            for (f, c) in cell_edges(cell, feats, counts, fold) {
                 let l = local[f as usize];
                 if l != u32::MAX {
                     feat.push(l);
