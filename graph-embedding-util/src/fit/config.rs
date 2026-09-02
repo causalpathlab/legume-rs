@@ -328,6 +328,10 @@ pub struct FitOutput {
     /// Both gates' posteriors on the β-sharing (splice) model. `Some` in place of
     /// [`Self::pb_posterior`] when `feat_factor` was set.
     pub splice_posterior: Option<crate::posterior::pb_gibbs::SpliceGibbsResult>,
+    /// The phase-1 pseudobulk embeddings per collapse level (coarsest → finest),
+    /// each with its pseudobulks' batches — the geometry the feature side was
+    /// trained against, for batch diagnostics.
+    pub pb_embeddings: Vec<super::pb_readout::PbLevelEmbedding>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
