@@ -16,10 +16,12 @@ mod selection;
 mod setup;
 pub(crate) mod stacked_pb;
 
-pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig};
+pub use config::{
+    FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned,
+};
 pub use lift::{CellLineage, LineageQc};
 pub use module_args::{GeneModuleArgs, DEFAULT_GENE_MODULES};
-pub use module_warm::warm_start_module_labels;
+pub use module_warm::{parent_module_logits, warm_start_module_labels, ParentModules};
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
@@ -95,19 +97,42 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let varmap = VarMap::new();
     // Module warm start: k-means over the feature profiles at the finest collapse
     // level, on the same batch-corrected pseudobulk counts phase 1 trains on.
-    let module_warm: Option<Vec<u32>> = config.gene_modules.as_ref().map(|g| {
+    // Either the k-means labels over this fit's own profiles, or — under a parent
+    // (`senna update`) — explicit logits carrying the parent's membership for the
+    // matched features and initializing the rest through the parent's modules.
+    let module_warm: Option<models::ModuleWarm> = config.gene_modules.as_ref().map(|g| {
         let finest = collapsed_levels.last().expect("at least one level");
         let pb_full = match &finest.mu_adjusted {
             Some(adj) => adj.posterior_mean(),
             None => finest.mu_observed.posterior_mean(),
         };
         let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
-        module_warm::warm_start_module_labels(&profile, g.n_modules, config.seed)
+        match &g.parent {
+            Some(parent) => models::ModuleWarm::Parent {
+                logits: module_warm::parent_module_logits(
+                    &module_warm::ParentModules {
+                        rho: &parent.rho,
+                        pi: &parent.pi,
+                        mu: &parent.mu,
+                        row_to_parent: &parent.row_to_parent,
+                    },
+                    &profile,
+                    parent.k,
+                    parent.similarity_floor,
+                ),
+                mu: parent.mu.clone(),
+            },
+            None => models::ModuleWarm::Labels(module_warm::warm_start_module_labels(
+                &profile,
+                g.n_modules,
+                config.seed,
+            )),
+        }
     });
     let models::Heads {
         mut cell_model,
         mut level_models,
-    } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_deref(), &varmap)?;
+    } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_ref(), &varmap)?;
 
     ////////////////////////////////
     // Composite axes and trainer //

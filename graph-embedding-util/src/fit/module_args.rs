@@ -172,6 +172,7 @@ impl GeneModuleArgs {
             residual_l2: self.module_residual_l2,
             units_per_step: self.module_units_per_step,
             init_own_mass: self.module_init_mass,
+            parent: None,
         }))
     }
 }
