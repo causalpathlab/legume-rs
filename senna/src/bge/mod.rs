@@ -368,7 +368,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // (`--no-gene-modules` opts out): on held-out marrow cells they turned the
             // gain over the training-marginal null from negative to zero, raised the
             // per-cell rank agreement, and lost less under gene ablation.
-            gene_modules: args.modules.resolve(Some(ge::DEFAULT_GENE_MODULES))?,
+            // Under `senna update` the parent's modules are carried as the warm start.
+            gene_modules: match args.modules.resolve(Some(ge::DEFAULT_GENE_MODULES))? {
+                Some(mut gm) => {
+                    gm.parent = parent_modules(args.init_from.as_deref(), &unified.feature_names)?;
+                    Some(gm)
+                }
+                None => None,
+            },
             // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
             // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
             // internal weight). There is no null absorber and no simplex — that was the
@@ -669,4 +676,51 @@ fn median_of(v: &[f64]) -> f64 {
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     s[s.len() / 2]
+}
+
+/// The parent run's module tables for `senna update`'s warm start, matched to
+/// this fit's feature axis by exact name. `None` when there is no parent, or the
+/// parent trained no modules (the fit then warm-starts from its own k-means, as a
+/// fresh run would).
+fn parent_modules(
+    init_from: Option<&str>,
+    feature_names: &[Box<str>],
+) -> anyhow::Result<Option<ge::ParentModulesOwned>> {
+    let Some(prefix) = init_from else {
+        return Ok(None);
+    };
+    let parent = crate::bge::score::BgeEmbedding::open(prefix)?;
+    let Some((pi, mu)) = parent.modules else {
+        info!(
+            "update: parent {prefix} trained no gene modules; warm-starting from this fit's own \
+             profiles"
+        );
+        return Ok(None);
+    };
+    let by_name: std::collections::HashMap<&str, usize> = parent
+        .gene_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_ref(), i))
+        .collect();
+    let row_to_parent: Vec<Option<usize>> = feature_names
+        .iter()
+        .map(|n| by_name.get(n.as_ref()).copied())
+        .collect();
+    let n_matched = row_to_parent.iter().filter(|r| r.is_some()).count();
+    info!(
+        "update: carrying {} gene modules from {prefix}; {} of {} features match the parent by name",
+        mu.nrows(),
+        n_matched,
+        feature_names.len()
+    );
+    let rho = Mat::from_row_slice(parent.gene_names.len(), parent.h, &parent.rho);
+    Ok(Some(ge::ParentModulesOwned {
+        rho,
+        pi,
+        mu,
+        row_to_parent,
+        k: 10,
+        similarity_floor: 0.2,
+    }))
 }

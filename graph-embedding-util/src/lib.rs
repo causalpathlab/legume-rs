@@ -49,7 +49,8 @@ pub use eval::{
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
     fit, warm_start_module_labels, CellLineage, FeatFactorSpec, FeatureGateConfig, FitConfig,
-    FitOutput, GeneModuleArgs, GeneModuleConfig, LineageQc, PbLevelVelocity, DEFAULT_GENE_MODULES,
+    FitOutput, GeneModuleArgs, GeneModuleConfig, LineageQc, ParentModulesOwned, PbLevelVelocity,
+    DEFAULT_GENE_MODULES,
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};
