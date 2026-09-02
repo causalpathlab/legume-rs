@@ -1,7 +1,7 @@
 use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::model::JointEmbedModel;
-use crate::training::TrainingParams;
+use crate::training::{ModuleTrainParams, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
 use data_beans_alg::refine_multilevel::RefineParams;
@@ -32,6 +32,10 @@ pub(crate) const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 /// orient the DAG — that is exactly what this fraction trades. Off the lineage
 /// path phase 1 keeps the whole budget and the run is byte-identical.
 pub(crate) const LINEAGE_WARMUP_FRAC: f64 = 0.5;
+
+/// Fraction of `epochs` the module membership is held at its warm start when
+/// [`GeneModuleConfig::warmup_epochs`] is not given.
+pub(crate) const MODULE_WARMUP_FRAC: f64 = 0.25;
 
 /// Hyperparameter / configuration bundle for [`fit`]. Constructed by
 /// each caller from its own CLI arguments — this crate doesn't import
@@ -191,6 +195,55 @@ pub struct FitConfig {
     /// `posterior::dim_block` samples as a PIP. See [`FeatureGateConfig`] and
     /// [`crate::model::FeatureGateSpec`].
     pub feature_gate: Option<FeatureGateConfig>,
+    /// Learned gene modules in front of the feature embedding
+    /// ([`crate::model::FeatModules`]): `ρ_g = Σ_m π_gm μ_m + r_g` with a learned
+    /// mixed membership, an exact cell–module softmax term, within-module NCE
+    /// negatives and gene dropout at pooling time. `None` (default) = the free
+    /// embedding, byte-identical to a build before this existed. Mutually
+    /// exclusive with `feat_factor` and `pb_posterior`.
+    pub gene_modules: Option<GeneModuleConfig>,
+}
+
+/// Caller-facing configuration of the learned gene modules.
+#[derive(Clone, Debug)]
+pub struct GeneModuleConfig {
+    /// Number of modules `M`.
+    pub n_modules: usize,
+    /// Epochs the warm-start membership is held before it trains. `None` = a
+    /// quarter of the epochs, at least one.
+    pub warmup_epochs: Option<usize>,
+    /// Per-step probability that a feature is hidden when the module counts are
+    /// pooled (`0` = off).
+    pub gene_dropout: f32,
+    /// Weight of the exact cell–module term relative to the NCE.
+    pub lambda_module: f32,
+    /// Weight of the load-balance prior `KL(π̄ ‖ Uniform)`.
+    pub lambda_balance: f32,
+    /// Weight of the row-entropy penalty on the membership (`0` = off).
+    pub lambda_entropy: f32,
+    /// Ridge on the per-feature residual `r_g` — the module model's only per-row
+    /// table, so this replaces `feature_embedding_l2`.
+    pub residual_l2: f32,
+    /// Units (cells or pseudobulks) pooled for the exact term per step per axis.
+    pub units_per_step: usize,
+    /// Share of a feature's warm-start membership on its k-means module.
+    pub init_own_mass: f32,
+}
+
+impl Default for GeneModuleConfig {
+    fn default() -> Self {
+        Self {
+            n_modules: 128,
+            warmup_epochs: None,
+            gene_dropout: 0.2,
+            lambda_module: 1.0,
+            lambda_balance: 1.0,
+            lambda_entropy: 0.0,
+            residual_l2: 0.1,
+            units_per_step: 64,
+            init_own_mass: 0.9,
+        }
+    }
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -276,5 +329,17 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,
+        module: config.gene_modules.as_ref().map(|g| ModuleTrainParams {
+            warmup_epochs: g
+                .warmup_epochs
+                .unwrap_or_else(|| ((config.epochs as f64) * MODULE_WARMUP_FRAC).ceil() as usize)
+                .clamp(usize::from(config.epochs > 0), config.epochs),
+            gene_dropout: g.gene_dropout,
+            units_per_step: g.units_per_step,
+            lambda_module: g.lambda_module,
+            lambda_balance: g.lambda_balance,
+            lambda_entropy: g.lambda_entropy,
+            residual_l2: g.residual_l2,
+        }),
     }
 }

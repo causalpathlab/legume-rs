@@ -6,6 +6,7 @@
 //! shape so the downstream NCE loss is sampler-agnostic.
 
 use crate::data::Triplet;
+use crate::loss::modules::ModulePools;
 use crate::loss::{logistic_nce, softmax_nce, NceObjective};
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
@@ -24,6 +25,9 @@ pub struct EdgeBatch {
     /// `[B*K]` row-major: negatives for positive `b` are at `[b*K..(b+1)*K]`.
     pub neg_feats: Vec<u32>,
     pub n_negatives: usize,
+    /// Positives whose within-module negative draw fell back to the global pool
+    /// (module too small in this sampler). `0` without module pools.
+    pub n_module_fallback: usize,
 }
 
 ///////////////////////////////////////////////////
@@ -69,6 +73,9 @@ pub struct PerBatchStratifiedEdgeBatchArgs<'a> {
     pub cell_coarsening: &'a FeatureCoarsening,
     pub batch_size: usize,
     pub n_negatives: usize,
+    /// Within-module negative pools for this sampler (module model only). `None`
+    /// keeps the global uniform draw and the RNG stream byte-identical.
+    pub module_pools: Option<&'a ModulePools>,
 }
 
 /// Two-stage draw: pick cell by `degree^alpha_cell`, then feature
@@ -94,9 +101,27 @@ pub fn sample_per_batch_stratified_edge_batch(
     }
 
     let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
-    for _ in 0..(args.batch_size * args.n_negatives) {
-        let local = s.neg.sample(rng);
-        neg_feats.push(s.feature_pool[local]);
+    let mut n_module_fallback = 0usize;
+    match args.module_pools {
+        // Within-module negatives: contrast the positive against its own module's
+        // members, so the NCE resolves features WITHIN a module and leaves the
+        // between-module structure to the exact module term.
+        Some(pools) => {
+            for &f in &fine_feats {
+                if !pools.draw_negatives(f, args.n_negatives, &mut neg_feats, rng) {
+                    n_module_fallback += 1;
+                    for _ in 0..args.n_negatives {
+                        neg_feats.push(s.feature_pool[s.neg.sample(rng)]);
+                    }
+                }
+            }
+        }
+        None => {
+            for _ in 0..(args.batch_size * args.n_negatives) {
+                let local = s.neg.sample(rng);
+                neg_feats.push(s.feature_pool[local]);
+            }
+        }
     }
 
     EdgeBatch {
@@ -104,6 +129,7 @@ pub fn sample_per_batch_stratified_edge_batch(
         fine_feats,
         neg_feats,
         n_negatives: args.n_negatives,
+        n_module_fallback,
     }
 }
 
@@ -163,6 +189,10 @@ pub struct PbFeatureSampler {
     /// draw emits both `features[i]` and `paired[i]` so δ_g trains at the spliced
     /// sampling frequency.
     pub paired: Vec<u32>,
+    /// The sampling weights aligned with `features` — the per-row count, or the
+    /// gene's total in gene-paired mode. Kept because the module term pools the
+    /// unit's whole count row, which the picker alone cannot give back.
+    pub counts: Vec<f32>,
     /// `WeightedIndex` over `features`; per-row weights = `μ_pf`,
     /// gene-paired weights = the gene's `total` count.
     pub picker: WeightedIndex<f32>,
@@ -314,12 +344,13 @@ pub fn build_stratified_sampler(
                     (features, Vec::new(), weights)
                 }
             };
-            let picker = WeightedIndex::new(weights).expect("non-empty pb feature weights");
+            let picker = WeightedIndex::new(weights.clone()).expect("non-empty pb feature weights");
             (
                 p as u32,
                 PbFeatureSampler {
                     features,
                     paired,
+                    counts: weights,
                     picker,
                 },
                 pb_size[p].max(1e-8).powf(alpha_pb),
@@ -373,14 +404,16 @@ pub struct StratifiedEdgeBatchArgs<'a> {
     pub sampler: &'a StratifiedSampler,
     pub batch_size: usize,
     pub n_negatives: usize,
+    /// See [`PerBatchStratifiedEdgeBatchArgs::module_pools`].
+    pub module_pools: Option<&'a ModulePools>,
 }
 
 /// Two-stage draw: pick pb by `q(p)`, then feature within pb. Output
 /// `EdgeBatch` is interchangeable with [`sample_edge_batch`]'s — the
 /// downstream NCE loss doesn't care how the batch was sampled.
-pub fn sample_stratified_edge_batch(
+pub fn sample_stratified_edge_batch<R: Rng>(
     args: StratifiedEdgeBatchArgs,
-    rng: &mut impl Rng,
+    rng: &mut R,
 ) -> EdgeBatch {
     let s = args.sampler;
     let mut coarse_cells = Vec::with_capacity(args.batch_size);
@@ -411,16 +444,36 @@ pub fn sample_stratified_edge_batch(
     let n_pos = fine_feats.len();
     let n_neg = n_pos * args.n_negatives;
     let mut neg_feats = Vec::with_capacity(n_neg);
+    let mut n_module_fallback = 0usize;
     // Half uniform, half degree-proportional — SIMBA's 100 + 100 split. Drawn by
     // alternating rather than by a coin flip so the ratio is exact for any
     // `n_negatives`, including odd ones.
-    for i in 0..n_neg {
-        let local = if i % 2 == 0 {
+    let global_draw = |i: usize, rng: &mut R| {
+        let local = if i.is_multiple_of(2) {
             s.neg.sample(rng)
         } else {
             s.neg_by_degree.sample(rng)
         };
-        neg_feats.push(s.feature_pool[local]);
+        s.feature_pool[local]
+    };
+    match args.module_pools {
+        // Within-module negatives (see the per-batch sampler); the global mixed
+        // draw is the fallback for a module too small to contrast within.
+        Some(pools) => {
+            for &f in &fine_feats {
+                if !pools.draw_negatives(f, args.n_negatives, &mut neg_feats, rng) {
+                    n_module_fallback += 1;
+                    for i in 0..args.n_negatives {
+                        neg_feats.push(global_draw(i, rng));
+                    }
+                }
+            }
+        }
+        None => {
+            for i in 0..n_neg {
+                neg_feats.push(global_draw(i, rng));
+            }
+        }
     }
 
     EdgeBatch {
@@ -428,6 +481,7 @@ pub fn sample_stratified_edge_batch(
         fine_feats,
         neg_feats,
         n_negatives: args.n_negatives,
+        n_module_fallback,
     }
 }
 
@@ -490,6 +544,23 @@ pub fn nce_loss_identity(
 /// learned path, the logits. Ungated with no `pip` it is the plain gather. This is the
 /// single feature-gather point for the bge + gem trainers.
 pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
+    // Modules: compose the gathered rows as `π μ + r` on the live tables, then the
+    // same gate/effect machinery as the free path. Comes FIRST and never reads
+    // `e_feat`, which is a detached snapshot for this parameterization.
+    if let Some(m) = &model.modules {
+        let mu = m.compose_rows(idx)?;
+        let logstd = model
+            .e_feat_logstd
+            .as_ref()
+            .map(|l| l.index_select(idx, 0))
+            .transpose()?;
+        let w = model.gathered_gate_weights(
+            crate::model::GateKind::Identity,
+            model.s_feat.as_ref(),
+            idx,
+        )?;
+        return model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true);
+    }
     // Adapter: compose the gathered rows from the fixed dictionary and the
     // shared map, then let the same gate/effect machinery as the free path
     // apply on top. Mutually exclusive with `factor` by construction.
