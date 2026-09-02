@@ -30,6 +30,11 @@ pub enum InitKind {
     /// (or from the matched-row mean when the gene's profile is all zero,
     /// in which case `neighbor_gene` is `None`).
     Neighbor,
+    /// No dictionary row; placed through the dictionary's learned modules as
+    /// `π̂ μ`, with `π̂` averaged over the closest matched genes' memberships
+    /// (`neighbor_gene` is the best of them; `None` when the diffuse prior was
+    /// used because no neighbour reached the similarity floor).
+    Membership,
 }
 
 impl InitKind {
@@ -37,6 +42,7 @@ impl InitKind {
         match self {
             InitKind::Matched => "matched",
             InitKind::Neighbor => "neighbor",
+            InitKind::Membership => "membership",
         }
     }
 }
@@ -105,6 +111,22 @@ pub struct PretrainedArgs<'a> {
     /// row directions matter). Called at most once, and only when some gene
     /// has no dictionary row — an all-matched dictionary never pays for it.
     pub gene_profiles: &'a dyn Fn() -> anyhow::Result<Mat>,
+    /// Place unmatched genes through the dictionary's learned modules when
+    /// `{stem}.module_membership.parquet` and `{stem}.module_dictionary.parquet`
+    /// sit beside it (`stem` = the dictionary path without its
+    /// `.feature_loading.parquet` / `.dictionary.parquet` / `.parquet` suffix):
+    /// `π̂` = similarity-weighted mean membership of the `k` closest matched
+    /// genes, row = `π̂ μ`. Falls back to the neighbour rule when the tables are
+    /// absent. `None` = the neighbour rule.
+    pub membership_init: Option<MembershipInit>,
+}
+
+/// Knobs of the membership initialization (see
+/// [`graph_embedding_util::transfer::align_gene_axis`]).
+#[derive(Clone, Copy, Debug)]
+pub struct MembershipInit {
+    pub k: usize,
+    pub similarity_floor: f32,
 }
 
 /// Load, align, and fill. See the module doc for the contract; every path
