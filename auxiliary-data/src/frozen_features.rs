@@ -37,6 +37,10 @@ pub struct FrozenFeatureHost {
     /// Indices into the *target* feature axis that matched a source row.
     /// Length equals `e_feat.nrows()`.
     pub keep_target_indices: Vec<usize>,
+    /// The *source* (dictionary) row each kept target row came from, parallel to
+    /// `keep_target_indices` — what a caller needs to look up any other table
+    /// keyed on the dictionary's rows (a module membership, say).
+    pub keep_src_indices: Vec<usize>,
     /// Rows in the dictionary file, i.e. how many features the MODEL has.
     ///
     /// The only field that survives the intersection unfiltered, and the reason
@@ -182,6 +186,7 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
         e_feat,
         b_feat,
         keep_target_indices,
+        keep_src_indices,
         n_src,
         h,
     })
