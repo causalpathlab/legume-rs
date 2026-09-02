@@ -489,6 +489,8 @@ impl CollapsingOps for SparseIoVec {
         reference_indices: Option<&[usize]>,
         stat: &mut CollapsedStat,
     ) -> anyhow::Result<()> {
+        // The reference batches source the counterfactual and pin δ.
+        stat.anchor_batches = reference_indices.map(<[usize]>::to_vec).unwrap_or_default();
         self.visit_columns_by_group(
             &collect_matched_stat_visitor,
             &KnnParams {
