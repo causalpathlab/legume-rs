@@ -16,6 +16,18 @@ use crate::model::{
 use candle_util::candle_nn::{VarBuilder, VarMap};
 use log::info;
 
+/// How the module membership starts: k-means labels over this fit's own
+/// profiles, or a parent's tables (`senna update`).
+pub(super) enum ModuleWarm {
+    Labels(Vec<u32>),
+    Parent {
+        /// `[D × M]` membership logits (simplex rows; sparsemax reproduces them).
+        logits: nalgebra::DMatrix<f32>,
+        /// `[M × H]` parent module dictionary.
+        mu: nalgebra::DMatrix<f32>,
+    },
+}
+
 /// The primary (per-cell) head and one head per pseudobulk level, coarsest → finest.
 pub(super) struct Heads {
     pub cell_model: JointEmbedModel,
@@ -33,7 +45,7 @@ pub(super) fn build_heads(
     unified: &UnifiedData,
     pb_blobs: &[UnifiedData],
     config: &FitConfig,
-    module_warm: Option<&[u32]>,
+    module_warm: Option<&ModuleWarm>,
     varmap: &VarMap,
 ) -> anyhow::Result<Heads> {
     let (n_features, n_cells, h) = (
@@ -67,21 +79,43 @@ pub(super) fn build_heads(
                     gm.residual_l2
                 );
             }
+            let (init_labels, init_logits, init_mu, n_modules) = match module_warm {
+                Some(ModuleWarm::Labels(l)) => (Some(l.as_slice()), None, None, gm.n_modules),
+                Some(ModuleWarm::Parent { logits, mu }) => {
+                    anyhow::ensure!(
+                        mu.ncols() == h,
+                        "parent modules are {}-dimensional but this fit uses H={h}; \
+                         set --embedding-dim to match the parent",
+                        mu.ncols()
+                    );
+                    (None, Some(logits), Some(mu), mu.nrows())
+                }
+                None => (None, None, None, gm.n_modules),
+            };
             info!(
-                "learned gene modules: {} features → {} modules (mixed membership), \
+                "learned gene modules: {} features → {} modules (mixed membership{}), \
                  gene dropout {}, exact module term λ={}, balance λ={}",
-                n_features, gm.n_modules, gm.gene_dropout, gm.lambda_module, gm.lambda_balance
+                n_features,
+                n_modules,
+                if init_mu.is_some() {
+                    ", warm-started from the parent"
+                } else {
+                    ""
+                },
+                gm.gene_dropout,
+                gm.lambda_module,
+                gm.lambda_balance
             );
             JointEmbedModel::new_with_modules(
                 ModuleInit {
                     n_features,
                     n_cells,
                     embedding_dim: h,
-                    n_modules: gm.n_modules,
-                    init_labels: module_warm,
+                    n_modules,
+                    init_labels,
                     init_own_mass: gm.init_own_mass,
-                    init_logits: None,
-                    init_mu: None,
+                    init_logits,
+                    init_mu,
                     b_feat: &zeros_features,
                     b_cell: &zeros_cells,
                     seed: config.seed,

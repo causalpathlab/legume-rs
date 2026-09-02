@@ -228,6 +228,29 @@ pub struct GeneModuleConfig {
     pub units_per_step: usize,
     /// Share of a feature's warm-start membership on its k-means module.
     pub init_own_mass: f32,
+    /// A parent run's module tables to warm-start from (`senna update`): matched
+    /// features carry the parent's membership, unmatched ones are initialized
+    /// through the parent's modules from their profile neighbours, and `μ` starts
+    /// at the parent's. Overrides `n_modules` with the parent's `M`. `None` = the
+    /// k-means warm start from this fit's own pseudobulks.
+    pub parent: Option<ParentModulesOwned>,
+}
+
+/// Owned form of [`crate::fit::module_warm::ParentModules`], carried on the
+/// config because the fit outlives the caller's borrows.
+#[derive(Clone, Debug)]
+pub struct ParentModulesOwned {
+    /// Parent composed rows `[D_parent × H]`.
+    pub rho: nalgebra::DMatrix<f32>,
+    /// Parent membership `[D_parent × M]`.
+    pub pi: nalgebra::DMatrix<f32>,
+    /// Parent module dictionary `[M × H]`.
+    pub mu: nalgebra::DMatrix<f32>,
+    /// For each feature of this fit's axis, the parent row it matched.
+    pub row_to_parent: Vec<Option<usize>>,
+    /// Neighbours / floor for the unmatched features' initialization.
+    pub k: usize,
+    pub similarity_floor: f32,
 }
 
 impl Default for GeneModuleConfig {
@@ -242,6 +265,7 @@ impl Default for GeneModuleConfig {
             residual_l2: 0.1,
             units_per_step: 64,
             init_own_mass: 0.9,
+            parent: None,
         }
     }
 }
