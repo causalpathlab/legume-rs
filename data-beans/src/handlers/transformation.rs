@@ -47,6 +47,14 @@ pub struct SubsetColumnsArgs {
     #[arg(long, default_value_t = true)]
     pub allow_prefix: bool,
 
+    /// Match names exactly (plus the delimiter base key): no prefix matching.
+    /// `--allow-prefix` defaults to on and, being a bare flag, cannot be turned
+    /// off from the command line; this is the off switch. Numeric or short gene
+    /// names are prefixes of many others, so a name list can otherwise keep far
+    /// more rows than it names.
+    #[arg(long, default_value_t = false)]
+    pub exact_names: bool,
+
     /// squeeze
     #[arg(long, default_value_t = false)]
     pub do_squeeze: bool,
@@ -84,6 +92,14 @@ pub struct SubsetRowsArgs {
     /// enable prefix matching (stored name is prefix of query or vice versa)
     #[arg(long, default_value_t = true)]
     pub allow_prefix: bool,
+
+    /// Match names exactly (plus the delimiter base key): no prefix matching.
+    /// `--allow-prefix` defaults to on and, being a bare flag, cannot be turned
+    /// off from the command line; this is the off switch. Numeric or short gene
+    /// names are prefixes of many others, so a name list can otherwise keep far
+    /// more rows than it names.
+    #[arg(long, default_value_t = false)]
+    pub exact_names: bool,
 
     /// squeeze
     #[arg(long, default_value_t = false)]
