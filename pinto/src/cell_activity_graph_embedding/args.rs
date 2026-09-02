@@ -736,7 +736,7 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 10,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
         value_name = "K",
         requires = "gene_embedding",
         help = "membership init: matched genes whose memberships are averaged"
@@ -745,7 +745,7 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 0.2,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
         value_name = "S",
         requires = "gene_embedding",
         help = "membership init: below this best profile similarity a gene takes the diffuse prior"

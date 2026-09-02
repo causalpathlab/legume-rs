@@ -31,10 +31,10 @@ use candle_util::candle_core::{Device, Result, Tensor};
 use candle_util::candle_nn::VarMap;
 use candle_util::nn::sparsemax;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::vars::{register_randn_seeded, register_var_from_mat, register_var_from_slice};
-use super::JointEmbedModel;
+use super::{ComposedFeat, JointEmbedModel};
 
 /// Registered names of the module Vars, so a caller that owns the `VarMap` can
 /// fetch them without hard-coding strings this crate chose.
@@ -43,26 +43,32 @@ pub const MODULE_MU_VAR_NAME: &str = "module_mu";
 pub const MODULE_RESIDUAL_VAR_NAME: &str = "module_residual";
 pub const MODULE_BIAS_VAR_NAME: &str = "module_bias";
 
+/// How the membership starts.
+pub enum ModuleWarmStart<'a> {
+    /// One module per feature from a clustering, holding `own_mass` of the
+    /// row on it and spreading the rest evenly so every module stays in the
+    /// sparsemax support and can still earn the feature
+    /// (see [`module_logit_for_own_mass`]).
+    Labels { labels: &'a [u32], own_mass: f32 },
+    /// Explicit logits `[n_features, M]`, and optionally the module dictionary
+    /// `[M, H]`. A membership row is a simplex point and sparsemax of a simplex
+    /// point is itself, so a parent's `π` passed here is reproduced exactly —
+    /// the warm start `update` carries.
+    Explicit {
+        logits: &'a nalgebra::DMatrix<f32>,
+        mu: Option<&'a nalgebra::DMatrix<f32>>,
+    },
+    /// Every module in the support with equal mass; the data alone decides.
+    Uniform,
+}
+
 /// Inputs for [`JointEmbedModel::new_with_modules`].
 pub struct ModuleInit<'a> {
     pub n_features: usize,
     pub n_cells: usize,
     pub embedding_dim: usize,
     pub n_modules: usize,
-    /// Warm-start module per feature (`len == n_features`, values `< n_modules`).
-    /// `None` seeds every feature uniformly across modules.
-    pub init_labels: Option<&'a [u32]>,
-    /// Share of a feature's membership placed on its warm-start module; the rest
-    /// is spread evenly over the others so every module stays in the sparsemax
-    /// support and can still earn the feature. See [`module_logit_for_own_mass`].
-    pub init_own_mass: f32,
-    /// Explicit membership logits `[n_features, M]`, taking precedence over
-    /// `init_labels`. A membership row is a simplex point and sparsemax of a
-    /// simplex point is itself, so a parent's `π` passed here is reproduced
-    /// exactly — the warm start `update` carries.
-    pub init_logits: Option<&'a nalgebra::DMatrix<f32>>,
-    /// Explicit module dictionary `[M, H]` instead of the seeded randn.
-    pub init_mu: Option<&'a nalgebra::DMatrix<f32>>,
+    pub warm: ModuleWarmStart<'a>,
     pub b_feat: &'a [f32],
     pub b_cell: &'a [f32],
     /// Base seed for the reproducible randn init of `μ` and the cell side.
@@ -88,6 +94,10 @@ pub struct FeatModules {
     /// While set, the membership is detached in every forward, so the warm-start
     /// partition is held and only `μ` / `r` train.
     pub frozen: Arc<AtomicBool>,
+    /// The detached membership while frozen: the logits cannot move, so one
+    /// sparsemax serves every step of the warm-up. Cleared on release. Shared
+    /// across heads like `frozen`.
+    frozen_pi: Arc<Mutex<Option<Tensor>>>,
 }
 
 /// The logit that puts a share `p` of a feature's sparsemax membership on one
@@ -115,45 +125,65 @@ impl FeatModules {
     /// Hold (`true`) or release (`false`) the membership. Shared across heads.
     pub fn set_frozen(&self, frozen: bool) {
         self.frozen.store(frozen, Ordering::Relaxed);
-    }
-
-    fn live_logits(&self) -> Tensor {
-        if self.is_frozen() {
-            self.logits.detach()
-        } else {
-            self.logits.clone()
+        if !frozen {
+            *self.frozen_pi.lock().expect("frozen membership poisoned") = None;
         }
     }
 
-    /// The full membership `π [n_features, M]` on the live logits (detached while
-    /// frozen). Rows are on the simplex with exact zeros.
+    /// The full membership `π [n_features, M]`: the live sparsemax, or, while
+    /// frozen, the detached table computed once. Rows are on the simplex with
+    /// exact zeros.
     pub fn membership(&self) -> Result<Tensor> {
-        sparsemax(&self.live_logits())
+        if !self.is_frozen() {
+            return sparsemax(&self.logits);
+        }
+        let mut cache = self.frozen_pi.lock().expect("frozen membership poisoned");
+        if let Some(pi) = cache.as_ref() {
+            return Ok(pi.clone());
+        }
+        let pi = sparsemax(&self.logits.detach())?;
+        *cache = Some(pi.clone());
+        Ok(pi)
     }
 
     /// Membership rows for `idx` — sparsemax is row-wise, so gathering first is
-    /// exact and keeps the per-step work at `[b, M]`.
+    /// exact and keeps the per-step work at `[b, M]` (or an `index_select` of the
+    /// cached table while frozen).
     pub fn membership_rows(&self, idx: &Tensor) -> Result<Tensor> {
-        sparsemax(&self.live_logits().index_select(idx, 0)?)
+        if self.is_frozen() {
+            return self.membership()?.index_select(idx, 0);
+        }
+        sparsemax(&self.logits.index_select(idx, 0)?)
     }
 
     /// The full composed table `ρ = π μ + r`, `[n_features, H]`, on the live
     /// parameters.
     pub fn compose(&self) -> Result<Tensor> {
+        ComposedFeat::compose(self)
+    }
+}
+
+impl ComposedFeat for FeatModules {
+    fn compose(&self) -> Result<Tensor> {
         self.membership()?.matmul(&self.mu)?.add(&self.residual)
     }
 
-    /// Composed rows for `idx`, `[b, H]`, on the live parameters.
-    pub fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
+    fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
         self.membership_rows(idx)?
             .matmul(&self.mu)?
             .add(&self.residual.index_select(idx, 0)?)
     }
+
+    /// The residual is the only per-row table; `μ` is shared and the membership
+    /// is a simplex, so neither can overfit row by row.
+    fn ridge_table(&self) -> Option<&Tensor> {
+        Some(&self.residual)
+    }
 }
 
 impl JointEmbedModel {
-    /// Module constructor: allocate the membership logits (warm-started from
-    /// `init_labels`), the randn module dictionary, the zero residual and the
+    /// Module constructor: allocate the membership logits (from the warm start),
+    /// the module dictionary (randn, or the parent's), the zero residual and the
     /// module bias, plus a fresh cell side. The `e_feat` field is seeded with the
     /// composed table and refreshed after phase 1 via [`Self::materialize_e_feat`].
     pub fn new_with_modules(args: ModuleInit, varmap: &VarMap, dev: &Device) -> Result<Self> {
@@ -174,28 +204,17 @@ impl JointEmbedModel {
                 args.n_cells
             );
         }
-        let kappa = module_logit_for_own_mass(args.init_own_mass, m);
         let mut logits_host = nalgebra::DMatrix::<f32>::zeros(d, m);
-        if let Some(l) = args.init_logits {
-            if l.nrows() != d || l.ncols() != m {
-                candle_util::candle_core::bail!(
-                    "new_with_modules: init_logits is {}×{} but the model is {d}×{m}",
-                    l.nrows(),
-                    l.ncols()
-                );
-            }
-            logits_host.copy_from(l);
-        }
-        // No warm start leaves every module in the support with equal mass, so
-        // the data alone decides the partition. Explicit logits win over labels.
-        if let (Some(labels), None) = (args.init_labels, args.init_logits) {
-            {
+        let mut mu_init: Option<&nalgebra::DMatrix<f32>> = None;
+        match args.warm {
+            ModuleWarmStart::Labels { labels, own_mass } => {
                 if labels.len() != d {
                     candle_util::candle_core::bail!(
                         "new_with_modules: {} warm-start labels for {d} features",
                         labels.len()
                     );
                 }
+                let kappa = module_logit_for_own_mass(own_mass, m);
                 for (g, &lab) in labels.iter().enumerate() {
                     if lab as usize >= m {
                         candle_util::candle_core::bail!(
@@ -206,19 +225,31 @@ impl JointEmbedModel {
                     logits_host[(g, lab as usize)] = kappa;
                 }
             }
-        }
-        let logits = register_var_from_mat(varmap, dev, MODULE_LOGITS_VAR_NAME, &logits_host)?;
-        let mu = match args.init_mu {
-            Some(parent) => {
-                if parent.nrows() != m || parent.ncols() != h {
+            ModuleWarmStart::Explicit { logits, mu } => {
+                if logits.nrows() != d || logits.ncols() != m {
                     candle_util::candle_core::bail!(
-                        "new_with_modules: init_mu is {}×{} but the model needs {m}×{h}",
-                        parent.nrows(),
-                        parent.ncols()
+                        "new_with_modules: warm-start logits are {}×{} but the model is {d}×{m}",
+                        logits.nrows(),
+                        logits.ncols()
                     );
                 }
-                register_var_from_mat(varmap, dev, MODULE_MU_VAR_NAME, parent)?
+                if let Some(parent) = mu {
+                    if parent.nrows() != m || parent.ncols() != h {
+                        candle_util::candle_core::bail!(
+                            "new_with_modules: warm-start μ is {}×{} but the model needs {m}×{h}",
+                            parent.nrows(),
+                            parent.ncols()
+                        );
+                    }
+                }
+                logits_host.copy_from(logits);
+                mu_init = mu;
             }
+            ModuleWarmStart::Uniform => {}
+        }
+        let logits = register_var_from_mat(varmap, dev, MODULE_LOGITS_VAR_NAME, &logits_host)?;
+        let mu = match mu_init {
+            Some(parent) => register_var_from_mat(varmap, dev, MODULE_MU_VAR_NAME, parent)?,
             None => register_randn_seeded(varmap, dev, MODULE_MU_VAR_NAME, m, h, args.seed)?,
         };
         let residual = register_var_from_mat(
@@ -239,6 +270,7 @@ impl JointEmbedModel {
             b_module,
             n_modules: m,
             frozen: Arc::new(AtomicBool::new(false)),
+            frozen_pi: Arc::new(Mutex::new(None)),
         };
         let e_feat = modules.compose()?.detach();
         Ok(Self {
@@ -254,7 +286,7 @@ impl JointEmbedModel {
             e_feat_raw: None,
             e_feat_logstd: None,
             gate_pip: None,
-            gate_mask: Arc::new(std::sync::Mutex::new(None)),
+            gate_mask: Arc::new(Mutex::new(None)),
             gate_ibp_bias: None,
             gate: None,
         })

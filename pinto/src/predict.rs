@@ -91,27 +91,20 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        value_enum,
-        default_value_t = crate::cell_activity_graph_embedding::args::GeneInitMode::Membership,
-        help = "How a gene the model never saw is placed: through its modules, or dropped",
-        long_help = "How a gene of this sample that the model never saw is handled.\n\
-                     \n\
-                     membership places it through the model's learned modules (needs\n\
-                     {model}.module_membership.parquet and {model}.module_dictionary.parquet):\n\
-                     its membership is the similarity-weighted mean of the closest matched\n\
-                     genes' memberships by count profile over pseudobulks of this sample,\n\
-                     and its row is that membership times the module dictionary. The gene\n\
-                     then sits on the partition axis with its own counts. Written to\n\
-                     {out}.gene_embedding_init.parquet with its provenance.\n\
-                     \n\
-                     neighbor drops it: no row, not on the partition axis — the historical\n\
-                     behaviour, kept because an invented row pulls on every pair's latent."
+        help = "Drop genes the model never saw instead of initializing them through its modules",
+        long_help = "Genes of this sample that the model never saw are placed through the model's\n\
+                     learned modules (needs {model}.module_membership.parquet and\n\
+                     {model}.module_dictionary.parquet): membership averaged over the closest\n\
+                     matched genes by count profile over pseudobulks of this sample, row =\n\
+                     membership times the module dictionary, with their own counts on the\n\
+                     partition axis and provenance in {out}.gene_embedding_init.parquet.\n\
+                     This flag restores the historical drop: no row, not on the axis."
     )]
-    pub gene_init_mode: crate::cell_activity_graph_embedding::args::GeneInitMode,
+    pub no_init_genes: bool,
 
     #[arg(
         long,
-        default_value_t = 10,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
         value_name = "K",
         help = "membership init: matched genes whose memberships are averaged"
     )]
@@ -119,7 +112,7 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        default_value_t = 0.2,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
         value_name = "S",
         help = "membership init: below this best profile similarity a gene takes the diffuse prior"
     )]
@@ -390,14 +383,14 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     for (i, &g) in host.keep_target_indices.iter().enumerate() {
         e_full.row_mut(g).copy_from(&host.e_feat.row(i));
     }
-    // Genes the model never saw: placed through its modules when asked and the
-    // tables exist (the same loader cage trains from), else left off the axis.
-    let mut initialized_genes: Vec<bool> = vec![false; n_genes];
-    if matches!(
-        args.gene_init_mode,
-        crate::cell_activity_graph_embedding::args::GeneInitMode::Membership
-    ) && n_matched < n_genes
-    {
+    // Which genes are on the partition axis: every matched gene, plus — unless
+    // `--no-init-genes` — the genes the model never saw, placed through its
+    // modules by the same loader cage trains from.
+    let mut on_axis: Vec<bool> = vec![false; n_genes];
+    for &g in &host.keep_target_indices {
+        on_axis[g] = true;
+    }
+    if !args.no_init_genes && n_matched < n_genes {
         use crate::cell_activity_graph_embedding::pretrained;
         // Profiles over pseudobulks of THIS sample: k-means on its random
         // projection, then per-gene sums per cluster.
@@ -406,7 +399,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("predict: no cell projection to cluster on"))?;
             let cells_by_dim = proj.proj.transpose(); // [n_cells × k]
-            let n_pb = (n_cells / 50).clamp(8, 256).min(n_cells.max(1));
+            let n_pb = graph_embedding_util::transfer::pseudobulk_count(n_cells);
             let (_, labels) =
                 matrix_util::principal_graph::kmeans_centroids_seeded(&cells_by_dim, n_pb, 20, 0);
             let row_profiles = crate::link_community::profiles::coarsen_cell_expression_dense(
@@ -422,23 +415,20 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             gene_names: &gene_names,
             name_kind: feature_kind.clone(),
             gene_profiles: &build_profiles,
-            membership_init: Some(pretrained::MembershipInit {
+            membership_init: Some(graph_embedding_util::transfer::AlignKnobs {
                 k: args.gene_init_neighbours,
                 similarity_floor: args.gene_init_similarity_floor,
             }),
         })?;
-        let n_init = pre
-            .records
-            .iter()
-            .filter(|r| r.init == pretrained::InitKind::Membership)
-            .count();
-        if n_init > 0 {
-            for (g, r) in pre.records.iter().enumerate() {
-                if r.init == pretrained::InitKind::Membership {
-                    e_full.row_mut(g).copy_from(&pre.e_gene.row(g));
-                    initialized_genes[g] = true;
-                }
+        let mut n_init = 0usize;
+        for (g, r) in pre.records.iter().enumerate() {
+            if r.init == pretrained::InitKind::Membership {
+                e_full.row_mut(g).copy_from(&pre.e_gene.row(g));
+                on_axis[g] = true;
+                n_init += 1;
             }
+        }
+        if n_init > 0 {
             pretrained::write_init_report(&c.out, &pre.records)?;
             info!(
                 "{n_init} genes the model never saw were initialized through its modules and \
@@ -453,9 +443,6 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             );
         }
     }
-    // Per-gene totals: from the TRAINING half when given, else from the query.
-    // Substituted here rather than later so the model-dictionary mask below still
-    // applies to whichever source was used.
     let mut gene_totals = match args.null_from.as_deref() {
         Some(files) => training_gene_totals(files, c, &feature_kind, &gene_names)?,
         None => {
@@ -473,15 +460,9 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             gene_axis.pool_totals(&row_totals)
         }
     };
-    {
-        let mut matched = vec![false; n_genes];
-        for &g in &host.keep_target_indices {
-            matched[g] = true;
-        }
-        for (g, t) in gene_totals.iter_mut().enumerate() {
-            if !matched[g] && !initialized_genes[g] {
-                *t = 0.0;
-            }
+    for (g, t) in gene_totals.iter_mut().enumerate() {
+        if !on_axis[g] {
+            *t = 0.0;
         }
     }
 

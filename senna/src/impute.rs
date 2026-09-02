@@ -405,8 +405,8 @@ fn predict_matching_latents(
         // per-cell rates, which become the model-imputed table below — retrieval
         // cannot reach a gene the reference has no counts for.
         no_init_genes: false,
-        init_neighbours: 10,
-        init_similarity_floor: 0.2,
+        init_neighbours: graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
+        init_similarity_floor: graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
         init_genes_in_fit: false,
         emit_gene_rates: true,
         null_from: None,
@@ -547,8 +547,10 @@ fn write_model_imputed_genes(args: &ImputeArgs, new_cell_names: &[Box<str>]) -> 
     if !(std::path::Path::new(&al_path).exists() && std::path::Path::new(&rates_path).exists()) {
         return Ok(());
     }
-    let al_genes = matrix_util::parquet::read_parquet_string_column(&al_path, 0)?;
-    let al_status = matrix_util::parquet::read_parquet_string_column(&al_path, 1)?;
+    let mut cols =
+        matrix_util::parquet::read_parquet_string_columns_by_name(&al_path, &["gene", "status"])?;
+    let al_status = cols.pop().expect("status column");
+    let al_genes = cols.pop().expect("gene column");
     let rates = <Mat as IoOps>::from_parquet(&rates_path)?;
     anyhow::ensure!(
         rates.mat.nrows() == new_cell_names.len(),
@@ -590,7 +592,10 @@ pub(crate) fn model_imputed_columns(
     let keep: Vec<(Box<str>, usize)> = alignment_genes
         .iter()
         .zip(alignment_status)
-        .filter(|(_, st)| st.as_ref() == "initialized")
+        .filter(|(_, st)| {
+            graph_embedding_util::transfer::GeneStatus::parse(st)
+                == Some(graph_embedding_util::transfer::GeneStatus::Initialized)
+        })
         .filter_map(|(g, _)| col_of.get(g.as_ref()).map(|&j| (g.clone(), j)))
         .collect();
     let mut out = Mat::zeros(rates.nrows(), keep.len());

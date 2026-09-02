@@ -19,7 +19,6 @@ use auxiliary_data::feature_rows::parse_feature_row;
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use candle_util::candle_core::{Tensor, Var};
 use log::{info, warn};
-use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 
 /// Where a gene's initial embedding row came from.
@@ -119,15 +118,7 @@ pub struct PretrainedArgs<'a> {
     /// `π̂` = similarity-weighted mean membership of the `k` closest matched
     /// genes, row = `π̂ μ`. Falls back to the neighbour rule when the tables are
     /// absent. `None` = the neighbour rule.
-    pub membership_init: Option<MembershipInit>,
-}
-
-/// Knobs of the membership initialization (see
-/// [`graph_embedding_util::transfer::align_gene_axis`]).
-#[derive(Clone, Copy, Debug)]
-pub struct MembershipInit {
-    pub k: usize,
-    pub similarity_floor: f32,
+    pub membership_init: Option<graph_embedding_util::transfer::AlignKnobs>,
 }
 
 /// Load, align, and fill. See the module doc for the contract; every path
@@ -187,8 +178,21 @@ pub fn load_pretrained_gene_embedding(
     // Membership initialization through the dictionary's modules, when asked
     // for and the tables exist. Returns early with the alignment's rows for the
     // unmatched genes; otherwise the neighbour rule below runs.
-    if let (Some(mi), false) = (args.membership_init, unmatched_idx.is_empty()) {
-        if let Some((pi, mu)) = read_module_tables(args.dictionary_path, &dict_names)? {
+    if let (Some(knobs), false) = (args.membership_init, unmatched_idx.is_empty()) {
+        let (pi_path, mu_path) =
+            graph_embedding_util::transfer::module_table_paths(args.dictionary_path);
+        let tables =
+            if std::path::Path::new(&pi_path).exists() && std::path::Path::new(&mu_path).exists() {
+                Some(graph_embedding_util::transfer::read_module_tables(
+                    &pi_path,
+                    &mu_path,
+                    &host.src_names,
+                    h,
+                )?)
+            } else {
+                None
+            };
+        if let Some((pi, mu)) = tables {
             let prof = (args.gene_profiles)()?;
             anyhow::ensure!(
                 prof.nrows() == n_genes,
@@ -196,8 +200,6 @@ pub fn load_pretrained_gene_embedding(
                 prof.nrows(),
                 n_genes
             );
-            let dict = <Mat as IoOps>::from_parquet(args.dictionary_path)?;
-            let n_src = dict.mat.nrows();
             // Run gene → dictionary row, for the matched genes.
             let mut new_to_train: Vec<Option<usize>> = vec![None; n_genes];
             for (&g, &src) in host
@@ -207,59 +209,58 @@ pub fn load_pretrained_gene_embedding(
             {
                 new_to_train[g] = Some(src);
             }
-            let zeros = vec![0f32; n_src];
             let al = graph_embedding_util::transfer::align_gene_axis(
                 &graph_embedding_util::transfer::AlignInputs {
-                    rho: &dict.mat,
-                    b_feat: &zeros,
+                    rho: &host.src_e_feat,
+                    b_feat: None,
                     modules: Some(graph_embedding_util::transfer::ModuleTables {
                         pi: &pi,
                         mu: &mu,
                     }),
                     new_to_train: &new_to_train,
                     profiles_new: Some(&prof),
-                    k: mi.k,
-                    similarity_floor: mi.similarity_floor,
+                    knobs,
                 },
             );
-            // The alignment lists the unmatched genes after the dictionary's rows,
-            // in run order — the same order as `unmatched_idx`.
             let mut diffuse = 0usize;
-            let mut records: Vec<InitRecord> = Vec::with_capacity(n_genes);
-            let mut u = 0usize;
-            for (g, gene) in args.gene_names.iter().enumerate() {
-                if matched[g] {
-                    records.push(InitRecord {
+            let records: Vec<InitRecord> = args
+                .gene_names
+                .iter()
+                .enumerate()
+                .map(|(g, gene)| {
+                    if matched[g] {
+                        return InitRecord {
+                            gene: gene.clone(),
+                            init: InitKind::Matched,
+                            neighbor_gene: None,
+                            cosine: f32::NAN,
+                        };
+                    }
+                    let union = al.new_to_union[g].expect("an unmatched gene is initialized");
+                    for c in 0..h {
+                        e_gene[(g, c)] = al.rows[(union, c)];
+                    }
+                    let prov = al.provenance[union]
+                        .as_ref()
+                        .expect("an initialized gene has provenance");
+                    if prov.diffuse {
+                        diffuse += 1;
+                    }
+                    InitRecord {
                         gene: gene.clone(),
-                        init: InitKind::Matched,
-                        neighbor_gene: None,
-                        cosine: f32::NAN,
-                    });
-                    continue;
-                }
-                let union = n_src + u;
-                u += 1;
-                debug_assert_eq!(al.union_to_new[union], Some(g));
-                for c in 0..h {
-                    e_gene[(g, c)] = al.rows[(union, c)];
-                }
-                let prov = al.provenance[union]
-                    .as_ref()
-                    .expect("an unmatched gene is initialized");
-                if prov.diffuse {
-                    diffuse += 1;
-                }
-                records.push(InitRecord {
-                    gene: gene.clone(),
-                    init: InitKind::Membership,
-                    neighbor_gene: prov.neighbours.first().map(|&src| dict_names[src].clone()),
-                    cosine: if prov.diffuse {
-                        f32::NAN
-                    } else {
-                        prov.best_similarity
-                    },
-                });
-            }
+                        init: InitKind::Membership,
+                        neighbor_gene: prov
+                            .neighbours
+                            .first()
+                            .map(|&src| host.src_names[src].clone()),
+                        cosine: if prov.diffuse {
+                            f32::NAN
+                        } else {
+                            prov.best_similarity
+                        },
+                    }
+                })
+                .collect();
             info!(
                 "Pre-trained gene embedding: {} matched, {} membership-initialized through {} \
                  modules ({} on the diffuse prior), {} dictionary rows unused",
@@ -392,38 +393,6 @@ pub fn load_pretrained_gene_embedding(
         b_gene,
         records,
     })
-}
-
-/// The dictionary's module tables, `(π [D_src × M], μ [M × H])`, when both sit
-/// beside it under the run's stem; `None` when either is absent. π's rows must
-/// be the dictionary's genes in the dictionary's order.
-fn read_module_tables(
-    dictionary_path: &str,
-    dict_names: &[Box<str>],
-) -> anyhow::Result<Option<(Mat, Mat)>> {
-    let stem = ["feature_loading", "dictionary"]
-        .iter()
-        .find_map(|slot| dictionary_path.strip_suffix(&format!(".{slot}.parquet")))
-        .or_else(|| dictionary_path.strip_suffix(".parquet"))
-        .unwrap_or(dictionary_path);
-    let pi_path = format!("{stem}.module_membership.parquet");
-    let mu_path = format!("{stem}.module_dictionary.parquet");
-    if !(std::path::Path::new(&pi_path).exists() && std::path::Path::new(&mu_path).exists()) {
-        return Ok(None);
-    }
-    let pi = <Mat as IoOps>::from_parquet(&pi_path)?;
-    let mu = <Mat as IoOps>::from_parquet(&mu_path)?;
-    anyhow::ensure!(
-        pi.rows.len() == dict_names.len() && pi.rows.iter().zip(dict_names).all(|(a, b)| a == b),
-        "{pi_path}: rows are not the dictionary's genes in the dictionary's order"
-    );
-    anyhow::ensure!(
-        mu.mat.nrows() == pi.mat.ncols(),
-        "{mu_path}: {} modules but {pi_path} has {}",
-        mu.mat.nrows(),
-        pi.mat.ncols()
-    );
-    Ok(Some((pi.mat, mu.mat)))
 }
 
 /// Write the audit table: one row per gene, in gene-axis order.

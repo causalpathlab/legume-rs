@@ -149,7 +149,6 @@ pub fn save_outputs_named(
         save_embedding(&vsel_path, &velocity_sel, ctx.feature_names, "feature")?;
         info!("Per-gene velocity inclusion probability σ(s_δ) → {vsel_path}");
     }
-    write_module_tables(out_prefix, model, ctx.feature_names)?;
     Ok(())
 }
 
@@ -163,41 +162,45 @@ pub fn save_outputs_named(
 /// * `{out}.module_bias.parquet` — the per-module bias of the exact term.
 ///
 /// The feature dictionary itself keeps holding the composed `ρ = π μ + r`, so
-/// nothing that reads it has to know modules exist.
+/// nothing that reads it has to know modules exist. Called by each driver after
+/// its own outputs, not from [`save_outputs_named`].
 pub fn write_module_tables(
     out_prefix: &str,
     model: &JointEmbedModel,
     feature_names: &[Box<str>],
 ) -> anyhow::Result<()> {
-    let Some(pi) = model.module_membership()? else {
+    use crate::transfer::{
+        MODULE_BIAS_SUFFIX, MODULE_DICTIONARY_SUFFIX, MODULE_MEMBERSHIP_SUFFIX,
+        MODULE_RESIDUAL_SUFFIX,
+    };
+    let Some(modules) = &model.modules else {
         return Ok(());
     };
-    let modules = model
-        .modules
-        .as_ref()
-        .expect("module_membership implies modules");
+    let pi = model
+        .module_membership()?
+        .expect("a module model has a membership");
     let m = modules.n_modules;
     let module_names: Vec<Box<str>> = (0..m).map(|i| format!("m{i}").into_boxed_str()).collect();
-    let pi_path = format!("{out_prefix}.module_membership.parquet");
+    let pi_path = format!("{out_prefix}.{MODULE_MEMBERSHIP_SUFFIX}");
     pi.to_parquet_with_names(
         &pi_path,
         (Some(feature_names), Some("feature")),
         Some(&module_names),
     )?;
     save_embedding(
-        &format!("{out_prefix}.module_dictionary.parquet"),
+        &format!("{out_prefix}.{MODULE_DICTIONARY_SUFFIX}"),
         &modules.mu.detach(),
         &module_names,
         "module",
     )?;
     save_embedding(
-        &format!("{out_prefix}.module_residual.parquet"),
+        &format!("{out_prefix}.{MODULE_RESIDUAL_SUFFIX}"),
         &modules.residual.detach(),
         feature_names,
         "feature",
     )?;
     save_bias(
-        &format!("{out_prefix}.module_bias.parquet"),
+        &format!("{out_prefix}.{MODULE_BIAS_SUFFIX}"),
         &modules.b_module.detach(),
         &module_names,
         "module",

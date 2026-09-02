@@ -25,9 +25,6 @@ pub struct EdgeBatch {
     /// `[B*K]` row-major: negatives for positive `b` are at `[b*K..(b+1)*K]`.
     pub neg_feats: Vec<u32>,
     pub n_negatives: usize,
-    /// Positives whose within-module negative draw fell back to the global pool
-    /// (module too small in this sampler). `0` without module pools.
-    pub n_module_fallback: usize,
 }
 
 ///////////////////////////////////////////////////
@@ -101,15 +98,14 @@ pub fn sample_per_batch_stratified_edge_batch(
     }
 
     let mut neg_feats = Vec::with_capacity(args.batch_size * args.n_negatives);
-    let mut n_module_fallback = 0usize;
     match args.module_pools {
         // Within-module negatives: contrast the positive against its own module's
         // members, so the NCE resolves features WITHIN a module and leaves the
-        // between-module structure to the exact module term.
+        // between-module structure to the exact module term. The pools count
+        // their own fallbacks.
         Some(pools) => {
             for &f in &fine_feats {
                 if !pools.draw_negatives(f, args.n_negatives, &mut neg_feats, rng) {
-                    n_module_fallback += 1;
                     for _ in 0..args.n_negatives {
                         neg_feats.push(s.feature_pool[s.neg.sample(rng)]);
                     }
@@ -129,7 +125,6 @@ pub fn sample_per_batch_stratified_edge_batch(
         fine_feats,
         neg_feats,
         n_negatives: args.n_negatives,
-        n_module_fallback,
     }
 }
 
@@ -444,7 +439,6 @@ pub fn sample_stratified_edge_batch<R: Rng>(
     let n_pos = fine_feats.len();
     let n_neg = n_pos * args.n_negatives;
     let mut neg_feats = Vec::with_capacity(n_neg);
-    let mut n_module_fallback = 0usize;
     // Half uniform, half degree-proportional — SIMBA's 100 + 100 split. Drawn by
     // alternating rather than by a coin flip so the ratio is exact for any
     // `n_negatives`, including odd ones.
@@ -462,7 +456,6 @@ pub fn sample_stratified_edge_batch<R: Rng>(
         Some(pools) => {
             for &f in &fine_feats {
                 if !pools.draw_negatives(f, args.n_negatives, &mut neg_feats, rng) {
-                    n_module_fallback += 1;
                     for i in 0..args.n_negatives {
                         neg_feats.push(global_draw(i, rng));
                     }
@@ -481,7 +474,6 @@ pub fn sample_stratified_edge_batch<R: Rng>(
         fine_feats,
         neg_feats,
         n_negatives: args.n_negatives,
-        n_module_fallback,
     }
 }
 
@@ -544,31 +536,11 @@ pub fn nce_loss_identity(
 /// learned path, the logits. Ungated with no `pip` it is the plain gather. This is the
 /// single feature-gather point for the bge + gem trainers.
 pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
-    // Modules: compose the gathered rows as `π μ + r` on the live tables, then the
-    // same gate/effect machinery as the free path. Comes FIRST and never reads
-    // `e_feat`, which is a detached snapshot for this parameterization.
-    if let Some(m) = &model.modules {
-        let mu = m.compose_rows(idx)?;
-        let logstd = model
-            .e_feat_logstd
-            .as_ref()
-            .map(|l| l.index_select(idx, 0))
-            .transpose()?;
-        let w = model.gathered_gate_weights(
-            crate::model::GateKind::Identity,
-            model.s_feat.as_ref(),
-            idx,
-        )?;
-        return model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true);
-    }
-    // Adapter: compose the gathered rows from the fixed dictionary and the
-    // shared map, then let the same gate/effect machinery as the free path
-    // apply on top. Mutually exclusive with `factor` by construction.
-    if let Some(a) = &model.adapter {
-        let mut mu = a.rho.index_select(idx, 0)?.matmul(&a.w)?;
-        if let Some(r) = &a.residual {
-            mu = mu.add(&r.index_select(idx, 0)?)?;
-        }
+    // Composed feature side (adapter `ρ·W + r`, modules `π μ + r`): compose the
+    // gathered rows on the live parameters, then the same gate/effect machinery as
+    // the free path. Never reads `e_feat`, a detached snapshot for these models.
+    if let Some(c) = model.composed() {
+        let mu = c.compose_rows(idx)?;
         let logstd = model
             .e_feat_logstd
             .as_ref()

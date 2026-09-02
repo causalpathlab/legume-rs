@@ -1,17 +1,6 @@
 use super::*;
 
 #[test]
-fn unseen_rows_exclude_matched_and_hidden() {
-    // new rows: 0 matched, 1 unseen, 2 hidden (matched before the hide), 3 unseen, 4 matched
-    let before_hide = vec![Some(3), None, Some(7), None, Some(1)];
-    let hidden: HashSet<usize> = [2usize].into_iter().collect();
-    assert_eq!(unseen_rows(&before_hide, &hidden), vec![1, 3]);
-    // A hidden row that was ALSO unmatched is still not "unseen": it was withheld.
-    let hidden2: HashSet<usize> = [1usize, 2].into_iter().collect();
-    assert_eq!(unseen_rows(&before_hide, &hidden2), vec![3]);
-}
-
-#[test]
 fn profiles_sum_counts_per_cluster() {
     let labels = vec![0usize, 1, 0];
     let f0: Vec<usize> = vec![0, 2];

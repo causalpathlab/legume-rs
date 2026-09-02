@@ -11,7 +11,8 @@
 use super::config::FitConfig;
 use crate::data::UnifiedData;
 use crate::model::{
-    FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ShareFeaturesArgs,
+    FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ModuleWarmStart,
+    ShareFeaturesArgs,
 };
 use candle_util::candle_nn::{VarBuilder, VarMap};
 use log::info;
@@ -79,8 +80,14 @@ pub(super) fn build_heads(
                     gm.residual_l2
                 );
             }
-            let (init_labels, init_logits, init_mu, n_modules) = match module_warm {
-                Some(ModuleWarm::Labels(l)) => (Some(l.as_slice()), None, None, gm.n_modules),
+            let (warm, n_modules) = match module_warm {
+                Some(ModuleWarm::Labels(l)) => (
+                    ModuleWarmStart::Labels {
+                        labels: l,
+                        own_mass: gm.init_own_mass,
+                    },
+                    gm.n_modules,
+                ),
                 Some(ModuleWarm::Parent { logits, mu }) => {
                     anyhow::ensure!(
                         mu.ncols() == h,
@@ -88,16 +95,23 @@ pub(super) fn build_heads(
                          set --embedding-dim to match the parent",
                         mu.ncols()
                     );
-                    (None, Some(logits), Some(mu), mu.nrows())
+                    (
+                        ModuleWarmStart::Explicit {
+                            logits,
+                            mu: Some(mu),
+                        },
+                        mu.nrows(),
+                    )
                 }
-                None => (None, None, None, gm.n_modules),
+                None => (ModuleWarmStart::Uniform, gm.n_modules),
             };
+            let from_parent = matches!(warm, ModuleWarmStart::Explicit { .. });
             info!(
                 "learned gene modules: {} features → {} modules (mixed membership{}), \
                  gene dropout {}, exact module term λ={}, balance λ={}",
                 n_features,
                 n_modules,
-                if init_mu.is_some() {
+                if from_parent {
                     ", warm-started from the parent"
                 } else {
                     ""
@@ -112,10 +126,7 @@ pub(super) fn build_heads(
                     n_cells,
                     embedding_dim: h,
                     n_modules,
-                    init_labels,
-                    init_own_mass: gm.init_own_mass,
-                    init_logits,
-                    init_mu,
+                    warm,
                     b_feat: &zeros_features,
                     b_cell: &zeros_cells,
                     seed: config.seed,
