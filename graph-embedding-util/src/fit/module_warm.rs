@@ -83,5 +83,34 @@ pub fn warm_start_module_labels(profile: &DMatrix<f32>, n_modules: usize, seed: 
     labels.into_iter().map(|l| l as u32).collect()
 }
 
+/// A parent run's module tables, for a warm start that carries them.
+pub struct ParentModules<'a> {
+    /// Parent composed rows `[D_parent × H]` (needed only to place unmatched
+    /// features, through [`crate::transfer::align_gene_axis`]).
+    pub rho: &'a DMatrix<f32>,
+    /// Parent membership `[D_parent × M]`.
+    pub pi: &'a DMatrix<f32>,
+    /// Parent module dictionary `[M × H]`.
+    pub mu: &'a DMatrix<f32>,
+    /// For each feature of THIS fit's axis, the parent row it matched, or `None`.
+    pub row_to_parent: &'a [Option<usize>],
+}
+
+/// Membership logits `[D × M]` for a fit warm-started from a parent: a matched
+/// feature takes the parent's membership row verbatim (a simplex point, which
+/// sparsemax reproduces exactly), an unmatched one is initialized through the
+/// parent's modules from its `k` nearest matched neighbours by profile, or the
+/// parent's module-average membership below the similarity floor.
+#[must_use]
+pub fn parent_module_logits(
+    parent: &ParentModules,
+    profiles: &DMatrix<f32>,
+    k: usize,
+    similarity_floor: f32,
+) -> DMatrix<f32> {
+    let _ = (parent, profiles, k, similarity_floor);
+    todo!("parent_module_logits")
+}
+
 #[cfg(test)]
 mod tests;

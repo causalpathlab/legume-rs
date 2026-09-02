@@ -969,6 +969,8 @@ pub fn fit_cell_activity_graph_embedding(
                         n_modules: gm.n_modules,
                         init_labels: Some(&labels),
                         init_own_mass: gm.init_own_mass,
+                        init_logits: None,
+                        init_mu: None,
                         b_feat: &b_feat_init,
                         b_cell: &b_pb_init,
                         seed: c.seed,

@@ -18,6 +18,8 @@ fn build(labels: Option<&[u32]>, own_mass: f32) -> (JointEmbedModel, VarMap) {
             n_modules: 3,
             init_labels: labels,
             init_own_mass: own_mass,
+            init_logits: None,
+            init_mu: None,
             b_feat: &[0f32; 6],
             b_cell: &[0f32; 3],
             seed: 9,
@@ -270,4 +272,65 @@ fn gate_rides_on_the_composed_rows() {
         grads.get(mu.as_tensor()).is_some(),
         "the effect KL must see the live μ"
     );
+}
+
+/// A parent's membership rows are simplex points, and sparsemax of a simplex point
+/// is that point, so explicit logits reproduce the parent's membership exactly and
+/// an explicit μ is registered verbatim — the warm start `update` carries.
+#[test]
+fn explicit_logits_and_mu_reproduce_the_parent() {
+    let vm = VarMap::new();
+    let pi = nalgebra::DMatrix::<f32>::from_row_slice(
+        6,
+        3,
+        &[
+            1.0, 0.0, 0.0, //
+            0.5, 0.5, 0.0, //
+            0.0, 0.2, 0.8, //
+            0.0, 0.0, 1.0, //
+            0.3, 0.3, 0.4, //
+            0.0, 1.0, 0.0,
+        ],
+    );
+    let mu = nalgebra::DMatrix::<f32>::from_fn(3, 4, |m, h| (m * 4 + h) as f32 * 0.1);
+    let model = JointEmbedModel::new_with_modules(
+        ModuleInit {
+            n_features: 6,
+            n_cells: 3,
+            embedding_dim: 4,
+            n_modules: 3,
+            init_labels: None,
+            init_own_mass: 0.9,
+            init_logits: Some(&pi),
+            init_mu: Some(&mu),
+            b_feat: &[0f32; 6],
+            b_cell: &[0f32; 3],
+            seed: 9,
+        },
+        &vm,
+        &dev(),
+    )
+    .unwrap();
+    let got: Vec<Vec<f32>> = model
+        .module_membership()
+        .unwrap()
+        .unwrap()
+        .to_vec2()
+        .unwrap();
+    for g in 0..6 {
+        for m in 0..3 {
+            assert!(
+                (got[g][m] - pi[(g, m)]).abs() < 1e-6,
+                "π[{g},{m}]: {} vs {}",
+                got[g][m],
+                pi[(g, m)]
+            );
+        }
+    }
+    let mu_got: Vec<Vec<f32>> = model.modules.as_ref().unwrap().mu.to_vec2().unwrap();
+    for m in 0..3 {
+        for h in 0..4 {
+            assert!((mu_got[m][h] - mu[(m, h)]).abs() < 1e-6);
+        }
+    }
 }

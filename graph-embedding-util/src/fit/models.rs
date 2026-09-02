@@ -80,6 +80,8 @@ pub(super) fn build_heads(
                     n_modules: gm.n_modules,
                     init_labels: module_warm,
                     init_own_mass: gm.init_own_mass,
+                    init_logits: None,
+                    init_mu: None,
                     b_feat: &zeros_features,
                     b_cell: &zeros_cells,
                     seed: config.seed,
