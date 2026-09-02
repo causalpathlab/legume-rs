@@ -24,7 +24,8 @@ fn trained() -> (DMatrix<f32>, DMatrix<f32>, DMatrix<f32>, Vec<f32>) {
 
 /// New-data profiles: genes 0..3 of the new axis match training rows 1, 3, 0 (in
 /// that order, exercising a permutation); training gene 2 is MISSING. New genes 3
-/// and 4 are unseen: 3 has exactly gene 0's profile, 4 resembles nothing.
+/// and 4 are unseen: 3 has exactly gene 0's profile, 4 has no shape once the
+/// pseudobulk depths are equalized.
 fn new_data() -> (Vec<Option<usize>>, DMatrix<f32>) {
     let new_to_train = vec![Some(1), Some(3), Some(0), None, None];
     let p = DMatrix::<f32>::from_row_slice(
@@ -35,7 +36,9 @@ fn new_data() -> (Vec<Option<usize>>, DMatrix<f32>) {
             0.0, 10.0, 0.0, 10.0, // new 1 = train 3
             10.0, 0.0, 10.0, 0.0, // new 2 = train 0
             10.0, 0.0, 10.0, 0.0, // new 3: identical to train 0's profile
-            5.0, 5.0, 5.0, 5.0, // new 4: flat, resembles nothing after centring
+            // new 4: proportional to the COLUMN TOTALS (45, 15, 45, 15), so it is
+            // flat after depth normalization and resembles nothing after centring.
+            15.0, 5.0, 15.0, 5.0,
         ],
     );
     (new_to_train, p)
