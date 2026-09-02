@@ -95,7 +95,7 @@
 //! nodes, so a caller with more nodes than it wants resident can stream them past
 //! the same dictionary.
 
-use super::CellBatchDivisor;
+use super::CellBatchFold;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::Device;
 use log::info;
@@ -298,9 +298,9 @@ pub(crate) struct GaugeShift {
 ///
 /// `cells` is the flattened per-node view `(global id, feature ids, counts)` — the
 /// per-cell sampler flattening on the `super::cells` path, one entry per pb node on
-/// the `super::pseudobulk` path. `batch_divisor`, when set, applies the
-/// `μ_residual` fold-factor divide — **once**, while the edges are flattened,
-/// rather than on every solve.
+/// the `super::pseudobulk` path. `batch_fold`, when set, divides each cell's
+/// counts by its batch's per-gene fold — **once**, while the edges are flattened,
+/// rather than on every solve (see [`crate::fit::batch_fold`]).
 ///
 /// Without `unspliced_rows` (bge) there is one pass over every feature row. With
 /// it (gem β-sharing) there are two: identity `θ` from the spliced edges with the
@@ -312,15 +312,15 @@ pub(crate) struct GaugeShift {
 pub(crate) fn project_cells(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
-    batch_divisor: Option<CellBatchDivisor>,
+    batch_fold: Option<CellBatchFold>,
     unspliced_rows: Option<&[bool]>,
 ) -> anyhow::Result<Phase2Out> {
-    let h = input.h;
     let n_features = input.b_feat.len();
     anyhow::ensure!(
-        input.feat.len() == n_features * h,
-        "phase-2: e_feat has {} entries, expected {n_features} × {h}",
-        input.feat.len()
+        input.feat.len() == n_features * input.h,
+        "phase-2: e_feat has {} entries, expected {n_features} × {}",
+        input.feat.len(),
+        input.h
     );
 
     // Per-pass feature partitions on the global feature axis. One pass (all rows)
@@ -346,11 +346,11 @@ pub(crate) fn project_cells(
         }
     };
 
-    // Flatten the sampler edges once, applying the batch divisor here so no solve
+    // Flatten the sampler edges once, applying the batch fold here so no solve
     // ever re-derives them. Grouped by the cell's position in `cells`.
-    let edges_a = EdgeTable::build(cells, &rows_a, n_features, batch_divisor);
+    let edges_a = EdgeTable::build(cells, &rows_a, n_features, batch_fold);
     let edges_b =
-        (!rows_b.is_empty()).then(|| EdgeTable::build(cells, &rows_b, n_features, batch_divisor));
+        (!rows_b.is_empty()).then(|| EdgeTable::build(cells, &rows_b, n_features, batch_fold));
 
     // The bar counts **cells**, across both passes, and advances *within* a block
     // in proportion to that block's Adam steps. Counting whole blocks would tick
@@ -410,7 +410,7 @@ pub(crate) fn project_cells(
 /// Project one group of nodes against a dictionary the caller has **already**
 /// built — the streaming counterpart of [`project_cells`].
 ///
-/// One feature partition (every row of the dictionary), no batch divisor and no
+/// One feature partition (every row of the dictionary), no batch fold and no
 /// splice pass, on the caller's own progress bar: the shape
 /// [`super::FrozenProjector`] needs to walk a query past a frozen side group by
 /// group.

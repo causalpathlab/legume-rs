@@ -332,6 +332,9 @@ pub struct FitOutput {
     /// each with its pseudobulks' batches — the geometry the feature side was
     /// trained against, for batch diagnostics.
     pub pb_embeddings: Vec<super::pb_readout::PbLevelEmbedding>,
+    /// Per-batch gene fold `log δ_gb` phase 2 divided each batch's cell counts by;
+    /// `None` on single-batch data.
+    pub batch_gene_fold: Option<super::batch_fold::BatchGeneFold>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {

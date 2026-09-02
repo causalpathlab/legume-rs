@@ -611,6 +611,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // separates by batch, this table says whether the separation was already
     // there before phase 2.
     write_pb_embeddings(&args.out, &out.pb_embeddings, &unified.batch_names)?;
+    if let Some(fold) = &out.batch_gene_fold {
+        write_batch_gene_fold(&args.out, fold, &unified.feature_names)?;
+    }
 
     // The posterior no longer runs here. It is phase-1's own sampler now
     // (`FitConfig::pb_posterior`), so it happens INSIDE `fit` — before phase 2,
@@ -732,6 +735,25 @@ fn parent_modules(
 /// command's, so it lives here rather than in the shared flag group.
 const DEFAULT_GENE_MODULES: usize = 128;
 
+/// `{out}.batch_gene_fold.parquet`: the per-batch gene fold phase 2 divided each
+/// batch's cell counts by, as `log δ_gb`, `[features × batches]`.
+fn write_batch_gene_fold(
+    out: &str,
+    fold: &ge::fit::BatchGeneFold,
+    feature_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    let table = Mat::from_row_slice(fold.n_batches(), fold.n_features, &fold.delta)
+        .map(f32::ln)
+        .transpose();
+    table.to_parquet_with_names(
+        &format!("{out}.batch_gene_fold.parquet"),
+        (Some(feature_names), Some("feature")),
+        Some(&fold.batch_names),
+    )?;
+    info!("Wrote {out}.batch_gene_fold.parquet");
+    Ok(())
+}
+
 /// `{out}.pb_embedding.parquet` (rows `l{level}:pb{i}`, columns `h0..`) and
 /// `{out}.pb_batch.parquet` (level and batch name per row), every level stacked.
 fn write_pb_embeddings(
@@ -739,27 +761,25 @@ fn write_pb_embeddings(
     levels: &[ge::fit::PbLevelEmbedding],
     batch_names: &[Box<str>],
 ) -> anyhow::Result<()> {
+    use matrix_util::dmatrix_util::concatenate_vertical;
     use matrix_util::parquet::{write_named_table, Column};
     if levels.is_empty() {
         return Ok(());
     }
     let h = levels[0].e_pb.ncols();
-    let n: usize = levels.iter().map(|l| l.e_pb.nrows()).sum();
-    let mut table = Mat::zeros(n, h);
+    let table = concatenate_vertical(&levels.iter().map(|l| l.e_pb.clone()).collect::<Vec<_>>())?;
+    let n = table.nrows();
     let mut rows: Vec<Box<str>> = Vec::with_capacity(n);
     let mut level_col: Vec<i32> = Vec::with_capacity(n);
     let mut batch_col: Vec<Box<str>> = Vec::with_capacity(n);
-    let mut r = 0usize;
     for (level, l) in levels.iter().enumerate() {
         for i in 0..l.e_pb.nrows() {
-            table.set_row(r, &l.e_pb.row(i));
             rows.push(format!("l{level}:pb{i}").into_boxed_str());
             level_col.push(level as i32);
             batch_col.push(match l.batch[i] {
                 u32::MAX => Box::from(""),
                 b => batch_names[b as usize].clone(),
             });
-            r += 1;
         }
     }
     table.to_parquet_with_names(
