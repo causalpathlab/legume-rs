@@ -108,8 +108,54 @@ pub fn parent_module_logits(
     k: usize,
     similarity_floor: f32,
 ) -> DMatrix<f32> {
-    let _ = (parent, profiles, k, similarity_floor);
-    todo!("parent_module_logits")
+    use crate::transfer::{align_gene_axis, AlignInputs, GeneStatus, ModuleTables};
+    let d = parent.row_to_parent.len();
+    let m = parent.pi.ncols();
+    let zeros = vec![0f32; parent.rho.nrows()];
+    let al = align_gene_axis(&AlignInputs {
+        rho: parent.rho,
+        b_feat: &zeros,
+        modules: Some(ModuleTables {
+            pi: parent.pi,
+            mu: parent.mu,
+        }),
+        new_to_train: parent.row_to_parent,
+        profiles_new: Some(profiles),
+        k,
+        similarity_floor,
+    });
+    let membership = al
+        .membership
+        .as_ref()
+        .expect("module tables given ⇒ membership present");
+    let mut logits = DMatrix::<f32>::zeros(d, m);
+    let mut next_unmatched = parent.rho.nrows();
+    let (mut n_matched, mut n_init, mut n_diffuse) = (0usize, 0usize, 0usize);
+    for g in 0..d {
+        let union = match parent.row_to_parent[g] {
+            Some(t) => {
+                n_matched += 1;
+                t
+            }
+            None => {
+                let u = next_unmatched;
+                next_unmatched += 1;
+                debug_assert_eq!(al.union_to_new[u], Some(g));
+                debug_assert_eq!(al.status[u], GeneStatus::Initialized);
+                n_init += 1;
+                if al.provenance[u].as_ref().is_some_and(|p| p.diffuse) {
+                    n_diffuse += 1;
+                }
+                u
+            }
+        };
+        logits.set_row(g, &membership.row(union));
+    }
+    info!(
+        "module warm start from a parent: {n_matched} features carry the parent's membership, \
+         {n_init} initialized through its modules ({n_diffuse} on the diffuse prior)"
+    );
+    logits
 }
 
 #[cfg(test)]
