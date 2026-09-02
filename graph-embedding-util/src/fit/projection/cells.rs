@@ -4,7 +4,7 @@
 //! [`super::pseudobulk`]; both drive the same engine.
 
 use super::block_sgd;
-use super::CellBatchDivisor;
+use super::CellBatchFold;
 use crate::loss::PerBatchStratifiedCellSampler;
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Device;
@@ -82,7 +82,7 @@ fn collect_sampler_cells(
 /// post-hoc aggregate.
 ///
 /// See [`Phase2Result`] for what comes back.
-#[allow(clippy::too_many_arguments)] // frozen dictionary + samplers + batch divisor + splice mask
+#[allow(clippy::too_many_arguments)] // frozen dictionary + samplers + batch fold + splice mask
 pub(crate) fn project_cells_phase2(
     model: &mut JointEmbedModel,
     varmap: &VarMap,
@@ -90,7 +90,7 @@ pub(crate) fn project_cells_phase2(
     n_cells: usize,
     lambda: f64,
     dev: &Device,
-    batch_divisor: Option<CellBatchDivisor>,
+    batch_fold: Option<CellBatchFold>,
     unspliced_rows: Option<&[bool]>,
     joint: bool,
 ) -> anyhow::Result<Phase2Result> {
@@ -107,10 +107,12 @@ pub(crate) fn project_cells_phase2(
         "Phase 2 — cell-block Poisson SGD over {n_cells} cells ({} with edges) on {dev:?}, \
          full log-partition, ridge λ={lambda}{}",
         cells.len(),
-        if batch_divisor.is_some() {
-            ", μ_residual batch-divided"
-        } else {
-            ""
+        match &batch_fold {
+            Some(bf) => format!(
+                ", counts divided by the per-batch gene fold ({} batches)",
+                bf.fold.n_batches()
+            ),
+            None => String::new(),
         }
     );
 
@@ -129,7 +131,7 @@ pub(crate) fn project_cells_phase2(
             joint,
         },
         &cells,
-        batch_divisor,
+        batch_fold,
         unspliced_rows,
     )?;
 
