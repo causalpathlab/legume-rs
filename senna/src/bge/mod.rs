@@ -606,6 +606,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         has_cell_to_pb: false,
     })?;
 
+    // The phase-1 pseudobulk embeddings, with each pseudobulk's batch: the
+    // geometry the dictionary was trained against. When the per-cell embedding
+    // separates by batch, this table says whether the separation was already
+    // there before phase 2.
+    write_pb_embeddings(&args.out, &out.pb_embeddings, &unified.batch_names)?;
+
     // The posterior no longer runs here. It is phase-1's own sampler now
     // (`FitConfig::pb_posterior`), so it happens INSIDE `fit` — before phase 2,
     // before the co-embedding, and against the pseudobulk side rather than a
@@ -725,3 +731,54 @@ fn parent_modules(
 /// Module count `senna bge` trains unless told otherwise — the policy is this
 /// command's, so it lives here rather than in the shared flag group.
 const DEFAULT_GENE_MODULES: usize = 128;
+
+/// `{out}.pb_embedding.parquet` (rows `l{level}:pb{i}`, columns `h0..`) and
+/// `{out}.pb_batch.parquet` (level and batch name per row), every level stacked.
+fn write_pb_embeddings(
+    out: &str,
+    levels: &[ge::fit::PbLevelEmbedding],
+    batch_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    use matrix_util::parquet::{write_named_table, Column};
+    if levels.is_empty() {
+        return Ok(());
+    }
+    let h = levels[0].e_pb.ncols();
+    let n: usize = levels.iter().map(|l| l.e_pb.nrows()).sum();
+    let mut table = Mat::zeros(n, h);
+    let mut rows: Vec<Box<str>> = Vec::with_capacity(n);
+    let mut level_col: Vec<i32> = Vec::with_capacity(n);
+    let mut batch_col: Vec<Box<str>> = Vec::with_capacity(n);
+    let mut r = 0usize;
+    for (level, l) in levels.iter().enumerate() {
+        for i in 0..l.e_pb.nrows() {
+            table.set_row(r, &l.e_pb.row(i));
+            rows.push(format!("l{level}:pb{i}").into_boxed_str());
+            level_col.push(level as i32);
+            batch_col.push(match l.batch[i] {
+                u32::MAX => Box::from(""),
+                b => batch_names[b as usize].clone(),
+            });
+            r += 1;
+        }
+    }
+    table.to_parquet_with_names(
+        &format!("{out}.pb_embedding.parquet"),
+        (Some(&rows), Some("pb")),
+        Some(&axis_id_names("h", h)),
+    )?;
+    write_named_table(
+        &format!("{out}.pb_batch.parquet"),
+        "pb",
+        &rows,
+        &[
+            (Box::from("level"), Column::I32(&level_col)),
+            (Box::from("batch"), Column::Str(&batch_col)),
+        ],
+    )?;
+    info!(
+        "Wrote {out}.pb_embedding.parquet / pb_batch.parquet ({n} pseudobulks over {} levels)",
+        levels.len()
+    );
+    Ok(())
+}

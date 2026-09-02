@@ -20,8 +20,29 @@ pub struct PbLevelEmbedding {
 /// cells' batches. Empty pseudobulks get `u32::MAX`.
 #[must_use]
 pub fn majority_batch_per_pb(cell_to_pb: &[usize], batch_of_cell: &[u32], n_pb: usize) -> Vec<u32> {
-    let _ = (cell_to_pb, batch_of_cell, n_pb);
-    todo!("majority_batch_per_pb")
+    let n_batches = batch_of_cell
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |b| b as usize + 1);
+    let mut counts = vec![vec![0usize; n_batches]; n_pb];
+    for (c, &p) in cell_to_pb.iter().enumerate() {
+        if p < n_pb {
+            counts[p][batch_of_cell[c] as usize] += 1;
+        }
+    }
+    counts
+        .iter()
+        .map(|row| {
+            let best = row.iter().copied().max().unwrap_or(0);
+            if best == 0 {
+                return u32::MAX;
+            }
+            row.iter()
+                .position(|&n| n == best)
+                .expect("max is in the row") as u32
+        })
+        .collect()
 }
 
 #[cfg(test)]

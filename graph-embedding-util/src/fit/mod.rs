@@ -264,6 +264,23 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
     // here, freeing them for the phase-2 `&mut` projection below.
 
+    // The trained pseudobulk tables, read before phase 2 takes `&mut cell_model`:
+    // one `[n_pb × H]` per level with each pseudobulk's batch.
+    let pb_embeddings: Vec<pb_readout::PbLevelEmbedding> = level_models
+        .iter()
+        .zip(&cell_to_pb_per_level)
+        .map(
+            |(m, c2pb)| -> anyhow::Result<pb_readout::PbLevelEmbedding> {
+                let n_pb = m.e_cell.dim(0)?;
+                let flat: Vec<f32> = m.e_cell.detach().flatten_all()?.to_vec1()?;
+                Ok(pb_readout::PbLevelEmbedding {
+                    e_pb: DMatrix::from_row_slice(n_pb, h, &flat),
+                    batch: pb_readout::majority_batch_per_pb(c2pb, &unified.batch_membership, n_pb),
+                })
+            },
+        )
+        .collect::<anyhow::Result<_>>()?;
+
     // Back to the mean for everything downstream: training averaged over draws, so
     // `E[z ⊙ β] = pip ⊙ β` is the dictionary the fit actually implies. Leaving a draw
     // installed would ship ONE random sub-model as if it were the answer. No-op when
@@ -536,6 +553,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         lineage_qc,
         pb_posterior,
         splice_posterior,
+        pb_embeddings,
     })
 }
 
