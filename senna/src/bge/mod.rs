@@ -363,6 +363,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             pb_posterior_nested_delta: true,
             pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
             nce_objective: args.nce_objective.to_ge(),
+            // `--gene-modules M`: learned mixed-membership modules in front of ρ.
+            gene_modules: args.modules.to_config()?,
             // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
             // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
             // internal weight). There is no null absorber and no simplex — that was the
@@ -521,6 +523,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 qc_keep_idx.as_deref(),
                 &cell_labels,
             )?;
+            // The --skip-etm branch writes these inside `save_outputs_named`.
+            ge::write_module_tables(&args.out, &out.model, &unified.feature_names)?;
         } else {
             ge::save_outputs_named(
                 &out.model,
@@ -544,6 +548,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
+    let has_modules = out.model.modules.is_some();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Bge,
@@ -570,6 +575,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // dictionary and ignores the co-embed file on disk).
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("feature_loading.parquet"),
+        // Learned gene modules, when the run trained them; the composed row still
+        // lives in `feature_loading`, so these are additive.
+        module_membership_suffix: has_modules.then_some("module_membership.parquet"),
+        module_dictionary_suffix: has_modules.then_some("module_dictionary.parquet"),
         // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
         softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
