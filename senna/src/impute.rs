@@ -532,6 +532,22 @@ fn svd_matching_latents(
     Ok((new_cell_names, theta_new, theta_ref))
 }
 
+/// The model-imputed columns for the genes the model never saw: from predict's
+/// `gene_alignment` (status per union gene) and `gene_rates` (per-cell rates of
+/// the missing and initialized genes), keep exactly the `initialized` columns, in
+/// the alignment's order. Retrieval cannot impute these genes — the reference has
+/// no counts for them — so they are written as their own table with their own
+/// provenance rather than mixed into the retrieved matrix.
+pub(crate) fn model_imputed_columns(
+    alignment_genes: &[Box<str>],
+    alignment_status: &[Box<str>],
+    rate_genes: &[Box<str>],
+    rates: &Mat,
+) -> (Vec<Box<str>>, Mat) {
+    let _ = (alignment_genes, alignment_status, rate_genes, rates);
+    todo!("model_imputed_columns")
+}
+
 #[cfg(test)]
 #[path = "impute/tests.rs"]
 mod tests;

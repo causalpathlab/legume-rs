@@ -237,3 +237,36 @@ fn svd_projection_refuses_a_query_sharing_no_gene() -> anyhow::Result<()> {
     .is_err());
     Ok(())
 }
+
+/// Only the `initialized` genes come through, in the alignment's order, and the
+/// column is looked up by NAME in the rates table (whose order is the writer's).
+#[test]
+fn model_imputed_columns_keep_only_initialized_genes_by_name() {
+    let al_genes: Vec<Box<str>> = ["A", "B", "U1", "U2"].iter().map(|s| (*s).into()).collect();
+    let al_status: Vec<Box<str>> = ["matched", "missing", "initialized", "initialized"]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    // rates hold missing + initialized, in a different order than the alignment.
+    let rate_genes: Vec<Box<str>> = ["U2", "B", "U1"].iter().map(|s| (*s).into()).collect();
+    let rates = Mat::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let (names, m) = model_imputed_columns(&al_genes, &al_status, &rate_genes, &rates);
+    assert_eq!(names, vec![Box::<str>::from("U1"), Box::<str>::from("U2")]);
+    assert_eq!(m.nrows(), 2);
+    assert_eq!(m.ncols(), 2);
+    assert_eq!(m[(0, 0)], 3.0); // U1, cell 0
+    assert_eq!(m[(0, 1)], 1.0); // U2, cell 0
+    assert_eq!(m[(1, 0)], 6.0);
+    assert_eq!(m[(1, 1)], 4.0);
+}
+
+/// No initialized gene → an empty table, not an error.
+#[test]
+fn model_imputed_columns_are_empty_without_initialized_genes() {
+    let al_genes: Vec<Box<str>> = ["A"].iter().map(|s| (*s).into()).collect();
+    let al_status: Vec<Box<str>> = ["matched"].iter().map(|s| (*s).into()).collect();
+    let (names, m) = model_imputed_columns(&al_genes, &al_status, &[], &Mat::zeros(2, 0));
+    assert!(names.is_empty());
+    assert_eq!(m.nrows(), 2);
+    assert_eq!(m.ncols(), 0);
+}
