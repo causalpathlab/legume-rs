@@ -712,6 +712,14 @@ pub struct CellActivityGraphEmbeddingArgs {
                 on top of the shared map"
     )]
     pub gene_adapter_residual: bool,
+
+    /// The `--gene-modules` flag group (see `graph_embedding_util::GeneModuleArgs`).
+    /// Cage has no gene-negative NCE, so the within-module negatives do not apply
+    /// here; the composition, the exact pseudobulk–module term, the gene dropout
+    /// and the warm start do. The residual takes `--embedding-l2` like every other
+    /// gene-side table in cage.
+    #[command(flatten)]
+    pub modules: graph_embedding_util::GeneModuleArgs,
 }
 
 /// What training may do to a pre-trained gene embedding.
