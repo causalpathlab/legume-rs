@@ -111,3 +111,28 @@ fn parent_warm_start_carries_matched_rows_and_initializes_the_rest() {
         assert!((logits[(3, m)] - avg[m]).abs() < 1e-6);
     }
 }
+
+/// Genes with no profile at all (never expressed in any pseudobulk) do not get
+/// to seed clusters: they go to one explicit background module, and the
+/// expressed genes are clustered among the remaining modules.
+#[test]
+fn zero_profile_genes_take_the_background_module() {
+    let (d, s) = (30usize, 12usize);
+    let mut m = DMatrix::<f32>::zeros(d, s);
+    // 20 expressed genes in two planted blocks; 10 genes with all-zero profiles.
+    for i in 0..20 {
+        let block = i / 10;
+        for j in 0..s {
+            let on = j / 6 == block;
+            m[(i, j)] = if on { 50.0 } else { 2.0 } + ((i * 7 + j * 3) % 5) as f32;
+        }
+    }
+    let labels = warm_start_module_labels(&m, 3, 11);
+    let bg = labels[20];
+    assert!(labels[20..].iter().all(|&l| l == bg), "zero rows share one module: {labels:?}");
+    assert!(labels[..20].iter().all(|&l| l != bg), "expressed genes stay out of it: {labels:?}");
+    assert!(labels[..10].iter().all(|&l| l == labels[0]));
+    assert!(labels[10..20].iter().all(|&l| l == labels[10]));
+    assert_ne!(labels[0], labels[10]);
+}
+
