@@ -428,7 +428,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "auxiliary-data"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "approx",
