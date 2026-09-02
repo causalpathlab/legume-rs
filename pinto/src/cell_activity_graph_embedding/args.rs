@@ -713,6 +713,45 @@ pub struct CellActivityGraphEmbeddingArgs {
     )]
     pub gene_adapter_residual: bool,
 
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = GeneInitMode::Membership,
+        requires = "gene_embedding",
+        help = "How a gene with no dictionary row starts",
+        long_help = "How a gene with no row in --gene-embedding starts.\n\
+                     \n\
+                     membership places it through the dictionary's learned modules:\n\
+                     its membership is the similarity-weighted mean of the closest\n\
+                     matched genes' memberships (by count profile), and its row is\n\
+                     that membership times the module dictionary, with no residual.\n\
+                     Needs {stem}.module_membership.parquet and\n\
+                     {stem}.module_dictionary.parquet beside the dictionary; without\n\
+                     them it falls back to neighbor and says so in\n\
+                     {out}.gene_embedding_init.parquet.\n\
+                     \n\
+                     neighbor copies the row of the single closest matched gene."
+    )]
+    pub gene_init_mode: GeneInitMode,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        value_name = "K",
+        requires = "gene_embedding",
+        help = "membership init: matched genes whose memberships are averaged"
+    )]
+    pub gene_init_neighbours: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.2,
+        value_name = "S",
+        requires = "gene_embedding",
+        help = "membership init: below this best profile similarity a gene takes the diffuse prior"
+    )]
+    pub gene_init_similarity_floor: f32,
+
     /// The `--gene-modules` flag group (see `graph_embedding_util::GeneModuleArgs`).
     /// Cage has no gene-negative NCE, so the within-module negatives do not apply
     /// here; the composition, the exact pseudobulk–module term, the gene dropout
@@ -720,6 +759,16 @@ pub struct CellActivityGraphEmbeddingArgs {
     /// gene-side table in cage.
     #[command(flatten)]
     pub modules: graph_embedding_util::GeneModuleArgs,
+}
+
+/// How a gene with no dictionary row is initialized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum GeneInitMode {
+    /// Through the dictionary's learned modules (falls back to `Neighbor`
+    /// without module tables).
+    Membership,
+    /// The closest matched gene's row.
+    Neighbor,
 }
 
 /// What training may do to a pre-trained gene embedding.

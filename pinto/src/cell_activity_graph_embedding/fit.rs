@@ -82,7 +82,7 @@
 //! because a dropout keep-rate is not a coefficient.
 
 use crate::cell_activity_graph_embedding::args::{
-    CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode,
+    CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode, GeneInitMode,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_exp_batch_cache, GeneGatedChainSampler,
@@ -871,6 +871,13 @@ pub fn fit_cell_activity_graph_embedding(
                 gene_names: &gene_names,
                 name_kind: feature_kind.clone(),
                 gene_profiles: &build_profiles,
+                membership_init: match args.gene_init_mode {
+                    GeneInitMode::Membership => Some(pretrained::MembershipInit {
+                        k: args.gene_init_neighbours,
+                        similarity_floor: args.gene_init_similarity_floor,
+                    }),
+                    GeneInitMode::Neighbor => None,
+                },
             })?;
             // adapt decouples the two widths; freeze/free install rows verbatim
             // and so need them equal.
