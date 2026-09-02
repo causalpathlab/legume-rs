@@ -56,6 +56,13 @@ pub struct ModuleInit<'a> {
     /// is spread evenly over the others so every module stays in the sparsemax
     /// support and can still earn the feature. See [`module_logit_for_own_mass`].
     pub init_own_mass: f32,
+    /// Explicit membership logits `[n_features, M]`, taking precedence over
+    /// `init_labels`. A membership row is a simplex point and sparsemax of a
+    /// simplex point is itself, so a parent's `π` passed here is reproduced
+    /// exactly — the warm start `update` carries.
+    pub init_logits: Option<&'a nalgebra::DMatrix<f32>>,
+    /// Explicit module dictionary `[M, H]` instead of the seeded randn.
+    pub init_mu: Option<&'a nalgebra::DMatrix<f32>>,
     pub b_feat: &'a [f32],
     pub b_cell: &'a [f32],
     /// Base seed for the reproducible randn init of `μ` and the cell side.

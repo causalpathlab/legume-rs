@@ -34,6 +34,8 @@ fn model(own_mass: f32, vm: &VarMap) -> JointEmbedModel {
             n_modules: M,
             init_labels: Some(&labels),
             init_own_mass: own_mass,
+            init_logits: None,
+            init_mu: None,
             b_feat: &[0f32; D],
             b_cell: &[0f32; N],
             seed: 1,

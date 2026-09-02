@@ -57,3 +57,54 @@ fn wide_profiles_are_sketched() {
     assert!(labels[6..].iter().all(|&l| l == labels[6]));
     assert_ne!(labels[0], labels[6]);
 }
+
+/// Warm start from a PARENT: matched features take the parent's membership rows
+/// verbatim; unmatched ones are initialized through the parent's modules from
+/// their profile neighbours (identical profile ⇒ identical row).
+#[test]
+fn parent_warm_start_carries_matched_rows_and_initializes_the_rest() {
+    let parent_pi = DMatrix::<f32>::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 0.5, 0.5]);
+    let parent_mu = DMatrix::<f32>::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let parent_rho = &parent_pi * &parent_mu;
+    // New axis: gene 0 = parent 2, gene 1 = parent 0, gene 2 = unseen with gene 1's
+    // profile, gene 3 = unseen with parent-1-like profile (parent 1 is MISSING here,
+    // so it is initialized from the matched neighbours only).
+    let row_to_parent = vec![Some(2), Some(0), None, None];
+    let profiles = DMatrix::<f32>::from_row_slice(
+        4,
+        4,
+        &[
+            5.0, 5.0, 5.0, 5.0, //
+            9.0, 1.0, 9.0, 1.0, //
+            9.0, 1.0, 9.0, 1.0, //
+            1.0, 9.0, 1.0, 9.0,
+        ],
+    );
+    let logits = parent_module_logits(
+        &ParentModules {
+            rho: &parent_rho,
+            pi: &parent_pi,
+            mu: &parent_mu,
+            row_to_parent: &row_to_parent,
+        },
+        &profiles,
+        2,
+        0.5,
+    );
+    assert_eq!(logits.nrows(), 4);
+    assert_eq!(logits.ncols(), 2);
+    assert_eq!(logits.row(0), parent_pi.row(2));
+    assert_eq!(logits.row(1), parent_pi.row(0));
+    assert_eq!(
+        logits.row(2),
+        parent_pi.row(0),
+        "same profile as gene 1 → parent 0's row"
+    );
+    // Anti-correlated with every matched gene → diffuse module average of the parent.
+    let avg: Vec<f32> = (0..2)
+        .map(|m| parent_pi.column(m).iter().sum::<f32>() / 3.0)
+        .collect();
+    for m in 0..2 {
+        assert!((logits[(3, m)] - avg[m]).abs() < 1e-6);
+    }
+}
