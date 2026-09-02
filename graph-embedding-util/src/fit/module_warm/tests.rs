@@ -1,4 +1,5 @@
 use super::*;
+use crate::fit::config::ParentModulesOwned;
 
 /// Three planted co-expression blocks over 12 pseudobulks are recovered as three
 /// modules, up to label permutation.
@@ -81,15 +82,17 @@ fn parent_warm_start_carries_matched_rows_and_initializes_the_rest() {
         ],
     );
     let logits = parent_module_logits(
-        &ParentModules {
-            rho: &parent_rho,
-            pi: &parent_pi,
-            mu: &parent_mu,
-            row_to_parent: &row_to_parent,
+        &ParentModulesOwned {
+            rho: parent_rho,
+            pi: parent_pi.clone(),
+            mu: parent_mu,
+            row_to_parent,
+            knobs: crate::transfer::AlignKnobs {
+                k: 2,
+                similarity_floor: 0.5,
+            },
         },
         &profiles,
-        2,
-        0.5,
     );
     assert_eq!(logits.nrows(), 4);
     assert_eq!(logits.ncols(), 2);

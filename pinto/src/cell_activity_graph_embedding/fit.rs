@@ -119,12 +119,13 @@ use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{
-    build_per_batch_unit_samplers, draw_gene_keep_mask, embedding_ridge, masked_membership,
-    membership_diagnostics, module_balance_prior, module_row_entropy, module_softmax_loss,
-    pool_module_counts, ChainGroupFilter,
+    build_per_batch_unit_samplers, draw_gene_keep_mask, embedding_ridge,
+    log_membership_diagnostics, masked_membership, module_priors, module_step_loss,
+    ChainGroupFilter,
 };
 use graph_embedding_util::model::{
     AdapterInit, FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit, ModuleInit,
+    ModuleWarmStart,
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
@@ -872,7 +873,7 @@ pub fn fit_cell_activity_graph_embedding(
                 name_kind: feature_kind.clone(),
                 gene_profiles: &build_profiles,
                 membership_init: match args.gene_init_mode {
-                    GeneInitMode::Membership => Some(pretrained::MembershipInit {
+                    GeneInitMode::Membership => Some(graph_embedding_util::transfer::AlignKnobs {
                         k: args.gene_init_neighbours,
                         similarity_floor: args.gene_init_similarity_floor,
                     }),
@@ -967,10 +968,10 @@ pub fn fit_cell_activity_graph_embedding(
                         n_cells: n_pb,
                         embedding_dim: args.embedding_dim,
                         n_modules: gm.n_modules,
-                        init_labels: Some(&labels),
-                        init_own_mass: gm.init_own_mass,
-                        init_logits: None,
-                        init_mu: None,
+                        warm: ModuleWarmStart::Labels {
+                            labels: &labels,
+                            own_mass: gm.init_own_mass,
+                        },
                         b_feat: &b_feat_init,
                         b_cell: &b_pb_init,
                         seed: c.seed,
@@ -1177,30 +1178,29 @@ pub fn fit_cell_activity_graph_embedding(
     let stop = setup_stop_handler();
 
     // Module warm-up: hold the k-means membership for the first epochs, release
-    // it afterwards (same schedule as geu's composite trainer).
-    let module_warmup = module_cfg.as_ref().map(|gm| {
-        gm.warmup_epochs
-            .unwrap_or_else(|| ((args.epochs as f64) * 0.25).ceil() as usize)
-            .clamp(usize::from(args.epochs > 0), args.epochs)
-    });
-    if let (Some(m), Some(wu)) = (&model.modules, module_warmup) {
-        m.set_frozen(wu > 0);
-        info!(
-            "gene modules: membership held for {wu} of {} epochs, then trained",
-            args.epochs
-        );
-    }
-    // The profile columns the module term pools, as row-major `[n_pb][G]` so a
-    // drawn pseudobulk's count row is one contiguous copy.
-    let module_rows: Option<Vec<Vec<f32>>> = module_profiles.as_ref().map(|p| {
-        (0..p.ncols())
-            .map(|j| p.column(j).iter().copied().collect())
-            .collect()
-    });
+    // it afterwards (geu's schedule). The profile matrix the exact term pools sits
+    // on the device as `[n_pb × G]`, so a step is one `index_select`.
+    let module_run: Option<(usize, Tensor)> = match (&module_cfg, &module_profiles) {
+        (Some(gm), Some(p)) => {
+            let wu = gm.warmup_epochs_for(args.epochs);
+            if let Some(m) = &model.modules {
+                m.set_frozen(wu > 0);
+            }
+            info!(
+                "gene modules: membership held for {wu} of {} epochs, then trained",
+                args.epochs
+            );
+            let rows: Vec<f32> = (0..p.ncols())
+                .flat_map(|j| p.column(j).iter().copied().collect::<Vec<f32>>())
+                .collect();
+            Some((wu, Tensor::from_vec(rows, (p.ncols(), p.nrows()), &dev)?))
+        }
+        _ => None,
+    };
 
     'epochs: for epoch in 0..args.epochs {
-        if let (Some(m), Some(wu)) = (&model.modules, module_warmup) {
-            if epoch == wu && m.is_frozen() {
+        if let (Some(m), Some((wu, _))) = (&model.modules, &module_run) {
+            if epoch == *wu && m.is_frozen() {
                 m.set_frozen(false);
                 info!("epoch {epoch}: module membership released — π now trains");
             }
@@ -1444,51 +1444,33 @@ pub fn fit_cell_activity_graph_embedding(
                 total = (total + (kl * (chunk_mass / epoch_mass))?)?;
             }
             // Exact pseudobulk–module term + membership priors, once per optimizer
-            // step like geu's composite trainer: draw `units_per_step` pseudobulks
-            // uniformly, pool their count rows through the (dropout-masked)
-            // membership, and score every module with a full softmax against the
+            // step, through the same functions geu's composite trainer uses: draw
+            // `units_per_step` pseudobulks uniformly, pool their count rows through
+            // the (dropout-masked) membership, and score every module against the
             // trained PB table.
-            if let (Some(m), Some(gm), Some(rows)) =
-                (&model.modules, module_cfg.as_ref(), module_rows.as_ref())
+            if let (Some(m), Some(gm), Some((_, profile_t))) =
+                (&model.modules, module_cfg.as_ref(), module_run.as_ref())
             {
                 let u = gm.units_per_step.min(n_pb);
                 if u > 0 && gm.lambda_module > 0.0 {
-                    let mut rng = SmallRng::seed_from_u64(
-                        c.seed
-                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                            .wrapping_add((epoch as u64).wrapping_mul(7_919))
-                            .wrapping_add(chunk_count as u64),
-                    );
-                    let picks: Vec<u32> =
-                        (0..u).map(|_| rng.random_range(0..n_pb) as u32).collect();
-                    let mut flat: Vec<f32> = Vec::with_capacity(u * n_genes);
-                    for &p in &picks {
-                        flat.extend_from_slice(&rows[p as usize]);
-                    }
-                    let x = Tensor::from_vec(flat, (u, n_genes), &dev)?;
+                    let picks: Vec<u32> = (0..u)
+                        .map(|_| rng_master.random_range(0..n_pb) as u32)
+                        .collect();
+                    let idx = Tensor::from_vec(picks, u, &dev)?;
+                    let x = profile_t.index_select(&idx, 0)?;
                     let pi = m.membership()?;
                     let pi_masked = if gm.gene_dropout > 0.0 {
-                        let keep = draw_gene_keep_mask(n_genes, gm.gene_dropout, &mut rng, &dev)?;
+                        let keep =
+                            draw_gene_keep_mask(n_genes, gm.gene_dropout, &mut rng_master, &dev)?;
                         masked_membership(&pi, &keep)?
                     } else {
-                        pi.clone()
+                        pi.detach()
                     };
-                    let x_cm = pool_module_counts(&x, &pi_masked)?;
-                    let idx = Tensor::from_vec(picks, u, &dev)?;
                     let e_units = model.e_cell.index_select(&idx, 0)?;
-                    let term = module_softmax_loss(&e_units, &m.mu, &m.b_module, &x_cm)?;
-                    total = (total + term.affine(f64::from(gm.lambda_module), 0.0)?)?;
-                    if !m.is_frozen() {
-                        if gm.lambda_balance > 0.0 {
-                            let bal = module_balance_prior(&pi)?
-                                .affine(f64::from(gm.lambda_balance), 0.0)?;
-                            total = (total + bal)?;
-                        }
-                        if gm.lambda_entropy > 0.0 {
-                            let ent = module_row_entropy(&pi)?
-                                .affine(f64::from(gm.lambda_entropy), 0.0)?;
-                            total = (total + ent)?;
-                        }
+                    total =
+                        (total + module_step_loss(m, &pi_masked, &x, &e_units, gm.lambda_module)?)?;
+                    if let Some(prior) = module_priors(m, &pi, gm.lambda_balance)? {
+                        total = (total + prior)?;
                     }
                 }
             }
@@ -1567,17 +1549,8 @@ pub fn fit_cell_activity_graph_embedding(
         );
         if let Some(m) = &model.modules {
             let pi_host: Vec<f32> = m.membership()?.detach().flatten_all()?.to_vec1()?;
-            let dg = membership_diagnostics(&pi_host, n_genes, m.n_modules, 5);
-            info!(
-                "epoch {epoch} modules{}: max occupancy {:.2}x uniform, {} of {} modules below 5 \
-                 genes, row entropy {:.3} nats, {:.2} modules/gene",
-                if m.is_frozen() { " (frozen)" } else { "" },
-                dg.max_occupancy_ratio,
-                dg.n_small_modules,
-                m.n_modules,
-                dg.mean_row_entropy,
-                dg.mean_row_support,
-            );
+            // cage draws its negatives over pseudobulks, so no within-module fallback.
+            log_membership_diagnostics(m, &pi_host, epoch, args.epochs, 0)?;
         }
 
         // Pair-term magnitude: the collapse detector. If this decays toward

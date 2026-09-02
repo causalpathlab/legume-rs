@@ -219,8 +219,6 @@ pub struct GeneModuleConfig {
     pub lambda_module: f32,
     /// Weight of the load-balance prior `KL(π̄ ‖ Uniform)`.
     pub lambda_balance: f32,
-    /// Weight of the row-entropy penalty on the membership (`0` = off).
-    pub lambda_entropy: f32,
     /// Ridge on the per-feature residual `r_g` — the module model's only per-row
     /// table, so this replaces `feature_embedding_l2`.
     pub residual_l2: f32,
@@ -236,8 +234,8 @@ pub struct GeneModuleConfig {
     pub parent: Option<ParentModulesOwned>,
 }
 
-/// Owned form of [`crate::fit::module_warm::ParentModules`], carried on the
-/// config because the fit outlives the caller's borrows.
+/// A parent run's module tables, carried on the config for the warm start
+/// (`senna update`).
 #[derive(Clone, Debug)]
 pub struct ParentModulesOwned {
     /// Parent composed rows `[D_parent × H]`.
@@ -248,25 +246,19 @@ pub struct ParentModulesOwned {
     pub mu: nalgebra::DMatrix<f32>,
     /// For each feature of this fit's axis, the parent row it matched.
     pub row_to_parent: Vec<Option<usize>>,
-    /// Neighbours / floor for the unmatched features' initialization.
-    pub k: usize,
-    pub similarity_floor: f32,
+    /// Neighbourhood for the unmatched features' initialization.
+    pub knobs: crate::transfer::AlignKnobs,
 }
 
-impl Default for GeneModuleConfig {
-    fn default() -> Self {
-        Self {
-            n_modules: 128,
-            warmup_epochs: None,
-            gene_dropout: 0.2,
-            lambda_module: 1.0,
-            lambda_balance: 1.0,
-            lambda_entropy: 0.0,
-            residual_l2: 0.1,
-            units_per_step: 64,
-            init_own_mass: 0.9,
-            parent: None,
-        }
+impl GeneModuleConfig {
+    /// Epochs the warm-start membership is held: the explicit count, else a
+    /// quarter of the epochs, at least one and at most all of them. The one
+    /// definition every trainer with a module model uses.
+    #[must_use]
+    pub fn warmup_epochs_for(&self, epochs: usize) -> usize {
+        self.warmup_epochs
+            .unwrap_or_else(|| ((epochs as f64) * MODULE_WARMUP_FRAC).ceil() as usize)
+            .clamp(usize::from(epochs > 0), epochs)
     }
 }
 
@@ -354,15 +346,11 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,
         module: config.gene_modules.as_ref().map(|g| ModuleTrainParams {
-            warmup_epochs: g
-                .warmup_epochs
-                .unwrap_or_else(|| ((config.epochs as f64) * MODULE_WARMUP_FRAC).ceil() as usize)
-                .clamp(usize::from(config.epochs > 0), config.epochs),
+            warmup_epochs: g.warmup_epochs_for(config.epochs),
             gene_dropout: g.gene_dropout,
             units_per_step: g.units_per_step,
             lambda_module: g.lambda_module,
             lambda_balance: g.lambda_balance,
-            lambda_entropy: g.lambda_entropy,
             residual_l2: g.residual_l2,
         }),
     }

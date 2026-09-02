@@ -29,7 +29,7 @@ pub use gate::{
     GATE_KL_WEIGHT,
 };
 pub use modules::{
-    module_logit_for_own_mass, FeatModules, ModuleInit, MODULE_BIAS_VAR_NAME,
+    module_logit_for_own_mass, FeatModules, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME,
     MODULE_LOGITS_VAR_NAME, MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
 };
 use vars::{
@@ -249,14 +249,45 @@ pub struct FeatAdapter {
     pub residual: Option<Tensor>,
 }
 
-impl FeatAdapter {
+/// A feature side whose `e_feat` is a detached COMPOSED snapshot of live
+/// parameters — the adapter (`ρ·W + r`) and the module layer (`π μ + r`). The
+/// gather, the materialize, the gate KL and the ridge all treat these two the
+/// same way, so they dispatch on this trait rather than on each field.
+pub trait ComposedFeat {
     /// The full composed table `[n_features, H]`, on the live parameters.
-    pub fn compose(&self) -> Result<Tensor> {
+    fn compose(&self) -> Result<Tensor>;
+    /// Composed rows for `idx`, `[b, H]`, on the live parameters.
+    fn compose_rows(&self, idx: &Tensor) -> Result<Tensor>;
+    /// The per-row table that can overfit row by row and takes the ridge, if any.
+    fn ridge_table(&self) -> Option<&Tensor>;
+}
+
+impl ComposedFeat for FeatAdapter {
+    fn compose(&self) -> Result<Tensor> {
         let base = self.rho.matmul(&self.w)?;
         match &self.residual {
             Some(r) => base.add(r),
             None => Ok(base),
         }
+    }
+
+    fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
+        let mut rows = self.rho.index_select(idx, 0)?.matmul(&self.w)?;
+        if let Some(r) = &self.residual {
+            rows = rows.add(&r.index_select(idx, 0)?)?;
+        }
+        Ok(rows)
+    }
+
+    fn ridge_table(&self) -> Option<&Tensor> {
+        self.residual.as_ref()
+    }
+}
+
+impl FeatAdapter {
+    /// The full composed table `[n_features, H]`, on the live parameters.
+    pub fn compose(&self) -> Result<Tensor> {
+        ComposedFeat::compose(self)
     }
 }
 
@@ -423,13 +454,8 @@ impl JointEmbedModel {
     /// Owning this here keeps a trainer from ridging `e_feat` on a model where
     /// that field is a detached snapshot, which is silently inert.
     pub fn feature_ridge(&self, lam: f64) -> Result<Option<Tensor>> {
-        // Modules: the residual is the only per-row table; `μ` is shared and the
-        // membership is a simplex, so neither can overfit row by row.
-        if let Some(m) = &self.modules {
-            return Ok(Some(crate::loss::embedding_ridge(&m.residual, lam)?));
-        }
-        if let Some(a) = &self.adapter {
-            return match &a.residual {
+        if let Some(c) = self.composed() {
+            return match c.ridge_table() {
                 Some(r) => Ok(Some(crate::loss::embedding_ridge(r, lam)?)),
                 None => Ok(None),
             };
@@ -441,16 +467,22 @@ impl JointEmbedModel {
         Ok(Some(crate::loss::embedding_ridge(table, lam)?))
     }
 
-    /// Refresh the `e_feat` snapshot of an ADAPTED model from the live
-    /// parameters WITHOUT baking any gate: the raw composed table. For the
-    /// gate-baked snapshot use [`Self::materialize_e_feat`]. A no-op for the
-    /// other parameterizations, whose `e_feat` is not adapter-derived.
-    pub fn recompose_e_feat_raw(&mut self) -> Result<()> {
-        if let Some(a) = &self.adapter {
-            self.e_feat = a.compose()?.detach();
-        }
+    /// The composed feature side, when this model has one (adapter or modules;
+    /// mutually exclusive by construction). `None` for free and factored models.
+    pub fn composed(&self) -> Option<&dyn ComposedFeat> {
         if let Some(m) = &self.modules {
-            self.e_feat = m.compose()?.detach();
+            return Some(m);
+        }
+        self.adapter.as_ref().map(|a| a as &dyn ComposedFeat)
+    }
+
+    /// Refresh the `e_feat` snapshot of a COMPOSED model (adapter or modules)
+    /// from the live parameters WITHOUT baking any gate: the raw composed table.
+    /// For the gate-baked snapshot use [`Self::materialize_e_feat`]. A no-op for
+    /// the other parameterizations, whose `e_feat` is the trained table itself.
+    pub fn recompose_e_feat_raw(&mut self) -> Result<()> {
+        if let Some(c) = self.composed() {
+            self.e_feat = c.compose()?.detach();
         }
         Ok(())
     }

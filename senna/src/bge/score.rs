@@ -56,12 +56,9 @@ pub struct BgeEmbedding {
 /// How `predict` treats the new data's genes the model never saw.
 #[derive(Clone, Copy, Debug)]
 pub struct InitOpts {
-    /// `false` drops unseen genes, the pre-alignment behaviour.
-    pub enabled: bool,
-    /// Neighbours whose membership is averaged for an unseen gene.
-    pub k: usize,
-    /// Below this best cosine similarity an unseen gene takes the diffuse prior.
-    pub similarity_floor: f32,
+    /// `None` drops unseen genes, the pre-alignment behaviour; `Some` places
+    /// them through the modules with this neighbourhood.
+    pub align: Option<graph_embedding_util::transfer::AlignKnobs>,
     /// Re-project every cell with the initialized genes as observations (pass 2).
     /// Off, they are scored from the pass-1 latent and never move it.
     pub in_fit: bool,
@@ -69,9 +66,7 @@ pub struct InitOpts {
 
 impl InitOpts {
     pub const OFF: Self = Self {
-        enabled: false,
-        k: 10,
-        similarity_floor: 0.2,
+        align: None,
         in_fit: false,
     };
 }
@@ -79,10 +74,6 @@ impl InitOpts {
 /// What the alignment produced, for the writers.
 pub struct InitOutcome {
     pub alignment: graph_embedding_util::transfer::GeneAlignment,
-    /// Row names of the NEW data (the alignment's `union_to_new` indexes these).
-    pub new_gene_names: Vec<Box<str>>,
-    /// New-data rows that were initialized, in alignment order.
-    pub unseen_rows: Vec<usize>,
     /// Per-cell score on the initialized genes.
     pub scores: Vec<super::transfer::InitScore>,
     /// Pseudobulks the profiles were formed over.
@@ -110,6 +101,11 @@ pub struct BgeFit {
 }
 
 impl BgeEmbedding {
+    /// ρ as a `[D, H]` matrix (the row-major buffer read back as columns).
+    pub fn rho_matrix(&self) -> DMatrix<f32> {
+        DMatrix::from_row_slice(self.gene_names.len(), self.h, &self.rho)
+    }
+
     /// Open from a run prefix or a `{run}.senna.json` path.
     ///
     /// Both, because the two callers disagree: `probe --model` is documented as a run
@@ -166,38 +162,20 @@ impl BgeEmbedding {
         let rho_rm = rho.mat.transpose().as_slice().to_vec();
         info!("bge model: {d} genes, H={h} (ρ {rho_path})");
 
-        // Module tables, when the run trained them. Rows must be the dictionary's genes
-        // in the dictionary's order: the alignment indexes π by training row.
+        // Module tables, when the run trained them.
         let modules = match (
             manifest.outputs.module_membership.as_deref(),
             manifest.outputs.module_dictionary.as_deref(),
         ) {
             (Some(pi_rel), Some(mu_rel)) => {
-                let pi_path = run_manifest::resolve(&dir, pi_rel)
-                    .to_string_lossy()
-                    .into_owned();
-                let mu_path = run_manifest::resolve(&dir, mu_rel)
-                    .to_string_lossy()
-                    .into_owned();
-                let pi = DMatrix::<f32>::from_parquet(&pi_path)
-                    .with_context(|| format!("reading module membership {pi_path}"))?;
-                let mu = DMatrix::<f32>::from_parquet(&mu_path)
-                    .with_context(|| format!("reading module dictionary {mu_path}"))?;
-                anyhow::ensure!(
-                    pi.rows == rho.rows,
-                    "module membership genes disagree with the dictionary ({} vs {} rows)",
-                    pi.rows.len(),
-                    rho.rows.len()
-                );
-                anyhow::ensure!(
-                    mu.mat.ncols() == h && mu.mat.nrows() == pi.mat.ncols(),
-                    "module dictionary is {}×{} but π has {} modules and H={h}",
-                    mu.mat.nrows(),
-                    mu.mat.ncols(),
-                    pi.mat.ncols()
-                );
-                info!("bge model carries {} learned gene modules", pi.mat.ncols());
-                Some((pi.mat, mu.mat))
+                let (pi, mu) = graph_embedding_util::transfer::read_module_tables(
+                    &run_manifest::resolve(&dir, pi_rel).to_string_lossy(),
+                    &run_manifest::resolve(&dir, mu_rel).to_string_lossy(),
+                    &rho.rows,
+                    h,
+                )?;
+                info!("bge model carries {} learned gene modules", pi.ncols());
+                Some((pi, mu))
             }
             _ => None,
         };
@@ -252,9 +230,10 @@ impl BgeEmbedding {
         init: InitOpts,
         dev: &Device,
     ) -> anyhow::Result<BgeFit> {
-        use super::transfer::{profiles_by_cluster, score_initialized, union_remap, unseen_rows};
+        use super::transfer::{profiles_by_cluster, score_initialized, union_remap};
         use graph_embedding_util::transfer::{
-            align_gene_axis, moment_matched_bias, AlignInputs, GeneStatus, ModuleTables,
+            align_gene_axis, moment_matched_bias, pseudobulk_count, AlignInputs, GeneStatus,
+            ModuleTables,
         };
 
         let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
@@ -277,7 +256,8 @@ impl BgeEmbedding {
         // be dropped here along with every `--feature-name-*` flag.
         crate::topic::eval::ensure_gene_coverage(&remap, qopts.min_overlap, "--feature-name-kind")?;
         // The remap BEFORE the hide pass: the alignment must see a withheld model gene as
-        // matched (its row is kept, its counts are not), never as unseen.
+        // matched (its row is kept, its counts are not), never as unseen. The unseen
+        // genes are exactly the rows that matched nothing here.
         let before_hide = remap.new_to_train.clone();
         // After the coverage gate, not before: the hidden genes are deliberately
         // withheld, so counting them as missing coverage would refuse every
@@ -286,17 +266,13 @@ impl BgeEmbedding {
         if let Some(hide) = qopts.hide.as_deref() {
             crate::topic::eval::hide_features(&mut remap, &new_genes, hide)?;
         }
-        let hidden_rows: std::collections::HashSet<usize> = (0..new_genes.len())
-            .filter(|&r| before_hide[r].is_some() && remap.new_to_train[r].is_none())
-            .collect();
-        let unseen: Vec<usize> = if init.enabled {
-            unseen_rows(&before_hide, &hidden_rows)
-        } else {
-            Vec::new()
+        let unseen: Vec<usize> = match init.align {
+            Some(_) => (0..new_genes.len())
+                .filter(|&r| before_hide[r].is_none())
+                .collect(),
+            None => Vec::new(),
         };
 
-        // The exact normalizer: every model gene, so `partition_scale = 1`.
-        let partition: Vec<u32> = (0..n_model as u32).collect();
         let side = FrozenSide {
             e: &self.rho,
             b: &self.b_feat,
@@ -320,19 +296,17 @@ impl BgeEmbedding {
             remap: &remap.new_to_train,
             projector: &projector,
             side: &side,
-            partition: &partition,
             n_model,
             block,
-            h: self.h,
         })?;
 
         let mut init_out: Option<InitOutcome> = None;
-        if !unseen.is_empty() {
+        if let (Some(knobs), false) = (init.align, unseen.is_empty()) {
             let n_cells = pass.latent.nrows();
             let n_new = new_genes.len();
             // Pseudobulks for the profiles: a clustering of the pass-1 latents, so a
             // profile is a gene's expression across the cell states this model sees.
-            let n_clusters = (n_cells / 50).clamp(8, 256).min(n_cells.max(1));
+            let n_clusters = pseudobulk_count(n_cells);
             let (_, labels) = matrix_util::principal_graph::kmeans_centroids_seeded(
                 &pass.latent,
                 n_clusters,
@@ -346,7 +320,6 @@ impl BgeEmbedding {
                 unseen_local[r] = i as u32;
             }
             let mut obs: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_cells];
-            let mut totals = vec![0f32; unseen.len()];
             let mut profiles = DMatrix::<f32>::zeros(n_new, n_clusters);
             let mut lb = 0usize;
             while lb < n_cells {
@@ -355,51 +328,45 @@ impl BgeEmbedding {
                 // Raw CSC arrays sliced by offset: a column view would borrow a local.
                 let (offsets, rows_all, vals_all) =
                     (csc.col_offsets(), csc.row_indices(), csc.values());
-                profiles_by_cluster(
-                    &mut profiles,
-                    &labels,
-                    (0..csc.ncols()).map(|j| {
-                        let (s0, s1) = (offsets[j], offsets[j + 1]);
-                        (lb + j, &rows_all[s0..s1], &vals_all[s0..s1])
-                    }),
-                );
                 for j in 0..csc.ncols() {
-                    let c = lb + j;
-                    let col = csc.col(j);
-                    for (&row, &v) in col.row_indices().iter().zip(col.values()) {
+                    let (s0, s1) = (offsets[j], offsets[j + 1]);
+                    let (rows, vals) = (&rows_all[s0..s1], &vals_all[s0..s1]);
+                    profiles_by_cluster(
+                        &mut profiles,
+                        &labels,
+                        std::iter::once((lb + j, rows, vals)),
+                    );
+                    for (&row, &v) in rows.iter().zip(vals) {
                         let li = unseen_local[row];
                         if li != u32::MAX {
-                            obs[c].push((li, v));
-                            totals[li as usize] += v;
+                            obs[lb + j].push((li, v));
                         }
                     }
                 }
                 lb = ub;
             }
+            let totals: Vec<f32> = unseen
+                .iter()
+                .map(|&r| profiles.row(r).iter().sum::<f32>())
+                .collect();
 
-            let rho_dm = DMatrix::<f32>::from_row_slice(n_model, self.h, &self.rho);
+            let rho_dm = self.rho_matrix();
             let modules = self
                 .modules
                 .as_ref()
                 .map(|(pi, mu)| ModuleTables { pi, mu });
             let mut alignment = align_gene_axis(&AlignInputs {
                 rho: &rho_dm,
-                b_feat: &self.b_feat,
+                b_feat: Some(&self.b_feat),
                 modules,
                 new_to_train: &before_hide,
                 profiles_new: Some(&profiles),
-                k: init.k,
-                similarity_floor: init.similarity_floor,
+                knobs,
             });
-            let init_idx = alignment.with_status(GeneStatus::Initialized);
-            anyhow::ensure!(
-                init_idx.len() == unseen.len()
-                    && init_idx
-                        .iter()
-                        .zip(&unseen)
-                        .all(|(&g, &r)| alignment.union_to_new[g] == Some(r)),
-                "alignment and unseen-row bookkeeping disagree"
-            );
+            let init_idx: Vec<usize> = unseen
+                .iter()
+                .map(|&r| alignment.new_to_union[r].expect("an unseen gene is initialized"))
+                .collect();
             let init_rows = alignment.rows.select_rows(init_idx.iter());
             // A gene the query never expresses has no scale to match; give it the
             // smallest trained bias rather than 0, which would make it the most
@@ -421,8 +388,8 @@ impl BgeEmbedding {
                 alignment.with_status(GeneStatus::Missing).len(),
                 init_idx.len(),
                 n_diffuse,
-                init.k,
-                init.similarity_floor
+                knobs.k,
+                knobs.similarity_floor
             );
 
             // Pass 2: the initialized genes become observations. The comparable score
@@ -446,10 +413,8 @@ impl BgeEmbedding {
                     remap: &remap2,
                     projector: &projector2,
                     side: &side,
-                    partition: &partition,
                     n_model,
                     block,
-                    h: self.h,
                 })?;
             }
 
@@ -467,8 +432,6 @@ impl BgeEmbedding {
             );
             init_out = Some(InitOutcome {
                 alignment,
-                new_gene_names: new_genes.clone(),
-                unseen_rows: unseen,
                 scores,
                 n_clusters,
                 in_fit: init.in_fit,
@@ -494,13 +457,11 @@ struct ProjectAll<'a> {
     remap: &'a [Option<usize>],
     projector: &'a FrozenProjector<'a>,
     side: &'a FrozenSide<'a>,
-    partition: &'a [u32],
     /// Rows below this belong to the model's own genes and enter the score;
     /// rows at or above it are initialized genes, observed by the projector but
     /// not scored here.
     n_model: usize,
     block: usize,
-    h: usize,
 }
 
 struct ProjectAllOut {
@@ -512,10 +473,13 @@ struct ProjectAllOut {
 
 fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
     let ntot = a.data_vec.num_columns();
+    let h = a.side.h;
+    // The exact normalizer: every model gene, so `partition_scale = 1`.
+    let partition: Vec<u32> = (0..a.n_model as u32).collect();
     let mut llik = Vec::with_capacity(ntot);
     let mut total = Vec::with_capacity(ntot);
     let mut b_cell = Vec::with_capacity(ntot);
-    let mut latent = Mat::zeros(ntot, a.h);
+    let mut latent = Mat::zeros(ntot, h);
     // ONE bar for the query. The projector advances it as its blocks step, so this
     // side never increments it: nesting a second bar under it (one per projection
     // call) is what the group loop used to do.
@@ -589,14 +553,14 @@ fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
                 .zip(count.iter().copied())
                 .filter(|&(f, _)| f < n_model)
                 .collect();
-            let node = NodeTerm::new(&pos, a.partition, 1.0);
-            multinomial_ll(&e_cell[c * a.h..(c + 1) * a.h], &node, a.side)
+            let node = NodeTerm::new(&pos, &partition, 1.0);
+            multinomial_ll(&e_cell[c * h..(c + 1) * h], &node, a.side)
         }));
         // `e_cell` is row-major `[n_group, H]`; `Mat` is column-major, so this is a
         // transposing copy rather than a memcpy.
         for c in 0..n_group {
-            for j in 0..a.h {
-                latent[(group_lb + c, j)] = e_cell[c * a.h + j];
+            for j in 0..h {
+                latent[(group_lb + c, j)] = e_cell[c * h + j];
             }
         }
         group.clear();

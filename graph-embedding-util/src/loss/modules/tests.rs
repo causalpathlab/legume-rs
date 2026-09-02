@@ -59,13 +59,15 @@ fn pooled_counts_ignore_dropped_features() {
     let c2: Vec<f32> = vec![2.0, 999.0, 1.0]; // dropped feature 1 perturbed
     let x1 = dense_count_block(&[(&f, &c1)], 6, &dev()).unwrap();
     let x2 = dense_count_block(&[(&f, &c2)], 6, &dev()).unwrap();
-    let a: Vec<f32> = pool_module_counts(&x1, &tilde)
+    let a: Vec<f32> = x1
+        .matmul(&tilde)
         .unwrap()
         .flatten_all()
         .unwrap()
         .to_vec1()
         .unwrap();
-    let b: Vec<f32> = pool_module_counts(&x2, &tilde)
+    let b: Vec<f32> = x2
+        .matmul(&tilde)
         .unwrap()
         .flatten_all()
         .unwrap()
@@ -121,14 +123,14 @@ fn module_softmax_gradient_matches_finite_difference() {
 
     let loss_fn = |logits: &Tensor, mu: &Tensor, b: &Tensor, e: &Tensor| -> f32 {
         let pi = sparsemax(logits).unwrap();
-        let xcm = pool_module_counts(&x, &pi).unwrap();
+        let xcm = x.matmul(&pi).unwrap();
         module_softmax_loss(e, mu, b, &xcm)
             .unwrap()
             .to_scalar::<f32>()
             .unwrap()
     };
     let pi = sparsemax(logits.as_tensor()).unwrap();
-    let xcm = pool_module_counts(&x, &pi).unwrap();
+    let xcm = x.matmul(&pi).unwrap();
     let loss = module_softmax_loss(e.as_tensor(), mu.as_tensor(), b.as_tensor(), &xcm).unwrap();
     let grads = loss.backward().unwrap();
 
@@ -209,16 +211,22 @@ fn pools_follow_membership_and_stay_inside_the_feature_pool() {
     let host: Vec<f32> = pi.flatten_all().unwrap().to_vec1().unwrap();
     let rows = membership_rows_host(&host, 6, 2);
     // Feature 5 is excluded from this sampler's pool.
+    // Above the uniform level 1/2: m0 = {0, 1, 3(0.5? no: 0.5 is not > 0.5)} — rows
+    // (1,0) (0.7,0.3) (0,1) (0.5,0.5) (0.2,0.8): m0 members 0,1; m1 members 2,4.
     let pool = ModulePools::build(rows, 2, &[0, 1, 2, 3, 4]);
-    assert_eq!(pool.member_counts(), vec![4, 4]); // m0: 0,1,3,4  m1: 1,2,3,4
     let mut rng = StdRng::seed_from_u64(1);
     let mut out = Vec::new();
-    // Feature 0 is only in module 0: negatives come from {0,1,3,4}.
+    // Feature 0 is only in module 0: negatives come from {0, 1}.
     for _ in 0..50 {
         assert!(pool.draw_negatives(0, 3, &mut out, &mut rng));
     }
     assert_eq!(out.len(), 150);
-    assert!(out.iter().all(|f| [0u32, 1, 3, 4].contains(f)), "{out:?}");
+    assert!(out.iter().all(|f| [0u32, 1].contains(f)), "{out:?}");
+    // Feature 3 sits exactly at the uniform level on both modules: no module
+    // above it, so it falls back and the fallback is counted.
+    assert!(!pool.draw_negatives(3, 2, &mut out, &mut rng));
+    assert_eq!(pool.take_fallbacks(), 1);
+    assert_eq!(pool.take_fallbacks(), 0);
 }
 
 #[test]
@@ -231,6 +239,7 @@ fn singleton_module_falls_back() {
     // Module 0 has one member: nothing to contrast with.
     assert!(!pool.draw_negatives(0, 2, &mut out, &mut rng));
     assert!(out.is_empty());
+    assert_eq!(pool.take_fallbacks(), 1);
     assert!(pool.draw_negatives(1, 2, &mut out, &mut rng));
     assert_eq!(out.len(), 2);
 }
@@ -306,7 +315,7 @@ fn entropy_stays_above_floor_on_random_counts() {
     .unwrap();
     for _ in 0..200 {
         let pi = sparsemax(logits.as_tensor()).unwrap();
-        let xcm = pool_module_counts(&x, &pi).unwrap();
+        let xcm = x.matmul(&pi).unwrap();
         let l = module_softmax_loss(e.as_tensor(), mu.as_tensor(), b.as_tensor(), &xcm).unwrap();
         let prior = module_balance_prior(&pi).unwrap();
         let loss = (l + prior).unwrap();

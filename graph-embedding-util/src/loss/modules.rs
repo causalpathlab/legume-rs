@@ -14,16 +14,24 @@
 //! the counts are pooled — the module keeps its expected count through the
 //! survivors — so `μ` is fit under exactly the perturbation a later dataset with a
 //! different gene panel applies.
+//!
+//! [`module_step_loss`], [`module_priors`] and [`log_membership_diagnostics`] are
+//! the pieces every trainer with a module model shares (geu's composite trainer,
+//! `pinto cage`), so the objective is written once.
 
+use crate::model::FeatModules;
 use candle_util::candle_core::{Device, Result, Tensor};
 use candle_util::candle_nn::ops::log_softmax;
+use log::info;
 use rand::{Rng, RngExt};
-use rand_distr::weighted::WeightedIndex;
-use rand_distr::Distribution;
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Floor on a pooled or marginal mass before it divides or is logged.
 const EPS: f64 = 1e-6;
+
+/// A module with fewer argmax features than this is reported as small.
+pub const MODULE_SMALL_FLOOR: usize = 5;
 
 ///////////////////////////////////
 // Dropout and the pooled counts //
@@ -51,21 +59,16 @@ pub fn draw_gene_keep_mask(
 
 /// `π̃ = keep ⊙ π`, rescaled per MODULE so each column keeps the mass it had
 /// before the mask: a dropped feature contributes exactly zero, and the survivors
-/// of its modules are scaled up to stand in for it. The scale is detached — it is
-/// a normalizer, not a parameter — so the gradient into `π` is the plain masked
-/// one. A module with no survivor stays at zero.
+/// of its modules are scaled up to stand in for it. Detached throughout: the only
+/// consumer is the exact term's target, which never trains the membership. A
+/// module with no survivor stays at zero.
 pub fn masked_membership(pi: &Tensor, keep: &Tensor) -> Result<Tensor> {
+    let pi = pi.detach();
     let kept = pi.broadcast_mul(keep)?; // [D, M]
-    let full_mass = pi.sum_keepdim(0)?.detach(); // [1, M]
-    let kept_mass = kept.sum_keepdim(0)?.detach().clamp(EPS, f64::INFINITY)?;
+    let full_mass = pi.sum_keepdim(0)?; // [1, M]
+    let kept_mass = kept.sum_keepdim(0)?.clamp(EPS, f64::INFINITY)?;
     let scale = full_mass.div(&kept_mass)?;
     kept.broadcast_mul(&scale)
-}
-
-/// Module-pooled counts `x̃ = X · π̃`, `[U, M]`. One matmul; the exact term
-/// detaches it, so the membership sees no gradient from the pooled target.
-pub fn pool_module_counts(x_dense: &Tensor, pi_masked: &Tensor) -> Result<Tensor> {
-    x_dense.matmul(pi_masked)
 }
 
 /// Scatter sparse count rows into one dense `[U, D]` block on `dev`. Rows are
@@ -128,6 +131,23 @@ pub fn module_softmax_loss(
     p.mul(&log_q)?.sum(1)?.neg()?.mean(0)
 }
 
+/// One trainer step of the exact term: pool the units' dense count block
+/// `[U, D]` through the (dropout-masked, detached) membership `[D, M]`, score
+/// every module against the units' embeddings `[U, H]`, and weight by
+/// `lambda_module`. The one definition both geu's composite trainer and
+/// `pinto cage` call.
+pub fn module_step_loss(
+    modules: &FeatModules,
+    pi_masked: &Tensor,
+    x_dense: &Tensor,
+    e_units: &Tensor,
+    lambda_module: f32,
+) -> Result<Tensor> {
+    let x_cm = x_dense.matmul(pi_masked)?; // [U, M]
+    module_softmax_loss(e_units, &modules.mu, &modules.b_module, &x_cm)?
+        .affine(f64::from(lambda_module), 0.0)
+}
+
 ////////////
 // Priors //
 ////////////
@@ -144,10 +164,19 @@ pub fn module_balance_prior(pi: &Tensor) -> Result<Tensor> {
     occ.mul(&occ_safe.affine(m, 0.0)?.log()?)?.sum_all()
 }
 
-/// Mean row entropy `mean_g −Σ_m π_gm log π_gm`. Exact zeros contribute nothing.
-pub fn module_row_entropy(pi: &Tensor) -> Result<Tensor> {
-    let safe = pi.clamp(EPS, f64::INFINITY)?;
-    pi.mul(&safe.log()?)?.sum(1)?.neg()?.mean(0)
+/// The membership priors for one optimizer step, or `None` while the membership
+/// is frozen (it is detached then, and they would be constants).
+pub fn module_priors(
+    modules: &FeatModules,
+    pi: &Tensor,
+    lambda_balance: f32,
+) -> Result<Option<Tensor>> {
+    if modules.is_frozen() || lambda_balance <= 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(
+        module_balance_prior(pi)?.affine(f64::from(lambda_balance), 0.0)?,
+    ))
 }
 
 /////////////////////////////////
@@ -159,29 +188,43 @@ pub fn module_row_entropy(pi: &Tensor) -> Result<Tensor> {
 /// epoch, the same granularity as the gate mask). One per sampler, because each
 /// sampler has its own expressed-feature pool.
 pub struct ModulePools {
-    /// Per feature: the nonzero `(module, weight)` entries of its membership row.
-    /// Shared by every sampler's pools; only `members` differs.
+    /// Per feature: the `(module, cumulative weight)` entries of its membership
+    /// row ABOVE the uniform level `1/M`, so a draw is one uniform number and a
+    /// scan. Shared by every sampler's pools; only `members` differs.
     rows: std::sync::Arc<Vec<Vec<(u32, f32)>>>,
-    /// Per module: the features with nonzero membership in it, restricted to this
-    /// sampler's feature pool.
+    /// Per module: the features with above-uniform membership in it, restricted
+    /// to this sampler's feature pool.
     members: Vec<Vec<u32>>,
+    /// Positives whose module was too small in this pool to contrast within, so
+    /// the caller drew globally. Read and reset by the diagnostics.
+    fallbacks: AtomicUsize,
 }
 
-/// The per-feature membership rows, built once per refresh and shared across the
-/// samplers' pools.
+/// The per-feature membership rows for the pools, built once per refresh and
+/// shared across the samplers' pools.
+///
+/// Only entries ABOVE the uniform level `1/M` count as membership here. The
+/// warm start deliberately keeps every module in every row's sparsemax support
+/// at a sliver of mass, so taking every nonzero would put every feature in every
+/// module: a "within-module" draw that is the global draw at `M ×` the memory.
 pub fn membership_rows_host(
     pi_host: &[f32],
     n_features: usize,
     n_modules: usize,
 ) -> std::sync::Arc<Vec<Vec<(u32, f32)>>> {
     assert_eq!(pi_host.len(), n_features * n_modules, "membership shape");
+    let floor = 1.0 / n_modules as f32;
     let rows: Vec<Vec<(u32, f32)>> = pi_host
         .par_chunks(n_modules)
         .map(|row| {
+            let mut cum = 0f32;
             row.iter()
                 .enumerate()
-                .filter(|(_, &w)| w > 0.0)
-                .map(|(m, &w)| (m as u32, w))
+                .filter(|(_, &w)| w > floor)
+                .map(|(m, &w)| {
+                    cum += w;
+                    (m as u32, cum)
+                })
                 .collect()
         })
         .collect();
@@ -202,20 +245,19 @@ impl ModulePools {
                 members[m as usize].push(f);
             }
         }
-        Self { rows, members }
-    }
-
-    /// Per-module member counts, for the diagnostics.
-    #[must_use]
-    pub fn member_counts(&self) -> Vec<usize> {
-        self.members.iter().map(Vec::len).collect()
+        Self {
+            rows,
+            members,
+            fallbacks: AtomicUsize::new(0),
+        }
     }
 
     /// Push `k` negatives for the positive `feat`: pick one of its modules with
     /// probability ∝ its membership weight, then draw uniformly from that module's
-    /// members. Returns `false` — pushing nothing — when the chosen module has
-    /// fewer than two members in this pool (a lone feature has nothing to contrast
-    /// with), so the caller falls back to the global draw.
+    /// members. Returns `false` — pushing nothing, and counting the fallback —
+    /// when the feature has no above-uniform module or the chosen module has
+    /// fewer than two members in this pool (a lone feature has nothing to
+    /// contrast with), so the caller falls back to the global draw.
     pub fn draw_negatives(
         &self,
         feat: u32,
@@ -224,26 +266,32 @@ impl ModulePools {
         rng: &mut impl Rng,
     ) -> bool {
         let row = &self.rows[feat as usize];
-        if row.is_empty() {
+        let Some(&(_, total)) = row.last() else {
+            self.fallbacks.fetch_add(1, Ordering::Relaxed);
             return false;
-        }
+        };
         let m = if row.len() == 1 {
             row[0].0
         } else {
-            let w: Vec<f32> = row.iter().map(|&(_, w)| w).collect();
-            let Ok(pick) = WeightedIndex::new(w) else {
-                return false;
-            };
-            row[pick.sample(rng)].0
+            let r = rng.random::<f32>() * total;
+            row.iter()
+                .find(|&&(_, cum)| r < cum)
+                .map_or(row[row.len() - 1].0, |&(m, _)| m)
         };
         let pool = &self.members[m as usize];
         if pool.len() < 2 {
+            self.fallbacks.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         for _ in 0..k {
             out.push(pool[rng.random_range(0..pool.len())]);
         }
         true
+    }
+
+    /// Fallbacks since the last call, and reset.
+    pub fn take_fallbacks(&self) -> usize {
+        self.fallbacks.swap(0, Ordering::Relaxed)
     }
 }
 
@@ -296,6 +344,54 @@ pub fn membership_diagnostics(
         mean_row_entropy: (ent / d) as f32,
         mean_row_support: (support as f64 / d) as f32,
     }
+}
+
+/// One `info` line per epoch on the membership: occupancy, small modules, row
+/// entropy and support, the residual's share of the row norm, and how many
+/// positives fell back to global negatives. Collapse shows up here long before it
+/// shows up in the loss. `pi_host` is the current `[D × M]` membership.
+pub fn log_membership_diagnostics(
+    modules: &FeatModules,
+    pi_host: &[f32],
+    epoch: usize,
+    epochs: usize,
+    fallbacks: usize,
+) -> Result<()> {
+    let m = modules.n_modules;
+    let n_features = modules.logits.dim(0)?;
+    let dg = membership_diagnostics(pi_host, n_features, m, MODULE_SMALL_FLOOR);
+    let r2: f32 = modules
+        .residual
+        .detach()
+        .sqr()?
+        .sum(1)?
+        .mean_all()?
+        .to_scalar()?;
+    let rho2: f32 = modules
+        .compose()?
+        .detach()
+        .sqr()?
+        .sum(1)?
+        .mean_all()?
+        .to_scalar()?;
+    info!(
+        "epoch {}/{} modules{}: max occupancy {:.2}x uniform, {} of {} modules below {} \
+         features, row entropy {:.3} nats, {:.2} modules/feature, mean ‖r‖² {:.3} vs \
+         ‖ρ‖² {:.3}, {} positives fell back to global negatives",
+        epoch + 1,
+        epochs,
+        if modules.is_frozen() { " (frozen)" } else { "" },
+        dg.max_occupancy_ratio,
+        dg.n_small_modules,
+        m,
+        MODULE_SMALL_FLOOR,
+        dg.mean_row_entropy,
+        dg.mean_row_support,
+        r2,
+        rho2,
+        fallbacks,
+    );
+    Ok(())
 }
 
 #[cfg(test)]
