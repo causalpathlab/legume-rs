@@ -685,6 +685,7 @@ fn a_sharing_head_still_has_a_gate_kl() {
             shared_e_feat_logstd: m.e_feat_logstd.clone(),
             shared_gate_ibp_bias: m.gate_ibp_bias.clone(),
             gate: m.gate,
+            shared_modules: None,
         },
         &vm,
         &dev(),

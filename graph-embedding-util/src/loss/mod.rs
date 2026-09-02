@@ -28,6 +28,7 @@ use candle_util::candle_core::{Result, Tensor};
 pub(crate) mod cell;
 pub(crate) mod chain;
 pub(crate) mod feat;
+pub(crate) mod modules;
 
 #[cfg(test)]
 mod tests;
@@ -44,6 +45,11 @@ pub use feat::{
     sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
     EdgeBatch, FeatPairing, PbFeatureSampler, PerBatchStratifiedCellSampler,
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
+};
+pub use modules::{
+    dense_count_block, draw_gene_keep_mask, masked_membership, membership_diagnostics,
+    membership_rows_host, module_balance_prior, module_row_entropy, module_softmax_loss,
+    pool_module_counts, MembershipDiagnostics, ModulePools,
 };
 
 /// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;

@@ -335,7 +335,16 @@ impl JointEmbedModel {
     pub fn materialize_e_feat(&mut self) -> Result<()> {
         // Compute the frozen dictionary first (borrows self immutably), then assign.
         // Uses effect MEANS (no reparam sampling) and bakes the gate(s) in.
-        let gated = if let Some(a) = &self.adapter {
+        let gated = if let Some(m) = &self.modules {
+            // Modules: recompose `π μ + r` from the live tables (idempotent), then bake
+            // whatever multiplies a free model's loading — same policy as the adapter.
+            let mu = m.compose()?;
+            let w = self.free_feature_multiplier()?;
+            Some(
+                self.gated_rows(&mu, self.e_feat_logstd.as_ref(), w.as_ref(), false)?
+                    .detach(),
+            )
+        } else if let Some(a) = &self.adapter {
             // Adapter: recompose from the fixed dictionary and the live map
             // (idempotent by construction), then bake whatever multiplies a
             // free model's loading — same policy as the free branch below.
@@ -900,7 +909,12 @@ impl JointEmbedModel {
         // taken at construction; the KL's mu^2 shrinkage must see the LIVE
         // composition or it prices alpha against loadings that no longer
         // exist and back-propagates nothing into the adapter parameters.
-        let adapter_mu = self.adapter.as_ref().map(|a| a.compose()).transpose()?;
+        // The module model has the same detached-snapshot contract as the adapter.
+        let adapter_mu = match (&self.adapter, &self.modules) {
+            (Some(a), _) => Some(a.compose()?),
+            (None, Some(m)) => Some(m.compose()?),
+            (None, None) => None,
+        };
         let mu = match (&adapter_mu, &self.factor) {
             (Some(m), _) => m,
             (None, Some(f)) => &f.beta,

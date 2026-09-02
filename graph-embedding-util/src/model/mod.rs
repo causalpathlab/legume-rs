@@ -19,6 +19,7 @@ use candle_util::candle_nn::{self, VarBuilder, VarMap};
 use std::sync::{Arc, Mutex};
 
 mod gate;
+mod modules;
 mod score;
 mod vars;
 
@@ -26,6 +27,10 @@ pub use gate::{
     gate_kl_step_weight, gate_logit_init, ibp_alpha_for_drop, ibp_gate_logit_bias, FeatureGateSpec,
     GateKind, GATE_EFFECT_PRIOR_VAR, GATE_IBP_LOGIT_DROP, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT,
     GATE_KL_WEIGHT,
+};
+pub use modules::{
+    module_logit_for_own_mass, FeatModules, ModuleInit, MODULE_BIAS_VAR_NAME,
+    MODULE_LOGITS_VAR_NAME, MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
 };
 use vars::{
     build_feat_factor, register_randn_seeded, register_var_from_mat, register_var_from_slice,
@@ -94,6 +99,11 @@ pub struct ShareFeaturesArgs<'a> {
     pub shared_gate_ibp_bias: Option<Tensor>,
     /// Gate configuration shared across heads. `None` when the gate is off.
     pub gate: Option<FeatureGateSpec>,
+    /// Shared module tables ([`FeatModules`]) for a module-parameterized primary
+    /// model. Every head must carry the SAME clone: a head without it gathers from
+    /// `e_feat`, which for this parameterization is a detached snapshot, and trains a
+    /// feature side nothing else sees.
+    pub shared_modules: Option<FeatModules>,
 }
 
 /// Inputs for [`JointEmbedModel::new_factored`] — a per-gene β-sharing feature
@@ -267,6 +277,10 @@ pub struct JointEmbedModel {
     /// Optional fixed-dictionary adapter parameterization (`None` = free
     /// `e_feat`). Mutually exclusive with `factor` by construction.
     pub adapter: Option<FeatAdapter>,
+    /// Optional learned-module parameterization (`None` = free `e_feat`): every
+    /// row is `Σ_m π_gm μ_m + r_g`. Mutually exclusive with `factor` and `adapter`.
+    /// The `e_feat` field is a detached composed snapshot, as for the adapter.
+    pub modules: Option<FeatModules>,
     pub embedding_dim: usize,
     /// Free-model gate logits `[n_features, H]` (see [`FeatureGateSpec`]). `None` for
     /// an ungated model, or for a factored one (its gate lives in `factor.s_beta`).
@@ -389,6 +403,7 @@ impl JointEmbedModel {
             b_cell,
             factor: None,
             adapter: None,
+            modules: None,
             embedding_dim: args.embedding_dim,
             s_feat: None,
             e_feat_raw: None,
@@ -401,13 +416,18 @@ impl JointEmbedModel {
     }
 
     /// The L2 term for whichever gene-side table can overfit row by row under
-    /// this parameterization: the free `e_feat` Var, the adapter's per-feature
-    /// residual, or nothing (an adapter without a residual trains only the
+    /// this parameterization: the free `e_feat` Var, the adapter's or the module
+    /// model's per-feature residual, or nothing (an adapter without a residual trains only the
     /// shared map, and a factored model's ridge is the trainer's `delta_l2`).
     ///
     /// Owning this here keeps a trainer from ridging `e_feat` on a model where
     /// that field is a detached snapshot, which is silently inert.
     pub fn feature_ridge(&self, lam: f64) -> Result<Option<Tensor>> {
+        // Modules: the residual is the only per-row table; `μ` is shared and the
+        // membership is a simplex, so neither can overfit row by row.
+        if let Some(m) = &self.modules {
+            return Ok(Some(crate::loss::embedding_ridge(&m.residual, lam)?));
+        }
         if let Some(a) = &self.adapter {
             return match &a.residual {
                 Some(r) => Ok(Some(crate::loss::embedding_ridge(r, lam)?)),
@@ -428,6 +448,9 @@ impl JointEmbedModel {
     pub fn recompose_e_feat_raw(&mut self) -> Result<()> {
         if let Some(a) = &self.adapter {
             self.e_feat = a.compose()?.detach();
+        }
+        if let Some(m) = &self.modules {
+            self.e_feat = m.compose()?.detach();
         }
         Ok(())
     }
@@ -501,6 +524,7 @@ impl JointEmbedModel {
             b_cell,
             factor: None,
             adapter: Some(adapter),
+            modules: None,
             embedding_dim: args.embedding_dim,
             s_feat: None,
             e_feat_raw: None,
@@ -538,6 +562,7 @@ impl JointEmbedModel {
             shared_e_feat_logstd,
             shared_gate_ibp_bias,
             gate,
+            shared_modules,
         } = args;
         let e_name = format!("{var_prefix}_e_cell");
         let b_name = format!("{var_prefix}_b_cell");
@@ -554,6 +579,7 @@ impl JointEmbedModel {
             b_cell,
             factor: None,
             adapter: None,
+            modules: shared_modules,
             embedding_dim,
             s_feat: shared_s_feat,
             e_feat_raw: shared_e_feat_raw,
@@ -614,6 +640,7 @@ impl JointEmbedModel {
             b_cell,
             factor: Some(factor),
             adapter: None,
+            modules: None,
             embedding_dim: args.embedding_dim,
             s_feat: None,
             e_feat_raw: None,
@@ -661,6 +688,7 @@ impl JointEmbedModel {
                 shared_e_feat_logstd: None,
                 shared_gate_ibp_bias: self.gate_ibp_bias.clone(),
                 gate: self.gate,
+                shared_modules: None,
             },
             varmap,
             dev,
@@ -675,3 +703,6 @@ mod tests;
 
 #[cfg(test)]
 mod adapter_tests;
+
+#[cfg(test)]
+mod module_tests;

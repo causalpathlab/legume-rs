@@ -66,6 +66,7 @@ fn free_with_heads(
                     shared_e_feat_logstd: None,
                     shared_gate_ibp_bias: None,
                     gate: None,
+                    shared_modules: None,
                 },
                 vm,
                 &dev(),
