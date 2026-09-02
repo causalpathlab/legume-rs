@@ -273,7 +273,8 @@ pub fn fit_cell_activity_graph_embedding(
             );
         }
     }
-    let module_cfg = args.modules.to_config()?;
+    // Opt-in on cage: the default sampled gate anchors on a free per-gene table.
+    let module_cfg = args.modules.resolve(None)?;
     anyhow::ensure!(
         !(module_cfg.is_some() && args.gene_embedding.is_some()),
         "--gene-modules learns the gene side through a module layer and --gene-embedding \

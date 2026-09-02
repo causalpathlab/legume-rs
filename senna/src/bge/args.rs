@@ -395,7 +395,8 @@ pub struct BgeArgs {
     #[command(flatten)]
     pub(crate) posterior: ge::posterior::PosteriorArgs,
 
-    /// The `--gene-modules` flag group (see `ge::GeneModuleArgs`).
+    /// The `--gene-modules` flag group (see `ge::GeneModuleArgs`); on by default
+    /// here, resolved in `build_config`.
     #[command(flatten)]
     pub(crate) modules: ge::GeneModuleArgs,
 

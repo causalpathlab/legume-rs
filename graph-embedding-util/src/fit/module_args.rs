@@ -6,16 +6,23 @@
 
 use super::config::GeneModuleConfig;
 
+/// Module count a CLI that turns modules on by default uses when `--gene-modules`
+/// is not given. `senna bge` passes it to [`GeneModuleArgs::resolve`]; `pinto cage`
+/// passes `None` (its default sampled gate is exclusive with modules).
+pub const DEFAULT_GENE_MODULES: usize = 128;
+
 #[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct GeneModuleArgs {
     #[arg(
         long = "gene-modules",
         value_name = "M",
-        help = "Learn M gene modules and embed genes THROUGH them (off by default)",
+        help = "Learn M gene modules and embed genes THROUGH them (senna bge: on by default, M=128)",
         long_help = "Put a learned mixed-membership module layer in front of the feature embedding.\n\
                      Each gene's row becomes a sparse mixture of M shared module vectors,\n\
                      plus a small ridge-shrunk residual of its own.\n\
+                     senna bge turns this on by default with M=128; --no-gene-modules turns it off.\n\
+                     pinto cage leaves it off unless M is given.\n\
                      \n\
                      WHY. A free row receives gradient only on the steps that draw its gene.\n\
                      A rare gene, or one absent from a later dataset, has nothing standing in for it.\n\
@@ -45,6 +52,13 @@ pub struct GeneModuleArgs {
     pub gene_modules: Option<usize>,
 
     #[arg(
+        long = "no-gene-modules",
+        conflicts_with = "gene_modules",
+        help = "Train the plain free feature embedding instead of the module layer"
+    )]
+    pub no_gene_modules: bool,
+
+    #[arg(
         long = "module-warmup-epochs",
         value_name = "N",
         help = "Epochs the warm-start membership is held before it trains (default: a quarter)",
@@ -58,7 +72,7 @@ pub struct GeneModuleArgs {
     #[arg(
         long = "gene-dropout",
         value_name = "P",
-        default_value_t = 0.2,
+        default_value_t = 0.3,
         help = "Per-step probability a gene is hidden when module counts are pooled",
         long_help = "Gene dropout at pooling time. Each step hides a random subset of genes\n\
                      when the module counts are formed, and rescales the survivors of each\n\
@@ -127,9 +141,14 @@ pub struct GeneModuleArgs {
 }
 
 impl GeneModuleArgs {
-    /// `None` when `--gene-modules` was not given; otherwise the validated config.
-    pub fn to_config(&self) -> anyhow::Result<Option<GeneModuleConfig>> {
-        let Some(m) = self.gene_modules else {
+    /// Resolve the group against the CLI's own default: `--no-gene-modules` wins,
+    /// then an explicit `--gene-modules M`, then `default_on` (`Some(M)` for a CLI
+    /// that trains modules unless told otherwise, `None` for an opt-in CLI).
+    pub fn resolve(&self, default_on: Option<usize>) -> anyhow::Result<Option<GeneModuleConfig>> {
+        if self.no_gene_modules {
+            return Ok(None);
+        }
+        let Some(m) = self.gene_modules.or(default_on) else {
             return Ok(None);
         };
         anyhow::ensure!(m >= 2, "--gene-modules needs at least 2 modules, got {m}");
@@ -156,3 +175,6 @@ impl GeneModuleArgs {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests;
