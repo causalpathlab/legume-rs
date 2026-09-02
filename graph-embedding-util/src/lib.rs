@@ -36,6 +36,7 @@ pub mod posterior;
 pub mod postprocess;
 pub mod progress;
 pub mod training;
+pub mod transfer;
 pub mod type_annotation;
 
 pub use auxiliary_data::feature_names::FeatureNameKind;
