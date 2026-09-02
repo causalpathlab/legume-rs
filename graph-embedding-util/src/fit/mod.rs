@@ -7,6 +7,8 @@ mod config;
 pub mod lift;
 pub mod lineage;
 mod models;
+pub mod module_args;
+pub mod module_warm;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
@@ -14,8 +16,10 @@ mod selection;
 mod setup;
 pub(crate) mod stacked_pb;
 
-pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput};
+pub use config::{FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig};
 pub use lift::{CellLineage, LineageQc};
+pub use module_args::GeneModuleArgs;
+pub use module_warm::warm_start_module_labels;
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
@@ -89,10 +93,21 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // VarMap and embedding heads //
     ////////////////////////////////
     let varmap = VarMap::new();
+    // Module warm start: k-means over the feature profiles at the finest collapse
+    // level, on the same batch-corrected pseudobulk counts phase 1 trains on.
+    let module_warm: Option<Vec<u32>> = config.gene_modules.as_ref().map(|g| {
+        let finest = collapsed_levels.last().expect("at least one level");
+        let pb_full = match &finest.mu_adjusted {
+            Some(adj) => adj.posterior_mean(),
+            None => finest.mu_observed.posterior_mean(),
+        };
+        let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
+        module_warm::warm_start_module_labels(&profile, g.n_modules, config.seed)
+    });
     let models::Heads {
         mut cell_model,
         mut level_models,
-    } = models::build_heads(unified, &pb_blobs, &config, &varmap)?;
+    } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_deref(), &varmap)?;
 
     ////////////////////////////////
     // Composite axes and trainer //

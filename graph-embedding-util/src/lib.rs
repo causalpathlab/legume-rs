@@ -43,12 +43,12 @@ pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, Uni
 pub use data_beans_alg::refine_multilevel::RefineParams;
 pub use eval::{
     embedding_col_names, save_embedding, save_outputs, save_outputs_named,
-    write_feature_coembedding, EmbeddingFileNames, OutputContext,
+    write_feature_coembedding, write_module_tables, EmbeddingFileNames, OutputContext,
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, CellLineage, FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, LineageQc,
-    PbLevelVelocity,
+    fit, warm_start_module_labels, CellLineage, FeatFactorSpec, FeatureGateConfig, FitConfig,
+    FitOutput, GeneModuleArgs, GeneModuleConfig, LineageQc, PbLevelVelocity,
 };
 pub use model::JointEmbedModel;
 pub use postprocess::{cell_clusters, feature_coembedding};

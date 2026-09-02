@@ -10,7 +10,9 @@
 
 use super::config::FitConfig;
 use crate::data::UnifiedData;
-use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use crate::model::{
+    FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ShareFeaturesArgs,
+};
 use candle_util::candle_nn::{VarBuilder, VarMap};
 use log::info;
 
@@ -31,6 +33,7 @@ pub(super) fn build_heads(
     unified: &UnifiedData,
     pb_blobs: &[UnifiedData],
     config: &FitConfig,
+    module_warm: Option<&[u32]>,
     varmap: &VarMap,
 ) -> anyhow::Result<Heads> {
     let (n_features, n_cells, h) = (
@@ -42,8 +45,50 @@ pub(super) fn build_heads(
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
-    let mut cell_model = match &config.feat_factor {
-        Some(spec) => {
+    let mut cell_model = match (&config.gene_modules, &config.feat_factor) {
+        (Some(gm), factor) => {
+            // Hard errors, not silent no-ops: the module model's `e_feat` is a
+            // composed snapshot, and both of these write or read it as the trained
+            // table.
+            anyhow::ensure!(
+                factor.is_none(),
+                "gene modules are not supported with feat_factor (β-sharing) in this version"
+            );
+            anyhow::ensure!(
+                config.pb_posterior.is_none(),
+                "gene modules cannot combine with the phase-1 posterior sampler: the \
+                 selection pass writes per-feature loadings into a table the module \
+                 model composes rather than trains"
+            );
+            if config.feature_embedding_l2 > 0.0 {
+                info!(
+                    "gene modules: feature_embedding_l2 is ignored; the residual ridge \
+                     ({}) is the module model's per-row shrinkage",
+                    gm.residual_l2
+                );
+            }
+            info!(
+                "learned gene modules: {} features → {} modules (mixed membership), \
+                 gene dropout {}, exact module term λ={}, balance λ={}",
+                n_features, gm.n_modules, gm.gene_dropout, gm.lambda_module, gm.lambda_balance
+            );
+            JointEmbedModel::new_with_modules(
+                ModuleInit {
+                    n_features,
+                    n_cells,
+                    embedding_dim: h,
+                    n_modules: gm.n_modules,
+                    init_labels: module_warm,
+                    init_own_mass: gm.init_own_mass,
+                    b_feat: &zeros_features,
+                    b_cell: &zeros_cells,
+                    seed: config.seed,
+                },
+                varmap,
+                &config.device,
+            )?
+        }
+        (None, Some(spec)) => {
             // β-sharing is incompatible with the free-E_feat L2, which assumes a single
             // free feature table per row.
             anyhow::ensure!(
@@ -98,7 +143,7 @@ pub(super) fn build_heads(
                 &config.device,
             )?
         }
-        None => JointEmbedModel::new_with_init(
+        (None, None) => JointEmbedModel::new_with_init(
             ModelArgs {
                 n_features,
                 n_cells,
@@ -156,6 +201,7 @@ pub(super) fn build_heads(
                     shared_e_feat_logstd: cell_model.e_feat_logstd.clone(),
                     shared_gate_ibp_bias: cell_model.gate_ibp_bias.clone(),
                     gate: cell_model.gate,
+                    shared_modules: cell_model.modules.clone(),
                 },
                 varmap,
                 &config.device,

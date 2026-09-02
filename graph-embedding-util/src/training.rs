@@ -18,16 +18,19 @@ use crate::coarsen::AxisCoarsenings;
 use crate::data::UnifiedData;
 use crate::fit::lineage::PbLineageLevel;
 use crate::loss::{
-    nce_loss, nce_loss_identity, sample_per_batch_stratified_edge_batch,
-    sample_stratified_edge_batch, EdgeBatch, PerBatchStratifiedCellSampler,
+    dense_count_block, draw_gene_keep_mask, masked_membership, membership_diagnostics,
+    membership_rows_host, module_balance_prior, module_row_entropy, module_softmax_loss, nce_loss,
+    nce_loss_identity, pool_module_counts, sample_per_batch_stratified_edge_batch,
+    sample_stratified_edge_batch, EdgeBatch, ModulePools, PerBatchStratifiedCellSampler,
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
-use crate::model::{JointEmbedModel, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT};
+use crate::model::{FeatModules, JointEmbedModel, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
 use log::info;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
+use rand_distr::Distribution;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -87,7 +90,134 @@ impl AxisSampler<'_> {
             Self::Stratified(s) => s.active_pbs.len(),
         }
     }
+
+    /// One expressed-feature pool per sampler on this axis, in sampler order — the
+    /// index the within-module negative pools are keyed by.
+    fn feature_pools(&self) -> Vec<&[u32]> {
+        match self {
+            Self::PerBatchStratified(s) => s.iter().map(|x| x.feature_pool.as_slice()).collect(),
+            Self::Stratified(s) => vec![s.feature_pool.as_slice()],
+        }
+    }
 }
+
+/// Training-side knobs of the learned gene modules (see
+/// [`crate::fit::GeneModuleConfig`] for the caller-facing form and the meaning of
+/// each field). `Some` only for a module-parameterized model.
+#[derive(Clone, Debug)]
+pub struct ModuleTrainParams {
+    pub warmup_epochs: usize,
+    pub gene_dropout: f32,
+    pub units_per_step: usize,
+    pub lambda_module: f32,
+    pub lambda_balance: f32,
+    pub lambda_entropy: f32,
+    pub residual_l2: f32,
+}
+
+/// Per-run state of the module layer that lives with the training loop rather
+/// than the model: the host-side negative pools per axis and sampler, refreshed
+/// from the membership once per epoch, and the fallback tally.
+struct ModuleState<'a> {
+    modules: &'a FeatModules,
+    params: &'a ModuleTrainParams,
+    /// `pools[axis][sampler]`.
+    pools: Vec<Vec<ModulePools>>,
+    /// The host copy of `π` the pools were built from; also feeds the diagnostics.
+    pi_host: Vec<f32>,
+    n_features: usize,
+    n_fallback: usize,
+}
+
+impl<'a> ModuleState<'a> {
+    fn new(
+        modules: &'a FeatModules,
+        params: &'a ModuleTrainParams,
+        ctx: &CompositeTrainContext,
+    ) -> anyhow::Result<Self> {
+        let n_features = modules.logits.dim(0)?;
+        let mut st = Self {
+            modules,
+            params,
+            pools: Vec::new(),
+            pi_host: Vec::new(),
+            n_features,
+            n_fallback: 0,
+        };
+        st.refresh(ctx)?;
+        Ok(st)
+    }
+
+    /// Rebuild the pools from the current membership (one device→host copy).
+    fn refresh(&mut self, ctx: &CompositeTrainContext) -> anyhow::Result<()> {
+        let pi = candle_util::nn::sparsemax(&self.modules.logits.detach())?;
+        self.pi_host = pi.flatten_all()?.to_vec1::<f32>()?;
+        let rows = membership_rows_host(&self.pi_host, self.n_features, self.modules.n_modules);
+        self.pools = ctx
+            .axes
+            .iter()
+            .map(|axis| {
+                axis.sampler
+                    .feature_pools()
+                    .into_iter()
+                    .map(|pool| ModulePools::build(rows.clone(), self.modules.n_modules, pool))
+                    .collect()
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// One `info` line per epoch on the membership: occupancy, dead modules, row
+    /// entropy and support, the residual's share of the row norm, and how many
+    /// positives fell back to global negatives. Collapse shows up here long before
+    /// it shows up in the loss.
+    fn log_diagnostics(&mut self, epoch: usize, epochs: usize) -> anyhow::Result<()> {
+        let m = self.modules.n_modules;
+        let dg = membership_diagnostics(&self.pi_host, self.n_features, m, MODULE_SMALL_FLOOR);
+        let r2: f32 = self
+            .modules
+            .residual
+            .detach()
+            .sqr()?
+            .sum(1)?
+            .mean_all()?
+            .to_scalar()?;
+        let rho2: f32 = self
+            .modules
+            .compose()?
+            .detach()
+            .sqr()?
+            .sum(1)?
+            .mean_all()?
+            .to_scalar()?;
+        info!(
+            "epoch {}/{} modules{}: max occupancy {:.2}x uniform, {} of {} modules below {} \
+             features, row entropy {:.3} nats, {:.2} modules/feature, mean ‖r‖² {:.3} vs \
+             ‖ρ‖² {:.3}, {} positives fell back to global negatives",
+            epoch + 1,
+            epochs,
+            if self.modules.is_frozen() {
+                " (frozen)"
+            } else {
+                ""
+            },
+            dg.max_occupancy_ratio,
+            dg.n_small_modules,
+            m,
+            MODULE_SMALL_FLOOR,
+            dg.mean_row_entropy,
+            dg.mean_row_support,
+            r2,
+            rho2,
+            self.n_fallback,
+        );
+        self.n_fallback = 0;
+        Ok(())
+    }
+}
+
+/// A module with fewer argmax features than this is reported as small.
+const MODULE_SMALL_FLOOR: usize = 5;
 
 #[derive(Clone)]
 pub struct TrainingParams {
@@ -123,6 +253,8 @@ pub struct TrainingParams {
     /// loss — a dense prior that fits the (dense) per-gene γ structure and is
     /// well-behaved under AdamW. `0.0` disables (plain β-sharing, no `δ_g`).
     pub delta_l2: f32,
+    /// Learned-module training knobs; `Some` iff the model is module-parameterized.
+    pub module: Option<ModuleTrainParams>,
 }
 
 pub struct CompositeTrainContext<'a> {
@@ -235,9 +367,28 @@ pub fn train_composite(
     let mut rng = StdRng::seed_from_u64(params.seed);
     let mut last_avg = 0f32; // final-epoch mean loss, returned as the fit-hygiene signal
 
-    // `--feature-embedding-l2` penalizes the *shared* E_feat — pull it from the
-    // first axis (every axis points at the same tensor).
-    let shared_e_feat = ctx.axes[0].model.e_feat.clone();
+    // The module layer, when the model has one: hold the warm-start membership for
+    // the warm-up, build the within-module negative pools, and pick the ridge that
+    // applies (the residual is the module model's only per-row table).
+    let mut module_state = match (ctx.axes[0].model.modules.as_ref(), params.module.as_ref()) {
+        (Some(m), Some(p)) => {
+            m.set_frozen(p.warmup_epochs > 0);
+            info!(
+                "gene modules: membership held for {} of {} epochs, then trained; {} units per \
+                 step per axis pooled for the exact module term, gene dropout {}",
+                p.warmup_epochs, params.epochs, p.units_per_step, p.gene_dropout
+            );
+            Some(ModuleState::new(m, p, ctx)?)
+        }
+        (Some(_), None) => {
+            anyhow::bail!("a module-parameterized model needs `TrainingParams::module`; got None")
+        }
+        _ => None,
+    };
+    let ridge_lambda = match &module_state {
+        Some(st) => st.params.residual_l2,
+        None => params.feature_embedding_l2,
+    };
 
     // Shared per-gene splice offset δ_g (factored splice models), for the L2 (ridge)
     // penalty below. `None` for free / plain-β-sharing models.
@@ -270,7 +421,7 @@ pub fn train_composite(
                 |n| {
                     let mut probe_params = params.clone();
                     probe_params.batch_size = n;
-                    match sum_step(ctx, &mut probe_rng, &probe_params) {
+                    match sum_step(ctx, &mut probe_rng, &probe_params, None) {
                         Ok(Some(loss)) => Ok(loss),
                         Ok(None) => Err(candle_util::candle_core::Error::Msg(
                             "probe sampled nothing".into(),
@@ -316,6 +467,20 @@ pub fn train_composite(
         // draw would model it as if each minibatch had its own inclusion state and would
         // add gradient variance for nothing. No-op unless a `gate_pip` is installed.
         ctx.axes[0].model.resample_gate_mask()?;
+        // Release the membership once the warm-up is over. Pools are refreshed at the
+        // END of each epoch below, so the first trained epoch still contrasts within
+        // the warm-start modules — one epoch of lag, the same as the gate mask.
+        if let Some(st) = &module_state {
+            if epoch == st.params.warmup_epochs && st.modules.is_frozen() {
+                st.modules.set_frozen(false);
+                info!(
+                    "epoch {}/{}: module membership released — π now trains with the exact \
+                     module term and the balance prior",
+                    epoch + 1,
+                    params.epochs
+                );
+            }
+        }
         // Loss kept **on-device** and synced to a scalar once per epoch (not
         // per minibatch) — `detach()` keeps the running sum off the autograd
         // graph so each step's forward graph is still freed immediately,
@@ -324,16 +489,17 @@ pub fn train_composite(
         let mut n_steps = 0usize;
 
         for _ in 0..batches_per_epoch {
-            let loss = sum_step(ctx, &mut rng, params)?;
+            let loss = sum_step(ctx, &mut rng, params, module_state.as_mut())?;
             let Some(mut loss) = loss else { continue };
-            if params.feature_embedding_l2 > 0.0 {
-                // `λ · mean_g ‖e_g‖²` — see `loss::embedding_ridge` for why the
-                // reduction sums over the latent axis instead of averaging over it.
-                let l2 = crate::loss::embedding_ridge(
-                    &shared_e_feat,
-                    f64::from(params.feature_embedding_l2),
-                )?;
-                loss = (loss + l2)?;
+            if ridge_lambda > 0.0 {
+                // `λ · mean_g ‖e_g‖²` on whichever per-row table this parameterization
+                // trains — see `loss::embedding_ridge` for the reduction, and
+                // `JointEmbedModel::feature_ridge` for why the model picks the table:
+                // ridging `e_feat` directly is silently inert on a model where that
+                // field is a detached snapshot.
+                if let Some(l2) = ctx.axes[0].model.feature_ridge(f64::from(ridge_lambda))? {
+                    loss = (loss + l2)?;
+                }
             }
             // SuSiE single-effect KL on the gate (identity + velocity): the fixed
             // `GATE_KL_WEIGHT · (categorical + Gaussian) KL`. `None` when the gate is
@@ -413,6 +579,14 @@ pub fn train_composite(
         last_avg = avg;
         prog_bar.set_message(format!("loss={avg:.3}"));
         prog_bar.inc(1);
+        if let Some(st) = &mut module_state {
+            // The membership moves only once released; the pools and the host copy
+            // stay valid until then.
+            if !st.modules.is_frozen() {
+                st.refresh(ctx)?;
+            }
+            st.log_diagnostics(epoch, params.epochs)?;
+        }
         // Every-epoch info; senna/pinto's `--verbose` flag raises the
         // log level to `info`, so this is gated by the user's choice
         // there. Quiet runs (warn level) suppress it.
@@ -456,19 +630,128 @@ fn sum_step(
     ctx: &CompositeTrainContext,
     rng: &mut StdRng,
     params: &TrainingParams,
+    mut module_state: Option<&mut ModuleState>,
 ) -> anyhow::Result<Option<Tensor>> {
+    // The full membership once per step: every axis's exact term and the priors
+    // read the same `π`, and it is detached while frozen.
+    let pi: Option<Tensor> = match &module_state {
+        Some(st) => Some(st.modules.membership()?),
+        None => None,
+    };
     let mut total_loss: Option<Tensor> = None;
-    for axis in ctx.axes {
-        let Some(loss) = single_axis_step(axis, rng, params, ctx.dev)? else {
+    for (axis_idx, axis) in ctx.axes.iter().enumerate() {
+        let step_modules = match (&module_state, &pi) {
+            (Some(st), Some(pi)) => Some(AxisModuleStep {
+                params: st.params,
+                pools: &st.pools[axis_idx],
+                pi,
+            }),
+            _ => None,
+        };
+        let Some((loss, n_fallback)) =
+            single_axis_step(axis, rng, params, ctx.dev, step_modules.as_ref())?
+        else {
             continue;
         };
+        if let Some(st) = module_state.as_deref_mut() {
+            st.n_fallback += n_fallback;
+        }
         let scaled = (loss * f64::from(axis.lambda))?;
         total_loss = Some(match total_loss {
             Some(prev) => (prev + scaled)?,
             None => scaled,
         });
     }
+    // Membership priors, once per step (not per axis), and only once the
+    // membership trains — while frozen `π` is detached and they would be constants.
+    if let (Some(st), Some(pi), Some(loss)) = (&module_state, &pi, total_loss.as_mut()) {
+        if !st.modules.is_frozen() {
+            if st.params.lambda_balance > 0.0 {
+                let bal =
+                    module_balance_prior(pi)?.affine(f64::from(st.params.lambda_balance), 0.0)?;
+                *loss = (&*loss + bal)?;
+            }
+            if st.params.lambda_entropy > 0.0 {
+                let ent =
+                    module_row_entropy(pi)?.affine(f64::from(st.params.lambda_entropy), 0.0)?;
+                *loss = (&*loss + ent)?;
+            }
+        }
+    }
     Ok(total_loss)
+}
+
+/// What one axis step needs from the module layer.
+struct AxisModuleStep<'a> {
+    params: &'a ModuleTrainParams,
+    /// This axis's pools, one per sampler.
+    pools: &'a [ModulePools],
+    /// The full live membership for this step.
+    pi: &'a Tensor,
+}
+
+/// The exact module term for one axis step: draw `units_per_step` units from the
+/// axis's own picker (the same `degree^α` weighting the positives use, so the two
+/// levels weight units alike), pool their count rows through the (dropout-masked)
+/// membership, and score every module with a full softmax.
+fn module_term(
+    axis: &CompositeAxis,
+    cc: &data_beans_alg::feature_coarsening::FeatureCoarsening,
+    rng: &mut StdRng,
+    step: &AxisModuleStep,
+    dev: &Device,
+) -> anyhow::Result<Option<Tensor>> {
+    let u = step.params.units_per_step;
+    if u == 0 || step.params.lambda_module <= 0.0 {
+        return Ok(None);
+    }
+    let n_features = axis.unified.n_features();
+    let mut rows: Vec<(&[u32], &[f32])> = Vec::with_capacity(u);
+    let mut coarse: Vec<u32> = Vec::with_capacity(u);
+    match axis.sampler {
+        AxisSampler::PerBatchStratified(samplers) => {
+            let s = &samplers[rng.random_range(0..samplers.len())];
+            for _ in 0..u {
+                let lc = s.cell_picker.sample(rng);
+                let pf = &s.per_cell[lc];
+                rows.push((&pf.features, &pf.counts));
+                coarse.push(cc.fine_to_coarse[s.active_cells[lc] as usize] as u32);
+            }
+        }
+        AxisSampler::Stratified(s) => {
+            for _ in 0..u {
+                let lp = s.pb_picker.sample(rng);
+                let pf = &s.per_pb[lp];
+                rows.push((&pf.features, &pf.counts));
+                coarse.push(s.active_pbs[lp]);
+            }
+        }
+    }
+    let x = dense_count_block(&rows, n_features, dev)?;
+    // Gene dropout on the membership side: a hidden feature's row is exactly zero
+    // and its modules' survivors are scaled up to keep the module's mass.
+    let pi_masked = if step.params.gene_dropout > 0.0 {
+        let keep = draw_gene_keep_mask(n_features, step.params.gene_dropout, rng, dev)?;
+        masked_membership(step.pi, &keep)?
+    } else {
+        step.pi.clone()
+    };
+    let x_cm = pool_module_counts(&x, &pi_masked)?;
+    let e_units = if axis.cell_axis.is_identity {
+        let idx = Tensor::from_vec(coarse, u, dev)?;
+        axis.model.e_cell.index_select(&idx, 0)?
+    } else {
+        axis.model.pool_cells(&coarse, &cc.coarse_to_fine, dev)?.0
+    };
+    let m = axis
+        .model
+        .modules
+        .as_ref()
+        .expect("module step on a model without modules");
+    let term = module_softmax_loss(&e_units, &m.mu, &m.b_module, &x_cm)?;
+    Ok(Some(
+        term.affine(f64::from(step.params.lambda_module), 0.0)?,
+    ))
 }
 
 /// Sample a minibatch from a single axis and compute its bipartite NCE
@@ -479,7 +762,8 @@ fn single_axis_step(
     rng: &mut StdRng,
     params: &TrainingParams,
     dev: &Device,
-) -> anyhow::Result<Option<Tensor>> {
+    modules: Option<&AxisModuleStep>,
+) -> anyhow::Result<Option<(Tensor, usize)>> {
     if axis.sampler.is_empty() {
         return Ok(None);
     }
@@ -504,6 +788,7 @@ fn single_axis_step(
                     cell_coarsening: cc,
                     batch_size: params.batch_size,
                     n_negatives: params.num_negatives,
+                    module_pools: modules.map(|m| &m.pools[id]),
                 },
                 rng,
             )
@@ -513,17 +798,24 @@ fn single_axis_step(
                 sampler: s,
                 batch_size: params.batch_size,
                 n_negatives: params.num_negatives,
+                module_pools: modules.map(|m| &m.pools[0]),
             },
             rng,
         ),
     };
+    let n_fallback = batch.n_module_fallback;
 
-    let bip_loss = if axis.cell_axis.is_identity {
+    let mut loss = if axis.cell_axis.is_identity {
         nce_loss_identity(axis.model, batch, params.objective, dev)?
     } else {
         nce_loss(axis.model, batch, &cc.coarse_to_fine, params.objective, dev)?
     };
-    Ok(Some(bip_loss))
+    if let Some(step) = modules {
+        if let Some(term) = module_term(axis, cc, rng, step, dev)? {
+            loss = (loss + term)?;
+        }
+    }
+    Ok(Some((loss, n_fallback)))
 }
 
 #[cfg(test)]

@@ -149,6 +149,60 @@ pub fn save_outputs_named(
         save_embedding(&vsel_path, &velocity_sel, ctx.feature_names, "feature")?;
         info!("Per-gene velocity inclusion probability σ(s_δ) → {vsel_path}");
     }
+    write_module_tables(out_prefix, model, ctx.feature_names)?;
+    Ok(())
+}
+
+/// Write the learned-module tables of a module-parameterized model; a no-op for
+/// every other parameterization.
+///
+/// * `{out}.module_membership.parquet` — `π [D × M]`, rows on the simplex with
+///   exact zeros, columns `m0..`; keyed on the feature names.
+/// * `{out}.module_dictionary.parquet` — `μ [M × H]`, rows `m0..`, columns `h0..`.
+/// * `{out}.module_residual.parquet` — `r [D × H]`, the per-feature remainder.
+/// * `{out}.module_bias.parquet` — the per-module bias of the exact term.
+///
+/// The feature dictionary itself keeps holding the composed `ρ = π μ + r`, so
+/// nothing that reads it has to know modules exist.
+pub fn write_module_tables(
+    out_prefix: &str,
+    model: &JointEmbedModel,
+    feature_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    let Some(pi) = model.module_membership()? else {
+        return Ok(());
+    };
+    let modules = model
+        .modules
+        .as_ref()
+        .expect("module_membership implies modules");
+    let m = modules.n_modules;
+    let module_names: Vec<Box<str>> = (0..m).map(|i| format!("m{i}").into_boxed_str()).collect();
+    let pi_path = format!("{out_prefix}.module_membership.parquet");
+    pi.to_parquet_with_names(
+        &pi_path,
+        (Some(feature_names), Some("feature")),
+        Some(&module_names),
+    )?;
+    save_embedding(
+        &format!("{out_prefix}.module_dictionary.parquet"),
+        &modules.mu.detach(),
+        &module_names,
+        "module",
+    )?;
+    save_embedding(
+        &format!("{out_prefix}.module_residual.parquet"),
+        &modules.residual.detach(),
+        feature_names,
+        "feature",
+    )?;
+    save_bias(
+        &format!("{out_prefix}.module_bias.parquet"),
+        &modules.b_module.detach(),
+        &module_names,
+        "module",
+    )?;
+    info!("Learned gene modules ({m}) → {pi_path} (+ module_dictionary / module_residual / module_bias)");
     Ok(())
 }
 
