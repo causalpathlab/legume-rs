@@ -459,7 +459,7 @@ pub(super) fn per_batch_sc_neighbors(
 }
 
 /// Match pb-samples across batches and accumulate counterfactual
-/// statistics into `stat.imputed_sum_ds` and `stat.residual_sum_ds`.
+/// statistics into `stat.imputed_sum_ds` and `stat.matched_bs`.
 ///
 /// `pbsamp_to_group` is the per-pb-sample group assignment to use when writing
 /// into stat columns; callers pass `&layout.pb_sample_to_group` for the

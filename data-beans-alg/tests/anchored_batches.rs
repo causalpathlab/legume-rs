@@ -158,8 +158,10 @@ fn the_anchor_batch_keeps_delta_at_one() {
     let d0 = mean_abs_log_delta(&out, 0);
     let d1 = mean_abs_log_delta(&out, 1);
     let (anchor_dev, new_dev) = if d0 < d1 { (d0, d1) } else { (d1, d0) };
+    // Exactly 1 up to the Gamma prior: the anchor set pins δ's per-gene scale,
+    // which the matched-stat collector records from the anchors it was handed.
     assert!(
-        anchor_dev < 0.15,
+        anchor_dev < 0.02,
         "anchor batch was re-adjusted: mean|log delta| = {anchor_dev}"
     );
     assert!(
