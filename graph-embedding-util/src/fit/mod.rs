@@ -9,6 +9,7 @@ pub mod lineage;
 mod models;
 pub mod module_args;
 pub mod module_warm;
+pub mod pb_readout;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
@@ -22,6 +23,7 @@ pub use config::{
 pub use lift::{CellLineage, LineageQc};
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
+pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
 pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
