@@ -16,6 +16,7 @@
 //! (`merge_stat`).
 
 use super::*;
+use nalgebra::DVector;
 
 pub(super) struct KnnParams<'a> {
     pub(super) knn_batches: usize,
@@ -52,8 +53,6 @@ pub(super) fn collect_matched_stat_visitor(
         }
     };
 
-    let mut y1 = data_vec.read_columns_csc(cells.iter().cloned())?;
-
     let y1_pos: HashMap<_, _> = cells
         .iter()
         .cloned()
@@ -78,29 +77,28 @@ pub(super) fn collect_matched_stat_visitor(
     // weight vector
     let ww = CscMat::from_nonzero_triplets(
         y0_matched.ncols(),
-        y1.ncols(),
+        cells.len(),
         neg_distance_triplets.as_ref(),
     )?
     .normalize_exp_logits_columns();
 
-    let y1_hat = &y0_matched * ww;
-    y1.adjust_by_division_inplace(&y1_hat);
+    let y1_hat = &y0_matched * &ww;
+    let source_batches = data_vec.get_batch_membership(source_columns.iter().cloned());
 
     let mut stat = arc_stat.lock().expect("lock stat");
+
+    // Source mass per batch: each cell's weights sum to 1 over its matches.
+    for w_j in ww.col_iter() {
+        for (&k, &w) in w_j.row_indices().iter().zip(w_j.values().iter()) {
+            stat.matched_bs[(source_batches[k], sample)] += w;
+        }
+    }
 
     for y_j in y1_hat.col_iter() {
         let rows = y_j.row_indices();
         let vals = y_j.values();
         for (&gene, &y) in rows.iter().zip(vals.iter()) {
             stat.imputed_sum_ds[(gene, sample)] += y;
-        }
-    }
-
-    for y_j in y1.col_iter() {
-        let rows = y_j.row_indices();
-        let vals = y_j.values();
-        for (&gene, &y) in rows.iter().zip(vals.iter()) {
-            stat.residual_sum_ds[(gene, sample)] += y;
         }
     }
 
@@ -187,20 +185,44 @@ fn add_effective_size(denom_ds: &mut nalgebra::DMatrix<f32>, stat: &CollapsedSta
     }
 }
 
-/// `denom *= effective size`, elementwise — same dispatch as
-/// [`add_effective_size`].
-fn scale_by_effective_size(denom_ds: &mut nalgebra::DMatrix<f32>, stat: &CollapsedStat) {
-    match stat.size_ds.as_ref() {
-        Some(size_ds) => {
-            debug_assert_eq!(denom_ds.shape(), size_ds.shape());
-            denom_ds.component_mul_assign(size_ds);
+/// Rescale δ's Gamma denominators so that, per gene, the frame batches'
+/// weighted geometric mean of the posterior mean `(a0 + num) / (b0 + den)` is
+/// exactly 1. A batch masked out for a gene (`obs_mask_db == 0`) sits on the
+/// prior and does not vote. Returns the adjusted denominators.
+fn pin_delta_scale(
+    num_db: &DMatrix<f32>,
+    den_db: &DMatrix<f32>,
+    (a0, b0): (f32, f32),
+    frame_w: &DVector<f32>,
+    mask_db: Option<&DMatrix<f32>>,
+) -> DMatrix<f32> {
+    let (ng, nb) = num_db.shape();
+    let mut out = den_db.clone();
+    for g in 0..ng {
+        let (mut lsum, mut wsum) = (0f64, 0f64);
+        for b in 0..nb {
+            let w = f64::from(frame_w[b]) * mask_db.map_or(1.0, |m| f64::from(m[(g, b)]));
+            if w > 0.0 {
+                let m = f64::from(a0 + num_db[(g, b)]) / f64::from(b0 + den_db[(g, b)]);
+                lsum += w * m.max(f64::MIN_POSITIVE).ln();
+                wsum += w;
+            }
         }
-        None => {
-            for s in 0..denom_ds.ncols() {
-                denom_ds.column_mut(s).scale_mut(stat.size_s[s]);
+        if wsum > 0.0 {
+            let gm = (lsum / wsum).exp() as f32;
+            for b in 0..nb {
+                // A masked entry carries no evidence and stays on the prior.
+                if mask_db.is_some_and(|m| m[(g, b)] == 0.0) {
+                    continue;
+                }
+                // (a0 + num) / (b0 + den') = mean / gm  ⇔  den' = (b0 + den)·gm − b0.
+                // The clamp only binds when gm < 1 on an entry with less than a
+                // cell's worth of evidence, where the prior dominates anyway.
+                out[(g, b)] = ((b0 + den_db[(g, b)]) * gm - b0).max(0.0);
             }
         }
     }
+    out
 }
 
 fn optimize_block(
@@ -217,117 +239,149 @@ fn optimize_block(
     let mut mu_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
 
     if num_batches > 1 {
-        // temporary denominator
-        let mut denom_ds = nalgebra::DMatrix::<f32>::zeros(num_genes, num_samples);
+        //////////////////////////////////////////////////////////////////
+        // One frame for every batch                                    //
+        //                                                              //
+        //   E[observed_gs] = μ_gs · Σ_b δ_gb · n_bs        (own cells) //
+        //   E[imputed_gs]  = μ_gs · Σ_b δ_gb · w_bs   (counterfactual) //
+        //                                                              //
+        // μ is the batch-free rate, δ_gb the per-batch fold, n_bs the  //
+        // own mass and w_bs the counterfactual's source mass. Both     //
+        // sides of a pseudobulk are Poisson at the SAME μ, so μ cannot //
+        // slide into another batch's frame; δ is identified by the     //
+        // counterfactual side and pinned per gene to geometric mean 1  //
+        // over the frame batches (all of them, or the anchors).        //
+        //////////////////////////////////////////////////////////////////
+        let n_bs = &stat.n_bs;
+        let w_bs = &stat.matched_bs;
+        let own_plus_src = n_bs + w_bs; // [b × s]
+        let obs_plus_imp = &stat.observed_sum_ds + &stat.imputed_sum_ds;
+        // Fraction of each (gene, sample)'s mass whose source measures the gene;
+        // `None` = fully observed.
+        let obs_frac: Option<DMatrix<f32>> = stat.size_ds.as_ref().map(|size_ds| {
+            DMatrix::from_fn(num_genes, num_samples, |g, s| {
+                let n = stat.size_s[s];
+                if n > 0.0 {
+                    size_ds[(g, s)] / n
+                } else {
+                    0.0
+                }
+            })
+        });
+        let frame_w = stat.frame_weights();
+        let own_plus_src_t = own_plus_src.transpose(); // [s × b]
+        let w_bs_t = w_bs.transpose();
 
-        // parameters
         let mut mu_adj_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-        let mut mu_resid_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
-        let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
         let mut delta_param = GammaMatrix::new((num_genes, num_batches), a0, b0);
+        let mut delta_gb = DMatrix::<f32>::from_element(num_genes, num_batches, 1.0);
 
-        //////////////////////////////
-        // E[y_resid] = E[μ_resid]  //
-        // E[y] = E[μ_resid] * E[μ] //
-        // E[y_hat] = E[γ] * E[μ]   //
-        // E[y_bat] = E[δ] * E[μ]   //
-        //////////////////////////////
-
-        //            residual_sum_ds
-        // μ_resid = -----------------
-        //            1_d * size_s'
-
-        {
-            add_effective_size(&mut denom_ds, stat);
-            mu_resid_param.update_stat(&stat.residual_sum_ds, &denom_ds);
-            // mu_resid is fixed across the loop (read via posterior_mean);
-            // calibrate to the output target now so it carries sd/log only
-            // when the caller actually needs them.
-            mu_resid_param.calibrate_with(out_target);
+        // μ given δ: (obs + imp) / (frac · Σ_b δ_gb (n_bs + w_bs))
+        let update_mu = |mu_adj_param: &mut GammaMatrix, delta_gb: &DMatrix<f32>| {
+            let mut denom_ds = delta_gb * &own_plus_src;
+            if let Some(f) = obs_frac.as_ref() {
+                denom_ds.component_mul_assign(f);
+            }
+            mu_adj_param.update_stat(&obs_plus_imp, &denom_ds);
+            mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
         };
 
+        // Scratch planes, allocated once: every [g × s] temporary below is
+        // rewritten in place each iteration rather than reallocated.
+        let mut imp_share = DMatrix::<f32>::zeros(num_genes, num_samples);
+        let mut mu_frac = DMatrix::<f32>::zeros(num_genes, num_samples);
         for _opt_iter in 0..num_iter {
             #[cfg(debug_assertions)]
             {
                 debug!("iteration: {}", &_opt_iter);
             }
 
-            let resid_ds = mu_resid_param.posterior_mean();
-            let gamma_ds = gamma_param.posterior_mean();
-
-            //      observed_ds + imputed_sum_ds
-            // μ = ---------------------------------
-            //      (μ_resid + γ) .* (1_d * size_s')
-
-            denom_ds.copy_from(&(resid_ds + gamma_ds));
-
-            scale_by_effective_size(&mut denom_ds, stat);
-
-            mu_adj_param.update_stat(&(&stat.observed_sum_ds + &stat.imputed_sum_ds), &denom_ds);
-            mu_adj_param.calibrate_with(CalibrateTarget::MeanOnly);
-
+            update_mu(&mut mu_adj_param, &delta_gb);
             let mu_ds = mu_adj_param.posterior_mean();
 
-            //      imputed_sum_ds
-            // γ = ---------------------
-            //      μ .* (1_d * size_s')
+            // δ given μ (one EM step): the observed side is exact per batch
+            // (`observed_sum_db`); the counterfactual side splits each
+            // sample's imputed sum over its source batches in proportion to
+            // δ_gb · w_bs.
+            //   num_gb = obs_db + Σ_s imp_gs · δ_gb w_bs / Σ_b' δ_gb' w_b's
+            //   den_gb = Σ_s μ_gs · frac_gs · (n_bs + w_bs)
+            imp_share.gemm(1.0, &delta_gb, w_bs, 0.0); // Σ_b δ_gb w_bs
+            imp_share.zip_apply(&stat.imputed_sum_ds, |z, x| {
+                *z = if *z > 0.0 { x / *z } else { 0.0 };
+            });
+            let mut num_db =
+                &stat.observed_sum_db + (&imp_share * &w_bs_t).component_mul(&delta_gb);
+            let mu_frac_ref: &DMatrix<f32> = match obs_frac.as_ref() {
+                Some(f) => {
+                    mu_frac.copy_from(mu_ds);
+                    mu_frac.component_mul_assign(f);
+                    &mu_frac
+                }
+                None => mu_ds,
+            };
+            let mut den_db = mu_frac_ref * &own_plus_src_t; // [g × b]
+            if let Some(mask) = stat.obs_mask_db.as_ref() {
+                // Zeroing a (gene, batch) entry means "this batch carries no δ
+                // evidence for this gene"; masking BOTH sides lands the
+                // posterior on the prior exactly (≈ 1, "no adjustment").
+                num_db.component_mul_assign(mask);
+                den_db.component_mul_assign(mask);
+            }
+            // Pin the per-gene scale: the frame batches' weighted geometric
+            // mean of δ is 1. Folded into the denominators so the Gamma
+            // posterior itself carries the normalised value.
+            let den_db = pin_delta_scale(
+                &num_db,
+                &den_db,
+                (a0, b0),
+                &frame_w,
+                stat.obs_mask_db.as_ref(),
+            );
+            delta_param.update_stat(&num_db, &den_db);
+            delta_param.calibrate_with(CalibrateTarget::MeanOnly);
+            delta_gb.copy_from(delta_param.posterior_mean());
 
-            denom_ds.copy_from(mu_ds);
-            scale_by_effective_size(&mut denom_ds, stat);
-            gamma_param.update_stat(&stat.imputed_sum_ds, &denom_ds);
-            gamma_param.calibrate_with(CalibrateTarget::MeanOnly);
-
-            // Tick per descent iteration so the bar keeps moving inside a
-            // block; `inc` is atomic, so concurrent blocks share one bar.
             if let Some(p) = prog {
                 p.inc(1);
             }
         }
-
-        // Output calibration after loop. `out_target` decides whether the
-        // sd / log_mean / log_sd planes are materialized (only when the
-        // caller writes them) or left empty (e.g. bge, which reads means).
+        // μ consistent with the final δ.
+        update_mu(&mut mu_adj_param, &delta_gb);
         mu_adj_param.calibrate_with(out_target);
+        delta_param.calibrate_with(out_target);
+
+        // Per-pseudobulk readouts against the batch-free μ, on the documented
+        // scale: E[y] = μ_resid · μ (own fold) and E[ŷ] = γ · μ (source fold).
+        // Each denominator is μ times a per-sample mass (own cells, or the
+        // counterfactual's matched cells), scaled by the observed fraction when
+        // a panel gap makes it less than full.
+        let mu_ds = mu_adj_param.posterior_mean();
+        let mass_times_mu = |per_sample: &dyn Fn(usize) -> f32| {
+            let mut m = mu_ds.clone();
+            for s in 0..num_samples {
+                m.column_mut(s).scale_mut(per_sample(s));
+            }
+            if let Some(f) = obs_frac.as_ref() {
+                m.component_mul_assign(f);
+            }
+            m
+        };
+        let resid_denom = mass_times_mu(&|s| stat.size_s[s]);
+        let mut mu_resid_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
+        mu_resid_param.update_stat(&stat.observed_sum_ds, &resid_denom);
+        mu_resid_param.calibrate_with(out_target);
+
+        let src_mass_s: Vec<f32> = (0..num_samples).map(|s| w_bs.column(s).sum()).collect();
+        let gamma_denom = mass_times_mu(&|s| src_mass_s[s]);
+        let mut gamma_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
+        gamma_param.update_stat(&stat.imputed_sum_ds, &gamma_denom);
         gamma_param.calibrate_with(out_target);
 
-        //      observed_db
-        // δ = ---------------------
-        //      μ * size_bs'
+        // Take the observed mean over the own mass.
         {
-            let mu_ds = mu_adj_param.posterior_mean();
-            let mut denom_db = mu_ds * &stat.n_bs.transpose();
-            match stat.obs_mask_db.as_ref() {
-                // Zeroing a (gene, batch) entry of `obs_mask_db` means "this
-                // batch carries no δ evidence for this gene", and the mask
-                // applies to BOTH sides of the ratio so the posterior lands
-                // on the prior exactly. Masking the denominator alone would
-                // leave `a0 + observed` over `b0` — an exploding mean, not
-                // "no adjustment".
-                //
-                // Two callers set it, and the numerator term is why they can
-                // share one mechanism. Structural absence (`attach_
-                // observability`): nothing was measured, so the numerator is
-                // already zero and masking it is a no-op — this arm stays
-                // bitwise identical to before it masked the numerator. Bulk
-                // batches (`mark_unmatched_bulk`): plenty was observed, so
-                // masking the numerator is exactly what keeps composition out
-                // of δ.
-                Some(mask) => {
-                    denom_db.component_mul_assign(mask);
-                    let mut num_db = stat.observed_sum_db.clone();
-                    num_db.component_mul_assign(mask);
-                    delta_param.update_stat(&num_db, &denom_db);
-                }
-                None => delta_param.update_stat(&stat.observed_sum_db, &denom_db),
-            }
-            delta_param.calibrate_with(out_target);
-        }
-
-        // Take the observed mean
-        {
-            let mut denom_ds = DMatrix::<f32>::zeros(num_genes, num_samples);
-            add_effective_size(&mut denom_ds, stat);
-            mu_param.update_stat(&stat.observed_sum_ds, &denom_ds);
+            let mut own_mass = DMatrix::<f32>::zeros(num_genes, num_samples);
+            add_effective_size(&mut own_mass, stat);
+            mu_param.update_stat(&stat.observed_sum_ds, &own_mass);
             mu_param.calibrate_with(out_target);
         };
 
@@ -337,9 +391,9 @@ fn optimize_block(
         // across all training epochs). `All` consumers keep the dense mean.
         if matches!(out_target, CalibrateTarget::MeanOnly) {
             mu_param.sparsify_mean_to_support(&stat.observed_sum_ds);
-            mu_adj_param.sparsify_mean_to_support(&(&stat.observed_sum_ds + &stat.imputed_sum_ds));
+            mu_adj_param.sparsify_mean_to_support(&obs_plus_imp);
             gamma_param.sparsify_mean_to_support(&stat.imputed_sum_ds);
-            mu_resid_param.sparsify_mean_to_support(&stat.residual_sum_ds);
+            mu_resid_param.sparsify_mean_to_support(&stat.observed_sum_ds);
         }
 
         Ok(CollapsedOut {
@@ -546,10 +600,18 @@ impl CollapsedOut {
 pub struct CollapsedStat {
     pub observed_sum_ds: nalgebra::DMatrix<f32>, // observed sum within each sample
     pub imputed_sum_ds: nalgebra::DMatrix<f32>,  // counterfactual sum within each sample
-    pub residual_sum_ds: nalgebra::DMatrix<f32>, // residual sum within each sample
     pub size_s: nalgebra::DVector<f32>,          // sample s size
     pub observed_sum_db: nalgebra::DMatrix<f32>, // divergence numerator
     pub n_bs: nalgebra::DMatrix<f32>,            // batch-specific sample size
+    /// Counterfactual SOURCE mass per (batch, sample): how much of sample `s`'s
+    /// imputed profile was drawn from batch `b`'s cells (each matched cell's
+    /// weights sum to 1, so a column sums to the matched cell count). With
+    /// `n_bs` this is what identifies `δ`: `E[imputed_gs] = μ_gs Σ_b δ_gb w_bs`
+    /// against `E[observed_gs] = μ_gs Σ_b δ_gb n_bs`.
+    pub matched_bs: nalgebra::DMatrix<f32>,
+    /// Batches whose frame IS the frame: `δ` is normalised so their per-gene
+    /// geometric mean is 1. Empty = pooled, where every batch's mass weighs in.
+    pub anchor_batches: Vec<usize>,
     /// Per-(gene, sample) effective size: the mass of sample `s` whose SOURCE
     /// actually measures gene `g`. `None` means fully observed — every gene
     /// sees `size_s[s]`, and `optimize` takes the exact historical code path.
@@ -572,10 +634,11 @@ impl CollapsedStat {
         Self {
             observed_sum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
             imputed_sum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
-            residual_sum_ds: nalgebra::DMatrix::<f32>::zeros(ngene, nsample),
             size_s: nalgebra::DVector::<f32>::zeros(nsample),
             observed_sum_db: nalgebra::DMatrix::<f32>::zeros(ngene, nbatch),
             n_bs: nalgebra::DMatrix::<f32>::zeros(nbatch, nsample),
+            matched_bs: nalgebra::DMatrix::<f32>::zeros(nbatch, nsample),
+            anchor_batches: Vec::new(),
             size_ds: None,
             obs_mask_db: None,
         }
@@ -593,13 +656,30 @@ impl CollapsedStat {
         self.observed_sum_db.ncols()
     }
 
+    /// Per-batch weights that define the frame `δ` is pinned to: the anchors
+    /// when there are any (each weighted 1), else every batch by its own cell
+    /// mass.
+    pub fn frame_weights(&self) -> DVector<f32> {
+        let nb = self.num_batches();
+        if self.anchor_batches.is_empty() {
+            DVector::from_fn(nb, |b, _| self.n_bs.row(b).sum())
+        } else {
+            let mut w = DVector::<f32>::zeros(nb);
+            for &b in &self.anchor_batches {
+                w[b] = 1.0;
+            }
+            w
+        }
+    }
+
     pub fn clear(&mut self) {
         self.observed_sum_ds.fill(0_f32);
         self.imputed_sum_ds.fill(0_f32);
-        self.residual_sum_ds.fill(0_f32);
         self.observed_sum_db.fill(0_f32);
         self.size_s.fill(0_f32);
         self.n_bs.fill(0_f32);
+        self.matched_bs.fill(0_f32);
+        self.anchor_batches.clear();
         self.size_ds = None;
         self.obs_mask_db = None;
     }
@@ -617,12 +697,10 @@ impl CollapsedStat {
             out.imputed_sum_ds
                 .column_mut(new_col)
                 .copy_from(&self.imputed_sum_ds.column(old_col));
-            out.residual_sum_ds
-                .column_mut(new_col)
-                .copy_from(&self.residual_sum_ds.column(old_col));
             out.size_s[new_col] = self.size_s[old_col];
             for b in 0..nb {
                 out.n_bs[(b, new_col)] = self.n_bs[(b, old_col)];
+                out.matched_bs[(b, new_col)] = self.matched_bs[(b, old_col)];
             }
         }
         if let Some(size_ds) = self.size_ds.as_ref() {
@@ -632,21 +710,23 @@ impl CollapsedStat {
         }
         out.obs_mask_db = self.obs_mask_db.clone();
         out.observed_sum_db.copy_from(&self.observed_sum_db);
+        out.anchor_batches = self.anchor_batches.clone();
         out
     }
 
     /// Select a contiguous block of feature rows (`r0..r0+nrows`). Per-gene
-    /// stats (`observed`/`imputed`/`residual`/`observed_db`) are sliced;
-    /// the per-sample `size_s` and per-batch `n_bs` are shared, so they're
-    /// copied whole. Used by the gene-blocked `optimize`.
+    /// stats (`observed`/`imputed`/`observed_db`) are sliced; the per-sample
+    /// `size_s` and per-batch `n_bs`/`matched_bs` are shared, so they're copied
+    /// whole. Used by the gene-blocked `optimize`.
     pub fn select_rows(&self, r0: usize, nrows: usize) -> Self {
         Self {
             observed_sum_ds: self.observed_sum_ds.rows(r0, nrows).into_owned(),
             imputed_sum_ds: self.imputed_sum_ds.rows(r0, nrows).into_owned(),
-            residual_sum_ds: self.residual_sum_ds.rows(r0, nrows).into_owned(),
             size_s: self.size_s.clone(),
             observed_sum_db: self.observed_sum_db.rows(r0, nrows).into_owned(),
             n_bs: self.n_bs.clone(),
+            matched_bs: self.matched_bs.clone(),
+            anchor_batches: self.anchor_batches.clone(),
             size_ds: self
                 .size_ds
                 .as_ref()
@@ -694,7 +774,8 @@ pub(super) const DEFAULT_COARSEST_SORT_DIM: usize = 7;
 /// Cross-batch matched-stat accumulation on top of the pb-sample
 /// layout. For each fine-group, fetches `knn` matched cells from each
 /// non-own batch via `batch_knn_lookup`, dedupes them through their
-/// pb-samples, and emits the matched gene sums into `stat.matched_dn`.
+/// pb-samples, and emits the counterfactual gene sums into
+/// `stat.imputed_sum_ds` and the per-batch source mass into `stat.matched_bs`.
 pub(super) fn collect_matched_stat_coarse(
     layout: &PbSampleLayout,
     gene_sums: &[Vec<(usize, f32)>],
@@ -707,6 +788,9 @@ pub(super) fn collect_matched_stat_coarse(
     let num_pb = layout.cell_counts.len();
     debug_assert_eq!(pbsamp_to_group.len(), num_pb);
 
+    // The batches that source the counterfactual are the batches that pin δ:
+    // recorded here, where that mass is written, so no caller can forget.
+    stat.anchor_batches = anchor_batches.map(<[usize]>::to_vec).unwrap_or_default();
     let neighbors_per_sc = per_batch_sc_neighbors(layout, batch_knn_lookup, knn, anchor_batches)?;
 
     use indicatif::ParallelProgressIterator;
@@ -765,17 +849,14 @@ pub(super) fn collect_matched_stat_coarse(
                 stat.imputed_sum_ds[(gene, pbsamp_group)] += sc_count * y;
             }
 
-            // Accumulate residual_sum_ds[g, s] += y_obs[g] / y_hat[g]
-            // where y_obs[g] = gene_sums[pbsamp][g] / cell_counts[pbsamp]
-            // -> residual_sum_ds[g, s] += gene_sums[pbsamp][g] / (cell_counts[pbsamp] * y_hat[g])
-            //    then × cell_counts[pbsamp] to match original scaling
-            // = gene_sums[pbsamp][g] / y_hat[g]
-            for &(gene, val) in &gene_sums[pbsamp_idx] {
-                if let Some(&y_h) = y_hat.get(&gene) {
-                    if y_h > 0.0 {
-                        stat.residual_sum_ds[(gene, pbsamp_group)] += val / y_h;
-                    }
+            // Source mass per batch: this pb-sample's `sc_count` cells split their
+            // unit weight over the matched pb-samples' batches.
+            for ((matched_sc, _), &w) in filtered.iter().zip(weights.iter()) {
+                if layout.cell_counts[*matched_sc] < 1.0 {
+                    continue;
                 }
+                stat.matched_bs[(layout.pb_sample_to_batch[*matched_sc], pbsamp_group)] +=
+                    sc_count * w;
             }
         });
 
@@ -805,13 +886,10 @@ pub(super) fn merge_stat(
             .imputed_sum_ds
             .column_mut(coarse_g)
             .add_assign(&fine_stat.imputed_sum_ds.column(fine_g));
-        coarse
-            .residual_sum_ds
-            .column_mut(coarse_g)
-            .add_assign(&fine_stat.residual_sum_ds.column(fine_g));
         coarse.size_s[coarse_g] += fine_stat.size_s[fine_g];
         for b in 0..num_batches {
             coarse.n_bs[(b, coarse_g)] += fine_stat.n_bs[(b, fine_g)];
+            coarse.matched_bs[(b, coarse_g)] += fine_stat.matched_bs[(b, fine_g)];
         }
     }
 
@@ -827,6 +905,7 @@ pub(super) fn merge_stat(
         coarse.size_ds = Some(size_ds);
     }
     coarse.obs_mask_db = fine_stat.obs_mask_db.clone();
+    coarse.anchor_batches = fine_stat.anchor_batches.clone();
 
     coarse.observed_sum_db.copy_from(&fine_stat.observed_sum_db);
     coarse
