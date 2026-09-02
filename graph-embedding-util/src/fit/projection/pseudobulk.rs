@@ -29,7 +29,7 @@ pub struct PbLevelVelocity {
 /// per-node Newton solve gave up on, on `dev`, not a cache-hostile per-node Gram.
 ///
 /// The pb aggregates (`pb_blobs[level].triplets`) are already batch-corrected, so
-/// no batch divisor is applied; `gauge_fix` is **off**, so `θ_pb` stays in the raw
+/// no batch fold is applied; `gauge_fix` is **off**, so `θ_pb` stays in the raw
 /// as-trained frame the cell-lift differences cells against (pb landmarks are never
 /// co-embedded, so there is no common mode to remove). `frozen_e` is row-major
 /// `[n_features × h]`.
@@ -60,7 +60,7 @@ pub(crate) fn project_pbs_phase2(
         let nodes: Vec<(u32, &[u32], &[f32])> = (0..n_pb)
             .map(|p| (p as u32, feats[p].as_slice(), counts[p].as_slice()))
             .collect();
-        // No batch divisor — pb aggregates are already batch-corrected. `gauge_fix`
+        // No batch fold — pb aggregates are already batch-free. `gauge_fix`
         // off keeps pb θ raw: the cell-lift differences cells against raw pb θ, and
         // pb landmarks are never co-embedded, so there is no common mode to remove.
         let res = block_sgd::project_cells(

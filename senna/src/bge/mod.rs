@@ -23,6 +23,7 @@ use graph_embedding_util as ge;
 pub(crate) mod args;
 mod resolve_etm;
 pub(crate) mod score;
+pub(crate) mod transfer;
 
 pub use args::BgeArgs;
 use args::MultiomeFile;
@@ -363,6 +364,18 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             pb_posterior_nested_delta: true,
             pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
             nce_objective: args.nce_objective.to_ge(),
+            // Learned mixed-membership modules in front of ρ — ON by default for bge
+            // (`--no-gene-modules` opts out): on held-out marrow cells they turned the
+            // gain over the training-marginal null from negative to zero, raised the
+            // per-cell rank agreement, and lost less under gene ablation.
+            // Under `senna update` the parent's modules are carried as the warm start.
+            gene_modules: match args.modules.resolve(Some(DEFAULT_GENE_MODULES))? {
+                Some(mut gm) => {
+                    gm.parent = parent_modules(args.init_from.as_deref(), &unified.feature_names)?;
+                    Some(gm)
+                }
+                None => None,
+            },
             // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
             // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
             // internal weight). There is no null absorber and no simplex — that was the
@@ -533,6 +546,9 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 ge::EmbeddingFileNames::SENNA_EMBEDDING,
             )?;
         }
+        // The learned-module tables, on both paths; the composed ρ above already
+        // carries them for every reader that does not care.
+        ge::write_module_tables(&args.out, &out.model, &unified.feature_names)?;
     }
 
     let input: Vec<String> = data_files
@@ -544,6 +560,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
+    let has_modules = out.model.modules.is_some();
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Bge,
@@ -570,6 +587,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // dictionary and ignores the co-embed file on disk).
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("feature_loading.parquet"),
+        // Learned gene modules, when the run trained them; the composed row still
+        // lives in `feature_loading`, so these are additive.
+        module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),
+        module_dictionary_suffix: has_modules.then_some(ge::transfer::MODULE_DICTIONARY_SUFFIX),
         // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
         softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         // Z always lands in cell_embedding.parquet — on BOTH the ETM and
@@ -584,6 +605,15 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
     })?;
+
+    // The phase-1 pseudobulk embeddings, with each pseudobulk's batch: the
+    // geometry the dictionary was trained against. When the per-cell embedding
+    // separates by batch, this table says whether the separation was already
+    // there before phase 2.
+    write_pb_embeddings(&args.out, &out.pb_embeddings, &unified.batch_names)?;
+    if let Some(fold) = &out.batch_gene_fold {
+        write_batch_gene_fold(&args.out, fold, &unified.feature_names)?;
+    }
 
     // The posterior no longer runs here. It is phase-1's own sampler now
     // (`FitConfig::pb_posterior`), so it happens INSIDE `fit` — before phase 2,
@@ -656,4 +686,119 @@ fn median_of(v: &[f64]) -> f64 {
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     s[s.len() / 2]
+}
+
+/// The parent run's module tables for `senna update`'s warm start, matched to
+/// this fit's feature axis by exact name. `None` when there is no parent, or the
+/// parent trained no modules (the fit then warm-starts from its own k-means, as a
+/// fresh run would).
+fn parent_modules(
+    init_from: Option<&str>,
+    feature_names: &[Box<str>],
+) -> anyhow::Result<Option<ge::ParentModulesOwned>> {
+    let Some(prefix) = init_from else {
+        return Ok(None);
+    };
+    let parent = crate::bge::score::BgeEmbedding::open(prefix)?;
+    let rho = parent.rho_matrix();
+    let Some((pi, mu)) = parent.modules else {
+        info!(
+            "update: parent {prefix} trained no gene modules; warm-starting from this fit's own \
+             profiles"
+        );
+        return Ok(None);
+    };
+    // The same flexible matcher `predict` aligns a query with, so a parent whose
+    // names differ by case or suffix still matches.
+    let remap = crate::topic::eval::build_gene_remap_with(
+        &parent.gene_names,
+        feature_names,
+        &crate::topic::eval::QueryNameOpts::default(),
+    );
+    let n_matched = remap.new_to_train.iter().filter(|r| r.is_some()).count();
+    info!(
+        "update: carrying {} gene modules from {prefix}; {} of {} features match the parent",
+        mu.nrows(),
+        n_matched,
+        feature_names.len()
+    );
+    Ok(Some(ge::ParentModulesOwned {
+        rho,
+        pi,
+        mu,
+        row_to_parent: remap.new_to_train,
+        knobs: ge::transfer::AlignKnobs::default(),
+    }))
+}
+
+/// Module count `senna bge` trains unless told otherwise — the policy is this
+/// command's, so it lives here rather than in the shared flag group.
+const DEFAULT_GENE_MODULES: usize = 128;
+
+/// `{out}.batch_gene_fold.parquet`: the per-batch gene fold phase 2 divided each
+/// batch's cell counts by, as `log δ_gb`, `[features × batches]`.
+fn write_batch_gene_fold(
+    out: &str,
+    fold: &ge::fit::BatchGeneFold,
+    feature_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    let table = Mat::from_row_slice(fold.n_batches(), fold.n_features, &fold.delta)
+        .map(f32::ln)
+        .transpose();
+    table.to_parquet_with_names(
+        &format!("{out}.batch_gene_fold.parquet"),
+        (Some(feature_names), Some("feature")),
+        Some(&fold.batch_names),
+    )?;
+    info!("Wrote {out}.batch_gene_fold.parquet");
+    Ok(())
+}
+
+/// `{out}.pb_embedding.parquet` (rows `l{level}:pb{i}`, columns `h0..`) and
+/// `{out}.pb_batch.parquet` (level and batch name per row), every level stacked.
+fn write_pb_embeddings(
+    out: &str,
+    levels: &[ge::fit::PbLevelEmbedding],
+    batch_names: &[Box<str>],
+) -> anyhow::Result<()> {
+    use matrix_util::dmatrix_util::concatenate_vertical;
+    use matrix_util::parquet::{write_named_table, Column};
+    if levels.is_empty() {
+        return Ok(());
+    }
+    let h = levels[0].e_pb.ncols();
+    let table = concatenate_vertical(&levels.iter().map(|l| l.e_pb.clone()).collect::<Vec<_>>())?;
+    let n = table.nrows();
+    let mut rows: Vec<Box<str>> = Vec::with_capacity(n);
+    let mut level_col: Vec<i32> = Vec::with_capacity(n);
+    let mut batch_col: Vec<Box<str>> = Vec::with_capacity(n);
+    for (level, l) in levels.iter().enumerate() {
+        for i in 0..l.e_pb.nrows() {
+            rows.push(format!("l{level}:pb{i}").into_boxed_str());
+            level_col.push(level as i32);
+            batch_col.push(match l.batch[i] {
+                u32::MAX => Box::from(""),
+                b => batch_names[b as usize].clone(),
+            });
+        }
+    }
+    table.to_parquet_with_names(
+        &format!("{out}.pb_embedding.parquet"),
+        (Some(&rows), Some("pb")),
+        Some(&axis_id_names("h", h)),
+    )?;
+    write_named_table(
+        &format!("{out}.pb_batch.parquet"),
+        "pb",
+        &rows,
+        &[
+            (Box::from("level"), Column::I32(&level_col)),
+            (Box::from("batch"), Column::Str(&batch_col)),
+        ],
+    )?;
+    info!(
+        "Wrote {out}.pb_embedding.parquet / pb_batch.parquet ({n} pseudobulks over {} levels)",
+        levels.len()
+    );
+    Ok(())
 }

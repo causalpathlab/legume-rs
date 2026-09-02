@@ -55,6 +55,7 @@ fn rows_follow_the_runs_gene_axis_not_the_dictionarys() -> anyhow::Result<()> {
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: None,
     })?;
 
     assert_eq!(out.h(), 4);
@@ -99,6 +100,7 @@ fn unmatched_gene_takes_the_closest_matched_profile_neighbor() -> anyhow::Result
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: None,
     })?;
 
     assert_eq!(out.frozen_row_mask(), vec![1.0, 1.0, 0.0]);
@@ -132,6 +134,7 @@ fn track_suffixed_rows_are_rejected_with_the_offending_name() -> anyhow::Result<
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: None,
     })
     .err()
     .expect("a co-embed table must be rejected")
@@ -159,6 +162,7 @@ fn zero_profile_gene_takes_the_matched_mean() -> anyhow::Result<()> {
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: None,
     })?;
 
     // Mean of rows (0,1) and (10,11) is (5,6).
@@ -199,6 +203,7 @@ fn bias_loads_for_matched_genes_and_zeros_elsewhere() -> anyhow::Result<()> {
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: None,
     })?;
 
     assert_eq!(out.b_gene, vec![8.0, 0.0]);
@@ -220,6 +225,7 @@ fn zero_matched_genes_is_a_hard_error() -> anyhow::Result<()> {
         gene_names: &run_genes,
         name_kind: FeatureNameKind::Exact,
         gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: None,
     })
     .is_err());
     Ok(())
@@ -249,5 +255,105 @@ fn restore_puts_frozen_rows_back_and_leaves_trainable_rows_alone() -> anyhow::Re
     assert_eq!(got[0], vec![1.0, 2.0], "frozen row 0 restored");
     assert_eq!(got[2], vec![5.0, 6.0], "frozen row 2 restored");
     assert_eq!(got[1], vec![13.0, 14.0], "trainable row 1 keeps its step");
+    Ok(())
+}
+
+/// With the dictionary's module tables beside it, an unmatched gene is placed
+/// through the membership of its profile neighbours: `π̂ μ`, without the
+/// neighbour's residual. Here the dictionary IS `π μ` (zero residual), so the
+/// initialized row equals its neighbour's row exactly, and the record says how.
+#[test]
+fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyhow::Result<()> {
+    use graph_embedding_util::transfer::AlignKnobs;
+    let dir = tempfile::tempdir()?;
+    let dict_genes = names(&["G1", "G2"]);
+    // π: G1 → module 0, G2 → module 1; μ: two distinct rows; ρ = π μ.
+    let pi = Mat::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let mu = Mat::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let rho = &pi * &mu;
+    let cols: Vec<Box<str>> = (0..3).map(|c| format!("h{c}").into()).collect();
+    let dict_path = dir
+        .path()
+        .join("run.feature_loading.parquet")
+        .to_string_lossy()
+        .into_owned();
+    rho.to_parquet_with_names(&dict_path, (Some(&dict_genes), Some("gene")), Some(&cols))?;
+    let mcols: Vec<Box<str>> = (0..2).map(|c| format!("m{c}").into()).collect();
+    let mnames = names(&["m0", "m1"]);
+    pi.to_parquet_with_names(
+        &dir.path()
+            .join("run.module_membership.parquet")
+            .to_string_lossy(),
+        (Some(&dict_genes), Some("feature")),
+        Some(&mcols),
+    )?;
+    mu.to_parquet_with_names(
+        &dir.path()
+            .join("run.module_dictionary.parquet")
+            .to_string_lossy(),
+        (Some(&mnames), Some("module")),
+        Some(&cols),
+    )?;
+
+    let run_genes = names(&["G1", "G2", "G9"]);
+    // Depth-equal pseudobulks; G9's profile is G2's shape.
+    let profiles = Mat::from_row_slice(
+        3,
+        4,
+        &[
+            9.0, 1.0, 9.0, 1.0, // G1
+            1.0, 9.0, 1.0, 9.0, // G2
+            2.0, 18.0, 2.0, 18.0, // G9 ~ G2
+        ],
+    );
+    let out = load_pretrained_gene_embedding(PretrainedArgs {
+        dictionary_path: &dict_path,
+        bias_path: None,
+        gene_names: &run_genes,
+        name_kind: FeatureNameKind::Exact,
+        gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: Some(AlignKnobs {
+            k: 1,
+            similarity_floor: 0.5,
+        }),
+    })?;
+    assert_eq!(out.frozen_row_mask(), vec![1.0, 1.0, 0.0]);
+    for c in 0..3 {
+        assert!(
+            (out.e_gene[(2, c)] - rho[(1, c)]).abs() < 1e-6,
+            "G9 col {c}"
+        );
+    }
+    let rec = &out.records[2];
+    assert_eq!(rec.init, InitKind::Membership);
+    assert_eq!(rec.neighbor_gene.as_deref(), Some("G2"));
+    assert!(rec.cosine > 0.99, "cosine {}", rec.cosine);
+    assert_eq!(out.records[0].init, InitKind::Matched);
+    Ok(())
+}
+
+/// Membership initialization asked for, but the dictionary has no module tables
+/// beside it: fall back to the neighbour rule and say so in the record.
+#[test]
+fn membership_init_without_tables_falls_back_to_the_neighbour_rule() -> anyhow::Result<()> {
+    use graph_embedding_util::transfer::AlignKnobs;
+    let dir = tempfile::tempdir()?;
+    let dict_genes = names(&["G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_genes, 3, 0.0)?;
+    let run_genes = names(&["G1", "G2", "G9"]);
+    let profiles = Mat::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 0.0, 2.0]);
+    let out = load_pretrained_gene_embedding(PretrainedArgs {
+        dictionary_path: &path,
+        bias_path: None,
+        gene_names: &run_genes,
+        name_kind: FeatureNameKind::Exact,
+        gene_profiles: &|| Ok(profiles.clone()),
+        membership_init: Some(AlignKnobs {
+            k: 3,
+            similarity_floor: 0.5,
+        }),
+    })?;
+    assert_eq!(out.records[2].init, InitKind::Neighbor);
+    assert_eq!(out.records[2].neighbor_gene.as_deref(), Some("G2"));
     Ok(())
 }

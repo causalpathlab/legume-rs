@@ -585,6 +585,16 @@ pub struct RunOutputs {
     /// consumers such as `senna deconvolve` had to demand `--skip-etm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_loading: Option<String>,
+    /// `{out}.module_membership.parquet`: gene × M learned-module membership
+    /// (rows on the simplex with exact zeros). Present only for a run trained with
+    /// gene modules; `feature_loading` still holds the composed row, so a reader
+    /// that ignores this slot loses nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_membership: Option<String>,
+    /// `{out}.module_dictionary.parquet`: M × H module vectors, the `μ` in
+    /// `ρ_g = Σ_m π_gm μ_m + r_g`. Paired with `module_membership`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_dictionary: Option<String>,
     /// `{out}.cell_embedding.parquet` — N × H per-cell embedding Z in the
     /// SAME H-space as `feature_embedding` ρ.
     ///
@@ -1153,6 +1163,10 @@ pub struct RunDescription<'a> {
     /// [`RunOutputs::feature_loading`] for why this is separate from
     /// `feature_embedding_suffix`.
     pub feature_loading_suffix: Option<&'a str>,
+    /// e.g. `"module_membership.parquet"` for a gene-module run; `None` to omit.
+    pub module_membership_suffix: Option<&'a str>,
+    /// e.g. `"module_dictionary.parquet"`; paired with the membership.
+    pub module_dictionary_suffix: Option<&'a str>,
     /// Suffix after `{basename}.` for the log-simplex topic dictionary β, e.g.
     /// `"dictionary.parquet"`. Set by kinds whose dictionary IS a
     /// `log_softmax`-over-genes simplex; `None` for signed loadings, which stay
@@ -1244,6 +1258,12 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.feature_loading_suffix {
         m.outputs.feature_loading = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.module_membership_suffix {
+        m.outputs.module_membership = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.module_dictionary_suffix {
+        m.outputs.module_dictionary = Some(format!("{basename}.{suf}"));
     }
     if let Some(suf) = desc.softmax_dictionary_suffix {
         m.outputs.softmax_dictionary = Some(format!("{basename}.{suf}"));

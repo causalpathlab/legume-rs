@@ -1,7 +1,7 @@
 use super::lift::{CellLineage, LineageQc};
 use super::projection::PbLevelVelocity;
 use crate::model::JointEmbedModel;
-use crate::training::TrainingParams;
+use crate::training::{ModuleTrainParams, TrainingParams};
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
 use data_beans_alg::refine_multilevel::RefineParams;
@@ -32,6 +32,10 @@ pub(crate) const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 /// orient the DAG — that is exactly what this fraction trades. Off the lineage
 /// path phase 1 keeps the whole budget and the run is byte-identical.
 pub(crate) const LINEAGE_WARMUP_FRAC: f64 = 0.5;
+
+/// Fraction of `epochs` the module membership is held at its warm start when
+/// [`GeneModuleConfig::warmup_epochs`] is not given.
+pub(crate) const MODULE_WARMUP_FRAC: f64 = 0.25;
 
 /// Hyperparameter / configuration bundle for [`fit`]. Constructed by
 /// each caller from its own CLI arguments — this crate doesn't import
@@ -191,6 +195,71 @@ pub struct FitConfig {
     /// `posterior::dim_block` samples as a PIP. See [`FeatureGateConfig`] and
     /// [`crate::model::FeatureGateSpec`].
     pub feature_gate: Option<FeatureGateConfig>,
+    /// Learned gene modules in front of the feature embedding
+    /// ([`crate::model::FeatModules`]): `ρ_g = Σ_m π_gm μ_m + r_g` with a learned
+    /// mixed membership, an exact cell–module softmax term, within-module NCE
+    /// negatives and gene dropout at pooling time. `None` (default) = the free
+    /// embedding, byte-identical to a build before this existed. Mutually
+    /// exclusive with `feat_factor` and `pb_posterior`.
+    pub gene_modules: Option<GeneModuleConfig>,
+}
+
+/// Caller-facing configuration of the learned gene modules.
+#[derive(Clone, Debug)]
+pub struct GeneModuleConfig {
+    /// Number of modules `M`.
+    pub n_modules: usize,
+    /// Epochs the warm-start membership is held before it trains. `None` = a
+    /// quarter of the epochs, at least one.
+    pub warmup_epochs: Option<usize>,
+    /// Per-step probability that a feature is hidden when the module counts are
+    /// pooled (`0` = off).
+    pub gene_dropout: f32,
+    /// Weight of the exact cell–module term relative to the NCE.
+    pub lambda_module: f32,
+    /// Weight of the load-balance prior `KL(π̄ ‖ Uniform)`.
+    pub lambda_balance: f32,
+    /// Ridge on the per-feature residual `r_g` — the module model's only per-row
+    /// table, so this replaces `feature_embedding_l2`.
+    pub residual_l2: f32,
+    /// Units (cells or pseudobulks) pooled for the exact term per step per axis.
+    pub units_per_step: usize,
+    /// Share of a feature's warm-start membership on its k-means module.
+    pub init_own_mass: f32,
+    /// A parent run's module tables to warm-start from (`senna update`): matched
+    /// features carry the parent's membership, unmatched ones are initialized
+    /// through the parent's modules from their profile neighbours, and `μ` starts
+    /// at the parent's. Overrides `n_modules` with the parent's `M`. `None` = the
+    /// k-means warm start from this fit's own pseudobulks.
+    pub parent: Option<ParentModulesOwned>,
+}
+
+/// A parent run's module tables, carried on the config for the warm start
+/// (`senna update`).
+#[derive(Clone, Debug)]
+pub struct ParentModulesOwned {
+    /// Parent composed rows `[D_parent × H]`.
+    pub rho: nalgebra::DMatrix<f32>,
+    /// Parent membership `[D_parent × M]`.
+    pub pi: nalgebra::DMatrix<f32>,
+    /// Parent module dictionary `[M × H]`.
+    pub mu: nalgebra::DMatrix<f32>,
+    /// For each feature of this fit's axis, the parent row it matched.
+    pub row_to_parent: Vec<Option<usize>>,
+    /// Neighbourhood for the unmatched features' initialization.
+    pub knobs: crate::transfer::AlignKnobs,
+}
+
+impl GeneModuleConfig {
+    /// Epochs the warm-start membership is held: the explicit count, else a
+    /// quarter of the epochs, at least one and at most all of them. The one
+    /// definition every trainer with a module model uses.
+    #[must_use]
+    pub fn warmup_epochs_for(&self, epochs: usize) -> usize {
+        self.warmup_epochs
+            .unwrap_or_else(|| ((epochs as f64) * MODULE_WARMUP_FRAC).ceil() as usize)
+            .clamp(usize::from(epochs > 0), epochs)
+    }
 }
 
 /// Caller-provided spec for the per-gene β-sharing feature factorization. Lengths
@@ -259,6 +328,13 @@ pub struct FitOutput {
     /// Both gates' posteriors on the β-sharing (splice) model. `Some` in place of
     /// [`Self::pb_posterior`] when `feat_factor` was set.
     pub splice_posterior: Option<crate::posterior::pb_gibbs::SpliceGibbsResult>,
+    /// The phase-1 pseudobulk embeddings per collapse level (coarsest → finest),
+    /// each with its pseudobulks' batches — the geometry the feature side was
+    /// trained against, for batch diagnostics.
+    pub pb_embeddings: Vec<super::pb_readout::PbLevelEmbedding>,
+    /// Per-batch gene fold `log δ_gb` phase 2 divided each batch's cell counts by;
+    /// `None` on single-batch data.
+    pub batch_gene_fold: Option<super::batch_fold::BatchGeneFold>,
 }
 
 pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
@@ -276,5 +352,13 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,
+        module: config.gene_modules.as_ref().map(|g| ModuleTrainParams {
+            warmup_epochs: g.warmup_epochs_for(config.epochs),
+            gene_dropout: g.gene_dropout,
+            units_per_step: g.units_per_step,
+            lambda_module: g.lambda_module,
+            lambda_balance: g.lambda_balance,
+            residual_l2: g.residual_l2,
+        }),
     }
 }

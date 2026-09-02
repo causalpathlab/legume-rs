@@ -270,6 +270,47 @@ pub struct PredictArgs {
     )]
     pub(crate) ablate_features: Option<Box<str>>,
 
+    /// bge only. Genes in the query that the model never saw are placed through the
+    /// learned modules (their membership is the similarity-weighted mean of the k
+    /// most similar matched genes' memberships, their bias is moment-matched to the
+    /// pass-1 latents) instead of being dropped. `--no-init-genes` restores the drop.
+    #[arg(
+        long,
+        help = "bge: drop genes the model never saw instead of initializing them through the modules"
+    )]
+    pub(crate) no_init_genes: bool,
+
+    #[arg(
+        long,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
+        value_name = "K",
+        help = "bge: matched genes whose memberships are averaged to initialize an unseen gene"
+    )]
+    pub(crate) init_neighbours: usize,
+
+    #[arg(
+        long,
+        default_value_t = graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
+        value_name = "S",
+        help = "bge: below this best profile similarity an unseen gene takes the diffuse prior"
+    )]
+    pub(crate) init_similarity_floor: f32,
+
+    #[arg(
+        long,
+        help = "bge: re-project every cell with the initialized genes as observations (pass 2)",
+        long_help = "bge: after initialization, run a second projection in which the initialized\n\
+                     genes' counts are observed. Off, they are scored from the pass-1 latent and\n\
+                     never move it. The comparable score still normalizes over the model's genes."
+    )]
+    pub(crate) init_genes_in_fit: bool,
+
+    #[arg(
+        long,
+        help = "bge: write {out}.gene_rates.parquet, per-cell predicted rates of the missing and initialized genes"
+    )]
+    pub(crate) emit_gene_rates: bool,
+
     /// Training data, read once to build the null every arm is scored against.
     ///
     /// The floor is the count-weighted gene composition of this data — what a
@@ -449,11 +490,18 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
 
     let model = crate::bge::score::BgeEmbedding::open(&args.model)?;
     let qopts = args.query_name_opts()?;
-    let fit = model.score(
+    let fit = model.score_with_init(
         &args.data_files,
         args.preload_data,
         args.minibatch_size,
         &qopts,
+        crate::bge::score::InitOpts {
+            align: (!args.no_init_genes).then_some(graph_embedding_util::transfer::AlignKnobs {
+                k: args.init_neighbours,
+                similarity_floor: args.init_similarity_floor,
+            }),
+            in_fit: args.init_genes_in_fit,
+        },
         &args.resolve_device()?,
     )?;
 
@@ -479,6 +527,7 @@ fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
         &fit.total,
         agreement.as_ref(),
     )?;
+    crate::bge::transfer::write_init_outputs(&args.out, &model, &fit, args.emit_gene_rates)?;
 
     Ok(())
 }
