@@ -433,6 +433,8 @@ fn run_gem_genes_bge(
             // the positive competing against its negatives in one distribution
             // separates cell types better than the per-pair logistic SGNS loss).
             nce_objective: args.model.nce_objective.to_ge(),
+            // Learned gene modules are not offered on the β-sharing path yet.
+            gene_modules: None,
             // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
             // single-effect, ALWAYS ON. Gates β_g (identity) AND, independently, δ_g
             // (velocity → velocity_selection); null absorber + categorical + Gaussian
@@ -876,6 +878,8 @@ fn run_gem_genes_bge(
         // on that manifold and goes to `feature_loading` instead.
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("beta_feature_embedding.parquet"),
+        module_membership_suffix: None,
+        module_dictionary_suffix: None,
         velocity_suffix: Some("velocity.parquet"),
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: Some("delta_feature_embedding.parquet"),

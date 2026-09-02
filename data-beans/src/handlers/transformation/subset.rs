@@ -89,7 +89,7 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
                 .iter()
                 .enumerate()
                 .map(|(i, name)| (name.clone(), i.to_string().into_boxed_str())),
-            args.allow_prefix,
+            args.allow_prefix && !args.exact_names,
         )
         .with_delimiter(args.delimiter);
 
@@ -179,7 +179,7 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
                 .iter()
                 .enumerate()
                 .map(|(i, name)| (name.clone(), i.to_string().into_boxed_str())),
-            args.allow_prefix,
+            args.allow_prefix && !args.exact_names,
         )
         .with_delimiter(args.delimiter);
 

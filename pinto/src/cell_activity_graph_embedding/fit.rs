@@ -82,7 +82,7 @@
 //! because a dropout keep-rate is not a coefficient.
 
 use crate::cell_activity_graph_embedding::args::{
-    CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode,
+    CellActivityGraphEmbeddingArgs, GateMode, GeneEmbeddingMode, GeneInitMode,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_exp_batch_cache, GeneGatedChainSampler,
@@ -119,15 +119,19 @@ use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{
-    build_per_batch_unit_samplers, embedding_ridge, ChainGroupFilter,
+    build_per_batch_unit_samplers, draw_gene_keep_mask, embedding_ridge,
+    log_membership_diagnostics, masked_membership, module_priors, module_step_loss,
+    ChainGroupFilter,
 };
 use graph_embedding_util::model::{
-    AdapterInit, FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit,
+    AdapterInit, FeatureGateSpec, GateKind, JointEmbedModel, ModelArgs, ModelInit, ModuleInit,
+    ModuleWarmStart,
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
+use rand::RngExt;
 use rand::SeedableRng;
 use std::sync::atomic::Ordering;
 
@@ -270,6 +274,19 @@ pub fn fit_cell_activity_graph_embedding(
             );
         }
     }
+    // Opt-in on cage: the default sampled gate anchors on a free per-gene table.
+    let module_cfg = args.modules.resolve(None)?;
+    anyhow::ensure!(
+        !(module_cfg.is_some() && args.gene_embedding.is_some()),
+        "--gene-modules learns the gene side through a module layer and --gene-embedding \
+         installs a pre-trained one; the two parameterizations are exclusive. Drop one."
+    );
+    anyhow::ensure!(
+        !(module_cfg.is_some() && args.gate_mode == GateMode::Sampled),
+        "--gene-modules cannot combine with --gate-mode sampled: the Gibbs selection \
+         anchors on a free per-gene table, which the module model composes rather than \
+         trains. Pass --gate-mode learned."
+    );
     anyhow::ensure!(
         !(args.gene_adapter_residual && args.gene_embedding_mode != GeneEmbeddingMode::Adapt),
         "--gene-adapter-residual is the adapter's per-gene correction and only \
@@ -826,28 +843,42 @@ pub fn fit_cell_activity_graph_embedding(
     // axis is final and the coarsening exists (its finest level pools the
     // per-gene profiles that seed unmatched genes), and before the model so
     // the init below can consume it.
+    // Per-gene profiles over the finest pseudobulks `[G × n_pb]`: the seed for
+    // unmatched pre-trained genes, and the count rows the module term pools.
+    // Lazy for the pre-trained path (a full pass over the data that runs only if
+    // the loader finds a gene with no dictionary row); materialized once for the
+    // module path, which reads it every step.
+    let build_profiles = || -> anyhow::Result<Mat> {
+        let finest = ml
+            .all_cell_labels
+            .last()
+            .expect("coarsening produced no levels");
+        let n_pb = finest.iter().copied().max().map_or(0, |m| m + 1);
+        let row_profiles = coarsen_cell_expression_dense(&data_vec, finest, n_pb)?;
+        Ok(gene_axis
+            .pool_rows_opt(&row_profiles)
+            .unwrap_or(row_profiles))
+    };
+    let module_profiles: Option<Mat> = match &module_cfg {
+        Some(_) => Some(build_profiles()?),
+        None => None,
+    };
     let pretrained_gene = match args.gene_embedding.as_deref() {
         None => None,
         Some(dict_path) => {
-            // Lazy: this full pass over the data runs only if the loader
-            // actually finds a gene with no dictionary row.
-            let build_profiles = || -> anyhow::Result<Mat> {
-                let finest = ml
-                    .all_cell_labels
-                    .last()
-                    .expect("coarsening produced no levels");
-                let n_pb = finest.iter().copied().max().map_or(0, |m| m + 1);
-                let row_profiles = coarsen_cell_expression_dense(&data_vec, finest, n_pb)?;
-                Ok(gene_axis
-                    .pool_rows_opt(&row_profiles)
-                    .unwrap_or(row_profiles))
-            };
             let pre = pretrained::load_pretrained_gene_embedding(pretrained::PretrainedArgs {
                 dictionary_path: dict_path,
                 bias_path: args.gene_embedding_bias.as_deref(),
                 gene_names: &gene_names,
                 name_kind: feature_kind.clone(),
                 gene_profiles: &build_profiles,
+                membership_init: match args.gene_init_mode {
+                    GeneInitMode::Membership => Some(graph_embedding_util::transfer::AlignKnobs {
+                        k: args.gene_init_neighbours,
+                        similarity_floor: args.gene_init_similarity_floor,
+                    }),
+                    GeneInitMode::Neighbor => None,
+                },
             })?;
             // adapt decouples the two widths; freeze/free install rows verbatim
             // and so need them equal.
@@ -909,6 +940,48 @@ pub fn fit_cell_activity_graph_embedding(
         (None, _) => info!("PB table starts from seeded random init (no collapse SVD)"),
     }
     let (mut model, frozen_gene) = match (&pretrained_gene, args.gene_embedding_mode) {
+        // Learned gene modules: every gene row is `Σ_m π_gm μ_m + r_g`, warm-started
+        // from a k-means over the pseudobulk profiles. Same detached-snapshot
+        // contract as the adapter arm.
+        _ if module_cfg.is_some() => {
+            let gm = module_cfg.as_ref().expect("checked above");
+            let profiles = module_profiles.as_ref().expect("built with the config");
+            anyhow::ensure!(
+                profiles.nrows() == n_genes && profiles.ncols() == n_pb,
+                "module profiles [{} x {}] do not match {} genes x {} pseudobulks",
+                profiles.nrows(),
+                profiles.ncols(),
+                n_genes,
+                n_pb
+            );
+            let labels =
+                graph_embedding_util::warm_start_module_labels(profiles, gm.n_modules, c.seed);
+            info!(
+                "learned gene modules: {} genes → {} modules (mixed membership), gene dropout {}, \
+                 exact module term λ={}, balance λ={}",
+                n_genes, gm.n_modules, gm.gene_dropout, gm.lambda_module, gm.lambda_balance
+            );
+            (
+                JointEmbedModel::new_with_modules(
+                    ModuleInit {
+                        n_features: n_genes,
+                        n_cells: n_pb,
+                        embedding_dim: args.embedding_dim,
+                        n_modules: gm.n_modules,
+                        warm: ModuleWarmStart::Labels {
+                            labels: &labels,
+                            own_mass: gm.init_own_mass,
+                        },
+                        b_feat: &b_feat_init,
+                        b_cell: &b_pb_init,
+                        seed: c.seed,
+                    },
+                    &varmap,
+                    &dev,
+                )?,
+                None,
+            )
+        }
         // Adapter: the dictionary is a fixed constant and the gene side trains
         // one shared [h_src x H] map (plus the optional per-gene residual), so
         // every gene's gradient moves the same few parameters.
@@ -1104,7 +1177,34 @@ pub fn fit_cell_activity_graph_embedding(
     // second ^C = hard abort. See graph_embedding_util::stop.
     let stop = setup_stop_handler();
 
+    // Module warm-up: hold the k-means membership for the first epochs, release
+    // it afterwards (geu's schedule). The profile matrix the exact term pools sits
+    // on the device as `[n_pb × G]`, so a step is one `index_select`.
+    let module_run: Option<(usize, Tensor)> = match (&module_cfg, &module_profiles) {
+        (Some(gm), Some(p)) => {
+            let wu = gm.warmup_epochs_for(args.epochs);
+            if let Some(m) = &model.modules {
+                m.set_frozen(wu > 0);
+            }
+            info!(
+                "gene modules: membership held for {wu} of {} epochs, then trained",
+                args.epochs
+            );
+            let rows: Vec<f32> = (0..p.ncols())
+                .flat_map(|j| p.column(j).iter().copied().collect::<Vec<f32>>())
+                .collect();
+            Some((wu, Tensor::from_vec(rows, (p.ncols(), p.nrows()), &dev)?))
+        }
+        _ => None,
+    };
+
     'epochs: for epoch in 0..args.epochs {
+        if let (Some(m), Some((wu, _))) = (&model.modules, &module_run) {
+            if epoch == *wu && m.is_frozen() {
+                m.set_frozen(false);
+                info!("epoch {epoch}: module membership released — π now trains");
+            }
+        }
         let mut perm: Vec<usize> = trainable_genes.clone();
         // ONE `z ~ Bern(pip)` draw for the whole epoch. Per-EPOCH, not
         // per-chunk: `z` is a latent for the DATASET, so a per-chunk draw would
@@ -1343,6 +1443,37 @@ pub fn fit_cell_activity_graph_embedding(
             if let Some(kl) = model.gate_kl()? {
                 total = (total + (kl * (chunk_mass / epoch_mass))?)?;
             }
+            // Exact pseudobulk–module term + membership priors, once per optimizer
+            // step, through the same functions geu's composite trainer uses: draw
+            // `units_per_step` pseudobulks uniformly, pool their count rows through
+            // the (dropout-masked) membership, and score every module against the
+            // trained PB table.
+            if let (Some(m), Some(gm), Some((_, profile_t))) =
+                (&model.modules, module_cfg.as_ref(), module_run.as_ref())
+            {
+                let u = gm.units_per_step.min(n_pb);
+                if u > 0 && gm.lambda_module > 0.0 {
+                    let picks: Vec<u32> = (0..u)
+                        .map(|_| rng_master.random_range(0..n_pb) as u32)
+                        .collect();
+                    let idx = Tensor::from_vec(picks, u, &dev)?;
+                    let x = profile_t.index_select(&idx, 0)?;
+                    let pi = m.membership()?;
+                    let pi_masked = if gm.gene_dropout > 0.0 {
+                        let keep =
+                            draw_gene_keep_mask(n_genes, gm.gene_dropout, &mut rng_master, &dev)?;
+                        masked_membership(&pi, &keep)?
+                    } else {
+                        pi.detach()
+                    };
+                    let e_units = model.e_cell.index_select(&idx, 0)?;
+                    total =
+                        (total + module_step_loss(m, &pi_masked, &x, &e_units, gm.lambda_module)?)?;
+                    if let Some(prior) = module_priors(m, &pi, gm.lambda_balance)? {
+                        total = (total + prior)?;
+                    }
+                }
+            }
             // Global-norm clip before the step. The NCE loss spikes when a
             // chunk draws a gene whose active edges are nearly all positives,
             // and an unbounded step there inflates the embedding norms every
@@ -1416,6 +1547,11 @@ pub fn fit_cell_activity_graph_embedding(
             "epoch {}: mean loss = {:.4e} (per-level: {:?}), samples = {}, skipped pairs = {}",
             epoch, mean_loss, mean_per_level, sample_count, skip_count
         );
+        if let Some(m) = &model.modules {
+            let pi_host: Vec<f32> = m.membership()?.detach().flatten_all()?.to_vec1()?;
+            // cage draws its negatives over pseudobulks, so no within-module fallback.
+            log_membership_diagnostics(m, &pi_host, epoch, args.epochs, 0)?;
+        }
 
         // Pair-term magnitude: the collapse detector. If this decays toward
         // zero while the loss still falls, the ungated cell biases have taken
@@ -1590,6 +1726,9 @@ pub fn fit_cell_activity_graph_embedding(
         (Some(&gene_names), Some("feature")),
         Some(&embedding_col_names(args.embedding_dim)),
     )?;
+    // Learned-module tables (no-op without modules); the feature embedding above
+    // already holds the composed row.
+    graph_embedding_util::write_module_tables(&c.out, &model, &gene_names)?;
 
     // The adapter map itself, so the spatial refinement can be applied OUTSIDE
     // this run: any gene with a row in the source dictionary, panel or not,

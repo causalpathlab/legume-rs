@@ -139,6 +139,7 @@ fn batches_per_epoch_resolves_auto_and_explicit() {
     use crate::training::resolve_batches_per_epoch;
 
     let params = |batch_size, batches_per_epoch| TrainingParams {
+        module: None,
         epochs: 1,
         batches_per_epoch,
         batch_size,

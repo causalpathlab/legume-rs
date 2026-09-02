@@ -30,6 +30,11 @@ pub enum InitKind {
     /// (or from the matched-row mean when the gene's profile is all zero,
     /// in which case `neighbor_gene` is `None`).
     Neighbor,
+    /// No dictionary row; placed through the dictionary's learned modules as
+    /// `π̂ μ`, with `π̂` averaged over the closest matched genes' memberships
+    /// (`neighbor_gene` is the best of them; `None` when the diffuse prior was
+    /// used because no neighbour reached the similarity floor).
+    Membership,
 }
 
 impl InitKind {
@@ -37,6 +42,7 @@ impl InitKind {
         match self {
             InitKind::Matched => "matched",
             InitKind::Neighbor => "neighbor",
+            InitKind::Membership => "membership",
         }
     }
 }
@@ -105,6 +111,14 @@ pub struct PretrainedArgs<'a> {
     /// row directions matter). Called at most once, and only when some gene
     /// has no dictionary row — an all-matched dictionary never pays for it.
     pub gene_profiles: &'a dyn Fn() -> anyhow::Result<Mat>,
+    /// Place unmatched genes through the dictionary's learned modules when
+    /// `{stem}.module_membership.parquet` and `{stem}.module_dictionary.parquet`
+    /// sit beside it (`stem` = the dictionary path without its
+    /// `.feature_loading.parquet` / `.dictionary.parquet` / `.parquet` suffix):
+    /// `π̂` = similarity-weighted mean membership of the `k` closest matched
+    /// genes, row = `π̂ μ`. Falls back to the neighbour rule when the tables are
+    /// absent. `None` = the neighbour rule.
+    pub membership_init: Option<graph_embedding_util::transfer::AlignKnobs>,
 }
 
 /// Load, align, and fill. See the module doc for the contract; every path
@@ -160,6 +174,114 @@ pub fn load_pretrained_gene_embedding(
     }
     let matched_idx: Vec<usize> = (0..n_genes).filter(|&g| matched[g]).collect();
     let unmatched_idx: Vec<usize> = (0..n_genes).filter(|&g| !matched[g]).collect();
+
+    // Membership initialization through the dictionary's modules, when asked
+    // for and the tables exist. Returns early with the alignment's rows for the
+    // unmatched genes; otherwise the neighbour rule below runs.
+    if let (Some(knobs), false) = (args.membership_init, unmatched_idx.is_empty()) {
+        let (pi_path, mu_path) =
+            graph_embedding_util::transfer::module_table_paths(args.dictionary_path);
+        let tables =
+            if std::path::Path::new(&pi_path).exists() && std::path::Path::new(&mu_path).exists() {
+                Some(graph_embedding_util::transfer::read_module_tables(
+                    &pi_path,
+                    &mu_path,
+                    &host.src_names,
+                    h,
+                )?)
+            } else {
+                None
+            };
+        if let Some((pi, mu)) = tables {
+            let prof = (args.gene_profiles)()?;
+            anyhow::ensure!(
+                prof.nrows() == n_genes,
+                "gene_profiles rows ({}) != gene axis ({})",
+                prof.nrows(),
+                n_genes
+            );
+            // Run gene → dictionary row, for the matched genes.
+            let mut new_to_train: Vec<Option<usize>> = vec![None; n_genes];
+            for (&g, &src) in host
+                .keep_target_indices
+                .iter()
+                .zip(host.keep_src_indices.iter())
+            {
+                new_to_train[g] = Some(src);
+            }
+            let al = graph_embedding_util::transfer::align_gene_axis(
+                &graph_embedding_util::transfer::AlignInputs {
+                    rho: &host.src_e_feat,
+                    b_feat: None,
+                    modules: Some(graph_embedding_util::transfer::ModuleTables {
+                        pi: &pi,
+                        mu: &mu,
+                    }),
+                    new_to_train: &new_to_train,
+                    profiles_new: Some(&prof),
+                    knobs,
+                },
+            );
+            let mut diffuse = 0usize;
+            let records: Vec<InitRecord> = args
+                .gene_names
+                .iter()
+                .enumerate()
+                .map(|(g, gene)| {
+                    if matched[g] {
+                        return InitRecord {
+                            gene: gene.clone(),
+                            init: InitKind::Matched,
+                            neighbor_gene: None,
+                            cosine: f32::NAN,
+                        };
+                    }
+                    let union = al.new_to_union[g].expect("an unmatched gene is initialized");
+                    for c in 0..h {
+                        e_gene[(g, c)] = al.rows[(union, c)];
+                    }
+                    let prov = al.provenance[union]
+                        .as_ref()
+                        .expect("an initialized gene has provenance");
+                    if prov.diffuse {
+                        diffuse += 1;
+                    }
+                    InitRecord {
+                        gene: gene.clone(),
+                        init: InitKind::Membership,
+                        neighbor_gene: prov
+                            .neighbours
+                            .first()
+                            .map(|&src| host.src_names[src].clone()),
+                        cosine: if prov.diffuse {
+                            f32::NAN
+                        } else {
+                            prov.best_similarity
+                        },
+                    }
+                })
+                .collect();
+            info!(
+                "Pre-trained gene embedding: {} matched, {} membership-initialized through {} \
+                 modules ({} on the diffuse prior), {} dictionary rows unused",
+                n_matched,
+                unmatched_idx.len(),
+                pi.ncols(),
+                diffuse,
+                dict_names.len().saturating_sub(n_matched)
+            );
+            return Ok(PretrainedGeneEmbedding {
+                e_gene,
+                b_gene,
+                records,
+            });
+        }
+        info!(
+            "membership initialization requested but {} has no module tables beside it; \
+             falling back to the neighbour rule",
+            args.dictionary_path
+        );
+    }
 
     // Closest matched gene by profile cosine, per unmatched gene. The
     // profiles (a full pass over the data at the caller) are built only when

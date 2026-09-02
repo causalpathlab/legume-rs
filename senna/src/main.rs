@@ -674,7 +674,9 @@ enum Commands {
                       \n\
                       Families: topic, masked-topic, masked-sbp, masked-vae, vae.\n\
                       For svd this re-fits on the union — there are no weights to\n\
-                      warm-start. bge is unsupported: it saves no checkpoint."
+                      warm-start. bge carries its learned gene modules (membership and\n\
+                      module dictionary) as the warm start; genes new to the union\n\
+                      axis are initialized through them."
     )]
     Update(UpdateArgs),
 

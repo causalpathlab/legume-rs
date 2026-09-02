@@ -15,6 +15,7 @@
 
 use super::edges::block_cells;
 use super::*;
+use crate::fit::batch_fold::BatchGeneFold;
 use candle_util::candle_core::Device;
 
 fn cos(a: &[f32], b: &[f32]) -> f32 {
@@ -55,36 +56,9 @@ fn rates(e: &[f32], b: &[f32], h: usize, theta: &[f32], b_c: f32) -> Vec<(u32, f
         .collect()
 }
 
-/// Run `project_cells` over one pass (no splice split) for a set of planted cells.
+/// Run `project_cells` over one pass (no splice split, no fold) for a set of planted cells.
 fn project(e: &[f32], b: &[f32], h: usize, per_cell: &[Vec<(u32, f32)>], lambda: f64) -> Phase2Out {
-    let feats: Vec<Vec<u32>> = per_cell
-        .iter()
-        .map(|c| c.iter().map(|&(f, _)| f).collect())
-        .collect();
-    let counts: Vec<Vec<f32>> = per_cell
-        .iter()
-        .map(|c| c.iter().map(|&(_, n)| n).collect())
-        .collect();
-    let cells: Vec<(u32, &[u32], &[f32])> = (0..per_cell.len())
-        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
-        .collect();
-    project_cells(
-        &Phase2Input {
-            feat: e,
-            b_feat: b,
-            h,
-            n_cells: per_cell.len(),
-            lambda,
-            dev: &Device::Cpu,
-            label: "Phase 2",
-            gauge_fix: true,
-            joint: false,
-        },
-        &cells,
-        None,
-        None,
-    )
-    .expect("phase-2 SGD")
+    project_with(e, b, h, per_cell, lambda, None)
 }
 
 /// Three planted latents; counts at the noiseless full-partition rate. Each cell's
@@ -521,4 +495,203 @@ fn the_offered_group_size_is_a_whole_number_of_blocks() {
             "F={n_feat}: group of {g} is not whole blocks of {bc}"
         );
     }
+}
+
+////////////////////////////
+// Per-batch gene fold     //
+////////////////////////////
+
+/// A planted per-feature batch fold on batch 1: powers of two in
+/// `{¼, ½, 1, 2, 4}`, exact in f32 so `(y·δ)/δ == y` bit for bit.
+fn planted_fold(n_feat: usize) -> Vec<f32> {
+    (0..n_feat)
+        .map(|f| 2f32.powi(((f * 3) % 5) as i32 - 2))
+        .collect()
+}
+
+/// A two-batch fold table: batch 0 unfolded, batch 1 with the planted fold.
+fn fold_table(n_feat: usize) -> BatchGeneFold {
+    let mut delta = vec![1f32; n_feat]; // batch 0: no fold
+    delta.extend(planted_fold(n_feat));
+    BatchGeneFold {
+        delta,
+        n_features: n_feat,
+        batch_names: vec!["a".into(), "b".into()],
+    }
+}
+
+/// Two batches, three planted latents each. Batch 1's counts carry a per-feature
+/// fold on top of the shared dictionary. Dividing by the matching fold must
+/// recover every planted direction in BOTH batches; solving raw must fail on
+/// batch 1 — that is what shows the fold is doing the work.
+#[test]
+fn batch_fold_recovers_a_shared_latent_across_batches() {
+    let (h, n_feat) = (8, 300);
+    let (e, b) = dictionary(n_feat, h, 0.4);
+    let fold = planted_fold(n_feat);
+    let planted = [
+        [0.8f32, -0.6, 0.4, 0.2, -0.3, 0.5, 0.1, -0.4],
+        [-0.5f32, 0.7, -0.2, 0.6, 0.1, -0.4, 0.3, 0.2],
+        [0.2f32, 0.1, -0.7, -0.3, 0.5, 0.2, -0.6, 0.4],
+    ];
+    // Cells 0..3 in batch 0, 3..6 in batch 1 (the same latents again).
+    let mut per_cell: Vec<Vec<(u32, f32)>> = Vec::new();
+    let mut cell_to_batch: Vec<u32> = Vec::new();
+    for batch in 0..2u32 {
+        for (i, t) in planted.iter().enumerate() {
+            let mut r = rates(&e, &b, h, t, 0.4 + 0.1 * i as f32);
+            if batch == 1 {
+                for (f, x) in r.iter_mut() {
+                    *x *= fold[*f as usize];
+                }
+            }
+            per_cell.push(r);
+            cell_to_batch.push(batch);
+        }
+    }
+    let table = fold_table(n_feat);
+    let cbf = CellBatchFold {
+        fold: &table,
+        cell_to_batch: &cell_to_batch,
+    };
+
+    let with = project_with(&e, &b, h, &per_cell, 1e-3, Some(cbf));
+    let without = project_with(&e, &b, h, &per_cell, 1e-3, None);
+    let cos_of = |out: &Phase2Out, i: usize| {
+        let got = ungauge(&out.theta[i * h..(i + 1) * h], &out.gauge.theta_mean);
+        cos(&got, &planted[i % 3])
+    };
+    for i in 0..6 {
+        let c = cos_of(&with, i);
+        assert!(c > 0.97, "with fold: cell {i} misaligned (cos={c:.3})");
+    }
+    let worst_without = (3..6).map(|i| cos_of(&without, i)).fold(1.0f32, f32::min);
+    assert!(
+        worst_without < 0.97,
+        "without the fold batch 1 must NOT pass the recovery bar (worst cos={worst_without:.3}), \
+         or the test has no teeth"
+    );
+}
+
+/// The contract that makes the divide batch-invariant under misfit: a cell whose
+/// counts are exactly a batch's fold of another cell's counts is the SAME problem
+/// after the divide, so it solves to the identical latent and intercept — bit for
+/// bit, misfit or not. (An offset on the rate weights each batch's misfit by its
+/// own fold and does not have this property.)
+#[test]
+fn a_folded_copy_of_a_cell_solves_to_the_identical_latent() {
+    let (h, n_feat) = (6, 120);
+    let (e, b) = dictionary(n_feat, h, 0.3);
+    let fold = planted_fold(n_feat);
+    // Counts that the dictionary cannot reproduce exactly: a planted profile plus
+    // an off-model bump on every third feature.
+    let mut base: Vec<(u32, f32)> = rates(&e, &b, h, &[0.4, -0.2, 0.5, 0.1, -0.6, 0.3], 0.3);
+    for (f, x) in base.iter_mut() {
+        if *f % 3 == 0 {
+            *x *= 3.0;
+        }
+    }
+    let folded: Vec<(u32, f32)> = base
+        .iter()
+        .map(|&(f, x)| (f, x * fold[f as usize]))
+        .collect();
+    let other = rates(&e, &b, h, &[-0.3, 0.6, -0.1, 0.4, 0.2, -0.5], 0.2);
+    let per_cell = vec![base, folded, other];
+    let cell_to_batch = vec![0u32, 1, 0];
+    let table = fold_table(n_feat);
+    let out = project_with(
+        &e,
+        &b,
+        h,
+        &per_cell,
+        1e-3,
+        Some(CellBatchFold {
+            fold: &table,
+            cell_to_batch: &cell_to_batch,
+        }),
+    );
+    assert_eq!(
+        &out.theta[..h],
+        &out.theta[h..2 * h],
+        "folded copy must solve identically"
+    );
+    assert_eq!(out.b_cell[0], out.b_cell[1], "and to the same intercept");
+    // Sanity: the third cell is a different problem.
+    assert_ne!(&out.theta[..h], &out.theta[2 * h..3 * h]);
+}
+
+/// A single batch with an all-ones fold row is the same problem as no fold at
+/// all — same block partition, same numbers, byte for byte.
+#[test]
+fn unit_fold_is_byte_identical_to_none() {
+    let (h, n_feat) = (6, 120);
+    let (e, b) = dictionary(n_feat, h, 0.3);
+    let per_cell: Vec<_> = (0..5)
+        .map(|i| {
+            let t: Vec<f32> = (0..h)
+                .map(|k| (((i * 3 + k * 5) % 7) as f32 / 7.0) - 0.5)
+                .collect();
+            rates(&e, &b, h, &t, 0.2 + 0.05 * i as f32)
+        })
+        .collect();
+    let ones = BatchGeneFold {
+        delta: vec![1f32; n_feat],
+        n_features: n_feat,
+        batch_names: vec!["only".into()],
+    };
+    let cell_to_batch = vec![0u32; 5];
+    let a = project_with(&e, &b, h, &per_cell, 1e-3, None);
+    let z = project_with(
+        &e,
+        &b,
+        h,
+        &per_cell,
+        1e-3,
+        Some(CellBatchFold {
+            fold: &ones,
+            cell_to_batch: &cell_to_batch,
+        }),
+    );
+    assert_eq!(a.theta, z.theta);
+    assert_eq!(a.b_cell, z.b_cell);
+    assert_eq!(a.gauge.theta_mean, z.gauge.theta_mean);
+}
+
+/// `project` with an optional batch fold.
+fn project_with(
+    e: &[f32],
+    b: &[f32],
+    h: usize,
+    per_cell: &[Vec<(u32, f32)>],
+    lambda: f64,
+    fold: Option<CellBatchFold>,
+) -> Phase2Out {
+    let feats: Vec<Vec<u32>> = per_cell
+        .iter()
+        .map(|c| c.iter().map(|&(f, _)| f).collect())
+        .collect();
+    let counts: Vec<Vec<f32>> = per_cell
+        .iter()
+        .map(|c| c.iter().map(|&(_, n)| n).collect())
+        .collect();
+    let cells: Vec<(u32, &[u32], &[f32])> = (0..per_cell.len())
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+    project_cells(
+        &Phase2Input {
+            feat: e,
+            b_feat: b,
+            h,
+            n_cells: per_cell.len(),
+            lambda,
+            dev: &Device::Cpu,
+            label: "Phase 2",
+            gauge_fix: true,
+            joint: false,
+        },
+        &cells,
+        fold,
+        None,
+    )
+    .expect("phase-2 SGD")
 }
