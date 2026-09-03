@@ -226,6 +226,12 @@ pub enum RunKind {
     /// Same inputs and the same velocity outputs, but an amortized encoder and
     /// a simplex latent, so its `latent.parquet` IS log θ.
     GemEncoder,
+    /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
+    /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw
+    /// gene table in `feature_loading`, SIMBA's fixed-T co-embedded genes in
+    /// `feature_embedding`. No decoder and no projector, so `predict`,
+    /// `probe`, `impute` and `update` refuse it.
+    Simba,
 }
 
 /// What the table [`RunOutputs::geometry_latent`] returns actually IS.
@@ -264,7 +270,8 @@ impl RunKind {
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
             | RunKind::Gem
-            | RunKind::GemEncoder => CellSpace::Embedding,
+            | RunKind::GemEncoder
+            | RunKind::Simba => CellSpace::Embedding,
             // `latent` is log θ and `cell_embedding` is absent, so the geometry
             // table is the simplex itself.
             RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => CellSpace::LogSimplex,
@@ -291,6 +298,7 @@ impl RunKind {
             RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
             RunKind::Gem => "gem",
             RunKind::GemEncoder => "gem-encoder",
+            RunKind::Simba => "simba",
         }
     }
 
@@ -319,7 +327,8 @@ impl RunKind {
             | RunKind::Bge
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem => false,
+            | RunKind::Gem
+            | RunKind::Simba => false,
         }
     }
 
@@ -352,7 +361,8 @@ impl RunKind {
             | RunKind::Bge
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem => false,
+            | RunKind::Gem
+            | RunKind::Simba => false,
         }
     }
 }
@@ -1093,7 +1103,8 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         // The gem kinds co-embed genes onto the cell manifold, same as bge, so
         // there is a feature embedding to inherit.
         | RunKind::Gem
-        | RunKind::GemEncoder => {}
+        | RunKind::GemEncoder
+        | RunKind::Simba => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",

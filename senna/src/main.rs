@@ -69,6 +69,7 @@ mod refine_weighting;
 mod resolve_embedding_space;
 mod run_manifest;
 mod senna_input;
+mod simba;
 mod svd;
 mod topic;
 mod tree_layout;
@@ -102,6 +103,7 @@ use predict::{predict_model, PredictArgs};
 use probe::{run_probe, ProbeArgs};
 use pseudotime::{run_pseudotime, PseudotimeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
+use simba::{fit_simba, SimbaArgs};
 use svd::*;
 use topic::cmd::*;
 use update::{run_update, UpdateArgs};
@@ -168,7 +170,7 @@ fn print_logo() {
                   Downstream commands read data and batch files from it.\n\
                   Steps 3 and 5 still need their own --latent / --out.\n\
                   \n  \
-                  1. Train embedding   senna topic | masked-topic | svd | bge\n                       \
+                  1. Train embedding   senna topic | masked-topic | svd | bge | simba\n                       \
                   senna joint-topic | joint-svd   (multi-modality)\n  \
                   2. Held-out inference senna predict            (apply trained model)\n  \
                   3. Cluster cells     senna clustering --from run.senna.json --latent L --out O\n  \
@@ -386,6 +388,34 @@ enum Commands {
         alias = "gbe"
     )]
     Bge(BgeArgs),
+
+    #[command(
+        about = "SIMBA baseline: cell and gene node embeddings on the binned expression graph.",
+        long_about = "A faithful re-implementation of SIMBA (PyTorch-BigGraph).\n\
+                      Cells and genes are the nodes of one bipartite graph.\n\
+                      Every nonzero entry of the log-normalized matrix is an edge.\n\
+                      Its expression bin is the edge's relation; higher bins weigh more.\n\
+                      \n\
+                      Both node tables train as free embeddings.\n\
+                      The loss is PBG's softmax over batch and uniform negatives,\n\
+                      corrupting the cell side and the gene side alike.\n\
+                      Row-wise Adagrad and a stochastic weight decay complete the recipe.\n\
+                      There are no pseudobulks, no gene modules and no projection step,\n\
+                      so this is the pure cell-level reference for `senna bge`.\n\
+                      \n\
+                      HVG selection HARD-SUBSETS the embedded genes here, as in SIMBA.\n\
+                      SIMBA's paper takes 2000 genes from its own selector.\n\
+                      With senna's selector the top 2000 are sparse and starve the graph;\n\
+                      prefer --n-hvg 0 (every gene) or --n-hvg 5000.\n\
+                      Pass the same --n-hvg to every arm of a comparison.\n\
+                      \n\
+                      Writes {out}.senna.json, {out}.cell_embedding.parquet (Z),\n\
+                      {out}.feature_loading.parquet (the raw gene table),\n\
+                      {out}.feature_embedding.parquet (genes co-embedded at a fixed T),\n\
+                      {out}.feature_scores.parquet (SIMBA's max/std/gini/entropy)\n\
+                      and {out}.simba_bins.parquet (the expression levels)."
+    )]
+    Simba(SimbaArgs),
 
     #[command(
         about = "Latent feature model over a feature-feature edge list.",
@@ -1129,6 +1159,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Bge(args) => {
             fit_bge(args)?;
+        }
+        Commands::Simba(args) => {
+            fit_simba(args)?;
         }
         Commands::Fne(args) => {
             fit_fne(args)?;

@@ -175,6 +175,12 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
             Ok(MatchingPlan::SoftmaxSimplex)
         }
         RunKind::Bge => Ok(MatchingPlan::CosineEmbedding),
+        // simba trains cells as free nodes and writes no projector, so a
+        // query has no way into its space.
+        RunKind::Simba => anyhow::bail!(
+            "impute does not support `simba` runs: they write no projector for query cells, \
+             so there is no query-side embedding to match. Impute against a `senna bge` run."
+        ),
         RunKind::Svd => Ok(MatchingPlan::DictionaryProjection),
         // The joint families write no encoder checkpoint (`has_model: false`),
         // so `predict` cannot load one and the simplex arm would fail deep
