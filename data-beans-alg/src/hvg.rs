@@ -113,7 +113,7 @@ pub struct HvgCliArgs {
                      What the selection DOES depends on the command.\n\
                      In `senna` it only weights the random projection, the pb sketch;\n\
                      every gene is still trained.\n\
-                     In `pinto` and `senna gem` it hard-subsets the trained axis."
+                     In `pinto`, `senna gem` and `senna simba` it hard-subsets the trained axis."
     )]
     pub n_hvg: usize,
 
@@ -137,7 +137,7 @@ pub struct HvgCliArgs {
                      WHAT THIS BUYS YOU DEPENDS ON THE COMMAND,\n\
                      because the HVG selection means different things:\n\
                      \n\
-                     • `pinto`, `senna gem` — the selection HARD-SUBSETS the\n\
+                     • `pinto`, `senna gem`, `senna simba` — the selection HARD-SUBSETS the\n\
                      trained gene axis. A feature that misses the cut is not fit at all;\n\
                      it only gets a post-hoc PROJECTED embedding.\n\
                      Naming it here is what puts it in the model. This is the intended use.\n\

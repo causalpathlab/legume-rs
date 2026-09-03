@@ -62,6 +62,9 @@ impl EmbeddingSource {
 
         let mut built = match manifest.kind {
             RunKind::Bge => Self::from_bge(&manifest, &dir),
+            RunKind::Simba => anyhow::bail!(
+                "deconvolve: `simba` runs are not supported (no gene bias, no projector); use `senna bge`."
+            ),
             // Topic-family sources are not accepted. The archetype reference
             // needs only a gene axis, a cell embedding, the counts and an
             // annotation, all of which a topic run has, so this is a matter of

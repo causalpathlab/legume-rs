@@ -163,3 +163,64 @@ fn a_saturated_posterior_is_reported_as_degenerate() {
     assert_eq!(s.n_below_half, 0);
     assert_eq!(s.n, 500);
 }
+
+/// SIMBA's `si.tl.embed`: raw dot scores, a FIXED temperature, no per-feature
+/// rescaling and no calibration. Checked against an f64 softmax average.
+#[test]
+fn fixed_t_coembedding_uses_raw_scores_and_matches_a_hand_computed_softmax_average() {
+    use candle_util::candle_core::{Device, Tensor};
+    let dev = Device::Cpu;
+    let cells: Vec<Vec<f64>> = vec![
+        vec![1.0, 0.0],
+        vec![0.0, 1.0],
+        vec![-1.0, 0.5],
+        vec![2.0, 2.0],
+    ];
+    let feats: Vec<Vec<f64>> = vec![vec![1.0, 0.0], vec![0.0, -1.0], vec![0.3, 0.3]];
+    let flat = |t: &[Vec<f64>]| -> Vec<f32> { t.iter().flatten().map(|&v| v as f32).collect() };
+    let e_cell = Tensor::from_vec(flat(&cells), (4, 2), &dev).unwrap();
+    let e_feat = Tensor::from_vec(flat(&feats), (3, 2), &dev).unwrap();
+    let t = 0.5;
+    let got = feature_coembedding_fixed_t(&e_cell, &e_feat, t)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    for (f, feat) in feats.iter().enumerate() {
+        let scores: Vec<f64> = cells
+            .iter()
+            .map(|c| c.iter().zip(feat).map(|(a, b)| a * b).sum::<f64>() / t)
+            .collect();
+        let m = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let z: f64 = scores.iter().map(|s| (s - m).exp()).sum();
+        let p: Vec<f64> = scores.iter().map(|s| (s - m).exp() / z).collect();
+        for h in 0..2 {
+            let want: f64 = cells.iter().zip(&p).map(|(c, w)| c[h] * w).sum();
+            assert!(
+                (f64::from(got[f][h]) - want).abs() < 1e-5,
+                "feature {f} dim {h}: {} vs {want}",
+                got[f][h]
+            );
+        }
+    }
+    // T → ∞ is the cell centroid; T → 0 is the best-scoring cell.
+    let hot = feature_coembedding_fixed_t(&e_cell, &e_feat, 1e6)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    let centroid = [0.5f64, 0.875];
+    for row in &hot {
+        for h in 0..2 {
+            assert!((f64::from(row[h]) - centroid[h]).abs() < 1e-4);
+        }
+    }
+    let cold = feature_coembedding_fixed_t(&e_cell, &e_feat, 1e-3)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    // feature 0 = (1, 0) scores cell 3 = (2, 2) highest
+    assert!(
+        (f64::from(cold[0][0]) - 2.0).abs() < 1e-4 && (f64::from(cold[0][1]) - 2.0).abs() < 1e-4
+    );
+    // feature 1 = (0, −1) scores cell 0 = (1, 0) highest (0 vs −1, −0.5, −2)
+    assert!((f64::from(cold[1][0]) - 1.0).abs() < 1e-4 && f64::from(cold[1][1]).abs() < 1e-4);
+}

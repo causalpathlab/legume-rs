@@ -35,6 +35,7 @@ pub mod model;
 pub mod posterior;
 pub mod postprocess;
 pub mod progress;
+pub mod simba;
 pub mod training;
 pub mod transfer;
 pub mod type_annotation;
@@ -52,7 +53,7 @@ pub use fit::{
     FitOutput, GeneModuleArgs, GeneModuleConfig, LineageQc, ParentModulesOwned, PbLevelVelocity,
 };
 pub use model::JointEmbedModel;
-pub use postprocess::{cell_clusters, feature_coembedding};
+pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_fixed_t};
 
 /// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
 /// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same
