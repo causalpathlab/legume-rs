@@ -121,3 +121,66 @@ fn parquet_gene_celltype_keeps_only_the_gene_column() {
     let got = read_name_list(&path).unwrap();
     assert_eq!(names(&got), ["CD8A", "MS4A1", "LYZ"]);
 }
+
+////////////////////////////////////
+// First-line header detection     //
+////////////////////////////////////
+
+fn scratch_gz(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
+    use std::io::Write;
+    let path = dir.path().join(name);
+    let f = std::fs::File::create(&path).expect("create gz");
+    let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+    enc.write_all(content.as_bytes()).expect("write gz");
+    enc.finish().expect("finish gz");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_non_numeric_first_line_is_a_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = scratch(&dir, "t.tsv", "gene\ts0\ts1\ng0\t1\t2\n");
+    assert_eq!(detect_header_row_numeric(&f, &['\t', ',']), Some(0));
+}
+
+#[test]
+fn an_all_numeric_first_line_is_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = scratch(&dir, "t.tsv", "g0\t1\t2\ng1\t3\t4\n");
+    assert_eq!(detect_header_row_numeric(&f, &['\t', ',']), None);
+}
+
+/// A fully quoted numeric field still reads as numeric, or a quoted headerless
+/// file loses its first data row to a phantom header.
+#[test]
+fn quoted_numbers_are_still_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = scratch(&dir, "t.csv", "\"g0\",\"1.5\",\"2\"\n");
+    assert_eq!(detect_header_row_numeric(&f, &['\t', ',']), None);
+}
+
+/// Delimited tables are routinely gzipped; detection has to read through that.
+#[test]
+fn header_detection_reads_through_gzip() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = scratch_gz(&dir, "t.tsv.gz", "gene\ts0\ts1\ng0\t1\t2\n");
+    assert_eq!(detect_header_row_numeric(&f, &['\t', ',']), Some(0));
+}
+
+#[test]
+fn first_line_fields_are_unquoted_and_trimmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = scratch(&dir, "t.csv", "\"gene\", s0 ,s1\r\ng0,1,2\n");
+    let got = first_line_fields(&f, &['\t', ',']).unwrap();
+    assert_eq!(names(&got), ["gene", "s0", "s1"]);
+}
+
+/// R writes missing values as `NA`, which is not a number to `f64::from_str`;
+/// a headerless file with one in its first row must not lose that row to a
+/// phantom header.
+#[test]
+fn r_missing_values_do_not_make_a_data_row_a_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = scratch(&dir, "t.tsv", "g0\tNA\t2\ng1\t3\tN/A\n");
+    assert_eq!(detect_header_row_numeric(&f, &['\t', ',']), None);
+}

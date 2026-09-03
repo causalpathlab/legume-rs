@@ -574,6 +574,11 @@ enum Commands {
                       \x20 senna predict cv.test.zarr.zip --model model -o pred \\\n\
                       \x20     --null-from cv.train.zarr.zip --eval-features panel.txt\n\
                       \n\
+                      BULK -- a dense genes x samples table (parquet or tsv) goes in\n\
+                      through --bulk instead of a backend; everything after that is the\n\
+                      same. The gene axis is found by matching names against the model:\n\
+                      \x20 senna predict --bulk counts.parquet --model model -o pred\n\
+                      \n\
                       Three rules make runs comparable to each other:\n\
                       \x20 1. --null-from takes the TRAINING half. It defines the floor\n\
                       \x20    every arm is scored against. Without it the null is built\n\

@@ -242,6 +242,133 @@ pub fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
     })
 }
 
+/// Delimiters a dense bulk table may use.
+pub const BULK_DELIMS: [char; 2] = ['\t', ','];
+
+/// Whether the first line of a text table is a header.
+///
+/// `auto` decides by type (a non-numeric field after column 0 cannot be a
+/// count row). Its one blind spot is a header of all-numeric sample IDs,
+/// which is what `yes` is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum HeaderArg {
+    #[default]
+    Auto,
+    Yes,
+    No,
+}
+
+/// How a dense bulk table is read: which axis is genes, and whether its first
+/// line is a header. Both default to deciding from the file.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BulkTableOpts {
+    /// `None` decides from the overlap with the reference genes.
+    pub orientation: Option<Orientation>,
+    pub header: HeaderArg,
+}
+
+/// The two flags that say how a bulk table is laid out. One definition,
+/// flattened into every subcommand that reads one, so the help text and the
+/// defaults cannot drift between them.
+#[derive(Args, Clone, Copy, Debug, Default)]
+pub struct BulkTableArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OrientationArg::Auto,
+        help = "Which axis of the bulk table is genes: auto|genes-by-samples|samples-by-genes",
+        long_help = "Which axis of the bulk table carries the genes.\n\
+                     `auto` scores both axes against the reference genes (the\n\
+                     model's gene axis) and takes the decisive one. It refuses\n\
+                     when neither matches, or both do.\n\
+                     Pass the orientation to settle an ambiguous file."
+    )]
+    pub bulk_orientation: OrientationArg,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = HeaderArg::Auto,
+        help = "Whether a bulk text table's first line is a header: auto|yes|no",
+        long_help = "Whether the first line of a bulk text table is a header.\n\
+                     `auto` decides by type: a line with a non-numeric field after\n\
+                     column 0 cannot be counts. Its blind spot is a header of\n\
+                     all-numeric sample IDs, which reads as data; pass `yes` then.\n\
+                     The decision and the line are logged. Parquet is unaffected."
+    )]
+    pub bulk_header: HeaderArg,
+}
+
+impl BulkTableArgs {
+    #[must_use]
+    pub fn opts(&self) -> BulkTableOpts {
+        BulkTableOpts {
+            orientation: self.bulk_orientation.forced(),
+            header: self.bulk_header,
+        }
+    }
+}
+
+/// Read a labeled dense table (parquet, or tab/comma text) with its row and
+/// column names.
+///
+/// Text differs from [`read_mat`] in one way: the header line is DETECTED
+/// (or forced by `header`). `read_mat` reads text headerless, which is right
+/// for its callers (latent and cluster tables written by this tool) and wrong
+/// for a bulk count table from outside, whose first line names the samples.
+/// Fed that, `read_mat` parsed the names as counts and died in the parser.
+/// Column 0 is the row-name column for text.
+///
+/// Parquet finds its name column by TYPE: the first string column, wherever
+/// it sits. A table with no string column has no names to align on and is
+/// refused rather than read with a data column stringified as names.
+pub fn read_labeled_mat(file_path: &str, header: HeaderArg) -> anyhow::Result<MatWithNames<Mat>> {
+    use matrix_util::common_io::{detect_header_row_numeric, first_line_fields};
+    Ok(match file_ext(file_path)?.as_ref() {
+        "parquet" => {
+            let idx = matrix_util::parquet::first_string_column(file_path)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{file_path}: no string column to take row names from (every column is \
+                     numeric), so there is no name column to align genes on. Write the \
+                     table with its gene names as a column."
+                )
+            })?;
+            if idx != 0 {
+                info!("{file_path}: row names come from column {idx}, the first string column");
+            }
+            Mat::from_parquet_with_row_names(file_path, Some(idx))?
+        }
+        _ => {
+            let header_row = match header {
+                HeaderArg::Auto => detect_header_row_numeric(file_path, &BULK_DELIMS),
+                HeaderArg::Yes => {
+                    info!("{file_path}: first line taken as a header (--bulk-header yes)");
+                    Some(0)
+                }
+                HeaderArg::No => {
+                    // Reading a non-numeric line as counts would die in the
+                    // parser; refuse here, with the fields, instead.
+                    if detect_header_row_numeric(file_path, &BULK_DELIMS).is_some() {
+                        let fields = first_line_fields(file_path, &BULK_DELIMS)?;
+                        anyhow::bail!(
+                            "{file_path}: --bulk-header no, but the first line has non-numeric \
+                             fields and cannot be read as counts: {fields:?}"
+                        );
+                    }
+                    None
+                }
+            };
+            if header_row.is_none() {
+                log::warn!(
+                    "{file_path}: read without a header; samples are named by position. Add a \
+                     header line, or pass --bulk-header yes if the first line is one."
+                );
+            }
+            Mat::read_data(file_path, &BULK_DELIMS, header_row, Some(0), None, None)?
+        }
+    })
+}
+
 /// Apply topic smoothing in log-space: exp → mix with uniform → log.
 pub fn smooth_topics(
     log_z_nk: candle_core::Tensor,
@@ -287,6 +414,129 @@ pub fn reconcile_name_kind(
         .unwrap_or(ref_kind)
 }
 
+/// Which axis of a dense table carries the genes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Orientation {
+    /// Rows are genes, columns are samples: the contract every reader wants.
+    GenesBySamples,
+    /// Rows are samples, columns are genes: the table is turned on read.
+    SamplesByGenes,
+}
+
+/// CLI form of [`Orientation`]: `auto` decides from the model's gene axis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum OrientationArg {
+    #[default]
+    Auto,
+    GenesBySamples,
+    SamplesByGenes,
+}
+
+impl OrientationArg {
+    /// The forced orientation, or `None` for `auto`.
+    #[must_use]
+    pub fn forced(self) -> Option<Orientation> {
+        match self {
+            Self::Auto => None,
+            Self::GenesBySamples => Some(Orientation::GenesBySamples),
+            Self::SamplesByGenes => Some(Orientation::SamplesByGenes),
+        }
+    }
+}
+
+/// How many labels on `axis` are the model's genes, under the naming rule
+/// that bridges THAT axis to the model.
+///
+/// Scored per axis on purpose. `reconcile_name_kind` adopts whichever side is
+/// informative, so one rule chosen off the sample IDs could depress the gene
+/// axis's count and flip the answer.
+fn genes_matched(axis: &[Box<str>], model_genes: &[Box<str>]) -> usize {
+    // Lowercased after canonicalizing, the same key `build_gene_remap_with`
+    // aligns on, so the axis this picks is the axis the remap will match.
+    let kind = reconcile_name_kind(model_genes, &[axis]);
+    let key = |g: &str| kind.canonicalize(g).to_lowercase();
+    let model: std::collections::HashSet<String> = model_genes.iter().map(|g| key(g)).collect();
+    axis.iter().filter(|l| model.contains(&key(l))).count()
+}
+
+/// Decide which axis of a dense table is the gene axis.
+///
+/// This is measured, not guessed: gene names match the model's gene axis
+/// after canonicalization and sample IDs do not, so the two label sets are
+/// scored against `model_genes` and the winner has to be decisive (the other
+/// axis under a tenth of it). Anything less is reported, with the labels of
+/// both axes and of the model, rather than resolved:
+/// - nothing matches: a naming failure or the wrong file;
+/// - both match: sample IDs that are themselves gene symbols. Pass
+///   `--bulk-orientation` to say which is which.
+///
+/// `forced` short-circuits the evidence.
+pub fn resolve_orientation(
+    rows: &[Box<str>],
+    cols: &[Box<str>],
+    model_genes: &[Box<str>],
+    forced: Option<Orientation>,
+) -> anyhow::Result<Orientation> {
+    if let Some(o) = forced {
+        info!("bulk orientation forced to {o:?}");
+        return Ok(o);
+    }
+    let r = genes_matched(rows, model_genes);
+    let c = genes_matched(cols, model_genes);
+    let n = model_genes.len();
+    let preview = |v: &[Box<str>]| -> String {
+        v.iter()
+            .take(5)
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    anyhow::ensure!(
+        r + c > 0,
+        "neither axis of the bulk table matches the model's {n} genes, even after \
+         canonicalization. Rows look like [{}], columns like [{}], the model's genes like \
+         [{}]. Check the gene naming, or that this is the right file.",
+        preview(rows),
+        preview(cols),
+        preview(model_genes)
+    );
+    let decisive = |win: usize, lose: usize| lose * 10 < win;
+    if decisive(r, c) {
+        info!(
+            "bulk table is genes × samples: matched {r} of the model's {n} genes on the row \
+             axis ({c} on the column axis)"
+        );
+        Ok(Orientation::GenesBySamples)
+    } else if decisive(c, r) {
+        info!(
+            "bulk table is samples × genes; transposing: matched {c} of the model's {n} genes \
+             on the column axis ({r} on the row axis)"
+        );
+        Ok(Orientation::SamplesByGenes)
+    } else {
+        anyhow::bail!(
+            "both axes of the bulk table look like genes: rows matched {r} and columns \
+             matched {c} of the model's {n} genes (rows [{}], columns [{}]). Say which is \
+             which with --bulk-orientation genes-by-samples or samples-by-genes.",
+            preview(rows),
+            preview(cols)
+        )
+    }
+}
+
+/// Put genes on the rows: a no-op for `GenesBySamples`, one transpose otherwise.
+#[must_use]
+pub fn oriented(m: MatWithNames<Mat>, o: Orientation) -> MatWithNames<Mat> {
+    match o {
+        Orientation::GenesBySamples => m,
+        Orientation::SamplesByGenes => MatWithNames {
+            rows: m.cols,
+            cols: m.rows,
+            mat: m.mat.transpose(),
+        },
+    }
+}
+
 /// Read bulk data files and align rows to the given gene list.
 ///
 /// Names are reconciled through the shared canonicalizer
@@ -298,16 +548,26 @@ pub fn reconcile_name_kind(
 /// the naming signature usually lives on only one side (a bare-symbol reference
 /// carries no `_`, so by itself it sniffs as `Exact` and the bridge is never
 /// built). Locus-style and mixed axes ride the same path.
+///
+/// Each file is read with its header detected ([`read_labeled_mat`]) and
+/// turned so genes are on the rows ([`resolve_orientation`]), so a samples ×
+/// genes table aligns instead of failing as "no gene names match".
 pub fn read_bulk_data_aligned(
     bulk_data_files: &[Box<str>],
     genes: &[Box<str>],
+    opts: &BulkTableOpts,
 ) -> anyhow::Result<BulkDataOut> {
     use dashmap::DashMap as HashMap;
 
     // Read every bulk file up front so the naming rule can see both axes.
     let loaded: Vec<MatWithNames<Mat>> = bulk_data_files
         .iter()
-        .map(|f| read_mat(f.as_ref()))
+        .map(|f| {
+            let m = read_labeled_mat(f.as_ref(), opts.header)?;
+            let o = resolve_orientation(&m.rows, &m.cols, genes, opts.orientation)
+                .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+            Ok(oriented(m, o))
+        })
         .collect::<anyhow::Result<_>>()?;
 
     // Detect PER AXIS and keep whichever is informative. Sniffing the pooled

@@ -1,5 +1,6 @@
 //! CLI arguments for `senna deconvolve`.
 
+use crate::embed_common::BulkTableArgs;
 use clap::Args;
 
 #[derive(Args, Debug)]
@@ -23,9 +24,17 @@ pub struct DeconvolveArgs {
         long = "bulk",
         required = true,
         num_args = 1..,
-        help = "One or more bulk count matrices (parquet/tsv; genes × samples)"
+        help = "One or more bulk count matrices (parquet/tsv; genes × samples)",
+        long_help = "One or more bulk count matrices, parquet or tab/comma text.\n\
+                     Column 0 holds the row names; a header line names the samples\n\
+                     and is detected. A samples × genes table is turned on read:\n\
+                     the axis whose names match the reference genes is the gene axis.\n\
+                     See --bulk-orientation to say so explicitly."
     )]
     pub bulk: Vec<Box<str>>,
+
+    #[command(flatten)]
+    pub bulk_table: BulkTableArgs,
 
     #[arg(
         short = 'o',
