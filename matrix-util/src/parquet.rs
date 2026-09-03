@@ -25,6 +25,26 @@ pub fn peek_parquet_field_names(file_path: &str) -> anyhow::Result<Vec<Box<str>>
         .collect())
 }
 
+/// The first string (`BYTE_ARRAY`) column of a parquet file, by index, or
+/// `None` when every column is numeric.
+///
+/// This is how a table's NAME column is found: by type, not by position. A
+/// table written without its index has no string column, and a reader that
+/// took column 0 regardless would stringify the first data column into names.
+pub fn first_string_column(file_path: &str) -> anyhow::Result<Option<usize>> {
+    let file = File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    let fields = reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .to_vec();
+    Ok(fields
+        .iter()
+        .position(|f| f.get_physical_type() == ParquetType::BYTE_ARRAY))
+}
+
 /// Read one string (`BYTE_ARRAY`) column out of a parquet file.
 ///
 /// [`ParquetReader`] is a *matrix* reader: it needs at least one numeric column
@@ -467,6 +487,79 @@ pub fn write_named_table(
     Ok(())
 }
 
+/// Write a mixed-type table to parquet with NO leading key column: exactly the
+/// columns given, in that order. The keyless sibling of [`write_named_table`],
+/// for tables whose name column sits elsewhere, or that have none.
+pub fn write_table(file_path: &str, columns: &[(Box<str>, Column)]) -> anyhow::Result<()> {
+    let n = columns.first().map_or(0, |(_, c)| c.len());
+    anyhow::ensure!(
+        columns.iter().all(|(_, c)| c.len() == n),
+        "write_table: every column must have the same length"
+    );
+    let names: Vec<Box<str>> = columns.iter().map(|(n, _)| n.clone()).collect();
+    let types: Vec<ParquetType> = columns.iter().map(|(_, c)| c.parquet_type()).collect();
+    let schema = Arc::new(
+        SchemaType::group_type_builder("2dMatrix")
+            .with_fields(column_fields(&names, &types))
+            .build()?,
+    );
+    let file = std::fs::File::create(file_path)?;
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(5)?))
+            .build(),
+    );
+    let mut fw = SerializedFileWriter::new(file, schema, props)?;
+    let mut rg = fw.next_row_group()?;
+    for (_, col) in columns {
+        match col {
+            Column::Str(d) => parquet_add_string_column(&mut rg, d)?,
+            Column::F32(d) => parquet_add_numeric_column(&mut rg, d)?,
+            Column::I32(d) => parquet_add_numeric_column(&mut rg, d)?,
+        }
+    }
+    rg.close()?;
+    fw.close()?;
+    Ok(())
+}
+
+impl Column<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Column::Str(d) => d.len(),
+            Column::F32(d) => d.len(),
+            Column::I32(d) => d.len(),
+        }
+    }
+
+    fn parquet_type(&self) -> ParquetType {
+        match self {
+            Column::Str(_) => ParquetType::BYTE_ARRAY,
+            Column::F32(_) => ParquetType::FLOAT,
+            Column::I32(_) => ParquetType::INT32,
+        }
+    }
+}
+
+/// One REQUIRED primitive field per (name, type); strings carry the UTF8
+/// converted type.
+fn column_fields(names: &[Box<str>], types: &[ParquetType]) -> Vec<Arc<SchemaType>> {
+    names
+        .iter()
+        .zip(types)
+        .map(|(name, &ty)| {
+            let b = SchemaType::primitive_type_builder(name, ty)
+                .with_repetition(parquet::basic::Repetition::REQUIRED);
+            let b = if ty == ParquetType::BYTE_ARRAY {
+                b.with_converted_type(ConvertedType::UTF8)
+            } else {
+                b
+            };
+            Arc::new(b.build().unwrap())
+        })
+        .collect()
+}
+
 fn build_columns_schema(
     ncols: usize,
     column_names: Option<&[Box<str>]>,
@@ -483,45 +576,29 @@ fn build_columns_schema(
         }
     }
 
-    let row_col_name = row_column_name.unwrap_or("rowname");
-    let mut fields = vec![Arc::new(
-        SchemaType::primitive_type_builder(row_col_name, ParquetType::BYTE_ARRAY)
-            .with_repetition(parquet::basic::Repetition::REQUIRED)
-            .with_converted_type(ConvertedType::UTF8)
-            .build()
-            .unwrap(),
-    )];
-
+    let row_col_name: Box<str> = row_column_name.unwrap_or("rowname").into();
     let _column_names: Vec<Box<str>> = (0..ncols).map(|x| x.to_string().into_boxed_str()).collect();
     let _column_types = (0..ncols).map(|_x| ParquetType::FLOAT).collect::<Vec<_>>();
-
     let column_names: &[Box<str>] = column_names.unwrap_or(&_column_names);
     let column_types: &[ParquetType] = column_types.unwrap_or(&_column_types);
 
-    for (column_name, &column_type) in column_names.iter().zip(column_types) {
-        if column_type == ParquetType::BYTE_ARRAY {
-            fields.push(Arc::new(
-                SchemaType::primitive_type_builder(column_name, column_type)
-                    .with_repetition(parquet::basic::Repetition::REQUIRED)
-                    .with_converted_type(ConvertedType::UTF8)
-                    .build()
-                    .unwrap(),
-            ));
-        } else {
-            fields.push(Arc::new(
-                SchemaType::primitive_type_builder(column_name, column_type)
-                    .with_repetition(parquet::basic::Repetition::REQUIRED)
-                    .build()
-                    .unwrap(),
-            ));
-        }
-    }
+    // The key column first, then the data columns, through one field builder.
+    let mut names: Vec<Box<str>> = Vec::with_capacity(ncols + 1);
+    let mut types: Vec<ParquetType> = Vec::with_capacity(ncols + 1);
+    names.push(row_col_name);
+    types.push(ParquetType::BYTE_ARRAY);
+    names.extend(column_names.iter().cloned());
+    types.extend(column_types.iter().copied());
 
     let schema = Arc::new(
         SchemaType::group_type_builder("2dMatrix")
-            .with_fields(fields)
+            .with_fields(column_fields(&names, &types))
             .build()?,
     );
 
     Ok(schema)
 }
+
+#[cfg(test)]
+#[path = "parquet_tests.rs"]
+mod parquet_tests;

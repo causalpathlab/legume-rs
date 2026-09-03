@@ -430,6 +430,77 @@ pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
     }
 }
 
+////////////////////////////////////
+// First-line inspection of a table //
+////////////////////////////////////
+
+/// The first line of a delimited file, split on `delimiters`, unquoted and
+/// trimmed, empty fields dropped. Reads through gzip.
+///
+/// For error messages and for header detection. It makes no claim about
+/// whether that line is a header; it only shows what the file actually holds.
+pub fn first_line_fields(path: &str, delimiters: &[char]) -> anyhow::Result<Vec<Box<str>>> {
+    let mut first = String::new();
+    open_buf_reader(path)?.read_line(&mut first)?;
+    Ok(first
+        .trim_end_matches(['\n', '\r'])
+        .split(delimiters)
+        .map(|f| unquote_field(f).to_string().into_boxed_str())
+        .filter(|f| !f.is_empty())
+        .collect())
+}
+
+/// Is the first line a header? Decided by type, not by guessing intent: a line
+/// whose fields after column 0 fail to parse as numbers cannot be a data row.
+///
+/// Column 0 is skipped because a row-name column is non-numeric either way.
+/// Fields are unquoted with the tokenizer's own rule first, so a fully quoted
+/// numeric field (`"100.5"`) reads as numeric and a quoted headerless file does
+/// not lose its first data row to a phantom header. Reads through gzip.
+///
+/// `Some(0)` when the first line is a header; `None` when every field after
+/// column 0 is numeric, or the file cannot be read.
+pub fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usize> {
+    let mut first = String::new();
+    open_buf_reader(file_path)
+        .ok()?
+        .read_line(&mut first)
+        .ok()?;
+    let fields: Vec<&str> = first
+        .trim_end_matches(['\n', '\r'])
+        .split(delimiters)
+        .map(unquote_field)
+        .collect();
+    let any_non_numeric_after_col0 = fields
+        .iter()
+        .skip(1)
+        .any(|t| !t.is_empty() && !is_numeric_or_missing(t));
+    // Both outcomes are logged WITH the fields, so a header swallowed as data
+    // (all-numeric sample IDs) or a data row taken as a header shows up in the
+    // log next to the evidence, not only as a wrong row count later.
+    let preview = fields
+        .iter()
+        .take(6)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if any_non_numeric_after_col0 {
+        log::info!("{file_path}: first line treated as a header (non-numeric): [{preview}]");
+        Some(0)
+    } else {
+        log::info!(
+            "{file_path}: first line treated as data (all numeric after column 0): [{preview}]"
+        );
+        None
+    }
+}
+
+/// A field a count row may legitimately hold: a number, or one of the missing
+/// value spellings R and friends write (`NA`, `N/A`; `NaN` already parses).
+fn is_numeric_or_missing(t: &str) -> bool {
+    t.parse::<f64>().is_ok() || matches!(t, "NA" | "N/A" | "na" | "n/a")
+}
+
 ///
 /// Open a file for writing, and return a buffered writer
 /// * `output_file` - file name--either gzipped or not
