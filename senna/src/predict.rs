@@ -460,6 +460,9 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         // svd writes no checkpoint either; its query side is the Nyström
         // projection onto the frozen dictionary.
         crate::run_manifest::RunKind::Svd => return predict_svd(args),
+        crate::run_manifest::RunKind::Simba => anyhow::bail!(
+            "predict does not support a `simba` run: it writes no encoder and no frozen projector"
+        ),
         _ => {}
     }
 

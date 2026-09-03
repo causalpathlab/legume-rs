@@ -32,6 +32,9 @@ pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<
         // svd project each column against a frozen dictionary and do not care
         // what depth it came at.
         RunKind::Bge => Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names),
+        RunKind::Simba => anyhow::bail!(
+            "a `simba` run writes no projection model; bulk input cannot be scored against it"
+        ),
         RunKind::Svd => Ok(crate::topic::model_metadata::load_dictionary(model)?.0),
         RunKind::Topic
         | RunKind::Itopic

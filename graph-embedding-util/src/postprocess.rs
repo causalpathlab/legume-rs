@@ -205,6 +205,48 @@ pub fn feature_coembedding(
     Ok((coembed, t as f32))
 }
 
+/// SIMBA's own `si.tl.embed`: the same softmax-over-cells average as
+/// [`feature_coembedding`], but on the RAW dot scores at a FIXED temperature
+/// (`T = 0.5` in SIMBA) — no per-feature rescale, no calibration, no biases.
+/// `senna simba` writes this as its `feature_embedding`, so the file holds
+/// SIMBA's co-embedding rather than bge's calibrated one.
+pub fn feature_coembedding_fixed_t(
+    e_cell: &Tensor,
+    e_feat: &Tensor,
+    t: f64,
+) -> anyhow::Result<Tensor> {
+    let (n, h) = e_cell.dims2()?;
+    let (d, h2) = e_feat.dims2()?;
+    anyhow::ensure!(
+        h == h2,
+        "feature_coembedding_fixed_t: H mismatch (e_cell {h} vs e_feat {h2})"
+    );
+    anyhow::ensure!(
+        n > 0 && d > 0,
+        "feature_coembedding_fixed_t: need ≥1 cell and ≥1 feature (got {n}, {d})"
+    );
+    anyhow::ensure!(
+        t > 0.0,
+        "feature_coembedding_fixed_t: T must be positive (got {t})"
+    );
+    let e_cell = e_cell.contiguous()?;
+    let e_feat = e_feat.contiguous()?;
+    let prog = crate::progress::new_progress_bar(d.div_ceil(FEAT_BLOCK) as u64)
+        .with_message("co-embedding features (fixed T)");
+    let mut blocks: Vec<Tensor> = Vec::new();
+    let mut start = 0usize;
+    while start < d {
+        let len = FEAT_BLOCK.min(d - start);
+        let ef = e_feat.narrow(0, start, len)?;
+        let scores = e_cell.matmul(&ef.t()?.contiguous()?)?; // [N, len], raw
+        blocks.push(coembed_from_scores(&scores, &e_cell, t)?); // [len, H]
+        start += len;
+        prog.inc(1);
+    }
+    prog.finish_and_clear();
+    Ok(Tensor::cat(blocks.as_slice(), 0)?)
+}
+
 /// Shrink each co-embedded feature toward the origin by a per-feature confidence
 /// in `[0, 1]`, e.g. the phase-1 selection posterior's `max_h PIP[g, h]`.
 ///
@@ -329,6 +371,13 @@ fn standardize_columns(scores: &Tensor) -> Result<Tensor> {
 /// score only.
 fn coembed_block(e_cell: &Tensor, e_feat_block: &Tensor, t: f64) -> Result<Tensor> {
     let scores = standardize_columns(&e_cell.matmul(&e_feat_block.t()?.contiguous()?)?)?; // [N, B]
+    coembed_from_scores(&scores, e_cell, t)
+}
+
+/// `softmax_over_cells(scores / T)ᵀ · e_cell` for one `[N, B]` score block:
+/// the step both the calibrated path ([`coembed_block`], standardized scores)
+/// and SIMBA's fixed-T path ([`feature_coembedding_fixed_t`], raw scores) share.
+fn coembed_from_scores(scores: &Tensor, e_cell: &Tensor, t: f64) -> Result<Tensor> {
     let p = softmax(&scores.affine(1.0 / t, 0.0)?, 0)?; // softmax over cells (dim 0)
     p.t()?.contiguous()?.matmul(e_cell) // [B, N]·[N, H] = [B, H]
 }
