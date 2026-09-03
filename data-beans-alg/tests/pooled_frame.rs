@@ -35,7 +35,12 @@ fn platform(g: usize) -> f32 {
 
 /// Columns `0..PER_BATCH` are the shifted batch, the next `PER_BATCH` the clean
 /// one; types alternate by column parity in both.
-fn cohort() -> (SparseIoVec, Vec<&'static str>) {
+///
+/// The backend lives in a directory of its own, returned as a guard: the two
+/// tests in this file run concurrently in one process, and a path keyed by
+/// process id had them deleting and rebuilding the SAME zarr under each other
+/// (a ~50% failure at `create backend`, never in serial).
+fn cohort() -> (SparseIoVec, Vec<&'static str>, tempfile::TempDir) {
     let mut cols: Vec<Vec<f32>> = Vec::new();
     let mut batches: Vec<&'static str> = Vec::new();
     for i in 0..PER_BATCH {
@@ -54,10 +59,8 @@ fn cohort() -> (SparseIoVec, Vec<&'static str>) {
         cols.push(type_profile(i).into_iter().map(|v| v * wiggle).collect());
         batches.push("clean");
     }
-    let dir = std::env::temp_dir().join(format!("dba_pooled_frame_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    let path = dir.join("frame.zarr");
-    let _ = std::fs::remove_dir_all(&path);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("frame.zarr");
     let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
     for (j, col) in cols.iter().enumerate() {
         for (g, &v) in col.iter().enumerate() {
@@ -84,7 +87,7 @@ fn cohort() -> (SparseIoVec, Vec<&'static str>) {
     );
     let mut v = SparseIoVec::new();
     v.push(std::sync::Arc::from(b), None).expect("push");
-    (v, batches)
+    (v, batches, dir)
 }
 
 /// Per-gene ratio `mu_adjusted(shifted-batch pbs) / mu_adjusted(clean-batch pbs)`
@@ -95,7 +98,8 @@ fn run_pooled() -> (
     data_beans_alg::collapse_data::MultilevelCollapseOut,
     Vec<Box<str>>,
 ) {
-    let (mut v, batches) = cohort();
+    // `_dir` keeps the backend's directory alive until the collapse is done.
+    let (mut v, batches, _dir) = cohort();
     let corrected = v
         .project_columns_with_batch_correction(4, None, Some(&batches))
         .expect("proj")
