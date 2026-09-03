@@ -48,7 +48,7 @@ pub fn run(args: &DeconvolveArgs) -> Result<()> {
 
     // 1. Embedding source and bulk, aligned on the gene axis.
     let src = EmbeddingSource::load(&args.from)?;
-    let bulk = read_bulk_data_aligned(&args.bulk, &src.feature_names)?;
+    let bulk = read_bulk_data_aligned(&args.bulk, &src.feature_names, &args.bulk_table.opts())?;
     let mut cfg = args.sampler_config();
     let (d, s) = (bulk.genes.len(), bulk.samples.len());
 

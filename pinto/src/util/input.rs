@@ -1093,7 +1093,12 @@ pub fn read_one_coord_file(
                 _ => {
                     let header_row = header_in_coord
                         .or_else(|| detect_header_row(coord_file, &['\t', ',', ' '], names))
-                        .or_else(|| detect_header_row_numeric(coord_file, &['\t', ',', ' ']));
+                        .or_else(|| {
+                            matrix_util::common_io::detect_header_row_numeric(
+                                coord_file,
+                                &['\t', ',', ' '],
+                            )
+                        });
                     Mat::read_data(
                         coord_file,
                         &['\t', ',', ' '],
@@ -1127,7 +1132,9 @@ pub fn read_one_coord_file(
         // error, and the caller already has an exact way to say what it meant.
         let mut hint = String::new();
         if !is_zarr {
-            if let Ok(first) = first_line_fields(coord_file) {
+            if let Ok(first) =
+                matrix_util::common_io::first_line_fields(coord_file, &['\t', ',', ' '])
+            {
                 hint = format!(" The file's first line reads {first:?}.");
             }
         }
@@ -1159,55 +1166,8 @@ pub fn read_one_coord_file(
     initial
 }
 
-/// Detect a header row by checking whether non-zero columns of the first
-/// line contain any non-numeric tokens. Used as a second-chance fallback
-/// when name-based detection fails (e.g. when reading by index with
-/// non-default headers like `barcode,foo,bar`).
-fn detect_header_row_numeric(file_path: &str, delimiters: &[char]) -> Option<usize> {
-    let first_line = std::io::BufRead::lines(std::io::BufReader::new(
-        std::fs::File::open(file_path).ok()?,
-    ))
-    .next()?
-    .ok()?;
-    // Unquote with the tokenizer's own rule first: a fully quoted numeric
-    // field ("100.5") must read as numeric, or a quoted headerless file gets
-    // its first data row swallowed as a header.
-    let any_non_numeric_after_col0 = first_line
-        .split(delimiters.as_ref())
-        .skip(1)
-        .map(matrix_util::common_io::unquote_field)
-        .any(|t| !t.is_empty() && t.parse::<f64>().is_err());
-    if any_non_numeric_after_col0 {
-        info!(
-            "Auto-detected header row in {} (numeric heuristic)",
-            file_path
-        );
-        Some(0)
-    } else {
-        None
-    }
-}
-
 /// Auto-detect whether the first line of a delimited file is a header row
 /// by checking if it contains any of the requested column names.
-/// The first line of a delimited file, split into fields.
-///
-/// Only ever quoted back to the caller in an error, so they can see what the
-/// file actually holds. It makes no claim about whether that line is a header.
-fn first_line_fields(path: &str) -> anyhow::Result<Vec<Box<str>>> {
-    use std::io::BufRead;
-    let mut first = String::new();
-    // gz-aware, because a coord file often is; opening it raw would fail here
-    // and quietly drop the one hint this error promises.
-    matrix_util::common_io::open_buf_reader(path)?.read_line(&mut first)?;
-    Ok(first
-        .trim_end_matches(['\n', '\r'])
-        .split(['\t', ',', ' '])
-        .map(|f| f.trim().trim_matches('"').to_string().into_boxed_str())
-        .filter(|f| !f.is_empty())
-        .collect())
-}
-
 fn detect_header_row(
     file_path: &str,
     delimiters: &[char],

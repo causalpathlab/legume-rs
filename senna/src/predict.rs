@@ -42,17 +42,51 @@ use indicatif::ParallelProgressIterator;
 use log::info;
 use rayon::prelude::*;
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
+#[command(group(
+    clap::ArgGroup::new("input")
+        .required(true)
+        .multiple(false)
+        .args(["data_files", "bulk"])
+))]
 pub struct PredictArgs {
     #[arg(
-        required = true,
         value_delimiter = ',',
-        help = "Held-out data files (.zarr or .h5)",
+        help = "Held-out data files (.zarr or .h5); or --bulk for a dense table",
         long_help = "Sparse backends to score with the pre-trained model.\n\
                      Gene sets may differ from training. Missing genes are padded.\n\
-                     Per-batch delta is re-estimated from the frozen dictionary."
+                     Per-batch delta is re-estimated from the frozen dictionary.\n\
+                     Give these, or --bulk, not both."
     )]
     pub(crate) data_files: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 1..,
+        help = "Dense bulk count matrices (parquet, or tab/comma text), genes × samples",
+        long_help = "Dense bulk count matrices instead of sparse backends.\n\
+                     Parquet, or tab/comma text; column 0 holds the row names\n\
+                     and a header line, when present, names the samples.\n\
+                     A samples × genes table is turned on read: the axis whose\n\
+                     names match the model's genes is the gene axis\n\
+                     (see --bulk-orientation).\n\
+                     \n\
+                     Each table becomes a temp sparse backend and is then scored\n\
+                     exactly as a data file would be, by every model family.\n\
+                     Several tables behave as several data files: each is its\n\
+                     own batch, and sample names get an @<file> suffix.\n\
+                     --batch-files is one label per sample.\n\
+                     \n\
+                     Values must be counts. Negative values are refused;\n\
+                     non-integer values are accepted with a warning.\n\
+                     --null-from still takes a backend: the null is the\n\
+                     composition of the TRAINING half, which the model was fitted on."
+    )]
+    pub(crate) bulk: Vec<Box<str>>,
+
+    #[command(flatten)]
+    pub(crate) bulk_table: BulkTableArgs,
 
     #[arg(
         long,
@@ -404,7 +438,24 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     // writes one (`has_model: false`), so opening it first turned "predict on a bge run"
     // into a bare file-not-found naming a path the user never typed — the same confusion
     // `BgeEmbedding::open` exists to prevent, reintroduced one level up.
-    match crate::topic::model_metadata::resolve_run_kind(&args.model)? {
+    let kind = crate::topic::model_metadata::resolve_run_kind(&args.model)?;
+
+    // `--bulk`: dense tables become temp backends here, and every family path
+    // below reads them as it would any data file. The guard removes them when
+    // this function returns, so it has to live to the end of it.
+    let mut args = args.clone();
+    let _bulk_guard = if args.bulk.is_empty() {
+        None
+    } else {
+        let model_genes = bulk::model_gene_axis(kind, &args.model)?;
+        let b = bulk::materialize(&args.bulk, &model_genes, &args.bulk_table.opts())?;
+        b.warn_if_split(args.minibatch_size);
+        args.data_files = b.paths().to_vec();
+        Some(b)
+    };
+    let args = &args;
+
+    match kind {
         crate::run_manifest::RunKind::Bge => return predict_bge(args),
         // svd writes no checkpoint either; its query side is the Nyström
         // projection onto the frozen dictionary.
@@ -779,6 +830,8 @@ fn resolve_mode(args: &PredictArgs) -> LatentMode {
         LatentMode::Encoder
     }
 }
+
+pub(crate) mod bulk;
 
 #[cfg(test)]
 mod tests;
@@ -2027,12 +2080,22 @@ pub(crate) fn dense_bytes(rows: usize, width: usize, tensors: usize) -> usize {
 /// `LEGUME_PREDICT_BUDGET_BYTES` overrides the default, following the
 /// `LEGUME_PRELOAD_BUDGET_BYTES` precedent for memory knobs.
 fn dense_block_concurrency(bytes_per_block: usize) -> usize {
-    const DEFAULT_BUDGET_BYTES: usize = 8 << 30;
     let budget = std::env::var("LEGUME_PREDICT_BUDGET_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_BUDGET_BYTES);
-    (budget / bytes_per_block.max(1)).clamp(1, rayon::current_num_threads())
+        .unwrap_or(DEFAULT_PREDICT_BUDGET_BYTES);
+    block_concurrency(bytes_per_block, budget, rayon::current_num_threads())
+}
+
+/// The memory budget the cap works from when `LEGUME_PREDICT_BUDGET_BYTES` is unset.
+pub(crate) const DEFAULT_PREDICT_BUDGET_BYTES: usize = 8 << 30;
+
+/// The cap as a pure function of the three things that set it. Kept apart from
+/// the env/rayon lookup so a test can state the machine it means instead of
+/// inheriting the one it happens to run on: the same block that runs wide
+/// open on a 32-thread box is rightly held at ~34 on a 64-thread one.
+pub(crate) fn block_concurrency(bytes_per_block: usize, budget: usize, threads: usize) -> usize {
+    (budget / bytes_per_block.max(1)).clamp(1, threads.max(1))
 }
 
 /// Run `block_fn` over `[0, ntot)` in `minibatch_size` blocks, concatenating

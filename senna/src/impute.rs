@@ -412,6 +412,8 @@ fn predict_matching_latents(
         null_from: None,
         eval_features: None,
         data_files: args.data_files.clone(),
+        bulk: Vec::new(),
+        bulk_table: crate::embed_common::BulkTableArgs::default(),
         model: args.model.clone(),
         out: predict_prefix.clone(),
         batch_files: args.batch_files.clone(),
