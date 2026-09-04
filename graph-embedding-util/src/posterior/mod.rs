@@ -5,8 +5,7 @@
 //! The score is `s(f,p) = ⟨e_f, e_p⟩ + b_f + b_p`. Freezing one side makes the
 //! other side's anchors conditionally independent under the Poisson likelihood, so
 //! a block is embarrassingly parallel: [`dim_block`] runs one elliptical-slice
-//! chain per anchor in a `rayon` `par_iter`, and [`pb_gibbs`] alternates the two
-//! sides to sample the joint.
+//! chain per anchor in a `rayon` `par_iter`.
 //!
 //! ## Likelihood
 //!
@@ -36,19 +35,11 @@
 pub(crate) mod column;
 pub mod diagnostics;
 pub mod dim_block;
-pub mod frozen_diag;
 pub mod hyper;
-pub mod index;
 pub mod lnpdf;
-pub mod pb_gibbs;
-pub mod pb_index;
-pub mod run;
 pub mod score;
 
 pub use diagnostics::{chain_diagnostics, scalar_diagnostics, worst_case, ChainDiag};
 pub use dim_block::{dim_block, dim_block_multi, DimBlockConfig, DimBlockResult, HyperState};
-pub use frozen_diag::{frozen_side_diag, FrozenSideDiag};
 pub use hyper::{ibp_pi0, sample_pi0, HalfCauchyVar};
-pub use index::ContrastiveIndex;
 pub use lnpdf::{poisson_ll, poisson_lnpdf, AnchorMoment, FrozenSide, NodeTerm};
-pub use run::{PosteriorArgs, PosteriorPlan, DEFAULT_PARTITION, DEFAULT_SAMPLES};

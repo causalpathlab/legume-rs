@@ -35,37 +35,6 @@ pub struct ModelArgs {
     pub delta_l2: f32,
 
     #[arg(
-        long = "independent-delta-gate",
-        default_value_t = false,
-        help = "Let the velocity gate select dims the identity gate did not (--posterior runs only).\n\
-                Default: nested.",
-        long_help = "gem carries TWO feature-side gates, and --posterior samples both.\n\
-                     The identity gate sits on β_g, pinned by the spliced rows.\n\
-                     The velocity gate sits on δ_g, pinned by the unspliced rows,\n\
-                     with β_g carried as an offset that refreshes every sweep.\n\
-                     This flag decides how the two relate.\n\
-                     \n\
-                     By default the velocity gate is NESTED inside the identity gate:\n\
-                     δ_g may be included on an embedding dim only where β_g already is.\n\
-                     Velocity is a deviation from the identity loading.\n\
-                     So a gene should not move along a dim its identity misses.\n\
-                     The model treats that as a state not to visit.\n\
-                     \n\
-                     Nesting also removes a real failure mode. β is pinned by the spliced rows.\n\
-                     δ is pinned by the unspliced-minus-spliced contrast.\n\
-                     A gene seen ONLY in the unspliced track pins β+δ.\n\
-                     It pins neither of them alone.\n\
-                     \n\
-                     Two independent gates then split inclusion mass between (z_β=1, z_δ=0) and (z_β=0, z_δ=1).\n\
-                     Both read confidently wrong. Such genes are reported as unidentified.\n\
-                     They are written as NaN in the δ tables, either way.\n\
-                     \n\
-                     Pass this flag to sample the two gates independently.\n\
-                     That checks for genes carrying velocity on a dim their identity misses."
-    )]
-    pub independent_delta_gate: bool,
-
-    #[arg(
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,
@@ -76,17 +45,7 @@ pub struct ModelArgs {
                      The positive competes with its negatives in one distribution.\n\
                      That separates cell types better on dense pseudobulk counts.\n\
                      \n\
-                     `logistic` is the per-pair SGNS loss.\n\
-                     \n\
-                     `logistic` CANNOT be combined with `--posterior`.\n\
-                     The sampler's likelihood is the profiled Poisson.\n\
-                     Its normalizer is the same estimand as sampled-softmax:\n\
-                     dividing by the anchor total gives InfoNCE exactly.\n\
-                     \n\
-                     SGNS is different. It is a sum of independent per-pair decisions,\n\
-                     with no logsumexp anywhere.\n\
-                     Sampling a logistic fit would report the wrong posterior.\n\
-                     The combination is a hard error, not a silent mismatch."
+                     `logistic` is the per-pair SGNS loss."
     )]
     pub nce_objective: NceObjectiveArg,
 
@@ -220,8 +179,7 @@ pub struct CollapseArgs {
                      WEIGHTS, DOES NOT DROP.\n\
                      Non-selected genes sit out the basis that the multilevel pseudobulk partition is built from.\n\
                      They stay on the feature axis regardless: still trained, still gated,\n\
-                     still present in the dictionary, in the δ_g velocity table,\n\
-                     and in `--posterior`'s anchor set.\n\
+                     still present in the dictionary and in the δ_g velocity table.\n\
                      So the selection shapes WHERE the pseudobulks land.\n\
                      It does not decide which genes the model may use.\n\
                      \n\
@@ -428,12 +386,7 @@ pub struct TrainArgs {
                      Off by default —\n\
                      the per-cell embedding is then byte-identical to a plain run;\n\
                      turning it ON changes the embedding (the second pass).\n\
-                     Only meaningful with spliced+unspliced input (β-sharing).\n\
-                     \n\
-                     CANNOT be combined with `--posterior`,\n\
-                     which REPLACES phase-1 training rather than refining it —\n\
-                     there is then no trained fit for the second pass to refine.\n\
-                     That combination is a hard error, not a silent skip."
+                     Only meaningful with spliced+unspliced input (β-sharing)."
     )]
     pub lineage_dag: bool,
 
@@ -602,11 +555,6 @@ pub struct GemArgs {
 
     #[command(flatten)]
     pub train: TrainArgs,
-
-    /// The shared `--posterior` / `--mcmc` flag group (see
-    /// `ge::posterior::PosteriorArgs`); `senna bge` flattens the same one.
-    #[command(flatten)]
-    pub posterior: graph_embedding_util::posterior::PosteriorArgs,
 
     /// Cell QC, applied as an OUTPUT FILTER only — see the note on `--out`.
     #[command(flatten)]

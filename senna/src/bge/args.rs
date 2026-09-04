@@ -141,42 +141,6 @@ pub struct BgeArgs {
     pub(crate) skip_etm: bool,
 
     #[arg(
-        long = "no-pip-shrinkage",
-        default_value_t = false,
-        help = "Do not shrink co-embedded features by posterior confidence",
-        long_help = "This applies when --posterior has run.\n\
-                     Each feature's co-embedded coordinate is then scaled.\n\
-                     The scale factor is its `max_h PIP`.\n\
-                     That is the posterior probability of loading ANY dim.\n\
-                     \n\
-                     Scaling is applied after the softmax.\n\
-                     Attention weights and the calibrated temperature are untouched.\n\
-                     What it does is compress low-confidence features radially,\n\
-                     toward the origin.\n\
-                     \n\
-                     READ THAT LITERALLY. It is a confidence-weighted radial scaling.\n\
-                     It corrects for nothing.\n\
-                     An earlier version of this help was wrong about it.\n\
-                     It claimed the scaling rescued signal-free genes.\n\
-                     Supposedly they piled up on the cell centroid. Measured,\n\
-                     there is no such pile-up.\n\
-                     0.0% of genes sit within 0.1 cell-radii of the centroid,\n\
-                     and the median distance is 0.80.\n\
-                     So the shrinkage does not undo a concentration. It CREATES one,\n\
-                     at the origin. Whether you want that depends on how you read the plot.\n\
-                     \n\
-                     The scaling is only as informative as its posterior.\n\
-                     When the embedding dimension far exceeds the effective rank,\n\
-                     nearly every gene loads something.\n\
-                     `max_h PIP` then saturates near 1. The weights degenerate into one constant.\n\
-                     The run reports the weight spread.\n\
-                     That case is therefore visible rather than silent.\n\
-                     \n\
-                     Pass this flag to keep the raw co-embedding."
-    )]
-    pub(crate) no_pip_shrinkage: bool,
-
-    #[arg(
         long = "num-topics",
         help = "ETM topics K (omit to auto-select via SPA-anchor residual-elbow sweep)."
     )]
@@ -369,9 +333,8 @@ pub struct BgeArgs {
         long,
         default_value_t = 1,
         value_name = "N",
-        help = "Seed for training and the posterior (default 1).",
-        long_help = "Seed for the fit's sampling RNG and parameter initialization,\n\
-                     and for the posterior samplers when --mcmc/--posterior is given.\n\
+        help = "Seed for training (default 1).",
+        long_help = "Seed for the fit's sampling RNG and parameter initialization.\n\
                      \n\
                      Changing it gives an INDEPENDENT fit.\n\
                      Initialization and minibatch order both differ.\n\
@@ -389,11 +352,6 @@ pub struct BgeArgs {
 
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub(crate) device_no: usize,
-
-    /// The shared `--posterior` / `--mcmc` flag group (see
-    /// `ge::posterior::PosteriorArgs`); `senna gem` flattens the same one.
-    #[command(flatten)]
-    pub(crate) posterior: ge::posterior::PosteriorArgs,
 
     /// The `--gene-modules` flag group (see `ge::GeneModuleArgs`); on by default
     /// here, resolved in `build_config`.
