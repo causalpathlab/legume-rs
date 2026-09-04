@@ -295,7 +295,7 @@ pub fn write_coembedding(
     let mut rows = track_row_names(gene_names, Track::Mature);
     rows.extend(track_row_names(gene_names, Track::Nascent));
 
-    graph_embedding_util::write_feature_coembedding(out, z, &both, &rows, target_eff, None)
+    graph_embedding_util::write_feature_coembedding(out, z, &both, &rows, target_eff)
         .context("feature co-embedding")
 }
 

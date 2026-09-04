@@ -92,8 +92,8 @@
 //! near-parallel, "which of them does gene `g` load" is not identifiable, and
 //! independent per-dim marginals split the mass between them and can look
 //! confidently wrong on *both*. This is not hypothetical — measured max VIF on
-//! real 12k BMMC fits at `H=16` is **29–37**, far past the conventional 5. Check
-//! [`super::frozen_diag`], which reports it per run and warns at 5. When it is
+//! real fits has run far past the conventional 5. Check the embedding's max VIF
+//! (`matrix_util::embedding_geometry`), which reports it per table. When it is
 //! high, read a gene's row as a profile rather than a winner: the mass a dim
 //! carries may belong to its collinear partner. A single-effect gate would offer a
 //! set-valued credible set instead, but only by sampling a per-gene
@@ -731,3 +731,21 @@ pub fn dim_block_multi(
 #[cfg(test)]
 #[path = "dim_block_tests.rs"]
 mod dim_block_tests;
+
+/// Per-block RNG seed that stays distinct at every sweep, including sweep 0.
+///
+/// The obvious `seed ^ (sweep * salt)` collapses to `seed` for every salt when
+/// `sweep == 0`, so on the sweep that seeds the whole chain the blocks would draw
+/// the identical stream of normals and uniforms — proposals perfectly correlated
+/// exactly where it matters most.
+///
+/// Lives beside the block sampler it seeds; its only remaining caller is
+/// `pinto cage`'s selection pass.
+#[must_use]
+pub fn block_seed(seed: u64, salt: u64, sweep: usize) -> u64 {
+    seed.rotate_left(17)
+        ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (sweep as u64)
+            .wrapping_add(1)
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9)
+}

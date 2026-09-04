@@ -1,6 +1,5 @@
 //! The `--gene-modules` flag group, flattened by the CLIs that expose the
-//! learned-module parameterization. Same pattern as
-//! [`crate::posterior::PosteriorArgs`]: one `clap::Args` so every caller shows one
+//! learned-module parameterization: one `clap::Args` so every caller shows one
 //! help text and resolves one way, and `serde` with `clap_defaults` so a manifest
 //! written before a flag existed still deserializes.
 
@@ -40,9 +39,7 @@ pub struct GeneModuleArgs {
                      OUTPUTS. {out}.module_membership.parquet (gene x M), \n\
                      {out}.module_dictionary.parquet (M x H), {out}.module_residual.parquet,\n\
                      {out}.module_bias.parquet. The feature dictionary keeps holding the composed\n\
-                     row, so nothing that reads it has to know modules exist.\n\
-                     \n\
-                     Cannot combine with --posterior."
+                     row, so nothing that reads it has to know modules exist."
     )]
     pub gene_modules: Option<usize>,
 

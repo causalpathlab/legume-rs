@@ -49,10 +49,6 @@ const DEFAULT_DELTA_L2: f32 = 1.0;
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     validate_args(args)?;
-    // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
-    // contradictory pair fails in the first second rather than after the fit.
-    let posterior_plan = args.posterior.resolve(args.runtime.seed)?;
-
     let n_threads = if args.runtime.threads == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -82,7 +78,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         args.batch_files.as_deref(),
     );
 
-    run_gem_genes_bge(args, feature_kind, batch_files, posterior_plan)
+    run_gem_genes_bge(args, feature_kind, batch_files)
 }
 
 /// Load the `--genes` files into one `UnifiedData`, tagging each file's
@@ -128,7 +124,6 @@ fn run_gem_genes_bge(
     args: &GemArgs,
     feature_kind: FeatureNameKind,
     batch_files: Option<&[Box<str>]>,
-    posterior_plan: Option<graph_embedding_util::posterior::PosteriorPlan>,
 ) -> anyhow::Result<()> {
     use graph_embedding_util as ge;
 
@@ -424,11 +419,6 @@ fn run_gem_genes_bge(
             // `null_fdr: 0` = restore ALL of them (no ash-null gate; the feature gate
             // is now the selector). Self-disables when the trained axis is the backend
             // (the default `--n-hvg 0`): nothing is held out. Cell outputs unaffected.
-            // `--posterior N` drives the phase-1 pb Gibbs over BOTH gates. Leaving
-            // this `None` while still resolving `posterior_plan` made the flag a
-            // silent no-op that the run manifest nonetheless advertised.
-            pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
-            pb_posterior_nested_delta: !args.model.independent_delta_gate,
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
             // the positive competing against its negatives in one distribution
             // separates cell types better than the per-pair logistic SGNS loss).
@@ -455,31 +445,6 @@ fn run_gem_genes_bge(
     let (cfg, gene_names, delta_l2, _row_to_gene, _unspliced_rows) = build_cfg(&unified)?;
     let out = ge::fit(&mut unified, cfg).context("ge::fit (genes bge)")?;
     let n_genes = gene_names.len();
-
-    // Both gates' posteriors, keyed by gene so they join against the β dictionary.
-    if let Some(post) = out.splice_posterior.as_ref() {
-        ge::eval::write_splice_posterior_tables(&args.out, post, &gene_names)?;
-        ge::posterior::pb_gibbs::write_splice_posterior_hyper(
-            &args.out,
-            post,
-            &out.varmap,
-            // geometry now travels on the result, not as a caller-supplied cap
-            args.runtime.seed,
-        )?;
-        info!(
-            "phase-1 splice posterior: {} sweeps; dims/gene β {:.2}, δ {:.2} (posterior); \
-             {} gene(s) with an unidentified δ",
-            post.n_kept,
-            // Mean row-sum of each gate's PIP table — the dims a gene loads AS INFERRED,
-            // per gate. Not `Σ_h (1 − π₀ₕ)`, which under the default IBP is the fixed
-            // ladder and would echo `α` twice over; not a median, which on a monotone
-            // ladder is the rate at dim H/2. Each gate gets its own because that is the
-            // point of sampling them separately.
-            mean_dims(&post.beta_pip, post.h),
-            mean_dims(&post.delta_pip, post.h),
-            post.delta_identified.iter().filter(|&&x| !x).count(),
-        );
-    }
 
     // On interrupt (Ctrl+C) `fit()` skips phase-2 + lineage, so the outputs below are
     // partial. gem has no heavy post-fit stage to skip (unlike bge's co-embed/ETM), so
@@ -841,12 +806,6 @@ fn run_gem_genes_bge(
         );
     }
 
-    // The posterior no longer runs here. It is phase-1's own sampler now
-    // (`FitConfig::pb_posterior`), so it happens INSIDE `fit`, against the
-    // pseudobulk side. gem's β-sharing feature side is not wired to it yet — see
-    // the warning `fit` emits — so a `--posterior` on this path is currently a
-    // no-op rather than a post-hoc pass over the finished fit.
-
     // Say what produced this prefix, in the same manifest every other senna
     // training command writes. gem's tables share names and shapes with
     // gem-encoder's while meaning something different — `cell_embedding.parquet`
@@ -902,13 +861,6 @@ fn run_gem_genes_bge(
         args.out
     );
     Ok(())
-}
-
-/// Mean row-sum of a `[n_anchors × h]` PIP table: the expected number of dims an
-/// anchor loads, as inferred. `0` for an empty table.
-fn mean_dims(pip: &[f32], h: usize) -> f64 {
-    let rows = (pip.len() / h.max(1)).max(1);
-    f64::from(pip.iter().sum::<f32>()) / rows as f64
 }
 
 /// Build the per-gene β-sharing feature factorization + the id-ordered gene names.

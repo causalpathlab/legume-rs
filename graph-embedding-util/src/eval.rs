@@ -259,47 +259,14 @@ pub fn save_bias(
 /// the reference cell embedding (left unchanged, SIMBA's anchor) and `e_feat`
 /// the raw feature embedding (both `[*, H]` on the same device); `target_eff`
 /// is the eff-cells temperature target from [`crate::cell_clusters`].
-///
-/// `confidence`, when given, is a per-feature weight in `[0, 1]` — the phase-1
-/// selection posterior's `max_h PIP[g, h]` — applied AFTER the softmax so the
-/// attention and its calibrated temperature are untouched. See
-/// [`crate::postprocess::shrink_by_confidence`]. Its spread is logged either way:
-/// a saturated posterior makes the shrinkage a constant rescale, and that has to
-/// be visible rather than silently doing nothing.
 pub fn write_feature_coembedding(
     out_prefix: &str,
     e_cell: &Tensor,
     e_feat: &Tensor,
     feature_names: &[Box<str>],
     target_eff: f64,
-    confidence: Option<&[f32]>,
 ) -> anyhow::Result<()> {
     let (coembed, t) = crate::feature_coembedding(e_cell, e_feat, target_eff)?;
-    let coembed = match confidence {
-        None => coembed,
-        Some(w) => {
-            let s = crate::postprocess::confidence_spread(w);
-            if s.is_degenerate() {
-                log::warn!(
-                    "co-embed confidence shrinkage is inert: per-feature weight spans \
-                     [{:.3}, {:.3}] over {} features, so it rescales every feature by \
-                     ~the same constant and moves nothing relative to anything else. \
-                     A selection posterior estimated on many more dims than the embedding \
-                     actually uses saturates this way — check the effective rank.",
-                    s.min,
-                    s.max,
-                    s.n
-                );
-            } else {
-                info!(
-                    "co-embed confidence shrinkage: weight min {:.3}, p05 {:.3}, median {:.3}, \
-                     max {:.3}; {} of {} features pulled at least halfway to the origin",
-                    s.min, s.p05, s.median, s.max, s.n_below_half, s.n
-                );
-            }
-            crate::postprocess::shrink_by_confidence(&coembed, w)?
-        }
-    };
     save_embedding(
         &format!("{out_prefix}.feature_embedding.parquet"),
         &coembed,
@@ -307,101 +274,5 @@ pub fn write_feature_coembedding(
         "feature",
     )?;
     info!("Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_embedding.parquet");
-    Ok(())
-}
-
-/// Write both gates' tables for the β-sharing (splice) model, keyed by GENE so
-/// they join directly against `{out}.beta_feature_embedding.parquet`.
-///
-/// Emits `{out}.{beta,delta}_{pip,posterior_mean}.parquet`. Genes whose `δ` is
-/// not identified — no spliced counts, so only `β + δ` is pinned — are written as
-/// `NaN` in the δ tables rather than as the prior draw the sampler happened to
-/// take, and their count is logged. A number there would be indistinguishable
-/// from a measurement.
-pub fn write_splice_posterior_tables(
-    out_prefix: &str,
-    res: &crate::posterior::pb_gibbs::SpliceGibbsResult,
-    gene_names: &[Box<str>],
-) -> anyhow::Result<()> {
-    let g = gene_names.len();
-    anyhow::ensure!(
-        res.beta_pip.len() == g * res.h && res.delta_pip.len() == g * res.h,
-        "splice posterior tables: {} β / {} δ values for {g} genes × {} dims",
-        res.beta_pip.len(),
-        res.delta_pip.len(),
-        res.h
-    );
-    let n_unid = res.delta_identified.iter().filter(|&&x| !x).count();
-    if n_unid > 0 {
-        info!(
-            "δ posterior: {n_unid} of {g} gene(s) have no spliced counts, so only β+δ is \
-             identified for them — their δ rows are written as NaN, not as a prior draw"
-        );
-    }
-    let mask_unidentified = |v: &[f32]| -> Vec<f32> {
-        v.chunks_exact(res.h)
-            .zip(&res.delta_identified)
-            .flat_map(|(row, &ok)| {
-                row.iter()
-                    .map(move |&x| if ok { x } else { f32::NAN })
-                    .collect::<Vec<f32>>()
-            })
-            .collect()
-    };
-    let dev = candle_util::candle_core::Device::Cpu;
-    let delta_pip = mask_unidentified(&res.delta_pip);
-    let delta_mean = mask_unidentified(&res.delta_mean);
-    for (values, suffix) in [
-        (&res.beta_pip, "beta_pip"),
-        (&res.beta_mean, "beta_posterior_mean"),
-        (&delta_pip, "delta_pip"),
-        (&delta_mean, "delta_posterior_mean"),
-    ] {
-        let t = Tensor::from_slice(values.as_slice(), (g, res.h), &dev)?;
-        let path = format!("{out_prefix}.{suffix}.parquet");
-        save_embedding(&path, &t, gene_names, "feature")?;
-        info!("wrote {path}");
-    }
-    Ok(())
-}
-
-/// Write the phase-1 posterior's two feature-side tables.
-///
-/// * `{out}.feature_pip.parquet` — `[D × H]` per-`(feature, dim)` inclusion
-///   probability. Read it per ENTRY: inclusion is independent per dim, so a row
-///   does not sum to 1 and may sum well past it.
-/// * `{out}.feature_posterior_mean.parquet` — `[D × H]` `E[z · β]`, the
-///   **effective** loading, with excluded draws contributing zero. This is what
-///   the model uses, and it is also what was written back into the fit; it is
-///   emitted so a reader can join loadings against their own uncertainty.
-///
-/// Both are on the full feature axis in model order, so they join positionally
-/// and by name against `{out}.feature_embedding.parquet`.
-pub fn write_pb_posterior_tables(
-    out_prefix: &str,
-    res: &crate::posterior::pb_gibbs::PbGibbsResult,
-    feature_names: &[Box<str>],
-) -> anyhow::Result<()> {
-    let d = feature_names.len();
-    anyhow::ensure!(
-        res.pip.len() == d * res.h,
-        "posterior tables: {} PIP values for {d} features × {} dims",
-        res.pip.len(),
-        res.h
-    );
-    let dev = candle_util::candle_core::Device::Cpu;
-    for (values, suffix, what) in [
-        (&res.pip, "feature_pip", "per-dim inclusion probability"),
-        (
-            &res.mean_beta,
-            "feature_posterior_mean",
-            "posterior-mean effective loading E[z·β]",
-        ),
-    ] {
-        let t = Tensor::from_slice(values.as_slice(), (d, res.h), &dev)?;
-        let path = format!("{out_prefix}.{suffix}.parquet");
-        save_embedding(&path, &t, feature_names, "feature")?;
-        info!("wrote {path} ({what})");
-    }
     Ok(())
 }

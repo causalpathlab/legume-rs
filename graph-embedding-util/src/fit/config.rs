@@ -167,22 +167,6 @@ pub struct FitConfig {
     /// instead of the default sequential θ-then-δ-with-θ-fixed. Only meaningful on the
     /// β-sharing (splice) path.
     pub joint_velocity: bool,
-    /// Sample phase 1 instead of stopping at its SGD point estimate: a two-sided
-    /// blocked Gibbs over the **pseudobulk** model, warm-started from that MAP
-    /// (see [`crate::posterior::pb_gibbs`]). Runs between phase 1 and
-    /// `materialize_e_feat`, and writes its posterior means back into the Vars,
-    /// so everything downstream — phase 2, the dictionary, the co-embed — reads a
-    /// refined fit rather than a second set of tables.
-    ///
-    /// `None` = SGD only, and the run is byte-identical to one built before this
-    /// existed.
-    pub pb_posterior: Option<crate::posterior::pb_gibbs::PbGibbsConfig>,
-    /// On the β-sharing (splice) model, allow `z_δ = 1` only where `z_β = 1` —
-    /// velocity is a deviation from the identity loading, so a gene should not
-    /// move along a dim its identity does not load. Also breaks the symmetry that
-    /// lets two independent gates split inclusion mass on a gene where only
-    /// `β + δ` is identified. Ignored without `feat_factor`.
-    pub pb_posterior_nested_delta: bool,
     /// NCE objective for the feature side ([`crate::loss::NceObjective`]). Defaults to
     /// `Softmax` (InfoNCE). Every CLI that exposes it — `senna gem`, `senna bge` and
     /// `pinto cage`, all as `--nce-objective` — also defaults to `Softmax`; `Logistic`
@@ -200,7 +184,7 @@ pub struct FitConfig {
     /// mixed membership, an exact cell–module softmax term, within-module NCE
     /// negatives and gene dropout at pooling time. `None` (default) = the free
     /// embedding, byte-identical to a build before this existed. Mutually
-    /// exclusive with `feat_factor` and `pb_posterior`.
+    /// exclusive with `feat_factor`.
     pub gene_modules: Option<GeneModuleConfig>,
 }
 
@@ -317,17 +301,6 @@ pub struct FitOutput {
     /// broken runs and inspect structure — NOT a validated quality ranker. Written as
     /// `{out}.lineage_qc.json`. `Some` alongside `cell_lineage`; `None` otherwise.
     pub lineage_qc: Option<LineageQc>,
-    /// Phase-1 posterior: per-`(feature, dim)` inclusion probability and both
-    /// sides' posterior-mean loadings. `Some` iff [`FitConfig::pb_posterior`] was
-    /// set and the run reached the stage.
-    ///
-    /// The loadings here are also already written back into the model, so this is
-    /// for the uncertainty — the PIP table and the per-dim hypers — not for
-    /// re-deriving the fit.
-    pub pb_posterior: Option<crate::posterior::pb_gibbs::PbGibbsResult>,
-    /// Both gates' posteriors on the β-sharing (splice) model. `Some` in place of
-    /// [`Self::pb_posterior`] when `feat_factor` was set.
-    pub splice_posterior: Option<crate::posterior::pb_gibbs::SpliceGibbsResult>,
     /// The phase-1 pseudobulk embeddings per collapse level (coarsest → finest),
     /// each with its pseudobulks' batches — the geometry the feature side was
     /// trained against, for batch diagnostics.
