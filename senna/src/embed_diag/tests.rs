@@ -89,6 +89,57 @@ fn the_manifest_path_and_the_prefix_resolve_to_the_same_report() {
     assert_eq!(by_prefix, by_path);
 }
 
+/// `bge --skip-etm` records the SAME ρ file as both `feature_loading` and
+/// `dictionary`. It is one table and must be measured once — reported twice it
+/// reads as two independent findings that happen to agree.
+#[test]
+fn one_file_recorded_under_two_slots_is_measured_once() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let prefix = dir.path().join("run").to_string_lossy().into_owned();
+
+    let genes = rank_one();
+    let shared = plant_table(&prefix, "feature_loading.parquet", &genes);
+    let mut manifest = RunManifest::new(RunKind::Bge, &prefix);
+    manifest.outputs.cell_embedding =
+        Some(plant_table(&prefix, "cell_embedding.parquet", &balanced()));
+    manifest.outputs.feature_loading = Some(shared.clone());
+    manifest.outputs.dictionary = Some(shared);
+    manifest
+        .save(Path::new(&default_path(&prefix)))
+        .expect("save manifest");
+
+    let names: Vec<&str> = collect_geometry(&prefix)
+        .expect("collect")
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(names, ["cell_embedding", "feature_loading"]);
+}
+
+/// An SVD- or topic-shaped run names its tables `latent` / `dictionary` rather
+/// than bge's `cell_embedding` / `feature_loading`. Measuring those is the whole
+/// point of the diagnostic: the comparison it exists for is across families.
+#[test]
+fn a_latent_and_dictionary_run_is_measured_too() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let prefix = dir.path().join("run").to_string_lossy().into_owned();
+
+    let cells = balanced();
+    let genes = rank_one();
+    let mut manifest = RunManifest::new(RunKind::Svd, &prefix);
+    manifest.outputs.latent = Some(plant_table(&prefix, "latent.parquet", &cells));
+    manifest.outputs.dictionary = Some(plant_table(&prefix, "dictionary.parquet", &genes));
+    manifest
+        .save(Path::new(&default_path(&prefix)))
+        .expect("save manifest");
+
+    let rows = collect_geometry(&prefix).expect("collect");
+    let names: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names, ["latent", "dictionary"]);
+    assert_eq!(rows[0].1, embedding_geometry(&cells));
+    assert_eq!(rows[1].1, embedding_geometry(&genes));
+}
+
 /// A run that records none of the measurable tables is a wrong `--from`, and
 /// the error must say what it looked for.
 #[test]
