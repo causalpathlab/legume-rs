@@ -35,7 +35,10 @@ fn log_pi(dev: &Device) -> Tensor {
     let counts: Vec<f32> = (0..G).map(|g| (g + 1) as f32).collect();
     let total: f32 = counts.iter().sum();
     Tensor::from_vec(
-        counts.iter().map(|c| (c / total).ln()).collect::<Vec<f32>>(),
+        counts
+            .iter()
+            .map(|c| (c / total).ln())
+            .collect::<Vec<f32>>(),
         (1, G),
         dev,
     )

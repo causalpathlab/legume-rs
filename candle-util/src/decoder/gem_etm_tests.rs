@@ -19,7 +19,14 @@ fn fixture(delta_scale: f32) -> (GemEtmDecoder, Tensor, Tensor, Device) {
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let dec = GemEtmDecoder::new(K, rho.clone(), delta.clone(), GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(), vb.pp("dec")).unwrap();
+    let dec = GemEtmDecoder::new(
+        K,
+        rho.clone(),
+        delta.clone(),
+        GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(),
+        vb.pp("dec"),
+    )
+    .unwrap();
     (dec, rho, delta, dev)
 }
 
@@ -127,8 +134,22 @@ fn uniform_delta_shift_leaves_the_mature_dictionary_unchanged() {
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let dec_a = GemEtmDecoder::new(K, rho.clone(), delta_a, GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(), vb.pp("dec")).unwrap();
-    let dec_b = GemEtmDecoder::new(K, rho, delta_b, GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(), vb.pp("dec")).unwrap();
+    let dec_a = GemEtmDecoder::new(
+        K,
+        rho.clone(),
+        delta_a,
+        GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(),
+        vb.pp("dec"),
+    )
+    .unwrap();
+    let dec_b = GemEtmDecoder::new(
+        K,
+        rho,
+        delta_b,
+        GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(),
+        vb.pp("dec"),
+    )
+    .unwrap();
 
     let a: Vec<f32> = dec_a
         .get_dictionary(Track::Mature)
