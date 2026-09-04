@@ -2600,7 +2600,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.3.22"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -2614,7 +2614,6 @@ dependencies = [
  "log",
  "matrix-param",
  "matrix-util",
- "mcmc-util",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "rand 0.10.1",
@@ -2622,7 +2621,6 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.2",
  "serde",
- "serde_json",
  "statrs",
 ]
 
