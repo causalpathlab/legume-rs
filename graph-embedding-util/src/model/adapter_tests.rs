@@ -3,8 +3,8 @@
 //! `rho` is a fixed dictionary from another training run; `W` (and the
 //! optional per-feature residual) are the only gene-side parameters. The
 //! tests pin the composition against a dense reference, the parameter
-//! surface (no `[n_features, H]` free Var may exist), the gate composing
-//! after the composition, and the materialized snapshot's idempotence.
+//! surface (no `[n_features, H]` free Var may exist), and the materialized
+//! snapshot's idempotence.
 
 use super::*;
 use candle_util::candle_core::Var;
@@ -112,41 +112,6 @@ fn adapter_registers_only_w_and_optionally_the_residual() {
         .unwrap()
         .iter()
         .all(|&v| v == 0.0));
-}
-
-/// An installed pip mask gates the COMPOSED rows, exactly as it gates a free
-/// model's rows: pip 0 rows come back zero, pip 1 rows come back unchanged.
-#[test]
-fn adapter_pip_gate_masks_the_composed_rows() {
-    let (mut m, _vm) = build(false);
-    // Deterministic mask: pip is exactly 0 or 1 per entry.
-    let pip =
-        Tensor::from_slice(&[1.0f32, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], (4, 2), &dev()).unwrap();
-    m.install_gate_pip(GateKind::Identity, &pip).unwrap();
-    m.resample_gate_mask().unwrap();
-
-    let idx = Tensor::from_slice(&[0u32, 1, 2, 3], 4, &dev()).unwrap();
-    let gated = crate::loss::feat::gather_feature_rows(&m, &idx)
-        .unwrap()
-        .to_vec2::<f32>()
-        .unwrap();
-    m.clear_gate_mask();
-    let raw = crate::loss::feat::gather_feature_rows(&m, &idx)
-        .unwrap()
-        .to_vec2::<f32>()
-        .unwrap();
-
-    let pip_host = [[1.0f32, 1.0], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-    for g in 0..4 {
-        for c in 0..2 {
-            let want = raw[g][c] * pip_host[g][c];
-            assert!(
-                (gated[g][c] - want).abs() < 1e-6,
-                "row {g} col {c}: got {} want {want}",
-                gated[g][c]
-            );
-        }
-    }
 }
 
 /// `materialize_e_feat` must write the current composition into the `e_feat`

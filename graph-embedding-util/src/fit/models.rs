@@ -2,11 +2,11 @@
 //! one pseudobulk head per collapse level that SHARES it.
 //!
 //! Split out because the allocation order is load-bearing and easy to break silently.
-//! The primary head registers the canonical feature Vars, the gate is enabled on it
-//! BEFORE any head exists, and each head then clones handles to those same Vars — so a
-//! head built too early, or one that misses a handle, trains against a feature side
-//! nothing else sees. That last failure mode already shipped once: `gate_ibp_bias` was
-//! not among the cloned handles, and the gate's whole KL silently left the loss.
+//! The primary head registers the canonical feature Vars BEFORE any head exists, and
+//! each head then clones handles to those same Vars — so a head built too early, or
+//! one that misses a handle, trains against a feature side nothing else sees. That
+//! last failure mode has shipped once already, as a missing handle whose whole term
+//! silently left the loss.
 
 use super::config::FitConfig;
 use crate::data::UnifiedData;
@@ -58,7 +58,7 @@ pub(super) fn build_heads(
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
-    let mut cell_model = match (&config.gene_modules, &config.feat_factor) {
+    let cell_model = match (&config.gene_modules, &config.feat_factor) {
         (Some(gm), factor) => {
             // Hard errors, not silent no-ops: the module model's `e_feat` is a
             // composed snapshot, and both of these write or read it as the trained
@@ -130,12 +130,6 @@ pub(super) fn build_heads(
             )?
         }
         (None, Some(spec)) => {
-            // β-sharing is incompatible with the free-E_feat L2, which assumes a single
-            // free feature table per row.
-            anyhow::ensure!(
-                config.feature_embedding_l2 == 0.0,
-                "feat_factor (β-sharing) is not supported with feature_embedding_l2 > 0"
-            );
             anyhow::ensure!(
                 spec.row_to_gene.len() == n_features && spec.unspliced_rows.len() == n_features,
                 "feat_factor row maps (row_to_gene {}, unspliced_rows {}) must match n_features {}",
@@ -202,17 +196,6 @@ pub(super) fn build_heads(
         )?,
     };
 
-    // BEFORE the sharing heads exist, so every head references the one gate Var
-    // (`s_feat` free / `s_beta` factored) rather than allocating its own.
-    if let Some(g) = config.feature_gate {
-        cell_model.enable_feature_gate(g, varmap, &config.device)?;
-        info!(
-            "Learned feature gate ON — an INDEPENDENT Bernoulli inclusion probability \
-             σ(S) per (feature, dim), with each dim's rate π_h learned. τ={}",
-            g.temperature
-        );
-    }
-
     let mut level_models: Vec<JointEmbedModel> = Vec::with_capacity(pb_blobs.len());
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
         let n_pb = pb.n_cells();
@@ -232,16 +215,6 @@ pub(super) fn build_heads(
                     b_cell_init: &vec![0f32; n_pb],
                     var_prefix: &prefix,
                     seed: config.seed,
-                    // EVERY gate handle, so each head reweights the SAME feature side and
-                    // AdamW updates one `s_feat`. `shared_gate_ibp_bias` is the one that
-                    // was missing: `train_composite` evaluates the gate KL on `axes[0]`,
-                    // which is a pb head whenever `--phase1-cells-per-pb` is 0 (the
-                    // default), so without it the KL returns `None` on every ordinary run.
-                    shared_s_feat: cell_model.s_feat.clone(),
-                    shared_e_feat_raw: cell_model.e_feat_raw.clone(),
-                    shared_e_feat_logstd: cell_model.e_feat_logstd.clone(),
-                    shared_gate_ibp_bias: cell_model.gate_ibp_bias.clone(),
-                    gate: cell_model.gate,
                     shared_modules: cell_model.modules.clone(),
                 },
                 varmap,

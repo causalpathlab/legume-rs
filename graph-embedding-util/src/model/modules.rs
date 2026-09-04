@@ -282,13 +282,6 @@ impl JointEmbedModel {
             adapter: None,
             modules: Some(modules),
             embedding_dim: h,
-            s_feat: None,
-            e_feat_raw: None,
-            e_feat_logstd: None,
-            gate_pip: None,
-            gate_mask: Arc::new(Mutex::new(None)),
-            gate_ibp_bias: None,
-            gate: None,
         })
     }
 

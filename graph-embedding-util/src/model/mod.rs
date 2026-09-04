@@ -16,18 +16,11 @@
 
 use candle_util::candle_core::{Device, Result, Tensor};
 use candle_util::candle_nn::{self, VarBuilder, VarMap};
-use std::sync::{Arc, Mutex};
 
-mod gate;
 mod modules;
 mod score;
 mod vars;
 
-pub use gate::{
-    gate_kl_step_weight, gate_logit_init, ibp_alpha_for_drop, ibp_gate_logit_bias, FeatureGateSpec,
-    GateKind, GATE_EFFECT_PRIOR_VAR, GATE_IBP_LOGIT_DROP, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT,
-    GATE_KL_WEIGHT,
-};
 pub use modules::{
     module_logit_for_own_mass, FeatModules, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME,
     MODULE_LOGITS_VAR_NAME, MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
@@ -36,9 +29,7 @@ use vars::{
     build_feat_factor, register_randn_seeded, register_var_from_mat, register_var_from_slice,
 };
 // Reached only through `tests`' `use super::*` — the live `pool_axis` caller is in
-// `score`, and `DType` now belongs to `vars`.
-#[cfg(test)]
-use candle_util::candle_core::DType;
+// `score`.
 #[cfg(test)]
 use vars::{pool_axis, pool_axis_loop};
 
@@ -81,24 +72,6 @@ pub struct ShareFeaturesArgs<'a> {
     /// Base seed for the reproducible randn init of the cell side when
     /// `e_cell_init` is `None`.
     pub seed: u64,
-    /// Shared softmax-gate logits (free model, `[n_features, H]`).
-    /// `None` when the gate is off. Every head references the SAME Var so AdamW
-    /// updates it once (see [`FeatureGateSpec`]).
-    pub shared_s_feat: Option<Tensor>,
-    /// Shared raw feature Var kept reachable for the gated training gather (so a
-    /// post-phase-1 materialize can bake the gate into `e_feat` without clobbering
-    /// the source). `None` when the gate is off.
-    pub shared_e_feat_raw: Option<Tensor>,
-    /// Shared free-model effect log-std (`[n_features, H]`). `Some` only for a KL gate.
-    pub shared_e_feat_logstd: Option<Tensor>,
-    /// Shared per-dim inclusion rate `π_h` (`[H]`). Must be handed to every head:
-    /// `train_composite` computes [`JointEmbedModel::gate_kl`] on `ctx.axes[0]`, which
-    /// is a pb head — not the cell model — whenever `--phase1-cells-per-pb` is 0 (the
-    /// default in both CLIs). Leaving it `None` makes `gate_kl` return `None` and the
-    /// gate regularisation disappear from the loss with the build green.
-    pub shared_gate_ibp_bias: Option<Tensor>,
-    /// Gate configuration shared across heads. `None` when the gate is off.
-    pub gate: Option<FeatureGateSpec>,
     /// Shared module tables ([`FeatModules`]) for a module-parameterized primary
     /// model. Every head must carry the SAME clone: a head without it gathers from
     /// `e_feat`, which for this parameterization is a detached snapshot, and trains a
@@ -159,30 +132,6 @@ pub struct FeatFactor {
     /// (the `mask` = 1/0 selector); L2-ridge in phase-1. `None` = plain β-sharing
     /// (spliced ≡ unspliced ≡ `β_g`).
     pub splice_delta: Option<(Tensor, Tensor)>,
-    /// Optional per-gene softmax-gate logits `[G, H]` (see [`FeatureGateSpec`]),
-    /// the IDENTITY gate on `β_g`. Gathered by `row_to_gene` alongside `β`/`δ`; `None`
-    /// = ungated. Cloned with the factor so composite heads share it.
-    pub s_beta: Option<Tensor>,
-    /// Optional per-gene Gaussian-effect log-std `[G, H]` (the `β` gate's variational
-    /// single-effect posterior std; `σ = exp`). `Some` iff the gate is on.
-    pub beta_logstd: Option<Tensor>,
-    /// Optional per-gene VELOCITY-gate logits `[G, H]` — the independent
-    /// spike-and-slab gate on `δ_g` (the motion), mirroring `s_beta`. `Some`
-    /// only when the gate is on AND `splice_delta` exists (velocity present); a gene
-    /// with no motion has `σ(s_delta) → 0` → `δ̃_g ≈ 0` (not a driver).
-    /// `σ(s_delta)` per feature row = the `velocity_selection` output.
-    pub s_delta: Option<Tensor>,
-    /// Optional per-gene velocity Gaussian-effect log-std `[G, H]` (the `δ` gate's
-    /// variational posterior std). `Some` iff `s_delta` is.
-    pub delta_logstd: Option<Tensor>,
-    /// Frozen VELOCITY inclusion probabilities `[G, H]` from a `--posterior` run —
-    /// the `δ` counterpart of [`JointEmbedModel::gate_pip`]. Separate table because
-    /// `β`'s inclusion and `δ`'s are different quantities; sharing one would mask the
-    /// motion by the identity's selection.
-    pub delta_gate_pip: Option<Tensor>,
-    /// This epoch's `z ~ Bern(delta_gate_pip)`, shared across axes like the identity
-    /// mask. `None` ⇒ use the mean.
-    pub delta_gate_mask: Option<Arc<Mutex<Option<Tensor>>>>,
 }
 
 impl FeatFactor {
@@ -251,8 +200,8 @@ pub struct FeatAdapter {
 
 /// A feature side whose `e_feat` is a detached COMPOSED snapshot of live
 /// parameters — the adapter (`ρ·W + r`) and the module layer (`π μ + r`). The
-/// gather, the materialize, the gate KL and the ridge all treat these two the
-/// same way, so they dispatch on this trait rather than on each field.
+/// gather, the materialize and the ridge all treat these two the same way, so
+/// they dispatch on this trait rather than on each field.
 pub trait ComposedFeat {
     /// The full composed table `[n_features, H]`, on the live parameters.
     fn compose(&self) -> Result<Tensor>;
@@ -313,82 +262,6 @@ pub struct JointEmbedModel {
     /// The `e_feat` field is a detached composed snapshot, as for the adapter.
     pub modules: Option<FeatModules>,
     pub embedding_dim: usize,
-    /// Free-model gate logits `[n_features, H]` (see [`FeatureGateSpec`]). `None` for
-    /// an ungated model, or for a factored one (its gate lives in `factor.s_beta`).
-    pub s_feat: Option<Tensor>,
-    /// Raw `e_feat` Var kept reachable for the gated training gather of a FREE model,
-    /// so [`Self::materialize_e_feat`] can overwrite `e_feat` with the gated snapshot
-    /// without corrupting the source the gather reads. `None` unless free + gated.
-    pub e_feat_raw: Option<Tensor>,
-    /// Free-model Gaussian-effect log-std `[n_features, H]` (variational single-effect
-    /// posterior std; `σ = exp`). `Some` only when the KL gate is on (free model).
-    pub e_feat_logstd: Option<Tensor>,
-    /// **Jitter (posterior-informed dropout).** Frozen `[rows, H]` inclusion
-    /// probabilities taken from a completed `--posterior` run — `P(z=1 | data)`, not a
-    /// learned parameter. `Some` puts the model in jitter mode: [`Self::gate_weights`]
-    /// stops consulting the learned logits entirely and returns a per-epoch Bernoulli
-    /// draw from this table during training, or this table itself (the mean `E[z]`) at
-    /// output.
-    ///
-    /// This is Hinton's dropout with an INFERRED keep-probability. Classic dropout picks
-    /// one global rate `p` and scales weights by `p` at test time; here the rate is
-    /// per-`(gene, dim)` and comes from a posterior, and the same rule applies —
-    /// `z ~ Bern(pip)` while training, `pip ⊙ β` at output. The regularization story
-    /// carries over unchanged (it breaks co-adaptation between genes); what differs is
-    /// that the rates are estimated rather than chosen.
-    ///
-    /// This exists because the LEARNED Bernoulli gate does not train. Measured on BM1:
-    /// the KL that has to drive selection is ~70x under-weighted against the true ELBO,
-    /// and initializing the logits anywhere the gate is inert (`σ(4) ≈ 0.98`) puts them
-    /// where `∂α/∂S = α(1−α)` passes 1/14 of the available gradient — so `α` never
-    /// leaves its initialization, and for the 37% of genes never drawn as NCE positives
-    /// it cannot, receiving exactly zero gradient. Sampling `z` is not subject to any of
-    /// that: the selection is an INPUT, computed by a method that demonstrably works.
-    pub gate_pip: Option<Tensor>,
-    /// The current epoch's `z ~ Bern(gate_pip)` draw, `[rows, H]` of 0/1 in f32.
-    ///
-    /// Redrawn once per EPOCH, never per minibatch: `z` is a latent for the DATASET, so
-    /// a per-batch draw would model it as if each minibatch had its own inclusion state
-    /// and would add gradient variance for nothing. One draw per epoch makes each epoch
-    /// a coherent sub-model.
-    ///
-    /// This is NOT Monte-Carlo EM, despite the resemblance. `gate_pip` is estimated
-    /// once and frozen; a real MCEM would re-estimate `z`'s distribution against the
-    /// updated `β` on every outer round. Here the selection never learns anything from
-    /// the loading that SGD goes on to fit.
-    ///
-    /// SHARED across axes and interior-mutable on purpose. The composite fit runs
-    /// several axes that share Vars but are separate `JointEmbedModel` values, and the
-    /// training loop holds them behind `&`. One `Arc` cell means a single redraw is
-    /// seen by every axis at once — so the axes cannot drift onto different sub-models
-    /// within an epoch, which a per-model field would have allowed.
-    pub gate_mask: Arc<Mutex<Option<Tensor>>>,
-    /// Per-dim inclusion rate logits `[H]` for the IDENTITY gate — `π_h = σ(·)`, the
-    /// SGD analogue of `posterior::hyper::sample_pi0`'s per-dim `π₀h`. Lives on the
-    /// model rather than beside the logit table because it is indexed by dim, not by
-    /// row, so free and factored models share one home for it. `Some` iff gated.
-    ///
-    /// It MUST be plumbed through [`ShareFeaturesArgs`] like `s_feat`, and this doc once
-    /// said the opposite — that only the axis computing [`Self::gate_kl`] needs it, so
-    /// sharing it was unnecessary. That reasoning is inverted: training calls `gate_kl`
-    /// on `axes[0]`, which is a pb HEAD, not the model the gate was enabled on, whenever
-    /// `--phase1-cells-per-pb` is 0 — the default in both CLIs. A head without it makes
-    /// `gate_kl` return `None`, and the entire gate regularisation leaves the loss with
-    /// the build green. Do not un-share it.
-    ///
-    /// The IBP ladder inherits that hazard in a nastier form: a head with
-    /// `gate_ibp_bias: None` still gates and still trains, it just silently drops
-    /// the per-dim prior — no `None`, no error, just a fit with no ordering on its
-    /// dims. `every_shared_head_carries_the_ibp_ladder` pins it.
-    ///
-    /// A constant, not a `Var`: `α` is chosen, so this has no gradient and is not
-    /// a checkpointed parameter. Both gates share ONE ladder — it is a function of
-    /// `α` and `H` alone, so the identity and velocity gates cannot disagree about
-    /// it the way they legitimately disagree about a learned rate.
-    pub gate_ibp_bias: Option<Tensor>,
-    /// Gate configuration (`None` = ungated). Presence is the single "is gated" flag
-    /// for both free (`s_feat`) and factored (`factor.s_beta`) models.
-    pub gate: Option<FeatureGateSpec>,
 }
 
 impl JointEmbedModel {
@@ -436,20 +309,14 @@ impl JointEmbedModel {
             adapter: None,
             modules: None,
             embedding_dim: args.embedding_dim,
-            s_feat: None,
-            e_feat_raw: None,
-            e_feat_logstd: None,
-            gate_pip: None,
-            gate_mask: Arc::new(Mutex::new(None)),
-            gate_ibp_bias: None,
-            gate: None,
         })
     }
 
     /// The L2 term for whichever gene-side table can overfit row by row under
-    /// this parameterization: the free `e_feat` Var, the adapter's or the module
-    /// model's per-feature residual, or nothing (an adapter without a residual trains only the
-    /// shared map, and a factored model's ridge is the trainer's `delta_l2`).
+    /// this parameterization: the free `e_feat` Var, the factored model's per-gene
+    /// `β` (its `δ_g` has the trainer's own `delta_l2`), the adapter's or the module
+    /// model's per-feature residual, or nothing (an adapter without a residual
+    /// trains only the shared map).
     ///
     /// Owning this here keeps a trainer from ridging `e_feat` on a model where
     /// that field is a detached snapshot, which is silently inert.
@@ -460,11 +327,10 @@ impl JointEmbedModel {
                 None => Ok(None),
             };
         }
-        if self.factor.is_some() {
-            return Ok(None);
+        if let Some(f) = &self.factor {
+            return Ok(Some(crate::loss::embedding_ridge(&f.beta, lam)?));
         }
-        let table = self.e_feat_raw.as_ref().unwrap_or(&self.e_feat);
-        Ok(Some(crate::loss::embedding_ridge(table, lam)?))
+        Ok(Some(crate::loss::embedding_ridge(&self.e_feat, lam)?))
     }
 
     /// The composed feature side, when this model has one (adapter or modules;
@@ -474,17 +340,6 @@ impl JointEmbedModel {
             return Some(m);
         }
         self.adapter.as_ref().map(|a| a as &dyn ComposedFeat)
-    }
-
-    /// Refresh the `e_feat` snapshot of a COMPOSED model (adapter or modules)
-    /// from the live parameters WITHOUT baking any gate: the raw composed table.
-    /// For the gate-baked snapshot use [`Self::materialize_e_feat`]. A no-op for
-    /// the other parameterizations, whose `e_feat` is the trained table itself.
-    pub fn recompose_e_feat_raw(&mut self) -> Result<()> {
-        if let Some(c) = self.composed() {
-            self.e_feat = c.compose()?.detach();
-        }
-        Ok(())
     }
 
     /// Fixed-dictionary adapter constructor: upload `rho` as a constant,
@@ -558,13 +413,6 @@ impl JointEmbedModel {
             adapter: Some(adapter),
             modules: None,
             embedding_dim: args.embedding_dim,
-            s_feat: None,
-            e_feat_raw: None,
-            e_feat_logstd: None,
-            gate_pip: None,
-            gate_mask: Arc::new(Mutex::new(None)),
-            gate_ibp_bias: None,
-            gate: None,
         })
     }
 
@@ -589,11 +437,6 @@ impl JointEmbedModel {
             b_cell_init,
             var_prefix,
             seed,
-            shared_s_feat,
-            shared_e_feat_raw,
-            shared_e_feat_logstd,
-            shared_gate_ibp_bias,
-            gate,
             shared_modules,
         } = args;
         let e_name = format!("{var_prefix}_e_cell");
@@ -613,13 +456,6 @@ impl JointEmbedModel {
             adapter: None,
             modules: shared_modules,
             embedding_dim,
-            s_feat: shared_s_feat,
-            e_feat_raw: shared_e_feat_raw,
-            e_feat_logstd: shared_e_feat_logstd,
-            gate_pip: None,
-            gate_mask: Arc::new(Mutex::new(None)),
-            gate_ibp_bias: shared_gate_ibp_bias,
-            gate,
         })
     }
 
@@ -674,13 +510,6 @@ impl JointEmbedModel {
             adapter: None,
             modules: None,
             embedding_dim: args.embedding_dim,
-            s_feat: None,
-            e_feat_raw: None,
-            e_feat_logstd: None,
-            gate_pip: None,
-            gate_mask: Arc::new(Mutex::new(None)),
-            gate_ibp_bias: None,
-            gate: None,
         })
     }
 
@@ -711,15 +540,6 @@ impl JointEmbedModel {
                 b_cell_init: &vec![0f32; n_cells],
                 var_prefix,
                 seed,
-                // The factored gate rides on the cloned `factor` (`s_beta`); the
-                // free-model gate fields stay empty. Copy the gate spec so the head
-                // knows to apply it, and `π_h`, which lives on the model rather than
-                // the factor and is what `gate_kl` needs.
-                shared_s_feat: None,
-                shared_e_feat_raw: None,
-                shared_e_feat_logstd: None,
-                shared_gate_ibp_bias: self.gate_ibp_bias.clone(),
-                gate: self.gate,
                 shared_modules: None,
             },
             varmap,
@@ -738,3 +558,29 @@ mod adapter_tests;
 
 #[cfg(test)]
 mod module_tests;
+
+impl JointEmbedModel {
+    /// Snapshot the composed feature side into the `e_feat` field (detached), so
+    /// the phase-2 projection and every output / co-embed reader see a fixed
+    /// dictionary: recomposed from the live parameters for an adapter / module
+    /// model, `β` (+ `δ` on unspliced rows) gathered to feature rows for a
+    /// factored one. A no-op for a free model, whose `e_feat` already IS the
+    /// trained Var. Call after phase 1.
+    pub fn materialize_e_feat(&mut self) -> Result<()> {
+        let snapshot = if let Some(c) = self.composed() {
+            Some(c.compose()?.detach())
+        } else if let Some(f) = &self.factor {
+            let mask = f.splice_delta.as_ref().map(|(_, m)| m.clone());
+            Some(
+                self.factored_feat_rows(f, &f.row_to_gene, mask.as_ref())?
+                    .detach(),
+            )
+        } else {
+            None
+        };
+        if let Some(s) = snapshot {
+            self.e_feat = s;
+        }
+        Ok(())
+    }
+}

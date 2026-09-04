@@ -172,13 +172,6 @@ pub struct FitConfig {
     /// `pinto cage`, all as `--nce-objective` — also defaults to `Softmax`; `Logistic`
     /// is opt-in and is the historical bge loss, kept byte-identical when chosen.
     pub nce_objective: crate::loss::NceObjective,
-    /// Optional per-gene spike-and-slab gate over the embedding dimensions (Bernoulli
-    /// inclusion + Gaussian effect prior = graceful feature selection). `Some` enables
-    /// it for both the free (`e_feat`) and factored (`β`) feature sides; `None`
-    /// (default) = ungated. Its `σ(S)` output is the same estimand
-    /// `posterior::dim_block` samples as a PIP. See [`FeatureGateConfig`] and
-    /// [`crate::model::FeatureGateSpec`].
-    pub feature_gate: Option<FeatureGateConfig>,
     /// Learned gene modules in front of the feature embedding
     /// ([`crate::model::FeatModules`]): `ρ_g = Σ_m π_gm μ_m + r_g` with a learned
     /// mixed membership, an exact cell–module softmax term, within-module NCE
@@ -257,11 +250,6 @@ pub struct FeatFactorSpec {
     /// split each cell's edges for the dual axis-δ projection.
     pub unspliced_rows: Vec<bool>,
 }
-
-/// Caller-facing name for the gate spec. One type, not a parallel copy: an earlier
-/// duplicate meant the model's doc was updated when the gate changed and the
-/// config's was not, so a caller reading the public API got the deleted design.
-pub use crate::model::FeatureGateSpec as FeatureGateConfig;
 
 /// Trained model + its `VarMap`. The varmap is exposed so callers can
 /// save checkpoints or re-run inference; the current caller (`senna

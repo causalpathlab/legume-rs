@@ -35,6 +35,23 @@ pub struct ModelArgs {
     pub delta_l2: f32,
 
     #[arg(
+        long = "feature-embedding-l2",
+        default_value_t = 0.1,
+        help = "L2 penalty λ on the per-gene loading β (row-mean of ‖β_g‖²).",
+        long_help = "L2 penalty λ on the per-gene loading β ∈ ℝ^{G×H}.\n\
+                     It adds λ · mean_g ‖β_g‖² to the per-step phase-1 loss.\n\
+                     The norm is summed over the H latent dims.\n\
+                     The mean is taken over the G genes.\n\
+                     So λ stays scale-invariant across G, but is not diluted by H.\n\
+                     \n\
+                     This is β's only shrinkage. It replaced the retired feature gate's\n\
+                     effect prior, and its default has not been calibrated against that;\n\
+                     treat it as a placeholder until an A/B says otherwise.\n\
+                     δ_g has its own ridge, --delta-l2."
+    )]
+    pub feature_embedding_l2: f32,
+
+    #[arg(
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,
@@ -48,43 +65,6 @@ pub struct ModelArgs {
                      `logistic` is the per-pair SGNS loss."
     )]
     pub nce_objective: NceObjectiveArg,
-
-    // Per-gene spike-and-slab feature gate — ALWAYS ON for gem (the standard
-    // training): β_g ⊙ σ(S_g), an INDEPENDENT inclusion probability per (gene, dim)
-    // — Bernoulli selection + Gaussian effect KL, with each dim's inclusion rate π_h
-    // learned. There is no null slot and no per-dim budget: a gene with no cell-state
-    // signal simply has σ(S) → 0 in every dim and contributes ≈0, giving single-pass
-    // feature selection. σ(S) is the same estimand `--posterior` reports as a PIP, so
-    // feature_selection.parquet and beta_pip.parquet are now comparable. The velocity
-    // δ_g gets its own independent gate and its own π_h (→ velocity_selection).
-    // Temperature is the one knob.
-    #[arg(
-        long = "feature-gate-temp",
-        alias = "feature-softmax-temp",
-        default_value_t = 1.0,
-        help = "Feature-gate temperature τ (< 1 sharpens each inclusion probability toward 0/1).",
-        hide = true
-    )]
-    pub feature_gate_temp: f32,
-
-    #[arg(
-        long = "gate-ibp-alpha",
-        help = "Truncated-IBP concentration for the gate's per-dim inclusion ladder;\n\
-                unset = auto",
-        long_help = "Concentration alpha of the truncated Indian Buffet Process whose\n\
-                     ladder tilts the feature gate: dim h carries a fixed logit\n\
-                     offset h * ln(alpha/(alpha+1)), so later dims must earn their\n\
-                     inclusion against a steeper prior. Chosen, never fitted.\n\
-                     \n\
-                     Unset (the default) derives alpha from the embedding dimension\n\
-                     so the ladder spans 4 logits end to end, leaving the last dim\n\
-                     at the sigmoid's most responsive point rather than frozen.\n\
-                     \n\
-                     SMALLER alpha means a steeper ladder and more sparsity. This\n\
-                     replaced a KL toward a Beta(1,9) inclusion prior, which had no\n\
-                     natural weight under gem's noise-contrastive phase-1 objective."
-    )]
-    pub gate_ibp_alpha: Option<f64>,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and
@@ -178,7 +158,7 @@ pub struct CollapseArgs {
                      \n\
                      WEIGHTS, DOES NOT DROP.\n\
                      Non-selected genes sit out the basis that the multilevel pseudobulk partition is built from.\n\
-                     They stay on the feature axis regardless: still trained, still gated,\n\
+                     They stay on the feature axis regardless: still trained,\n\
                      still present in the dictionary and in the δ_g velocity table.\n\
                      So the selection shapes WHERE the pseudobulks land.\n\
                      It does not decide which genes the model may use.\n\

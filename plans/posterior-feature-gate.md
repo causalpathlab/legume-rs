@@ -1,5 +1,38 @@
 # Posterior feature gate — handoff
 
+## Retired — 2026-09-04
+
+Everything this note describes has been removed from the tree, on the branch
+that also added `senna embed-diag`. What the removal rests on, and what it
+deliberately overrides, so the table below is read in context:
+
+- **The learned gate was measured inert on `senna bge` at its shipped `H=128`**
+  (purity within noise of the ungated fit, ~40% slower). The `H=16` numbers in
+  the table below predate that and were already marked stale by their own
+  warning; the later measurement governs.
+- **Gibbs/PIP sampling of the gate was infeasible at bge's scale** (on the order
+  of 1e10 updates, no progress after many minutes on a small input), and
+  measured to buy nothing where it did finish.
+- **`pinto cage`'s sampled arm measured better than its learned arm** on cage's
+  own data (12.0x vs 10.3x against a neighbour-agreement null, +33% wall-clock).
+  It was retired anyway, on cost and on the rule that a PIP consumer with no
+  producer left in the workspace is debris. That number stands and can be
+  revisited if cage needs a selector back.
+- **`senna gem`'s splice posterior** (`pb_gibbs_splice`, `posterior_hyper.json`)
+  and the sampled-pseudobulk write-back were independent of the gate and were
+  never refuted on their own merits. They went as collateral for a clean
+  boundary and are resurrectable from history.
+
+What replaced the gate's effect prior: plain L2 on the feature side —
+`--feature-embedding-l2` on bge (already there), and the same flag on gem, now
+ridging the per-gene `β` directly. gem's default is a placeholder pending its
+own A/B. The frozen-side participation ratio the sampler diagnostic reported
+lives on as `matrix_util::embedding_geometry` behind `senna embed-diag`.
+
+Everything below is the historical record.
+
+---
+
 Started 2026-07-30. Session 2 (same day) closed all 15 review findings and did the
 legacy/modularization pass. Everything below is measured or read off the code; where
 something is an assumption it says so.

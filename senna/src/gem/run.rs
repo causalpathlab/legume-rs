@@ -40,12 +40,6 @@ use crate::gem::sample_id::{file_sample_id, longest_common_underscore_suffix};
 /// range (0.01–1.0).
 const DEFAULT_DELTA_L2: f32 = 1.0;
 
-// NOTE: `feature_embedding_l2` MUST be 0 for gem. It penalizes a free `E_feat`
-// Var, but gem is β-sharing (`feat_factor = Some`) — the trained params are β_g
-// and δ_g (δ_g already regularized by `--delta-l2`), and `E_feat` is a
-// materialized snapshot, not a Var. A nonzero value trips the engine's
-// `feat_factor + feature_embedding_l2 > 0` guard (fit/mod.rs) and aborts the fit.
-
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     validate_args(args)?;
@@ -175,7 +169,7 @@ fn run_gem_genes_bge(
     // factorization stays aligned — and `subset_features` narrows the dictionary/co-embed
     // accordingly, with the uniform `hvg_weights` over the survivors then restricting the
     // pb projection / membership to those genes too. `None` (n_hvg = 0, the DEFAULT) keeps
-    // every gene and lets the feature gate select, which is the recommended path.
+    // every gene, which is the recommended path.
     //
     // What the subset is for is a smaller dictionary, and nothing more. An earlier version
     // of this comment justified it as "removing the low-detection empty genes that pile at
@@ -185,15 +179,11 @@ fn run_gem_genes_bge(
     //
     // `--must-train-features` force-includes a curated panel on top of that cut, at
     // the GENE level (so both splice tracks of a kept gene come along). Loaded only
-    // when the HVG cut is on (the feature gate handles selection otherwise).
+    // when the HVG cut is on.
     //
-    // The feature gate is gem's selector now — an INDEPENDENT Bernoulli inclusion
-    // probability per (gene, dim), so a gene with no cell-state signal simply has
-    // σ(S) → 0 in every dim and contributes ≈0. There is no null slot to send mass to:
-    // that was the per-dim softmax over genes, which this replaced. The old ash-QC /
-    // LRT two-pass
-    // refit is retired. An explicit `--n-hvg N` still hard-subsets to the top-N genes
-    // (a smaller dictionary; the remainder is restored by the post-hoc projection).
+    // The old ash-QC / LRT two-pass refit is retired. An explicit `--n-hvg N` still
+    // hard-subsets to the top-N genes (a smaller dictionary; the remainder is
+    // restored by the post-hoc projection).
     let hvg_on = args.collapse.n_hvg > 0;
     let selection_on = hvg_on;
     // `--markers` is force-trained alongside `--must-train-features`. The annotators read
@@ -290,8 +280,8 @@ fn run_gem_genes_bge(
         }
         // WEIGHT, do not subset — the `senna bge` semantics. Non-selected genes get
         // projection weight 0, so they sit out the basis the pseudobulk partition is built
-        // from, but they stay on the feature axis: still trained, still gated, still in the
-        // dictionary, the co-embedding and the posterior's anchor set.
+        // from, but they stay on the feature axis: still trained, still in the
+        // dictionary and the co-embedding.
         //
         // This used to call `subset_features`, which dropped them outright. Weighting is
         // strictly more informative for the same cost — the RP sees the same genes either
@@ -320,8 +310,8 @@ fn run_gem_genes_bge(
         );
     }
 
-    // Compute device. gem does a single gated fit (the feature gate selects
-    // features during training), so there is no second pass to reconcile here.
+    // Compute device. gem does a single fit, so there is no second pass to
+    // reconcile here.
     let dev = args
         .runtime
         .device
@@ -335,8 +325,8 @@ fn run_gem_genes_bge(
 
     // Build a `FitConfig` for the CURRENT feature axis of `unified`: the per-gene
     // β-sharing factor is derived from the live feature names, and the δ_g ridge /
-    // HVG weights align to that axis. gem fits ONCE (the feature gate is the
-    // selector; the senna-bge post-QC refit is retired). Returns the config plus the
+    // HVG weights align to that axis. gem fits ONCE (the senna-bge post-QC refit
+    // is retired). Returns the config plus the
     // axis-derived gene names
     // and resolved δ ridge the downstream dictionary writers need.
     //
@@ -403,7 +393,8 @@ fn run_gem_genes_bge(
             seed: args.runtime.seed,
             device: dev.clone(),
             block_size: None,
-            feature_embedding_l2: 0.0, // must be 0 for β-sharing (see note above)
+            // The engine ridges the factored model's per-gene β with this.
+            feature_embedding_l2: args.model.feature_embedding_l2,
             weight_decay: args.train.weight_decay,
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
@@ -416,8 +407,8 @@ fn run_gem_genes_bge(
             joint_velocity: !args.train.sequential_velocity,
             // Restore backend genes the trained axis is missing — the `--n-hvg`
             // remainder — solved (with velocity) against the frozen pseudobulk side.
-            // `null_fdr: 0` = restore ALL of them (no ash-null gate; the feature gate
-            // is now the selector). Self-disables when the trained axis is the backend
+            // `null_fdr: 0` = restore ALL of them (no ash-null gate). Self-disables
+            // when the trained axis is the backend
             // (the default `--n-hvg 0`): nothing is held out. Cell outputs unaffected.
             // `--nce-objective` (default softmax = InfoNCE: on gem's dense count data
             // the positive competing against its negatives in one distribution
@@ -425,21 +416,12 @@ fn run_gem_genes_bge(
             nce_objective: args.model.nce_objective.to_ge(),
             // Learned gene modules are not offered on the β-sharing path yet.
             gene_modules: None,
-            // Per-gene softmax feature gate — the SuSiE variational spike-and-slab
-            // single-effect, ALWAYS ON. Gates β_g (identity) AND, independently, δ_g
-            // (velocity → velocity_selection); null absorber + categorical + Gaussian
-            // effect KL at the fixed internal weight. Temperature is the one knob.
-            feature_gate: Some(ge::FeatureGateConfig {
-                temperature: args.model.feature_gate_temp,
-                ibp_alpha: args.model.gate_ibp_alpha,
-            }),
         };
         Ok((cfg, gene_names, delta_l2, row_to_gene, unspliced_rows))
     };
 
-    // Single-pass gated fit — the feature gate selects features DURING training (a
-    // junk gene sends its gate mass to null → β̃_g ≈ 0), so there is no LRT null-call
-    // or two-pass refit. The `--n-hvg` remainder (if any) is restored post-hoc.
+    // Single-pass fit — no LRT null-call or two-pass refit. The `--n-hvg`
+    // remainder (if any) is restored post-hoc.
     // `row_to_gene` / `unspliced_rows` now travel to the sampler inside `FitConfig`
     // (`feat_factor`), so nothing outside `fit` re-derives the splice keying.
     let (cfg, gene_names, delta_l2, _row_to_gene, _unspliced_rows) = build_cfg(&unified)?;
