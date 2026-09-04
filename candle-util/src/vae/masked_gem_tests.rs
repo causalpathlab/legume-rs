@@ -28,7 +28,14 @@ fn planted_decoder(dev: &Device) -> (GemEtmDecoder, VarMap) {
     }
     let rho_t = Tensor::from_vec(rho, (G, H), dev).unwrap();
     let delta_t = Tensor::zeros((G, H), DType::F32, dev).unwrap();
-    let dec = GemEtmDecoder::new(K, rho_t, delta_t, vb.pp("dec")).unwrap();
+    let dec = GemEtmDecoder::new(
+        K,
+        rho_t,
+        delta_t,
+        GemEtmDecoder::uniform_log_pi(G, dev).unwrap(),
+        vb.pp("dec"),
+    )
+    .unwrap();
 
     // α: topic t reads H-slot t, so β_t concentrates on genes with g % K == t.
     let mut alpha = vec![0f32; K * H];
