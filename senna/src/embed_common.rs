@@ -72,6 +72,14 @@ pub fn try_parse_axis_ids(cols: &[Box<str>], prefix: &str) -> Option<Vec<i64>> {
     cols.iter().map(|c| parse_axis_id(c, prefix)).collect()
 }
 
+/// [`try_parse_axis_ids`] with the positional fallback every plot uses: a
+/// table whose columns carry no `{prefix}{c}` IDs (an embedding's `h0..`,
+/// or arbitrary names) is numbered `0..n` in column order.
+#[must_use]
+pub fn axis_ids_or_positions(cols: &[Box<str>], prefix: &str) -> Vec<i64> {
+    try_parse_axis_ids(cols, prefix).unwrap_or_else(|| (0..cols.len() as i64).collect())
+}
+
 /// Clap-declared defaults for an `Args` struct — see
 /// [`matrix_util::clap_defaults`]. Re-exported because senna's arg structs name
 /// it by path in `#[serde(default = "...")]`.

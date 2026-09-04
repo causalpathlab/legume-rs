@@ -1,7 +1,7 @@
 //! Resolve the gene axis and the archetype inputs from an upstream run manifest.
 //!
-//! **`senna bge` is the only supported source**, with or without `--skip-etm`.
-//! What is taken from it:
+//! **`senna bge` (with or without `--skip-etm`) and `senna simba` are the
+//! supported sources.** What is taken from a run:
 //!
 //! - the gene axis and embedding width, from `feature_loading.parquet` — the
 //!   per-gene loading ρ. Older runs kept ρ only under `--skip-etm`, where it
@@ -61,10 +61,7 @@ impl EmbeddingSource {
         };
 
         let mut built = match manifest.kind {
-            RunKind::Bge => Self::from_bge(&manifest, &dir),
-            RunKind::Simba => anyhow::bail!(
-                "deconvolve: `simba` runs are not supported (no gene bias, no projector); use `senna bge`."
-            ),
+            k if k.has_frozen_gene_table() => Self::from_gene_table(&manifest, &dir),
             // Topic-family sources are not accepted. The archetype reference
             // needs only a gene axis, a cell embedding, the counts and an
             // annotation, all of which a topic run has, so this is a matter of
@@ -82,7 +79,7 @@ impl EmbeddingSource {
                 )
             }
             other => {
-                anyhow::bail!("deconvolve: unsupported source kind `{other}` — use `senna bge`")
+                anyhow::bail!("deconvolve: unsupported source kind `{other}` — use `senna bge` or `senna simba`")
             }
         }?;
 
@@ -104,17 +101,18 @@ impl EmbeddingSource {
         Ok(built)
     }
 
-    /// `bge`: the gene axis and the embedding width.
+    /// `bge` / `simba`: the gene axis and the embedding width, from the raw
+    /// gene table (ρ, or SIMBA's gene node table).
     ///
     /// Resolution is delegated to [`run_manifest::resolve_feature_loading_for`],
     /// the single place that knows where ρ can live and that verifies each
     /// candidate's scale. Duplicating that probe here is what let the same bug
     /// recur in three consumers.
-    fn from_bge(m: &RunManifest, dir: &Path) -> Result<Self> {
+    fn from_gene_table(m: &RunManifest, dir: &Path) -> Result<Self> {
         let (rho_path, _) = run_manifest::resolve_feature_loading_for(m, dir)?;
         let rho = load_mat(&rho_path, "per-gene loading ρ")?;
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
-        Self::assemble(rho, RunKind::Bge)
+        Self::assemble(rho, m.kind)
     }
 
     /// Keep the gene axis and the width; the values are not needed.

@@ -76,7 +76,7 @@ pub struct UpdateArgs {
         required = true,
         help = "Parent model prefix to continue training from",
         long_help = "A run prefix written by `senna topic / masked-topic / masked-sbp /\n\
-                     masked-vae / vae / svd / bge`."
+                     masked-vae / vae / svd / bge / simba`."
     )]
     model: Box<str>,
 
@@ -278,6 +278,11 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // re-read the cells. The substitution is what turns a round from
     // "every cell ever absorbed" into "the new cells only".
     let reference = if args.use_pb_reference {
+        anyhow::ensure!(
+            kind != RunKind::Simba,
+            "--use-pb-reference does not apply to a simba run: it trains on cells, never on \
+             pseudobulks, so there is nothing to substitute. Drop the flag."
+        );
         let r = crate::pb_reference::prepare(&args.model, &args.out)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "{} carries no pseudobulks, so there is nothing to substitute for its cells. \
@@ -466,9 +471,17 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             info!("bge has no trainable checkpoint — re-fitting on the union (not a warm start)");
             crate::bge::fit_bge(&a)
         }
+        // As `svd` and `bge`: the node tables are not a checkpoint to warm-start
+        // (they are re-drawn per run), so this is a re-fit on the union.
+        RunKind::Simba => {
+            let mut a: crate::simba::SimbaArgs = manifest.train_args_as(&args.model)?;
+            a.rebase(rebase);
+            info!("simba has no trainable checkpoint — re-fitting on the union (not a warm start)");
+            crate::simba::fit_simba(&a)
+        }
         other => anyhow::bail!(
             "update does not support a '{other}' run. Supported: topic, masked-topic, \
-             masked-sbp, masked-vae, vae, svd, bge."
+             masked-sbp, masked-vae, vae, svd, bge, simba."
         ),
     }
 }

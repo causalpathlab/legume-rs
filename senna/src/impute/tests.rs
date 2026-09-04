@@ -35,6 +35,8 @@ fn base_args(model: Box<str>, out: Box<str>) -> ImputeArgs {
         block_size: None,
         preload_data: false,
         verbose: false,
+        device: crate::embed_common::ComputeDevice::Cpu,
+        device_no: 0,
     }
 }
 
@@ -269,4 +271,14 @@ fn model_imputed_columns_are_empty_without_initialized_genes() {
     assert!(names.is_empty());
     assert_eq!(m.nrows(), 2);
     assert_eq!(m.ncols(), 0);
+}
+
+/// A simba run projects through the bge path, so it matches by cosine in
+/// its cell embedding exactly as bge does.
+#[test]
+fn simba_shares_bges_matching_plan() {
+    assert_eq!(
+        matching_plan(RunKind::Simba).unwrap(),
+        matching_plan(RunKind::Bge).unwrap()
+    );
 }

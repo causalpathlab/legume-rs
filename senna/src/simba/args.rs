@@ -163,3 +163,16 @@ pub struct SimbaArgs {
     )]
     pub(crate) out: Box<str>,
 }
+
+impl crate::update::Updatable for SimbaArgs {
+    fn rebase(&mut self, r: crate::update::Rebase) {
+        self.data_files = r.data_files;
+        self.batch_files = r.batch_files;
+        self.out = r.out;
+        // No checkpoint and no pseudobulks: `init_from` and `reference` have
+        // nothing to act on, so `update` re-fits on the union.
+        if let Some(e) = r.epochs {
+            self.epochs = e;
+        }
+    }
+}

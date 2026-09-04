@@ -1,4 +1,4 @@
-//! Score cells against a frozen `senna bge` gene embedding.
+//! Score cells against a frozen `senna bge` (or `senna simba`) gene embedding.
 //!
 //! Not the counterpart of [`crate::topic::masked_artifact`], despite both being "how you open
 //! a model": that module *declares which files must exist* and validates them, because a
@@ -21,7 +21,7 @@
 
 use crate::embed_common::Mat;
 use crate::logging::new_progress_bar;
-use crate::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
+use crate::run_manifest::{self, ArtifactScale, RunManifest};
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
@@ -35,7 +35,14 @@ use nalgebra::DMatrix;
 use rayon::prelude::*;
 use std::path::Path;
 
-/// An opened `senna bge` model: the frozen feature side, and the gene axis it lives on.
+/// An opened `senna bge` (or `senna simba`) model: the frozen feature side, and the
+/// gene axis it lives on.
+///
+/// A simba run fits here without a special case. SIMBA scores an edge as `⟨z, e_g⟩` with
+/// no bias, and its gene-side softmax loss is a sampled softmax over genes — so the frozen
+/// side `(e_gene, 0)` under [`multinomial_ll`] is the full-softmax limit of its own cell-side
+/// objective, with counts in place of the binned relation weights and no cell-side
+/// negatives. That is the same relation bge's projection has to bge's training.
 pub struct BgeEmbedding {
     /// ρ as **row-major** `[D, H]`. The SGD projection and `FrozenSide` both want that layout;
     /// nalgebra stores column-major, so this is transposed once at load rather than per cell.
@@ -124,10 +131,10 @@ impl BgeEmbedding {
             );
         };
         let (manifest, dir) = RunManifest::load(&manifest_path)?;
+        let kind = manifest.kind;
         anyhow::ensure!(
-            manifest.kind == RunKind::Bge,
-            "{from} is a '{}' run; this reader is for `senna bge` output",
-            manifest.kind
+            kind.has_frozen_gene_table(),
+            "{from} is a '{kind}' run; this reader is for `senna bge` / `senna simba` output"
         );
 
         let (rho_path, bias_path) = run_manifest::resolve_feature_loading_for(&manifest, &dir)?;
@@ -137,27 +144,37 @@ impl BgeEmbedding {
         // confusion `--skip-etm` used to create.
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
 
-        let bias_path = bias_path.ok_or_else(|| {
-            anyhow::anyhow!(
+        let (d, h) = (rho.mat.nrows(), rho.mat.ncols());
+        // A kind without a gene bias (simba: the score is a pure dot product) has zeros as
+        // its frozen side. Where the bias is half the model, its absence is an error, never
+        // a silent default.
+        let b_feat: Vec<f32> = match (kind.has_gene_bias(), bias_path) {
+            (false, _) => {
+                info!("{kind} model: no gene bias (the score is a pure dot product)");
+                vec![0.0; d]
+            }
+            (true, Some(bias_path)) => {
+                let bias = DMatrix::<f32>::from_parquet(&bias_path)
+                    .with_context(|| format!("reading per-gene bias {bias_path}"))?;
+                anyhow::ensure!(
+                    bias.rows == rho.rows,
+                    "gene axes disagree: ρ has {} genes, bias has {}",
+                    rho.rows.len(),
+                    bias.rows.len()
+                );
+                bias.mat.column(0).iter().copied().collect()
+            }
+            (true, None) => anyhow::bail!(
                 "{from}: found ρ at {rho_path} but no matching feature_bias.parquet. The \
                  per-gene bias is half of the frozen side — scoring without it would silently \
                  use b_feat = 0 and misrank every cell."
-            )
-        })?;
-        let bias = DMatrix::<f32>::from_parquet(&bias_path)
-            .with_context(|| format!("reading per-gene bias {bias_path}"))?;
-        anyhow::ensure!(
-            bias.rows == rho.rows,
-            "gene axes disagree: ρ has {} genes, bias has {}",
-            rho.rows.len(),
-            bias.rows.len()
-        );
+            ),
+        };
 
-        let (d, h) = (rho.mat.nrows(), rho.mat.ncols());
         // nalgebra stores column-major, so the transpose's buffer *is* row-major of the
         // original — no hand-rolled loop, and no second place stating the layout invariant.
         let rho_rm = rho.mat.transpose().as_slice().to_vec();
-        info!("bge model: {d} genes, H={h} (ρ {rho_path})");
+        info!("{kind} model: {d} genes, H={h} (ρ {rho_path})");
 
         // Module tables, when the run trained them.
         let modules = match (
@@ -179,7 +196,7 @@ impl BgeEmbedding {
 
         Ok(Self {
             rho: rho_rm,
-            b_feat: bias.mat.column(0).iter().copied().collect(),
+            b_feat,
             gene_names: rho.rows,
             h,
             modules,
