@@ -67,12 +67,6 @@ pub(super) fn build_heads(
                 factor.is_none(),
                 "gene modules are not supported with feat_factor (β-sharing) in this version"
             );
-            anyhow::ensure!(
-                config.pb_posterior.is_none(),
-                "gene modules cannot combine with the phase-1 posterior sampler: the \
-                 selection pass writes per-feature loadings into a table the module \
-                 model composes rather than trains"
-            );
             if config.feature_embedding_l2 > 0.0 {
                 info!(
                     "gene modules: feature_embedding_l2 is ignored; the residual ridge \

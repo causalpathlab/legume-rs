@@ -14,9 +14,7 @@ pub mod pb_readout;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
-mod selection;
 mod setup;
-pub(crate) mod stacked_pb;
 
 pub use batch_fold::BatchGeneFold;
 pub use config::{
@@ -43,7 +41,6 @@ use projection::{project_cells_phase2, project_pbs_phase2, CellBatchFold, PHASE2
 pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
-use selection::{install_selection, run_selection_pass, SelectionPassInput};
 
 /// Composite-objective gbe fit — trained in **two phases**.
 ///
@@ -146,7 +143,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     });
     let models::Heads {
         mut cell_model,
-        mut level_models,
+        level_models,
     } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_ref(), &varmap)?;
 
     ////////////////////////////////
@@ -154,56 +151,6 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     ////////////////////////////////
     let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
     let (use_cell_axis, cell_samplers) = (ax.use_cell_axis, &ax.cell_samplers);
-
-    /////////////////////////////////////////////////////////////
-    // Selection pass: sample WHICH features load WHICH dims    //
-    /////////////////////////////////////////////////////////////
-    //
-    // Runs BEFORE phase 1, and shapes it. The sampler chooses the selection; the SGD
-    // below fits the loading under a mask drawn from it. Two things follow from the
-    // ordering, and both are the reason it is here rather than after:
-    //
-    // * there is exactly ONE training block. The predecessor sampled *after* phase 1
-    //   and then ran a second, copied SGD block under the mask, which meant a SIGINT
-    //   between them skipped both the write-back and that second block while phase 2
-    //   (which deliberately does not check `stop`) went on to project every cell onto a
-    //   randn-initialized dictionary and write it out as a complete result;
-    // * the write-back cannot double-gate. `beta_mean` is `E[z·β]` — already gated by
-    //   the sampler's own selection — so installing it as the starting point and then
-    //   applying the mask on top would gate twice. The feature side is therefore NOT
-    //   written back at all: the posterior contributes the selection, SGD fits the
-    //   loading from its own initialization. Only the pb side is warm-started.
-    //
-    // Deliberately NOT Monte-Carlo EM: `pip` is estimated once and frozen, where MCEM
-    // would re-estimate it against the updated `β` each outer round. So the selection
-    // is fixed at what a cold chain saw, and cannot be refined by the loading SGD goes
-    // on to find. That is the known limitation of this design, not an oversight —
-    // buying it back costs another sampler run per round.
-    let mut splice_posterior = None;
-    let pb_posterior = run_selection_pass(
-        &SelectionPassInput {
-            config: &config,
-            unified,
-            varmap: &varmap,
-            collapsed_levels: &collapsed_levels,
-            cell_to_pb_per_level: &cell_to_pb_per_level,
-            b_feat: &cell_model.b_feat,
-            e_feat: &cell_model.e_feat,
-        },
-        use_cell_axis,
-        num_levels,
-        h,
-        &mut splice_posterior,
-    )?;
-    install_selection(
-        &mut cell_model,
-        &mut level_models,
-        pb_posterior.as_ref(),
-        splice_posterior.as_ref(),
-        unified.n_features(),
-        h,
-        &config.device,
-    )?;
 
     // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
     // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
@@ -562,86 +509,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         pb_velocity,
         cell_lineage,
         lineage_qc,
-        pb_posterior,
-        splice_posterior,
         pb_embeddings,
-    })
-}
-
-/// Stack every collapse level's **trained** pseudobulk embedding into one frozen
-/// table, paired with that level's full-backend count matrix.
-///
-/// Phase 1 shapes `β` against exactly these axes — one per level, combined with
-/// summed at uniform `λ = 1` — and with the default
-/// `phase1_cells_per_pb == 0` the cell axis is suppressed entirely, so this stack
-/// *is* the objective `β` was fit under — which is what makes it the right frame for
-/// the posterior sampler to condition on.
-///
-/// The pb Vars are read out of the `VarMap` by name rather than off
-/// `level_models[l].e_cell`: the latter is a `Tensor` aliasing the `Var`'s
-/// storage, and whether it tracks in-place `Var::set` updates is a candle
-/// implementation detail.
-///
-/// Counts come from `mu_adjusted` when the collapse produced one, matching the
-/// `pb_blobs` the model actually trained on, so the sampler sees the same scale the
-/// fit did.
-pub(crate) fn stacked_pb_view<'a>(
-    varmap: &VarMap,
-    collapsed_levels: &'a [data_beans_alg::collapse_data::CollapsedOut],
-    cell_to_pb_per_level: &[Vec<usize>],
-    h: usize,
-) -> anyhow::Result<stacked_pb::StackedPb<'a>> {
-    let vars = varmap.data().lock().expect("varmap poisoned");
-    let (mut theta, mut bias, mut counts, mut sizes, mut offsets) =
-        (vec![], vec![], vec![], vec![], vec![]);
-    for (level, collapsed) in collapsed_levels.iter().enumerate() {
-        let get = |suffix: &str| -> anyhow::Result<Vec<f32>> {
-            let name = format!("pb_l{level}_{suffix}");
-            let var = vars
-                .get(&name)
-                .ok_or_else(|| anyhow::anyhow!("pb var {name} missing from the varmap"))?;
-            Ok(var.as_tensor().flatten_all()?.to_vec1::<f32>()?)
-        };
-        let level_bias = get("b_cell")?;
-        let level_theta = get("e_cell")?;
-        let n_pb = level_bias.len();
-        let pb_full = match &collapsed.mu_adjusted {
-            Some(adj) => adj.posterior_mean(),
-            None => collapsed.mu_observed.posterior_mean(),
-        };
-        anyhow::ensure!(
-            level_theta.len() == n_pb * h && pb_full.ncols() == n_pb,
-            "pb_l{level}: embedding ({} × {h}) and counts ({} pb) disagree on the pseudobulk count {n_pb}",
-            level_theta.len() / h.max(1),
-            pb_full.ncols(),
-        );
-
-        // Exposure: cells per pseudobulk. The collapse stores per-cell RATES, so a
-        // Poisson likelihood on them is mis-scaled unless each column carries its
-        // `size_p` — see `StackedPb`. Empty pseudobulks are clamped to 1 so the
-        // `log(size)` offset stays finite; their counts are zero anyway.
-        let mut level_sizes = vec![0f32; n_pb];
-        for &p in &cell_to_pb_per_level[level] {
-            if p < n_pb {
-                level_sizes[p] += 1.0;
-            }
-        }
-        for s in &mut level_sizes {
-            *s = s.max(1.0);
-        }
-
-        offsets.push(bias.len());
-        theta.extend(level_theta);
-        bias.extend(level_bias.iter().zip(&level_sizes).map(|(b, s)| b + s.ln()));
-        counts.push(pb_full);
-        sizes.push(level_sizes);
-    }
-    Ok(stacked_pb::StackedPb {
-        theta,
-        bias,
-        counts,
-        sizes,
-        offsets,
     })
 }
 

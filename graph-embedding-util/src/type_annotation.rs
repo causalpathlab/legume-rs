@@ -110,12 +110,8 @@ pub(super) fn n_communities(community: &[usize]) -> usize {
 /// direction. Consumers must read it as **missing data, not an observation of zero** —
 /// averaging it in would drag the mean toward the origin.
 ///
-/// Two mechanisms put an exact zero there, and both mean the same thing. A consumer can
-/// zero a row it has judged uninformative (`hub_call` does, for the rows the co-embedding
-/// parked at the centre of the cell cloud). And the posterior selection pass installs a
-/// per-`(feature, dim)` `pip`: an entry at `pip == 0` is permanently masked, its loading
-/// never trains, and the materialized dictionary carries an exact zero — so an all-zero
-/// row is a feature the selection excluded on *every* dimension, which is precisely the
+/// A consumer puts the zero there when it has judged a row uninformative (`hub_call`
+/// does, for the rows the co-embedding parked at the centre of the cell cloud) — the
 /// "no usable direction" case this function exists to catch.
 ///
 /// It remains an invariant rather than a heuristic: a coordinate that actually trained is

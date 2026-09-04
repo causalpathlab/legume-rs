@@ -317,9 +317,8 @@ impl GeneAxis {
     /// Which genes could ever pin a nascent-minus-mature contrast, from per-row
     /// count totals.
     ///
-    /// Mirrors the rule the pseudobulk splice Gibbs already applies
-    /// (`graph-embedding-util/src/posterior/pb_gibbs/splice.rs`): `δ` needs
-    /// counts on BOTH tracks. With no spliced counts only `β + δ` is pinned;
+    /// The rule: `δ` needs counts on BOTH tracks. With no spliced counts only
+    /// `β + δ` is pinned;
     /// with no unspliced counts `δ` enters no likelihood term at all and would
     /// be drawn straight from the prior. Reporting the count here — before any
     /// of the modelling exists — is what makes the go/no-go decidable.

@@ -39,10 +39,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
          end — and their weights are applied by position. Drop --use-pb-reference for this \
          round and let it re-collapse."
     );
-    // Reconcile --posterior with --mcmc/--jitter BEFORE any I/O, so a
-    // contradictory pair fails in the first second rather than after the fit.
-    let posterior_plan = args.posterior.resolve(args.seed)?;
-
     // Input files: positional (single-modality) OR --multiome modality groups.
     // Each --multiome occurrence is one group; comma-separated files within it.
     let is_multiome = !args.multiome.is_empty();
@@ -358,11 +354,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             lineage_smooth: false,
             lineage_mst: false,
             joint_velocity: false,
-            // `--posterior N` now means N retained sweeps of the phase-1
-            // pseudobulk Gibbs, run inside `fit` and written back into the model
-            // — not a post-hoc pass over the finished fit.
-            pb_posterior_nested_delta: true,
-            pb_posterior: posterior_plan.map(|plan| plan.pb_gibbs_config()),
             nce_objective: args.nce_objective.to_ge(),
             // Learned mixed-membership modules in front of ρ — ON by default for bge
             // (`--no-gene-modules` opts out): on held-out marrow cells they turned the
@@ -470,29 +461,12 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // Every gene is trained + gated (no held-out projection), so the co-embed runs
         // directly on the trained ρ. The gate zeroes deselected genes' embeddings, and
         // the co-embed maps them onto the cell manifold like any other row.
-        //
-        // When the phase-1 posterior ran, each feature is additionally compressed
-        // toward the origin by its `max_h PIP` — the co-embed has no other per-feature
-        // quality signal. This is a radial scaling, NOT a fix for a centroid pile-up:
-        // measured, 0.0% of genes sit within 0.1 cell-radii of the centroid (median
-        // 0.803), so it creates a concentration rather than undoing one. See
-        // `shrink_by_confidence`. `--no-pip-shrinkage` opts out.
-        let confidence: Option<Vec<f32>> = (!args.no_pip_shrinkage)
-            .then_some(out.pb_posterior.as_ref())
-            .flatten()
-            .map(|p| {
-                p.pip
-                    .chunks_exact(p.h)
-                    .map(|row| row.iter().copied().fold(0f32, f32::max))
-                    .collect()
-            });
         ge::write_feature_coembedding(
             &args.out,
             &e_cell_cpu,
             &e_feat_cpu,
             &unified.feature_names,
             target_eff,
-            confidence.as_deref(),
         )?;
 
         // Raw ρ, on BOTH paths. This is the model-axis loading that pairs with
@@ -615,51 +589,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         write_batch_gene_fold(&args.out, fold, &unified.feature_names)?;
     }
 
-    // The posterior no longer runs here. It is phase-1's own sampler now
-    // (`FitConfig::pb_posterior`), so it happens INSIDE `fit` — before phase 2,
-    // before the co-embedding, and against the pseudobulk side rather than a
-    // frozen full-cell side. The old guard here ("skip when interrupted, because
-    // `e_cell` is un-projected") no longer applies: the pb Gibbs never reads
-    // `e_cell`. Only its tables are written here, after the fit's own outputs.
-    if let Some(post) = out.pb_posterior.as_ref() {
-        ge::eval::write_pb_posterior_tables(&args.out, post, &unified.feature_names)?;
-        ge::posterior::pb_gibbs::write_posterior_hyper_from_model(
-            &args.out,
-            post,
-            &out.varmap,
-            // geometry now travels on the result, not as a caller-supplied cap
-            args.seed,
-        )?;
-        let worst_ess = post
-            .sigma_diag
-            .iter()
-            .chain(&post.pi0_diag)
-            .map(|d| f64::from(d.min_ess))
-            .fold(f64::INFINITY, f64::min);
-        info!(
-            "phase-1 posterior: {} sweeps retained, per-dim σ₀² median {:.4}, \
-             dims/feature {:.2} (posterior), worst hyper ESS {:.1}",
-            post.n_kept,
-            median_of(&post.sigma2),
-            // Mean row-sum of the PIP table: the expected number of dims a feature
-            // loads, AS INFERRED. Deliberately not `Σ_h (1 − π₀ₕ)`, which under the
-            // default IBP is the fixed ladder and would merely echo the `α` that went
-            // in; and not a median over π₀, which on a monotone ladder is just the rate
-            // at dim H/2. This is the one number here the data actually determined, and
-            // it is on the same scale as `α`, so the two can be read against each other.
-            f64::from(post.pip.iter().sum::<f32>())
-                / (post.pip.len() / post.h.max(1)).max(1) as f64,
-            worst_ess
-        );
-        if worst_ess < 10.0 {
-            log::warn!(
-                "posterior hyper chains barely moved (min ESS {worst_ess:.1}) — the per-dim \
-                 σ₀²/π₀ are close to their priors, so read the inclusion probabilities as \
-                 weakly identified rather than as calibrated selection."
-            );
-        }
-    }
-
     if resolve_etm {
         info!(
             "Done — outputs at {}.{{cell_embedding,latent,dictionary,feature_embedding,*_bias}}.parquet \
@@ -675,17 +604,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Median of a slice, for the one-line posterior summary. Empty ⇒ `NaN`, which
-/// serializes and prints as such rather than silently reading as zero.
-fn median_of(v: &[f64]) -> f64 {
-    if v.is_empty() {
-        return f64::NAN;
-    }
-    let mut s = v.to_vec();
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    s[s.len() / 2]
 }
 
 /// The parent run's module tables for `senna update`'s warm start, matched to

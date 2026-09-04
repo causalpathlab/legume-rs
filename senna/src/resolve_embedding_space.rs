@@ -438,7 +438,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     let z_t = trained.z.to_tensor(&cpu)?;
     let rho_t = trained.rho.to_tensor(&cpu)?;
     let (_labels, target_eff) = ge::cell_clusters(&z_t, Some(k))?;
-    ge::write_feature_coembedding(&out, &z_t, &rho_t, &gene_names, target_eff, None)?;
+    ge::write_feature_coembedding(&out, &z_t, &rho_t, &gene_names, target_eff)?;
 
     write_outputs(&trained, &gene_names, &kept_names, &out)?;
 

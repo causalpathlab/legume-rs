@@ -70,7 +70,7 @@
 use crate::link_community::profiles::coarsen_cell_expression_dense;
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
-use graph_embedding_util::posterior::pb_gibbs::block_seed;
+use graph_embedding_util::posterior::dim_block::block_seed;
 use graph_embedding_util::posterior::{
     dim_block, dim_block_multi, scalar_diagnostics, worst_case, ChainDiag, DimBlockConfig,
     DimBlockResult, FrozenSide, HyperState, NodeTerm,
