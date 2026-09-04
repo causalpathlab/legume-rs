@@ -121,10 +121,18 @@ impl EmbeddedNbTopicDecoder {
     /// the log-partition and the training likelihood all read it — so the
     /// trained model and the dictionary written to disk stay consistent.
     pub fn full_logits_kd(&self) -> Result<Tensor> {
-        let alpha_mean_1h = self.topic_embeddings.mean_keepdim(0)?;
-        self.topic_embeddings
-            .broadcast_sub(&alpha_mean_1h)?
+        self.centered_topic_embeddings()?
             .matmul(&self.feature_embeddings.t()?)
+    }
+
+    /// `α - ᾱ` `[K, H]`: the topic embeddings with the mean archetype removed.
+    /// Every consumer of `α` — the full dictionary logits *and* the per-cell
+    /// rate at the sampled genes — must go through this, because the
+    /// log-partition is taken over the centered logits and the numerator has to
+    /// be the same quantity or `β` stops summing to one.
+    fn centered_topic_embeddings(&self) -> Result<Tensor> {
+        let alpha_mean_1h = self.topic_embeddings.mean_keepdim(0)?;
+        self.topic_embeddings.broadcast_sub(&alpha_mean_1h)
     }
 
     /// Full `[D, K]` log-β = `log_softmax_d(α·ρᵀ)` — for dictionary output.
@@ -165,9 +173,10 @@ impl EmbeddedNbTopicDecoder {
         let flat = indices.flatten_all()?; // [N*K]
 
         // β_kg at the cell's genes, properly normalized over the full vocab.
+        // Same centered `α` as `full_logits_kd`, which `logz_11k` came from.
         let rho_g = self.feature_embeddings.index_select(&flat, 0)?; // [N*K, H]
         let logits = rho_g
-            .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
+            .matmul(&self.centered_topic_embeddings()?.t()?)? // [N*K, T]
             .reshape((n, k, t))?; // [N, K, T]
         let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
 
