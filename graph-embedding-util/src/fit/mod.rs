@@ -5,6 +5,7 @@
 mod axes;
 pub mod batch_fold;
 mod config;
+mod jitter;
 pub mod lift;
 pub mod lineage;
 mod models;
@@ -147,8 +148,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     ////////////////////////////////
     // Composite axes and trainer //
     ////////////////////////////////
-    let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
-    let (use_cell_axis, cell_samplers) = (ax.use_cell_axis, &ax.cell_samplers);
+    let mut ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
+    let use_cell_axis = ax.use_cell_axis;
 
     // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
     // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
@@ -192,10 +193,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     };
     let refine_epochs = config.epochs - warmup_epochs;
     {
-        let joint_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
         let mut opt1 = AdamW::new(varmap.all_vars(), adamw_params())?;
         let mut p1 = stage_params(&config);
-        p1.epochs = warmup_epochs;
         let cell_prefix = if use_cell_axis { "cell + " } else { "" };
         let n_pb_levels = num_levels;
         if refine_epochs > 0 {
@@ -211,18 +210,52 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                 cell_prefix, n_pb_levels, warmup_epochs,
             );
         }
-        train_composite(
-            &CompositeTrainContext {
-                axes: &joint_axes,
-                dev: &config.device,
-                stop: &stop,
-                cell_to_pb_per_level: None,
-                lineage_sem: None,
-                lineage_sem_theta: None,
-            },
-            &mut opt1,
-            &p1,
-        )?;
+        // Posterior jitter: the epochs split into `rounds`, and every round after
+        // the first redraws the pseudobulk profiles from their Gamma posterior and
+        // refreshes the samplers in place (see `jitter`). Round 0 trains on the
+        // posterior mean, so a single round is today's fit exactly. The optimizer
+        // persists across rounds; only the sampling weights move.
+        let rounds = config.jitter_rounds.max(1);
+        for round in 0..rounds {
+            if round > 0 {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let report = jitter::rejitter_levels(
+                    &mut ax,
+                    &collapsed_levels,
+                    n_features,
+                    &feature_to_backend,
+                    matrix_util::rand_util::mix_seed(config.seed, round as u64),
+                )?;
+                info!(
+                    "jitter round {}/{}: redrew {} pseudobulk level(s) from the Gamma posterior \
+                     ({:.1}% mean relative change in the sampling weights, {:.2}s)",
+                    round + 1,
+                    rounds,
+                    report.levels,
+                    100.0 * report.mean_rel_change,
+                    report.secs
+                );
+            }
+            p1.epochs = jitter::epochs_for_round(warmup_epochs, rounds, round);
+            if p1.epochs == 0 {
+                continue;
+            }
+            let joint_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
+            train_composite(
+                &CompositeTrainContext {
+                    axes: &joint_axes,
+                    dev: &config.device,
+                    stop: &stop,
+                    cell_to_pb_per_level: None,
+                    lineage_sem: None,
+                    lineage_sem_theta: None,
+                },
+                &mut opt1,
+                &p1,
+            )?;
+        }
     }
     // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
     // here, freeing them for the phase-2 `&mut` projection below.
@@ -411,7 +444,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         project_cells_phase2(
             &mut cell_model,
             &varmap,
-            cell_samplers,
+            &ax.cell_samplers,
             n_cells,
             f64::from(PHASE2_RIDGE),
             &config.device,

@@ -15,7 +15,7 @@
 //! and the trivial-identity fallback (`refine_or_identity`) used by
 //! the single-batch path.
 
-use super::stats::DEFAULT_COARSEST_SORT_DIM;
+use super::stats::{optimize_with, retention, DEFAULT_COARSEST_SORT_DIM};
 use super::*;
 
 pub(super) fn pad_numeric_labels(cell_to_group: &[usize], k: usize) -> Vec<String> {
@@ -249,6 +249,8 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) observe_panels: bool,
     /// See `MultilevelParams::keep_finest_stats`.
     pub(super) keep_finest_stats: bool,
+    /// See `MultilevelParams::keep_shape_stats`.
+    pub(super) keep_shape_stats: bool,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -281,6 +283,7 @@ pub(super) fn refine_and_collect_single_layer(
         bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
+        keep_shape_stats: _,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -435,13 +438,13 @@ pub(super) fn refine_and_collect_single_layer(
     }
 
     let mut results: Vec<CollapsedOut> = Vec::with_capacity(num_levels);
-    let finest_out = optimize(
+    let finest_out = optimize_with(
         &fine_stat,
         (1.0, 1.0),
         opt_iter,
         &format!("Fit L1/{}", num_levels),
         output_calibration,
-        ctx.keep_finest_stats,
+        retention(ctx.keep_finest_stats, ctx.keep_shape_stats),
     )?;
     results.push(finest_out);
 
@@ -463,13 +466,13 @@ pub(super) fn refine_and_collect_single_layer(
             k_prev
         );
         let level_opt_iter = (opt_iter / 2).max(10);
-        let out = optimize(
+        let out = optimize_with(
             &coarse_stat,
             (1.0, 1.0),
             level_opt_iter,
             &format!("Fit L{}/{}", level + 1, num_levels),
             output_calibration,
-            false,
+            retention(false, ctx.keep_shape_stats),
         )?;
         results.push(out);
         prev_stat = coarse_stat;
@@ -520,6 +523,7 @@ pub(super) fn refine_and_collect_stack(
         bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
+        keep_shape_stats: _,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
