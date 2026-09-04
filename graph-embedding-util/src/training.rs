@@ -19,10 +19,10 @@ use crate::data::UnifiedData;
 use crate::fit::lineage::PbLineageLevel;
 use crate::loss::{
     dense_count_block, draw_gene_keep_mask, log_membership_diagnostics, masked_membership,
-    membership_rows_host, module_priors, module_step_loss, nce_loss, nce_loss_identity,
-    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, EdgeBatch, ModulePools,
-    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
-    StratifiedSampler,
+    membership_rows_host, module_dictionary_prior, module_priors, module_step_loss, nce_loss,
+    nce_loss_identity, sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch,
+    EdgeBatch, ModulePools, PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs,
+    StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 use crate::model::{FeatModules, JointEmbedModel};
 use crate::progress::new_progress_bar;
@@ -113,6 +113,8 @@ pub struct ModuleTrainParams {
     pub lambda_module: f32,
     pub lambda_balance: f32,
     pub residual_l2: f32,
+    pub lambda_uniform: f32,
+    pub uniform_temp: f32,
 }
 
 /// Per-run state of the module layer that lives with the training loop rather
@@ -434,6 +436,19 @@ pub fn train_composite(
                 // field is a detached snapshot.
                 if let Some(l2) = ctx.axes[0].model.feature_ridge(f64::from(ridge_lambda))? {
                     loss = (loss + l2)?;
+                }
+            }
+            // The dictionary-geometry term, in its own block: it is not a ridge
+            // (so it must not hide behind `ridge_lambda`) and it is not a
+            // membership prior (so it must not hide behind the freeze — μ trains
+            // through the warm-up).
+            if let Some(st) = module_state.as_ref() {
+                if let Some(pen) = module_dictionary_prior(
+                    st.modules,
+                    st.params.lambda_uniform,
+                    st.params.uniform_temp,
+                )? {
+                    loss = (loss + pen)?;
                 }
             }
             // L2 (ridge) shrinkage on the per-gene splice offset δ_g (factored

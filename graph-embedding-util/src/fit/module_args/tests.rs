@@ -51,3 +51,25 @@ fn validation_rejects_bad_knobs() {
         .resolve(None)
         .is_err());
 }
+
+#[test]
+fn the_uniformity_knobs_default_to_off() {
+    let cfg = parse(&[]).resolve(Some(128)).unwrap().unwrap();
+    assert_eq!(cfg.lambda_uniform, 0.0);
+    assert_eq!(cfg.uniform_temp, 2.0);
+    let cfg = parse(&["--module-uniform", "0.1"])
+        .resolve(Some(128))
+        .unwrap()
+        .unwrap();
+    assert_eq!(cfg.lambda_uniform, 0.1);
+}
+
+#[test]
+fn negative_uniformity_and_a_zero_temperature_are_rejected() {
+    assert!(parse(&["--module-uniform=-0.1"])
+        .resolve(Some(128))
+        .is_err());
+    assert!(parse(&["--module-uniform-temp", "0"])
+        .resolve(Some(128))
+        .is_err());
+}

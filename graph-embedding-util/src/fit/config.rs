@@ -207,6 +207,12 @@ pub struct GeneModuleConfig {
     /// Ridge on the per-feature residual `r_g` — the module model's only per-row
     /// table, so this replaces `feature_embedding_l2`.
     pub residual_l2: f32,
+    /// Weight of the uniformity repulsion on the row-normalized module
+    /// dictionary ([`crate::loss::dictionary_uniformity`]). `0` (default) = off,
+    /// byte-identical to a build before this existed.
+    pub lambda_uniform: f32,
+    /// Temperature `t` of the uniformity kernel `exp(−t‖x̂_a − x̂_b‖²)`.
+    pub uniform_temp: f32,
     /// Units (cells or pseudobulks) pooled for the exact term per step per axis.
     pub units_per_step: usize,
     /// Share of a feature's warm-start membership on its k-means module.
@@ -328,6 +334,8 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
             lambda_module: g.lambda_module,
             lambda_balance: g.lambda_balance,
             residual_l2: g.residual_l2,
+            lambda_uniform: g.lambda_uniform,
+            uniform_temp: g.uniform_temp,
         }),
     }
 }

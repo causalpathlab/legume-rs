@@ -81,8 +81,8 @@ use data_beans_alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{
     build_per_batch_unit_samplers, draw_gene_keep_mask, embedding_ridge,
-    log_membership_diagnostics, masked_membership, module_priors, module_step_loss,
-    ChainGroupFilter,
+    log_membership_diagnostics, masked_membership, module_dictionary_prior, module_priors,
+    module_step_loss, ChainGroupFilter,
 };
 use graph_embedding_util::model::{
     AdapterInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ModuleWarmStart,
@@ -1116,6 +1116,14 @@ pub fn fit_cell_activity_graph_embedding(
                     if let Some(ridge) = model.feature_ridge(lam)? {
                         total = (total + ridge)?;
                     }
+                }
+            }
+            // Dictionary geometry, in its own block: neither a ridge nor a
+            // membership prior, so it hides behind neither `--embedding-l2` nor
+            // `--module-weight`.
+            if let (Some(m), Some(gm)) = (&model.modules, module_cfg.as_ref()) {
+                if let Some(pen) = module_dictionary_prior(m, gm.lambda_uniform, gm.uniform_temp)? {
+                    total = (total + pen)?;
                 }
             }
             // Exact pseudobulk–module term + membership priors, once per optimizer
