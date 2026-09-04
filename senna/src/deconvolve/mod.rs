@@ -19,7 +19,7 @@ mod io;
 mod monitor;
 mod reference;
 mod result;
-mod source;
+pub(crate) mod source;
 #[cfg(test)]
 mod tests;
 

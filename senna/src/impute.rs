@@ -5,7 +5,7 @@
 //!    `senna predict` for the encoder/projection families, or a direct
 //!    dictionary projection for `svd` runs.
 //! 2. Place the reference cells in the SAME space: the training run's
-//!    latent (topic families), its cell embedding (`bge`), or the same
+//!    latent (topic families), its cell embedding (`bge`, `simba`), or the same
 //!    dictionary projection applied to the reference data (`svd`).
 //! 3. Build an HNSW kNN index over the reference and, for each new cell,
 //!    find the K nearest reference cells.
@@ -47,7 +47,7 @@ pub struct ImputeArgs {
     #[arg(
         long,
         required = true,
-        help = "Trained model prefix (topic family, masked family, vae, bge, or svd run)"
+        help = "Trained model prefix (topic family, masked family, vae, bge, simba, or svd run)"
     )]
     pub model: Box<str>,
 
@@ -71,7 +71,7 @@ pub struct ImputeArgs {
         help = "Reference latent parquet (overrides the manifest's latent)",
         long_help = "Reference latent parquet, e.g. `{train_out}.latent.parquet`.\n\
                      Must live in the model's matching space: log θ for the topic\n\
-                     families, the H-space cell embedding for a bge model.\n\
+                     families, the H-space cell embedding for a bge or simba model.\n\
                      Ignored for svd models — their matching latent is re-projected\n\
                      from the reference data because the training whitening scale\n\
                      is not persisted."
@@ -133,6 +133,22 @@ pub struct ImputeArgs {
 
     #[arg(short, long, help = "Verbose logging")]
     pub verbose: bool,
+
+    #[arg(
+        long,
+        default_value_t = crate::embed_common::ComputeDevice::Cpu,
+        value_enum,
+        help = "Compute device for the inner predict",
+        long_help = "Compute device for the inner predict.\n\
+                     `cuda` / `metal` require the matching cargo feature.\n\
+                     Matters for a bge or simba model, whose projection re-runs\n\
+                     the per-cell SGD of training; the encoder families infer\n\
+                     with one forward pass."
+    )]
+    pub device: crate::embed_common::ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
+    pub device_no: usize,
 }
 
 /// How a run kind's cells reach the matching space.
@@ -174,13 +190,9 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
         RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::Vae => {
             Ok(MatchingPlan::SoftmaxSimplex)
         }
-        RunKind::Bge => Ok(MatchingPlan::CosineEmbedding),
-        // simba trains cells as free nodes and writes no projector, so a
-        // query has no way into its space.
-        RunKind::Simba => anyhow::bail!(
-            "impute does not support `simba` runs: they write no projector for query cells, \
-             so there is no query-side embedding to match. Impute against a `senna bge` run."
-        ),
+        // simba projects a query through bge's path (frozen gene table, zero
+        // bias), so it matches in its cell embedding exactly as bge does.
+        RunKind::Bge | RunKind::Simba => Ok(MatchingPlan::CosineEmbedding),
         RunKind::Svd => Ok(MatchingPlan::DictionaryProjection),
         // The joint families write no encoder checkpoint (`has_model: false`),
         // so `predict` cannot load one and the simplex arm would fail deep
@@ -426,10 +438,8 @@ fn predict_matching_latents(
         minibatch_size: args.minibatch_size,
         block_size: args.block_size,
         preload_data: args.preload_data,
-        // impute is topic-family only (the bge arm is refused above), so its inner
-        // predict is one encoder forward pass — no device knob to be worth exposing.
-        device: crate::embed_common::ComputeDevice::Cpu,
-        device_no: 0,
+        device: args.device.clone(),
+        device_no: args.device_no,
         refine_steps: 0,
         refine_lr: 0.01,
         refine_reg: 1.0,

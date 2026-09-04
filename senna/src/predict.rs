@@ -161,8 +161,8 @@ pub struct PredictArgs {
         help = "Compute device",
         long_help = "Compute device. `cuda` / `metal` require the matching cargo feature.\n\
                      \n\
-                     Matters most for a bge model. Every other family infers with one\n\
-                     encoder forward pass, but bge has no encoder — prediction re-runs\n\
+                     Matters most for a bge or simba model. Every other family infers with\n\
+                     one encoder forward pass, but these have none — prediction re-runs\n\
                      the same per-cell Poisson SGD the training did, so it belongs on\n\
                      the device that trained it."
     )]
@@ -456,13 +456,12 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     let args = &args;
 
     match kind {
-        crate::run_manifest::RunKind::Bge => return predict_bge(args),
+        // bge and simba: a frozen gene table, projected onto per cell (see
+        // `BgeEmbedding`).
+        k if k.has_frozen_gene_table() => return predict_bge(args, kind),
         // svd writes no checkpoint either; its query side is the Nyström
         // projection onto the frozen dictionary.
         crate::run_manifest::RunKind::Svd => return predict_svd(args),
-        crate::run_manifest::RunKind::Simba => anyhow::bail!(
-            "predict does not support a `simba` run: it writes no encoder and no frozen projector"
-        ),
         _ => {}
     }
 
@@ -508,11 +507,16 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     }
 }
 
-/// Score a held-out backend against a `senna bge` run.
+/// Score a held-out backend against a `senna bge` or `senna simba` run.
 ///
 /// bge's whole gene-side model is `(ρ, b_feat)` — there is no checkpoint, no encoder and no
 /// decoder — so this is the projection path and nothing else: fit each query cell against
 /// the frozen ρ by Poisson MAP, then score it with the profile (multinomial) likelihood.
+/// A simba run is the same object with `b_feat = 0` and its gene node table as ρ; the
+/// multinomial over `softmax_g ⟨z, e_g⟩` is SIMBA's own gene-side conditional, so `llik`
+/// here IS comparable between the two. The `--init-*` gene alignment runs on both: with
+/// no gene modules (every simba run) an unseen query gene is placed at its neighbours'
+/// row average, and its moment-matched bias sits at zero like every trained gene's.
 /// `--decoder-only` and `--refine-steps` have nothing to act on here and are rejected
 /// rather than silently ignored, so a command line that asks for refinement does not come
 /// back looking like it got it. `--delta-iters` and `--batch-files` are inert here too:
@@ -522,23 +526,23 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
 /// see [`crate::bge::score::BgeEmbedding::score`] for the measurement. `--eval-mask-fraction`
 /// on the training run, or `senna probe`, answer "has the model seen this biology" better
 /// than a per-cell fit with H free parameters can.
-fn predict_bge(args: &PredictArgs) -> anyhow::Result<()> {
+fn predict_bge(args: &PredictArgs, kind: crate::run_manifest::RunKind) -> anyhow::Result<()> {
     anyhow::ensure!(
         !args.decoder_only && args.refine_steps == 0,
-        "--decoder-only / --refine-steps are for the topic families; {} is a `senna bge` run, \
-         whose only inference is the Poisson-MAP projection onto the frozen ρ.",
+        "--decoder-only / --refine-steps are for the topic families; {} is a `senna {kind}` \
+         run, whose only inference is the Poisson-MAP projection onto the frozen ρ.",
         args.model
     );
     if args.batch_files.is_some() {
         log::warn!(
-            "--batch-files has no effect on a bge run: the projection is per cell against a \
+            "--batch-files has no effect on a {kind} run: the projection is per cell against a \
              frozen ρ, with no per-batch δ to estimate"
         );
     }
     if args.residual_out.is_some() {
         log::warn!(
-            "--residual-out is not available for a bge run (no count decoder to regress out); \
-             ignoring it"
+            "--residual-out is not available for a {kind} run (no count decoder to regress \
+             out); ignoring it"
         );
     }
 

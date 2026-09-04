@@ -28,13 +28,12 @@ use std::path::{Path, PathBuf};
 /// same match so a new family is classified once, at compile time.
 pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<Box<str>>> {
     match kind {
-        // bge writes no dictionary; its gene axis is the row axis of ρ. It and
-        // svd project each column against a frozen dictionary and do not care
-        // what depth it came at.
-        RunKind::Bge => Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names),
-        RunKind::Simba => anyhow::bail!(
-            "a `simba` run writes no projection model; bulk input cannot be scored against it"
-        ),
+        // bge and simba write no dictionary; their gene axis is the row axis of
+        // the gene table. They and svd project each column against a frozen
+        // table and do not care what depth it came at.
+        RunKind::Bge | RunKind::Simba => {
+            Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names)
+        }
         RunKind::Svd => Ok(crate::topic::model_metadata::load_dictionary(model)?.0),
         RunKind::Topic
         | RunKind::Itopic
@@ -43,7 +42,7 @@ pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<
         | RunKind::Vae => {
             info!(
                 "bulk input into a {kind} model: its encoder was trained at single-cell depth. \
-                 The latent is a per-sample mixture, not a composition; `senna bge` / `senna svd` \
+                 The latent is a per-sample mixture, not a composition; `senna bge` / `senna simba` / `senna svd` \
                  project without an encoder, and `senna deconvolve` estimates fractions."
             );
             Ok(crate::topic::model_metadata::load_dictionary(model)?.0)
