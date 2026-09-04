@@ -53,7 +53,7 @@ use stats::{
     collect_basic_stat_visitor, collect_batch_stat_visitor, collect_matched_stat_coarse,
     collect_matched_stat_visitor, merge_stat, optimize, KnnParams, DEFAULT_NUM_LEVELS,
 };
-pub use stats::{resample_and_optimize, CollapsedOut, CollapsedStat};
+pub use stats::{resample_and_optimize, CollapsedOut, CollapsedStat, StatRetention};
 
 pub struct MultilevelCollapseOut {
     pub levels: Vec<CollapsedOut>,
@@ -110,6 +110,12 @@ pub struct MultilevelParams {
     /// `a_stat`/`b_stat`; `MeanOnly` normally drops them per block to bound
     /// memory. Costs two extra `[D, S]` planes per finest-level parameter.
     pub keep_finest_stats: bool,
+    /// Retain the SHAPE plane of every level's mean parameters
+    /// (`StatRetention::Shape`), so a consumer can redraw the pseudobulk
+    /// profiles from their Gamma posterior (`posterior_sample_seeded`) after
+    /// the collapse — graph-embedding's phase-1 posterior jitter. One extra
+    /// `[D, S]` plane per mean parameter per level; nothing else is kept.
+    pub keep_shape_stats: bool,
 }
 
 impl MultilevelParams {
@@ -125,6 +131,7 @@ impl MultilevelParams {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
+            keep_shape_stats: false,
         }
     }
 }
@@ -599,6 +606,7 @@ where
         bulk_batches: bulk_batches.as_deref(),
         observe_panels: params.observe_panels,
         keep_finest_stats: params.keep_finest_stats,
+        keep_shape_stats: params.keep_shape_stats,
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -938,6 +946,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 bulk_batches: bulk_batches.as_deref(),
                 observe_panels: params.observe_panels,
                 keep_finest_stats: params.keep_finest_stats,
+                keep_shape_stats: params.keep_shape_stats,
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
@@ -1135,6 +1144,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 bulk_batches: None,
                 observe_panels: false,
                 keep_finest_stats: false,
+                keep_shape_stats: false,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }

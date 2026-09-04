@@ -146,6 +146,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
+            keep_shape_stats: false,
         },
     )?;
 
