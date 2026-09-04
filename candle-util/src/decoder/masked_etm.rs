@@ -101,9 +101,30 @@ impl EmbeddedNbTopicDecoder {
         self.n_topics
     }
 
-    /// Full `[K, D]` pre-softmax logits `α · ρᵀ` (for the anchor-prior CE).
+    /// Full `[K, D]` pre-softmax logits `(α - ᾱ) · ρᵀ` (for the anchor-prior CE).
+    ///
+    /// `α` is centered over the topic axis first. The raw loading `α · ρᵀ` is
+    /// dominated by a shared "abundance" direction (the mean archetype `ᾱ`) that
+    /// ranks the same genes top in *every* topic; because each row is normalized
+    /// independently, raising all `K` topics on those genes is a direction the
+    /// whole dictionary descends at once, and nothing opposes it — the
+    /// off-diagonal response of one topic to another is exactly zero.
+    ///
+    /// Subtracting `ᾱ` is a projection, so `Σ_k (α_k - ᾱ)·ρ_g = 0` holds for
+    /// every gene at every step and for all parameter values: each gene's total
+    /// log-mass becomes a conserved quantity and one topic can only gain on a
+    /// gene at another's expense (`∂/∂S_jg` of topic `k` is `δ_jk - 1/K`, which
+    /// is strictly negative off-diagonal). There is no coefficient to balance
+    /// and no way to switch it off.
+    ///
+    /// This is the single chokepoint for the `[K, D]` logits — the dictionary,
+    /// the log-partition and the training likelihood all read it — so the
+    /// trained model and the dictionary written to disk stay consistent.
     pub fn full_logits_kd(&self) -> Result<Tensor> {
-        self.topic_embeddings.matmul(&self.feature_embeddings.t()?)
+        let alpha_mean_1h = self.topic_embeddings.mean_keepdim(0)?;
+        self.topic_embeddings
+            .broadcast_sub(&alpha_mean_1h)?
+            .matmul(&self.feature_embeddings.t()?)
     }
 
     /// Full `[D, K]` log-β = `log_softmax_d(α·ρᵀ)` — for dictionary output.
