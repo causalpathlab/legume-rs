@@ -183,63 +183,6 @@ fn backward_reaches_the_gene_embedding() {
     assert!(mag > 0.0, "gradient reached e_feat but is all zero");
 }
 
-/// The installed `pip` reaches the score, and the per-epoch draw changes it.
-///
-/// Without this, cage could install a gate that `gathered_gate_weights` never
-/// consulted and every other test here would still pass — which is exactly the
-/// defect the forked loss had before it routed through geu's helper.
-#[test]
-fn installed_pip_gates_the_score_and_resampling_moves_it() {
-    use graph_embedding_util::model::GateKind;
-    let dev = Device::Cpu;
-    let varmap = VarMap::new();
-    let mut m = model(&varmap, &dev);
-
-    let (bs, ids) = batches();
-    let ungated: f32 = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev)
-        .unwrap()
-        .mean_abs_pair
-        .to_scalar()
-        .unwrap();
-
-    // Half the table off, half on: a draw must land strictly between.
-    let mut p = vec![1.0_f32; N_GENES * DIM];
-    for (i, v) in p.iter_mut().enumerate() {
-        if i % DIM >= DIM / 2 {
-            *v = 0.0;
-        }
-    }
-    let pip = candle_util::candle_core::Tensor::from_vec(p, (N_GENES, DIM), &dev).unwrap();
-    m.install_gate_pip(GateKind::Identity, &pip).unwrap();
-
-    let (bs2, ids2) = batches();
-    let gated: f32 = cage_nce_loss_per_gene_level(&m, bs2, &ids2, NceObjective::Logistic, &dev)
-        .unwrap()
-        .mean_abs_pair
-        .to_scalar()
-        .unwrap();
-    assert!(
-        (gated - ungated).abs() > 1e-6,
-        "installing pip did not change the score: {gated} vs {ungated}"
-    );
-
-    // A draw of a deterministic 0/1 pip reproduces it exactly, so the masked
-    // score must match the frozen-pip score rather than drift.
-    m.resample_gate_mask().unwrap();
-    let (bs3, ids3) = batches();
-    let drawn: f32 = cage_nce_loss_per_gene_level(&m, bs3, &ids3, NceObjective::Logistic, &dev)
-        .unwrap()
-        .mean_abs_pair
-        .to_scalar()
-        .unwrap();
-    assert!(
-        (drawn - gated).abs() < 1e-5,
-        "z ~ Bern(0/1) should reproduce the pip exactly: {drawn} vs {gated}"
-    );
-
-    m.clear_gate_mask();
-}
-
 /// `--nce-objective` must actually reach the loss. The two objectives differ in
 /// how they normalize (`softmax` puts the positive and its negatives in one
 /// distribution; `logistic` decides each pair alone), so on identical batches

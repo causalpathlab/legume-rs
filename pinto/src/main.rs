@@ -307,16 +307,6 @@ enum Commands {
                       Each gene defines a per-cell activity vector,\n\
                       folded onto the super edges it touches.\n\
                       That gates a shared multi-scale PB hierarchy.\n\n\
-                      A per-gene per-dim selection is SAMPLED by block Gibbs.\n\
-                      It runs against a pseudobulk Poisson.\n\
-                      The resulting inclusion probabilities become DROP RATES.\n\
-                      A fresh z ~ Bern(pip) is drawn each epoch.\n\
-                      Every epoch therefore trains a different sub-network.\n\
-                      The rates re-estimate against the live embedding.\n\
-                      See --selection-refresh-epochs.\n\n\
-                      --embedding-dim is an UPPER BOUND.\n\
-                      The stick-breaking (IBP) prior orders dims by admittance.\n\
-                      The data decides how many are really used.\n\
                       Chain levels differ only in their negative pools.\n\
                       This is embedding-only. There is no count decoder.\n\n\
                       NOTE --n-hvg no longer subsets the trained gene axis.\n\
@@ -340,16 +330,10 @@ enum Commands {
                       so a gene is never half-weighted in the projection.\n\
                       A matrix mixing channel rows with plain rows is rejected.\n\
                       A {gene}/count/total row is the usual cause.\n\n\
-                      With both tracks present, the sampler gains a second gate.\n\
-                      It samples a nascent DEVIATION on top of each gene loading:\n\
-                      spliced scores the loading, unspliced the loading plus delta.\n\
-                      That is `senna gem`'s sign, recorded as delta_base in the manifest.\n\
-                      `senna gem-encoder` uses the opposite base, so the two\n\
-                      delta tables are not comparable without reading that field.\n\
-                      A gene needs counts on BOTH tracks to identify delta at all.\n\
-                      Genes that do not are written NaN, never a number.\n\
-                      The manifest reports how many qualified.\n\
-                      See --independent-delta-gate for the un-nested arm.\n\n\
+                      With both tracks present, the manifest reports how many genes\n\
+                      carry counts on BOTH tracks -- the structural precondition for\n\
+                      a nascent-minus-mature contrast -- and the base track that\n\
+                      contrast is measured from (delta_base, `senna gem`'s sign).\n\n\
                       After training, cells return in EVALUATION only.\n\
                       Every CELL PAIR is projected:\n\
                       The target is the frozen gene embedding.\n\
@@ -375,13 +359,7 @@ enum Commands {
                       \x20 {out}.cell_pb.parquet         cell → finest super-cell id\n\
                       \x20 {out}.cell_embedding.parquet  cell × embedding_dim (readout)\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
-                      \x20 {out}.feature_posterior_mean.parquet  feature × dim (E[z*beta])\n\
-                      \x20 {out}.delta_feature_embedding.parquet gene × dim (E[z*delta])\n\
-                      \x20                              (splice-channelized input only)\n\
-                      \x20 {out}.delta_selection.parquet  gene × dim delta inclusion\n\
-                      \x20                              (splice-channelized input only)\n\
                       \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
-                      \x20                              (--gate-mode sampled only)\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\
                       \x20 {out}.coord_pairs.parquet     cell pair list, tagged by kind\n\
                       \x20 {out}.latent.parquet          cell pair × embedding_dim\n\
