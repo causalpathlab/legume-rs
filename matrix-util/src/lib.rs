@@ -7,6 +7,7 @@ pub mod common_io;
 pub mod dmatrix_io;
 pub mod dmatrix_rsvd;
 pub mod dmatrix_util;
+pub mod embedding_geometry;
 pub mod graph;
 pub mod hypothesis;
 pub mod knn;
