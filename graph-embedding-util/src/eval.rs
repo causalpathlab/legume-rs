@@ -121,34 +121,6 @@ pub fn save_outputs_named(
         ctx.feature_names,
         "feature",
     )?;
-    // The LEARNED gate's inclusion probabilities `σ(S)`, when that gate is what
-    // selected. Rows align with the feature dictionary. Every entry is an INDEPENDENT
-    // probability in (0,1) for that (gene, dim): neither rows nor columns sum to
-    // anything in particular, and a gene may load several dims. This is the variational
-    // estimate of the same estimand `--posterior` samples into `feature_pip` /
-    // `beta_pip`.
-    //
-    // Skipped for an ungated model, AND under `--posterior`: there the selection pass
-    // installed a `pip`, training stopped reading these logits, and `feature_pip` is
-    // already the table to read. Emitting both would ship two files with identical
-    // bytes and a comment inviting the reader to compare them.
-    //
-    // The predecessor was a per-dim softmax over genes, where a COLUMN carried one
-    // unit of mass and 1.0 meant "neutral". Anything reading these tables against that
-    // convention will misread them — the neutral point is gone, and the range is now
-    // (0,1) rather than (0, D).
-    if let Some(selection) = model.feature_selection()? {
-        let sel_path = format!("{out_prefix}.feature_selection.parquet");
-        save_embedding(&sel_path, &selection, ctx.feature_names, "feature")?;
-        info!("Per-gene feature inclusion probability σ(S) → {sel_path}");
-    }
-    // Per-gene VELOCITY inclusion `σ(s_delta)` — the independent δ-gate readout
-    // (motion driver genes); `Some` only for a factored model with velocity.
-    if let Some(velocity_sel) = model.velocity_selection()? {
-        let vsel_path = format!("{out_prefix}.velocity_selection.parquet");
-        save_embedding(&vsel_path, &velocity_sel, ctx.feature_names, "feature")?;
-        info!("Per-gene velocity inclusion probability σ(s_δ) → {vsel_path}");
-    }
     Ok(())
 }
 

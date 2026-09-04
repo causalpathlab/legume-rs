@@ -4,14 +4,12 @@
 
 use candle_util::candle_core::{DType, Device, Tensor, Var};
 use candle_util::candle_nn::VarMap;
-use candle_util::nn::sparsemax;
 use graph_embedding_util::loss::{
-    gather_feature_rows, module_balance_prior, module_softmax_loss, nce_loss_identity, EdgeBatch,
-    NceObjective,
+    module_balance_prior, module_softmax_loss, nce_loss_identity, EdgeBatch, NceObjective,
 };
 use graph_embedding_util::model::{
-    FeatureGateSpec, JointEmbedModel, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME,
-    MODULE_LOGITS_VAR_NAME, MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
+    JointEmbedModel, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME, MODULE_LOGITS_VAR_NAME,
+    MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
 };
 
 const D: usize = 8;
@@ -204,12 +202,11 @@ fn exact_term_reaches_mu_bias_cells_with_q_minus_p_and_nothing_else() {
     }
 }
 
-/// Balance prior reaches only the logits; the ridge only the residual; the gate
-/// KL reaches the gate tables and, through the live composition, μ.
+/// Balance prior reaches only the logits; the ridge only the residual.
 #[test]
 fn priors_reach_their_own_tables() {
     let vm = VarMap::new();
-    let mut m = model(0.7, &vm);
+    let m = model(0.7, &vm);
     let pi = m.modules.as_ref().unwrap().membership().unwrap();
     let grads = module_balance_prior(&pi).unwrap().backward().unwrap();
     assert!(grad_norm(&grads, &var(&vm, MODULE_LOGITS_VAR_NAME)).unwrap() > 1e-6);
@@ -228,23 +225,4 @@ fn priors_reach_their_own_tables() {
     assert!(grads
         .get(var(&vm, MODULE_LOGITS_VAR_NAME).as_tensor())
         .is_none());
-
-    m.enable_feature_gate(
-        FeatureGateSpec {
-            temperature: 1.0,
-            ibp_alpha: None,
-        },
-        &vm,
-        &dev(),
-    )
-    .unwrap();
-    let grads = m.gate_kl().unwrap().unwrap().backward().unwrap();
-    assert!(grad_norm(&grads, &var(&vm, "s_feat")).unwrap() > 1e-8);
-    assert!(grad_norm(&grads, &var(&vm, "e_feat_logstd")).unwrap() > 1e-8);
-    assert!(grad_norm(&grads, &var(&vm, MODULE_MU_VAR_NAME)).unwrap() > 1e-8);
-    // And the gated gather still composes the live row.
-    let idx = Tensor::from_vec(vec![1u32], 1, &dev()).unwrap();
-    let rows = gather_feature_rows(&m, &idx).unwrap();
-    assert_eq!(rows.dims(), &[1, H]);
-    let _ = sparsemax(&m.modules.as_ref().unwrap().logits).unwrap();
 }

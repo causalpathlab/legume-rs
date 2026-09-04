@@ -211,11 +211,6 @@ fn every_shared_head_carries_the_modules() {
             b_cell_init: &[0f32; 5],
             var_prefix: "pb_l0",
             seed: 3,
-            shared_s_feat: None,
-            shared_e_feat_raw: None,
-            shared_e_feat_logstd: None,
-            shared_gate_ibp_bias: None,
-            gate: None,
             shared_modules: m.modules.clone(),
         },
         &vm,
@@ -238,41 +233,6 @@ fn every_shared_head_carries_the_modules() {
     // And the frozen flag is one cell shared by both.
     m.modules.as_ref().unwrap().set_frozen(true);
     assert!(head.modules.as_ref().unwrap().is_frozen());
-}
-
-/// The gate sits on the composed ρ: with a gate enabled, the gather still reaches
-/// μ and the residual through the gate multiplier, and the KL prices the LIVE
-/// composition.
-#[test]
-fn gate_rides_on_the_composed_rows() {
-    let (mut m, vm) = build(Some(&[0, 1, 2, 0, 1, 2]), 0.8);
-    m.enable_feature_gate(
-        FeatureGateSpec {
-            temperature: 1.0,
-            ibp_alpha: None,
-        },
-        &vm,
-        &dev(),
-    )
-    .unwrap();
-    let mu = var(&vm, MODULE_MU_VAR_NAME);
-    let s = var(&vm, "s_feat");
-    let idx = Tensor::from_vec(vec![1u32, 4], 2, &dev()).unwrap();
-    let loss = crate::loss::gather_feature_rows(&m, &idx)
-        .unwrap()
-        .sqr()
-        .unwrap()
-        .sum_all()
-        .unwrap();
-    let grads = loss.backward().unwrap();
-    assert!(grads.get(mu.as_tensor()).is_some());
-    assert!(grads.get(s.as_tensor()).is_some());
-    let kl = m.gate_kl().unwrap().expect("gated model has a KL");
-    let grads = kl.backward().unwrap();
-    assert!(
-        grads.get(mu.as_tensor()).is_some(),
-        "the effect KL must see the live μ"
-    );
 }
 
 /// A parent's membership rows are simplex points, and sparsemax of a simplex point

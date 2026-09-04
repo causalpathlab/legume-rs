@@ -36,12 +36,6 @@ pub(super) fn build_feat_factor(
         beta: beta.clone(),
         row_to_gene: row_to_gene_t,
         splice_delta,
-        s_beta: None,
-        beta_logstd: None,
-        s_delta: None,
-        delta_logstd: None,
-        delta_gate_pip: None,
-        delta_gate_mask: None,
     })
 }
 

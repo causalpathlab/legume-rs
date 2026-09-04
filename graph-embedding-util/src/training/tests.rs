@@ -100,38 +100,6 @@ fn sem_term_survives_multi_edge_level() {
     assert!(PbSemTerm::new(&level, 2, 1.0, 1.0, &dev).unwrap().is_some());
 }
 
-/// The gate KL is a prior over GLOBAL parameters, so its weight must not move
-/// when a THROUGHPUT knob moves. It used to be `GATE_KL_WEIGHT / batch_size`,
-/// making the prior's share of the objective scale `1/B`: `--batch-size 4096`
-/// cut it to a quarter and `64` raised it 16x, so a flag chosen for memory
-/// silently retuned how sparse the learned feature sets came out.
-///
-/// Two earlier versions of this test were vacuous — one recomputed the formula
-/// in its own closure, the next called a wrapper that ignored its argument. So
-/// this one does not try to prove invariance by calling anything: the weight is
-/// now a `const` with no runtime inputs at all, and invariance is a property of
-/// the type system rather than of a value. What is left worth pinning is the
-/// LEVEL, which is the part a refactor could silently move.
-#[test]
-fn gate_kl_step_weight_is_pinned_to_the_historical_level() {
-    use crate::model::{GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT, GATE_KL_WEIGHT};
-
-    // THE LOAD-BEARING CLAIM: at the default `--batch-size 1024`, which both
-    // `senna bge` and `senna gem` carry, this equals the `λ/batch_size` it
-    // replaced. That is the whole reason the change was behaviour-preserving,
-    // so it is pinned rather than argued.
-    assert!((GATE_KL_STEP_WEIGHT - GATE_KL_WEIGHT / 1024.0).abs() < 1e-15);
-    assert!((GATE_KL_STEP_WEIGHT - GATE_KL_WEIGHT / GATE_KL_REF_UNITS).abs() < 1e-15);
-    // The reference IS both CLIs' default `--batch-size`; moving it is a
-    // re-tune, not a refactor. Compile-time, since both sides are consts.
-    const _: () = assert!(GATE_KL_REF_UNITS == 1024.0);
-
-    // The general helper must agree with the constant at the units geu uses.
-    assert!(
-        (crate::model::gate_kl_step_weight(GATE_KL_WEIGHT, 1) - GATE_KL_STEP_WEIGHT).abs() < 1e-15
-    );
-}
-
 /// `resolve_batches_per_epoch` is what turns `--batch-size` into a step budget;
 /// pin the auto and explicit paths so a change there is deliberate.
 #[test]

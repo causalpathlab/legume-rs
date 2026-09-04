@@ -69,43 +69,6 @@ pub struct BgeArgs {
     #[command(flatten)]
     pub(crate) qc: QcArgs,
 
-    // Spike-and-slab feature gate — ALWAYS ON for bge (the standard training):
-    // Ẽ_{g,h} = σ(S_{g,h}) · E_{g,h}, an INDEPENDENT inclusion probability per
-    // (gene, dim). Each dim's inclusion rate π_h is learned, so per-dim mass is
-    // controlled by the prior rather than pinned by a normalizer. There is no null
-    // column: an unselected gene simply has σ(S) → 0 everywhere. σ(S) is the same
-    // estimand `--posterior` reports as feature_pip, so the two are comparable.
-    // Temperature is the one knob.
-    #[arg(
-        long = "feature-gate-temp",
-        alias = "feature-softmax-temp",
-        default_value_t = 1.0,
-        help = "Feature-gate temperature τ (< 1 sharpens each inclusion probability toward 0/1).",
-        hide = true
-    )]
-    pub(crate) feature_gate_temp: f32,
-
-    #[arg(
-        long = "gate-ibp-alpha",
-        help = "Truncated-IBP concentration for the gate's per-dim inclusion ladder;\n\
-                unset = auto",
-        long_help = "Concentration alpha of the truncated Indian Buffet Process.\n\
-                     Its ladder tilts the feature gate.\n\
-                     Dim h carries a fixed logit offset h * ln(alpha/(alpha+1)).\n\
-                     So later dims must earn inclusion against a steeper prior.\n\
-                     Chosen, never fitted.\n\
-                     \n\
-                     Unset (the default) derives alpha from --embedding-dim.\n\
-                     The ladder then spans 4 logits end to end.\n\
-                     That leaves the last dim at the sigmoid's most responsive point,\n\
-                     rather than frozen.\n\
-                     \n\
-                     SMALLER alpha means a steeper ladder and more sparsity.\n\
-                     This replaced a KL toward a Beta(1,9) inclusion prior.\n\
-                     It had no natural weight under bge's noise-contrastive objective."
-    )]
-    pub(crate) gate_ibp_alpha: Option<f64>,
-
     #[arg(
         long = "phase1-cells-per-pb",
         default_value_t = 0,
@@ -341,8 +304,6 @@ pub struct BgeArgs {
                      That is what an A/B across seeds needs.\n\
                      \n\
                      It does NOT make a run bit-reproducible.\n\
-                     The variational gate's noise comes from the device RNG.\n\
-                     That sits outside this stream.\n\
                      Two runs at the same seed still differ slightly."
     )]
     pub(crate) seed: u64,
