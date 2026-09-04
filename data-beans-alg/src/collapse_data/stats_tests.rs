@@ -288,7 +288,7 @@ fn mean_only_vconcat_drops_stats_keeps_means() {
     for (r0, nr) in [(0usize, 5usize), (5, 4)] {
         let sub = stat.select_rows(r0, nr);
         let mut out = optimize_block(&sub, hyper, iters, CalibrateTarget::MeanOnly, None).unwrap();
-        out.release_stats();
+        out.retain(StatRetention::None);
         blocks.push(out.mu_observed);
     }
     let assembled = GammaMatrix::vconcat(blocks, false);
@@ -305,4 +305,81 @@ fn mean_only_vconcat_drops_stats_keeps_means() {
         0,
         "sd should be empty under MeanOnly"
     );
+}
+
+/////////////////////////////////////////////////
+// Shape-only retention for posterior jitter  //
+/////////////////////////////////////////////////
+
+/// Under `StatRetention::Shape` the two mean parameters keep enough to be
+/// resampled — and draw exactly what a fully retained fit draws at the same
+/// seed — while the residual, `γ` and `δ` planes nothing resamples are dropped.
+/// Under `None` nothing is resamplable at all.
+#[test]
+fn shape_retention_keeps_the_draw_and_drops_the_rest() {
+    let stat = toy_stat(12, 5, 2);
+    let hyper = (1.0, 1.0);
+    let full = optimize_with(
+        &stat,
+        hyper,
+        20,
+        "full",
+        CalibrateTarget::MeanOnly,
+        StatRetention::Full,
+    )
+    .unwrap();
+    let shape = optimize_with(
+        &stat,
+        hyper,
+        20,
+        "shape",
+        CalibrateTarget::MeanOnly,
+        StatRetention::Shape,
+    )
+    .unwrap();
+    let none = optimize_with(
+        &stat,
+        hyper,
+        20,
+        "none",
+        CalibrateTarget::MeanOnly,
+        StatRetention::None,
+    )
+    .unwrap();
+
+    assert!(shape.mu_observed.has_shape_stat());
+    assert!(shape.mu_adjusted.as_ref().unwrap().has_shape_stat());
+    for p in [&shape.mu_residual, &shape.gamma, &shape.delta] {
+        assert!(
+            !p.as_ref().unwrap().has_shape_stat(),
+            "only the mean parameters are resampled; the rest must be released"
+        );
+    }
+    assert!(!none.mu_observed.has_shape_stat());
+    assert!(none.mu_observed.posterior_sample_seeded(1).is_err());
+
+    let a = full.mu_observed.posterior_sample_seeded(3).unwrap();
+    let b = shape.mu_observed.posterior_sample_seeded(3).unwrap();
+    let rel = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs() / x.abs().max(1e-6))
+        .fold(0.0f32, f32::max);
+    assert!(
+        rel < 1e-5,
+        "shape-only draw must match the full draw: {rel}"
+    );
+    let a = full
+        .mu_adjusted
+        .as_ref()
+        .unwrap()
+        .posterior_sample_seeded(4)
+        .unwrap();
+    let b = shape
+        .mu_adjusted
+        .as_ref()
+        .unwrap()
+        .posterior_sample_seeded(4)
+        .unwrap();
+    assert_mat_close(&a, &b, "mu_adjusted shape-only draw");
 }

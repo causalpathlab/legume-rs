@@ -509,6 +509,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         bulk_batches: args.mixture_batches.clone(),
         observe_panels: args.observe_panels,
         keep_finest_stats: false,
+        keep_shape_stats: false,
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /

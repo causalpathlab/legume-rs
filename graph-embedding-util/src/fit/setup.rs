@@ -74,6 +74,9 @@ pub(super) fn build_pseudobulks(
             bulk_batches: config.bulk_batches.clone(),
             observe_panels: true,
             keep_finest_stats: config.emit_finest_collapse,
+            // One extra plane per level's mean parameter, and only when a jitter
+            // round will actually redraw from it.
+            keep_shape_stats: config.jitter_rounds > 1,
         },
     )?;
     let mut collapsed_levels = collapse_out.levels;

@@ -236,6 +236,91 @@ impl GammaMatrix {
         self.b_stat = DMatrix::zeros(0, 0);
     }
 
+    /// Drop only the rate plane `b_stat`, keeping the shape `a_stat`.
+    ///
+    /// `posterior_mean = a/b`, so `(mean, a)` determines `b` exactly and
+    /// [`Self::posterior_sample_seeded`] reconstructs it on the fly. That makes
+    /// a resamplable parameter cost ONE extra plane over a mean-only one rather
+    /// than two — the difference between "keep the sufficient statistics" and
+    /// "keep enough to draw", which matters at high pseudobulk counts where the
+    /// planes are the bulk of the collapse's memory.
+    pub fn release_rate_stat(&mut self) {
+        self.b_stat = DMatrix::zeros(0, 0);
+    }
+
+    /// Whether the shape plane is resident, i.e. whether
+    /// [`Self::posterior_sample_seeded`] can run. `false` after
+    /// [`Self::release_stats`].
+    #[must_use]
+    pub fn has_shape_stat(&self) -> bool {
+        self.a_stat.shape() == (self.num_rows, self.num_columns)
+    }
+
+    /// Draw a fresh `Gamma(a, rate b)` sample per element, seeded.
+    ///
+    /// The rate comes from `b_stat` when it is resident and from `a / mean`
+    /// after [`Self::release_rate_stat`] (falling back to the prior `b0` where
+    /// the mean is zero). Seeded per fixed-width CHUNK of the element stream,
+    /// exactly as [`Inference::posterior_log_sample`] is, so the draw is
+    /// reproducible and independent of how rayon splits the work — the
+    /// unseeded [`Inference::posterior_sample`] is neither.
+    ///
+    /// Errors when the shape plane has been released: there is nothing to draw
+    /// from, and a prior draw dressed as a posterior one would be worse than a
+    /// refusal.
+    pub fn posterior_sample_seeded(&self, seed: u64) -> anyhow::Result<DMatrix<f32>> {
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Gamma};
+
+        anyhow::ensure!(
+            self.has_shape_stat(),
+            "posterior_sample_seeded: the shape statistics were released \
+             (`release_stats`), so there is nothing to draw from"
+        );
+        let (rows, cols) = (self.num_rows, self.num_columns);
+        let a = self.a_stat.as_slice();
+        let b_resident: Option<&[f32]> =
+            (self.b_stat.shape() == (rows, cols)).then(|| self.b_stat.as_slice());
+        if b_resident.is_none() {
+            anyhow::ensure!(
+                self.estimated_mean.shape() == (rows, cols),
+                "posterior_sample_seeded: the rate plane was released and there is no \
+                 calibrated mean to reconstruct it from"
+            );
+        }
+        let mean = self.estimated_mean.as_slice();
+        let b0 = self.b0;
+
+        // Same shape/scale floor as the unseeded draw, and the same fixed chunk
+        // width as `posterior_log_sample`: which elements share an RNG is a
+        // property of the data shape, never of how rayon split the work.
+        const EPS: f32 = 1e-8;
+        const CHUNK: usize = 1024;
+        let mut out = vec![0.0f32; rows * cols];
+        out.par_chunks_mut(CHUNK).enumerate().try_for_each(
+            |(ci, chunk)| -> anyhow::Result<()> {
+                let mut rng =
+                    SmallRng::seed_from_u64(seed ^ (ci as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let base = ci * CHUNK;
+                for (k, o) in chunk.iter_mut().enumerate() {
+                    let i = base + k;
+                    let rate = match b_resident {
+                        Some(b) => b[i],
+                        // `mean = a/b` ⇒ `b = a/mean`; a zero mean has zero shape
+                        // too, and draws (essentially) zero from the prior rate.
+                        None if mean[i] > 0.0 => a[i] / mean[i],
+                        None => b0,
+                    };
+                    let pdf = Gamma::new(a[i] + EPS, (rate + EPS).recip())?;
+                    *o = pdf.sample(&mut rng);
+                }
+                Ok(())
+            },
+        )?;
+        Ok(DMatrix::from_vec(rows, cols, out))
+    }
+
     /// Zero every `estimated_mean` entry whose corresponding `numerator` is
     /// zero, collapsing the per-column Gamma prior baseline (`a0/denom`,
     /// present at *every* unobserved cell) to exact zero. This lets a

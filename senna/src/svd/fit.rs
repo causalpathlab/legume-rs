@@ -174,6 +174,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             bulk_batches: args.collapse.mixture_batch.clone(),
             observe_panels: true,
             keep_finest_stats: false,
+            keep_shape_stats: false,
         },
     )?;
     anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");

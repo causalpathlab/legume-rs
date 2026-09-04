@@ -138,6 +138,13 @@ pub struct FitConfig {
     /// - `k ≥ n_cells`: no pb-sample exceeds `k`, so subsampling is a no-op —
     ///   every cell shapes `E_feat` (legacy all-cells behaviour; slowest).
     pub phase1_cells_per_pb: usize,
+    /// Posterior-jitter rounds for phase 1. `1` trains on the pseudobulk
+    /// posterior MEAN throughout (byte-identical to a build before this
+    /// existed); `R > 1` splits the epochs into `R` rounds and, from the second
+    /// on, redraws every pseudobulk profile from its Gamma posterior and
+    /// refreshes the samplers in place (see `fit::jitter`). Asks the collapse to
+    /// retain its shape statistics exactly when `R > 1`.
+    pub jitter_rounds: usize,
     /// Optional per-gene β-sharing feature parameterization. When `Some`, the
     /// feature side is built as [`crate::model::FeatFactor`] (every feature row
     /// reuses its gene's `β_g`) instead of a free `E_feat` table, phase-2 identity

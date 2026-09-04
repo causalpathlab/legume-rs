@@ -287,6 +287,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
+            keep_shape_stats: false,
         },
     )?;
     if levels.is_empty() {
