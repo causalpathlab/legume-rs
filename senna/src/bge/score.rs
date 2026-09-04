@@ -13,7 +13,7 @@
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
 //! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
-//! [`graph_embedding_util::loss::lnpdf::multinomial_ll`] consume.
+//! [`graph_embedding_util::loss::multinomial_ll`] consume.
 //!
 //! `--skip-etm` is **not** required. It used to be, before `feature_loading.parquet` always
 //! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
@@ -28,7 +28,7 @@ use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs}
 use candle_util::candle_core::Device;
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD};
-use graph_embedding_util::loss::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
+use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
 use log::info;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;

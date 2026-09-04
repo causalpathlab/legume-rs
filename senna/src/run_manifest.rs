@@ -681,7 +681,47 @@ impl RunOutputs {
     pub fn geometry_latent(&self) -> Option<&str> {
         self.cell_embedding.as_deref().or(self.latent.as_deref())
     }
+
+    /// Every recorded table with the `[units x h]` shape an embedding geometry
+    /// is defined on, as `(slot name, recorded path)` in report order.
+    ///
+    /// Two slots per side, because the families name them differently and
+    /// comparing ACROSS families is what a geometry readout is for: `bge`
+    /// writes `cell_embedding` / `feature_loading`, while the topic and SVD
+    /// families write `latent` (cell x K) / `dictionary` (gene x K). A bge run
+    /// that also resolved topics records both, and both belong in the report —
+    /// they are different objects (`Z` vs `log theta`).
+    ///
+    /// Which slots are measurable is a property of the manifest contract, so it
+    /// is decided here rather than re-derived by each consumer. Two slots may
+    /// still name the same *content* (`bge --skip-etm` writes rho to two
+    /// paths); recognising that needs the files, so it belongs to the caller
+    /// that opens them.
+    #[must_use]
+    pub fn geometry_tables(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("cell_embedding", self.cell_embedding.as_deref()),
+            ("latent", self.latent.as_deref()),
+            ("feature_loading", self.feature_loading.as_deref()),
+            ("dictionary", self.gene_dictionary()),
+            ("module_dictionary", self.module_dictionary.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, rel)| rel.map(|r| (name, r)))
+        .collect()
+    }
 }
+
+/// The slot names [`RunOutputs::geometry_tables`] can return, in report order.
+/// Named separately so a "nothing measurable" error can say what was looked
+/// for without a manifest to look in.
+pub const GEOMETRY_TABLE_SLOTS: [&str; 5] = [
+    "cell_embedding",
+    "latent",
+    "feature_loading",
+    "dictionary",
+    "module_dictionary",
+];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunLayout {

@@ -10,9 +10,8 @@
 //!   for the corresponding edge. The gene-gated sampler rebuilds a
 //!   per-call `WeightedIndex` only over this small list.
 //!
-//! The gene direction's own selection lives in
-//! [`super::selection`]; this module is purely the
-//! data-derived sampling weight and owns no learnable parameters.
+//! Purely the data-derived sampling weight: this module owns no
+//! learnable parameters, and nothing here is fit.
 
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;

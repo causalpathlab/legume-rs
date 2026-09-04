@@ -1,36 +1,16 @@
 //! The bilinear score and the row gathers that feed it.
 //!
-//! The hot path from parameter tables to a `[B]` / `[B, K]` score: the factored
-//! row composition, the cell-axis mean pool, and the four score kernels
-//! (feature-cell and cell-cell, positives and negatives).
+//! The hot path from parameter tables to a `[B]` / `[B, K]` score: the cell-axis
+//! mean pool and the four score kernels (feature-cell and cell-cell, positives
+//! and negatives). Feature-side composition lives on [`super::ComposedFeat`].
 
 use candle_util::batched_dot::batched_matvec;
 use candle_util::candle_core::{Device, Result, Tensor};
 
 use super::vars::pool_axis;
-use super::{FeatFactor, JointEmbedModel};
+use super::JointEmbedModel;
 
 impl JointEmbedModel {
-    /// Compose the factored feature rows: `β + mask·δ`. `genes` gathers the
-    /// per-gene tables (`row_to_gene[idx]` in training, the full `row_to_gene` at
-    /// materialize); `mask_rows` is the `[N,1]` unspliced selector (already
-    /// gathered), `None` when there is no velocity.
-    pub(crate) fn factored_feat_rows(
-        &self,
-        f: &FeatFactor,
-        genes: &Tensor,
-        mask_rows: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let beta = f.beta.index_select(genes, 0)?;
-        match (&f.splice_delta, mask_rows) {
-            // + mask ⊙ δ on the unspliced rows
-            (Some((delta, _)), Some(m)) => {
-                beta.add(&delta.index_select(genes, 0)?.broadcast_mul(m)?)
-            }
-            _ => Ok(beta),
-        }
-    }
-
     /// Mean-pool the cell embedding table over the fine children of a
     /// list of coarse-block indices. Output `[n_blocks, H]` plus a
     /// matching `[n_blocks]` bias vector.

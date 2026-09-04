@@ -59,15 +59,13 @@ pub struct EmbeddingGeometry {
 /// Participation ratio `(Σλ)²/Σλ²` of a symmetric PSD matrix's spectrum — a
 /// smooth "how many dims are really in use" that needs no eigenvalue cutoff.
 /// A zero matrix reports `0`, not NaN.
-#[must_use]
-pub fn participation_ratio(gram: &DMatrix<f64>) -> f32 {
-    let ev = gram.clone().symmetric_eigenvalues();
-    let (mut s1, mut s2) = (0.0f64, 0.0f64);
-    for l in ev.iter() {
-        let l = l.max(0.0); // numerical negatives on a PSD matrix
-        s1 += l;
-        s2 += l * l;
-    }
+///
+/// No eigendecomposition: for symmetric `G = QΛQᵀ`, `Σλ = trace(G)` and
+/// `Σλ² = trace(G²) = ‖G‖_F²`, so the ratio is `trace(G)² / ‖G‖_F²` exactly.
+/// That is `O(h²)` off the matrix itself instead of `O(h³)` plus the two `h×h`
+/// copies `symmetric_eigenvalues` makes (it clones internally as well as here).
+fn participation_ratio(gram: &DMatrix<f64>) -> f32 {
+    let (s1, s2) = (gram.trace(), gram.norm_squared());
     if s2 <= 0.0 {
         return 0.0;
     }
@@ -144,10 +142,17 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
             ..Default::default()
         };
     }
-    // Row-major f64 copy. nalgebra is column-major, so the transpose's buffer
-    // *is* row-major of the original; f64 because every quantity below is a sum
-    // over all rows.
-    let rm: Vec<f64> = e.transpose().iter().map(|&x| f64::from(x)).collect();
+    // Row-major f64 copy: the passes below walk rows, nalgebra stores columns,
+    // and f64 because every quantity here is a sum over all `n` rows. Written
+    // directly rather than via `e.transpose()`, which would materialise a whole
+    // extra `[h, n]` f32 matrix alongside this buffer (~52 MB together on a
+    // 34k × 128 table, for one buffer's worth of data).
+    let mut rm = vec![0.0f64; n * h];
+    rm.par_chunks_mut(h).enumerate().for_each(|(i, dst)| {
+        for (j, d) in dst.iter_mut().enumerate() {
+            *d = f64::from(e[(i, j)]);
+        }
+    });
     let inv_n = 1.0 / n as f64;
 
     let pass = rm
@@ -217,9 +222,12 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
             ctr_gram[(i, j)] * inv_sd[i] * inv_sd[j]
         }
     });
+    // `&DMatrix` is Copy, so the inner `move` closure borrows rather than
+    // consuming the matrix the VIF solve below still needs.
+    let cr = &corr;
     let max_abs_corr = (0..h)
-        .flat_map(|i| ((i + 1)..h).map(move |j| (i, j)))
-        .fold(0.0f64, |acc, (i, j)| acc.max(corr[(i, j)].abs()));
+        .flat_map(|i| ((i + 1)..h).map(move |j| cr[(i, j)].abs()))
+        .fold(0.0f64, f64::max);
 
     // VIF = diag(C⁻¹), via a Cholesky solve against the identity rather than an
     // explicit inverse — it matters most exactly here, since near-collinear dims
