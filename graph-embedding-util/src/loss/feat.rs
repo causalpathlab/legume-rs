@@ -528,19 +528,8 @@ pub fn nce_loss_identity(
 /// trainers, and it never reads `e_feat` on a model where that field is a
 /// detached snapshot.
 pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
-    if let Some(c) = model.composed() {
-        return c.compose_rows(idx);
-    }
-    match &model.factor {
-        Some(f) => {
-            let genes = f.row_to_gene.index_select(idx, 0)?;
-            let mask = f
-                .splice_delta
-                .as_ref()
-                .map(|(_, m)| m.index_select(idx, 0)) // [b, 1] unspliced selector
-                .transpose()?;
-            model.factored_feat_rows(f, &genes, mask.as_ref())
-        }
+    match model.composed() {
+        Some(c) => c.compose_rows(idx),
         None => model.e_feat.index_select(idx, 0),
     }
 }

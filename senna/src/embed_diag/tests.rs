@@ -89,21 +89,27 @@ fn the_manifest_path_and_the_prefix_resolve_to_the_same_report() {
     assert_eq!(by_prefix, by_path);
 }
 
-/// `bge --skip-etm` records the SAME ρ file as both `feature_loading` and
-/// `dictionary`. It is one table and must be measured once — reported twice it
-/// reads as two independent findings that happen to agree.
+/// `bge --skip-etm` writes the SAME ρ to `feature_loading.parquet` and to
+/// `dictionary.parquet`: two DISTINCT files, byte-identical content. It is one
+/// table and must be measured once — reported twice it reads as two independent
+/// findings that happen to agree. Planted the way the run writes it, so the
+/// paths genuinely differ and only the content says they are the same table.
 #[test]
-fn one_file_recorded_under_two_slots_is_measured_once() {
+fn one_table_written_to_two_files_is_measured_once() {
     let dir = tempfile::tempdir().expect("tmp");
     let prefix = dir.path().join("run").to_string_lossy().into_owned();
 
     let genes = rank_one();
-    let shared = plant_table(&prefix, "feature_loading.parquet", &genes);
     let mut manifest = RunManifest::new(RunKind::Bge, &prefix);
     manifest.outputs.cell_embedding =
         Some(plant_table(&prefix, "cell_embedding.parquet", &balanced()));
-    manifest.outputs.feature_loading = Some(shared.clone());
-    manifest.outputs.dictionary = Some(shared);
+    manifest.outputs.feature_loading =
+        Some(plant_table(&prefix, "feature_loading.parquet", &genes));
+    manifest.outputs.dictionary = Some(plant_table(&prefix, "dictionary.parquet", &genes));
+    assert_ne!(
+        manifest.outputs.feature_loading, manifest.outputs.dictionary,
+        "the fixture must plant two different paths, or it tests nothing"
+    );
     manifest
         .save(Path::new(&default_path(&prefix)))
         .expect("save manifest");
@@ -152,7 +158,7 @@ fn a_manifest_with_nothing_measurable_is_an_error_naming_the_tables() {
 
     let err = collect_geometry(&prefix).expect_err("nothing to measure");
     let msg = err.to_string();
-    for t in TABLES {
+    for t in crate::run_manifest::GEOMETRY_TABLE_SLOTS {
         assert!(msg.contains(t), "error must name `{t}`: {msg}");
     }
 }

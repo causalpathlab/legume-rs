@@ -19,67 +19,55 @@ pub struct EmbedDiagArgs {
     pub(crate) from: Box<str>,
 }
 
-/// The tables a manifest may record that have the `[units × h]` shape the
-/// geometry is defined on. Order is the report order.
-///
-/// Two per side, because the families name them differently and a comparison
-/// across families is the whole point: bge writes `cell_embedding` / the raw
-/// `feature_loading`, while the topic and SVD families write `latent` (cell ×
-/// K) / `dictionary` (gene × K). A bge run that also resolved topics records
-/// both, and both are reported — they are different objects (`Z` vs `log θ`)
-/// and the row names say which.
-const TABLES: [&str; 5] = [
-    "cell_embedding",
-    "latent",
-    "feature_loading",
-    "dictionary",
-    "module_dictionary",
-];
-
 pub fn embed_diag(args: &EmbedDiagArgs) -> anyhow::Result<()> {
     let rows = collect_geometry(&args.from)?;
     print_report(&rows);
     Ok(())
 }
 
-/// Measure every recorded table of `from`, in [`TABLES`] order. Errors when the
-/// manifest records none of them — a run with nothing to measure is a wrong
-/// `--from`, not an empty report.
+/// A digest of a file's bytes, used to recognise ONE table recorded under two
+/// manifest slots. `bge --skip-etm` writes ρ to `{out}.feature_loading.parquet`
+/// **and** `{out}.dictionary.parquet` — two distinct files with identical
+/// content — so comparing paths, canonical or not, does not catch it, and the
+/// report shows one table as two independent findings that happen to agree.
+fn content_key(path: &std::path::Path) -> std::io::Result<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::fs::read(path)?.hash(&mut h);
+    Ok(h.finish())
+}
+
+/// Measure every geometry table the manifest records, in report order. Errors
+/// when it records none — a run with nothing to measure is a wrong `--from`,
+/// not an empty report.
+///
+/// WHICH slots are measurable is [`run_manifest::RunOutputs::geometry_tables`]'s
+/// call, not this command's; all that is decided here is that a table is
+/// measured once per distinct file.
 pub(crate) fn collect_geometry(
     from: &str,
 ) -> anyhow::Result<Vec<(&'static str, EmbeddingGeometry)>> {
     let (manifest, dir) = run_manifest::load_for(from)?;
-    let out = &manifest.outputs;
-    let recorded = [
-        out.cell_embedding.as_deref(),
-        out.latent.as_deref(),
-        out.feature_loading.as_deref(),
-        out.gene_dictionary(),
-        out.module_dictionary.as_deref(),
-    ];
 
     let mut rows = Vec::new();
-    // One row per FILE, not per manifest slot: the slots overlap by design —
-    // `bge --skip-etm` records the same ρ as both `feature_loading` and
-    // `dictionary` — and measuring one file twice reads as two findings.
-    let mut seen: Vec<std::path::PathBuf> = Vec::new();
-    for (name, rel) in TABLES.iter().zip(recorded) {
-        let Some(rel) = rel else { continue };
+    let mut seen: Vec<u64> = Vec::new();
+    for (name, rel) in manifest.outputs.geometry_tables() {
         let path = run_manifest::resolve(&dir, rel);
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if seen.contains(&canonical) {
+        let key =
+            content_key(&path).map_err(|e| anyhow::anyhow!("{name} at {}: {e}", path.display()))?;
+        if seen.contains(&key) {
             continue;
         }
-        seen.push(canonical);
+        seen.push(key);
         let path = path.to_string_lossy();
         let table = DMatrix::<f32>::from_parquet(&path)
             .map_err(|e| anyhow::anyhow!("{name} at {path}: {e}"))?;
-        rows.push((*name, embedding_geometry(&table.mat)));
+        rows.push((name, embedding_geometry(&table.mat)));
     }
     anyhow::ensure!(
         !rows.is_empty(),
         "{from}: the manifest records none of {}",
-        TABLES.join(" / ")
+        run_manifest::GEOMETRY_TABLE_SLOTS.join(" / ")
     );
     Ok(rows)
 }

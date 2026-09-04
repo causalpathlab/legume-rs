@@ -15,6 +15,9 @@
 //!   filtered, with per-chain-position sibling pools precomputed.
 //! - [`chain`] — multi-level cell-cell NCE over the chain hierarchy.
 //!   Consumed by `pinto cage`; includes the batched-over-genes variant.
+//! - `lnpdf` — the per-node profile (multinomial) likelihood a trained
+//!   feature side is scored under. Not a training loss; `senna bge`'s
+//!   scorer is its only consumer, through the re-exports below.
 //!
 //! Public items are re-exported here so callers continue using
 //! `graph_embedding_util::loss::Foo` paths unchanged.
@@ -28,7 +31,7 @@ use candle_util::candle_core::{Result, Tensor};
 pub(crate) mod cell;
 pub(crate) mod chain;
 pub(crate) mod feat;
-pub mod lnpdf;
+pub(crate) mod lnpdf;
 pub(crate) mod modules;
 
 #[cfg(test)]
@@ -41,6 +44,8 @@ pub use chain::{
     sample_unit_chain_batch, sample_unit_chain_batch_with_pos, UnitChainBatch, UnitChainBatchArgs,
     UnitChainBatchStats,
 };
+pub use lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
+
 pub use feat::{
     build_stratified_sampler, gather_feature_rows, nce_loss, nce_loss_identity,
     sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
