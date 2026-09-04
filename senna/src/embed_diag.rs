@@ -21,7 +21,20 @@ pub struct EmbedDiagArgs {
 
 /// The tables a manifest may record that have the `[units × h]` shape the
 /// geometry is defined on. Order is the report order.
-const TABLES: [&str; 3] = ["cell_embedding", "feature_loading", "module_dictionary"];
+///
+/// Two per side, because the families name them differently and a comparison
+/// across families is the whole point: bge writes `cell_embedding` / the raw
+/// `feature_loading`, while the topic and SVD families write `latent` (cell ×
+/// K) / `dictionary` (gene × K). A bge run that also resolved topics records
+/// both, and both are reported — they are different objects (`Z` vs `log θ`)
+/// and the row names say which.
+const TABLES: [&str; 5] = [
+    "cell_embedding",
+    "latent",
+    "feature_loading",
+    "dictionary",
+    "module_dictionary",
+];
 
 pub fn embed_diag(args: &EmbedDiagArgs) -> anyhow::Result<()> {
     let rows = collect_geometry(&args.from)?;
@@ -39,14 +52,25 @@ pub(crate) fn collect_geometry(
     let out = &manifest.outputs;
     let recorded = [
         out.cell_embedding.as_deref(),
+        out.latent.as_deref(),
         out.feature_loading.as_deref(),
+        out.gene_dictionary(),
         out.module_dictionary.as_deref(),
     ];
 
     let mut rows = Vec::new();
+    // One row per FILE, not per manifest slot: the slots overlap by design —
+    // `bge --skip-etm` records the same ρ as both `feature_loading` and
+    // `dictionary` — and measuring one file twice reads as two findings.
+    let mut seen: Vec<std::path::PathBuf> = Vec::new();
     for (name, rel) in TABLES.iter().zip(recorded) {
         let Some(rel) = rel else { continue };
         let path = run_manifest::resolve(&dir, rel);
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.contains(&canonical) {
+            continue;
+        }
+        seen.push(canonical);
         let path = path.to_string_lossy();
         let table = DMatrix::<f32>::from_parquet(&path)
             .map_err(|e| anyhow::anyhow!("{name} at {path}: {e}"))?;
