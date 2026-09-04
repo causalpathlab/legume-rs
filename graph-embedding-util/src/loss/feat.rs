@@ -172,9 +172,6 @@ pub struct StratifiedSampler {
     /// The degree-proportional half of the negative distribution.
     pub neg_by_degree: WeightedIndex<f32>,
     pub feature_pool: Vec<u32>,
-    /// The stratum exponent `pb_picker` was built with, kept so a jitter pass
-    /// can rebuild it from refreshed sizes ([`Self::rejitter`]).
-    pub alpha_pb: f32,
 }
 
 pub struct PbFeatureSampler {
@@ -395,103 +392,7 @@ pub fn build_stratified_sampler(
         neg,
         neg_by_degree,
         feature_pool,
-        alpha_pb,
     })
-}
-
-impl StratifiedSampler {
-    /// Refresh the sampling WEIGHTS in place from a fresh draw of the pseudobulk
-    /// profiles, keeping the support.
-    ///
-    /// `draw(pb, row)` is the redrawn count of feature `row` (unified axis) in
-    /// pseudobulk `pb`. Every unit's `counts` and `picker`, the stratum picker
-    /// (`pb_size^alpha_pb`) and the degree-proportional negative picker are
-    /// rebuilt from the draws; `features`, `paired`, `active_pbs` and the
-    /// negative pool are untouched — a Gamma draw is positive wherever the mean
-    /// is, so the support cannot change. In gene-paired mode a gene's weight is
-    /// the sum of its two rows' draws, as at build time.
-    ///
-    /// This is the whole cost of a jitter round: `nnz` draws and one
-    /// `WeightedIndex` per unit — no triplet list, no bucketing. Parallel over
-    /// units. Returns the mean relative change `Σ|new − old| / Σ old` over the
-    /// weights, for the log line; exactly `0` when `draw` returns the weights
-    /// the sampler was built from.
-    pub fn rejitter(&mut self, n_features: usize, draw: &(dyn Fn(u32, u32) -> f32 + Sync)) -> f64 {
-        let alpha_pb = self.alpha_pb;
-        // What one unit hands back for the global pickers: the old and new
-        // weight totals for the change readout, the new stratum size, and the
-        // per-row draws the degree pool sums.
-        struct UnitDraw {
-            old_total: f64,
-            abs_change: f64,
-            size: f32,
-            degree: Vec<(u32, f32)>,
-        }
-        let per_unit: Vec<UnitDraw> = self
-            .per_pb
-            .par_iter_mut()
-            .zip(self.active_pbs.par_iter())
-            .map(|(unit, &pb)| {
-                let paired = !unit.paired.is_empty();
-                let mut degree =
-                    Vec::with_capacity(unit.features.len() * if paired { 2 } else { 1 });
-                let mut new_counts = Vec::with_capacity(unit.features.len());
-                let (mut old_total, mut abs_change, mut size) = (0.0f64, 0.0f64, 0.0f32);
-                for (i, &row) in unit.features.iter().enumerate() {
-                    let d = draw(pb, row).max(0.0);
-                    degree.push((row, d));
-                    let mut w = d;
-                    if paired {
-                        let u = unit.paired[i];
-                        if u != u32::MAX {
-                            let du = draw(pb, u).max(0.0);
-                            degree.push((u, du));
-                            w += du;
-                        }
-                    }
-                    // The builder's floor, so redrawing the mean is exact.
-                    let w = w.max(1e-8);
-                    old_total += f64::from(unit.counts[i]);
-                    abs_change += f64::from((w - unit.counts[i]).abs());
-                    size += w;
-                    new_counts.push(w);
-                }
-                unit.picker =
-                    WeightedIndex::new(new_counts.clone()).expect("non-empty pb feature weights");
-                unit.counts = new_counts;
-                UnitDraw {
-                    old_total,
-                    abs_change,
-                    size,
-                    degree,
-                }
-            })
-            .collect();
-
-        let (mut old_total, mut abs_change) = (0.0f64, 0.0f64);
-        let mut pb_q = Vec::with_capacity(per_unit.len());
-        let mut feat_count = vec![0f32; n_features];
-        for u in &per_unit {
-            old_total += u.old_total;
-            abs_change += u.abs_change;
-            pb_q.push(u.size.max(1e-8).powf(alpha_pb));
-            for &(row, d) in &u.degree {
-                feat_count[row as usize] += d;
-            }
-        }
-        self.pb_picker = WeightedIndex::new(pb_q).expect("non-empty pb weights");
-        let deg_w: Vec<f32> = self
-            .feature_pool
-            .iter()
-            .map(|&f| feat_count[f as usize].max(1e-8))
-            .collect();
-        self.neg_by_degree = WeightedIndex::new(deg_w).expect("non-empty negative pool");
-        if old_total > 0.0 {
-            abs_change / old_total
-        } else {
-            0.0
-        }
-    }
 }
 
 pub struct StratifiedEdgeBatchArgs<'a> {
@@ -709,9 +610,6 @@ fn unique_with_index(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
     }
     (unique, idx_map)
 }
-
-#[cfg(test)]
-mod tests;
 
 #[cfg(test)]
 mod pairing_tests {

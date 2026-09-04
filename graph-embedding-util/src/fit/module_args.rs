@@ -105,39 +105,6 @@ pub struct GeneModuleArgs {
     pub module_residual_l2: f32,
 
     #[arg(
-        long = "module-uniform",
-        value_name = "LAMBDA",
-        default_value_t = 0.0,
-        help = "Weight of the uniformity repulsion between module vectors (0 = off)",
-        long_help = "Push the module vectors apart on the unit sphere.\n\
-                     \n\
-                     Nothing on the dictionary side forbids two modules pointing the same\n\
-                     way: duplication is a symmetry of the mixture likelihood, absorbed by\n\
-                     the membership, which is why the load-balance prior cannot fix\n\
-                     direction -- it constrains how much mass each module holds, and\n\
-                     duplicates satisfy it.\n\
-                     \n\
-                     The term is the log-mean of exp(-t * squared distance) over distinct\n\
-                     pairs of row-normalized module vectors: a soft-min over cosine, so the\n\
-                     CLOSEST pair dominates and duplicates are what it prices. Rows are\n\
-                     normalized inside the term only; the model stays on the raw dot product.\n\
-                     \n\
-                     0 (default) is off and byte-identical to a build without this flag.\n\
-                     Do not read the term back as a quality metric; judge it by the\n\
-                     dictionary's participation ratio, which the epoch log reports."
-    )]
-    pub module_uniform: f32,
-
-    #[arg(
-        long = "module-uniform-temp",
-        value_name = "T",
-        default_value_t = 2.0,
-        help = "Temperature t of the uniformity kernel exp(-t * squared distance)",
-        hide = true
-    )]
-    pub module_uniform_temp: f32,
-
-    #[arg(
         long = "module-units-per-step",
         value_name = "U",
         default_value_t = 64,
@@ -178,16 +145,6 @@ impl GeneModuleArgs {
             "--module-init-mass must be in (0, 1], got {}",
             self.module_init_mass
         );
-        anyhow::ensure!(
-            self.module_uniform >= 0.0,
-            "--module-uniform must be >= 0, got {}",
-            self.module_uniform
-        );
-        anyhow::ensure!(
-            self.module_uniform_temp > 0.0,
-            "--module-uniform-temp must be > 0, got {}",
-            self.module_uniform_temp
-        );
         Ok(Some(GeneModuleConfig {
             n_modules: m,
             warmup_epochs: self.module_warmup_epochs,
@@ -195,8 +152,6 @@ impl GeneModuleArgs {
             lambda_module: self.module_weight,
             lambda_balance: self.module_balance,
             residual_l2: self.module_residual_l2,
-            lambda_uniform: self.module_uniform,
-            uniform_temp: self.module_uniform_temp,
             units_per_step: self.module_units_per_step,
             init_own_mass: self.module_init_mass,
             parent: None,

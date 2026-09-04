@@ -421,35 +421,14 @@ fn optimize_block(
     }
 }
 
-/// What a fit keeps of each parameter's Gamma sufficient statistics once the
-/// posterior estimates are calibrated. The planes are the bulk of the collapse's
-/// memory at high pseudobulk counts, so this is decided per consumer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatRetention {
-    /// Drop `a_stat` and `b_stat` everywhere: the consumer reads posterior
-    /// means only (bge's default).
-    None,
-    /// Keep the SHAPE plane of the two mean parameters (`mu_observed`,
-    /// `mu_adjusted`) and drop everything else: enough to resample them from
-    /// their posterior (`GammaMatrix::posterior_sample_seeded` reconstructs
-    /// the rate from the mean), at one extra plane per parameter.
-    Shape,
-    /// Keep both planes on every parameter: `evidence_mean` and the unseeded
-    /// `posterior_sample` read them.
-    Full,
-}
-
-/// The retention a level gets from the two caller-facing knobs.
-pub(super) fn retention(keep_full: bool, keep_shape: bool) -> StatRetention {
-    match (keep_full, keep_shape) {
-        (true, _) => StatRetention::Full,
-        (false, true) => StatRetention::Shape,
-        (false, false) => StatRetention::None,
-    }
-}
-
-/// [`optimize_with`] under the historical two-way choice: `keep_stats` retains
-/// both planes on every parameter, else none.
+/// Optimize the mean parameters for the DC-Poisson collapse, **blocked over
+/// feature rows** so peak working memory scales with a block, not the full
+/// feature axis. Every update is elementwise per `(gene, sample)` and δ is
+/// per-gene given the shared per-sample / per-batch sizes, so the fit is
+/// separable across features — block-independent descent is numerically
+/// identical to the joint fit. For `MeanOnly` output the heavy
+/// `a_stat`/`b_stat` planes are dropped per block, so the assembled result
+/// carries only posterior estimates (bge never calls `posterior_sample`).
 pub(super) fn optimize(
     stat: &CollapsedStat,
     hyper: (f32, f32),
@@ -459,32 +438,6 @@ pub(super) fn optimize(
     // Retain a_stat/b_stat even under MeanOnly — the finest level of an
     // `--emit-pb-reference` run serializes `evidence_mean`, which reads them.
     keep_stats: bool,
-) -> anyhow::Result<CollapsedOut> {
-    optimize_with(
-        stat,
-        hyper,
-        num_iter,
-        label,
-        out_target,
-        retention(keep_stats, false),
-    )
-}
-
-/// Optimize the mean parameters for the DC-Poisson collapse, **blocked over
-/// feature rows** so peak working memory scales with a block, not the full
-/// feature axis. Every update is elementwise per `(gene, sample)` and δ is
-/// per-gene given the shared per-sample / per-batch sizes, so the fit is
-/// separable across features — block-independent descent is numerically
-/// identical to the joint fit. The sufficient-stat planes are trimmed per
-/// block to `retain`, so the assembled result never holds more than the
-/// consumer asked for.
-pub(super) fn optimize_with(
-    stat: &CollapsedStat,
-    hyper: (f32, f32),
-    num_iter: usize,
-    label: &str,
-    out_target: CalibrateTarget,
-    retain: StatRetention,
 ) -> anyhow::Result<CollapsedOut> {
     let num_genes = stat.num_genes();
     let num_samples = stat.num_samples();
@@ -509,14 +462,10 @@ pub(super) fn optimize_with(
 
     let dims = format!("{num_genes} genes × {num_samples} samples");
 
-    // `All` calibration is what the unseeded `posterior_sample` path (topic
-    // models) asks for, and that reads both planes on every parameter.
-    let retain = if matches!(out_target, CalibrateTarget::All) {
-        StatRetention::Full
-    } else {
-        retain
-    };
-    let stack_stats = retain != StatRetention::None;
+    // `posterior_sample` (topic path) reads a_stat/b_stat; bge (MeanOnly)
+    // does not, so those planes can be discarded per block — that's what
+    // keeps the assembled output from holding the full sufficient stats.
+    let keep_stats = keep_stats || matches!(out_target, CalibrateTarget::All);
 
     // The moving unit is one descent iteration whenever the batch-correction
     // loop runs: each block ticks `num_iter` times (`optimize_block` handed the
@@ -541,20 +490,17 @@ pub(super) fn optimize_with(
     // iteration bar (batched) still beats a spinner; without batches there is
     // nothing to count, so a spinner avoids a `0/1` bar frozen at zero.
     if n_blocks <= 1 {
-        let mut out = if batched {
+        if batched {
             let prog = styled_progress_bar(total as u64, &msg);
-            let out = optimize_block(stat, hyper, num_iter, out_target, Some(&prog))?;
+            let out = optimize_block(stat, hyper, num_iter, out_target, Some(&prog));
             prog.finish_and_clear();
-            out
-        } else {
-            let spin = matrix_util::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
-                .with_message(format!("{label} single gene-block · {dims}"));
-            let out = optimize_block(stat, hyper, num_iter, out_target, None)?;
-            spin.finish_and_clear();
-            out
-        };
-        out.retain(retain);
-        return Ok(out);
+            return out;
+        }
+        let spin = matrix_util::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
+            .with_message(format!("{label} single gene-block · {dims}"));
+        let out = optimize_block(stat, hyper, num_iter, out_target, None);
+        spin.finish_and_clear();
+        return out;
     }
 
     // The gene axis is separable — a block's fit depends only on its own rows
@@ -573,9 +519,11 @@ pub(super) fn optimize_with(
             let sub = stat.select_rows(lb, ub - lb);
             let mut out_b =
                 optimize_block(&sub, hyper, num_iter, out_target, batched.then_some(&prog))?;
-            // Trim now, so the accumulated blocks never add up to more of the
-            // sufficient-stat planes than the consumer asked for.
-            out_b.retain(retain);
+            if !keep_stats {
+                // Free a_stat/b_stat now so the accumulated blocks never add
+                // up to the full sufficient-stat planes.
+                out_b.release_stats();
+            }
             if !batched {
                 prog.inc(1);
             }
@@ -606,10 +554,10 @@ pub(super) fn optimize_with(
     }
 
     let join = |v: Vec<GammaMatrix>| -> Option<GammaMatrix> {
-        (!v.is_empty()).then(|| GammaMatrix::vconcat(v, stack_stats))
+        (!v.is_empty()).then(|| GammaMatrix::vconcat(v, keep_stats))
     };
     Ok(CollapsedOut {
-        mu_observed: GammaMatrix::vconcat(mu_obs, stack_stats),
+        mu_observed: GammaMatrix::vconcat(mu_obs, keep_stats),
         mu_adjusted: join(mu_adj),
         mu_residual: join(mu_res),
         gamma: join(gam),
@@ -628,37 +576,20 @@ pub struct CollapsedOut {
 }
 
 impl CollapsedOut {
-    /// Trim the sufficient-stat planes to `retain` — see [`StatRetention`].
-    /// Used by the gene-blocked `optimize_with` per block, so accumulated
-    /// blocks never sum to more than the consumer asked for.
-    pub fn retain(&mut self, retain: StatRetention) {
-        match retain {
-            StatRetention::Full => {}
-            StatRetention::None => {
-                self.mu_observed.release_stats();
-                for p in [
-                    &mut self.mu_adjusted,
-                    &mut self.mu_residual,
-                    &mut self.gamma,
-                    &mut self.delta,
-                ] {
-                    if let Some(g) = p.as_mut() {
-                        g.release_stats();
-                    }
-                }
-            }
-            StatRetention::Shape => {
-                // The two mean parameters are what a jitter pass resamples; the
-                // residual, γ and δ are read as means only.
-                self.mu_observed.release_rate_stat();
-                if let Some(g) = self.mu_adjusted.as_mut() {
-                    g.release_rate_stat();
-                }
-                for p in [&mut self.mu_residual, &mut self.gamma, &mut self.delta] {
-                    if let Some(g) = p.as_mut() {
-                        g.release_stats();
-                    }
-                }
+    /// Drop `a_stat`/`b_stat` on every contained parameter. Safe when the
+    /// consumer reads posterior means/log-means but never `posterior_sample`
+    /// (bge). Used by the gene-blocked `optimize` to keep accumulated blocks
+    /// from summing to the full sufficient-stat planes.
+    fn release_stats(&mut self) {
+        self.mu_observed.release_stats();
+        for p in [
+            &mut self.mu_adjusted,
+            &mut self.mu_residual,
+            &mut self.gamma,
+            &mut self.delta,
+        ] {
+            if let Some(g) = p.as_mut() {
+                g.release_stats();
             }
         }
     }

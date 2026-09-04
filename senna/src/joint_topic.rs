@@ -262,7 +262,6 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
-            keep_shape_stats: false,
         },
     )?;
     // Reverse so training goes coarse→fine: coarsest (fewest samples)
