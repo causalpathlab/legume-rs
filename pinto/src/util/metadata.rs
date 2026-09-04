@@ -150,34 +150,6 @@ pub struct SpliceTrackInfo {
     /// two `delta_feature_embedding.parquet` files are comparable only after
     /// reading this field. Without it the tables look interchangeable and are not.
     pub delta_base: String,
-    /// Whether `delta_feature_embedding.parquet` was fit against the LIVE cell
-    /// embedding (a refresh) or the cold pseudobulk SVD basis.
-    ///
-    /// Three states, and they are different findings:
-    /// - **absent** — no delta table was written at all (`--gate-mode learned`
-    ///   runs no sampler; a spliced-only input identifies no delta). A consumer
-    ///   should not go looking for the file.
-    /// - `false` — written, but fit against the cold pseudobulk SVD basis
-    ///   (`--selection-refresh-epochs 0`, or an early stop before the first
-    ///   refresh). A diagnostic, NOT a dictionary: it is in a different frame
-    ///   from `feature_embedding.parquet` and must not be added to it.
-    /// - `true` — written against the live cell embedding, so the two share a
-    ///   frame and delta may be added.
-    ///
-    /// A consumer that adds delta to the gene embedding MUST check this field.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta_from_refresh: Option<bool>,
-    /// Median unspliced counts per identified gene, and the pseudobulk bins they
-    /// are spread over. `None` under `--gate-mode learned`, which runs no sampler.
-    ///
-    /// [`Self::n_delta_identified`] is STRUCTURAL — at least one count on each
-    /// track — and passing it says nothing about whether the contrast can be
-    /// estimated. These two say that. Below ~1 count per bin the Poisson has
-    /// nothing to fit, however high the identified fraction looks.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta_median_counts: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta_counts_per_pseudobulk: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -251,12 +223,6 @@ pub struct OutputFiles {
     /// Cell -> finest-level PB id map.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_pb: Option<String>,
-
-    /// `pinto cage` per-gene per-dim posterior mean EFFECTIVE loading
-    /// `E[z·β]` `[G × D]` — `pip` multiplied in already, so do NOT gate it
-    /// again. Not consumed by training; shipped for downstream use.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub feature_posterior_mean: Option<String>,
 
     /// `pinto cage` feature (gene) embedding `[G × D]` — same shared
     /// D-dim space as `cell_embedding`. Cosine similarity between
@@ -557,7 +523,6 @@ pub fn create_cage_metadata(
             pb_embedding: Some(format!("{prefix}.pb_embedding.parquet")),
             pb_bias: Some(format!("{prefix}.pb_bias.parquet")),
             cell_pb: Some(format!("{prefix}.cell_pb.parquet")),
-            feature_posterior_mean: Some(format!("{prefix}.feature_posterior_mean.parquet")),
             feature_embedding: Some(format!("{prefix}.feature_embedding.parquet")),
             gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
             ..Default::default()

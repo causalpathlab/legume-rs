@@ -30,22 +30,6 @@ impl NceObjectiveArg {
     }
 }
 
-/// Which selector supplies the per-(gene, dim) inclusion weights.
-///
-/// Both arms land on the same `GateKind::Identity` slot in geu's model, but by
-/// different routes: `learned` installs the variational gate and lets SGD fit
-/// `σ(S/τ)`, while `sampled` installs a `pip` from cage's Gibbs Poisson sampler,
-/// which then takes over the slot entirely (`model/gate.rs:503-511`).
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
-#[clap(rename_all = "lowercase")]
-pub enum GateMode {
-    /// Variational spike-and-slab gate trained by SGD alongside the embedding.
-    Learned,
-    /// Gibbs profiled-Poisson sampler over super-cell counts, installed as a
-    /// per-epoch Bernoulli mask.
-    Sampled,
-}
-
 /// Row-name canonicalization strategy for matching the data's gene
 /// names against external resources (PPI networks, marker lists,
 /// pretrained gene embeddings). `Auto` sniffs the first data file's
@@ -114,108 +98,6 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 5,
-        help = "Re-estimate pip every N epochs against the current embedding; 0 = never",
-        long_help = "How often to re-estimate the gate's keep-probabilities.\n\
-                     \n\
-                     The per-epoch z draw is dropout-style regularization.\n\
-                     It is a hard 0/1 mask per (gene, dim).\n\
-                     The mask zeroes the gradient for excluded coordinates,\n\
-                     so each epoch trains a different sub-network.\n\
-                     This flag sets how often the DROP RATES behind it refresh.\n\
-                     \n\
-                     They need refreshing.\n\
-                     The initial fit sees an SVD of pseudobulk log-counts.\n\
-                     That is not the embedding the model ships.\n\
-                     So every N epochs the sampler re-runs. It sees the live cell embedding,\n\
-                     folded into pseudobulks. Each round warm-starts from the previous one.\n\
-                     \n\
-                     This is NOT EM. The refresh is a Poisson fit on counts.\n\
-                     Training is edge NCE. No single objective improves, so nothing converges.\n\
-                     \n\
-                     The per-epoch z draw does NOT depend on this flag.\n\
-                     It costs one Bernoulli per (gene, dim) on device.\n\
-                     Every epoch trains its own sub-network regardless.\n\
-                     This flag prices only the sampler.\n\
-                     \n\
-                     The default of 5 is a budget choice, not a statistical one.\n\
-                     Measured on real data, the rates settle by epoch 6 and hold.\n\
-                     Refreshing every epoch then re-derives a settled answer.\n\
-                     Pass 1 to refresh every epoch anyway.\n\
-                     Pass 0 to keep the cold rates for the whole run.\n\
-                     That is what `senna bge` does.",
-        hide = true
-    )]
-    pub selection_refresh_epochs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Sweeps per pip refresh (half are burn-in)",
-        long_help = "Gibbs sweeps for each --selection-refresh-epochs round.\n\
-                     \n\
-                     Deliberately too few to converge a posterior on its own.\n\
-                     A refresh is one cheap step in a long sequence.\n\
-                     The chain warm-starts from the previous round's state.\n\
-                     Many rounds against a moving embedding make it good.\n\
-                     Running any single round to convergence does not.\n\
-                     \n\
-                     10 sweeps means 5 kept.\n\
-                     That is only sane because the PIP is Rao-Blackwellized.\n\
-                     Each kept sweep contributes an ANALYTIC probability.\n\
-                     That beats contributing one 0/1 draw.\n\
-                     So 5 sweeps do not pin the estimate to a 1/5 grid.\n\
-                     Raising this buys precision per round.\n\
-                     Spending the same budget on more epochs is usually better.",
-        hide = true
-    )]
-    pub selection_refresh_sweeps: usize,
-
-    #[arg(
-        long,
-        default_value_t = 10,
-        help = "Gibbs sweeps for the COLD initial pip (half are burn-in)",
-        long_help = "Sweeps for the one-off fit that runs before training.\n\
-                     It conditions on an SVD of the pseudobulk log-counts.\n\
-                     \n\
-                     This round only has to BREAK IN.\n\
-                     It gets the chain off its initialization and somewhere sane.\n\
-                     It is not asked to converge.\n\
-                     So it carries no more sweeps than a refresh does.\n\
-                     The SVD basis it sees is not the embedding the model ships.\n\
-                     A precise fit here would answer the wrong question precisely.\n\
-                     The refreshes against the live embedding do the real work.\n\
-                     \n\
-                     Raise it if you set --selection-refresh-epochs 0.\n\
-                     The cold rates are then the only ones the run ever uses.",
-        hide = true
-    )]
-    pub selection_sweeps: usize,
-
-    #[arg(
-        long,
-        help = "Let the nascent deviation load on dims the gene's identity does not",
-        long_help = "Splice-channelized input only, and off by default.\n\
-                     \n\
-                     The nascent deviation is a DEVIATION from the identity loading.\n\
-                     By default it may only be included where the identity is:\n\
-                     a gene moving along a dim its identity does not load\n\
-                     is a state the model should not visit.\n\
-                     The nesting also breaks a symmetry.\n\
-                     Two independent spike-and-slabs can otherwise split\n\
-                     inclusion mass between (identity on, deviation off)\n\
-                     and (identity off, deviation on)\n\
-                     on a gene where only their sum is identified.\n\
-                     \n\
-                     Set this to sample the two gates independently.\n\
-                     It is an A/B arm, not a tuning knob.\n\
-                     `senna gem` nests by default for the same reason.",
-        hide = true
-    )]
-    pub independent_delta_gate: bool,
-
-    #[arg(
-        long,
         help = "Skip the degree-corrected Poisson refinement of the coarsening levels",
         long_help = "Each coarsening level gets a second-opinion refinement.\n\
                      It runs on RAW counts, degree-corrected Poisson.\n\
@@ -239,16 +121,11 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "Training epochs over the gene axis (early-stops on --convergence-tol)",
         long_help = "Passes over the gene axis.\n\
                      \n\
-                     Each epoch draws its own z ~ Bern(pip).\n\
-                     Epochs are therefore how the gate's dropout averages out.\n\
-                     A handful of them samples the sub-network space too thinly.\n\
                      The run early-stops once the loss flattens, per\n\
                      --convergence-tol over --convergence-window.\n\
                      A high value here is a ceiling, not a fixed cost.\n\
                      \n\
-                     Pair with --genes-per-epoch to cap per-epoch cost.\n\
-                     Pair with --selection-refresh-epochs as well.\n\
-                     That keeps the sampler off the critical path."
+                     Pair with --genes-per-epoch to cap per-epoch cost."
     )]
     pub epochs: usize,
 
@@ -454,15 +331,10 @@ pub struct CellActivityGraphEmbeddingArgs {
     /// `--feature-list-file`). cage **weights the random projection** with it,
     /// exactly as `senna bge` and `senna gem` do — non-selected genes get
     /// projection weight 0 and so sit out the basis the coarsening hierarchy is
-    /// built from, but they stay on the trained axis: still fit, still sampled,
-    /// still in the PIP table. The selection shapes *where the pseudobulks
-    /// land*, not *which genes the model may use*. `--n-hvg 0` disables.
-    ///
-    /// This used to hard-subset the trained axis. It no longer does, because
-    /// the Gibbs-sampled spike-and-slab is the feature selector now and running
-    /// a variance cut in front of it would select twice, cruder first and
-    /// irreversibly. Use `--genes-per-epoch` for the cost lever the subset used
-    /// to provide.
+    /// built from, but they stay on the trained axis. The selection shapes
+    /// *where the pseudobulks land*, not *which genes the model may use*.
+    /// `--n-hvg 0` disables. Use `--genes-per-epoch` for the cost lever a hard
+    /// subset used to provide.
     #[command(flatten)]
     pub hvg: HvgCliArgs,
 
@@ -554,103 +426,10 @@ pub struct CellActivityGraphEmbeddingArgs {
         help = "NCE objective: softmax or logistic",
         long_help = "NCE objective. softmax is InfoNCE, where negatives compete.\n\
                      It is sharper on dense data, and is the default.\n\
-                     logistic is per-pair SGNS, cage's historical loss.\n\
-                     \n\
-                     Under --gate-mode sampled, prefer softmax.\n\
-                     The mask is drawn from a profiled Poisson whose normalizer\n\
-                     IS the sampled-softmax estimand, so softmax puts the gate\n\
-                     and the loss on one estimand.\n\
-                     Against logistic that identity does not hold:\n\
-                     SGNS is a sum of per-pair decisions, with no logsumexp.\n\
-                     geu makes the same pairing a hard error under --posterior.\n\
-                     cage permits it, because its pip is a dropout rate rather\n\
-                     than a reported posterior, but it is the off-label choice.",
+                     logistic is per-pair SGNS, cage's historical loss.",
         hide = true
     )]
     pub nce_objective: NceObjectiveArg,
-
-    #[arg(
-        long = "gate-mode",
-        default_value_t = GateMode::Sampled,
-        value_enum,
-        help = "How the per-(gene, dim) selection is estimated",
-        long_help = "Which selector supplies the feature gate.\n\
-                     \n\
-                     sampled is the default, and it MEASURED BETTER.\n\
-                     It runs cage's Gibbs profiled-Poisson sampler\n\
-                     over super-cell counts,\n\
-                     installing the result as a per-epoch Bernoulli mask.\n\
-                     It gates hard, leaving roughly a twentieth of the\n\
-                     (gene, dim) table on, and that selection buys finer\n\
-                     communities: 12.0x a neighbour-agreement null against\n\
-                     learned's 10.3x, at matched budget.\n\
-                     It scans every gene on every sweep,\n\
-                     so it costs about a third more wall-clock.\n\
-                     Tune it with the --selection-* flags.\n\
-                     \n\
-                     learned is the arm `senna bge` uses,\n\
-                     and the cheaper one.\n\
-                     It fits a per-(gene, dim) Bernoulli spike-and-slab by SGD,\n\
-                     alongside the embedding, scanning no counts.\n\
-                     Its sharpness knob is --feature-gate-temp,\n\
-                     and its sparsity knob is --gate-ibp-alpha.\n\
-                     It does select (median inclusion ~0.29),\n\
-                     so prefer it when the runtime matters more\n\
-                     than the last of the resolution.\n\
-                     \n\
-                     Both arms now draw selection from the same truncated-IBP\n\
-                     ladder, so they estimate ONE quantity two ways.\n\
-                     An earlier learned arm selected nothing there,\n\
-                     with every inclusion probability above 0.95.\n\
-                     That was the inclusion KL it used at the time:\n\
-                     a penalty with a free coefficient under an NCE objective,\n\
-                     needing lambda around 1000 in cage against 1/1024 in geu.\n\
-                     The ladder replaced it and has nothing to calibrate.\n\
-                     \n\
-                     The two arms ship different tables.\n\
-                     learned bakes the gate into feature_embedding.parquet,\n\
-                     because the gate multiplied the loading during training,\n\
-                     and reports the inclusion table as feature_selection.parquet.\n\
-                     sampled ships the raw embedding plus\n\
-                     feature_posterior_mean.parquet, since there the mask was\n\
-                     regularization rather than a coefficient."
-    )]
-    pub gate_mode: GateMode,
-
-    #[arg(
-        long = "gate-ibp-alpha",
-        help = "Truncated-IBP concentration for the learned gate's per-dim inclusion\n\
-                ladder (--gate-mode learned only); unset = auto",
-        long_help = "Concentration alpha of the truncated Indian Buffet Process whose\n\
-                     ladder tilts the learned gate: dim h carries a fixed logit\n\
-                     offset h * ln(alpha/(alpha+1)), so later dims must earn their\n\
-                     inclusion against a steeper prior. This is the model's sparsity\n\
-                     knob, and it is CHOSEN, never fitted.\n\
-                     \n\
-                     Unset (the default) derives alpha from --embedding-dim so the\n\
-                     ladder spans 4 logits end to end: dim 0 starts at sigma(4)=0.98\n\
-                     and the last dim at sigma(0)=0.5, the most responsive point of\n\
-                     the sigmoid. That keeps the tail trainable at any dimension.\n\
-                     \n\
-                     SMALLER alpha means a steeper ladder and more pressure toward\n\
-                     sparsity. Do not copy the sampler's alpha=1 here: on 16 dims it\n\
-                     is an ~11-logit drop, which does not make the gate sparse but\n\
-                     freezes the tail at init — a gradient cannot recover a zeroed\n\
-                     multiplier, where Gibbs resurrects one from a likelihood ratio.\n\
-                     \n\
-                     Rejected under --gate-mode sampled, where the sampler draws the\n\
-                     mask from its own IBP and no learned gate exists to tilt.",
-        hide = true
-    )]
-    pub gate_ibp_alpha: Option<f64>,
-
-    #[arg(
-        long = "feature-gate-temp",
-        default_value_t = 1.0,
-        help = "Learned-gate temperature τ; < 1 sharpens toward 0/1 (--gate-mode learned only)",
-        hide = true
-    )]
-    pub feature_gate_temp: f32,
 
     #[arg(
         long,
@@ -694,8 +473,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      where the shared map is not enough.\n\
                      \n\
                      freeze keeps every dictionary-matched row fixed at its loaded value.\n\
-                     Neighbor-seeded rows still train, and the selection gate stays live,\n\
-                     so a gated run still ships a gate-scaled table.\n\
+                     Neighbor-seeded rows still train.\n\
                      Requires the dictionary width to equal --embedding-dim.\n\
                      The e_feat ridge is skipped: a fixed table needs no shrinkage.\n\
                      \n\
