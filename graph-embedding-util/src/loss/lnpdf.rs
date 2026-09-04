@@ -1,19 +1,21 @@
-//! Per-node Poisson log-likelihood against a **frozen** other side.
+//! Per-node log-likelihood against a **frozen** other side — the profile
+//! (multinomial) form of the bilinear Poisson score that `senna bge`'s scorer
+//! evaluates a cell under.
 //!
-//! For an anchor node `a` (a cell in the cell sweep, a feature in the feature
-//! sweep) with parameter `θ_a = [e_a ; b_a]` (length `H+1`) and the other side
-//! held fixed as `{ (e_o, b_o) }`, the score is `s_ao = ⟨e_a, e_o⟩ + b_a + b_o`
-//! and the Poisson log-likelihood is
+//! For an anchor node `a` (a cell scored against a frozen feature side) with
+//! loading `e_a` and the other side held fixed as `{ (e_o, b_o) }`, the score is
+//! `s_ao = ⟨e_a, e_o⟩ + b_o` and the Poisson log-likelihood, with the anchor's
+//! own intercept `b_a` still in, is
 //!
 //! ```text
-//!   Σ_{o ∈ pos}  n_ao · s_ao   −   scale · Σ_{o ∈ partition}  exp(s_ao)
+//!   Σ_{o ∈ pos}  n_ao · (s_ao + b_a)   −   scale · Σ_{o ∈ partition}  exp(s_ao + b_a)
 //! ```
 //!
 //! `pos` are the observed `(o, count)` edges; `partition` is the set of other-side
 //! rows summed in the rate normalizer (the whole other side for the exact
 //! small-scale case, or a frozen sampled slate with `scale = |pool|/K` at scale).
-//! The Gaussian prior on `θ_a` is supplied by the sampler (ESS draws the ellipse
-//! from it), so this function is the **likelihood only**.
+//! [`multinomial_ll`] maximizes `b_a` out analytically; nothing here supplies a
+//! prior, so this module is the **likelihood only**.
 //!
 //! Every linear predictor is clamped at [`SCORE_CLAMP`] before `exp`, matching
 //! `crate::cell_projection::SCORE_CLAMP` (f32 `exp` overflows at ~88; the shared
@@ -22,7 +24,6 @@
 //! when many small terms are added.
 
 use crate::cell_projection::SCORE_CLAMP;
-use nalgebra::DVector;
 
 /// The frozen other side of the bilinear score: row-major embeddings `e`
 /// (`[n_other × h]`) and per-row biases `b` (`[n_other]`).
@@ -208,39 +209,11 @@ fn score(e_a: &[f32], b_a: f64, o: u32, side: &FrozenSide, offset: Option<&[f32]
     (dot + b_a + f64::from(side.b[o as usize])).clamp(-SCORE_CLAMP, SCORE_CLAMP)
 }
 
-/// Per-node Poisson log-likelihood with the embedding `e_a` and bias `b_a` passed
-/// separately (see the module doc). Split this way so a caller can either sample the
-/// bias alongside the loading ([`poisson_lnpdf`], which packs `θ = [e ; b]`) or hold
-/// it fixed and sample only the `H`-dim loading.
-#[must_use]
-pub fn poisson_ll(e_a: &[f32], b_a: f64, node: &NodeTerm, side: &FrozenSide) -> f32 {
-    debug_assert_eq!(e_a.len(), side.h);
-    let mut ll = 0.0f64;
-    for &(o, n) in node.pos {
-        ll += f64::from(n) * score(e_a, b_a, o, side, node.offset);
-    }
-    let mut part = 0.0f64;
-    for &o in node.partition {
-        part += score(e_a, b_a, o, side, node.offset).exp();
-    }
-    ll -= node.partition_scale * part;
-    ll as f32
-}
-
-/// Per-node Poisson log-likelihood (see the module doc). `theta` is `[e_a ; b_a]`
-/// of length `h + 1` — the bias is the last coordinate and is sampled with the rest.
-#[must_use]
-pub fn poisson_lnpdf(theta: &DVector<f32>, node: &NodeTerm, side: &FrozenSide) -> f32 {
-    let h = side.h;
-    debug_assert_eq!(theta.len(), h + 1);
-    poisson_ll(&theta.as_slice()[..h], f64::from(theta[h]), node, side)
-}
-
 /// Per-node **profile** log-likelihood: the Poisson with its intercept `b_a`
 /// analytically maximized out, which is exactly the multinomial (softmax)
 /// likelihood over the other side.
 ///
-/// # Why this and not [`poisson_ll`]
+/// # Why the profile likelihood
 ///
 /// `b_a` is a pure nuisance parameter — it sets the anchor's overall rate, not
 /// which direction it loads — and it has a closed-form optimum:
@@ -257,7 +230,7 @@ pub fn poisson_lnpdf(theta: &DVector<f32>, node: &NodeTerm, side: &FrozenSide) -
 /// ```
 ///
 /// with `s_o = ⟨e_a, e_o⟩ + b_o` — no `b_a` anywhere. Three consequences, and
-/// they are the reason this is the default for the gate:
+/// they are the reason the scorer uses it:
 ///
 /// 1. **No intercept to get wrong.** Holding `b_a` fixed at a value fitted under
 ///    a *different* objective (the trainer is NCE, not Poisson) is what made the
@@ -277,8 +250,8 @@ pub fn poisson_lnpdf(theta: &DVector<f32>, node: &NodeTerm, side: &FrozenSide) -
 #[must_use]
 pub fn multinomial_ll(e_a: &[f32], node: &NodeTerm, side: &FrozenSide) -> f32 {
     debug_assert_eq!(e_a.len(), side.h);
-    // The intercept is profiled out, so any constant here would cancel; 0 keeps
-    // `score` shared with the Poisson path.
+    // The intercept is profiled out, so any constant passed as `b_a` would
+    // cancel; 0 it is.
     // The collapsed form is exact only while no observed score can saturate
     // `SCORE_CLAMP`; past that the clamp is nonlinear in `e_a` and the fast path
     // stops agreeing with the walk by a constant. Checking costs one norm.
@@ -336,5 +309,4 @@ pub fn multinomial_ll(e_a: &[f32], node: &NodeTerm, side: &FrozenSide) -> f32 {
 }
 
 #[cfg(test)]
-#[path = "lnpdf_tests.rs"]
-mod lnpdf_tests;
+mod tests;
