@@ -112,3 +112,76 @@ fn raising_one_module_on_a_gene_lowers_the_others() {
         );
     }
 }
+
+/// The training likelihood must score the *same* `β` the dictionary reports.
+/// Driving the multinomial head with one-hot rows (row `g` observes gene `g`
+/// alone, every gene visible and masked) returns `log p_g = log Σ_t θ_t β_tg`
+/// for each gene, so the full-vocab probabilities must sum to one and agree
+/// gene-wise with `θ · exp(get_dictionary)`. Feeding the partition from the
+/// centered logits but the rate from the raw ones breaks both.
+#[test]
+fn masked_likelihood_scores_the_dictionary_it_writes() {
+    use candle_util::decoder::MaskedNbTarget;
+    let dev = Device::Cpu;
+    let dec = decoder_with(alpha_rows());
+
+    let log_theta = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], (1, K), &dev)
+        .unwrap()
+        .log()
+        .unwrap()
+        .broadcast_as((D, K))
+        .unwrap()
+        .contiguous()
+        .unwrap();
+    let indices = Tensor::arange(0u32, D as u32, &dev)
+        .unwrap()
+        .unsqueeze(0)
+        .unwrap()
+        .broadcast_as((D, D))
+        .unwrap()
+        .contiguous()
+        .unwrap();
+    let values = Tensor::eye(D, DType::F32, &dev).unwrap();
+    let ones = Tensor::ones((D, D), DType::F32, &dev).unwrap();
+    let lib = Tensor::ones((D, 1), DType::F32, &dev).unwrap();
+    let target = MaskedNbTarget {
+        indices: &indices,
+        residual: None,
+        values: &values,
+        lib: &lib,
+        mask: &ones,
+    };
+
+    let full_kd = dec.full_logits_kd().unwrap();
+    let logz = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd).unwrap();
+    let log_p = dec
+        .impute_masked_multinomial(&log_theta, &target, &logz)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+    let total: f32 = log_p.iter().map(|l| l.exp()).sum();
+    assert!(
+        (total - 1.0).abs() < 1e-4,
+        "Σ_g p_g over the full vocab must be 1, got {total:.6} from {log_p:?}"
+    );
+
+    // Gene-wise agreement with the dictionary: p_g = Σ_t θ_t β_tg.
+    let beta_dk = dec.get_dictionary().unwrap().exp().unwrap();
+    let theta_k1 = log_theta.i(0).unwrap().exp().unwrap().unsqueeze(1).unwrap();
+    let expected = beta_dk
+        .matmul(&theta_k1)
+        .unwrap()
+        .squeeze(1)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for g in 0..D {
+        assert!(
+            (log_p[g].exp() - expected[g]).abs() < 1e-5,
+            "gene {g}: likelihood p={} but dictionary p={}",
+            log_p[g].exp(),
+            expected[g]
+        );
+    }
+}
