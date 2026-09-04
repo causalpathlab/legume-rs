@@ -3,9 +3,11 @@
 //!
 //! Preferred invocation is `senna plot-topic --from {prefix}.senna.json`;
 //! the manifest carries data/batch/latent/dictionary paths produced by
-//! `senna topic` / `masked-topic` / `joint-topic`. CLI flags override
-//! manifest values, mirroring the `senna plot` resolution rules at
-//! `fit_plot.rs:428`.
+//! `senna topic` / `masked-topic` / `joint-topic`. An embedding run with no
+//! topic latent (`simba`, `bge --skip-etm`) falls back to its cell embedding
+//! and gene table: the bars become each cell's softmax over the embedding
+//! axes. CLI flags override manifest values, mirroring the `senna plot`
+//! resolution rules at `fit_plot.rs:428`.
 //!
 //! Outputs default to PDF only — pass `--svg` / `--png` to also emit
 //! those formats. Layout under `{out}.plots/`:
@@ -93,7 +95,7 @@ pub struct PlotTopicArgs {
     #[arg(
         long,
         short = 'f',
-        help = "Run manifest JSON from `senna topic`/`masked-topic`/`joint-topic`",
+        help = "Run manifest JSON (topic families, or an embedding run via its cell embedding)",
         long_help = "Fills in --latent, --dictionary and the batch-file list.\n\
                      They come from the manifest's outputs and data sections.\n\
                      CLI flags still override individual values."
@@ -247,8 +249,7 @@ pub fn fit_plot_topic(args: &PlotTopicArgs) -> anyhow::Result<()> {
 
     // Topic IDs: parse from "T{c}" naming when present so the palette
     // keys by topic-id rather than column index. Falls back to 0..K.
-    let topic_ids = try_parse_axis_ids(&topic_cols, "T")
-        .unwrap_or_else(|| (0..n_topics as i64).collect::<Vec<_>>());
+    let topic_ids = axis_ids_or_positions(&topic_cols, "T");
 
     let palette = palette::resolve(&resolved.palette, n_topics);
     // One color per *column position*, but keyed by topic-id so a topic
@@ -279,7 +280,7 @@ pub fn fit_plot_topic(args: &PlotTopicArgs) -> anyhow::Result<()> {
 
     if !args.no_struct {
         let group_labels = match args.group_by {
-            GroupBy::Batch => load_batch_labels(&resolved, n_cells)?,
+            GroupBy::Batch => load_batch_labels(&resolved, &cell_names)?,
             GroupBy::Annotation => load_annotation_labels(&resolved, &cell_names)?,
         };
         render_structure_plots(
@@ -329,24 +330,31 @@ fn resolve_inputs(args: &PlotTopicArgs) -> anyhow::Result<ResolvedInputs> {
         .as_deref()
         .map(String::from)
         .or_else(|| {
-            manifest
-                .as_ref()
-                .and_then(|m| m.outputs.latent.as_deref())
-                .map(resolve_str)
+            let m = manifest.as_ref()?;
+            // The embedding fallback is for the frozen-gene-table kinds, whose Z
+            // and gene table are the model itself. A gem-family run also records
+            // both slots, but its gene table is a splice offset and its Z carries
+            // library size, so exponentiating either would draw nonsense.
+            if m.outputs.latent.is_none() && !m.kind.has_frozen_gene_table() {
+                return None;
+            }
+            m.outputs.structure_latent().map(resolve_str)
         })
-        .ok_or_else(|| anyhow::anyhow!("no --latent given and manifest has no outputs.latent"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no --latent given and manifest has no outputs.latent (an embedding run \
+                 falls back to outputs.cell_embedding only for bge / simba)"
+            )
+        })?;
 
-    // Dictionary preference: empirical (full-resolution) when present,
-    // else the coarse-then-expanded `dictionary`. Mirrors the same
-    // preference `senna annotate-by-enrichment` uses.
+    // The gene table paired with the latent above; a signed one (an
+    // embedding run's gene table) is exponentiated and column-normalised by
+    // the dictionary panel.
     let dictionary = args.dictionary.as_deref().map(String::from).or_else(|| {
-        manifest.as_ref().and_then(|m| {
-            m.outputs
-                .dictionary_empirical
-                .as_deref()
-                .or_else(|| m.outputs.gene_dictionary())
-                .map(&resolve_str)
-        })
+        manifest
+            .as_ref()
+            .and_then(|m| m.outputs.structure_dictionary())
+            .map(resolve_str)
     });
 
     let batch_files = manifest
@@ -394,11 +402,65 @@ fn resolve_inputs(args: &PlotTopicArgs) -> anyhow::Result<ResolvedInputs> {
     })
 }
 
-/// Per-cell batch label, length == `n_cells`, in `latent.parquet` row
-/// order. Reads the original batch-file paths from the manifest
-/// (matching pinto's "paths-in-json" pattern); falls back to a synthetic
-/// label per data-file when no batch files were provided.
-fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Result<Vec<Box<str>>> {
+/// Per-cell batch label, one per latent row, in `latent.parquet` row order.
+/// Reads the original batch-file paths from the manifest (matching pinto's
+/// "paths-in-json" pattern); falls back to a synthetic label per data-file
+/// when no batch files were provided.
+///
+/// A run that QC-filtered its cells writes fewer latent rows than the files
+/// have cells, so a by-count assembly cannot line up. The labels are then
+/// keyed by barcode: each data file's column names are zipped with its
+/// labels, and every latent row is looked up by its name, with or without
+/// the loader's `@batch` suffix.
+fn load_batch_labels(
+    resolved: &ResolvedInputs,
+    cell_names: &[Box<str>],
+) -> anyhow::Result<Vec<Box<str>>> {
+    use data_beans::convert::try_open_or_convert;
+
+    let n_cells = cell_names.len();
+    let by_count = load_batch_labels_by_count(resolved, n_cells)?;
+    if by_count.len() == n_cells {
+        return Ok(by_count);
+    }
+    info!(
+        "batch files list {} cells but the latent has {n_cells} rows (a QC-filtered run); \
+         matching the labels by barcode",
+        by_count.len()
+    );
+    let mut by_barcode: FxHashMap<Box<str>, Box<str>> = FxHashMap::default();
+    let mut labels = by_count.into_iter();
+    for df in &resolved.data_files {
+        for name in try_open_or_convert(df)?.column_names()? {
+            let label = labels.next().ok_or_else(|| {
+                anyhow::anyhow!("batch labels run out before the cells of {df} (stale data.batch?)")
+            })?;
+            by_barcode.insert(name, label);
+        }
+    }
+    cell_names
+        .iter()
+        .map(|c| {
+            let bare = c.rsplit_once('@').map_or(c.as_ref(), |(b, _)| b);
+            by_barcode
+                .get(c.as_ref())
+                .or_else(|| by_barcode.get(bare))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "latent row {c} is not a column of any data file in the manifest"
+                    )
+                })
+        })
+        .collect()
+}
+
+/// The labels as the batch files / data files state them, in file order.
+/// Its length is the files' cell count, which the caller checks.
+fn load_batch_labels_by_count(
+    resolved: &ResolvedInputs,
+    n_cells: usize,
+) -> anyhow::Result<Vec<Box<str>>> {
     use matrix_util::common_io::read_lines;
 
     if !resolved.batch_files.is_empty() {
@@ -408,13 +470,6 @@ fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Resul
             for s in read_lines(bf)? {
                 all.push(s);
             }
-        }
-        if all.len() != n_cells {
-            anyhow::bail!(
-                "batch labels total {} != latent rows {} (manifest data.batch may be stale)",
-                all.len(),
-                n_cells,
-            );
         }
         return Ok(all);
     }
@@ -468,13 +523,6 @@ fn load_batch_labels(resolved: &ResolvedInputs, n_cells: usize) -> anyhow::Resul
             .num_columns()
             .ok_or_else(|| anyhow::anyhow!("data file {df} has no column count"))?;
         all.extend(std::iter::repeat_n(label.clone(), n));
-    }
-    if all.len() != n_cells {
-        anyhow::bail!(
-            "fallback batch labels {} != latent rows {} (data_files inconsistent)",
-            all.len(),
-            n_cells,
-        );
     }
     Ok(all)
 }
@@ -1034,8 +1082,7 @@ fn render_dict_plot(
     );
 
     // Verify dict columns parse to topic IDs and align with topic_ids.
-    let dict_topic_ids = try_parse_axis_ids(&dict_cols, "T")
-        .unwrap_or_else(|| (0..n_topics as i64).collect::<Vec<_>>());
+    let dict_topic_ids = axis_ids_or_positions(&dict_cols, "T");
 
     // Display gene labels as the canonical (HGNC) symbol when the axis is
     // gene-like: `ENSG00000105329_TGFB1` → `TGFB1`. A no-op for axes that

@@ -25,6 +25,10 @@ use rustc_hash::FxHashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+#[path = "scatter_tests.rs"]
+mod tests;
+
 const PT_PER_INCH: f32 = 72.0;
 
 /// Source of the per-cell group ID used for coloring.
@@ -643,10 +647,12 @@ fn resolve_inputs(args: &PlotArgs) -> anyhow::Result<ResolvedInputs> {
             )
         })?;
 
+    // Log θ when the run resolved topics, else the cell embedding: argmax
+    // over its axes is the natural "dominant direction" colouring.
     let topics = args.topics.as_deref().map(String::from).or_else(|| {
         manifest
             .as_ref()
-            .and_then(|m| m.outputs.latent.as_deref())
+            .and_then(|m| m.outputs.structure_latent())
             .map(resolve_opt)
     });
 
@@ -947,10 +953,11 @@ fn read_cell_coords(path: &str) -> anyhow::Result<CellCoords> {
     Ok((rows, by_name))
 }
 
-/// Argmax over cells × K topic proportions, returning the **topic ID**
-/// per row (parsed from the column name), not the column position. So a
-/// downstream `T5` legend swatch always means topic 5, even if the
-/// columns aren't in 0..K-1 order on disk.
+/// Argmax over cells × K, returning the **axis ID** per row rather than
+/// the column position: a topic table names its columns `T{c}`, so a
+/// downstream `T5` legend swatch always means topic 5 even if the columns
+/// aren't in 0..K-1 order on disk. An embedding table (`h{c}`) has no IDs of
+/// its own, so its axes are numbered by position.
 fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>> {
     let MatWithNames { cols, mat, .. } = Mat::from_parquet(path)?;
     if mat.nrows() != n_cells_expected {
@@ -960,12 +967,16 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
             n_cells_expected
         );
     }
-    let topic_ids = crate::embed_common::try_parse_axis_ids(&cols, "T").ok_or_else(|| {
-        anyhow::anyhow!(
-            "topics parquet at {path} has columns that aren't topic IDs \
-             (expected \"T{{c}}\" or bare integer)"
-        )
-    })?;
+    // `T{c}` carries an ID; `h{c}` is an embedding axis, numbered by position;
+    // anything else is refused rather than argmaxed as if it were a composition.
+    let topic_ids = crate::embed_common::try_parse_axis_ids(&cols, "T")
+        .or_else(|| crate::embed_common::try_parse_axis_ids(&cols, "h"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "topics parquet at {path} has columns that are neither topic IDs (`T{{c}}`) \
+                 nor embedding axes (`h{{c}}`)"
+            )
+        })?;
     let mut out = Vec::with_capacity(mat.nrows());
     for i in 0..mat.nrows() {
         let mut best_j = 0usize;

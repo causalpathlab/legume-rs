@@ -229,8 +229,11 @@ pub enum RunKind {
     /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
     /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw
     /// gene table in `feature_loading`, SIMBA's fixed-T co-embedded genes in
-    /// `feature_embedding`. No decoder and no projector, so `predict`,
-    /// `probe`, `impute` and `update` refuse it.
+    /// `feature_embedding`. No decoder. Every downstream command reads it as
+    /// a `bge` run: `predict`, `probe` and `impute` project a query onto the
+    /// frozen gene table with a zero gene bias (SIMBA's score is a pure dot
+    /// product), `deconvolve` takes the gene axis and Z, and `update` re-fits
+    /// on the union.
     Simba,
 }
 
@@ -340,6 +343,56 @@ impl RunKind {
     #[must_use]
     pub fn is_masked_family(self) -> bool {
         matches!(self, RunKind::Itopic | RunKind::MaskedVae)
+    }
+
+    /// Kinds whose whole gene-side model is a frozen `gene × H` table in
+    /// `feature_loading` — no checkpoint, no encoder — so a query is placed
+    /// by projecting each cell onto it (`predict`, `probe`, `impute`,
+    /// `deconvolve`, `predict --bulk` all go through `BgeEmbedding`).
+    ///
+    /// A full match on purpose: a new kind must say whether it reads this
+    /// way before this compiles, rather than being missed at six call sites.
+    #[must_use]
+    pub fn has_frozen_gene_table(self) -> bool {
+        match self {
+            RunKind::Bge | RunKind::Simba => true,
+            RunKind::Topic
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::JointTopic
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem
+            | RunKind::GemEncoder => false,
+        }
+    }
+
+    /// Whether the frozen gene table comes with a per-gene bias
+    /// (`feature_bias.parquet`). bge fits one and cannot be scored without
+    /// it; SIMBA's score is a pure dot product, so its bias is zero by
+    /// construction and the file never exists. Only meaningful for kinds
+    /// with [`Self::has_frozen_gene_table`].
+    #[must_use]
+    pub fn has_gene_bias(self) -> bool {
+        match self {
+            RunKind::Bge => true,
+            RunKind::Simba => false,
+            // Not a frozen-gene-table kind; the question does not arise.
+            RunKind::Topic
+            | RunKind::Itopic
+            | RunKind::MaskedVae
+            | RunKind::JointTopic
+            | RunKind::Vae
+            | RunKind::Svd
+            | RunKind::JointSvd
+            | RunKind::Fne
+            | RunKind::ResolveEmbeddingSpace
+            | RunKind::Gem
+            | RunKind::GemEncoder => false,
+        }
     }
 
     /// True when `{out}.latent.parquet` holds `log θ` on the probability
@@ -676,10 +729,40 @@ impl RunOutputs {
     /// (Z stored in `latent`, no `cell_embedding`) working unchanged.
     ///
     /// Topic-semantics consumers — `plot --colour-by topic`, `plot-topic` —
-    /// must NOT use this; they need θ specifically and should read `latent`.
+    /// must NOT use this; they need θ first and go through
+    /// [`RunOutputs::structure_latent`], whose priority is the reverse.
     #[must_use]
     pub fn geometry_latent(&self) -> Option<&str> {
         self.cell_embedding.as_deref().or(self.latent.as_deref())
+    }
+
+    /// The cell × K table to use for a COMPOSITION view — `plot-topic`'s
+    /// structure bars, `plot --colour-by topic`: prefer `latent` (log θ),
+    /// fall back to `cell_embedding`.
+    ///
+    /// Those consumers exponentiate and row-normalise whatever they read, so
+    /// a signed embedding falls through the same arithmetic as a per-cell
+    /// softmax over its axes: an honest "which direction dominates this
+    /// cell" picture for a run with no topics (`simba`, `bge --skip-etm`).
+    /// The priority is the opposite of [`RunOutputs::geometry_latent`] on
+    /// purpose: a topic-resolving embedding run has both tables, and θ is the
+    /// composition while Z is the geometry.
+    #[must_use]
+    pub fn structure_latent(&self) -> Option<&str> {
+        self.latent.as_deref().or(self.cell_embedding.as_deref())
+    }
+
+    /// The gene × K table paired with [`RunOutputs::structure_latent`]:
+    /// `dictionary_empirical` (full resolution), else the topic / SVD
+    /// dictionary, else the raw gene table of an embedding run. The last
+    /// pairs with `cell_embedding` — both are `H` wide — which is what keeps
+    /// the dictionary panel's K check honest when the latent fell through.
+    #[must_use]
+    pub fn structure_dictionary(&self) -> Option<&str> {
+        self.dictionary_empirical
+            .as_deref()
+            .or_else(|| self.gene_dictionary())
+            .or(self.feature_loading.as_deref())
     }
 
     /// Every recorded table with the `[units x h]` shape an embedding geometry
@@ -1351,6 +1434,25 @@ mod tests {
             back.layout.cell_coords.as_deref(),
             Some("run1.cell_coords.parquet")
         );
+    }
+
+    /// Composition views read the latent first and only fall back to the
+    /// embedding; geometry consumers do the opposite. The dictionary side
+    /// falls through to the gene table in the same order.
+    #[test]
+    fn structure_tables_prefer_topics_then_fall_back_to_the_embedding() {
+        let mut o = RunOutputs::default();
+        assert_eq!(o.structure_latent(), None);
+        assert_eq!(o.structure_dictionary(), None);
+        o.cell_embedding = Some("r.cell_embedding.parquet".into());
+        o.feature_loading = Some("r.feature_loading.parquet".into());
+        assert_eq!(o.structure_latent(), Some("r.cell_embedding.parquet"));
+        assert_eq!(o.structure_dictionary(), Some("r.feature_loading.parquet"));
+        o.latent = Some("r.latent.parquet".into());
+        o.softmax_dictionary = Some("r.dictionary.parquet".into());
+        assert_eq!(o.structure_latent(), Some("r.latent.parquet"));
+        assert_eq!(o.structure_dictionary(), Some("r.dictionary.parquet"));
+        assert_eq!(o.geometry_latent(), Some("r.cell_embedding.parquet"));
     }
 
     #[test]

@@ -100,7 +100,7 @@ pub struct ProbeArgs {
         help = "Compute device",
         long_help = "Compute device. `cuda` / `metal` require the matching cargo feature.\n\
                      \n\
-                     Matters most for a bge model, which has no encoder: probe fits every\n\
+                     Matters most for a bge or simba model, which has no encoder: probe fits every\n\
                      cell by Poisson SGD, and it does so TWICE — once for the calibration\n\
                      arm and once for the query."
     )]
@@ -266,34 +266,33 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
     let kind = resolve_run_kind(&args.model)?;
     match kind {
         k if k.is_masked_family() => probe_masked(args),
-        RunKind::Bge => probe_bge(args),
+        k if k.has_frozen_gene_table() => probe_bge(args, kind),
         RunKind::Topic | RunKind::Vae => probe_fit_only(args, kind),
         other => anyhow::bail!(
             "probe does not support a '{}' run. Supported: masked-topic / masked-sbp / \
-             masked-vae, topic, vae, bge.",
+             masked-vae, topic, vae, bge, simba.",
             other.as_str()
         ),
     }
 }
 
-/// Fit score for a `senna bge` run.
+/// Fit score for a `senna bge` or `senna simba` run.
 ///
 /// No refit is possible here for the same reason as the dense families, only more so: bge's
 /// only learnable object on the gene side is ρ itself (`[D,H]`, ~2.5M numbers at D=20k),
 /// which a few hundred query cells cannot identify. Chain
 /// `bge --skip-etm` → `masked-topic --freeze-feature-embedding` → `probe --counterfactual`
 /// when the counterfactual is what you want.
-fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
+fn probe_bge(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyhow::Result<()> {
     use crate::bge::score::BgeEmbedding;
 
     anyhow::ensure!(
         !args.counterfactual,
-        "--counterfactual is available for masked models only; {} is a `senna bge` run, whose \
-         gene-side parameter is ρ itself (~2.5M numbers at D=20k) rather than a K×H block. See \
-         the `probe_bge` docs for the chaining route.",
+        "--counterfactual is available for masked models only; {} is a `senna {kind}` run, \
+         whose gene-side parameter is the whole gene table rather than a K×H block. See the \
+         `probe_bge` docs for the chaining route.",
         args.model
     );
-
     let model = BgeEmbedding::open(&args.model)?;
     // No coverage floor: a thin panel is exactly what probe exists to score.
     let qopts = crate::topic::eval::QueryNameOpts::default();
@@ -315,7 +314,7 @@ fn probe_bge(args: &ProbeArgs) -> anyhow::Result<()> {
 
     write_verdict(Verdict {
         args,
-        model_type: "bge",
+        model_type: kind.as_str(),
         cal_fit: per_cell_fit(&cal.llik, &cal.total),
         q_fit: per_cell_fit(&query.llik, &query.total),
         q_names: query.data_vec.column_names()?,

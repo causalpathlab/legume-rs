@@ -185,7 +185,7 @@ fn print_logo() {
                   \n\
                   `senna plot` auto-runs steps 3 + 6 on demand.\n\
                   \n\
-                  Bulk deconvolution is a side branch off a `bge` run.\n\
+                  Bulk deconvolution is a side branch off a `bge` or `simba` run.\n\
                   It needs an annotation and bulk counts, plus the single-cell\n\
                   counts the reference profiles are measured from.\n\
                   \n  \
@@ -402,8 +402,14 @@ enum Commands {
                       The loss is PBG's softmax over batch and uniform negatives,\n\
                       corrupting the cell side and the gene side alike.\n\
                       Row-wise Adagrad and a stochastic weight decay complete the recipe.\n\
-                      There are no pseudobulks, no gene modules and no projection step,\n\
+                      There are no pseudobulks and no gene modules,\n\
                       so this is the pure cell-level reference for `senna bge`.\n\
+                      \n\
+                      Every downstream command reads it as it reads a bge run.\n\
+                      predict, impute and probe project a query onto the frozen gene table,\n\
+                      with a zero gene bias, since SIMBA scores a pure dot product.\n\
+                      deconvolve takes the gene axis and Z; update re-fits on the union.\n\
+                      plot-topic shows each cell's softmax over the embedding axes.\n\
                       \n\
                       HVG selection HARD-SUBSETS the embedded genes here, as in SIMBA.\n\
                       SIMBA's paper takes 2000 genes from its own selector.\n\
@@ -710,8 +716,8 @@ enum Commands {
                       senna update new.zarr --model M_v1 -o M_v2\n\
                       \n\
                       Families: topic, masked-topic, masked-sbp, masked-vae, vae.\n\
-                      For svd this re-fits on the union — there are no weights to\n\
-                      warm-start. bge carries its learned gene modules (membership and\n\
+                      For svd and simba this re-fits on the union — there are no weights\n\
+                      to warm-start. bge carries its learned gene modules (membership and\n\
                       module dictionary) as the warm start; genes new to the union\n\
                       axis are initialized through them."
     )]
@@ -721,7 +727,7 @@ enum Commands {
         about = "Impute full-feature counts on new cells by kNN over a reference latent.",
         long_about = "Two-stage post-hoc imputation:\n  \
                       1. Place new sparse-panel data in the model's latent space.\n  \
-                      \x20  Topic-family, vae, and bge models run the predict\n  \
+                      \x20  Topic-family, vae, bge and simba models run the predict\n  \
                       \x20  pipeline internally; svd models are projected\n  \
                       \x20  through the frozen dictionary.\n  \
                       2. For each new cell, find its K nearest reference cells\n  \
