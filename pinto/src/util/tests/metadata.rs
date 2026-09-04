@@ -29,17 +29,12 @@ fn metadata_roundtrip_lc() {
             genes_scored: 10,
         }),
         // A channelized `lc` run reports the structural fact of its feature
-        // axis. The three `delta_*` fields stay `None` because `lc` runs no
-        // splice sampler: "no contrast was fit" and "the contrast came out
-        // empty" are different findings and must stay distinguishable.
+        // axis.
         Some(SpliceTrackInfo {
             n_rows: 36000,
             n_delta_identified: 13000,
             nascent_count_fraction: 0.21,
             delta_base: DELTA_BASE_SPLICED.to_string(),
-            delta_from_refresh: None,
-            delta_median_counts: None,
-            delta_counts_per_pseudobulk: None,
         }),
         &[0, 1, 2],
     );
@@ -73,10 +68,6 @@ fn metadata_roundtrip_lc() {
     assert_eq!(splice.n_rows, 36000);
     assert_eq!(splice.n_delta_identified, 13000);
     assert_eq!(splice.delta_base, DELTA_BASE_SPLICED);
-    assert!(
-        splice.delta_from_refresh.is_none(),
-        "lc runs no splice sampler"
-    );
 }
 
 #[test]
@@ -103,9 +94,6 @@ fn metadata_roundtrip_cage() {
             n_delta_identified: 15000,
             nascent_count_fraction: 0.23,
             delta_base: DELTA_BASE_SPLICED.to_string(),
-            delta_from_refresh: Some(true),
-            delta_median_counts: Some(19.0),
-            delta_counts_per_pseudobulk: Some(0.14),
         }),
     );
     let path = dir.path().join("run.pinto.json");
@@ -121,10 +109,6 @@ fn metadata_roundtrip_cage() {
     assert!(back.outputs.pb_embedding.is_some());
     assert!(back.outputs.pb_bias.is_some());
     assert!(back.outputs.cell_pb.is_some());
-    assert_eq!(
-        back.outputs.feature_posterior_mean,
-        Some(format!("{prefix}.feature_posterior_mean.parquet"))
-    );
     assert!(back.outputs.feature_embedding.is_some());
     assert!(back.outputs.gene_bias.is_some());
     assert!(back.outputs.scores.is_some());
@@ -136,10 +120,6 @@ fn metadata_roundtrip_cage() {
     assert_eq!(splice.n_rows, 40000);
     assert_eq!(splice.n_delta_identified, 15000);
     assert_eq!(splice.delta_base, "spliced");
-    assert_eq!(splice.delta_from_refresh, Some(true));
-    // Structural identifiability and usable evidence are different findings
-    // and both have to survive the round-trip.
-    assert_eq!(splice.delta_counts_per_pseudobulk, Some(0.14));
     assert!(back.outputs.batch_effects.is_some());
     assert!(back.outputs.clusters.is_none());
     let levels = back.levels.expect("levels");

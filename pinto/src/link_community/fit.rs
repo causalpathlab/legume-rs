@@ -622,9 +622,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 graph: (&knn).into(),
             },
             merge_summary,
-            // `lc` runs no splice sampler, so the three `delta_*` fields stay
-            // `None`: what it can report is the structural fact of the axis,
-            // not a fitted contrast.
+            // What `lc` can report is the structural fact of the axis, not a
+            // fitted contrast.
             gene_axis
                 .report_delta_identifiability(&row_totals)
                 .map(|r| crate::util::metadata::SpliceTrackInfo {
@@ -632,9 +631,6 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     n_delta_identified: r.n_identified,
                     nascent_count_fraction: r.nascent_fraction,
                     delta_base: crate::util::metadata::DELTA_BASE_SPLICED.to_string(),
-                    delta_from_refresh: None,
-                    delta_median_counts: None,
-                    delta_counts_per_pseudobulk: None,
                 }),
             &cascade_level_indices,
         );
