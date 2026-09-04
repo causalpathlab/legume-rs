@@ -24,7 +24,7 @@ use crate::loss::{
     PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
     StratifiedSampler,
 };
-use crate::model::{FeatModules, JointEmbedModel, GATE_KL_REF_UNITS, GATE_KL_STEP_WEIGHT};
+use crate::model::{FeatModules, JointEmbedModel};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Tensor};
 use candle_util::candle_nn::AdamW;
@@ -393,21 +393,6 @@ pub fn train_composite(
     };
 
     let batches_per_epoch = resolve_batches_per_epoch(params, max_axis_units);
-    // The gate KL used to be `λ/batch_size`; it is now pinned to the reference
-    // so a throughput knob stops retuning feature sparsity. At the default that
-    // is the same number, but a non-default `--batch-size` DOES change results
-    // versus older builds, so say so rather than let it look like seed noise.
-    if params.batch_size != GATE_KL_REF_UNITS as usize
-        && ctx.axes.iter().any(|a| a.model.gate.is_some())
-    {
-        info!(
-            "gate KL is pinned at 1/{:.0} (was 1/batch_size); with --batch-size {} \
-             the gate is {:.2}x the strength older builds applied",
-            GATE_KL_REF_UNITS,
-            params.batch_size,
-            params.batch_size as f64 / GATE_KL_REF_UNITS
-        );
-    }
     log::info!(
         "train_composite: {} epochs × {} batches (auto={}, max_axis_units={})",
         params.epochs,
@@ -417,15 +402,9 @@ pub fn train_composite(
     );
 
     for epoch in 0..params.epochs {
-        // One `z ~ Bern(pip)` draw for the whole epoch, shared by every axis.
-        //
-        // Per-EPOCH, not per-minibatch: `z` is a latent for the DATASET, so a per-batch
-        // draw would model it as if each minibatch had its own inclusion state and would
-        // add gradient variance for nothing. No-op unless a `gate_pip` is installed.
-        ctx.axes[0].model.resample_gate_mask()?;
         // Release the membership once the warm-up is over. Pools are refreshed at the
         // END of each epoch below, so the first trained epoch still contrasts within
-        // the warm-start modules — one epoch of lag, the same as the gate mask.
+        // the warm-start modules — one epoch of lag.
         if let Some(st) = &module_state {
             if epoch == st.params.warmup_epochs && st.modules.is_frozen() {
                 st.modules.set_frozen(false);
@@ -456,28 +435,6 @@ pub fn train_composite(
                 if let Some(l2) = ctx.axes[0].model.feature_ridge(f64::from(ridge_lambda))? {
                     loss = (loss + l2)?;
                 }
-            }
-            // SuSiE single-effect KL on the gate (identity + velocity): the fixed
-            // `GATE_KL_WEIGHT · (categorical + Gaussian) KL`. `None` when the gate is
-            // off. The shared gate lives on every axis identically; axes[0] is the
-            // representative (counted once, not once per axis).
-            //
-            // Weighted by `gate_kl_step_weight`. `data_units = 1` is deliberate: it
-            // reproduces the historical level `λ/1024` EXACTLY at the default
-            // `--batch-size`, which is what makes this a correctness fix. The share
-            // `w/u` therefore still carries a `1/axis_count` factor, so
-            // `--phase1-cells-per-pb` and `--num-levels` continue to retune the prior.
-            // Normalizing that away is a real behavioural change and is deferred.
-            //
-            // This replaced `GATE_KL_WEIGHT / batch_size`, which made that share
-            // `∝ 1/B`: `--batch-size 4096` quartered the prior and `64` raised it 16×,
-            // so a throughput flag retuned feature sparsity. At the default
-            // `--batch-size 1024` — which both `senna bge` and `senna gem` carry — the
-            // new weight is numerically identical to the old one, so default runs are
-            // unchanged.
-            if let Some(kl) = ctx.axes[0].model.gate_kl()? {
-                let w = GATE_KL_STEP_WEIGHT;
-                loss = (loss + kl.affine(w, 0.0)?)?;
             }
             // L2 (ridge) shrinkage on the per-gene splice offset δ_g (factored
             // models with a splice split). `mean(δ_g²)` keeps λ scale-invariant

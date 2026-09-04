@@ -367,19 +367,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 }
                 None => None,
             },
-            // Per-(gene, dim) Bernoulli spike-and-slab feature gate, ALWAYS ON for bge
-            // (inclusion KL against a learned π_h + Gaussian effect KL, at the fixed
-            // internal weight). There is no null absorber and no simplex — that was the
-            // retired softmax. Temperature is the one knob.
-            feature_gate: Some(ge::FeatureGateConfig {
-                temperature: args.feature_gate_temp,
-                ibp_alpha: args.gate_ibp_alpha,
-            }),
         })
     };
 
-    // Single-pass gated fit over the full feature axis — the feature gate handles
-    // feature selection during training (no post-hoc null-drop / refit).
+    // Single-pass fit over the full feature axis (no post-hoc null-drop / refit).
     let cfg = build_config(&unified)?;
     let out = ge::fit(&mut unified, cfg)?;
 
@@ -458,9 +449,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         );
         let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
 
-        // Every gene is trained + gated (no held-out projection), so the co-embed runs
-        // directly on the trained ρ. The gate zeroes deselected genes' embeddings, and
-        // the co-embed maps them onto the cell manifold like any other row.
+        // Every gene is trained (no held-out projection), so the co-embed runs
+        // directly on the trained ρ.
         ge::write_feature_coembedding(
             &args.out,
             &e_cell_cpu,

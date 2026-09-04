@@ -17,9 +17,7 @@ mod samplers;
 mod setup;
 
 pub use batch_fold::BatchGeneFold;
-pub use config::{
-    FeatFactorSpec, FeatureGateConfig, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned,
-};
+pub use config::{FeatFactorSpec, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned};
 pub use lift::{CellLineage, LineageQc};
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
@@ -200,22 +198,17 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         p1.epochs = warmup_epochs;
         let cell_prefix = if use_cell_axis { "cell + " } else { "" };
         let n_pb_levels = num_levels;
-        let under = if cell_model.is_jittered() {
-            " UNDER THE SAMPLED MASK (z ~ Bern(pip), redrawn once per epoch)"
-        } else {
-            ""
-        };
         if refine_epochs > 0 {
             info!(
                 "Phase 1 (joint) = LINEAGE WARM-UP — {}/{} epochs; the DAG refine gets the other \
                  {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb \
-                 level(s){}",
-                warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels, under,
+                 level(s)",
+                warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels,
             );
         } else {
             info!(
-                "Phase 1 (joint) — features + {}{} pb level(s), {} epochs{}",
-                cell_prefix, n_pb_levels, warmup_epochs, under,
+                "Phase 1 (joint) — features + {}{} pb level(s), {} epochs",
+                cell_prefix, n_pb_levels, warmup_epochs,
             );
         }
         train_composite(
@@ -251,12 +244,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         )
         .collect::<anyhow::Result<_>>()?;
 
-    // Back to the mean for everything downstream: training averaged over draws, so
-    // `E[z ⊙ β] = pip ⊙ β` is the dictionary the fit actually implies. Leaving a draw
-    // installed would ship ONE random sub-model as if it were the answer. No-op when
-    // no `pip` was installed.
-    cell_model.clear_gate_mask();
-    // Snapshot β+δ (gate baked in) into the `e_feat` field so phase 2 and every
+    // Snapshot β+δ into the `e_feat` field so phase 2 and every
     // output/co-embed reader see a fixed materialized dictionary. No-op for a free,
     // ungated model. This MUST come after the training above: `e_feat` is what phase 2
     // projects against and what the dictionary output writes, so materializing before

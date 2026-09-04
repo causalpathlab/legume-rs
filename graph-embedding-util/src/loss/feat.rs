@@ -521,37 +521,15 @@ pub fn nce_loss_identity(
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
 }
 
-/// Gather the feature-embedding rows for `idx`, applying the per-gene gate(s) when
-/// enabled. A β-sharing factored model composes `β̃ + mask·δ̃` (identity + velocity, each
-/// an independently gated effect — see [`JointEmbedModel::factored_feat_rows`]) via the
-/// row→gene gathers, so only the batch's rows (`b + b·k`) are materialized — never the
-/// full `[n_features, H]` dictionary — and gradients still reach `β`/`δ` and the gate
-/// logits. A free model selects from the raw `e_feat` Var (SGC-smoothed when a smoother
-/// is present; a factored model never has one — see `fit::run`) and gates that.
-///
-/// When gated, the base is reparam-sampled (`μ + σ·ε`) and multiplied by the gate's
-/// weight table: this epoch's `z ~ Bern(pip)` when a selection pass installed one, else
-/// the learned `α = σ(S/τ)` — an INDEPENDENT inclusion probability per (feature, dim),
-/// with no normalizer and no null column. Gradients reach both the base and, on the
-/// learned path, the logits. Ungated with no `pip` it is the plain gather. This is the
-/// single feature-gather point for the bge + gem trainers.
+/// Gather the effective feature rows `[b, H]` for feature indices `idx` on the
+/// LIVE parameters: the composed rows for an adapter / module model, `β` (+ `δ`
+/// on unspliced rows) gathered per gene for a factored one, and the free `e_feat`
+/// Var otherwise. This is the single feature-gather point for the bge + gem
+/// trainers, and it never reads `e_feat` on a model where that field is a
+/// detached snapshot.
 pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
-    // Composed feature side (adapter `ρ·W + r`, modules `π μ + r`): compose the
-    // gathered rows on the live parameters, then the same gate/effect machinery as
-    // the free path. Never reads `e_feat`, a detached snapshot for these models.
     if let Some(c) = model.composed() {
-        let mu = c.compose_rows(idx)?;
-        let logstd = model
-            .e_feat_logstd
-            .as_ref()
-            .map(|l| l.index_select(idx, 0))
-            .transpose()?;
-        let w = model.gathered_gate_weights(
-            crate::model::GateKind::Identity,
-            model.s_feat.as_ref(),
-            idx,
-        )?;
-        return model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true);
+        return c.compose_rows(idx);
     }
     match &model.factor {
         Some(f) => {
@@ -561,25 +539,9 @@ pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tens
                 .as_ref()
                 .map(|(_, m)| m.index_select(idx, 0)) // [b, 1] unspliced selector
                 .transpose()?;
-            model.factored_feat_rows(f, &genes, mask.as_ref(), true)
+            model.factored_feat_rows(f, &genes, mask.as_ref())
         }
-        None => {
-            // Gate reads the RAW Var (`e_feat_raw`) once the gate is on, so a post-
-            // phase-1 materialize can overwrite `e_feat` without double-gating here.
-            let raw = model.e_feat_raw.as_ref().unwrap_or(&model.e_feat);
-            let mu = raw.index_select(idx, 0)?; // effect mean μ
-            let logstd = model
-                .e_feat_logstd
-                .as_ref()
-                .map(|l| l.index_select(idx, 0))
-                .transpose()?;
-            let w = model.gathered_gate_weights(
-                crate::model::GateKind::Identity,
-                model.s_feat.as_ref(),
-                idx,
-            )?;
-            model.gated_rows(&mu, logstd.as_ref(), w.as_ref(), true)
-        }
+        None => model.e_feat.index_select(idx, 0),
     }
 }
 
