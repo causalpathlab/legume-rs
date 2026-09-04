@@ -372,8 +372,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // refine — and nothing else. Every stage from here down is a follow-up routine
     // that turns the trained dictionary into the run's deliverables, so gating them
     // on `stop` does not save the user time, it destroys the output. Phase 2
-    // especially: at the default `--phase1-cells-per-pb 0` the cell axis is never
-    // trained in phase 1, so `e_cell` is still its randn init until phase 2 runs —
+    // especially: below `--phase1-cells-per-pb n_cells` most cells never train in
+    // phase 1, so their `e_cell` rows are still randn init until phase 2 runs —
     // skipping it wrote a `cell_embedding.parquet` of pure noise, silently. A
     // second Ctrl+C aborts the process outright (`matrix_util::stop`), which is the
     // escape hatch for a user who really does want out now.

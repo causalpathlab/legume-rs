@@ -129,7 +129,8 @@ pub struct FitConfig {
     /// phase 1; phase 2 always analytically projects *every* cell against the
     /// fixed feature side, so the full per-cell embedding is unaffected.
     /// - `k == 0`: suppress the cell axis entirely (pure-pb — `E_feat` shaped
-    ///   by pb aggregates only; fastest). This is the default.
+    ///   by pb aggregates only; fastest). `senna gem`'s default; `senna bge`
+    ///   injects a moderate `k`, which measured better than either extreme.
     /// - `1 ≤ k < n_cells`: keep ≤`k` cells per pb-sample at EVERY collapse
     ///   level (union), shrinking the phase-1 step budget
     ///   (`Σ active_cells / batch_size`) while keeping rare/shallow cells
