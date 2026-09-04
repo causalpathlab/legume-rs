@@ -48,98 +48,6 @@ impl FrozenSide<'_> {
     }
 }
 
-/// Precomputed sufficient statistics that collapse an anchor's **data** term to
-/// a single dot product.
-///
-/// [`multinomial_ll`]'s data term is `Σ_pos n·⟨e_a + off, e_o⟩`, which is exactly
-/// `⟨e_a + off, Σ_pos n·e_o⟩`. The inner sum does not depend on `e_a`, so it can
-/// be formed once per anchor instead of re-walking every edge on every likelihood
-/// evaluation — turning an `O(|pos| · h)` term into `O(h)`. It is the same
-/// quantity [`multinomial_ll`]'s own gradient note calls `m_a`.
-///
-/// This matters most when an anchor's edge list is the whole other side. A
-/// pseudobulk anchored against the feature axis has tens of thousands of observed
-/// edges, and re-walking them per dim per sweep dominates everything else.
-///
-/// **Difference from the edge walk, and the bound that keeps it safe.** The
-/// collapsed form omits `Σ_pos n·b_o`, so [`Self::bias_dot`] carries it and
-/// [`multinomial_ll`] adds it back.
-///
-/// It would be tempting not to: the term is constant in `e_a`, and it cancels in
-/// both consumers — an elliptical-slice threshold comparison, and the `z` draw's
-/// `ll_on − ll_off`. That reasoning is **wrong**, because the choice between the
-/// collapse and the walk is made per EVALUATION, not per anchor. A `z` draw whose
-/// `ll_off` at `x = 0` sits inside the radius while its `ll_on` sits outside
-/// compares a collapsed value against a walked one, and then the constant does not
-/// cancel — it lands in the logit at full size. The same holds for a slice threshold
-/// whose current point and proposal straddle the radius. Carrying the term makes the
-/// two forms agree in absolute value, so which one ran stops being observable.
-///
-/// The collapse also cannot apply the per-edge [`SCORE_CLAMP`], and that part is **not**
-/// free. `SCORE_CLAMP` is 30 — a modelling bound, not an `exp` overflow guard at
-/// ~88 — and `clamp` is nonlinear in `e_a`, so once any score saturates the two
-/// forms stop differing by a constant. Worse, the partition term stays clamped:
-/// an unclamped data term against a capped normalizer is unbounded above in
-/// `e_a`, and a slice sampler will happily walk out along it.
-///
-/// So [`Self::safe_radius`] records how far `e_a + offset` may reach before ANY
-/// score could saturate, and [`multinomial_ll`] falls back to the exact clamped
-/// edge walk outside it. Inside the radius the collapse is exact; outside, it is
-/// simply not used.
-pub struct AnchorMoment {
-    /// `[h]` count-weighted sum of the observed other-side rows, `Σ_pos n·e_o`.
-    pub m: Vec<f32>,
-    /// `Σ_pos n` — the anchor's total observed count.
-    pub total: f64,
-    /// `Σ_pos n·b_o` — the part of the data term the `⟨v, m⟩` collapse leaves out.
-    /// Added back so the collapsed and walked forms are equal, not merely equal up
-    /// to a constant; see the type doc for why "up to a constant" is not enough.
-    pub bias_dot: f64,
-    /// Largest `‖e_a + offset‖` for which no observed edge's score can reach
-    /// `±SCORE_CLAMP`, so the collapsed data term is exactly the clamped one.
-    ///
-    /// From `|s| ≤ ‖e_a + off‖·max‖e_o‖ + max|b_o|` over this anchor's edges.
-    pub safe_radius: f32,
-}
-
-impl AnchorMoment {
-    /// Form the moment for one anchor's edges against `side`.
-    #[must_use]
-    pub fn new(pos: &[(u32, f32)], side: &FrozenSide) -> Self {
-        let mut m = vec![0.0f32; side.h];
-        let mut total = 0.0f64;
-        let mut bias_dot = 0.0f64;
-        let mut max_row_norm = 0.0f32;
-        let mut max_abs_b = 0.0f32;
-        for &(o, n) in pos {
-            let e_o = side.row(o);
-            let mut nrm2 = 0.0f32;
-            for (acc, v) in m.iter_mut().zip(e_o) {
-                *acc += n * v;
-                nrm2 += v * v;
-            }
-            max_row_norm = max_row_norm.max(nrm2.sqrt());
-            max_abs_b = max_abs_b.max(side.b[o as usize].abs());
-            total += f64::from(n);
-            bias_dot += f64::from(n) * f64::from(side.b[o as usize]);
-        }
-        let headroom = SCORE_CLAMP as f32 - max_abs_b;
-        let safe_radius = if max_row_norm > 0.0 && headroom > 0.0 {
-            headroom / max_row_norm
-        } else {
-            // A degenerate side (or a bias already at the clamp) gives the fast
-            // path no safe region at all; always take the exact walk.
-            0.0
-        };
-        Self {
-            m,
-            total,
-            bias_dot,
-            safe_radius,
-        }
-    }
-}
-
 /// One anchor node's likelihood terms against the frozen side.
 #[derive(Clone, Copy)]
 pub struct NodeTerm<'a> {
@@ -150,62 +58,29 @@ pub struct NodeTerm<'a> {
     /// `|pool| / K` — folds a sampled `partition` back up to the full-sum scale.
     /// `1.0` when `partition` is the whole other side (the exact case).
     pub partition_scale: f64,
-    /// Fixed `[h]` vector added to the sampled `e_a` before the dot product, so
-    /// the sampler explores a **deviation from a frozen direction** rather than an
-    /// absolute loading: `⟨e_a + offset, e_o⟩`.
-    ///
-    /// This is what lets a second, dependent effect be sampled against a first one
-    /// held at its MAP. `senna gem`'s velocity gate is the motivating case — an
-    /// unspliced row scores `⟨β_g + δ_g, e_c⟩`, so sampling `δ_g` means carrying
-    /// `β_g` as the offset — but nothing here is gem-specific. `None` is the plain
-    /// case, and costs nothing.
-    pub offset: Option<&'a [f32]>,
-    /// Precomputed data-term statistics. `Some` makes [`multinomial_ll`] skip the
-    /// edge walk entirely — see [`AnchorMoment`] for what that changes (nothing
-    /// that reaches an inference) and when it is worth it. `None` walks `pos`.
-    pub moment: Option<&'a AnchorMoment>,
 }
 
 impl<'a> NodeTerm<'a> {
-    /// A node with no frozen offset — the common case.
     #[must_use]
     pub fn new(pos: &'a [(u32, f32)], partition: &'a [u32], partition_scale: f64) -> Self {
         Self {
             pos,
             partition,
             partition_scale,
-            offset: None,
-            moment: None,
         }
-    }
-
-    /// Attach precomputed data-term statistics; see [`AnchorMoment`].
-    #[must_use]
-    pub fn with_moment(mut self, moment: &'a AnchorMoment) -> Self {
-        self.moment = Some(moment);
-        self
     }
 }
 
-/// `s_ao = ⟨e_a + offset, e_o⟩ + b_a + b_o`, clamped to `±SCORE_CLAMP`. `e_a` /
-/// `b_a` come from `θ_a`; `e_o` / `b_o` from the frozen side; `offset` is the
-/// anchor's frozen direction (`None` ⇒ zero).
+/// `s_ao = ⟨e_a, e_o⟩ + b_a + b_o`, clamped to `±SCORE_CLAMP`. `e_a` / `b_a`
+/// come from `θ_a`; `e_o` / `b_o` from the frozen side.
 #[inline]
-fn score(e_a: &[f32], b_a: f64, o: u32, side: &FrozenSide, offset: Option<&[f32]>) -> f64 {
+fn score(e_a: &[f32], b_a: f64, o: u32, side: &FrozenSide) -> f64 {
     let e_o = side.row(o);
-    let dot: f64 = match offset {
-        None => e_a
-            .iter()
-            .zip(e_o)
-            .map(|(a, b)| f64::from(*a) * f64::from(*b))
-            .sum(),
-        Some(off) => e_a
-            .iter()
-            .zip(off)
-            .zip(e_o)
-            .map(|((a, f), b)| (f64::from(*a) + f64::from(*f)) * f64::from(*b))
-            .sum(),
-    };
+    let dot: f64 = e_a
+        .iter()
+        .zip(e_o)
+        .map(|(a, b)| f64::from(*a) * f64::from(*b))
+        .sum();
     (dot + b_a + f64::from(side.b[o as usize])).clamp(-SCORE_CLAMP, SCORE_CLAMP)
 }
 
@@ -252,58 +127,25 @@ pub fn multinomial_ll(e_a: &[f32], node: &NodeTerm, side: &FrozenSide) -> f32 {
     debug_assert_eq!(e_a.len(), side.h);
     // The intercept is profiled out, so any constant passed as `b_a` would
     // cancel; 0 it is.
-    // The collapsed form is exact only while no observed score can saturate
-    // `SCORE_CLAMP`; past that the clamp is nonlinear in `e_a` and the fast path
-    // stops agreeing with the walk by a constant. Checking costs one norm.
-    let moment = node.moment.filter(|mom| {
-        let r2: f32 = match node.offset {
-            None => e_a.iter().map(|v| v * v).sum(),
-            Some(off) => e_a.iter().zip(off).map(|(a, f)| (a + f) * (a + f)).sum(),
-        };
-        r2.sqrt() <= mom.safe_radius
-    });
-    let (data, total) = match moment {
-        // Collapsed form: `Σ_pos n·⟨e_a + off, e_o⟩ = ⟨e_a + off, m⟩`, plus the
-        // `Σ n·b_o` the collapse leaves out — carried in `bias_dot` so this branch
-        // equals the walk outright. See `AnchorMoment` for why "equal up to a
-        // constant" is not sufficient when the guard switches per evaluation.
-        Some(mom) => {
-            debug_assert_eq!(mom.m.len(), side.h);
-            let dot: f64 = match node.offset {
-                None => e_a
-                    .iter()
-                    .zip(&mom.m)
-                    .map(|(a, m)| f64::from(*a) * f64::from(*m))
-                    .sum(),
-                Some(off) => e_a
-                    .iter()
-                    .zip(off)
-                    .zip(&mom.m)
-                    .map(|((a, f), m)| (f64::from(*a) + f64::from(*f)) * f64::from(*m))
-                    .sum(),
-            };
-            (dot + mom.bias_dot, mom.total)
+    let (data, total) = {
+        let mut data = 0.0f64;
+        let mut total = 0.0f64;
+        for &(o, n) in node.pos {
+            data += f64::from(n) * score(e_a, 0.0, o, side);
+            total += f64::from(n);
         }
-        None => {
-            let mut data = 0.0f64;
-            let mut total = 0.0f64;
-            for &(o, n) in node.pos {
-                data += f64::from(n) * score(e_a, 0.0, o, side, node.offset);
-                total += f64::from(n);
-            }
-            (data, total)
-        }
+        (data, total)
     };
     if total == 0.0 {
         return 0.0; // no counts ⇒ the likelihood is flat in `e_a`
     }
     let mut m = f64::NEG_INFINITY;
     for &o in node.partition {
-        m = m.max(score(e_a, 0.0, o, side, node.offset));
+        m = m.max(score(e_a, 0.0, o, side));
     }
     let mut s = 0.0f64;
     for &o in node.partition {
-        s += (score(e_a, 0.0, o, side, node.offset) - m).exp();
+        s += (score(e_a, 0.0, o, side) - m).exp();
     }
     (data - total * (m + s.max(f64::MIN_POSITIVE).ln())) as f32
 }

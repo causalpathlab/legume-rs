@@ -48,6 +48,7 @@ use anyhow::{ensure, Result};
 use candle_util::candle_core::{DType, Device, Tensor, Var};
 use candle_util::candle_nn::{ops, AdamW, Optimizer, ParamsAdamW};
 use log::info;
+use matrix_util::embedding_geometry::embedding_geometry;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -753,22 +754,17 @@ pub fn effective_rank(gate: &DMatrix<f32>) -> f64 {
     if gate.nrows() < 2 {
         return f64::NAN;
     }
-    let mut centered = DMatrix::<f64>::zeros(gate.nrows(), gate.ncols());
-    for j in 0..gate.ncols() {
-        let mean =
-            (0..gate.nrows()).map(|i| gate[(i, j)] as f64).sum::<f64>() / gate.nrows() as f64;
-        for i in 0..gate.nrows() {
-            centered[(i, j)] = gate[(i, j)] as f64 - mean;
-        }
+    // The participation ratio of the column-centered spectrum, which
+    // `matrix_util` computes in closed form off the Gram — same quantity, no
+    // SVD and no centered copy. A gate with no variation at all has no spread
+    // to report: that reads as `NaN` here (not measured), where the shared
+    // helper returns a plain `0`.
+    let pr = embedding_geometry(gate).eff_rank_centered;
+    if pr > 0.0 {
+        f64::from(pr)
+    } else {
+        f64::NAN
     }
-    let sv = centered.singular_values();
-    let var: Vec<f64> = sv.iter().map(|s| s * s).collect();
-    let total: f64 = var.iter().sum();
-    if total <= 0.0 {
-        return f64::NAN;
-    }
-    let sum_sq: f64 = var.iter().map(|v| (v / total).powi(2)).sum();
-    1.0 / sum_sq
 }
 
 /// Group of a context name, taken from the label itself.

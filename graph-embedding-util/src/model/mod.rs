@@ -134,11 +134,13 @@ pub struct FeatFactor {
     pub splice_delta: Option<(Tensor, Tensor)>,
 }
 
-impl FeatFactor {
-    /// Materialize the full feature embedding `[n_features, H]` from `β` (plus
-    /// `δ_g` on the unspliced rows). Stays in the autograd graph so gradients
-    /// flow back to the `β` / `δ_g` Vars.
-    fn e_feat(&self) -> Result<Tensor> {
+impl ComposedFeat for FeatFactor {
+    /// The full feature embedding `[n_features, H]` from `β` (plus `δ_g` on the
+    /// unspliced rows). Stays in the autograd graph so gradients flow back to the
+    /// `β` / `δ_g` Vars.
+    fn compose(&self) -> Result<Tensor> {
+        // `row_to_gene` IS the whole-table feature→gene gather, and the stored
+        // mask is already on the full feature axis, so this needs no index.
         let base = self.beta.index_select(&self.row_to_gene, 0)?;
         match &self.splice_delta {
             Some((delta, mask)) => {
@@ -147,6 +149,31 @@ impl FeatFactor {
             }
             None => Ok(base),
         }
+    }
+
+    /// Rows for the FEATURE indices `idx` — `β_{gene(r)} + mask_r · δ_{gene(r)}`.
+    ///
+    /// Two gathers on the same `idx`: `row_to_gene` maps it onto the per-gene
+    /// tables, and the unspliced mask is feature-indexed so it is gathered by
+    /// `idx` directly. Keeping both keyed on `idx` is what lets this satisfy the
+    /// trait's feature-row contract like the other two parameterizations.
+    fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
+        let genes = self.row_to_gene.index_select(idx, 0)?;
+        let base = self.beta.index_select(&genes, 0)?;
+        match &self.splice_delta {
+            Some((delta, mask)) => {
+                let d = delta.index_select(&genes, 0)?;
+                let m = mask.index_select(idx, 0)?; // [b, 1] unspliced selector
+                base.add(&d.broadcast_mul(&m)?)
+            }
+            None => Ok(base),
+        }
+    }
+
+    /// `β` is the per-gene table that can overfit row by row; `δ_g` has the
+    /// trainer's own `delta_l2`.
+    fn ridge_table(&self) -> Option<&Tensor> {
+        Some(&self.beta)
     }
 }
 
@@ -321,21 +348,44 @@ impl JointEmbedModel {
     /// Owning this here keeps a trainer from ridging `e_feat` on a model where
     /// that field is a detached snapshot, which is silently inert.
     pub fn feature_ridge(&self, lam: f64) -> Result<Option<Tensor>> {
-        if let Some(c) = self.composed() {
-            return match c.ridge_table() {
-                Some(r) => Ok(Some(crate::loss::embedding_ridge(r, lam)?)),
-                None => Ok(None),
-            };
+        let table = match self.composed() {
+            Some(c) => c.ridge_table(),
+            None => Some(&self.e_feat),
+        };
+        match table {
+            Some(t) => Ok(Some(crate::loss::embedding_ridge(t, lam)?)),
+            None => Ok(None),
         }
-        if let Some(f) = &self.factor {
-            return Ok(Some(crate::loss::embedding_ridge(&f.beta, lam)?));
-        }
-        Ok(Some(crate::loss::embedding_ridge(&self.e_feat, lam)?))
     }
 
-    /// The composed feature side, when this model has one (adapter or modules;
-    /// mutually exclusive by construction). `None` for free and factored models.
+    /// Snapshot the composed feature side into the `e_feat` field (detached), so
+    /// the phase-2 projection and every output / co-embed reader see a fixed
+    /// dictionary. A no-op for a free model, whose `e_feat` already IS the
+    /// trained Var. Call after phase 1.
+    pub fn materialize_e_feat(&mut self) -> Result<()> {
+        let snapshot = match self.composed() {
+            Some(c) => Some(c.compose()?.detach()),
+            None => None,
+        };
+        if let Some(s) = snapshot {
+            self.e_feat = s;
+        }
+        Ok(())
+    }
+
+    /// The composed feature side, when this model has one — the module layer,
+    /// the adapter, or the per-gene β-sharing factor, mutually exclusive by
+    /// construction. `None` only for a FREE model, whose `e_feat` is the trained
+    /// Var itself.
+    ///
+    /// Every consumer that has to ask "which table does this parameterization
+    /// actually train" goes through here — the gather, the materialize and the
+    /// ridge — so a fourth parameterization is one `impl`, not three new match
+    /// arms in three files.
     pub fn composed(&self) -> Option<&dyn ComposedFeat> {
+        if let Some(f) = &self.factor {
+            return Some(f);
+        }
         if let Some(m) = &self.modules {
             return Some(m);
         }
@@ -500,7 +550,7 @@ impl JointEmbedModel {
             None => None,
         };
         let factor = build_feat_factor(&beta, args.row_to_gene, delta, args.unspliced_rows, dev)?;
-        let e_feat = factor.e_feat()?.detach();
+        let e_feat = factor.compose()?.detach();
         Ok(Self {
             e_feat,
             e_cell,
@@ -558,29 +608,3 @@ mod adapter_tests;
 
 #[cfg(test)]
 mod module_tests;
-
-impl JointEmbedModel {
-    /// Snapshot the composed feature side into the `e_feat` field (detached), so
-    /// the phase-2 projection and every output / co-embed reader see a fixed
-    /// dictionary: recomposed from the live parameters for an adapter / module
-    /// model, `β` (+ `δ` on unspliced rows) gathered to feature rows for a
-    /// factored one. A no-op for a free model, whose `e_feat` already IS the
-    /// trained Var. Call after phase 1.
-    pub fn materialize_e_feat(&mut self) -> Result<()> {
-        let snapshot = if let Some(c) = self.composed() {
-            Some(c.compose()?.detach())
-        } else if let Some(f) = &self.factor {
-            let mask = f.splice_delta.as_ref().map(|(_, m)| m.clone());
-            Some(
-                self.factored_feat_rows(f, &f.row_to_gene, mask.as_ref())?
-                    .detach(),
-            )
-        } else {
-            None
-        };
-        if let Some(s) = snapshot {
-            self.e_feat = s;
-        }
-        Ok(())
-    }
-}
