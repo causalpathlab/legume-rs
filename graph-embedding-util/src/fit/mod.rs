@@ -242,6 +242,14 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             if p1.epochs == 0 {
                 continue;
             }
+            // The local epoch counter restarts every call, so the module warm-up
+            // (and anything else keyed on the epoch) needs the running total or
+            // it never fires: at the default 1000 epochs, a 250-epoch warm-up and
+            // 4 rounds of 250, `epoch == warmup` was true in no round at all and
+            // the membership stayed frozen for the whole fit.
+            p1.epoch_offset = (0..round)
+                .map(|r| jitter::epochs_for_round(warmup_epochs, rounds, r))
+                .sum();
             let joint_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
             train_composite(
                 &CompositeTrainContext {
