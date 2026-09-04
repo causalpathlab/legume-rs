@@ -3,7 +3,7 @@ name = "data-beans-alg"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-version = "0.5.0"
+version = "0.4.3"
 description = "random projection and collapsing routines"
 
 [features]

@@ -95,27 +95,6 @@ pub struct BgeArgs {
     pub(crate) phase1_cells_per_pb: usize,
 
     #[arg(
-        long = "jitter-rounds",
-        default_value_t = 1,
-        value_name = "R",
-        help = "Redraw the pseudobulk profiles from their Gamma posterior R times over phase 1; 1 = off.",
-        long_help = "Posterior jitter of the pseudobulk profiles.\n\
-                     \n\
-                     The collapse fits a Gamma posterior per (gene, pseudobulk).\n\
-                     Phase 1 normally trains on its MEAN and discards the variance.\n\
-                     With R > 1 the epochs split into R rounds; every round after\n\
-                     the first redraws each profile from its posterior and refreshes\n\
-                     the sampling weights in place. The noise is structured and\n\
-                     magnitude-aware -- scaled by the data, not by a hyperparameter --\n\
-                     and a round costs one Gamma draw per profile entry.\n\
-                     \n\
-                     1 (default) trains on the mean and is byte-identical to a run\n\
-                     without this flag. R > 1 also retains one extra plane of the\n\
-                     collapse's sufficient statistics per level."
-    )]
-    pub(crate) jitter_rounds: usize,
-
-    #[arg(
         long = "skip-etm",
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",

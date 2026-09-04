@@ -5,8 +5,7 @@
 use candle_util::candle_core::{DType, Device, Tensor, Var};
 use candle_util::candle_nn::VarMap;
 use graph_embedding_util::loss::{
-    module_balance_prior, module_dictionary_prior, module_softmax_loss, nce_loss_identity,
-    EdgeBatch, NceObjective,
+    module_balance_prior, module_softmax_loss, nce_loss_identity, EdgeBatch, NceObjective,
 };
 use graph_embedding_util::model::{
     JointEmbedModel, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME, MODULE_LOGITS_VAR_NAME,
@@ -226,37 +225,4 @@ fn priors_reach_their_own_tables() {
     assert!(grads
         .get(var(&vm, MODULE_LOGITS_VAR_NAME).as_tensor())
         .is_none());
-}
-
-/// The uniformity term reaches the dictionary and nothing else — and it fires
-/// while the membership is frozen, since μ trains through the warm-up. A term
-/// routed through `module_priors` would have been silent for that quarter of
-/// the run.
-#[test]
-fn uniformity_reaches_the_dictionary_and_fires_during_the_warm_up() {
-    let vm = VarMap::new();
-    let m = model(0.7, &vm);
-    let modules = m.modules.as_ref().unwrap();
-    // Distinct, non-degenerate rows so the term has a gradient to give.
-    var(&vm, MODULE_MU_VAR_NAME)
-        .set(&Tensor::rand(-0.5f32, 0.5, (M, H), &dev()).unwrap())
-        .unwrap();
-    let pen = module_dictionary_prior(modules, 0.5, 2.0)
-        .unwrap()
-        .expect("λ > 0 builds the term");
-    let grads = pen.backward().unwrap();
-    assert!(grad_norm(&grads, &var(&vm, MODULE_MU_VAR_NAME)).unwrap() > 1e-6);
-    assert!(grads
-        .get(var(&vm, MODULE_LOGITS_VAR_NAME).as_tensor())
-        .is_none());
-    assert!(grads
-        .get(var(&vm, MODULE_RESIDUAL_VAR_NAME).as_tensor())
-        .is_none());
-
-    modules.set_frozen(true);
-    let pen = module_dictionary_prior(modules, 0.5, 2.0)
-        .unwrap()
-        .expect("still on while the membership is frozen");
-    let grads = pen.backward().unwrap();
-    assert!(grad_norm(&grads, &var(&vm, MODULE_MU_VAR_NAME)).unwrap() > 1e-6);
 }

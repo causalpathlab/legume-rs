@@ -20,9 +20,8 @@
 //! `pinto cage`), so the objective is written once.
 
 use crate::model::FeatModules;
-use candle_util::candle_core::{DType, Device, Result, Tensor};
+use candle_util::candle_core::{Device, Result, Tensor};
 use candle_util::candle_nn::ops::log_softmax;
-use candle_util::sgvb::l2_normalize_dim;
 use log::info;
 use rand::{Rng, RngExt};
 use rayon::prelude::*;
@@ -296,99 +295,6 @@ impl ModulePools {
     }
 }
 
-/////////////////////////
-// Dictionary geometry //
-/////////////////////////
-
-/// Wang & Isola's uniformity term (arXiv:2005.10242) on a row-L2-normalized
-/// table:
-///
-/// ```text
-///   L = ln( (1 / (K(K−1))) · Σ_{a≠b} exp( −t · ‖x̂_a − x̂_b‖² ) )
-/// ```
-///
-/// `‖x̂_a − x̂_b‖² = 2 − 2cos`, so this is a soft-min over cosine: the CLOSEST
-/// pair dominates. That is the instrument we want, because the pathology is
-/// duplicate directions, not mild global correlation — a mean squared cosine
-/// weights every pair alike and is blind to one duplicated pair among many
-/// well-spread ones. It keeps repelling past orthogonality too, where a squared
-/// cosine is flat.
-///
-/// Normalization is INTERNAL to the term and nowhere else: without a norm
-/// constraint the objective is gamed by rescaling rows, and everything outside
-/// this function stays on the raw dot product the model is scored with. For
-/// finite `K` the minimizer is a spherical code, not the uniform measure; the
-/// clean-optimum story is asymptotic.
-///
-/// Do NOT read this value back as an evaluation metric — it is insensitive to
-/// dimensional collapse. Evaluation is the participation ratio
-/// ([`dictionary_participation_ratio`]) plus module purity.
-pub fn dictionary_uniformity(table: &Tensor, t: f32) -> Result<Tensor> {
-    let k = table.dim(0)?;
-    if k < 2 {
-        // No pairs: nothing to repel. A zero of the table's dtype and device.
-        return table.zeros_like()?.sum_all();
-    }
-    let x = l2_normalize_dim(table, 1)?; // [K, H], unit rows
-    let cos = x.matmul(&x.t()?)?; // [K, K]
-                                  // `‖x̂_a − x̂_b‖² = 2 − 2cos`, then the kernel; the diagonal (distance 0,
-                                  // kernel 1) is masked out exactly rather than subtracted, so the row
-                                  // normalization's `+ε` cannot leak into the mean.
-    let kernel = cos.affine(-2.0, 2.0)?.affine(-f64::from(t), 0.0)?.exp()?;
-    let off_diagonal = (kernel.ones_like()? - Tensor::eye(k, DType::F32, table.device())?)?;
-    let pairs = (k * (k - 1)) as f64;
-    kernel
-        .mul(&off_diagonal)?
-        .sum_all()?
-        .affine(1.0 / pairs, 0.0)?
-        .log()
-}
-
-/// The dictionary-geometry penalty for one step: [`dictionary_uniformity`] on
-/// the module dictionary `μ`, weighted by `lambda`; `None` when `lambda <= 0`,
-/// so a zero weight never enters the graph.
-///
-/// Deliberately NOT gated on `is_frozen()`. The membership freeze detaches `π`;
-/// it does not stop `μ` training — the exact cell–module term trains it every
-/// step of the warm-up. A μ-penalty suppressed there would be absent for the
-/// whole quarter of the run in which the dictionary is laid down from its randn
-/// init.
-///
-/// Why a repulsion term exists at all: nothing on the dictionary side forbids
-/// two identical modules. Duplication is a SYMMETRY of the mixture likelihood —
-/// `π μ` is unchanged if two rows of `μ` are merged and the membership mass is
-/// redistributed between them, and `π` absorbs exactly that. That is why
-/// [`module_balance_prior`] cannot fix direction: it constrains how much mass
-/// each module holds, and the duplicate configuration satisfies it perfectly.
-pub fn module_dictionary_prior(
-    modules: &FeatModules,
-    lambda: f32,
-    t: f32,
-) -> Result<Option<Tensor>> {
-    if lambda <= 0.0 {
-        return Ok(None);
-    }
-    Ok(Some(
-        dictionary_uniformity(&modules.mu, t)?.affine(f64::from(lambda), 0.0)?,
-    ))
-}
-
-/// Participation ratio of the dictionary's directions,
-/// `‖μ‖_F⁴ / ‖μ μᵀ‖_F²` — the `(Σλ)²/Σλ²` of the Gram's spectrum, without an
-/// eigendecomposition. `M` for orthonormal rows, `1` when every row points the
-/// same way. The EVALUATION readout the stages of the dictionary work are gated
-/// on; never a training term.
-pub fn dictionary_participation_ratio(mu: &Tensor) -> Result<f32> {
-    let mu = mu.detach();
-    let fro2: f32 = mu.sqr()?.sum_all()?.to_scalar()?;
-    let gram2: f32 = mu.matmul(&mu.t()?)?.sqr()?.sum_all()?.to_scalar()?;
-    Ok(if gram2 > 0.0 {
-        fro2 * fro2 / gram2
-    } else {
-        0.0
-    })
-}
-
 /////////////////
 // Diagnostics //
 /////////////////
@@ -468,13 +374,10 @@ pub fn log_membership_diagnostics(
         .sum(1)?
         .mean_all()?
         .to_scalar()?;
-    // The dictionary's effective directions: the readout every geometry term on
-    // μ is trying to move, and the gate for adding another.
-    let pr = dictionary_participation_ratio(&modules.mu)?;
     info!(
         "epoch {}/{} modules{}: max occupancy {:.2}x uniform, {} of {} modules below {} \
          features, row entropy {:.3} nats, {:.2} modules/feature, mean ‖r‖² {:.3} vs \
-         ‖ρ‖² {:.3}, dictionary PR {:.2} of {}, {} positives fell back to global negatives",
+         ‖ρ‖² {:.3}, {} positives fell back to global negatives",
         epoch + 1,
         epochs,
         if modules.is_frozen() { " (frozen)" } else { "" },
@@ -486,8 +389,6 @@ pub fn log_membership_diagnostics(
         dg.mean_row_support,
         r2,
         rho2,
-        pr,
-        modules.mu.dim(1)?,
         fallbacks,
     );
     Ok(())

@@ -117,7 +117,6 @@ fn batches_per_epoch_resolves_auto_and_explicit() {
         feature_embedding_l2: 0.0,
         max_grad_norm: 0.0,
         delta_l2: 0.0,
-        epoch_offset: 0,
         gpu_mem_fraction: None,
     };
 
@@ -125,70 +124,4 @@ fn batches_per_epoch_resolves_auto_and_explicit() {
     assert_eq!(resolve_batches_per_epoch(&params(1024, Some(7)), 8_192), 7);
     // Never zero, or the epoch would run no steps at all.
     assert!(resolve_batches_per_epoch(&params(65_536, None), 8_192) >= 1);
-}
-
-////////////////////////////////////////////
-// Warm-up release across training calls  //
-////////////////////////////////////////////
-
-/// A run split into several `train_composite` calls (posterior jitter) restarts
-/// its local epoch counter each call, so a warm-up keyed on the LOCAL epoch
-/// releases at the wrong time or — when every call is shorter than the warm-up —
-/// never at all. `epoch_offset` is what makes the rule global.
-///
-/// The measured consequence of getting this wrong: with 1000 epochs, a 250-epoch
-/// warm-up and 4 jitter rounds of 250, `epoch == warmup` was never true in any
-/// round and the membership stayed frozen for the entire fit.
-#[test]
-fn the_warm_up_releases_exactly_once_at_the_right_global_epoch() {
-    use crate::training::{frozen_at_entry, releases_at_local_epoch};
-
-    // 1000 epochs, warm-up 250, four rounds of 250: round 0 holds and releases
-    // on its last boundary; every later round starts already released.
-    let (total, warmup, rounds) = (1000usize, 250usize, 4usize);
-    let per = total / rounds;
-    let mut released_at: Vec<usize> = Vec::new();
-    let mut frozen = true;
-    for r in 0..rounds {
-        let offset = r * per;
-        // A call only re-freezes while the warm-up is genuinely still ahead.
-        if r == 0 {
-            frozen = frozen_at_entry(warmup, offset);
-        } else {
-            assert_eq!(
-                frozen_at_entry(warmup, offset),
-                offset < warmup,
-                "round {r} must not re-freeze a released membership"
-            );
-        }
-        for epoch in 0..per {
-            if frozen && releases_at_local_epoch(warmup, offset, epoch) {
-                released_at.push(offset + epoch);
-                frozen = false;
-            }
-        }
-    }
-    assert_eq!(
-        released_at,
-        vec![warmup],
-        "the membership must release exactly once, at global epoch {warmup}"
-    );
-    assert!(!frozen, "and stay released");
-
-    // A single round is the historical path: release at the same global epoch.
-    let mut hits = Vec::new();
-    for epoch in 0..total {
-        if releases_at_local_epoch(warmup, 0, epoch) {
-            hits.push(epoch);
-        }
-    }
-    assert_eq!(hits, vec![warmup]);
-
-    // A warm-up that straddles a round boundary still fires inside the round
-    // that contains it, not at that round's edge.
-    assert!(!releases_at_local_epoch(300, 250, 0));
-    assert!(releases_at_local_epoch(300, 250, 50));
-    // Zero warm-up: never frozen, never a release event.
-    assert!(!frozen_at_entry(0, 0));
-    assert!(!releases_at_local_epoch(0, 0, 0));
 }

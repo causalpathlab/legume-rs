@@ -138,13 +138,6 @@ pub struct FitConfig {
     /// - `k ≥ n_cells`: no pb-sample exceeds `k`, so subsampling is a no-op —
     ///   every cell shapes `E_feat` (legacy all-cells behaviour; slowest).
     pub phase1_cells_per_pb: usize,
-    /// Posterior-jitter rounds for phase 1. `1` trains on the pseudobulk
-    /// posterior MEAN throughout (byte-identical to a build before this
-    /// existed); `R > 1` splits the epochs into `R` rounds and, from the second
-    /// on, redraws every pseudobulk profile from its Gamma posterior and
-    /// refreshes the samplers in place (see `fit::jitter`). Asks the collapse to
-    /// retain its shape statistics exactly when `R > 1`.
-    pub jitter_rounds: usize,
     /// Optional per-gene β-sharing feature parameterization. When `Some`, the
     /// feature side is built as [`crate::model::FeatFactor`] (every feature row
     /// reuses its gene's `β_g`) instead of a free `E_feat` table, phase-2 identity
@@ -207,12 +200,6 @@ pub struct GeneModuleConfig {
     /// Ridge on the per-feature residual `r_g` — the module model's only per-row
     /// table, so this replaces `feature_embedding_l2`.
     pub residual_l2: f32,
-    /// Weight of the uniformity repulsion on the row-normalized module
-    /// dictionary ([`crate::loss::dictionary_uniformity`]). `0` (default) = off,
-    /// byte-identical to a build before this existed.
-    pub lambda_uniform: f32,
-    /// Temperature `t` of the uniformity kernel `exp(−t‖x̂_a − x̂_b‖²)`.
-    pub uniform_temp: f32,
     /// Units (cells or pseudobulks) pooled for the exact term per step per axis.
     pub units_per_step: usize,
     /// Share of a feature's warm-start membership on its k-means module.
@@ -327,8 +314,6 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,
-        // The jitter loop overwrites this per round; a single-call fit starts at 0.
-        epoch_offset: 0,
         module: config.gene_modules.as_ref().map(|g| ModuleTrainParams {
             warmup_epochs: g.warmup_epochs_for(config.epochs),
             gene_dropout: g.gene_dropout,
@@ -336,8 +321,6 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
             lambda_module: g.lambda_module,
             lambda_balance: g.lambda_balance,
             residual_l2: g.residual_l2,
-            lambda_uniform: g.lambda_uniform,
-            uniform_temp: g.uniform_temp,
         }),
     }
 }

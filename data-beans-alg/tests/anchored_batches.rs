@@ -131,7 +131,6 @@ fn run(tag: &str, anchored: bool) -> data_beans_alg::collapse_data::CollapsedOut
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
-        keep_shape_stats: false,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -207,7 +206,6 @@ fn an_unknown_anchor_batch_is_refused() {
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
-        keep_shape_stats: false,
     };
     let err = match collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params) {
         Ok(_) => panic!("an unknown anchor batch must be refused"),
@@ -304,7 +302,6 @@ fn novel_biology_survives_into_the_adjusted_target() {
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
-        keep_shape_stats: false,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -371,7 +368,6 @@ fn anchored_columns_keep_singleton_finest_groups() {
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: true,
-        keep_shape_stats: false,
     };
     let out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");

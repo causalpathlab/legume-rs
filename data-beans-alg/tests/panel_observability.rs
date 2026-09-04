@@ -129,7 +129,6 @@ fn run(tag: &str, observe_panels: bool) -> (CollapsedOut, Vec<Box<str>>) {
         bulk_batches: None,
         observe_panels,
         keep_finest_stats: false,
-        keep_shape_stats: false,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -270,7 +269,6 @@ fn identical_panels_are_a_bitwise_no_op() {
             bulk_batches: None,
             observe_panels: observe,
             keep_finest_stats: false,
-            keep_shape_stats: false,
         };
         let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
             .expect("collapse");
