@@ -48,9 +48,10 @@ pub use feat::{
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
 pub use modules::{
-    dense_count_block, draw_gene_keep_mask, log_membership_diagnostics, masked_membership,
-    membership_diagnostics, membership_rows_host, module_balance_prior, module_priors,
-    module_softmax_loss, module_step_loss, MembershipDiagnostics, ModulePools, MODULE_SMALL_FLOOR,
+    dense_count_block, dictionary_participation_ratio, dictionary_uniformity, draw_gene_keep_mask,
+    log_membership_diagnostics, masked_membership, membership_diagnostics, membership_rows_host,
+    module_balance_prior, module_dictionary_prior, module_priors, module_softmax_loss,
+    module_step_loss, MembershipDiagnostics, ModulePools, MODULE_SMALL_FLOOR,
 };
 
 /// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;
