@@ -327,6 +327,8 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,
+        // The jitter loop overwrites this per round; a single-call fit starts at 0.
+        epoch_offset: 0,
         module: config.gene_modules.as_ref().map(|g| ModuleTrainParams {
             warmup_epochs: g.warmup_epochs_for(config.epochs),
             gene_dropout: g.gene_dropout,
