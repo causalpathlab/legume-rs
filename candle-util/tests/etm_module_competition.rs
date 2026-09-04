@@ -30,6 +30,11 @@ fn alpha_rows() -> Vec<f32> {
 }
 
 fn decoder_with(alpha: Vec<f32>) -> EmbeddedNbTopicDecoder {
+    decoder_with_background(alpha, vec![-(D as f32).ln(); D])
+}
+
+/// Same, with an explicit per-gene log-background `log π_g`.
+fn decoder_with_background(alpha: Vec<f32>, log_pi: Vec<f32>) -> EmbeddedNbTopicDecoder {
     let dev = Device::Cpu;
     let rho = Tensor::from_vec(rho_rows(), (D, H), &dev).unwrap();
     let mut ts = HashMap::new();
@@ -41,8 +46,49 @@ fn decoder_with(alpha: Vec<f32>) -> EmbeddedNbTopicDecoder {
         "dec.log_phi".to_string(),
         Tensor::from_vec(vec![0.693f32; D], (1, D), &dev).unwrap(),
     );
+    ts.insert(
+        "dec.log_pi".to_string(),
+        Tensor::from_vec(log_pi, (1, D), &dev).unwrap(),
+    );
     let vb = VarBuilder::from_tensors(ts, DType::F32, &dev);
     EmbeddedNbTopicDecoder::new(K, rho, vb.pp("dec")).unwrap()
+}
+
+/// A gene abundant in every cell needs a home the centered topics cannot give
+/// it. With `log π` pinned high on gene 0, every topic carries more mass on
+/// gene 0 than under a uniform background, while the per-gene budget
+/// `Σ_k log β_kg − K·log π_g` stays gene-constant so the competition is intact.
+#[test]
+fn pinned_background_gives_shared_abundance_a_home() {
+    let mut log_pi = vec![-(D as f32).ln(); D];
+    log_pi[0] += 3.0;
+    let with = decoder_with_background(alpha_rows(), log_pi.clone())
+        .get_dictionary()
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    let without = decoder_with(alpha_rows())
+        .get_dictionary()
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    for k in 0..K {
+        assert!(
+            with[0][k] > without[0][k] + 1.0,
+            "topic {k} must raise gene 0 under the pinned background: {} vs {}",
+            with[0][k],
+            without[0][k]
+        );
+    }
+    let budget: Vec<f32> = (0..D)
+        .map(|g| (0..K).map(|k| with[g][k]).sum::<f32>() - K as f32 * log_pi[g])
+        .collect();
+    let spread = budget.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+        - budget.iter().cloned().fold(f32::INFINITY, f32::min);
+    assert!(
+        spread < 1e-4,
+        "per-gene budget must stay conserved, spread {spread:.6}"
+    );
 }
 
 /// Every gene carries the same total log-mass across the `K` modules, so a
@@ -114,34 +160,45 @@ fn raising_one_module_on_a_gene_lowers_the_others() {
 }
 
 /// The training likelihood must score the *same* `β` the dictionary reports.
-/// Driving the multinomial head with one-hot rows (row `g` observes gene `g`
-/// alone, every gene visible and masked) returns `log p_g = log Σ_t θ_t β_tg`
-/// for each gene, so the full-vocab probabilities must sum to one and agree
-/// gene-wise with `θ · exp(get_dictionary)`. Feeding the partition from the
-/// centered logits but the rate from the raw ones breaks both.
+/// Each row `n` observes one gene `g_n` alone, placed at a row-specific
+/// position of a permuted index row, with its own `θ_n`; the multinomial head
+/// then returns `log p_n = log Σ_t θ_nt β_{t,g_n}`. The full-vocab
+/// probabilities under one shared `θ` must sum to one, and every row must
+/// agree gene-wise with `θ_n · exp(get_dictionary)`. A rate built from the
+/// raw `α` while the partition comes from the centered logits breaks both;
+/// mixing rows or ignoring the index order breaks the second.
 #[test]
 fn masked_likelihood_scores_the_dictionary_it_writes() {
     use candle_util::decoder::MaskedNbTarget;
     let dev = Device::Cpu;
     let dec = decoder_with(alpha_rows());
+    let full_kd = dec.full_logits_kd().unwrap();
+    let beta_dk = dec.get_dictionary().unwrap().exp().unwrap();
 
-    let log_theta = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], (1, K), &dev)
+    // Row n: a distinct θ_n, a permuted index row, a one-hot at gene n.
+    let perm: Vec<u32> = (0..D as u32).map(|g| (g * 5 + 1) % D as u32).collect();
+    let mut theta = vec![0f32; D * K];
+    let mut values = vec![0f32; D * D];
+    for n in 0..D {
+        let raw: Vec<f32> = (0..K).map(|k| 1.0 + ((n * 3 + k * 7) % 5) as f32).collect();
+        let z: f32 = raw.iter().sum();
+        for k in 0..K {
+            theta[n * K + k] = raw[k] / z;
+        }
+        let pos = perm.iter().position(|&g| g as usize == n).unwrap();
+        values[n * D + pos] = 1.0;
+    }
+    let log_theta = Tensor::from_vec(theta.clone(), (D, K), &dev)
         .unwrap()
         .log()
-        .unwrap()
-        .broadcast_as((D, K))
-        .unwrap()
-        .contiguous()
         .unwrap();
-    let indices = Tensor::arange(0u32, D as u32, &dev)
-        .unwrap()
-        .unsqueeze(0)
+    let indices = Tensor::from_vec(perm.clone(), (1, D), &dev)
         .unwrap()
         .broadcast_as((D, D))
         .unwrap()
         .contiguous()
         .unwrap();
-    let values = Tensor::eye(D, DType::F32, &dev).unwrap();
+    let values = Tensor::from_vec(values, (D, D), &dev).unwrap();
     let ones = Tensor::ones((D, D), DType::F32, &dev).unwrap();
     let lib = Tensor::ones((D, 1), DType::F32, &dev).unwrap();
     let target = MaskedNbTarget {
@@ -151,37 +208,42 @@ fn masked_likelihood_scores_the_dictionary_it_writes() {
         lib: &lib,
         mask: &ones,
     };
-
-    let full_kd = dec.full_logits_kd().unwrap();
-    let logz = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd).unwrap();
     let log_p = dec
-        .impute_masked_multinomial(&log_theta, &target, &logz)
+        .impute_masked_multinomial(&log_theta, &target, &full_kd)
         .unwrap()
         .to_vec1::<f32>()
         .unwrap();
 
-    let total: f32 = log_p.iter().map(|l| l.exp()).sum();
-    assert!(
-        (total - 1.0).abs() < 1e-4,
-        "Σ_g p_g over the full vocab must be 1, got {total:.6} from {log_p:?}"
-    );
-
-    // Gene-wise agreement with the dictionary: p_g = Σ_t θ_t β_tg.
-    let beta_dk = dec.get_dictionary().unwrap().exp().unwrap();
-    let theta_k1 = log_theta.i(0).unwrap().exp().unwrap().unsqueeze(1).unwrap();
-    let expected = beta_dk
-        .matmul(&theta_k1)
-        .unwrap()
-        .squeeze(1)
-        .unwrap()
-        .to_vec1::<f32>()
-        .unwrap();
-    for g in 0..D {
+    let beta = beta_dk.to_vec2::<f32>().unwrap(); // [D, K]
+    for n in 0..D {
+        let expected: f32 = (0..K).map(|k| theta[n * K + k] * beta[n][k]).sum();
         assert!(
-            (log_p[g].exp() - expected[g]).abs() < 1e-5,
-            "gene {g}: likelihood p={} but dictionary p={}",
-            log_p[g].exp(),
-            expected[g]
+            (log_p[n].exp() - expected).abs() < 1e-5,
+            "row {n}: likelihood p={} but dictionary p={}",
+            log_p[n].exp(),
+            expected
         );
     }
+
+    // Under one shared θ the full-vocab probabilities sum to one.
+    let shared = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], (1, K), &dev)
+        .unwrap()
+        .log()
+        .unwrap()
+        .broadcast_as((D, K))
+        .unwrap()
+        .contiguous()
+        .unwrap();
+    let total: f32 = dec
+        .impute_masked_multinomial(&shared, &target, &full_kd)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap()
+        .iter()
+        .map(|l| l.exp())
+        .sum();
+    assert!(
+        (total - 1.0).abs() < 1e-4,
+        "Σ_g p_g must be 1, got {total:.6}"
+    );
 }

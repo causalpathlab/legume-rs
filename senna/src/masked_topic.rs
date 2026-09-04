@@ -8,6 +8,7 @@ use crate::topic::train_masked::{
     train_masked, write_feature_embedding, write_masked_dictionary, IndexedTrainConfig,
 };
 
+use candle_util::decoder::masked_etm::{log_background_from_mean, pin_background};
 use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::encoder::*;
 use candle_util::vae::masked_topic::LatentHead;
@@ -926,6 +927,20 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // Per-level decoders: all at D_full, levels differ in N (sample coarsening).
     // ETM-factorized — each decoder shares the encoder's feature embeddings ρ,
     // and learns only its own topic embeddings α_{level} [K, H].
+    // Per-gene mean expression rate `μ_d` from the finest-level pseudobulk
+    // posterior. The encoder composes it with the per-cell batch null as a
+    // multiplicative count-rate divisor before Anscombe — joint correction
+    // for batch effect × gene-typical-rate, leaving the cell's biological
+    // deviation. Stored as the raw mean; Anscombe is applied inside the
+    // encoder via `anscombe_lite`.
+    let feature_mean: Vec<f32> = {
+        let mu = finest_collapsed.mu_observed.posterior_mean();
+        let n_pb = mu.ncols().max(1) as f32;
+        (0..n_features_full)
+            .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
+            .collect()
+    };
+
     let shared_rho = base_encoder.feature_embeddings().clone();
     let decoders: Vec<EmbeddedNbTopicDecoder> = (0..num_levels)
         .map(|i| {
@@ -937,6 +952,13 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             .expect("decoder creation")
         })
         .collect();
+
+    // Pin every level's per-gene background at the data's gene marginal: the
+    // home for shared abundance that centering α removes from the topics.
+    let log_pi_1d = log_background_from_mean(&feature_mean, &dev)?;
+    for i in 0..num_levels {
+        pin_background(&parameters, &format!("dec_{i}"), &log_pi_1d)?;
+    }
 
     // Overwrite ρ in place with the pre-trained values BEFORE warm-start
     // from a prior topic checkpoint. The encoder/decoder both hold a
@@ -1033,19 +1055,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         args.block_size,
     )?;
 
-    // Per-gene mean expression rate `μ_d` from the finest-level pseudobulk
-    // posterior. The encoder composes it with the per-cell batch null as a
-    // multiplicative count-rate divisor before Anscombe — joint correction
-    // for batch effect × gene-typical-rate, leaving the cell's biological
-    // deviation. Stored as the raw mean; Anscombe is applied inside the
-    // encoder via `anscombe_lite`.
-    let feature_mean: Vec<f32> = {
-        let mu = finest_collapsed.mu_observed.posterior_mean();
-        let n_pb = mu.ncols().max(1) as f32;
-        (0..n_features_full)
-            .map(|d| mu.row(d).iter().sum::<f32>() / n_pb)
-            .collect()
-    };
     // Anchor-prior CE penalty: Gram-Schmidt anchors selected on the
     // finest-level pseudobulks give each topic k a per-gene prior simplex
     // (rows of `[K, D]`), which we cross-entropy against
