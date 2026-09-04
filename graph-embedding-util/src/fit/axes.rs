@@ -66,8 +66,8 @@ impl AxisData {
         pb_blobs: &'a [UnifiedData],
     ) -> Vec<CompositeAxis<'a>> {
         let mut axes: Vec<CompositeAxis<'a>> = Vec::with_capacity(1 + level_models.len());
-        // Per-cell embedding, trained jointly to shape `E_feat`. Suppressed at the
-        // default `--phase1-cells-per-pb 0`, where pb aggregates shape it alone.
+        // Per-cell embedding, trained jointly to shape `E_feat`. Suppressed at
+        // `--phase1-cells-per-pb 0`, where pb aggregates shape it alone.
         if self.use_cell_axis {
             axes.push(CompositeAxis {
                 model: cell_model,
@@ -100,7 +100,7 @@ impl AxisData {
 /// `k` controls only what shapes `E_feat` in phase 1; phase 2 always projects every
 /// cell.
 ///
-/// * `k == 0` — suppress the cell axis entirely (pure-pb phase 1). The default.
+/// * `k == 0` — suppress the cell axis entirely (pure-pb phase 1).
 /// * `1 ≤ k < n_cells` — keep ≤ `k` cells per pb-sample at every collapse level
 ///   (union), shrinking the per-epoch step budget from `n_cells` to ≈ `k` × pb-samples
 ///   while preserving rare-cell coverage.
