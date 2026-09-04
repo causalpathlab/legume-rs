@@ -331,3 +331,136 @@ fn entropy_stays_above_floor_on_random_counts() {
     );
     assert!(dg.n_small_modules < m, "every module emptied but one");
 }
+
+////////////////////////////////////////
+// Dictionary uniformity (repulsion) //
+////////////////////////////////////////
+
+fn rows(v: Vec<f32>, m: usize, h: usize) -> Tensor {
+    Tensor::from_vec(v, (m, h), &dev()).unwrap()
+}
+
+fn uniformity(t: &Tensor, temp: f32) -> f32 {
+    dictionary_uniformity(t, temp).unwrap().to_scalar().unwrap()
+}
+
+/// At `t = 2` on two rows of R²: orthogonal unit rows are `‖a−b‖² = 2` apart,
+/// so `L = ln exp(−2t) = −4`; duplicates are 0 apart, `L = 0`.
+#[test]
+fn duplicate_modules_score_worse_than_orthogonal() {
+    let lo = uniformity(&rows(vec![1.0, 0.0, 0.0, 1.0], 2, 2), 2.0);
+    let ld = uniformity(&rows(vec![1.0, 0.0, 1.0, 0.0], 2, 2), 2.0);
+    assert!((lo + 4.0).abs() < 1e-4, "orthogonal: {lo}");
+    assert!(ld.abs() < 1e-4, "duplicate: {ld}");
+    assert!(ld > lo);
+}
+
+/// Antipodal rows are `‖a−b‖² = 4` apart and score `−4t = −8`: the term keeps
+/// repelling past orthogonality, where a squared cosine would be flat.
+#[test]
+fn uniformity_keeps_repelling_past_orthogonality() {
+    let l = uniformity(&rows(vec![1.0, 0.0, -1.0, 0.0], 2, 2), 2.0);
+    assert!((l + 8.0).abs() < 1e-4, "antipodal: {l}");
+}
+
+/// Rows are normalized INSIDE the term, so rescaling any row cannot move it —
+/// the objective is not to be gamed by shrinking or inflating a module.
+#[test]
+fn uniformity_is_invariant_to_row_rescaling() {
+    let base = vec![
+        0.3f32, -0.2, 0.1, 0.4, -0.5, 0.2, 0.7, 0.1, -0.3, -0.6, 0.2, 0.5,
+    ];
+    let mut scaled = base.clone();
+    for v in &mut scaled[0..3] {
+        *v *= 0.01;
+    }
+    for v in &mut scaled[6..9] {
+        *v *= 7.0;
+    }
+    let la = uniformity(&rows(base, 4, 3), 2.0);
+    let lb = uniformity(&rows(scaled, 4, 3), 2.0);
+    assert!((la - lb).abs() < 1e-5, "{la} vs {lb}");
+}
+
+/// Central finite differences on the dictionary, through the internal
+/// normalization.
+#[test]
+fn uniformity_gradient_matches_finite_difference() {
+    let d = dev();
+    let (m, h) = (4usize, 3usize);
+    let base = vec![
+        0.3f32, -0.2, 0.1, 0.4, -0.5, 0.2, 0.7, 0.1, -0.3, -0.6, 0.2, 0.5,
+    ];
+    let mu = Var::from_tensor(&Tensor::from_vec(base.clone(), (m, h), &d).unwrap()).unwrap();
+    let loss = dictionary_uniformity(mu.as_tensor(), 2.0).unwrap();
+    let grads = loss.backward().unwrap();
+    let g: Vec<f32> = grads
+        .get(mu.as_tensor())
+        .expect("gradient reaches the dictionary")
+        .flatten_all()
+        .unwrap()
+        .to_vec1()
+        .unwrap();
+    let eps = 1e-2f32;
+    for i in 0..base.len() {
+        let mut up = base.clone();
+        up[i] += eps;
+        let mut dn = base.clone();
+        dn[i] -= eps;
+        let lu = uniformity(&Tensor::from_vec(up, (m, h), &d).unwrap(), 2.0);
+        let ld = uniformity(&Tensor::from_vec(dn, (m, h), &d).unwrap(), 2.0);
+        let fd = (lu - ld) / (2.0 * eps);
+        let tol = 2e-2 * (1.0 + fd.abs().max(g[i].abs()));
+        assert!(
+            (fd - g[i]).abs() < tol,
+            "mu[{i}]: autograd {} vs finite-difference {fd}",
+            g[i]
+        );
+    }
+}
+
+/// `λ = 0` must not even enter the graph; `λ > 0` builds the term.
+#[test]
+fn zero_lambda_builds_no_penalty() {
+    let vm = candle_util::candle_nn::VarMap::new();
+    let labels = [0u32, 1, 0, 1];
+    let m = crate::model::JointEmbedModel::new_with_modules(
+        crate::model::ModuleInit {
+            n_features: 4,
+            n_cells: 2,
+            embedding_dim: 3,
+            n_modules: 2,
+            warm: crate::model::ModuleWarmStart::Labels {
+                labels: &labels,
+                own_mass: 0.9,
+            },
+            b_feat: &[0f32; 4],
+            b_cell: &[0f32; 2],
+            seed: 3,
+        },
+        &vm,
+        &dev(),
+    )
+    .unwrap();
+    let modules = m.modules.as_ref().unwrap();
+    assert!(module_dictionary_prior(modules, 0.0, 2.0)
+        .unwrap()
+        .is_none());
+    assert!(module_dictionary_prior(modules, 0.5, 2.0)
+        .unwrap()
+        .is_some());
+}
+
+/// The evaluation readout, never a training term: `PR = ‖μ‖_F⁴ / ‖μμᵀ‖_F²` is
+/// `M` for orthonormal rows and `1` when every row is the same direction.
+#[test]
+fn participation_ratio_is_m_for_orthonormal_and_one_for_duplicates() {
+    let eye = rows(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], 3, 3);
+    assert!((dictionary_participation_ratio(&eye).unwrap() - 3.0).abs() < 1e-5);
+    let dup = rows(
+        vec![1.0, 2.0, 0.5, 2.0, 4.0, 1.0, 3.0, 6.0, 1.5, 0.1, 0.2, 0.05],
+        4,
+        3,
+    );
+    assert!((dictionary_participation_ratio(&dup).unwrap() - 1.0).abs() < 1e-5);
+}
