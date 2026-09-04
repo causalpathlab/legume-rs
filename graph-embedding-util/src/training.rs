@@ -117,6 +117,25 @@ pub struct ModuleTrainParams {
     pub uniform_temp: f32,
 }
 
+/// Whether the membership is held when a training call beginning at global epoch
+/// `epoch_offset` starts: only while the warm-up is genuinely still ahead. A
+/// later jitter round must not re-freeze a membership an earlier one released.
+#[must_use]
+pub(crate) fn frozen_at_entry(warmup_epochs: usize, epoch_offset: usize) -> bool {
+    warmup_epochs > epoch_offset
+}
+
+/// Whether the warm-up ends at LOCAL epoch `epoch` of a call beginning at global
+/// epoch `epoch_offset` — i.e. whether this is the global epoch `warmup_epochs`.
+#[must_use]
+pub(crate) fn releases_at_local_epoch(
+    warmup_epochs: usize,
+    epoch_offset: usize,
+    epoch: usize,
+) -> bool {
+    warmup_epochs > 0 && epoch_offset + epoch == warmup_epochs
+}
+
 /// Per-run state of the module layer that lives with the training loop rather
 /// than the model: the host-side negative pools per axis and sampler, refreshed
 /// from the membership once per epoch.
@@ -211,6 +230,12 @@ pub struct TrainingParams {
     /// loss — a dense prior that fits the (dense) per-gene γ structure and is
     /// well-behaved under AdamW. `0.0` disables (plain β-sharing, no `δ_g`).
     pub delta_l2: f32,
+    /// Global epoch this call starts at. `0` for an ordinary single-call fit;
+    /// posterior jitter (`fit::jitter`) splits one run across several calls and
+    /// passes the running total, because the LOCAL epoch counter restarts every
+    /// call and anything keyed on it — the module warm-up above all — would fire
+    /// at the wrong time or, when every call is shorter than the warm-up, never.
+    pub epoch_offset: usize,
     /// Learned-module training knobs; `Some` iff the model is module-parameterized.
     pub module: Option<ModuleTrainParams>,
 }
@@ -330,12 +355,14 @@ pub fn train_composite(
     // applies (the residual is the module model's only per-row table).
     let mut module_state = match (ctx.axes[0].model.modules.as_ref(), params.module.as_ref()) {
         (Some(m), Some(p)) => {
-            m.set_frozen(p.warmup_epochs > 0);
-            info!(
-                "gene modules: membership held for {} of {} epochs, then trained; {} units per \
-                 step per axis pooled for the exact module term, gene dropout {}",
-                p.warmup_epochs, params.epochs, p.units_per_step, p.gene_dropout
-            );
+            m.set_frozen(frozen_at_entry(p.warmup_epochs, params.epoch_offset));
+            if params.epoch_offset == 0 {
+                info!(
+                    "gene modules: membership held for {} epochs, then trained; {} units per \
+                     step per axis pooled for the exact module term, gene dropout {}",
+                    p.warmup_epochs, p.units_per_step, p.gene_dropout
+                );
+            }
             Some(ModuleState::new(m, p, ctx)?)
         }
         (Some(_), None) => {
@@ -408,13 +435,14 @@ pub fn train_composite(
         // END of each epoch below, so the first trained epoch still contrasts within
         // the warm-start modules — one epoch of lag.
         if let Some(st) = &module_state {
-            if epoch == st.params.warmup_epochs && st.modules.is_frozen() {
+            if releases_at_local_epoch(st.params.warmup_epochs, params.epoch_offset, epoch)
+                && st.modules.is_frozen()
+            {
                 st.modules.set_frozen(false);
                 info!(
-                    "epoch {}/{}: module membership released — π now trains with the exact \
+                    "epoch {}: module membership released — π now trains with the exact \
                      module term and the balance prior",
-                    epoch + 1,
-                    params.epochs
+                    params.epoch_offset + epoch + 1,
                 );
             }
         }
