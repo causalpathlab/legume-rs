@@ -71,19 +71,26 @@ pub struct BgeArgs {
 
     #[arg(
         long = "phase1-cells-per-pb",
-        default_value_t = 0,
-        help = "Phase-1 cell-axis mode (k); 0 = pure-pb (fastest),\n\
-                phase 2 always projects every cell.",
-        long_help = "Phase-1 cell-axis mode (k).\n\
-                     Controls what shapes the feature dictionary in phase 1;\n\
-                     phase 2 ALWAYS analytically projects every cell,\n\
-                     so the per-cell embedding output is unaffected.\n\
-                     k=0 (default) → suppress the cell axis entirely.\n\
-                     This is pure-pb: E_feat from pb aggregates only, and fastest.\n\
-                     1≤k<n_cells → keep ≤k cells per pb-sample at each level (union).\n\
-                     That cuts the phase-1 step budget, preserving rare-cell coverage.\n\
-                     k≥n_cells → all cells (legacy; slowest).",
-        hide = true
+        default_value_t = 16,
+        help = "Cells injected per pseudobulk into phase-1 training (k); 0 = pure-pb.",
+        long_help = "Phase-1 cell-axis mode (k): how many raw cells per pseudobulk-sample,\n\
+                     at each collapse level, train alongside the pseudobulks.\n\
+                     Phase 2 ALWAYS analytically projects every cell,\n\
+                     so this shapes the feature dictionary, not the per-cell output.\n\
+                     \n\
+                     A pseudobulk averages many cells, and averaging smooths away the\n\
+                     sharp present-versus-absent contrast that separates closely related\n\
+                     states. A few raw cells restore it: measured, a moderate k raised\n\
+                     purity on exactly the within-lineage classes pure-pb lost, and\n\
+                     several-fold more of the embedding's dimensions carry variance.\n\
+                     \n\
+                     It has an interior optimum. Injecting EVERY cell is worse than\n\
+                     injecting none, and costs the most; the default is the moderate\n\
+                     setting that measured best, at a few times pure-pb's runtime.\n\
+                     \n\
+                     k = 0 → suppress the cell axis (pure-pb, fastest).\n\
+                     1 ≤ k < n_cells → keep ≤ k cells per pb-sample at each level (union).\n\
+                     k ≥ n_cells → every cell (slowest, and measured worse)."
     )]
     pub(crate) phase1_cells_per_pb: usize,
 
