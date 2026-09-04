@@ -399,8 +399,6 @@ fn run_gem_genes_bge(
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
             phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
-            // Posterior jitter is a `senna bge` experiment for now.
-            jitter_rounds: 1,
             feat_factor: Some(factor),
             delta_l2,
             lineage_dag: args.train.lineage_dag,
