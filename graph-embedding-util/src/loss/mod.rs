@@ -28,6 +28,7 @@ use candle_util::candle_core::{Result, Tensor};
 pub(crate) mod cell;
 pub(crate) mod chain;
 pub(crate) mod feat;
+pub mod lnpdf;
 pub(crate) mod modules;
 
 #[cfg(test)]

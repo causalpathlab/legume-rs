@@ -13,25 +13,22 @@
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
 //! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
-//! [`graph_embedding_util::posterior::multinomial_ll`] consume.
+//! [`graph_embedding_util::loss::lnpdf::multinomial_ll`] consume.
 //!
 //! `--skip-etm` is **not** required. It used to be, before `feature_loading.parquet` always
 //! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
 //! itself as working with or without the flag.
 
+use crate::embed_common::Mat;
+use crate::logging::new_progress_bar;
 use crate::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+use candle_util::candle_core::Device;
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD};
-// `multinomial_ll` is not in `posterior`'s re-export list (only `poisson_ll` is), so it comes
-// from the module directly. It is the one we want — see `BgeModel::score`.
-use crate::embed_common::Mat;
-use crate::logging::new_progress_bar;
-use candle_util::candle_core::Device;
-use graph_embedding_util::posterior::lnpdf::multinomial_ll;
-use graph_embedding_util::posterior::{FrozenSide, NodeTerm};
+use graph_embedding_util::loss::lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
 use log::info;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;

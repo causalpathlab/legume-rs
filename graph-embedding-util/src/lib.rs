@@ -32,7 +32,6 @@ pub mod feature_qc;
 pub mod fit;
 pub mod loss;
 pub mod model;
-pub mod posterior;
 pub mod postprocess;
 pub mod progress;
 pub mod simba;
