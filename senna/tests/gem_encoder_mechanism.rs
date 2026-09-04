@@ -158,6 +158,7 @@ fn fit(sim: &Sim, epochs: usize, delta_l2: f32, seed_tag: &str) -> Fitted {
         K,
         encoder.feature_embeddings().clone(),
         encoder.delta_embeddings().clone(),
+        GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(),
         vb.pp("dec_0"),
     )
     .expect("decoder")];

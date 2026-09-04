@@ -312,12 +312,16 @@ fn build_model(
 
     let rho = encoder.feature_embeddings().clone();
     let delta = encoder.delta_embeddings().clone();
+    // TODO: replace with the observed per-gene count marginal; uniform is a
+    // constant and therefore a no-op under the gene-axis log_softmax.
+    let log_pi = GemEtmDecoder::uniform_log_pi(n_genes, vb.device()).context("log_pi init")?;
     let decoders: Vec<GemEtmDecoder> = (0..n_levels)
         .map(|i| {
             GemEtmDecoder::new(
                 args.n_latent,
                 rho.clone(),
                 delta.clone(),
+                log_pi.clone(),
                 vb.pp(format!("dec_{i}")),
             )
         })

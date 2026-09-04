@@ -19,7 +19,7 @@ fn fixture(delta_scale: f32) -> (GemEtmDecoder, Tensor, Tensor, Device) {
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let dec = GemEtmDecoder::new(K, rho.clone(), delta.clone(), vb.pp("dec")).unwrap();
+    let dec = GemEtmDecoder::new(K, rho.clone(), delta.clone(), GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(), vb.pp("dec")).unwrap();
     (dec, rho, delta, dev)
 }
 
@@ -127,8 +127,8 @@ fn uniform_delta_shift_leaves_the_mature_dictionary_unchanged() {
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let dec_a = GemEtmDecoder::new(K, rho.clone(), delta_a, vb.pp("dec")).unwrap();
-    let dec_b = GemEtmDecoder::new(K, rho, delta_b, vb.pp("dec")).unwrap();
+    let dec_a = GemEtmDecoder::new(K, rho.clone(), delta_a, GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(), vb.pp("dec")).unwrap();
+    let dec_b = GemEtmDecoder::new(K, rho, delta_b, GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(), vb.pp("dec")).unwrap();
 
     let a: Vec<f32> = dec_a
         .get_dictionary(Track::Mature)
@@ -171,7 +171,17 @@ fn shared_bias_moves_the_dictionary_but_leaves_the_delta_estimand_intact() {
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
-    let dec = GemEtmDecoder::new(K, rho, delta.clone(), vb.pp("dec")).unwrap();
+    // The background is frozen, so it is varied by constructing a SECOND decoder
+    // rather than by driving a Var off zero. Both share `α` — same var names
+    // under the `dec` prefix — so the dictionary can only differ through `log π`.
+    let dec = GemEtmDecoder::new(
+        K,
+        rho.clone(),
+        delta.clone(),
+        GemEtmDecoder::uniform_log_pi(G, &dev).unwrap(),
+        vb.pp("dec"),
+    )
+    .unwrap();
 
     let before: Vec<Vec<f32>> = dec
         .get_dictionary(Track::Mature)
@@ -179,12 +189,17 @@ fn shared_bias_moves_the_dictionary_but_leaves_the_delta_estimand_intact() {
         .to_vec2()
         .unwrap();
 
-    // Gene-VARYING bias. A gene-constant one is absorbed by the softmax, which
-    // would make the "it moved" half of this test pass vacuously.
+    // Gene-VARYING background. A gene-constant one is absorbed by the softmax,
+    // which would make the "it moved" half of this test pass vacuously.
     let b: Vec<f32> = (0..G).map(|g| (g % 3) as f32 - 1.0).collect();
-    varmap.data().lock().unwrap()["dec.logit_bias"]
-        .set(&Tensor::from_vec(b, (1, G), &dev).unwrap())
-        .unwrap();
+    let dec = GemEtmDecoder::new(
+        K,
+        rho,
+        delta.clone(),
+        Tensor::from_vec(b, (1, G), &dev).unwrap(),
+        vb.pp("dec"),
+    )
+    .unwrap();
 
     let after: Vec<Vec<f32>> = dec
         .get_dictionary(Track::Mature)
@@ -197,7 +212,7 @@ fn shared_bias_moves_the_dictionary_but_leaves_the_delta_estimand_intact() {
         .any(|(x, y)| x.iter().zip(y.iter()).any(|(a, c)| (a - c).abs() > 1e-4));
     assert!(
         moved,
-        "the bias left the dictionary unchanged — it is not live"
+        "the background left the dictionary unchanged — it is not live"
     );
 
     // …yet log β^s − log β^u is STILL ⟨α_t, δ_g⟩ + a per-topic constant.

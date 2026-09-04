@@ -215,13 +215,19 @@ pub struct GemEtmDecoder {
     /// same-named `delta_feature_embedding.parquet` files that are NOT
     /// comparable without negating one.
     delta_embeddings: Tensor,
-    /// `b [1, G]` per-gene log-background, SHARED by both tracks (see the module
-    /// header). Same name, shape and zero-init as
-    /// [`crate::nn::linear::log_softmax_linear`]'s `logit_bias`, which is where
-    /// this pattern is established and measured.
+    /// `log π [1, G]` per-gene log-background, SHARED by both tracks (see the
+    /// module header) and **frozen** at the data's own gene marginal.
     ///
-    /// Unpenalized: it is the nuisance parameter we WANT to absorb the mean.
-    logit_bias: Tensor,
+    /// It plays the mean-absorbing role the learnable `logit_bias` was
+    /// introduced for — the background still exists, and must, since removing it
+    /// entirely is the ≈7× worse multinomial case the module header records —
+    /// but it is pinned rather than free. A *learnable* per-gene bias shifts all
+    /// `K` topics equally on a gene, which is exactly the shared abundance
+    /// direction that centering `α` removes from the `α · ρᵀ` path; leaving it
+    /// free lets the optimizer reinstate that direction through another
+    /// parameter and silently cancel the competition. Pinning it is what makes
+    /// the per-gene log-enrichment budget in [`Self::full_logits_kg`] hold.
+    log_pi_1g: Tensor,
     /// `log φ [2, G]` per-track, per-gene NB inverse dispersion (learnable).
     /// Row 0 = nascent, row 1 = mature; the two tracks are genuinely
     /// differently over-dispersed, so they do not share a row.
@@ -236,6 +242,7 @@ impl GemEtmDecoder {
         n_topics: usize,
         feature_embeddings: Tensor,
         delta_embeddings: Tensor,
+        log_pi_1g: Tensor,
         vs: VarBuilder,
     ) -> Result<Self> {
         let dims = feature_embeddings.dims();
@@ -254,6 +261,13 @@ impl GemEtmDecoder {
         }
         let n_genes = dims[0];
         let embedding_dim = dims[1];
+        if log_pi_1g.dims() != [1, n_genes] {
+            candle_core::bail!(
+                "GemEtmDecoder: log_pi must be [1, {}], got {:?}",
+                n_genes,
+                log_pi_1g.dims()
+            );
+        }
 
         let topic_embeddings = vs.get_with_hints(
             (n_topics, embedding_dim),
@@ -262,7 +276,6 @@ impl GemEtmDecoder {
         )?;
         let log_phi_2g =
             vs.get_with_hints((2, n_genes), "log_phi", candle_nn::Init::Const(0.693))?;
-        let logit_bias = vs.get_with_hints((1, n_genes), "logit_bias", candle_nn::init::ZERO)?;
 
         Ok(Self {
             n_genes,
@@ -270,9 +283,17 @@ impl GemEtmDecoder {
             topic_embeddings,
             feature_embeddings,
             delta_embeddings,
-            logit_bias,
+            log_pi_1g,
             log_phi_2g,
         })
+    }
+
+    /// Uniform `log π [1, G]` = `-ln G`, for callers with no observed marginal
+    /// (fixtures, and any site not yet wired to the data's gene counts). A
+    /// constant is a no-op under the gene-axis `log_softmax`, so this reproduces
+    /// a zero background exactly.
+    pub fn uniform_log_pi(n_genes: usize, device: &candle_core::Device) -> Result<Tensor> {
+        Tensor::full(-(n_genes as f64).ln() as f32, (1, n_genes), device)
     }
 
     #[must_use]
@@ -296,7 +317,7 @@ impl GemEtmDecoder {
     pub fn full_logits_kg(&self, track: Track) -> Result<Tensor> {
         self.topic_embeddings
             .matmul(&self.track_embedding(track)?.t()?)? // [K, G]
-            .broadcast_add(&self.logit_bias) // + b_g, same for every topic
+            .broadcast_add(&self.log_pi_1g) // + log π_g, same for every topic
     }
 
     /// Full `[G, K]` log-β = `log_softmax_g(b_g + α · ρ^τᵀ)` for one track —
@@ -354,11 +375,11 @@ impl GemEtmDecoder {
         let rho_g = self.track_embedding(track)?.index_select(&flat, 0)?; // [N*K, H]
         let logits = rho_g
             .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
-            // + b_g at the cell's genes, the same value for every topic. MUST
+            // + log π_g at the cell's genes, same for every topic. MUST
             // match `full_logits_kg`, since `logz_11k` is computed from that.
             .broadcast_add(
                 &self
-                    .logit_bias
+                    .log_pi_1g
                     .reshape((self.n_genes, 1))?
                     .index_select(&flat, 0)?,
             )? // [N*K, 1]
