@@ -236,15 +236,19 @@ enum Commands {
                       \n\
                       Training masks part of that window and encodes what is left:\n\
                       θ_n = softmax(encoder(visible)), deterministic and KL-free.\n\
-                      The head then imputes every gene the encoder did NOT see,\n\
-                      across the whole feature axis and including absent genes,\n\
-                      with μ = ℓ · (θ·β) against the batch-adjusted rows.\n\
+                      The head then imputes what the encoder did NOT see, absent\n\
+                      genes included, with μ = ℓ · (θ·β) against the batch-adjusted rows.\n\
                       There β_kg = softmax_g(α_k · ρ_g). φ_g is a per-gene dispersion.\n\
+                      By default genes are collapsed into modules for that target\n\
+                      (--max-coarse-features): each module's unseen mass is scored,\n\
+                      and a gene takes a pinned share of its module's rate.\n\
                       \n\
                       The encoder's window is a compute budget; what the decoder\n\
                       answers for does not depend on it. Scoring only the window\n\
                       would ask about abundant genes alone and never about an\n\
                       absent one, which is far weaker evidence about θ.\n\
+                      --query-decoder adds a gene-level read: a masked or absent\n\
+                      gene attends over the visible context and corrects its own rate.\n\
                       \n\
                       The masked objective prevents collapse, not a KL bottleneck.\n\
                       So it scales with more data. Inference is encoder-only.\n\
