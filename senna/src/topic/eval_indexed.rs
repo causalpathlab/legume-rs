@@ -313,7 +313,6 @@ pub(crate) fn evaluate_holdout_imputation(
 ) -> anyhow::Result<f32> {
     let ntot = data_vec.num_columns();
     let full_kd = decoder.full_logits_kd()?;
-    let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
 
     let mut llik_sum = 0f64;
     let mut mask_cnt = 0f64;
@@ -386,9 +385,9 @@ pub(crate) fn evaluate_holdout_imputation(
             mask: &masked,
         };
         let llik = match config.likelihood {
-            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &logz_11k)?,
+            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &full_kd)?,
             MaskedLikelihood::Multinomial => {
-                decoder.impute_masked_multinomial(&log_z, &target, &logz_11k)?
+                decoder.impute_masked_multinomial(&log_z, &target, &full_kd)?
             }
         };
         llik_sum += f64::from(llik.sum_all()?.to_scalar::<f32>()?);
