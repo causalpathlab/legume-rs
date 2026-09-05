@@ -19,6 +19,7 @@
 //! `E[y] = μ_residual · μ_adjusted`).
 
 use crate::batched_dot::batched_matvec;
+use crate::decoder::module_map::ModuleMap;
 use crate::fast_index::gather_rows;
 use crate::loss::nb_log_likelihood_elem;
 use candle_core::{Result, Tensor};
@@ -58,16 +59,54 @@ pub struct MaskedDenseTarget<'a> {
     pub lib: &'a Tensor,
     /// `[N, D]` 1 = scored, 0 = withheld (the encoder's visible genes).
     pub mask: &'a Tensor,
-    /// `[N, D]` per-gene log-residual from the query decoder, 0 wherever no
-    /// query was drawn; `None` ⇒ no residual. Multiplies the mixture rate, so
-    /// the mixture explains what it can and the residual carries the rest.
-    pub log_residual: Option<&'a Tensor>,
+}
+
+/// Minibatch target for the **module-collapsed** head: the row's counts
+/// summed into modules, less what the encoder's context saw.
+///
+/// The module head predicts each module's UNSEEN share. The visible genes'
+/// counts are subtracted from the module total (both from the target row, so
+/// the difference is exact), and the module's rate is scaled by the pinned
+/// share of its mass the context did not see. A module the context saw
+/// completely has nothing left to predict and is not scored. Under the
+/// identity map this is the dense gene head term for term.
+pub struct ModuleTarget<'a> {
+    /// `[N, M]` module totals of the target row.
+    pub values: &'a Tensor,
+    /// `[N, M]` target counts of the visible context genes, summed per module.
+    pub visible_counts: &'a Tensor,
+    /// `[N, M]` `Σ_{g visible in m} π_{g|m}`: the module's share the context saw.
+    pub visible_share: &'a Tensor,
+    /// `[N, 1]` per-row library size over the full row.
+    pub lib: &'a Tensor,
+}
+
+/// Minibatch target for the gene-level **query head**: a sampled set of
+/// genes per row, each read at its module's rate times its share times the
+/// query decoder's residual.
+pub struct QueryTarget<'a> {
+    /// `[N, Q]` u32 query genes (gene 0 on pads).
+    pub gene_ids: &'a Tensor,
+    /// `[N, Q]` target counts at the query genes.
+    pub values: &'a Tensor,
+    /// `[N, Q]` 1 on a real query, 0 on a pad.
+    pub weight: &'a Tensor,
+    /// `[N, Q]` the query decoder's log-residual `r_g`.
+    pub log_residual: &'a Tensor,
+    /// `[N, 1]` per-row library size over the full row.
+    pub lib: &'a Tensor,
 }
 
 /// NB embedded-topic decoder for masked imputation.
 pub struct EmbeddedNbTopicDecoder {
+    /// Rows of ρ: the gene axis.
     n_features: usize,
+    /// The decoder's output width: modules under a module map, genes under
+    /// the identity.
+    n_obs: usize,
     n_topics: usize,
+    /// Gene → module map; identity when the decoder scores genes.
+    modules: ModuleMap,
     /// `α [K, H]` topic embeddings (learnable, decoder scope).
     topic_embeddings: Tensor,
     /// `ρ [D, H]` gene symbol embeddings — the **same** handle as the encoder
@@ -130,6 +169,21 @@ impl EmbeddedNbTopicDecoder {
     /// (`encoder.feature_embeddings().clone()`). `α` is Kaiming-init in `vs`;
     /// `log φ` starts at ln(2) ≈ 0.69 (moderate dispersion).
     pub fn new(n_topics: usize, feature_embeddings: Tensor, vs: VarBuilder) -> Result<Self> {
+        let d = feature_embeddings.dim(0)?;
+        let identity = ModuleMap::identity(d, feature_embeddings.device())?;
+        Self::new_with_modules(n_topics, feature_embeddings, identity, vs)
+    }
+
+    /// A decoder whose dense output axis is the map's modules: `φ` and the
+    /// pinned background live at `[1, M]`, the logits are `(α − ᾱ)·ρ̄ᵀ + log π_m`
+    /// with `ρ̄` the within-module mean of ρ, and any gene is scored at its
+    /// module's rate times its pinned share. Same var names as [`Self::new`].
+    pub fn new_with_modules(
+        n_topics: usize,
+        feature_embeddings: Tensor,
+        modules: ModuleMap,
+        vs: VarBuilder,
+    ) -> Result<Self> {
         let dims = feature_embeddings.dims();
         if dims.len() != 2 {
             candle_core::bail!(
@@ -139,28 +193,41 @@ impl EmbeddedNbTopicDecoder {
         }
         let n_features = dims[0];
         let embedding_dim = dims[1];
+        if modules.n_fine() != n_features {
+            candle_core::bail!(
+                "EmbeddedNbTopicDecoder: module map covers {} genes but ρ has {n_features}",
+                modules.n_fine()
+            );
+        }
+        let n_obs = modules.n_coarse();
 
         let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
         let topic_embeddings =
             vs.get_with_hints((n_topics, embedding_dim), "topic.embeddings", init_ws)?;
-        let log_phi_1d =
-            vs.get_with_hints((1, n_features), "log_phi", candle_nn::Init::Const(0.693))?;
-        // Uniform until pinned: a constant is a no-op under the gene-axis
+        let log_phi_1d = vs.get_with_hints((1, n_obs), "log_phi", candle_nn::Init::Const(0.693))?;
+        // Uniform until pinned: a constant is a no-op under the output-axis
         // log_softmax, so an unpinned decoder is exactly background-free.
         let log_pi_1d = vs.get_with_hints(
-            (1, n_features),
+            (1, n_obs),
             BACKGROUND_VAR,
-            candle_nn::Init::Const(-(n_features as f64).ln()),
+            candle_nn::Init::Const(-(n_obs as f64).ln()),
         )?;
 
         Ok(Self {
             n_features,
+            n_obs,
             n_topics,
+            modules,
             topic_embeddings,
             feature_embeddings,
             log_phi_1d,
             log_pi_1d,
         })
+    }
+
+    /// The gene → module map (identity when the decoder scores genes).
+    pub fn modules(&self) -> &ModuleMap {
+        &self.modules
     }
 
     pub fn topic_embeddings(&self) -> &Tensor {
@@ -179,7 +246,13 @@ impl EmbeddedNbTopicDecoder {
     pub fn phi(&self) -> Result<Tensor> {
         self.log_phi_1d.exp()
     }
+    /// The dense output width: modules under a module map, genes otherwise.
     pub fn dim_obs(&self) -> usize {
+        self.n_obs
+    }
+
+    /// The gene axis (rows of ρ).
+    pub fn n_features(&self) -> usize {
         self.n_features
     }
     pub fn dim_latent(&self) -> usize {
@@ -206,8 +279,12 @@ impl EmbeddedNbTopicDecoder {
     /// the log-partition and the training likelihood all read it — so the
     /// trained model and the dictionary written to disk stay consistent.
     pub fn full_logits_kd(&self) -> Result<Tensor> {
+        // Under a module map the table is the within-module mean of ρ, so ρ
+        // still trains through the dense head — each gene at 1/|m| of its
+        // module's gradient.
+        let table = self.modules.coarsen_mean_dh(&self.feature_embeddings)?;
         self.centered_topic_embeddings()?
-            .matmul(&self.feature_embeddings.t()?)?
+            .matmul(&table.t()?)?
             .broadcast_add(&self.log_pi_1d)
     }
 
@@ -268,7 +345,7 @@ impl EmbeddedNbTopicDecoder {
     /// The logits are **gathered** from the caller's `full_kd` (see
     /// [`Self::full_logits_kd`]) rather than recomputed, so the numerator and
     /// the partition are one quantity by construction.
-    fn mixture_rate_nk(
+    pub(crate) fn mixture_rate_nk(
         &self,
         log_theta_nk: &Tensor,
         indices: &Tensor,
@@ -279,15 +356,21 @@ impl EmbeddedNbTopicDecoder {
         let t = self.n_topics;
 
         let theta_nt = log_theta_nk.exp()?; // [N, T]
-        let flat = indices.flatten_all()?; // [N*K]
+                                            // A gene is scored at its module's rate times its pinned share; under
+                                            // the identity map both lookups are the gene itself and share one.
+        let flat = self.modules.modules_of(indices)?.flatten_all()?; // [N*K] module ids
 
         let logz_11k = Self::log_partition_from_logits(full_kd)?; // [1, 1, T]
-        let logits = gather_rows(&full_kd.t()?.contiguous()?, &flat)? // [D, T] → [N*K, T]
+        let logits = gather_rows(&full_kd.t()?.contiguous()?, &flat)? // [M, T] → [N*K, T]
             .reshape((n, k, t))?; // [N, K, T]
         let beta_nkt = logits.broadcast_sub(&logz_11k)?.exp()?; // [N, K, T]
 
         // Mixture rate `Σ_t β·θ` as a gemm — see `candle_util::batched_dot`.
-        batched_matvec(&beta_nkt, &theta_nt) // [N, K]
+        let rate_nk = batched_matvec(&beta_nkt, &theta_nt)?; // [N, K]
+        if self.modules.is_identity() {
+            return Ok(rate_nk);
+        }
+        rate_nk.mul(&self.modules.log_share_at(indices)?.exp()?)
     }
 
     /// Masked NB imputation log-likelihood, summed over masked positions →
@@ -315,8 +398,8 @@ impl EmbeddedNbTopicDecoder {
         let (n, k) = (indices.dim(0)?, indices.dim(1)?);
         let theta_beta_nk = self.mixture_rate_nk(log_theta_nk, indices, full_kd)?; // [N, K]
 
-        // φ at the cell's genes
-        let flat = indices.flatten_all()?; // [N*K]
+        // φ at the cell's genes: per module under a module map.
+        let flat = self.modules.modules_of(indices)?.flatten_all()?; // [N*K]
         let log_phi_nk = gather_rows(&self.log_phi_1d.squeeze(0)?, &flat)?.reshape((n, k))?; // [N, K]
 
         nb_score(
@@ -367,10 +450,7 @@ impl EmbeddedNbTopicDecoder {
         target: &MaskedDenseTarget<'_>,
         full_kd: &Tensor,
     ) -> Result<Tensor> {
-        let rate_nd = apply_log_residual(
-            &self.mixture_rate_nd(log_theta_nk, full_kd)?,
-            target.log_residual,
-        )?;
+        let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
         let log_phi_nd = self.log_phi_1d.broadcast_as(rate_nd.shape())?;
         nb_score(
             target.values,
@@ -391,25 +471,82 @@ impl EmbeddedNbTopicDecoder {
         full_kd: &Tensor,
     ) -> Result<Tensor> {
         let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
-        // The residual breaks the row's normalization; put it back so the
-        // multinomial stays a distribution over genes.
-        let rate_nd = match target.log_residual {
-            Some(_) => {
-                let r = apply_log_residual(&rate_nd, target.log_residual)?;
-                let z = r.sum_keepdim(1)?;
-                r.broadcast_div(&z)?
-            }
-            None => rate_nd,
-        };
         multinomial_score(target.values, &rate_nd, target.mask)
     }
-}
 
-/// `rate · exp(log_residual)`, or `rate` itself when there is no residual.
-fn apply_log_residual(rate: &Tensor, log_residual: Option<&Tensor>) -> Result<Tensor> {
-    match log_residual {
-        Some(r) => rate * r.exp()?,
-        None => Ok(rate.clone()),
+    ////////////////////////////////////////////////////////
+    // Module-collapsed head and the gene-level query head //
+    ////////////////////////////////////////////////////////
+
+    /// NB log-likelihood of each module's unseen counts under the module's
+    /// rate scaled by its unseen share → `(llik [N], scored units [N])`.
+    ///
+    /// `μ_nm = ℓ_n · (θβ)_m · (1 − visible_share_nm)`; a module whose share
+    /// the context saw completely is not scored. Under the identity map this
+    /// equals [`Self::impute_dense_nb`] on the mask.
+    pub fn score_unseen_modules_nb(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &ModuleTarget<'_>,
+        full_km: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let (rate_nm, unseen, share, scored) = self.unseen_parts(log_theta_nk, target, full_km)?;
+        let mu = rate_nm.mul(&share)?.broadcast_mul(target.lib)?;
+        let log_phi = self.log_phi_1d.broadcast_as(mu.shape())?;
+        let elem = nb_log_likelihood_elem(&unseen, &mu, &log_phi)?;
+        Ok((elem.mul(&scored)?.sum(1)?, scored.sum(1)?))
+    }
+
+    /// Multinomial sibling of [`Self::score_unseen_modules_nb`]: the unseen
+    /// counts against `log((θβ)_m · unseen share)`, the full-axis rate
+    /// restricted to what the context did not see, as the dense head does.
+    pub fn score_unseen_modules_multinomial(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &ModuleTarget<'_>,
+        full_km: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let (rate_nm, unseen, share, scored) = self.unseen_parts(log_theta_nk, target, full_km)?;
+        let p = rate_nm.mul(&share)?;
+        let ll = (unseen * (p + 1e-20)?.log()?)?;
+        Ok((ll.mul(&scored)?.sum(1)?, scored.sum(1)?))
+    }
+
+    /// `(rate [N, M], unseen counts, unseen share, scored indicator)`.
+    fn unseen_parts(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &ModuleTarget<'_>,
+        full_km: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        let rate_nm = self.mixture_rate_nd(log_theta_nk, full_km)?;
+        // Both from the target row, so the difference is exact; clamp guards
+        // rounding in the sums.
+        let unseen = (target.values - target.visible_counts)?.clamp(0.0, f64::INFINITY)?;
+        let share = target.visible_share.affine(-1.0, 1.0)?;
+        let scored = share.gt(1e-6)?.to_dtype(rate_nm.dtype())?;
+        Ok((rate_nm, unseen, share, scored))
+    }
+
+    /// NB log-likelihood at the sampled query genes, weighted, → `[N]`:
+    /// `μ_nq = ℓ_n · (θβ)_{m(g)} · π_{g|m(g)} · exp(r_nq)`, `φ` at the module.
+    /// With `r = 0` this is the expanded dictionary's rate.
+    pub fn score_queries_nb(
+        &self,
+        log_theta_nk: &Tensor,
+        q: &QueryTarget<'_>,
+        full_km: &Tensor,
+    ) -> Result<Tensor> {
+        let rate_nm = self.mixture_rate_nd(log_theta_nk, full_km)?; // [N, M]
+        let ids_m = self.modules.modules_of(q.gene_ids)?; // [N, Q]
+        let rate_nq = rate_nm.gather(&ids_m, 1)?; // [N, Q]
+        let log_factor = (self.modules.log_share_at(q.gene_ids)? + q.log_residual)?;
+        let mu = rate_nq.mul(&log_factor.exp()?)?.broadcast_mul(q.lib)?;
+        let (n, qn) = ids_m.dims2()?;
+        let log_phi =
+            gather_rows(&self.log_phi_1d.squeeze(0)?, &ids_m.flatten_all()?)?.reshape((n, qn))?;
+        let elem = nb_log_likelihood_elem(q.values, &mu, &log_phi)?;
+        elem.mul(q.weight)?.sum(1)
     }
 }
 

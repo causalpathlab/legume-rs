@@ -556,6 +556,22 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        value_name = "M",
+        help = "Collapse genes into at most M modules for the decoder targets (0 = off)",
+        long_help = "Collapse genes into at most M modules for the decoder targets.\n\
+                     The encoder keeps its gene-level context and embedding; the query\n\
+                     decoder keeps its gene-level reads. What changes is what the dense\n\
+                     head answers for: each module's unseen mass instead of each gene,\n\
+                     so no per-step tensor grows with the number of genes.\n\
+                     Modules come from the finest pseudobulk profiles, nested per level\n\
+                     with log-spaced widths, as in `senna topic`. A gene's share of its\n\
+                     module is pinned at its mean rate. 0 scores every gene."
+    )]
+    max_coarse_features: usize,
+
+    #[arg(
+        long,
         default_value_t = 42,
         value_name = "N",
         help = "Seed for the masking and thinning draws",
@@ -963,24 +979,36 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             .collect()
     };
 
+    // Per-level gene → module maps for the decoder targets (identity when
+    // `--max-coarse-features` is off), keyed like `senna topic`'s coarsening
+    // and persisted with the model.
+    let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
+        args.max_coarse_features,
+        args.init_from.as_deref(),
+        finest_collapsed,
+        num_levels,
+        n_features_full,
+        args.collapse.pb_refine.to_params(),
+    )?;
     let shared_rho = base_encoder.feature_embeddings().clone();
-    let decoders: Vec<EmbeddedNbTopicDecoder> = (0..num_levels)
-        .map(|i| {
-            EmbeddedNbTopicDecoder::new(
-                n_topics,
-                shared_rho.clone(),
-                param_builder.pp(format!("dec_{i}")),
-            )
-            .expect("decoder creation")
-        })
-        .collect();
-
-    // Pin every level's per-gene background at the data's gene marginal: the
-    // home for shared abundance that centering α removes from the topics.
-    let log_pi_1d = log_background_from_mean(&feature_mean, &dev)?;
-    for i in 0..num_levels {
-        pin_background(&parameters, &format!("dec_{i}"), &log_pi_1d)?;
+    let mut decoders: Vec<EmbeddedNbTopicDecoder> = Vec::with_capacity(num_levels);
+    for (i, fc) in level_coarsenings.iter().enumerate() {
+        let (map, module_mass) =
+            crate::topic::train_masked::module_map_for(fc.as_ref(), &feature_mean, &dev)?;
+        decoders.push(EmbeddedNbTopicDecoder::new_with_modules(
+            n_topics,
+            shared_rho.clone(),
+            map,
+            param_builder.pp(format!("dec_{i}")),
+        )?);
+        // Pin the level's background at the data's marginal over its output
+        // axis: the home for shared abundance that centering α removes from
+        // the topics.
+        let log_pi = log_background_from_mean(&module_mass, &dev)?;
+        pin_background(&parameters, &format!("dec_{i}"), &log_pi)?;
     }
+    let level_decoder_dims: Vec<usize> = decoders.iter().map(|d| d.dim_obs()).collect();
+    let has_coarsening = level_coarsenings.iter().any(Option::is_some);
 
     // Overwrite ρ in place with the pre-trained values BEFORE warm-start
     // from a prior topic checkpoint. The encoder/decoder both hold a
@@ -1043,7 +1071,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 n_features_full,
                 n_features_encoder: n_features_full,
                 encoder_hidden: &args.encoder_layers,
-                level_decoder_dims: &vec![n_features_full; num_levels],
+                level_decoder_dims: &level_decoder_dims,
                 embedding_dim: Some(h),
                 growth: crate::topic::warm_start::Growth {
                     add_topics: args.add_topics,
@@ -1054,8 +1082,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     }
 
     info!(
-        "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, scored over all D)",
-        n_features_full, h, args.context_size, num_levels, n_features_full,
+        "input: {} genes -> indexed encoder (emb={}, ctx={}) -> {} decoders over {:?} \
+         (unseen modules scored; genes through the query head)",
+        n_features_full, h, args.context_size, num_levels, level_decoder_dims,
     );
 
     // Bulk deconvolution is not supported on the masked-imputation path; the
@@ -1161,7 +1190,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // Optional held-out masked-imputation evaluation — the un-optimized
     // generalization metric (see `--eval-mask-fraction`). Runs on the training
     // device with the in-memory encoder + finest decoder, before the CPU move.
-    if args.eval_mask_fraction > 0.0 {
+    if args.eval_mask_fraction > 0.0 && has_coarsening {
+        warn!(
+            "--eval-mask-fraction scores the dense gene head, which a module-collapsed \
+             decoder does not have; skipped. Run without --max-coarse-features to evaluate."
+        );
+    } else if args.eval_mask_fraction > 0.0 {
         use crate::topic::eval_indexed::{evaluate_holdout_imputation, HoldoutEvalConfig};
         let delta_train = match args.adj_method {
             AdjMethod::Batch => finest_collapsed.delta.as_ref(),
@@ -1222,9 +1256,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         n_topics,
         encoder_hidden: args.encoder_layers.clone(),
         num_levels,
-        level_decoder_dims: vec![n_features_full; num_levels],
+        level_decoder_dims: level_decoder_dims.clone(),
         adj_method: args.adj_method.as_str().into(),
-        has_coarsening: false,
+        has_coarsening,
         embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
         theta_mean: None,
@@ -1234,6 +1268,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         n_gene_modules: Some(args.gene_modules),
     };
     metadata.save(&args.out)?;
+    if has_coarsening {
+        crate::topic::model_metadata::save_coarsening_levels(&level_coarsenings, &args.out)?;
+    }
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
     save_feature_mean(&feature_mean, &gene_names, &args.out)?;
 

@@ -3,8 +3,11 @@
 //! context mask, the mask-rate schedule, the `[N, D]` target mask, the
 //! per-level target table, and that visible genes are never scored.
 
-use super::{epoch_seed, poisson_draw, residual_nd, target_mask_nd, EpochAccum, LevelTarget, Mat};
+use super::{
+    epoch_seed, poisson_draw, scatter_rows_nd, target_mask_nd, EpochAccum, LevelTarget, Mat,
+};
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
+use crate::decoder::module_map::ModuleMap;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
@@ -113,13 +116,13 @@ fn epoch_accumulator_sums_steps_on_device_and_reads_once() {
     let dev = Device::Cpu;
     let mut acc = EpochAccum::new(&dev).unwrap();
     let steps = [
-        (-3.0f32, 0.5f32, 2.0f32),
-        (-5.0, 1.5, 0.25),
-        (-1.0, 0.0, 0.0),
+        (-3.0f32, 4.0f32, 0.5f32, 2.0f32),
+        (-5.0, 4.0, 1.5, 0.25),
+        (-1.0, 4.0, 0.0, 0.0),
     ];
-    for (l, k, r) in steps {
+    for (l, u, k, r) in steps {
         let t = |v: f32| Tensor::new(v, &dev).unwrap();
-        acc.add(&t(l), Some(&t(k)), Some(&t(r)), 4.0, 2.0, 1.0)
+        acc.add(&t(l), &t(u), Some(&t(k)), Some(&t(r)), 2.0, 1.0)
             .unwrap();
     }
     let (llik, kl, rms) = acc.read().unwrap();
@@ -186,7 +189,12 @@ fn level_target_library_is_the_full_row_total() {
             };
         }
     }
-    let lt = LevelTarget::from_mat(&rows, &Device::Cpu).unwrap();
+    let lt = LevelTarget::from_mat(
+        &rows,
+        &ModuleMap::identity(rows.ncols(), &Device::Cpu).unwrap(),
+        &Device::Cpu,
+    )
+    .unwrap();
     let lib: Vec<f32> = lt.row_lib().flatten_all().unwrap().to_vec1().unwrap();
     for i in 0..3 {
         let total: f32 = (0..8).map(|j| rows[(i, j)]).sum::<f32>() + 1.0;
@@ -247,6 +255,7 @@ fn visible_genes_are_never_scored() {
 
     let (idx, vis) = small_context();
     let mask = target_mask_nd(&idx, &vis, D).unwrap();
+    let identity = ModuleMap::identity(D, &dev).unwrap();
     let mut rows = Mat::zeros(3, D);
     for i in 0..3 {
         for j in 0..D {
@@ -254,14 +263,13 @@ fn visible_genes_are_never_scored() {
         }
     }
     let score = |rows: &Mat| -> Vec<f32> {
-        let lt = LevelTarget::from_mat(rows, &dev).unwrap();
+        let lt = LevelTarget::from_mat(rows, &identity, &dev).unwrap();
         let (values, lib) = lt.rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap()).unwrap();
         let target = MaskedDenseTarget {
             values: &values,
             residual: None,
             lib: &lib,
             mask: &mask,
-            log_residual: None,
         };
         dec.impute_dense_nb(&log_theta, &target, &full_kd)
             .unwrap()
@@ -274,9 +282,9 @@ fn visible_genes_are_never_scored() {
     // mask keeps out of the scored positions' likelihood up to the ℓ scale.
     let mut visible_perturbed = rows.clone();
     visible_perturbed[(0, 1)] += 3.0;
-    let lt = LevelTarget::from_mat(&visible_perturbed, &dev).unwrap();
+    let lt = LevelTarget::from_mat(&visible_perturbed, &identity, &dev).unwrap();
     let (values, _) = lt.rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap()).unwrap();
-    let lib = LevelTarget::from_mat(&rows, &dev)
+    let lib = LevelTarget::from_mat(&rows, &identity, &dev)
         .unwrap()
         .rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap())
         .unwrap()
@@ -286,7 +294,6 @@ fn visible_genes_are_never_scored() {
         residual: None,
         lib: &lib,
         mask: &mask,
-        log_residual: None,
     };
     let same_lib: Vec<f32> = dec
         .impute_dense_nb(&log_theta, &target, &full_kd)
@@ -315,36 +322,33 @@ fn visible_genes_are_never_scored() {
 // Residual //
 //////////////
 
-/// The scattered residual is nonzero exactly at the weighted query genes, and
-/// the gradient comes back to each query from its own gene only — through a
-/// backward that candle actually implements for this layout (its `scatter_add`
-/// backward only accepts as many indexes as columns).
+/// Values scattered by column id land on their columns, duplicates add, and
+/// the gradient comes back to each slot from its own column — through a
+/// backward that runs one thread per slot on the device.
 #[test]
-fn the_residual_lands_on_the_query_genes_only_and_backpropagates() {
-    let ids = Tensor::from_vec(vec![4u32, 6, 0, 3, 1, 0], (2, 3), &Device::Cpu).unwrap();
-    let w = Tensor::from_vec(vec![1f32, 1.0, 0.0, 1.0, 1.0, 0.0], (2, 3), &Device::Cpu).unwrap();
-    let r = candle_core::Var::from_tensor(
+fn scattered_values_land_on_their_columns_and_backpropagate() {
+    let ids = Tensor::from_vec(vec![4u32, 6, 4, 3, 1, 0], (2, 3), &Device::Cpu).unwrap();
+    let v = candle_core::Var::from_tensor(
         &Tensor::from_vec(
-            vec![0.5f32, -1.0, 9.0, 0.25, 2.0, 9.0],
+            vec![0.5f32, -1.0, 2.0, 0.25, 2.0, 9.0],
             (2, 3),
             &Device::Cpu,
         )
         .unwrap(),
     )
     .unwrap();
-    let nd_t = residual_nd(&ids, r.as_tensor(), &w, 8).unwrap();
+    let nd_t = scatter_rows_nd(&ids, v.as_tensor(), 8).unwrap();
     let nd = to_vec2(&nd_t);
     let expect = vec![
-        vec![0.0, 0.0, 0.0, 0.0, 0.5, 0.0, -1.0, 0.0],
-        vec![0.0, 2.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.0, 2.5, 0.0, -1.0, 0.0],
+        vec![9.0, 2.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0],
     ];
-    assert_eq!(nd, expect, "pads (weight 0) must not leak onto gene 0");
-    // d/dr of Σ_g c_g · nd_g is c at the query's gene, times its weight.
+    assert_eq!(nd, expect);
     let c: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
     let c = Tensor::from_vec(c, (2, 8), &Device::Cpu).unwrap();
     let grads = (nd_t * c).unwrap().sum_all().unwrap().backward().unwrap();
-    let g = to_vec2(grads.get(&r).expect("residual receives gradient"));
-    let expect_g = vec![vec![0.4, 0.6, 0.0], vec![1.1, 0.9, 0.0]];
+    let g = to_vec2(grads.get(&v).expect("values receive gradient"));
+    let expect_g = vec![vec![0.4, 0.6, 0.4], vec![1.1, 0.9, 0.8]];
     for (gr, er) in g.iter().zip(&expect_g) {
         for (a, b) in gr.iter().zip(er) {
             assert!((a - b).abs() < 1e-6, "gradient {g:?} vs {expect_g:?}");
