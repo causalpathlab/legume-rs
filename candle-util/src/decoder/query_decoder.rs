@@ -28,6 +28,7 @@
 //! genes a target read from: with no positions in a bag of genes, that is the
 //! learned co-expression.
 
+use crate::fast_index::gather_rows;
 use candle_core::{Result, Tensor};
 use candle_nn::{linear, linear_no_bias, ops, Linear, Module, VarBuilder};
 
@@ -100,20 +101,13 @@ impl QueryDecoder {
         // Project the table once, gather at the context slots, apply the gate.
         let flat_idx = x.indices.flatten_all()?;
         let gate_nk1 = x.gate.unsqueeze(2)?; // [N, K, 1]
-        let keys = self
-            .w_k
-            .forward(rho)? // [D, r]
-            .index_select(&flat_idx, 0)?
+        let keys = gather_rows(&self.w_k.forward(rho)?, &flat_idx)? // [D, r] gathered
             .reshape((n, k, r))?
             .broadcast_mul(&gate_nk1)?; // [N, K, r]
-        let values = self
-            .w_v
-            .forward(rho)?
-            .index_select(&flat_idx, 0)?
+        let values = gather_rows(&self.w_v.forward(rho)?, &flat_idx)?
             .reshape((n, k, r))?
             .broadcast_mul(&gate_nk1)?; // [N, K, r]
-        let queries = rho
-            .index_select(&x.query_ids.flatten_all()?, 0)?
+        let queries = gather_rows(rho, &x.query_ids.flatten_all()?)?
             .reshape((n, q, h))?
             .broadcast_add(&self.e_mask)?; // [N, Q, H]
         let qh = self.w_q.forward(&queries)?; // [N, Q, r]

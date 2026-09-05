@@ -19,6 +19,7 @@
 //! `E[y] = μ_residual · μ_adjusted`).
 
 use crate::batched_dot::batched_matvec;
+use crate::fast_index::gather_rows;
 use crate::loss::nb_log_likelihood_elem;
 use candle_core::{Result, Tensor};
 use candle_nn::{ops, VarBuilder};
@@ -281,10 +282,7 @@ impl EmbeddedNbTopicDecoder {
         let flat = indices.flatten_all()?; // [N*K]
 
         let logz_11k = Self::log_partition_from_logits(full_kd)?; // [1, 1, T]
-        let logits = full_kd
-            .t()?
-            .contiguous()? // [D, T]
-            .index_select(&flat, 0)? // [N*K, T]
+        let logits = gather_rows(&full_kd.t()?.contiguous()?, &flat)? // [D, T] → [N*K, T]
             .reshape((n, k, t))?; // [N, K, T]
         let beta_nkt = logits.broadcast_sub(&logz_11k)?.exp()?; // [N, K, T]
 
@@ -319,11 +317,7 @@ impl EmbeddedNbTopicDecoder {
 
         // φ at the cell's genes
         let flat = indices.flatten_all()?; // [N*K]
-        let log_phi_nk = self
-            .log_phi_1d
-            .squeeze(0)? // [D]
-            .index_select(&flat, 0)?
-            .reshape((n, k))?; // [N, K]
+        let log_phi_nk = gather_rows(&self.log_phi_1d.squeeze(0)?, &flat)?.reshape((n, k))?; // [N, K]
 
         nb_score(
             values_nk,

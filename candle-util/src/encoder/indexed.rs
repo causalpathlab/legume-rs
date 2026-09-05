@@ -1,5 +1,6 @@
 use crate::batched_dot::{batched_matvec_shared, batched_weighted_sum};
 use crate::data::indexed::SparseEdgeBatch;
+use crate::fast_index::gather_rows;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
 use crate::nn::gcn::GcnBlock;
@@ -243,10 +244,7 @@ impl IndexedEmbeddingEncoder {
         let h = self.embedding_dim;
 
         let flat_idx = indices.flatten_all()?; // [N*K]
-        let e_nk_h = self
-            .feature_embeddings
-            .index_select(&flat_idx, 0)?
-            .reshape((n, k, h))?; // [N, K, H]
+        let e_nk_h = gather_rows(&self.feature_embeddings, &flat_idx)?.reshape((n, k, h))?; // [N, K, H]
 
         // Per-slot Anscombe scalar gate on ρ — broadcast across H.
         // `anscombe_lite` divides by (batch null × per-gene mean) then
@@ -291,10 +289,7 @@ impl IndexedEmbeddingEncoder {
         let h = self.embedding_dim;
 
         let flat_idx = indices.flatten_all()?;
-        let e_nk_h = self
-            .feature_embeddings
-            .index_select(&flat_idx, 0)?
-            .reshape((n, k, h))?;
+        let e_nk_h = gather_rows(&self.feature_embeddings, &flat_idx)?.reshape((n, k, h))?; // [N, K, H]
 
         // Value-gated token per slot (expression × symbol embedding). Note:
         // `a_nk` uses the raw values for ALL slots; masking is applied to the
@@ -419,10 +414,11 @@ impl IndexedEmbeddingEncoder {
             return Ok(None);
         };
         let (n, k) = indices.dims2()?;
-        let e_nk_h = self
-            .feature_embeddings
-            .index_select(&indices.flatten_all()?, 0)?
-            .reshape((n, k, self.embedding_dim))?;
+        let e_nk_h = gather_rows(&self.feature_embeddings, &indices.flatten_all()?)?.reshape((
+            n,
+            k,
+            self.embedding_dim,
+        ))?;
         let a_nk = anscombe_lite(values, values_null, values_mean)?;
         self.module_pool(&e_nk_h, &a_nk, visible_mask, centroids)
             .map(Some)
