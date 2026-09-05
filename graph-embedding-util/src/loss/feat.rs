@@ -11,6 +11,7 @@ use crate::loss::{logistic_nce, softmax_nce, NceObjective};
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Result, Tensor};
+use candle_util::fast_index::gather_rows;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use indicatif::ParallelProgressIterator;
 use rand::Rng;
@@ -492,8 +493,8 @@ pub fn nce_loss(
     let (e_cell_u, b_cell_u) = model.pool_cells(&unique_cells, cell_coarse_to_fine, dev)?;
 
     let cell_idx_t = Tensor::from_vec(cell_pos_idx, b, dev)?;
-    let e_cell_pos = e_cell_u.index_select(&cell_idx_t, 0)?;
-    let b_cell_pos = b_cell_u.index_select(&cell_idx_t, 0)?;
+    let e_cell_pos = gather_rows(&e_cell_u, &cell_idx_t)?;
+    let b_cell_pos = gather_rows(&b_cell_u, &cell_idx_t)?;
 
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
 }
@@ -516,8 +517,8 @@ pub fn nce_loss_identity(
         return Tensor::zeros((), candle_util::candle_core::DType::F32, dev);
     }
     let cell_idx_t = Tensor::from_slice(&batch.coarse_cells, b, dev)?;
-    let e_cell_pos = model.e_cell.index_select(&cell_idx_t, 0)?;
-    let b_cell_pos = model.b_cell.index_select(&cell_idx_t, 0)?;
+    let e_cell_pos = gather_rows(&model.e_cell, &cell_idx_t)?;
+    let b_cell_pos = gather_rows(&model.b_cell, &cell_idx_t)?;
     nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
 }
 
@@ -530,7 +531,7 @@ pub fn nce_loss_identity(
 pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tensor> {
     match model.composed() {
         Some(c) => c.compose_rows(idx),
-        None => model.e_feat.index_select(idx, 0),
+        None => gather_rows(&model.e_feat, idx),
     }
 }
 
@@ -555,11 +556,11 @@ fn nce_loss_with_cell_side(
 
     let pos_feat_idx_t = Tensor::from_slice(&batch.fine_feats, b, dev)?;
     let e_feat_pos = gather_feat(&pos_feat_idx_t)?;
-    let b_feat_pos = model.b_feat.index_select(&pos_feat_idx_t, 0)?;
+    let b_feat_pos = gather_rows(&model.b_feat, &pos_feat_idx_t)?;
 
     let neg_feat_idx_t = Tensor::from_slice(&batch.neg_feats, b * k, dev)?;
     let e_feat_neg_flat = gather_feat(&neg_feat_idx_t)?;
-    let b_feat_neg_flat = model.b_feat.index_select(&neg_feat_idx_t, 0)?;
+    let b_feat_neg_flat = gather_rows(&model.b_feat, &neg_feat_idx_t)?;
     let h = e_feat_neg_flat.dim(1)?;
     let e_feat_neg = e_feat_neg_flat.reshape((b, k, h))?;
     let b_feat_neg = b_feat_neg_flat.reshape((b, k))?;
