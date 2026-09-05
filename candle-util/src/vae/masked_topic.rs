@@ -13,6 +13,7 @@ use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedIn
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use crate::decoder::query_decoder::{QueryDecoder, QueryInput};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
+use crate::fast_index::index_add_rows;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
@@ -242,11 +243,11 @@ pub fn target_mask_nd(
 /// Scatter the weighted per-query residual onto the gene axis: `[N, D]` with
 /// `r` at each real query's gene and 0 everywhere else, pads included.
 ///
-/// Done as a one-dimensional `index_add` over the flattened `[N·D]` table with
-/// `row·D + gene` offsets rather than a row-wise `scatter_add`: candle's
-/// `scatter_add` backward assumes the index tensor has as many columns as the
-/// target, which a `[N, Q]` query set never does, whereas `index_add` gathers
-/// the gradient back to each query exactly.
+/// Done as a row-wise index-add over the flattened `[N·D, 1]` table with
+/// `row·D + gene` offsets ([`index_add_rows`]): one thread per query on the
+/// device, and a backward that gathers the gradient back to each query.
+/// candle's own `scatter_add` backward assumes as many indexes as columns,
+/// and its flattened `index_add` runs on a single CUDA thread.
 pub fn residual_nd(
     ids: &Tensor,
     residual: &Tensor,
@@ -259,10 +260,9 @@ pub fn residual_nd(
         .affine(n_features as f64, 0.0)?
         .unsqueeze(1)?; // [N, 1]
     let flat_ids = ids.broadcast_add(&offsets)?.reshape(n * q)?; // [N·Q]
-    let src = (residual * weight)?.reshape(n * q)?;
-    Tensor::zeros(n * n_features, residual.dtype(), dev)?
-        .index_add(&flat_ids, &src, 0)?
-        .reshape((n, n_features))
+    let src = (residual * weight)?.reshape((n * q, 1))?;
+    let table = Tensor::zeros((n * n_features, 1), residual.dtype(), dev)?;
+    index_add_rows(&table, &flat_ids, &src)?.reshape((n, n_features))
 }
 
 /// One level's decoder targets, resident on device as `[P, D]`.
