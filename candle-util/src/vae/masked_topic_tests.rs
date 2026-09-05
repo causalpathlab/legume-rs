@@ -3,11 +3,10 @@
 //! context mask, the mask-rate schedule, the `[N, D]` target mask, the
 //! per-level target table, and that visible genes are never scored.
 
-use super::{
-    epoch_seed, poisson_draw, scatter_rows_nd, target_mask_nd, EpochAccum, LevelTarget, Mat,
-};
+use super::{epoch_seed, poisson_draw, target_mask_nd, EpochAccum, LevelTarget, Mat};
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use crate::decoder::module_map::ModuleMap;
+use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
@@ -337,7 +336,7 @@ fn scattered_values_land_on_their_columns_and_backpropagate() {
         .unwrap(),
     )
     .unwrap();
-    let nd_t = scatter_rows_nd(&ids, v.as_tensor(), 8).unwrap();
+    let nd_t = scatter_add_cols(&ids, v.as_tensor(), 8).unwrap();
     let nd = to_vec2(&nd_t);
     let expect = vec![
         vec![0.0, 0.0, 0.0, 0.0, 2.5, 0.0, -1.0, 0.0],

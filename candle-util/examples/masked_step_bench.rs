@@ -12,7 +12,8 @@ use candle_util::decoder::masked_etm::QueryTarget;
 use candle_util::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use candle_util::decoder::query_decoder::{QueryDecoder, QueryInput};
 use candle_util::fast_index::gather_rows;
-use candle_util::vae::masked_topic::{scatter_rows_nd, target_mask_nd};
+use candle_util::fast_index::scatter_add_cols;
+use candle_util::vae::masked_topic::target_mask_nd;
 use std::time::Instant;
 
 const N: usize = 100;
@@ -143,9 +144,9 @@ fn main() -> anyhow::Result<()> {
     });
 
     // 7. Scatter of per-slot values onto [N, D] (the module view of the context).
-    time(&dev, "scatter_rows_nd [N,K]→[N,D] (fwd+bwd)", || {
+    time(&dev, "scatter_add_cols [N,K]→[N,D] (fwd+bwd)", || {
         let v = Var::from_tensor(&Tensor::rand(-1f32, 1.0, (N, K), &dev)?)?;
-        let nd = scatter_rows_nd(&indices, &v, D)?;
+        let nd = scatter_add_cols(&indices, &v, D)?;
         let _ = nd.sum_all()?.backward()?;
         Ok(())
     });

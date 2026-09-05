@@ -5,10 +5,10 @@ use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
 use candle_util::decoder::masked_etm::ModuleTarget;
 use candle_util::decoder::EmbeddedNbTopicDecoder;
+use candle_util::fast_index::scatter_add_cols;
 use candle_util::traits::*;
 use candle_util::vae::masked_topic::{
-    decoder_log_theta, masked_encode, scatter_rows_nd, LatentHead, MaskedEncoderInput,
-    MaskedLikelihood,
+    decoder_log_theta, masked_encode, LatentHead, MaskedEncoderInput, MaskedLikelihood,
 };
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -399,9 +399,9 @@ pub(crate) fn evaluate_holdout_imputation(
         let values_nm = Tensor::from_vec(dense, (n, n_obs), config.dev)?;
         let lib_n1 = Tensor::from_vec(lib, (n, 1), config.dev)?;
         let m_ctx = map.modules_of(&enc_pack.indices)?;
-        let visible_counts = scatter_rows_nd(&m_ctx, &(&enc_pack.values * &visible)?, n_obs)?;
+        let visible_counts = scatter_add_cols(&m_ctx, &(&enc_pack.values * &visible)?, n_obs)?;
         let share_ctx = map.log_share_at(&enc_pack.indices)?.exp()?;
-        let visible_share = scatter_rows_nd(&m_ctx, &(share_ctx * &visible)?, n_obs)?;
+        let visible_share = scatter_add_cols(&m_ctx, &(share_ctx * &visible)?, n_obs)?;
         // The per-gene batch offset averaged into modules by share.
         let residual_nm = x0_nd
             .as_ref()
