@@ -140,4 +140,26 @@ fn lookups_follow_the_map_and_shares_expand_by_module() {
         agg.row(1).iter().copied().collect::<Vec<_>>(),
         vec![1.0, 1.0, 1.0]
     );
+    // The device aggregation agrees with the host one, and the identity map
+    // returns its input.
+    let x = Tensor::from_vec(
+        vec![
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+        ],
+        (2, D),
+        &dev(),
+    )
+    .unwrap();
+    assert_eq!(
+        m.aggregate_columns(&x).unwrap().to_vec2::<f32>().unwrap(),
+        vec![vec![3.0, 12.0, 6.0], vec![1.0, 1.0, 1.0]]
+    );
+    let id = ModuleMap::identity(D, &dev()).unwrap();
+    assert_eq!(
+        id.aggregate_columns(&x).unwrap().to_vec2::<f32>().unwrap(),
+        x.to_vec2::<f32>().unwrap()
+    );
+    let ls = m.log_share_1d().to_vec2::<f32>().unwrap();
+    assert_eq!(ls.len(), 1);
+    assert!((ls[0][0] - (2.0f32 / 3.0).ln()).abs() < 1e-6);
 }
