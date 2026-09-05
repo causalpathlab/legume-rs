@@ -135,6 +135,41 @@ impl ModuleMap {
         x_1m.index_select(&self.fine_to_coarse_d, 1)
     }
 
+    /// `[1, D]` `log π_{g|m(g)}` on the device.
+    #[must_use]
+    pub fn log_share_1d(&self) -> Tensor {
+        self.log_share_d.unsqueeze(0).expect("[D] → [1, D]")
+    }
+
+    /// Sum the columns of an `[N, D]` device tensor into `[N, M]`
+    /// (differentiable through [`index_add_rows`]); the input itself under
+    /// the identity map.
+    pub fn aggregate_columns(&self, x_nd: &Tensor) -> Result<Tensor> {
+        if self.identity {
+            return Ok(x_nd.clone());
+        }
+        let (n, d) = x_nd.dims2()?;
+        if d != self.n_fine {
+            candle_core::bail!(
+                "module map: {} genes but the input has {d} columns",
+                self.n_fine
+            );
+        }
+        let m = self.n_coarse;
+        let dev = x_nd.device();
+        let offsets = Tensor::arange(0u32, n as u32, dev)?
+            .affine(m as f64, 0.0)?
+            .unsqueeze(1)?; // [N, 1]
+        let ids = self
+            .fine_to_coarse_d
+            .unsqueeze(0)?
+            .broadcast_add(&offsets)?
+            .reshape(n * d)?; // [N·D]
+        let src = x_nd.reshape((n * d, 1))?;
+        let table = Tensor::zeros((n * m, 1), x_nd.dtype(), dev)?;
+        index_add_rows(&table, &ids, &src)?.reshape((n, m))
+    }
+
     /// Sum the columns of a `[P, D]` host matrix into `[P, M]`.
     #[must_use]
     pub fn aggregate_columns_host(&self, x: &DMatrix<f32>) -> DMatrix<f32> {

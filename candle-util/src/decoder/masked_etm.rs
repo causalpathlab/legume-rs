@@ -77,6 +77,10 @@ pub struct ModuleTarget<'a> {
     pub visible_counts: &'a Tensor,
     /// `[N, M]` `Σ_{g visible in m} π_{g|m}`: the module's share the context saw.
     pub visible_share: &'a Tensor,
+    /// `[N, M]` per-row multiplicative batch offset per module (the per-gene
+    /// offset averaged by share); `None` ⇒ none. Training scores batch-free
+    /// rows and passes `None`; cell-level scoring passes the cell's offset.
+    pub residual: Option<&'a Tensor>,
     /// `[N, 1]` per-row library size over the full row.
     pub lib: &'a Tensor,
 }
@@ -492,6 +496,10 @@ impl EmbeddedNbTopicDecoder {
     ) -> Result<(Tensor, Tensor)> {
         let (rate_nm, unseen, share, scored) = self.unseen_parts(log_theta_nk, target, full_km)?;
         let mu = rate_nm.mul(&share)?.broadcast_mul(target.lib)?;
+        let mu = match target.residual {
+            Some(r) => mu.mul(r)?,
+            None => mu,
+        };
         let log_phi = self.log_phi_1d.broadcast_as(mu.shape())?;
         let elem = nb_log_likelihood_elem(&unseen, &mu, &log_phi)?;
         Ok((elem.mul(&scored)?.sum(1)?, scored.sum(1)?))

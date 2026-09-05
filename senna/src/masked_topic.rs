@@ -1190,12 +1190,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // Optional held-out masked-imputation evaluation — the un-optimized
     // generalization metric (see `--eval-mask-fraction`). Runs on the training
     // device with the in-memory encoder + finest decoder, before the CPU move.
-    if args.eval_mask_fraction > 0.0 && has_coarsening {
-        warn!(
-            "--eval-mask-fraction scores the dense gene head, which a module-collapsed \
-             decoder does not have; skipped. Run without --max-coarse-features to evaluate."
-        );
-    } else if args.eval_mask_fraction > 0.0 {
+    if args.eval_mask_fraction > 0.0 {
         use crate::topic::eval_indexed::{evaluate_holdout_imputation, HoldoutEvalConfig};
         let delta_train = match args.adj_method {
             AdjMethod::Batch => finest_collapsed.delta.as_ref(),
@@ -1231,7 +1226,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             delta_train.as_ref(),
         )?;
         info!(
-            "Held-out imputation: mean log-likelihood/gene = {holdout_llik:.4} \
+            "Held-out imputation: mean log-likelihood/unit = {holdout_llik:.4} \
              (mask={}, seed={})",
             args.eval_mask_fraction, args.eval_seed
         );

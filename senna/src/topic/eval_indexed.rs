@@ -3,11 +3,11 @@ use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
-use candle_util::decoder::masked_etm::MaskedDenseTarget;
+use candle_util::decoder::masked_etm::ModuleTarget;
 use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::traits::*;
 use candle_util::vae::masked_topic::{
-    decoder_log_theta, masked_encode, target_mask_nd, LatentHead, MaskedEncoderInput,
+    decoder_log_theta, masked_encode, scatter_rows_nd, LatentHead, MaskedEncoderInput,
     MaskedLikelihood,
 };
 use rand::rngs::StdRng;
@@ -378,34 +378,50 @@ pub(crate) fn evaluate_holdout_imputation(
         // held-out number is not comparable to the training trace.
         let log_z = decoder_log_theta(raw_z, config.head, config.topic_smoothing)?;
 
-        // Score every gene the encoder did not see, matching the training
-        // law: the full row, the full library, and `residual` because these
-        // are cells, whose counts still carry the batch effect.
-        let n_features = decoder.dim_obs();
-        let mut dense = vec![0f32; n * n_features];
+        // Score what the encoder did not see, matching the training law:
+        // every module's unseen counts (every gene's, under the identity map)
+        // against the module rate scaled by the unseen share, the full
+        // library, and `residual` because these are cells, whose counts still
+        // carry the batch effect. The module view of the block is built on
+        // the host straight from the sparse columns.
+        let map = decoder.modules();
+        let n_obs = decoder.dim_obs();
+        let f2c = map.host_fine_to_coarse();
+        let mut dense = vec![0f32; n * n_obs];
+        let mut lib = vec![1f32; n];
         for (j, col) in (lb..ub).enumerate() {
             let c = x_dn.col(col - lb);
             for (&r, &v) in c.row_indices().iter().zip(c.values().iter()) {
-                dense[j * n_features + r] = v;
+                dense[j * n_obs + f2c[r]] += v;
+                lib[j] += v;
             }
         }
-        let values_nd = Tensor::from_vec(dense, (n, n_features), config.dev)?;
-        let lib_n1 = (values_nd.sum_keepdim(1)? + 1.0)?;
-        let mask_nd = target_mask_nd(&enc_pack.indices, &visible, n_features)?;
-        let target = MaskedDenseTarget {
-            values: &values_nd,
-            residual: x0_nd.as_ref(),
+        let values_nm = Tensor::from_vec(dense, (n, n_obs), config.dev)?;
+        let lib_n1 = Tensor::from_vec(lib, (n, 1), config.dev)?;
+        let m_ctx = map.modules_of(&enc_pack.indices)?;
+        let visible_counts = scatter_rows_nd(&m_ctx, &(&enc_pack.values * &visible)?, n_obs)?;
+        let share_ctx = map.log_share_at(&enc_pack.indices)?.exp()?;
+        let visible_share = scatter_rows_nd(&m_ctx, &(share_ctx * &visible)?, n_obs)?;
+        // The per-gene batch offset averaged into modules by share.
+        let residual_nm = x0_nd
+            .as_ref()
+            .map(|x0| map.aggregate_columns(&x0.broadcast_mul(&map.log_share_1d().exp()?)?))
+            .transpose()?;
+        let target = ModuleTarget {
+            values: &values_nm,
+            visible_counts: &visible_counts,
+            visible_share: &visible_share,
+            residual: residual_nm.as_ref(),
             lib: &lib_n1,
-            mask: &mask_nd,
         };
-        let llik = match config.likelihood {
-            MaskedLikelihood::Nb => decoder.impute_dense_nb(&log_z, &target, &full_kd)?,
+        let (llik, units) = match config.likelihood {
+            MaskedLikelihood::Nb => decoder.score_unseen_modules_nb(&log_z, &target, &full_kd)?,
             MaskedLikelihood::Multinomial => {
-                decoder.impute_dense_multinomial(&log_z, &target, &full_kd)?
+                decoder.score_unseen_modules_multinomial(&log_z, &target, &full_kd)?
             }
         };
         llik_sum += f64::from(llik.sum_all()?.to_scalar::<f32>()?);
-        mask_cnt += f64::from(mask_nd.sum_all()?.to_scalar::<f32>()?);
+        mask_cnt += f64::from(units.sum_all()?.to_scalar::<f32>()?);
     }
 
     Ok(if mask_cnt > 0.0 {
