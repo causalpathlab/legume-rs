@@ -45,7 +45,7 @@ fn track_scores(dev: &Device) -> (f32, f32) {
     // still a registered Var — only the background was frozen — so it can be
     // driven off its constant init through the varmap.
     let mut rows = vec![(0.5f32).ln(); G];
-    rows.extend(std::iter::repeat(8.0f32.ln()).take(G));
+    rows.extend(std::iter::repeat_n(8.0f32.ln(), G));
     varmap.data().lock().unwrap()["dec.log_phi"]
         .set(&Tensor::from_vec(rows, (2, G), dev).unwrap())
         .unwrap();
