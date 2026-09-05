@@ -323,7 +323,6 @@ fn nb_llik(
     log_z: &Tensor,
 ) -> anyhow::Result<(Tensor, Tensor)> {
     let full_kd = decoder.full_logits_kd()?;
-    let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
     let lib_n1 = (values.sum_keepdim(1)? + 1.0)?;
     let mask = values.gt(0.0)?.to_dtype(DType::F32)?;
     let target = MaskedNbTarget {
@@ -333,7 +332,7 @@ fn nb_llik(
         lib: &lib_n1,
         mask: &mask,
     };
-    let llik = decoder.impute_masked_nb(log_z, &target, &logz_11k)?;
+    let llik = decoder.impute_masked_nb(log_z, &target, &full_kd)?;
     Ok((llik, mask))
 }
 

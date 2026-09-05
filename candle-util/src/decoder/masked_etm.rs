@@ -50,6 +50,54 @@ pub struct EmbeddedNbTopicDecoder {
     feature_embeddings: Tensor,
     /// `log φ_g [1, D]` per-gene NB inverse dispersion (learnable).
     log_phi_1d: Tensor,
+    /// `log π_g [1, D]` per-gene log-background, added to every topic's logits
+    /// and **pinned** at the data's gene marginal (see [`pin_background`]).
+    ///
+    /// Centering `α` over the topic axis makes each gene's total log-mass a
+    /// conserved quantity, so a gene abundant in *every* cell has nowhere to
+    /// put that abundance: the only escapes are a permanently dead
+    /// "background" topic or diffuse `θ`. `log π_g` is that home. It must stay
+    /// frozen — a learnable per-gene bias shifts all `K` topics equally on a
+    /// gene, which is exactly the shared direction centering removes, and the
+    /// optimizer would reinstate it through this parameter.
+    log_pi_1d: Tensor,
+}
+
+/// Name of the pinned background var inside a decoder's scope.
+pub const BACKGROUND_VAR: &str = "log_pi";
+
+/// Pin a decoder's background at `log_pi_1d` `[1, D]` by writing the var named
+/// `{prefix}.log_pi` in `varmap`. The decoder holds a handle into that var, so
+/// the value takes effect immediately and round-trips through `VarMap::save`;
+/// the trainer excludes every `*.log_pi` var from the optimizer.
+pub fn pin_background(varmap: &candle_nn::VarMap, prefix: &str, log_pi_1d: &Tensor) -> Result<()> {
+    let name = format!("{prefix}.{BACKGROUND_VAR}");
+    let tbl = varmap.data().lock().unwrap();
+    let var = tbl
+        .get(&name)
+        .ok_or_else(|| candle_core::Error::Msg(format!("no var `{name}` to pin")))?;
+    var.set(&log_pi_1d.to_device(var.device())?.to_dtype(var.dtype())?)
+}
+
+/// `log π_g` from a per-gene mean expression `mean_d` (any non-negative scale):
+/// the normalized marginal, floored so an unobserved gene keeps a finite
+/// background.
+pub fn log_background_from_mean(mean_d: &[f32], device: &candle_core::Device) -> Result<Tensor> {
+    let total: f64 = mean_d.iter().map(|&m| f64::from(m.max(0.0))).sum();
+    let d = mean_d.len().max(1) as f64;
+    let floor = 1e-3 / d;
+    let log_pi: Vec<f32> = mean_d
+        .iter()
+        .map(|&m| {
+            let p = if total > 0.0 {
+                f64::from(m.max(0.0)) / total
+            } else {
+                1.0 / d
+            };
+            p.max(floor).ln() as f32
+        })
+        .collect();
+    Tensor::from_vec(log_pi, (1, mean_d.len()), device)
 }
 
 impl EmbeddedNbTopicDecoder {
@@ -72,6 +120,13 @@ impl EmbeddedNbTopicDecoder {
             vs.get_with_hints((n_topics, embedding_dim), "topic.embeddings", init_ws)?;
         let log_phi_1d =
             vs.get_with_hints((1, n_features), "log_phi", candle_nn::Init::Const(0.693))?;
+        // Uniform until pinned: a constant is a no-op under the gene-axis
+        // log_softmax, so an unpinned decoder is exactly background-free.
+        let log_pi_1d = vs.get_with_hints(
+            (1, n_features),
+            BACKGROUND_VAR,
+            candle_nn::Init::Const(-(n_features as f64).ln()),
+        )?;
 
         Ok(Self {
             n_features,
@@ -79,6 +134,7 @@ impl EmbeddedNbTopicDecoder {
             topic_embeddings,
             feature_embeddings,
             log_phi_1d,
+            log_pi_1d,
         })
     }
 
@@ -91,6 +147,10 @@ impl EmbeddedNbTopicDecoder {
     pub fn log_phi(&self) -> &Tensor {
         &self.log_phi_1d
     }
+    /// Pinned per-gene log-background `[1, D]`.
+    pub fn log_background(&self) -> &Tensor {
+        &self.log_pi_1d
+    }
     pub fn phi(&self) -> Result<Tensor> {
         self.log_phi_1d.exp()
     }
@@ -101,7 +161,7 @@ impl EmbeddedNbTopicDecoder {
         self.n_topics
     }
 
-    /// Full `[K, D]` pre-softmax logits `(α - ᾱ) · ρᵀ` (for the anchor-prior CE).
+    /// Full `[K, D]` pre-softmax logits `(α - ᾱ) · ρᵀ + log π_g`.
     ///
     /// `α` is centered over the topic axis first. The raw loading `α · ρᵀ` is
     /// dominated by a shared "abundance" direction (the mean archetype `ᾱ`) that
@@ -121,13 +181,22 @@ impl EmbeddedNbTopicDecoder {
     /// the log-partition and the training likelihood all read it — so the
     /// trained model and the dictionary written to disk stay consistent.
     pub fn full_logits_kd(&self) -> Result<Tensor> {
-        let alpha_mean_1h = self.topic_embeddings.mean_keepdim(0)?;
-        self.topic_embeddings
-            .broadcast_sub(&alpha_mean_1h)?
-            .matmul(&self.feature_embeddings.t()?)
+        self.centered_topic_embeddings()?
+            .matmul(&self.feature_embeddings.t()?)?
+            .broadcast_add(&self.log_pi_1d)
     }
 
-    /// Full `[D, K]` log-β = `log_softmax_d(α·ρᵀ)` — for dictionary output.
+    /// `α - ᾱ` `[K, H]`: the topic embeddings with the mean archetype removed.
+    /// Every consumer of `α` — the full dictionary logits *and* the per-cell
+    /// rate at the sampled genes — must go through this, because the
+    /// log-partition is taken over the centered logits and the numerator has to
+    /// be the same quantity or `β` stops summing to one.
+    fn centered_topic_embeddings(&self) -> Result<Tensor> {
+        let alpha_mean_1h = self.topic_embeddings.mean_keepdim(0)?;
+        self.topic_embeddings.broadcast_sub(&alpha_mean_1h)
+    }
+
+    /// Full `[D, K]` log-β = `log_softmax_d((α - ᾱ)·ρᵀ + log π)` — for dictionary output.
     pub fn get_dictionary(&self) -> Result<Tensor> {
         let logits_kd = self.full_logits_kd()?;
         let log_beta_kd = ops::log_softmax(&logits_kd, logits_kd.rank() - 1)?;
@@ -151,11 +220,15 @@ impl EmbeddedNbTopicDecoder {
     /// genes, with β normalized over the full vocab (so `Σ_g p_g = 1`). The
     /// shared core of both masked-impute heads; the NB and multinomial
     /// likelihoods differ only in how they score this rate. `[N, K]`.
+    ///
+    /// The logits are **gathered** from the caller's `full_kd` (see
+    /// [`Self::full_logits_kd`]) rather than recomputed, so the numerator and
+    /// the partition are one quantity by construction.
     fn mixture_rate_nk(
         &self,
         log_theta_nk: &Tensor,
         indices: &Tensor,
-        logz_11k: &Tensor,
+        full_kd: &Tensor,
     ) -> Result<Tensor> {
         let n = indices.dim(0)?;
         let k = indices.dim(1)?;
@@ -164,12 +237,13 @@ impl EmbeddedNbTopicDecoder {
         let theta_nt = log_theta_nk.exp()?; // [N, T]
         let flat = indices.flatten_all()?; // [N*K]
 
-        // β_kg at the cell's genes, properly normalized over the full vocab.
-        let rho_g = self.feature_embeddings.index_select(&flat, 0)?; // [N*K, H]
-        let logits = rho_g
-            .matmul(&self.topic_embeddings.t()?)? // [N*K, T]
+        let logz_11k = Self::log_partition_from_logits(full_kd)?; // [1, 1, T]
+        let logits = full_kd
+            .t()?
+            .contiguous()? // [D, T]
+            .index_select(&flat, 0)? // [N*K, T]
             .reshape((n, k, t))?; // [N, K, T]
-        let beta_nkt = logits.broadcast_sub(logz_11k)?.exp()?; // [N, K, T]
+        let beta_nkt = logits.broadcast_sub(&logz_11k)?.exp()?; // [N, K, T]
 
         // Mixture rate `Σ_t β·θ` as a gemm — see `candle_util::batched_dot`.
         batched_matvec(&beta_nkt, &theta_nt) // [N, K]
@@ -180,13 +254,14 @@ impl EmbeddedNbTopicDecoder {
     ///
     /// * `log_theta_nk` — `[N, K_topics]` encoder log-proportions.
     /// * `target` — the per-cell minibatch target (see [`MaskedNbTarget`]).
-    /// * `logz_11k` — `[1, 1, K]` per-topic log-partition from
-    ///   [`Self::log_partition_from_logits`] (caller-hoisted; see there).
+    /// * `full_kd` — `[K, D]` logits from [`Self::full_logits_kd`]
+    ///   (caller-hoisted: it is the dominant decoder cost and the anchor-prior
+    ///   CE shares it).
     pub fn impute_masked_nb(
         &self,
         log_theta_nk: &Tensor,
         target: &MaskedNbTarget<'_>,
-        logz_11k: &Tensor,
+        full_kd: &Tensor,
     ) -> Result<Tensor> {
         let MaskedNbTarget {
             indices,
@@ -197,7 +272,7 @@ impl EmbeddedNbTopicDecoder {
         } = *target;
 
         let (n, k) = (indices.dim(0)?, indices.dim(1)?);
-        let theta_beta_nk = self.mixture_rate_nk(log_theta_nk, indices, logz_11k)?; // [N, K]
+        let theta_beta_nk = self.mixture_rate_nk(log_theta_nk, indices, full_kd)?; // [N, K]
 
         // μ = residual · ℓ · θβ
         let mu_nk = match residual_nk {
@@ -232,10 +307,10 @@ impl EmbeddedNbTopicDecoder {
         &self,
         log_theta_nk: &Tensor,
         target: &MaskedNbTarget<'_>,
-        logz_11k: &Tensor,
+        full_kd: &Tensor,
     ) -> Result<Tensor> {
-        let p_nk = self.mixture_rate_nk(log_theta_nk, target.indices, logz_11k)?; // [N, K]
-                                                                                  // Categorical cross-entropy at masked positions: Σ y_g · log p_g.
+        let p_nk = self.mixture_rate_nk(log_theta_nk, target.indices, full_kd)?; // [N, K]
+                                                                                 // Categorical cross-entropy at masked positions: Σ y_g · log p_g.
         let ll_nk = (target.values * (p_nk + 1e-20)?.log()?)?; // [N, K]
         ll_nk.mul(target.mask)?.sum(1) // [N]
     }
