@@ -425,7 +425,6 @@ fn masked_minibatch_loss(
     let full_kd = decoder.full_logits_kd()?;
 
     let (mut loss, batch_metric, batch_count) = {
-        let logz_11k = EmbeddedNbTopicDecoder::log_partition_from_logits(&full_kd)?;
         let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
         let target = MaskedNbTarget {
             indices: &mb.input_indices,
@@ -435,9 +434,9 @@ fn masked_minibatch_loss(
             mask: &masked,
         };
         let llik = match opts.likelihood {
-            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &logz_11k)?,
+            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &full_kd)?,
             MaskedLikelihood::Multinomial => {
-                decoder.impute_masked_multinomial(&log_z, &target, &logz_11k)?
+                decoder.impute_masked_multinomial(&log_z, &target, &full_kd)?
             }
         };
         let m = llik.sum_all()?.to_scalar::<f32>()?;
@@ -506,10 +505,22 @@ pub fn train_masked(
         "Masked-imputation training: {num_levels} levels, {total_epochs} epochs, mask={mask_fraction}"
     );
 
-    let adam_vars: Vec<Var> = match config.frozen_feature_var {
-        None => config.parameters.all_vars(),
-        Some(name) => crate::frozen_features::trainable_vars(config.parameters, &[name]),
+    // Every decoder's pinned background stays out of the optimizer, plus the
+    // frozen ρ when a prior run supplied it.
+    let pinned: Vec<String> = {
+        let suffix = format!(".{}", crate::decoder::masked_etm::BACKGROUND_VAR);
+        let tbl = config.parameters.data().lock().unwrap();
+        tbl.keys()
+            .filter(|name| name.ends_with(&suffix))
+            .cloned()
+            .collect()
     };
+    let frozen: Vec<&str> = pinned
+        .iter()
+        .map(String::as_str)
+        .chain(config.frozen_feature_var)
+        .collect();
+    let adam_vars: Vec<Var> = crate::frozen_features::trainable_vars(config.parameters, &frozen);
     let mut adam = AdamW::new(
         adam_vars,
         candle_nn::ParamsAdamW {
