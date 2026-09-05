@@ -534,16 +534,19 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 42,
         value_name = "N",
-        help = "Seed for --poisson-thin's per-epoch draw",
-        long_help = "Seed for the stochastic training choices this subcommand owns.\n\
-                     Today that is exactly one: --poisson-thin's per-epoch draw.\n\
+        help = "Seed for the masking and thinning draws",
+        long_help = "Seed for the stochastic training choices this subcommand owns:\n\
+                     the per-step context mask (and its rate under --mask-schedule\n\
+                     uniform), and --poisson-thin's per-epoch draw.\n\
                      \n\
-                     That draw is keyed on (seed, epoch, level, column),\n\
-                     so it is reproducible whatever the thread count.\n\
+                     Each is keyed on its own sub-stream — the mask on\n\
+                     (seed, epoch, level, minibatch, row), the thinning draw on\n\
+                     (seed, epoch, level, column) — so both are reproducible\n\
+                     whatever the thread count.\n\
                      \n\
                      It does NOT make a run bit-reproducible on its own.\n\
-                     Parameter initialization and minibatch order come from the device RNG.\n\
-                     That sits outside this stream."
+                     Parameter initialization, the pseudobulk posterior draw and\n\
+                     minibatch order sit outside this stream."
     )]
     seed: u64,
 
@@ -552,8 +555,13 @@ pub struct MaskedTopicArgs {
         default_value_t = 512,
         help = "Encoder context window (top-K features per cell)",
         long_help = "Each cell keeps its top-K features by value.\n\
-                     Minibatches use the union of the selected indices.\n\
-                     A smaller K gives a faster decoder."
+                     This is the ENCODER's budget only: it bounds how much of a\n\
+                     cell the encoder reads, and a smaller K makes the encoder\n\
+                     cheaper.\n\
+                     \n\
+                     It does not bound what the decoder is scored on. That is\n\
+                     every gene outside this window, over the full feature axis,\n\
+                     so the decoder's cost is set by the feature count instead."
     )]
     context_size: usize,
 
@@ -572,14 +580,6 @@ pub struct MaskedTopicArgs {
                      pass 0 to auto-resolve to 2K instead. H < K errors at startup."
     )]
     embedding_dim: usize,
-
-    #[arg(
-        long,
-        help = "Decoder context window (default: --context-size)",
-        long_help = "Top-K features per sample used on the decoder side.\n\
-                     Defaults to the encoder's --context-size when not set."
-    )]
-    decoder_context_size: Option<usize>,
 
     #[arg(
         long,
@@ -889,8 +889,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let param_builder =
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
-    let dec_context_size = args.decoder_context_size.unwrap_or(args.context_size);
-
     // Gene names — used for output artifacts further down.
     let gene_names = data_vec.row_names()?;
 
@@ -1032,8 +1030,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     }
 
     info!(
-        "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, ctx={})",
-        n_features_full, h, args.context_size, num_levels, n_features_full, dec_context_size,
+        "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, scored over all D)",
+        n_features_full, h, args.context_size, num_levels, n_features_full,
     );
 
     // Bulk deconvolution is not supported on the masked-imputation path; the
@@ -1089,11 +1087,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         learning_rate: args.learning_rate,
         topic_smoothing: args.topic_smoothing,
         enc_context_size: args.context_size,
-        dec_context_size,
         stop: &stop,
         shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
-        feature_fisher_weights: &shortlist_weights,
         grad_clip: args.grad_clip,
         feature_graph: None,
         feature_embedding_l2: args.feature_embedding_l2,
@@ -1208,7 +1204,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         has_coarsening: false,
         embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
-        dec_context_size: Some(dec_context_size),
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
         // Round-trips the encoder's FC input width; without it every rebuild site

@@ -1118,7 +1118,6 @@ where
         has_coarsening: ctx.finest_coarsening.is_some(),
         embedding_dim: None,
         enc_context_size: None,
-        dec_context_size: None,
         theta_mean: None,
         n_train_cells: Some(ctx.data_vec.num_columns()),
         // Dense `topic` uses no indexed encoder, so the module branch does not apply.

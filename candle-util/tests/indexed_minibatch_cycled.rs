@@ -22,13 +22,9 @@ fn small_loader() -> IndexedInMemoryData {
     IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
         input: &data,
         input_null: None,
-        output: &data,
         input_context_size: 3,
-        output_context_size: 3,
         input_shortlist_weights: &w,
-        output_shortlist_weights: &w,
         input_mean: None,
-        output_fisher_weights: None,
     })
     .unwrap()
 }
@@ -49,6 +45,14 @@ fn cycled_rows_repeat_the_data_in_order() {
     for i in 0..10 {
         assert_eq!(vals[i], vals[i % 4], "row {i} != row {}", i % 4);
     }
+}
+
+#[test]
+fn cycled_row_ids_repeat_the_data_in_order() {
+    let loader = small_loader();
+    let mb = loader.minibatch_cycled(10, &Device::Cpu).unwrap();
+    let ids: Vec<u32> = mb.row_ids.to_vec1().unwrap();
+    assert_eq!(ids, (0..10).map(|i| (i % 4) as u32).collect::<Vec<_>>());
 }
 
 #[test]
