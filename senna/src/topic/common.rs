@@ -105,6 +105,107 @@ pub fn coarsen_features_multilevel(
     Ok(refined.levels)
 }
 
+/// The per-level feature coarsenings of a fit: inherited verbatim from an
+/// `--init-from` parent (its weights are keyed to the parent's grouping),
+/// otherwise built from the finest pseudobulk profiles when `max_coarse_features`
+/// caps the feature axis, with log-spaced widths coarsest first; `None` per
+/// level when neither applies.
+pub(crate) fn resolve_level_coarsenings(
+    max_coarse_features: usize,
+    init_from: Option<&str>,
+    finest_collapsed: &CollapsedOut,
+    num_levels: usize,
+    n_features_full: usize,
+    dc_params: data_beans_alg::dc_poisson::RefineParams,
+) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
+    if let Some(parent) = init_from {
+        return inherit_level_coarsenings(parent, num_levels, n_features_full);
+    }
+    if max_coarse_features == 0 || n_features_full <= max_coarse_features {
+        return Ok(vec![None; num_levels]);
+    }
+    let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
+    let finest_target = max_coarse_features;
+    let min_target = (finest_target / num_levels).max(50);
+    let level_targets: Vec<usize> = (0..num_levels)
+        .map(|i| {
+            let frac = if num_levels > 1 {
+                i as f64 / (num_levels - 1) as f64
+            } else {
+                1.0
+            };
+            let log_min = (min_target as f64).ln();
+            let log_max = (finest_target as f64).ln();
+            let target = (log_min + frac * (log_max - log_min)).exp().round() as usize;
+            target.clamp(min_target, finest_target)
+        })
+        .collect();
+    Ok(
+        coarsen_features_multilevel(&sketch_ds, &level_targets, dc_params)?
+            .into_iter()
+            .map(Some)
+            .collect(),
+    )
+}
+
+/// Load the parent's per-level feature coarsenings for a `--init-from` run.
+///
+/// See the call site for why recomputing them is unsafe. Both the "parent had
+/// none" and "parent had some" cases have to agree with this run, so a
+/// mismatch is reported rather than silently reconciled.
+pub(crate) fn inherit_level_coarsenings(
+    parent: &str,
+    num_levels: usize,
+    n_features_full: usize,
+) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
+    use crate::topic::model_metadata::load_coarsening_levels;
+
+    let Some(levels) = load_coarsening_levels(parent)? else {
+        // No file: the parent trained at full resolution. Match it, so the
+        // encoder's input width is `n_features_full` on both sides.
+        log::info!(
+            "--init-from {parent}: parent trained without feature coarsening; \
+             training at full resolution ({n_features_full} features) to match"
+        );
+        return Ok(vec![None; num_levels]);
+    };
+
+    anyhow::ensure!(
+        levels.len() == num_levels,
+        "--init-from {parent}: parent has {} coarsening level(s) but this run has \
+         --num-levels {num_levels}. The per-level decoders are keyed to their own \
+         groupings, so the ladders must match — pass --num-levels {}.",
+        levels.len(),
+        levels.len(),
+    );
+    for (i, lvl) in levels.iter().enumerate() {
+        if let Some(fc) = lvl {
+            anyhow::ensure!(
+                fc.fine_to_coarse.len() == n_features_full,
+                "--init-from {parent}: level {i}'s coarsening covers {} features but this \
+                 run has {n_features_full}. The two cohorts do not share a gene axis — either \
+                 they spell some genes differently (see --feature-name-kind) or the new data \
+                 measures genes the model has never seen, which cannot be added to a trained \
+                 model.",
+                fc.fine_to_coarse.len(),
+            );
+        }
+    }
+    let widths: Vec<String> = levels
+        .iter()
+        .map(|l| {
+            l.as_ref()
+                .map_or_else(|| "full".into(), |c| c.num_coarse.to_string())
+        })
+        .collect();
+    log::info!(
+        "--init-from {parent}: inheriting feature coarsening, level widths [{}] \
+         (--max-coarse-features is ignored)",
+        widths.join(", "),
+    );
+    Ok(levels)
+}
+
 /// Compute per-level epoch allocation for progressive training.
 ///
 /// Coarser levels (lower index) get more epochs: `w[i] = num_levels - i`.

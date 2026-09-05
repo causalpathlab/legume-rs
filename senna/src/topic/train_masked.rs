@@ -94,24 +94,108 @@ fn write_tensor_parquet(
     Ok(())
 }
 
+/// The decoder's gene → module map for one level, with the pinned
+/// within-module shares, and the per-module mass the background is pinned at.
+///
+/// A gene's share of its module is its mean rate over the module's total
+/// (uniform within a module that has no mass); the module's background mass
+/// is that total. With no coarsening the map is the identity and the masses
+/// are the gene means themselves.
+pub(crate) fn module_map_for(
+    coarsening: Option<&FeatureCoarsening>,
+    feature_mean: &[f32],
+    dev: &candle_core::Device,
+) -> anyhow::Result<(candle_util::decoder::module_map::ModuleMap, Vec<f32>)> {
+    use candle_util::decoder::module_map::ModuleMap;
+    let d = feature_mean.len();
+    let Some(fc) = coarsening else {
+        return Ok((ModuleMap::identity(d, dev)?, feature_mean.to_vec()));
+    };
+    anyhow::ensure!(
+        fc.fine_to_coarse.len() == d,
+        "feature coarsening covers {} genes but the run has {d}",
+        fc.fine_to_coarse.len()
+    );
+    let mut module_mass = vec![0f32; fc.num_coarse];
+    for (g, &m) in fc.fine_to_coarse.iter().enumerate() {
+        module_mass[m] += feature_mean[g].max(0.0);
+    }
+    let share: Vec<f32> = fc
+        .fine_to_coarse
+        .iter()
+        .enumerate()
+        .map(|(g, &m)| {
+            if module_mass[m] > 0.0 {
+                feature_mean[g].max(0.0) / module_mass[m]
+            } else {
+                1.0 / fc.coarse_to_fine[m].len().max(1) as f32
+            }
+        })
+        .collect();
+    Ok((
+        ModuleMap::new(&fc.fine_to_coarse, &share, dev)?,
+        module_mass,
+    ))
+}
+
+/// Expand a module-level log-dictionary `[M, K]` to genes `[D, K]`:
+/// `log β_kg = log β^mod_{k,m(g)} + log π_{g|m(g)}`, so a gene takes its
+/// pinned share of its module's mass and every column still sums to one.
+pub(crate) fn expand_log_dict_with_shares(
+    log_dict_mk: &Mat,
+    fine_to_coarse: &[usize],
+    log_share: &[f32],
+) -> Mat {
+    let k = log_dict_mk.ncols();
+    Mat::from_fn(fine_to_coarse.len(), k, |g, kk| {
+        log_dict_mk[(fine_to_coarse[g], kk)] + log_share[g]
+    })
+}
+
 /// Write the `[D, K]` log-β dictionary + the per-gene dispersion `φ` for the
-/// masked-imputation NB embedded topic decoder.
+/// masked-imputation NB embedded topic decoder. A module-collapsed decoder is
+/// expanded to genes through its pinned shares; `φ` is per module, so every
+/// gene of a module carries its module's dispersion.
 pub(crate) fn write_masked_dictionary(
     decoder: &candle_util::decoder::EmbeddedNbTopicDecoder,
     gene_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
+    let map = decoder.modules();
+    let dict = decoder
+        .get_dictionary()?
+        .to_device(&candle_core::Device::Cpu)?;
+    let phi_1d = decoder.phi()?.to_device(&candle_core::Device::Cpu)?; // [1, M]
+    let (dict_dk, phi_d1) = if map.is_identity() {
+        (dict, phi_1d.transpose(0, 1)?.contiguous()?)
+    } else {
+        let dict_mk = Mat::from_tensor(&dict)?;
+        let expanded =
+            expand_log_dict_with_shares(&dict_mk, map.host_fine_to_coarse(), map.host_log_share());
+        let phi_m: Vec<f32> = phi_1d.flatten_all()?.to_vec1()?;
+        let phi_d: Vec<f32> = map
+            .host_fine_to_coarse()
+            .iter()
+            .map(|&m| phi_m[m])
+            .collect();
+        log::info!(
+            "Expanded dictionary from {} modules to {} genes through the pinned shares",
+            map.n_coarse(),
+            map.n_fine()
+        );
+        (
+            expanded.to_tensor(&candle_core::Device::Cpu)?,
+            Tensor::from_vec(phi_d, (map.n_fine(), 1), &candle_core::Device::Cpu)?,
+        )
+    };
     write_tensor_parquet(
-        &decoder.get_dictionary()?,
+        &dict_dk,
         out_prefix,
         "dictionary.parquet",
         gene_names,
         "gene",
         "T",
     )?;
-    // Per-gene NB dispersion φ = exp(log_phi) as [D, 1].
-    let phi_1d = decoder.phi()?; // [1, D]
-    let phi_d1 = phi_1d.transpose(0, 1)?.contiguous()?; // [D, 1]
     write_tensor_parquet(
         &phi_d1,
         out_prefix,
@@ -140,3 +224,7 @@ pub(crate) fn write_feature_embedding(
         "H",
     )
 }
+
+#[cfg(test)]
+#[path = "train_masked_tests.rs"]
+mod train_masked_tests;

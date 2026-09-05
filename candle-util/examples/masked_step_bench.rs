@@ -8,10 +8,11 @@
 
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{VarBuilder, VarMap};
+use candle_util::decoder::masked_etm::QueryTarget;
 use candle_util::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use candle_util::decoder::query_decoder::{QueryDecoder, QueryInput};
 use candle_util::fast_index::gather_rows;
-use candle_util::vae::masked_topic::{residual_nd, target_mask_nd};
+use candle_util::vae::masked_topic::{scatter_rows_nd, target_mask_nd};
 use std::time::Instant;
 
 const N: usize = 100;
@@ -84,7 +85,6 @@ fn main() -> anyhow::Result<()> {
             residual: None,
             lib: &lib_n1,
             mask: &mask_nd,
-            log_residual: None,
         };
         let _ = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
         Ok(())
@@ -97,7 +97,6 @@ fn main() -> anyhow::Result<()> {
             residual: None,
             lib: &lib_n1,
             mask: &mask_nd,
-            log_residual: None,
         };
         let llik = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
         let _ = llik.mean_all()?.neg()?.backward()?;
@@ -143,29 +142,37 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    // 7. Residual scatter + exp on [N, D].
-    time(&dev, "residual_nd index_add + exp (fwd+bwd)", || {
-        let r = Var::from_tensor(&Tensor::rand(-1f32, 1.0, (N, Q), &dev)?)?;
-        let r_nd = residual_nd(&query_ids, &r, &weight, D)?;
-        let _ = r_nd.exp()?.sum_all()?.backward()?;
+    // 7. Scatter of per-slot values onto [N, D] (the module view of the context).
+    time(&dev, "scatter_rows_nd [N,K]→[N,D] (fwd+bwd)", || {
+        let v = Var::from_tensor(&Tensor::rand(-1f32, 1.0, (N, K), &dev)?)?;
+        let nd = scatter_rows_nd(&indices, &v, D)?;
+        let _ = nd.sum_all()?.backward()?;
         Ok(())
     });
 
-    // 8. The whole decoder side as the trainer runs it (query on).
+    // 8. The whole decoder side as the trainer runs it (query on): dense NB
+    //    head plus the gene-level query head.
+    let q_target = Tensor::rand(0f32, 5.0, (N, Q), &dev)?.floor()?;
     time(&dev, "decoder side, query on (fwd+bwd)", || {
         let full_kd = dec.full_logits_kd()?;
         let read = qd.forward(&rho, &qin)?;
-        let r_nd = residual_nd(&query_ids, &read.residual, &weight, D)?;
         let dense = MaskedDenseTarget {
             values: &values_nd,
             residual: None,
             lib: &lib_n1,
             mask: &mask_nd,
-            log_residual: Some(&r_nd),
         };
         let llik = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
+        let q = QueryTarget {
+            gene_ids: &query_ids,
+            values: &q_target,
+            weight: &weight,
+            log_residual: &read.residual,
+            lib: &lib_n1,
+        };
+        let llik_q = dec.score_queries_nb(&log_theta, &q, &full_kd)?;
         let pen = (read.residual.sqr()? * &weight)?.sum_all()?;
-        let loss = (llik.mean_all()?.neg()? + pen)?;
+        let loss = ((llik.mean_all()?.neg()? - llik_q.mean_all()?)? + pen)?;
         let _ = loss.backward()?;
         Ok(())
     });
