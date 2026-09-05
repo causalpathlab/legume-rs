@@ -97,11 +97,6 @@ fn identity_map_is_a_no_op() {
         .iter()
         .flatten()
         .all(|&x| x == 0.0));
-    let x = Tensor::from_vec((0..D).map(|i| i as f32).collect(), (1, D), &dev()).unwrap();
-    assert_eq!(
-        m.expand_1m_to_1d(&x).unwrap().to_vec2::<f32>().unwrap(),
-        x.to_vec2::<f32>().unwrap()
-    );
 }
 
 #[test]
@@ -121,11 +116,6 @@ fn lookups_follow_the_map_and_shares_expand_by_module() {
     for (a, b) in ls.iter().flatten().zip(want.iter().flatten()) {
         assert!((a - b).abs() < 1e-6);
     }
-    let x = Tensor::from_vec(vec![10.0f32, 20.0, 30.0], (1, 3), &dev()).unwrap();
-    assert_eq!(
-        m.expand_1m_to_1d(&x).unwrap().to_vec2::<f32>().unwrap(),
-        vec![vec![10.0, 10.0, 20.0, 20.0, 20.0, 30.0]]
-    );
     let rows = DMatrix::from_row_slice(
         2,
         D,

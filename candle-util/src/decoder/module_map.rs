@@ -10,7 +10,7 @@
 //! its genes wherever a gene is asked about. The identity map (every gene its
 //! own module) reproduces the dense heads exactly.
 
-use crate::fast_index::index_add_rows;
+use crate::fast_index::{index_add_rows, scatter_add_cols};
 use candle_core::{DType, Device, Result, Tensor};
 use nalgebra::DMatrix;
 
@@ -127,14 +127,6 @@ impl ModuleMap {
             .reshape(ids.shape())
     }
 
-    /// Broadcast a per-module row `[1, M]` to its genes `[1, D]`.
-    pub fn expand_1m_to_1d(&self, x_1m: &Tensor) -> Result<Tensor> {
-        if self.identity {
-            return Ok(x_1m.clone());
-        }
-        x_1m.index_select(&self.fine_to_coarse_d, 1)
-    }
-
     /// `[1, D]` `log π_{g|m(g)}` on the device.
     #[must_use]
     pub fn log_share_1d(&self) -> Tensor {
@@ -155,19 +147,8 @@ impl ModuleMap {
                 self.n_fine
             );
         }
-        let m = self.n_coarse;
-        let dev = x_nd.device();
-        let offsets = Tensor::arange(0u32, n as u32, dev)?
-            .affine(m as f64, 0.0)?
-            .unsqueeze(1)?; // [N, 1]
-        let ids = self
-            .fine_to_coarse_d
-            .unsqueeze(0)?
-            .broadcast_add(&offsets)?
-            .reshape(n * d)?; // [N·D]
-        let src = x_nd.reshape((n * d, 1))?;
-        let table = Tensor::zeros((n * m, 1), x_nd.dtype(), dev)?;
-        index_add_rows(&table, &ids, &src)?.reshape((n, m))
+        let ids = self.fine_to_coarse_d.unsqueeze(0)?.broadcast_as((n, d))?;
+        scatter_add_cols(&ids, x_nd, self.n_coarse)
     }
 
     /// Sum the columns of a `[P, D]` host matrix into `[P, M]`.

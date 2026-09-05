@@ -31,6 +31,27 @@ pub fn index_add_rows(dst: &Tensor, ids: &Tensor, src: &Tensor) -> Result<Tensor
     dst.apply_op3(ids, src, IndexAddRows)
 }
 
+/// Scatter `[N, K]` values onto `[N, n_cols]` by column id: `out[n, ids[n,k]] +=
+/// values[n,k]`, duplicates within a row summed, gradients flowing back to each
+/// slot.
+///
+/// Done as one row-wise index-add over the flattened `[N·n_cols, 1]` table with
+/// `row·n_cols + col` offsets: candle's own `scatter_add` backward assumes as
+/// many indexes as columns, and its flattened `index_add` runs on a single CUDA
+/// thread. `ids` may be a broadcast row, so a fixed per-column map scatters the
+/// same way a per-slot one does.
+pub fn scatter_add_cols(ids: &Tensor, values: &Tensor, n_cols: usize) -> Result<Tensor> {
+    let (n, k) = values.dims2()?;
+    let dev = values.device();
+    let offsets = Tensor::arange(0u32, n as u32, dev)?
+        .affine(n_cols as f64, 0.0)?
+        .unsqueeze(1)?; // [N, 1]
+    let flat_ids = ids.broadcast_add(&offsets)?.reshape(n * k)?; // [N·K]
+    let src = values.reshape((n * k, 1))?;
+    let table = Tensor::zeros((n * n_cols, 1), values.dtype(), dev)?;
+    index_add_rows(&table, &flat_ids, &src)?.reshape((n, n_cols))
+}
+
 fn contiguous_range(l: &Layout, what: &str) -> Result<(usize, usize)> {
     l.contiguous_offsets()
         .ok_or_else(|| candle_core::Error::Msg(format!("{what}: expected a contiguous tensor")))

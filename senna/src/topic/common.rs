@@ -124,7 +124,7 @@ pub(crate) fn resolve_level_coarsenings(
     if max_coarse_features == 0 || n_features_full <= max_coarse_features {
         return Ok(vec![None; num_levels]);
     }
-    let sketch_ds = finest_collapsed.mu_observed.posterior_mean().clone();
+    let sketch_ds = finest_collapsed.mu_observed.posterior_mean();
     let finest_target = max_coarse_features;
     let min_target = (finest_target / num_levels).max(50);
     let level_targets: Vec<usize> = (0..num_levels)
@@ -141,7 +141,7 @@ pub(crate) fn resolve_level_coarsenings(
         })
         .collect();
     Ok(
-        coarsen_features_multilevel(&sketch_ds, &level_targets, dc_params)?
+        coarsen_features_multilevel(sketch_ds, &level_targets, dc_params)?
             .into_iter()
             .map(Some)
             .collect(),
@@ -153,7 +153,7 @@ pub(crate) fn resolve_level_coarsenings(
 /// See the call site for why recomputing them is unsafe. Both the "parent had
 /// none" and "parent had some" cases have to agree with this run, so a
 /// mismatch is reported rather than silently reconciled.
-pub(crate) fn inherit_level_coarsenings(
+fn inherit_level_coarsenings(
     parent: &str,
     num_levels: usize,
     n_features_full: usize,

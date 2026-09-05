@@ -14,7 +14,7 @@ use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget, QueryTarg
 use crate::decoder::module_map::ModuleMap;
 use crate::decoder::query_decoder::{QueryDecoder, QueryInput};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
-use crate::fast_index::index_add_rows;
+use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
@@ -241,30 +241,6 @@ pub fn target_mask_nd(
     zeros.scatter_add(indices, visible, 1)?.affine(-1.0, 1.0)
 }
 
-/// Scatter per-slot values onto a `[N, n_cols]` table by column id: `[N, K]`
-/// ids and values → `[N, n_cols]`, duplicates within a row summed.
-///
-/// Done as a row-wise index-add over the flattened `[N·n_cols, 1]` table with
-/// `row·n_cols + col` offsets ([`index_add_rows`]): one thread per slot on the
-/// device, and a backward that gathers the gradient back to each slot.
-/// candle's own `scatter_add` backward assumes as many indexes as columns,
-/// and its flattened `index_add` runs on a single CUDA thread.
-pub fn scatter_rows_nd(
-    ids: &Tensor,
-    values: &Tensor,
-    n_cols: usize,
-) -> candle_core::Result<Tensor> {
-    let (n, k) = ids.dims2()?;
-    let dev = values.device();
-    let offsets = Tensor::arange(0u32, n as u32, dev)?
-        .affine(n_cols as f64, 0.0)?
-        .unsqueeze(1)?; // [N, 1]
-    let flat_ids = ids.broadcast_add(&offsets)?.reshape(n * k)?; // [N·K]
-    let src = values.reshape((n * k, 1))?;
-    let table = Tensor::zeros((n * n_cols, 1), values.dtype(), dev)?;
-    index_add_rows(&table, &flat_ids, &src)?.reshape((n, n_cols))
-}
-
 /// One level's decoder targets, resident on device as `[P, M]`: the
 /// batch-free rows summed into the decoder's modules (the rows themselves
 /// under the identity map).
@@ -281,10 +257,11 @@ impl LevelTarget {
     /// Aggregate a level's `[P, D]` target rows into the decoder's modules,
     /// upload, and precompute `Σ_g y_pg + 1` over the full row.
     pub fn from_mat(rows: &Mat, modules: &ModuleMap, dev: &Device) -> anyhow::Result<Self> {
-        let row_lib: Vec<f32> = (0..rows.nrows()).map(|p| rows.row(p).sum() + 1.0).collect();
         let values_pm =
             crate::data::loader_util::upload_to_device(&modules.aggregate_columns_host(rows), dev)?;
-        let row_lib_p1 = Tensor::from_vec(row_lib, (rows.nrows(), 1), dev)?;
+        // Modules partition the genes, so the module totals sum to the row's
+        // total over every gene.
+        let row_lib_p1 = (values_pm.sum_keepdim(1)? + 1.0)?;
         Ok(Self {
             values_pm,
             row_lib_p1,
@@ -549,9 +526,9 @@ fn masked_minibatch_loss(
     let mm = decoder.modules();
     let n_obs = decoder.dim_obs();
     let m_ctx = mm.modules_of(&base.input_indices)?; // [N, K] module ids
-    let visible_counts = scatter_rows_nd(&m_ctx, &(&mb.target_at_context * &mb.visible)?, n_obs)?;
+    let visible_counts = scatter_add_cols(&m_ctx, &(&mb.target_at_context * &mb.visible)?, n_obs)?;
     let share_ctx = mm.log_share_at(&base.input_indices)?.exp()?;
-    let visible_share = scatter_rows_nd(&m_ctx, &(share_ctx * &mb.visible)?, n_obs)?;
+    let visible_share = scatter_add_cols(&m_ctx, &(share_ctx * &mb.visible)?, n_obs)?;
     let (values_nm, lib_n1) = target.rows(&base.row_ids)?;
     // These rows are the batch-FREE targets, so β is fit to composition the
     // collapse already corrected; the per-row offset belongs to cell-level
