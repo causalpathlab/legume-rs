@@ -4998,7 +4998,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senna"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "approx",
