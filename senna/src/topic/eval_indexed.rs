@@ -3,10 +3,12 @@ use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
-use candle_util::decoder::{EmbeddedNbTopicDecoder, MaskedNbTarget};
+use candle_util::decoder::masked_etm::MaskedDenseTarget;
+use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::traits::*;
 use candle_util::vae::masked_topic::{
-    decoder_log_theta, masked_encode, LatentHead, MaskedEncoderInput, MaskedLikelihood,
+    decoder_log_theta, masked_encode, target_mask_nd, LatentHead, MaskedEncoderInput,
+    MaskedLikelihood,
 };
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -376,22 +378,34 @@ pub(crate) fn evaluate_holdout_imputation(
         // held-out number is not comparable to the training trace.
         let log_z = decoder_log_theta(raw_z, config.head, config.topic_smoothing)?;
 
-        let lib_n1 = (enc_pack.values.sum_keepdim(1)? + 1.0)?;
-        let target = MaskedNbTarget {
-            indices: &enc_pack.indices,
-            residual: values_null.as_ref(),
-            values: &enc_pack.values,
+        // Score every gene the encoder did not see, matching the training
+        // law: the full row, the full library, and `residual` because these
+        // are cells, whose counts still carry the batch effect.
+        let n_features = decoder.dim_obs();
+        let mut dense = vec![0f32; n * n_features];
+        for (j, col) in (lb..ub).enumerate() {
+            let c = x_dn.col(col - lb);
+            for (&r, &v) in c.row_indices().iter().zip(c.values().iter()) {
+                dense[j * n_features + r] = v;
+            }
+        }
+        let values_nd = Tensor::from_vec(dense, (n, n_features), config.dev)?;
+        let lib_n1 = (values_nd.sum_keepdim(1)? + 1.0)?;
+        let mask_nd = target_mask_nd(&enc_pack.indices, &visible, n_features)?;
+        let target = MaskedDenseTarget {
+            values: &values_nd,
+            residual: x0_nd.as_ref(),
             lib: &lib_n1,
-            mask: &masked,
+            mask: &mask_nd,
         };
         let llik = match config.likelihood {
-            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &full_kd)?,
+            MaskedLikelihood::Nb => decoder.impute_dense_nb(&log_z, &target, &full_kd)?,
             MaskedLikelihood::Multinomial => {
-                decoder.impute_masked_multinomial(&log_z, &target, &full_kd)?
+                decoder.impute_dense_multinomial(&log_z, &target, &full_kd)?
             }
         };
         llik_sum += f64::from(llik.sum_all()?.to_scalar::<f32>()?);
-        mask_cnt += f64::from(masked.sum_all()?.to_scalar::<f32>()?);
+        mask_cnt += f64::from(mask_nd.sum_all()?.to_scalar::<f32>()?);
     }
 
     Ok(if mask_cnt > 0.0 {
