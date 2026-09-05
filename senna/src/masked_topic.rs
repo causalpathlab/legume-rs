@@ -466,7 +466,7 @@ pub struct MaskedTopicArgs {
         default_value_t = MaskScheduleArg::Fixed,
         help = "Mask-rate schedule: fixed or uniform per-minibatch sampling",
         long_help = "Mask-rate schedule. fixed uses --mask-fraction.\n\
-                     uniform samples the rate per minibatch,\n\
+                     uniform samples the rate per row and epoch,\n\
                      within [--mask-rate-lo, --mask-rate-hi]. That is the any-order,\n\
                      absorbing-diffusion style."
     )]
@@ -560,13 +560,13 @@ pub struct MaskedTopicArgs {
         value_name = "N",
         help = "Seed for the masking and thinning draws",
         long_help = "Seed for the stochastic training choices this subcommand owns:\n\
-                     the per-step context mask (and its rate under --mask-schedule\n\
-                     uniform), and --poisson-thin's per-epoch draw.\n\
+                     the context mask (and its rate under --mask-schedule uniform),\n\
+                     the query set, and --poisson-thin's per-epoch draw.\n\
                      \n\
-                     Each is keyed on its own sub-stream — the mask on\n\
-                     (seed, epoch, level, minibatch, row), the thinning draw on\n\
-                     (seed, epoch, level, column) — so both are reproducible\n\
-                     whatever the thread count.\n\
+                     Each is keyed on its own sub-stream — the mask and the query set\n\
+                     on (seed, epoch, level, row), drawn once per epoch, the thinning\n\
+                     draw on (seed, epoch, level, column) — so all are reproducible\n\
+                     whatever the thread count, the batch size or the shuffle.\n\
                      \n\
                      It does NOT make a run bit-reproducible on its own.\n\
                      Parameter initialization, the pseudobulk posterior draw and\n\
