@@ -555,8 +555,13 @@ pub struct MaskedTopicArgs {
         default_value_t = 512,
         help = "Encoder context window (top-K features per cell)",
         long_help = "Each cell keeps its top-K features by value.\n\
-                     Minibatches use the union of the selected indices.\n\
-                     A smaller K gives a faster decoder."
+                     This is the ENCODER's budget only: it bounds how much of a\n\
+                     cell the encoder reads, and a smaller K makes the encoder\n\
+                     cheaper.\n\
+                     \n\
+                     It does not bound what the decoder is scored on. That is\n\
+                     every gene outside this window, over the full feature axis,\n\
+                     so the decoder's cost is set by the feature count instead."
     )]
     context_size: usize,
 
