@@ -124,6 +124,7 @@ fn dense_heads_match_an_elementwise_reference() {
         residual: Some(&residual),
         lib: &lib,
         mask: &mask,
+        log_residual: None,
     };
     let nb = to_vec1(
         &dec.impute_dense_nb(&log_theta(), &target, &full_kd)
@@ -197,6 +198,7 @@ fn dense_and_indexed_heads_agree_on_the_same_positions() {
         residual: Some(&residual),
         lib: &lib,
         mask: &mask,
+        log_residual: None,
     };
 
     let nb_i = to_vec1(
@@ -226,4 +228,200 @@ fn dense_and_indexed_heads_agree_on_the_same_positions() {
             mn_d[n]
         );
     }
+}
+
+//////////////////////////////
+// Query-decoder residual    //
+//////////////////////////////
+
+/// `log_residual` multiplies the rate: a uniform residual `c` on the NB head is
+/// the same as scaling the library by `exp(c)`, and a residual set on one
+/// gene changes the likelihood only where that gene is scored.
+#[test]
+fn a_log_residual_scales_the_nb_rate_and_only_where_it_is_set() {
+    let dec = decoder();
+    let full_kd = dec.full_logits_kd().unwrap();
+    let (values, mask, lib) = (values(), mask(), lib());
+    let c = 0.7f64;
+    let uniform = Tensor::full(c as f32, (N, D), &dev()).unwrap();
+    let with_res = dec
+        .impute_dense_nb(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask,
+                log_residual: Some(&uniform),
+            },
+            &full_kd,
+        )
+        .unwrap();
+    let scaled_lib = lib.affine(c.exp(), 0.0).unwrap();
+    let with_lib = dec
+        .impute_dense_nb(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &scaled_lib,
+                mask: &mask,
+                log_residual: None,
+            },
+            &full_kd,
+        )
+        .unwrap();
+    for (a, b) in to_vec1(&with_res).iter().zip(to_vec1(&with_lib)) {
+        assert!(
+            (a - b).abs() < 1e-4,
+            "uniform residual {a} vs scaled library {b}"
+        );
+    }
+
+    // Residual only on gene 2. Row 0 scores gene 2, so its llik moves; with a
+    // mask that leaves gene 2 out, nothing moves.
+    let mut one = vec![0f32; N * D];
+    one[2] = 1.5;
+    one[D + 2] = -0.8;
+    one[2 * D + 2] = 0.3;
+    let one = Tensor::from_vec(one, (N, D), &dev()).unwrap();
+    let base = dec
+        .impute_dense_nb(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask,
+                log_residual: None,
+            },
+            &full_kd,
+        )
+        .unwrap();
+    let moved = dec
+        .impute_dense_nb(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask,
+                log_residual: Some(&one),
+            },
+            &full_kd,
+        )
+        .unwrap();
+    for (n, (a, b)) in to_vec1(&base).iter().zip(to_vec1(&moved)).enumerate() {
+        assert!(
+            (a - b).abs() > 1e-4,
+            "row {n} scores gene 2 but did not move: {a} vs {b}"
+        );
+    }
+    let mut m = to_vec2(&mask);
+    for row in &mut m {
+        row[2] = 0.0;
+    }
+    let mask_no2 = Tensor::from_vec(m.concat(), (N, D), &dev()).unwrap();
+    let base2 = dec
+        .impute_dense_nb(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask_no2,
+                log_residual: None,
+            },
+            &full_kd,
+        )
+        .unwrap();
+    let same = dec
+        .impute_dense_nb(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask_no2,
+                log_residual: Some(&one),
+            },
+            &full_kd,
+        )
+        .unwrap();
+    for (a, b) in to_vec1(&base2).iter().zip(to_vec1(&same)) {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "gene 2 unscored but the llik moved: {a} vs {b}"
+        );
+    }
+}
+
+/// The multinomial rate is renormalized after the residual, so a uniform
+/// residual leaves it unchanged and a one-gene residual moves the other
+/// genes' probabilities down.
+#[test]
+fn the_multinomial_renormalizes_after_the_residual() {
+    let dec = decoder();
+    let full_kd = dec.full_logits_kd().unwrap();
+    let (values, mask, lib) = (values(), mask(), lib());
+    let uniform = Tensor::full(0.9f32, (N, D), &dev()).unwrap();
+    let base = dec
+        .impute_dense_multinomial(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask,
+                log_residual: None,
+            },
+            &full_kd,
+        )
+        .unwrap();
+    let same = dec
+        .impute_dense_multinomial(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask,
+                log_residual: Some(&uniform),
+            },
+            &full_kd,
+        )
+        .unwrap();
+    for (a, b) in to_vec1(&base).iter().zip(to_vec1(&same)) {
+        assert!(
+            (a - b).abs() < 1e-4,
+            "uniform residual changed the multinomial: {a} vs {b}"
+        );
+    }
+    // Raise gene 4 in every row; row 0 has count 5 there and gene 4 is unscored
+    // in row 0, so row 0's scored genes lose mass and its llik must fall.
+    let mut one = vec![0f32; N * D];
+    for n in 0..N {
+        one[n * D + 4] = 2.0;
+    }
+    let one = Tensor::from_vec(one, (N, D), &dev()).unwrap();
+    let moved = dec
+        .impute_dense_multinomial(
+            &log_theta(),
+            &MaskedDenseTarget {
+                values: &values,
+                residual: None,
+                lib: &lib,
+                mask: &mask,
+                log_residual: Some(&one),
+            },
+            &full_kd,
+        )
+        .unwrap();
+    let (b, m) = (to_vec1(&base), to_vec1(&moved));
+    assert!(
+        m[0] < b[0] - 1e-4,
+        "row 0: unscored gene 4 up must pull scored mass down ({} vs {})",
+        m[0],
+        b[0]
+    );
 }

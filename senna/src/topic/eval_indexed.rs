@@ -397,6 +397,7 @@ pub(crate) fn evaluate_holdout_imputation(
             residual: x0_nd.as_ref(),
             lib: &lib_n1,
             mask: &mask_nd,
+            log_residual: None,
         };
         let llik = match config.likelihood {
             MaskedLikelihood::Nb => decoder.impute_dense_nb(&log_z, &target, &full_kd)?,

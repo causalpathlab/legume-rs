@@ -17,6 +17,7 @@ pub mod joint_topic;
 pub mod masked_etm;
 pub mod nb_mixture;
 pub mod poisson;
+pub mod query_decoder;
 pub mod topic;
 
 pub use bipartite::{
