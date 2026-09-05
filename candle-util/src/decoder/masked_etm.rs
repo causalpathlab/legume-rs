@@ -39,6 +39,26 @@ pub struct MaskedNbTarget<'a> {
     pub mask: &'a Tensor,
 }
 
+/// Minibatch target for the **dense** masked heads, laid out over the whole
+/// gene axis rather than a per-row context.
+///
+/// This is the canonical masked-training shape: the encoder reads a bounded
+/// context, and the decoder is scored over a prediction space that does not
+/// depend on that budget, so a gene the encoder never saw — including one with
+/// a zero count — still teaches the dictionary.
+pub struct MaskedDenseTarget<'a> {
+    /// `[N, D]` observed counts over the full gene axis.
+    pub values: &'a Tensor,
+    /// `[N, D]` per-row μ_residual (batch offset); `None` ⇒ no offset. Training
+    /// scores batch-free target rows and passes `None`; cell-level scoring,
+    /// where the counts are batch-mixed, passes the per-cell offset.
+    pub residual: Option<&'a Tensor>,
+    /// `[N, 1]` per-row library size over the full row.
+    pub lib: &'a Tensor,
+    /// `[N, D]` 1 = scored, 0 = withheld (the encoder's visible genes).
+    pub mask: &'a Tensor,
+}
+
 /// NB embedded-topic decoder for masked imputation.
 pub struct EmbeddedNbTopicDecoder {
     n_features: usize,
@@ -210,10 +230,29 @@ impl EmbeddedNbTopicDecoder {
     /// anchor-prior CE rather than recomputing it inside each.
     pub fn log_partition_from_logits(full_kd: &Tensor) -> Result<Tensor> {
         let k = full_kd.dim(0)?;
+        Self::log_partition_k1(full_kd)?.reshape((1, 1, k))
+    }
+
+    /// Per-topic log-partition as `[K, 1]` — the natural shape for the dense
+    /// `[K, D]` normalization. [`Self::log_partition_from_logits`] is the same
+    /// quantity reshaped for the indexed head's `[N, K, T]` broadcast.
+    pub fn log_partition_k1(full_kd: &Tensor) -> Result<Tensor> {
         let m = full_kd.max_keepdim(1)?; // [K, 1]
         let lse = (full_kd.broadcast_sub(&m)?.exp()?.sum_keepdim(1)? + 1e-20)?.log()?; // [K,1]
-        let logz_k1 = (lse + m)?; // [K, 1]
-        logz_k1.reshape((1, 1, k))
+        lse + m
+    }
+
+    /// Per-row mixture rate `p_ng = Σ_t θ_nt · β_{t,g}` over the **whole** gene
+    /// axis, `[N, D]`, so `Σ_g p_ng = 1` exactly.
+    ///
+    /// One `[N,K] × [K,D]` gemm against the normalized dictionary. The indexed
+    /// sibling ([`Self::mixture_rate_nk`]) instead gathers `[N·K, T]` logits,
+    /// which is the cheaper shape only while the scored set is a small
+    /// per-row context.
+    pub fn mixture_rate_nd(&self, log_theta_nk: &Tensor, full_kd: &Tensor) -> Result<Tensor> {
+        let logz_k1 = Self::log_partition_k1(full_kd)?; // [K, 1]
+        let beta_kd = full_kd.broadcast_sub(&logz_k1)?.exp()?; // [K, D]
+        log_theta_nk.exp()?.matmul(&beta_kd) // [N, D]
     }
 
     /// Per-cell mixture rate `p_nk = Σ_t θ_nt · β_{t,g}` at the cell's top-K
@@ -274,12 +313,6 @@ impl EmbeddedNbTopicDecoder {
         let (n, k) = (indices.dim(0)?, indices.dim(1)?);
         let theta_beta_nk = self.mixture_rate_nk(log_theta_nk, indices, full_kd)?; // [N, K]
 
-        // μ = residual · ℓ · θβ
-        let mu_nk = match residual_nk {
-            Some(r) => theta_beta_nk.mul(r)?.broadcast_mul(lib_n1)?,
-            None => theta_beta_nk.broadcast_mul(lib_n1)?,
-        };
-
         // φ at the cell's genes
         let flat = indices.flatten_all()?; // [N*K]
         let log_phi_nk = self
@@ -288,8 +321,14 @@ impl EmbeddedNbTopicDecoder {
             .index_select(&flat, 0)?
             .reshape((n, k))?; // [N, K]
 
-        let nb_nk = nb_log_likelihood_elem(values_nk, &mu_nk, &log_phi_nk)?; // [N, K]
-        nb_nk.mul(mask_nk)?.sum(1) // [N]
+        nb_score(
+            values_nk,
+            &theta_beta_nk,
+            residual_nk,
+            lib_n1,
+            &log_phi_nk,
+            mask_nk,
+        )
     }
 
     /// Masked **multinomial** (categorical) imputation log-likelihood, summed
@@ -311,7 +350,81 @@ impl EmbeddedNbTopicDecoder {
     ) -> Result<Tensor> {
         let p_nk = self.mixture_rate_nk(log_theta_nk, target.indices, full_kd)?; // [N, K]
                                                                                  // Categorical cross-entropy at masked positions: Σ y_g · log p_g.
-        let ll_nk = (target.values * (p_nk + 1e-20)?.log()?)?; // [N, K]
-        ll_nk.mul(target.mask)?.sum(1) // [N]
+        multinomial_score(target.values, &p_nk, target.mask)
+    }
+
+    ////////////////////////////////////////////////////
+    // Dense heads — scored over the whole gene axis   //
+    ////////////////////////////////////////////////////
+
+    /// Masked NB imputation log-likelihood over the full gene axis → `[N]`.
+    ///
+    /// The dense sibling of [`Self::impute_masked_nb`]: same likelihood, same
+    /// dictionary, but the scored positions come from the caller's `[N, D]`
+    /// mask instead of a per-row context, so a gene with a zero count is a
+    /// first-class observation rather than one the top-K dropped.
+    pub fn impute_dense_nb(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &MaskedDenseTarget<'_>,
+        full_kd: &Tensor,
+    ) -> Result<Tensor> {
+        let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
+        let log_phi_nd = self.log_phi_1d.broadcast_as(rate_nd.shape())?;
+        nb_score(
+            target.values,
+            &rate_nd,
+            target.residual,
+            target.lib,
+            &log_phi_nd,
+            target.mask,
+        )
+    }
+
+    /// Masked multinomial imputation log-likelihood over the full gene axis →
+    /// `[N]`. The dense sibling of [`Self::impute_masked_multinomial`].
+    pub fn impute_dense_multinomial(
+        &self,
+        log_theta_nk: &Tensor,
+        target: &MaskedDenseTarget<'_>,
+        full_kd: &Tensor,
+    ) -> Result<Tensor> {
+        let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
+        multinomial_score(target.values, &rate_nd, target.mask)
     }
 }
+
+/////////////////////////////////////////////////////////
+// Shared scorers — one definition per likelihood       //
+/////////////////////////////////////////////////////////
+
+/// `Σ_{scored} log NB(y | residual · ℓ · rate, φ)`, summed over the last axis.
+///
+/// Shape-agnostic so the indexed `[N, K]` and dense `[N, D]` heads cannot drift
+/// apart: they differ in which positions they score, never in how.
+fn nb_score(
+    values: &Tensor,
+    rate: &Tensor,
+    residual: Option<&Tensor>,
+    lib_n1: &Tensor,
+    log_phi: &Tensor,
+    mask: &Tensor,
+) -> Result<Tensor> {
+    // μ = residual · ℓ · rate
+    let mu = match residual {
+        Some(r) => rate.mul(r)?.broadcast_mul(lib_n1)?,
+        None => rate.broadcast_mul(lib_n1)?,
+    };
+    let elem = nb_log_likelihood_elem(values, &mu, log_phi)?;
+    elem.mul(mask)?.sum(elem.rank() - 1)
+}
+
+/// `Σ_{scored} y · log p`, summed over the last axis.
+fn multinomial_score(values: &Tensor, rate: &Tensor, mask: &Tensor) -> Result<Tensor> {
+    let ll = (values * (rate + 1e-20)?.log()?)?;
+    ll.mul(mask)?.sum(ll.rank() - 1)
+}
+
+#[cfg(test)]
+#[path = "masked_etm_tests.rs"]
+mod masked_etm_tests;
