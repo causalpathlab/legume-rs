@@ -31,6 +31,7 @@ use candle_util::candle_core::{Result, Tensor};
 pub(crate) mod cell;
 pub(crate) mod chain;
 pub(crate) mod feat;
+pub(crate) mod gene_pair;
 pub(crate) mod lnpdf;
 pub(crate) mod modules;
 
@@ -52,6 +53,7 @@ pub use feat::{
     EdgeBatch, FeatPairing, PbFeatureSampler, PerBatchStratifiedCellSampler,
     PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
 };
+pub use gene_pair::{gene_pair_nce, GenePairBatch, GenePairSampler, HopTree, HopWeights};
 pub use modules::{
     dense_count_block, draw_gene_keep_mask, log_membership_diagnostics, masked_membership,
     membership_diagnostics, membership_rows_host, module_balance_prior, module_priors,

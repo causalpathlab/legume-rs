@@ -24,6 +24,7 @@ use crate::loss::{
     PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
     StratifiedSampler,
 };
+use crate::loss::{gene_pair_nce, GenePairSampler};
 use crate::model::{FeatModules, JointEmbedModel};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Tensor};
@@ -48,6 +49,19 @@ pub struct CompositeAxis<'a> {
     pub lambda: f32,
     /// Short label for log lines (e.g. "cell", "`pb_l0`"). Cosmetic.
     pub label: &'a str,
+}
+
+/// The gene-gene co-occurrence term of the composite objective (see
+/// [`crate::loss::GenePairSampler`]). `model` is any head sharing the feature
+/// side; only `ρ` and `b_feat` are read.
+pub struct GenePairAxis<'a> {
+    pub model: &'a JointEmbedModel,
+    pub sampler: &'a GenePairSampler,
+    /// The cell samplers the pair sampler was built against.
+    pub cell_samplers: &'a [PerBatchStratifiedCellSampler],
+    pub n_negatives: usize,
+    /// Mixing weight in the summed objective.
+    pub lambda: f32,
 }
 
 /// Bipartite sampler attached to a composite axis. Two variants:
@@ -224,6 +238,11 @@ pub struct CompositeTrainContext<'a> {
     /// deleted as unreachable. Kept because a nested chain sampler is the standing plan
     /// for this field and rebuilding the plumbing is the expensive part.
     pub cell_to_pb_per_level: Option<&'a [Vec<usize>]>,
+    /// Gene-gene co-occurrence edges with hop-matched negatives, added to every
+    /// step's loss after the axes. `None` leaves training byte-identical: the
+    /// term draws from the RNG only when present, and only after the axes have
+    /// drawn.
+    pub gene_pairs: Option<&'a GenePairAxis<'a>>,
     /// Optional per-axis velocity-drift SEM term (lineage-DAG refine pass, fixed velocity-KNN
     /// structure). Aligned 1:1 with `axes`: `None` for axes with no lineage structure
     /// (the cell axis, and any pb level with no oriented edges), `Some` otherwise.
@@ -583,6 +602,21 @@ fn sum_step(
             Some(prev) => (prev + scaled)?,
             None => scaled,
         });
+    }
+    // Gene-gene co-occurrence, after the axes so their draws are unchanged by its
+    // presence. One batch of pairs, hop-matched negatives, scored on the shared ρ.
+    if let Some(gp) = ctx.gene_pairs {
+        let batch =
+            gp.sampler
+                .sample_batch(gp.cell_samplers, params.batch_size, gp.n_negatives, rng);
+        if !batch.pos_g.is_empty() {
+            let loss = gene_pair_nce(gp.model, batch, params.objective, ctx.dev)?;
+            let scaled = (loss * f64::from(gp.lambda))?;
+            total_loss = Some(match total_loss {
+                Some(prev) => (prev + scaled)?,
+                None => scaled,
+            });
+        }
     }
     // Membership priors, once per step (not per axis); `None` while frozen.
     if let (Some(st), Some((pi, _)), Some(loss)) = (module_state, &per_step, total_loss.as_mut()) {

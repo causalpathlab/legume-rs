@@ -95,6 +95,60 @@ pub struct BgeArgs {
     pub(crate) phase1_cells_per_pb: usize,
 
     #[arg(
+        long,
+        default_value_t = false,
+        help = "Add gene-gene co-occurrence edges to phase 1 (off = today's bge)",
+        long_help = "Train the gene embedding on gene PAIRS as well as cell-gene edges.\n\
+                     A positive pair is two genes drawn from one cell by count.\n\
+                     Its negative keeps the first gene and replaces the second with a\n\
+                     gene from ANOTHER cell — one drawn from under a shared ancestor\n\
+                     in the collapse tree, a random number of hops up (--gene-hops).\n\
+                     \n\
+                     Which other cell decides what is learned. A random cell teaches\n\
+                     cell type, which the cell-gene edges already carry. A cell of the\n\
+                     same type in a different state teaches co-occurrence BEYOND type,\n\
+                     the part a topic latent cannot represent. Real data has that\n\
+                     residual; a topic model does not absorb it with more topics.\n\
+                     \n\
+                     Off by default. When off the run is byte-identical to a build\n\
+                     without this flag."
+    )]
+    pub(crate) gene_edges: bool,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Weight of the gene-pair term in the composite loss (needs --gene-edges)"
+    )]
+    pub(crate) gene_edge_weight: f32,
+
+    #[arg(
+        long,
+        value_name = "K",
+        help = "Negatives per gene-pair positive (default: --num-negatives)"
+    )]
+    pub(crate) gene_negatives: Option<usize>,
+
+    #[arg(
+        long,
+        default_value_t = GeneHopsArg::Uniform,
+        value_enum,
+        help = "How far up the collapse tree a gene-pair negative is drawn from",
+        long_help = "Distribution of the hop count for gene-pair negatives.\n\
+                     Hop 1 is a sister group (same parent); the last hop is the root,\n\
+                     i.e. any other group — the plain uniform negative.\n\
+                     A group with no partner at the drawn hop resolves at the first\n\
+                     hop above it that has one; the root always does.\n\
+                     \n\
+                     uniform — equal mass on every hop (default).\n\
+                     near    — sisters most, root least.\n\
+                     far     — root most, sisters least.\n\
+                     sisters — hop 1 only: the hardest negatives.\n\
+                     root    — root only: no tree matching at all, for A/B."
+    )]
+    pub(crate) gene_hops: GeneHopsArg,
+
+    #[arg(
         long = "skip-etm",
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",

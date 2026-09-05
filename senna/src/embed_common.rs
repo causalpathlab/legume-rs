@@ -160,6 +160,38 @@ impl NceObjectiveArg {
     }
 }
 
+/// How far up the collapse tree a gene-pair negative's partner cell is drawn
+/// from (CLI surface for [`graph_embedding_util::HopWeights`]).
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum GeneHopsArg {
+    /// Equal mass on every hop, sisters through the root.
+    Uniform,
+    /// More mass on nearby hops: sisters most, the root least.
+    Near,
+    /// More mass on distant hops: the root most, sisters least.
+    Far,
+    /// Sisters only — the hardest negatives; a group with no sister escalates.
+    Sisters,
+    /// Root only — a plain draw over every other group, no tree matching.
+    Root,
+}
+
+impl GeneHopsArg {
+    #[must_use]
+    pub fn to_ge(&self) -> graph_embedding_util::HopWeights {
+        use graph_embedding_util::HopWeights as H;
+        match self {
+            GeneHopsArg::Uniform => H::Uniform,
+            GeneHopsArg::Near => H::Near,
+            GeneHopsArg::Far => H::Far,
+            GeneHopsArg::Sisters => H::Sisters,
+            GeneHopsArg::Root => H::Root,
+        }
+    }
+}
+
 /// Batch adjustment method
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]

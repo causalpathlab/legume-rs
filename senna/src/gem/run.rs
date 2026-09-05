@@ -399,6 +399,9 @@ fn run_gem_genes_bge(
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
             phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
+            // Gene-gene co-occurrence edges are a bge option; gem trains the
+            // splice-factored feature side without them.
+            gene_pairs: None,
             feat_factor: Some(factor),
             delta_l2,
             lineage_dag: args.train.lineage_dag,

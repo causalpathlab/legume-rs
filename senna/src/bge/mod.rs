@@ -345,6 +345,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             max_grad_norm: args.max_grad_norm,
             cell_weight_mult,
             phase1_cells_per_pb: args.phase1_cells_per_pb,
+            gene_pairs: args.gene_edges.then(|| ge::GenePairConfig {
+                n_negatives: args.gene_negatives.unwrap_or(args.num_negatives),
+                hops: args.gene_hops.to_ge(),
+                lambda: args.gene_edge_weight,
+            }),
             // bge uses a free E_feat (no per-gene β-sharing factorization).
             feat_factor: None,
             // δ_g splice offset is gem-only (needs feat_factor); off for bge.

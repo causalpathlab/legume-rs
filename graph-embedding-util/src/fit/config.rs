@@ -180,6 +180,21 @@ pub struct FitConfig {
     /// embedding, byte-identical to a build before this existed. Mutually
     /// exclusive with `feat_factor`.
     pub gene_modules: Option<GeneModuleConfig>,
+    /// Gene-gene co-occurrence edges with hop-matched negatives
+    /// ([`crate::loss::GenePairSampler`]), added to the phase-1 objective.
+    /// `None` (default) = today's bge, byte-identical.
+    pub gene_pairs: Option<GenePairConfig>,
+}
+
+/// Caller-facing configuration of the gene-gene co-occurrence term.
+#[derive(Clone, Debug)]
+pub struct GenePairConfig {
+    /// Negatives per positive pair.
+    pub n_negatives: usize,
+    /// How far up the collapse tree each negative's partner group is drawn from.
+    pub hops: crate::loss::HopWeights,
+    /// Mixing weight of the term in the composite loss.
+    pub lambda: f32,
 }
 
 /// Caller-facing configuration of the learned gene modules.

@@ -17,7 +17,9 @@ mod samplers;
 mod setup;
 
 pub use batch_fold::BatchGeneFold;
-pub use config::{FeatFactorSpec, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned};
+pub use config::{
+    FeatFactorSpec, FitConfig, FitOutput, GeneModuleConfig, GenePairConfig, ParentModulesOwned,
+};
 pub use lift::{CellLineage, LineageQc};
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
@@ -26,8 +28,9 @@ pub use projection::PbLevelVelocity;
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
 use crate::data::UnifiedData;
+use crate::loss::{GenePairSampler, PerBatchStratifiedCellSampler};
 use crate::model::JointEmbedModel;
-use crate::training::{train_composite, CompositeTrainContext, PbSemTerm};
+use crate::training::{train_composite, CompositeTrainContext, GenePairAxis, PbSemTerm};
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 use log::info;
 use matrix_param::traits::Inference;
@@ -150,6 +153,27 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
     let (use_cell_axis, cell_samplers) = (ax.use_cell_axis, &ax.cell_samplers);
 
+    // Gene-gene co-occurrence edges: positives are two genes of one cell, drawn
+    // from the FULL cell samplers (every cell is a co-occurrence context, whatever
+    // phase 1's cell axis keeps); negatives come from a cell under a shared
+    // collapse ancestor a random number of hops up.
+    let gene_pair_sampler: Option<GenePairSampler> = match config.gene_pairs.as_ref() {
+        Some(gp) => {
+            let s = GenePairSampler::new(cell_samplers, &cell_to_pb_per_level, &gp.hops)?;
+            info!(
+                "Gene-pair edges ON: {} negatives/pair, λ={}, {} hops with mass {:?}, {} finest \
+                 groups",
+                gp.n_negatives,
+                gp.lambda,
+                s.n_hops(),
+                s.hop_weights(),
+                s.tree().n_finest_groups(),
+            );
+            Some(s)
+        }
+        None => None,
+    };
+
     // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
     // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
     // that sample's depth so the shared `E_feat` captures composition, not
@@ -211,12 +235,19 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                 cell_prefix, n_pb_levels, warmup_epochs,
             );
         }
+        let gp_axis = gene_pair_axis(
+            &config,
+            gene_pair_sampler.as_ref(),
+            cell_samplers,
+            &cell_model,
+        );
         train_composite(
             &CompositeTrainContext {
                 axes: &joint_axes,
                 dev: &config.device,
                 stop: &stop,
                 cell_to_pb_per_level: None,
+                gene_pairs: gp_axis.as_ref(),
                 lineage_sem: None,
                 lineage_sem_theta: None,
             },
@@ -331,12 +362,20 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                     &config.device,
                 )?;
                 let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
+                // The SAME gene-pair term as the warm-up, for the same reason as the axes.
+                let gp_axis = gene_pair_axis(
+                    &config,
+                    gene_pair_sampler.as_ref(),
+                    cell_samplers,
+                    &cell_model,
+                );
                 refine_loss = train_composite(
                     &CompositeTrainContext {
                         axes: &refine_axes,
                         dev: &config.device,
                         stop: &stop,
                         cell_to_pb_per_level: None,
+                        gene_pairs: gp_axis.as_ref(),
                         lineage_sem: Some(&terms),
                         lineage_sem_theta: Some(&theta_terms),
                     },
@@ -498,6 +537,26 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_lineage,
         lineage_qc,
         pb_embeddings,
+    })
+}
+
+/// The gene-pair term for one training pass, or `None` when the config has no
+/// gene edges. Borrows are taken per pass so the warm-up and the lineage refine
+/// train the same term the same way the axes are rebuilt per pass.
+fn gene_pair_axis<'a>(
+    config: &'a FitConfig,
+    sampler: Option<&'a GenePairSampler>,
+    cell_samplers: &'a [PerBatchStratifiedCellSampler],
+    model: &'a JointEmbedModel,
+) -> Option<GenePairAxis<'a>> {
+    let gp = config.gene_pairs.as_ref()?;
+    let sampler = sampler?;
+    Some(GenePairAxis {
+        model,
+        sampler,
+        cell_samplers,
+        n_negatives: gp.n_negatives,
+        lambda: gp.lambda,
     })
 }
 
