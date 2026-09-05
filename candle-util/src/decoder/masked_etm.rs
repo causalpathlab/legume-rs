@@ -57,6 +57,10 @@ pub struct MaskedDenseTarget<'a> {
     pub lib: &'a Tensor,
     /// `[N, D]` 1 = scored, 0 = withheld (the encoder's visible genes).
     pub mask: &'a Tensor,
+    /// `[N, D]` per-gene log-residual from the query decoder, 0 wherever no
+    /// query was drawn; `None` ⇒ no residual. Multiplies the mixture rate, so
+    /// the mixture explains what it can and the residual carries the rest.
+    pub log_residual: Option<&'a Tensor>,
 }
 
 /// NB embedded-topic decoder for masked imputation.
@@ -369,7 +373,10 @@ impl EmbeddedNbTopicDecoder {
         target: &MaskedDenseTarget<'_>,
         full_kd: &Tensor,
     ) -> Result<Tensor> {
-        let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
+        let rate_nd = apply_log_residual(
+            &self.mixture_rate_nd(log_theta_nk, full_kd)?,
+            target.log_residual,
+        )?;
         let log_phi_nd = self.log_phi_1d.broadcast_as(rate_nd.shape())?;
         nb_score(
             target.values,
@@ -390,7 +397,25 @@ impl EmbeddedNbTopicDecoder {
         full_kd: &Tensor,
     ) -> Result<Tensor> {
         let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
+        // The residual breaks the row's normalization; put it back so the
+        // multinomial stays a distribution over genes.
+        let rate_nd = match target.log_residual {
+            Some(_) => {
+                let r = apply_log_residual(&rate_nd, target.log_residual)?;
+                let z = r.sum_keepdim(1)?;
+                r.broadcast_div(&z)?
+            }
+            None => rate_nd,
+        };
         multinomial_score(target.values, &rate_nd, target.mask)
+    }
+}
+
+/// `rate · exp(log_residual)`, or `rate` itself when there is no residual.
+fn apply_log_residual(rate: &Tensor, log_residual: Option<&Tensor>) -> Result<Tensor> {
+    match log_residual {
+        Some(r) => rate * r.exp()?,
+        None => Ok(rate.clone()),
     }
 }
 

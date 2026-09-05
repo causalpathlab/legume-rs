@@ -4,8 +4,8 @@
 //! per-level target table, and that visible genes are never scored.
 
 use super::{
-    draw_context_mask, mask_rate, poisson_draw, step_seed, target_mask_nd, LevelTarget,
-    MaskSchedule, Mat,
+    draw_context_mask, draw_query_set, mask_rate, poisson_draw, residual_nd, step_seed,
+    target_mask_nd, LevelTarget, MaskSchedule, Mat,
 };
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use candle_core::{DType, Device, Tensor};
@@ -312,6 +312,7 @@ fn visible_genes_are_never_scored() {
             residual: None,
             lib: &lib,
             mask: &mask,
+            log_residual: None,
         };
         dec.impute_dense_nb(&log_theta, &target, &full_kd)
             .unwrap()
@@ -336,6 +337,7 @@ fn visible_genes_are_never_scored() {
         residual: None,
         lib: &lib,
         mask: &mask,
+        log_residual: None,
     };
     let same_lib: Vec<f32> = dec
         .impute_dense_nb(&log_theta, &target, &full_kd)
@@ -358,4 +360,133 @@ fn visible_genes_are_never_scored() {
         "a scored gene's count did not reach the loss"
     );
     assert!((moved[1] - base[1]).abs() < 1e-6, "row 1 must be untouched");
+}
+
+///////////////
+// Query set //
+///////////////
+
+/// Counts at the three context slots of `small_context`; row 1's pad is 0.
+fn small_values() -> Tensor {
+    #[rustfmt::skip]
+    let v: Vec<f32> = vec![
+        3.0, 2.0, 1.0,
+        4.0, 1.0, 0.0,
+        2.0, 5.0, 1.0,
+    ];
+    Tensor::from_vec(v, (3, 3), &Device::Cpu).unwrap()
+}
+
+/// Every masked real slot is a query with weight 1, the extras are genes
+/// outside the row's whole context (never a visible one, never a duplicate),
+/// pads carry weight 0, and the draw is a function of the seed.
+#[test]
+fn the_query_set_holds_the_masked_genes_and_extras_outside_the_context() {
+    let (idx, vis) = small_context();
+    let vals = small_values();
+    let extra = 2;
+    let qs = draw_query_set(&idx, &vals, &vis, 8, extra, 77).unwrap();
+    let ids = to_vec2u(&qs.ids);
+    let w = to_vec2(&qs.weight);
+    // Row 0 masks slot 1 (gene 4); row 1 masks nothing real; row 2 masks slot 0 (gene 3).
+    // Q = max masked (1) + extra (2) = 3.
+    assert_eq!(qs.ids.dims(), &[3, 3]);
+    let idxv = to_vec2u(&idx);
+    let valv = to_vec2(&vals);
+    let visv = to_vec2(&vis);
+    let masked: Vec<Vec<u32>> = vec![vec![4], vec![], vec![3]];
+    for r in 0..3 {
+        let context: Vec<u32> = (0..3)
+            .filter(|&s| valv[r][s] > 0.0)
+            .map(|s| idxv[r][s])
+            .collect();
+        let real: Vec<u32> = ids[r]
+            .iter()
+            .zip(&w[r])
+            .filter(|(_, &w)| w > 0.0)
+            .map(|(&g, _)| g)
+            .collect();
+        let n_pad = w[r].iter().filter(|&&w| w == 0.0).count();
+        assert_eq!(real.len() + n_pad, 3);
+        assert_eq!(n_pad, 1 - masked[r].len(), "row {r}: pads");
+        for &g in &masked[r] {
+            assert!(real.contains(&g), "row {r}: masked gene {g} is not a query");
+        }
+        let extras: Vec<u32> = real
+            .iter()
+            .copied()
+            .filter(|g| !masked[r].contains(g))
+            .collect();
+        assert_eq!(extras.len(), extra, "row {r}: extras {extras:?}");
+        for &g in &extras {
+            assert!(
+                !context.contains(&g),
+                "row {r}: extra {g} is in the context {context:?}"
+            );
+            assert!(g < 8);
+        }
+        let mut dedup = real.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(dedup.len(), real.len(), "row {r}: duplicate query {real:?}");
+        for (s, &wv) in w[r].iter().enumerate() {
+            if wv == 0.0 {
+                assert_eq!(
+                    ids[r][s], 0,
+                    "row {r}: pad query carries gene {}",
+                    ids[r][s]
+                );
+            }
+        }
+        let _ = visv;
+    }
+    let again = draw_query_set(&idx, &vals, &vis, 8, extra, 77).unwrap();
+    assert_eq!(to_vec2u(&again.ids), ids);
+    let other = draw_query_set(&idx, &vals, &vis, 8, extra, 78).unwrap();
+    assert_ne!(
+        to_vec2u(&other.ids),
+        ids,
+        "a different seed must move the extras"
+    );
+}
+
+/// The scattered residual is nonzero exactly at the weighted query genes, and
+/// the gradient comes back to each query from its own gene only — through a
+/// backward that candle actually implements for this layout (its `scatter_add`
+/// backward only accepts as many indexes as columns).
+#[test]
+fn the_residual_lands_on_the_query_genes_only_and_backpropagates() {
+    let ids = Tensor::from_vec(vec![4u32, 6, 0, 3, 1, 0], (2, 3), &Device::Cpu).unwrap();
+    let w = Tensor::from_vec(vec![1f32, 1.0, 0.0, 1.0, 1.0, 0.0], (2, 3), &Device::Cpu).unwrap();
+    let r = candle_core::Var::from_tensor(
+        &Tensor::from_vec(
+            vec![0.5f32, -1.0, 9.0, 0.25, 2.0, 9.0],
+            (2, 3),
+            &Device::Cpu,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let nd_t = residual_nd(&ids, r.as_tensor(), &w, 8).unwrap();
+    let nd = to_vec2(&nd_t);
+    let expect = vec![
+        vec![0.0, 0.0, 0.0, 0.0, 0.5, 0.0, -1.0, 0.0],
+        vec![0.0, 2.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0],
+    ];
+    assert_eq!(nd, expect, "pads (weight 0) must not leak onto gene 0");
+    // d/dr of Σ_g c_g · nd_g is c at the query's gene, times its weight.
+    let c: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let c = Tensor::from_vec(c, (2, 8), &Device::Cpu).unwrap();
+    let grads = (nd_t * c).unwrap().sum_all().unwrap().backward().unwrap();
+    let g = to_vec2(grads.get(&r).expect("residual receives gradient"));
+    let expect_g = vec![vec![0.4, 0.6, 0.0], vec![1.1, 0.9, 0.0]];
+    for (gr, er) in g.iter().zip(&expect_g) {
+        for (a, b) in gr.iter().zip(er) {
+            assert!((a - b).abs() < 1e-6, "gradient {g:?} vs {expect_g:?}");
+        }
+    }
+}
+
+fn to_vec2u(t: &Tensor) -> Vec<Vec<u32>> {
+    t.to_vec2::<u32>().unwrap()
 }

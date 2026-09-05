@@ -328,20 +328,6 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Cross-entropy penalty λ on β toward the anchor prior (0 = off)",
-        long_help = "Cross-entropy penalty λ on β toward the anchor prior.\n\
-                     It anchors topic indices to Gram-Schmidt anchor gene sets,\n\
-                     derived from the finest-level pseudobulks.\n\
-                     \n\
-                     That breaks the K-way permutation symmetry of β.\n\
-                     It is the load-bearing anti-mode-collapse force here. 0 disables it;\n\
-                     the default is 1.0."
-    )]
-    anchor_penalty: f32,
-
-    #[arg(
-        long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay for all parameters (default 0.0 = off)",
         long_help = "AdamW decoupled weight decay, applied uniformly to every parameter.\n\
@@ -494,6 +480,44 @@ pub struct MaskedTopicArgs {
                 nb (overdispersed counts) or multinomial (depth-invariant)."
     )]
     masked_likelihood: MaskedLikelihoodArg,
+
+    #[arg(
+        long,
+        help = "Query decoder: masked and absent genes read the visible context",
+        long_help = "Query decoder. Each masked context gene, and --query-extra genes\n\
+                     outside the context, becomes a query ρ_g + e_mask that attends over\n\
+                     the row's visible slots and adds a log-residual to its own rate,\n\
+                     μ_g = ℓ · (θβ)_g · exp(r_g).\n\
+                     The mixture explains what it can; attention carries the rest.\n\
+                     Off: today's masked heads, byte for byte."
+    )]
+    query_decoder: bool,
+
+    #[arg(
+        long,
+        default_value_t = 32,
+        value_name = "R",
+        help = "Query decoder: width of the query, key and value projections",
+        long_help = "Query decoder: width of the query, key and value projections.\n\
+                     The gene-by-gene co-expression the decoder learns has rank at most R\n\
+                     and is never formed."
+    )]
+    query_rank: usize,
+
+    #[arg(
+        long,
+        default_value_t = 128,
+        value_name = "Q",
+        help = "Query decoder: genes outside the context drawn per row as extra queries"
+    )]
+    query_extra: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Query decoder: weight of mean r² (the mixture explains first)"
+    )]
+    query_penalty: f64,
 
     #[arg(
         long,
@@ -1053,28 +1077,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         args.block_size,
     )?;
 
-    // Anchor-prior CE penalty: Gram-Schmidt anchors selected on the
-    // finest-level pseudobulks give each topic k a per-gene prior simplex
-    // (rows of `[K, D]`), which we cross-entropy against
-    // `β_kd = log_softmax_d(α · ρᵀ)` at every minibatch. This is the
-    // only K-way symmetry-breaking force on the ETM-factorized β —
-    // without it the model collapses onto one or two dominant topics.
-    let anchor_tensors: Option<Vec<candle_core::Tensor>> = if args.anchor_penalty > 0.0 {
-        info!("Building anchor prior (K={n_topics}) from finest pseudobulks");
-        let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
-            finest_collapsed,
-            n_topics,
-            None,
-        )?;
-        // Indexed decoders all run at D_full — no per-level feature coarsening.
-        let level_coarsenings_none: Vec<
-            Option<data_beans_alg::feature_coarsening::FeatureCoarsening>,
-        > = (0..num_levels).map(|_| None).collect();
-        Some(anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?)
-    } else {
-        None
-    };
-
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -1099,8 +1101,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         } else {
             None
         },
-        anchor_prior_per_level: anchor_tensors.as_deref(),
-        anchor_penalty: args.anchor_penalty,
     };
 
     use candle_util::vae::masked_topic::{MaskSchedule, MaskedTrainOpts};
@@ -1117,12 +1117,35 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         kl_weight: args.kl_weight,
         poisson_thin: args.poisson_thin,
         seed: args.seed,
+        query: args
+            .query_decoder
+            .then_some(candle_util::vae::masked_topic::QueryOpts {
+                extra: args.query_extra,
+                penalty: args.query_penalty,
+            }),
     };
+    let query_decoder = args
+        .query_decoder
+        .then(|| {
+            candle_util::decoder::query_decoder::QueryDecoder::new(
+                h,
+                args.query_rank,
+                param_builder.pp("dec_query"),
+            )
+        })
+        .transpose()?;
+    if query_decoder.is_some() {
+        info!(
+            "Query decoder ON: rank {}, {} extra queries/row, penalty {}",
+            args.query_rank, args.query_extra, args.query_penalty
+        );
+    }
 
     let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
         &decoders,
+        query_decoder.as_ref(),
         &train_config,
         args.mask_fraction,
         &masked_opts,
@@ -1297,8 +1320,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 "the encoder's sharpness differs between the rows it trained on and single \
                  cells; it is one-hot on whichever distribution it was trained on and softer \
                  off it. A near one-hot latent on BOTH is a training-side property of the \
-                 masked objective, not an input mismatch — see --anchor-penalty, K, and the \
-                 head's KL weight."
+                 masked objective, not an input mismatch — see K and the head's KL weight."
             );
         }
     }
