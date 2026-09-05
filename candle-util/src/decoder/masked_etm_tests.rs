@@ -326,6 +326,7 @@ fn module_scorer_matches_the_dense_gene_scorer_under_the_identity_map() {
         values: &values,
         visible_counts: &visible_counts,
         visible_share: &visible,
+        residual: None,
         lib: &lib,
     };
     let dense = MaskedDenseTarget {
@@ -386,6 +387,7 @@ fn unseen_module_scores_match_a_host_reference_and_skip_full_modules() {
         values: &values_t,
         visible_counts: &vc,
         visible_share: &vs,
+        residual: None,
         lib: &lib,
     };
     let (llik, units) = dec
@@ -413,6 +415,7 @@ fn unseen_module_scores_match_a_host_reference_and_skip_full_modules() {
         values: &values2,
         visible_counts: &vc,
         visible_share: &vs,
+        residual: None,
         lib: &lib,
     };
     let (llik2, _) = dec
@@ -504,5 +507,53 @@ fn indexed_head_at_genes_agrees_with_the_expanded_dictionary() {
                 got[n][j]
             );
         }
+    }
+}
+
+/// A per-module batch offset multiplies the NB mean: a uniform offset `c` is
+/// the same as scaling the library by `c`.
+#[test]
+fn a_module_residual_scales_the_nb_mean() {
+    let dec = module_decoder();
+    let full_km = dec.full_logits_kd().unwrap();
+    let values = Tensor::from_vec(
+        vec![9.0f32, 4.0, 2.0, 1.0, 6.0, 0.0, 5.0, 5.0, 5.0],
+        (N, M),
+        &dev(),
+    )
+    .unwrap();
+    let vc = Tensor::zeros((N, M), DType::F32, &dev()).unwrap();
+    let vs = Tensor::from_vec(
+        vec![0.2f32, 0.0, 0.5, 0.0, 0.5, 0.0, 0.1, 0.25, 0.0],
+        (N, M),
+        &dev(),
+    )
+    .unwrap();
+    let lib = lib();
+    let c = 1.7f64;
+    let uniform = Tensor::full(c as f32, (N, M), &dev()).unwrap();
+    let with_res = ModuleTarget {
+        values: &values,
+        visible_counts: &vc,
+        visible_share: &vs,
+        residual: Some(&uniform),
+        lib: &lib,
+    };
+    let scaled = lib.affine(c, 0.0).unwrap();
+    let with_lib = ModuleTarget {
+        values: &values,
+        visible_counts: &vc,
+        visible_share: &vs,
+        residual: None,
+        lib: &scaled,
+    };
+    let (a, _) = dec
+        .score_unseen_modules_nb(&log_theta(), &with_res, &full_km)
+        .unwrap();
+    let (b, _) = dec
+        .score_unseen_modules_nb(&log_theta(), &with_lib, &full_km)
+        .unwrap();
+    for (x, y) in to_vec1(&a).iter().zip(to_vec1(&b)) {
+        assert!((x - y).abs() < 1e-4, "residual {x} vs scaled library {y}");
     }
 }

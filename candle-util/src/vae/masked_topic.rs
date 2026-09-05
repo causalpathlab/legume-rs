@@ -560,6 +560,7 @@ fn masked_minibatch_loss(
         values: &values_nm,
         visible_counts: &visible_counts,
         visible_share: &visible_share,
+        residual: None,
         lib: &lib_n1,
     };
     let (llik, units) = match opts.likelihood {
