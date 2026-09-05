@@ -3,10 +3,7 @@
 //! context mask, the mask-rate schedule, the `[N, D]` target mask, the
 //! per-level target table, and that visible genes are never scored.
 
-use super::{
-    draw_context_mask, draw_query_set, mask_rate, poisson_draw, residual_nd, step_seed,
-    target_mask_nd, LevelTarget, MaskSchedule, Mat,
-};
+use super::{epoch_seed, poisson_draw, residual_nd, target_mask_nd, EpochAccum, LevelTarget, Mat};
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -96,95 +93,47 @@ fn to_vec2(t: &Tensor) -> Vec<Vec<f32>> {
     t.to_vec2().unwrap()
 }
 
-/// A `[3, 4]` packed context with a pad slot in every row.
-fn context_values() -> Tensor {
-    #[rustfmt::skip]
-    let v: Vec<f32> = vec![
-        2.0, 5.0, 1.0, 0.0,
-        7.0, 3.0, 0.0, 0.0,
-        4.0, 6.0, 9.0, 0.0,
+#[test]
+fn epoch_seeds_are_distinct_across_epoch_and_level() {
+    let a = epoch_seed(42, 0, 0);
+    let b = epoch_seed(42, 1, 0);
+    let c = epoch_seed(42, 0, 1);
+    let d = epoch_seed(43, 0, 0);
+    assert!(
+        a != b && a != c && a != d && b != c,
+        "seeds collide: {a} {b} {c} {d}"
+    );
+    assert_eq!(a, epoch_seed(42, 0, 0));
+}
+
+/// The epoch accumulator sums device scalars step by step and reads them back
+/// once, normalised by the host-side counts.
+#[test]
+fn epoch_accumulator_sums_steps_on_device_and_reads_once() {
+    let dev = Device::Cpu;
+    let mut acc = EpochAccum::new(&dev).unwrap();
+    let steps = [
+        (-3.0f32, 0.5f32, 2.0f32),
+        (-5.0, 1.5, 0.25),
+        (-1.0, 0.0, 0.0),
     ];
-    Tensor::from_vec(v, (3, 4), &Device::Cpu).unwrap()
-}
-
-#[test]
-fn context_mask_is_reproducible_from_its_seed() {
-    let values = Tensor::from_vec(
-        (0..2000)
-            .map(|i| {
-                if i % 5 == 0 {
-                    0.0
-                } else {
-                    1.0 + (i % 7) as f32
-                }
-            })
-            .collect(),
-        (40, 50),
-        &Device::Cpu,
-    )
-    .unwrap();
-    let (vis_a, msk_a) = draw_context_mask(&values, 0.3, 99).unwrap();
-    let (vis_b, msk_b) = draw_context_mask(&values, 0.3, 99).unwrap();
-    assert_eq!(to_vec2(&vis_a), to_vec2(&vis_b), "same seed, same visible");
-    assert_eq!(to_vec2(&msk_a), to_vec2(&msk_b), "same seed, same masked");
-    let (vis_c, _) = draw_context_mask(&values, 0.3, 100).unwrap();
-    assert_ne!(
-        to_vec2(&vis_a),
-        to_vec2(&vis_c),
-        "a different seed must differ"
-    );
-
-    // visible + masked partitions exactly the real (value > 0) slots.
-    let real = to_vec2(&values.gt(0.0).unwrap().to_dtype(DType::F32).unwrap());
-    let (vis, msk) = (to_vec2(&vis_a), to_vec2(&msk_a));
-    for n in 0..40 {
-        for k in 0..50 {
-            assert_eq!(vis[n][k] + msk[n][k], real[n][k], "slot ({n},{k})");
-            assert!(vis[n][k] == 0.0 || vis[n][k] == 1.0);
-        }
+    for (l, k, r) in steps {
+        let t = |v: f32| Tensor::new(v, &dev).unwrap();
+        acc.add(&t(l), Some(&t(k)), Some(&t(r)), 4.0, 2.0, 1.0)
+            .unwrap();
     }
-    let masked_frac = msk.iter().flatten().sum::<f32>() / real.iter().flatten().sum::<f32>();
+    let (llik, kl, rms) = acc.read().unwrap();
     assert!(
-        (masked_frac - 0.3).abs() < 0.05,
-        "masked fraction {masked_frac} is far from the rate"
+        (llik - (-9.0 / 12.0)).abs() < 1e-6,
+        "llik per scored {llik}"
     );
-}
-
-#[test]
-fn pads_are_neither_visible_nor_masked() {
-    let (vis, msk) = draw_context_mask(&context_values(), 0.5, 1).unwrap();
-    let (vis, msk) = (to_vec2(&vis), to_vec2(&msk));
-    for n in 0..3 {
-        assert_eq!(vis[n][3], 0.0, "row {n} pad visible");
-        assert_eq!(msk[n][3], 0.0, "row {n} pad masked");
-    }
-    assert_eq!(vis[1][2], 0.0);
-    assert_eq!(msk[1][2], 0.0);
-}
-
-#[test]
-fn uniform_schedule_rate_is_reproducible_and_in_range() {
-    assert_eq!(mask_rate(MaskSchedule::Fixed, 0.3, 5), 0.3);
-    let sched = MaskSchedule::Uniform { lo: 0.1, hi: 0.6 };
-    let a = mask_rate(sched, 0.3, 5);
-    let b = mask_rate(sched, 0.3, 5);
-    assert_eq!(a, b, "same step seed, same rate");
-    assert!((0.1..=0.6).contains(&a), "rate {a} outside [lo, hi]");
-    let rates: Vec<f64> = (0..50).map(|s| mask_rate(sched, 0.3, s)).collect();
+    assert!((kl - (2.0 / 6.0)).abs() < 1e-6, "kl per row {kl}");
     assert!(
-        rates.iter().any(|&r| (r - a).abs() > 1e-9),
-        "rate never moves across steps"
+        (rms - (2.25f32 / 3.0).sqrt()).abs() < 1e-6,
+        "rms residual {rms}"
     );
-}
-
-#[test]
-fn step_seeds_are_distinct_across_epoch_level_and_minibatch() {
-    let s = step_seed(42, 0, 0, 0);
-    assert_ne!(s, step_seed(42, 1, 0, 0));
-    assert_ne!(s, step_seed(42, 0, 1, 0));
-    assert_ne!(s, step_seed(42, 0, 0, 1));
-    assert_ne!(s, step_seed(43, 0, 0, 0));
-    assert_eq!(s, step_seed(42, 0, 0, 0));
+    let empty = EpochAccum::new(&dev).unwrap();
+    assert_eq!(empty.read().unwrap(), (0.0, 0.0, 0.0));
 }
 
 ////////////////////////
@@ -362,93 +311,9 @@ fn visible_genes_are_never_scored() {
     assert!((moved[1] - base[1]).abs() < 1e-6, "row 1 must be untouched");
 }
 
-///////////////
-// Query set //
-///////////////
-
-/// Counts at the three context slots of `small_context`; row 1's pad is 0.
-fn small_values() -> Tensor {
-    #[rustfmt::skip]
-    let v: Vec<f32> = vec![
-        3.0, 2.0, 1.0,
-        4.0, 1.0, 0.0,
-        2.0, 5.0, 1.0,
-    ];
-    Tensor::from_vec(v, (3, 3), &Device::Cpu).unwrap()
-}
-
-/// Every masked real slot is a query with weight 1, the extras are genes
-/// outside the row's whole context (never a visible one, never a duplicate),
-/// pads carry weight 0, and the draw is a function of the seed.
-#[test]
-fn the_query_set_holds_the_masked_genes_and_extras_outside_the_context() {
-    let (idx, vis) = small_context();
-    let vals = small_values();
-    let extra = 2;
-    let qs = draw_query_set(&idx, &vals, &vis, 8, extra, 77).unwrap();
-    let ids = to_vec2u(&qs.ids);
-    let w = to_vec2(&qs.weight);
-    // Row 0 masks slot 1 (gene 4); row 1 masks nothing real; row 2 masks slot 0 (gene 3).
-    // Q = max masked (1) + extra (2) = 3.
-    assert_eq!(qs.ids.dims(), &[3, 3]);
-    let idxv = to_vec2u(&idx);
-    let valv = to_vec2(&vals);
-    let visv = to_vec2(&vis);
-    let masked: Vec<Vec<u32>> = vec![vec![4], vec![], vec![3]];
-    for r in 0..3 {
-        let context: Vec<u32> = (0..3)
-            .filter(|&s| valv[r][s] > 0.0)
-            .map(|s| idxv[r][s])
-            .collect();
-        let real: Vec<u32> = ids[r]
-            .iter()
-            .zip(&w[r])
-            .filter(|(_, &w)| w > 0.0)
-            .map(|(&g, _)| g)
-            .collect();
-        let n_pad = w[r].iter().filter(|&&w| w == 0.0).count();
-        assert_eq!(real.len() + n_pad, 3);
-        assert_eq!(n_pad, 1 - masked[r].len(), "row {r}: pads");
-        for &g in &masked[r] {
-            assert!(real.contains(&g), "row {r}: masked gene {g} is not a query");
-        }
-        let extras: Vec<u32> = real
-            .iter()
-            .copied()
-            .filter(|g| !masked[r].contains(g))
-            .collect();
-        assert_eq!(extras.len(), extra, "row {r}: extras {extras:?}");
-        for &g in &extras {
-            assert!(
-                !context.contains(&g),
-                "row {r}: extra {g} is in the context {context:?}"
-            );
-            assert!(g < 8);
-        }
-        let mut dedup = real.clone();
-        dedup.sort_unstable();
-        dedup.dedup();
-        assert_eq!(dedup.len(), real.len(), "row {r}: duplicate query {real:?}");
-        for (s, &wv) in w[r].iter().enumerate() {
-            if wv == 0.0 {
-                assert_eq!(
-                    ids[r][s], 0,
-                    "row {r}: pad query carries gene {}",
-                    ids[r][s]
-                );
-            }
-        }
-        let _ = visv;
-    }
-    let again = draw_query_set(&idx, &vals, &vis, 8, extra, 77).unwrap();
-    assert_eq!(to_vec2u(&again.ids), ids);
-    let other = draw_query_set(&idx, &vals, &vis, 8, extra, 78).unwrap();
-    assert_ne!(
-        to_vec2u(&other.ids),
-        ids,
-        "a different seed must move the extras"
-    );
-}
+//////////////
+// Residual //
+//////////////
 
 /// The scattered residual is nonzero exactly at the weighted query genes, and
 /// the gradient comes back to each query from its own gene only — through a
@@ -485,8 +350,4 @@ fn the_residual_lands_on_the_query_genes_only_and_backpropagates() {
             assert!((a - b).abs() < 1e-6, "gradient {g:?} vs {expect_g:?}");
         }
     }
-}
-
-fn to_vec2u(t: &Tensor) -> Vec<Vec<u32>> {
-    t.to_vec2::<u32>().unwrap()
 }
