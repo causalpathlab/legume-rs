@@ -556,9 +556,9 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
+        default_value_t = 1000,
         value_name = "M",
-        help = "Collapse genes into at most M modules for the decoder targets (0 = off)",
+        help = "Collapse genes into at most M modules for the decoder targets (0 = every gene)",
         long_help = "Collapse genes into at most M modules for the decoder targets.\n\
                      The encoder keeps its gene-level context and embedding; the query\n\
                      decoder keeps its gene-level reads. What changes is what the dense\n\
@@ -566,7 +566,11 @@ pub struct MaskedTopicArgs {
                      so no per-step tensor grows with the number of genes.\n\
                      Modules come from the finest pseudobulk profiles, nested per level\n\
                      with log-spaced widths, as in `senna topic`. A gene's share of its\n\
-                     module is pinned at its mean rate. 0 scores every gene."
+                     module is pinned at its mean rate.\n\
+                     \n\
+                     On by default: a module's mass is a denser target than a single\n\
+                     sparse gene, and the latent separates cell types better for it,\n\
+                     at a fraction of the time. 0 scores every gene."
     )]
     max_coarse_features: usize,
 
