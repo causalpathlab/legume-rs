@@ -26,9 +26,12 @@ pub fn gather_rows(table: &Tensor, ids: &Tensor) -> Result<Tensor> {
 }
 
 /// `dst` with `src[i]` added into row `ids[i]`, for `dst [D, H]`, `ids [n]`
-/// u32, `src [n, H]`. Duplicate ids accumulate.
+/// u32, `src [n, H]`. Duplicate ids accumulate. Any layout: a gather's
+/// backward can arrive as a transposed view, and `contiguous` is a no-op on
+/// a tensor that already is.
 pub fn index_add_rows(dst: &Tensor, ids: &Tensor, src: &Tensor) -> Result<Tensor> {
-    dst.apply_op3(ids, src, IndexAddRows)
+    dst.contiguous()?
+        .apply_op3(&ids.contiguous()?, &src.contiguous()?, IndexAddRows)
 }
 
 /// Scatter `[N, K]` values onto `[N, n_cols]` by column id: `out[n, ids[n,k]] +=
@@ -152,18 +155,12 @@ impl CustomOp3 for IndexAddRows {
             candle_core::bail!("index_add_rows: expected f32 dst/src and u32 ids");
         };
         let mut out = dst[d0..d1].to_vec();
-        let ids = &ids[i0..i1];
+        let ids = &ids[i0..i1][..n];
         let src = &src[s0..s1];
-        for (i, &row) in ids.iter().enumerate().take(n) {
-            let row = row as usize;
-            if row >= d {
-                candle_core::bail!("index_add_rows: id {row} out of range for {d} rows");
-            }
-            let (o, s) = (&mut out[row * h..(row + 1) * h], &src[i * h..(i + 1) * h]);
-            for (x, y) in o.iter_mut().zip(s) {
-                *x += y;
-            }
+        if let Some(&row) = ids.iter().find(|&&row| row as usize >= d) {
+            candle_core::bail!("index_add_rows: id {row} out of range for {d} rows");
         }
+        cpu_index_add_rows(&mut out, ids, src, h);
         Ok((CpuStorage::F32(out), dst_l.shape().clone()))
     }
 
@@ -233,6 +230,43 @@ impl CustomOp3 for IndexAddRows {
             Some(gather_rows(grad_res, ids)?),
         ))
     }
+}
+
+/// `out[ids[i]] += src[i]` on the host. Each worker owns a block of
+/// destination rows and walks every id, so no two workers touch the same
+/// element and the sums need no locks; the id scan is repeated per block,
+/// which is cheap next to the adds. Small inputs stay on one thread.
+fn cpu_index_add_rows(out: &mut [f32], ids: &[u32], src: &[f32], h: usize) {
+    use rayon::prelude::*;
+    let d = out.len() / h.max(1);
+    let n_blocks = rayon::current_num_threads().clamp(1, d.max(1));
+    if h == 0 || ids.len() * h < 1 << 15 || n_blocks == 1 {
+        for (i, &row) in ids.iter().enumerate() {
+            let row = row as usize;
+            let (o, s) = (&mut out[row * h..(row + 1) * h], &src[i * h..(i + 1) * h]);
+            for (x, y) in o.iter_mut().zip(s) {
+                *x += y;
+            }
+        }
+        return;
+    }
+    let rows_per_block = d.div_ceil(n_blocks);
+    out.par_chunks_mut(rows_per_block * h)
+        .enumerate()
+        .for_each(|(b, block)| {
+            let r0 = b * rows_per_block;
+            let r1 = r0 + block.len() / h;
+            for (i, &row) in ids.iter().enumerate() {
+                let row = row as usize;
+                if row < r0 || row >= r1 {
+                    continue;
+                }
+                let o = &mut block[(row - r0) * h..(row - r0 + 1) * h];
+                for (x, y) in o.iter_mut().zip(&src[i * h..(i + 1) * h]) {
+                    *x += y;
+                }
+            }
+        });
 }
 
 #[cfg(feature = "cuda")]

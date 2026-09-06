@@ -119,3 +119,51 @@ fn an_id_past_the_table_is_rejected() {
         "expected an out-of-range error, got: {err}"
     );
 }
+
+#[test]
+fn a_transposed_source_adds_the_same_as_a_contiguous_one() {
+    // The backward of a gather can arrive as a transposed view; the scatter
+    // must take it as it is.
+    let dst = Tensor::zeros((6, 4), candle_core::DType::F32, &dev()).unwrap();
+    let src_t = Tensor::from_vec((0..28).map(|i| i as f32).collect(), (4, 7), &dev()).unwrap();
+    let src_view = src_t.t().unwrap(); // [7, 4], not contiguous
+    assert!(!src_view.is_contiguous());
+    let a = index_add_rows(&dst, &ids(), &src_view)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    let b = index_add_rows(&dst, &ids(), &src_view.contiguous().unwrap())
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn a_wide_table_with_many_duplicate_ids_matches_index_add() {
+    // Large enough to take the parallel path; ids pile onto a few rows so
+    // every block sees duplicates.
+    let (d, h, n) = (50usize, 128usize, 4000usize);
+    let dst = Tensor::zeros((d, h), candle_core::DType::F32, &dev()).unwrap();
+    let ids: Vec<u32> = (0..n).map(|i| ((i * 7919) % 13) as u32 + 3).collect();
+    let ids_t = Tensor::from_vec(ids, n, &dev()).unwrap();
+    let src = Tensor::from_vec(
+        (0..n * h)
+            .map(|i| ((i % 97) as f32 - 48.0) * 0.25)
+            .collect(),
+        (n, h),
+        &dev(),
+    )
+    .unwrap();
+    let a = index_add_rows(&dst, &ids_t, &src).unwrap();
+    let b = dst.index_add(&ids_t, &src, 0).unwrap();
+    let diff = (a - b)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .max_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    assert!(diff < 1e-3, "max |diff| = {diff}");
+}

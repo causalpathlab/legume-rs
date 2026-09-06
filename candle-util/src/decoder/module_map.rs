@@ -10,9 +10,10 @@
 //! its genes wherever a gene is asked about. The identity map (every gene its
 //! own module) reproduces the dense heads exactly.
 
-use crate::fast_index::{index_add_rows, scatter_add_cols};
+use crate::fast_index::index_add_rows;
 use candle_core::{DType, Device, Result, Tensor};
 use nalgebra::DMatrix;
+use rayon::prelude::*;
 
 pub struct ModuleMap {
     /// `[D]` u32, module of each gene.
@@ -22,6 +23,8 @@ pub struct ModuleMap {
     /// `[D]` `log π_{g|m(g)}`.
     log_share_d: Tensor,
     host_fine_to_coarse: Vec<usize>,
+    /// Genes of each module, for the host aggregation.
+    host_coarse_to_fine: Vec<Vec<usize>>,
     host_log_share: Vec<f32>,
     n_fine: usize,
     n_coarse: usize,
@@ -38,13 +41,19 @@ impl ModuleMap {
             candle_core::bail!("module map: {} genes but {} shares", d, share_of_gene.len());
         }
         let m = fine_to_coarse.iter().max().map_or(0, |&x| x + 1);
-        let mut size = vec![0f32; m];
-        for &c in fine_to_coarse {
-            size[c] += 1.0;
+        let mut coarse_to_fine: Vec<Vec<usize>> = vec![Vec::new(); m];
+        for (g, &c) in fine_to_coarse.iter().enumerate() {
+            coarse_to_fine[c].push(g);
         }
-        let inv_size: Vec<f32> = size
+        let inv_size: Vec<f32> = coarse_to_fine
             .iter()
-            .map(|&s| if s > 0.0 { 1.0 / s } else { 0.0 })
+            .map(|genes| {
+                if genes.is_empty() {
+                    0.0
+                } else {
+                    1.0 / genes.len() as f32
+                }
+            })
             .collect();
         let log_share: Vec<f32> = share_of_gene.iter().map(|&s| s.max(1e-12).ln()).collect();
         let identity = m == d && fine_to_coarse.iter().enumerate().all(|(g, &c)| g == c);
@@ -57,6 +66,7 @@ impl ModuleMap {
             inv_size_m1: Tensor::from_vec(inv_size, (m, 1), dev)?,
             log_share_d: Tensor::from_vec(log_share.clone(), d, dev)?,
             host_fine_to_coarse: fine_to_coarse.to_vec(),
+            host_coarse_to_fine: coarse_to_fine,
             host_log_share: log_share,
             n_fine: d,
             n_coarse: m,
@@ -135,7 +145,8 @@ impl ModuleMap {
 
     /// Sum the columns of an `[N, D]` device tensor into `[N, M]`
     /// (differentiable through [`index_add_rows`]); the input itself under
-    /// the identity map.
+    /// the identity map. Done on the transpose, so the `[D]` map indexes rows
+    /// directly and no `[N, D]` index tensor is formed.
     pub fn aggregate_columns(&self, x_nd: &Tensor) -> Result<Tensor> {
         if self.identity {
             return Ok(x_nd.clone());
@@ -147,11 +158,14 @@ impl ModuleMap {
                 self.n_fine
             );
         }
-        let ids = self.fine_to_coarse_d.unsqueeze(0)?.broadcast_as((n, d))?;
-        scatter_add_cols(&ids, x_nd, self.n_coarse)
+        let zeros = Tensor::zeros((self.n_coarse, n), x_nd.dtype(), x_nd.device())?;
+        index_add_rows(&zeros, &self.fine_to_coarse_d, &x_nd.t()?)?
+            .t()?
+            .contiguous()
     }
 
-    /// Sum the columns of a `[P, D]` host matrix into `[P, M]`.
+    /// Sum the columns of a `[P, D]` host matrix into `[P, M]`, one module's
+    /// column per worker.
     #[must_use]
     pub fn aggregate_columns_host(&self, x: &DMatrix<f32>) -> DMatrix<f32> {
         if self.identity {
@@ -159,11 +173,16 @@ impl ModuleMap {
         }
         let p = x.nrows();
         let mut out = DMatrix::<f32>::zeros(p, self.n_coarse);
-        for (g, &c) in self.host_fine_to_coarse.iter().enumerate() {
-            let src = x.column(g);
-            let mut dst = out.column_mut(c);
-            dst += src;
-        }
+        out.as_mut_slice()
+            .par_chunks_mut(p.max(1))
+            .zip(self.host_coarse_to_fine.par_iter())
+            .for_each(|(col, genes)| {
+                for &g in genes {
+                    for (o, s) in col.iter_mut().zip(x.column(g).iter()) {
+                        *o += *s;
+                    }
+                }
+            });
         out
     }
 }
