@@ -1,5 +1,4 @@
 use crate::traits::*;
-use nalgebra::LU;
 use nalgebra::{DMatrix, DVector};
 use nalgebra_sparse::{csc::CscMatrix, csr::CsrMatrix};
 
@@ -90,38 +89,22 @@ where
     let max_iter = 5; // five should be enough
 
     let nc = xx.num_columns();
-    let nr = xx.num_rows();
-    let mut ll = DMatrix::<T>::zeros(nr, rank_and_oversample);
-    // Fixed seed: the 5 subspace iterations below converge onto the dominant
+    // Fixed seed: the subspace iterations below converge onto the dominant
     // subspace regardless of the start, so a pinned (rather than entropy) draw
     // makes the whole randomized SVD reproducible run-to-run — which in turn
     // pins every downstream consumer (binary-sketch collapse, layout, SVD fits)
     // — without changing what subspace it recovers.
     let mut qq = DMatrix::<T>::runif_seeded(nc, rank_and_oversample, RSVD_SUBSPACE_SEED);
-    let zero = T::from(0.).expect("no zero found");
+    let half = T::from(0.5).expect("no half found");
+    qq.iter_mut().for_each(|x| *x -= half);
 
+    // Each half-step re-orthonormalises the iterate with a thin QR. The
+    // basis must span exactly the range of the product it came from: a
+    // pivoted LU factor does not (its permutation is lost), and iterating on
+    // a row-permuted range does not converge onto the dominant subspace.
     for _i in 0..max_iter {
-        let lu1 = xx.matmul(&qq);
-        let lu1 = LU::new(lu1);
-        let lu1 = lu1.l();
-
-        // note: LU may shrink the matrix
-        ll.fill(zero);
-        ll.fill_with_identity();
-        ll.view_mut((0, 0), (nr, rank_and_oversample.min(lu1.ncols())))
-            .lower_triangle()
-            .copy_from(&lu1);
-
-        let lu2 = xx.transpose_matmul(&ll);
-        let lu2 = LU::new(lu2);
-        let lu2 = lu2.l();
-
-        // note: LU may shrink the matrix
-        qq.fill(zero);
-        qq.fill_with_identity();
-        qq.view_mut((0, 0), (nc, rank_and_oversample.min(lu2.ncols())))
-            .lower_triangle()
-            .copy_from(&lu2);
+        let ll = xx.matmul(&qq).qr().q();
+        qq = xx.transpose_matmul(&ll).qr().q();
     }
 
     // let qq = DMatrix::<T>::runif(nc, rank_and_oversample);
@@ -154,10 +137,11 @@ where
 
     debug_assert!(rank > 0, "Must be at least rank = 1");
 
+    // Keep the oversampled basis through the projection: its columns are
+    // not ordered by singular value, so truncating here would discard part
+    // of the dominant subspace. The rank is applied to the small SVD below.
     let qq = _subspace_iteration(xx, rank + oversample)?;
     let rank = rank.min(qq.ncols());
-
-    let qq = qq.columns(0, rank).into_owned();
 
     // let bb = qq.transpose() * xx
     let bb = xx.transpose_matmul(&qq).transpose();
@@ -215,3 +199,7 @@ where
         _randomized_svd(self, max_rank)
     }
 }
+
+#[cfg(test)]
+#[path = "dmatrix_rsvd_tests.rs"]
+mod tests;
