@@ -107,3 +107,15 @@ fn index_add_rows_gradients_reach_dst_and_src() {
         "src gradient is the upstream gradient gathered at ids"
     );
 }
+
+#[test]
+fn an_id_past_the_table_is_rejected() {
+    let dst = table(); // [6, 4]
+    let ids = Tensor::from_vec(vec![0u32, 6], 2, &dev()).unwrap();
+    let src = Tensor::ones((2, 4), candle_core::DType::F32, &dev()).unwrap();
+    let err = index_add_rows(&dst, &ids, &src).unwrap_err().to_string();
+    assert!(
+        err.contains("out of range"),
+        "expected an out-of-range error, got: {err}"
+    );
+}
