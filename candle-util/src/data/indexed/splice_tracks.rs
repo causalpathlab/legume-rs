@@ -109,10 +109,8 @@ pub struct GemMinibatchData {
     ///
     /// Multiplies the decoder's per-position log-likelihood, so a gene carrying
     /// little information about cell state contributes less to `β`'s gradient
-    /// even once it is inside a cell's top-K. This mirrors senna's
-    /// `output_values_weight` (`traits::indexed::forward_indexed_with_log_beta`,
-    /// "Fisher-weighted multinomial NLL"), which gem-encoder had been applying
-    /// to SHORTLIST SELECTION ONLY.
+    /// even once it is inside a cell's top-K — where the same weight had
+    /// otherwise been applied to SHORTLIST SELECTION ONLY.
     pub values_weight: Option<Tensor>,
     /// `[N, K]` f32 — per-gene mean nascent rate at `gene_indices`.
     pub nascent_mean: Option<Tensor>,
