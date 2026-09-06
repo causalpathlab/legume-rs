@@ -1265,6 +1265,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         // Round-trips the encoder's FC input width; without it every rebuild site
         // would construct `[L, H]` and `VarMap::load` would reject the checkpoint.
         n_gene_modules: Some(args.gene_modules),
+        query_rank: args.query_decoder.then_some(args.query_rank),
     };
     metadata.save(&args.out)?;
     if has_coarsening {

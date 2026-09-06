@@ -385,6 +385,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         n_train_cells: Some(data_vec.num_columns()),
         // `vae` uses a GaussianEncoder, not the indexed one; the module branch does not apply.
         n_gene_modules: None,
+        query_rank: None,
     };
     metadata.save(&args.out)?;
 
