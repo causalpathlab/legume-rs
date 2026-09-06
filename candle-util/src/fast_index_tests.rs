@@ -167,3 +167,61 @@ fn a_wide_table_with_many_duplicate_ids_matches_index_add() {
         .unwrap();
     assert!(diff < 1e-3, "max |diff| = {diff}");
 }
+/// Elementwise results must not depend on how many threads ran them: the
+/// same op on the same bytes, once on a one-thread pool and once on the
+/// process pool, is bit-identical. Guards the threaded CPU maps.
+#[test]
+fn cpu_elementwise_results_do_not_depend_on_the_thread_count() {
+    let n = 1 << 18; // above any parallel threshold
+    let x = Tensor::from_vec(
+        (0..n)
+            .map(|i| ((i * 7919) % 1000) as f32 * 0.001 - 0.5)
+            .collect(),
+        (256, 1024),
+        &dev(),
+    )
+    .unwrap();
+    let gate = Tensor::from_vec(
+        (0..256).map(|i| i as f32 * 0.01).collect(),
+        (256, 1),
+        &dev(),
+    )
+    .unwrap();
+    let run = || -> Vec<Vec<f32>> {
+        let e = x.exp().unwrap();
+        let g = x.broadcast_mul(&gate).unwrap();
+        let a = x.affine(3.0, -1.0).unwrap();
+        let c = x
+            .gt(0.0)
+            .unwrap()
+            .to_dtype(candle_core::DType::F32)
+            .unwrap();
+        let s = x.sum_keepdim(1).unwrap();
+        let t = x.sum_all().unwrap().reshape((1, 1)).unwrap();
+        [e, g, a, c, s, t]
+            .iter()
+            .map(|t| t.flatten_all().unwrap().to_vec1::<f32>().unwrap())
+            .collect()
+    };
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let many = rayon::ThreadPoolBuilder::new()
+        .num_threads(7)
+        .build()
+        .unwrap();
+    let a = one.install(run);
+    let b = many.install(run);
+    let c = run();
+    for (i, ((a, b), c)) in a.iter().zip(&b).zip(&c).enumerate() {
+        assert!(
+            a.iter().zip(b).all(|(p, q)| p.to_bits() == q.to_bits()),
+            "op {i}: 1 vs 7 threads differ"
+        );
+        assert!(
+            a.iter().zip(c).all(|(p, q)| p.to_bits() == q.to_bits()),
+            "op {i}: 1 thread vs the process pool differ"
+        );
+    }
+}
