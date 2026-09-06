@@ -147,3 +147,10 @@ plot-utils = { path = "plot-utils" }
 # candle-util/examples/cpu_elementwise_bench.rs.
 [patch.crates-io]
 candle-core = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
+# The Metal kernels must come from the same checkout as `candle-core`. The
+# fork's `candle-core` links its own in-tree copy, so leaving this one on
+# crates.io puts two `candle_metal_kernels` in the graph and `candle-nn`
+# fails to type-check under `--features metal` (`&Buffer` from one copy is a
+# different type from `&Buffer` in the other). `candle-kernels` (CUDA) needs
+# no entry: nothing outside `candle-core` depends on it.
+candle-metal-kernels = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
