@@ -10,7 +10,7 @@
 use super::{clip_and_step_dense, smooth_topics, TrainScores};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
 use crate::data::IndexedMinibatchData;
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use candle_core::{Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
@@ -37,20 +37,14 @@ pub struct IndexedTrainConfig<'a> {
     pub learning_rate: f32,
     pub topic_smoothing: f64,
     pub enc_context_size: usize,
-    pub dec_context_size: usize,
     pub stop: &'a AtomicBool,
-    /// Per-gene weights used to *score* candidates during top-K shortlist
-    /// selection (encoder + decoder). Stored values remain raw counts.
+    /// Per-gene weights used to *score* candidates during the encoder's
+    /// top-K shortlist selection. Stored values remain raw counts.
     pub shortlist_weights: &'a [f32],
     /// Per-gene Anscombe baseline (length = D_full). When supplied, the
     /// loader gathers it at each sample's encoder top-K positions; the
     /// encoder subtracts it from Anscombe-stabilized values before pooling.
     pub feature_mean: &'a [f32],
-    /// Per-gene NB-Fisher info weight (length = D_full). When supplied,
-    /// the loader gathers it at each sample's decoder top-K positions; the
-    /// decoder multiplies it into the `(value+1).log()` likelihood term
-    /// so housekeeping observations contribute less to β's gradient.
-    pub feature_fisher_weights: &'a [f32],
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
     /// Optional feature-feature graph attached to every level loader so
@@ -159,9 +153,11 @@ pub struct MaskedTrainOpts {
     /// is near one-hot on whatever distribution it trained on and softer off it,
     /// so this is a likelihood lever, not a remedy for a one-hot latent.
     pub poisson_thin: bool,
-    /// Seed for [`MaskedTrainOpts::poisson_thin`]'s per-epoch draw. Ignored
-    /// when thinning is off. The draw is keyed on `(seed, epoch, level,
-    /// column)`, so it is reproducible independently of the thread count.
+    /// Seed for the trainer's own stochastic draws: the per-step context mask
+    /// (and its rate under [`MaskSchedule::Uniform`]), and
+    /// [`MaskedTrainOpts::poisson_thin`]'s per-epoch draw. Each is keyed on a
+    /// disjoint sub-stream of this seed, so both are reproducible
+    /// independently of the thread count.
     pub seed: u64,
 }
 
@@ -208,6 +204,135 @@ fn poisson_draw(rates: &Mat, seed: u64) -> Mat {
             }
         });
     out
+}
+
+////////////////////////////////////////////////////////
+// Seeded per-step draws: the mask and its rate       //
+////////////////////////////////////////////////////////
+
+/// Seed for one training step's stochastic choices, keyed on
+/// `(seed, epoch, level, minibatch)`.
+///
+/// Drawn host-side because there is no seedable device RNG: `Device::set_seed`
+/// errors on the CPU backend, so `Tensor::rand` is OS-seeded and a run cannot
+/// be replayed or bisected. Keying on the step rather than a running counter
+/// also makes the draw independent of how many steps preceded it.
+///
+/// The `"mask"` name puts this in a different sub-stream from the Poisson
+/// thinning draw, which keys `(epoch, level)` off the bare seed.
+#[must_use]
+pub fn step_seed(seed: u64, epoch: usize, level: usize, minibatch: usize) -> u64 {
+    let salt = ((epoch as u64) << 40) | ((level as u64) << 32) | (minibatch as u64 & 0xFFFF_FFFF);
+    mix_seed(matrix_util::rand_util::name_seed(seed, "mask"), salt)
+}
+
+/// The mask rate for one step: constant, or a seeded draw from `[lo, hi]`.
+#[must_use]
+pub fn mask_rate(schedule: MaskSchedule, mask_fraction: f64, step_seed: u64) -> f64 {
+    match schedule {
+        MaskSchedule::Fixed => mask_fraction,
+        MaskSchedule::Uniform { lo, hi } => {
+            use rand::{rngs::SmallRng, SeedableRng};
+            let mut rng = SmallRng::seed_from_u64(step_seed);
+            lo + rng.random::<f64>() * (hi - lo)
+        }
+    }
+}
+
+/// Split a packed `[N, K]` context into `(visible, masked)` indicator tensors.
+///
+/// Only real slots (`value > 0`) are split; a pad is in neither, so it neither
+/// contaminates the pool nor gets scored. Drawn on the host from `step_seed`,
+/// then handed to the caller for upload with the rest of the minibatch.
+pub fn draw_context_mask(
+    values: &Tensor,
+    rate: f64,
+    step_seed: u64,
+) -> candle_core::Result<(Tensor, Tensor)> {
+    use rand::{rngs::SmallRng, SeedableRng};
+    let (n, k) = values.dims2()?;
+    let host: Vec<f32> = values
+        .to_device(&Device::Cpu)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let mut vis = vec![0f32; n * k];
+    let mut msk = vec![0f32; n * k];
+    // Seeded per row, not per worker: the row index pins each row's draw
+    // whatever the batch layout, and rows keep independent streams.
+    for r in 0..n {
+        let mut rng = SmallRng::seed_from_u64(mix_seed(step_seed, r as u64));
+        for c in 0..k {
+            let slot = r * k + c;
+            if host[slot] > 0.0 {
+                if rng.random::<f64>() < rate {
+                    msk[slot] = 1.0;
+                } else {
+                    vis[slot] = 1.0;
+                }
+            }
+        }
+    }
+    let dev = values.device();
+    Ok((
+        Tensor::from_vec(vis, (n, k), dev)?,
+        Tensor::from_vec(msk, (n, k), dev)?,
+    ))
+}
+
+/// `[N, D]` scored-position mask: 1 everywhere the encoder could not see.
+///
+/// The canonical masked-training prediction space. The encoder's budget is the
+/// `[N, K]` context; what the decoder answers for is every *other* gene,
+/// zero-count genes included, so the scored set does not inherit the context's
+/// selection bias toward abundant genes.
+///
+/// Pads carry index 0 with a zero visible flag, so they scatter nothing and
+/// gene 0 stays scored for a row that did not really see it.
+pub fn target_mask_nd(
+    indices: &Tensor,
+    visible: &Tensor,
+    n_features: usize,
+) -> candle_core::Result<Tensor> {
+    let n = indices.dim(0)?;
+    let zeros = Tensor::zeros((n, n_features), visible.dtype(), visible.device())?;
+    zeros.scatter_add(indices, visible, 1)?.affine(-1.0, 1.0)
+}
+
+/// One level's decoder targets, resident on device as `[P, D]`.
+///
+/// These are the **batch-free** rows (`mu_adjusted` where a batch-aware
+/// collapse ran), which the loader used to select a top-K from and then
+/// discard. The library is the whole row's total, so the NB mean is on the
+/// scale of the counts being scored rather than the encoder context's share
+/// of them.
+pub struct LevelTarget {
+    values_pd: Tensor,
+    row_lib_p1: Tensor,
+}
+
+impl LevelTarget {
+    /// Upload a level's `[P, D]` target rows and precompute `Σ_g y_pg + 1`.
+    pub fn from_mat(rows: &Mat, dev: &Device) -> anyhow::Result<Self> {
+        let values_pd = crate::data::loader_util::upload_to_device(rows, dev)?;
+        let row_lib_p1 = (values_pd.sum_keepdim(1)? + 1.0)?;
+        Ok(Self {
+            values_pd,
+            row_lib_p1,
+        })
+    }
+
+    /// `(values [N, D], lib [N, 1])` for the minibatch's source rows.
+    pub fn rows(&self, row_ids: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
+        Ok((
+            self.values_pd.index_select(row_ids, 0)?,
+            self.row_lib_p1.index_select(row_ids, 0)?,
+        ))
+    }
+
+    /// Per-row library `[P, 1]`.
+    pub fn row_lib(&self) -> &Tensor {
+        &self.row_lib_p1
+    }
 }
 
 /// Borrowed masked-encoder inputs: the per-cell packed top-K plus the
@@ -314,17 +439,13 @@ pub fn build_indexed_loaders(
 ) -> anyhow::Result<Vec<IndexedInMemoryData>> {
     level_data
         .iter()
-        .map(|&(mixed, batch, target)| {
+        .map(|&(mixed, batch, _target)| {
             let mut loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
                 input: mixed,
                 input_null: batch,
-                output: target,
                 input_context_size: config.enc_context_size,
-                output_context_size: config.dec_context_size,
                 input_shortlist_weights: config.shortlist_weights,
-                output_shortlist_weights: config.shortlist_weights,
                 input_mean: Some(config.feature_mean),
-                output_fisher_weights: Some(config.feature_fisher_weights),
             })?;
             loader.set_graph_csr(config.feature_graph.clone());
             Ok(loader)
@@ -383,19 +504,15 @@ fn masked_minibatch_loss(
     mask_fraction: f64,
     level: usize,
     mb: &IndexedMinibatchData,
+    target: &LevelTarget,
+    step_seed: u64,
 ) -> anyhow::Result<MaskedMinibatchLoss> {
-    // Visible/masked split over the cell's real (value>0) top-K.
-    // Pads (value==0) are neither visible (no ρ₀ contamination)
-    // nor scored.
-    let real = mb.input_values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-    let rate = match opts.mask_schedule {
-        MaskSchedule::Fixed => mask_fraction,
-        MaskSchedule::Uniform { lo, hi } => lo + rand::rng().random::<f64>() * (hi - lo),
-    };
-    let rnd = Tensor::rand(0f32, 1f32, mb.input_values.shape(), config.dev)?;
-    let drop = rnd.lt(rate)?.to_dtype(candle_core::DType::F32)?;
-    let masked = real.mul(&drop)?;
-    let visible = (&real - &masked)?;
+    // Visible/masked split over the row's real (value>0) top-K. Pads
+    // (value==0) are neither visible (no ρ₀ contamination) nor scored.
+    // `masked` is only a bookkeeping complement here: what the decoder
+    // answers for is every gene OUTSIDE the context (see `target_mask_nd`).
+    let rate = mask_rate(opts.mask_schedule, mask_fraction, step_seed);
+    let (visible, _masked) = draw_context_mask(&mb.input_values, rate, step_seed)?;
 
     // Masked-VAE: reparameterized Gaussian `z` (no softmax) + KL.
     // Masked-topic: deterministic simplex `log θ` (softmax or
@@ -425,22 +542,25 @@ fn masked_minibatch_loss(
     let full_kd = decoder.full_logits_kd()?;
 
     let (mut loss, batch_metric, batch_count) = {
-        let lib_n1 = (mb.input_values.sum_keepdim(1)? + 1.0)?;
-        let target = MaskedNbTarget {
-            indices: &mb.input_indices,
-            residual: mb.input_values_null.as_ref(),
-            values: &mb.input_values,
+        let (values_nd, lib_n1) = target.rows(&mb.row_ids)?;
+        let mask_nd = target_mask_nd(&mb.input_indices, &visible, decoder.dim_obs())?;
+        // `residual: None` — these rows are the batch-FREE targets, so β is
+        // fit to composition the collapse already corrected. The per-row
+        // offset belongs to cell-level scoring, where counts are mixed.
+        let dense = MaskedDenseTarget {
+            values: &values_nd,
+            residual: None,
             lib: &lib_n1,
-            mask: &masked,
+            mask: &mask_nd,
         };
         let llik = match opts.likelihood {
-            MaskedLikelihood::Nb => decoder.impute_masked_nb(&log_z, &target, &full_kd)?,
+            MaskedLikelihood::Nb => decoder.impute_dense_nb(&log_z, &dense, &full_kd)?,
             MaskedLikelihood::Multinomial => {
-                decoder.impute_masked_multinomial(&log_z, &target, &full_kd)?
+                decoder.impute_dense_multinomial(&log_z, &dense, &full_kd)?
             }
         };
         let m = llik.sum_all()?.to_scalar::<f32>()?;
-        let c = masked.sum_all()?.to_scalar::<f32>()?;
+        let c = mask_nd.sum_all()?.to_scalar::<f32>()?;
         (llik.mean_all()?.neg()?, m, c)
     };
     // Masked-VAE KL bottleneck: β · mean_N KL(z ‖ N(0, I)). `kl_opt`
@@ -536,6 +656,12 @@ pub fn train_masked(
     // `llik` so `TrainScores::to_parquet` sees equal-length columns.
     let mut kl_trace = Vec::with_capacity(total_epochs);
     let mut data_loaders = build_indexed_loaders(level_data, config)?;
+    // The decoder's targets: the batch-free rows, whole, on device. The loader
+    // holds only the encoder's context; the scored set is this trainer's own.
+    let mut level_targets = level_data
+        .iter()
+        .map(|&(_, _, target)| LevelTarget::from_mat(target, config.dev))
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     // On CUDA, optionally shrink the minibatch size to fit free device
     // memory. The probe runs the exact forward a training step retains
@@ -559,6 +685,8 @@ pub fn train_masked(
                     mask_fraction,
                     0,
                     &mb,
+                    &level_targets[0],
+                    step_seed(opts.seed, 0, 0, 0),
                 )
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 Ok(fwd.loss)
@@ -597,6 +725,10 @@ pub fn train_masked(
                 .collect();
             let refs: Vec<LevelData> = thinned.iter().map(|(x, b, y)| (x, *b, y)).collect();
             data_loaders = build_indexed_loaders(&refs, config)?;
+            level_targets = refs
+                .iter()
+                .map(|&(_, _, target)| LevelTarget::from_mat(target, config.dev))
+                .collect::<anyhow::Result<Vec<_>>>()?;
         }
         for loader in data_loaders.iter_mut() {
             shuffle_and_precompute(loader, minibatch_size)?;
@@ -622,6 +754,8 @@ pub fn train_masked(
                     mask_fraction,
                     level,
                     &mb,
+                    &level_targets[level],
+                    step_seed(opts.seed, epoch, level, b),
                 )?;
                 if let Some((ks, kc)) = fwd.kl_sums {
                     kl_tot += ks;
@@ -669,7 +803,10 @@ pub fn train_masked(
             } else {
                 String::new()
             };
-            info!("[epoch {epoch}] masked-NB llik/gene={per_metric:.4}{kl_msg}");
+            // Per scored gene, and the scored set is now every gene the encoder
+            // did not see — so this is not comparable to a run that scored only
+            // the context's masked share.
+            info!("[epoch {epoch}] masked llik/gene={per_metric:.4}{kl_msg}");
         }
         if config.stop.load(Ordering::SeqCst) {
             prog_bar.finish_and_clear();
