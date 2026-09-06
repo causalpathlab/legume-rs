@@ -292,6 +292,18 @@ mod tests {
     /// gene's program. Unlike `pooled_fdr_is_controlled` (hand-built z ~ N(Rβ,R)),
     /// this passes z/R through `build_atac_embedding` + `cis_link_stats`, so it
     /// tests whether the embedding-space statistics keep the knockoff FDR honest.
+    ///
+    /// The LD ridge is the dense-cis operating value, not the CLI default. `R`
+    /// is the cosine Gram matrix of the cis peaks' embeddings, whose mass lies
+    /// in the `k` program directions, and the cis set here is larger than `k`,
+    /// so `R` is rank-deficient. A near-null eigenvector `v` of `R` forces
+    /// `Σ_j s_j v_j² ≤ 2λ_v ≈ 0`, so every `s_j` collapses whatever the
+    /// s-method, the knockoffs equal the originals, `W ≈ 0` everywhere and
+    /// nothing is ever selected. A converging `rsvd` exposes this exactly; a
+    /// non-converging one hid it by leaking noise directions into the
+    /// embedding. The ridge bounds `λ_min(R_λ)` away from zero — the same lever
+    /// `--ko-ridge` is for a real dense cis window — and the FDR check below
+    /// is then made under that deliberate misspecification of `R`.
     #[test]
     fn embedding_knockoff_controls_fdr_on_nulls() {
         use crate::p2g::embed::{build_atac_embedding, cis_link_stats, project_gene};
@@ -336,7 +348,7 @@ mod tests {
         }
 
         let params = KnockoffParams {
-            ridge: 0.05,
+            ridge: 0.25,
             seed: 7,
             s_method: KnockoffS::Mvr,
         };
