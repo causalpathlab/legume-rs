@@ -470,6 +470,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
+        has_pb_tree: false,
     })?;
 
     if stop.load(Ordering::SeqCst) {

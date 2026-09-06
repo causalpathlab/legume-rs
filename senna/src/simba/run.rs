@@ -223,6 +223,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
+        has_pb_tree: false,
     })?;
     info!(
         "simba: {} edges over {} cells × {} genes (per level {:?}); wd {}; final train loss {:.4}/edge → {prefix}.*",

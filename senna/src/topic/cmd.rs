@@ -358,6 +358,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        pb_tree,
         output_keep_idx,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &data_files,
@@ -374,6 +375,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         must_train_file: args.hvg.must_train_features.as_deref(),
         refine: Some(args.collapse.pb_refine.to_params()),
+        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: args.block_size,
@@ -625,6 +627,12 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     } else {
         false
     };
+    let has_pb_tree = if let Some(ref tree) = pb_tree {
+        crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &gene_names)?;
+        true
+    } else {
+        false
+    };
 
     let pb_reference_suffix = crate::pb_reference::emit_if_requested(
         args.collapse.emit_pb_reference,
@@ -642,6 +650,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &data_files,
         batch_files.as_deref(),
         has_cell_to_pb,
+        has_pb_tree,
         pb_reference_suffix,
         crate::run_manifest::record_train_args(args)?,
     )?;
@@ -658,6 +667,7 @@ fn write_topic_manifest(
     data_files: &[Box<str>],
     batch_files: Option<&[Box<str>]>,
     has_cell_to_pb: bool,
+    has_pb_tree: bool,
     pb_reference_suffix: Option<&'static str>,
     train_args: crate::run_manifest::TrainArgsRecord,
 ) -> anyhow::Result<()> {
@@ -694,6 +704,7 @@ fn write_topic_manifest(
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
         has_cell_to_pb,
+        has_pb_tree,
     })
 }
 
