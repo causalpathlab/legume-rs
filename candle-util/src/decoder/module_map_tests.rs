@@ -153,3 +153,25 @@ fn lookups_follow_the_map_and_shares_expand_by_module() {
     assert_eq!(ls.len(), 1);
     assert!((ls[0][0] - (2.0f32 / 3.0).ln()).abs() < 1e-6);
 }
+
+#[test]
+fn aggregate_columns_passes_a_module_weight_back_to_every_gene_of_the_module() {
+    use candle_core::Var;
+    let m = map();
+    let x = Var::from_vec(vec![0.5f32; 2 * D], (2, D), &dev()).unwrap();
+    let w = Tensor::from_vec(vec![1.0f32, 10.0, 100.0, 2.0, 20.0, 200.0], (2, 3), &dev()).unwrap();
+    let loss = m
+        .aggregate_columns(&x)
+        .unwrap()
+        .mul(&w)
+        .unwrap()
+        .sum_all()
+        .unwrap();
+    let grads = loss.backward().unwrap();
+    let g = grads.get(&x).unwrap().to_vec2::<f32>().unwrap();
+    for (row, wr) in g.iter().zip([[1.0f32, 10.0, 100.0], [2.0, 20.0, 200.0]]) {
+        for (gene, &c) in m.host_fine_to_coarse().iter().enumerate() {
+            assert_eq!(row[gene], wr[c], "gene {gene} in module {c}");
+        }
+    }
+}

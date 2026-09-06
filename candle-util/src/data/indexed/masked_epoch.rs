@@ -171,8 +171,6 @@ pub struct MaskedEpoch {
     pub batches: Vec<MaskedMinibatch>,
     /// Per batch: number of real queries (Σ weight).
     pub n_queries: Vec<f32>,
-    /// Per batch: number of visible slots (Σ visible).
-    pub n_visible: Vec<f32>,
 }
 
 impl IndexedInMemoryData {
@@ -233,11 +231,6 @@ impl MaskedLevelData {
     #[must_use]
     pub fn num_data(&self) -> usize {
         self.samples.len()
-    }
-
-    #[must_use]
-    pub fn context_size(&self) -> usize {
-        self.k
     }
 
     /// A fresh epoch: every row once in a random order, the last minibatch
@@ -317,13 +310,20 @@ impl MaskedLevelData {
                 let mut ids = vec![0u32; p * q];
                 let mut weight = vec![0f32; p * q];
                 let mut tgt = vec![0f32; p * q];
-                for (r, rd) in rows.iter().enumerate() {
-                    for (j, &g) in rd.queries.iter().enumerate() {
-                        ids[r * q + j] = g;
-                        weight[r * q + j] = 1.0;
-                        tgt[r * q + j] = target[(r, g as usize)];
-                    }
-                }
+                // One row per worker: the target reads jump across columns,
+                // so this is the loader's cache-bound loop.
+                ids.par_chunks_mut(q)
+                    .zip(weight.par_chunks_mut(q))
+                    .zip(tgt.par_chunks_mut(q))
+                    .zip(rows.par_iter())
+                    .enumerate()
+                    .for_each(|(r, (((id, w), t), rd))| {
+                        for (j, &g) in rd.queries.iter().enumerate() {
+                            id[j] = g;
+                            w[j] = 1.0;
+                            t[j] = target[(r, g as usize)];
+                        }
+                    });
                 Some((
                     Tensor::from_vec(ids, (p, q), &cpu)?.to_device(&self.dev)?,
                     Tensor::from_vec(weight, (p, q), &cpu)?.to_device(&self.dev)?,
@@ -352,18 +352,11 @@ impl MaskedLevelData {
         let nbatch = ntot.div_ceil(batch_size);
         let mut batches = Vec::with_capacity(nbatch);
         let mut n_queries = Vec::with_capacity(nbatch);
-        let mut n_visible = Vec::with_capacity(nbatch);
         for b in 0..nbatch {
             let start = b * batch_size;
             let len = batch_size.min(ntot - start);
             let cut = |t: &Tensor| t.narrow(0, start, len);
             let rows_b = &idx[start..start + len];
-            n_visible.push(
-                rows_b
-                    .iter()
-                    .map(|&r| rows[r as usize].visible.iter().sum::<f32>())
-                    .sum(),
-            );
             n_queries.push(
                 rows_b
                     .iter()
@@ -392,11 +385,7 @@ impl MaskedLevelData {
                 query,
             });
         }
-        Ok(MaskedEpoch {
-            batches,
-            n_queries,
-            n_visible,
-        })
+        Ok(MaskedEpoch { batches, n_queries })
     }
 }
 
