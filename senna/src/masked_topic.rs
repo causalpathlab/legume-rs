@@ -881,6 +881,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        pb_tree,
         output_keep_idx,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &data_files,
@@ -911,6 +912,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         },
         feature_kind: args.feature_name_kind.clone().into(),
         refine: Some(args.collapse.pb_refine.to_params()),
+        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: true,
         prebuilt_partition,
@@ -1498,6 +1500,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     } else {
         false
     };
+    let has_pb_tree = if let Some(ref tree) = pb_tree {
+        crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &gene_names)?;
+        true
+    } else {
+        false
+    };
 
     let pb_reference_suffix = crate::pb_reference::emit_if_requested(
         args.collapse.emit_pb_reference,
@@ -1544,6 +1552,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,
+        has_pb_tree,
         velocity_suffix: None,
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,

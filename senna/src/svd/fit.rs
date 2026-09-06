@@ -174,6 +174,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             bulk_batches: args.collapse.mixture_batch.clone(),
             observe_panels: true,
             keep_finest_stats: false,
+            pb_tree: args.collapse.pb_tree_params(),
         },
     )?;
     anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");
@@ -359,6 +360,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
+        has_pb_tree: false,
     })?;
 
     Ok(())

@@ -131,6 +131,7 @@ fn run_pooled() -> (
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
+        pb_tree: None,
     };
     let out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
