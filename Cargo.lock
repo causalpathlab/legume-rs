@@ -653,13 +653,12 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f38e8dacffb6765fd9845c1c84686854e6322a8c3ff8582759361e48998024f"
+source = "git+https://github.com/causalpathlab/candle?branch=cpu-parallel-elementwise-0.10.1#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "accelerate-src",
  "byteorder",
  "candle-kernels",
- "candle-metal-kernels",
+ "candle-metal-kernels 0.10.1 (git+https://github.com/causalpathlab/candle?branch=cpu-parallel-elementwise-0.10.1)",
  "candle-ug",
  "cudarc 0.19.4",
  "float8",
@@ -685,8 +684,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2ef09884eb8bf0f2e14d1d3ceac4bdb66761e16e89061a3a187505c7125229e"
+source = "git+https://github.com/causalpathlab/candle?branch=cpu-parallel-elementwise-0.10.1#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "cudaforge",
 ]
@@ -707,6 +705,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-metal-kernels"
+version = "0.10.1"
+source = "git+https://github.com/causalpathlab/candle?branch=cpu-parallel-elementwise-0.10.1#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
+dependencies = [
+ "half",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+ "once_cell",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "candle-nn"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -714,7 +726,7 @@ checksum = "0c0dfc1aff5552fdbae4ec94c877b16f2cf1424a07901f0ce5504d7b45adb172"
 dependencies = [
  "accelerate-src",
  "candle-core",
- "candle-metal-kernels",
+ "candle-metal-kernels 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "half",
  "libc",
  "num-traits",
@@ -728,8 +740,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b77d554274658f2492f7780748ae8324f0824a224c3b9647d54d03265f1d192"
+source = "git+https://github.com/causalpathlab/candle?branch=cpu-parallel-elementwise-0.10.1#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "ug",
  "ug-cuda",
