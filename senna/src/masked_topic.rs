@@ -328,20 +328,6 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Cross-entropy penalty λ on β toward the anchor prior (0 = off)",
-        long_help = "Cross-entropy penalty λ on β toward the anchor prior.\n\
-                     It anchors topic indices to Gram-Schmidt anchor gene sets,\n\
-                     derived from the finest-level pseudobulks.\n\
-                     \n\
-                     That breaks the K-way permutation symmetry of β.\n\
-                     It is the load-bearing anti-mode-collapse force here. 0 disables it;\n\
-                     the default is 1.0."
-    )]
-    anchor_penalty: f32,
-
-    #[arg(
-        long,
         default_value_t = 0.0,
         help = "AdamW decoupled weight decay for all parameters (default 0.0 = off)",
         long_help = "AdamW decoupled weight decay, applied uniformly to every parameter.\n\
@@ -480,7 +466,7 @@ pub struct MaskedTopicArgs {
         default_value_t = MaskScheduleArg::Fixed,
         help = "Mask-rate schedule: fixed or uniform per-minibatch sampling",
         long_help = "Mask-rate schedule. fixed uses --mask-fraction.\n\
-                     uniform samples the rate per minibatch,\n\
+                     uniform samples the rate per row and epoch,\n\
                      within [--mask-rate-lo, --mask-rate-hi]. That is the any-order,\n\
                      absorbing-diffusion style."
     )]
@@ -494,6 +480,44 @@ pub struct MaskedTopicArgs {
                 nb (overdispersed counts) or multinomial (depth-invariant)."
     )]
     masked_likelihood: MaskedLikelihoodArg,
+
+    #[arg(
+        long,
+        help = "Query decoder: masked and absent genes read the visible context",
+        long_help = "Query decoder. Each masked context gene, and --query-extra genes\n\
+                     outside the context, becomes a query ρ_g + e_mask that attends over\n\
+                     the row's visible slots and adds a log-residual to its own rate,\n\
+                     μ_g = ℓ · (θβ)_g · exp(r_g).\n\
+                     The mixture explains what it can; attention carries the rest.\n\
+                     Off: today's masked heads, byte for byte."
+    )]
+    query_decoder: bool,
+
+    #[arg(
+        long,
+        default_value_t = 32,
+        value_name = "R",
+        help = "Query decoder: width of the query, key and value projections",
+        long_help = "Query decoder: width of the query, key and value projections.\n\
+                     The gene-by-gene co-expression the decoder learns has rank at most R\n\
+                     and is never formed."
+    )]
+    query_rank: usize,
+
+    #[arg(
+        long,
+        default_value_t = 128,
+        value_name = "Q",
+        help = "Query decoder: genes outside the context drawn per row as extra queries"
+    )]
+    query_extra: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Query decoder: weight of mean r² (the mixture explains first)"
+    )]
+    query_penalty: f64,
 
     #[arg(
         long,
@@ -532,17 +556,37 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
+        default_value_t = 1000,
+        value_name = "M",
+        help = "Collapse genes into at most M modules for the decoder targets (0 = every gene)",
+        long_help = "Collapse genes into at most M modules for the decoder targets.\n\
+                     The encoder keeps its gene-level context and embedding; the query\n\
+                     decoder keeps its gene-level reads. What changes is what the dense\n\
+                     head answers for: each module's unseen mass instead of each gene,\n\
+                     so no per-step tensor grows with the number of genes.\n\
+                     Modules come from the finest pseudobulk profiles, nested per level\n\
+                     with log-spaced widths, as in `senna topic`. A gene's share of its\n\
+                     module is pinned at its mean rate.\n\
+                     \n\
+                     On by default: a module's mass is a denser target than a single\n\
+                     sparse gene, and the latent separates cell types better for it,\n\
+                     at a fraction of the time. 0 scores every gene."
+    )]
+    max_coarse_features: usize,
+
+    #[arg(
+        long,
         default_value_t = 42,
         value_name = "N",
         help = "Seed for the masking and thinning draws",
         long_help = "Seed for the stochastic training choices this subcommand owns:\n\
-                     the per-step context mask (and its rate under --mask-schedule\n\
-                     uniform), and --poisson-thin's per-epoch draw.\n\
+                     the context mask (and its rate under --mask-schedule uniform),\n\
+                     the query set, and --poisson-thin's per-epoch draw.\n\
                      \n\
-                     Each is keyed on its own sub-stream — the mask on\n\
-                     (seed, epoch, level, minibatch, row), the thinning draw on\n\
-                     (seed, epoch, level, column) — so both are reproducible\n\
-                     whatever the thread count.\n\
+                     Each is keyed on its own sub-stream — the mask and the query set\n\
+                     on (seed, epoch, level, row), drawn once per epoch, the thinning\n\
+                     draw on (seed, epoch, level, column) — so all are reproducible\n\
+                     whatever the thread count, the batch size or the shuffle.\n\
                      \n\
                      It does NOT make a run bit-reproducible on its own.\n\
                      Parameter initialization, the pseudobulk posterior draw and\n\
@@ -939,24 +983,36 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             .collect()
     };
 
+    // Per-level gene → module maps for the decoder targets (identity when
+    // `--max-coarse-features` is off), keyed like `senna topic`'s coarsening
+    // and persisted with the model.
+    let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
+        args.max_coarse_features,
+        args.init_from.as_deref(),
+        finest_collapsed,
+        num_levels,
+        n_features_full,
+        args.collapse.pb_refine.to_params(),
+    )?;
     let shared_rho = base_encoder.feature_embeddings().clone();
-    let decoders: Vec<EmbeddedNbTopicDecoder> = (0..num_levels)
-        .map(|i| {
-            EmbeddedNbTopicDecoder::new(
-                n_topics,
-                shared_rho.clone(),
-                param_builder.pp(format!("dec_{i}")),
-            )
-            .expect("decoder creation")
-        })
-        .collect();
-
-    // Pin every level's per-gene background at the data's gene marginal: the
-    // home for shared abundance that centering α removes from the topics.
-    let log_pi_1d = log_background_from_mean(&feature_mean, &dev)?;
-    for i in 0..num_levels {
-        pin_background(&parameters, &format!("dec_{i}"), &log_pi_1d)?;
+    let mut decoders: Vec<EmbeddedNbTopicDecoder> = Vec::with_capacity(num_levels);
+    for (i, fc) in level_coarsenings.iter().enumerate() {
+        let (map, module_mass) =
+            crate::topic::train_masked::module_map_for(fc.as_ref(), &feature_mean, &dev)?;
+        decoders.push(EmbeddedNbTopicDecoder::new_with_modules(
+            n_topics,
+            shared_rho.clone(),
+            map,
+            param_builder.pp(format!("dec_{i}")),
+        )?);
+        // Pin the level's background at the data's marginal over its output
+        // axis: the home for shared abundance that centering α removes from
+        // the topics.
+        let log_pi = log_background_from_mean(&module_mass, &dev)?;
+        pin_background(&parameters, &format!("dec_{i}"), &log_pi)?;
     }
+    let level_decoder_dims: Vec<usize> = decoders.iter().map(|d| d.dim_obs()).collect();
+    let has_coarsening = level_coarsenings.iter().any(Option::is_some);
 
     // Overwrite ρ in place with the pre-trained values BEFORE warm-start
     // from a prior topic checkpoint. The encoder/decoder both hold a
@@ -1019,7 +1075,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 n_features_full,
                 n_features_encoder: n_features_full,
                 encoder_hidden: &args.encoder_layers,
-                level_decoder_dims: &vec![n_features_full; num_levels],
+                level_decoder_dims: &level_decoder_dims,
                 embedding_dim: Some(h),
                 growth: crate::topic::warm_start::Growth {
                     add_topics: args.add_topics,
@@ -1030,8 +1086,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     }
 
     info!(
-        "input: {} -> indexed encoder (emb={}, ctx={}) -> {} decoders (D={}, scored over all D)",
-        n_features_full, h, args.context_size, num_levels, n_features_full,
+        "input: {} genes -> indexed encoder (emb={}, ctx={}) -> {} decoders over {:?} \
+         (unseen modules scored; genes through the query head)",
+        n_features_full, h, args.context_size, num_levels, level_decoder_dims,
     );
 
     // Bulk deconvolution is not supported on the masked-imputation path; the
@@ -1052,28 +1109,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         &data_vec,
         args.block_size,
     )?;
-
-    // Anchor-prior CE penalty: Gram-Schmidt anchors selected on the
-    // finest-level pseudobulks give each topic k a per-gene prior simplex
-    // (rows of `[K, D]`), which we cross-entropy against
-    // `β_kd = log_softmax_d(α · ρᵀ)` at every minibatch. This is the
-    // only K-way symmetry-breaking force on the ETM-factorized β —
-    // without it the model collapses onto one or two dominant topics.
-    let anchor_tensors: Option<Vec<candle_core::Tensor>> = if args.anchor_penalty > 0.0 {
-        info!("Building anchor prior (K={n_topics}) from finest pseudobulks");
-        let anchor_prior = crate::topic::anchor_prior::AnchorPrior::from_pseudobulk(
-            finest_collapsed,
-            n_topics,
-            None,
-        )?;
-        // Indexed decoders all run at D_full — no per-level feature coarsening.
-        let level_coarsenings_none: Vec<
-            Option<data_beans_alg::feature_coarsening::FeatureCoarsening>,
-        > = (0..num_levels).map(|_| None).collect();
-        Some(anchor_prior.per_level_device_tensors(&level_coarsenings_none, &dev)?)
-    } else {
-        None
-    };
 
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
@@ -1099,8 +1134,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         } else {
             None
         },
-        anchor_prior_per_level: anchor_tensors.as_deref(),
-        anchor_penalty: args.anchor_penalty,
     };
 
     use candle_util::vae::masked_topic::{MaskSchedule, MaskedTrainOpts};
@@ -1117,12 +1150,35 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         kl_weight: args.kl_weight,
         poisson_thin: args.poisson_thin,
         seed: args.seed,
+        query: args
+            .query_decoder
+            .then_some(candle_util::vae::masked_topic::QueryOpts {
+                extra: args.query_extra,
+                penalty: args.query_penalty,
+            }),
     };
+    let query_decoder = args
+        .query_decoder
+        .then(|| {
+            candle_util::decoder::query_decoder::QueryDecoder::new(
+                h,
+                args.query_rank,
+                param_builder.pp("dec_query"),
+            )
+        })
+        .transpose()?;
+    if query_decoder.is_some() {
+        info!(
+            "Query decoder ON: rank {}, {} extra queries/row, penalty {}",
+            args.query_rank, args.query_extra, args.query_penalty
+        );
+    }
 
     let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
         &decoders,
+        query_decoder.as_ref(),
         &train_config,
         args.mask_fraction,
         &masked_opts,
@@ -1174,7 +1230,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             delta_train.as_ref(),
         )?;
         info!(
-            "Held-out imputation: mean log-likelihood/gene = {holdout_llik:.4} \
+            "Held-out imputation: mean log-likelihood/unit = {holdout_llik:.4} \
              (mask={}, seed={})",
             args.eval_mask_fraction, args.eval_seed
         );
@@ -1199,9 +1255,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         n_topics,
         encoder_hidden: args.encoder_layers.clone(),
         num_levels,
-        level_decoder_dims: vec![n_features_full; num_levels],
+        level_decoder_dims: level_decoder_dims.clone(),
         adj_method: args.adj_method.as_str().into(),
-        has_coarsening: false,
+        has_coarsening,
         embedding_dim: Some(h),
         enc_context_size: Some(args.context_size),
         theta_mean: None,
@@ -1209,8 +1265,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         // Round-trips the encoder's FC input width; without it every rebuild site
         // would construct `[L, H]` and `VarMap::load` would reject the checkpoint.
         n_gene_modules: Some(args.gene_modules),
+        query_rank: args.query_decoder.then_some(args.query_rank),
     };
     metadata.save(&args.out)?;
+    if has_coarsening {
+        crate::topic::model_metadata::save_coarsening_levels(&level_coarsenings, &args.out)?;
+    }
     save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
     save_feature_mean(&feature_mean, &gene_names, &args.out)?;
 
@@ -1297,8 +1357,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 "the encoder's sharpness differs between the rows it trained on and single \
                  cells; it is one-hot on whichever distribution it was trained on and softer \
                  off it. A near one-hot latent on BOTH is a training-side property of the \
-                 masked objective, not an input mismatch — see --anchor-penalty, K, and the \
-                 head's KL weight."
+                 masked objective, not an input mismatch — see K and the head's KL weight."
             );
         }
     }
