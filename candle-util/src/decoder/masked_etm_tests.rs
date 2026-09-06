@@ -227,3 +227,333 @@ fn dense_and_indexed_heads_agree_on_the_same_positions() {
         );
     }
 }
+
+////////////////////////////
+// Module-collapsed heads   //
+////////////////////////////
+
+use super::{ModuleTarget, QueryTarget};
+use crate::decoder::module_map::ModuleMap;
+use crate::loss::nb_log_likelihood_elem;
+
+/// Modules {0,1}, {2,3,4}, {5} over the six genes, shares from a mean
+/// vector [2,1 | 1,1,2 | 4].
+fn module_map() -> ModuleMap {
+    ModuleMap::new(
+        &[0, 0, 1, 1, 1, 2],
+        &[2.0 / 3.0, 1.0 / 3.0, 0.25, 0.25, 0.5, 1.0],
+        &dev(),
+    )
+    .unwrap()
+}
+
+const M: usize = 3;
+
+/// A decoder over the three modules with deterministic α, φ and background.
+fn module_decoder() -> EmbeddedNbTopicDecoder {
+    let log_phi: Vec<f32> = (0..M).map(|m| 0.3 * m as f32 - 0.4).collect();
+    let log_pi: Vec<f32> = vec![
+        (3.0f32 / 11.0).ln(),
+        (4.0f32 / 11.0).ln(),
+        (4.0f32 / 11.0).ln(),
+    ];
+    let mut ts = HashMap::new();
+    ts.insert("mdec.topic.embeddings".to_string(), alpha());
+    ts.insert(
+        "mdec.log_phi".to_string(),
+        Tensor::from_vec(log_phi, (1, M), &dev()).unwrap(),
+    );
+    ts.insert(
+        "mdec.log_pi".to_string(),
+        Tensor::from_vec(log_pi, (1, M), &dev()).unwrap(),
+    );
+    let vb = VarBuilder::from_tensors(ts, DType::F32, &dev());
+    EmbeddedNbTopicDecoder::new_with_modules(K, rho(), module_map(), vb.pp("mdec")).unwrap()
+}
+
+#[test]
+fn module_logits_carry_the_module_background_and_rows_sum_to_one() {
+    let dec = module_decoder();
+    assert_eq!(dec.dim_obs(), M);
+    let full_km = dec.full_logits_kd().unwrap();
+    assert_eq!(full_km.dims(), &[K, M]);
+    // Host: (α − ᾱ)·ρ̄ᵀ + log π_m with ρ̄ the within-module mean.
+    let a = alpha().to_vec2::<f32>().unwrap();
+    let r = rho().to_vec2::<f32>().unwrap();
+    let groups: [&[usize]; 3] = [&[0, 1], &[2, 3, 4], &[5]];
+    let log_pi = [
+        (3.0f32 / 11.0).ln(),
+        (4.0f32 / 11.0).ln(),
+        (4.0f32 / 11.0).ln(),
+    ];
+    let mean_a: Vec<f32> = (0..H)
+        .map(|h| (0..K).map(|k| a[k][h]).sum::<f32>() / K as f32)
+        .collect();
+    let got = full_km.to_vec2::<f32>().unwrap();
+    for k in 0..K {
+        for (m, g) in groups.iter().enumerate() {
+            let bar: Vec<f32> = (0..H)
+                .map(|h| g.iter().map(|&i| r[i][h]).sum::<f32>() / g.len() as f32)
+                .collect();
+            let want: f32 = (0..H).map(|h| (a[k][h] - mean_a[h]) * bar[h]).sum::<f32>() + log_pi[m];
+            assert!(
+                (got[k][m] - want).abs() < 1e-5,
+                "logit[{k}][{m}] {} vs {want}",
+                got[k][m]
+            );
+        }
+    }
+    let beta = ops::softmax(&full_km, 1)
+        .unwrap()
+        .sum(1)
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    assert!(beta.iter().all(|s| (s - 1.0).abs() < 1e-5));
+}
+
+/// Under the identity map the module scorer is the dense gene scorer, term
+/// for term, for both likelihoods; the scored units are the mask.
+#[test]
+fn module_scorer_matches_the_dense_gene_scorer_under_the_identity_map() {
+    let dec = decoder();
+    assert!(dec.modules().is_identity());
+    let full_kd = dec.full_logits_kd().unwrap();
+    let (values, mask, lib) = (values(), mask(), lib());
+    let visible = mask.affine(-1.0, 1.0).unwrap();
+    let visible_counts = (&values * &visible).unwrap();
+    let t = ModuleTarget {
+        values: &values,
+        visible_counts: &visible_counts,
+        visible_share: &visible,
+        residual: None,
+        lib: &lib,
+    };
+    let dense = MaskedDenseTarget {
+        values: &values,
+        residual: None,
+        lib: &lib,
+        mask: &mask,
+    };
+    let (nb, units) = dec
+        .score_unseen_modules_nb(&log_theta(), &t, &full_kd)
+        .unwrap();
+    let want = dec.impute_dense_nb(&log_theta(), &dense, &full_kd).unwrap();
+    for (a, b) in to_vec1(&nb).iter().zip(to_vec1(&want)) {
+        assert!((a - b).abs() < 1e-4, "NB module {a} vs dense {b}");
+    }
+    assert_eq!(to_vec1(&units), to_vec1(&mask.sum(1).unwrap()));
+    let (mn, _) = dec
+        .score_unseen_modules_multinomial(&log_theta(), &t, &full_kd)
+        .unwrap();
+    let want = dec
+        .impute_dense_multinomial(&log_theta(), &dense, &full_kd)
+        .unwrap();
+    for (a, b) in to_vec1(&mn).iter().zip(to_vec1(&want)) {
+        assert!((a - b).abs() < 1e-4, "multinomial module {a} vs dense {b}");
+    }
+}
+
+/// The unseen target is the module total minus what the context saw, the
+/// rate is scaled by the prior unseen share, and a module the context saw
+/// completely is not scored.
+#[test]
+fn unseen_module_scores_match_a_host_reference_and_skip_full_modules() {
+    let dec = module_decoder();
+    let full_km = dec.full_logits_kd().unwrap();
+    #[rustfmt::skip]
+    let values: Vec<f32> = vec![
+        9.0, 4.0, 2.0,
+        1.0, 6.0, 0.0,
+        5.0, 5.0, 5.0,
+    ];
+    #[rustfmt::skip]
+    let vis_counts: Vec<f32> = vec![
+        3.0, 0.0, 2.0,   // row 0 saw part of module 0, none of 1, all of 2
+        0.0, 6.0, 0.0,
+        5.0, 1.0, 0.0,
+    ];
+    #[rustfmt::skip]
+    let vis_share: Vec<f32> = vec![
+        1.0 / 3.0, 0.0, 1.0,
+        0.0, 0.5, 0.0,
+        1.0, 0.25, 0.0,
+    ];
+    let values_t = Tensor::from_vec(values.clone(), (N, M), &dev()).unwrap();
+    let vc = Tensor::from_vec(vis_counts.clone(), (N, M), &dev()).unwrap();
+    let vs = Tensor::from_vec(vis_share.clone(), (N, M), &dev()).unwrap();
+    let lib = lib();
+    let t = ModuleTarget {
+        values: &values_t,
+        visible_counts: &vc,
+        visible_share: &vs,
+        residual: None,
+        lib: &lib,
+    };
+    let (llik, units) = dec
+        .score_unseen_modules_nb(&log_theta(), &t, &full_km)
+        .unwrap();
+    // Host reference on the same rate.
+    let rate = dec.mixture_rate_nd(&log_theta(), &full_km).unwrap();
+    let unseen = (&values_t - &vc).unwrap();
+    let s = vs.affine(-1.0, 1.0).unwrap();
+    let mu = (rate * &s).unwrap().broadcast_mul(&lib).unwrap();
+    let log_phi = dec.log_phi().broadcast_as((N, M)).unwrap();
+    let elem = nb_log_likelihood_elem(&unseen, &mu, &log_phi).unwrap();
+    let scored = s.gt(1e-6).unwrap().to_dtype(DType::F32).unwrap();
+    let want = (elem * &scored).unwrap().sum(1).unwrap();
+    for (a, b) in to_vec1(&llik).iter().zip(to_vec1(&want)) {
+        assert!((a - b).abs() < 1e-4, "{a} vs host {b}");
+    }
+    assert_eq!(to_vec1(&units), vec![2.0, 3.0, 2.0]);
+    // Perturb the fully visible modules' totals: nothing moves.
+    let mut v2 = values;
+    v2[2] += 7.0; // row 0, module 2
+    v2[6] += 7.0; // row 2, module 0
+    let values2 = Tensor::from_vec(v2, (N, M), &dev()).unwrap();
+    let t2 = ModuleTarget {
+        values: &values2,
+        visible_counts: &vc,
+        visible_share: &vs,
+        residual: None,
+        lib: &lib,
+    };
+    let (llik2, _) = dec
+        .score_unseen_modules_nb(&log_theta(), &t2, &full_km)
+        .unwrap();
+    assert_eq!(to_vec1(&llik), to_vec1(&llik2));
+}
+
+/// A query gene's rate is its module's rate times its share times the
+/// residual; with r = 0 it is the expanded dictionary's rate.
+#[test]
+fn gene_level_query_rate_is_module_rate_times_share_times_residual() {
+    let dec = module_decoder();
+    let full_km = dec.full_logits_kd().unwrap();
+    let ids = Tensor::from_vec(vec![5u32, 0, 3, 1, 4, 2], (N, 2), &dev()).unwrap();
+    let xq = Tensor::from_vec(vec![2.0f32, 0.0, 1.0, 4.0, 0.0, 3.0], (N, 2), &dev()).unwrap();
+    let w = Tensor::from_vec(vec![1.0f32, 1.0, 1.0, 0.0, 1.0, 1.0], (N, 2), &dev()).unwrap();
+    let r = Tensor::from_vec(vec![0.3f32, -0.2, 0.0, 0.5, 1.0, -1.0], (N, 2), &dev()).unwrap();
+    let lib = lib();
+    let q = QueryTarget {
+        gene_ids: &ids,
+        values: &xq,
+        weight: &w,
+        log_residual: &r,
+        lib: &lib,
+    };
+    let got = to_vec1(&dec.score_queries_nb(&log_theta(), &q, &full_km).unwrap());
+    // Host: μ = ℓ · rate_{m(g)} · π_{g|m} · exp(r), φ at the module.
+    let rate = dec
+        .mixture_rate_nd(&log_theta(), &full_km)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    let f2c = [0usize, 0, 1, 1, 1, 2];
+    let share = [2.0f32 / 3.0, 1.0 / 3.0, 0.25, 0.25, 0.5, 1.0];
+    let idv = ids.to_vec2::<u32>().unwrap();
+    let rv = r.to_vec2::<f32>().unwrap();
+    let libv = to_vec1(&lib);
+    let mut mu = vec![0f32; N * 2];
+    let mut lp = vec![0f32; N * 2];
+    let log_phi_m = to_vec1(dec.log_phi());
+    for n in 0..N {
+        for j in 0..2 {
+            let g = idv[n][j] as usize;
+            mu[n * 2 + j] = libv[n] * rate[n][f2c[g]] * share[g] * rv[n][j].exp();
+            lp[n * 2 + j] = log_phi_m[f2c[g]];
+        }
+    }
+    let mu_t = Tensor::from_vec(mu, (N, 2), &dev()).unwrap();
+    let lp_t = Tensor::from_vec(lp, (N, 2), &dev()).unwrap();
+    let want = to_vec1(
+        &(nb_log_likelihood_elem(&xq, &mu_t, &lp_t).unwrap() * &w)
+            .unwrap()
+            .sum(1)
+            .unwrap(),
+    );
+    for (a, b) in got.iter().zip(&want) {
+        assert!((a - b).abs() < 1e-4, "query llik {a} vs host {b}");
+    }
+}
+
+/// The indexed head on a module decoder scores a gene at its module's rate
+/// times its share — the expanded dictionary.
+#[test]
+fn indexed_head_at_genes_agrees_with_the_expanded_dictionary() {
+    let dec = module_decoder();
+    let full_km = dec.full_logits_kd().unwrap();
+    let ids = Tensor::from_vec(vec![5u32, 0, 3, 1, 4, 2], (N, 2), &dev()).unwrap();
+    let got = dec
+        .mixture_rate_nk(&log_theta(), &ids, &full_km)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    let rate = dec
+        .mixture_rate_nd(&log_theta(), &full_km)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap();
+    let f2c = [0usize, 0, 1, 1, 1, 2];
+    let share = [2.0f32 / 3.0, 1.0 / 3.0, 0.25, 0.25, 0.5, 1.0];
+    let idv = ids.to_vec2::<u32>().unwrap();
+    for n in 0..N {
+        for j in 0..2 {
+            let g = idv[n][j] as usize;
+            let want = rate[n][f2c[g]] * share[g];
+            assert!(
+                (got[n][j] - want).abs() < 1e-5,
+                "rate[{n}][{j}] {} vs {want}",
+                got[n][j]
+            );
+        }
+    }
+}
+
+/// A per-module batch offset multiplies the NB mean: a uniform offset `c` is
+/// the same as scaling the library by `c`.
+#[test]
+fn a_module_residual_scales_the_nb_mean() {
+    let dec = module_decoder();
+    let full_km = dec.full_logits_kd().unwrap();
+    let values = Tensor::from_vec(
+        vec![9.0f32, 4.0, 2.0, 1.0, 6.0, 0.0, 5.0, 5.0, 5.0],
+        (N, M),
+        &dev(),
+    )
+    .unwrap();
+    let vc = Tensor::zeros((N, M), DType::F32, &dev()).unwrap();
+    let vs = Tensor::from_vec(
+        vec![0.2f32, 0.0, 0.5, 0.0, 0.5, 0.0, 0.1, 0.25, 0.0],
+        (N, M),
+        &dev(),
+    )
+    .unwrap();
+    let lib = lib();
+    let c = 1.7f64;
+    let uniform = Tensor::full(c as f32, (N, M), &dev()).unwrap();
+    let with_res = ModuleTarget {
+        values: &values,
+        visible_counts: &vc,
+        visible_share: &vs,
+        residual: Some(&uniform),
+        lib: &lib,
+    };
+    let scaled = lib.affine(c, 0.0).unwrap();
+    let with_lib = ModuleTarget {
+        values: &values,
+        visible_counts: &vc,
+        visible_share: &vs,
+        residual: None,
+        lib: &scaled,
+    };
+    let (a, _) = dec
+        .score_unseen_modules_nb(&log_theta(), &with_res, &full_km)
+        .unwrap();
+    let (b, _) = dec
+        .score_unseen_modules_nb(&log_theta(), &with_lib, &full_km)
+        .unwrap();
+    for (x, y) in to_vec1(&a).iter().zip(to_vec1(&b)) {
+        assert!((x - y).abs() < 1e-4, "residual {x} vs scaled library {y}");
+    }
+}
