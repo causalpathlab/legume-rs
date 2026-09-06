@@ -3,11 +3,10 @@
 //! context mask, the mask-rate schedule, the `[N, D]` target mask, the
 //! per-level target table, and that visible genes are never scored.
 
-use super::{
-    draw_context_mask, mask_rate, poisson_draw, step_seed, target_mask_nd, LevelTarget,
-    MaskSchedule, Mat,
-};
+use super::{epoch_seed, poisson_draw, target_mask_nd, EpochAccum, LevelTarget, Mat};
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
+use crate::decoder::module_map::ModuleMap;
+use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
@@ -96,95 +95,47 @@ fn to_vec2(t: &Tensor) -> Vec<Vec<f32>> {
     t.to_vec2().unwrap()
 }
 
-/// A `[3, 4]` packed context with a pad slot in every row.
-fn context_values() -> Tensor {
-    #[rustfmt::skip]
-    let v: Vec<f32> = vec![
-        2.0, 5.0, 1.0, 0.0,
-        7.0, 3.0, 0.0, 0.0,
-        4.0, 6.0, 9.0, 0.0,
+#[test]
+fn epoch_seeds_are_distinct_across_epoch_and_level() {
+    let a = epoch_seed(42, 0, 0);
+    let b = epoch_seed(42, 1, 0);
+    let c = epoch_seed(42, 0, 1);
+    let d = epoch_seed(43, 0, 0);
+    assert!(
+        a != b && a != c && a != d && b != c,
+        "seeds collide: {a} {b} {c} {d}"
+    );
+    assert_eq!(a, epoch_seed(42, 0, 0));
+}
+
+/// The epoch accumulator sums device scalars step by step and reads them back
+/// once, normalised by the host-side counts.
+#[test]
+fn epoch_accumulator_sums_steps_on_device_and_reads_once() {
+    let dev = Device::Cpu;
+    let mut acc = EpochAccum::new(&dev).unwrap();
+    let steps = [
+        (-3.0f32, 4.0f32, 0.5f32, 2.0f32),
+        (-5.0, 4.0, 1.5, 0.25),
+        (-1.0, 4.0, 0.0, 0.0),
     ];
-    Tensor::from_vec(v, (3, 4), &Device::Cpu).unwrap()
-}
-
-#[test]
-fn context_mask_is_reproducible_from_its_seed() {
-    let values = Tensor::from_vec(
-        (0..2000)
-            .map(|i| {
-                if i % 5 == 0 {
-                    0.0
-                } else {
-                    1.0 + (i % 7) as f32
-                }
-            })
-            .collect(),
-        (40, 50),
-        &Device::Cpu,
-    )
-    .unwrap();
-    let (vis_a, msk_a) = draw_context_mask(&values, 0.3, 99).unwrap();
-    let (vis_b, msk_b) = draw_context_mask(&values, 0.3, 99).unwrap();
-    assert_eq!(to_vec2(&vis_a), to_vec2(&vis_b), "same seed, same visible");
-    assert_eq!(to_vec2(&msk_a), to_vec2(&msk_b), "same seed, same masked");
-    let (vis_c, _) = draw_context_mask(&values, 0.3, 100).unwrap();
-    assert_ne!(
-        to_vec2(&vis_a),
-        to_vec2(&vis_c),
-        "a different seed must differ"
-    );
-
-    // visible + masked partitions exactly the real (value > 0) slots.
-    let real = to_vec2(&values.gt(0.0).unwrap().to_dtype(DType::F32).unwrap());
-    let (vis, msk) = (to_vec2(&vis_a), to_vec2(&msk_a));
-    for n in 0..40 {
-        for k in 0..50 {
-            assert_eq!(vis[n][k] + msk[n][k], real[n][k], "slot ({n},{k})");
-            assert!(vis[n][k] == 0.0 || vis[n][k] == 1.0);
-        }
+    for (l, u, k, r) in steps {
+        let t = |v: f32| Tensor::new(v, &dev).unwrap();
+        acc.add(&t(l), &t(u), Some(&t(k)), Some(&t(r)), 2.0, 1.0)
+            .unwrap();
     }
-    let masked_frac = msk.iter().flatten().sum::<f32>() / real.iter().flatten().sum::<f32>();
+    let (llik, kl, rms) = acc.read().unwrap();
     assert!(
-        (masked_frac - 0.3).abs() < 0.05,
-        "masked fraction {masked_frac} is far from the rate"
+        (llik - (-9.0 / 12.0)).abs() < 1e-6,
+        "llik per scored {llik}"
     );
-}
-
-#[test]
-fn pads_are_neither_visible_nor_masked() {
-    let (vis, msk) = draw_context_mask(&context_values(), 0.5, 1).unwrap();
-    let (vis, msk) = (to_vec2(&vis), to_vec2(&msk));
-    for n in 0..3 {
-        assert_eq!(vis[n][3], 0.0, "row {n} pad visible");
-        assert_eq!(msk[n][3], 0.0, "row {n} pad masked");
-    }
-    assert_eq!(vis[1][2], 0.0);
-    assert_eq!(msk[1][2], 0.0);
-}
-
-#[test]
-fn uniform_schedule_rate_is_reproducible_and_in_range() {
-    assert_eq!(mask_rate(MaskSchedule::Fixed, 0.3, 5), 0.3);
-    let sched = MaskSchedule::Uniform { lo: 0.1, hi: 0.6 };
-    let a = mask_rate(sched, 0.3, 5);
-    let b = mask_rate(sched, 0.3, 5);
-    assert_eq!(a, b, "same step seed, same rate");
-    assert!((0.1..=0.6).contains(&a), "rate {a} outside [lo, hi]");
-    let rates: Vec<f64> = (0..50).map(|s| mask_rate(sched, 0.3, s)).collect();
+    assert!((kl - (2.0 / 6.0)).abs() < 1e-6, "kl per row {kl}");
     assert!(
-        rates.iter().any(|&r| (r - a).abs() > 1e-9),
-        "rate never moves across steps"
+        (rms - (2.25f32 / 3.0).sqrt()).abs() < 1e-6,
+        "rms residual {rms}"
     );
-}
-
-#[test]
-fn step_seeds_are_distinct_across_epoch_level_and_minibatch() {
-    let s = step_seed(42, 0, 0, 0);
-    assert_ne!(s, step_seed(42, 1, 0, 0));
-    assert_ne!(s, step_seed(42, 0, 1, 0));
-    assert_ne!(s, step_seed(42, 0, 0, 1));
-    assert_ne!(s, step_seed(43, 0, 0, 0));
-    assert_eq!(s, step_seed(42, 0, 0, 0));
+    let empty = EpochAccum::new(&dev).unwrap();
+    assert_eq!(empty.read().unwrap(), (0.0, 0.0, 0.0));
 }
 
 ////////////////////////
@@ -237,7 +188,12 @@ fn level_target_library_is_the_full_row_total() {
             };
         }
     }
-    let lt = LevelTarget::from_mat(&rows, &Device::Cpu).unwrap();
+    let lt = LevelTarget::from_mat(
+        &rows,
+        &ModuleMap::identity(rows.ncols(), &Device::Cpu).unwrap(),
+        &Device::Cpu,
+    )
+    .unwrap();
     let lib: Vec<f32> = lt.row_lib().flatten_all().unwrap().to_vec1().unwrap();
     for i in 0..3 {
         let total: f32 = (0..8).map(|j| rows[(i, j)]).sum::<f32>() + 1.0;
@@ -298,6 +254,7 @@ fn visible_genes_are_never_scored() {
 
     let (idx, vis) = small_context();
     let mask = target_mask_nd(&idx, &vis, D).unwrap();
+    let identity = ModuleMap::identity(D, &dev).unwrap();
     let mut rows = Mat::zeros(3, D);
     for i in 0..3 {
         for j in 0..D {
@@ -305,7 +262,7 @@ fn visible_genes_are_never_scored() {
         }
     }
     let score = |rows: &Mat| -> Vec<f32> {
-        let lt = LevelTarget::from_mat(rows, &dev).unwrap();
+        let lt = LevelTarget::from_mat(rows, &identity, &dev).unwrap();
         let (values, lib) = lt.rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap()).unwrap();
         let target = MaskedDenseTarget {
             values: &values,
@@ -324,9 +281,9 @@ fn visible_genes_are_never_scored() {
     // mask keeps out of the scored positions' likelihood up to the ℓ scale.
     let mut visible_perturbed = rows.clone();
     visible_perturbed[(0, 1)] += 3.0;
-    let lt = LevelTarget::from_mat(&visible_perturbed, &dev).unwrap();
+    let lt = LevelTarget::from_mat(&visible_perturbed, &identity, &dev).unwrap();
     let (values, _) = lt.rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap()).unwrap();
-    let lib = LevelTarget::from_mat(&rows, &dev)
+    let lib = LevelTarget::from_mat(&rows, &identity, &dev)
         .unwrap()
         .rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap())
         .unwrap()
@@ -358,4 +315,42 @@ fn visible_genes_are_never_scored() {
         "a scored gene's count did not reach the loss"
     );
     assert!((moved[1] - base[1]).abs() < 1e-6, "row 1 must be untouched");
+}
+
+//////////////
+// Residual //
+//////////////
+
+/// Values scattered by column id land on their columns, duplicates add, and
+/// the gradient comes back to each slot from its own column — through a
+/// backward that runs one thread per slot on the device.
+#[test]
+fn scattered_values_land_on_their_columns_and_backpropagate() {
+    let ids = Tensor::from_vec(vec![4u32, 6, 4, 3, 1, 0], (2, 3), &Device::Cpu).unwrap();
+    let v = candle_core::Var::from_tensor(
+        &Tensor::from_vec(
+            vec![0.5f32, -1.0, 2.0, 0.25, 2.0, 9.0],
+            (2, 3),
+            &Device::Cpu,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let nd_t = scatter_add_cols(&ids, v.as_tensor(), 8).unwrap();
+    let nd = to_vec2(&nd_t);
+    let expect = vec![
+        vec![0.0, 0.0, 0.0, 0.0, 2.5, 0.0, -1.0, 0.0],
+        vec![9.0, 2.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0],
+    ];
+    assert_eq!(nd, expect);
+    let c: Vec<f32> = (0..16).map(|i| i as f32 * 0.1).collect();
+    let c = Tensor::from_vec(c, (2, 8), &Device::Cpu).unwrap();
+    let grads = (nd_t * c).unwrap().sum_all().unwrap().backward().unwrap();
+    let g = to_vec2(grads.get(&v).expect("values receive gradient"));
+    let expect_g = vec![vec![0.4, 0.6, 0.4], vec![1.1, 0.9, 0.8]];
+    for (gr, er) in g.iter().zip(&expect_g) {
+        for (a, b) in gr.iter().zip(er) {
+            assert!((a - b).abs() < 1e-6, "gradient {g:?} vs {expect_g:?}");
+        }
+    }
 }

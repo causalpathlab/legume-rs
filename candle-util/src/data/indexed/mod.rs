@@ -23,6 +23,7 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 pub mod graph_adj;
+pub mod masked_epoch;
 pub mod pack;
 pub mod splice_tracks;
 pub mod top_k;

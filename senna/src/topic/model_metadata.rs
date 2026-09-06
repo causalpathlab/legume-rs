@@ -180,6 +180,17 @@ pub struct TopicModelMetadata {
     /// the shape they were trained at.
     #[serde(default)]
     pub n_gene_modules: Option<usize>,
+    /// Query-decoder projection width, `None` when the run had none.
+    ///
+    /// The query decoder's weights (`dec_query.*`) ride in the checkpoint, and
+    /// `VarMap::load` fills only the vars a rebuild has already registered —
+    /// tensors it does not know about are skipped in silence. So a consumer
+    /// that means to use the decoder has to construct it at this rank before
+    /// loading, and one that does not should say so rather than quietly score
+    /// without it. `serde(default)` gives older models `None`, which is what
+    /// they were trained at.
+    #[serde(default)]
+    pub query_rank: Option<usize>,
 }
 
 impl TopicModelMetadata {
