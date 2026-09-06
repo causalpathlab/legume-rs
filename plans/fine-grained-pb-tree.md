@@ -191,3 +191,16 @@ Firm design: hash -> reassign cells (3 sweeps, all same-batch nodes as candidate
 
 The refined tree moves the topic cell latent with the coarsened encoder input unchanged: naive vs memory becomes a visible gradient inside the T island (UMAP `rb/umap_refined_tree.png`), where the marginal hash gives a fully mixed island. Lineage ARI within the topic family's 0.08 noise (single runs). Progress bars: reassign cells inherits the DC-Poisson sweep bar; the tree growth has a leaf-count bar toward the finest target with the level in the message.
 
+## Residual pseudobulk rows (branch ypp/residual-pb-rows, uncommitted, 2026-09-06)
+
+`senna topic --pb-residual-rows`: a copy of the finest pseudobulks as their excess over the parent (floored at zero, rescaled to the child's mass; empty rows dropped), added as an extra training level on the finest axis ahead of the collapsed levels (own decoder slot; finest stays last). 782 of 1024 finest pseudobulks carry excess on this donor.
+
+| run (single) | broad ARI | fine ARI | CD4 n/m 2-means | probe |
+|---|---|---|---|---|
+| tree only, default coarsening | 0.383 | 0.222 | 0.225 | 0.845 |
+| tree + residual rows, default coarsening | 0.352 | 0.182 | 0.157 | 0.802 |
+| tree only, full axis | 0.223 | 0.142 | 0.061 | 0.895 |
+| tree + residual rows, full axis | 0.229 | 0.169 | 0.040 | 0.831 |
+
+REFUTED (augmentation form): the excess rows lower the probe by 0.04-0.06 and the dominance readout with either encoder axis. Code removed, branch deleted. Not tried: the consistent form (cells residualised against their root at inference too, topics = within-lineage programs); the augmentation result says the train/inference mismatch is what hurts, so that form would be a different model, not a flag. Side finding: tree + full axis reaches probe 0.895 (the bge bar) at a lineage cost (broad 0.22), so the encoder's gene axis is the remaining lever: coarsen genes by residual co-variation (the gene tree) so the program stays visible without the full-axis cost.
+
