@@ -234,10 +234,17 @@ enum Commands {
                       That follows Dieng et al. 2020 (ETM).\n\
                       The encoder pools a per-cell top-K window by attention.\n\
                       \n\
-                      Training splits each cell's top-K genes into visible and masked.\n\
+                      Training masks part of that window and encodes what is left:\n\
                       θ_n = softmax(encoder(visible)), deterministic and KL-free.\n\
-                      The NB head imputes held-out genes with μ = residual · ℓ · (θ·β).\n\
+                      The head then imputes every gene the encoder did NOT see,\n\
+                      across the whole feature axis and including absent genes,\n\
+                      with μ = ℓ · (θ·β) against the batch-adjusted rows.\n\
                       There β_kg = softmax_g(α_k · ρ_g). φ_g is a per-gene dispersion.\n\
+                      \n\
+                      The encoder's window is a compute budget; what the decoder\n\
+                      answers for does not depend on it. Scoring only the window\n\
+                      would ask about abundant genes alone and never about an\n\
+                      absent one, which is far weaker evidence about θ.\n\
                       \n\
                       The masked objective prevents collapse, not a KL bottleneck.\n\
                       So it scales with more data. Inference is encoder-only.\n\

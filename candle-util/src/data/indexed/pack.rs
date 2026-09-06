@@ -67,28 +67,6 @@ pub fn pack_indices_values(
     Ok((indices, values))
 }
 
-/// Pack only the per-cell values into `[N, K]` f32 — for the decoder
-/// path that already has its scatter positions and doesn't need the
-/// indices tensor. Parallel over rows.
-pub(crate) fn pack_values_only(
-    samples: &[IndexedSample],
-    sample_indices: &[usize],
-    k: usize,
-    target_device: &Device,
-) -> anyhow::Result<Tensor> {
-    let n = sample_indices.len();
-    let mut val_buf = vec![0.0f32; n * k];
-    val_buf
-        .par_chunks_mut(k)
-        .zip(sample_indices.par_iter())
-        .for_each(|(chunk, &si)| {
-            let s = &samples[si];
-            let take = s.values.len().min(k);
-            chunk[..take].copy_from_slice(&s.values[..take]);
-        });
-    Ok(Tensor::from_vec(val_buf, (n, k), target_device)?)
-}
-
 /// Pack a per-cell row `(per_sample[si][feat])` at `samples[si].indices`
 /// into `[N, K] f32`. Used for the encoder's μ_residual batch null.
 pub(crate) fn pack_null_at_indices(

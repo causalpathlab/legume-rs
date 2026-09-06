@@ -158,9 +158,6 @@ pub struct TopicModelMetadata {
     /// Top-K shortlist size at encoder (`indexed_topic` only)
     #[serde(default)]
     pub enc_context_size: Option<usize>,
-    /// Top-K shortlist size at decoder (`indexed_topic` only)
-    #[serde(default)]
-    pub dec_context_size: Option<usize>,
     /// Mean training topic proportions θ̄ ∈ ℝ^K. Used at predict time as the
     /// mixture weights for the training-implied gene marginal in
     /// per-batch δ estimation. Falls back to uniform 1/K when absent.
