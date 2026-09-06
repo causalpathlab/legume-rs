@@ -658,7 +658,7 @@ dependencies = [
  "accelerate-src",
  "byteorder",
  "candle-kernels",
- "candle-metal-kernels 0.10.1 (git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25)",
+ "candle-metal-kernels",
  "candle-ug",
  "cudarc 0.19.4",
  "float8",
@@ -692,21 +692,6 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd26e64dd80c782de434ec741e5ab6d2854db0bf5135a64f33689fd062575952"
-dependencies = [
- "half",
- "objc2",
- "objc2-foundation",
- "objc2-metal",
- "once_cell",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "candle-metal-kernels"
-version = "0.10.1"
 source = "git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "half",
@@ -726,7 +711,7 @@ checksum = "0c0dfc1aff5552fdbae4ec94c877b16f2cf1424a07901f0ce5504d7b45adb172"
 dependencies = [
  "accelerate-src",
  "candle-core",
- "candle-metal-kernels 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-metal-kernels",
  "half",
  "libc",
  "num-traits",
