@@ -30,6 +30,13 @@
     clippy::many_single_char_names,
 )]
 
+// Training on the CPU allocates and frees multi-megabyte buffers every
+// step; the system allocator hands them back to the kernel on free and page
+// faults them in again on the next step, which cost as much as the arithmetic
+// in the elementwise passes. mimalloc keeps large blocks around.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod anchor_common;
 mod annotate;
 mod assoc;
