@@ -270,6 +270,22 @@ fn main() -> anyhow::Result<()> {
         let scale = g2.get(&t2).unwrap().abs()?.max_all()?.to_scalar::<f32>()?;
         println!("gather_rows backward vs index_select backward: max |diff| = {diff:.3e} (max |grad| = {scale:.3e})");
     }
+    // The scatter alone, against candle's index_add: the backward of every
+    // gather, isolated from the elementwise passes around it.
+    {
+        use candle_util::fast_index::index_add_rows;
+        let flat = indices.flatten_all()?;
+        let src = Tensor::rand(-1f32, 1.0, (N * K, H), &dev)?;
+        let zeros = Tensor::zeros((D, H), DType::F32, &dev)?;
+        time(&dev, "index_add_rows [N·K, H] → [D, H] (alone)", || {
+            let _ = index_add_rows(&zeros, &flat, &src)?;
+            Ok(())
+        });
+        time(&dev, "candle index_add, same shapes (alone)", || {
+            let _ = zeros.index_add(&flat, &src, 0)?;
+            Ok(())
+        });
+    }
     time(&dev, "gather_rows [N·K, H] (fwd+bwd)", || {
         let e = gather_rows(&rho, &indices.flatten_all()?)?.reshape((N, K, H))?;
         let c = e.broadcast_mul(&gate.unsqueeze(2)?)?;

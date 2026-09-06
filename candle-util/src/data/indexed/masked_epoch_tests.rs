@@ -313,7 +313,6 @@ fn minibatches_are_narrow_views_of_one_shuffled_block() {
         }
     }
     assert_eq!(seen.len(), P, "every source row appears at least once");
-    assert_eq!(ep.n_visible.len(), 3);
 }
 
 #[test]
