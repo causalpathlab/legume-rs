@@ -74,6 +74,7 @@ pub(super) fn build_pseudobulks(
             bulk_batches: config.bulk_batches.clone(),
             observe_panels: true,
             keep_finest_stats: config.emit_finest_collapse,
+            pb_tree: None,
         },
     )?;
     let mut collapsed_levels = collapse_out.levels;

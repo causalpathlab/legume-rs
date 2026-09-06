@@ -265,6 +265,10 @@ pub struct PreparedData {
     /// the writer that serializes `{out}.cell_to_pb.parquet` for
     /// downstream `--from` chains.
     pub cell_to_pb_per_level: Option<Vec<Vec<usize>>>,
+    /// The tree behind the finest partition, when the collapse grew one (see
+    /// `LoadCollapseArgs::pb_tree`); the writer serialises it as
+    /// `{out}.pb_tree.json`.
+    pub pb_tree: Option<data_beans_alg::collapse_data::PbTree>,
     /// Near-empty output keep-mask from cell QC (post-`mask_columns`
     /// column order). `None` when no QC ran. Applied at the per-cell
     /// output writers via `Mat::select_rows`.
@@ -514,6 +518,8 @@ pub struct LoadCollapseArgs<'a> {
     /// Opt-in BBKNN + Poisson DC-SBM refinement of the multilevel
     /// partition. `None` keeps the legacy hash-only behavior.
     pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
+    /// Grow the finest partition as a tree — see `MultilevelParams::pb_tree`.
+    pub pb_tree: Option<data_beans_alg::collapse_data::PbTreeParams>,
     /// Treat all cells as a single batch — no per-batch δ estimation.
     pub ignore_batch: bool,
     /// Optional shared cell QC — see [`LoadProjectArgs::qc`].
@@ -610,6 +616,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         bulk_batches: args.mixture_batches.clone(),
         observe_panels: args.observe_panels,
         keep_finest_stats: false,
+        pb_tree: args.pb_tree.clone(),
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /
@@ -620,59 +627,61 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     // route through `collapse_columns_multilevel_with_partition` which
     // skips the BBKNN + Poisson DC-SBM refinement.
     let want_hierarchy = args.want_hierarchy || args.prebuilt_partition.is_some();
-    let (mut collapsed_levels, cell_to_pb_per_level): (Vec<CollapsedOut>, Option<Vec<Vec<usize>>>) =
-        if let Some((partition_src, cell_names_src)) = args.prebuilt_partition.clone() {
-            let data_cell_names = data_vec.column_names()?;
-            // Align by cell name (handles row-order differences /
-            // bails on cell-set mismatch). The aligned partition is
-            // returned finest-last; data-beans-alg expects finest-
-            // first, so reverse before the call.
-            let aligned_finest_last =
-                crate::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
-                    partition_src,
-                    &cell_names_src,
-                    &data_cell_names,
-                )?;
-            let mut partition_finest_first = aligned_finest_last;
-            partition_finest_first.reverse();
-            info!(
-                "Inheriting cell→pb membership for {} levels (skipping BBKNN + DC-SBM refinement)",
-                partition_finest_first.len()
-            );
-            let MultilevelCollapseOut {
-                levels,
-                mut cell_to_pb_per_level,
-            } = data_beans_alg::collapse_data::collapse_columns_multilevel_with_partition(
-                &mut data_vec,
-                &proj_kn,
-                &batch_membership,
-                &ml_params,
-                &partition_finest_first,
+    let (mut collapsed_levels, cell_to_pb_per_level, pb_tree): (
+        Vec<CollapsedOut>,
+        Option<Vec<Vec<usize>>>,
+        Option<data_beans_alg::collapse_data::PbTree>,
+    ) = if let Some((partition_src, cell_names_src)) = args.prebuilt_partition.clone() {
+        let data_cell_names = data_vec.column_names()?;
+        // Align by cell name (handles row-order differences /
+        // bails on cell-set mismatch). The aligned partition is
+        // returned finest-last; data-beans-alg expects finest-
+        // first, so reverse before the call.
+        let aligned_finest_last =
+            crate::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
+                partition_src,
+                &cell_names_src,
+                &data_cell_names,
             )?;
-            cell_to_pb_per_level.reverse();
-            (levels, Some(cell_to_pb_per_level))
-        } else if want_hierarchy {
-            let MultilevelCollapseOut {
-                levels,
-                mut cell_to_pb_per_level,
-            } = collapse_columns_multilevel_with_hierarchy(
-                &mut data_vec,
-                &proj_kn,
-                &batch_membership,
-                &ml_params,
-            )?;
-            cell_to_pb_per_level.reverse();
-            (levels, Some(cell_to_pb_per_level))
-        } else {
-            (
-                data_vec.collapse_columns_multilevel_vec(
-                    &proj_kn,
-                    &batch_membership,
-                    &ml_params,
-                )?,
-                None,
-            )
-        };
+        let mut partition_finest_first = aligned_finest_last;
+        partition_finest_first.reverse();
+        info!(
+            "Inheriting cell→pb membership for {} levels (skipping BBKNN + DC-SBM refinement)",
+            partition_finest_first.len()
+        );
+        let MultilevelCollapseOut {
+            levels,
+            mut cell_to_pb_per_level,
+            pb_tree,
+        } = data_beans_alg::collapse_data::collapse_columns_multilevel_with_partition(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            &ml_params,
+            &partition_finest_first,
+        )?;
+        cell_to_pb_per_level.reverse();
+        (levels, Some(cell_to_pb_per_level), pb_tree)
+    } else if want_hierarchy {
+        let MultilevelCollapseOut {
+            levels,
+            mut cell_to_pb_per_level,
+            pb_tree,
+        } = collapse_columns_multilevel_with_hierarchy(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            &ml_params,
+        )?;
+        cell_to_pb_per_level.reverse();
+        (levels, Some(cell_to_pb_per_level), pb_tree)
+    } else {
+        (
+            data_vec.collapse_columns_multilevel_vec(&proj_kn, &batch_membership, &ml_params)?,
+            None,
+            None,
+        )
+    };
     collapsed_levels.reverse();
 
     // 4. Write delta output from finest level
@@ -693,6 +702,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        pb_tree,
         output_keep_idx,
     })
 }
