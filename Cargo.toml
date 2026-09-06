@@ -139,3 +139,10 @@ matrix-param = { path = "matrix-param" }
 matrix-util = { path = "matrix-util" }
 mcmc-util = { path = "mcmc-util" }
 plot-utils = { path = "plot-utils" }
+
+# candle-core with its CPU elementwise maps, strided copies and reductions
+# threaded over rayon; the crates.io build walks them on one core. One commit
+# on tag 0.10.1, the version candle-nn locks. Measured in
+# candle-util/examples/cpu_elementwise_bench.rs.
+[patch.crates-io]
+candle-core = { git = "https://github.com/causalpathlab/candle", branch = "cpu-parallel-elementwise-0.10.1" }
