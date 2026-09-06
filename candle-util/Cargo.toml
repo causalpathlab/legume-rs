@@ -52,3 +52,6 @@ default-features = false
 [dependencies.candle-nn]
 version = "0.10"
 default-features = false
+
+[dev-dependencies]
+mimalloc = "0.1"
