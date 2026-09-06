@@ -179,7 +179,7 @@ impl CustomOp3 for IndexAddRows {
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
         use candle_core::cuda_backend::WrapErr;
-        let (_d, h, n) = Self::check(dst_l, ids_l, src_l)?;
+        let (d, h, n) = Self::check(dst_l, ids_l, src_l)?;
         let (d0, d1) = contiguous_range(dst_l, "index_add_rows dst")?;
         let (i0, i1) = contiguous_range(ids_l, "index_add_rows ids")?;
         let (s0, s1) = contiguous_range(src_l, "index_add_rows src")?;
@@ -204,6 +204,7 @@ impl CustomOp3 for IndexAddRows {
             builder.arg(&out);
             candle_core::builder_arg!(builder, total as u32);
             candle_core::builder_arg!(builder, h as u32);
+            candle_core::builder_arg!(builder, d as u32);
             // SAFETY: the kernel reads `ids`/`src` and adds into `out`, all sized
             // by the checks above.
             unsafe { builder.launch(cfg) }.w()?;
@@ -238,13 +239,18 @@ impl CustomOp3 for IndexAddRows {
 const CUDA_SRC: &str = r#"
 extern "C" __global__ void index_add_rows_f32(
     const unsigned int *ids, const float *src, float *out,
-    const unsigned int total, const unsigned int h)
+    const unsigned int total, const unsigned int h, const unsigned int n_rows)
 {
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     unsigned int row = i / h;
+    unsigned int dst = ids[row];
+    // An id past the table would write outside it. The host path rejects one
+    // with an error; a kernel cannot, so it drops the element rather than
+    // corrupt memory.
+    if (dst >= n_rows) return;
     unsigned int col = i - row * h;
-    atomicAdd(out + ids[row] * h + col, src[i]);
+    atomicAdd(out + dst * h + col, src[i]);
 }
 "#;
 
