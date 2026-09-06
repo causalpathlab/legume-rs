@@ -653,13 +653,12 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f38e8dacffb6765fd9845c1c84686854e6322a8c3ff8582759361e48998024f"
+source = "git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "accelerate-src",
  "byteorder",
  "candle-kernels",
- "candle-metal-kernels",
+ "candle-metal-kernels 0.10.1 (git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25)",
  "candle-ug",
  "cudarc 0.19.4",
  "float8",
@@ -685,8 +684,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2ef09884eb8bf0f2e14d1d3ceac4bdb66761e16e89061a3a187505c7125229e"
+source = "git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "cudaforge",
 ]
@@ -707,6 +705,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-metal-kernels"
+version = "0.10.1"
+source = "git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
+dependencies = [
+ "half",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+ "once_cell",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "candle-nn"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -714,7 +726,7 @@ checksum = "0c0dfc1aff5552fdbae4ec94c877b16f2cf1424a07901f0ce5504d7b45adb172"
 dependencies = [
  "accelerate-src",
  "candle-core",
- "candle-metal-kernels",
+ "candle-metal-kernels 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "half",
  "libc",
  "num-traits",
@@ -728,8 +740,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b77d554274658f2492f7780748ae8324f0824a224c3b9647d54d03265f1d192"
+source = "git+https://github.com/causalpathlab/candle?rev=7d19a1d3a1b96b8409baad88700f96e80ec9da25#7d19a1d3a1b96b8409baad88700f96e80ec9da25"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -751,6 +762,7 @@ dependencies = [
  "log",
  "matrix-param",
  "matrix-util",
+ "mimalloc",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "ndarray",
@@ -3287,6 +3299,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3550,6 +3571,15 @@ dependencies = [
  "log",
  "objc",
  "paste",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -5025,6 +5055,7 @@ dependencies = [
  "matrix-param",
  "matrix-util",
  "mcmc-util",
+ "mimalloc",
  "nalgebra 0.34.2",
  "nalgebra-sparse",
  "ndarray",
