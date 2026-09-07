@@ -8,7 +8,7 @@ pub const VERBOSE_LOG_FILTER: &str = "info";
 /// Default `env_logger` filter when verbose mode is off.
 pub const QUIET_LOG_FILTER: &str = "warn";
 
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -416,11 +416,16 @@ pub fn open_buf_reader(input_file: &str) -> anyhow::Result<Box<dyn BufRead>> {
     // return buffered reader accordingly
     let ext = Path::new(input_file).extension().and_then(|x| x.to_str());
     match ext {
-        Some("gz") => {
-            // dbg!(input_file);
+        Some("gz") | Some("bgz") | Some("bgzf") => {
             let input_file = File::open(input_file)?;
-            let decoder = GzDecoder::new(input_file);
-            Ok(Box::new(BufReader::new(decoder)))
+            // `MultiGzDecoder`, not `GzDecoder`: BGZF and anything else
+            // written by `bgzip` is a concatenation of gzip members, and a
+            // decoder that stops after the first one drops the rest of the
+            // file silently, with no error and no short read.
+            let decoder = MultiGzDecoder::new(input_file);
+            // A wide buffer over the inflater: a body read one line at a time
+            // would otherwise refill through it every few kilobytes.
+            Ok(Box::new(BufReader::with_capacity(1 << 20, decoder)))
         }
         _ => {
             // dbg!(input_file);

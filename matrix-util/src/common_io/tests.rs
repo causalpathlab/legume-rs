@@ -1,12 +1,6 @@
 use super::*;
 use crate::parquet::{write_named_table, Column};
-
-/// Write `content` to a scratch file named `name` inside `dir`.
-fn scratch(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
-    let path = dir.path().join(name);
-    std::fs::write(&path, content).expect("write scratch file");
-    path.to_string_lossy().into_owned()
-}
+use crate::test_support::{scratch, scratch_gz, write_gz_members};
 
 fn names(v: &[Box<str>]) -> Vec<&str> {
     v.iter().map(std::convert::AsRef::as_ref).collect()
@@ -126,16 +120,6 @@ fn parquet_gene_celltype_keeps_only_the_gene_column() {
 // First-line header detection     //
 ////////////////////////////////////
 
-fn scratch_gz(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
-    use std::io::Write;
-    let path = dir.path().join(name);
-    let f = std::fs::File::create(&path).expect("create gz");
-    let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
-    enc.write_all(content.as_bytes()).expect("write gz");
-    enc.finish().expect("finish gz");
-    path.to_string_lossy().into_owned()
-}
-
 #[test]
 fn a_non_numeric_first_line_is_a_header() {
     let dir = tempfile::tempdir().unwrap();
@@ -183,4 +167,25 @@ fn r_missing_values_do_not_make_a_data_row_a_header() {
     let dir = tempfile::tempdir().unwrap();
     let f = scratch(&dir, "t.tsv", "g0\tNA\t2\ng1\t3\tN/A\n");
     assert_eq!(detect_header_row_numeric(&f, &['\t', ',']), None);
+}
+
+////////////////////////////////////
+// Multi-member gzip (BGZF)        //
+////////////////////////////////////
+
+/// `bgzip` output is a concatenation of independent gzip members, each with an
+/// `FEXTRA` field. A reader that stops at the end of the first member returns
+/// a prefix of the file with no error at all.
+#[test]
+fn a_multi_member_gzip_is_read_to_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("names.txt.gz");
+    write_gz_members(&path, "CD8A\nMS4A1\nLYZ\nNKG7\nGNLY\n", 3, true);
+
+    let got: Vec<String> = open_buf_reader(path.to_str().unwrap())
+        .unwrap()
+        .lines()
+        .map(|l| l.unwrap())
+        .collect();
+    assert_eq!(got, ["CD8A", "MS4A1", "LYZ", "NKG7", "GNLY"]);
 }

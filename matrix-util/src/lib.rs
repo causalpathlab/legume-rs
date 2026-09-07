@@ -33,6 +33,8 @@ pub mod sparse_stat;
 pub mod stop;
 pub mod tensor_io;
 pub mod tensor_util;
+#[cfg(test)]
+mod test_support;
 pub mod traits;
 pub mod umap;
 pub mod utils;
