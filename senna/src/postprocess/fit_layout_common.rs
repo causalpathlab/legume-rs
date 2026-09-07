@@ -1031,6 +1031,7 @@ fn preprocess_layout_data_recompute(
         collapsed_levels,
         mut proj_kn,
         cell_to_pb_per_level: _,
+        pb_tree: _,
         output_keep_idx: _,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &resolved.data_files,
@@ -1056,6 +1057,9 @@ fn preprocess_layout_data_recompute(
             feature_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()
         }),
+        // Layout only needs a marginal grid; the training tree is read from
+        // the manifest, never recomputed here.
+        pb_tree: None,
         ignore_batch: false,
         feature_mask_fn: None,
         pb_reference: None,

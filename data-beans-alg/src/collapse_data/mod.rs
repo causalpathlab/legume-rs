@@ -42,6 +42,10 @@ use pb_samples::{
 pub use pb_samples::{PbSampleCollection, PbSampleLayout};
 // Shared cross-batch pb-sample matching, reused by `refine_multilevel`.
 pub(crate) use pb_samples::bbknn_match_one_pbsamp;
+mod reassign_cells;
+pub use reassign_cells::ReassignCellsParams;
+mod pb_tree;
+pub use pb_tree::{BelowEdge, ContrastGene, PbTree, PbTreeParams, RootRecord, SplitRecord};
 mod refine;
 use refine::{
     compute_fine_to_coarse_mapping, compute_level_sort_dims, fine_to_coarse_from_refined,
@@ -58,6 +62,9 @@ pub use stats::{resample_and_optimize, CollapsedOut, CollapsedStat};
 pub struct MultilevelCollapseOut {
     pub levels: Vec<CollapsedOut>,
     pub cell_to_pb_per_level: Vec<Vec<usize>>,
+    /// The tree behind the finest partition, when it was grown (see
+    /// `MultilevelParams::pb_tree`).
+    pub pb_tree: Option<PbTree>,
 }
 
 /// Configuration for multi-level collapsing.
@@ -110,6 +117,11 @@ pub struct MultilevelParams {
     /// `a_stat`/`b_stat`; `MeanOnly` normally drops them per block to bound
     /// memory. Costs two extra `[D, S]` planes per finest-level parameter.
     pub keep_finest_stats: bool,
+    /// Grow the finest partition as a tree from the marginal top nodes:
+    /// reassign cells by likelihood, then bisect on residual components to
+    /// one leaf target per level. `None` keeps the marginal hash, bit-identical
+    /// to before this field existed.
+    pub pb_tree: Option<PbTreeParams>,
 }
 
 impl MultilevelParams {
@@ -125,8 +137,74 @@ impl MultilevelParams {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
+            pb_tree: None,
         }
     }
+}
+
+/// Finest codes and their level widths (finest-first). Without residual
+/// bits: the marginal sketch signs masked by `level_dims`. With them: the
+/// marginal top nodes (optionally re-sorted by `reassign_cells`) are the
+/// roots of a tree grown to one leaf target per level, `2^dim` for each of
+/// `level_dims`, and the nested levels are packed into prefix codes whose
+/// widths replace `level_dims`. Batch membership must already be
+/// registered on `data_vec`.
+fn finest_codes(
+    data_vec: &SparseIoVec,
+    proj_kn: &DMatrix<f32>,
+    level_dims: &[usize],
+    params: &MultilevelParams,
+) -> anyhow::Result<(Vec<usize>, Vec<usize>, Option<PbTree>)> {
+    let finest_dim = level_dims[0];
+    let nn = proj_kn.ncols();
+    let kk = proj_kn.nrows().min(finest_dim).min(nn);
+    let codes = binary_sort_columns(proj_kn, kk)?;
+    let Some(rb) = params.pb_tree.as_ref() else {
+        return Ok((codes, level_dims.to_vec(), None));
+    };
+    let coarse_bits = if level_dims.len() >= 2 {
+        *level_dims.last().expect("non-empty level dims")
+    } else {
+        stats::DEFAULT_COARSEST_SORT_DIM.min(kk)
+    };
+    let low_mask = (1usize << coarse_bits) - 1;
+    let n = data_vec.num_columns();
+    // Summary columns (carried reference, bulk) are not tree members; they
+    // become singleton pb-samples downstream regardless of their code.
+    let active: Vec<bool> = if data_vec.has_column_multiplicity() {
+        (0..n)
+            .map(|c| (data_vec.column_multiplicity(c) - 1.0).abs() <= f32::EPSILON)
+            .collect()
+    } else {
+        vec![true; n]
+    };
+    let low: Vec<usize> = codes.iter().map(|&c| c & low_mask).collect();
+    let (mut node, _) = crate::dc_poisson::compact_labels(&low);
+    let reassigned_cells = match rb.reassign_cells.as_ref() {
+        Some(cr) => {
+            let col_to_batch = data_vec.get_batch_membership(0..n);
+            let csc = data_vec.read_columns_csc(0..n)?;
+            reassign_cells::reassign_cells_to_nodes(
+                &csc,
+                &col_to_batch,
+                data_vec.num_batches().max(1),
+                &active,
+                &mut node,
+                cr,
+            )
+        }
+        None => 0,
+    };
+    for (c, nd) in node.iter_mut().enumerate() {
+        if !active[c] {
+            *nd = usize::MAX;
+        }
+    }
+    // Leaf targets per level, coarse to fine.
+    let targets: Vec<usize> = level_dims.iter().rev().map(|&d| 1usize << d).collect();
+    let (codes, widths, mut tree) = pb_tree::build_tree(data_vec, &node, &codes, &targets, rb)?;
+    tree.reassigned_cells = reassigned_cells;
+    Ok((codes, widths, Some(tree)))
 }
 
 /// Resolve [`MultilevelParams::anchor_batches`] / `bulk_batches` names to
@@ -554,10 +632,7 @@ where
     }
 
     let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-    let finest_dim = level_dims[0];
-    let nn = proj_kn.ncols();
-    let kk = proj_kn.nrows().min(finest_dim).min(nn);
-    let fine_codes = binary_sort_columns(proj_kn, kk)?;
+    let (fine_codes, level_dims, pb_tree) = finest_codes(data_vec, proj_kn, &level_dims, params)?;
     data_vec.assign_groups(&fine_codes, None);
 
     let group_to_cols = data_vec
@@ -599,6 +674,7 @@ where
         bulk_batches: bulk_batches.as_deref(),
         observe_panels: params.observe_panels,
         keep_finest_stats: params.keep_finest_stats,
+        pb_tree: pb_tree.as_ref(),
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -644,15 +720,23 @@ where
         cell_to_pb_per_level.len(),
         level_dims.len(),
     );
-    let finest_dim = level_dims[0];
-    let nn = proj_kn.ncols();
-    let kk = proj_kn.nrows().min(finest_dim).min(nn);
-    let fine_codes = binary_sort_columns(proj_kn, kk)?;
-    data_vec.assign_groups(&fine_codes, None);
+    // pb-samples are built from the INHERITED finest membership, so each
+    // pb-sample is one (batch, source finest group) intersection and the
+    // per-level vote below is unanimous by construction. Fresh marginal
+    // leaves would straddle a source partition whose high bits came from
+    // within-node residuals, and a modal vote over them would erode it.
+    // pb-samples are still needed for the cross-batch matched-stat path on
+    // multi-batch data; refinement is what we skip.
+    let inherited_finest = &cell_to_pb_per_level[0];
+    anyhow::ensure!(
+        inherited_finest.len() == proj_kn.ncols(),
+        "inherited cell_to_pb finest level has {} cells, data has {}",
+        inherited_finest.len(),
+        proj_kn.ncols()
+    );
+    let k_inherited = inherited_finest.iter().copied().max().map_or(0, |m| m + 1);
+    data_vec.assign_groups(&pad_numeric_labels(inherited_finest, k_inherited), None);
 
-    // pb-samples are still built locally — they're needed for the
-    // cross-batch matched-stat path on multi-batch data. Refinement is
-    // what we skip; pb-sample construction is cheap.
     let anchor_batches =
         resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
     let bulk_batches = resolve_named_batches(data_vec, "bulk", params.bulk_batches.as_deref())?;
@@ -676,10 +760,9 @@ where
     let pb_sample_to_cells = build_pb_sample_to_cells(&pb_samples.layout);
 
     // Synthesize a RefinedAssignment from the inherited cell→pb
-    // membership via per-pb-sample modal vote at each level. Modal vote
-    // lets us tolerate small misalignments between this run's
-    // hash-partition pb-samples and the source's; in practice pb-samps
-    // are tiny so most have a unanimous inherited label.
+    // membership per pb-sample at each level. The vote is unanimous at the
+    // finest level by construction; coarser levels vote in case the source
+    // hierarchy was not strictly nested.
     let num_levels = level_dims.len();
     let mut pbsamp_to_group: Vec<Vec<usize>> = Vec::with_capacity(num_levels);
     let mut num_groups_per_level: Vec<usize> = Vec::with_capacity(num_levels);
@@ -821,6 +904,7 @@ where
     Ok(MultilevelCollapseOut {
         levels: results,
         cell_to_pb_per_level: cell_to_pb_per_level_out,
+        pb_tree: None,
     })
 }
 
@@ -897,10 +981,8 @@ impl MultilevelCollapsingOps for SparseIoVec {
         );
 
         // Compute binary codes at finest resolution once
+        let (fine_codes, level_dims, pb_tree) = finest_codes(self, proj_kn, &level_dims, params)?;
         let finest_dim = level_dims[0];
-        let nn = proj_kn.ncols();
-        let kk = proj_kn.nrows().min(finest_dim).min(nn);
-        let fine_codes = binary_sort_columns(proj_kn, kk)?;
 
         // Partition at finest level
         self.assign_groups(&fine_codes, None);
@@ -938,6 +1020,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 bulk_batches: bulk_batches.as_deref(),
                 observe_panels: params.observe_panels,
                 keep_finest_stats: params.keep_finest_stats,
+                pb_tree: pb_tree.as_ref(),
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
@@ -1135,6 +1218,7 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 bulk_batches: None,
                 observe_panels: false,
                 keep_finest_stats: false,
+                pb_tree: None,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }
