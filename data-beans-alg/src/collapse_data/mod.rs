@@ -884,6 +884,10 @@ where
         results.push(out);
         prev_stat = coarse_stat;
     }
+    info!(
+        "Fitted pseudobulk posteriors for {} levels: k = {:?} (finest first)",
+        num_levels, refined.num_groups_per_level
+    );
 
     // Re-derive cell_to_pb_per_level from the post-modal-vote groups so
     // the returned struct is self-consistent — small drift vs the
