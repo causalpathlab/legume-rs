@@ -342,3 +342,40 @@ fn columns_concurrent_calls_share_cache() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// `from_mtx_file` streams the sorted triplets out as CSC slabs and then
+/// transposes on disk for the row index. Empty leading, interior and trailing
+/// rows and columns must all be tiled, and both orientations must read back
+/// the dense source exactly.
+#[test]
+fn from_mtx_file_tiles_empty_rows_and_columns_in_both_orientations() -> anyhow::Result<()> {
+    let (nr, nc) = (6, 7);
+    let mut raw = Array2::<f32>::zeros((nr, nc));
+    // columns 0, 3 and 6 empty; rows 0 and 5 empty
+    raw[[1, 1]] = 1.0;
+    raw[[4, 1]] = 2.0;
+    raw[[2, 2]] = 3.0;
+    raw[[1, 4]] = 4.0;
+    raw[[3, 4]] = 5.0;
+    raw[[4, 4]] = 6.0;
+    raw[[2, 5]] = 7.0;
+
+    let dir = tempfile::tempdir()?;
+    let mtx = dir.path().join("in.mtx.gz");
+    let mtx = mtx.to_str().unwrap();
+    let all_cols: Vec<usize> = (0..nc).collect();
+    let mut triplets = dense_to_triplets(&raw, &all_cols);
+    triplets.reverse(); // file order is not column-major
+    matrix_util::mtx_io::write_mtx_triplets(&triplets, nr, nc, mtx)?;
+
+    let backend = dir.path().join("out.zarr");
+    let sp = create_sparse_from_mtx_file(mtx, Some(backend.to_str().unwrap()), None)?;
+
+    let (_, _, by_col) = sp.read_triplets_by_columns(all_cols.clone())?;
+    assert_triplets_match(by_col, dense_to_triplets(&raw, &all_cols));
+
+    let all_rows: Vec<usize> = (0..nr).collect();
+    let (_, _, by_row) = sp.read_triplets_by_rows(all_rows.clone())?;
+    assert_triplets_match(by_row, dense_to_triplets_by_rows(&raw, &all_rows));
+    Ok(())
+}
