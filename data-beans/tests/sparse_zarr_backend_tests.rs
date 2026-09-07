@@ -274,7 +274,7 @@ fn assert_mtx_roundtrip(raw: &Array2<f32>) -> anyhow::Result<()> {
     let expected = dense_to_triplets(raw, &all_cols);
 
     let (triplets, shape) = read_mtx_triplets(path)?;
-    assert_eq!(shape, Some((nr, nc, expected.len())));
+    assert_eq!(shape, (nr, nc, expected.len()));
     assert_triplets_match(triplets, expected);
     Ok(())
 }

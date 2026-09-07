@@ -151,7 +151,7 @@ pub trait SparseIo: Sync + Send {
         if mtx_triplets.is_empty() {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
-        self.record_mtx_shape(mtx_shape)?;
+        self.record_mtx_shape(Some(mtx_shape))?;
         self.record_triplets_by_row(&mut mtx_triplets)
     }
 
@@ -163,7 +163,7 @@ pub trait SparseIo: Sync + Send {
         if mtx_triplets.is_empty() {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
-        self.record_mtx_shape(mtx_shape)?;
+        self.record_mtx_shape(Some(mtx_shape))?;
         self.record_triplets_by_col(&mut mtx_triplets)
     }
 
@@ -695,8 +695,10 @@ pub trait SparseIo: Sync + Send {
             return self.record_csr_dataset_backend(&[], &[], &csr_rowptr);
         }
 
-        row_col_val_triplets.par_sort_by_key(|&(_, col, _)| col);
-        row_col_val_triplets.par_sort_by_key(|&(row, _, _)| row);
+        // One in-place pass on the full key. A stable sort would allocate a
+        // scratch copy of the whole vector, and duplicate coordinates carry no
+        // meaning in coordinate format, so stability buys nothing.
+        row_col_val_triplets.par_sort_unstable_by_key(|&(row, col, _)| (row, col));
 
         let mut csr_rowptr = vec![];
         let mut csr_cols = vec![];
