@@ -477,6 +477,10 @@ pub(super) fn refine_and_collect_single_layer(
         results.push(out);
         prev_stat = coarse_stat;
     }
+    info!(
+        "Fitted pseudobulk posteriors for {} levels: k = {:?} (finest first)",
+        num_levels, refined.num_groups_per_level
+    );
 
     // Build per-level cell → pb mapping (finest-first) by walking
     // refined.pbsamp_to_group[level] through pb_sample_to_cells.

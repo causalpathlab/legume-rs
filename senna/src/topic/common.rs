@@ -688,6 +688,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();
     if let Some(batch_db) = finest_collapsed.delta.as_ref() {
         let outfile = args.out.to_string() + ".delta.parquet";
+        info!("Writing batch delta: {outfile}");
         let batch_names = data_vec.batch_names();
         let gene_names = data_vec.row_names()?;
         batch_db.to_melted_parquet(
