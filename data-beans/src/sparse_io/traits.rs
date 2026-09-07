@@ -23,6 +23,9 @@ use rustc_hash::FxHashMap as HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
 pub enum SparseIoBackend {
@@ -41,6 +44,36 @@ pub enum CsKey {
     CsrData,
     CsrIndices,
     CsrIndptr,
+}
+
+/// Entries per CSC slab handed to the backend while a sorted triplet vector is
+/// streamed out. Bounds the staging buffers; the triplets themselves are the
+/// only full-size structure alive at that point.
+const CSC_SLAB_NNZ: usize = 1 << 20;
+
+/// End of the slab that starts at triplet `start` of a column-major sorted
+/// vector: at least `slab_nnz` entries, or all that remain, and never splitting
+/// a column. Returns `(end, band_end_col)` -- the exclusive triplet index and
+/// the exclusive column bound -- so consecutive slabs tile `0..ncol` with no
+/// gap, empty columns included; the last slab runs to `ncol`.
+fn csc_slab_end(
+    triplets: &[(u64, u64, f32)],
+    start: usize,
+    slab_nnz: usize,
+    ncol: usize,
+) -> (usize, u64) {
+    debug_assert!(slab_nnz > 0);
+    let nnz = triplets.len();
+    let mut end = (start + slab_nnz).min(nnz);
+    while end < nnz && triplets[end].1 == triplets[end - 1].1 {
+        end += 1;
+    }
+    let band_end_col = if end == nnz {
+        ncol as u64
+    } else {
+        triplets[end].1
+    };
+    (end, band_end_col)
 }
 
 pub trait SparseIo: Sync + Send {
@@ -731,49 +764,62 @@ pub trait SparseIo: Sync + Send {
         self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
     }
 
+    /// Stream the triplets out as CSC slabs.
+    ///
+    /// After the one in-place sort the triplet vector is the only full-size
+    /// structure alive; the slab staging buffers are bounded by
+    /// [`CSC_SLAB_NNZ`], and the backend's streaming audits check the column
+    /// tiling and the appended count on the way through.
     fn record_triplets_by_col(
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
+        let nrow = self.num_rows().expect("should have `nrow`");
         let ncol = self.num_columns().expect("should have `ncol`");
+        let nnz = row_col_val_triplets.len();
 
-        if row_col_val_triplets.is_empty() {
+        if nnz == 0 {
             let csc_colptr = vec![0u64; ncol + 1];
             return self.record_csc_dataset_backend(&[], &[], &csc_colptr);
         }
 
-        row_col_val_triplets.par_sort_by_key(|&(row, _, _)| row);
-        row_col_val_triplets.par_sort_by_key(|&(_, col, _)| col);
+        // See `record_triplets_by_row` for why this is one unstable pass.
+        row_col_val_triplets.par_sort_unstable_by_key(|&(row, col, _)| (col, row));
 
-        let mut csc_colptr: Vec<u64> = vec![];
-        let mut csc_rows: Vec<u64> = vec![];
-        let mut csc_vals: Vec<f32> = vec![];
+        self.begin_streaming_csc((nrow, ncol, nnz))?;
 
-        let nnz = row_col_val_triplets.len();
+        let mut local_colptr: Vec<u64> = Vec::new();
+        let mut rows: Vec<u64> = Vec::with_capacity(CSC_SLAB_NNZ);
+        let mut vals: Vec<f32> = Vec::with_capacity(CSC_SLAB_NNZ);
 
-        let first = row_col_val_triplets[0].1 as usize;
-        csc_colptr.resize(first, 0);
+        let mut start = 0_usize;
+        let mut col_offset = 0_u64;
+        while (col_offset as usize) < ncol {
+            let (end, band_end_col) = csc_slab_end(row_col_val_triplets, start, CSC_SLAB_NNZ, ncol);
 
-        csc_colptr.push(0);
-        csc_rows.push(row_col_val_triplets[0].0);
-        csc_vals.push(row_col_val_triplets[0].2);
-
-        for i in 1..nnz {
-            let lb = row_col_val_triplets[i - 1].1;
-            let ub = row_col_val_triplets[i].1;
-            for _ in lb..ub {
-                csc_colptr.push(i as u64);
+            local_colptr.clear();
+            rows.clear();
+            vals.clear();
+            let mut i = start;
+            for col in col_offset..band_end_col {
+                local_colptr.push((i - start) as u64);
+                while i < end && row_col_val_triplets[i].1 == col {
+                    rows.push(row_col_val_triplets[i].0);
+                    vals.push(row_col_val_triplets[i].2);
+                    i += 1;
+                }
             }
-            csc_rows.push(row_col_val_triplets[i].0);
-            csc_vals.push(row_col_val_triplets[i].2);
+            debug_assert_eq!(
+                i, end,
+                "every entry of the band belongs to one of its columns"
+            );
+
+            self.append_csc_slab(col_offset, start as u64, &local_colptr, &rows, &vals)?;
+            start = end;
+            col_offset = band_end_col;
         }
 
-        let last = row_col_val_triplets[nnz - 1].1 as usize;
-        for _ in last..ncol {
-            csc_colptr.push(nnz as u64);
-        }
-
-        self.record_csc_dataset_backend(&csc_rows, &csc_vals, &csc_colptr)
+        self.finalize_streaming_csc()
     }
 
     /// CSR data structure in Zarr backend
