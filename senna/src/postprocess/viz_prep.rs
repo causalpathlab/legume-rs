@@ -182,6 +182,169 @@ pub(crate) fn write_cell_to_pb(
     Ok(path)
 }
 
+////////////////////////////
+// Residual-bit tree JSON //
+////////////////////////////
+
+#[derive(serde::Serialize)]
+struct PbTreeGeneView<'a> {
+    gene: &'a str,
+    loading: f32,
+    lfc: f32,
+    weight: f32,
+}
+
+#[derive(serde::Serialize)]
+struct PbTreeSplitView<'a> {
+    id: String,
+    depth: usize,
+    path: usize,
+    left: String,
+    right: String,
+    n_cells: usize,
+    n_left: usize,
+    n_right: usize,
+    n_left_per_batch: &'a [usize],
+    n_right_per_batch: &'a [usize],
+    n_genes: usize,
+    s1: f32,
+    s2: f32,
+    sigma: f32,
+    mp_edge: f32,
+    s1_over_edge: f32,
+    passes_edge: bool,
+    applied: bool,
+    llr_split: f64,
+    ve_ratio: f32,
+    pos: Vec<PbTreeGeneView<'a>>,
+    neg: Vec<PbTreeGeneView<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct PbTreeRootView<'a> {
+    root: usize,
+    n_cells: usize,
+    n_genes: usize,
+    ve_ratio_residual: f32,
+    ve_ratio_marginal: f32,
+    splits: Vec<PbTreeSplitView<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct PbTreeLeafView<'a> {
+    code: usize,
+    coarse_group: usize,
+    path: usize,
+    pb_ids: &'a [usize],
+}
+
+#[derive(serde::Serialize)]
+struct PbTreeView<'a> {
+    coarse_bits: usize,
+    depth: usize,
+    num_cells: usize,
+    num_batches: usize,
+    edge_margin: f32,
+    reassigned_cells: usize,
+    roots: Vec<PbTreeRootView<'a>>,
+    leaves: Vec<PbTreeLeafView<'a>>,
+}
+
+fn split_id(root: usize, depth: usize, path: usize) -> String {
+    format!("{root}:{depth}:{path}")
+}
+
+/// Write `{prefix}.pb_tree.json`: the tree behind the finest pseudobulk
+/// partition, with each split's contrast genes named. The full
+/// loading vectors stay out of the file; the top genes per side carry the
+/// interpretation.
+pub(crate) fn write_pb_tree(
+    prefix: &str,
+    tree: &data_beans_alg::collapse_data::PbTree,
+    gene_names: &[Box<str>],
+) -> anyhow::Result<String> {
+    let name = |g: usize| gene_names.get(g).map_or("", |n| n.as_ref());
+    let gene_view = |cg: &data_beans_alg::collapse_data::ContrastGene| PbTreeGeneView {
+        gene: name(cg.gene),
+        loading: cg.loading,
+        lfc: cg.lfc,
+        weight: cg.weight,
+    };
+    let roots: Vec<PbTreeRootView<'_>> = tree
+        .roots
+        .iter()
+        .map(|nd| PbTreeRootView {
+            root: nd.root,
+            n_cells: nd.n_cells,
+            n_genes: nd.n_genes,
+            ve_ratio_residual: nd.ve_ratio_residual,
+            ve_ratio_marginal: nd.ve_ratio_marginal,
+            splits: nd
+                .splits
+                .iter()
+                .map(|sp| PbTreeSplitView {
+                    id: split_id(sp.root, sp.depth, sp.path),
+                    depth: sp.depth,
+                    path: sp.path,
+                    left: split_id(sp.root, sp.depth + 1, sp.path << 1),
+                    right: split_id(sp.root, sp.depth + 1, (sp.path << 1) | 1),
+                    n_cells: sp.n_cells,
+                    n_left: sp.n_left,
+                    n_right: sp.n_right,
+                    n_left_per_batch: &sp.n_left_per_batch,
+                    n_right_per_batch: &sp.n_right_per_batch,
+                    n_genes: sp.n_genes,
+                    s1: sp.s1,
+                    s2: sp.s2,
+                    sigma: sp.sigma,
+                    mp_edge: sp.mp_edge,
+                    s1_over_edge: if sp.mp_edge > 0.0 {
+                        sp.s1 / sp.mp_edge
+                    } else {
+                        f32::NAN
+                    },
+                    passes_edge: sp.passes_edge,
+                    applied: sp.applied,
+                    llr_split: sp.llr_split,
+                    ve_ratio: sp.ve_ratio,
+                    pos: sp.pos.iter().map(gene_view).collect(),
+                    neg: sp.neg.iter().map(gene_view).collect(),
+                })
+                .collect(),
+        })
+        .collect();
+    let low_mask = (1usize << tree.coarse_bits) - 1;
+    let leaves: Vec<PbTreeLeafView<'_>> = tree
+        .leaf_to_finest_pb
+        .iter()
+        .map(|(code, pbs)| PbTreeLeafView {
+            code: *code,
+            coarse_group: code & low_mask,
+            path: code >> tree.coarse_bits,
+            pb_ids: pbs,
+        })
+        .collect();
+    let view = PbTreeView {
+        coarse_bits: tree.coarse_bits,
+        depth: tree.depth,
+        num_cells: tree.num_cells,
+        num_batches: tree.num_batches,
+        edge_margin: tree.edge_margin,
+        reassigned_cells: tree.reassigned_cells,
+        roots,
+        leaves,
+    };
+    let path = format!("{prefix}.pb_tree.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&view)?)?;
+    let n_splits: usize = tree.roots.iter().map(|n| n.splits.len()).sum();
+    info!(
+        "Wrote pseudobulk tree: {} roots, {} splits → {path}",
+        tree.roots.len(),
+        n_splits
+    );
+    Ok(path)
+}
+
 /// Apply SVD preprocessing: reduce matrix to top N components.
 /// Returns U * diag(S) where (U, S, V) = rsvd(mat, `n_components`).
 pub(super) fn apply_svd_preprocessing(mat: &Mat, n_components: usize) -> anyhow::Result<Mat> {

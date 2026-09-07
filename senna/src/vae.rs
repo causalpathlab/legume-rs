@@ -225,6 +225,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         collapsed_levels,
         proj_kn,
         cell_to_pb_per_level,
+        pb_tree,
         output_keep_idx,
     } = load_and_collapse(&LoadCollapseArgs {
         data_files: &data_files,
@@ -241,6 +242,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         must_train_file: args.hvg.must_train_features.as_deref(),
         refine: Some(args.collapse.pb_refine.to_params()),
+        pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
         qc_block_size: args.block_size,
@@ -444,6 +446,12 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     } else {
         false
     };
+    let has_pb_tree = if let Some(ref tree) = pb_tree {
+        crate::postprocess::viz_prep::write_pb_tree(&args.out, tree, &gene_names)?;
+        true
+    } else {
+        false
+    };
 
     let input: Vec<String> = data_files
         .iter()
@@ -476,6 +484,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,
+        has_pb_tree,
         velocity_suffix: None,
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
