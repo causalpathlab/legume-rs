@@ -262,6 +262,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
+            pb_tree: args.collapse.pb_tree_params(),
         },
     )?;
     // Reverse so training goes coarse→fine: coarsest (fewest samples)
@@ -517,6 +518,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
+        has_pb_tree: false,
     })?;
 
     info!("Done");

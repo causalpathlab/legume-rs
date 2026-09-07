@@ -700,6 +700,12 @@ pub struct RunOutputs {
     pub delta_feature_embedding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_to_pb: Option<String>,
+    /// `{out}.pb_tree.json` — the tree behind the finest
+    /// pseudobulk partition: per node, the recursive splits with their
+    /// contrast genes, noise-edge verdicts and likelihood ratios. Written
+    /// by the topic-family fits whose collapse rewrote the high bits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pb_tree: Option<String>,
 }
 
 impl RunOutputs {
@@ -1333,6 +1339,9 @@ pub struct RunDescription<'a> {
     /// Set by topic-family fits that ran `collapse_columns_multilevel_*`
     /// so a downstream `--from` chain can skip the refinement step.
     pub has_cell_to_pb: bool,
+    /// True if the run emits `{basename}.pb_tree.json` — see
+    /// [`RunOutputs::pb_tree`].
+    pub has_pb_tree: bool,
 }
 
 /// Write `{prefix}.senna.json` describing the run that just finished.
@@ -1407,6 +1416,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if desc.has_cell_to_pb {
         m.outputs.cell_to_pb = Some(format!("{basename}.cell_to_pb.parquet"));
+    }
+    if desc.has_pb_tree {
+        m.outputs.pb_tree = Some(format!("{basename}.pb_tree.json"));
     }
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 

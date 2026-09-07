@@ -242,6 +242,7 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         has_model: true,
         has_cell_proj: false,
         has_cell_to_pb: false,
+        has_pb_tree: false,
         pb_gene_suffix: None,
         pb_latent_suffix: None,
         pb_reference_suffix: None,

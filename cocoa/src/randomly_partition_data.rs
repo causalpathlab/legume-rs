@@ -164,6 +164,7 @@ impl RandPartitionOps for SparseIoVec {
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
+            pb_tree: None,
         };
 
         // collapse_columns_multilevel_vec:

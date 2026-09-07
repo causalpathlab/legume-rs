@@ -568,6 +568,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         velocity_factor_suffix: None,
         delta_feature_embedding_suffix: None,
         has_cell_to_pb: false,
+        has_pb_tree: false,
     })?;
 
     // The phase-1 pseudobulk embeddings, with each pseudobulk's batch: the

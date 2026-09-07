@@ -249,6 +249,8 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) observe_panels: bool,
     /// See `MultilevelParams::keep_finest_stats`.
     pub(super) keep_finest_stats: bool,
+    /// Tree behind `fine_codes`, when the finest partition was grown.
+    pub(super) pb_tree: Option<&'a PbTree>,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -281,6 +283,7 @@ pub(super) fn refine_and_collect_single_layer(
         bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
+        pb_tree: _,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -489,9 +492,28 @@ pub(super) fn refine_and_collect_single_layer(
         cell_to_pb_per_level.push(c2g);
     }
 
+    // Tree: attach the finest pb ids behind every leaf code.
+    let pb_tree = ctx.pb_tree.map(|tree| {
+        let mut tree = tree.clone();
+        let mut leaf_pbs: HashMap<usize, std::collections::BTreeSet<usize>> = HashMap::default();
+        if let Some(finest) = cell_to_pb_per_level.first() {
+            for (c, &code) in fine_codes.iter().enumerate() {
+                leaf_pbs.entry(code).or_default().insert(finest[c]);
+            }
+        }
+        let mut leaves: Vec<(usize, Vec<usize>)> = leaf_pbs
+            .into_iter()
+            .map(|(code, pbs)| (code, pbs.into_iter().collect()))
+            .collect();
+        leaves.sort_by_key(|x| x.0);
+        tree.leaf_to_finest_pb = leaves;
+        tree
+    });
+
     Ok(MultilevelCollapseOut {
         levels: results,
         cell_to_pb_per_level,
+        pb_tree,
     })
 }
 
@@ -520,6 +542,7 @@ pub(super) fn refine_and_collect_stack(
         bulk_batches: _,
         observe_panels: _,
         keep_finest_stats: _,
+        pb_tree: _,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
