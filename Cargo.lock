@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -3541,7 +3541,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "anyhow",
  "approx",
