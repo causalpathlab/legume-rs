@@ -147,10 +147,15 @@ plot-utils = { path = "plot-utils" }
 # candle-util/examples/cpu_elementwise_bench.rs.
 [patch.crates-io]
 candle-core = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
-# The Metal kernels must come from the same checkout as `candle-core`. The
-# fork's `candle-core` links its own in-tree copy, so leaving this one on
-# crates.io puts two `candle_metal_kernels` in the graph and `candle-nn`
-# fails to type-check under `--features metal` (`&Buffer` from one copy is a
-# different type from `&Buffer` in the other). `candle-kernels` (CUDA) needs
-# no entry: nothing outside `candle-core` depends on it.
-candle-metal-kernels = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
+# `candle-nn` is unmodified upstream at this rev -- its `src/` diffs clean
+# against the published crate -- and comes from the fork for one reason: it
+# carries an optional `candle-metal-kernels` of its own. Reached from two
+# different sources, those resolve to two distinct crates and a `metal` build
+# stops type-checking (`&Buffer` from one copy is a different type from
+# `&Buffer` in the other). Metal is the Makefile's default backend on macOS,
+# so that build has to keep working. Patching `candle-metal-kernels` directly
+# fixes the same collision, but it is a patch on an *optional* dependency:
+# absent from the graph on every build that leaves Metal off, which is what
+# cargo reports as "patch was not used in the crate graph". `candle-kernels`
+# (CUDA) needs no entry: nothing outside `candle-core` depends on it.
+candle-nn = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
