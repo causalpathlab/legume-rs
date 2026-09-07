@@ -24,16 +24,26 @@ fn dict_from_approx(points: &[Vec<f32>]) -> ColumnDict<usize> {
     super::backend::build_column_dict(views, names, 0)
 }
 
-/// Independent ground-truth top-k by exact L2 (excluding self).
-fn brute_others(points: &[Vec<f32>], q: usize, k: usize) -> Vec<usize> {
-    let mut scored: Vec<(usize, f32)> = points
+/// Independent ground truth for the top-`k` others of `points[q]`: Euclidean
+/// distances by direct differences in double precision, nearest first, ties
+/// by index. Shared by the dictionary tests and the all-pairs kernel tests.
+pub(super) fn brute_others(points: &[Vec<f32>], q: usize, k: usize) -> (Vec<usize>, Vec<f32>) {
+    let mut scored: Vec<(f64, usize)> = points
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != q)
-        .map(|(i, p)| (i, l2_simd(p, &points[q])))
+        .map(|(i, p)| {
+            let d2: f64 = p
+                .iter()
+                .zip(&points[q])
+                .map(|(&a, &b)| (a as f64 - b as f64).powi(2))
+                .sum();
+            (d2.sqrt(), i)
+        })
         .collect();
-    scored.sort_by(|a, b| a.1.total_cmp(&b.1));
-    scored.into_iter().take(k).map(|(i, _)| i).collect()
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.truncate(k);
+    scored.into_iter().map(|(d, i)| (i, d as f32)).unzip()
 }
 
 #[test]
@@ -62,7 +72,7 @@ fn approx_recall_vs_exact() {
     for q in (0..points.len()).step_by(23) {
         // search_others returns exactly k *others* (self excluded).
         let (got, _) = dict.search_others(&q, k).unwrap();
-        let truth = brute_others(&points, q, k);
+        let truth = brute_others(&points, q, k).0;
         let truth: std::collections::HashSet<usize> = truth.into_iter().collect();
         hits += got.iter().filter(|i| truth.contains(i)).count();
         total += k;
@@ -80,7 +90,7 @@ fn exact_path_is_perfect() {
     for q in 0..points.len() {
         // search_others returns exactly k *others* (self excluded).
         let (got, dists) = dict.search_others(&q, k).unwrap();
-        let truth = brute_others(&points, q, k);
+        let truth = brute_others(&points, q, k).0;
         assert_eq!(
             got, truth,
             "exact backend disagreed with brute force at {q}"

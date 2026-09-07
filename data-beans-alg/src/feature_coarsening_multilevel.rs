@@ -41,7 +41,7 @@ use crate::dc_poisson::{
 use crate::feature_coarsening::{compute_feature_coarsening, FeatureCoarsening};
 use crate::union_find::UnionFind;
 use log::{debug, info};
-use matrix_util::knn_match::ColumnDict;
+use matrix_util::knn::all_pairs::knn_rows_l2;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -54,9 +54,8 @@ use std::cmp::Ordering;
 //////////////////
 
 /// Per-feature top-k KNN cache shared between the bottom-up coarsening pass
-/// and top-down refinement. Built once via [`Self::from_sketch`]; the HNSW
-/// index is dropped after queries complete, so only the result vectors are
-/// retained.
+/// and top-down refinement. Built once via [`Self::from_sketch`], which keeps
+/// only the result vectors.
 pub struct FeatureKnnContext {
     /// Per-feature top-k neighbor indices (excludes self).
     pub neighbors: Vec<Vec<usize>>,
@@ -65,43 +64,27 @@ pub struct FeatureKnnContext {
 }
 
 impl FeatureKnnContext {
-    /// Build from a `[D, S]` pseudobulk sketch using L2 distance over the
-    /// sample-dimension profile of each feature. Queries are parallelized
-    /// across features; the HNSW index is dropped before returning.
+    /// Build from a `[D, S]` pseudobulk sketch: the exact `knn_k` nearest
+    /// other features of every feature by L2 distance over the sample
+    /// profiles, nearest first. Features at a non-finite distance (a
+    /// degenerate profile) are dropped from every list.
     pub fn from_sketch(sketch_ds: &DMatrix<f32>, knn_k: usize) -> anyhow::Result<Self> {
         let d = sketch_ds.nrows();
         if d == 0 {
             return Err(anyhow::anyhow!("sketch has zero features"));
         }
-        // `search_others` returns exactly this many neighbours (self excluded),
-        // clamped to the number of other features available.
-        let knn_query = knn_k.min(d.saturating_sub(1)).max(1);
-
-        let sketch_sd = sketch_ds.transpose();
-        let names: Vec<usize> = (0..d).collect();
-        let knn_dict =
-            ColumnDict::<usize>::from_dvector_views(sketch_sd.column_iter().collect(), names);
-
-        let pairs: Vec<(Vec<usize>, Vec<f32>)> = (0..d)
-            .into_par_iter()
-            .map(|f| -> anyhow::Result<(Vec<usize>, Vec<f32>)> {
-                let (nbrs, dists) = knn_dict.search_others(&f, knn_query)?;
-                let mut keep_n = Vec::with_capacity(nbrs.len());
-                let mut keep_d = Vec::with_capacity(dists.len());
-                for (n, dist) in nbrs.into_iter().zip(dists) {
-                    // Filter NaN/Inf — degenerate (e.g. all-zero) profiles can
-                    // produce non-finite cosine/L2 distances that break sort
-                    // ordering and union-find tiebreaks downstream.
-                    if n != f && dist.is_finite() {
-                        keep_n.push(n);
-                        keep_d.push(dist);
-                    }
-                }
-                Ok((keep_n, keep_d))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        let (neighbors, distances) = pairs.into_iter().unzip();
+        let knn_query = knn_k.max(1);
+        info!(
+            "Feature kNN over {d} features x {} samples, k={knn_query} ...",
+            sketch_ds.ncols()
+        );
+        let (mut neighbors, mut distances) = knn_rows_l2(sketch_ds, knn_query);
+        // Non-finite distances come last, so the filter is a truncation.
+        for (nb, ds) in neighbors.iter_mut().zip(distances.iter_mut()) {
+            let cut = ds.iter().position(|d| !d.is_finite()).unwrap_or(ds.len());
+            nb.truncate(cut);
+            ds.truncate(cut);
+        }
         Ok(Self {
             neighbors,
             distances,

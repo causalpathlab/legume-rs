@@ -103,3 +103,55 @@ fn duplicate_level_targets_share_one_snapshot() {
     assert_eq!(ml.levels.len(), 3);
     assert_eq!(ml.levels[0].num_coarse, ml.levels[1].num_coarse);
 }
+
+/////////////////////////////////////////
+// Feature kNN: exact, Euclidean, and //
+// clean of non-finite neighbours     //
+/////////////////////////////////////////
+
+#[test]
+fn feature_knn_is_the_kernel_with_euclidean_distances() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(21);
+    let x = DMatrix::<f32>::from_fn(120, 9, |_, _| rng.random_range(0.0f32..3.0));
+    let k = 16;
+    let knn = FeatureKnnContext::from_sketch(&x, k).unwrap();
+    let (kernel_nb, kernel_ds) = knn_rows_l2(&x, k);
+    assert_eq!(knn.num_features(), 120);
+    assert_eq!(
+        knn.neighbors, kernel_nb,
+        "the wrapper passes the kernel through"
+    );
+    assert_eq!(knn.distances, kernel_ds);
+    for f in 0..120 {
+        for (&j, &d) in knn.neighbors[f].iter().zip(&knn.distances[f]) {
+            let direct = (x.row(f) - x.row(j)).norm();
+            assert!(
+                (d - direct).abs() < 1e-4,
+                "feature {f} -> {j}: {d} vs {direct}"
+            );
+        }
+        assert!(
+            knn.distances[f].windows(2).all(|w| w[0] <= w[1]),
+            "feature {f} not nearest-first"
+        );
+    }
+}
+
+#[test]
+fn feature_knn_drops_non_finite_neighbours() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(22);
+    let mut x = DMatrix::<f32>::from_fn(40, 5, |_, _| rng.random_range(0.0f32..3.0));
+    x[(9, 1)] = f32::NAN;
+    let knn = FeatureKnnContext::from_sketch(&x, 6).unwrap();
+    assert!(
+        knn.neighbors[9].is_empty(),
+        "the NaN feature keeps no neighbours"
+    );
+    for f in 0..40 {
+        assert!(
+            !knn.neighbors[f].contains(&9),
+            "feature {f} lists the NaN feature"
+        );
+        assert!(knn.distances[f].iter().all(|d| d.is_finite()));
+    }
+}

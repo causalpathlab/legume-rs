@@ -885,7 +885,7 @@ where
         prev_stat = coarse_stat;
     }
     info!(
-        "Fitted pseudobulk posteriors for {} levels: k = {:?} (finest first)",
+        "Fitted pseudobulk posteriors for {} inherited levels: k = {:?} (finest first)",
         num_levels, refined.num_groups_per_level
     );
 
