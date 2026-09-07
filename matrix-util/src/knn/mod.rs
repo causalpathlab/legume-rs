@@ -34,6 +34,11 @@
 //! The approximate backend internally wraps the query slice in a `VecPoint`
 //! (an `Arc` over `query.len()` floats — not the point set), so callers never
 //! construct one themselves.
+//!
+//! When every point is itself a query — the all-pairs neighbours of one set —
+//! neither backend fits: an index is built once and amortised over nothing, and
+//! a scan per query is scalar `O(n²·d)`. [`all_pairs::knn_rows_l2`] does that
+//! case exactly, as blocked GEMMs.
 
 use rustc_hash::FxHashMap as HashMap;
 use std::fmt::{Debug, Display};
@@ -41,6 +46,7 @@ use std::sync::Arc;
 
 use instant_distance::Search;
 
+pub mod all_pairs;
 mod backend;
 mod exact;
 pub mod metric;
