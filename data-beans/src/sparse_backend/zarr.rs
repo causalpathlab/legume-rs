@@ -182,9 +182,10 @@ impl SparseMtxData {
         ret.read_column_indptr()?;
 
         if index_by_row == Some(true) {
-            info!("importing mtx file by row");
-            ret.import_mtx_file_by_row(mtx_file)?;
-            ret.read_row_indptr()?;
+            // Transpose the CSC just written rather than parse the file a
+            // second time: bounded memory, and the mtx is inflated once.
+            info!("building row index from the column index");
+            ret.build_csr_from_csc_streaming()?;
         }
 
         info!("created sparse backend from {}", mtx_file);
