@@ -46,34 +46,36 @@ pub enum CsKey {
     CsrIndptr,
 }
 
-/// Entries per CSC slab handed to the backend while a sorted triplet vector is
-/// streamed out. Bounds the staging buffers; the triplets themselves are the
-/// only full-size structure alive at that point.
-const CSC_SLAB_NNZ: usize = 1 << 20;
+/// Entries per slab handed to the backend while a sorted triplet vector is
+/// streamed out as CSC or CSR. Bounds the staging buffers; the triplets
+/// themselves are the only full-size structure alive at that point.
+const SLAB_NNZ: usize = 1 << 20;
 
-/// End of the slab that starts at triplet `start` of a column-major sorted
-/// vector: at least `slab_nnz` entries, or all that remain, and never splitting
-/// a column. Returns `(end, band_end_col)` -- the exclusive triplet index and
-/// the exclusive column bound -- so consecutive slabs tile `0..ncol` with no
-/// gap, empty columns included; the last slab runs to `ncol`.
-fn csc_slab_end(
+/// End of the slab that starts at triplet `start` of a vector sorted on the
+/// major axis `major` (column for CSC, row for CSR): at least `slab_nnz`
+/// entries, or all that remain, and never splitting a major index. Returns
+/// `(end, band_end)` -- the exclusive triplet index and the exclusive major
+/// bound -- so consecutive slabs tile `0..n_major` with no gap, empty
+/// columns or rows included; the last slab runs to `n_major`.
+fn slab_end(
     triplets: &[(u64, u64, f32)],
     start: usize,
     slab_nnz: usize,
-    ncol: usize,
+    n_major: usize,
+    major: impl Fn(&(u64, u64, f32)) -> u64,
 ) -> (usize, u64) {
     debug_assert!(slab_nnz > 0);
     let nnz = triplets.len();
     let mut end = (start + slab_nnz).min(nnz);
-    while end < nnz && triplets[end].1 == triplets[end - 1].1 {
+    while end < nnz && major(&triplets[end]) == major(&triplets[end - 1]) {
         end += 1;
     }
-    let band_end_col = if end == nnz {
-        ncol as u64
+    let band_end = if end == nnz {
+        n_major as u64
     } else {
-        triplets[end].1
+        major(&triplets[end])
     };
-    (end, band_end_col)
+    (end, band_end)
 }
 
 pub trait SparseIo: Sync + Send {
@@ -176,28 +178,25 @@ pub trait SparseIo: Sync + Send {
     // `mtx` related functions //
     /////////////////////////////
 
-    /// Read mtx file and populate the data into HDF5 for faster row-by-row access
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_file_by_row(&mut self, mtx_file: &str) -> anyhow::Result<()> {
+    /// Read an mtx file once and populate the backend: the column (CSC) index
+    /// always, the row (CSR) index as well when `index_by_row`. Both are
+    /// streamed out of the same triplet vector, so the file is inflated once
+    /// and the triplets are the only full-size structure alive.
+    /// * `mtx_file`: mtx file to be read into the backend
+    fn import_mtx_file(&mut self, mtx_file: &str, index_by_row: bool) -> anyhow::Result<()> {
         let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
         info!("read mtx file: {}", mtx_file);
         if mtx_triplets.is_empty() {
             return Err(anyhow::anyhow!("No data in mtx file"));
         }
         self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_row(&mut mtx_triplets)
-    }
-
-    /// Read mtx file and populate the data into HDF5 for faster column-by-column access
-    /// * `mtx_file`: mtx file to be read into HDF5 backend
-    fn import_mtx_file_by_col(&mut self, mtx_file: &str) -> anyhow::Result<()> {
-        let (mut mtx_triplets, mtx_shape) = read_mtx_triplets(mtx_file)?;
-        info!("read mtx file: {}", mtx_file);
-        if mtx_triplets.is_empty() {
-            return Err(anyhow::anyhow!("No data in mtx file"));
+        info!("recording the column index");
+        self.record_triplets_by_col(&mut mtx_triplets)?;
+        if index_by_row {
+            info!("recording the row index");
+            self.record_triplets_by_row(&mut mtx_triplets)?;
         }
-        self.record_mtx_shape(Some(mtx_shape))?;
-        self.record_triplets_by_col(&mut mtx_triplets)
+        Ok(())
     }
 
     /////////////////////////////////
@@ -716,14 +715,17 @@ pub trait SparseIo: Sync + Send {
 
     fn record_mtx_shape(&mut self, mtx_shape: Option<(usize, usize, usize)>) -> anyhow::Result<()>;
 
-    /// Helper function to add triplets to zarr backend by row (CSR format)
+    /// Stream the triplets out as CSR slabs; the row-major twin of
+    /// [`record_triplets_by_col`](Self::record_triplets_by_col).
     fn record_triplets_by_row(
         &mut self,
         row_col_val_triplets: &mut Vec<(u64, u64, f32)>,
     ) -> anyhow::Result<()> {
         let nrow = self.num_rows().expect("should have `nrow`");
+        let ncol = self.num_columns().expect("should have `ncol`");
+        let nnz = row_col_val_triplets.len();
 
-        if row_col_val_triplets.is_empty() {
+        if nnz == 0 {
             let csr_rowptr = vec![0u64; nrow + 1];
             return self.record_csr_dataset_backend(&[], &[], &csr_rowptr);
         }
@@ -733,42 +735,45 @@ pub trait SparseIo: Sync + Send {
         // meaning in coordinate format, so stability buys nothing.
         row_col_val_triplets.par_sort_unstable_by_key(|&(row, col, _)| (row, col));
 
-        let mut csr_rowptr = vec![];
-        let mut csr_cols = vec![];
-        let mut csr_vals = vec![];
+        self.begin_streaming_csr((nrow, ncol, nnz))?;
 
-        let nnz = row_col_val_triplets.len();
+        let mut local_rowptr: Vec<u64> = Vec::new();
+        let mut cols: Vec<u64> = Vec::with_capacity(SLAB_NNZ);
+        let mut vals: Vec<f32> = Vec::with_capacity(SLAB_NNZ);
 
-        let first = row_col_val_triplets[0].0 as usize;
-        csr_rowptr.resize(first, 0);
+        let mut start = 0_usize;
+        let mut row_offset = 0_u64;
+        while (row_offset as usize) < nrow {
+            let (end, band_end_row) =
+                slab_end(row_col_val_triplets, start, SLAB_NNZ, nrow, |t| t.0);
 
-        csr_rowptr.push(0);
-        csr_cols.push(row_col_val_triplets[0].1);
-        csr_vals.push(row_col_val_triplets[0].2);
-
-        for i in 1..nnz {
-            let lb = row_col_val_triplets[i - 1].0;
-            let ub = row_col_val_triplets[i].0;
-            for _ in lb..ub {
-                csr_rowptr.push(i as u64);
+            local_rowptr.clear();
+            cols.clear();
+            vals.clear();
+            let mut i = start;
+            for row in row_offset..band_end_row {
+                local_rowptr.push((i - start) as u64);
+                while i < end && row_col_val_triplets[i].0 == row {
+                    cols.push(row_col_val_triplets[i].1);
+                    vals.push(row_col_val_triplets[i].2);
+                    i += 1;
+                }
             }
-            csr_cols.push(row_col_val_triplets[i].1);
-            csr_vals.push(row_col_val_triplets[i].2);
+            debug_assert_eq!(i, end, "every entry of the band belongs to one of its rows");
+
+            self.append_csr_slab(row_offset, start as u64, &local_rowptr, &cols, &vals)?;
+            start = end;
+            row_offset = band_end_row;
         }
 
-        let last = row_col_val_triplets[nnz - 1].0 as usize;
-        for _ in last..nrow {
-            csr_rowptr.push(nnz as u64);
-        }
-
-        self.record_csr_dataset_backend(&csr_cols, &csr_vals, &csr_rowptr)
+        self.finalize_streaming_csr()
     }
 
     /// Stream the triplets out as CSC slabs.
     ///
     /// After the one in-place sort the triplet vector is the only full-size
     /// structure alive; the slab staging buffers are bounded by
-    /// [`CSC_SLAB_NNZ`], and the backend's streaming audits check the column
+    /// [`SLAB_NNZ`], and the backend's streaming audits check the column
     /// tiling and the appended count on the way through.
     fn record_triplets_by_col(
         &mut self,
@@ -789,13 +794,14 @@ pub trait SparseIo: Sync + Send {
         self.begin_streaming_csc((nrow, ncol, nnz))?;
 
         let mut local_colptr: Vec<u64> = Vec::new();
-        let mut rows: Vec<u64> = Vec::with_capacity(CSC_SLAB_NNZ);
-        let mut vals: Vec<f32> = Vec::with_capacity(CSC_SLAB_NNZ);
+        let mut rows: Vec<u64> = Vec::with_capacity(SLAB_NNZ);
+        let mut vals: Vec<f32> = Vec::with_capacity(SLAB_NNZ);
 
         let mut start = 0_usize;
         let mut col_offset = 0_u64;
         while (col_offset as usize) < ncol {
-            let (end, band_end_col) = csc_slab_end(row_col_val_triplets, start, CSC_SLAB_NNZ, ncol);
+            let (end, band_end_col) =
+                slab_end(row_col_val_triplets, start, SLAB_NNZ, ncol, |t| t.1);
 
             local_colptr.clear();
             rows.clear();
@@ -1006,6 +1012,109 @@ pub trait SparseIo: Sync + Send {
             "finalize_streaming_csc: {appended} entries appended but {nnz} \
              declared — the difference reads back as fill values wearing real \
              entries' positions"
+        );
+        Ok(())
+    }
+
+    /// Begin a streaming CSR build for a sparse matrix of known shape; the
+    /// row-major twin of [`begin_streaming_csc`](Self::begin_streaming_csc).
+    fn begin_streaming_csr(&mut self, shape: (usize, usize, usize)) -> anyhow::Result<()> {
+        self.reset_streamed_nnz();
+        let (nrow, _, nnz) = shape;
+        self.record_mtx_shape(Some(shape))?;
+        self.cs_create(CsKey::CsrData, nnz)?;
+        self.cs_create(CsKey::CsrIndices, nnz)?;
+        self.cs_create(CsKey::CsrIndptr, nrow + 1)?;
+        Ok(())
+    }
+
+    /// Append one contiguous CSR row band; the row-major twin of
+    /// [`append_csc_slab`](Self::append_csc_slab), with the same audits.
+    ///
+    /// * `row_offset` — global row index where this band starts
+    /// * `nnz_offset` — global nnz offset where this band's values land
+    /// * `local_rowptr` — length `batch_nrow`, values in `[0, batch_nnz]`,
+    ///   will be shifted by `nnz_offset` before writing
+    /// * `col_indices` — length `batch_nnz`
+    /// * `values`      — length `batch_nnz`
+    fn append_csr_slab(
+        &mut self,
+        row_offset: u64,
+        nnz_offset: u64,
+        local_rowptr: &[u64],
+        col_indices: &[u64],
+        values: &[f32],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            col_indices.len() == values.len(),
+            "append_csr_slab: {} column indices vs {} values",
+            col_indices.len(),
+            values.len()
+        );
+        anyhow::ensure!(
+            local_rowptr.first().copied() == Some(0) || local_rowptr.is_empty(),
+            "append_csr_slab: local_rowptr must start at 0"
+        );
+        anyhow::ensure!(
+            local_rowptr.windows(2).all(|w| w[0] <= w[1]),
+            "append_csr_slab: local_rowptr must be monotone non-decreasing"
+        );
+        if let Some(&last) = local_rowptr.last() {
+            anyhow::ensure!(
+                last <= values.len() as u64,
+                "append_csr_slab: rowptr claims {last} entries, slab holds {}",
+                values.len()
+            );
+        }
+        if let Some(ncol) = self.num_columns() {
+            if let Some(&bad) = col_indices.iter().find(|&&c| c >= ncol as u64) {
+                anyhow::bail!(
+                    "append_csr_slab: column index {bad} outside the {ncol}-column matrix"
+                );
+            }
+        }
+        for (r, &start) in local_rowptr.iter().enumerate() {
+            let end = local_rowptr
+                .get(r + 1)
+                .copied()
+                .unwrap_or(values.len() as u64) as usize;
+            anyhow::ensure!(
+                col_indices[start as usize..end]
+                    .windows(2)
+                    .all(|w| w[0] < w[1]),
+                "append_csr_slab: columns within row {} of this band must be \
+                 strictly ascending — repeated columns usually mean duplicate \
+                 (row, col) coordinates in the source",
+                row_offset as usize + r
+            );
+        }
+
+        let shifted: Vec<u64> = local_rowptr.iter().map(|&p| p + nnz_offset).collect();
+        self.cs_write_u64(CsKey::CsrIndptr, row_offset, &shifted)?;
+        self.cs_write_u64(CsKey::CsrIndices, nnz_offset, col_indices)?;
+        self.cs_write_f32(CsKey::CsrData, nnz_offset, values)?;
+        self.note_streamed_nnz(values.len() as u64);
+        Ok(())
+    }
+
+    /// Finalize CSR streaming: write the indptr sentinel at position `nrow`,
+    /// load the row index, and check the appended count against the declared
+    /// nnz -- the one violation the written indptr cannot reveal.
+    fn finalize_streaming_csr(&mut self) -> anyhow::Result<()> {
+        let nrow = self
+            .num_rows()
+            .ok_or_else(|| anyhow::anyhow!("nrow not set before finalize_streaming_csr"))?;
+        let nnz = self
+            .num_non_zeros()
+            .ok_or_else(|| anyhow::anyhow!("nnz not set before finalize_streaming_csr"))?;
+        self.cs_write_u64(CsKey::CsrIndptr, nrow as u64, &[nnz as u64])?;
+        self.read_row_indptr()?;
+
+        let appended = self.streamed_nnz();
+        anyhow::ensure!(
+            appended == nnz as u64,
+            "finalize_streaming_csr: {appended} entries appended but {nnz} \
+             declared — the slabs did not cover the matrix"
         );
         Ok(())
     }
