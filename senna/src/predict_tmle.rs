@@ -165,7 +165,6 @@ pub fn iterate_delta_dense(
     for iter in 0..n_iters {
         let delta_tensor_coarse = build_delta_tensor_at_encoder_dim(&delta, coarsening, dev)?;
         let jobs = create_jobs(ntot, 0, Some(minibatch_size));
-        let njobs = jobs.len() as u64;
 
         let accumulate = |block: (usize, usize)| {
             accumulate_block_dense(
@@ -182,24 +181,15 @@ pub fn iterate_delta_dense(
                 adj_method,
             )
         };
-        // Each block runs the encoder on `dev`. Off the CPU that is one stream
-        // and one cuBLAS handle, so the blocks go one at a time on this thread,
-        // as `topic::common::process_blocks` does; the pool is for CPU blocks.
-        let chunk_sums: Vec<DeltaSums> = if dev.is_cpu() {
-            jobs.par_iter()
-                .progress_with(new_progress_bar(njobs))
-                .map(|&block| accumulate(block))
-                .collect::<anyhow::Result<Vec<_>>>()?
-        } else {
-            let bar = new_progress_bar(njobs);
-            let mut out = Vec::with_capacity(jobs.len());
-            for &block in &jobs {
-                out.push(accumulate(block)?);
-                bar.inc(1);
-            }
-            bar.finish_and_clear();
-            out
-        };
+        // Each block runs the encoder on `dev`, so the device rule applies:
+        // one block in flight off the CPU. Shared with every other block
+        // runner through `map_blocks`.
+        let max_conc = crate::topic::common::device_concurrency(
+            dev.is_cpu(),
+            rayon::current_num_threads(),
+        );
+        let chunk_sums: Vec<DeltaSums> =
+            crate::topic::common::map_blocks(&jobs, max_conc, accumulate)?;
 
         let mut total = DeltaSums::zeros(beta_dk_full.nrows(), n_batches);
         for s in &chunk_sums {

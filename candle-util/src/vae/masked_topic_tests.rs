@@ -121,7 +121,7 @@ fn epoch_accumulator_sums_steps_on_device_and_reads_once() {
     ];
     for (l, u, r) in steps {
         let t = |v: f32| Tensor::new(v, &dev).unwrap();
-        acc.add(&t(l), &t(u), Some(&t(r)), 2.0, 1.0).unwrap();
+        acc.add(&t(l), &t(u), Some(&t(r)), 1.0).unwrap();
     }
     let (llik, rms) = acc.read().unwrap();
     assert!(

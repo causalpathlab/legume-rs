@@ -265,17 +265,13 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
 
     let (max_abs_corr, max_vif) = corr_and_vif(&ctr_gram);
 
-    // Double centering in closed form: subtracting each row's mean across
-    // columns is `E·P` with `P = I − 11ᵀ/h`, so that table's Gram is
-    // `P·(EᵀE/n)·P` and its column means are `P·μ`; column centering is then
-    // the same rank-one update as above. All off what the row pass already
-    // holds — no second pass over `n`.
-    let proj = DMatrix::<f64>::from_fn(h, h, |i, j| {
-        (if i == j { 1.0 } else { 0.0 }) - 1.0 / h as f64
-    });
-    let row_gram = &proj * &raw_gram * &proj;
-    let row_mean = &proj * nalgebra::DVector::<f64>::from_vec(mean.clone());
-    let double_gram = &row_gram - &row_mean * row_mean.transpose();
+    // Double centering in closed form. Row centering is `E·P` with the
+    // symmetric idempotent `P = I − 11ᵀ/h`, so the doubly centred Gram is
+    // `P·(EᵀE/n − μμᵀ)·P` = `P·ctr_gram·P` — the column-centred Gram the
+    // block above already holds, projected on both sides. No second pass
+    // over `n`, and no separate row-centred mean to carry.
+    let proj = DMatrix::<f64>::identity(h, h) - DMatrix::<f64>::repeat(h, h, 1.0 / h as f64);
+    let double_gram = &proj * &ctr_gram * &proj;
 
     EmbeddingGeometry {
         n_rows: n,

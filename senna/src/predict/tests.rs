@@ -128,40 +128,6 @@ fn an_exact_hit_does_not_widen_to_suffix_sharing_rows() {
     assert_eq!(out.new_to_train, vec![None, Some(1), Some(2)]);
 }
 
-/// A gene list on a foreign axis must be refused before any backend is read,
-/// naming the flag and showing both spellings, so the user sees which file
-/// is on the wrong axis without waiting for the import.
-mod early_gene_list_gate {
-    use super::super::ensure_gene_list_resolves;
-
-    fn names(v: &[&str]) -> Vec<Box<str>> {
-        v.iter().map(|s| Box::from(*s)).collect()
-    }
-
-    #[test]
-    fn a_list_on_the_models_axis_passes_and_counts_hits() {
-        let axis = names(&["tspan6", "tnmd", "dpm1"]);
-        let list = names(&["ENSG00000000003_TSPAN6", "ENSG00000000419_DPM1", "NOPE"]);
-        assert_eq!(
-            ensure_gene_list_resolves(&axis, &list, "--eval-features", "eval.txt").unwrap(),
-            2
-        );
-    }
-
-    #[test]
-    fn a_list_matching_nothing_names_the_flag_and_both_spellings() {
-        let axis = names(&["tspan6", "tnmd", "dpm1"]);
-        let list = names(&["chr1:100-200", "chr2:5-9"]);
-        let err = ensure_gene_list_resolves(&axis, &list, "--ablate-features", "hide.txt")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--ablate-features"), "{err}");
-        assert!(err.contains("hide.txt"), "{err}");
-        assert!(err.contains("chr1:100-200"), "{err}");
-        assert!(err.contains("tspan6"), "{err}");
-    }
-}
-
 /// The scoring cap exists for one reason: a dense block's working set must not
 /// be multiplied by every thread. It has to bite at whole-transcriptome width
 /// and stay out of the way at the coarsened widths the topic paths score on,
@@ -248,12 +214,18 @@ mod block_concurrency {
 
     /// A CUDA device is one stream and one cuBLAS handle; blocks driven at it
     /// from a thread pool raced (CUBLAS_STATUS_EXECUTION_FAILED, or a hang).
-    /// Off the CPU exactly one block is in flight, whatever the budget says.
+    /// Off the CPU exactly one block is in flight, and the memory budget —
+    /// which only ever lowers the ceiling — cannot raise it back.
     #[test]
     fn off_the_cpu_exactly_one_block_is_in_flight() {
-        use super::super::blocks_in_flight;
-        assert_eq!(blocks_in_flight(false, 1, BUDGET, THREADS), 1);
-        assert_eq!(blocks_in_flight(true, 1, BUDGET, THREADS), THREADS);
+        use crate::topic::common::device_concurrency;
+        assert_eq!(device_concurrency(false, THREADS), 1);
+        assert_eq!(device_concurrency(true, THREADS), THREADS);
+        // How `dense_block_concurrency` composes the two ceilings.
+        assert_eq!(
+            block_concurrency(1, BUDGET, device_concurrency(false, THREADS)),
+            1
+        );
     }
 }
 

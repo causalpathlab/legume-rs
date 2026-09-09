@@ -17,13 +17,13 @@ pub const MODEL_TYPE_INDEXED_MASKED: &str = "indexed_topic_masked";
 /// stick-breaking simplex instead of softmax — ordered, exchangeability-broken
 /// topics with a self-pruning tail. Inference is encoder-only.
 pub const MODEL_TYPE_MASKED_SBP: &str = "masked_sbp";
-/// Masked **Gaussian VAE** (`senna masked-vae`): same masked-imputation ETM
-/// pipeline as [`MODEL_TYPE_INDEXED_MASKED`], but the encoder emits a
-/// reparameterized Gaussian latent `z` (no simplex softmax) regularized by a KL
-/// term. The NB head's per-topic intensities are `softmax(z)`, so the decoder
-/// coupling matches the simplex heads and only the reparameterized sample plus
-/// its KL differ. Inference is encoder-only (posterior-mean `z`), and the
-/// **stored latent is the raw `z`** — see [`latent_to_theta`].
+/// Masked **unconstrained-latent** model (`senna masked-vae`): same
+/// masked-imputation ETM pipeline as [`MODEL_TYPE_INDEXED_MASKED`], and — since
+/// the KL bottleneck was removed — the same deterministic forward and the same
+/// gradients. The NB head's per-topic intensities are `softmax(z)`, so the
+/// decoder coupling matches the simplex heads exactly. What differs is the
+/// **stored latent: the raw pre-softmax `z`**, not `log θ` — see
+/// [`latent_to_theta`]. Inference is encoder-only.
 pub const MODEL_TYPE_MASKED_VAE: &str = "masked_vae";
 /// scVI-style Gaussian VAE (`senna vae`): a Gaussian (unconstrained continuous)
 /// latent `z` from a [`candle_util::encoder::GaussianEncoder`] paired with a
@@ -116,9 +116,12 @@ pub fn masked_head_label(head: LatentHead) -> &'static str {
     }
 }
 
-/// Decoder-type label persisted for a masked head. The NB ETM decoder is
-/// identical across the two deterministic simplex heads; only the Gaussian VAE
-/// gets a distinct label.
+/// Decoder-type label persisted for a masked head.
+///
+/// The NB ETM decoder is now identical across all THREE heads — the Gaussian
+/// head kept its own label from when it carried a KL, and the label is on disk
+/// in every masked-vae artifact, so it stays. Do not read it as a decoder
+/// difference: dispatch on the head, not on this string.
 pub fn masked_decoder_type(head: LatentHead) -> &'static str {
     match head {
         LatentHead::Gaussian => "nb_masked_vae",

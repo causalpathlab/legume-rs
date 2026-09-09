@@ -714,7 +714,8 @@ pub struct MaskedTopicArgs {
         help = "Per-name canonicalization across input backends",
         long_help = "How row names align across `--data-files`.\n\
                      \n\
-                     `auto` — sniff sampled row names and pick one of the rules below.\n\
+                     `auto` — sniff EACH file's row names, pick a rule per file,\n\
+                     and reconcile them into one rule for the load.\n\
                      It picks locus-overlap if ≥50% parse as `chr:start-end`.\n\
                      It picks gene if ≥50% contain `_`, and exact otherwise (default).\n\
                      \n\
