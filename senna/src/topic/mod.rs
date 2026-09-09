@@ -13,3 +13,4 @@ pub(crate) mod train;
 pub(crate) mod train_joint;
 pub(crate) mod train_masked;
 pub(crate) mod warm_start;
+pub(crate) mod gene_axis;
