@@ -270,24 +270,22 @@ enum Commands {
 
     #[command(
         name = "masked-vae",
-        about = "Train a masked-imputation Gaussian VAE (BERT-style, continuous latent).",
-        long_about = "Masked-imputation VAE.\n\
-                      It is the Gaussian-latent sibling of `masked-topic`.\n\
+        about = "Train a masked-imputation model with an unconstrained latent (BERT-style).",
+        long_about = "Masked-imputation model with an unconstrained latent.\n\
+                      It is the continuous-latent sibling of `masked-topic`.\n\
                       The pipeline is the same. PB-collapse training, a shared ρ embedding,\n\
                       an NB ETM head, encoder-only inference.\n\
                       \n\
                       The encoder differs.\n\
-                      It emits a reparameterized Gaussian latent z. There is no simplex softmax;\n\
-                      a KL term regularizes it. That is a true variational bottleneck.\n\
-                      exp(z) drives the NB head's per-topic intensities,\n\
-                      μ_g = ℓ·Σ_t exp(z_t)·β_{t,g}.\n\
+                      It emits a raw latent z with no simplex softmax.\n\
+                      The decoder reads it through log_softmax,\n\
+                      and the latent written out is the raw z.\n\
                       \n\
-                      Masked objective and KL together train that embedding,\n\
-                      which stays unconstrained and continuous.\n\
-                      The masked decoder is reused unchanged.\n\
-                      Held-out genes are imputed.\n\
-                      The masked objective keeps the latent from collapsing.\n\
-                      The KL alone does not.\n\
+                      It is deterministic and KL-free, like masked-topic and masked-sbp.\n\
+                      The masked objective is the regularizer.\n\
+                      A KL bottleneck used to sit on top of it;\n\
+                      at its default weight it pulled z to zero and every θ to uniform,\n\
+                      so it is gone.\n\
                       \n\
                       Writes the same artifacts as `masked-topic`.\n\
                       The NB objective is the only one available.",

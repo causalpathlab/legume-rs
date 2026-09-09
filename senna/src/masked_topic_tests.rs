@@ -20,3 +20,33 @@ fn adj_method_is_listed_in_help() {
         .expect("the masked family accepts --adj-method");
     assert!(!arg.is_hide_set(), "--adj-method must not be hidden from --help");
 }
+
+/// The masked objective is the regularizer; `masked-vae` no longer weighs a KL.
+mod no_kl {
+    use super::super::MaskedTopicArgs;
+    use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
+    use clap::Parser;
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: MaskedTopicArgs,
+    }
+
+    #[test]
+    fn kl_weight_is_not_a_flag_any_more() {
+        let r = Cli::try_parse_from(["senna-masked-vae", "d.zarr", "-o", "out", "--kl-weight", "0.1"]);
+        assert!(r.is_err(), "--kl-weight must be rejected, not silently ignored");
+    }
+
+    #[test]
+    fn a_fit_recorded_with_a_kl_weight_still_replays() {
+        let mut m = RunManifest::new(RunKind::MaskedVae, "old");
+        m.train_args = Some(TrainArgsRecord {
+            senna_version: "0.14.2".into(),
+            args: serde_json::json!({ "data_files": ["d.zarr"], "out": "old", "kl_weight": 1.0, "n_latent_topics": 9 }),
+        });
+        let a: MaskedTopicArgs = m.train_args_as("old").expect("a recorded kl_weight is ignored");
+        assert_eq!(a.n_latent_topics, 9);
+    }
+}

@@ -523,37 +523,12 @@ impl IndexedEmbeddingEncoder {
         crate::vae::stick_breaking_log_simplex(&z_mean_nk)
     }
 
-    /// Latent Gaussian params `(z_mean, z_lnvar)` from the **visible-pooled**
-    /// masked input — the masked analogue of [`Self::latent_gaussian_params_indexed`]
-    /// (pools only the visible genes, like [`Self::forward_indexed_masked`]).
-    pub fn latent_gaussian_params_masked(
-        &self,
-        indices: &Tensor,
-        values: &Tensor,
-        values_null: Option<&Tensor>,
-        values_mean: Option<&Tensor>,
-        visible_mask: &Tensor,
-        train: bool,
-    ) -> Result<(Tensor, Tensor)> {
-        let bn_nl = self.masked_hidden(
-            indices,
-            values,
-            values_null,
-            values_mean,
-            visible_mask,
-            train,
-        )?;
-        let z_mean_nk = soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
-        let z_lnvar_nk = soft_clamp(&self.z_lnvar.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
-        Ok((z_mean_nk, z_lnvar_nk))
-    }
-
-    /// **Gaussian** masked-encoder forward → `(z [N,K], KL [N])`. Visible-pooled
-    /// like [`Self::forward_indexed_masked`], but returns the reparameterized
-    /// **Gaussian** latent (no softmax — unconstrained continuous factors) plus
-    /// the Gaussian KL. This is the masked-VAE bottleneck: the masked-imputation
-    /// objective still drives reconstruction, and the KL regularizes `z` toward
-    /// `N(0, I)`. At eval (`train = false`) `z` is the posterior mean.
+    /// **Gaussian** masked-encoder forward → `z [N, K]`, the unconstrained
+    /// latent. Visible-pooled like [`Self::forward_indexed_masked`] with the
+    /// softmax left off, and deterministic: no reparameterized draw and no KL.
+    /// The masked-imputation objective is the regularizer on this path, as it
+    /// is for the simplex heads; a KL toward `N(0, I)` on top of it pulled `z`
+    /// to zero and every row's θ to uniform at the default weight.
     pub fn forward_indexed_masked_gaussian(
         &self,
         indices: &Tensor,
@@ -562,8 +537,8 @@ impl IndexedEmbeddingEncoder {
         values_mean: Option<&Tensor>,
         visible_mask: &Tensor,
         train: bool,
-    ) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params_masked(
+    ) -> Result<Tensor> {
+        let bn_nl = self.masked_hidden(
             indices,
             values,
             values_null,
@@ -571,8 +546,7 @@ impl IndexedEmbeddingEncoder {
             visible_mask,
             train,
         )?;
-        let z_nk = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
-        Ok((z_nk, gaussian_kl_loss(&z_mean_nk, &z_lnvar_nk)?))
+        soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)
     }
 
     /// Compute latent Gaussian parameters from packed indexed input.
