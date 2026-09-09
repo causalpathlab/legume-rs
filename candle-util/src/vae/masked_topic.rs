@@ -92,14 +92,13 @@ pub enum MaskedLikelihood {
 /// the per-topic log-intensity `log θ` the NB/multinomial imputation head reads.
 ///
 /// `Softmax` and `StickBreaking` are both deterministic point estimates with no
-/// KL (the masked objective alone prevents collapse); they differ only in the
-/// simplex parameterization. `Gaussian` is the true variational bottleneck.
+/// KL (the masked objective alone prevents collapse); they differ only in how
+/// the latent reaches the decoder. `Gaussian` is deterministic too: it used to
+/// reparameterize and add a KL toward `N(0, I)`, and at the default weight
+/// that pulled `z` to zero and every row's θ to uniform.
 ///
 /// This is a pure identity tag — a `Copy`, round-trippable value used by the
-/// train dispatch, the inference dispatch, and model persistence alike. The
-/// Gaussian KL weight is a train-only hyperparameter and lives on
-/// [`MaskedTrainOpts::kl_weight`], not in the tag, so the inference/persistence
-/// sites never fabricate a placeholder weight.
+/// train dispatch, the inference dispatch, and model persistence alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LatentHead {
     /// Deterministic simplex `log_softmax(z)` — exchangeable topics. The legacy
@@ -109,9 +108,9 @@ pub enum LatentHead {
     /// broken topics with a self-pruning tail. Same no-KL objective as
     /// `Softmax`, only the final simplex map differs.
     StickBreaking,
-    /// Reparameterized **Gaussian** latent `z` (no simplex projection) plus a
-    /// `kl_weight · KL(z ‖ N(0, I))` term. `exp(z)` drives the NB head's
-    /// per-topic intensities, so the decoder is reused unchanged.
+    /// Unconstrained **Gaussian-style** latent `z` (no simplex projection in
+    /// the encoder). The decoder reads it through `log_softmax` (see
+    /// [`decoder_log_theta`]); the latent written out is the raw `z`.
     Gaussian,
 }
 
@@ -119,11 +118,9 @@ pub struct MaskedTrainOpts {
     pub mask_schedule: MaskSchedule,
     /// Per-gene likelihood for the masked imputation loss.
     pub likelihood: MaskedLikelihood,
-    /// Latent head: simplex (softmax / stick-breaking, deterministic no-KL) or
-    /// Gaussian (reparameterized + KL). See [`LatentHead`].
+    /// Latent head: simplex (softmax / stick-breaking) or unconstrained
+    /// Gaussian-style `z`; all deterministic, none with a KL. See [`LatentHead`].
     pub latent: LatentHead,
-    /// KL weight `β` for the Gaussian latent. Ignored unless `latent == Gaussian`.
-    pub kl_weight: f64,
     /// Train on **Poisson draws** from the pseudobulk rate rows, redrawn every
     /// epoch, instead of the rates themselves.
     ///
@@ -169,7 +166,6 @@ impl Default for MaskedTrainOpts {
             mask_schedule: MaskSchedule::Fixed,
             likelihood: MaskedLikelihood::Nb,
             latent: LatentHead::Softmax,
-            kl_weight: 1.0,
             poisson_thin: false,
             seed: 42,
             query: None,
@@ -295,54 +291,44 @@ pub struct MaskedEncoderInput<'a> {
 }
 
 /// Run the masked encoder under `head`, returning the raw per-topic latent
-/// `[N, K]` (`log θ` for the simplex heads, `z` for Gaussian) and — only for
-/// `Gaussian` — the per-cell KL `[N]`.
+/// `[N, K]` (`log θ` for the simplex heads, `z` for Gaussian).
 ///
 /// Single source of truth for the head → encoder-forward dispatch shared by
 /// [`train_masked`] and senna's encoder-only inference. The encoder itself
 /// stays head-agnostic (three plain forwards, no `LatentHead` dependency).
-/// Callers own their post-processing: the trainer smooths the simplex heads
-/// (`kl.is_none()`) and adds the KL term; inference discards the KL.
+/// Every head is deterministic and none carries a KL; the trainer's only
+/// post-processing is the decoder coupling in [`decoder_log_theta`].
 pub fn masked_encode(
     encoder: &IndexedEmbeddingEncoder,
     head: LatentHead,
     input: &MaskedEncoderInput,
     train: bool,
-) -> candle_core::Result<(Tensor, Option<Tensor>)> {
+) -> candle_core::Result<Tensor> {
     match head {
-        LatentHead::Gaussian => {
-            let (z, kl) = encoder.forward_indexed_masked_gaussian(
-                input.indices,
-                input.values,
-                input.values_null,
-                input.values_mean,
-                input.visible_mask,
-                train,
-            )?;
-            Ok((z, Some(kl)))
-        }
-        LatentHead::StickBreaking => Ok((
-            encoder.forward_indexed_masked_stick(
-                input.indices,
-                input.values,
-                input.values_null,
-                input.values_mean,
-                input.visible_mask,
-                train,
-            )?,
-            None,
-        )),
-        LatentHead::Softmax => Ok((
-            encoder.forward_indexed_masked(
-                input.indices,
-                input.values,
-                input.values_null,
-                input.values_mean,
-                input.visible_mask,
-                train,
-            )?,
-            None,
-        )),
+        LatentHead::Gaussian => encoder.forward_indexed_masked_gaussian(
+            input.indices,
+            input.values,
+            input.values_null,
+            input.values_mean,
+            input.visible_mask,
+            train,
+        ),
+        LatentHead::StickBreaking => encoder.forward_indexed_masked_stick(
+            input.indices,
+            input.values,
+            input.values_null,
+            input.values_mean,
+            input.visible_mask,
+            train,
+        ),
+        LatentHead::Softmax => encoder.forward_indexed_masked(
+            input.indices,
+            input.values,
+            input.values_null,
+            input.values_mean,
+            input.visible_mask,
+            train,
+        ),
     }
 }
 
@@ -356,8 +342,8 @@ pub fn masked_encode(
 /// then drove itself into the ±8 clamp, where the gradient is exactly zero, and
 /// the encoder stopped learning for the rest of the run while the likelihood
 /// trace still looked alive. Projecting with `log_softmax` makes masked-VAE
-/// differ from masked-topic in exactly one respect — the reparameterized sample
-/// and its KL.
+/// differ from masked-topic in exactly one respect — the latent it writes out
+/// is the raw `z`, not `log θ`.
 ///
 /// This is the *decoder coupling only*. The latent written to
 /// `{out}.latent.parquet` stays the raw Gaussian `z`; see [`LatentHead`].
@@ -409,8 +395,6 @@ struct StepLoss {
     llik_sum: Tensor,
     /// Number of scored units.
     units_sum: Tensor,
-    /// Σ KL over the rows, Gaussian head only.
-    kl_sum: Option<Tensor>,
     /// Σ w·r² over the queries, query decoder only.
     r2_sum: Option<Tensor>,
 }
@@ -419,7 +403,6 @@ struct StepLoss {
 pub(crate) struct EpochAccum {
     llik: Tensor,
     scored: Tensor,
-    kl: Tensor,
     r2: Tensor,
     pub rows: f32,
     pub queries: f32,
@@ -431,7 +414,6 @@ impl EpochAccum {
         Ok(Self {
             llik: zero()?,
             scored: zero()?,
-            kl: zero()?,
             r2: zero()?,
             rows: 0.0,
             queries: 0.0,
@@ -444,16 +426,12 @@ impl EpochAccum {
         &mut self,
         llik_sum: &Tensor,
         units_sum: &Tensor,
-        kl_sum: Option<&Tensor>,
         r2_sum: Option<&Tensor>,
         rows: f32,
         queries: f32,
     ) -> candle_core::Result<()> {
         self.llik = (&self.llik + llik_sum.detach())?;
         self.scored = (&self.scored + units_sum.detach())?;
-        if let Some(k) = kl_sum {
-            self.kl = (&self.kl + k.detach())?;
-        }
         if let Some(r) = r2_sum {
             self.r2 = (&self.r2 + r.detach())?;
         }
@@ -462,9 +440,9 @@ impl EpochAccum {
         Ok(())
     }
 
-    /// `(llik per scored unit, KL per row, rms residual per query)` — the one
-    /// host read of the epoch.
-    pub(crate) fn read(&self) -> candle_core::Result<(f32, f32, f32)> {
+    /// `(llik per scored unit, rms residual per query)` — the one host read
+    /// of the epoch.
+    pub(crate) fn read(&self) -> candle_core::Result<(f32, f32)> {
         let per = |t: &Tensor, n: f32| -> candle_core::Result<f32> {
             Ok(if n > 0.0 {
                 t.to_scalar::<f32>()? / n
@@ -475,7 +453,6 @@ impl EpochAccum {
         let scored = self.scored.to_scalar::<f32>()?;
         Ok((
             per(&self.llik, scored)?,
-            per(&self.kl, self.rows)?,
             per(&self.r2, self.queries)?.sqrt(),
         ))
     }
@@ -497,12 +474,11 @@ fn masked_minibatch_loss(
     target: &LevelTarget,
 ) -> anyhow::Result<StepLoss> {
     let base = &mb.base;
-    // Masked-VAE: reparameterized Gaussian `z` (no softmax) + KL.
-    // Masked-topic: deterministic simplex `log θ` (softmax or
-    // stick-breaking), no KL. In all cases the NB head reads this as
-    // its per-topic intensity log — `exp(z)` for the VAE, `θ` for
-    // the topic models.
-    let (raw_z, kl_opt) = masked_encode(
+    // Masked-VAE: unconstrained `z` (no softmax in the encoder).
+    // Masked-topic: simplex `log θ` (softmax or stick-breaking). All
+    // deterministic, none with a KL; `decoder_log_theta` below is the only
+    // head-specific step before the NB head.
+    let raw_z = masked_encode(
         encoder,
         opts.latent,
         &MaskedEncoderInput {
@@ -553,13 +529,6 @@ fn masked_minibatch_loss(
     // Per scored unit, so every penalty below is on the same scale as the
     // number the epoch log reports.
     let mut loss = llik_sum.neg()?.div(&units_sum.clamp(1.0, f64::INFINITY)?)?;
-    // Masked-VAE KL bottleneck: β · mean_N KL(z ‖ N(0, I)). `kl_opt`
-    // is `Some` only on the Gaussian head, so no head re-check needed.
-    let mut kl_sum = None;
-    if let Some(kl) = kl_opt {
-        kl_sum = Some(kl.sum_all()?);
-        loss = (loss + kl.mean_all()?.affine(opts.kl_weight, 0.0)?)?;
-    }
     // Query head: each sampled gene reads the visible slots through the query
     // decoder and is scored at its module's rate times its share times the
     // residual. The pool above and this read see the same slots through the
@@ -601,7 +570,6 @@ fn masked_minibatch_loss(
         loss,
         llik_sum,
         units_sum,
-        kl_sum,
         r2_sum,
     })
 }
@@ -817,7 +785,6 @@ pub fn train_masked(
                 acc.add(
                     &fwd.llik_sum,
                     &fwd.units_sum,
-                    fwd.kl_sum.as_ref(),
                     fwd.r2_sum.as_ref(),
                     rows,
                     ep.n_queries[b],
@@ -832,9 +799,11 @@ pub fn train_masked(
             }
         }
 
-        let (per_metric, per_kl, rms_r) = acc.read()?;
+        let (per_metric, rms_r) = acc.read()?;
         llik_trace.push(per_metric);
-        kl_trace.push(per_kl);
+        // No head on this path carries a KL; the column is kept so the trace
+        // parquet has the same schema as the dense trainer's.
+        kl_trace.push(0.0);
         prog_bar.set_message(format!("llik={per_metric:.3}"));
         prog_bar.inc(1);
         // A skipped step means the gradient overflowed. Parameters are intact
@@ -849,11 +818,6 @@ pub fn train_masked(
             );
         }
         if log::log_enabled!(log::Level::Info) {
-            let kl_msg = if matches!(opts.latent, LatentHead::Gaussian) {
-                format!(" kl/cell={per_kl:.4}")
-            } else {
-                String::new()
-            };
             // Root mean square of the residual per query: how much the query
             // decoder is carrying beyond the mixture. Near zero on data without
             // co-expression beyond the topics; the number to watch on real data.
@@ -866,7 +830,7 @@ pub fn train_masked(
             // module it did not see completely — so this is not comparable
             // across module maps, nor to a run that scored only the context's
             // masked share.
-            info!("[epoch {epoch}] masked llik/unit={per_metric:.4}{kl_msg}{r_msg}");
+            info!("[epoch {epoch}] masked llik/unit={per_metric:.4}{r_msg}");
         }
         if config.stop.load(Ordering::SeqCst) {
             prog_bar.finish_and_clear();

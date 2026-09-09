@@ -454,16 +454,6 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "KL weight β for the Gaussian latent (masked-vae only; default 1.0)",
-        long_help = "KL weight β for the Gaussian latent (masked-vae only; ignored by masked-topic).\n\
-                     The masked-NB signal is weaker than a full reconstruction.\n\
-                     So β < 1 (e.g. 0.1–0.5) avoids over-regularizing toward the prior."
-    )]
-    kl_weight: f64,
-
-    #[arg(
-        long,
         value_enum,
         default_value_t = MaskScheduleArg::Fixed,
         help = "Mask-rate schedule: fixed or uniform per-minibatch sampling",
@@ -764,10 +754,11 @@ pub fn fit_masked_sbp_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::StickBreaking)
 }
 
-/// `senna masked-vae` — Gaussian-latent (reparam + KL) masked VAE. Shares the
+/// `senna masked-vae` — unconstrained-latent masked ETM. Shares the
 /// masked-topic pipeline (PB training, encoder-only cell eval, ETM ρ/α decoder);
-/// the encoder emits a reparameterized `z` (no softmax) and the loss gains a KL
-/// term. `exp(z)` plays the role of the per-topic intensities in the NB head.
+/// the encoder emits a raw `z` (no softmax) that the decoder reads through
+/// `log_softmax`, and the latent written out is that raw `z`. Deterministic and
+/// KL-free like its siblings: the masked objective is the regularizer.
 pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::Gaussian)
 }
@@ -1155,7 +1146,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         },
         likelihood: args.masked_likelihood.to_lib(),
         latent: head,
-        kl_weight: args.kl_weight,
         poisson_thin: args.poisson_thin,
         seed: args.seed,
         query: args
@@ -1365,7 +1355,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 "the encoder's sharpness differs between the rows it trained on and single \
                  cells; it is one-hot on whichever distribution it was trained on and softer \
                  off it. A near one-hot latent on BOTH is a training-side property of the \
-                 masked objective, not an input mismatch — see K and the head's KL weight."
+                 masked objective, not an input mismatch — see K and --mask-fraction."
             );
         }
     }
