@@ -224,6 +224,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::Fne,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &[],
         data_input_null: &[],
         dictionary_suffix: None,

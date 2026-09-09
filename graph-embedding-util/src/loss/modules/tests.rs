@@ -213,7 +213,7 @@ fn pools_follow_membership_and_stay_inside_the_feature_pool() {
     // Feature 5 is excluded from this sampler's pool.
     // Above the uniform level 1/2: m0 = {0, 1, 3(0.5? no: 0.5 is not > 0.5)} — rows
     // (1,0) (0.7,0.3) (0,1) (0.5,0.5) (0.2,0.8): m0 members 0,1; m1 members 2,4.
-    let pool = ModulePools::build(rows, 2, &[0, 1, 2, 3, 4]);
+    let pool = ModulePools::build(rows, 2, &[0, 1, 2, 3, 4], None);
     let mut rng = StdRng::seed_from_u64(1);
     let mut out = Vec::new();
     // Feature 0 is only in module 0: negatives come from {0, 1}.
@@ -233,7 +233,7 @@ fn pools_follow_membership_and_stay_inside_the_feature_pool() {
 fn singleton_module_falls_back() {
     let host = vec![1f32, 0.0, 0.0, 1.0, 0.0, 1.0];
     let rows = membership_rows_host(&host, 3, 2);
-    let pool = ModulePools::build(rows, 2, &[0, 1, 2]);
+    let pool = ModulePools::build(rows, 2, &[0, 1, 2], None);
     let mut rng = StdRng::seed_from_u64(2);
     let mut out = Vec::new();
     // Module 0 has one member: nothing to contrast with.
@@ -330,4 +330,65 @@ fn entropy_stays_above_floor_on_random_counts() {
         dg.max_occupancy_ratio
     );
     assert!(dg.n_small_modules < m, "every module emptied but one");
+}
+
+/// A module spans panels on a multiome axis, and contrasting a protein against
+/// the genes that share its module is exactly the asymmetry the per-modality
+/// pools exist to remove. So the panel splits the module too.
+#[test]
+fn within_module_negatives_stay_inside_the_positives_modality() {
+    // Features 0..3 are genes, 4..6 proteins; every one is in module 0.
+    let rows = std::sync::Arc::new(vec![vec![(0u32, 1.0f32)]; 7]);
+    let modality: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![0u32, 0, 0, 0, 1, 1, 1]);
+    let pool = ModulePools::build(rows, 1, &[0, 1, 2, 3, 4, 5, 6], Some((&modality, 2)));
+    let mut rng = StdRng::seed_from_u64(1);
+    let mut out = Vec::new();
+    assert!(pool.draw_negatives(5, 64, &mut out, &mut rng));
+    assert!(out.iter().all(|&f| f >= 4), "protein drew a gene: {out:?}");
+    out.clear();
+    assert!(pool.draw_negatives(1, 64, &mut out, &mut rng));
+    assert!(out.iter().all(|&f| f < 4), "gene drew a protein: {out:?}");
+}
+
+/// A `(module, panel)` cell with one member has nothing to contrast against,
+/// so the caller is told to fall back rather than handed the positive itself.
+#[test]
+fn a_lone_feature_in_its_panel_falls_back() {
+    let rows = std::sync::Arc::new(vec![vec![(0u32, 1.0f32)]; 4]);
+    let modality: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![0u32, 0, 0, 1]);
+    let pool = ModulePools::build(rows, 1, &[0, 1, 2, 3], Some((&modality, 2)));
+    let mut rng = StdRng::seed_from_u64(2);
+    let mut out = Vec::new();
+    assert!(!pool.draw_negatives(3, 4, &mut out, &mut rng));
+    assert!(out.is_empty());
+}
+
+/// The single-modality path must be untouched: an all-one-panel slice has to
+/// draw exactly what `None` draws, from the same seed.
+#[test]
+fn one_panel_draws_identically_to_no_panel_at_all() {
+    let rows = std::sync::Arc::new(vec![
+        vec![(0u32, 0.6f32)],
+        vec![(1u32, 0.7f32)],
+        vec![(0u32, 0.5f32)],
+        vec![(1u32, 0.9f32)],
+        vec![(0u32, 0.8f32)],
+    ]);
+    let pool_a = ModulePools::build(rows.clone(), 2, &[0, 1, 2, 3, 4], None);
+    let pool_b = ModulePools::build(
+        rows,
+        2,
+        &[0, 1, 2, 3, 4],
+        Some((&std::sync::Arc::from(vec![0u32; 5]), 1)),
+    );
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    let mut ra = StdRng::seed_from_u64(99);
+    let mut rb = StdRng::seed_from_u64(99);
+    for f in 0..5u32 {
+        assert_eq!(
+            pool_a.draw_negatives(f, 8, &mut a, &mut ra),
+            pool_b.draw_negatives(f, 8, &mut b, &mut rb)
+        );
+    }
+    assert_eq!(a, b);
 }

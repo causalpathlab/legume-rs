@@ -236,3 +236,141 @@ fn embedding_ridge_matches_elementwise_form() {
     }
     let _ = DType::F32;
 }
+
+/////////////////////////////////////////////////////////////
+// Single-modality equivalence of the per-modality negative //
+// pools. Runs cannot be diffed on disk (bge does not       //
+// reproduce byte-for-byte across processes), so the guard  //
+// is in-process: with one panel the sampler must consume   //
+// the RNG exactly as the global draw did, and emit the     //
+// same negatives.                                          //
+/////////////////////////////////////////////////////////////
+
+use crate::coarsen::identity_axis;
+use crate::loss::feat::{
+    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
+    PerBatchStratifiedCellSampler, PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs,
+};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+use rand_distr::weighted::WeightedIndex;
+use rand_distr::Distribution;
+
+fn cell_sampler(
+    modality: Option<std::sync::Arc<crate::loss::ModalityPools>>,
+) -> PerBatchStratifiedCellSampler {
+    let per_cell: Vec<CellFeatureSampler> = (0..3)
+        .map(|c| {
+            let features: Vec<u32> = vec![c, (c + 1) % 5, (c + 2) % 5];
+            let counts = vec![3.0f32, 2.0, 1.0];
+            let picker = WeightedIndex::new(counts.clone()).unwrap();
+            CellFeatureSampler {
+                features,
+                counts,
+                picker,
+            }
+        })
+        .collect();
+    PerBatchStratifiedCellSampler {
+        cell_picker: WeightedIndex::new(vec![1.0f32; 3]).unwrap(),
+        active_cells: vec![0, 1, 2],
+        per_cell,
+        neg: WeightedIndex::new(vec![1.0f32; 5]).unwrap(),
+        feature_pool: vec![0, 1, 2, 3, 4],
+        modality,
+    }
+}
+
+/// One panel is no panel: the batch a single-modality sampler emits must be
+/// bit-for-bit what it emitted before the split existed. The reference here is
+/// the pre-change loop — `batch_size * n_negatives` uniform draws off `neg`.
+#[test]
+fn one_modality_cell_axis_draws_exactly_the_old_negatives() {
+    let coarsening = identity_axis(3);
+    let s = cell_sampler(None);
+    let (bs, k) = (16usize, 4usize);
+
+    let mut rng = StdRng::seed_from_u64(4242);
+    let got = sample_per_batch_stratified_edge_batch(
+        PerBatchStratifiedEdgeBatchArgs {
+            sampler: &s,
+            cell_coarsening: &coarsening.coarsenings[0],
+            batch_size: bs,
+            n_negatives: k,
+            module_pools: None,
+        },
+        &mut rng,
+    );
+
+    // Reference: the positives are drawn the same way, then the negatives are
+    // one flat run of uniform draws over the whole pool.
+    let mut want_rng = StdRng::seed_from_u64(4242);
+    let mut want_feats = Vec::new();
+    for _ in 0..bs {
+        let lc = s.cell_picker.sample(&mut want_rng);
+        let pf = &s.per_cell[lc];
+        want_feats.push(pf.features[pf.picker.sample(&mut want_rng)]);
+    }
+    let want_neg: Vec<u32> = (0..bs * k)
+        .map(|_| s.feature_pool[s.neg.sample(&mut want_rng)])
+        .collect();
+
+    assert_eq!(got.fine_feats, want_feats);
+    assert_eq!(got.neg_feats, want_neg);
+    assert_eq!(got.neg_feats.len(), bs * k);
+}
+
+/// The same guard on the pb axis, whose global draw alternates uniform and
+/// degree-weighted. The alternation must stay keyed on the negative's index.
+#[test]
+fn one_modality_pb_axis_draws_exactly_the_old_negatives() {
+    let t = |cell, feature, count| crate::data::Triplet {
+        cell,
+        feature,
+        count,
+    };
+    let triplets = [
+        t(0, 0, 5.0),
+        t(0, 1, 3.0),
+        t(0, 2, 1.0),
+        t(1, 1, 4.0),
+        t(1, 3, 2.0),
+        t(1, 4, 6.0),
+    ];
+    let s =
+        crate::loss::build_stratified_sampler(&triplets, 2, 5, 1.0, None, None).expect("sampler");
+    assert!(s.modality.is_none(), "one panel must leave the pools off");
+    let (bs, k) = (12usize, 3usize);
+
+    let mut rng = StdRng::seed_from_u64(77);
+    let got = sample_stratified_edge_batch(
+        StratifiedEdgeBatchArgs {
+            sampler: &s,
+            batch_size: bs,
+            n_negatives: k,
+            module_pools: None,
+        },
+        &mut rng,
+    );
+
+    let mut want_rng = StdRng::seed_from_u64(77);
+    let mut want_feats = Vec::new();
+    for _ in 0..bs {
+        let lp = s.pb_picker.sample(&mut want_rng);
+        let pf = &s.per_pb[lp];
+        want_feats.push(pf.features[pf.picker.sample(&mut want_rng)]);
+    }
+    let want_neg: Vec<u32> = (0..bs * k)
+        .map(|i| {
+            let local = if i % 2 == 0 {
+                s.neg.sample(&mut want_rng)
+            } else {
+                s.neg_by_degree.sample(&mut want_rng)
+            };
+            s.feature_pool[local]
+        })
+        .collect();
+
+    assert_eq!(got.fine_feats, want_feats);
+    assert_eq!(got.neg_feats, want_neg);
+}

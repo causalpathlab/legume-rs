@@ -65,6 +65,7 @@ mod lineage_plot;
 mod logging;
 mod marker_support;
 mod masked_topic;
+mod multiome_layout;
 mod output_helpers;
 mod pb_reference;
 mod postprocess;
@@ -387,9 +388,11 @@ enum Commands {
                       Positives are drawn by a two-stage stratified sampler.\n\
                       Stage 1 picks a pseudobulk with q(p) ∝ pb_size(p)^alpha_pb.\n\
                       Stage 2 picks a feature within it, weighted by μ_pf.\n\
-                      Negatives are drawn UNIFORMLY over the global pool.\n\
-                      That pool holds every expressed feature.\n\
-                      They are therefore abundance-independent.\n\
+                      Negatives are drawn UNIFORMLY over the pool of expressed\n\
+                      features, and are therefore abundance-independent.\n\
+                      With more than one modality on the axis, that pool is the\n\
+                      positive's OWN modality: a panel that carries most of the\n\
+                      library would otherwise never be contrasted against itself.\n\
                       \n\
                       Training runs in two phases. Phase 1 embeds features and pseudobulks.\n\
                       That learns the gene side.\n\

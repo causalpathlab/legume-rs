@@ -206,6 +206,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
             inh.source_kind
         );
     }
+    crate::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "vae")?;
     let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
         inherited.as_ref(),
         &args.data_files,
@@ -466,6 +467,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::Vae,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),

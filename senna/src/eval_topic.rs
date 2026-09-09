@@ -123,12 +123,15 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         None
     };
 
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: args.data_files.clone(),
+            batch_files: args.batch_files.clone(),
+            preload: args.preload_data,
+            ..Default::default()
+        },
+        &training_genes,
+    )?)?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);
     info!(

@@ -224,6 +224,7 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::GemEncoder,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         // θ·α, the H-space projection every geometry consumer wants; `latent`

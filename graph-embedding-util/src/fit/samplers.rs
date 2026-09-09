@@ -1,4 +1,5 @@
 use crate::data::UnifiedData;
+use crate::loss::modality::ModalityPools;
 use crate::loss::{CellFeatureSampler, PerBatchStratifiedCellSampler};
 use crate::progress::new_progress_bar;
 use log::warn;
@@ -85,6 +86,10 @@ pub(crate) fn subsample_cell_samplers_multilevel(
                 per_cell,
                 neg: s.neg.clone(),
                 feature_pool: s.feature_pool.clone(),
+                // The negative marginal is cloned unchanged (see the doc
+                // comment), and so are its per-modality pools: they are over
+                // the batch's features, which dropping cells does not change.
+                modality: s.modality.clone(),
             })
         })
         .collect()
@@ -106,6 +111,10 @@ pub(crate) fn build_active_samplers(
     // exactly a column read — so the 5 GB flat triplet list (which only the
     // unused flat `PerBatch` path ever read) is skipped entirely. The HVG /
     // frozen subset is honored via `feature_to_backend_row`.
+    // Split the negative pools by modality so a positive is contrasted against
+    // its own panel. `None` for a single panel.
+    let modality_of_feature = unified.feature_modality.clone();
+
     let data = unified.count_backend();
     let n_cells = data.num_columns();
     let n_features = unified.n_features();
@@ -206,12 +215,16 @@ pub(crate) fn build_active_samplers(
         // Uniform negatives (abundance-independent noise distribution).
         let neg_w: Vec<f32> = vec![1.0; feature_pool.len()];
         let neg = WeightedIndex::new(neg_w).expect("batch feature pool");
+        let modality = modality_of_feature
+            .as_ref()
+            .map(|of| std::sync::Arc::new(ModalityPools::build(of, &feature_pool, fc)));
         active.push(PerBatchStratifiedCellSampler {
             cell_picker,
             active_cells: std::mem::take(&mut active_cells[b]),
             per_cell: std::mem::take(&mut per_cell[b]),
             neg,
             feature_pool,
+            modality,
         });
     }
     if !empty.is_empty() {

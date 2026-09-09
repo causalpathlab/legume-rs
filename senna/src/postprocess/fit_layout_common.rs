@@ -387,6 +387,9 @@ pub(crate) struct ResolvedViz {
     /// when present. Layout's recompute fallback uses this to skip the
     /// BBKNN + DC-SBM refinement on chained runs.
     pub cell_to_pb_path: Option<String>,
+    /// The multiome layout the run trained under, replayed from its manifest.
+    /// Default (a plain load) for every single-modality run.
+    pub reload: crate::multiome_layout::ReloadLayout,
 }
 
 pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<ResolvedViz> {
@@ -462,6 +465,14 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
         })
     });
 
+    // Replay the run's multiome layout, so the reload glues cells by barcode
+    // and namespaces features exactly as training did. Positional against
+    // `data.input`, hence the file-count check inside.
+    let reload = crate::multiome_layout::recorded_layout(
+        manifest.as_ref().and_then(|m| m.data.multiome.as_ref()),
+        data_files.len(),
+    )?;
+
     Ok(ResolvedViz {
         data_files,
         batch_files,
@@ -469,6 +480,7 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
         manifest_path,
         manifest,
         cell_to_pb_path,
+        reload,
     })
 }
 
@@ -656,12 +668,12 @@ fn preprocess_layout_data_from_latent(
 ) -> anyhow::Result<LayoutPrep> {
     let SparseDataWithBatch {
         data: mut data_vec, ..
-    } = read_data_on_shared_rows(ReadSharedRowsArgs {
+    } = read_data_on_shared_rows(resolved.reload.apply(ReadSharedRowsArgs {
         data_files: resolved.data_files.clone(),
         batch_files: resolved.batch_files.clone(),
         preload: args.preload_data,
         ..Default::default()
-    })?;
+    })?)?;
 
     let MatWithNames {
         rows: cell_names_cached,
@@ -894,12 +906,12 @@ fn preprocess_layout_data_from_cache(
     //    we need later for output parquet headers.
     let SparseDataWithBatch {
         data: mut data_vec, ..
-    } = read_data_on_shared_rows(ReadSharedRowsArgs {
+    } = read_data_on_shared_rows(resolved.reload.apply(ReadSharedRowsArgs {
         data_files: resolved.data_files.clone(),
         batch_files: resolved.batch_files.clone(),
         preload: args.preload_data,
         ..Default::default()
-    })?;
+    })?)?;
 
     // 2. Load the cached projection (written as cells × proj_dim). The
     //    transpose lands us in column-per-cell layout expected by the

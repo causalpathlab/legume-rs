@@ -167,6 +167,14 @@ pub(super) fn build_axis_data(
         unspliced_rows: &spec.unspliced_rows,
     });
 
+    // The partition the loader recorded when it namespaced the rows. `None`
+    // for a single panel — every draw then stays exactly as it was.
+    let modality_of_feature = unified.feature_modality.clone();
+    if let Some(m) = modality_of_feature.as_ref() {
+        let n = m.iter().copied().max().map_or(0, |x| x + 1);
+        info!("Negative pools split by modality ({n} panels on the feature axis)");
+    }
+
     let mut level_axes: Vec<(AxisCoarsenings, StratifiedSampler)> = Vec::with_capacity(num_levels);
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
         let n_pb = pb.n_cells();
@@ -176,6 +184,7 @@ pub(super) fn build_axis_data(
             n_features,
             DEFAULT_STRATIFY_ALPHA_PB,
             pairing.as_ref(),
+            modality_of_feature.as_ref(),
         )
         .ok_or_else(|| {
             anyhow::anyhow!(

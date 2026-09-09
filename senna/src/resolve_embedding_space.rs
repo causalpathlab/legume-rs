@@ -319,12 +319,16 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     /////////////////////////////
     // Counts + axis alignment //
     /////////////////////////////
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
+    // The counts ρ trains against are the source run's own files, so replay
+    // the multiome layout they were trained under.
+    let reload =
+        crate::multiome_layout::recorded_layout(manifest.data.multiome.as_ref(), data_files.len())?;
+    let loaded = read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
         data_files,
         batch_files,
         preload: args.preload_data,
         ..Default::default()
-    })?;
+    })?)?;
     let data_vec = loaded.data;
     let gene_names = data_vec.row_names()?;
     let count_cell_names = data_vec.column_names()?;
@@ -447,6 +451,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::ResolveEmbeddingSpace,
         prefix: &out,
         data_input: &input_for_manifest,
+        data_multiome: None,
         data_batch: &batch_for_manifest,
         data_input_null: &[],
         dictionary_suffix: None,
