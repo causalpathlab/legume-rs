@@ -338,6 +338,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 embedding_dim: None,
                 // `senna vae` has no growth surface yet.
                 growth: crate::topic::warm_start::Growth::default(),
+                gene_axis: None,
             },
         )?;
     }

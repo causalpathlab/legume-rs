@@ -170,9 +170,16 @@ pub(crate) fn resolve_level_coarsenings(
     num_levels: usize,
     n_features_full: usize,
     dc_params: data_beans_alg::dc_poisson::RefineParams,
+    gene_axis: Option<&crate::topic::gene_axis::GeneAxisRemap>,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     if let Some(parent) = init_from {
-        return inherit_level_coarsenings(parent, num_levels, n_features_full);
+        return inherit_level_coarsenings(
+            parent,
+            num_levels,
+            n_features_full,
+            gene_axis,
+            finest_collapsed.mu_observed.posterior_mean(),
+        );
     }
     if max_coarse_features == 0 || n_features_full <= max_coarse_features {
         return Ok(vec![None; num_levels]);
@@ -206,14 +213,21 @@ pub(crate) fn resolve_level_coarsenings(
 /// See the call site for why recomputing them is unsafe. Both the "parent had
 /// none" and "parent had some" cases have to agree with this run, so a
 /// mismatch is reported rather than silently reconciled.
+///
+/// With `gene_axis`, a level keyed to the source run's axis is GROWN onto this
+/// run's by name instead of refused: known genes keep their module, unknown
+/// ones are placed by their pseudobulk profile (`profiles_dn`, this run's
+/// finest posterior), and the module count the decoders are keyed to stays.
 fn inherit_level_coarsenings(
     parent: &str,
     num_levels: usize,
     n_features_full: usize,
+    gene_axis: Option<&crate::topic::gene_axis::GeneAxisRemap>,
+    profiles_dn: &Mat,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     use crate::topic::model_metadata::load_coarsening_levels;
 
-    let Some(levels) = load_coarsening_levels(parent)? else {
+    let Some(mut levels) = load_coarsening_levels(parent)? else {
         // No file: the parent trained at full resolution. Match it, so the
         // encoder's input width is `n_features_full` on both sides.
         log::info!(
@@ -231,8 +245,14 @@ fn inherit_level_coarsenings(
         levels.len(),
         levels.len(),
     );
-    for (i, lvl) in levels.iter().enumerate() {
+    for (i, lvl) in levels.iter_mut().enumerate() {
         if let Some(fc) = lvl {
+            if fc.fine_to_coarse.len() != n_features_full {
+                if let Some(remap) = gene_axis.filter(|r| r.n_source == fc.fine_to_coarse.len()) {
+                    *fc = crate::topic::gene_axis::grow_fine_to_coarse(fc, remap, profiles_dn)?;
+                    continue;
+                }
+            }
             anyhow::ensure!(
                 fc.fine_to_coarse.len() == n_features_full,
                 "--init-from {parent}: level {i}'s coarsening covers {} features but this \
