@@ -191,20 +191,20 @@ pub struct VaeArgs {
         long_help = "How row names align across `--data-files`.\n\
                      The same rule as `masked-topic`, so the two families can share one gene axis.\n\
                      \n\
-                     `auto` — sniff each file's row names and pick one of the rules below.\n\
-                     It picks locus-overlap if ≥50% parse as `chr:start-end`.\n\
-                     It picks gene if ≥50% contain `_`, and exact otherwise (default).\n\
+                     `auto` sniffs each file's row names and picks one of the rules below.\n\
+                     It picks locus-overlap if at least half parse as `chr:start-end`.\n\
+                     It picks gene if at least half contain `_`, and exact otherwise (default).\n\
                      \n\
-                     `exact` — strict string match.\n\
+                     `exact` is a strict string match.\n\
                      \n\
-                     `gene` — also register each `_`-split component as an alias.\n\
-                     So `ENSG000_TGFB1` and `TGFB1` resolve to the same row.\n\
+                     `gene` also registers each `_`-split component as an alias,\n\
+                     so `ENSG000_TGFB1` and `TGFB1` resolve to the same row.\n\
                      \n\
-                     `locus` — normalize `chr1:1000-2000`, `1:1000-2000`, and so on.\n\
-                     They all reach a canonical form.\n\
+                     `locus` normalizes `chr1:1000-2000`, `1:1000-2000`, and so on\n\
+                     to one canonical form.\n\
                      \n\
-                     `locus-overlap` — same as `locus`, plus overlap clustering.\n\
-                     Intervals that overlap on the same chromosome are grouped."
+                     `locus-overlap` is `locus` plus overlap clustering:\n\
+                     intervals that overlap on the same chromosome are grouped."
     )]
     pub(crate) feature_name_kind: crate::masked_topic::FeatureNameKindArg,
 
