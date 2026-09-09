@@ -270,3 +270,47 @@ fn participation_ratio_is_h_for_identity_and_one_for_rank_one() {
     // Zero matrix has no spectrum to report: 0, not NaN.
     assert_eq!(participation_ratio(&DMatrix::<f64>::zeros(3, 3)), 0.0);
 }
+
+//////////////////////////////////////////////////
+// A per-row offset shared by every column       //
+//////////////////////////////////////////////////
+
+/// A dictionary carries a per-gene background that every topic column shares.
+/// Column centering cannot remove it (it varies by ROW), so `pr_ctr` reads
+/// near 1 and the VIF explodes while the topics themselves are spread out.
+/// Row centering removes exactly that offset.
+#[test]
+fn a_shared_per_row_offset_is_removed_by_row_centering_not_column_centering() {
+    let (n, h, r) = (60, 6, 3);
+    // Rank-3 signal: three independent row scores on three zero-mean column
+    // patterns (pairs of opposite columns), then a large offset per row added
+    // to every column.
+    let t = DMatrix::<f32>::from_fn(n, h, |i, j| {
+        let sig: f32 = (0..r)
+            .map(|k| {
+                let score = ((i * (k + 1)) as f32 * 0.37 + k as f32).sin();
+                let pattern = if j / 2 == k { if j % 2 == 0 { 1.0 } else { -1.0 } } else { 0.0 };
+                score * pattern
+            })
+            .sum();
+        sig + 50.0 * ((i % 7) as f32)
+    });
+    let g = embedding_geometry(&t);
+    assert!(g.eff_rank_centered < 1.3, "column centering keeps the offset: {}", g.eff_rank_centered);
+    assert!(g.max_vif > 50.0, "the shared offset reads as collinearity: {}", g.max_vif);
+    assert!(
+        g.eff_rank_row_centered > 2.0 && g.eff_rank_row_centered <= r as f32 + 0.5,
+        "row centering recovers the signal rank: {}",
+        g.eff_rank_row_centered
+    );
+}
+
+/// Row centering projects out the all-ones direction, so a full-rank balanced
+/// table loses exactly one dimension and nothing else.
+#[test]
+fn row_centering_costs_a_full_rank_table_one_dimension() {
+    let t = balanced_axes(4, 4);
+    let g = embedding_geometry(&t);
+    assert!((g.eff_rank_centered - 4.0).abs() < 0.05, "{}", g.eff_rank_centered);
+    assert!((g.eff_rank_row_centered - 3.0).abs() < 0.05, "{}", g.eff_rank_row_centered);
+}
