@@ -332,8 +332,8 @@ pub fn emit_if_requested(
     // Finest-last, matching `collapsed_levels`.
     let Some(finest_membership) = cell_to_pb_per_level.and_then(<[Vec<usize>]>::last) else {
         log::warn!(
-            "--emit-pb-reference: this run has no cell → pb membership, so the carried \
-             pseudobulks would have no cell counts and would weigh one cell apiece. Skipping."
+            "not carrying pseudobulks forward: this run has no cell → pb membership, so the \
+             reference would have no cell counts and every column would weigh one cell."
         );
         return Ok(None);
     };
