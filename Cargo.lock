@@ -428,7 +428,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "auxiliary-data"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "candle-util"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -5090,7 +5090,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "senna"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "approx",
