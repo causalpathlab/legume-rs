@@ -455,6 +455,20 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     };
     let args = &args;
 
+    // The gene lists are checked against the MODEL's axis here, before any
+    // backend is imported: a list on a foreign axis used to surface only after
+    // the whole query had been loaded, as "matched no feature".
+    for (flag, path) in [
+        ("--eval-features", args.eval_features.as_deref()),
+        ("--ablate-features", args.ablate_features.as_deref()),
+    ] {
+        let Some(path) = path else { continue };
+        let listed = matrix_util::common_io::read_name_list(path)
+            .map_err(|e| anyhow::anyhow!("reading {flag} {path}: {e}"))?;
+        let axis = bulk::model_gene_names(kind, &args.model)?;
+        ensure_gene_list_resolves(&axis, &listed, flag, path)?;
+    }
+
     match kind {
         // bge and simba: a frozen gene table, projected onto per cell (see
         // `BgeEmbedding`).
@@ -845,6 +859,40 @@ pub(crate) mod bulk;
 
 #[cfg(test)]
 mod tests;
+
+/// How many of `listed` name a gene on `axis`, or an error naming the flag,
+/// the file and a sample of both spellings when none does.
+///
+/// Matching is the same [`crate::topic::eval::ReconciledNames`] the hide and
+/// eval passes use, so a list that passes here resolves there too.
+fn ensure_gene_list_resolves(
+    axis: &[Box<str>],
+    listed: &[Box<str>],
+    flag: &str,
+    path: &str,
+) -> anyhow::Result<usize> {
+    let matcher = crate::topic::eval::ReconciledNames::new(axis, listed);
+    let hits = axis.iter().filter(|a| matcher.contains(a)).count();
+    let sample = |v: &[Box<str>]| -> String {
+        v.iter()
+            .take(3)
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    anyhow::ensure!(
+        hits > 0,
+        "{flag} {path}: none of its {} names is on the model's {}-gene axis, even after \
+         canonicalization. The file spells genes like [{}], the model like [{}]. Write the list \
+         in the model's spelling (see --feature-name-kind).",
+        listed.len(),
+        axis.len(),
+        sample(listed),
+        sample(axis),
+    );
+    info!("{flag} {path}: {hits} of its {} names are on the model's axis", listed.len());
+    Ok(hits)
+}
 
 /// Align query genes onto the model's axis, or `None` when the axes already
 /// match. Coverage is logged and gated by
