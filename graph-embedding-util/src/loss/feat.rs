@@ -6,6 +6,7 @@
 //! shape so the downstream NCE loss is sampler-agnostic.
 
 use crate::data::Triplet;
+use crate::loss::modality::ModalityPools;
 use crate::loss::modules::ModulePools;
 use crate::loss::{logistic_nce, softmax_nce, NceObjective};
 use crate::model::JointEmbedModel;
@@ -53,6 +54,10 @@ pub struct PerBatchStratifiedCellSampler {
     /// Negative pool: features with any nonzero count in this batch.
     pub neg: WeightedIndex<f32>,
     pub feature_pool: Vec<u32>,
+    /// Per-modality pools, on a multiome axis; see [`crate::loss::modality`].
+    /// `None` for a single-modality axis. Shared across the clones a
+    /// phase-1 subsample makes, hence the `Arc`.
+    pub modality: Option<std::sync::Arc<ModalityPools>>,
 }
 
 #[derive(Clone)]
@@ -79,6 +84,17 @@ pub struct PerBatchStratifiedEdgeBatchArgs<'a> {
 /// Two-stage draw: pick cell by `degree^alpha_cell`, then feature
 /// within cell by `count`. Output `EdgeBatch` shape matches the flat
 /// and stratified pb samplers — downstream NCE doesn't care.
+/// One uniform negative for the positive `feat`: from its own modality when
+/// the axis has more than one, else from this batch's whole feature pool.
+fn draw_one<R: Rng>(s: &PerBatchStratifiedCellSampler, feat: u32, rng: &mut R) -> u32 {
+    if let Some(mp) = s.modality.as_ref() {
+        if let Some(f) = mp.draw_uniform(feat, rng) {
+            return f;
+        }
+    }
+    s.feature_pool[s.neg.sample(rng)]
+}
+
 pub fn sample_per_batch_stratified_edge_batch(
     args: PerBatchStratifiedEdgeBatchArgs,
     rng: &mut impl Rng,
@@ -108,15 +124,16 @@ pub fn sample_per_batch_stratified_edge_batch(
             for &f in &fine_feats {
                 if !pools.draw_negatives(f, args.n_negatives, &mut neg_feats, rng) {
                     for _ in 0..args.n_negatives {
-                        neg_feats.push(s.feature_pool[s.neg.sample(rng)]);
+                        neg_feats.push(draw_one(s, f, rng));
                     }
                 }
             }
         }
         None => {
-            for _ in 0..(args.batch_size * args.n_negatives) {
-                let local = s.neg.sample(rng);
-                neg_feats.push(s.feature_pool[local]);
+            for &f in &fine_feats {
+                for _ in 0..args.n_negatives {
+                    neg_feats.push(draw_one(s, f, rng));
+                }
             }
         }
     }
@@ -173,6 +190,10 @@ pub struct StratifiedSampler {
     /// The degree-proportional half of the negative distribution.
     pub neg_by_degree: WeightedIndex<f32>,
     pub feature_pool: Vec<u32>,
+    /// Per-modality pools, on a multiome axis. A positive is then contrasted
+    /// against its own panel: see [`crate::loss::modality`]. `None` for a
+    /// single-modality axis, which leaves every draw exactly as it was.
+    pub modality: Option<ModalityPools>,
 }
 
 pub struct PbFeatureSampler {
@@ -261,6 +282,7 @@ pub fn build_stratified_sampler(
     n_features: usize,
     alpha_pb: f32,
     pairing: Option<&FeatPairing>,
+    modality_of_feature: Option<&std::sync::Arc<[u32]>>,
 ) -> Option<StratifiedSampler> {
     if triplets.is_empty() {
         return None;
@@ -386,6 +408,8 @@ pub fn build_stratified_sampler(
         .collect();
     let neg_by_degree = WeightedIndex::new(deg_w).expect("non-empty negative pool");
 
+    let modality =
+        modality_of_feature.map(|of| ModalityPools::build(of, &feature_pool, &feat_count));
     Some(StratifiedSampler {
         pb_picker,
         active_pbs,
@@ -393,6 +417,7 @@ pub fn build_stratified_sampler(
         neg,
         neg_by_degree,
         feature_pool,
+        modality,
     })
 }
 
@@ -443,8 +468,22 @@ pub fn sample_stratified_edge_batch<R: Rng>(
     // Half uniform, half degree-proportional — SIMBA's 100 + 100 split. Drawn by
     // alternating rather than by a coin flip so the ratio is exact for any
     // `n_negatives`, including odd ones.
-    let global_draw = |i: usize, rng: &mut R| {
-        let local = if i.is_multiple_of(2) {
+    // Same 50/50 split, but inside the positive's own modality when the axis
+    // has more than one. `feat` is the positive being contrasted; a panel with
+    // nothing to contrast against falls through to the global pool.
+    let global_draw = |feat: u32, i: usize, rng: &mut R| {
+        let uniform = i.is_multiple_of(2);
+        if let Some(mp) = s.modality.as_ref() {
+            let drawn = if uniform {
+                mp.draw_uniform(feat, rng)
+            } else {
+                mp.draw_by_degree(feat, rng)
+            };
+            if let Some(f) = drawn {
+                return f;
+            }
+        }
+        let local = if uniform {
             s.neg.sample(rng)
         } else {
             s.neg_by_degree.sample(rng)
@@ -458,14 +497,18 @@ pub fn sample_stratified_edge_batch<R: Rng>(
             for &f in &fine_feats {
                 if !pools.draw_negatives(f, args.n_negatives, &mut neg_feats, rng) {
                     for i in 0..args.n_negatives {
-                        neg_feats.push(global_draw(i, rng));
+                        neg_feats.push(global_draw(f, i, rng));
                     }
                 }
             }
         }
         None => {
-            for i in 0..n_neg {
-                neg_feats.push(global_draw(i, rng));
+            let mut i = 0usize;
+            for &f in &fine_feats {
+                for _ in 0..args.n_negatives {
+                    neg_feats.push(global_draw(f, i, rng));
+                    i += 1;
+                }
             }
         }
     }

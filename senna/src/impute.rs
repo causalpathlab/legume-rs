@@ -224,6 +224,10 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
 struct ReferenceSpec {
     latent: Option<Box<str>>,
     data_files: Vec<Box<str>>,
+    /// The multiome layout the reference run trained under, when its manifest
+    /// recorded one. `None` for `--reference-data` given by hand: those files
+    /// are the caller's, not the run's, so there is nothing to replay.
+    multiome: Option<crate::multiome_layout::RunMultiome>,
 }
 
 /// Resolve the reference from `--reference` / the model's own manifest,
@@ -254,6 +258,9 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
                 .then(|| args.reference_latent.clone())
                 .flatten(),
             data_files: args.reference_data.clone().expect("checked above"),
+            // No manifest was consulted on this path, so there is no recorded
+            // layout to replay; --reference-data files load plainly.
+            multiome: None,
         });
     }
 
@@ -323,19 +330,23 @@ fn resolve_reference(args: &ImputeArgs, model_kind: RunKind) -> anyhow::Result<R
         Some(to_box(rel))
     };
 
-    let data_files = match args.reference_data.clone() {
-        Some(files) => files,
+    let (data_files, multiome) = match args.reference_data.clone() {
+        Some(files) => (files, None),
         None => {
             let files: Vec<Box<str>> = manifest.data.input.iter().map(|s| to_box(s)).collect();
             anyhow::ensure!(
                 !files.is_empty(),
                 "reference run `{prefix}` records no data files; pass --reference-data"
             );
-            files
+            (files, manifest.data.multiome.clone())
         }
     };
 
-    Ok(ReferenceSpec { latent, data_files })
+    Ok(ReferenceSpec {
+        latent,
+        data_files,
+        multiome,
+    })
 }
 
 pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
@@ -350,12 +361,16 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
             "Opening reference data ({} file(s))",
             reference.data_files.len()
         );
-        let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
+        let reload = crate::multiome_layout::recorded_layout(
+            reference.multiome.as_ref(),
+            reference.data_files.len(),
+        )?;
+        let loaded = read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
             data_files: reference.data_files.clone(),
             batch_files: args.reference_batch_files.clone(),
             preload: args.preload_data,
             ..Default::default()
-        })?;
+        })?)?;
         Ok(loaded.data)
     };
 
@@ -514,12 +529,15 @@ fn svd_matching_latents(
     );
 
     info!("Loading new data for the dictionary projection");
-    let new_loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.clone(),
-        batch_files: args.batch_files.clone(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?;
+    let new_loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: args.data_files.clone(),
+            batch_files: args.batch_files.clone(),
+            preload: args.preload_data,
+            ..Default::default()
+        },
+        &train_genes,
+    )?)?;
     let new_data: SparseIoVec = new_loaded.data;
     let new_cell_names = new_data.column_names()?;
 

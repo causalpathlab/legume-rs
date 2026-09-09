@@ -250,11 +250,14 @@ impl BgeEmbedding {
             ModuleTables,
         };
 
-        let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-            data_files: files.to_vec(),
-            preload,
-            ..Default::default()
-        })?;
+        let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+            ReadSharedRowsArgs {
+                data_files: files.to_vec(),
+                preload,
+                ..Default::default()
+            },
+            &self.gene_names,
+        )?)?;
         let data_vec = loaded.data;
         info!(
             "Query data: {} features × {} cells",

@@ -202,6 +202,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         kind: RunKind::Simba,
         prefix,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: None,

@@ -100,6 +100,18 @@ impl AxisSampler<'_> {
             Self::Stratified(s) => vec![s.feature_pool.as_slice()],
         }
     }
+
+    /// The feature-axis modality partition and its panel count, on a multiome
+    /// axis. Every sampler on an axis shares one `ModalityPools`, so the first
+    /// answers for all; the `Arc` is handed on so the module pools share it
+    /// rather than copying an n_features-long vector per pool per epoch.
+    fn modality_strata(&self) -> Option<(&Arc<[u32]>, usize)> {
+        let pools = match self {
+            Self::PerBatchStratified(s) => s.first().and_then(|x| x.modality.as_deref()),
+            Self::Stratified(s) => s.modality.as_ref(),
+        }?;
+        Some((pools.of_feature(), pools.n_panels()))
+    }
 }
 
 /// Training-side knobs of the learned gene modules (see
@@ -153,10 +165,15 @@ impl<'a> ModuleState<'a> {
             .axes
             .par_iter()
             .map(|axis| {
+                let strata = axis.sampler.modality_strata();
+                // One pool per batch on the cell axis, so building them one at
+                // a time makes that axis the critical path of every refresh.
                 axis.sampler
                     .feature_pools()
-                    .into_iter()
-                    .map(|pool| ModulePools::build(rows.clone(), self.modules.n_modules, pool))
+                    .into_par_iter()
+                    .map(|pool| {
+                        ModulePools::build(rows.clone(), self.modules.n_modules, pool, strata)
+                    })
                     .collect()
             })
             .collect();

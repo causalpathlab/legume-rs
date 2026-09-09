@@ -61,6 +61,16 @@ pub struct UnifiedData {
     /// needs to be aligned to the compact axis.
     pub feature_to_backend_row: Vec<usize>,
 
+    /// Modality id per feature, when the load namespaced rows as
+    /// `{name}/{modality}` (a multiome load). `None` for a single panel.
+    ///
+    /// Taken from the suffix list the loader was GIVEN, never re-parsed out of
+    /// the row names: other producers use the same separator for a different
+    /// grammar — faba/gem rows are `{gene}/{modality}/{channel}`, whose last
+    /// field is the splice channel — and a trailing-field rule reads those as
+    /// two modalities and silently re-scopes their negative pools.
+    pub feature_modality: Option<std::sync::Arc<[u32]>>,
+
     ///////////////
     // edge list //
     ///////////////
@@ -203,6 +213,8 @@ impl UnifiedData {
             cell_modality: vec![1u32; n_pb],
             feature_names,
             feature_to_backend_row,
+            // The pb path never namespaces its feature axis.
+            feature_modality: None,
             triplets,
             backend: None,
         })
@@ -235,6 +247,14 @@ impl UnifiedData {
             .iter()
             .map(|&i| self.feature_to_backend_row[i])
             .collect();
+        let new_feature_modality: Option<std::sync::Arc<[u32]>> =
+            self.feature_modality.as_ref().map(|m| {
+                selected_indices
+                    .iter()
+                    .map(|&i| m[i])
+                    .collect::<Vec<u32>>()
+                    .into()
+            });
 
         let n_before = self.triplets.len();
         // Compact + remap in place: no second triplet vec, so peak memory
@@ -270,6 +290,7 @@ impl UnifiedData {
         }
         self.feature_names = new_feature_names;
         self.feature_to_backend_row = new_feature_to_backend_row;
+        self.feature_modality = new_feature_modality;
     }
 
     /// Build a `UnifiedData` from a single in-memory `SparseIoVec` plus
@@ -279,8 +300,10 @@ impl UnifiedData {
         batch_labels: &[Box<str>],
         condition_labels: Option<&[Box<str>]>,
         auto_modality_batch: bool,
+        feature_suffix: Option<&[Box<str>]>,
     ) -> anyhow::Result<Self> {
         let feature_names = data.row_names()?;
+        let feature_modality = feature_modality_from_suffix(&feature_names, feature_suffix);
         let barcodes = data.column_names()?;
 
         // Per-cell modality bitmask: which input backend(s) each unified
@@ -379,10 +402,40 @@ impl UnifiedData {
             cell_modality,
             feature_names,
             feature_to_backend_row: (0..n_features).collect(),
+            feature_modality,
             triplets: Vec::new(),
             backend: Some(data),
         })
     }
+}
+
+/// Per-feature modality id from the suffix list the loader applied, matching
+/// each row against the `/{suffix}` it was namespaced with.
+///
+/// Deliberately NOT a trailing-field parse of the row name: `/` is also the
+/// separator of the `{gene}/{modality}/{channel}` grammar faba writes and gem
+/// reads, whose last field is a splice channel. Matching the suffixes the load
+/// actually used cannot confuse the two. Returns `None` unless every row
+/// carries one of them and at least two are present.
+fn feature_modality_from_suffix(
+    feature_names: &[Box<str>],
+    feature_suffix: Option<&[Box<str>]>,
+) -> Option<std::sync::Arc<[u32]>> {
+    let suffixes = feature_suffix?;
+    let mut ids: FxHashMap<&str, u32> = FxHashMap::default();
+    for s in suffixes {
+        let next = ids.len() as u32;
+        ids.entry(s.as_ref()).or_insert(next);
+    }
+    if ids.len() < 2 {
+        return None;
+    }
+    let mut out: Vec<u32> = Vec::with_capacity(feature_names.len());
+    for name in feature_names {
+        let (_, tag) = name.rsplit_once('/')?;
+        out.push(*ids.get(tag)?);
+    }
+    Some(out.into())
 }
 
 /// Format the first `max_show` names from a slice, appending "… and N more" when
@@ -518,7 +571,7 @@ pub fn load_unified_data(args: LoadUnifiedArgs) -> anyhow::Result<UnifiedData> {
         preload,
         feature_kind,
         column_alignment,
-        per_file_feature_suffix,
+        per_file_feature_suffix: per_file_feature_suffix.clone(),
         per_file_barcode_suffix,
         ..Default::default()
     })?;
@@ -572,8 +625,12 @@ pub fn load_unified_data(args: LoadUnifiedArgs) -> anyhow::Result<UnifiedData> {
         &loaded.batch,
         condition_labels.as_deref(),
         auto_modality_batch,
+        per_file_feature_suffix.as_deref(),
     )
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Validate multiome group structure against the post-load unified barcodes
 /// and `cell_modality` bitmasks (bit `b` set ⇔ barcode present in file `b` of

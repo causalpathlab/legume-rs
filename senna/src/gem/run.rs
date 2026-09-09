@@ -809,6 +809,7 @@ fn run_gem_genes_bge(
         kind: crate::run_manifest::RunKind::Gem,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         // Z, the Euclidean identity θ. Raw — its norm carries library size — so

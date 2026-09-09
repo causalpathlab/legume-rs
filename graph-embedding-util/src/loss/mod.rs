@@ -32,6 +32,7 @@ pub(crate) mod cell;
 pub(crate) mod chain;
 pub(crate) mod feat;
 pub(crate) mod lnpdf;
+pub(crate) mod modality;
 pub(crate) mod modules;
 
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub use chain::{
     UnitChainBatchStats,
 };
 pub use lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
+pub use modality::ModalityPools;
 
 pub use feat::{
     build_stratified_sampler, gather_feature_rows, nce_loss, nce_loss_identity,

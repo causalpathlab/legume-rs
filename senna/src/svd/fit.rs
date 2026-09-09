@@ -336,6 +336,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::Svd,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),

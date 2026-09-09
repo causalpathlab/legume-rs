@@ -10,22 +10,30 @@ use crate::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
 
-/// The label (or, when `None`, the within-group position) namespaces that
-/// file's features as `{name}/{modality}`.
-pub(crate) type MultiomeFile = (Option<Box<str>>, Box<str>);
-
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "crate::embed_common::clap_defaults")]
 pub struct BgeArgs {
     #[arg(
         value_delimiter = ',',
         help = "Sparse count matrices (zarr/h5), comma-separated",
-        long_help = "Single-modality input. One or more files share a feature axis.\n\
-                     Cells are unified by barcode.\n\
+        long_help = "Count matrices to embed. Pass them all, in any order.\n\
                      \n\
-                     Multiome input goes to --multiome instead.\n\
-                     There the modalities have distinct feature spaces, glued by barcode.\n\
-                     Exactly one of the positional files or --multiome is required."
+                     Multiome is detected, not declared. Files whose feature axes\n\
+                     mostly agree are one modality and share a row block.\n\
+                     Files of DIFFERENT modalities whose barcodes mostly agree\n\
+                     are the same cells measured twice, and become one sample group.\n\
+                     \x20\n\
+                     RNA + ADT for four donors is therefore just:\n\
+                     \x20 senna bge scRNA_*.zarr.zip scADT_*.zarr.zip\n\
+                     \x20\n\
+                     A layout is only claimed when matched cells exist.\n\
+                     Two feature axes with no shared cells are as likely two assays\n\
+                     on different donors, so that case loads as it always has:\n\
+                     one feature axis, cells stacked.\n\
+                     \x20\n\
+                     The resolved layout is printed before training. Override it\n\
+                     with --multiome when the modalities SHARE feature names\n\
+                     (spliced versus unspliced, say), which no rule can read off the axes."
     )]
     pub(crate) data_files: Vec<Box<str>>,
 
@@ -250,8 +258,12 @@ pub struct BgeArgs {
     #[arg(
         long,
         value_name = "FILE[,FILE...]",
-        help = "Multiome modality files (comma-separated); repeat for multiple samples.",
-        long_help = "Multiome load. Pass one sample (group) per flag, comma-separated,\n\
+        help = "Declare the multiome layout by hand; one sample (group) per flag.",
+        long_help = "Declare the multiome layout instead of letting it be detected\n\
+                     from the inputs. Reach for this when the modalities share\n\
+                     feature names, which the detector cannot see.\n\
+                     \x20\n\
+                     Pass one sample (group) per flag, comma-separated,\n\
                      as in `--multiome rna.zarr,atac.zarr`. Cells are the shared axis.\n\
                      Each modality keeps its own features.\n\
                      Repeat the flag for each additional sample or group:\n\
@@ -284,7 +296,12 @@ pub struct BgeArgs {
                      This flag replaces the positional data files.\n\
                      \n\
                      Note: comma-separate files within one group, with no spaces.\n\
-                     Use a separate --multiome flag for each additional group."
+                     Use a separate --multiome flag for each additional group.\n\
+                     \x20\n\
+                     Declared groups are NOT barcode-namespaced, so a barcode shared\n\
+                     across groups is an error. Detected groups are namespaced\n\
+                     `{barcode}@{group}`, which is why several samples need no\n\
+                     pre-processing there."
     )]
     pub(crate) multiome: Vec<Box<str>>,
 

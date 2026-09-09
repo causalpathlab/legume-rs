@@ -797,6 +797,10 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             inh.source_kind
         );
     }
+    crate::run_manifest::InheritedFromManifest::ensure_replayable(
+        inherited.as_ref(),
+        "masked-topic",
+    )?;
     let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
         inherited.as_ref(),
         &args.data_files,
@@ -1531,6 +1535,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         kind: masked_run_kind(head),
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),

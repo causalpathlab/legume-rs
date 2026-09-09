@@ -21,15 +21,14 @@ use data_beans_alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;
 
 pub(crate) mod args;
+mod multiome;
 mod resolve_etm;
 pub(crate) mod score;
 pub(crate) mod transfer;
 
 pub use args::BgeArgs;
-use args::MultiomeFile;
 use resolve_etm::resolve_etm_topics;
 
-/// One parsed `--multiome` file entry: `(optional modality label, file path)`.
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     anyhow::ensure!(
@@ -39,31 +38,23 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
          end — and their weights are applied by position. Drop --use-pb-reference for this \
          round and let it re-collapse."
     );
-    // Input files: positional (single-modality) OR --multiome modality groups.
-    // Each --multiome occurrence is one group; comma-separated files within it.
-    let is_multiome = !args.multiome.is_empty();
-
-    // Parse each --multiome occurrence (one group) into its files, honoring an
-    // optional `label=file` prefix that names the modality. The label (or, when
-    // omitted, the within-group position `m{pos}`) namespaces that file's
-    // features as `{name}/{label}` so distinct modalities stay on separate rows
-    // (e.g. spliced vs unspliced `TSPAN6`), while the same modality across
-    // samples (same label/position) still merges. Each `(label, file)` pair is
-    // (Option<modality label>, file path).
-    let multiome_groups: Vec<Vec<MultiomeFile>> = args
-        .multiome
-        .iter()
-        .map(|s| {
-            s.split(',')
-                .map(|tok| match tok.split_once('=') {
-                    Some((label, file)) if !label.is_empty() && !file.is_empty() => {
-                        (Some(label.into()), file.into())
-                    }
-                    _ => (None, tok.into()),
-                })
-                .collect()
-        })
-        .collect();
+    // Multiome layout. `--multiome` declares it; otherwise it is read off the
+    // inputs themselves — the feature axes say which files are the same assay,
+    // and the barcode lists say which cells are the same cell. Both routes
+    // land on one `MultiomePlan`, so nothing below has two shapes to handle.
+    let plan: Option<ge::MultiomePlan> = if args.multiome.is_empty() {
+        multiome::auto_plan(
+            &args.data_files,
+            args.batch_files.as_ref().map_or(0, Vec::len),
+            args.pb_reference.is_some(),
+        )?
+    } else {
+        multiome::declared_plan(&args.multiome)?
+    };
+    if let Some(p) = plan.as_ref() {
+        multiome::log_plan(p, !args.multiome.is_empty());
+    }
+    let is_multiome = plan.is_some();
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
     // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
@@ -81,66 +72,31 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         ge::FeatureNameKind::Gene { delim: '_' }
     };
 
-    // Flatten groups to get the per-file slice passed to load_unified_data,
-    // plus the parallel per-file modality suffix (label, else `m{within-group
-    // position}`) used to namespace features as `{name}/{suffix}`.
-    let data_files_flat: Vec<Box<str>>;
-    let feature_suffix: Option<Vec<Box<str>>>;
-    let data_files: &[Box<str>] = if is_multiome {
-        data_files_flat = multiome_groups
-            .iter()
-            .flat_map(|g| g.iter().map(|(_, file)| file.clone()))
-            .collect();
-        feature_suffix = Some(
-            multiome_groups
-                .iter()
-                .flat_map(|g| {
-                    g.iter().enumerate().map(|(pos, (label, _))| {
-                        label
-                            .clone()
-                            .unwrap_or_else(|| format!("m{pos}").into_boxed_str())
-                    })
-                })
-                .collect(),
-        );
-        if multiome_groups.len() > 1 {
-            let counts = multiome_groups
-                .iter()
-                .map(|g| g.len().to_string())
-                .collect::<Vec<_>>()
-                .join("+");
-            info!(
-                "--multiome: {} groups, {} total files ({})",
-                multiome_groups.len(),
-                data_files_flat.len(),
-                counts
+    // Under a plan the files are re-ordered so each sample group is contiguous
+    // — the order `validate_multiome_groups` reads `group_sizes` against.
+    let data_files: &[Box<str>] = match plan.as_ref() {
+        Some(p) => &p.files,
+        None => {
+            anyhow::ensure!(
+                !args.data_files.is_empty(),
+                "no input files: pass the count matrices positionally. Modality \n\
+                 groups are detected from the data; declare them by hand with \n\
+                 `--multiome rna.zarr,atac.zarr [--multiome rna2.zarr,atac2.zarr ...]` \n\
+                 when the feature axes overlap (spliced vs unspliced, say)."
             );
+            &args.data_files
         }
-        if let Some(suf) = feature_suffix.as_ref() {
-            info!(
-                "--multiome: namespacing features as {{name}}/{{modality}} \n\
-		 (per-file modality: {})",
-                suf.iter()
-                    .map(std::convert::AsRef::as_ref)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        &data_files_flat
-    } else {
-        feature_suffix = None;
-        anyhow::ensure!(
-            !args.data_files.is_empty(),
-            "no input files: pass single-modality files positionally, or multiome \n\
-             groups via `--multiome rna.zarr,atac.zarr [--multiome rna2.zarr,atac2.zarr ...]`"
-        );
-        &args.data_files
     };
+    let feature_suffix: Option<Vec<Box<str>>> = plan.as_ref().map(|p| p.modality.clone());
+    let barcode_suffix: Option<Vec<Option<Box<str>>>> =
+        plan.as_ref().and_then(ge::MultiomePlan::barcode_suffix);
 
     let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
-    let effective_multiome = effective_hvg.multiome;
-    let column_alignment = if effective_multiome {
+    // From the plan, never from the HVG resolver: that one also clears its
+    // multiome flag on file count, and a plan that says Union while the load
+    // says Disjoint is a manifest whose replay cannot reproduce the run.
+    let column_alignment = if is_multiome {
         data_beans::sparse_io_vector::ColumnAlignment::Union
     } else {
         data_beans::sparse_io_vector::ColumnAlignment::Disjoint
@@ -158,7 +114,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         preload: args.preload_data,
         column_alignment,
         per_file_feature_suffix: feature_suffix,
-        // senna uses disjoint barcodes per group; no per-file barcode suffix.
+        // Only set when a detected layout has several sample groups: raw 10x
+        // barcodes collide across samples, and Union loading would fold two
+        // donors' cells into one.
+        per_file_barcode_suffix: barcode_suffix,
         ..Default::default()
     })?;
 
@@ -181,11 +140,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         );
     }
 
-    // Guard barcode identity across groups: disjoint barcodes, so Union
-    // loading never merges cells from different samples. No-op for one group.
-    if is_multiome {
-        let group_sizes: Vec<usize> = multiome_groups.iter().map(Vec::len).collect();
-        ge::validate_multiome_groups(&group_sizes, &unified.barcodes, &unified.cell_modality)?;
+    // Guard barcode identity across groups, so Union loading never merges cells
+    // from different samples. A detected layout already tags barcodes by group,
+    // which makes this a no-op; a declared one relies on it.
+    if let Some(p) = plan.as_ref() {
+        ge::validate_multiome_groups(&p.group_sizes, &unified.barcodes, &unified.cell_modality)?;
     }
 
     /////////////////////////////
@@ -532,6 +491,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_input: &input,
         data_batch: &batch,
         data_input_null: &[],
+        // So `senna layout / plot / impute --from` can re-read these files the
+        // way training did, instead of stacking the modalities as extra cells.
+        data_multiome: plan
+            .as_ref()
+            .map(crate::multiome_layout::RunMultiome::from_plan),
         // With ETM resolved the dictionary is β (gene × topic); otherwise it IS ρ.
         //
         // ρ does NOT go to feature_embedding.parquet — that file is always the SIMBA co-embed (see

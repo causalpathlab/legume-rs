@@ -2686,7 +2686,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -5090,7 +5090,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "senna"
-version = "0.14.2"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "approx",

@@ -234,6 +234,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::JointSvd,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
