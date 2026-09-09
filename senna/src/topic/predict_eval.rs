@@ -127,20 +127,17 @@ pub(crate) fn resolve_eval_genes(
     let Some(path) = path else {
         return Ok((0..gene_names.len()).collect());
     };
-    // Lowercased on both sides — the same key the gene remap matches on, so a
-    // panel that resolves for the model also resolves here regardless of case.
-    let index: std::collections::HashMap<String, usize> = gene_names
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.to_lowercase(), i))
-        .collect();
     let wanted = matrix_util::common_io::read_name_list(path)
         .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?;
+    // Case-insensitive, and bridged across spellings when the file and the
+    // model do not share one (`ReconciledNames`): the file is the same across
+    // arms whose axes are spelled differently.
+    let matcher = crate::topic::eval::ReconciledNames::new(gene_names, &wanted);
     let mut out = Vec::with_capacity(wanted.len());
     let mut missing = 0usize;
-    for name in &wanted {
-        match index.get(&name.to_lowercase()) {
-            Some(&i) => out.push(i),
+    for pos in matcher.positions(gene_names, &wanted) {
+        match pos {
+            Some(i) => out.push(i),
             None => missing += 1,
         }
     }

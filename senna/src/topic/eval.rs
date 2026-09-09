@@ -105,6 +105,73 @@ pub(crate) struct QueryNameOpts {
     pub hide: Option<std::sync::Arc<std::collections::HashSet<Box<str>>>>,
 }
 
+/// A gene list matched against an axis whose spelling it may not share.
+///
+/// `--eval-features` and `--ablate-features` are contractually ONE file
+/// across every arm of a benchmark, and the arms do not all spell their axes
+/// the same way: a model trained under the canonical rule has bare symbols
+/// where a list keyed on the raw backend rows has `ENSG..._SYMBOL`. Matching
+/// lowercase strings hid nothing in that case and errored after the whole
+/// backend had been imported.
+///
+/// Exact (lowercased) hits are the whole answer whenever there are any: the
+/// canonical rule must not widen a hit onto a second row that merely shares a
+/// suffix (`gene_0` vs `other_0`). Only when nothing matches exactly is the
+/// naming rule reconciled between the two sides
+/// ([`crate::embed_common::reconcile_name_kind`]) and both keyed canonically.
+pub(crate) struct ReconciledNames {
+    exact: rustc_hash::FxHashSet<String>,
+    canonical: Option<(
+        auxiliary_data::feature_names::FeatureNameKind,
+        rustc_hash::FxHashSet<String>,
+    )>,
+}
+
+impl ReconciledNames {
+    /// Index `names` for lookups from `axis`.
+    pub(crate) fn new(axis: &[Box<str>], names: &[Box<str>]) -> Self {
+        let exact: rustc_hash::FxHashSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
+        let any_exact = axis.iter().any(|a| exact.contains(&a.to_lowercase()));
+        let canonical = (!any_exact).then(|| {
+            let kind = crate::embed_common::reconcile_name_kind(axis, &[names]);
+            let keys = names
+                .iter()
+                .map(|n| kind.canonicalize(n).to_lowercase())
+                .collect();
+            log::info!(
+                "gene list: no name matches the axis as spelled; matching under the {kind:?} rule"
+            );
+            (kind, keys)
+        });
+        Self { exact, canonical }
+    }
+
+    /// Does the list name this axis entry?
+    pub(crate) fn contains(&self, axis_name: &str) -> bool {
+        match &self.canonical {
+            None => self.exact.contains(&axis_name.to_lowercase()),
+            Some((kind, keys)) => keys.contains(&kind.canonicalize(axis_name).to_lowercase()),
+        }
+    }
+
+    /// The axis position of each listed name, in list order (`None` = absent).
+    /// A first-writer index over the axis, so many-to-one spellings resolve to
+    /// the first row like the remap does.
+    pub(crate) fn positions(&self, axis: &[Box<str>], names: &[Box<str>]) -> Vec<Option<usize>> {
+        let key = |s: &str| -> String {
+            match &self.canonical {
+                None => s.to_lowercase(),
+                Some((kind, _)) => kind.canonicalize(s).to_lowercase(),
+            }
+        };
+        let mut index: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
+        for (i, a) in axis.iter().enumerate() {
+            index.entry(key(a)).or_insert(i);
+        }
+        names.iter().map(|n| index.get(&key(n)).copied()).collect()
+    }
+}
+
 /// Point the named features at `None` in a remap, hiding them from the model.
 ///
 /// Applied to the remap because that is the gate every backend already reads to
@@ -118,15 +185,15 @@ pub(crate) fn hide_features(
     new_genes: &[Box<str>],
     hide: &std::collections::HashSet<Box<str>>,
 ) -> anyhow::Result<()> {
-    // Lowercased on BOTH sides, matching the remap's own key. The panel file and
-    // the data may disagree on case while naming the same genes; an exact match
-    // here would hide nothing and then error with "matched no feature", which
-    // points at the wrong cause.
-    let hide_lower: std::collections::HashSet<String> =
-        hide.iter().map(|n| n.to_lowercase()).collect();
+    // Case-insensitive, and bridged across spellings when the list and the
+    // axis do not share one (see `ReconciledNames`): an exact match hid
+    // nothing and then errored with "matched no feature", which points at the
+    // wrong cause.
+    let listed: Vec<Box<str>> = hide.iter().cloned().collect();
+    let matcher = ReconciledNames::new(new_genes, &listed);
     let mut hidden = 0usize;
     for (row, name) in new_genes.iter().enumerate() {
-        if hide_lower.contains(&name.to_lowercase()) && remap.new_to_train[row].take().is_some() {
+        if matcher.contains(name) && remap.new_to_train[row].take().is_some() {
             hidden += 1;
         }
     }

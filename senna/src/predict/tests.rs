@@ -90,6 +90,78 @@ fn hiding_matches_case_insensitively_like_the_remap_does() {
     assert_eq!(out.new_to_train, vec![None, Some(1), None]);
 }
 
+/// The gene lists are contractually one file shared across arms, and the arms
+/// do not all spell their axes the same way: a model trained under the
+/// canonical rule has bare symbols where a list keyed on the raw backend rows
+/// has `ENSG..._SYMBOL`. The list must hide the same genes either way.
+#[test]
+fn hiding_bridges_raw_list_names_onto_a_canonical_axis() {
+    let genes = names(&["tspan6", "tnmd", "dpm1"]);
+    let out = build_remap(
+        &genes,
+        &genes,
+        &opts_hiding(&["ENSG00000000003_TSPAN6", "ENSG00000000419_DPM1"], 0.0),
+    )
+    .expect("raw names must resolve onto the canonical axis")
+    .expect("hiding always yields a remap");
+    assert_eq!(out.new_to_train, vec![None, Some(1), None]);
+}
+
+#[test]
+fn hiding_bridges_symbol_list_names_onto_a_raw_axis() {
+    let genes = names(&["ENSG00000000003_TSPAN6", "ENSG00000000005_TNMD", "ENSG00000000419_DPM1"]);
+    let out = build_remap(&genes, &genes, &opts_hiding(&["TSPAN6", "DPM1"], 0.0))
+        .expect("symbols must resolve onto the raw axis")
+        .expect("hiding always yields a remap");
+    assert_eq!(out.new_to_train, vec![None, Some(1), None]);
+}
+
+/// When the list spells names exactly as the axis does, the exact matches are
+/// the whole answer: the canonical rule must not widen a hit onto a second row
+/// that merely shares a suffix.
+#[test]
+fn an_exact_hit_does_not_widen_to_suffix_sharing_rows() {
+    let genes = names(&["gene_0", "other_0", "gene_1"]);
+    let out = build_remap(&genes, &genes, &opts_hiding(&["gene_0"], 0.0))
+        .expect("remap")
+        .expect("hiding always yields a remap");
+    assert_eq!(out.new_to_train, vec![None, Some(1), Some(2)]);
+}
+
+/// A gene list on a foreign axis must be refused before any backend is read,
+/// naming the flag and showing both spellings, so the user sees which file
+/// is on the wrong axis without waiting for the import.
+mod early_gene_list_gate {
+    use super::super::ensure_gene_list_resolves;
+
+    fn names(v: &[&str]) -> Vec<Box<str>> {
+        v.iter().map(|s| Box::from(*s)).collect()
+    }
+
+    #[test]
+    fn a_list_on_the_models_axis_passes_and_counts_hits() {
+        let axis = names(&["tspan6", "tnmd", "dpm1"]);
+        let list = names(&["ENSG00000000003_TSPAN6", "ENSG00000000419_DPM1", "NOPE"]);
+        assert_eq!(
+            ensure_gene_list_resolves(&axis, &list, "--eval-features", "eval.txt").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_list_matching_nothing_names_the_flag_and_both_spellings() {
+        let axis = names(&["tspan6", "tnmd", "dpm1"]);
+        let list = names(&["chr1:100-200", "chr2:5-9"]);
+        let err = ensure_gene_list_resolves(&axis, &list, "--ablate-features", "hide.txt")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--ablate-features"), "{err}");
+        assert!(err.contains("hide.txt"), "{err}");
+        assert!(err.contains("chr1:100-200"), "{err}");
+        assert!(err.contains("tspan6"), "{err}");
+    }
+}
+
 /// The scoring cap exists for one reason: a dense block's working set must not
 /// be multiplied by every thread. It has to bite at whole-transcriptome width
 /// and stay out of the way at the coarsened widths the topic paths score on,
