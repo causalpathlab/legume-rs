@@ -282,7 +282,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 .is_some()
                 .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
             bulk_batches: args.collapse.mixture_batch.clone(),
-            emit_finest_collapse: args.collapse.emit_pb_reference,
+            emit_finest_collapse: args.collapse.emits_pb_reference(),
             num_levels: args.collapse.num_levels,
             sort_dim: args.collapse.sort_dim,
             knn_pb_samples: args.collapse.knn_cells,
@@ -337,7 +337,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // finest collapse level's evidence rates + per-column cell counts.
     let pb_reference_suffix = match out.finest_collapse.as_ref() {
         Some((finest, membership)) => crate::pb_reference::emit_if_requested(
-            args.collapse.emit_pb_reference,
+            args.collapse.emits_pb_reference(),
             &args.out,
             finest,
             Some(std::slice::from_ref(membership)),
