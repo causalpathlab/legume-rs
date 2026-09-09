@@ -48,6 +48,17 @@ pub struct EmbeddingGeometry {
     /// [`Self::eff_rank_raw`] ⇒ the apparent low rank is a mean offset (a common
     /// mode), not a genuine collapse.
     pub eff_rank_centered: f32,
+    /// Same, after centering each ROW across its `h` columns — the offset a
+    /// row shares with every column removed. That is what a per-gene
+    /// background pinned into a dictionary looks like (every topic column
+    /// carries it), and what a per-cell depth offset looks like in an
+    /// embedding: column centering cannot touch it, so [`Self::eff_rank_centered`]
+    /// reads near 1 and [`Self::max_vif`] explodes while the columns' own
+    /// content is spread. Row centering projects out the all-ones direction,
+    /// so a genuinely full-rank table reads `h − 1` here, not `h`. No VIF is
+    /// reported for the row-centered table: its columns sum to zero, so their
+    /// correlation matrix is singular by construction.
+    pub eff_rank_row_centered: f32,
     /// Largest `|correlation|` between two distinct dims.
     pub max_abs_corr: f32,
     /// Largest variance-inflation factor `diag(C⁻¹)` over dims (`1` =
@@ -70,6 +81,54 @@ fn participation_ratio(gram: &DMatrix<f64>) -> f32 {
         return 0.0;
     }
     ((s1 * s1) / s2) as f32
+}
+
+/// `(max |corr|, max VIF)` off a centered Gram.
+///
+/// Correlation from the CENTERED Gram (a correlation is centered by
+/// definition; the raw Gram would report a common mode as collinearity and
+/// conflate the two things this module exists to separate). A constant dim
+/// gets `inv_sd = 0`, so it correlates with nothing.
+///
+/// VIF = diag(C⁻¹), via a Cholesky solve against the identity rather than an
+/// explicit inverse — it matters most exactly here, since near-collinear dims
+/// are the case this measures. A singular `C` means a dim is an exact
+/// combination of the others: infinite inflation, reported as such rather
+/// than as a NaN that would read as "not measured".
+fn corr_and_vif(ctr_gram: &DMatrix<f64>) -> (f32, f32) {
+    let h = ctr_gram.nrows();
+    let inv_sd: Vec<f64> = (0..h)
+        .map(|j| {
+            let sd = ctr_gram[(j, j)].max(0.0).sqrt();
+            if sd > 0.0 {
+                1.0 / sd
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let corr = DMatrix::<f64>::from_fn(h, h, |i, j| {
+        if i == j {
+            1.0
+        } else {
+            ctr_gram[(i, j)] * inv_sd[i] * inv_sd[j]
+        }
+    });
+    let cr = &corr;
+    let max_abs_corr = (0..h)
+        .flat_map(|i| ((i + 1)..h).map(move |j| cr[(i, j)].abs()))
+        .fold(0.0f64, f64::max);
+    let eye = DMatrix::<f64>::identity(h, h);
+    let max_vif = corr
+        .clone()
+        .cholesky()
+        .map(|c| c.solve(&eye))
+        .or_else(|| corr.lu().solve(&eye))
+        .map_or(f32::INFINITY, |inv| {
+            (0..h).fold(0.0f64, |acc, j| acc.max(inv[(j, j)])) as f32
+        })
+        .max(1.0);
+    (max_abs_corr as f32, max_vif)
 }
 
 /// Per-thread accumulator for the single row pass: the upper triangle of the
@@ -201,49 +260,15 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
         (acc * inv_n) as f32
     };
 
-    // Correlation matrix from the CENTERED Gram (a correlation is centered by
-    // definition; the raw Gram would report a common mode as collinearity and
-    // conflate the two things this struct exists to separate). A constant dim
-    // gets `inv_sd = 0`, so it correlates with nothing.
-    let inv_sd: Vec<f64> = (0..h)
-        .map(|j| {
-            let sd = ctr_gram[(j, j)].max(0.0).sqrt();
-            if sd > 0.0 {
-                1.0 / sd
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    let corr = DMatrix::<f64>::from_fn(h, h, |i, j| {
-        if i == j {
-            1.0
-        } else {
-            ctr_gram[(i, j)] * inv_sd[i] * inv_sd[j]
-        }
-    });
-    // `&DMatrix` is Copy, so the inner `move` closure borrows rather than
-    // consuming the matrix the VIF solve below still needs.
-    let cr = &corr;
-    let max_abs_corr = (0..h)
-        .flat_map(|i| ((i + 1)..h).map(move |j| cr[(i, j)].abs()))
-        .fold(0.0f64, f64::max);
+    let (max_abs_corr, max_vif) = corr_and_vif(&ctr_gram);
 
-    // VIF = diag(C⁻¹), via a Cholesky solve against the identity rather than an
-    // explicit inverse — it matters most exactly here, since near-collinear dims
-    // are the case this measures. A singular `C` means a dim is an exact
-    // combination of the others: infinite inflation, reported as such rather
-    // than as a NaN that would read as "not measured".
-    let eye = DMatrix::<f64>::identity(h, h);
-    let max_vif = corr
-        .clone()
-        .cholesky()
-        .map(|c| c.solve(&eye))
-        .or_else(|| corr.lu().solve(&eye))
-        .map_or(f32::INFINITY, |inv| {
-            (0..h).fold(0.0f64, |acc, j| acc.max(inv[(j, j)])) as f32
-        })
-        .max(1.0);
+    // Row centering in closed form: subtracting each row's mean across columns
+    // is `E·P` with `P = I − 11ᵀ/h`, so its Gram is `P·(EᵀE/n)·P`, off what
+    // the row pass already holds — no second pass over `n`.
+    let proj = DMatrix::<f64>::from_fn(h, h, |i, j| {
+        (if i == j { 1.0 } else { 0.0 }) - 1.0 / h as f64
+    });
+    let row_gram = &proj * &raw_gram * &proj;
 
     EmbeddingGeometry {
         n_rows: n,
@@ -252,7 +277,8 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
         mean_pairwise_cos,
         eff_rank_raw: participation_ratio(&raw_gram),
         eff_rank_centered: participation_ratio(&ctr_gram),
-        max_abs_corr: max_abs_corr as f32,
+        eff_rank_row_centered: participation_ratio(&row_gram),
+        max_abs_corr,
         max_vif,
     }
 }
