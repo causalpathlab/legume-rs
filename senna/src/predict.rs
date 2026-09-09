@@ -364,15 +364,21 @@ pub struct PredictArgs {
     #[arg(
         long,
         value_enum,
-        default_value_t = FeatureNameKindArg::Exact,
-        help = "Canonicalize query row names: auto|exact|gene|locus|locus-overlap|mixed",
-        long_help = "Mirrors the training-side flag.\n\
-                     `exact` (default) preserves legacy exact-then-flexible matching.\n\
-                     `gene` resolves `ENSG..._TSPAN6` → `TSPAN6`, rsplit on '_',\n\
+        help = "Row-name rule for the query: auto|exact|gene|locus|locus-overlap|mixed",
+        long_help = "Mirrors the training-side flag, and drives both halves of the query side:\n\
+                     how the query files' rows are aligned when they are read,\n\
+                     and how each row name is matched to the model's gene axis.\n\
+                     \n\
+                     Unset: rows are aligned by auto-detection,\n\
+                     then matched to the model exactly, with a flexible fallback.\n\
+                     `exact` keeps the rows exactly as the file spells them\n\
+                     (the choice for a model trained with `--feature-name-kind exact`).\n\
+                     `gene` resolves `ENSG..._TSPAN6` to `TSPAN6`, rsplit on '_',\n\
                      so a symbol-keyed dictionary matches a query keyed by `<ensembl>_<symbol>`.\n\
+                     `auto` aligns the rows by auto-detection and matches under `gene`.\n\
                      Applied AFTER the suffix trim (see --feature-name-suffix-delim)."
     )]
-    pub(crate) feature_name_kind: FeatureNameKindArg,
+    pub(crate) feature_name_kind: Option<FeatureNameKindArg>,
 
     #[arg(
         long,
@@ -422,7 +428,15 @@ impl PredictArgs {
             None => None,
         };
         Ok(QueryNameOpts {
-            kind: self.feature_name_kind.clone().resolve_or_gene(),
+            loader_kind: self.feature_name_kind.clone().and_then(Into::into),
+            // Unset keeps the legacy pairing: the remap matches exactly first
+            // and falls back to the flexible matcher.
+            kind: self
+                .feature_name_kind
+                .as_ref()
+                .map_or(auxiliary_data::feature_names::FeatureNameKind::Exact, |k| {
+                    k.resolve_or_gene()
+                }),
             suffix_delim: self.feature_name_suffix_delim,
             keep_suffix: self.keep_feature_suffix.clone(),
             min_overlap: self.min_gene_overlap,
@@ -652,6 +666,7 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
         ReadSharedRowsArgs {
             data_files: args.data_files.to_vec(),
             preload: args.preload_data,
+            feature_kind: args.query_name_opts()?.loader_kind,
             ..Default::default()
         },
         &training_genes,
@@ -1073,6 +1088,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
             data_files: a.data_files.to_vec(),
             batch_files: a.batch_files.map(<[_]>::to_vec),
             preload: a.preload,
+            feature_kind: a.query_name_opts.loader_kind.clone(),
             ..Default::default()
         },
         &training_genes,
@@ -1611,6 +1627,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             data_files: a.data_files.to_vec(),
             batch_files: a.batch_files.map(<[_]>::to_vec),
             preload: a.preload,
+            feature_kind: a.query_name_opts.loader_kind.clone(),
             ..Default::default()
         },
         &training_genes,
@@ -2003,6 +2020,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
             data_files: a.data_files.to_vec(),
             batch_files: a.batch_files.map(<[_]>::to_vec),
             preload: a.preload,
+            feature_kind: a.query_name_opts.loader_kind.clone(),
             ..Default::default()
         },
         &training_genes,
@@ -2358,6 +2376,7 @@ fn training_marginal(
         ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload: args.preload_data,
+            feature_kind: args.query_name_opts()?.loader_kind,
             ..Default::default()
         },
         training_genes,

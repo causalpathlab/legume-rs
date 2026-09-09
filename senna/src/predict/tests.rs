@@ -356,3 +356,49 @@ fn bulk_header_defaults_to_auto_and_parses_yes_no() {
     .expect("parses");
     assert_eq!(a.bulk_table.bulk_header, crate::embed_common::HeaderArg::No);
 }
+
+//////////////////////////////////////////////////////////////////
+// `--feature-name-kind` reaches the loader, not only the remap //
+//////////////////////////////////////////////////////////////////
+
+/// The flag used to be applied to the query→dictionary remap only, while the
+/// backend was still loaded under auto-detection, so `exact` on an
+/// exact-trained model still got a canonicalized query. Unset keeps the legacy
+/// pairing (loader auto, remap exact-then-flexible); a value now drives both.
+mod feature_name_kind_reaches_the_loader {
+    use super::parse;
+    use auxiliary_data::feature_names::FeatureNameKind;
+
+    const BASE: &[&str] = &["q.zarr", "--model", "m", "-o", "out"];
+
+    fn with<'a>(extra: &'a [&'a str]) -> Vec<&'a str> {
+        BASE.iter().chain(extra).copied().collect()
+    }
+
+    #[test]
+    fn unset_keeps_the_legacy_pairing() {
+        let opts = parse(&with(&[])).unwrap().query_name_opts().unwrap();
+        assert_eq!(opts.loader_kind, None);
+        assert_eq!(opts.kind, FeatureNameKind::Exact);
+    }
+
+    #[test]
+    fn exact_pins_both_the_loader_and_the_remap() {
+        let opts = parse(&with(&["--feature-name-kind", "exact"]))
+            .unwrap()
+            .query_name_opts()
+            .unwrap();
+        assert_eq!(opts.loader_kind, Some(FeatureNameKind::Exact));
+        assert_eq!(opts.kind, FeatureNameKind::Exact);
+    }
+
+    #[test]
+    fn explicit_auto_means_loader_auto_and_gene_remap() {
+        let opts = parse(&with(&["--feature-name-kind", "auto"]))
+            .unwrap()
+            .query_name_opts()
+            .unwrap();
+        assert_eq!(opts.loader_kind, None);
+        assert_eq!(opts.kind, FeatureNameKind::Gene { delim: '_' });
+    }
+}
