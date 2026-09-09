@@ -48,17 +48,20 @@ pub struct EmbeddingGeometry {
     /// [`Self::eff_rank_raw`] ⇒ the apparent low rank is a mean offset (a common
     /// mode), not a genuine collapse.
     pub eff_rank_centered: f32,
-    /// Same, after centering each ROW across its `h` columns — the offset a
-    /// row shares with every column removed. That is what a per-gene
-    /// background pinned into a dictionary looks like (every topic column
-    /// carries it), and what a per-cell depth offset looks like in an
-    /// embedding: column centering cannot touch it, so [`Self::eff_rank_centered`]
-    /// reads near 1 and [`Self::max_vif`] explodes while the columns' own
-    /// content is spread. Row centering projects out the all-ones direction,
-    /// so a genuinely full-rank table reads `h − 1` here, not `h`. No VIF is
-    /// reported for the row-centered table: its columns sum to zero, so their
+    /// Same, after DOUBLE centering: each row's mean across its `h` columns
+    /// removed, then each column's mean. A log-simplex dictionary is
+    /// `log β_gk = (per-gene share) + (module/topic content) − (per-topic
+    /// partition)`, and the two offsets dominate its variance: column
+    /// centering leaves the per-gene share, row centering leaves the
+    /// per-topic constant, and either alone reads near 1 with a huge
+    /// [`Self::max_vif`]. Removing both leaves the topic-specific content,
+    /// which is what "how many directions do the topics use" means for such
+    /// a table. For an embedding it removes a per-unit depth-like offset the
+    /// same way. Row centering projects out the all-ones direction, so a
+    /// genuinely full-rank table reads `h − 1` here, not `h`. No VIF is
+    /// reported for it: the row-centered columns sum to zero, so their
     /// correlation matrix is singular by construction.
-    pub eff_rank_row_centered: f32,
+    pub eff_rank_double_centered: f32,
     /// Largest `|correlation|` between two distinct dims.
     pub max_abs_corr: f32,
     /// Largest variance-inflation factor `diag(C⁻¹)` over dims (`1` =
@@ -262,13 +265,17 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
 
     let (max_abs_corr, max_vif) = corr_and_vif(&ctr_gram);
 
-    // Row centering in closed form: subtracting each row's mean across columns
-    // is `E·P` with `P = I − 11ᵀ/h`, so its Gram is `P·(EᵀE/n)·P`, off what
-    // the row pass already holds — no second pass over `n`.
+    // Double centering in closed form: subtracting each row's mean across
+    // columns is `E·P` with `P = I − 11ᵀ/h`, so that table's Gram is
+    // `P·(EᵀE/n)·P` and its column means are `P·μ`; column centering is then
+    // the same rank-one update as above. All off what the row pass already
+    // holds — no second pass over `n`.
     let proj = DMatrix::<f64>::from_fn(h, h, |i, j| {
         (if i == j { 1.0 } else { 0.0 }) - 1.0 / h as f64
     });
     let row_gram = &proj * &raw_gram * &proj;
+    let row_mean = &proj * nalgebra::DVector::<f64>::from_vec(mean.clone());
+    let double_gram = &row_gram - &row_mean * row_mean.transpose();
 
     EmbeddingGeometry {
         n_rows: n,
@@ -277,7 +284,7 @@ pub fn embedding_geometry(e: &DMatrix<f32>) -> EmbeddingGeometry {
         mean_pairwise_cos,
         eff_rank_raw: participation_ratio(&raw_gram),
         eff_rank_centered: participation_ratio(&ctr_gram),
-        eff_rank_row_centered: participation_ratio(&row_gram),
+        eff_rank_double_centered: participation_ratio(&double_gram),
         max_abs_corr,
         max_vif,
     }

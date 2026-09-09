@@ -275,12 +275,12 @@ fn participation_ratio_is_h_for_identity_and_one_for_rank_one() {
 // A per-row offset shared by every column       //
 //////////////////////////////////////////////////
 
-/// A dictionary carries a per-gene background that every topic column shares.
+/// A dictionary carries a per-gene share that every topic column shares.
 /// Column centering cannot remove it (it varies by ROW), so `pr_ctr` reads
 /// near 1 and the VIF explodes while the topics themselves are spread out.
-/// Row centering removes exactly that offset.
+/// Double centering removes exactly that offset (and any per-column one).
 #[test]
-fn a_shared_per_row_offset_is_removed_by_row_centering_not_column_centering() {
+fn a_shared_per_row_offset_is_removed_by_double_centering_not_column_centering() {
     let (n, h, r) = (60, 6, 3);
     // Rank-3 signal: three independent row scores on three zero-mean column
     // patterns (pairs of opposite columns), then a large offset per row added
@@ -299,18 +299,18 @@ fn a_shared_per_row_offset_is_removed_by_row_centering_not_column_centering() {
     assert!(g.eff_rank_centered < 1.3, "column centering keeps the offset: {}", g.eff_rank_centered);
     assert!(g.max_vif > 50.0, "the shared offset reads as collinearity: {}", g.max_vif);
     assert!(
-        g.eff_rank_row_centered > 2.0 && g.eff_rank_row_centered <= r as f32 + 0.5,
-        "row centering recovers the signal rank: {}",
-        g.eff_rank_row_centered
+        g.eff_rank_double_centered > 2.0 && g.eff_rank_double_centered <= r as f32 + 0.5,
+        "double centering recovers the signal rank: {}",
+        g.eff_rank_double_centered
     );
 }
 
 /// Row centering projects out the all-ones direction, so a full-rank balanced
 /// table loses exactly one dimension and nothing else.
 #[test]
-fn row_centering_costs_a_full_rank_table_one_dimension() {
+fn double_centering_costs_a_full_rank_table_one_dimension() {
     let t = balanced_axes(4, 4);
     let g = embedding_geometry(&t);
     assert!((g.eff_rank_centered - 4.0).abs() < 0.05, "{}", g.eff_rank_centered);
-    assert!((g.eff_rank_row_centered - 3.0).abs() < 0.05, "{}", g.eff_rank_row_centered);
+    assert!((g.eff_rank_double_centered - 3.0).abs() < 0.05, "{}", g.eff_rank_double_centered);
 }
