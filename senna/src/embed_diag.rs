@@ -76,7 +76,7 @@ pub(crate) fn collect_geometry(
 fn print_report(rows: &[(&str, EmbeddingGeometry)]) {
     println!(
         "{:<18} {:>8} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "table", "rows", "h", "pr_raw", "pr_ctr", "pr_row", "pair_cos", "mode_cos", "max_corr", "max_vif"
+        "table", "rows", "h", "pr_raw", "pr_ctr", "pr_both", "pair_cos", "mode_cos", "max_corr", "max_vif"
     );
     for (name, g) in rows {
         println!(
@@ -86,7 +86,7 @@ fn print_report(rows: &[(&str, EmbeddingGeometry)]) {
             g.h,
             g.eff_rank_raw,
             g.eff_rank_centered,
-            g.eff_rank_row_centered,
+            g.eff_rank_double_centered,
             g.mean_pairwise_cos,
             g.common_mode_cos,
             g.max_abs_corr,
@@ -99,10 +99,9 @@ fn print_report(rows: &[(&str, EmbeddingGeometry)]) {
          Read it as VARIANCE CONCENTRATION, not useful dimensionality: a low value says\n\
          few directions carry the variance, not that the rest are noise.\n\
          pr_raw far below pr_ctr is a mean offset (mode_cos near 1), not a collapse.\n\
-         pr_row: the same after centring each ROW across its h columns, in [1, h-1].\n\
-         It removes an offset every column shares row by row: the per-gene background a\n\
-         dictionary carries, or a per-cell depth offset. pr_ctr near 1 with a large max_vif\n\
-         but pr_row well above 1 is that shared offset, not collinear columns.\n\
+         pr_both: the same after centring rows AND columns, in [1, h-1]. A log-simplex\n\
+         dictionary is per-gene share + topic content - per-topic partition; the two\n\
+         offsets dominate pr_raw/pr_ctr and max_vif, pr_both is the topic content alone.\n\
          pair_cos: signed mean cosine over distinct row pairs (a balanced cloud reads −1/(n−1))."
     );
 }
