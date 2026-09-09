@@ -35,45 +35,41 @@ where `log q_S` is the Jean et al. (2015) importance correction for sampled soft
 
 - `{out}.feature_embedding.parquet` — D × H learned ρ. Directly usable for gene-gene similarity, clustering into programs, or initializing downstream models.
 
-## `senna masked-vae` — masked-imputation Gaussian VAE (BERT-style)
+## `senna masked-vae` — masked imputation with an unconstrained latent (BERT-style)
 
-The Gaussian-latent sibling of `masked-topic` (alias `bert`). Same masked-imputation
+The continuous-latent sibling of `masked-topic` (alias `bert`). Same masked-imputation
 pipeline — PB-collapse training, shared per-gene embedding ρ, NB ETM head, encoder-only
-cell inference — but the latent is a **reparameterized Gaussian** `z` (no simplex
-softmax) regularized by a KL term: a genuine variational bottleneck on top of the
-masked objective.
+cell inference — but the encoder emits a raw `z` with no simplex softmax. It is
+deterministic and KL-free, like `masked-topic` and `masked-sbp`: the masking is the
+regularizer.
 
 **Model**
 
 ```text
 encoder (masked, visible-pooled):
     h       = Σ_{k∈visible} v_norm[k] · ρ[idx[k]]            # bag-of-visible-genes
-    z       ∼ Gaussian(μ_z(h), σ_z(h))                       # raw latent, NO softmax
+    z       = clamp(W_z · h)                                 # raw latent, NO softmax
 
 decoder (NB ETM head, reused unchanged):
+    θ       = softmax(z)                                     # gene-axis mixture weights
     β_kg    = softmax_d(α_k · ρ_dᵀ)                          # per-topic gene dist (full-vocab Zₖ)
-    μ_g     = ℓ · Σ_t exp(z_t) · β_{t,g}                     # exp(z) = log-normal intensities
+    μ_g     = ℓ · Σ_t θ_t · β_{t,g}
     x_g     ∼ NB(μ_g, φ_g)        for masked g
 
-loss = − Σ_{masked g} log NB(x_g | μ_g, φ_g)  +  β · KL(z ‖ N(0, I))
+loss = − Σ_{masked g} log NB(x_g | μ_g, φ_g)
 ```
 
-**Why `exp(z)`, not `softmax_d(z·α·ρᵀ)`.** A genuine gene-axis softmax over a Gaussian
-`z` needs the full-vocab partition `Σ_d exp(z·α·ρ_d)`, which does *not* decompose per
-topic (z couples topics inside the logsumexp) — expensive in the masked/indexed setting.
-Using `exp(z)` as **non-negative log-normal topic intensities** keeps the cheap
-per-topic partition `Zₖ` the masked head already computes, so the NB decoder
-(`impute_masked_nb`) is reused **verbatim** — `z` simply takes the place of `log θ`,
-and `exp(z)` the place of the simplex weights. The only new code is the encoder's
-Gaussian masked forward (reparameterize + KL).
+**Latent vs masked-topic.** Both are deterministic and KL-free, and both hand the
+decoder `log_softmax` of the encoder's logits, so they train the same model with the
+same gradients. The difference is what is written out: `masked-topic` stores `log θ`,
+`masked-vae` stores the raw pre-softmax `z`, which is the more natural input for a
+downstream kNN or linear model. NB objective only. Outputs otherwise match
+`masked-topic` (`.dictionary`, `.feature_embedding`, `.dispersion`, `.latent`, …).
 
-**Latent vs masked-topic.** `masked-topic` is deterministic (`θ = softmax(z_mean)`,
-no KL) — the masking *is* the regularizer. `masked-vae` adds the KL bottleneck back
-(reparameterization + `β·KL`), so the masking *and* the KL regularize; the latent is
-unconstrained continuous factors rather than topic proportions. `--kl-weight` tunes
-β (the masked-NB signal is weaker than a full reconstruction, so β < 1 often helps).
-NB objective only. Outputs match `masked-topic` (`.dictionary`, `.feature_embedding`,
-`.dispersion`, `.latent`, …).
+> A KL bottleneck (`--kl-weight`) used to sit on top of the masked objective here. At
+> its default weight it drove `z` to zero and every cell's θ to uniform, so it was
+> removed along with the flag; a model recorded with `kl_weight` still replays, the
+> value is ignored.
 
 ## `senna vae` — scVI-style Gaussian VAE
 

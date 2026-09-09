@@ -153,21 +153,16 @@ impl FeatureNameKind {
     /// both; `Mixed` anywhere stays `Mixed`; all-`Exact` stays `Exact`.
     #[must_use]
     pub fn reconcile(kinds: &[FeatureNameKind]) -> FeatureNameKind {
-        let mut gene: Option<FeatureNameKind> = None;
-        let mut locus: Option<FeatureNameKind> = None;
-        for k in kinds {
-            match k {
-                FeatureNameKind::Mixed => return FeatureNameKind::Mixed,
-                FeatureNameKind::Gene { .. } => gene.get_or_insert_with(|| k.clone()),
-                FeatureNameKind::Locus { .. } => locus.get_or_insert_with(|| k.clone()),
-                FeatureNameKind::Exact => continue,
-            };
+        if kinds.iter().any(|k| matches!(k, FeatureNameKind::Mixed)) {
+            return FeatureNameKind::Mixed;
         }
+        let gene = kinds.iter().find(|k| matches!(k, FeatureNameKind::Gene { .. }));
+        let locus = kinds
+            .iter()
+            .find(|k| matches!(k, FeatureNameKind::Locus { .. }));
         match (gene, locus) {
             (Some(_), Some(_)) => FeatureNameKind::Mixed,
-            (Some(g), None) => g,
-            (None, Some(l)) => l,
-            (None, None) => FeatureNameKind::Exact,
+            _ => gene.or(locus).cloned().unwrap_or(FeatureNameKind::Exact),
         }
     }
 

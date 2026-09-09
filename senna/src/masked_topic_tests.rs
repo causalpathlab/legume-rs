@@ -23,15 +23,9 @@ fn adj_method_is_listed_in_help() {
 
 /// The masked objective is the regularizer; `masked-vae` no longer weighs a KL.
 mod no_kl {
-    use super::super::MaskedTopicArgs;
+    use super::{Cli, MaskedTopicArgs};
     use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
-
-    #[derive(clap::Parser)]
-    struct Cli {
-        #[command(flatten)]
-        args: MaskedTopicArgs,
-    }
 
     #[test]
     fn kl_weight_is_not_a_flag_any_more() {
