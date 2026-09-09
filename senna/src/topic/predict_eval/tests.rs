@@ -160,3 +160,44 @@ fn the_per_gene_axis_needs_counts_not_rates() {
         );
     }
 }
+
+/// `--eval-features` is the same file for every arm, so it has to resolve on a
+/// model that spells its axis differently from the file: raw `ENSG_SYMBOL`
+/// rows against a canonical (bare-symbol) dictionary and the reverse.
+mod eval_features_naming {
+    use super::super::resolve_eval_genes;
+
+    fn names(v: &[&str]) -> Vec<Box<str>> {
+        v.iter().map(|s| Box::from(*s)).collect()
+    }
+
+    fn list_file(dir: &std::path::Path, lines: &[&str]) -> String {
+        let p = dir.join("eval.txt");
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn raw_names_resolve_on_a_canonical_axis() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = list_file(dir.path(), &["ENSG00000000419_DPM1", "ENSG00000000003_TSPAN6"]);
+        let axis = names(&["tspan6", "tnmd", "dpm1"]);
+        assert_eq!(resolve_eval_genes(Some(&path), &axis).unwrap(), vec![2, 0]);
+    }
+
+    #[test]
+    fn symbols_resolve_on_a_raw_axis() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = list_file(dir.path(), &["DPM1", "TSPAN6"]);
+        let axis = names(&["ENSG00000000003_TSPAN6", "ENSG00000000005_TNMD", "ENSG00000000419_DPM1"]);
+        assert_eq!(resolve_eval_genes(Some(&path), &axis).unwrap(), vec![2, 0]);
+    }
+
+    #[test]
+    fn an_exact_hit_wins_over_a_suffix_sharing_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = list_file(dir.path(), &["gene_0"]);
+        let axis = names(&["other_0", "gene_0"]);
+        assert_eq!(resolve_eval_genes(Some(&path), &axis).unwrap(), vec![1]);
+    }
+}
