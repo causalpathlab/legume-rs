@@ -128,9 +128,27 @@ pub struct UpdateArgs {
                      {out}.latent.parquet covers the NEW cells only. The parent's\n\
                      latent remains the record for everything absorbed earlier.\n\
                      \n\
-                     Off by default — re-collapsing is the exact computation."
+                     ON by default whenever the parent carries pseudobulks and the
+                     new data has batch labels. Without them, or with
+                     --no-pb-reference, this round re-collapses instead — the exact
+                     computation, and the fallback for a parent that carries nothing."
     )]
     use_pb_reference: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "use_pb_reference",
+        help = "Re-collapse the whole cohort from cells, ignoring any carried pseudobulks",
+        long_help = "Forces the exact computation: every cell the model has already\n\
+                     seen is re-read and re-collapsed alongside the new ones, and\n\
+                     old-vs-new batch matching stays at cell resolution.\n\
+                     \n\
+                     This is what every round did before carrying was the default.\n\
+                     It costs time proportional to the WHOLE cohort, so a chain of S\n\
+                     samples is quadratic in cell reads, but it is the baseline the\n\
+                     substituted-pseudobulk path is checked against."
+    )]
+    no_pb_reference: bool,
 
     #[arg(
         long,
@@ -277,23 +295,58 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // Either substitute the parent's carried pseudobulks for its cells, or
     // re-read the cells. The substitution is what turns a round from
     // "every cell ever absorbed" into "the new cells only".
-    let reference = if args.use_pb_reference {
+    // Substituting the parent's carried pseudobulks is the default, because it
+    // is what makes a round cost the NEW data rather than every cell the model
+    // has ever seen. It needs three things, and any of them missing falls back
+    // to the exact re-collapse rather than failing: a family that trains on
+    // pseudobulks at all, a parent that actually carries some, and batch labels
+    // for the new data (the carried columns are their own batch, and the loader
+    // takes one batch file per data file, so a partial set cannot be assembled).
+    //
+    // An EXPLICIT `--use-pb-reference` still errors on each of those instead of
+    // quietly doing something else, because there the user has said what they
+    // want and a silent downgrade would cost them a round to notice.
+    let explicit = args.use_pb_reference;
+    let reference = if args.no_pb_reference {
+        None
+    } else if kind == RunKind::Simba {
         anyhow::ensure!(
-            kind != RunKind::Simba,
+            !explicit,
             "--use-pb-reference does not apply to a simba run: it trains on cells, never on \
              pseudobulks, so there is nothing to substitute. Drop the flag."
         );
-        let r = crate::pb_reference::prepare(&args.model, &args.out)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} carries no pseudobulks, so there is nothing to substitute for its cells. \
-                 Re-train it with --emit-pb-reference, or drop --use-pb-reference and let this \
-                 round re-collapse.",
-                args.model,
-            )
-        })?;
-        Some(r)
-    } else {
         None
+    } else if args.batch_files.is_none() {
+        anyhow::ensure!(
+            !explicit,
+            "--use-pb-reference needs --batch-files for the new data: the carried \
+             pseudobulks are their own batch, and the loader takes one batch file per \
+             data file."
+        );
+        info!(
+            "no --batch-files for the new data, so this round re-collapses the whole cohort. \
+             Passing batch labels lets it reuse {}'s carried pseudobulks and cost the new \
+             data only.",
+            args.model,
+        );
+        None
+    } else {
+        let prepared = crate::pb_reference::prepare(&args.model, &args.out)?;
+        if prepared.is_none() {
+            anyhow::ensure!(
+                !explicit,
+                "{} carries no pseudobulks, so there is nothing to substitute for its cells. \
+                 Re-train it without --no-emit-pb-reference, or pass --no-pb-reference and let \
+                 this round re-collapse.",
+                args.model,
+            );
+            info!(
+                "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
+                 carrying was the default), so this round re-collapses the whole cohort.",
+                args.model,
+            );
+        }
+        prepared
     };
 
     let (data_files, batch_files) = if let Some(r) = reference.as_ref() {
@@ -313,11 +366,9 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
                 v.push(r.batch_file.clone());
                 Some(v)
             }
-            None => anyhow::bail!(
-                "--use-pb-reference needs --batch-files for the new data: the carried \
-                 pseudobulks are their own batch, and the loader takes one batch file per \
-                 data file."
-            ),
+            // Guaranteed by the reference-selection block above, which falls
+            // back to re-collapsing when the new data has no batch labels.
+            None => unreachable!("a carried reference is only selected with --batch-files"),
         };
         (d, b)
     } else {
@@ -341,6 +392,16 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
              cells each), plus {} new file(s)",
             n_cols as usize,
             n_cells as usize,
+            args.data_files.len(),
+        );
+        // Now the default path, so say what it changes about the OUTPUT, not
+        // just about the cost: nothing downstream reads a manifest to discover
+        // that a chain's latents stopped covering the whole cohort.
+        info!(
+            "{}.latent.parquet will cover the {} new cell(s) only; the parent's latent remains \
+             the record for everything absorbed earlier (--no-pb-reference re-collapses and \
+             writes the whole cohort)",
+            args.out,
             args.data_files.len(),
         );
         // The saving is the ratio. Below ~2 the pseudobulks are near-singletons,
@@ -436,7 +497,11 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             );
             let mut a: crate::svd::SvdArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
-            info!("svd has no trainable weights — re-fitting on the union (not a warm start)");
+            info!(
+                "svd: re-fitting on the union. Its gene x K dictionary is recomputed rather \
+                 than continued from {}, though the gene axis is shared across rounds",
+                args.model
+            );
             crate::svd::fit_svd(&a)
         }
         k if k.is_masked_family() => {
@@ -468,15 +533,30 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         RunKind::Bge => {
             let mut a: crate::bge::BgeArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
-            info!("bge has no trainable checkpoint — re-fitting on the union (not a warm start)");
+            // bge DOES continue something: `rebase` hands it the parent prefix and
+            // `build_config` loads that run's learned gene modules as this run's
+            // warm start. What it does not continue is the ETM, which is
+            // re-derived by archetypal analysis every run.
+            info!(
+                "bge: warm-starting the gene modules from {}; the ETM is re-derived on the union",
+                args.model
+            );
             crate::bge::fit_bge(&a)
         }
-        // As `svd` and `bge`: the node tables are not a checkpoint to warm-start
-        // (they are re-drawn per run), so this is a re-fit on the union.
+        // Re-fit on the union today. NOT because there is nothing to continue:
+        // simba persists a gene x H node table (`feature_embedding.parquet`,
+        // and `has_frozen_gene_table` is true for it, which is how `predict`
+        // scores a simba run), and the gene axis is shared across rounds by
+        // construction. Only the CELL nodes are genuinely new each round. So a
+        // gene-side warm start is available here and simply is not wired up.
         RunKind::Simba => {
             let mut a: crate::simba::SimbaArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
-            info!("simba has no trainable checkpoint — re-fitting on the union (not a warm start)");
+            info!(
+                "simba: re-fitting on the union. Its gene node table is re-drawn rather than \
+                 continued from {}, though the gene axis is shared across rounds",
+                args.model
+            );
             crate::simba::fit_simba(&a)
         }
         other => anyhow::bail!(
@@ -485,3 +565,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         ),
     }
 }
+
+#[cfg(test)]
+#[path = "update_tests.rs"]
+mod update_tests;

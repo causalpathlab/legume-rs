@@ -169,8 +169,11 @@ impl crate::update::Updatable for SimbaArgs {
         self.data_files = r.data_files;
         self.batch_files = r.batch_files;
         self.out = r.out;
-        // No checkpoint and no pseudobulks: `init_from` and `reference` have
-        // nothing to act on, so `update` re-fits on the union.
+        // `reference` has nothing to act on: simba trains on cells, never on
+        // pseudobulks. `init_from` is a different story — simba writes a
+        // gene x H node table and the gene axis is shared across rounds, so a
+        // gene-side warm start is available and simply is not wired up yet.
+        // Until it is, `update` re-fits on the union.
         if let Some(e) = r.epochs {
             self.epochs = e;
         }

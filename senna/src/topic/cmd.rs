@@ -635,7 +635,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     };
 
     let pb_reference_suffix = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
+        args.collapse.emits_pb_reference(),
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),

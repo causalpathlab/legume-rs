@@ -248,9 +248,13 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) iter_opt: usize,
 
+    /// Explicit opt-in. Redundant now that carrying is the default, but kept
+    /// so existing scripts keep parsing AND so `reject_pb_reference` can tell
+    /// "the user asked for this" from "the default is on" — the former is a
+    /// mistake worth an error on a family that cannot use it, the latter is not.
     #[arg(
         long,
-        help = "Carry this run's pseudobulks forward for a later `senna update`",
+        help = "Carry this run's pseudobulks forward (already the default)",
         long_help = "Writes {out}.pb_reference.zarr — one column per pseudobulk, holding\n\
                      its batch-adjusted per-cell rate — plus a sidecar with each\n\
                      column's cell count.\n\
@@ -274,6 +278,21 @@ pub(crate) struct CollapseArgs {
                      svd and bge — the families `senna update` can continue."
     )]
     pub(crate) emit_pb_reference: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "emit_pb_reference",
+        help = "Do NOT carry this run's pseudobulks forward",
+        long_help = "Carrying them is the default, because it is what lets a later\n\
+                     `senna update` absorb a sample without re-reading every cell\n\
+                     the model has already seen.\n\
+                     \n\
+                     Pass this to skip the extra artifact when you know the model\n\
+                     will never be grown. The cost it saves is bounded: at most\n\
+                     2^sort-dim + 1 columns, independent of how many cells the run\n\
+                     collapsed."
+    )]
+    pub(crate) no_emit_pb_reference: bool,
 
     #[command(flatten)]
     pub(crate) pb_refine: PbRefineArgs,
@@ -368,6 +387,18 @@ impl CollapseArgs {
     /// nothing. Accepting it there and silently doing nothing is the worst of
     /// the three options: the user believes the reference exists and only finds
     /// out a round later, when the parent turns out to carry nothing.
+    /// Whether this run should carry its pseudobulks forward.
+    ///
+    /// On unless opted out. Carrying them is what lets `senna update` absorb a
+    /// sample in time proportional to the NEW data instead of re-reading every
+    /// cell the model has seen, and the artifact is bounded at `2^sort-dim + 1`
+    /// columns regardless of cohort size — so the old default made the cheap
+    /// path unavailable to anyone who had not planned for it a round earlier.
+    #[must_use]
+    pub(crate) fn emits_pb_reference(&self) -> bool {
+        !self.no_emit_pb_reference
+    }
+
     pub(crate) fn reject_pb_reference(
         &self,
         kind: crate::run_manifest::RunKind,
@@ -377,6 +408,9 @@ impl CollapseArgs {
             "--mixture-batch has no effect on `{kind}`: its collapse path does not carry the \
              bulk role. Supported: topic, masked-topic, masked-sbp, masked-vae, vae, svd, bge."
         );
+        // Only an EXPLICIT `--emit-pb-reference` is an error here. The default
+        // is on everywhere, and a default cannot be a user mistake: these
+        // families simply write nothing.
         anyhow::ensure!(
             !self.emit_pb_reference,
             "--emit-pb-reference has no effect on `{kind}`: `senna update` cannot continue a \

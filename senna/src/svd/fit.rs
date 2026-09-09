@@ -311,7 +311,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     )?;
 
     let pb_reference_suffix = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
+        args.collapse.emits_pb_reference(),
         &args.out,
         &collapse_out,
         Some(std::slice::from_ref(&finest_membership)),
