@@ -538,15 +538,14 @@ impl IndexedEmbeddingEncoder {
         visible_mask: &Tensor,
         train: bool,
     ) -> Result<Tensor> {
-        let bn_nl = self.masked_hidden(
+        self.masked_logits(
             indices,
             values,
             values_null,
             values_mean,
             visible_mask,
             train,
-        )?;
-        soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)
+        )
     }
 
     /// Compute latent Gaussian parameters from packed indexed input.

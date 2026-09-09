@@ -194,14 +194,13 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             // under half, so the pair sniffed as `Exact` and every gene
             // became two rows. See `FeatureNameKind::reconcile`.
             let names = all_names.as_ref().expect("peeked when auto");
-            let mut start = 0usize;
-            let per_file: Vec<FeatureNameKind> = file_ends
-                .iter()
-                .map(|&end| {
-                    let k = FeatureNameKind::auto_detect(&names[start..end]);
-                    start = end;
-                    k
-                })
+            // Each file's slice of the flat list, from the cumulative ends: a
+            // plain zip of starts and ends, so the slicing does not depend on
+            // the closure running in order.
+            let per_file: Vec<FeatureNameKind> = std::iter::once(0)
+                .chain(file_ends.iter().copied())
+                .zip(file_ends.iter().copied())
+                .map(|(start, end)| FeatureNameKind::auto_detect(&names[start..end]))
                 .collect();
             let k = FeatureNameKind::reconcile(&per_file);
             debug!(

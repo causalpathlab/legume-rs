@@ -8,6 +8,75 @@ use candle_core::{Device, Tensor};
 use indicatif::ParallelProgressIterator;
 use rayon::prelude::*;
 
+/// How many blocks may be in flight, given the device the closure computes on.
+///
+/// **One off the CPU.** A CUDA device is a single stream behind a single
+/// cuBLAS handle, and driving it from several threads at once raced: some runs
+/// died with `CUBLAS_STATUS_EXECUTION_FAILED`, others hung, and the same work
+/// succeeded every time on one thread. The GPU is already parallel *inside* a
+/// block, so the pool only ever paid off for CPU blocks.
+///
+/// Takes the two facts rather than a `Device` so it can be tested without one.
+#[must_use]
+pub(crate) fn device_concurrency(is_cpu: bool, threads: usize) -> usize {
+    if is_cpu {
+        threads.max(1)
+    } else {
+        1
+    }
+}
+
+/// Run `f` over `jobs` with at most `max_conc` blocks in flight, collecting
+/// the results in job order.
+///
+/// The one place the device rule above is applied. Every block runner in senna
+/// goes through it — [`process_blocks`] here, and the dense `predict` drivers
+/// — so "one block at a time off the CPU" is stated once instead of being
+/// re-derived wherever a scoring loop is written.
+pub(crate) fn map_blocks<T, F>(
+    jobs: &[(usize, usize)],
+    max_conc: usize,
+    f: F,
+) -> anyhow::Result<Vec<T>>
+where
+    T: Send,
+    F: Fn((usize, usize)) -> anyhow::Result<T> + Send + Sync,
+{
+    let bar = new_progress_bar(jobs.len() as u64);
+    // Bound before `?`, so an error still clears the bar.
+    let out = if max_conc <= 1 {
+        // On the calling thread — the one that owns the device's tensors —
+        // rather than a one-worker pool, which was pure overhead.
+        jobs.iter()
+            .map(|&block| {
+                let r = f(block);
+                bar.inc(1);
+                r
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+    } else if max_conc >= rayon::current_num_threads() {
+        jobs.par_iter()
+            .progress_with(bar.clone())
+            .map(|&block| f(block))
+            .collect::<anyhow::Result<Vec<_>>>()
+    } else {
+        // A pool sized to the cap rather than waves of `par_iter`: the cap has
+        // to bound how many blocks hold their dense tensors at once, and a wave
+        // stalls on its slowest block before the next starts.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(max_conc)
+            .build()?;
+        pool.install(|| {
+            jobs.par_iter()
+                .progress_with(bar.clone())
+                .map(|&block| f(block))
+                .collect::<anyhow::Result<Vec<_>>>()
+        })
+    };
+    bar.finish_and_clear();
+    out
+}
+
 /// Run a block-processing closure over `ntot` items in blocks of `block_size`,
 /// dispatching in parallel on CPU or sequentially on GPU.
 ///
@@ -24,24 +93,8 @@ where
     F: Fn((usize, usize)) -> anyhow::Result<(usize, Mat)> + Send + Sync,
 {
     let jobs = create_jobs(ntot, 0, Some(block_size));
-    let njobs = jobs.len() as u64;
-
-    let prog_bar = new_progress_bar(njobs);
-    let mut chunks: Vec<(usize, Mat)> = if dev.is_cpu() {
-        jobs.par_iter()
-            .progress_with(prog_bar.clone())
-            .map(|&block| eval_block(block))
-            .collect::<anyhow::Result<Vec<_>>>()?
-    } else {
-        jobs.iter()
-            .map(|&block| {
-                let r = eval_block(block);
-                prog_bar.inc(1);
-                r
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
-    };
-    prog_bar.finish_and_clear();
+    let max_conc = device_concurrency(dev.is_cpu(), rayon::current_num_threads());
+    let mut chunks: Vec<(usize, Mat)> = map_blocks(&jobs, max_conc, eval_block)?;
 
     chunks.sort_by_key(|&(lb, _)| lb);
 

@@ -123,27 +123,40 @@ impl PredictEval {
 pub(crate) fn resolve_eval_genes(
     path: Option<&str>,
     gene_names: &[Box<str>],
+    flag: &str,
 ) -> anyhow::Result<Vec<usize>> {
     let Some(path) = path else {
         return Ok((0..gene_names.len()).collect());
     };
     let wanted = matrix_util::common_io::read_name_list(path)
-        .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("reading {flag} {path}: {e}"))?;
     // Case-insensitive, and bridged across spellings when the file and the
     // model do not share one (`ReconciledNames`): the file is the same across
     // arms whose axes are spelled differently.
-    let matcher = crate::topic::eval::ReconciledNames::new(gene_names, &wanted);
     let mut out = Vec::with_capacity(wanted.len());
     let mut missing = 0usize;
-    for pos in matcher.positions(gene_names, &wanted) {
+    for pos in crate::topic::eval::resolve_positions(gene_names, &wanted) {
         match pos {
             Some(i) => out.push(i),
             None => missing += 1,
         }
     }
+    let sample = |v: &[Box<str>]| -> String {
+        v.iter()
+            .take(3)
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     anyhow::ensure!(
         !out.is_empty(),
-        "{path}: none of the listed features are in this model's gene axis"
+        "{flag} {path}: none of its {} names is on the model's {}-gene axis, even after \
+         canonicalization. The file spells genes like [{}], the model like [{}]. Write the \
+         list in the model's spelling (see --feature-name-kind).",
+        wanted.len(),
+        gene_names.len(),
+        sample(&wanted),
+        sample(gene_names),
     );
     if missing > 0 {
         info!(
@@ -152,7 +165,7 @@ pub(crate) fn resolve_eval_genes(
         );
     }
     info!(
-        "Scoring {} of {} model features",
+        "{flag} {path}: {} of the model's {} features",
         out.len(),
         gene_names.len()
     );

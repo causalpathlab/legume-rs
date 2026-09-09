@@ -404,7 +404,6 @@ pub(crate) struct EpochAccum {
     llik: Tensor,
     scored: Tensor,
     r2: Tensor,
-    pub rows: f32,
     pub queries: f32,
 }
 
@@ -415,19 +414,17 @@ impl EpochAccum {
             llik: zero()?,
             scored: zero()?,
             r2: zero()?,
-            rows: 0.0,
             queries: 0.0,
         })
     }
 
-    /// Fold one step in. `rows` and `queries` are the step's counts, known on
-    /// the host; the scored units come from the scorer.
+    /// Fold one step in. `queries` is the step's count, known on the host; the
+    /// scored units come from the scorer.
     pub(crate) fn add(
         &mut self,
         llik_sum: &Tensor,
         units_sum: &Tensor,
         r2_sum: Option<&Tensor>,
-        rows: f32,
         queries: f32,
     ) -> candle_core::Result<()> {
         self.llik = (&self.llik + llik_sum.detach())?;
@@ -435,7 +432,6 @@ impl EpochAccum {
         if let Some(r) = r2_sum {
             self.r2 = (&self.r2 + r.detach())?;
         }
-        self.rows += rows;
         self.queries += queries;
         Ok(())
     }
@@ -660,7 +656,6 @@ pub fn train_masked(
     let mut llik_trace = Vec::with_capacity(total_epochs);
     // No KL in the masked objective; keep a zero column the same length as
     // `llik` so `TrainScores::to_parquet` sees equal-length columns.
-    let mut kl_trace = Vec::with_capacity(total_epochs);
     let draw = MaskedDraw {
         schedule: opts.mask_schedule,
         mask_fraction,
@@ -781,12 +776,10 @@ pub fn train_masked(
                     ep.n_queries[b],
                     &level_targets[level],
                 )?;
-                let rows = mb.base.row_ids.dim(0)? as f32;
                 acc.add(
                     &fwd.llik_sum,
                     &fwd.units_sum,
                     fwd.r2_sum.as_ref(),
-                    rows,
                     ep.n_queries[b],
                 )?;
                 let grads = fwd.loss.backward()?;
@@ -801,9 +794,6 @@ pub fn train_masked(
 
         let (per_metric, rms_r) = acc.read()?;
         llik_trace.push(per_metric);
-        // No head on this path carries a KL; the column is kept so the trace
-        // parquet has the same schema as the dense trainer's.
-        kl_trace.push(0.0);
         prog_bar.set_message(format!("llik={per_metric:.3}"));
         prog_bar.inc(1);
         // A skipped step means the gradient overflowed. Parameters are intact
@@ -836,8 +826,8 @@ pub fn train_masked(
             prog_bar.finish_and_clear();
             info!("Stopping early at epoch {epoch}");
             return Ok(TrainScores {
+                kl: vec![0.0; llik_trace.len()],
                 llik: llik_trace,
-                kl: kl_trace,
             });
         }
     }
@@ -845,8 +835,8 @@ pub fn train_masked(
     prog_bar.finish_and_clear();
     info!("done masked-imputation training");
     Ok(TrainScores {
+        kl: vec![0.0; llik_trace.len()],
         llik: llik_trace,
-        kl: kl_trace,
     })
 }
 

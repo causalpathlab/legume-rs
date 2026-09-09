@@ -129,56 +129,72 @@ pub(crate) struct QueryNameOpts {
 /// naming rule reconciled between the two sides
 /// ([`crate::embed_common::reconcile_name_kind`]) and both keyed canonically.
 pub(crate) struct ReconciledNames {
-    exact: rustc_hash::FxHashSet<String>,
-    canonical: Option<(
-        auxiliary_data::feature_names::FeatureNameKind,
-        rustc_hash::FxHashSet<String>,
-    )>,
+    /// The rule BOTH sides are keyed under. `Exact` when the list already
+    /// spells names the way the axis does — `Exact::canonicalize` is the
+    /// identity, so one keying rule covers both cases.
+    kind: auxiliary_data::feature_names::FeatureNameKind,
+    keys: rustc_hash::FxHashSet<String>,
 }
 
 impl ReconciledNames {
     /// Index `names` for lookups from `axis`.
-    pub(crate) fn new(axis: &[Box<str>], names: &[Box<str>]) -> Self {
-        let exact: rustc_hash::FxHashSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
-        let any_exact = axis.iter().any(|a| exact.contains(&a.to_lowercase()));
-        let canonical = (!any_exact).then(|| {
-            let kind = crate::embed_common::reconcile_name_kind(axis, &[names]);
-            let keys = names
-                .iter()
-                .map(|n| kind.canonicalize(n).to_lowercase())
-                .collect();
-            log::info!(
-                "gene list: no name matches the axis as spelled; matching under the {kind:?} rule"
-            );
-            (kind, keys)
-        });
-        Self { exact, canonical }
+    pub(crate) fn new<'a, I>(axis: &[Box<str>], names: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str> + Clone,
+    {
+        use auxiliary_data::feature_names::FeatureNameKind;
+        let keys: rustc_hash::FxHashSet<String> =
+            names.clone().into_iter().map(str::to_lowercase).collect();
+        if axis.iter().any(|a| keys.contains(&a.to_lowercase())) {
+            return Self {
+                kind: FeatureNameKind::Exact,
+                keys,
+            };
+        }
+        // Nothing matches as spelled, so bridge the two axes. The list is
+        // materialised only here, on the path that needs it.
+        let listed: Vec<Box<str>> = names.into_iter().map(Box::from).collect();
+        let kind = crate::embed_common::reconcile_name_kind(axis, &[&listed]);
+        log::info!(
+            "gene list: no name matches the axis as spelled; matching under the {kind:?} rule"
+        );
+        let keys = listed
+            .iter()
+            .map(|n| kind.canonicalize(n).to_lowercase())
+            .collect();
+        Self { kind, keys }
+    }
+
+    /// The lookup key for one name, under whichever rule was resolved.
+    fn key(&self, name: &str) -> String {
+        self.kind.canonicalize(name).to_lowercase()
     }
 
     /// Does the list name this axis entry?
     pub(crate) fn contains(&self, axis_name: &str) -> bool {
-        match &self.canonical {
-            None => self.exact.contains(&axis_name.to_lowercase()),
-            Some((kind, keys)) => keys.contains(&kind.canonicalize(axis_name).to_lowercase()),
-        }
+        self.keys.contains(&self.key(axis_name))
     }
+}
 
-    /// The axis position of each listed name, in list order (`None` = absent).
-    /// A first-writer index over the axis, so many-to-one spellings resolve to
-    /// the first row like the remap does.
-    pub(crate) fn positions(&self, axis: &[Box<str>], names: &[Box<str>]) -> Vec<Option<usize>> {
-        let key = |s: &str| -> String {
-            match &self.canonical {
-                None => s.to_lowercase(),
-                Some((kind, _)) => kind.canonicalize(s).to_lowercase(),
-            }
-        };
-        let mut index: rustc_hash::FxHashMap<String, usize> = rustc_hash::FxHashMap::default();
-        for (i, a) in axis.iter().enumerate() {
-            index.entry(key(a)).or_insert(i);
-        }
-        names.iter().map(|n| index.get(&key(n)).copied()).collect()
-    }
+/// The axis position of each listed name, in list order (`None` = absent).
+///
+/// A free function rather than a method so the axis it indexes is by
+/// construction the axis the names were reconciled against; passing a
+/// different one silently returned positions into the wrong table.
+///
+/// Duplicate spellings resolve LAST-writer, matching [`build_gene_remap_with`]
+/// below and what this replaced.
+pub(crate) fn resolve_positions(axis: &[Box<str>], names: &[Box<str>]) -> Vec<Option<usize>> {
+    let matcher = ReconciledNames::new(axis, names.iter().map(AsRef::as_ref));
+    let index: rustc_hash::FxHashMap<String, usize> = axis
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (matcher.key(a), i))
+        .collect();
+    names
+        .iter()
+        .map(|n| index.get(&matcher.key(n)).copied())
+        .collect()
 }
 
 /// Point the named features at `None` in a remap, hiding them from the model.
@@ -198,8 +214,7 @@ pub(crate) fn hide_features(
     // axis do not share one (see `ReconciledNames`): an exact match hid
     // nothing and then errored with "matched no feature", which points at the
     // wrong cause.
-    let listed: Vec<Box<str>> = hide.iter().cloned().collect();
-    let matcher = ReconciledNames::new(new_genes, &listed);
+    let matcher = ReconciledNames::new(new_genes, hide.iter().map(AsRef::as_ref));
     let mut hidden = 0usize;
     for (row, name) in new_genes.iter().enumerate() {
         if matcher.contains(name) && remap.new_to_train[row].take().is_some() {

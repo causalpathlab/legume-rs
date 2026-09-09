@@ -427,16 +427,16 @@ impl PredictArgs {
             )),
             None => None,
         };
+        // Both halves of the flag in one expression, so the pairing cannot
+        // drift: unset is the legacy behaviour (loader auto-detects, the remap
+        // matches exactly then falls back to the flexible matcher).
+        let (loader_kind, kind) = match &self.feature_name_kind {
+            None => (None, auxiliary_data::feature_names::FeatureNameKind::Exact),
+            Some(arg) => (arg.clone().into(), arg.resolve_or_gene()),
+        };
         Ok(QueryNameOpts {
-            loader_kind: self.feature_name_kind.clone().and_then(Into::into),
-            // Unset keeps the legacy pairing: the remap matches exactly first
-            // and falls back to the flexible matcher.
-            kind: self
-                .feature_name_kind
-                .as_ref()
-                .map_or(auxiliary_data::feature_names::FeatureNameKind::Exact, |k| {
-                    k.resolve_or_gene()
-                }),
+            loader_kind,
+            kind,
             suffix_delim: self.feature_name_suffix_delim,
             keep_suffix: self.keep_feature_suffix.clone(),
             min_overlap: self.min_gene_overlap,
@@ -469,18 +469,24 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     };
     let args = &args;
 
-    // The gene lists are checked against the MODEL's axis here, before any
-    // backend is imported: a list on a foreign axis used to surface only after
-    // the whole query had been loaded, as "matched no feature".
-    for (flag, path) in [
+    // Pre-flight the gene lists against the MODEL's axis, before any backend
+    // is imported: a list on a foreign axis used to surface only after the
+    // whole query had been loaded, as "matched no feature". This is the same
+    // resolution the scoring pass runs later, brought forward; the query-side
+    // ablation check in `hide_features` still runs on the query's own axis.
+    let listed_paths: Vec<(&str, &str)> = [
         ("--eval-features", args.eval_features.as_deref()),
         ("--ablate-features", args.ablate_features.as_deref()),
-    ] {
-        let Some(path) = path else { continue };
-        let listed = matrix_util::common_io::read_name_list(path)
-            .map_err(|e| anyhow::anyhow!("reading {flag} {path}: {e}"))?;
+    ]
+    .into_iter()
+    .filter_map(|(flag, path)| path.map(|p| (flag, p)))
+    .collect();
+    if !listed_paths.is_empty() {
+        // Loaded once: `model_gene_names` decodes the whole dictionary parquet.
         let axis = bulk::model_gene_names(kind, &args.model)?;
-        ensure_gene_list_resolves(&axis, &listed, flag, path)?;
+        for (flag, path) in listed_paths {
+            crate::topic::predict_eval::resolve_eval_genes(Some(path), &axis, flag)?;
+        }
     }
 
     match kind {
@@ -664,11 +670,13 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     let (training_genes, u_dk) = load_dictionary(&args.model)?;
     let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
 
+    // Resolved once: building these reads `--ablate-features` from disk.
+    let qopts = args.query_name_opts()?;
     let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: args.data_files.to_vec(),
             preload: args.preload_data,
-            feature_kind: args.query_name_opts()?.loader_kind,
+            feature_kind: qopts.loader_kind.clone(),
             ..Default::default()
         },
         &training_genes,
@@ -679,28 +687,20 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     // is about to be scored on, which is a reconstruction, not a prediction.
     // Only the remap is built here — the projection itself happens inside the
     // scoring loop, off the same block read, so the data is streamed once.
-    let proj_remap = crate::svd::project::projection_remap(
-        &data_vec,
-        &training_genes,
-        &args.query_name_opts()?,
-        "query",
-    )?;
+    let proj_remap = crate::svd::project::projection_remap(&data_vec, &training_genes, &qopts, "query")?;
 
     // Restrict to the scored genes exactly as the other families do, so a
     // benchmark passing one --eval-features file grades every arm on the
     // same curriculum.
-    let restrict = args
-        .eval_features
-        .as_deref()
-        .or(args.ablate_features.as_deref());
-    let eval_genes = resolve_eval_genes(restrict, &training_genes)?;
+    let (restrict, restrict_flag) = eval_gene_source(args);
+    let eval_genes = resolve_eval_genes(restrict, &training_genes, restrict_flag)?;
     anyhow::ensure!(
         !eval_genes.is_empty(),
         "no evaluation features matched the model's genes"
     );
     // Scoring reads the OBSERVED counts, hidden genes included — that is the
     // point of hiding them from the projection above.
-    let mut opts = args.query_name_opts()?;
+    let mut opts = qopts;
     opts.hide = None;
     let remap = build_remap(&training_genes, &data_vec.row_names()?, &opts)?;
 
@@ -877,38 +877,14 @@ pub(crate) mod bulk;
 #[cfg(test)]
 mod tests;
 
-/// How many of `listed` name a gene on `axis`, or an error naming the flag,
-/// the file and a sample of both spellings when none does.
-///
-/// Matching is the same [`crate::topic::eval::ReconciledNames`] the hide and
-/// eval passes use, so a list that passes here resolves there too.
-fn ensure_gene_list_resolves(
-    axis: &[Box<str>],
-    listed: &[Box<str>],
-    flag: &str,
-    path: &str,
-) -> anyhow::Result<usize> {
-    let matcher = crate::topic::eval::ReconciledNames::new(axis, listed);
-    let hits = axis.iter().filter(|a| matcher.contains(a)).count();
-    let sample = |v: &[Box<str>]| -> String {
-        v.iter()
-            .take(3)
-            .map(AsRef::as_ref)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    anyhow::ensure!(
-        hits > 0,
-        "{flag} {path}: none of its {} names is on the model's {}-gene axis, even after \
-         canonicalization. The file spells genes like [{}], the model like [{}]. Write the list \
-         in the model's spelling (see --feature-name-kind).",
-        listed.len(),
-        axis.len(),
-        sample(listed),
-        sample(axis),
-    );
-    info!("{flag} {path}: {hits} of its {} names are on the model's axis", listed.len());
-    Ok(hits)
+/// Which flag named the scored gene set, and its path. `--ablate-features`
+/// implies `--eval-features` on the same file unless that is given separately,
+/// so the two are resolved in one place rather than re-`or`-ed at each site.
+fn eval_gene_source(args: &PredictArgs) -> (Option<&str>, &'static str) {
+    match args.eval_features.as_deref() {
+        Some(p) => (Some(p), "--eval-features"),
+        None => (args.ablate_features.as_deref(), "--ablate-features"),
+    }
 }
 
 /// Align query genes onto the model's axis, or `None` when the axes already
@@ -2182,30 +2158,11 @@ fn dense_block_concurrency(dev: &Device, bytes_per_block: usize) -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_PREDICT_BUDGET_BYTES);
-    blocks_in_flight(
-        dev.is_cpu(),
-        bytes_per_block,
-        budget,
-        rayon::current_num_threads(),
-    )
-}
-
-/// How many blocks may run at once on this device.
-///
-/// Off the CPU the answer is one, whatever the memory budget says: a CUDA
-/// device is a single stream and a single cuBLAS handle, and driving it from
-/// several threads at once raced — `CUBLAS_STATUS_EXECUTION_FAILED` on some
-/// runs, a hang on others, and the same scoring succeeded every time with one
-/// thread. The GPU is already parallel inside a block; the pool only ever
-/// paid off for CPU blocks. This is the dense drivers' counterpart of
-/// `topic::common::process_blocks`, which the masked path (which never failed
-/// on CUDA) has always gone through.
-pub(crate) fn blocks_in_flight(is_cpu: bool, bytes_per_block: usize, budget: usize, threads: usize) -> usize {
-    if is_cpu {
-        block_concurrency(bytes_per_block, budget, threads)
-    } else {
-        1
-    }
+    // Two ceilings, composed: the device's (one block off the CPU — see
+    // `device_concurrency`) and the memory budget's. `block_concurrency`
+    // clamps to the first, so off the CPU the budget cannot raise it.
+    let threads = crate::topic::common::device_concurrency(dev.is_cpu(), rayon::current_num_threads());
+    block_concurrency(bytes_per_block, budget, threads)
 }
 
 /// The memory budget the cap works from when `LEGUME_PREDICT_BUDGET_BYTES` is unset.
@@ -2234,45 +2191,21 @@ fn run_predict_blocks<F>(
     block_fn: F,
 ) -> anyhow::Result<(Mat, Vec<f32>, Vec<f32>)>
 where
-    F: Fn((usize, usize)) -> anyhow::Result<(usize, Mat, Vec<f32>, Vec<f32>)> + Sync,
+    F: Fn((usize, usize)) -> anyhow::Result<(usize, Mat, Vec<f32>, Vec<f32>)> + Send + Sync,
 {
     let jobs = create_jobs(ntot, 0, Some(minibatch_size));
-    let njobs = jobs.len() as u64;
     let max_conc = dense_block_concurrency(dev, bytes_per_block);
     if dev.is_cpu() && max_conc < rayon::current_num_threads() {
         info!(
-            "Scoring {njobs} blocks at most {max_conc} at a time: one block's ~{} MB dense \
+            "Scoring {} blocks at most {max_conc} at a time: one block's ~{} MB dense \
              working set would otherwise be multiplied by every thread \
              (LEGUME_PREDICT_BUDGET_BYTES to raise)",
+            jobs.len(),
             bytes_per_block >> 20
         );
     }
-    let bar = new_progress_bar(njobs);
-    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = if max_conc == 1 {
-        // One at a time on THIS thread — the thread that built the encoder's
-        // weights and the device tensors — exactly as `process_blocks` does.
-        let mut out = Vec::with_capacity(jobs.len());
-        for &block in &jobs {
-            out.push(block_fn(block)?);
-            bar.inc(1);
-        }
-        out
-    } else {
-        // A pool sized to the cap rather than waves of `par_iter`: the cap has
-        // to bound how many blocks hold their dense tensors at once, and a wave
-        // stalls on its slowest block before the next starts. Sizing the pool
-        // keeps rayon work-stealing continuously under the same ceiling.
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(max_conc)
-            .build()?;
-        pool.install(|| {
-            jobs.par_iter()
-                .progress_with(bar.clone())
-                .map(|&block| block_fn(block))
-                .collect::<anyhow::Result<Vec<_>>>()
-        })?
-    };
-    bar.finish_and_clear();
+    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> =
+        crate::topic::common::map_blocks(&jobs, max_conc, block_fn)?;
     chunks.sort_by_key(|c| c.0);
 
     let mut z_nk = Mat::zeros(ntot, kk);
@@ -2348,12 +2281,8 @@ fn evaluate_agreement(a: AgreementInputs<'_>) -> anyhow::Result<Option<EvalOutco
     // Training axis, not query axis: the pass densifies the observed counts onto
     // the model's features before scoring, so an index that came from the query's
     // row names would point at the wrong gene whenever the two axes differ.
-    let restrict = a
-        .args
-        .eval_features
-        .as_deref()
-        .or(a.args.ablate_features.as_deref());
-    let eval_genes = resolve_eval_genes(restrict, a.training_genes)?;
+    let (restrict, restrict_flag) = eval_gene_source(a.args);
+    let eval_genes = resolve_eval_genes(restrict, a.training_genes, restrict_flag)?;
     if eval_genes.is_empty() {
         info!("No evaluation features matched; skipping agreement metrics");
         return Ok(None);
@@ -2412,20 +2341,21 @@ fn training_marginal(
         );
         return Ok(None);
     };
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
-        ReadSharedRowsArgs {
-            data_files: files.to_vec(),
-            preload: args.preload_data,
-            feature_kind: args.query_name_opts()?.loader_kind,
-            ..Default::default()
-        },
-        training_genes,
-    )?)?;
+    // Resolved once: building this reads `--ablate-features` from disk.
     // The training half is aligned onto the model's axis the same way the query
     // is, so a name-kind difference between the two files cannot silently drop
     // genes from the floor that the model is being scored on.
     let mut opts = args.query_name_opts()?;
     opts.hide = None;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: files.to_vec(),
+            preload: args.preload_data,
+            feature_kind: opts.loader_kind.clone(),
+            ..Default::default()
+        },
+        training_genes,
+    )?)?;
     let remap = build_remap(training_genes, &loaded.data.row_names()?, &opts)?;
     let comp = crate::topic::predict_eval::empirical_composition(
         &loaded.data,
