@@ -254,6 +254,7 @@ pub(crate) struct CollapseArgs {
     /// mistake worth an error on a family that cannot use it, the latter is not.
     #[arg(
         long,
+        hide = true,
         help = "Carry this run's pseudobulks forward (already the default)",
         long_help = "Writes {out}.pb_reference.zarr — one column per pseudobulk, holding\n\
                      its batch-adjusted per-cell rate — plus a sidecar with each\n\
