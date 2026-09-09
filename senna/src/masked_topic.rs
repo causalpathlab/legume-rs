@@ -360,8 +360,10 @@ pub struct MaskedTopicArgs {
         default_value = "residual",
         help = "Batch adjustment (batch|residual)",
         long_help = "batch    — subtract per-batch pseudobulk mean.\n\
-                     residual — divide by fitted delta per pseudobulk group.",
-        hide = true
+                     residual — divide by fitted delta per pseudobulk group.\n\
+                     \n\
+                     `senna predict` builds its held-out null per batch,\n\
+                     so a model trained with `batch` is scored under the null it saw."
     )]
     adj_method: AdjMethod,
 
@@ -1593,3 +1595,7 @@ impl crate::update::Updatable for MaskedTopicArgs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "masked_topic_tests.rs"]
+mod masked_topic_tests;

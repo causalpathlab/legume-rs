@@ -506,12 +506,14 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
     // exists after a multilevel collapse pass over the held-out data — and
     // the predict path skips that pass. We feed Batch-style x0 instead, so
     // the encoder sees a different-distribution null than it saw at training.
-    // Warn loudly: θ̂ may be biased on held-out for residual-trained models.
+    // Say what predict does and what removes the mismatch; `residual` is the
+    // training default, so this is not a misconfiguration to "fix".
     if metadata.adj_method.as_ref() == "residual" {
         log::warn!(
-            "model was trained with --adj-method residual; predict only supports \
-             batch-style x0. θ̂ may be biased — retrain with --adj-method batch \
-             for clean held-out semantics."
+            "model was trained with --adj-method residual (the training default); predict \
+             builds its held-out null per batch, a differently shaped null than the encoder \
+             saw in training, so θ̂ may be biased on held-out data. A model trained with \
+             --adj-method batch is scored under the null it saw."
         );
     }
 
