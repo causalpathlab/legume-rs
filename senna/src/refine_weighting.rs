@@ -265,8 +265,8 @@ pub(crate) struct CollapseArgs {
                      cell the model has already seen. Absorbing S samples one at a\n\
                      time goes from quadratic to linear in cell reads.\n\
                      \n\
-                     Off by default: it is a second copy of the pseudobulks, useful\n\
-                     only if you intend to keep growing this model.\n\
+                     On by default; --no-emit-pb-reference skips the extra copy when\n\
+                     the model will never be grown.\n\
                      \n\
                      The reference is APPEND-ONLY across rounds: carried columns\n\
                      pass through byte-stable and each update adds at most\n\
@@ -380,14 +380,6 @@ pub(crate) fn fit_fisher_weights(
 }
 
 impl CollapseArgs {
-    /// Refuse `--emit-pb-reference` on a family that would ignore it.
-    ///
-    /// The flag rides on this shared struct, so it appears on every command
-    /// that flattens `CollapseArgs` — including `joint-topic`, `joint-svd` and
-    /// `bge`, which `senna update` cannot continue and which therefore write
-    /// nothing. Accepting it there and silently doing nothing is the worst of
-    /// the three options: the user believes the reference exists and only finds
-    /// out a round later, when the parent turns out to carry nothing.
     /// Whether this run should carry its pseudobulks forward.
     ///
     /// On unless opted out. Carrying them is what lets `senna update` absorb a
@@ -400,6 +392,14 @@ impl CollapseArgs {
         !self.no_emit_pb_reference
     }
 
+    /// Refuse an EXPLICIT `--emit-pb-reference` on a family that would ignore it.
+    ///
+    /// The flag rides on this shared struct, so it appears on every command
+    /// that flattens `CollapseArgs` — including `joint-topic` and `joint-svd`,
+    /// which `senna update` cannot continue and which therefore write nothing.
+    /// Accepting an explicit request there and silently doing nothing is the
+    /// worst option: the user believes the reference exists and only finds out
+    /// a round later. The default is not a request, so it is not an error.
     pub(crate) fn reject_pb_reference(
         &self,
         kind: crate::run_manifest::RunKind,

@@ -129,9 +129,9 @@ pub struct UpdateArgs {
                      {out}.latent.parquet covers the NEW cells only. The parent's\n\
                      latent remains the record for everything absorbed earlier.\n\
                      \n\
-                     ON by default whenever the parent carries pseudobulks and the
-                     new data has batch labels. Without them, or with
-                     --no-pb-reference, this round re-collapses instead — the exact
+                     ON by default whenever the parent carries pseudobulks and the\n\
+                     new data has batch labels. Without them, or with\n\
+                     --no-pb-reference, this round re-collapses instead: the exact\n\
                      computation, and the fallback for a parent that carries nothing."
     )]
     use_pb_reference: bool,
@@ -220,6 +220,17 @@ fn recorded_paths(recorded: &[String], dir: &Path) -> Vec<Box<str>> {
 /// while changing nothing. Both sides are compared after canonicalization so
 /// two spellings of one path still count as a repeat.
 fn union_inputs(recorded: Vec<Box<str>>, new: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
+    ensure_not_recorded(&recorded, new)?;
+    let mut out = recorded;
+    out.extend(new.iter().cloned());
+    Ok(out)
+}
+
+/// The repeat check on its own, so the carried-reference path — which never
+/// builds the union — still refuses a file the parent already trained on.
+/// Left in, that file's cells would be counted twice: once as themselves and
+/// once inside the carried pseudobulks that already summarize them.
+fn ensure_not_recorded(recorded: &[Box<str>], new: &[Box<str>]) -> anyhow::Result<()> {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
     let seen: Vec<PathBuf> = recorded.iter().map(|r| canon(r)).collect();
     for n in new {
@@ -229,9 +240,7 @@ fn union_inputs(recorded: Vec<Box<str>>, new: &[Box<str>]) -> anyhow::Result<Vec
              the model has NOT seen — check the file, or the --model prefix."
         );
     }
-    let mut out = recorded;
-    out.extend(new.iter().cloned());
-    Ok(out)
+    Ok(())
 }
 
 /// Recorded batch files followed by the new ones, with the arity the loader
@@ -317,6 +326,23 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
              pseudobulks, so there is nothing to substitute. Drop the flag."
         );
         None
+    } else if manifest.data.multiome.is_some() {
+        // A multiome run loads with union column alignment, which gives no
+        // guarantee the carried pseudobulks stay contiguous at the end — and
+        // their weights are applied by position. The family loaders refuse the
+        // combination, so decide it here where the fallback exists.
+        anyhow::ensure!(
+            !explicit,
+            "--use-pb-reference does not compose with a multiome parent: its union column \
+             alignment cannot keep the carried pseudobulks contiguous. Pass --no-pb-reference \
+             and let this round re-collapse."
+        );
+        info!(
+            "{} is a multiome run, so this round re-collapses the whole cohort (carried \
+             pseudobulks need positional column order, which union alignment does not keep).",
+            args.model,
+        );
+        None
     } else if args.batch_files.is_none() {
         anyhow::ensure!(
             !explicit,
@@ -332,7 +358,22 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         );
         None
     } else {
-        let prepared = crate::pb_reference::prepare(&args.model, &args.out)?;
+        // A sidecar whose backend has gone missing, or that fails to parse, is
+        // "nothing to substitute" on the default path — a moved run directory
+        // used to update fine and must keep doing so — and an error only when
+        // the user asked for the substitution by name.
+        let prepared = match crate::pb_reference::prepare(&args.model, &args.out) {
+            Ok(p) => p,
+            Err(e) if !explicit => {
+                log::warn!(
+                    "{}'s carried pseudobulks cannot be used ({e}); re-collapsing the whole \
+                     cohort instead",
+                    args.model,
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        };
         if prepared.is_none() {
             anyhow::ensure!(
                 !explicit,
@@ -353,6 +394,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     let (data_files, batch_files) = if let Some(r) = reference.as_ref() {
         // The reference goes LAST: `weights_for` keys on that, and the loader
         // concatenates columns in file order.
+        ensure_not_recorded(&recorded_paths(&manifest.data.input, &dir), &args.data_files)?;
         let mut d: Vec<Box<str>> = args.data_files.clone();
         d.push(r.backend.clone());
         let b = match args.batch_files.as_deref() {
@@ -398,10 +440,10 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         // Now the default path, so say what it changes about the OUTPUT, not
         // just about the cost: nothing downstream reads a manifest to discover
         // that a chain's latents stopped covering the whole cohort.
-        info!(
-            "{}.latent.parquet will cover the {} new cell(s) only; the parent's latent remains \
-             the record for everything absorbed earlier (--no-pb-reference re-collapses and \
-             writes the whole cohort)",
+        log::warn!(
+            "{}.latent.parquet will cover only the new cells from {} file(s); the parent's \
+             latent remains the record for everything absorbed earlier (--no-pb-reference \
+             re-collapses and writes the whole cohort)",
             args.out,
             args.data_files.len(),
         );
@@ -410,8 +452,8 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
         if ratio < 2.0 {
             log::warn!(
                 "carried pseudobulks hold {ratio:.1} cells each, so substituting them saves \
-                 little while coarsening old-vs-new batch matching. Re-collapsing (drop \
-                 --use-pb-reference) is likely the better trade at this scale."
+                 little while coarsening old-vs-new batch matching. Re-collapsing \
+                 (--no-pb-reference) is likely the better trade at this scale."
             );
         }
     } else {
@@ -487,7 +529,8 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             a.rebase(rebase);
             crate::vae::fit_vae_model(&a)
         }
-        // `svd` has no weights and no `--init-from`: this re-fits on the union
+        // `svd` has no weights to warm-start (`init_from` only chains the
+        // reference's generation counter): this re-fits on the union
         // with the recorded configuration. Still worth routing here so one
         // command covers the cohort, but it is a refit, not a warm start.
         RunKind::Svd => {
@@ -528,9 +571,6 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             // we already have one.
             crate::masked_topic::fit_masked_model(&a, head)
         }
-        // Like `svd`: no weights to warm-start (the ETM is re-derived by
-        // archetypal analysis each run), so this is a re-fit on the union —
-        // O(new) when the parent carries a pb_reference.
         RunKind::Bge => {
             let mut a: crate::bge::BgeArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
@@ -539,7 +579,8 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             // warm start. What it does not continue is the ETM, which is
             // re-derived by archetypal analysis every run.
             info!(
-                "bge: warm-starting the gene modules from {}; the ETM is re-derived on the union",
+                "bge: continuing from {} (its gene modules warm-start this fit when it trained \
+                 any); the ETM is re-derived on the union",
                 args.model
             );
             crate::bge::fit_bge(&a)
