@@ -183,6 +183,31 @@ pub struct VaeArgs {
     #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,
 
+    #[arg(
+        long,
+        value_enum,
+        default_value = "auto",
+        help = "Per-name canonicalization across input backends",
+        long_help = "How row names align across `--data-files`.\n\
+                     The same rule as `masked-topic`, so the two families can share one gene axis.\n\
+                     \n\
+                     `auto` — sniff each file's row names and pick one of the rules below.\n\
+                     It picks locus-overlap if ≥50% parse as `chr:start-end`.\n\
+                     It picks gene if ≥50% contain `_`, and exact otherwise (default).\n\
+                     \n\
+                     `exact` — strict string match.\n\
+                     \n\
+                     `gene` — also register each `_`-split component as an alias.\n\
+                     So `ENSG000_TGFB1` and `TGFB1` resolve to the same row.\n\
+                     \n\
+                     `locus` — normalize `chr1:1000-2000`, `1:1000-2000`, and so on.\n\
+                     They all reach a canonical form.\n\
+                     \n\
+                     `locus-overlap` — same as `locus`, plus overlap clustering.\n\
+                     Intervals that overlap on the same chromosome are grouped."
+    )]
+    pub(crate) feature_name_kind: crate::masked_topic::FeatureNameKindArg,
+
     #[command(flatten)]
     pub(crate) qc: QcArgs,
 }
@@ -254,7 +279,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         observe_panels: true,
         row_alignment: data_beans::sparse_io_vector::RowAlignment::default(),
         column_alignment: data_beans::sparse_io_vector::ColumnAlignment::default(),
-        feature_kind: None,
+        feature_kind: args.feature_name_kind.clone().into(),
         want_hierarchy: true,
         prebuilt_partition,
     })?;
@@ -533,3 +558,7 @@ impl crate::update::Updatable for VaeArgs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "vae_tests.rs"]
+mod vae_tests;
