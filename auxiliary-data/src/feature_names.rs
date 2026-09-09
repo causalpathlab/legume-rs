@@ -36,7 +36,7 @@ use rustc_hash::FxHashMap as HashMap;
 /// Concrete strategy only — no "request" variants. Callers that want
 /// auto-detection pass [`None`] (or whatever wrapping enum they choose)
 /// and call [`FeatureNameKind::auto_detect`] once row names are in hand.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum FeatureNameKind {
     /// Strict string match — no canonicalization. Default.
     #[default]
@@ -134,6 +134,40 @@ impl FeatureNameKind {
             Self::Gene { delim: '_' }
         } else {
             Self::Exact
+        }
+    }
+
+    /// The one kind to install for a set of files that were each sniffed
+    /// with [`auto_detect`](Self::auto_detect) on their own.
+    ///
+    /// Sniffing the POOLED names does not work: the signature usually lives
+    /// on one side only. A raw `ENSG_SYM` cohort pooled with a reference
+    /// already on the bare-symbol axis (a carried `pb_reference`, a
+    /// symbol-keyed panel) leaves the gene-like share under half, the pair
+    /// sniffs as `Exact`, and every gene becomes two rows. Canonicalizing
+    /// under `Gene` is a no-op for names lacking the delimiter, so adopting
+    /// the informative side is safe for both.
+    ///
+    /// Gene-style and locus-style files together dispatch per name
+    /// (`Mixed`), which is what `auto_detect` would pick on one axis holding
+    /// both; `Mixed` anywhere stays `Mixed`; all-`Exact` stays `Exact`.
+    #[must_use]
+    pub fn reconcile(kinds: &[FeatureNameKind]) -> FeatureNameKind {
+        let mut gene: Option<FeatureNameKind> = None;
+        let mut locus: Option<FeatureNameKind> = None;
+        for k in kinds {
+            match k {
+                FeatureNameKind::Mixed => return FeatureNameKind::Mixed,
+                FeatureNameKind::Gene { .. } => gene.get_or_insert_with(|| k.clone()),
+                FeatureNameKind::Locus { .. } => locus.get_or_insert_with(|| k.clone()),
+                FeatureNameKind::Exact => continue,
+            };
+        }
+        match (gene, locus) {
+            (Some(_), Some(_)) => FeatureNameKind::Mixed,
+            (Some(g), None) => g,
+            (None, Some(l)) => l,
+            (None, None) => FeatureNameKind::Exact,
         }
     }
 
@@ -374,6 +408,10 @@ impl From<FeatureNameKindArg> for Option<FeatureNameKind> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "feature_names_tests.rs"]
+mod feature_names_tests;
 
 #[cfg(test)]
 mod tests {
