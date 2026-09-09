@@ -27,6 +27,23 @@ use std::path::{Path, PathBuf};
 /// deep with a parquet path the user never typed. The depth note rides on the
 /// same match so a new family is classified once, at compile time.
 pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<Box<str>>> {
+    if matches!(
+        kind,
+        RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic | RunKind::Vae
+    ) {
+        info!(
+            "bulk input into a {kind} model: its encoder was trained at single-cell depth. \
+             The latent is a per-sample mixture, not a composition; `senna bge` / `senna simba` / `senna svd` \
+             project without an encoder, and `senna deconvolve` estimates fractions."
+        );
+    }
+    model_gene_names(kind, model)
+}
+
+/// The model's gene axis, read from whichever file the family keeps it in.
+/// Quiet: says nothing about depth, so the early gene-list gate can call it
+/// for every query, bulk or not.
+pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec<Box<str>>> {
     match kind {
         // bge and simba write no dictionary; their gene axis is the row axis of
         // the gene table. They and svd project each column against a frozen
@@ -34,26 +51,19 @@ pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<
         RunKind::Bge | RunKind::Simba => {
             Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names)
         }
-        RunKind::Svd => Ok(crate::topic::model_metadata::load_dictionary(model)?.0),
-        RunKind::Topic
+        RunKind::Svd
+        | RunKind::Topic
         | RunKind::Itopic
         | RunKind::MaskedVae
         | RunKind::JointTopic
-        | RunKind::Vae => {
-            info!(
-                "bulk input into a {kind} model: its encoder was trained at single-cell depth. \
-                 The latent is a per-sample mixture, not a composition; `senna bge` / `senna simba` / `senna svd` \
-                 project without an encoder, and `senna deconvolve` estimates fractions."
-            );
-            Ok(crate::topic::model_metadata::load_dictionary(model)?.0)
-        }
+        | RunKind::Vae => Ok(crate::topic::model_metadata::load_dictionary(model)?.0),
         RunKind::JointSvd
         | RunKind::Fne
         | RunKind::ResolveEmbeddingSpace
         | RunKind::Gem
         | RunKind::GemEncoder => anyhow::bail!(
-            "predict --bulk: a {kind} run has no gene dictionary to orient a bulk table \
-             against, and predict does not score this family"
+            "predict: a {kind} run has no gene dictionary to align a query against, and \
+             predict does not score this family"
         ),
     }
 }
