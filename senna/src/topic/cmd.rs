@@ -406,6 +406,9 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         num_levels,
         n_features_full,
         args.collapse.pb_refine.to_params(),
+        // The dense encoder's weights are gene-keyed by position throughout,
+        // so this family still needs the exact axis.
+        None,
     )?;
 
     // Finest-level coarsening (used for encoder, evaluation, dictionary output)
@@ -843,6 +846,7 @@ where
                     add_topics: ctx.args.add_topics,
                     add_embedding_dim: 0,
                 },
+                gene_axis: None,
             },
         )?;
     }
@@ -1174,6 +1178,7 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
                     add_topics: ctx.args.add_topics,
                     add_embedding_dim: 0,
                 },
+                gene_axis: None,
             },
         )?;
     }

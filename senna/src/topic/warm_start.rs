@@ -15,6 +15,19 @@ use crate::topic::model_metadata::TopicModelMetadata;
 use candle_util::candle_nn::VarMap;
 pub use candle_util::grow::Growth;
 
+/// The per-gene embedding already grown onto this run's axis, when that axis
+/// differs from the source run's. `n_source` is what the checkpoint's gene-keyed
+/// dimensions are expected to read; `rho` replaces the checkpoint's ρ.
+pub struct GrownRho {
+    pub n_source: usize,
+    pub rho: crate::embed_common::Mat,
+}
+
+/// Name of the one gene-keyed learned tensor in a masked checkpoint: the
+/// encoder's per-gene embedding ρ. Everything else the decoders hold is keyed
+/// to modules or topics.
+const RHO_TENSOR: &str = "enc.feature.embeddings";
+
 /// Architecture invariants the saved checkpoint must match.
 pub struct WarmStartCheck<'a> {
     /// "topic" or "`indexed_topic`"
@@ -29,6 +42,10 @@ pub struct WarmStartCheck<'a> {
     /// When non-zero, `n_topics` / `embedding_dim` above are the *grown* sizes
     /// and the checkpoint is expected to be smaller by exactly this much.
     pub growth: Growth,
+    /// `Some` when this run's gene axis differs from the source run's: the
+    /// gene-keyed checks read against the source run's length, and ρ is taken from
+    /// here rather than from the file. Masked family only.
+    pub gene_axis: Option<GrownRho>,
 }
 
 /// Validate that the saved checkpoint is architecture-compatible, then load
@@ -60,8 +77,13 @@ pub fn warm_start_load(
         metadata.encoder_hidden,
         expected.encoder_hidden,
     );
+    // On a grown gene axis the checkpoint is keyed to the SOURCE run's length.
+    let saved_features = expected
+        .gene_axis
+        .as_ref()
+        .map_or(expected.n_features_full, |g| g.n_source);
     anyhow::ensure!(
-        metadata.n_features_full == expected.n_features_full,
+        metadata.n_features_full == saved_features,
         "warm-start: n_features_full mismatch (saved={}, current={}). The saved weights are \
          keyed to the parent's gene axis, so it has to be the same axis.\n\
          \n\
@@ -72,10 +94,15 @@ pub fn warm_start_load(
          does measure genes the model has never seen, those cannot be added to a trained \
          model: restrict the input to the parent's gene set, or re-train.",
         metadata.n_features_full,
-        expected.n_features_full,
+        saved_features,
     );
+    let saved_encoder = if expected.gene_axis.is_some() {
+        saved_features
+    } else {
+        expected.n_features_encoder
+    };
     anyhow::ensure!(
-        metadata.n_features_encoder == expected.n_features_encoder,
+        metadata.n_features_encoder == saved_encoder,
         "warm-start: n_features_encoder (D_coarse) mismatch (saved={}, current={}). \
          Coarsening parameters must match the original run.",
         metadata.n_features_encoder,
@@ -107,6 +134,16 @@ pub fn warm_start_load(
     let safetensors_path = format!("{prefix}.safetensors");
     log::info!("Warm-starting from {safetensors_path}");
 
+    let dims = candle_util::grow::GrowthDims {
+        k_old: metadata.n_topics,
+        k_new: expected.n_topics,
+        h_old: metadata.embedding_dim.unwrap_or(0),
+        h_new: expected.embedding_dim.unwrap_or(0),
+    };
+    if let Some(grown) = expected.gene_axis.as_ref() {
+        return load_with_grown_rho(parameters, &safetensors_path, &dims, &grown.rho);
+    }
+
     if expected.growth.is_none() {
         // VarMap has interior mutability via Arc<Mutex<_>>; clone shares storage
         // and lets us call `.load()` (which takes `&mut self`) without forcing
@@ -120,12 +157,6 @@ pub fn warm_start_load(
         return Ok(());
     }
 
-    let dims = candle_util::grow::GrowthDims {
-        k_old: metadata.n_topics,
-        k_new: expected.n_topics,
-        h_old: metadata.embedding_dim.unwrap_or(0),
-        h_new: expected.embedding_dim.unwrap_or(0),
-    };
     log::info!(
         "Warm-start with growth: K {} → {}, H {} → {}",
         dims.k_old,
@@ -134,4 +165,54 @@ pub fn warm_start_load(
         dims.h_new,
     );
     candle_util::grow::load_grown(parameters, &safetensors_path, &dims)
+}
+
+/// Load a checkpoint whose gene axis is not this run's.
+///
+/// Every tensor but ρ is module- or topic-keyed and loads as usual, grown on K
+/// or H if asked. ρ is the one gene-keyed tensor, and it comes from `rho`,
+/// already grown by name; if H grew too, the same slab fill the other tensors
+/// get is applied on top.
+fn load_with_grown_rho(
+    parameters: &VarMap,
+    path: &str,
+    dims: &candle_util::grow::GrowthDims,
+    rho: &crate::embed_common::Mat,
+) -> anyhow::Result<()> {
+    use matrix_util::traits::ConvertMatOps;
+    let saved = candle_util::candle_core::safetensors::load(path, &candle_util::candle_core::Device::Cpu)?;
+    let data = parameters.data().lock().expect("VarMap lock");
+    let (mut n_copied, mut n_grown) = (0usize, 0usize);
+    for (name, var) in data.iter() {
+        let fresh = var.as_tensor();
+        let s = if name == RHO_TENSOR {
+            rho.to_tensor(var.device())?
+        } else {
+            saved
+                .get(name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("warm-start: {path} has no tensor named `{name}`; architectures differ")
+                })?
+                .to_device(var.device())?
+        };
+        if s.dims() == fresh.dims() {
+            var.set(&s)?;
+            n_copied += 1;
+        } else {
+            anyhow::ensure!(
+                s.rank() == fresh.rank(),
+                "warm-start: `{name}` has rank {} in the checkpoint and {} here",
+                s.rank(),
+                fresh.rank(),
+            );
+            var.set(&candle_util::grow::grow_tensor(name, fresh, &s, dims)?)?;
+            n_grown += 1;
+        }
+    }
+    log::info!(
+        "Warm-start on a grown gene axis: {n_copied} variables copied, {n_grown} grown; ρ has \
+         {} rows",
+        rho.nrows()
+    );
+    Ok(())
 }
