@@ -445,7 +445,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
     let pb_reference_suffix = crate::pb_reference::emit_if_requested(
-        args.collapse.emit_pb_reference,
+        args.collapse.emits_pb_reference(),
         &args.out,
         finest_collapsed,
         cell_to_pb_per_level.as_deref(),
