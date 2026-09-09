@@ -254,6 +254,7 @@ impl BgeEmbedding {
             ReadSharedRowsArgs {
                 data_files: files.to_vec(),
                 preload,
+                feature_kind: qopts.loader_kind.clone(),
                 ..Default::default()
             },
             &self.gene_names,
