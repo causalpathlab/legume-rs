@@ -111,6 +111,7 @@ pub struct UpdateArgs {
 
     #[arg(
         long,
+        hide = true,
         help = "Reuse the parent's carried pseudobulks instead of re-reading its cells",
         long_help = "Needs the parent to have been trained with --emit-pb-reference.\n\
                      \n\
