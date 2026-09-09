@@ -255,9 +255,9 @@ where
             .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
             .transpose()?;
         let visible = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-        // Encoder-only inference: `train = false` (Gaussian returns its posterior
-        // mean), and the KL is discarded — the latent alone is written out.
-        let (latent_nk, _kl) = masked_encode(
+        // Encoder-only inference: `train = false`; the latent alone is
+        // written out.
+        let latent_nk = masked_encode(
             encoder,
             config.head,
             &MaskedEncoderInput {
@@ -359,10 +359,9 @@ pub(crate) fn evaluate_holdout_imputation(
         let visible = (&real - &masked)?;
 
         // Encode from the visible genes only, mirroring the training split
-        // (including the simplex-head topic smoothing).
-        // KL is a training-time term only; the held-out metric is the
-        // imputation likelihood alone.
-        let (raw_z, _kl) = masked_encode(
+        // (including the simplex-head topic smoothing). The held-out metric is
+        // the imputation likelihood alone.
+        let raw_z = masked_encode(
             encoder,
             config.head,
             &MaskedEncoderInput {

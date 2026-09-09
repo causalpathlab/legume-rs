@@ -115,27 +115,25 @@ fn epoch_accumulator_sums_steps_on_device_and_reads_once() {
     let dev = Device::Cpu;
     let mut acc = EpochAccum::new(&dev).unwrap();
     let steps = [
-        (-3.0f32, 4.0f32, 0.5f32, 2.0f32),
-        (-5.0, 4.0, 1.5, 0.25),
-        (-1.0, 4.0, 0.0, 0.0),
+        (-3.0f32, 4.0f32, 2.0f32),
+        (-5.0, 4.0, 0.25),
+        (-1.0, 4.0, 0.0),
     ];
-    for (l, u, k, r) in steps {
+    for (l, u, r) in steps {
         let t = |v: f32| Tensor::new(v, &dev).unwrap();
-        acc.add(&t(l), &t(u), Some(&t(k)), Some(&t(r)), 2.0, 1.0)
-            .unwrap();
+        acc.add(&t(l), &t(u), Some(&t(r)), 2.0, 1.0).unwrap();
     }
-    let (llik, kl, rms) = acc.read().unwrap();
+    let (llik, rms) = acc.read().unwrap();
     assert!(
         (llik - (-9.0 / 12.0)).abs() < 1e-6,
         "llik per scored {llik}"
     );
-    assert!((kl - (2.0 / 6.0)).abs() < 1e-6, "kl per row {kl}");
     assert!(
         (rms - (2.25f32 / 3.0).sqrt()).abs() < 1e-6,
         "rms residual {rms}"
     );
     let empty = EpochAccum::new(&dev).unwrap();
-    assert_eq!(empty.read().unwrap(), (0.0, 0.0, 0.0));
+    assert_eq!(empty.read().unwrap(), (0.0, 0.0));
 }
 
 ////////////////////////
@@ -353,4 +351,55 @@ fn scattered_values_land_on_their_columns_and_backpropagate() {
             assert!((a - b).abs() < 1e-6, "gradient {g:?} vs {expect_g:?}");
         }
     }
+}
+
+///////////////////////////////////////////////
+// The Gaussian head is deterministic, no KL //
+///////////////////////////////////////////////
+
+/// The masked objective is the regularizer for every head. The Gaussian head
+/// used to reparameterize its latent and add a KL toward N(0, I), and at the
+/// default weight that pulled z to zero and every cell's θ to uniform. It is
+/// now the same forward as the simplex heads with the softmax left off: two
+/// training-mode calls give the same z (and `masked_encode` has no KL to
+/// return).
+#[test]
+fn the_gaussian_head_is_deterministic_and_carries_no_kl() {
+    use super::{masked_encode, LatentHead, MaskedEncoderInput};
+    use crate::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+    use candle_nn::VarMap;
+
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+    let enc = IndexedEmbeddingEncoder::new(
+        IndexedEmbeddingEncoderArgs {
+            n_features: 8,
+            n_topics: 4,
+            embedding_dim: 6,
+            layers: &[5],
+            use_gcn: false,
+            attn_pool: true,
+            n_gene_modules: 0,
+        },
+        &varmap,
+        vb,
+    )
+    .unwrap();
+    let (idx, vis) = small_context();
+    let values = Tensor::from_vec(
+        vec![3.0f32, 1.0, 2.0, 4.0, 1.0, 0.0, 2.0, 2.0, 5.0],
+        (3, 3),
+        &Device::Cpu,
+    )
+    .unwrap();
+    let input = MaskedEncoderInput {
+        indices: &idx,
+        values: &values,
+        values_null: None,
+        values_mean: None,
+        visible_mask: &vis,
+    };
+    let z1 = masked_encode(&enc, LatentHead::Gaussian, &input, true).unwrap();
+    let z2 = masked_encode(&enc, LatentHead::Gaussian, &input, true).unwrap();
+    assert_eq!(to_vec2(&z1), to_vec2(&z2), "training-mode z must not be a draw");
 }
