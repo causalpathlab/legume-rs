@@ -87,6 +87,15 @@ pub(crate) struct GeneRemap {
 /// `Exact`, so the whole struct derives `Default`.
 #[derive(Default)]
 pub(crate) struct QueryNameOpts {
+    /// The rule the LOADER aligns the query's own files under, handed to
+    /// `ReadSharedRowsArgs::feature_kind`. `None` = auto-detect, which is what
+    /// every caller got before `--feature-name-kind` reached the loader at all:
+    /// the flag used to drive only `kind` below, so `exact` on an exact-trained
+    /// model still scored a canonicalized query. A multiome query layout may
+    /// refuse an explicit kind (see `crate::multiome_layout`).
+    pub loader_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
+    /// The rule applied to each query row name before it is matched to the
+    /// model's axis.
     pub kind: auxiliary_data::feature_names::FeatureNameKind,
     pub suffix_delim: Option<char>,
     pub keep_suffix: Option<Box<str>>,
