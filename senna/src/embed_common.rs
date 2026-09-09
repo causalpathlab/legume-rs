@@ -411,15 +411,12 @@ pub fn reconcile_name_kind(
     others: &[&[Box<str>]],
 ) -> auxiliary_data::feature_names::FeatureNameKind {
     use auxiliary_data::feature_names::FeatureNameKind;
-    let ref_kind = FeatureNameKind::auto_detect(reference);
-    if !ref_kind.is_exact() {
-        return ref_kind;
-    }
-    others
-        .iter()
-        .map(|axis| FeatureNameKind::auto_detect(axis))
-        .find(|k| !k.is_exact())
-        .unwrap_or(ref_kind)
+    // The same per-axis fold the loader applies across input files.
+    let kinds: Vec<FeatureNameKind> = std::iter::once(reference)
+        .chain(others.iter().copied())
+        .map(FeatureNameKind::auto_detect)
+        .collect();
+    FeatureNameKind::reconcile(&kinds)
 }
 
 /// Which axis of a dense table carries the genes.
