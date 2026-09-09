@@ -1321,7 +1321,7 @@ where
     };
 
     let (z_nk, llik, total) =
-        run_predict_blocks(ntot, kk, minibatch_size, bytes_per_block, |(lb, ub)| {
+        run_predict_blocks(ntot, kk, minibatch_size, bytes_per_block, dev, |(lb, ub)| {
             predict_block_dense::<Dec>(PredictBlockDenseArgs {
                 lb,
                 ub,
@@ -2107,6 +2107,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
                 crate::topic::predict_common::SCORE_GENE_CHUNK,
                 NB_CHAIN_TENSORS,
             ),
+        dev,
         |(lb, ub)| {
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
@@ -2174,12 +2175,35 @@ pub(crate) fn dense_bytes(rows: usize, width: usize, tensors: usize) -> usize {
 ///
 /// `LEGUME_PREDICT_BUDGET_BYTES` overrides the default, following the
 /// `LEGUME_PRELOAD_BUDGET_BYTES` precedent for memory knobs.
-fn dense_block_concurrency(bytes_per_block: usize) -> usize {
+fn dense_block_concurrency(dev: &Device, bytes_per_block: usize) -> usize {
     let budget = std::env::var("LEGUME_PREDICT_BUDGET_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(DEFAULT_PREDICT_BUDGET_BYTES);
-    block_concurrency(bytes_per_block, budget, rayon::current_num_threads())
+    blocks_in_flight(
+        dev.is_cpu(),
+        bytes_per_block,
+        budget,
+        rayon::current_num_threads(),
+    )
+}
+
+/// How many blocks may run at once on this device.
+///
+/// Off the CPU the answer is one, whatever the memory budget says: a CUDA
+/// device is a single stream and a single cuBLAS handle, and driving it from
+/// several threads at once raced — `CUBLAS_STATUS_EXECUTION_FAILED` on some
+/// runs, a hang on others, and the same scoring succeeded every time with one
+/// thread. The GPU is already parallel inside a block; the pool only ever
+/// paid off for CPU blocks. This is the dense drivers' counterpart of
+/// `topic::common::process_blocks`, which the masked path (which never failed
+/// on CUDA) has always gone through.
+pub(crate) fn blocks_in_flight(is_cpu: bool, bytes_per_block: usize, budget: usize, threads: usize) -> usize {
+    if is_cpu {
+        block_concurrency(bytes_per_block, budget, threads)
+    } else {
+        1
+    }
 }
 
 /// The memory budget the cap works from when `LEGUME_PREDICT_BUDGET_BYTES` is unset.
@@ -2202,6 +2226,9 @@ fn run_predict_blocks<F>(
     minibatch_size: usize,
     // Peak dense bytes ONE block holds, for the concurrency cap.
     bytes_per_block: usize,
+    // Where the blocks run: off the CPU they run one at a time, on the
+    // calling thread (see `blocks_in_flight`).
+    dev: &Device,
     block_fn: F,
 ) -> anyhow::Result<(Mat, Vec<f32>, Vec<f32>)>
 where
@@ -2209,8 +2236,8 @@ where
 {
     let jobs = create_jobs(ntot, 0, Some(minibatch_size));
     let njobs = jobs.len() as u64;
-    let max_conc = dense_block_concurrency(bytes_per_block);
-    if max_conc < rayon::current_num_threads() {
+    let max_conc = dense_block_concurrency(dev, bytes_per_block);
+    if dev.is_cpu() && max_conc < rayon::current_num_threads() {
         info!(
             "Scoring {njobs} blocks at most {max_conc} at a time: one block's ~{} MB dense \
              working set would otherwise be multiplied by every thread \
@@ -2219,19 +2246,30 @@ where
         );
     }
     let bar = new_progress_bar(njobs);
-    // A pool sized to the cap rather than waves of `par_iter`: the cap has to
-    // bound how many blocks hold their dense tensors at once, and a wave stalls
-    // on its slowest block before the next starts. Sizing the pool keeps rayon
-    // work-stealing continuously under the same ceiling.
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(max_conc)
-        .build()?;
-    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = pool.install(|| {
-        jobs.par_iter()
-            .progress_with(bar.clone())
-            .map(|&block| block_fn(block))
-            .collect::<anyhow::Result<Vec<_>>>()
-    })?;
+    let mut chunks: Vec<(usize, Mat, Vec<f32>, Vec<f32>)> = if max_conc == 1 {
+        // One at a time on THIS thread — the thread that built the encoder's
+        // weights and the device tensors — exactly as `process_blocks` does.
+        let mut out = Vec::with_capacity(jobs.len());
+        for &block in &jobs {
+            out.push(block_fn(block)?);
+            bar.inc(1);
+        }
+        out
+    } else {
+        // A pool sized to the cap rather than waves of `par_iter`: the cap has
+        // to bound how many blocks hold their dense tensors at once, and a wave
+        // stalls on its slowest block before the next starts. Sizing the pool
+        // keeps rayon work-stealing continuously under the same ceiling.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(max_conc)
+            .build()?;
+        pool.install(|| {
+            jobs.par_iter()
+                .progress_with(bar.clone())
+                .map(|&block| block_fn(block))
+                .collect::<anyhow::Result<Vec<_>>>()
+        })?
+    };
     bar.finish_and_clear();
     chunks.sort_by_key(|c| c.0);
 
