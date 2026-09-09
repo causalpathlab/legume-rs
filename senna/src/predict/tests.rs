@@ -245,6 +245,16 @@ mod block_concurrency {
     fn an_absurd_block_still_admits_one() {
         assert_eq!(block_concurrency(usize::MAX, BUDGET, THREADS), 1);
     }
+
+    /// A CUDA device is one stream and one cuBLAS handle; blocks driven at it
+    /// from a thread pool raced (CUBLAS_STATUS_EXECUTION_FAILED, or a hang).
+    /// Off the CPU exactly one block is in flight, whatever the budget says.
+    #[test]
+    fn off_the_cpu_exactly_one_block_is_in_flight() {
+        use super::super::blocks_in_flight;
+        assert_eq!(blocks_in_flight(false, 1, BUDGET, THREADS), 1);
+        assert_eq!(blocks_in_flight(true, 1, BUDGET, THREADS), THREADS);
+    }
 }
 
 ////////////////////////////////////////////////

@@ -167,25 +167,39 @@ pub fn iterate_delta_dense(
         let jobs = create_jobs(ntot, 0, Some(minibatch_size));
         let njobs = jobs.len() as u64;
 
-        let chunk_sums: Vec<DeltaSums> = jobs
-            .par_iter()
-            .progress_with(new_progress_bar(njobs))
-            .map(|&block| {
-                accumulate_block_dense(
-                    block,
-                    data_vec,
-                    encoder,
-                    Some(&delta_tensor_coarse),
-                    gene_remap,
-                    coarsening,
-                    &exp_beta_dk,
-                    phi,
-                    n_batches,
-                    dev,
-                    adj_method,
-                )
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let accumulate = |block: (usize, usize)| {
+            accumulate_block_dense(
+                block,
+                data_vec,
+                encoder,
+                Some(&delta_tensor_coarse),
+                gene_remap,
+                coarsening,
+                &exp_beta_dk,
+                phi,
+                n_batches,
+                dev,
+                adj_method,
+            )
+        };
+        // Each block runs the encoder on `dev`. Off the CPU that is one stream
+        // and one cuBLAS handle, so the blocks go one at a time on this thread,
+        // as `topic::common::process_blocks` does; the pool is for CPU blocks.
+        let chunk_sums: Vec<DeltaSums> = if dev.is_cpu() {
+            jobs.par_iter()
+                .progress_with(new_progress_bar(njobs))
+                .map(|&block| accumulate(block))
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            let bar = new_progress_bar(njobs);
+            let mut out = Vec::with_capacity(jobs.len());
+            for &block in &jobs {
+                out.push(accumulate(block)?);
+                bar.inc(1);
+            }
+            bar.finish_and_clear();
+            out
+        };
 
         let mut total = DeltaSums::zeros(beta_dk_full.nrows(), n_batches);
         for s in &chunk_sums {
