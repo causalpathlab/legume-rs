@@ -488,6 +488,13 @@ pub struct RunData {
     pub input_null: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub batch: Vec<String>,
+    /// The multiome layout `input` was loaded under, when there was one.
+    /// Positional against `input`, which the trainer writes in group order.
+    /// Absent for a single-modality run — and for multiome runs written
+    /// before this was recorded, which is why every consumer treats `None`
+    /// as the plain load rather than failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiome: Option<crate::multiome_layout::RunMultiome>,
 }
 
 /// The numeric SCALE a gene × component artifact is stored in.
@@ -1110,9 +1117,30 @@ pub struct InheritedFromManifest {
     pub cell_to_pb_path: Option<Box<str>>,
     /// Source manifest kind — useful for logging.
     pub source_kind: RunKind,
+    /// The multiome layout `data_files` was trained under. Carried beside the
+    /// files, not derived separately, so a consumer that inherits the inputs
+    /// cannot silently forget how they were namespaced and load the modalities
+    /// back as extra cells.
+    pub reload: crate::multiome_layout::ReloadLayout,
 }
 
 impl InheritedFromManifest {
+    /// Refuse to inherit a multiome source into a loader that cannot replay
+    /// its namespacing. Without this the modalities come back as extra cells
+    /// and every feature name misses the dictionary — silently.
+    pub fn ensure_replayable(inherited: Option<&Self>, command: &str) -> anyhow::Result<()> {
+        if let Some(inh) = inherited {
+            anyhow::ensure!(
+                !inh.reload.is_multiome(),
+                "--from names a multiome run, and `senna {command}` cannot reproduce its \
+                 load: cells there are glued by barcode and features namespaced per \
+                 modality. Re-run it on the same files directly, or chain from a \
+                 single-modality run."
+            );
+        }
+        Ok(())
+    }
+
     /// Pick the effective input file list: explicit CLI wins; otherwise
     /// the manifest's inherited list. Bails if neither is non-empty so
     /// the data loader gets a clear "no inputs" error instead of an
@@ -1245,12 +1273,15 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
     let batch_files: Vec<Box<str>> = m.data.batch.iter().map(|s| to_box(s)).collect();
     let feature_embedding_prefix: Box<str> = to_box(&m.prefix);
     let cell_to_pb_path: Option<Box<str>> = m.outputs.cell_to_pb.as_deref().map(to_box);
+    let reload =
+        crate::multiome_layout::recorded_layout(m.data.multiome.as_ref(), m.data.input.len())?;
     Ok(InheritedFromManifest {
         data_files,
         batch_files,
         feature_embedding_prefix,
         cell_to_pb_path,
         source_kind: m.kind,
+        reload,
     })
 }
 
@@ -1268,6 +1299,8 @@ pub struct RunDescription<'a> {
     pub data_input: &'a [String],
     pub data_batch: &'a [String],
     pub data_input_null: &'a [String],
+    /// The multiome layout `data_input` was loaded under, when there was one.
+    pub data_multiome: Option<crate::multiome_layout::RunMultiome>,
     /// Suffix after `{basename}.` for the dictionary parquet, e.g.
     /// `"dictionary.parquet"` or (joint-topic) `"base_dictionary.parquet"`.
     /// `None` to omit — SVD runs still produce one, topic runs always do.
@@ -1360,6 +1393,7 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     m.data.input = desc.data_input.to_vec();
     m.data.input_null = desc.data_input_null.to_vec();
     m.data.batch = desc.data_batch.to_vec();
+    m.data.multiome = desc.data_multiome.clone();
     m.train_args = desc.train_args.clone();
 
     if desc.has_latent {

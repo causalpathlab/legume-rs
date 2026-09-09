@@ -634,11 +634,14 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     let (training_genes, u_dk) = load_dictionary(&args.model)?;
     let column_sum_norm = crate::svd::project::column_sum_norm(&args.model);
 
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: args.data_files.to_vec(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: args.data_files.to_vec(),
+            preload: args.preload_data,
+            ..Default::default()
+        },
+        &training_genes,
+    )?)?;
     let data_vec = loaded.data;
     // The projection sees the caller's query-axis rules, INCLUDING
     // `--ablate-features`: without that the latent is fitted on the genes it
@@ -1017,12 +1020,15 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
             Err(_) => None,
         };
 
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: a.data_files.to_vec(),
-        batch_files: a.batch_files.map(<[_]>::to_vec),
-        preload: a.preload,
-        ..Default::default()
-    })?;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: a.data_files.to_vec(),
+            batch_files: a.batch_files.map(<[_]>::to_vec),
+            preload: a.preload,
+            ..Default::default()
+        },
+        &training_genes,
+    )?)?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);
     info!(
@@ -1552,12 +1558,15 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         training_genes.len()
     );
 
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: a.data_files.to_vec(),
-        batch_files: a.batch_files.map(<[_]>::to_vec),
-        preload: a.preload,
-        ..Default::default()
-    })?;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: a.data_files.to_vec(),
+            batch_files: a.batch_files.map(<[_]>::to_vec),
+            preload: a.preload,
+            ..Default::default()
+        },
+        &training_genes,
+    )?)?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);
     info!(
@@ -1941,12 +1950,15 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         training_genes.len()
     );
 
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: a.data_files.to_vec(),
-        batch_files: a.batch_files.map(<[_]>::to_vec),
-        preload: a.preload,
-        ..Default::default()
-    })?;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: a.data_files.to_vec(),
+            batch_files: a.batch_files.map(<[_]>::to_vec),
+            preload: a.preload,
+            ..Default::default()
+        },
+        &training_genes,
+    )?)?;
     let mut data_vec = loaded.data;
     data_vec.register_batch_membership(&loaded.batch);
     info!(
@@ -2294,11 +2306,14 @@ fn training_marginal(
         );
         return Ok(None);
     };
-    let loaded = read_data_on_shared_rows(ReadSharedRowsArgs {
-        data_files: files.to_vec(),
-        preload: args.preload_data,
-        ..Default::default()
-    })?;
+    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        ReadSharedRowsArgs {
+            data_files: files.to_vec(),
+            preload: args.preload_data,
+            ..Default::default()
+        },
+        training_genes,
+    )?)?;
     // The training half is aligned onto the model's axis the same way the query
     // is, so a name-kind difference between the two files cannot silently drop
     // genes from the floor that the model is being scored on.

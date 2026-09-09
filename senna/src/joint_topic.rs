@@ -489,6 +489,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         kind: crate::run_manifest::RunKind::JointTopic,
         prefix: &args.out,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         // `train_and_save` writes `{out}.dictionary.parquet` (the EFFECTIVE

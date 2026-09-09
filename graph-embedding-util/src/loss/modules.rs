@@ -192,9 +192,17 @@ pub struct ModulePools {
     /// row ABOVE the uniform level `1/M`, so a draw is one uniform number and a
     /// scan. Shared by every sampler's pools; only `members` differs.
     rows: std::sync::Arc<Vec<Vec<(u32, f32)>>>,
-    /// Per module: the features with above-uniform membership in it, restricted
-    /// to this sampler's feature pool.
+    /// Per `(module, stratum)`: the features with above-uniform membership in
+    /// that module, restricted to this sampler's feature pool and to one
+    /// stratum. Indexed `module * n_strata + stratum`, so an unstratified axis
+    /// is the plain per-module list it always was.
     members: Vec<Vec<u32>>,
+    /// The partition that refines the modules — the feature axis's modality on
+    /// a multiome fit. Shared, not copied: `refresh` rebuilds one pool per
+    /// batch per axis every epoch, and this vector is one entry per feature.
+    strata: Option<std::sync::Arc<[u32]>>,
+    /// Strata on the feature axis; 1 unless this is a multiome fit.
+    n_strata: usize,
     /// Positives whose module was too small in this pool to contrast within, so
     /// the caller drew globally. Read and reset by the diagnostics.
     fallbacks: AtomicUsize,
@@ -238,16 +246,28 @@ impl ModulePools {
         rows: std::sync::Arc<Vec<Vec<(u32, f32)>>>,
         n_modules: usize,
         feature_pool: &[u32],
+        strata: Option<(&std::sync::Arc<[u32]>, usize)>,
     ) -> Self {
-        let mut members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
+        // Modules are learned across the whole axis, so on a multiome fit one
+        // module holds features of several panels. Contrasting a protein
+        // against the genes that share its module is the very asymmetry the
+        // per-modality pools exist to remove, so the panel splits the module
+        // too — and a `(module, panel)` cell too thin to contrast in reports a
+        // fallback, which lands on the modality pool.
+        let n_strata = strata.map_or(1, |(_, n)| n);
+        let of_feature = strata.map(|(of, _)| of);
+        let mut members: Vec<Vec<u32>> = vec![Vec::new(); n_modules * n_strata];
         for &f in feature_pool {
+            let stratum = of_feature.map_or(0, |of| of[f as usize] as usize);
             for &(m, _) in &rows[f as usize] {
-                members[m as usize].push(f);
+                members[m as usize * n_strata + stratum].push(f);
             }
         }
         Self {
             rows,
             members,
+            strata: of_feature.cloned(),
+            n_strata,
             fallbacks: AtomicUsize::new(0),
         }
     }
@@ -278,7 +298,11 @@ impl ModulePools {
                 .find(|&&(_, cum)| r < cum)
                 .map_or(row[row.len() - 1].0, |&(m, _)| m)
         };
-        let pool = &self.members[m as usize];
+        let stratum = self
+            .strata
+            .as_ref()
+            .map_or(0, |of| of[feat as usize] as usize);
+        let pool = &self.members[m as usize * self.n_strata + stratum];
         if pool.len() < 2 {
             self.fallbacks.fetch_add(1, Ordering::Relaxed);
             return false;

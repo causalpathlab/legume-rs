@@ -683,6 +683,7 @@ fn write_topic_manifest(
         kind: crate::run_manifest::RunKind::Topic,
         prefix,
         data_input: &input,
+        data_multiome: None,
         data_batch: &batch,
         data_input_null: &[],
         dictionary_suffix: Some("dictionary.parquet"),
