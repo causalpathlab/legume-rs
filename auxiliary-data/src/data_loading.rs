@@ -167,10 +167,16 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
             .feature_kind
             .as_ref()
             .is_some_and(|k| k.needs_global_pass());
+    // One flat list of every file's row names (the Mixed / locus-overlap
+    // maps are built over all of them at once), plus where each file's
+    // slice ends, so auto-detection can look at one file at a time without a
+    // second read.
+    let mut file_ends: Vec<usize> = Vec::with_capacity(opened.len());
     let all_names: Option<Vec<Box<str>>> = if needs_names {
         let mut acc: Vec<Box<str>> = Vec::new();
         for (_, d) in opened.iter() {
             acc.extend(d.row_names()?);
+            file_ends.push(acc.len());
         }
         Some(acc)
     } else {
@@ -181,11 +187,27 @@ pub fn read_data_on_shared_rows(args: ReadSharedRowsArgs) -> anyhow::Result<Spar
     let resolved_kind: FeatureNameKind = match args.feature_kind.clone() {
         Some(k) => k,
         None => {
+            // Per FILE, then reconciled — never over the pool. The naming
+            // signature usually lives on one side only: a raw `ENSG_SYM`
+            // cohort next to a reference already on the bare-symbol axis
+            // (a carried `pb_reference`) left the pooled gene-like share
+            // under half, so the pair sniffed as `Exact` and every gene
+            // became two rows. See `FeatureNameKind::reconcile`.
             let names = all_names.as_ref().expect("peeked when auto");
-            let k = FeatureNameKind::auto_detect(names);
+            let mut start = 0usize;
+            let per_file: Vec<FeatureNameKind> = file_ends
+                .iter()
+                .map(|&end| {
+                    let k = FeatureNameKind::auto_detect(&names[start..end]);
+                    start = end;
+                    k
+                })
+                .collect();
+            let k = FeatureNameKind::reconcile(&per_file);
             debug!(
-                "Row alignment: auto-detected feature name kind → {:?} ({} rows)",
+                "Row alignment: auto-detected feature name kind → {:?} (per file: {:?}; {} rows)",
                 k,
+                per_file,
                 names.len()
             );
             k
@@ -590,6 +612,10 @@ fn infer_batch_from_columns(
         (vec![fallback; file_columns.len()], false)
     }
 }
+
+#[cfg(test)]
+#[path = "data_loading_tests.rs"]
+mod data_loading_tests;
 
 #[cfg(test)]
 mod tests {
