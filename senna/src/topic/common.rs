@@ -170,7 +170,7 @@ pub(crate) fn resolve_level_coarsenings(
     num_levels: usize,
     n_features_full: usize,
     dc_params: data_beans_alg::dc_poisson::RefineParams,
-    gene_axis: Option<&crate::topic::gene_axis::GeneAxisRemap>,
+    gene_axis: Option<&crate::topic::eval::GeneRemap>,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     if let Some(parent) = init_from {
         return inherit_level_coarsenings(
@@ -217,12 +217,13 @@ pub(crate) fn resolve_level_coarsenings(
 /// With `gene_axis`, a level keyed to the source run's axis is GROWN onto this
 /// run's by name instead of refused: known genes keep their module, unknown
 /// ones are placed by their pseudobulk profile (`profiles_dn`, this run's
-/// finest posterior), and the module count the decoders are keyed to stays.
+/// finest posterior, read the way bge's alignment reads one: depth-normalized,
+/// log, centred), and the module count the decoders are keyed to stays.
 fn inherit_level_coarsenings(
     parent: &str,
     num_levels: usize,
     n_features_full: usize,
-    gene_axis: Option<&crate::topic::gene_axis::GeneAxisRemap>,
+    gene_axis: Option<&crate::topic::eval::GeneRemap>,
     profiles_dn: &Mat,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     use crate::topic::model_metadata::load_coarsening_levels;
@@ -245,14 +246,31 @@ fn inherit_level_coarsenings(
         levels.len(),
         levels.len(),
     );
+    // One reading of every gene's profile, shared by all levels.
+    let unit_profiles = gene_axis.map(|_| {
+        anyhow::ensure!(
+            profiles_dn.nrows() == n_features_full,
+            "gene axis growth: {} pseudobulk profiles for {n_features_full} genes",
+            profiles_dn.nrows(),
+        );
+        Ok(graph_embedding_util::transfer::unit_log_profile_rows(profiles_dn))
+    });
+    let unit_profiles = unit_profiles.transpose()?;
     for (i, lvl) in levels.iter_mut().enumerate() {
-        if let Some(fc) = lvl {
-            if fc.fine_to_coarse.len() != n_features_full {
-                if let Some(remap) = gene_axis.filter(|r| r.n_source == fc.fine_to_coarse.len()) {
-                    *fc = crate::topic::gene_axis::grow_fine_to_coarse(fc, remap, profiles_dn)?;
-                    continue;
-                }
-            }
+        let Some(fc) = lvl else { continue };
+        // A remap means the axes differ by NAME, so the level is grown even
+        // when the two axes happen to have the same length: positions no
+        // longer mean the same gene.
+        if let (Some(remap), Some(unit)) = (gene_axis, unit_profiles.as_ref()) {
+            anyhow::ensure!(
+                remap.d_train == fc.fine_to_coarse.len(),
+                "--init-from {parent}: level {i}'s coarsening covers {} features but the \
+                 source run's gene axis has {}",
+                fc.fine_to_coarse.len(),
+                remap.d_train,
+            );
+            *fc = fc.grow_by_profile(&remap.new_to_train, unit)?;
+        } else {
             anyhow::ensure!(
                 fc.fine_to_coarse.len() == n_features_full,
                 "--init-from {parent}: level {i}'s coarsening covers {} features but this \
@@ -442,7 +460,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
             || args.column_alignment != data_beans::sparse_io_vector::ColumnAlignment::Union,
         "a pb_reference and union column alignment (--multiome) do not compose: union alignment \
          gives no guarantee the carried pseudobulks stay contiguous at the end, and their \
-         weights are applied by position. Drop --use-pb-reference for this round and let it \
+         weights are applied by position. Pass --no-pb-reference for this round and let it \
          re-collapse."
     );
 
@@ -933,3 +951,7 @@ pub fn resolve_embedding_dim(
     }
     Ok(h)
 }
+
+#[cfg(test)]
+#[path = "common_tests.rs"]
+mod common_tests;

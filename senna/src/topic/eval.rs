@@ -73,6 +73,20 @@ pub(crate) struct GeneRemap {
     pub n_mapped: usize,
 }
 
+impl GeneRemap {
+    /// True when the two axes are the same genes in the same order, so nothing
+    /// keyed by gene needs to move.
+    #[must_use]
+    pub(crate) fn is_identity(&self) -> bool {
+        self.new_to_train.len() == self.d_train
+            && self
+                .new_to_train
+                .iter()
+                .enumerate()
+                .all(|(i, p)| *p == Some(i))
+    }
+}
+
 /// How a query's feature axis is aligned onto the model's: the row-name
 /// transforms applied *before* matching, plus the coverage floor applied after
 /// (see [`ensure_gene_coverage`]).
