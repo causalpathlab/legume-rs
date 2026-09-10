@@ -406,8 +406,14 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         num_levels,
         n_features_full,
         args.collapse.pb_refine.to_params(),
-        // The dense encoder's weights are gene-keyed by position throughout,
-        // so this family still needs the exact axis.
+        // Not wired here yet. Under the default coarsening this family is in
+        // fact module-keyed throughout — the encoder reads `num_coarse`
+        // inputs and every level's decoder writes `num_coarse` outputs, both
+        // unchanged by growing a level onto a new axis — so growth is a
+        // smaller change here than in the masked family. At
+        // `--max-coarse-features 0` the dense encoder's first layer is
+        // gene-keyed on its input axis, which `candle_util::grow` already
+        // gathers. Turning it on needs a measured run, not just the plumbing.
         None,
     )?;
 
