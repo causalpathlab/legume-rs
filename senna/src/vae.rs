@@ -16,7 +16,7 @@
 
 use crate::embed_common::*;
 use crate::topic::common::{
-    create_device, load_and_collapse, move_varmap_to_cpu, sample_collapsed_data,
+    create_device, load_and_collapse, move_varmap_to_cpu,
     setup_stop_handler, LoadCollapseArgs, PreparedData,
 };
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
@@ -183,6 +183,10 @@ pub struct VaeArgs {
     #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,
 
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
+
     #[arg(
         long,
         value_enum,
@@ -303,24 +307,78 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &dev);
 
     info!(
-        "input: {n_features} -> Gaussian encoder -> {n_latent} factors -> NB decoder (dim {n_features}), {num_levels} level(s)"
+        "input: {n_features} -> Gaussian encoder -> {n_latent} factors -> NB decoder, {num_levels} level(s)"
     );
 
     let gene_names = data_vec.row_names()?;
     let stop = setup_stop_handler();
 
-    let mut encoder = build_encoder(
+    // Where this run's gene axis differs from an `--init-from` source run's,
+    // that run's gene-keyed state is continued by NAME.
+    let gene_axis = crate::topic::gene_axis::remap_for_init_from(
+        args.init_from.as_deref(),
+        &args.feature_name_kind,
+        &gene_names,
+    )?;
+    // Coarse features for the encoder and every decoder. Both sides move
+    // together here: this family has no feature-level context to keep back.
+    let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
+        args.coarsening.cap(),
+        args.init_from.as_deref(),
+        collapsed_levels.last().expect("at least one level"),
+        num_levels,
         n_features,
+        args.collapse.pb_refine.to_params(),
+        gene_axis.as_ref(),
+    )?;
+    let finest_coarsening = level_coarsenings.last().and_then(Option::as_ref);
+    let n_features_encoder = finest_coarsening.map_or(n_features, |fc| fc.num_coarse);
+    let level_decoder_dims: Vec<usize> = level_coarsenings
+        .iter()
+        .map(|fc| fc.as_ref().map_or(n_features, |c| c.num_coarse))
+        .collect();
+    // `μ_d` at coarse width is the MEAN over each group's features, not the
+    // sum: the data and the batch null are sum-coarsened, so the divisive
+    // correction only recovers the biological part when `μ` stays on a
+    // per-feature rate scale. Same rule as `senna topic`.
+    let feature_mean_enc: Vec<f32> = match finest_coarsening {
+        None => feature_mean.clone(),
+        Some(fc) => {
+            let mu = nalgebra::DMatrix::<f32>::from_row_slice(1, n_features, &feature_mean);
+            fc.aggregate_columns_nd(&mu)
+                .row(0)
+                .iter()
+                .zip(fc.coarse_to_fine.iter())
+                .map(|(&sum, fines)| sum / fines.len().max(1) as f32)
+                .collect()
+        }
+    };
+    if let Some(fc) = finest_coarsening {
+        info!(
+            "Training at {} coarse features instead of {n_features}; the dictionary is \
+             expanded back on output",
+            fc.num_coarse
+        );
+    }
+
+    let mut encoder = build_encoder(
+        n_features_encoder,
         n_latent,
         &args.encoder_layers,
-        &feature_mean,
+        &feature_mean_enc,
         &parameters,
         param_builder.clone(),
     )?;
 
     // One full-D NB decoder per pseudobulk level, sharing the encoder.
     let decoders: Vec<GaussianNbDecoder> = (0..num_levels)
-        .map(|i| GaussianNbDecoder::new(n_features, n_latent, param_builder.pp(format!("dec_{i}"))))
+        .map(|i| {
+            GaussianNbDecoder::new(
+                level_decoder_dims[i],
+                n_latent,
+                param_builder.pp(format!("dec_{i}")),
+            )
+        })
         .collect::<candle_core::Result<Vec<_>>>()?;
 
     if let Some(prefix) = args.init_from.as_deref() {
@@ -341,9 +399,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 model_type_expected: crate::topic::model_metadata::MODEL_TYPE_VAE,
                 n_topics: n_latent,
                 n_features_full: n_features,
-                n_features_encoder: n_features,
+                n_features_encoder,
                 encoder_hidden: &args.encoder_layers,
-                level_decoder_dims: &vec![n_features; num_levels],
+                level_decoder_dims: &level_decoder_dims,
                 embedding_dim: None,
                 // `senna vae` has no growth surface yet.
                 growth: crate::topic::warm_start::Growth::default(),
@@ -354,13 +412,15 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    // Per-level (encoder-input, batch-null, decoder-target) triples — full-D,
-    // no coarsening. The encoder reads `mixed` (μ observed), the decoder
-    // reconstructs `target` (μ adjusted); `batch` is the per-cell null.
-    let level_data: Vec<(Mat, Option<Mat>, Mat)> = collapsed_levels
-        .iter()
-        .map(sample_collapsed_data)
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Per-level (encoder-input, batch-null, decoder-target) triples, each
+    // aggregated to the width its side trains at. The encoder reads `mixed`
+    // (μ observed), the decoder reconstructs `target` (μ adjusted); `batch` is
+    // the per-cell null.
+    let level_data: Vec<(Mat, Option<Mat>, Mat)> = crate::topic::common::build_level_data(
+        &collapsed_levels,
+        &level_coarsenings,
+        finest_coarsening,
+    )?;
     let level_refs: Vec<candle_util::vae::topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
@@ -396,29 +456,35 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     crate::topic::model_metadata::save_parameters(&parameters, &args.out)?;
     crate::topic::model_metadata::save_feature_mean(&feature_mean, &gene_names, &args.out)?;
 
-    // Gene × factor loadings (the decoder weight `[D, K]`). Full-D, no
-    // coarsening to expand.
+    // Gene × factor loadings (the decoder weight `[D, K]`). Under coarsening
+    // the weight is per coarse feature, and every feature of a group takes its
+    // group's row unchanged: the loadings multiply the latent, so the split of
+    // a group's mass across its features belongs to the per-feature offset,
+    // not here.
     let finest_decoder = decoders.last().unwrap();
-    crate::topic::decoder_output::write_dictionary_expanded(
+    crate::topic::decoder_output::write_loadings_expanded(
         finest_decoder,
-        None,
+        finest_coarsening,
         n_features,
         &gene_names,
         &args.out,
     )?;
+    if !level_coarsenings.iter().all(Option::is_none) {
+        crate::topic::model_metadata::save_coarsening_levels(&level_coarsenings, &args.out)?;
+    }
 
     let metadata = crate::topic::model_metadata::TopicModelMetadata {
         model_type: crate::topic::model_metadata::MODEL_TYPE_VAE.into(),
         decoder_types: vec!["gauss_nb".into()],
         decoder_weights: vec![1.0],
-        n_features_encoder: n_features,
+        n_features_encoder,
         n_features_full: n_features,
         n_topics: n_latent,
         encoder_hidden: args.encoder_layers.clone(),
         num_levels,
-        level_decoder_dims: vec![n_features; num_levels],
+        level_decoder_dims: level_decoder_dims.clone(),
         adj_method: args.adj_method.as_str().into(),
-        has_coarsening: false,
+        has_coarsening: finest_coarsening.is_some(),
         embedding_dim: None,
         enc_context_size: None,
         theta_mean: None,
@@ -434,11 +500,13 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     let cpu_dev = candle_core::Device::Cpu;
     move_varmap_to_cpu(&parameters)?;
     let cpu_vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, &cpu_dev);
+    // The encoder reads whatever width it trained at, and the cells have to be
+    // aggregated the same way before they reach it.
     let cpu_encoder = build_encoder(
-        n_features,
+        n_features_encoder,
         n_latent,
         &args.encoder_layers,
-        &feature_mean,
+        &feature_mean_enc,
         &parameters,
         cpu_vb.clone(),
     )?;
@@ -447,7 +515,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         dev: &cpu_dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size.unwrap_or(100),
-        feature_coarsening: None,
+        feature_coarsening: finest_coarsening,
         decoder: None,
         refine_config: None,
     };

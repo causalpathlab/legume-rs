@@ -15,7 +15,7 @@ pub mod gaussian_nb;
 pub mod gem_etm;
 pub mod joint_topic;
 pub mod masked_etm;
-pub mod module_map;
+pub mod coarsening_map;
 pub mod nb_mixture;
 pub mod poisson;
 pub mod query_decoder;

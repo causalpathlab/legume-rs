@@ -1,29 +1,41 @@
-//! A hard gene → module map for the module-collapsed decoder.
+//! A hard feature → coarse-feature map for the collapsed decoder.
 //!
-//! The dense masked heads score every gene, which costs one `[K, D]` product
-//! and a few dozen `[N, D]` kernels per step. With a map from genes to `M`
-//! modules the decoder's dense targets become module totals, its logits
-//! `[K, M]`, and its per-gene questions are answered by the query head on a
-//! sampled set. The gene-level embedding ρ stays: the module embedding is the
-//! within-module mean of ρ, computed each step, so ρ trains through it, and
-//! the pinned within-module share `π_{g|m}` splits a module's rate back over
-//! its genes wherever a gene is asked about. The identity map (every gene its
-//! own module) reproduces the dense heads exactly.
+//! The dense masked heads score every feature, which costs one `[K, D]`
+//! product and a few dozen `[N, D]` kernels per step. With a map from features
+//! to `M` coarse features the decoder's dense targets become group totals, its
+//! logits `[K, M]`, and its per-feature questions are answered by the query
+//! head on a sampled set.
+//!
+//! Two things stay at feature level, which is why coarsening here is not a
+//! loss of resolution the way it is for a family that coarsens both sides.
+//! The per-feature embedding ρ trains throughout: a group's embedding is the
+//! mean of its members' ρ, recomputed every step, so gradient reaches every
+//! row. And the pinned within-group share `π_{g|m}` splits a group's rate back
+//! over its members wherever one is asked about. That share is fixed from the
+//! data, not learned.
+//!
+//! The identity map (every feature its own group) reproduces the dense heads
+//! exactly.
+//!
+//! The membership here is FIXED: it arrives already computed and is held as
+//! plain tensors, never as parameters, so no gradient reaches it. That is what
+//! separates a coarsening from a module — a module learns which features group
+//! together (see the masked encoder's centroids), a coarsening is told.
 
 use crate::fast_index::index_add_rows;
 use candle_core::{DType, Device, Result, Tensor};
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
-pub struct ModuleMap {
-    /// `[D]` u32, module of each gene.
+pub struct CoarseningMap {
+    /// `[D]` u32, coarse feature of each gene.
     fine_to_coarse_d: Tensor,
-    /// `[M, 1]` reciprocal module sizes (0 for an empty module).
+    /// `[M, 1]` reciprocal coarse feature sizes (0 for an empty coarse feature).
     inv_size_m1: Tensor,
     /// `[D]` `log π_{g|m(g)}`.
     log_share_d: Tensor,
     host_fine_to_coarse: Vec<usize>,
-    /// Genes of each module, for the host aggregation.
+    /// Genes of each coarse feature, for the host aggregation.
     host_coarse_to_fine: Vec<Vec<usize>>,
     host_log_share: Vec<f32>,
     n_fine: usize,
@@ -31,14 +43,14 @@ pub struct ModuleMap {
     identity: bool,
 }
 
-impl ModuleMap {
-    /// `fine_to_coarse[g]` is the module of gene `g`; `share_of_gene[g]` is
-    /// the gene's pinned share of its module's rate, summing to one within a
-    /// module.
+impl CoarseningMap {
+    /// `fine_to_coarse[g]` is the coarse feature of gene `g`; `share_of_gene[g]` is
+    /// the gene's pinned share of its coarse feature's rate, summing to one within a
+    /// coarse feature.
     pub fn new(fine_to_coarse: &[usize], share_of_gene: &[f32], dev: &Device) -> Result<Self> {
         let d = fine_to_coarse.len();
         if share_of_gene.len() != d {
-            candle_core::bail!("module map: {} genes but {} shares", d, share_of_gene.len());
+            candle_core::bail!("coarse feature map: {} genes but {} shares", d, share_of_gene.len());
         }
         let m = fine_to_coarse.iter().max().map_or(0, |&x| x + 1);
         let mut coarse_to_fine: Vec<Vec<usize>> = vec![Vec::new(); m];
@@ -74,7 +86,7 @@ impl ModuleMap {
         })
     }
 
-    /// Every gene its own module, share one.
+    /// Every gene its own coarse feature, share one.
     pub fn identity(d: usize, dev: &Device) -> Result<Self> {
         let f2c: Vec<usize> = (0..d).collect();
         Self::new(&f2c, &vec![1.0; d], dev)
@@ -105,8 +117,8 @@ impl ModuleMap {
         &self.host_log_share
     }
 
-    /// `[M, H]` within-module mean of a `[D, H]` table; ρ itself under the
-    /// identity map. Differentiable: each gene gets `1/|m|` of its module's
+    /// `[M, H]` within-group mean of a `[D, H]` table; ρ itself under the
+    /// identity map. Differentiable: each gene gets `1/|m|` of its coarse feature's
     /// gradient.
     pub fn coarsen_mean_dh(&self, rho: &Tensor) -> Result<Tensor> {
         if self.identity {
@@ -118,7 +130,7 @@ impl ModuleMap {
     }
 
     /// Module of each gene id, same shape as `ids` (u32).
-    pub fn modules_of(&self, ids: &Tensor) -> Result<Tensor> {
+    pub fn groups_of(&self, ids: &Tensor) -> Result<Tensor> {
         if self.identity {
             return Ok(ids.clone());
         }
@@ -154,7 +166,7 @@ impl ModuleMap {
         let (n, d) = x_nd.dims2()?;
         if d != self.n_fine {
             candle_core::bail!(
-                "module map: {} genes but the input has {d} columns",
+                "coarse feature map: {} genes but the input has {d} columns",
                 self.n_fine
             );
         }
@@ -164,7 +176,7 @@ impl ModuleMap {
             .contiguous()
     }
 
-    /// Sum the columns of a `[P, D]` host matrix into `[P, M]`, one module's
+    /// Sum the columns of a `[P, D]` host matrix into `[P, M]`, one coarse feature's
     /// column per worker.
     #[must_use]
     pub fn aggregate_columns_host(&self, x: &DMatrix<f32>) -> DMatrix<f32> {
@@ -188,5 +200,5 @@ impl ModuleMap {
 }
 
 #[cfg(test)]
-#[path = "module_map_tests.rs"]
-mod module_map_tests;
+#[path = "coarsening_map_tests.rs"]
+mod coarsening_map_tests;

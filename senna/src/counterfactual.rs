@@ -177,29 +177,29 @@ fn rebuild_model(
         Some(_) => Some(crate::topic::model_metadata::load_feature_mean(model)?.1),
         None => None,
     };
-    let level_map = |i: usize| -> anyhow::Result<candle_util::decoder::module_map::ModuleMap> {
+    let level_map = |i: usize| -> anyhow::Result<candle_util::decoder::coarsening_map::CoarseningMap> {
         let fc = levels
             .as_ref()
             .and_then(|l| l.get(i).and_then(Option::as_ref));
         match (fc, feature_mean.as_deref()) {
             (Some(fc), Some(mean)) => {
-                Ok(crate::topic::train_masked::module_map_for(Some(fc), mean, dev)?.0)
+                Ok(crate::topic::train_masked::coarsening_map_for(Some(fc), mean, dev)?.0)
             }
-            _ => Ok(candle_util::decoder::module_map::ModuleMap::identity(
+            _ => Ok(candle_util::decoder::coarsening_map::CoarseningMap::identity(
                 metadata.n_features_full,
                 dev,
             )?),
         }
     };
     for i in 0..finest {
-        EmbeddedNbTopicDecoder::new_with_modules(
+        EmbeddedNbTopicDecoder::new_with_coarsening(
             metadata.n_topics,
             rho.clone(),
             level_map(i)?,
             vb.pp(format!("dec_{i}")),
         )?;
     }
-    let decoder = EmbeddedNbTopicDecoder::new_with_modules(
+    let decoder = EmbeddedNbTopicDecoder::new_with_coarsening(
         metadata.n_topics,
         rho,
         level_map(finest)?,
