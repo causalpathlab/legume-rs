@@ -220,6 +220,38 @@ pub(crate) fn write_dictionary_tensor(
     Ok(())
 }
 
+/// Write a decoder's `[d, K]` table as `[D, K]` FACTOR LOADINGS.
+///
+/// The counterpart to [`write_dictionary_expanded`] for a family whose
+/// dictionary is not a log-probability: the Gaussian decoder's weight
+/// multiplies the latent, so a coarse feature's row belongs to each of its
+/// features unchanged. Splitting it the way a log-simplex is split would
+/// shrink every loading by its group size and change what the factors mean.
+pub(crate) fn write_loadings_expanded<Dec: DecoderModuleT + ?Sized>(
+    decoder: &Dec,
+    coarsening: Option<&FeatureCoarsening>,
+    n_features_full: usize,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<()> {
+    let dict_tensor = decoder.get_dictionary()?;
+    let Some(fc) = coarsening else {
+        return write_dictionary_tensor(&dict_tensor, None, n_features_full, gene_names, out_prefix);
+    };
+    let table_dk: Mat = Mat::from_tensor(&dict_tensor)?;
+    let expanded = fc.expand_rows_dk(&table_dk, n_features_full);
+    expanded.to_parquet_with_names(
+        &(out_prefix.to_string() + ".dictionary.parquet"),
+        (Some(gene_names), Some("gene")),
+        Some(&axis_id_names("T", expanded.ncols())),
+    )?;
+    info!(
+        "Expanded loadings from {} to {n_features_full} features",
+        fc.num_coarse
+    );
+    Ok(())
+}
+
 /// Write dictionary from a decoder implementing `DecoderModuleT`.
 pub(crate) fn write_dictionary_expanded<Dec: DecoderModuleT + ?Sized>(
     decoder: &Dec,

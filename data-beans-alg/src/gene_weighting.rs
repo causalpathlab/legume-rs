@@ -52,7 +52,7 @@ pub fn fisher_weights_from_stats(
 ///
 /// `mu_ds` is a `[D, S]` posterior-mean matrix of per-cell *rates* — the
 /// finest `CollapsedOut` — and `size_s[s]` is the number of cells behind
-/// column `s`. `coarsening`, when given, sums features into meta-features
+/// column `s`. `coarsening`, when given, sums features into coarse features
 /// first, matching whatever resolution the decoder runs at.
 ///
 /// **The count rescaling is the whole trick.** `phi_hat = (var - mu)/mu²`

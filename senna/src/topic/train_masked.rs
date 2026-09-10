@@ -66,6 +66,19 @@ fn write_tensor_parquet(
     row_axis: &str,
     col_prefix: &str,
 ) -> anyhow::Result<()> {
+    let cols = axis_id_names(col_prefix, tensor.dims().last().copied().unwrap_or(0));
+    write_tensor_parquet_named(tensor, out_prefix, suffix, row_names, row_axis, &cols)
+}
+
+/// [`write_tensor_parquet`] with the column names given rather than generated.
+fn write_tensor_parquet_named(
+    tensor: &Tensor,
+    out_prefix: &str,
+    suffix: &str,
+    row_names: &[Box<str>],
+    row_axis: &str,
+    col_names: &[Box<str>],
+) -> anyhow::Result<()> {
     let host = tensor.to_device(&candle_core::Device::Cpu)?;
     // Refuse to persist a diverged artifact. The masked/joint dictionary,
     // dispersion, and feature-embedding all funnel through here and are written
@@ -85,12 +98,7 @@ fn write_tensor_parquet(
          diverged (check the log_likelihood trace and any \"skipped optimizer step\" \
          warnings; re-run with a lower --learning-rate)."
     );
-    let n_cols = host.dims().last().copied().unwrap_or(0);
-    host.to_parquet_with_names(
-        &path,
-        (Some(row_names), Some(row_axis)),
-        Some(&axis_id_names(col_prefix, n_cols)),
-    )?;
+    host.to_parquet_with_names(&path, (Some(row_names), Some(row_axis)), Some(col_names))?;
     Ok(())
 }
 
@@ -101,40 +109,40 @@ fn write_tensor_parquet(
 /// (uniform within a module that has no mass); the module's background mass
 /// is that total. With no coarsening the map is the identity and the masses
 /// are the gene means themselves.
-pub(crate) fn module_map_for(
+pub(crate) fn coarsening_map_for(
     coarsening: Option<&FeatureCoarsening>,
     feature_mean: &[f32],
     dev: &candle_core::Device,
-) -> anyhow::Result<(candle_util::decoder::module_map::ModuleMap, Vec<f32>)> {
-    use candle_util::decoder::module_map::ModuleMap;
+) -> anyhow::Result<(candle_util::decoder::coarsening_map::CoarseningMap, Vec<f32>)> {
+    use candle_util::decoder::coarsening_map::CoarseningMap;
     let d = feature_mean.len();
     let Some(fc) = coarsening else {
-        return Ok((ModuleMap::identity(d, dev)?, feature_mean.to_vec()));
+        return Ok((CoarseningMap::identity(d, dev)?, feature_mean.to_vec()));
     };
     anyhow::ensure!(
         fc.fine_to_coarse.len() == d,
         "feature coarsening covers {} genes but the run has {d}",
         fc.fine_to_coarse.len()
     );
-    let mut module_mass = vec![0f32; fc.num_coarse];
+    let mut coarse_mass = vec![0f32; fc.num_coarse];
     for (g, &m) in fc.fine_to_coarse.iter().enumerate() {
-        module_mass[m] += feature_mean[g].max(0.0);
+        coarse_mass[m] += feature_mean[g].max(0.0);
     }
     let share: Vec<f32> = fc
         .fine_to_coarse
         .iter()
         .enumerate()
         .map(|(g, &m)| {
-            if module_mass[m] > 0.0 {
-                feature_mean[g].max(0.0) / module_mass[m]
+            if coarse_mass[m] > 0.0 {
+                feature_mean[g].max(0.0) / coarse_mass[m]
             } else {
                 1.0 / fc.coarse_to_fine[m].len().max(1) as f32
             }
         })
         .collect();
     Ok((
-        ModuleMap::new(&fc.fine_to_coarse, &share, dev)?,
-        module_mass,
+        CoarseningMap::new(&fc.fine_to_coarse, &share, dev)?,
+        coarse_mass,
     ))
 }
 
@@ -161,7 +169,7 @@ pub(crate) fn write_masked_dictionary(
     gene_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    let map = decoder.modules();
+    let map = decoder.coarsening();
     let dict = decoder
         .get_dictionary()?
         .to_device(&candle_core::Device::Cpu)?;
@@ -223,6 +231,60 @@ pub(crate) fn write_feature_embedding(
         "gene",
         "H",
     )
+}
+
+/// Write the encoder's learned gene modules in the shape the graph-embedding
+/// family writes them: a `[D, M]` membership and an `[M, H]` dictionary, under
+/// the same suffixes.
+///
+/// The two families parameterize modules differently and should keep doing so
+/// — one learns a membership per feature, the other learns centroids and reads
+/// membership off the embedding, which is what lets it place a feature it has
+/// never seen. What they share is the artifact: one shape on disk means the
+/// alignment and transfer code, and anything that reads modules downstream,
+/// does not care which family produced them.
+///
+/// Returns the two suffixes when the encoder has modules, so the caller can
+/// record them in the manifest, and `None` when it has none.
+pub(crate) fn write_gene_modules(
+    encoder: &IndexedEmbeddingEncoder,
+    gene_names: &[Box<str>],
+    out_prefix: &str,
+) -> anyhow::Result<Option<(&'static str, &'static str)>> {
+    let Some(membership) = encoder.feature_module_membership()? else {
+        return Ok(None);
+    };
+    let module_names: Vec<Box<str>> = (0..encoder.n_gene_modules())
+        .map(|i| format!("m{i}").into_boxed_str())
+        .collect();
+    let membership_suffix = graph_embedding_util::transfer::MODULE_MEMBERSHIP_SUFFIX;
+    let dictionary_suffix = graph_embedding_util::transfer::MODULE_DICTIONARY_SUFFIX;
+    write_tensor_parquet_named(
+        &membership,
+        out_prefix,
+        membership_suffix,
+        gene_names,
+        "gene",
+        &module_names,
+    )?;
+    let centroids = encoder
+        .module_centroids()
+        .expect("a module encoder has centroids")
+        .t()?
+        .contiguous()?;
+    write_tensor_parquet(
+        &centroids,
+        out_prefix,
+        dictionary_suffix,
+        &module_names,
+        "module",
+        "H",
+    )?;
+    log::info!(
+        "Wrote {} gene module(s) to {out_prefix}.{membership_suffix} and .{dictionary_suffix}",
+        encoder.n_gene_modules(),
+    );
+    Ok(Some((membership_suffix, dictionary_suffix)))
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
-//! Tests for the gene→module map: the module embedding is the within-module
+//! Tests for the gene→coarse feature map: the coarse feature embedding is the within-group
 //! mean of ρ, ρ receives that gradient, the identity map is a no-op, and the
 //! shares and lookups behave.
 
-use super::ModuleMap;
+use super::CoarseningMap;
 use candle_core::{Device, Tensor, Var};
 use nalgebra::DMatrix;
 
@@ -13,11 +13,11 @@ fn dev() -> Device {
     Device::Cpu
 }
 
-/// Modules {0,1}, {2,3,4}, {5}; shares from a mean vector [2,1 | 1,1,2 | 4].
-fn map() -> ModuleMap {
+/// Coarse features {0,1}, {2,3,4}, {5}; shares from a mean vector [2,1 | 1,1,2 | 4].
+fn map() -> CoarseningMap {
     let f2c = [0usize, 0, 1, 1, 1, 2];
     let share = [2.0f32 / 3.0, 1.0 / 3.0, 0.25, 0.25, 0.5, 1.0];
-    ModuleMap::new(&f2c, &share, &dev()).unwrap()
+    CoarseningMap::new(&f2c, &share, &dev()).unwrap()
 }
 
 fn rho() -> Tensor {
@@ -76,7 +76,7 @@ fn rho_receives_the_gradient_through_the_module_mean() {
 
 #[test]
 fn identity_map_is_a_no_op() {
-    let m = ModuleMap::identity(D, &dev()).unwrap();
+    let m = CoarseningMap::identity(D, &dev()).unwrap();
     assert!(m.is_identity());
     assert_eq!(m.n_coarse(), D);
     let r = rho();
@@ -86,7 +86,7 @@ fn identity_map_is_a_no_op() {
     );
     let ids = Tensor::from_vec(vec![5u32, 0, 3, 3], (2, 2), &dev()).unwrap();
     assert_eq!(
-        m.modules_of(&ids).unwrap().to_vec2::<u32>().unwrap(),
+        m.groups_of(&ids).unwrap().to_vec2::<u32>().unwrap(),
         ids.to_vec2::<u32>().unwrap()
     );
     assert!(m
@@ -105,7 +105,7 @@ fn lookups_follow_the_map_and_shares_expand_by_module() {
     assert!(!m.is_identity());
     let ids = Tensor::from_vec(vec![5u32, 0, 3, 4], (2, 2), &dev()).unwrap();
     assert_eq!(
-        m.modules_of(&ids).unwrap().to_vec2::<u32>().unwrap(),
+        m.groups_of(&ids).unwrap().to_vec2::<u32>().unwrap(),
         vec![vec![2, 0], vec![1, 1]]
     );
     let ls = m.log_share_at(&ids).unwrap().to_vec2::<f32>().unwrap();
@@ -144,7 +144,7 @@ fn lookups_follow_the_map_and_shares_expand_by_module() {
         m.aggregate_columns(&x).unwrap().to_vec2::<f32>().unwrap(),
         vec![vec![3.0, 12.0, 6.0], vec![1.0, 1.0, 1.0]]
     );
-    let id = ModuleMap::identity(D, &dev()).unwrap();
+    let id = CoarseningMap::identity(D, &dev()).unwrap();
     assert_eq!(
         id.aggregate_columns(&x).unwrap().to_vec2::<f32>().unwrap(),
         x.to_vec2::<f32>().unwrap()
@@ -171,7 +171,7 @@ fn aggregate_columns_passes_a_module_weight_back_to_every_gene_of_the_module() {
     let g = grads.get(&x).unwrap().to_vec2::<f32>().unwrap();
     for (row, wr) in g.iter().zip([[1.0f32, 10.0, 100.0], [2.0, 20.0, 200.0]]) {
         for (gene, &c) in m.host_fine_to_coarse().iter().enumerate() {
-            assert_eq!(row[gene], wr[c], "gene {gene} in module {c}");
+            assert_eq!(row[gene], wr[c], "gene {gene} in coarse feature {c}");
         }
     }
 }

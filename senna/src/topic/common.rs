@@ -164,7 +164,7 @@ pub fn coarsen_features_multilevel(
 /// caps the feature axis, with log-spaced widths coarsest first; `None` per
 /// level when neither applies.
 pub(crate) fn resolve_level_coarsenings(
-    max_coarse_features: usize,
+    cap: Option<std::num::NonZeroUsize>,
     init_from: Option<&str>,
     finest_collapsed: &CollapsedOut,
     num_levels: usize,
@@ -173,19 +173,33 @@ pub(crate) fn resolve_level_coarsenings(
     gene_axis: Option<&crate::topic::eval::GeneRemap>,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     if let Some(parent) = init_from {
-        return inherit_level_coarsenings(
+        // Continuing keys the child to the SOURCE run's groups, read from its
+        // `coarsening.json`, because every decoder is keyed to their count.
+        // So the cap is inert here, and saying so beats letting someone
+        // believe they changed the resolution of a continued fit.
+        let levels = inherit_level_coarsenings(
             parent,
             num_levels,
             n_features_full,
             gene_axis,
             finest_collapsed.mu_observed.posterior_mean(),
-        );
+        )?;
+        let inherited = levels.last().and_then(Option::as_ref).map(|fc| fc.num_coarse);
+        if inherited != cap.map(std::num::NonZeroUsize::get) {
+            log::info!(
+                "--init-from {parent}: keeping that run's {} coarse feature(s); the coarsening \
+                 options do not apply to a continued fit, whose decoders are keyed to the \
+                 groups they were trained on",
+                inherited.map_or_else(|| "no".to_string(), |n| n.to_string()),
+            );
+        }
+        return Ok(levels);
     }
-    if max_coarse_features == 0 || n_features_full <= max_coarse_features {
+    let Some(cap) = cap.map(std::num::NonZeroUsize::get).filter(|c| n_features_full > *c) else {
         return Ok(vec![None; num_levels]);
-    }
+    };
     let sketch_ds = finest_collapsed.mu_observed.posterior_mean();
-    let finest_target = max_coarse_features;
+    let finest_target = cap;
     let min_target = (finest_target / num_levels).max(50);
     let level_targets: Vec<usize> = (0..num_levels)
         .map(|i| {
@@ -338,6 +352,49 @@ pub(crate) fn pseudobulk_feature_mean(mu_dp: &Mat) -> Vec<f32> {
     let n_pb = mu_dp.ncols().max(1) as f32;
     (0..mu_dp.nrows())
         .map(|d| mu_dp.row(d).iter().sum::<f32>() / n_pb)
+        .collect()
+}
+
+/// Materialize `(encoder-input, batch, decoder-target)` `Mat` triples
+/// once per training run, applying the encoder's and per-level decoder
+/// coarsenings.
+///
+/// Shared by the families whose encoder and decoders both train at coarse
+/// width. `enc_coarsening` is the finest level's, since that is what the
+/// encoder reads; each decoder takes its own level's.
+pub(crate) fn build_level_data(
+    collapsed_levels: &[CollapsedOut],
+    level_coarsenings: &[Option<FeatureCoarsening>],
+    enc_coarsening: Option<&FeatureCoarsening>,
+) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
+    collapsed_levels
+        .iter()
+        .zip(level_coarsenings.iter())
+        .map(|(collapsed, dec_fc)| {
+            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(collapsed)?;
+
+            let enc_nd = if let Some(fc) = enc_coarsening {
+                fc.aggregate_columns_nd(&mixed_nd)
+            } else {
+                mixed_nd
+            };
+
+            let batch_nd = batch_nd.map(|b| {
+                if let Some(fc) = enc_coarsening {
+                    fc.aggregate_columns_nd(&b)
+                } else {
+                    b
+                }
+            });
+
+            let dec_target = if let Some(fc) = dec_fc.as_ref() {
+                fc.aggregate_columns_nd(&target_nd)
+            } else {
+                target_nd
+            };
+
+            Ok((enc_nd, batch_nd, dec_target))
+        })
         .collect()
 }
 

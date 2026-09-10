@@ -383,7 +383,7 @@ pub(crate) fn evaluate_holdout_imputation(
         // library, and `residual` because these are cells, whose counts still
         // carry the batch effect. The module view of the block is built on
         // the host straight from the sparse columns.
-        let map = decoder.modules();
+        let map = decoder.coarsening();
         let n_obs = decoder.dim_obs();
         let f2c = map.host_fine_to_coarse();
         let mut dense = vec![0f32; n * n_obs];
@@ -397,7 +397,7 @@ pub(crate) fn evaluate_holdout_imputation(
         }
         let values_nm = Tensor::from_vec(dense, (n, n_obs), config.dev)?;
         let lib_n1 = Tensor::from_vec(lib, (n, 1), config.dev)?;
-        let m_ctx = map.modules_of(&enc_pack.indices)?;
+        let m_ctx = map.groups_of(&enc_pack.indices)?;
         let visible_counts = scatter_add_cols(&m_ctx, &(&enc_pack.values * &visible)?, n_obs)?;
         let share_ctx = map.log_share_at(&enc_pack.indices)?.exp()?;
         let visible_share = scatter_add_cols(&m_ctx, &(share_ctx * &visible)?, n_obs)?;

@@ -5,7 +5,7 @@
 
 use super::{epoch_seed, poisson_draw, target_mask_nd, EpochAccum, LevelTarget, Mat};
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
-use crate::decoder::module_map::ModuleMap;
+use crate::decoder::coarsening_map::CoarseningMap;
 use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -188,7 +188,7 @@ fn level_target_library_is_the_full_row_total() {
     }
     let lt = LevelTarget::from_mat(
         &rows,
-        &ModuleMap::identity(rows.ncols(), &Device::Cpu).unwrap(),
+        &CoarseningMap::identity(rows.ncols(), &Device::Cpu).unwrap(),
         &Device::Cpu,
     )
     .unwrap();
@@ -252,7 +252,7 @@ fn visible_genes_are_never_scored() {
 
     let (idx, vis) = small_context();
     let mask = target_mask_nd(&idx, &vis, D).unwrap();
-    let identity = ModuleMap::identity(D, &dev).unwrap();
+    let identity = CoarseningMap::identity(D, &dev).unwrap();
     let mut rows = Mat::zeros(3, D);
     for i in 0..3 {
         for j in 0..D {

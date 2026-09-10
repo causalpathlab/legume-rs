@@ -151,17 +151,10 @@ pub struct JointTopicArgs {
     )]
     pub(crate) adj_method: AdjMethod,
 
-    #[arg(
-        long,
-        default_value_t = 5000,
-        help = "Cap feature dim by meta-feature coarsening (0 to disable)",
-        long_help = "Groups co-expressed features into ≤N meta-features.\n\
-                     The model then trains at reduced resolution.\n\
-                     The dictionary is expanded back to full resolution on output.\n\
-                     Independent mode: computed per modality.\n\
-                     Delta mode: computed on the reference modality and shared."
-    )]
-    pub(crate) max_coarse_features: usize,
+    // `JointTopicArgs` is not serialized (this family is not continuable),
+    // so no serde attribute here.
+    #[command(flatten)]
+    pub(crate) coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -272,7 +265,8 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     // After reversing, the finest level (most groups) is the last element.
     let collapsed_data_vec = collapsed_levels.last().unwrap();
 
-    // 3b. Feature coarsening per modality (if D > max_coarse_features)
+    // 3b. Feature coarsening per modality (when a modality is wider than the cap)
+    let cap = args.coarsening.cap();
     let n_features_full: Vec<usize> = collapsed_data_vec
         .iter()
         .map(|x| x.mu_observed.nrows())
@@ -283,29 +277,29 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     let coarsen_one = |sketch: &nalgebra::DMatrix<f32>| -> anyhow::Result<FeatureCoarsening> {
         let mut levels = crate::topic::common::coarsen_features_multilevel(
             sketch,
-            &[args.max_coarse_features],
+            &[cap.map_or(0, std::num::NonZeroUsize::get)],
             data_beans_alg::dc_poisson::RefineParams::default(),
         )?;
         Ok(levels.remove(0))
     };
 
     let coarsenings: Vec<Option<FeatureCoarsening>> =
-        if args.max_coarse_features > 0 && args.decoder_type == JointDecoderType::Delta {
+        if cap.is_some() && args.decoder_type == JointDecoderType::Delta {
             // Delta mode: shared coarsening from reference modality
             let n_full = n_features_full[0];
-            if n_full > args.max_coarse_features {
+            if cap.is_some_and(|c| n_full > c.get()) {
                 let collapsed_ref = &collapsed_data_vec[0];
                 let sketch = collapsed_ref.mu_observed.posterior_mean().clone();
                 let fc = coarsen_one(&sketch)?;
                 info!(
-                    "Shared coarsening: {} → {} meta-features",
+                    "Shared coarsening: {} → {} coarse features",
                     n_full, fc.num_coarse
                 );
                 vec![Some(fc); args.num_modalities]
             } else {
                 vec![None; args.num_modalities]
             }
-        } else if args.max_coarse_features > 0 {
+        } else if cap.is_some() {
             // Independent mode: per-modality coarsening
             collapsed_data_vec
                 .iter()
@@ -313,11 +307,11 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
                 .enumerate()
                 .map(
                     |(d, (collapsed, &n_full))| -> anyhow::Result<Option<FeatureCoarsening>> {
-                        if n_full > args.max_coarse_features {
+                        if cap.is_some_and(|c| n_full > c.get()) {
                             let sketch = collapsed.mu_observed.posterior_mean().clone();
                             let fc = coarsen_one(&sketch)?;
                             info!(
-                                "Modality {}: coarsened {} → {} meta-features",
+                                "Modality {}: coarsened {} → {} coarse features",
                                 d, n_full, fc.num_coarse
                             );
                             Ok(Some(fc))

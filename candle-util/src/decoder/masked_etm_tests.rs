@@ -233,13 +233,13 @@ fn dense_and_indexed_heads_agree_on_the_same_positions() {
 ////////////////////////////
 
 use super::{ModuleTarget, QueryTarget};
-use crate::decoder::module_map::ModuleMap;
+use crate::decoder::coarsening_map::CoarseningMap;
 use crate::loss::nb_log_likelihood_elem;
 
 /// Modules {0,1}, {2,3,4}, {5} over the six genes, shares from a mean
 /// vector [2,1 | 1,1,2 | 4].
-fn module_map() -> ModuleMap {
-    ModuleMap::new(
+fn coarsening_map() -> CoarseningMap {
+    CoarseningMap::new(
         &[0, 0, 1, 1, 1, 2],
         &[2.0 / 3.0, 1.0 / 3.0, 0.25, 0.25, 0.5, 1.0],
         &dev(),
@@ -268,7 +268,7 @@ fn module_decoder() -> EmbeddedNbTopicDecoder {
         Tensor::from_vec(log_pi, (1, M), &dev()).unwrap(),
     );
     let vb = VarBuilder::from_tensors(ts, DType::F32, &dev());
-    EmbeddedNbTopicDecoder::new_with_modules(K, rho(), module_map(), vb.pp("mdec")).unwrap()
+    EmbeddedNbTopicDecoder::new_with_coarsening(K, rho(), coarsening_map(), vb.pp("mdec")).unwrap()
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn module_logits_carry_the_module_background_and_rows_sum_to_one() {
 #[test]
 fn module_scorer_matches_the_dense_gene_scorer_under_the_identity_map() {
     let dec = decoder();
-    assert!(dec.modules().is_identity());
+    assert!(dec.coarsening().is_identity());
     let full_kd = dec.full_logits_kd().unwrap();
     let (values, mask, lib) = (values(), mask(), lib());
     let visible = mask.affine(-1.0, 1.0).unwrap();

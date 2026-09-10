@@ -257,3 +257,41 @@ fn grown_axis_with_nothing_in_common_is_refused() {
 fn from_fine_to_coarse_rejects_a_group_index_out_of_range() {
     assert!(FeatureCoarsening::from_fine_to_coarse(vec![0, 2], 2).is_err());
 }
+
+/// Turning the grouping off should be sayable, not encoded as a number whose
+/// literal reading ("at most zero features") is the opposite of its meaning.
+/// The numeric spelling stays, because recorded runs and existing scripts use
+/// it, so the two have to agree.
+mod switching_it_off {
+    use super::FeatureCoarseningArgs;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: FeatureCoarseningArgs,
+    }
+
+    fn parse(extra: &[&str]) -> Result<FeatureCoarseningArgs, clap::Error> {
+        Cli::try_parse_from(["x"].iter().copied().chain(extra.iter().copied())).map(|c| c.args)
+    }
+
+    #[test]
+    fn the_named_switch_and_the_zero_agree() {
+        assert_eq!(parse(&[]).unwrap().cap().map(std::num::NonZeroUsize::get), Some(1000));
+        assert!(parse(&["--no-feature-coarsening"]).unwrap().cap().is_none());
+        assert!(parse(&["--max-coarse-features", "0"]).unwrap().cap().is_none());
+        assert_eq!(
+            parse(&["--max-coarse-features", "250"]).unwrap().cap().map(std::num::NonZeroUsize::get),
+            Some(250)
+        );
+    }
+
+    /// One says group at most N, the other says do not group. Asking for both
+    /// is a contradiction rather than a precedence puzzle.
+    #[test]
+    fn asking_for_both_is_refused() {
+        assert!(parse(&["--no-feature-coarsening", "--max-coarse-features", "250"]).is_err());
+    }
+
+}

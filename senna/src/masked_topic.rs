@@ -218,6 +218,11 @@ pub struct MaskedTopicArgs {
                      actually observed. Set M well above the topic count; these are\n\
                      fine-grained redundancy sets, not topics.\n\
                      \n\
+                     This is a MODULE, not a coarsening: the centroids are learned,\n\
+                     so which genes group together changes as the fit proceeds.\n\
+                     --max-coarse-features is the other kind, read off the data\n\
+                     before training and fixed thereafter.\n\
+                     \n\
                      0 leaves the encoder exactly as it was."
     )]
     gene_modules: usize,
@@ -546,25 +551,9 @@ pub struct MaskedTopicArgs {
     )]
     poisson_thin: bool,
 
-    #[arg(
-        long,
-        default_value_t = 1000,
-        value_name = "M",
-        help = "Collapse genes into at most M modules for the decoder targets (0 = every gene)",
-        long_help = "Collapse genes into at most M modules for the decoder targets.\n\
-                     The encoder keeps its gene-level context and embedding; the query\n\
-                     decoder keeps its gene-level reads. What changes is what the dense\n\
-                     head answers for: each module's unseen mass instead of each gene,\n\
-                     so no per-step tensor grows with the number of genes.\n\
-                     Modules come from the finest pseudobulk profiles, nested per level\n\
-                     with log-spaced widths, as in `senna topic`. A gene's share of its\n\
-                     module is pinned at its mean rate.\n\
-                     \n\
-                     On by default: a module's mass is a denser target than a single\n\
-                     sparse gene, and the latent separates cell types better for it,\n\
-                     at a fraction of the time. 0 scores every gene."
-    )]
-    max_coarse_features: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -996,7 +985,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         &gene_names,
     )?;
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
-        args.max_coarse_features,
+        args.coarsening.cap(),
         args.init_from.as_deref(),
         finest_collapsed,
         num_levels,
@@ -1007,9 +996,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let shared_rho = base_encoder.feature_embeddings().clone();
     let mut decoders: Vec<EmbeddedNbTopicDecoder> = Vec::with_capacity(num_levels);
     for (i, fc) in level_coarsenings.iter().enumerate() {
-        let (map, module_mass) =
-            crate::topic::train_masked::module_map_for(fc.as_ref(), &feature_mean, &dev)?;
-        decoders.push(EmbeddedNbTopicDecoder::new_with_modules(
+        let (map, coarse_mass) =
+            crate::topic::train_masked::coarsening_map_for(fc.as_ref(), &feature_mean, &dev)?;
+        decoders.push(EmbeddedNbTopicDecoder::new_with_coarsening(
             n_topics,
             shared_rho.clone(),
             map,
@@ -1018,7 +1007,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         // Pin the level's background at the data's marginal over its output
         // axis: the home for shared abundance that centering α removes from
         // the topics.
-        let log_pi = log_background_from_mean(&module_mass, &dev)?;
+        let log_pi = log_background_from_mean(&coarse_mass, &dev)?;
         pin_background(&parameters, &format!("dec_{i}"), &log_pi)?;
     }
     let level_decoder_dims: Vec<usize> = decoders.iter().map(|d| d.dim_obs()).collect();
@@ -1206,6 +1195,10 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let finest_decoder = decoders.last().unwrap();
     write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
+    // Learned gene modules, in the shape the graph-embedding family writes
+    // them, so one reader serves both.
+    let module_suffixes =
+        crate::topic::train_masked::write_gene_modules(&base_encoder, &gene_names, &args.out)?;
 
     // Optional held-out masked-imputation evaluation — the un-optimized
     // generalization metric (see `--eval-mask-fraction`). Runs on the training
@@ -1560,8 +1553,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: None,
-        module_membership_suffix: None,
-        module_dictionary_suffix: None,
+        module_membership_suffix: module_suffixes.map(|(m, _)| m),
+        module_dictionary_suffix: module_suffixes.map(|(_, d)| d),
         softmax_dictionary_suffix: Some("dictionary.parquet"),
         cell_embedding_suffix: None,
         default_colour_by: "cluster",

@@ -184,6 +184,22 @@ impl IndexedEmbeddingEncoder {
         self.module_centroids.as_ref()
     }
 
+    /// Every feature's soft module membership `[D, M]`, or `None` when the
+    /// encoder has no modules.
+    ///
+    /// The SAME transform the pooling path applies, so what a reader gets is
+    /// the grouping the model actually used rather than a plausible
+    /// re-derivation of it. Membership is a function of ρ and the centroids,
+    /// which is why the encoder stores no per-feature membership: this
+    /// materializes it, for export and for anything downstream that wants the
+    /// module tables in the shape the graph-embedding family writes them.
+    pub fn feature_module_membership(&self) -> Result<Option<Tensor>> {
+        let Some(centroids) = self.module_centroids.as_ref() else {
+            return Ok(None);
+        };
+        Some(module_membership_from(&self.feature_embeddings, centroids)).transpose()
+    }
+
     /// Whether this encoder owns a [`GcnBlock`]. Callers use this to
     /// decide whether to supply per-minibatch sparse edges.
     pub fn has_gcn(&self) -> bool {
@@ -366,10 +382,8 @@ impl IndexedEmbeddingEncoder {
         // Cosine, not dot product: magnitude is the channel by which one centroid
         // swallows every gene, and bounded logits are what make `MODULE_TEMP` mean
         // something on a fixed scale.
-        let logits_nkm = l2_normalize_dim(&e_nk_h.reshape((n * k, h))?, 1)?
-            .matmul(&l2_normalize_dim(centroids, 0)?)?
-            .reshape((n, k, m))?;
-        let mem_nkm = ops::softmax(&(logits_nkm / MODULE_TEMP)?, 2)?; // [N, K, M]
+        let mem_nkm = module_membership_from(&e_nk_h.reshape((n * k, h))?, centroids)?
+            .reshape((n, k, m))?; // [N, K, M]
 
         // Restrict to observed slots: a masked gene must not contribute to either the
         // level or the coverage, or the branch leaks the value being imputed.
@@ -598,6 +612,18 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
     fn dim_latent(&self) -> usize {
         self.n_topics
     }
+}
+
+/// Soft membership of rows `[.., H]` over centroids `[H, M]`.
+///
+/// Cosine, not dot product: magnitude is the channel by which one centroid
+/// swallows every feature, and bounded logits are what make [`MODULE_TEMP`]
+/// mean something on a fixed scale. One definition, used by the encoder's
+/// pooling and by the exported tables, so the two can never drift.
+fn module_membership_from(rows: &Tensor, centroids: &Tensor) -> Result<Tensor> {
+    let logits = l2_normalize_dim(rows, 1)?.matmul(&l2_normalize_dim(centroids, 0)?)?;
+    let last = logits.rank() - 1;
+    ops::softmax(&(logits / MODULE_TEMP)?, last)
 }
 
 #[cfg(test)]
@@ -873,4 +899,66 @@ mod tests {
             .unwrap()
             .is_none());
     }
+    /// The exported membership has to be the SAME transform the encoder pools
+    /// with, or a downstream reader is looking at a grouping the model never
+    /// used. Both go through `feature_module_membership`, and this pins its
+    /// shape and its two defining properties: every feature's memberships form
+    /// a distribution, and a feature sitting on a centroid puts its mass there.
+    #[test]
+    fn exported_membership_is_a_distribution_that_follows_the_centroids() {
+        let dev = Device::Cpu;
+        let vm = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&vm, candle_core::DType::F32, &dev);
+        let (d, h, m) = (6usize, 4usize, 3usize);
+        let layers = vec![h, h];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: d,
+                n_topics: 2,
+                embedding_dim: h,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: false,
+                n_gene_modules: m,
+            },
+            &vm,
+            vb,
+        )
+        .expect("encoder");
+
+        // Put feature 0 exactly on centroid 1's direction.
+        let centroids = enc.module_centroids().expect("modules are on").clone();
+        let c1: Vec<f32> = centroids
+            .narrow(1, 1, 1)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        {
+            let data = vm.data().lock().unwrap();
+            let rho = data["feature.embeddings"].as_tensor().clone();
+            let mut rows: Vec<f32> = rho.flatten_all().unwrap().to_vec1().unwrap();
+            rows[..h].copy_from_slice(&c1);
+            data["feature.embeddings"]
+                .set(&Tensor::from_vec(rows, (d, h), &dev).unwrap())
+                .unwrap();
+        }
+
+        let pi = enc.feature_module_membership().expect("membership").expect("modules are on");
+        assert_eq!(pi.dims(), &[d, m]);
+        let rows: Vec<Vec<f32>> = pi.to_vec2().unwrap();
+        for (g, row) in rows.iter().enumerate() {
+            let total: f32 = row.iter().sum();
+            assert!((total - 1.0).abs() < 1e-4, "feature {g} sums to {total}");
+        }
+        let best = rows[0]
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
+        assert_eq!(best, 1, "a feature on a centroid belongs to it");
+    }
+
 }

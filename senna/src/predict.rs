@@ -1984,6 +1984,15 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     use crate::topic::model_metadata::load_feature_mean;
 
     let metadata = a.metadata;
+
+    // The coarsening this model trained at, if any: the encoder reads coarse
+    // features, so the query has to be aggregated the same way before it is
+    // scored, and `μ_d` re-aggregated to match.
+    let coarsening = if metadata.has_coarsening {
+        crate::topic::model_metadata::load_coarsening(a.model)?
+    } else {
+        None
+    };
     let (training_genes, loadings_dk) = load_dictionary(a.model)?;
     let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
     anyhow::ensure!(
@@ -2017,6 +2026,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     let dev = a.dev;
     let mut parameters = candle_nn::VarMap::new();
     let vb = candle_nn::VarBuilder::from_varmap(&parameters, candle_core::DType::F32, dev);
+    let feature_mean = aggregate_feature_mean_to_coarse(&feature_mean, coarsening.as_ref());
     let encoder = GaussianEncoder::new(
         GaussianEncoderArgs {
             n_features: metadata.n_features_encoder,
@@ -2059,6 +2069,24 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     let recon = decoder.and_then(|dec| {
         let bias = dec.feature_bias()?;
         let bias: Vec<f32> = bias.flatten_all().ok()?.to_vec1().ok()?;
+        // Under coarsening the offset is per coarse feature, while the
+        // loadings were expanded to every feature on the way out. Split each
+        // group's offset evenly across its members, which is what makes the
+        // per-feature softmax reproduce the group's rate exactly: the shares
+        // inside a group sum to one, so the normalizer is unchanged.
+        let bias = match coarsening.as_ref() {
+            None => bias,
+            Some(fc) => {
+                let mut per_gene = vec![0f32; loadings_dk.nrows()];
+                for (m, fines) in fc.coarse_to_fine.iter().enumerate() {
+                    let share = (fines.len().max(1) as f32).ln();
+                    for &g in fines {
+                        per_gene[g] = bias.get(m).copied().unwrap_or(0.0) - share;
+                    }
+                }
+                per_gene
+            }
+        };
         if bias.len() != loadings_dk.nrows() {
             log::warn!(
                 "vae decoder bias has {} entries but the dictionary has {} genes; \
@@ -2090,7 +2118,8 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
             // Gene-mean null only (x0 = None): the divisive μ_d correction is
             // baked into the encoder via `feature_mean`.
             let csc = data_vec.read_columns_csc(lb..ub)?;
-            let x_nd = remap_and_coarsen_dense(&csc, gene_remap.as_ref(), None, dev)?;
+            let x_nd =
+                remap_and_coarsen_dense(&csc, gene_remap.as_ref(), coarsening.as_ref(), dev)?;
             let (z, _) = encoder.forward_t(&x_nd, None, false)?;
             let z_mat = Mat::from_tensor(&z.to_device(&Device::Cpu)?)?;
             let Some(dec) = decoder else {
