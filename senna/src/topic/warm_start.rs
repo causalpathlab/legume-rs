@@ -16,11 +16,14 @@ use candle_util::candle_nn::VarMap;
 pub use candle_util::grow::Growth;
 
 /// This run's gene axis is not the source run's: how the two align, and the
-/// modules an unseen gene was placed in (so its ρ can restart at its module's
-/// mean rather than the global one). `None` modules when the source run
-/// trained at full resolution.
+/// modules an unseen gene was placed in.
 pub struct GeneAxisGrowth<'a> {
     pub remap: &'a crate::topic::eval::GeneRemap,
+    /// Where an unseen gene's per-gene embedding restarts: at the mean of its
+    /// module's known members rather than at the global mean the loader gives
+    /// it. `None` when there is nothing to refine — the family has no per-gene
+    /// embedding at all, or the source run trained at full resolution and has
+    /// no modules to take a mean over.
     pub modules: Option<&'a data_beans_alg::feature_coarsening::FeatureCoarsening>,
 }
 
@@ -80,15 +83,13 @@ pub fn warm_start_load(
         .map_or(expected.n_features_full, |g| g.remap.d_train);
     anyhow::ensure!(
         metadata.n_features_full == saved_features,
-        "warm-start: n_features_full mismatch (saved={}, current={}). The saved weights are \
-         keyed to the parent's gene axis, so it has to be the same axis.\n\
+        "warm-start: n_features_full mismatch (saved={}, current={}).\n\
          \n\
-         Absorbing a new cohort is the usual cause, and it splits two ways. If the axis GREW \
-         because the two cohorts spell some genes differently, each unreconciled name became a \
-         second row — reconcile them with the family's row-name canonicalization option (for \
-         example `ENSG00000105329_TGFB1` vs `TGFB1`). If it grew because the new cohort really \
-         does measure genes the model has never seen, those cannot be added to a trained \
-         model: restrict the input to the parent's gene set, or re-train.",
+         A gene axis this run does not share with the source run is continued by name, so \
+         reaching this means the source run's own records disagree with each other: its \
+         model.json says one axis length and its feature_mean.parquet another. That is a \
+         copied or half-written prefix rather than anything about this cohort — check \
+         --init-from.",
         metadata.n_features_full,
         saved_features,
     );

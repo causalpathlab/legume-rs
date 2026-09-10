@@ -399,6 +399,20 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let n_features_full = data_vec.num_rows();
     let num_levels = collapsed_levels.len();
 
+    // Where this run's gene axis differs from an `--init-from` source run's,
+    // that run's gene-keyed state is continued by NAME: its modules are grown
+    // onto this axis here, and its checkpoint is gathered onto it at the warm
+    // start. What growth does move for this family is the per-module mean the
+    // encoder divides by: a module that absorbed unseen genes has more members
+    // than the one the checkpoint was fitted against. It is a divisive null
+    // before the variance-stabilizing transform, so the effect is a level
+    // shift rather than a change of shape.
+    let gene_names = data_vec.row_names()?;
+    let gene_axis = crate::topic::gene_axis::remap_for_init_from(
+        args.init_from.as_deref(),
+        &args.feature_name_kind,
+        &gene_names,
+    )?;
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
         args.max_coarse_features,
         args.init_from.as_deref(),
@@ -406,15 +420,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         num_levels,
         n_features_full,
         args.collapse.pb_refine.to_params(),
-        // Not wired here yet. Under the default coarsening this family is in
-        // fact module-keyed throughout — the encoder reads `num_coarse`
-        // inputs and every level's decoder writes `num_coarse` outputs, both
-        // unchanged by growing a level onto a new axis — so growth is a
-        // smaller change here than in the masked family. At
-        // `--max-coarse-features 0` the dense encoder's first layer is
-        // gene-keyed on its input axis, which `candle_util::grow` already
-        // gathers. Turning it on needs a measured run, not just the plumbing.
-        None,
+        gene_axis.as_ref(),
     )?;
 
     // Finest-level coarsening (used for encoder, evaluation, dictionary output)
@@ -478,8 +484,6 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         "input: {} -> encoder -> {:?} decoder(s) (dims {:?}) -> finest: {}",
         n_features_encoder, args.decoder, level_decoder_dims, n_features_encoder,
     );
-
-    let gene_names = data_vec.row_names()?;
 
     // Per-level NB-Fisher weights at the *coarse* feature resolution each
     // decoder operates on, so the dispersion trend matches the data the
@@ -546,6 +550,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             .map(Vec::as_slice),
         n_features_full,
         gene_names: &gene_names,
+        gene_axis: gene_axis.as_ref(),
         data_vec: &data_vec,
         parameters: &parameters,
         dev: &dev,
@@ -762,6 +767,9 @@ struct PipelineCtx<'a> {
     cell_to_pb_finest: Option<&'a [usize]>,
     n_features_full: usize,
     gene_names: &'a [Box<str>],
+    /// How this run's gene axis lines up with the `--init-from` source run's,
+    /// when the two differ. `None` for a fresh fit or an identical axis.
+    gene_axis: Option<&'a crate::topic::eval::GeneRemap>,
     data_vec: &'a SparseIoVec,
     parameters: &'a candle_nn::VarMap,
     dev: &'a candle_core::Device,
@@ -800,6 +808,45 @@ struct FeatureStats<'a> {
     fisher_per_level: &'a [Vec<f32>],
 }
 
+/// Load an `--init-from` checkpoint into this run's weights, if one was named.
+///
+/// Both dense pipelines warm-start identically — same architecture invariants,
+/// same growth surface — so the check lives here rather than being written out
+/// at each of them.
+fn warm_start_dense(ctx: &PipelineCtx<'_>) -> anyhow::Result<()> {
+    use crate::topic::warm_start::{warm_start_load, GeneAxisGrowth, WarmStartCheck};
+    let Some(prefix) = ctx.args.init_from.as_deref() else {
+        return Ok(());
+    };
+    let n_features_encoder = *ctx
+        .level_decoder_dims
+        .last()
+        .unwrap_or(&ctx.n_features_full);
+    warm_start_load(
+        ctx.parameters,
+        prefix,
+        &WarmStartCheck {
+            model_type_expected: crate::topic::model_metadata::MODEL_TYPE_TOPIC,
+            n_topics: ctx.n_topics,
+            n_features_full: ctx.n_features_full,
+            n_features_encoder,
+            encoder_hidden: &ctx.args.encoder_layers,
+            level_decoder_dims: ctx.level_decoder_dims,
+            embedding_dim: None,
+            growth: crate::topic::warm_start::Growth {
+                add_topics: ctx.args.add_topics,
+                add_embedding_dim: 0,
+            },
+            // This family has no per-gene embedding: its gene-keyed state is
+            // the decoder dictionary, which the loader gathers by itself.
+            gene_axis: ctx.gene_axis.map(|remap| GeneAxisGrowth {
+                remap,
+                modules: None,
+            }),
+        },
+    )
+}
+
 fn run_topic_pipeline<Enc, Dec>(
     ctx: &PipelineCtx,
     encoder: &mut Enc,
@@ -831,31 +878,7 @@ where
 
     // Optional model-checkpoint warm-start: load encoder + decoder weights
     // from a previously trained run (must match this run's architecture).
-    if let Some(prefix) = ctx.args.init_from.as_deref() {
-        use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
-        let n_features_encoder = *ctx
-            .level_decoder_dims
-            .last()
-            .unwrap_or(&ctx.n_features_full);
-        warm_start_load(
-            ctx.parameters,
-            prefix,
-            &WarmStartCheck {
-                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_TOPIC,
-                n_topics: ctx.n_topics,
-                n_features_full: ctx.n_features_full,
-                n_features_encoder,
-                encoder_hidden: &ctx.args.encoder_layers,
-                level_decoder_dims: ctx.level_decoder_dims,
-                embedding_dim: None,
-                growth: crate::topic::warm_start::Growth {
-                    add_topics: ctx.args.add_topics,
-                    add_embedding_dim: 0,
-                },
-                gene_axis: None,
-            },
-        )?;
-    }
+    warm_start_dense(ctx)?;
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,
@@ -1163,31 +1186,7 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
         .collect();
 
     // Optional model-checkpoint warm-start (multi-decoder variant).
-    if let Some(prefix) = ctx.args.init_from.as_deref() {
-        use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
-        let n_features_encoder = *ctx
-            .level_decoder_dims
-            .last()
-            .unwrap_or(&ctx.n_features_full);
-        warm_start_load(
-            ctx.parameters,
-            prefix,
-            &WarmStartCheck {
-                model_type_expected: crate::topic::model_metadata::MODEL_TYPE_TOPIC,
-                n_topics: ctx.n_topics,
-                n_features_full: ctx.n_features_full,
-                n_features_encoder,
-                encoder_hidden: &ctx.args.encoder_layers,
-                level_decoder_dims: ctx.level_decoder_dims,
-                embedding_dim: None,
-                growth: crate::topic::warm_start::Growth {
-                    add_topics: ctx.args.add_topics,
-                    add_embedding_dim: 0,
-                },
-                gene_axis: None,
-            },
-        )?;
-    }
+    warm_start_dense(ctx)?;
 
     let train_config = TrainConfig {
         parameters: ctx.parameters,
