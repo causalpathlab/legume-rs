@@ -18,6 +18,122 @@ pub struct FeatureCoarsening {
 }
 
 impl FeatureCoarsening {
+    /// Build the two-way map from the fine → coarse assignment alone.
+    ///
+    /// The one place the inverse is derived, and the one place a stray group
+    /// index is caught: every consumer indexes `coarse_to_fine` by the
+    /// assignment, so an out-of-range entry would otherwise panic at first use.
+    pub fn from_fine_to_coarse(fine_to_coarse: Vec<usize>, num_coarse: usize) -> anyhow::Result<Self> {
+        let mut coarse_to_fine = vec![Vec::new(); num_coarse];
+        for (f, &c) in fine_to_coarse.iter().enumerate() {
+            anyhow::ensure!(
+                c < num_coarse,
+                "feature coarsening: feature {f} is assigned to group {c} of {num_coarse}"
+            );
+            coarse_to_fine[c].push(f);
+        }
+        Ok(Self {
+            fine_to_coarse,
+            coarse_to_fine,
+            num_coarse,
+        })
+    }
+
+    /// This coarsening carried onto a different fine axis, by name.
+    ///
+    /// `new_to_old[g]` is the position on this coarsening's axis of gene `g`
+    /// of the new axis, or `None` for a gene it never covered. A known gene
+    /// keeps its group. An unknown one joins the group whose known members it
+    /// most resembles, by cosine between `unit_profiles` — one unit vector per
+    /// gene of the NEW axis, in whatever reading of a profile the caller uses —
+    /// and each group's centroid of its known members' vectors. A gene with no
+    /// profile (a zero vector) carries nothing to place it by and goes to the
+    /// group with the most known members, which perturbs the fit least. A
+    /// group none of whose members survived cannot attract anything; it keeps
+    /// its index and stays empty of new genes, because whatever is keyed to
+    /// the groups (a decoder, say) still has a slot for it.
+    ///
+    /// The group count is unchanged by construction.
+    pub fn grow_by_profile(
+        &self,
+        new_to_old: &[Option<usize>],
+        unit_profiles: &[Vec<f32>],
+    ) -> anyhow::Result<FeatureCoarsening> {
+        let d_new = new_to_old.len();
+        anyhow::ensure!(
+            unit_profiles.len() == d_new,
+            "feature coarsening growth: {} profiles for {d_new} features",
+            unit_profiles.len(),
+        );
+        let k = self.num_coarse;
+        let n_pb = unit_profiles.first().map_or(0, Vec::len);
+
+        // Known genes keep their group; their unit profiles sum into the
+        // group's centroid, one contiguous column per group.
+        let mut fine_to_coarse = vec![usize::MAX; d_new];
+        let mut centroid = DMatrix::<f32>::zeros(n_pb, k);
+        let mut members = vec![0usize; k];
+        for (g, old) in new_to_old.iter().enumerate() {
+            let Some(p) = old else { continue };
+            anyhow::ensure!(
+                *p < self.fine_to_coarse.len(),
+                "feature coarsening growth: feature {g} maps to {p}, beyond the {} covered",
+                self.fine_to_coarse.len(),
+            );
+            let m = self.fine_to_coarse[*p];
+            fine_to_coarse[g] = m;
+            members[m] += 1;
+            for (c, v) in centroid.column_mut(m).iter_mut().zip(&unit_profiles[g]) {
+                *c += v;
+            }
+        }
+        let live: Vec<usize> = (0..k).filter(|&m| members[m] > 0).collect();
+        anyhow::ensure!(
+            !live.is_empty(),
+            "feature coarsening growth: no feature of the new axis is covered, so the groups \
+             cannot be placed on it"
+        );
+        let fallback = live
+            .iter()
+            .copied()
+            .max_by_key(|&m| members[m])
+            .expect("a live group exists");
+        let mut centroid = centroid.select_columns(&live);
+        for mut c in centroid.column_iter_mut() {
+            let nrm = c.norm();
+            if nrm > 0.0 {
+                c /= nrm;
+            }
+        }
+
+        // Unknown genes: one product of their unit profiles against the live
+        // centroids, then a row-wise argmax.
+        let new: Vec<usize> = (0..d_new).filter(|&g| new_to_old[g].is_none()).collect();
+        let u = DMatrix::from_fn(new.len(), n_pb, |i, j| unit_profiles[new[i]][j]);
+        let scores = u * centroid;
+        for (i, &g) in new.iter().enumerate() {
+            let row = scores.row(i);
+            let best = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .expect("a live group exists");
+            fine_to_coarse[g] = if row.iter().all(|&v| v == 0.0) {
+                fallback
+            } else {
+                live[best.0]
+            };
+        }
+        debug!(
+            "feature coarsening growth: {} of {d_new} features known, {} placed by profile into \
+             {k} groups ({} groups had no surviving member)",
+            d_new - new.len(),
+            new.len(),
+            k - live.len(),
+        );
+        Self::from_fine_to_coarse(fine_to_coarse, k)
+    }
+
     /// Aggregate columns of an [N, D] matrix → [N, d] by summing
     /// features within each coarse group.
     pub fn aggregate_columns_nd(&self, data_nd: &DMatrix<f32>) -> DMatrix<f32> {
