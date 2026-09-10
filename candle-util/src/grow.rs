@@ -70,6 +70,34 @@ pub struct GrowthDims<'a> {
     pub gene_axis: Option<AxisRemap<'a>>,
 }
 
+/// Which of a model's axes a tensor's changed dimension belongs to.
+///
+/// The fill rule reads this because one tensor can carry two of them: the
+/// encoder's input weight is `[hidden, H]` in the masked family and
+/// `[hidden, D]` in the dense one, so its second dimension means the embedding
+/// width in one and the feature axis in the other. Naming the axis keeps a
+/// rule written for one from silently governing the other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Axis {
+    /// Topics appended to `K`.
+    Topics,
+    /// Dimensions appended to the per-feature embedding `H`.
+    Embedding,
+    /// The feature axis, reordered onto this run's names.
+    Features,
+}
+
+impl Axis {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Axis::Topics => "K",
+            Axis::Embedding => "H",
+            Axis::Features => "D",
+        }
+    }
+}
+
 impl GrowthDims<'_> {
     /// Name the axis a `old → new` change on some tensor corresponds to, or
     /// `None` when it matches neither declared growth.
@@ -77,13 +105,13 @@ impl GrowthDims<'_> {
     /// This is what keeps growth from papering over a real architecture change:
     /// a widened hidden layer or an undeclared change of the gene axis grows a
     /// tensor too, and must still be an error rather than a silent zero-pad.
-    pub fn classify(&self, old: usize, new: usize) -> Option<&'static str> {
+    pub fn classify(&self, old: usize, new: usize) -> Option<Axis> {
         if self.is_gene_axis(old, new) {
-            Some("D")
+            Some(Axis::Features)
         } else if old == self.k_old && new == self.k_new {
-            Some("K")
+            Some(Axis::Topics)
         } else if old == self.h_old && new == self.h_new {
-            Some("H")
+            Some(Axis::Embedding)
         } else {
             None
         }
@@ -126,14 +154,22 @@ impl GrowthDims<'_> {
 ///
 /// Everything else keeps its fresh init, which is what new capacity should
 /// start from.
-pub fn new_slab_value(name: &str, dim: usize) -> Option<f64> {
+pub fn new_slab_value(name: &str, axis: Axis) -> Option<f64> {
     // α [K, H] — column growth must not disturb β.
     if name.ends_with("topic.embeddings") {
-        return (dim == 1).then_some(0.0);
+        return (axis == Axis::Embedding).then_some(0.0);
     }
-    // The encoder's view of a wider ρ must start out ignoring the new part.
     if name.ends_with("attn.query") || name.ends_with("fc.relu_linear_stack.0.weight") {
-        return (dim == 1).then_some(0.0);
+        return match axis {
+            // The encoder's view of a wider ρ must start out ignoring the new
+            // part, so its output is unchanged at step 0.
+            Axis::Embedding => Some(0.0),
+            // The same weight is feature-keyed in the families with no ρ. A
+            // feature the checkpoint never saw contributes nothing at step 0
+            // and still receives gradient, so it is inert rather than dead.
+            Axis::Features => Some(0.0),
+            Axis::Topics => None,
+        };
     }
     if name.contains("z.mean") || name.contains("z.lnvar") {
         return Some(if name.ends_with(".bias") {
@@ -143,7 +179,9 @@ pub fn new_slab_value(name: &str, dim: usize) -> Option<f64> {
         });
     }
     // ρ (`feature.embeddings`) deliberately falls through: its new columns stay
-    // random so the added subspace can receive gradient.
+    // random so the added subspace can receive gradient. On the feature axis
+    // the fall-through means the checkpoint's mean, which is what an unseen
+    // feature should start from — see [`gather_gene_axis`].
     None
 }
 
@@ -228,9 +266,11 @@ pub fn grow_tensor(
         if old == new {
             continue;
         }
-        let axis = dims.classify(old, new).unwrap_or("?");
+        let Some(axis) = dims.classify(old, new) else {
+            continue;
+        };
 
-        if let Some(v) = new_slab_value(name, dim) {
+        if let Some(v) = new_slab_value(name, axis) {
             let mut slab_shape: Vec<usize> = fresh.dims().to_vec();
             slab_shape[dim] = new - old;
             let slab =
@@ -238,10 +278,14 @@ pub fn grow_tensor(
             let mut r: Vec<std::ops::Range<usize>> = fresh.dims().iter().map(|&d| 0..d).collect();
             r[dim] = old..new;
             out = out.slice_assign(&r, &slab)?;
-            log::debug!("warm-start: `{name}` axis {dim} ({axis}) {old} → {new}, new slab = {v}");
+            log::debug!(
+                "warm-start: `{name}` axis {dim} ({}) {old} → {new}, new slab = {v}",
+                axis.label(),
+            );
         } else {
             log::debug!(
-                "warm-start: `{name}` axis {dim} ({axis}) {old} → {new}, new slab keeps its init"
+                "warm-start: `{name}` axis {dim} ({}) {old} → {new}, new slab keeps its init",
+                axis.label(),
             );
         }
     }
@@ -263,38 +307,38 @@ fn gather_gene_axis(
     remap: &AxisRemap<'_>,
 ) -> anyhow::Result<Tensor> {
     let n_new = remap.new_to_old.len();
-    let dev = saved.device();
-    let idx: Vec<u32> = remap
-        .new_to_old
-        .iter()
-        .map(|p| p.unwrap_or(0) as u32)
-        .collect();
-    let gathered = saved.index_select(&Tensor::from_vec(idx, n_new, dev)?, dim)?;
-
-    let mut along: Vec<usize> = vec![1; saved.rank()];
-    along[dim] = n_new;
-    let known: Vec<f32> = remap
-        .new_to_old
-        .iter()
-        .map(|p| if p.is_some() { 1.0 } else { 0.0 })
-        .collect();
-    let known = Tensor::from_vec(known, along.as_slice(), dev)?.to_dtype(saved.dtype())?;
-    let unknown = known.affine(-1.0, 1.0)?;
-
-    let fill = match new_slab_value(name, dim) {
-        Some(v) => {
-            let mut one: Vec<usize> = saved.dims().to_vec();
-            one[dim] = 1;
-            Tensor::full(v, one.as_slice(), dev)?.to_dtype(saved.dtype())?
-        }
-        None => saved.mean_keepdim(dim)?,
-    };
     let n_known = remap.new_to_old.iter().filter(|p| p.is_some()).count();
+    let dev = saved.device();
     log::debug!(
         "warm-start: `{name}` axis {dim} (D) gathered {} → {n_new} ({n_known} known)",
         remap.n_old,
     );
-    Ok(gathered
-        .broadcast_mul(&known)?
-        .broadcast_add(&fill.broadcast_mul(&unknown)?)?)
+
+    // Everything the checkpoint had, plus one extra entry holding what an
+    // unseen feature starts from, so the whole axis is one gather: an unseen
+    // feature simply points at that entry. Nothing extra is built when the
+    // axis is a pure reordering.
+    let source = if n_known == n_new {
+        saved.clone()
+    } else {
+        let fill = match new_slab_value(name, Axis::Features) {
+            Some(v) => {
+                let mut one: Vec<usize> = saved.dims().to_vec();
+                one[dim] = 1;
+                Tensor::full(v, one.as_slice(), dev)?.to_dtype(saved.dtype())?
+            }
+            // The checkpoint's own mean along this axis. For a parameter the
+            // model reads in log space that is the geometric mean of the rate,
+            // which is the right centre for a positive scale.
+            None => saved.mean_keepdim(dim)?,
+        };
+        Tensor::cat(&[saved, &fill], dim)?
+    };
+    let unseen = remap.n_old as u32;
+    let idx: Vec<u32> = remap
+        .new_to_old
+        .iter()
+        .map(|p| p.map_or(unseen, |g| g as u32))
+        .collect();
+    Ok(source.index_select(&Tensor::from_vec(idx, n_new, dev)?, dim)?)
 }
