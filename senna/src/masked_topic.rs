@@ -742,6 +742,18 @@ pub struct MaskedTopicArgs {
 
 pub use auxiliary_data::feature_names::FeatureNameKindArg;
 
+impl MaskedTopicArgs {
+    /// How another run's gene names are aligned onto this run's: under the
+    /// same rule the loader aligned this run's own files, so `--feature-name-kind`
+    /// means one thing for the whole command.
+    pub(crate) fn axis_opts(&self) -> crate::topic::eval::QueryNameOpts {
+        crate::topic::eval::QueryNameOpts {
+            kind: self.feature_name_kind.resolve_or_gene(),
+            ..Default::default()
+        }
+    }
+}
+
 /// `senna masked-topic` — softmax simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::Softmax)
@@ -991,7 +1003,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // onto this axis below, and its ρ at the warm start. A cohort measuring
     // genes the model has never seen is then absorbed rather than refused.
     let gene_axis = match args.init_from.as_deref() {
-        Some(prefix) => crate::topic::gene_axis::remap_to_source(prefix, &gene_names)?,
+        Some(prefix) => {
+            crate::topic::gene_axis::remap_to_source(prefix, &gene_names, &args.axis_opts())?
+        }
         None => None,
     };
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
@@ -1072,24 +1086,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     }
 
     if let Some(prefix) = args.init_from.as_deref() {
-        use crate::topic::warm_start::{warm_start_load, GrownRho, WarmStartCheck};
-        // ρ grown onto this axis, from the source run's own gene order; a new gene
-        // starts at its module's mean ρ (or the global mean when the source run
-        // trained at full resolution and there are no modules).
-        let grown_rho = match gene_axis.as_ref() {
-            None => None,
-            Some(remap) => {
-                let source_rho = crate::topic::gene_axis::load_source_rho(prefix)?;
-                let rho = match level_coarsenings.last().and_then(|l| l.as_ref()) {
-                    Some(fc) => crate::topic::gene_axis::grow_rho(&source_rho, remap, fc)?,
-                    None => crate::topic::gene_axis::grow_rho_without_modules(&source_rho, remap)?,
-                };
-                Some(GrownRho {
-                    n_source: remap.n_source,
-                    rho,
-                })
-            }
-        };
+        use crate::topic::warm_start::{warm_start_load, GeneAxisGrowth, WarmStartCheck};
         warm_start_load(
             &parameters,
             prefix,
@@ -1107,7 +1104,13 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                     add_topics: args.add_topics,
                     add_embedding_dim: args.add_embedding_dim,
                 },
-                gene_axis: grown_rho,
+                // An unseen gene's ρ restarts at its module's mean (the finest
+                // level's), or the global mean when the source run trained at
+                // full resolution and there are no modules.
+                gene_axis: gene_axis.as_ref().map(|remap| GeneAxisGrowth {
+                    remap,
+                    modules: level_coarsenings.last().and_then(Option::as_ref),
+                }),
             },
         )?;
     }

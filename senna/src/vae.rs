@@ -338,6 +338,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 embedding_dim: None,
                 // `senna vae` has no growth surface yet.
                 growth: crate::topic::warm_start::Growth::default(),
+                // `vae` has no coarsening: its encoder and decoder are both
+                // gene-keyed at full width, so continuing onto a new axis
+                // means gathering those two along it. Not wired yet.
                 gene_axis: None,
             },
         )?;
