@@ -324,7 +324,16 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         .collect::<candle_core::Result<Vec<_>>>()?;
 
     if let Some(prefix) = args.init_from.as_deref() {
-        use crate::topic::warm_start::{warm_start_load, WarmStartCheck};
+        use crate::topic::warm_start::{warm_start_load, GeneAxisGrowth, WarmStartCheck};
+        // `vae` has no coarsening: its encoder's first layer and every level's
+        // decoder are gene-keyed at full width. Continuing onto an axis the
+        // source run did not have means gathering those onto this run's gene
+        // order, which the loader does once it is handed the alignment.
+        let gene_axis = crate::topic::gene_axis::remap_for_init_from(
+            Some(prefix),
+            &args.feature_name_kind,
+            &gene_names,
+        )?;
         warm_start_load(
             &parameters,
             prefix,
@@ -338,10 +347,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 embedding_dim: None,
                 // `senna vae` has no growth surface yet.
                 growth: crate::topic::warm_start::Growth::default(),
-                // `vae` has no coarsening: its encoder and decoder are both
-                // gene-keyed at full width, so continuing onto a new axis
-                // means gathering those two along it. Not wired yet.
-                gene_axis: None,
+                gene_axis: gene_axis
+                    .as_ref()
+                    .map(|remap| GeneAxisGrowth { remap, modules: None }),
             },
         )?;
     }

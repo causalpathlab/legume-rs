@@ -1,45 +1,64 @@
-//! Continuing a masked model onto a gene axis the source run did not have.
+//! Continuing a model onto a gene axis the source run did not have.
 //!
 //! A checkpoint's gene-keyed state is small: the fine-to-module map of each
-//! coarsening level and the per-gene embedding ρ. Everything else the decoders
-//! hold is module- or topic-keyed, so a cohort that measures genes the source
-//! run never saw can still be absorbed if those two are carried by NAME rather
-//! than refused by position. The pieces live where their mechanism does:
+//! coarsening level, and whichever tensors are keyed by gene rather than by
+//! module or topic. A cohort that measures genes the source run never saw can
+//! still be absorbed if those are carried by NAME rather than refused by
+//! position. Every family with a checkpoint goes through here. The pieces live
+//! where their mechanism does:
 //!
 //! - the alignment of this run's names onto the source run's is the same
-//!   matcher `predict` aligns a query with ([`remap_to_source`]);
+//!   matcher `predict` aligns a query with ([`remap_for_init_from`]);
 //! - a coarsening level is grown by `FeatureCoarsening::grow_by_profile`, each
 //!   unknown gene joining the inherited module whose known members its
 //!   pseudobulk profile most resembles (see `inherit_level_coarsenings`);
 //! - the checkpoint's gene-keyed tensors are gathered onto the new order by
 //!   `candle_util::grow`, which starts an unseen gene at the checkpoint's mean;
-//! - ρ alone knows more than that, so [`refine_rho_by_module`] moves an unseen
-//!   gene's row from the global mean to the mean of its module's known members.
+//! - the masked family's ρ knows more than that, so [`refine_rho_by_module`]
+//!   moves an unseen gene's row from the global mean to the mean of its
+//!   module's known members. The other families have no per-gene embedding.
 
 use crate::embed_common::Mat;
 use crate::topic::eval::{GeneRemap, QueryNameOpts};
+use auxiliary_data::feature_names::FeatureNameKindArg;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 
 /// Name of the per-gene embedding ρ in a masked checkpoint.
 pub(crate) const RHO_TENSOR: &str = "enc.feature.embeddings";
 
-/// This run's genes aligned onto an `--init-from` source run's, or `None` when the
-/// two axes are identical and the exact warm start applies.
+/// This run's genes aligned onto an `--init-from` source run's: `None` when
+/// there is no source run, or when the two axes are identical and the exact
+/// warm start applies.
 ///
-/// The source run's axis is the row order of its `feature_mean.parquet`, which is
-/// the order every gene-keyed artifact of that run shares. `opts` carries the
-/// run's own `--feature-name-kind`, so the source run's names are read under
-/// the same rule the loader aligned this run's under.
-pub(crate) fn remap_to_source(
-    source: &str,
+/// The source run's axis is the row order of its `feature_mean.parquet`, which
+/// is the order every gene-keyed artifact of that run shares — and the
+/// cheapest of them to read, which is why this does not go through
+/// `predict::bulk::model_gene_names`: every family that can be a source here
+/// writes that file, and the alternatives are the D×K dictionary and ρ. Its
+/// names are read under `kind` — the run's own `--feature-name-kind` — so one
+/// flag means one thing for the whole command rather than one rule for the
+/// loader and another for the warm start.
+pub(crate) fn remap_for_init_from(
+    init_from: Option<&str>,
+    kind: &FeatureNameKindArg,
     new_genes: &[Box<str>],
-    opts: &QueryNameOpts,
 ) -> anyhow::Result<Option<GeneRemap>> {
+    let Some(source) = init_from else {
+        return Ok(None);
+    };
+    let opts = QueryNameOpts {
+        kind: kind.resolve_or_gene(),
+        ..Default::default()
+    };
     let (source_genes, _) = crate::topic::model_metadata::load_feature_mean(source)?;
-    let remap = crate::topic::eval::build_gene_remap_with(&source_genes, new_genes, opts);
+    let remap = crate::topic::eval::build_gene_remap_with(&source_genes, new_genes, &opts);
     if remap.is_identity() {
         return Ok(None);
     }
+    // Sharing nothing is not a continuation. Left through, every gene-keyed
+    // tensor would be re-initialized from the checkpoint's mean and the run
+    // would log "continuing by name" while being a retrain from scratch.
+    crate::topic::eval::ensure_gene_coverage(&remap, 0.0, "--feature-name-kind")?;
     log::info!(
         "--init-from {source}: this run's gene axis is not the source run's ({} genes here, {} \
          there, {} in common); continuing by name",
