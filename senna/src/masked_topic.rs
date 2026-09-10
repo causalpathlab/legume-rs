@@ -742,18 +742,6 @@ pub struct MaskedTopicArgs {
 
 pub use auxiliary_data::feature_names::FeatureNameKindArg;
 
-impl MaskedTopicArgs {
-    /// How another run's gene names are aligned onto this run's: under the
-    /// same rule the loader aligned this run's own files, so `--feature-name-kind`
-    /// means one thing for the whole command.
-    pub(crate) fn axis_opts(&self) -> crate::topic::eval::QueryNameOpts {
-        crate::topic::eval::QueryNameOpts {
-            kind: self.feature_name_kind.resolve_or_gene(),
-            ..Default::default()
-        }
-    }
-}
-
 /// `senna masked-topic` — softmax simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
     fit_masked_model(args, LatentHead::Softmax)
@@ -1002,12 +990,11 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // that run's gene-keyed state is continued by NAME: its modules are grown
     // onto this axis below, and its ρ at the warm start. A cohort measuring
     // genes the model has never seen is then absorbed rather than refused.
-    let gene_axis = match args.init_from.as_deref() {
-        Some(prefix) => {
-            crate::topic::gene_axis::remap_to_source(prefix, &gene_names, &args.axis_opts())?
-        }
-        None => None,
-    };
+    let gene_axis = crate::topic::gene_axis::remap_for_init_from(
+        args.init_from.as_deref(),
+        &args.feature_name_kind,
+        &gene_names,
+    )?;
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
         args.max_coarse_features,
         args.init_from.as_deref(),
