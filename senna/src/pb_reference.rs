@@ -230,19 +230,27 @@ pub fn write(
         })
         .collect();
 
-    let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
-    for (pb, &count) in cell_counts.iter().enumerate() {
-        if count <= 0.0 {
-            continue;
-        }
+    // Two passes over a D × n_pb table of two array reads each: a count, then
+    // one exactly-sized allocation. Growing the vector by doubling would move
+    // the whole (typically hundreds of MB) triplet list several times over.
+    let value = |g: usize, pb: usize| -> Option<f32> {
         let src = if pure_carried(pb) {
             &finest.mu_observed
         } else {
             param
         };
+        let v = src.evidence_mean(g, pb);
+        (v > 0.0 && v.is_finite()).then_some(v)
+    };
+    let live_pbs: Vec<usize> = (0..n_pb).filter(|&pb| cell_counts[pb] > 0.0).collect();
+    let nnz: usize = live_pbs
+        .iter()
+        .map(|&pb| (0..n_genes).filter(|&g| value(g, pb).is_some()).count())
+        .sum();
+    let mut triplets: Vec<(u64, u64, f32)> = Vec::with_capacity(nnz);
+    for &pb in &live_pbs {
         for g in 0..n_genes {
-            let v = src.evidence_mean(g, pb);
-            if v > 0.0 && v.is_finite() {
+            if let Some(v) = value(g, pb) {
                 triplets.push((g as u64, pb as u64, v));
             }
         }
