@@ -15,10 +15,12 @@
 //! resolution by `collect_matched_stat_visitor` — stronger than anything that
 //! works from stored pseudobulk summaries.
 //!
-//! What this costs is time: each round re-reads every previously absorbed cell,
-//! so absorbing S samples one at a time is O(S²) in cell reads. That is the
-//! known trade and the reason this is the correctness baseline rather than the
-//! final word.
+//! What that costs is time: re-reading every previously absorbed cell makes a
+//! chain of S samples O(S²) in cell reads. So by default a round substitutes the
+//! parent's carried pseudobulks for its cells ([`crate::pb_reference`]) and
+//! costs the new data only; the exact re-collapse remains the baseline it is
+//! checked against (`--no-pb-reference`), and the fallback when the
+//! substitution is impossible — see [`select_reference`].
 //!
 //! **The partition is deliberately not inherited.** `--from` would pull the
 //! parent's cell→pb membership along with its inputs, but
@@ -109,30 +111,15 @@ pub struct UpdateArgs {
     )]
     epochs: Option<usize>,
 
+    /// Explicit form of the default. Kept so existing scripts parse, and so a
+    /// request the round cannot honour is an error rather than a fallback.
     #[arg(
         long,
         hide = true,
-        help = "Reuse the parent's carried pseudobulks instead of re-reading its cells",
-        long_help = "Needs the parent to have been trained with --emit-pb-reference.\n\
-                     \n\
-                     Absorbing a sample normally re-collapses the whole cohort, so\n\
-                     taking S samples one at a time re-reads every earlier cell each\n\
-                     time. This substitutes the parent's stored pseudobulks for its\n\
-                     cells, making a round cost the NEW data only.\n\
-                     \n\
-                     The trade is resolution: old-vs-new batch matching drops from\n\
-                     cell level to pseudobulk level, and it is only a saving when a\n\
-                     pseudobulk stands for many cells. `update` reports the ratio\n\
-                     and says so when it does not.\n\
-                     \n\
-                     One consequence: the old cells are never loaded, so\n\
-                     {out}.latent.parquet covers the NEW cells only. The parent's\n\
-                     latent remains the record for everything absorbed earlier.\n\
-                     \n\
-                     ON by default whenever the parent carries pseudobulks and the\n\
-                     new data has batch labels. Without them, or with\n\
-                     --no-pb-reference, this round re-collapses instead: the exact\n\
-                     computation, and the fallback for a parent that carries nothing."
+        help = "Reuse the parent's carried pseudobulks (already the default)",
+        long_help = "Already the default. Passing it turns every case where the\n\
+                     substitution is impossible into an error instead of a\n\
+                     re-collapse."
     )]
     use_pb_reference: bool,
 
@@ -140,14 +127,27 @@ pub struct UpdateArgs {
         long,
         conflicts_with = "use_pb_reference",
         help = "Re-collapse the whole cohort from cells, ignoring any carried pseudobulks",
-        long_help = "Forces the exact computation: every cell the model has already\n\
-                     seen is re-read and re-collapsed alongside the new ones, and\n\
-                     old-vs-new batch matching stays at cell resolution.\n\
+        long_help = "By default a round substitutes the parent's carried pseudobulks\n\
+                     for its cells, so it costs the NEW data only: absorbing S\n\
+                     samples one at a time is linear in cell reads instead of\n\
+                     quadratic. The trade is resolution. Old-vs-new batch matching\n\
+                     drops from cell level to pseudobulk level, and it is only a\n\
+                     saving when a pseudobulk stands for many cells; `update`\n\
+                     reports the ratio and says so when it does not. The old cells\n\
+                     are never loaded, so {out}.latent.parquet covers the NEW cells\n\
+                     only and the parent's latent remains the record for everything\n\
+                     absorbed earlier.\n\
                      \n\
-                     This is what every round did before carrying was the default.\n\
-                     It costs time proportional to the WHOLE cohort, so a chain of S\n\
-                     samples is quadratic in cell reads, but it is the baseline the\n\
-                     substituted-pseudobulk path is checked against."
+                     This flag forces the exact computation instead: every cell the\n\
+                     model has already seen is re-read and re-collapsed alongside\n\
+                     the new ones, and batch matching stays at cell resolution. It\n\
+                     is also what a round does on its own when the substitution is\n\
+                     impossible: no batch labels for the new data, a parent that\n\
+                     carries nothing, a simba or multiome parent.\n\
+                     \n\
+                     Not available once a chain has substituted: that round's\n\
+                     inputs hold the carried reference in place of the cells, and\n\
+                     re-reading it as cells would weigh each pseudobulk as one."
     )]
     no_pb_reference: bool,
 
@@ -212,24 +212,14 @@ fn recorded_paths(recorded: &[String], dir: &Path) -> Vec<Box<str>> {
         .collect()
 }
 
-/// Recorded inputs followed by the new ones.
+/// Refuse a new input the parent already trained on.
 ///
-/// A repeat is rejected rather than deduplicated: passing a file the parent
-/// already trained on means either the wrong file or the wrong parent, and
-/// silently ignoring it would double a cohort's apparent growth in the log
-/// while changing nothing. Both sides are compared after canonicalization so
-/// two spellings of one path still count as a repeat.
-fn union_inputs(recorded: Vec<Box<str>>, new: &[Box<str>]) -> anyhow::Result<Vec<Box<str>>> {
-    ensure_not_recorded(&recorded, new)?;
-    let mut out = recorded;
-    out.extend(new.iter().cloned());
-    Ok(out)
-}
-
-/// The repeat check on its own, so the carried-reference path — which never
-/// builds the union — still refuses a file the parent already trained on.
-/// Left in, that file's cells would be counted twice: once as themselves and
-/// once inside the carried pseudobulks that already summarize them.
+/// A repeat is rejected rather than deduplicated: passing such a file means
+/// either the wrong file or the wrong parent, and silently ignoring it would
+/// double a cohort's apparent growth in the log while changing nothing — or,
+/// on the carried-reference path, count its cells twice: once as themselves
+/// and once inside the pseudobulks that already summarize them. Both sides are
+/// compared after canonicalization so two spellings of one path still count.
 fn ensure_not_recorded(recorded: &[Box<str>], new: &[Box<str>]) -> anyhow::Result<()> {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
     let seen: Vec<PathBuf> = recorded.iter().map(|r| canon(r)).collect();
@@ -276,6 +266,115 @@ fn union_batches(
     }
 }
 
+/// Which of the parent's cells this round re-reads: none, because its carried
+/// pseudobulks stand in for them (the default), or all of them.
+///
+/// The substitution needs a family that trains on pseudobulks, a parent that
+/// carries some, batch labels for the new data (the carried columns are their
+/// own batch, and the loader takes one batch file per data file), and a parent
+/// whose files load in positional column order (a multiome parent's union
+/// alignment cannot keep the carried columns contiguous, and their weights
+/// apply by position). Any of those missing falls back to the exact
+/// re-collapse, said out loud. An EXPLICIT `--use-pb-reference` errors there
+/// instead: the user has said what they want, and a silent downgrade would
+/// cost them a round to notice.
+///
+/// One case cannot fall back at all. A lineage that already substituted once
+/// records a carried reference among its inputs in place of the cells it
+/// stood for; re-reading that as ordinary input would weigh each carried
+/// pseudobulk as a single cell, so the whole absorbed history would collapse
+/// to a handful of cells' influence with nothing to say so.
+fn select_reference(
+    args: &UpdateArgs,
+    manifest: &RunManifest,
+    recorded: &[Box<str>],
+) -> anyhow::Result<Option<crate::pb_reference::ReferenceInput>> {
+    let chosen: Result<Option<crate::pb_reference::ReferenceInput>, String> =
+        if args.no_pb_reference {
+            Err("--no-pb-reference was passed".into())
+        } else if manifest.kind == RunKind::Simba {
+            Err("a simba run trains on cells, never on pseudobulks, so there is nothing to \
+                 substitute"
+                .into())
+        } else if multiome_recorded(manifest) {
+            Err(format!(
+                "{} is a multiome run, whose union column alignment cannot keep carried \
+                 pseudobulks contiguous",
+                args.model
+            ))
+        } else if args.batch_files.is_none() {
+            Err(format!(
+                "the new data has no --batch-files; the carried pseudobulks are their own batch \
+                 and the loader takes one batch file per data file. Passing batch labels lets a \
+                 round reuse {}'s carried pseudobulks and cost the new data only",
+                args.model
+            ))
+        } else {
+            // A sidecar whose backend has gone missing, or that fails to
+            // parse, is "nothing to substitute": a moved run directory used to
+            // update fine and must keep doing so.
+            match crate::pb_reference::prepare(&args.model, &args.out) {
+                Ok(Some(r)) => Ok(Some(r)),
+                Ok(None) => Err(format!(
+                    "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
+                     carrying was the default)",
+                    args.model
+                )),
+                Err(e) => Err(format!("{}'s carried pseudobulks cannot be used: {e}", args.model)),
+            }
+        };
+    let why = match chosen {
+        Ok(r) => return Ok(r),
+        Err(why) => why,
+    };
+    if let Some(path) = carried_reference_among(recorded) {
+        anyhow::bail!(
+            "{} cannot be re-collapsed from cells ({why}): its inputs hold a carried reference \
+             ({path}) in place of the cells absorbed before it, and re-reading that as cells \
+             would weigh each carried pseudobulk as one cell. A chain that has substituted once \
+             keeps substituting; pass --batch-files for the new data and drop --no-pb-reference.",
+            args.model
+        );
+    }
+    anyhow::ensure!(!args.use_pb_reference, "--use-pb-reference: {why}");
+    info!("re-collapsing the whole cohort: {why}");
+    Ok(None)
+}
+
+/// Whether the parent loaded under multiome column alignment.
+///
+/// The manifest's layout record is absent for runs written before it existed,
+/// so the recorded fit arguments are the authority: their `multiome` switch (a
+/// flag on the topic families, a suffix list on bge) is what the replay passes
+/// again — and a parent that trained on a single file, where the flag is a
+/// no-op, still turns it on the moment a second file is appended.
+fn multiome_recorded(manifest: &RunManifest) -> bool {
+    manifest.data.multiome.is_some()
+        || manifest
+            .train_args
+            .as_ref()
+            .is_some_and(|t| multiome_in_args(&t.args))
+}
+
+fn multiome_in_args(args: &serde_json::Value) -> bool {
+    match args.get("multiome") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Array(a)) => !a.is_empty(),
+        _ => false,
+    }
+}
+
+/// The carried reference among a run's recorded inputs, when it substituted
+/// one: the backend `update` itself appended, recognised by the name the tool
+/// gives it.
+fn carried_reference_among(recorded: &[Box<str>]) -> Option<&str> {
+    let suffix = format!(".{}", crate::pb_reference::BACKEND_SUFFIX);
+    recorded
+        .iter()
+        .map(AsRef::as_ref)
+        .find(|p: &&str| p.ends_with(&suffix))
+}
+
 pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
         args.out.as_ref() != args.model.as_ref(),
@@ -302,127 +401,40 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     })?;
     let kind = manifest.kind;
 
-    // Either substitute the parent's carried pseudobulks for its cells, or
-    // re-read the cells. The substitution is what turns a round from
-    // "every cell ever absorbed" into "the new cells only".
-    // Substituting the parent's carried pseudobulks is the default, because it
-    // is what makes a round cost the NEW data rather than every cell the model
-    // has ever seen. It needs three things, and any of them missing falls back
-    // to the exact re-collapse rather than failing: a family that trains on
-    // pseudobulks at all, a parent that actually carries some, and batch labels
-    // for the new data (the carried columns are their own batch, and the loader
-    // takes one batch file per data file, so a partial set cannot be assembled).
-    //
-    // An EXPLICIT `--use-pb-reference` still errors on each of those instead of
-    // quietly doing something else, because there the user has said what they
-    // want and a silent downgrade would cost them a round to notice.
-    let explicit = args.use_pb_reference;
-    let reference = if args.no_pb_reference {
-        None
-    } else if kind == RunKind::Simba {
-        anyhow::ensure!(
-            !explicit,
-            "--use-pb-reference does not apply to a simba run: it trains on cells, never on \
-             pseudobulks, so there is nothing to substitute. Drop the flag."
-        );
-        None
-    } else if manifest.data.multiome.is_some() {
-        // A multiome run loads with union column alignment, which gives no
-        // guarantee the carried pseudobulks stay contiguous at the end — and
-        // their weights are applied by position. The family loaders refuse the
-        // combination, so decide it here where the fallback exists.
-        anyhow::ensure!(
-            !explicit,
-            "--use-pb-reference does not compose with a multiome parent: its union column \
-             alignment cannot keep the carried pseudobulks contiguous. Pass --no-pb-reference \
-             and let this round re-collapse."
-        );
-        info!(
-            "{} is a multiome run, so this round re-collapses the whole cohort (carried \
-             pseudobulks need positional column order, which union alignment does not keep).",
-            args.model,
-        );
-        None
-    } else if args.batch_files.is_none() {
-        anyhow::ensure!(
-            !explicit,
-            "--use-pb-reference needs --batch-files for the new data: the carried \
-             pseudobulks are their own batch, and the loader takes one batch file per \
-             data file."
-        );
-        info!(
-            "no --batch-files for the new data, so this round re-collapses the whole cohort. \
-             Passing batch labels lets it reuse {}'s carried pseudobulks and cost the new \
-             data only.",
-            args.model,
-        );
-        None
-    } else {
-        // A sidecar whose backend has gone missing, or that fails to parse, is
-        // "nothing to substitute" on the default path — a moved run directory
-        // used to update fine and must keep doing so — and an error only when
-        // the user asked for the substitution by name.
-        let prepared = match crate::pb_reference::prepare(&args.model, &args.out) {
-            Ok(p) => p,
-            Err(e) if !explicit => {
-                log::warn!(
-                    "{}'s carried pseudobulks cannot be used ({e}); re-collapsing the whole \
-                     cohort instead",
-                    args.model,
-                );
-                None
-            }
-            Err(e) => return Err(e),
-        };
-        if prepared.is_none() {
-            anyhow::ensure!(
-                !explicit,
-                "{} carries no pseudobulks, so there is nothing to substitute for its cells. \
-                 Re-train it without --no-emit-pb-reference, or pass --no-pb-reference and let \
-                 this round re-collapse.",
-                args.model,
-            );
-            info!(
-                "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
-                 carrying was the default), so this round re-collapses the whole cohort.",
-                args.model,
-            );
-        }
-        prepared
-    };
+    let recorded = recorded_paths(&manifest.data.input, &dir);
+    ensure_not_recorded(&recorded, &args.data_files)?;
+    let reference = select_reference(args, &manifest, &recorded)?;
 
-    let (data_files, batch_files) = if let Some(r) = reference.as_ref() {
-        // The reference goes LAST: `weights_for` keys on that, and the loader
-        // concatenates columns in file order.
-        ensure_not_recorded(&recorded_paths(&manifest.data.input, &dir), &args.data_files)?;
-        let mut d: Vec<Box<str>> = args.data_files.clone();
-        d.push(r.backend.clone());
-        let b = match args.batch_files.as_deref() {
-            Some(new_b) => {
-                anyhow::ensure!(
-                    new_b.len() == args.data_files.len(),
-                    "--batch-files has {} entries but {} new data file(s) were given",
-                    new_b.len(),
-                    args.data_files.len(),
-                );
-                let mut v = new_b.to_vec();
-                v.push(r.batch_file.clone());
-                Some(v)
-            }
-            // Guaranteed by the reference-selection block above, which falls
-            // back to re-collapsing when the new data has no batch labels.
-            None => unreachable!("a carried reference is only selected with --batch-files"),
-        };
-        (d, b)
-    } else {
-        (
-            union_inputs(recorded_paths(&manifest.data.input, &dir), &args.data_files)?,
-            union_batches(
+    let (data_files, batch_files) = match reference.as_ref() {
+        Some(r) => {
+            // The reference goes LAST: `weights_for` keys on that, and the
+            // loader concatenates columns in file order.
+            let new_b = args
+                .batch_files
+                .as_deref()
+                .expect("a carried reference is only selected with --batch-files");
+            anyhow::ensure!(
+                new_b.len() == args.data_files.len(),
+                "--batch-files has {} entries but {} new data file(s) were given",
+                new_b.len(),
+                args.data_files.len(),
+            );
+            let mut d = args.data_files.clone();
+            d.push(r.backend.clone());
+            let mut b = new_b.to_vec();
+            b.push(r.batch_file.clone());
+            (d, Some(b))
+        }
+        None => {
+            let mut d = recorded;
+            d.extend(args.data_files.iter().cloned());
+            let b = union_batches(
                 recorded_paths(&manifest.data.batch, &dir),
                 args.batch_files.as_deref(),
                 args.data_files.len(),
-            )?,
-        )
+            )?;
+            (d, b)
+        }
     };
 
     // Deliberately does not claim "warm-starting": `svd` has no weights, and
@@ -585,12 +597,8 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             );
             crate::bge::fit_bge(&a)
         }
-        // Re-fit on the union today. NOT because there is nothing to continue:
-        // simba persists a gene x H node table (`feature_embedding.parquet`,
-        // and `has_frozen_gene_table` is true for it, which is how `predict`
-        // scores a simba run), and the gene axis is shared across rounds by
-        // construction. Only the CELL nodes are genuinely new each round. So a
-        // gene-side warm start is available here and simply is not wired up.
+        // Re-fit on the union today; a gene-side warm start is available and
+        // not wired up (see `SimbaArgs::rebase`).
         RunKind::Simba => {
             let mut a: crate::simba::SimbaArgs = manifest.train_args_as(&args.model)?;
             a.rebase(rebase);
