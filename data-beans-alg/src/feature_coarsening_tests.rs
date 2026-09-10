@@ -191,3 +191,69 @@ fn test_skip_when_d_small() {
     assert!(fc.num_coarse <= d);
     assert!(fc.num_coarse > 0);
 }
+
+/// Source axis [g0 g1 g2 g3], groups {g0,g1} and {g2,g3}. The new axis is
+/// [g1 gX g3 gY g0]: two source genes reordered, one dropped, two new.
+fn grown_fixture() -> (FeatureCoarsening, Vec<Option<usize>>, Vec<Vec<f32>>) {
+    let source = FeatureCoarsening::from_fine_to_coarse(vec![0, 0, 1, 1], 2).unwrap();
+    let remap = vec![Some(1), None, Some(3), None, Some(0)];
+    // Two pseudobulks: group 0's genes lean to the first, group 1's to the
+    // second; gX leans to the first, gY to the second.
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let unit = vec![
+        vec![s, -s],  // g1
+        vec![s, -s],  // gX
+        vec![-s, s],  // g3
+        vec![-s, s],  // gY
+        vec![s, -s],  // g0
+    ];
+    (source, remap, unit)
+}
+
+#[test]
+fn grown_known_features_keep_their_group_and_new_ones_join_the_nearest() {
+    let (source, remap, unit) = grown_fixture();
+    let grown = source.grow_by_profile(&remap, &unit).unwrap();
+    assert_eq!(grown.fine_to_coarse, vec![0, 0, 1, 1, 0]);
+    assert_eq!(grown.num_coarse, 2, "the group count is what consumers are keyed to");
+    assert_eq!(grown.coarse_to_fine[0], vec![0, 1, 4]);
+    assert_eq!(grown.coarse_to_fine[1], vec![2, 3]);
+}
+
+#[test]
+fn grown_group_with_no_surviving_member_attracts_nothing_but_keeps_its_index() {
+    // Three source groups; group 2's only gene is absent from the new axis.
+    let source = FeatureCoarsening::from_fine_to_coarse(vec![0, 1, 2], 3).unwrap();
+    let remap = vec![Some(0), Some(1), None];
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let unit = vec![vec![s, -s], vec![-s, s], vec![-s, s]];
+    let grown = source.grow_by_profile(&remap, &unit).unwrap();
+    assert_eq!(grown.num_coarse, 3);
+    assert_eq!(grown.fine_to_coarse, vec![0, 1, 1]);
+    assert!(grown.coarse_to_fine[2].is_empty());
+}
+
+#[test]
+fn grown_feature_without_a_profile_goes_to_the_largest_group() {
+    let source = FeatureCoarsening::from_fine_to_coarse(vec![0, 0, 1], 2).unwrap();
+    let remap = vec![Some(0), Some(1), Some(2), None];
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let unit = vec![vec![s, -s], vec![s, -s], vec![-s, s], vec![0.0, 0.0]];
+    let grown = source.grow_by_profile(&remap, &unit).unwrap();
+    assert_eq!(grown.fine_to_coarse[3], 0);
+}
+
+#[test]
+fn grown_axis_with_nothing_in_common_is_refused() {
+    let source = FeatureCoarsening::from_fine_to_coarse(vec![0, 1], 2).unwrap();
+    let err = match source.grow_by_profile(&[None, None], &[vec![1.0], vec![1.0]]) {
+        Ok(_) => panic!("an axis with nothing in common must be refused"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("no feature"), "{err}");
+}
+
+#[test]
+fn from_fine_to_coarse_rejects_a_group_index_out_of_range() {
+    assert!(FeatureCoarsening::from_fine_to_coarse(vec![0, 2], 2).is_err());
+}
