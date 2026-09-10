@@ -236,15 +236,9 @@ pub struct TopicArgs {
     #[command(flatten)]
     pub(crate) hvg: crate::hvg::HvgCliArgs,
 
-    #[arg(
-        long,
-        default_value_t = 1000,
-        help = "Cap feature dim by meta-feature coarsening (0 to disable)",
-        long_help = "Groups co-expressed features into at most N meta-features.\n\
-                     so the model trains at reduced resolution.\n\
-                     The dictionary is expanded back to full resolution on output."
-    )]
-    pub(crate) max_coarse_features: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -414,7 +408,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         &gene_names,
     )?;
     let level_coarsenings = crate::topic::common::resolve_level_coarsenings(
-        args.max_coarse_features,
+        args.coarsening.cap(),
         args.init_from.as_deref(),
         finest_collapsed,
         num_levels,

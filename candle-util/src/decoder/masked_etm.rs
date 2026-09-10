@@ -19,7 +19,7 @@
 //! `E[y] = μ_residual · μ_adjusted`).
 
 use crate::batched_dot::batched_matvec;
-use crate::decoder::module_map::ModuleMap;
+use crate::decoder::coarsening_map::CoarseningMap;
 use crate::fast_index::gather_rows;
 use crate::loss::nb_log_likelihood_elem;
 use candle_core::{Result, Tensor};
@@ -62,7 +62,7 @@ pub struct MaskedDenseTarget<'a> {
 }
 
 /// Minibatch target for the **module-collapsed** head: the row's counts
-/// summed into modules, less what the encoder's context saw.
+/// summed into coarse features, less what the encoder's context saw.
 ///
 /// The module head predicts each module's UNSEEN share. The visible genes'
 /// counts are subtracted from the module total (both from the target row, so
@@ -105,12 +105,13 @@ pub struct QueryTarget<'a> {
 pub struct EmbeddedNbTopicDecoder {
     /// Rows of ρ: the gene axis.
     n_features: usize,
-    /// The decoder's output width: modules under a module map, genes under
+    /// The decoder's output width: coarse features under a coarsening, every
+    /// feature under
     /// the identity.
     n_obs: usize,
     n_topics: usize,
     /// Gene → module map; identity when the decoder scores genes.
-    modules: ModuleMap,
+    coarsening: CoarseningMap,
     /// `α [K, H]` topic embeddings (learnable, decoder scope).
     topic_embeddings: Tensor,
     /// `ρ [D, H]` gene symbol embeddings — the **same** handle as the encoder
@@ -174,18 +175,18 @@ impl EmbeddedNbTopicDecoder {
     /// `log φ` starts at ln(2) ≈ 0.69 (moderate dispersion).
     pub fn new(n_topics: usize, feature_embeddings: Tensor, vs: VarBuilder) -> Result<Self> {
         let d = feature_embeddings.dim(0)?;
-        let identity = ModuleMap::identity(d, feature_embeddings.device())?;
-        Self::new_with_modules(n_topics, feature_embeddings, identity, vs)
+        let identity = CoarseningMap::identity(d, feature_embeddings.device())?;
+        Self::new_with_coarsening(n_topics, feature_embeddings, identity, vs)
     }
 
-    /// A decoder whose dense output axis is the map's modules: `φ` and the
+    /// A decoder whose dense output axis is the map's coarse features: `φ` and the
     /// pinned background live at `[1, M]`, the logits are `(α − ᾱ)·ρ̄ᵀ + log π_m`
     /// with `ρ̄` the within-module mean of ρ, and any gene is scored at its
     /// module's rate times its pinned share. Same var names as [`Self::new`].
-    pub fn new_with_modules(
+    pub fn new_with_coarsening(
         n_topics: usize,
         feature_embeddings: Tensor,
-        modules: ModuleMap,
+        coarsening: CoarseningMap,
         vs: VarBuilder,
     ) -> Result<Self> {
         let dims = feature_embeddings.dims();
@@ -197,13 +198,13 @@ impl EmbeddedNbTopicDecoder {
         }
         let n_features = dims[0];
         let embedding_dim = dims[1];
-        if modules.n_fine() != n_features {
+        if coarsening.n_fine() != n_features {
             candle_core::bail!(
-                "EmbeddedNbTopicDecoder: module map covers {} genes but ρ has {n_features}",
-                modules.n_fine()
+                "EmbeddedNbTopicDecoder: the coarsening covers {} features but ρ has {n_features}",
+                coarsening.n_fine()
             );
         }
-        let n_obs = modules.n_coarse();
+        let n_obs = coarsening.n_coarse();
 
         let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
         let topic_embeddings =
@@ -221,7 +222,7 @@ impl EmbeddedNbTopicDecoder {
             n_features,
             n_obs,
             n_topics,
-            modules,
+            coarsening,
             topic_embeddings,
             feature_embeddings,
             log_phi_1d,
@@ -229,9 +230,10 @@ impl EmbeddedNbTopicDecoder {
         })
     }
 
-    /// The gene → module map (identity when the decoder scores genes).
-    pub fn modules(&self) -> &ModuleMap {
-        &self.modules
+    /// The feature → coarse-feature map (identity when the decoder scores
+    /// every feature).
+    pub fn coarsening(&self) -> &CoarseningMap {
+        &self.coarsening
     }
 
     pub fn topic_embeddings(&self) -> &Tensor {
@@ -286,7 +288,7 @@ impl EmbeddedNbTopicDecoder {
         // Under a module map the table is the within-module mean of ρ, so ρ
         // still trains through the dense head — each gene at 1/|m| of its
         // module's gradient.
-        let table = self.modules.coarsen_mean_dh(&self.feature_embeddings)?;
+        let table = self.coarsening.coarsen_mean_dh(&self.feature_embeddings)?;
         self.centered_topic_embeddings()?
             .matmul(&table.t()?)?
             .broadcast_add(&self.log_pi_1d)
@@ -362,7 +364,7 @@ impl EmbeddedNbTopicDecoder {
         let theta_nt = log_theta_nk.exp()?; // [N, T]
                                             // A gene is scored at its module's rate times its pinned share; under
                                             // the identity map both lookups are the gene itself and share one.
-        let flat = self.modules.modules_of(indices)?.flatten_all()?; // [N*K] module ids
+        let flat = self.coarsening.groups_of(indices)?.flatten_all()?; // [N*K] module ids
 
         let logz_11k = Self::log_partition_from_logits(full_kd)?; // [1, 1, T]
         let logits = gather_rows(&full_kd.t()?.contiguous()?, &flat)? // [M, T] → [N*K, T]
@@ -371,10 +373,10 @@ impl EmbeddedNbTopicDecoder {
 
         // Mixture rate `Σ_t β·θ` as a gemm — see `candle_util::batched_dot`.
         let rate_nk = batched_matvec(&beta_nkt, &theta_nt)?; // [N, K]
-        if self.modules.is_identity() {
+        if self.coarsening.is_identity() {
             return Ok(rate_nk);
         }
-        rate_nk.mul(&self.modules.log_share_at(indices)?.exp()?)
+        rate_nk.mul(&self.coarsening.log_share_at(indices)?.exp()?)
     }
 
     /// Masked NB imputation log-likelihood, summed over masked positions →
@@ -403,7 +405,7 @@ impl EmbeddedNbTopicDecoder {
         let theta_beta_nk = self.mixture_rate_nk(log_theta_nk, indices, full_kd)?; // [N, K]
 
         // φ at the cell's genes: per module under a module map.
-        let flat = self.modules.modules_of(indices)?.flatten_all()?; // [N*K]
+        let flat = self.coarsening.groups_of(indices)?.flatten_all()?; // [N*K]
         let log_phi_nk = gather_rows(&self.log_phi_1d.squeeze(0)?, &flat)?.reshape((n, k))?; // [N, K]
 
         nb_score(
@@ -546,9 +548,9 @@ impl EmbeddedNbTopicDecoder {
         full_km: &Tensor,
     ) -> Result<Tensor> {
         let rate_nm = self.mixture_rate_nd(log_theta_nk, full_km)?; // [N, M]
-        let ids_m = self.modules.modules_of(q.gene_ids)?; // [N, Q]
+        let ids_m = self.coarsening.groups_of(q.gene_ids)?; // [N, Q]
         let rate_nq = rate_nm.gather(&ids_m, 1)?; // [N, Q]
-        let log_factor = (self.modules.log_share_at(q.gene_ids)? + q.log_residual)?;
+        let log_factor = (self.coarsening.log_share_at(q.gene_ids)? + q.log_residual)?;
         let mu = rate_nq.mul(&log_factor.exp()?)?.broadcast_mul(q.lib)?;
         let (n, qn) = ids_m.dims2()?;
         let log_phi =

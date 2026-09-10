@@ -14,7 +14,7 @@ use candle_util::traits::*;
 use std::sync::atomic::AtomicBool;
 
 use super::anchor_prior::anchor_penalty_at_level;
-use super::common::sample_collapsed_data;
+use super::common::build_level_data;
 
 /// Configuration for training (senna-side bundle).
 pub(crate) struct TrainConfig<'a> {
@@ -27,45 +27,6 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_prior_per_level: Option<&'a [Tensor]>,
     /// Cross-entropy penalty strength λ applied per minibatch.
     pub anchor_penalty: f32,
-}
-
-/// Materialize `(encoder-input, batch, decoder-target)` `Mat` triples
-/// once per training run, applying the encoder's and per-level decoder
-/// coarsenings.
-fn build_level_data(
-    collapsed_levels: &[CollapsedOut],
-    level_coarsenings: &[Option<FeatureCoarsening>],
-    enc_coarsening: Option<&FeatureCoarsening>,
-) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
-    collapsed_levels
-        .iter()
-        .zip(level_coarsenings.iter())
-        .map(|(collapsed, dec_fc)| {
-            let (mixed_nd, batch_nd, target_nd) = sample_collapsed_data(collapsed)?;
-
-            let enc_nd = if let Some(fc) = enc_coarsening {
-                fc.aggregate_columns_nd(&mixed_nd)
-            } else {
-                mixed_nd
-            };
-
-            let batch_nd = batch_nd.map(|b| {
-                if let Some(fc) = enc_coarsening {
-                    fc.aggregate_columns_nd(&b)
-                } else {
-                    b
-                }
-            });
-
-            let dec_target = if let Some(fc) = dec_fc.as_ref() {
-                fc.aggregate_columns_nd(&target_nd)
-            } else {
-                target_nd
-            };
-
-            Ok((enc_nd, batch_nd, dec_target))
-        })
-        .collect()
 }
 
 /// Build the candle-util-side `TrainConfig` from the senna-side bundle.

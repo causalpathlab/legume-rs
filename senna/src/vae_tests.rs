@@ -39,3 +39,26 @@ fn a_fit_recorded_before_the_flag_replays_under_auto() {
     assert_eq!(a.n_latent, 7);
     assert!(matches!(a.feature_name_kind, FeatureNameKindArg::Auto));
 }
+
+/// `--max-coarse-features` moved into a shared flattened struct. The recorded
+/// key sits at the top level of the fit arguments, so a manifest written
+/// before the move has to replay onto the new shape unchanged: `senna update`
+/// reads these back and would otherwise silently re-collapse at the default.
+#[test]
+fn a_coarsening_recorded_before_the_shared_struct_still_replays() {
+    let recorded = serde_json::json!({
+        "data_files": ["a.zarr"],
+        "out": "old",
+        "max_coarse_features": 250,
+    });
+    let args: super::VaeArgs = serde_json::from_value(recorded).expect("an old manifest replays");
+    assert_eq!(args.coarsening.max_coarse_features, 250);
+    assert_eq!(
+        args.coarsening.cap().map(std::num::NonZeroUsize::get),
+        Some(250)
+    );
+
+    let off = serde_json::json!({ "data_files": ["a.zarr"], "out": "old", "max_coarse_features": 0 });
+    let args: super::VaeArgs = serde_json::from_value(off).expect("replays");
+    assert!(args.coarsening.cap().is_none(), "0 means every feature");
+}

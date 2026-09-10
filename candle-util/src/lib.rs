@@ -8,6 +8,7 @@ pub mod decoder;
 pub mod device;
 pub mod encoder;
 pub mod fast_index;
+pub mod feature_embedding;
 pub mod frozen_features;
 pub mod grad_clip;
 pub mod grow;

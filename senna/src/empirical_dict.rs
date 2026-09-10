@@ -2,11 +2,11 @@
 //! annotation.
 //!
 //! The feature-coarsened β from topic training lives at a reduced resolution
-//! (~1k meta-features) and is expanded back to full gene resolution via
-//! `expand_log_dict_dk`, which spreads each meta-feature's loading across its
+//! (~1k coarse features) and is expanded back to full gene resolution via
+//! `expand_log_dict_dk`, which spreads each coarse feature's loading across its
 //! constituent genes proportional to the training-time sufficient statistics.
 //! That expansion is a lossy approximation — rare informative genes (e.g.
-//! hemoglobins for erythroid cells) can get merged into generic meta-features
+//! hemoglobins for erythroid cells) can get merged into generic coarse features
 //! and lose lineage-specific contrast at reporting time.
 //!
 //! This module computes an alternative *empirical* β at full gene resolution:

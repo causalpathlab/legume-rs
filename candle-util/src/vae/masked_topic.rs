@@ -11,7 +11,7 @@ use super::{clip_and_step_dense, smooth_topics, TrainScores};
 use crate::data::indexed::masked_epoch::{MaskedDraw, MaskedLevelData, MaskedMinibatch};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget, QueryTarget};
-use crate::decoder::module_map::ModuleMap;
+use crate::decoder::coarsening_map::CoarseningMap;
 use crate::decoder::query_decoder::{QueryDecoder, QueryInput};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::fast_index::scatter_add_cols;
@@ -252,7 +252,7 @@ pub struct LevelTarget {
 impl LevelTarget {
     /// Aggregate a level's `[P, D]` target rows into the decoder's modules,
     /// upload, and precompute `Σ_g y_pg + 1` over the full row.
-    pub fn from_mat(rows: &Mat, modules: &ModuleMap, dev: &Device) -> anyhow::Result<Self> {
+    pub fn from_mat(rows: &Mat, modules: &CoarseningMap, dev: &Device) -> anyhow::Result<Self> {
         let values_pm =
             crate::data::loader_util::upload_to_device(&modules.aggregate_columns_host(rows), dev)?;
         // Modules partition the genes, so the module totals sum to the row's
@@ -495,9 +495,9 @@ fn masked_minibatch_loss(
     // identity map — and the module-level view of what the context saw: the
     // visible slots' target counts and pinned shares summed into modules.
     let full_kd = decoder.full_logits_kd()?;
-    let mm = decoder.modules();
+    let mm = decoder.coarsening();
     let n_obs = decoder.dim_obs();
-    let m_ctx = mm.modules_of(&base.input_indices)?; // [N, K] module ids
+    let m_ctx = mm.groups_of(&base.input_indices)?; // [N, K] module ids
     let visible_counts = scatter_add_cols(&m_ctx, &(&mb.target_at_context * &mb.visible)?, n_obs)?;
     let share_ctx = mm.log_share_at(&base.input_indices)?.exp()?;
     let visible_share = scatter_add_cols(&m_ctx, &(share_ctx * &mb.visible)?, n_obs)?;
@@ -670,7 +670,7 @@ pub fn train_masked(
     let mut level_targets = level_data
         .iter()
         .zip(decoders)
-        .map(|(&(_, _, target), dec)| LevelTarget::from_mat(target, dec.modules(), config.dev))
+        .map(|(&(_, _, target), dec)| LevelTarget::from_mat(target, dec.coarsening(), config.dev))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // On CUDA, optionally shrink the minibatch size to fit free device
@@ -744,7 +744,7 @@ pub fn train_masked(
                 .iter()
                 .zip(decoders)
                 .map(|(&(_, _, target), dec)| {
-                    LevelTarget::from_mat(target, dec.modules(), config.dev)
+                    LevelTarget::from_mat(target, dec.coarsening(), config.dev)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
         }

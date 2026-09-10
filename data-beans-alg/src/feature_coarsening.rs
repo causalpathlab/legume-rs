@@ -1,4 +1,19 @@
+//! Grouping features so a model answers for a group instead of each feature.
+//!
+//! **A coarsening is fixed; a module is learned.** That is the line senna
+//! draws between its two kinds of feature grouping, and the reason both words
+//! exist. A coarsening's membership is read off the data before training and
+//! never moves, which is what lets a decoder be keyed to it and what lets a
+//! continued fit inherit it verbatim. A module's membership is a parameter:
+//! the masked encoder's `--gene-modules` learns centroids and re-derives
+//! membership from them every step. Neither word should be used for the other,
+//! and a grouping that learns its membership is a module however it is built.
+//!
+//! What a coarsening fixes is the assignment, not the meaning: a group's
+//! embedding is the mean of its members' and moves at every step.
+
 use crate::random_projection::binary_sort_columns;
+use clap::Args;
 use log::debug;
 use matrix_util::dmatrix_util::build_columns_par;
 use nalgebra::DMatrix;
@@ -6,14 +21,14 @@ use serde::{Deserialize, Serialize};
 
 type CscMat = nalgebra_sparse::CscMatrix<f32>;
 
-/// Maps D fine features to d coarse meta-features and back.
+/// Maps D fine features to d coarse coarse features and back.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FeatureCoarsening {
     /// For each original feature, the coarse group index it belongs to.
     pub fine_to_coarse: Vec<usize>,
     /// For each coarse group, the list of original feature indices.
     pub coarse_to_fine: Vec<Vec<usize>>,
-    /// Number of coarse meta-features (d).
+    /// Number of coarse coarse features (d).
     pub num_coarse: usize,
 }
 
@@ -180,6 +195,27 @@ impl FeatureCoarsening {
         })
     }
 
+    /// Expand a per-group `[d, K]` table to `[D, K]` by giving every fine
+    /// feature its group's row unchanged.
+    ///
+    /// The counterpart to [`Self::expand_log_dict_dk`], for a table that is
+    /// NOT a log-probability and must not be split across the group's
+    /// members: factor loadings multiply a latent rather than carrying mass,
+    /// so a group's loading IS each of its features' loading. Where such a
+    /// model also has a per-feature offset, that offset is where the split
+    /// belongs.
+    pub fn expand_rows_dk(&self, table_dk: &DMatrix<f32>, d_fine: usize) -> DMatrix<f32> {
+        let k = table_dk.ncols();
+        build_columns_par(d_fine, k, |kk, col| {
+            let src_col = table_dk.column(kk);
+            for (c, fine_indices) in self.coarse_to_fine.iter().enumerate() {
+                for &f in fine_indices {
+                    col[f] = src_col[c];
+                }
+            }
+        })
+    }
+
     /// Aggregate a sparse [D, n] CSC matrix → dense [d, n] by summing
     /// rows within each coarse group. Efficient: O(nnz) work.
     pub fn aggregate_sparse_csc(&self, data_dn: &CscMat) -> DMatrix<f32> {
@@ -254,6 +290,93 @@ pub fn compute_feature_coarsening(
         coarse_to_fine,
         num_coarse,
     })
+}
+
+/// Shared CLI arg for grouping co-expressed features before training.
+///
+/// One declaration, one wording, one default, flattened by every command that
+/// can train at reduced feature resolution — the same shape as
+/// `crate::hvg::HvgCliArgs`, and read alongside it: selection decides which
+/// features weigh on the sketch, this decides how many distinct outputs the
+/// model answers for.
+#[derive(Args, Debug, Clone, Serialize, Deserialize)]
+#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
+pub struct FeatureCoarseningArgs {
+    #[arg(
+        long,
+        default_value_t = 1000,
+        value_name = "N",
+        help = "Group co-expressed features into at most N coarse features; 0 = every feature",
+        long_help = "Group co-expressed features into at most N coarse features,\n\
+                     so the model answers for a group instead of for each feature.\n\
+                     Groups come from the finest pseudobulk profiles, nested per\n\
+                     level with log-spaced widths. The dictionary is expanded back\n\
+                     to every feature on output, so what you read is unchanged.\n\
+                     \n\
+                     --no-feature-coarsening trains on every feature instead. So\n\
+                     does 0 here, kept because recorded runs and existing scripts\n\
+                     spell it that way.\n\
+                     \n\
+                     WHAT THE GROUPING APPLIES TO DEPENDS ON THE COMMAND:\n\
+                     \n\
+                     `topic` and `vae` group both sides. The encoder reads coarse\n\
+                     features and every decoder answers for them, so 0 makes each\n\
+                     per-step tensor as wide as the feature axis.\n\
+                     \n\
+                     `masked-topic`, `masked-vae` and `masked-sbp` group the decoder\n\
+                     targets only. The encoder keeps its feature-level context and\n\
+                     embedding either way.\n\
+                     \n\
+                     `joint-topic` groups per modality, or on the reference modality\n\
+                     and shares it, following --decoder-type.\n\
+                     \n\
+                     This is a COARSENING, not a module. senna tells the two kinds\n\
+                     of grouping apart by one question: does training move the\n\
+                     membership? A coarsening's does not. It is read off the data\n\
+                     before the first step and fixed for the life of the model,\n\
+                     which is what lets every decoder be keyed to it and what lets a\n\
+                     continued fit inherit it. A module's does: --gene-modules learns\n\
+                     its centroids, so which features group together changes as the\n\
+                     fit proceeds.\n\
+                     \n\
+                     What a coarsening fixes is the assignment, not the meaning. A\n\
+                     group's embedding is the mean of its members' and moves at every\n\
+                     step, so grouping the targets does not freeze what the model can\n\
+                     learn about a feature."
+    )]
+    pub max_coarse_features: usize,
+
+    #[arg(
+        long,
+        conflicts_with = "max_coarse_features",
+        help = "Train on every feature, with no grouping",
+        long_help = "Train on every feature. The named form of\n\
+                     --max-coarse-features 0, which reads as a request for zero\n\
+                     features when it means the opposite.\n\
+                     \n\
+                     Every per-step tensor is then as wide as the feature axis, so\n\
+                     the fit costs considerably more at the same epoch count. It is\n\
+                     also fixed for the life of a model: a continued fit inherits\n\
+                     the groups the source run trained on, so a chain that starts\n\
+                     ungrouped stays ungrouped and one that starts grouped cannot\n\
+                     be switched over partway."
+    )]
+    pub no_feature_coarsening: bool,
+}
+
+impl FeatureCoarseningArgs {
+    /// The cap, or `None` when the model trains on every feature.
+    ///
+    /// The one place either spelling of "off" is read, so no command repeats
+    /// the convention: the named switch and the zero mean the same thing here
+    /// and clap refuses both at once.
+    #[must_use]
+    pub fn cap(&self) -> Option<std::num::NonZeroUsize> {
+        if self.no_feature_coarsening {
+            return None;
+        }
+        std::num::NonZeroUsize::new(self.max_coarse_features)
+    }
 }
 
 #[cfg(test)]
