@@ -248,35 +248,16 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) iter_opt: usize,
 
-    /// Explicit opt-in. Redundant now that carrying is the default, but kept
-    /// so existing scripts keep parsing AND so `reject_pb_reference` can tell
-    /// "the user asked for this" from "the default is on" — the former is a
-    /// mistake worth an error on a family that cannot use it, the latter is not.
+    /// Explicit form of the default. Kept so existing scripts parse, and so
+    /// `reject_pb_reference` can tell "the user asked for this" from "the
+    /// default is on": the former is worth an error on a family that cannot
+    /// use it, the latter is not.
     #[arg(
         long,
         hide = true,
         help = "Carry this run's pseudobulks forward (already the default)",
-        long_help = "Writes {out}.pb_reference.zarr — one column per pseudobulk, holding\n\
-                     its batch-adjusted per-cell rate — plus a sidecar with each\n\
-                     column's cell count.\n\
-                     \n\
-                     `senna update` can then absorb a new sample by re-collapsing\n\
-                     only the NEW cells against these, instead of re-reading every\n\
-                     cell the model has already seen. Absorbing S samples one at a\n\
-                     time goes from quadratic to linear in cell reads.\n\
-                     \n\
-                     On by default; --no-emit-pb-reference skips the extra copy when\n\
-                     the model will never be grown.\n\
-                     \n\
-                     The reference is APPEND-ONLY across rounds: carried columns\n\
-                     pass through byte-stable and each update adds at most\n\
-                     2^sort-dim + 1 new columns for its own cells, so growth is\n\
-                     linear in rounds and independent of sample size, with total\n\
-                     cell mass conserved exactly. Old rounds are never re-averaged\n\
-                     — re-summarizing every round would compound resolution loss.\n\
-                     \n\
-                     Available on topic, masked-topic, masked-sbp, masked-vae, vae,\n\
-                     svd and bge — the families `senna update` can continue."
+        long_help = "Already the default. Passing it makes a family that cannot carry\n\
+                     pseudobulks refuse instead of silently writing nothing."
     )]
     pub(crate) emit_pb_reference: bool,
 
@@ -284,14 +265,24 @@ pub(crate) struct CollapseArgs {
         long,
         conflicts_with = "emit_pb_reference",
         help = "Do NOT carry this run's pseudobulks forward",
-        long_help = "Carrying them is the default, because it is what lets a later\n\
-                     `senna update` absorb a sample without re-reading every cell\n\
-                     the model has already seen.\n\
+        long_help = "By default a run writes {out}.pb_reference.zarr, one column per\n\
+                     pseudobulk holding its batch-adjusted per-cell rate, plus a\n\
+                     sidecar with each column's cell count. `senna update` then\n\
+                     absorbs a new sample by re-collapsing only the NEW cells\n\
+                     against these, instead of re-reading every cell the model has\n\
+                     already seen: absorbing S samples one at a time goes from\n\
+                     quadratic to linear in cell reads.\n\
                      \n\
-                     Pass this to skip the extra artifact when you know the model\n\
-                     will never be grown. The cost it saves is bounded: at most\n\
-                     2^sort-dim + 1 columns, independent of how many cells the run\n\
-                     collapsed."
+                     The reference is append-only across rounds. Carried columns\n\
+                     pass through byte-stable and each update adds at most\n\
+                     2^sort-dim + 1 new columns for its own cells, so growth is\n\
+                     linear in rounds and independent of sample size, with total\n\
+                     cell mass conserved exactly. Old rounds are never re-averaged,\n\
+                     which would compound resolution loss.\n\
+                     \n\
+                     Pass this to skip the artifact when the model will never be\n\
+                     grown. Written by topic, masked-topic, masked-sbp, masked-vae,\n\
+                     vae, svd and bge, the families `senna update` can continue."
     )]
     pub(crate) no_emit_pb_reference: bool,
 
