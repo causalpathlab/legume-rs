@@ -1,7 +1,7 @@
 //! What `senna update` decides before it dispatches: whether to substitute the
 //! parent's carried pseudobulks, and what it does when it cannot.
 
-use super::UpdateArgs;
+use super::{carried_reference_among, multiome_in_args, UpdateArgs};
 use clap::Parser;
 
 #[derive(clap::Parser)]
@@ -43,4 +43,26 @@ fn the_explicit_request_still_parses() {
     let a = parse(&["--use-pb-reference"]).expect("legacy scripts keep working");
     assert!(a.use_pb_reference);
     assert!(!a.no_pb_reference);
+}
+
+/// The recorded fit arguments say whether the parent loads under multiome
+/// alignment: a flag on the topic families, a suffix list on bge, and absent
+/// on a run that predates the option.
+#[test]
+fn a_multiome_parent_is_read_off_its_recorded_arguments() {
+    assert!(multiome_in_args(&serde_json::json!({ "multiome": true })));
+    assert!(!multiome_in_args(&serde_json::json!({ "multiome": false })));
+    assert!(multiome_in_args(&serde_json::json!({ "multiome": ["rna", "atac"] })));
+    assert!(!multiome_in_args(&serde_json::json!({ "multiome": [] })));
+    assert!(!multiome_in_args(&serde_json::json!({ "epochs": 10 })));
+}
+
+/// A lineage that substituted once holds the carried reference among its
+/// inputs, under the name `update` gave it.
+#[test]
+fn a_substituted_lineage_is_recognised_by_its_carried_reference() {
+    let plain: Vec<Box<str>> = vec!["a.zarr".into(), "b.zarr".into()];
+    assert_eq!(carried_reference_among(&plain), None);
+    let substituted: Vec<Box<str>> = vec!["c.zarr".into(), "runs/r1.pb_reference.zarr".into()];
+    assert_eq!(carried_reference_among(&substituted), Some("runs/r1.pb_reference.zarr"));
 }

@@ -35,7 +35,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         args.pb_reference.is_none() || args.multiome.is_empty(),
         "a pb_reference and --multiome do not compose: multiome loads with union column \
          alignment, which gives no guarantee the carried pseudobulks stay contiguous at the \
-         end — and their weights are applied by position. Drop --use-pb-reference for this \
+         end — and their weights are applied by position. Pass --no-pb-reference for this \
          round and let it re-collapse."
     );
     // Multiome layout. `--multiome` declares it; otherwise it is read off the
