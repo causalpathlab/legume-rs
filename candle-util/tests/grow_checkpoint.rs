@@ -13,7 +13,7 @@
 //! silently gives a model that trains as if the flag had done nothing.
 
 use candle_core::{DType, Device, Tensor};
-use candle_util::grow::{grow_tensor, GrowthDims, NEW_TOPIC_LOGIT_BIAS};
+use candle_util::grow::{grow_tensor, load_grown, AxisRemap, GrowthDims, NEW_TOPIC_LOGIT_BIAS};
 
 const K_OLD: usize = 4;
 const K_NEW: usize = 7;
@@ -21,12 +21,24 @@ const H_OLD: usize = 12;
 const H_NEW: usize = 18;
 const D: usize = 40;
 
-fn dims() -> GrowthDims {
+fn dims() -> GrowthDims<'static> {
     GrowthDims {
         k_old: K_OLD,
         k_new: K_NEW,
         h_old: H_OLD,
         h_new: H_NEW,
+        gene_axis: None,
+    }
+}
+
+/// No K/H growth; only the gene axis changes.
+fn gene_dims(new_to_old: &[Option<usize>], n_old: usize) -> GrowthDims<'_> {
+    GrowthDims {
+        k_old: K_OLD,
+        k_new: K_OLD,
+        h_old: H_OLD,
+        h_new: H_OLD,
+        gene_axis: Some(AxisRemap { new_to_old, n_old }),
     }
 }
 
@@ -149,4 +161,99 @@ fn an_unrelated_shape_change_is_rejected() {
         msg.contains("architecture change"),
         "should say what it is refusing: {msg}"
     );
+}
+
+/// A gene the checkpoint knew keeps its ρ row wherever it now sits; one it
+/// never saw starts at the mean of the rows it did have.
+#[test]
+fn rho_rows_follow_the_gene_by_name_and_new_genes_start_at_the_mean() {
+    let dev = Device::Cpu;
+    let saved = ramp(&[4, H_OLD], &dev);
+    // This run: [old 2, unseen, old 0] — reordered, one dropped, one new.
+    let remap = [Some(2), None, Some(0)];
+    let fresh = ramp(&[3, H_OLD], &dev).affine(-1.0, 0.0).expect("neg");
+
+    let out = grow_tensor("enc.feature.embeddings", &fresh, &saved, &gene_dims(&remap, 4))
+        .expect("grow");
+    let (o, s) = (to_vec2(&out), to_vec2(&saved));
+    assert_eq!(o[0], s[2]);
+    assert_eq!(o[2], s[0]);
+    for h in 0..H_OLD {
+        let mean = (0..4).map(|d| s[d][h]).sum::<f32>() / 4.0;
+        assert!((o[1][h] - mean).abs() < 1e-5, "new gene column {h}: {} vs {mean}", o[1][h]);
+    }
+}
+
+/// The encoder's gene-keyed input weight is gathered on its COLUMN axis, and a
+/// new gene's column is zero so the encoder's output does not move.
+#[test]
+fn a_gene_keyed_weight_gathers_its_columns_and_zeroes_the_new_gene() {
+    let dev = Device::Cpu;
+    let hidden = 3usize;
+    let saved = ramp(&[hidden, 4], &dev);
+    let remap = [Some(3), Some(1), None];
+    let fresh = ramp(&[hidden, 3], &dev);
+
+    let out = grow_tensor(
+        "enc.nn.enc.fc.relu_linear_stack.0.weight",
+        &fresh,
+        &saved,
+        &gene_dims(&remap, 4),
+    )
+    .expect("grow");
+    let (o, s) = (to_vec2(&out), to_vec2(&saved));
+    for r in 0..hidden {
+        assert_eq!(o[r][0], s[r][3]);
+        assert_eq!(o[r][1], s[r][1]);
+        assert_eq!(o[r][2], 0.0, "new gene's input weight must be zero");
+    }
+}
+
+/// Same gene count, different order: the shapes match, but a positional copy
+/// would key every gene to the wrong row. The loader must gather anyway, and
+/// a tensor without a gene axis is left alone.
+#[test]
+fn a_same_length_permutation_is_gathered_not_copied() {
+    use candle_nn::VarMap;
+    let dev = Device::Cpu;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ckpt.safetensors");
+    let path = path.to_str().expect("utf8");
+
+    let src = VarMap::new();
+    let (d, h) = (3usize, 2usize);
+    src.get((1, d), "dec_0.log_phi", candle_nn::Init::Const(0.0), DType::F32, &dev)
+        .expect("var");
+    src.get((K_OLD, h), "dec_0.topic.embeddings", candle_nn::Init::Const(0.0), DType::F32, &dev)
+        .expect("var");
+    {
+        let data = src.data().lock().expect("lock");
+        data["dec_0.log_phi"].set(&ramp(&[1, d], &dev)).expect("set");
+        data["dec_0.topic.embeddings"].set(&ramp(&[K_OLD, h], &dev)).expect("set");
+    }
+    src.save(path).expect("save");
+
+    let dst = VarMap::new();
+    dst.get((1, d), "dec_0.log_phi", candle_nn::Init::Const(0.0), DType::F32, &dev)
+        .expect("var");
+    dst.get((K_OLD, h), "dec_0.topic.embeddings", candle_nn::Init::Const(0.0), DType::F32, &dev)
+        .expect("var");
+    let remap = [Some(2), Some(0), Some(1)];
+    let dims = GrowthDims {
+        k_old: K_OLD,
+        k_new: K_OLD,
+        h_old: h,
+        h_new: h,
+        gene_axis: Some(AxisRemap {
+            new_to_old: &remap,
+            n_old: d,
+        }),
+    };
+    load_grown(&dst, path, &dims).expect("load");
+
+    let data = dst.data().lock().expect("lock");
+    let phi = to_vec2(data["dec_0.log_phi"].as_tensor());
+    assert_eq!(phi[0], vec![3.0, 1.0, 2.0], "gathered onto the new gene order");
+    let alpha = to_vec2(data["dec_0.topic.embeddings"].as_tensor());
+    assert_eq!(alpha, to_vec2(&ramp(&[K_OLD, h], &dev)), "no gene axis: copied as is");
 }

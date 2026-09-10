@@ -4,7 +4,9 @@
 //! have — a topic for biology it never saw, or a wider gene embedding. Loading
 //! a checkpoint into a bigger `VarMap` is a shape mismatch, so the saved
 //! tensors are copied into the leading corner and the new slab is filled by a
-//! rule that keeps the model's output unchanged at step 0.
+//! rule that keeps the model's output unchanged at step 0. A cohort can also
+//! measure a different set of genes: every gene-keyed tensor is then gathered
+//! onto the new order by name ([`AxisRemap`]) before the corner copy.
 //!
 //! This lives here rather than in the caller because the rule keys on the
 //! variable **names** — `topic.embeddings`, `feature.embeddings`, `attn.query`
@@ -42,29 +44,68 @@ impl Growth {
     }
 }
 
-/// The old and new sizes of the two axes that may grow.
-pub struct GrowthDims {
+/// This run's gene axis expressed on the checkpoint's, when the two differ.
+///
+/// Growth on `K` and `H` appends capacity, so a saved tensor sits in the
+/// leading corner of the new one. A changed gene axis is a *reordering* with
+/// gaps: gene `g` of this run is gene `new_to_old[g]` of the checkpoint, or
+/// `None` for a gene the checkpoint never saw. Every tensor with an axis of
+/// the checkpoint's gene count is gathered along it by that map, and the
+/// unseen entries start at the mean of the seen ones, so a new gene enters at
+/// the model's average and nothing it computes for the known genes moves.
+pub struct AxisRemap<'a> {
+    /// For each gene of this run, its position on the checkpoint's gene axis.
+    pub new_to_old: &'a [Option<usize>],
+    /// The checkpoint's gene count.
+    pub n_old: usize,
+}
+
+/// The old and new sizes of the axes that may change.
+pub struct GrowthDims<'a> {
     pub k_old: usize,
     pub k_new: usize,
     pub h_old: usize,
     pub h_new: usize,
+    /// `Some` when this run's gene axis is not the checkpoint's; see [`AxisRemap`].
+    pub gene_axis: Option<AxisRemap<'a>>,
 }
 
-impl GrowthDims {
+impl GrowthDims<'_> {
     /// Name the axis a `old → new` change on some tensor corresponds to, or
     /// `None` when it matches neither declared growth.
     ///
     /// This is what keeps growth from papering over a real architecture change:
-    /// a widened hidden layer or a changed gene axis grows a tensor too, and
-    /// must still be an error rather than a silent zero-pad.
+    /// a widened hidden layer or an undeclared change of the gene axis grows a
+    /// tensor too, and must still be an error rather than a silent zero-pad.
     pub fn classify(&self, old: usize, new: usize) -> Option<&'static str> {
-        if old == self.k_old && new == self.k_new {
+        if self.is_gene_axis(old, new) {
+            Some("D")
+        } else if old == self.k_old && new == self.k_new {
             Some("K")
         } else if old == self.h_old && new == self.h_new {
             Some("H")
         } else {
             None
         }
+    }
+
+    /// Whether a saved axis of `old` entries meeting a fresh one of `new` is the
+    /// declared gene axis (the two lengths may be equal: a permutation).
+    fn is_gene_axis(&self, old: usize, new: usize) -> bool {
+        self.gene_axis
+            .as_ref()
+            .is_some_and(|g| old == g.n_old && new == g.new_to_old.len())
+    }
+
+    /// Whether a saved tensor of this shape has to be gathered onto the new gene
+    /// order even when its shape already matches — a same-length permuted axis
+    /// is not an exact match.
+    #[must_use]
+    pub fn reorders(&self, saved_dims: &[usize], fresh_dims: &[usize]) -> bool {
+        saved_dims
+            .iter()
+            .zip(fresh_dims)
+            .any(|(&o, &n)| self.is_gene_axis(o, n))
     }
 }
 
@@ -107,7 +148,7 @@ pub fn new_slab_value(name: &str, dim: usize) -> Option<f64> {
 }
 
 /// Copy the checkpoint into a larger `VarMap`, padding the axes that grew.
-pub fn load_grown(parameters: &VarMap, path: &str, dims: &GrowthDims) -> anyhow::Result<()> {
+pub fn load_grown(parameters: &VarMap, path: &str, dims: &GrowthDims<'_>) -> anyhow::Result<()> {
     let saved = candle_core::safetensors::load(path, &Device::Cpu)?;
     let data = parameters.data().lock().expect("VarMap lock");
 
@@ -119,17 +160,11 @@ pub fn load_grown(parameters: &VarMap, path: &str, dims: &GrowthDims) -> anyhow:
         let s = s.to_device(var.device())?;
         let fresh = var.as_tensor();
 
-        if s.dims() == fresh.dims() {
+        if s.dims() == fresh.dims() && !dims.reorders(s.dims(), fresh.dims()) {
             var.set(&s)?;
             n_copied += 1;
             continue;
         }
-        anyhow::ensure!(
-            s.rank() == fresh.rank(),
-            "warm-start: `{name}` has rank {} in the checkpoint and {} here",
-            s.rank(),
-            fresh.rank(),
-        );
         var.set(&grow_tensor(name, fresh, &s, dims)?)?;
         n_grown += 1;
     }
@@ -143,8 +178,27 @@ pub fn grow_tensor(
     name: &str,
     fresh: &Tensor,
     saved: &Tensor,
-    dims: &GrowthDims,
+    dims: &GrowthDims<'_>,
 ) -> anyhow::Result<Tensor> {
+    anyhow::ensure!(
+        saved.rank() == fresh.rank(),
+        "warm-start: `{name}` has rank {} in the checkpoint and {} here",
+        saved.rank(),
+        fresh.rank(),
+    );
+    // The gene axis first: it is a reordering, not an appended slab, so the
+    // saved tensor is gathered onto this run's order and then treated as an
+    // exact match on that axis by the corner copy below.
+    let mut saved = saved.clone();
+    if let Some(g) = dims.gene_axis.as_ref() {
+        for dim in 0..saved.rank() {
+            if dims.is_gene_axis(saved.dims()[dim], fresh.dims()[dim]) {
+                saved = gather_gene_axis(name, &saved, dim, g)?;
+            }
+        }
+    }
+    let saved = &saved;
+
     // Validate every axis BEFORE touching the data. `slice_assign` fails first
     // otherwise, and reports "upper bound is out of range for dim 1, 18 12" —
     // true, but it names neither the tensor nor what the caller did wrong.
@@ -192,4 +246,55 @@ pub fn grow_tensor(
         }
     }
     Ok(out)
+}
+
+/// One tensor's gene axis, gathered onto this run's order.
+///
+/// Known genes take their saved entries. An unseen gene takes the slab value
+/// the tensor's growth rule names ([`new_slab_value`]), or — where the rule
+/// keeps the fresh init, as it does for ρ — the mean of the saved entries
+/// along that axis, so it enters at the checkpoint's average rather than at a
+/// random point. A caller that knows more (a module the gene was placed in)
+/// refines from there.
+fn gather_gene_axis(
+    name: &str,
+    saved: &Tensor,
+    dim: usize,
+    remap: &AxisRemap<'_>,
+) -> anyhow::Result<Tensor> {
+    let n_new = remap.new_to_old.len();
+    let dev = saved.device();
+    let idx: Vec<u32> = remap
+        .new_to_old
+        .iter()
+        .map(|p| p.unwrap_or(0) as u32)
+        .collect();
+    let gathered = saved.index_select(&Tensor::from_vec(idx, n_new, dev)?, dim)?;
+
+    let mut along: Vec<usize> = vec![1; saved.rank()];
+    along[dim] = n_new;
+    let known: Vec<f32> = remap
+        .new_to_old
+        .iter()
+        .map(|p| if p.is_some() { 1.0 } else { 0.0 })
+        .collect();
+    let known = Tensor::from_vec(known, along.as_slice(), dev)?.to_dtype(saved.dtype())?;
+    let unknown = known.affine(-1.0, 1.0)?;
+
+    let fill = match new_slab_value(name, dim) {
+        Some(v) => {
+            let mut one: Vec<usize> = saved.dims().to_vec();
+            one[dim] = 1;
+            Tensor::full(v, one.as_slice(), dev)?.to_dtype(saved.dtype())?
+        }
+        None => saved.mean_keepdim(dim)?,
+    };
+    let n_known = remap.new_to_old.iter().filter(|p| p.is_some()).count();
+    log::debug!(
+        "warm-start: `{name}` axis {dim} (D) gathered {} → {n_new} ({n_known} known)",
+        remap.n_old,
+    );
+    Ok(gathered
+        .broadcast_mul(&known)?
+        .broadcast_add(&fill.broadcast_mul(&unknown)?)?)
 }
