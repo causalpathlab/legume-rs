@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "candle-util"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "approx",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "approx",
@@ -5090,7 +5090,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "senna"
-version = "0.15.3"
+version = "0.15.4"
 dependencies = [
  "anyhow",
  "approx",
