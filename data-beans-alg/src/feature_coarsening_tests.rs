@@ -201,11 +201,11 @@ fn grown_fixture() -> (FeatureCoarsening, Vec<Option<usize>>, Vec<Vec<f32>>) {
     // second; gX leans to the first, gY to the second.
     let s = std::f32::consts::FRAC_1_SQRT_2;
     let unit = vec![
-        vec![s, -s],  // g1
-        vec![s, -s],  // gX
-        vec![-s, s],  // g3
-        vec![-s, s],  // gY
-        vec![s, -s],  // g0
+        vec![s, -s], // g1
+        vec![s, -s], // gX
+        vec![-s, s], // g3
+        vec![-s, s], // gY
+        vec![s, -s], // g0
     ];
     (source, remap, unit)
 }
@@ -215,7 +215,10 @@ fn grown_known_features_keep_their_group_and_new_ones_join_the_nearest() {
     let (source, remap, unit) = grown_fixture();
     let grown = source.grow_by_profile(&remap, &unit).unwrap();
     assert_eq!(grown.fine_to_coarse, vec![0, 0, 1, 1, 0]);
-    assert_eq!(grown.num_coarse, 2, "the group count is what consumers are keyed to");
+    assert_eq!(
+        grown.num_coarse, 2,
+        "the group count is what consumers are keyed to"
+    );
     assert_eq!(grown.coarse_to_fine[0], vec![0, 1, 4]);
     assert_eq!(grown.coarse_to_fine[1], vec![2, 3]);
 }
@@ -278,11 +281,20 @@ mod switching_it_off {
 
     #[test]
     fn the_named_switch_and_the_zero_agree() {
-        assert_eq!(parse(&[]).unwrap().cap().map(std::num::NonZeroUsize::get), Some(1000));
-        assert!(parse(&["--no-feature-coarsening"]).unwrap().cap().is_none());
-        assert!(parse(&["--max-coarse-features", "0"]).unwrap().cap().is_none());
         assert_eq!(
-            parse(&["--max-coarse-features", "250"]).unwrap().cap().map(std::num::NonZeroUsize::get),
+            parse(&[]).unwrap().cap().map(std::num::NonZeroUsize::get),
+            Some(1000)
+        );
+        assert!(parse(&["--no-feature-coarsening"]).unwrap().cap().is_none());
+        assert!(parse(&["--max-coarse-features", "0"])
+            .unwrap()
+            .cap()
+            .is_none());
+        assert_eq!(
+            parse(&["--max-coarse-features", "250"])
+                .unwrap()
+                .cap()
+                .map(std::num::NonZeroUsize::get),
             Some(250)
         );
     }
@@ -293,5 +305,4 @@ mod switching_it_off {
     fn asking_for_both_is_refused() {
         assert!(parse(&["--no-feature-coarsening", "--max-coarse-features", "250"]).is_err());
     }
-
 }
