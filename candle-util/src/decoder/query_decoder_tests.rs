@@ -21,6 +21,11 @@ fn dev() -> Device {
     Device::Cpu
 }
 
+/// The feature side these tests read through: a fixed table.
+fn features() -> std::sync::Arc<crate::feature_embedding::FeatureEmbedding> {
+    crate::feature_embedding::FeatureEmbedding::fixed(rho())
+}
+
 fn rho() -> Tensor {
     let v: Vec<f32> = (0..D * H)
         .map(|i| ((i * 7 % 11) as f32 - 5.0) * 0.3)
@@ -82,7 +87,7 @@ fn shapes_and_attention_rows_sum_to_one_over_the_visible_slots() {
     let varmap = VarMap::new();
     let d = decoder(&varmap);
     let (idx, g, vis, q) = (indices(), gate(), visible(), query_ids());
-    let out = d.forward(&rho(), &input(&idx, &g, &vis, &q)).unwrap();
+    let out = d.forward(&features(), &input(&idx, &g, &vis, &q)).unwrap();
     assert_eq!(out.residual.dims(), &[N, Q]);
     assert_eq!(out.attention.dims(), &[N, Q, V]);
     let a = out.attention.to_vec3::<f32>().unwrap();
@@ -109,7 +114,7 @@ fn a_row_with_nothing_visible_reads_nothing() {
     let d = decoder(&varmap);
     let (idx, g, q) = (indices(), gate(), query_ids());
     let none = Tensor::zeros((N, V), DType::F32, &dev()).unwrap();
-    let out = d.forward(&rho(), &input(&idx, &g, &none, &q)).unwrap();
+    let out = d.forward(&features(), &input(&idx, &g, &none, &q)).unwrap();
     let r = out.residual.to_vec2::<f32>().unwrap();
     assert!(
         r.iter().flatten().all(|&x| x == 0.0),
@@ -122,14 +127,16 @@ fn the_read_is_invariant_to_the_order_of_the_context_slots() {
     let varmap = VarMap::new();
     let d = decoder(&varmap);
     let (idx, g, vis, q) = (indices(), gate(), visible(), query_ids());
-    let a = d.forward(&rho(), &input(&idx, &g, &vis, &q)).unwrap();
+    let a = d.forward(&features(), &input(&idx, &g, &vis, &q)).unwrap();
     let perm = Tensor::from_vec((0..V as u32).rev().collect::<Vec<_>>(), V, &dev()).unwrap();
     let (idx_p, g_p, vis_p) = (
         idx.index_select(&perm, 1).unwrap(),
         g.index_select(&perm, 1).unwrap(),
         vis.index_select(&perm, 1).unwrap(),
     );
-    let b = d.forward(&rho(), &input(&idx_p, &g_p, &vis_p, &q)).unwrap();
+    let b = d
+        .forward(&features(), &input(&idx_p, &g_p, &vis_p, &q))
+        .unwrap();
     let ra = a.residual.to_vec2::<f32>().unwrap();
     let rb = b.residual.to_vec2::<f32>().unwrap();
     for n in 0..N {
@@ -152,7 +159,10 @@ fn a_query_reads_the_visible_slots_of_its_own_row_only() {
     let g = Var::from_tensor(&gate()).unwrap();
     let rho_var = Var::from_tensor(&rho()).unwrap();
     let out = d
-        .forward(rho_var.as_tensor(), &input(&idx, g.as_tensor(), &vis, &q))
+        .forward(
+            &crate::feature_embedding::FeatureEmbedding::fixed(rho_var.as_tensor().clone()),
+            &input(&idx, g.as_tensor(), &vis, &q),
+        )
         .unwrap();
     // Row 0, query 0's residual against every slot's gate and against ρ.
     let target = out.residual.get(0).unwrap().get(0).unwrap();
@@ -228,7 +238,12 @@ fn the_read_matches_a_host_reference_on_gated_tokens() {
     let g = Tensor::from_vec(vec![0.5f32, 2.0, 1.0], (1, 3), &dev()).unwrap();
     let vis = Tensor::from_vec(vec![1.0f32, 1.0, 0.0], (1, 3), &dev()).unwrap();
     let q = Tensor::from_vec(vec![1u32], (1, 1), &dev()).unwrap();
-    let out = d.forward(&rho, &input(&idx, &g, &vis, &q)).unwrap();
+    let out = d
+        .forward(
+            &crate::feature_embedding::FeatureEmbedding::fixed(rho.clone()),
+            &input(&idx, &g, &vis, &q),
+        )
+        .unwrap();
     let got = out.residual.to_vec2::<f32>().unwrap()[0][0];
 
     // Host: tokens = gate · ρ_idx; query = ρ_1 + mask = [0.5, 0.75].

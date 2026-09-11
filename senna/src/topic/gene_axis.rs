@@ -1,8 +1,8 @@
 //! Continuing a model onto a gene axis the source run did not have.
 //!
-//! A checkpoint's gene-keyed state is small: the fine-to-module map of each
+//! A checkpoint's gene-keyed state is small: the fine-to-coarse map of each
 //! coarsening level, and whichever tensors are keyed by gene rather than by
-//! module or topic. A cohort that measures genes the source run never saw can
+//! coarse group, module or topic. A cohort that measures genes the source run never saw can
 //! still be absorbed if those are carried by NAME rather than refused by
 //! position. Every family with a checkpoint goes through here. The pieces live
 //! where their mechanism does:
@@ -10,13 +10,16 @@
 //! - the alignment of this run's names onto the source run's is the same
 //!   matcher `predict` aligns a query with ([`remap_for_init_from`]);
 //! - a coarsening level is grown by `FeatureCoarsening::grow_by_profile`, each
-//!   unknown gene joining the inherited module whose known members its
+//!   unknown gene joining the inherited coarse group whose known members its
 //!   pseudobulk profile most resembles (see `inherit_level_coarsenings`);
 //! - the checkpoint's gene-keyed tensors are gathered onto the new order by
 //!   `candle_util::grow`, which starts an unseen gene at the checkpoint's mean;
-//! - the masked family's ρ knows more than that, so [`refine_rho_by_module`]
-//!   moves an unseen gene's row from the global mean to the mean of its
-//!   module's known members. The other families have no per-gene embedding.
+//! - a free per-gene ρ knows more than that, so [`refine_rho_by_coarsening`]
+//!   moves an unseen gene's row from the global mean to the mean of its coarse
+//!   group's known members. A feature side composed from learned modules takes
+//!   neither: its membership starts flat, the one start that leaves every
+//!   module reachable (see `candle_util::grow`). The families with no per-gene
+//!   embedding at all take only the gather.
 
 use crate::embed_common::Mat;
 use crate::topic::eval::{GeneRemap, QueryNameOpts};
@@ -70,12 +73,12 @@ pub(crate) fn remap_for_init_from(
 }
 
 /// After the checkpoint is loaded on the new axis, restart each unseen gene's
-/// ρ row at the mean of its module's known members instead of the global mean
-/// it was given, so it enters the fit inside its module's neighbourhood.
-pub(crate) fn refine_rho_by_module(
+/// ρ row at the mean of its coarse group's known members instead of the global
+/// mean it was given, so it enters the fit inside that group's neighbourhood.
+pub(crate) fn refine_rho_by_coarsening(
     parameters: &candle_util::candle_nn::VarMap,
     remap: &GeneRemap,
-    modules: &FeatureCoarsening,
+    coarsening: &FeatureCoarsening,
 ) -> anyhow::Result<()> {
     use matrix_util::traits::ConvertMatOps;
     let var = parameters
@@ -84,40 +87,50 @@ pub(crate) fn refine_rho_by_module(
         .expect("VarMap lock")
         .get(RHO_TENSOR)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("warm-start: no tensor named `{RHO_TENSOR}`"))?;
-    let mut rho = Mat::from_tensor(&var.as_tensor().to_device(&candle_util::candle_core::Device::Cpu)?)?;
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "gene axis growth: this run has a free per-gene embedding, but the model it \
+                 just loaded registers no `{RHO_TENSOR}`. A feature side composed from learned \
+                 modules has none either — it is refined by its own rule and never reaches \
+                 here — so this is a model that did not load."
+            )
+        })?;
+    let mut rho = Mat::from_tensor(
+        &var.as_tensor()
+            .to_device(&candle_util::candle_core::Device::Cpu)?,
+    )?;
     let known: Vec<bool> = remap.new_to_train.iter().map(Option::is_some).collect();
-    fill_rows_by_module(&mut rho, &known, modules)?;
+    fill_rows_by_coarsening(&mut rho, &known, coarsening)?;
     candle_util::frozen_features::overwrite_var_2d(parameters, RHO_TENSOR, &rho, var.device())?;
     Ok(())
 }
 
 /// Overwrite every unknown row of `rho` with the mean of the known rows in its
-/// module. Pure so it can be checked without a checkpoint.
-pub(crate) fn fill_rows_by_module(
+/// coarse group. Pure so it can be checked without a checkpoint.
+pub(crate) fn fill_rows_by_coarsening(
     rho: &mut Mat,
     known: &[bool],
-    modules: &FeatureCoarsening,
+    coarsening: &FeatureCoarsening,
 ) -> anyhow::Result<()> {
     let d = rho.nrows();
     anyhow::ensure!(
-        known.len() == d && modules.fine_to_coarse.len() == d,
-        "gene axis growth: ρ has {d} rows, {} known flags, modules cover {}",
+        known.len() == d && coarsening.fine_to_coarse.len() == d,
+        "gene axis growth: ρ has {d} rows, {} known flags, the coarsening covers {}",
         known.len(),
-        modules.fine_to_coarse.len(),
+        coarsening.fine_to_coarse.len(),
     );
-    // Sum the known rows per module: zero the unknown ones so one aggregation
-    // over the whole matrix counts only known members.
+    // Sum the known rows per coarse group: zero the unknown ones so one
+    // aggregation over the whole matrix counts only known members.
     let mut known_rows = rho.clone();
-    let mut members = vec![0usize; modules.num_coarse];
+    let mut members = vec![0usize; coarsening.num_coarse];
     for (g, &k) in known.iter().enumerate() {
         if k {
-            members[modules.fine_to_coarse[g]] += 1;
+            members[coarsening.fine_to_coarse[g]] += 1;
         } else {
             known_rows.row_mut(g).fill(0.0);
         }
     }
-    let mut mean = modules.aggregate_rows_ds(&known_rows);
+    let mut mean = coarsening.aggregate_rows_ds(&known_rows);
     for (m, &n) in members.iter().enumerate() {
         if n > 0 {
             mean.row_mut(m).scale_mut(1.0 / n as f32);
@@ -127,11 +140,11 @@ pub(crate) fn fill_rows_by_module(
         if k {
             continue;
         }
-        let m = modules.fine_to_coarse[g];
+        let m = coarsening.fine_to_coarse[g];
         anyhow::ensure!(
             members[m] > 0,
-            "gene axis growth: gene {g} was placed in module {m}, which has no surviving member \
-             to start its embedding from"
+            "gene axis growth: gene {g} was placed in coarse group {m}, which has no surviving \
+             member to start its embedding from"
         );
         rho.row_mut(g).copy_from(&mean.row(m));
     }

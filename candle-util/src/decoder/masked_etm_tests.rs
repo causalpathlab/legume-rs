@@ -22,6 +22,12 @@ fn rho() -> Tensor {
     Tensor::from_vec(rows, (D, H), &dev()).unwrap()
 }
 
+/// A free feature side holding exactly [`rho`], for the tests that want a
+/// fixed table rather than a learned one.
+fn fixed_features() -> std::sync::Arc<crate::feature_embedding::FeatureEmbedding> {
+    crate::feature_embedding::FeatureEmbedding::fixed(rho())
+}
+
 fn alpha() -> Tensor {
     let rows: Vec<f32> = (0..K * H)
         .map(|i| ((i * 5 % 13) as f32 - 6.0) * 0.25)
@@ -44,7 +50,7 @@ fn decoder() -> EmbeddedNbTopicDecoder {
         Tensor::from_vec(log_pi, (1, D), &dev()).unwrap(),
     );
     let vb = VarBuilder::from_tensors(ts, DType::F32, &dev());
-    EmbeddedNbTopicDecoder::new(K, rho(), vb.pp("dec")).unwrap()
+    EmbeddedNbTopicDecoder::new(K, fixed_features(), vb.pp("dec")).unwrap()
 }
 
 fn log_theta() -> Tensor {
@@ -268,7 +274,13 @@ fn module_decoder() -> EmbeddedNbTopicDecoder {
         Tensor::from_vec(log_pi, (1, M), &dev()).unwrap(),
     );
     let vb = VarBuilder::from_tensors(ts, DType::F32, &dev());
-    EmbeddedNbTopicDecoder::new_with_coarsening(K, rho(), coarsening_map(), vb.pp("mdec")).unwrap()
+    EmbeddedNbTopicDecoder::new_with_coarsening(
+        K,
+        fixed_features(),
+        coarsening_map(),
+        vb.pp("mdec"),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -556,4 +568,53 @@ fn a_module_residual_scales_the_nb_mean() {
     for (x, y) in to_vec1(&a).iter().zip(to_vec1(&b)) {
         assert!((x - y).abs() < 1e-4, "residual {x} vs scaled library {y}");
     }
+}
+
+/// The decoder shares the encoder's feature side, and "shares" has to mean the
+/// live one. With a free table that is automatic, because the table is a `Var`
+/// and a held handle reads through to it. With a composed feature side the
+/// handle is a computed value, so holding it freezes the feature rows at their
+/// initialization while the parameters underneath move — the fit would train
+/// its topics against an embedding that never updates.
+#[test]
+fn the_decoder_sees_the_feature_side_as_it_moves() {
+    use crate::feature_embedding::{FeatureEmbedding, LOGITS_VAR_NAME, MU_VAR_NAME};
+    let dev = Device::Cpu;
+    let vm = candle_nn::VarMap::new();
+    let vb = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &dev);
+    let (d, h, m, k) = (5usize, 3usize, 2usize, 2usize);
+    let features = FeatureEmbedding::new(d, m, h, vb.pp("enc")).unwrap();
+    let dec = EmbeddedNbTopicDecoder::new(k, std::sync::Arc::new(features), vb.pp("dec")).unwrap();
+
+    // A flat membership gives every feature the same row, and a dictionary
+    // that is uniform whatever `μ` holds — so separate the features first, or
+    // the check cannot fail no matter how stale the read is.
+    {
+        let data = vm.data().lock().unwrap();
+        let spread: Vec<f32> = (0..d * m)
+            .map(|i| if i % m == i / m % m { 4.0 } else { 0.0 })
+            .collect();
+        data[&format!("enc.{LOGITS_VAR_NAME}")]
+            .set(&Tensor::from_vec(spread, (d, m), &dev).unwrap())
+            .unwrap();
+    }
+    let before: Vec<Vec<f32>> = dec.get_dictionary().unwrap().to_vec2().unwrap();
+    assert!(
+        before.iter().any(|r| r != &before[0]),
+        "the fixture must separate the features, or staleness is undetectable"
+    );
+
+    // Move the dictionary the feature rows are composed from.
+    {
+        let data = vm.data().lock().unwrap();
+        let mu = &data[&format!("enc.{MU_VAR_NAME}")];
+        let bumped = (mu.as_tensor() * 3.0).unwrap();
+        mu.set(&bumped).unwrap();
+    }
+
+    let after: Vec<Vec<f32>> = dec.get_dictionary().unwrap().to_vec2().unwrap();
+    assert_ne!(
+        before, after,
+        "the decoder is reading a snapshot of the feature side, not the live one"
+    );
 }

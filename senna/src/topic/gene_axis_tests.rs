@@ -1,8 +1,8 @@
 //! Carrying a masked model's gene-keyed state onto an axis the source run did
 //! not have: the alignment that decides whether anything is needed, and the
-//! module-mean restart of an unseen gene's ρ row.
+//! group-mean restart of an unseen gene's ρ row.
 
-use super::fill_rows_by_module;
+use super::fill_rows_by_coarsening;
 use crate::embed_common::Mat;
 use crate::topic::eval::GeneRemap;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
@@ -29,11 +29,11 @@ fn an_identical_axis_is_recognised_so_the_exact_path_is_taken() {
     assert!(!shorter.is_identity());
 }
 
-/// Axis [g1 gX g3 gY g0], modules {g1,g0} = 0 and {g3} = 1 with gX in 0 and gY
-/// in 1: each unknown row becomes the mean of its module's KNOWN rows.
+/// Axis [g1 gX g3 gY g0], coarse groups {g1,g0} = 0 and {g3} = 1 with gX in 0
+/// and gY in 1: each unknown row becomes the mean of its group's KNOWN rows.
 #[test]
-fn an_unseen_gene_restarts_at_the_mean_of_its_module_known_members() {
-    let modules = FeatureCoarsening::from_fine_to_coarse(vec![0, 0, 1, 1, 0], 2).unwrap();
+fn an_unseen_gene_restarts_at_the_mean_of_its_groups_known_members() {
+    let coarsening = FeatureCoarsening::from_fine_to_coarse(vec![0, 0, 1, 1, 0], 2).unwrap();
     let known = [true, false, true, false, true];
     let mut rho = Mat::from_row_slice(
         5,
@@ -46,17 +46,51 @@ fn an_unseen_gene_restarts_at_the_mean_of_its_module_known_members() {
             3.0, 4.0, // g0
         ],
     );
-    fill_rows_by_module(&mut rho, &known, &modules).unwrap();
-    assert_eq!(rho.row(1).iter().copied().collect::<Vec<_>>(), vec![2.0, 3.0]);
-    assert_eq!(rho.row(3).iter().copied().collect::<Vec<_>>(), vec![5.0, 6.0]);
-    assert_eq!(rho.row(0).iter().copied().collect::<Vec<_>>(), vec![1.0, 2.0], "known rows untouched");
+    fill_rows_by_coarsening(&mut rho, &known, &coarsening).unwrap();
+    assert_eq!(
+        rho.row(1).iter().copied().collect::<Vec<_>>(),
+        vec![2.0, 3.0]
+    );
+    assert_eq!(
+        rho.row(3).iter().copied().collect::<Vec<_>>(),
+        vec![5.0, 6.0]
+    );
+    assert_eq!(
+        rho.row(0).iter().copied().collect::<Vec<_>>(),
+        vec![1.0, 2.0],
+        "known rows untouched"
+    );
 }
 
 #[test]
-fn an_unseen_gene_in_a_module_with_no_known_member_is_refused() {
-    let modules = FeatureCoarsening::from_fine_to_coarse(vec![0, 1], 2).unwrap();
+fn an_unseen_gene_in_a_group_with_no_known_member_is_refused() {
+    let coarsening = FeatureCoarsening::from_fine_to_coarse(vec![0, 1], 2).unwrap();
     let mut rho = Mat::zeros(2, 3);
-    assert!(fill_rows_by_module(&mut rho, &[true, false], &modules).is_err());
+    assert!(fill_rows_by_coarsening(&mut rho, &[true, false], &coarsening).is_err());
+}
+
+/// The name is the encoder's prefix plus the constant the feature side
+/// registers itself under, so a rename there must not leave this probing a
+/// tensor that no longer exists.
+#[test]
+fn the_rho_tensor_name_tracks_the_one_the_feature_side_registers() {
+    assert!(super::RHO_TENSOR.ends_with(candle_util::feature_embedding::FREE_VAR_NAME));
+}
+
+/// A run whose feature side IS a free per-gene table, but whose checkpoint
+/// holds no ρ, is a broken load rather than a composed feature side. Which of
+/// the two it is, is the caller's to know, so reaching here without ρ has to
+/// fail rather than quietly leave every unseen gene at the global mean.
+#[test]
+fn refining_a_free_feature_side_with_no_rho_is_an_error() {
+    let coarsening = FeatureCoarsening::from_fine_to_coarse(vec![0, 0], 1).unwrap();
+    let remap = GeneRemap {
+        new_to_train: vec![Some(0), None],
+        d_train: 1,
+        n_mapped: 1,
+    };
+    let empty = candle_util::candle_nn::VarMap::new();
+    assert!(super::refine_rho_by_coarsening(&empty, &remap, &coarsening).is_err());
 }
 
 /// Every family asks the same question before it warm-starts: is this run's
@@ -64,8 +98,8 @@ fn an_unseen_gene_in_a_module_with_no_known_member_is_refused() {
 /// comes from the source run's own feature-mean row order.
 mod for_init_from {
     use super::super::remap_for_init_from;
-    use auxiliary_data::feature_names::FeatureNameKindArg;
     use crate::topic::model_metadata::save_feature_mean;
+    use auxiliary_data::feature_names::FeatureNameKindArg;
 
     fn genes(names: &[&str]) -> Vec<Box<str>> {
         names.iter().map(|g| (*g).into()).collect()
@@ -128,11 +162,22 @@ mod for_init_from {
             remap_for_init_from(Some(&prefix), &kind, &genes(&["ENSG1_A", "ENSG2_B"]))
                 .map(|r| r.map_or(2, |r| r.n_mapped))
         };
-        assert_eq!(under(FeatureNameKindArg::Gene).unwrap(), 2, "the suffix is canonicalized away");
-        assert_eq!(under(FeatureNameKindArg::Auto).unwrap(), 2, "auto resolves to the gene rule");
+        assert_eq!(
+            under(FeatureNameKindArg::Gene).unwrap(),
+            2,
+            "the suffix is canonicalized away"
+        );
+        assert_eq!(
+            under(FeatureNameKindArg::Auto).unwrap(),
+            2,
+            "auto resolves to the gene rule"
+        );
         // Exact spelling was asked for, so the suffixed names are different
         // genes and the two axes share nothing at all.
-        assert!(under(FeatureNameKindArg::Exact).is_err(), "exact spelling was asked for");
+        assert!(
+            under(FeatureNameKindArg::Exact).is_err(),
+            "exact spelling was asked for"
+        );
     }
 
     /// An `--init-from` that shares no gene with this run is a retrain wearing

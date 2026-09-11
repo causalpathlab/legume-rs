@@ -20,7 +20,7 @@
 //! The membership here is FIXED: it arrives already computed and is held as
 //! plain tensors, never as parameters, so no gradient reaches it. That is what
 //! separates a coarsening from a module — a module learns which features group
-//! together (see the masked encoder's centroids), a coarsening is told.
+//! together, as the masked encoder's do, a coarsening is told.
 
 use crate::fast_index::index_add_rows;
 use candle_core::{DType, Device, Result, Tensor};
@@ -50,7 +50,11 @@ impl CoarseningMap {
     pub fn new(fine_to_coarse: &[usize], share_of_gene: &[f32], dev: &Device) -> Result<Self> {
         let d = fine_to_coarse.len();
         if share_of_gene.len() != d {
-            candle_core::bail!("coarse feature map: {} genes but {} shares", d, share_of_gene.len());
+            candle_core::bail!(
+                "coarse feature map: {} genes but {} shares",
+                d,
+                share_of_gene.len()
+            );
         }
         let m = fine_to_coarse.iter().max().map_or(0, |&x| x + 1);
         let mut coarse_to_fine: Vec<Vec<usize>> = vec![Vec::new(); m];

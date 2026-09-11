@@ -197,6 +197,14 @@ pub struct TopicModelMetadata {
 }
 
 impl TopicModelMetadata {
+    /// Learned gene modules `M`, with the back-compat rule in one place: a
+    /// model written before the field existed has none, which is `0` — exactly
+    /// the shape it was trained at.
+    #[must_use]
+    pub fn gene_modules(&self) -> usize {
+        self.n_gene_modules.unwrap_or(0)
+    }
+
     pub fn save(&self, prefix: &str) -> anyhow::Result<()> {
         let path = format!("{prefix}.model.json");
         let json = serde_json::to_string_pretty(self)?;

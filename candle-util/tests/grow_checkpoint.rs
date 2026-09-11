@@ -163,24 +163,34 @@ fn an_unrelated_shape_change_is_rejected() {
     );
 }
 
+/// Grow one tensor onto the axis `[old 2, unseen, old 0]`: four saved rows
+/// become three, one of them a feature the checkpoint never had. Returns the
+/// grown tensor alongside it and the checkpoint, with the part both callers
+/// share already asserted.
+fn onto_a_changed_gene_axis(name: &str, width: usize) -> (Tensor, Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let dev = Device::Cpu;
+    let saved = ramp(&[4, width], &dev);
+    let fresh = ramp(&[3, width], &dev).affine(-1.0, 0.0).expect("neg");
+    let remap = [Some(2), None, Some(0)];
+    let out = grow_tensor(name, &fresh, &saved, &gene_dims(&remap, 4)).expect("grow");
+    let (o, s) = (to_vec2(&out), to_vec2(&saved));
+    assert_eq!(o[0], s[2], "a known feature keeps its row exactly");
+    assert_eq!(o[2], s[0]);
+    (out, o, s)
+}
+
 /// A gene the checkpoint knew keeps its ρ row wherever it now sits; one it
 /// never saw starts at the mean of the rows it did have.
 #[test]
 fn rho_rows_follow_the_gene_by_name_and_new_genes_start_at_the_mean() {
-    let dev = Device::Cpu;
-    let saved = ramp(&[4, H_OLD], &dev);
-    // This run: [old 2, unseen, old 0] — reordered, one dropped, one new.
-    let remap = [Some(2), None, Some(0)];
-    let fresh = ramp(&[3, H_OLD], &dev).affine(-1.0, 0.0).expect("neg");
-
-    let out = grow_tensor("enc.feature.embeddings", &fresh, &saved, &gene_dims(&remap, 4))
-        .expect("grow");
-    let (o, s) = (to_vec2(&out), to_vec2(&saved));
-    assert_eq!(o[0], s[2]);
-    assert_eq!(o[2], s[0]);
+    let (_, o, s) = onto_a_changed_gene_axis("enc.feature.embeddings", H_OLD);
     for h in 0..H_OLD {
         let mean = (0..4).map(|d| s[d][h]).sum::<f32>() / 4.0;
-        assert!((o[1][h] - mean).abs() < 1e-5, "new gene column {h}: {} vs {mean}", o[1][h]);
+        assert!(
+            (o[1][h] - mean).abs() < 1e-5,
+            "new gene column {h}: {} vs {mean}",
+            o[1][h]
+        );
     }
 }
 
@@ -222,22 +232,50 @@ fn a_same_length_permutation_is_gathered_not_copied() {
 
     let src = VarMap::new();
     let (d, h) = (3usize, 2usize);
-    src.get((1, d), "dec_0.log_phi", candle_nn::Init::Const(0.0), DType::F32, &dev)
-        .expect("var");
-    src.get((K_OLD, h), "dec_0.topic.embeddings", candle_nn::Init::Const(0.0), DType::F32, &dev)
-        .expect("var");
+    src.get(
+        (1, d),
+        "dec_0.log_phi",
+        candle_nn::Init::Const(0.0),
+        DType::F32,
+        &dev,
+    )
+    .expect("var");
+    src.get(
+        (K_OLD, h),
+        "dec_0.topic.embeddings",
+        candle_nn::Init::Const(0.0),
+        DType::F32,
+        &dev,
+    )
+    .expect("var");
     {
         let data = src.data().lock().expect("lock");
-        data["dec_0.log_phi"].set(&ramp(&[1, d], &dev)).expect("set");
-        data["dec_0.topic.embeddings"].set(&ramp(&[K_OLD, h], &dev)).expect("set");
+        data["dec_0.log_phi"]
+            .set(&ramp(&[1, d], &dev))
+            .expect("set");
+        data["dec_0.topic.embeddings"]
+            .set(&ramp(&[K_OLD, h], &dev))
+            .expect("set");
     }
     src.save(path).expect("save");
 
     let dst = VarMap::new();
-    dst.get((1, d), "dec_0.log_phi", candle_nn::Init::Const(0.0), DType::F32, &dev)
-        .expect("var");
-    dst.get((K_OLD, h), "dec_0.topic.embeddings", candle_nn::Init::Const(0.0), DType::F32, &dev)
-        .expect("var");
+    dst.get(
+        (1, d),
+        "dec_0.log_phi",
+        candle_nn::Init::Const(0.0),
+        DType::F32,
+        &dev,
+    )
+    .expect("var");
+    dst.get(
+        (K_OLD, h),
+        "dec_0.topic.embeddings",
+        candle_nn::Init::Const(0.0),
+        DType::F32,
+        &dev,
+    )
+    .expect("var");
     let remap = [Some(2), Some(0), Some(1)];
     let dims = GrowthDims {
         k_old: K_OLD,
@@ -253,7 +291,43 @@ fn a_same_length_permutation_is_gathered_not_copied() {
 
     let data = dst.data().lock().expect("lock");
     let phi = to_vec2(data["dec_0.log_phi"].as_tensor());
-    assert_eq!(phi[0], vec![3.0, 1.0, 2.0], "gathered onto the new gene order");
+    assert_eq!(
+        phi[0],
+        vec![3.0, 1.0, 2.0],
+        "gathered onto the new gene order"
+    );
     let alpha = to_vec2(data["dec_0.topic.embeddings"].as_tensor());
-    assert_eq!(alpha, to_vec2(&ramp(&[K_OLD, h], &dev)), "no gene axis: copied as is");
+    assert_eq!(
+        alpha,
+        to_vec2(&ramp(&[K_OLD, h], &dev)),
+        "no gene axis: copied as is"
+    );
+}
+
+/// The membership table is gene-keyed, so it follows the axis the way `ρ` does
+/// — but it must NOT take `ρ`'s fill. Sparsemax has zero Jacobian outside the
+/// support, so a feature's set of modules can only shrink: whatever support it
+/// starts with is the most it will ever have. Given the checkpoint's mean
+/// logits, a new feature would inherit that vector's support — one module, for
+/// a trained spread — and be locked out of the rest of the dictionary before
+/// its first step. A flat row is the only start that leaves every module
+/// reachable, and it composes the dictionary's centroid.
+#[test]
+fn a_new_features_membership_starts_flat_so_every_module_stays_reachable() {
+    use candle_util::nn::layers::sparsemax;
+    let m = 5usize;
+    // The checkpoint's logits are spread the way a trained table's are, so the
+    // mean of them has a support of ONE module: taking it would foreclose the
+    // other four for this feature permanently.
+    let (out, _, _) = onto_a_changed_gene_axis("enc.modules.logits", m);
+
+    let pi = to_vec2(&sparsemax(&out).expect("sparsemax"));
+    let uniform = 1.0 / m as f32;
+    for (j, &p) in pi[1].iter().enumerate() {
+        assert!(
+            (p - uniform).abs() < 1e-6,
+            "a new feature starts at {p} on module {j}, not the uniform {uniform}: \
+             every module it is not on is foreclosed for good",
+        );
+    }
 }

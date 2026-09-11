@@ -16,8 +16,8 @@
 
 use crate::embed_common::*;
 use crate::topic::common::{
-    create_device, load_and_collapse, move_varmap_to_cpu,
-    setup_stop_handler, LoadCollapseArgs, PreparedData,
+    create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
+    PreparedData,
 };
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 
@@ -405,9 +405,11 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
                 embedding_dim: None,
                 // `senna vae` has no growth surface yet.
                 growth: crate::topic::warm_start::Growth::default(),
-                gene_axis: gene_axis
-                    .as_ref()
-                    .map(|remap| GeneAxisGrowth { remap, modules: None }),
+                n_gene_modules: 0,
+                gene_axis: gene_axis.as_ref().map(|remap| GeneAxisGrowth {
+                    remap,
+                    coarsening: None,
+                }),
             },
         )?;
     }

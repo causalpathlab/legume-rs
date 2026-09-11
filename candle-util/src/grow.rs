@@ -140,7 +140,8 @@ impl GrowthDims<'_> {
 /// Value to write into a tensor's newly created slab, or `None` to keep the
 /// freshly-initialized values already there.
 ///
-/// The overrides are exactly the ones function preservation requires:
+/// Four of the overrides are what function preservation requires; the fifth is
+/// about gradient reachability instead:
 ///
 /// - **`α`'s new H columns → 0.** `β = softmax_g(α·ρᵀ)`, so zeroing them leaves
 ///   `β` bit-for-bit unchanged whatever `ρ`'s new columns hold.
@@ -151,6 +152,10 @@ impl GrowthDims<'_> {
 ///   columns, so the encoder's output is unchanged despite `ρ` being wider.
 /// - **new topic rows of `z.mean` / `z.lnvar` → 0 weight**, with the bias at
 ///   [`NEW_TOPIC_LOGIT_BIAS`], so added topics start at ~0 mass.
+/// - **a gained feature's membership row → flat.** Not preservation: the row is
+///   new, so there is nothing to preserve. Sparsemax gives no gradient outside
+///   its support, so this is the only start that leaves the whole dictionary
+///   reachable (`crate::feature_embedding`).
 ///
 /// Everything else keeps its fresh init, which is what new capacity should
 /// start from.
@@ -170,6 +175,16 @@ pub fn new_slab_value(name: &str, axis: Axis) -> Option<f64> {
             Axis::Features => Some(0.0),
             Axis::Topics => None,
         };
+    }
+    // The membership table `ℓ` [D, M]. A feature's modules are only ever lost,
+    // not gained (see `crate::feature_embedding`), so a feature the axis
+    // gained must start with the whole dictionary in its support — which the
+    // checkpoint's mean logits, a trained and so spread-out vector, would not
+    // give it. Flat is that start, and it composes the dictionary's centroid.
+    // Safe here, unlike at init, because the model around it is already
+    // trained: there is no symmetry left to break.
+    if name.ends_with(crate::feature_embedding::LOGITS_VAR_NAME) {
+        return (axis == Axis::Features).then_some(0.0);
     }
     if name.contains("z.mean") || name.contains("z.lnvar") {
         return Some(if name.ends_with(".bias") {
@@ -298,8 +313,8 @@ pub fn grow_tensor(
 /// the tensor's growth rule names ([`new_slab_value`]), or — where the rule
 /// keeps the fresh init, as it does for ρ — the mean of the saved entries
 /// along that axis, so it enters at the checkpoint's average rather than at a
-/// random point. A caller that knows more (a module the gene was placed in)
-/// refines from there.
+/// random point. A caller that knows more (the coarse group the gene was placed
+/// in) refines from there.
 fn gather_gene_axis(
     name: &str,
     saved: &Tensor,
