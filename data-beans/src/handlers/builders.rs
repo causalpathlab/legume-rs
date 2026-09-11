@@ -45,6 +45,9 @@ pub(super) fn run_squeeze_if_needed(
     if do_squeeze {
         info!("Squeeze the backend data {}", backend_file);
         let squeeze_args = RunSqueezeArgs {
+            // Squeezing in place on a path the caller already resolved: the
+            // zip decision was made there, so nothing is re-zipped here.
+            zip: false,
             data_files: vec![backend_file.into()],
             row_nnz_cutoff,
             column_nnz_cutoff,

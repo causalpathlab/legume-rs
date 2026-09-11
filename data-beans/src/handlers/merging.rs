@@ -405,6 +405,9 @@ pub fn run_merge_backend(args: &MergeBackendArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
+            // Squeezing in place on a path the caller already resolved: the
+            // zip decision was made there, so nothing is re-zipped here.
+            zip: false,
             data_files: vec![backend_file.clone()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,
@@ -705,6 +708,9 @@ pub fn run_merge_mtx(args: &MergeMtxArgs) -> anyhow::Result<()> {
     if args.do_squeeze {
         info!("Squeeze the backend data {}", &backend_file);
         let squeeze_args = RunSqueezeArgs {
+            // Squeezing in place on a path the caller already resolved: the
+            // zip decision was made there, so nothing is re-zipped here.
+            zip: false,
             data_files: vec![backend_file.clone().into_boxed_str()],
             row_nnz_cutoff: args.row_nnz_cutoff,
             column_nnz_cutoff: args.column_nnz_cutoff,

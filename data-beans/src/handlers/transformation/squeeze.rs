@@ -6,7 +6,7 @@ use crate::hdf5_io::*;
 use crate::interactive::{confirm, prompt_user_action, UserAction};
 use crate::qc::*;
 use crate::sparse_io::*;
-use crate::zarr_io::{finalize_zarr_output, materialize_writable_backend};
+use crate::zarr_io::{apply_zip_flag, finalize_zarr_output, materialize_writable_backend};
 
 use log::info;
 use matrix_util::common_io::*;
@@ -30,7 +30,11 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         let (backend, data_file) = resolve_backend_file(data_file_arg, None)?;
 
         // Resolve target path (do not stage yet — defer until after user confirm)
-        let target_file = if let Some(output_prefix) = &cmd_args.output {
+        let effective_output = cmd_args
+            .output
+            .as_ref()
+            .map(|o| apply_zip_flag(o, cmd_args.zip, &backend));
+        let target_file = if let Some(output_prefix) = &effective_output {
             let (_, output_file) = resolve_backend_file(output_prefix, Some(backend.clone()))?;
             if std::path::Path::new(output_file.as_ref()).exists() {
                 return Err(anyhow::anyhow!(
@@ -206,7 +210,7 @@ pub fn run_squeeze(cmd_args: &RunSqueezeArgs) -> anyhow::Result<()> {
         );
         drop(data);
 
-        if let Some(output_prefix) = &cmd_args.output {
+        if let Some(output_prefix) = &effective_output {
             finalize_zarr_output(&target_file, output_prefix)?;
         }
     }
@@ -451,7 +455,12 @@ fn run_merge_then_squeeze(
         all_triplets.len()
     );
 
-    let (backend, backend_file) = resolve_backend_file(output_prefix, None)?;
+    // `output_prefix` keeps naming the sidecars; the backend itself takes the
+    // `.zarr.zip` the rest of the tool produces, written as a directory here and
+    // zipped once everything below has finished with it.
+    let (backend, _) = resolve_backend_file(output_prefix, None)?;
+    let effective_output = apply_zip_flag(output_prefix, cmd_args.zip, &backend);
+    let (backend, backend_file) = resolve_backend_file(&effective_output, Some(backend))?;
 
     if std::path::Path::new(backend_file.as_ref()).exists() {
         info!("Removing existing output file: {}", &backend_file);
@@ -509,6 +518,9 @@ fn run_merge_then_squeeze(
         .map(|k| batch_map.get(k).unwrap_or(&default_batch).clone())
         .collect();
     write_lines(&final_batch_names, &batch_memb_file)?;
+
+    drop(final_data);
+    finalize_zarr_output(&backend_file, &effective_output)?;
 
     info!("Squeeze and merge (union) complete!");
     Ok(())
@@ -640,7 +652,9 @@ fn run_squeeze_then_merge(
         data_files: temp_files.clone(),
         backend,
         output: cmd_args.output.clone().unwrap(),
-        zip: false,
+        // The merge writes what the user asked squeeze for, so it takes
+        // squeeze's own zip decision rather than always leaving a directory.
+        zip: cmd_args.zip,
         do_squeeze: false,
         row_nnz_cutoff: 0,
         column_nnz_cutoff: 0,

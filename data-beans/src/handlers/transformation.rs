@@ -24,6 +24,10 @@ pub struct ReorderRowsArgs {
     /// output header
     #[arg(short, long, required = true)]
     pub output: Box<str>,
+
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
 }
 
 #[derive(Args, Debug)]
@@ -70,6 +74,10 @@ pub struct SubsetColumnsArgs {
     /// output file
     #[arg(short, long, required = true)]
     pub output: Box<str>,
+
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
 }
 
 #[derive(Args, Debug)]
@@ -116,6 +124,10 @@ pub struct SubsetRowsArgs {
     /// output file
     #[arg(short, long, required = true)]
     pub output: Box<str>,
+
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
 }
 
 #[derive(Args, Debug)]
@@ -221,6 +233,10 @@ pub struct RunSqueezeArgs {
                      modifies files in-place (requires confirmation in interactive mode)."
     )]
     pub output: Option<Box<str>>,
+
+    /// keep a `.zarr` directory instead of producing a `.zarr.zip` archive
+    #[arg(long = "no-zip", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    pub zip: bool,
 
     /// row alignment strategy for merging multiple files
     #[arg(
