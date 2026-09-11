@@ -38,7 +38,10 @@ impl FeatureCoarsening {
     /// The one place the inverse is derived, and the one place a stray group
     /// index is caught: every consumer indexes `coarse_to_fine` by the
     /// assignment, so an out-of-range entry would otherwise panic at first use.
-    pub fn from_fine_to_coarse(fine_to_coarse: Vec<usize>, num_coarse: usize) -> anyhow::Result<Self> {
+    pub fn from_fine_to_coarse(
+        fine_to_coarse: Vec<usize>,
+        num_coarse: usize,
+    ) -> anyhow::Result<Self> {
         let mut coarse_to_fine = vec![Vec::new(); num_coarse];
         for (f, &c) in fine_to_coarse.iter().enumerate() {
             anyhow::ensure!(

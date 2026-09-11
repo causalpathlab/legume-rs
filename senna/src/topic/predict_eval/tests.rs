@@ -180,17 +180,30 @@ mod eval_features_naming {
     #[test]
     fn raw_names_resolve_on_a_canonical_axis() {
         let dir = tempfile::tempdir().unwrap();
-        let path = list_file(dir.path(), &["ENSG00000000419_DPM1", "ENSG00000000003_TSPAN6"]);
+        let path = list_file(
+            dir.path(),
+            &["ENSG00000000419_DPM1", "ENSG00000000003_TSPAN6"],
+        );
         let axis = names(&["tspan6", "tnmd", "dpm1"]);
-        assert_eq!(resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(), vec![2, 0]);
+        assert_eq!(
+            resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
+            vec![2, 0]
+        );
     }
 
     #[test]
     fn symbols_resolve_on_a_raw_axis() {
         let dir = tempfile::tempdir().unwrap();
         let path = list_file(dir.path(), &["DPM1", "TSPAN6"]);
-        let axis = names(&["ENSG00000000003_TSPAN6", "ENSG00000000005_TNMD", "ENSG00000000419_DPM1"]);
-        assert_eq!(resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(), vec![2, 0]);
+        let axis = names(&[
+            "ENSG00000000003_TSPAN6",
+            "ENSG00000000005_TNMD",
+            "ENSG00000000419_DPM1",
+        ]);
+        assert_eq!(
+            resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
+            vec![2, 0]
+        );
     }
 
     #[test]
@@ -198,7 +211,10 @@ mod eval_features_naming {
         let dir = tempfile::tempdir().unwrap();
         let path = list_file(dir.path(), &["gene_0"]);
         let axis = names(&["other_0", "gene_0"]);
-        assert_eq!(resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(), vec![1]);
+        assert_eq!(
+            resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap(),
+            vec![1]
+        );
     }
 
     /// A list on a foreign axis is refused, and the message shows both
@@ -209,7 +225,9 @@ mod eval_features_naming {
         let dir = tempfile::tempdir().unwrap();
         let path = list_file(dir.path(), &["chr1:100-200", "chr2:5-9"]);
         let axis = names(&["tspan6", "tnmd", "dpm1"]);
-        let err = resolve_eval_genes(Some(&path), &axis, "--eval-features").unwrap_err().to_string();
+        let err = resolve_eval_genes(Some(&path), &axis, "--eval-features")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("chr1:100-200"), "{err}");
         assert!(err.contains("tspan6"), "{err}");
         assert!(err.contains("--feature-name-kind"), "{err}");

@@ -76,7 +76,16 @@ pub(crate) fn collect_geometry(
 fn print_report(rows: &[(&str, EmbeddingGeometry)]) {
     println!(
         "{:<18} {:>8} {:>5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "table", "rows", "h", "pr_raw", "pr_ctr", "pr_both", "pair_cos", "mode_cos", "max_corr", "max_vif"
+        "table",
+        "rows",
+        "h",
+        "pr_raw",
+        "pr_ctr",
+        "pr_both",
+        "pair_cos",
+        "mode_cos",
+        "max_corr",
+        "max_vif"
     );
     for (name, g) in rows {
         println!(

@@ -30,7 +30,10 @@ fn the_tree_is_the_default_and_marginal_switches_it_off() {
 fn a_fit_recorded_before_the_opt_out_existed_still_carries() {
     let json = r#"{"emit_pb_reference": false}"#;
     let a: CollapseArgs = serde_json::from_str(json).expect("old record replays");
-    assert!(a.emits_pb_reference(), "missing field is the default, which is on");
+    assert!(
+        a.emits_pb_reference(),
+        "missing field is the default, which is on"
+    );
     let json = r#"{"no_emit_pb_reference": true}"#;
     let a: CollapseArgs = serde_json::from_str(json).expect("opt-out replays");
     assert!(!a.emits_pb_reference());

@@ -236,7 +236,13 @@ pub(crate) fn write_loadings_expanded<Dec: DecoderModuleT + ?Sized>(
 ) -> anyhow::Result<()> {
     let dict_tensor = decoder.get_dictionary()?;
     let Some(fc) = coarsening else {
-        return write_dictionary_tensor(&dict_tensor, None, n_features_full, gene_names, out_prefix);
+        return write_dictionary_tensor(
+            &dict_tensor,
+            None,
+            n_features_full,
+            gene_names,
+            out_prefix,
+        );
     };
     let table_dk: Mat = Mat::from_tensor(&dict_tensor)?;
     let expanded = fc.expand_rows_dk(&table_dk, n_features_full);
