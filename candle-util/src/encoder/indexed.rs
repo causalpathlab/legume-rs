@@ -1,11 +1,9 @@
 use crate::batched_dot::{batched_matvec_shared, batched_weighted_sum};
 use crate::data::indexed::SparseEdgeBatch;
-use crate::fast_index::gather_rows;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
 use crate::nn::gcn::GcnBlock;
 use crate::nn::layers::*;
-use crate::sgvb::l2_normalize_dim;
 use crate::traits::indexed::*;
 use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
@@ -23,7 +21,9 @@ pub struct IndexedEmbeddingEncoder {
     n_features: usize,
     n_topics: usize,
     embedding_dim: usize,
-    feature_embeddings: Tensor, // [D, H] learnable
+    /// The feature side. With modules it is a sparse mixture of shared
+    /// vectors and no `[D, H]` table exists; without them it is that table.
+    features: std::sync::Arc<crate::feature_embedding::FeatureEmbedding>,
     /// Optional γ-gated GCN block applied to the per-slot value-gated
     /// embedding `[N, K, H]` before pooling. Present iff
     /// `IndexedEmbeddingEncoderArgs::use_gcn` was true at construction.
@@ -39,28 +39,7 @@ pub struct IndexedEmbeddingEncoder {
     /// (dense/legacy/pinto) neither allocate nor persist this var, and old
     /// safetensors (lacking `attn.query`) still load.
     attn_query: Option<Tensor>,
-    /// Gene-module centroids `C [H, M]` for the module-pooling branch.
-    ///
-    /// Several features often do the same job — paralogues, co-regulated members of
-    /// one program, alternative probes for a transcript — and *which* of them a
-    /// dataset captures varies with chemistry, dropout and panel. The single-query
-    /// pool attends to each gene separately, so it has no way to know two genes were
-    /// interchangeable. Pooling *within a learned group* gives a statistic that
-    /// survives when individual members drop out.
-    ///
-    /// `None` when `n_gene_modules == 0`: no var is registered, the FC input width is
-    /// unchanged, and the safetensors are byte-identical to a build without this.
-    module_centroids: Option<Tensor>,
-    n_gene_modules: usize,
 }
-
-/// Softmax temperature for gene-module membership.
-///
-/// Membership logits are **cosine** similarities, so they live in `[-1, 1]` and this
-/// is the only thing setting sharpness — on a fixed, interpretable scale. Too low and
-/// membership goes one-hot with dead modules; too high and every gene belongs to every
-/// module, so the branch carries nothing. Deliberately a constant, not a tuned knob.
-const MODULE_TEMP: f64 = 0.1;
 
 /// Floor on per-module coverage when it is used as a divisor.
 ///
@@ -86,8 +65,8 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     /// (dense ELBO / pinto) set this `false` so no `attn.query` var is
     /// registered — keeping their safetensors unchanged.
     pub attn_pool: bool,
-    /// Number of learned gene modules `M` for the module-pooling branch (see
-    /// [`IndexedEmbeddingEncoder`]'s `module_centroids`).
+    /// Number of learned gene modules `M`. They both compose the feature side
+    /// and pool the context, so this is the one knob for either.
     ///
     /// `0` disables it entirely: no new var, unchanged FC input width, byte-identical
     /// safetensors. Callers that do not want it pass `0`.
@@ -105,13 +84,13 @@ impl IndexedEmbeddingEncoder {
 
         debug_assert!(!args.layers.is_empty());
 
-        // Feature embeddings: [D, H]
         let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
-        let feature_embeddings = vb.get_with_hints(
-            (args.n_features, args.embedding_dim),
-            "feature.embeddings",
-            init_ws,
-        )?;
+        let features = std::sync::Arc::new(crate::feature_embedding::FeatureEmbedding::new(
+            args.n_features,
+            args.n_gene_modules,
+            args.embedding_dim,
+            vb.clone(),
+        )?);
 
         let gcn = if args.use_gcn {
             Some(GcnBlock::new(args.embedding_dim, vb.pp("nn.enc.gcn"))?)
@@ -138,66 +117,37 @@ impl IndexedEmbeddingEncoder {
             None
         };
 
-        let module_centroids = if args.n_gene_modules > 0 {
-            Some(vb.get_with_hints(
-                (args.embedding_dim, args.n_gene_modules),
-                "modules.centroids",
-                init_ws,
-            )?)
-        } else {
-            None
-        };
-
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
             embedding_dim: args.embedding_dim,
-            feature_embeddings,
+            features,
             gcn,
             fc,
             bn_z,
             z_mean,
             z_lnvar,
             attn_query,
-            module_centroids,
-            n_gene_modules: args.n_gene_modules,
         })
     }
 
     /// Number of learned gene modules `M` (`0` when the branch is disabled).
     pub fn n_gene_modules(&self) -> usize {
-        self.n_gene_modules
+        self.features.n_modules()
     }
 
-    /// Gene-module centroids `C [H, M]`, or `None` when the branch is disabled.
-    ///
-    /// The Kaiming default is deliberate, not a placeholder: membership is scored by
-    /// **cosine**, so the init's scale is discarded and what remains is `M` random unit
-    /// directions — the right uninformative prior for a directional quantity, and
-    /// near-orthogonal already at the usual `H` (expected pairwise `|cos| ≈ 1/√H`).
-    ///
-    /// Read-only. Seeding `C` from data (spherical k-means on a *pretrained* `ρ`) is
-    /// worth doing only if the per-module load histogram shows dead modules, or if `M`
-    /// approaches `H` where random directions start colliding. That write goes through
-    /// the `enc.modules.centroids` `Var` in the `VarMap`, not through here.
-    pub fn module_centroids(&self) -> Option<&Tensor> {
-        self.module_centroids.as_ref()
+    /// The module dictionary `[M, H]`, or `None` without modules.
+    pub fn module_dictionary(&self) -> Option<&Tensor> {
+        self.features.dictionary()
     }
 
-    /// Every feature's soft module membership `[D, M]`, or `None` when the
-    /// encoder has no modules.
+    /// Every feature's module membership `[D, M]`, or `None` when the encoder
+    /// has no modules.
     ///
-    /// The SAME transform the pooling path applies, so what a reader gets is
-    /// the grouping the model actually used rather than a plausible
-    /// re-derivation of it. Membership is a function of ρ and the centroids,
-    /// which is why the encoder stores no per-feature membership: this
-    /// materializes it, for export and for anything downstream that wants the
-    /// module tables in the shape the graph-embedding family writes them.
+    /// Membership is a parameter, so this is a read rather than a derivation:
+    /// what a caller exports is what the model trains with.
     pub fn feature_module_membership(&self) -> Result<Option<Tensor>> {
-        let Some(centroids) = self.module_centroids.as_ref() else {
-            return Ok(None);
-        };
-        Some(module_membership_from(&self.feature_embeddings, centroids)).transpose()
+        self.features.membership()
     }
 
     /// Whether this encoder owns a [`GcnBlock`]. Callers use this to
@@ -225,9 +175,29 @@ impl IndexedEmbeddingEncoder {
         self.embedding_dim
     }
 
-    /// Access the learnable feature embedding table [D, H].
-    pub fn feature_embeddings(&self) -> &Tensor {
-        &self.feature_embeddings
+    /// The feature side, for a caller that needs to compose rows itself.
+    pub fn features(&self) -> &crate::feature_embedding::FeatureEmbedding {
+        &self.features
+    }
+
+    /// A shared handle on the feature side.
+    ///
+    /// A decoder tied to this encoder must hold THIS, not a composed table:
+    /// with modules the table is a computed value, so a held copy would freeze
+    /// the feature rows at their initialization while the parameters beneath
+    /// them keep moving.
+    #[must_use]
+    pub fn features_shared(&self) -> std::sync::Arc<crate::feature_embedding::FeatureEmbedding> {
+        std::sync::Arc::clone(&self.features)
+    }
+
+    /// The composed `[D, H]` table.
+    ///
+    /// Forming it is the cost the module parameterization exists to avoid, so
+    /// this belongs to export and to callers that genuinely need every row at
+    /// once, not to a per-step path.
+    pub fn feature_embeddings(&self) -> Result<Tensor> {
+        self.features.full()
     }
 
     /// Pool packed top-K input into `[N, H]`.
@@ -260,7 +230,7 @@ impl IndexedEmbeddingEncoder {
         let h = self.embedding_dim;
 
         let flat_idx = indices.flatten_all()?; // [N*K]
-        let e_nk_h = gather_rows(&self.feature_embeddings, &flat_idx)?.reshape((n, k, h))?; // [N, K, H]
+        let e_nk_h = self.features.gather(&flat_idx)?.reshape((n, k, h))?; // [N, K, H]
 
         // Per-slot Anscombe scalar gate on ρ — broadcast across H.
         // `anscombe_lite` divides by (batch null × per-gene mean) then
@@ -305,7 +275,7 @@ impl IndexedEmbeddingEncoder {
         let h = self.embedding_dim;
 
         let flat_idx = indices.flatten_all()?;
-        let e_nk_h = gather_rows(&self.feature_embeddings, &flat_idx)?.reshape((n, k, h))?; // [N, K, H]
+        let e_nk_h = self.features.gather(&flat_idx)?.reshape((n, k, h))?; // [N, K, H]
 
         // Value-gated token per slot (expression × symbol embedding). Note:
         // `a_nk` uses the raw values for ALL slots; masking is applied to the
@@ -342,10 +312,10 @@ impl IndexedEmbeddingEncoder {
         let pooled_nh = pooled_nh.broadcast_mul(&has_visible_n1)?; // [N, H]
 
         // Module branch. Disabled ⇒ return exactly what this function always returned.
-        let Some(centroids) = self.module_centroids.as_ref() else {
+        let Some(mem) = self.features.gather_membership(&flat_idx)? else {
             return Ok(pooled_nh);
         };
-        let (u_nm, cov_nm) = self.module_pool(&e_nk_h, &a_nk, visible_mask, centroids)?;
+        let (u_nm, cov_nm) = self.module_pool(&mem, &a_nk, visible_mask)?;
 
         // Plain `log`, NOT centered. Expression is multiplicative so a log belongs
         // here, but a linear layer downstream can already form any log-ratio
@@ -371,34 +341,31 @@ impl IndexedEmbeddingEncoder {
     /// captured, so losing members costs variance, not level.
     fn module_pool(
         &self,
-        e_nk_h: &Tensor,
+        mem_flat: &Tensor,
         a_nk: &Tensor,
         visible_mask: &Tensor,
-        centroids: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        let (n, k, h) = e_nk_h.dims3()?;
-        let m = self.n_gene_modules;
-
-        // Cosine, not dot product: magnitude is the channel by which one centroid
-        // swallows every gene, and bounded logits are what make `MODULE_TEMP` mean
-        // something on a fixed scale.
-        let mem_nkm = module_membership_from(&e_nk_h.reshape((n * k, h))?, centroids)?
-            .reshape((n, k, m))?; // [N, K, M]
+        let (n, k) = a_nk.dims2()?;
+        let m = self.n_gene_modules();
+        // Membership is a parameter now, so this is a gather rather than a
+        // similarity: the grouping the pool uses IS the grouping that composes
+        // the feature rows, not a second reading of them.
+        let mem_nkm = mem_flat.reshape((n, k, m))?; // [N, K, M]
 
         // Restrict to observed slots: a masked gene must not contribute to either the
         // level or the coverage, or the branch leaks the value being imputed.
         let mem_vis = mem_nkm.broadcast_mul(&visible_mask.unsqueeze(2)?)?; // [N, K, M]
         let cov_nm = mem_vis.sum(1)?; // [N, M]
 
-        // Divide by a FLOORED coverage. `cov` is never exactly zero — membership is a
-        // softmax, so every module gets some mass from every observed gene — but it
-        // spans orders of magnitude: at `MODULE_TEMP = 0.1` a maximally mismatched
-        // module receives ~exp(-2/τ) ≈ 2e-9 per slot, so with a few hundred visible
-        // slots its coverage lands near 1e-6. Dividing by that directly makes
-        // `∂u/∂numerator = 1/cov ≈ 1e6`, and the downstream `log(u + ε)` multiplies by
-        // another `1/(u+ε)` — an absent module would then dominate the gradient of the
-        // whole branch. The floor caps that at `1/EPS_COVERAGE` and costs nothing where
-        // a module is genuinely present, since real coverage is O(1) or larger.
+        // Divide by a FLOORED coverage. Membership is a sparsemax, so `cov` reaches
+        // exactly zero: a module none of this cell's visible slots belongs to has no
+        // coverage at all, and everything between that and O(1) is reachable too —
+        // one slot holding a sliver of mass is as real as fifty holding all of it.
+        // Dividing by it directly leaves `∂u/∂numerator = 1/cov` unbounded, and the
+        // downstream `log(u + ε)` multiplies by another `1/(u+ε)`, so a barely-present
+        // module would dominate the gradient of the whole branch. The floor bounds
+        // that at `1/EPS_COVERAGE` and costs nothing where a module is genuinely
+        // present, since real coverage is O(1) or larger.
         let u_nm = mem_vis
             .broadcast_mul(&a_nk.unsqueeze(2)?)?
             .sum(1)?
@@ -413,9 +380,10 @@ impl IndexedEmbeddingEncoder {
     /// Not used by training — the objective is deliberately unchanged by this branch.
     /// It exists so the per-module load histogram can be logged without a second
     /// forward pass. Watch it from the first epoch: without a load-balancing penalty
-    /// (which would be a loss change) collapse is resisted only by the cosine
-    /// parameterization, the centroid init and `MODULE_TEMP`, and it is self-absorbing
-    /// once it happens, because a dead module's centroid stops receiving gradient.
+    /// A module carrying no mass is dead in a strong sense: sparsemax gives it
+    /// exact zeros, and its Jacobian is zero there, so no gradient reaches it
+    /// and it cannot recover on its own. That is what this read-out is for, and
+    /// why capacity is added by splitting a loaded module rather than appending.
     pub fn module_activity(
         &self,
         indices: &Tensor,
@@ -424,18 +392,11 @@ impl IndexedEmbeddingEncoder {
         values_mean: Option<&Tensor>,
         visible_mask: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        let Some(centroids) = self.module_centroids.as_ref() else {
+        let Some(mem) = self.features.gather_membership(&indices.flatten_all()?)? else {
             return Ok(None);
         };
-        let (n, k) = indices.dims2()?;
-        let e_nk_h = gather_rows(&self.feature_embeddings, &indices.flatten_all()?)?.reshape((
-            n,
-            k,
-            self.embedding_dim,
-        ))?;
         let a_nk = anscombe_lite(values, values_null, values_mean)?;
-        self.module_pool(&e_nk_h, &a_nk, visible_mask, centroids)
-            .map(Some)
+        self.module_pool(&mem, &a_nk, visible_mask).map(Some)
     }
 
     /// Shared masked-encoder trunk: visible-pool → FC → BN → `bn_nl [N, L]`.
@@ -614,18 +575,6 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
     }
 }
 
-/// Soft membership of rows `[.., H]` over centroids `[H, M]`.
-///
-/// Cosine, not dot product: magnitude is the channel by which one centroid
-/// swallows every feature, and bounded logits are what make [`MODULE_TEMP`]
-/// mean something on a fixed scale. One definition, used by the encoder's
-/// pooling and by the exported tables, so the two can never drift.
-fn module_membership_from(rows: &Tensor, centroids: &Tensor) -> Result<Tensor> {
-    let logits = l2_normalize_dim(rows, 1)?.matmul(&l2_normalize_dim(centroids, 0)?)?;
-    let last = logits.rank() - 1;
-    ops::softmax(&(logits / MODULE_TEMP)?, last)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,8 +671,10 @@ mod tests {
         );
     }
 
-    /// `M > 0` adds exactly one var and widens the FC input by `2M` — `log u` and
-    /// `log1p(cov)` per module, nothing else.
+    /// `M > 0` replaces the per-feature table with the membership and the
+    /// dictionary, and widens the FC input by `2M` — `log u` and `log1p(cov)`
+    /// per module, nothing else. A checkpoint therefore cannot be loaded across
+    /// this switch, which is the intended cost of composing the feature side.
     #[test]
     fn module_branch_adds_one_var_and_widens_by_two_m() {
         let m = 3;
@@ -736,15 +687,25 @@ mod tests {
             "FC input must grow by 2M (level + coverage per module)"
         );
 
+        // With modules the feature side IS the module pair, so the free table
+        // is replaced rather than supplemented.
         let added: Vec<&String> = on.iter().filter(|n| !off.contains(n)).collect();
         assert_eq!(
             added,
-            vec!["enc.modules.centroids"],
-            "the branch must add exactly the centroid var"
+            vec!["enc.modules.logits", "enc.modules.mu"],
+            "the branch must add exactly the membership and the dictionary"
+        );
+        let dropped: Vec<&String> = off.iter().filter(|n| !on.contains(n)).collect();
+        assert_eq!(
+            dropped,
+            vec!["enc.feature.embeddings"],
+            "and must drop the per-feature table it composes away"
         );
         assert!(
-            off.iter().all(|n| on.contains(n)),
-            "enabling modules must not remove any existing var"
+            off.iter()
+                .filter(|n| *n != "enc.feature.embeddings")
+                .all(|n| on.contains(n)),
+            "enabling modules must leave every other var alone"
         );
     }
 
@@ -850,19 +811,19 @@ mod tests {
         let grads = loss.backward().unwrap();
 
         let vars = varmap.all_vars();
-        let centroids = vars
+        let dictionary = vars
             .iter()
-            .find(|v| v.dims() == [embedding_dim, m])
-            .expect("centroid var");
+            .find(|v| v.dims() == [m, embedding_dim])
+            .expect("module dictionary var");
         let g = grads
-            .get(centroids)
-            .expect("centroids must receive gradient");
+            .get(dictionary)
+            .expect("the dictionary must receive gradient");
         for row in g.to_vec2::<f32>().unwrap() {
             for v in row {
-                assert!(v.is_finite(), "non-finite centroid gradient {v}");
+                assert!(v.is_finite(), "non-finite dictionary gradient {v}");
                 assert!(
                     v.abs() < 1e5,
-                    "centroid gradient {v} is exploding — check the coverage floor"
+                    "dictionary gradient {v} is exploding — check the coverage floor"
                 );
             }
         }
@@ -899,17 +860,16 @@ mod tests {
             .unwrap()
             .is_none());
     }
-    /// The exported membership has to be the SAME transform the encoder pools
-    /// with, or a downstream reader is looking at a grouping the model never
-    /// used. Both go through `feature_module_membership`, and this pins its
-    /// shape and its two defining properties: every feature's memberships form
-    /// a distribution, and a feature sitting on a centroid puts its mass there.
+    /// The membership the encoder pools over and the membership it exports are
+    /// now the same parameter, so what a reader gets is what the model used.
+    /// This pins that they agree row for row, and that the rows are
+    /// distributions with the exact zeros sparsemax is chosen for.
     #[test]
-    fn exported_membership_is_a_distribution_that_follows_the_centroids() {
+    fn the_pooled_and_exported_membership_are_one_parameter() {
         let dev = Device::Cpu;
         let vm = VarMap::new();
         let vb = candle_nn::VarBuilder::from_varmap(&vm, candle_core::DType::F32, &dev);
-        let (d, h, m) = (6usize, 4usize, 3usize);
+        let (d, h, m) = (5usize, 4usize, 3usize);
         let layers = vec![h, h];
         let enc = IndexedEmbeddingEncoder::new(
             IndexedEmbeddingEncoderArgs {
@@ -924,41 +884,87 @@ mod tests {
             &vm,
             vb,
         )
-        .expect("encoder");
+        .unwrap();
 
-        // Put feature 0 exactly on centroid 1's direction.
-        let centroids = enc.module_centroids().expect("modules are on").clone();
-        let c1: Vec<f32> = centroids
-            .narrow(1, 1, 1)
+        let exported: Vec<Vec<f32>> = enc
+            .feature_module_membership()
             .unwrap()
-            .flatten_all()
-            .unwrap()
-            .to_vec1()
+            .expect("modules are on")
+            .to_vec2()
             .unwrap();
-        {
-            let data = vm.data().lock().unwrap();
-            let rho = data["feature.embeddings"].as_tensor().clone();
-            let mut rows: Vec<f32> = rho.flatten_all().unwrap().to_vec1().unwrap();
-            rows[..h].copy_from_slice(&c1);
-            data["feature.embeddings"]
-                .set(&Tensor::from_vec(rows, (d, h), &dev).unwrap())
-                .unwrap();
+        assert_eq!(exported.len(), d);
+        for row in &exported {
+            let total: f32 = row.iter().sum();
+            assert!((total - 1.0).abs() < 1e-5, "row {row:?}");
         }
 
-        let pi = enc.feature_module_membership().expect("membership").expect("modules are on");
-        assert_eq!(pi.dims(), &[d, m]);
-        let rows: Vec<Vec<f32>> = pi.to_vec2().unwrap();
-        for (g, row) in rows.iter().enumerate() {
-            let total: f32 = row.iter().sum();
-            assert!((total - 1.0).abs() < 1e-4, "feature {g} sums to {total}");
-        }
-        let best = rows[0]
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
+        let ids = Tensor::from_vec(vec![4u32, 1], 2, &dev).unwrap();
+        let pooled: Vec<Vec<f32>> = enc
+            .features()
+            .gather_membership(&ids)
             .unwrap()
-            .0;
-        assert_eq!(best, 1, "a feature on a centroid belongs to it");
+            .expect("modules are on")
+            .to_vec2()
+            .unwrap();
+        for (row, &g) in pooled.iter().zip([4usize, 1].iter()) {
+            assert_eq!(row, &exported[g], "the pool reads a different membership");
+        }
     }
 
+    /// Stage 2's gate: pooling in module space must equal gathering composed
+    /// rows and pooling them. The cheap path is only allowed to exist because
+    /// these agree, and the whole reason the context cap can be lifted is that
+    /// the dictionary factors out of the per-slot sum.
+    #[test]
+    fn module_space_pooling_equals_the_dense_route() {
+        let dev = Device::Cpu;
+        let vm = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&vm, candle_core::DType::F32, &dev);
+        let (d, h, m, n, k) = (6usize, 4usize, 3usize, 2usize, 3usize);
+        let layers = vec![h, h];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: d,
+                n_topics: 2,
+                embedding_dim: h,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: false,
+                n_gene_modules: m,
+            },
+            &vm,
+            vb,
+        )
+        .unwrap();
+
+        let indices = Tensor::from_vec(vec![0u32, 3, 3, 1, 4, 0], (n, k), &dev).unwrap();
+        let values =
+            Tensor::from_vec(vec![4.0f32, 9.0, 1.0, 16.0, 2.0, 25.0], (n, k), &dev).unwrap();
+        let pooled = enc
+            .preprocess_indexed(&indices, &values, None, None, None)
+            .unwrap();
+
+        // Reference: compose every row, select the slots, gate, sum over k.
+        let rows = crate::fast_index::gather_rows(
+            &enc.features().full().unwrap(),
+            &indices.flatten_all().unwrap(),
+        )
+        .unwrap()
+        .reshape((n, k, h))
+        .unwrap();
+        let a_nk = anscombe_lite(&values, None, None).unwrap();
+        let want = rows
+            .broadcast_mul(&a_nk.unsqueeze(2).unwrap())
+            .unwrap()
+            .sum(1)
+            .unwrap();
+
+        let got: Vec<Vec<f32>> = pooled.to_vec2().unwrap();
+        let want: Vec<Vec<f32>> = want.to_vec2().unwrap();
+        for (g, w) in got.iter().zip(&want) {
+            for (a, b) in g.iter().zip(w.iter()) {
+                assert!((a - b).abs() < 1e-4, "module space {g:?} vs dense {w:?}");
+            }
+        }
+    }
 }

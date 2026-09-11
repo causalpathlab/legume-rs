@@ -109,7 +109,11 @@ fn hiding_bridges_raw_list_names_onto_a_canonical_axis() {
 
 #[test]
 fn hiding_bridges_symbol_list_names_onto_a_raw_axis() {
-    let genes = names(&["ENSG00000000003_TSPAN6", "ENSG00000000005_TNMD", "ENSG00000000419_DPM1"]);
+    let genes = names(&[
+        "ENSG00000000003_TSPAN6",
+        "ENSG00000000005_TNMD",
+        "ENSG00000000419_DPM1",
+    ]);
     let out = build_remap(&genes, &genes, &opts_hiding(&["TSPAN6", "DPM1"], 0.0))
         .expect("symbols must resolve onto the raw axis")
         .expect("hiding always yields a remap");

@@ -833,9 +833,10 @@ fn warm_start_dense(ctx: &PipelineCtx<'_>) -> anyhow::Result<()> {
             },
             // This family has no per-gene embedding: its gene-keyed state is
             // the decoder dictionary, which the loader gathers by itself.
+            n_gene_modules: 0,
             gene_axis: ctx.gene_axis.map(|remap| GeneAxisGrowth {
                 remap,
-                modules: None,
+                coarsening: None,
             }),
         },
     )

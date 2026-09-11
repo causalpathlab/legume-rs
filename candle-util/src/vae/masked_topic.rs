@@ -10,8 +10,8 @@
 use super::{clip_and_step_dense, smooth_topics, TrainScores};
 use crate::data::indexed::masked_epoch::{MaskedDraw, MaskedLevelData, MaskedMinibatch};
 use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget, QueryTarget};
 use crate::decoder::coarsening_map::CoarseningMap;
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget, QueryTarget};
 use crate::decoder::query_decoder::{QueryDecoder, QueryInput};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use crate::fast_index::scatter_add_cols;
@@ -532,7 +532,7 @@ fn masked_minibatch_loss(
     let mut r2_sum = None;
     if let (Some(qd), Some(qo), Some(qb)) = (query_decoder, opts.query, mb.query.as_ref()) {
         let read = qd.forward(
-            encoder.feature_embeddings(),
+            encoder.features(),
             &QueryInput {
                 indices: &base.input_indices,
                 gate: &mb.gate,
@@ -555,8 +555,12 @@ fn masked_minibatch_loss(
         r2_sum = Some(r2);
     }
     if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
+        // Shrink what is actually free: the dictionary under modules, the table
+        // otherwise. Penalizing composed rows would charge every member of a
+        // module for the same shared vector.
         let rho_l2 = encoder
-            .feature_embeddings()
+            .features()
+            .ridge_table()
             .sqr()?
             .mean_all()?
             .affine(f64::from(config.feature_embedding_l2), 0.0)?;

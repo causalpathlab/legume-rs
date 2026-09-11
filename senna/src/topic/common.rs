@@ -184,7 +184,10 @@ pub(crate) fn resolve_level_coarsenings(
             gene_axis,
             finest_collapsed.mu_observed.posterior_mean(),
         )?;
-        let inherited = levels.last().and_then(Option::as_ref).map(|fc| fc.num_coarse);
+        let inherited = levels
+            .last()
+            .and_then(Option::as_ref)
+            .map(|fc| fc.num_coarse);
         if inherited != cap.map(std::num::NonZeroUsize::get) {
             log::info!(
                 "--init-from {parent}: keeping that run's {} coarse feature(s); the coarsening \
@@ -195,7 +198,10 @@ pub(crate) fn resolve_level_coarsenings(
         }
         return Ok(levels);
     }
-    let Some(cap) = cap.map(std::num::NonZeroUsize::get).filter(|c| n_features_full > *c) else {
+    let Some(cap) = cap
+        .map(std::num::NonZeroUsize::get)
+        .filter(|c| n_features_full > *c)
+    else {
         return Ok(vec![None; num_levels]);
     };
     let sketch_ds = finest_collapsed.mu_observed.posterior_mean();
@@ -229,10 +235,11 @@ pub(crate) fn resolve_level_coarsenings(
 /// mismatch is reported rather than silently reconciled.
 ///
 /// With `gene_axis`, a level keyed to the source run's axis is GROWN onto this
-/// run's by name instead of refused: known genes keep their module, unknown
-/// ones are placed by their pseudobulk profile (`profiles_dn`, this run's
-/// finest posterior, read the way bge's alignment reads one: depth-normalized,
-/// log, centred), and the module count the decoders are keyed to stays.
+/// run's by name instead of refused: known genes keep their coarse group,
+/// unknown ones are placed by their pseudobulk profile (`profiles_dn`, this
+/// run's finest posterior, read the way bge's alignment reads one:
+/// depth-normalized, log, centred), and the coarse-feature count the decoders
+/// are keyed to stays.
 fn inherit_level_coarsenings(
     parent: &str,
     num_levels: usize,
@@ -267,7 +274,9 @@ fn inherit_level_coarsenings(
             "gene axis growth: {} pseudobulk profiles for {n_features_full} genes",
             profiles_dn.nrows(),
         );
-        Ok(graph_embedding_util::transfer::unit_log_profile_rows(profiles_dn))
+        Ok(graph_embedding_util::transfer::unit_log_profile_rows(
+            profiles_dn,
+        ))
     });
     let unit_profiles = unit_profiles.transpose()?;
     for (i, lvl) in levels.iter_mut().enumerate() {

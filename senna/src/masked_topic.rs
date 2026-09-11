@@ -205,25 +205,39 @@ pub struct MaskedTopicArgs {
         long,
         default_value_t = 0,
         help = "Learned gene modules M in the encoder (0 = off)",
-        long_help = "Pool the encoder's context genes within M learned groups, alongside the\n\
-                     existing attention pool.\n\
+        long_help = "Pool the encoder's context genes within M learned groups,\n\
+                     alongside the existing attention pool.\n\
                      \n\
-                     Several genes often do the same job — paralogues, co-regulated members\n\
-                     of a program, alternative probes for one transcript. Which of them a\n\
-                     dataset captures varies with chemistry, dropout and panel, so any single\n\
-                     gene is fragile across datasets. A group mean is not.\n\
+                     Several genes often do the same job:\n\
+                     paralogues, co-regulated members of a program,\n\
+                     alternative probes for one transcript.\n\
+                     Which of them a dataset captures varies\n\
+                     with chemistry, dropout and panel,\n\
+                     so any single gene is fragile across datasets.\n\
+                     A group mean is not.\n\
                      \n\
-                     Each gene gets a soft membership from its position in the embedding, and\n\
-                     the encoder additionally sees each module's level and how much of it was\n\
-                     actually observed. Set M well above the topic count; these are\n\
-                     fine-grained redundancy sets, not topics.\n\
+                     Each gene's membership over the M modules is itself learned,\n\
+                     and its embedding row becomes that membership's mixture\n\
+                     of M shared vectors, so no per-gene row is stored.\n\
+                     The encoder additionally sees each module's level\n\
+                     and how much of it was actually observed.\n\
+                     Set M well above the topic count:\n\
+                     these are fine-grained redundancy sets, not topics.\n\
                      \n\
-                     This is a MODULE, not a coarsening: the centroids are learned,\n\
-                     so which genes group together changes as the fit proceeds.\n\
-                     --max-coarse-features is the other kind, read off the data\n\
-                     before training and fixed thereafter.\n\
+                     Membership is sparse: a gene lands on a few modules\n\
+                     with exact zeros elsewhere,\n\
+                     and which ones changes as the fit proceeds.\n\
                      \n\
-                     0 leaves the encoder exactly as it was."
+                     This is a MODULE, not a coarsening: it is learned.\n\
+                     --max-coarse-features is the other kind,\n\
+                     read off the data before training and fixed thereafter.\n\
+                     \n\
+                     0 keeps the older free per-gene embedding instead.\n\
+                     \n\
+                     A continued fit cannot change M, in either direction:\n\
+                     the count decides which weights exist at all,\n\
+                     so a checkpoint trained at one M has nothing to give\n\
+                     a run that asks for another."
     )]
     gene_modules: usize,
 
@@ -805,11 +819,38 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         .as_deref()
         .or(init_feature_embedding.as_deref());
     let freeze_rho = freeze_feature_embedding.is_some();
+    // Whether this run's feature side is the checkpoint's is decidable from the
+    // checkpoint's metadata, so ask now rather than after the import and the
+    // collapse. Re-checked inside the warm start, which every entry point takes.
+    if let Some(prefix) = args.init_from.as_deref() {
+        crate::topic::warm_start::check_feature_side(
+            prefix,
+            args.gene_modules,
+            args.add_embedding_dim,
+        )?;
+    }
+
     // Resolved before H so the pre-trained dictionary's column count
     // pins the encoder dim.
     let pretrained_spec: Option<crate::topic::freeze::FrozenFeatureSpec> = match pretrained_prefix {
         None => None,
         Some(prefix) => {
+            // Refuse here, before anything is read. With modules the encoder
+            // has no per-gene table to seed or to hold fixed: a gene's row is
+            // composed from shared vectors, so a pre-trained table would have
+            // to be factorized into a membership and a dictionary first.
+            anyhow::ensure!(
+                args.gene_modules == 0,
+                "--{} does not compose with --gene-modules {}: with modules a gene's embedding \
+                 is a learned mixture of shared vectors, so there is no per-gene table to seed \
+                 or freeze. Drop one of the two.",
+                if freeze_rho {
+                    "freeze-feature-embedding"
+                } else {
+                    "init-feature-embedding"
+                },
+                args.gene_modules,
+            );
             if freeze_rho {
                 anyhow::ensure!(
                     args.feature_network.is_none(),
@@ -993,14 +1034,16 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         args.collapse.pb_refine.to_params(),
         gene_axis.as_ref(),
     )?;
-    let shared_rho = base_encoder.feature_embeddings().clone();
+    // The decoders share the encoder's feature side by handle, not by value:
+    // with modules the rows are computed, so a copy would freeze them.
+    let shared_features = base_encoder.features_shared();
     let mut decoders: Vec<EmbeddedNbTopicDecoder> = Vec::with_capacity(num_levels);
     for (i, fc) in level_coarsenings.iter().enumerate() {
         let (map, coarse_mass) =
             crate::topic::train_masked::coarsening_map_for(fc.as_ref(), &feature_mean, &dev)?;
         decoders.push(EmbeddedNbTopicDecoder::new_with_coarsening(
             n_topics,
-            shared_rho.clone(),
+            std::sync::Arc::clone(&shared_features),
             map,
             param_builder.pp(format!("dec_{i}")),
         )?);
@@ -1080,12 +1123,14 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                     add_topics: args.add_topics,
                     add_embedding_dim: args.add_embedding_dim,
                 },
-                // An unseen gene's ρ restarts at its module's mean (the finest
-                // level's), or the global mean when the source run trained at
-                // full resolution and there are no modules.
+                n_gene_modules: args.gene_modules,
+                // A free ρ restarts an unseen gene at the mean of its finest
+                // coarse group, or at the global mean when the source run
+                // trained at full resolution. A composed feature side ignores
+                // this: its membership starts flat.
                 gene_axis: gene_axis.as_ref().map(|remap| GeneAxisGrowth {
                     remap,
-                    modules: level_coarsenings.last().and_then(Option::as_ref),
+                    coarsening: level_coarsenings.last().and_then(Option::as_ref),
                 }),
             },
         )?;
@@ -1194,7 +1239,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // Use finest-level decoder for output
     let finest_decoder = decoders.last().unwrap();
     write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
-    write_feature_embedding(base_encoder.feature_embeddings(), &gene_names, &args.out)?;
+    write_feature_embedding(&base_encoder.feature_embeddings()?, &gene_names, &args.out)?;
     // Learned gene modules, in the shape the graph-embedding family writes
     // them, so one reader serves both.
     let module_suffixes =

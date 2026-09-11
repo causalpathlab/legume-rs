@@ -51,7 +51,12 @@ fn decoder_with_background(alpha: Vec<f32>, log_pi: Vec<f32>) -> EmbeddedNbTopic
         Tensor::from_vec(log_pi, (1, D), &dev).unwrap(),
     );
     let vb = VarBuilder::from_tensors(ts, DType::F32, &dev);
-    EmbeddedNbTopicDecoder::new(K, rho, vb.pp("dec")).unwrap()
+    EmbeddedNbTopicDecoder::new(
+        K,
+        candle_util::feature_embedding::FeatureEmbedding::fixed(rho),
+        vb.pp("dec"),
+    )
+    .unwrap()
 }
 
 /// A gene abundant in every cell needs a home the centered topics cannot give

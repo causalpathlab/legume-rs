@@ -50,7 +50,8 @@ fn main() -> anyhow::Result<()> {
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
     let rho = vb.get_with_hints((D, H), "rho", candle_nn::init::DEFAULT_KAIMING_NORMAL)?;
-    let dec = EmbeddedNbTopicDecoder::new(T, rho.clone(), vb.pp("dec"))?;
+    let features = candle_util::feature_embedding::FeatureEmbedding::fixed(rho.clone());
+    let dec = EmbeddedNbTopicDecoder::new(T, std::sync::Arc::clone(&features), vb.pp("dec"))?;
     let qd = QueryDecoder::new(H, R, vb.pp("dec_query"))?;
     let log_theta = Var::from_tensor(&candle_nn::ops::log_softmax(
         &Tensor::randn(0f32, 1.0, (N, T), &dev)?,
@@ -134,11 +135,11 @@ fn main() -> anyhow::Result<()> {
         query_ids: &query_ids,
     };
     time(&dev, "query decoder (fwd)", || {
-        let _ = qd.forward(&rho, &qin)?;
+        let _ = qd.forward(&features, &qin)?;
         Ok(())
     });
     time(&dev, "query decoder (fwd+bwd)", || {
-        let read = qd.forward(&rho, &qin)?;
+        let read = qd.forward(&features, &qin)?;
         let _ = read.residual.sum_all()?.backward()?;
         Ok(())
     });
@@ -156,7 +157,7 @@ fn main() -> anyhow::Result<()> {
     let q_target = Tensor::rand(0f32, 5.0, (N, Q), &dev)?.floor()?;
     time(&dev, "decoder side, query on (fwd+bwd)", || {
         let full_kd = dec.full_logits_kd()?;
-        let read = qd.forward(&rho, &qin)?;
+        let read = qd.forward(&features, &qin)?;
         let dense = MaskedDenseTarget {
             values: &values_nd,
             residual: None,
