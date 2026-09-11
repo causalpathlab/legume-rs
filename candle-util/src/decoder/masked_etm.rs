@@ -114,9 +114,11 @@ pub struct EmbeddedNbTopicDecoder {
     coarsening: CoarseningMap,
     /// `α [K, H]` topic embeddings (learnable, decoder scope).
     topic_embeddings: Tensor,
-    /// `ρ [D, H]` gene symbol embeddings — the **same** handle as the encoder
-    /// (ETM tying); gradients from either path land on the same `Var`.
-    feature_embeddings: Tensor,
+    /// The feature side, shared with the encoder (ETM tying) so gradients from
+    /// either path land on the same parameters. Held as a handle rather than a
+    /// table: under modules the rows are composed, and a copy would freeze
+    /// them at construction.
+    features: std::sync::Arc<crate::feature_embedding::FeatureEmbedding>,
     /// `log φ_g [1, D]` per-gene NB inverse dispersion (learnable).
     log_phi_1d: Tensor,
     /// `log π_g [1, D]` per-gene log-background, added to every topic's logits
@@ -171,12 +173,15 @@ pub fn log_background_from_mean(mean_d: &[f32], device: &candle_core::Device) ->
 
 impl EmbeddedNbTopicDecoder {
     /// Construct with a shared feature-embedding handle
-    /// (`encoder.feature_embeddings().clone()`). `α` is Kaiming-init in `vs`;
+    /// (`encoder.features_shared()`). `α` is Kaiming-init in `vs`;
     /// `log φ` starts at ln(2) ≈ 0.69 (moderate dispersion).
-    pub fn new(n_topics: usize, feature_embeddings: Tensor, vs: VarBuilder) -> Result<Self> {
-        let d = feature_embeddings.dim(0)?;
-        let identity = CoarseningMap::identity(d, feature_embeddings.device())?;
-        Self::new_with_coarsening(n_topics, feature_embeddings, identity, vs)
+    pub fn new(
+        n_topics: usize,
+        features: std::sync::Arc<crate::feature_embedding::FeatureEmbedding>,
+        vs: VarBuilder,
+    ) -> Result<Self> {
+        let identity = CoarseningMap::identity(features.n_features(), features.device())?;
+        Self::new_with_coarsening(n_topics, features, identity, vs)
     }
 
     /// A decoder whose dense output axis is the map's coarse features: `φ` and the
@@ -185,19 +190,12 @@ impl EmbeddedNbTopicDecoder {
     /// module's rate times its pinned share. Same var names as [`Self::new`].
     pub fn new_with_coarsening(
         n_topics: usize,
-        feature_embeddings: Tensor,
+        features: std::sync::Arc<crate::feature_embedding::FeatureEmbedding>,
         coarsening: CoarseningMap,
         vs: VarBuilder,
     ) -> Result<Self> {
-        let dims = feature_embeddings.dims();
-        if dims.len() != 2 {
-            candle_core::bail!(
-                "EmbeddedNbTopicDecoder: feature_embeddings must be 2-D [D, H], got {:?}",
-                dims
-            );
-        }
-        let n_features = dims[0];
-        let embedding_dim = dims[1];
+        let n_features = features.n_features();
+        let embedding_dim = features.embedding_dim();
         if coarsening.n_fine() != n_features {
             candle_core::bail!(
                 "EmbeddedNbTopicDecoder: the coarsening covers {} features but ρ has {n_features}",
@@ -224,7 +222,7 @@ impl EmbeddedNbTopicDecoder {
             n_topics,
             coarsening,
             topic_embeddings,
-            feature_embeddings,
+            features,
             log_phi_1d,
             log_pi_1d,
         })
@@ -234,13 +232,6 @@ impl EmbeddedNbTopicDecoder {
     /// every feature).
     pub fn coarsening(&self) -> &CoarseningMap {
         &self.coarsening
-    }
-
-    pub fn topic_embeddings(&self) -> &Tensor {
-        &self.topic_embeddings
-    }
-    pub fn feature_embeddings(&self) -> &Tensor {
-        &self.feature_embeddings
     }
     pub fn log_phi(&self) -> &Tensor {
         &self.log_phi_1d
@@ -288,7 +279,14 @@ impl EmbeddedNbTopicDecoder {
         // Under a module map the table is the within-module mean of ρ, so ρ
         // still trains through the dense head — each gene at 1/|m| of its
         // module's gradient.
-        let table = self.coarsening.coarsen_mean_dh(&self.feature_embeddings)?;
+        // Read the feature side live, and read it through the map: the
+        // coarsening is an unweighted row mean, so coarsening the membership
+        // and then composing gives the same table as the other order. Under a
+        // real coarsening that is `[d, M]` work rather than `[D, H]`; under the
+        // identity map, which is the default, it is the full table either way.
+        let table = self
+            .features
+            .map_rows_linear(|rows| self.coarsening.coarsen_mean_dh(rows))?;
         self.centered_topic_embeddings()?
             .matmul(&table.t()?)?
             .broadcast_add(&self.log_pi_1d)

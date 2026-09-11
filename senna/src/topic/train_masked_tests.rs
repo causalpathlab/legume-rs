@@ -1,7 +1,7 @@
 //! Tests for the module map a level's decoder is built from, and for the
 //! expansion of a module-level dictionary back to genes.
 
-use super::{expand_log_dict_with_shares, coarsening_map_for};
+use super::{coarsening_map_for, expand_log_dict_with_shares};
 use crate::embed_common::Mat;
 use candle_util::candle_core::Device;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;

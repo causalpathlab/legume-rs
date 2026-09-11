@@ -161,47 +161,53 @@ fn rebuild_model(
             attn_pool: true,
             // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
             // errors on a shape mismatch.
-            n_gene_modules: metadata.n_gene_modules.unwrap_or(0),
+            n_gene_modules: metadata.gene_modules(),
         },
         &parameters,
         vb.pp("enc"),
     )?;
 
-    let rho = encoder.feature_embeddings().detach();
+    // A rebuild scores a trained checkpoint, so the feature side is read as
+    // it stands; sharing the handle keeps that true whether it is a table or a
+    // module composition.
+    let shared_features = encoder.features_shared();
     let num_levels = metadata.num_levels.max(1);
     let finest = num_levels - 1;
-    // A module-collapsed model keys each level's decoder to its own map; the
-    // maps and the gene means the shares come from are saved with the model.
+    // A coarsened model keys each level's decoder to its own map; the maps and
+    // the gene means the shares come from are saved with the model.
     let levels = crate::topic::model_metadata::load_coarsening_levels(model)?;
     let feature_mean = match levels {
         Some(_) => Some(crate::topic::model_metadata::load_feature_mean(model)?.1),
         None => None,
     };
-    let level_map = |i: usize| -> anyhow::Result<candle_util::decoder::coarsening_map::CoarseningMap> {
-        let fc = levels
-            .as_ref()
-            .and_then(|l| l.get(i).and_then(Option::as_ref));
-        match (fc, feature_mean.as_deref()) {
-            (Some(fc), Some(mean)) => {
-                Ok(crate::topic::train_masked::coarsening_map_for(Some(fc), mean, dev)?.0)
+    let level_map =
+        |i: usize| -> anyhow::Result<candle_util::decoder::coarsening_map::CoarseningMap> {
+            let fc = levels
+                .as_ref()
+                .and_then(|l| l.get(i).and_then(Option::as_ref));
+            match (fc, feature_mean.as_deref()) {
+                (Some(fc), Some(mean)) => {
+                    Ok(crate::topic::train_masked::coarsening_map_for(Some(fc), mean, dev)?.0)
+                }
+                _ => Ok(
+                    candle_util::decoder::coarsening_map::CoarseningMap::identity(
+                        metadata.n_features_full,
+                        dev,
+                    )?,
+                ),
             }
-            _ => Ok(candle_util::decoder::coarsening_map::CoarseningMap::identity(
-                metadata.n_features_full,
-                dev,
-            )?),
-        }
-    };
+        };
     for i in 0..finest {
         EmbeddedNbTopicDecoder::new_with_coarsening(
             metadata.n_topics,
-            rho.clone(),
+            std::sync::Arc::clone(&shared_features),
             level_map(i)?,
             vb.pp(format!("dec_{i}")),
         )?;
     }
     let decoder = EmbeddedNbTopicDecoder::new_with_coarsening(
         metadata.n_topics,
-        rho,
+        shared_features,
         level_map(finest)?,
         vb.pp(format!("dec_{finest}")),
     )?;

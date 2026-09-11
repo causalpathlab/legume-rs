@@ -32,7 +32,7 @@ fn set(vm: &VarMap, name: &str, v: Vec<f32>, shape: (usize, usize)) {
 fn a_flat_row_is_uniform_over_the_full_support() {
     let (vm, fe) = build(2, 4, 3);
     set(&vm, "modules.logits", vec![0.0; 8], (2, 4));
-    let pi = fe.membership().unwrap().to_vec2::<f32>().unwrap();
+    let pi = fe.membership().unwrap().unwrap().to_vec2::<f32>().unwrap();
     for row in &pi {
         for v in row {
             assert!((v - 0.25).abs() < 1e-6, "expected uniform, got {row:?}");
@@ -46,7 +46,7 @@ fn a_flat_row_is_uniform_over_the_full_support() {
 fn an_unused_module_is_exactly_zero() {
     let (vm, fe) = build(1, 3, 2);
     set(&vm, "modules.logits", vec![5.0, 0.0, 0.0], (1, 3));
-    let pi = fe.membership().unwrap().to_vec2::<f32>().unwrap();
+    let pi = fe.membership().unwrap().unwrap().to_vec2::<f32>().unwrap();
     assert_eq!(pi[0][1], 0.0, "row {:?}", pi[0]);
     assert_eq!(pi[0][2], 0.0, "row {:?}", pi[0]);
     assert!((pi[0][0] - 1.0).abs() < 1e-6);
@@ -74,7 +74,12 @@ fn gathering_agrees_with_composing_the_whole_table() {
 fn a_feature_on_one_module_reproduces_its_vector() {
     let (vm, fe) = build(1, 2, 3);
     set(&vm, "modules.logits", vec![9.0, 0.0], (1, 2));
-    set(&vm, "modules.mu", vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0], (2, 3));
+    set(
+        &vm,
+        "modules.mu",
+        vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0],
+        (2, 3),
+    );
     let row = fe.full().unwrap().to_vec2::<f32>().unwrap();
     assert_eq!(row[0], vec![1.0, 2.0, 3.0]);
 }
@@ -88,7 +93,12 @@ fn gradient_reaches_both_parameters_but_not_an_unused_module() {
     let (vm, fe) = build(2, 3, 2);
     // Feature 0 sits entirely on module 0, feature 1 entirely on module 1;
     // module 2 is outside both supports.
-    set(&vm, "modules.logits", vec![9.0, 0.0, 0.0, 0.0, 9.0, 0.0], (2, 3));
+    set(
+        &vm,
+        "modules.logits",
+        vec![9.0, 0.0, 0.0, 0.0, 9.0, 0.0],
+        (2, 3),
+    );
     let loss = fe.full().unwrap().sqr().unwrap().sum_all().unwrap();
     let grads = loss.backward().unwrap();
 
@@ -102,7 +112,10 @@ fn gradient_reaches_both_parameters_but_not_an_unused_module() {
         "a module outside every support receives nothing: {:?}",
         rows[2]
     );
-    assert!(grads.get(&data["modules.logits"]).is_some(), "membership must train");
+    assert!(
+        grads.get(&data["modules.logits"]).is_some(),
+        "membership must train"
+    );
 }
 
 /// One module means one shared row for every feature. Degenerate, but it should
@@ -113,6 +126,35 @@ fn a_single_module_gives_every_feature_the_same_row() {
     set(&vm, "modules.mu", vec![0.5, -0.5], (1, 2));
     let rows = fe.full().unwrap().to_vec2::<f32>().unwrap();
     for row in &rows {
-        assert_eq!(row, &vec![0.5, -0.5]);
+        // Approximately, not exactly: sparsemax of one coordinate reaches 1.0
+        // through a sort and a cumulative sum, so the composed row carries a
+        // rounding of that arithmetic.
+        for (got, want) in row.iter().zip([0.5f32, -0.5]) {
+            assert!((got - want).abs() < 1e-6, "{row:?}");
+        }
+    }
+}
+
+/// A flat membership gives every feature the same composed row. That is the
+/// right state for a feature the axis gains later, since the model around it
+/// is trained — but it is a degenerate place to START a fit from, so the
+/// initialization has to separate features.
+#[test]
+fn initialization_separates_the_features() {
+    let (_vm, fe) = build(8, 4, 3);
+    let rows = fe.full().unwrap().to_vec2::<f32>().unwrap();
+    assert!(
+        rows.iter().any(|r| r != &rows[0]),
+        "every feature composed the same row: {:?}",
+        &rows[..2]
+    );
+    // Still near-uniform, though: the separation is a symmetry break, not a
+    // prior about which features belong together.
+    let pi = fe.membership().unwrap().unwrap().to_vec2::<f32>().unwrap();
+    for row in &pi {
+        assert!(
+            row.iter().all(|v| *v > 0.0),
+            "initialization must leave every module able to earn a feature: {row:?}"
+        );
     }
 }

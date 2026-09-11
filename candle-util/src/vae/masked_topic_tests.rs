@@ -4,8 +4,8 @@
 //! per-level target table, and that visible genes are never scored.
 
 use super::{epoch_seed, poisson_draw, target_mask_nd, EpochAccum, LevelTarget, Mat};
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use crate::decoder::coarsening_map::CoarseningMap;
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -242,7 +242,12 @@ fn visible_genes_are_never_scored() {
         Tensor::full(-(D as f32).ln(), (1, D), &dev).unwrap(),
     );
     let vb = VarBuilder::from_tensors(ts, DType::F32, &dev);
-    let dec = EmbeddedNbTopicDecoder::new(K, rho, vb.pp("dec")).unwrap();
+    let dec = EmbeddedNbTopicDecoder::new(
+        K,
+        crate::feature_embedding::FeatureEmbedding::fixed(rho),
+        vb.pp("dec"),
+    )
+    .unwrap();
     let full_kd = dec.full_logits_kd().unwrap();
     let log_theta = candle_nn::ops::log_softmax(
         &Tensor::from_vec(vec![0.2f32, -0.1, 0.4, 0.3, -0.5, 0.6], (3, K), &dev).unwrap(),
@@ -401,5 +406,9 @@ fn the_gaussian_head_is_deterministic_and_carries_no_kl() {
     };
     let z1 = masked_encode(&enc, LatentHead::Gaussian, &input, true).unwrap();
     let z2 = masked_encode(&enc, LatentHead::Gaussian, &input, true).unwrap();
-    assert_eq!(to_vec2(&z1), to_vec2(&z2), "training-mode z must not be a draw");
+    assert_eq!(
+        to_vec2(&z1),
+        to_vec2(&z2),
+        "training-mode z must not be a draw"
+    );
 }

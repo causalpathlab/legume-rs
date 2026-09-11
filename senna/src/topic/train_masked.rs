@@ -102,18 +102,21 @@ fn write_tensor_parquet_named(
     Ok(())
 }
 
-/// The decoder's gene → module map for one level, with the pinned
-/// within-module shares, and the per-module mass the background is pinned at.
+/// The decoder's gene → coarse-group map for one level, with the pinned
+/// within-group shares, and the per-group mass the background is pinned at.
 ///
-/// A gene's share of its module is its mean rate over the module's total
-/// (uniform within a module that has no mass); the module's background mass
+/// A gene's share of its group is its mean rate over the group's total
+/// (uniform within a group that has no mass); the group's background mass
 /// is that total. With no coarsening the map is the identity and the masses
 /// are the gene means themselves.
 pub(crate) fn coarsening_map_for(
     coarsening: Option<&FeatureCoarsening>,
     feature_mean: &[f32],
     dev: &candle_core::Device,
-) -> anyhow::Result<(candle_util::decoder::coarsening_map::CoarseningMap, Vec<f32>)> {
+) -> anyhow::Result<(
+    candle_util::decoder::coarsening_map::CoarseningMap,
+    Vec<f32>,
+)> {
     use candle_util::decoder::coarsening_map::CoarseningMap;
     let d = feature_mean.len();
     let Some(fc) = coarsening else {
@@ -146,9 +149,9 @@ pub(crate) fn coarsening_map_for(
     ))
 }
 
-/// Expand a module-level log-dictionary `[M, K]` to genes `[D, K]`:
-/// `log β_kg = log β^mod_{k,m(g)} + log π_{g|m(g)}`, so a gene takes its
-/// pinned share of its module's mass and every column still sums to one.
+/// Expand a coarse-level log-dictionary `[C, K]` to genes `[D, K]`:
+/// `log β_kg = log β^coarse_{k,c(g)} + log π_{g|c(g)}`, so a gene takes its
+/// pinned share of its group's mass and every column still sums to one.
 pub(crate) fn expand_log_dict_with_shares(
     log_dict_mk: &Mat,
     fine_to_coarse: &[usize],
@@ -161,9 +164,9 @@ pub(crate) fn expand_log_dict_with_shares(
 }
 
 /// Write the `[D, K]` log-β dictionary + the per-gene dispersion `φ` for the
-/// masked-imputation NB embedded topic decoder. A module-collapsed decoder is
-/// expanded to genes through its pinned shares; `φ` is per module, so every
-/// gene of a module carries its module's dispersion.
+/// masked-imputation NB embedded topic decoder. A coarsened decoder is
+/// expanded to genes through its pinned shares; `φ` is per coarse group, so
+/// every gene of a group carries its group's dispersion.
 pub(crate) fn write_masked_dictionary(
     decoder: &candle_util::decoder::EmbeddedNbTopicDecoder,
     gene_names: &[Box<str>],
@@ -187,7 +190,7 @@ pub(crate) fn write_masked_dictionary(
             .map(|&m| phi_m[m])
             .collect();
         log::info!(
-            "Expanded dictionary from {} modules to {} genes through the pinned shares",
+            "Expanded dictionary from {} coarse features to {} genes through the pinned shares",
             map.n_coarse(),
             map.n_fine()
         );
@@ -237,12 +240,12 @@ pub(crate) fn write_feature_embedding(
 /// family writes them: a `[D, M]` membership and an `[M, H]` dictionary, under
 /// the same suffixes.
 ///
-/// The two families parameterize modules differently and should keep doing so
-/// — one learns a membership per feature, the other learns centroids and reads
-/// membership off the embedding, which is what lets it place a feature it has
-/// never seen. What they share is the artifact: one shape on disk means the
-/// alignment and transfer code, and anything that reads modules downstream,
-/// does not care which family produced them.
+/// Both families now learn a membership per feature and compose a row from
+/// shared module vectors, so the artifact means the same thing on either side.
+/// They still differ in what surrounds it — the graph-embedding family keeps a
+/// per-feature residual and warm-starts its membership from a clustering,
+/// while this one composes without a residual from a flat start — so the
+/// tables are shared, not the parameterization.
 ///
 /// Returns the two suffixes when the encoder has modules, so the caller can
 /// record them in the manifest, and `None` when it has none.
@@ -267,13 +270,13 @@ pub(crate) fn write_gene_modules(
         "gene",
         &module_names,
     )?;
-    let centroids = encoder
-        .module_centroids()
-        .expect("a module encoder has centroids")
-        .t()?
-        .contiguous()?;
+    // Already `[M, H]`: the dictionary is stored the way it is written.
+    let dictionary = encoder
+        .module_dictionary()
+        .expect("a module encoder has a dictionary")
+        .clone();
     write_tensor_parquet(
-        &centroids,
+        &dictionary,
         out_prefix,
         dictionary_suffix,
         &module_names,

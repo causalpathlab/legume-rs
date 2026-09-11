@@ -58,7 +58,8 @@ fn a_coarsening_recorded_before_the_shared_struct_still_replays() {
         Some(250)
     );
 
-    let off = serde_json::json!({ "data_files": ["a.zarr"], "out": "old", "max_coarse_features": 0 });
+    let off =
+        serde_json::json!({ "data_files": ["a.zarr"], "out": "old", "max_coarse_features": 0 });
     let args: super::VaeArgs = serde_json::from_value(off).expect("replays");
     assert!(args.coarsening.cap().is_none(), "0 means every feature");
 }

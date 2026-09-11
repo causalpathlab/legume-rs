@@ -9,13 +9,13 @@
 //! - [`dyn_decoder`]: trait-object wrapper for runtime decoder selection
 
 pub mod bipartite;
+pub mod coarsening_map;
 pub mod delta_topic;
 pub mod dyn_decoder;
 pub mod gaussian_nb;
 pub mod gem_etm;
 pub mod joint_topic;
 pub mod masked_etm;
-pub mod coarsening_map;
 pub mod nb_mixture;
 pub mod poisson;
 pub mod query_decoder;

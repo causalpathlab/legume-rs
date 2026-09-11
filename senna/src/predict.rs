@@ -687,7 +687,8 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     // is about to be scored on, which is a reconstruction, not a prediction.
     // Only the remap is built here — the projection itself happens inside the
     // scoring loop, off the same block read, so the data is streamed once.
-    let proj_remap = crate::svd::project::projection_remap(&data_vec, &training_genes, &qopts, "query")?;
+    let proj_remap =
+        crate::svd::project::projection_remap(&data_vec, &training_genes, &qopts, "query")?;
 
     // Restrict to the scored genes exactly as the other families do, so a
     // benchmark passing one --eval-features file grades every arm on the
@@ -1298,8 +1299,13 @@ where
         dense_bytes(minibatch_size, d_dense, NB_CHAIN_TENSORS)
     };
 
-    let (z_nk, llik, total) =
-        run_predict_blocks(ntot, kk, minibatch_size, bytes_per_block, dev, |(lb, ub)| {
+    let (z_nk, llik, total) = run_predict_blocks(
+        ntot,
+        kk,
+        minibatch_size,
+        bytes_per_block,
+        dev,
+        |(lb, ub)| {
             predict_block_dense::<Dec>(PredictBlockDenseArgs {
                 lb,
                 ub,
@@ -1314,7 +1320,8 @@ where
                 mode,
                 refine_config,
             })
-        })?;
+        },
+    )?;
     // Return the finalized (TMLE-refined) δ so the caller can regress it
     // out when writing the residual backend.
     Ok((z_nk, llik, total, delta_db))
@@ -1650,7 +1657,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             attn_pool: true,
             // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
             // errors on a shape mismatch.
-            n_gene_modules: a.metadata.n_gene_modules.unwrap_or(0),
+            n_gene_modules: a.metadata.gene_modules(),
         },
         &parameters,
         vb.pp("enc"),
@@ -2190,7 +2197,8 @@ fn dense_block_concurrency(dev: &Device, bytes_per_block: usize) -> usize {
     // Two ceilings, composed: the device's (one block off the CPU — see
     // `device_concurrency`) and the memory budget's. `block_concurrency`
     // clamps to the first, so off the CPU the budget cannot raise it.
-    let threads = crate::topic::common::device_concurrency(dev.is_cpu(), rayon::current_num_threads());
+    let threads =
+        crate::topic::common::device_concurrency(dev.is_cpu(), rayon::current_num_threads());
     block_concurrency(bytes_per_block, budget, threads)
 }
 

@@ -28,7 +28,6 @@
 //! genes a target read from: with no positions in a bag of genes, that is the
 //! learned co-expression.
 
-use crate::fast_index::gather_rows;
 use candle_core::{Result, Tensor};
 use candle_nn::{linear, linear_no_bias, ops, Linear, Module, VarBuilder};
 
@@ -92,22 +91,34 @@ impl QueryDecoder {
     }
 
     /// `rho` is the shared `[D, H]` gene embedding.
-    pub fn forward(&self, rho: &Tensor, x: &QueryInput<'_>) -> Result<QueryRead> {
+    pub fn forward(
+        &self,
+        features: &crate::feature_embedding::FeatureEmbedding,
+        x: &QueryInput<'_>,
+    ) -> Result<QueryRead> {
         let (n, k) = x.indices.dims2()?;
         let q = x.query_ids.dim(1)?;
         let r = self.rank;
-        let h = rho.dim(1)?;
+        let h = features.embedding_dim();
 
-        // Project the table once, gather at the context slots, apply the gate.
+        // Gather the slots this minibatch touches, THEN project. The other
+        // order costs a pass over every feature — and under a composed feature
+        // side it would compose the whole table to read a few thousand rows.
         let flat_idx = x.indices.flatten_all()?;
         let gate_nk1 = x.gate.unsqueeze(2)?; // [N, K, 1]
-        let keys = gather_rows(&self.w_k.forward(rho)?, &flat_idx)? // [D, r] gathered
+        let context = features.gather(&flat_idx)?; // [N*K, H]
+        let keys = self
+            .w_k
+            .forward(&context)?
             .reshape((n, k, r))?
             .broadcast_mul(&gate_nk1)?; // [N, K, r]
-        let values = gather_rows(&self.w_v.forward(rho)?, &flat_idx)?
+        let values = self
+            .w_v
+            .forward(&context)?
             .reshape((n, k, r))?
             .broadcast_mul(&gate_nk1)?; // [N, K, r]
-        let queries = gather_rows(rho, &x.query_ids.flatten_all()?)?
+        let queries = features
+            .gather(&x.query_ids.flatten_all()?)?
             .reshape((n, q, h))?
             .broadcast_add(&self.e_mask)?; // [N, Q, H]
         let qh = self.w_q.forward(&queries)?; // [N, Q, r]
