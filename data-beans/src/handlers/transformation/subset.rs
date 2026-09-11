@@ -5,27 +5,36 @@ use crate::sparse_io::*;
 use crate::utilities::io_helpers::{
     read_col_names, read_row_names, MAX_COLUMN_NAME_IDX, MAX_ROW_NAME_IDX,
 };
-use crate::zarr_io::{finalize_zarr_output, materialize_writable_backend};
+use crate::zarr_io::{apply_zip_flag, finalize_zarr_output, materialize_writable_backend};
 
 use log::info;
 use matrix_util::common_io::*;
 use matrix_util::membership::Membership;
 
+/// `(backend, effective_output, working_path, opened_data)`. The effective
+/// output is what the user will find; the working path is the `.zarr` directory
+/// actually written, which [`finalize_zarr_output`] re-zips onto it.
 type EditStage = (
     SparseIoBackend,
+    Box<str>,
     Box<str>,
     Box<dyn SparseIo<IndexIter = Vec<usize>>>,
 );
 
-/// Resolve `(backend, working_path, opened_data)` for an in-place edit handler:
-/// stage the input at the output location (extracting `.zarr.zip` if needed),
-/// mkdir the output parent, and open the backend for read/write.
+/// Resolve `(backend, effective_output, working_path, opened_data)` for an
+/// in-place edit handler: stage the input at the output location (extracting
+/// `.zarr.zip` if needed), mkdir the output parent, and open the backend for
+/// read/write.
+///
+/// `zip` is applied here, the same way every `from-*` builder applies it, so a
+/// bare `-o out` lands on `out.zarr.zip` whichever subcommand produced it.
 ///
 /// Pair with [`finalize_zarr_output`] at the end of the handler so `.zarr.zip`
 /// output paths get re-zipped.
-fn stage_for_edit(input: &str, output: &str) -> anyhow::Result<EditStage> {
+fn stage_for_edit(input: &str, output: &str, zip: bool) -> anyhow::Result<EditStage> {
     let (backend, data_file) = resolve_backend_file(input, None)?;
-    let (_, output_file) = resolve_backend_file(output, Some(backend.clone()))?;
+    let effective_output = apply_zip_flag(output, zip, &backend);
+    let (_, output_file) = resolve_backend_file(&effective_output, Some(backend.clone()))?;
 
     if let Some(out_dir) = dirname(&output_file) {
         mkdir(&out_dir)?;
@@ -35,12 +44,14 @@ fn stage_for_edit(input: &str, output: &str) -> anyhow::Result<EditStage> {
     info!("staged working copy at {}", output_file);
 
     let data = open_sparse_matrix(&output_file, &backend)?;
-    Ok((backend, output_file, data))
+    Ok((backend, effective_output, output_file, data))
 }
 
 fn build_squeeze_args(output_file: Box<str>, args_cols: usize, args_rows: usize) -> RunSqueezeArgs {
     RunSqueezeArgs {
         data_files: vec![output_file],
+        // The caller already resolved the path and re-zips it itself.
+        zip: false,
         row_nnz_cutoff: args_rows,
         column_nnz_cutoff: args_cols,
         block_size: None,
@@ -65,7 +76,8 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
     let columns_indices = args.column_indices.clone();
     let column_name_file = args.name_file.clone();
 
-    let (_backend, output_file, mut data) = stage_for_edit(&args.data_file, &args.output)?;
+    let (_backend, effective_output, output_file, mut data) =
+        stage_for_edit(&args.data_file, &args.output, args.zip)?;
 
     let original_ncol = data.num_columns().unwrap_or(0);
     info!("original data: {} columns", original_ncol);
@@ -142,7 +154,7 @@ pub fn subset_columns(args: &SubsetColumnsArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
-    finalize_zarr_output(&output_file, &args.output)?;
+    finalize_zarr_output(&output_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -157,7 +169,8 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
     let row_indices = args.row_indices.clone();
     let row_name_file = args.name_file.clone();
 
-    let (_backend, output_file, mut data) = stage_for_edit(&args.data_file, &args.output)?;
+    let (_backend, effective_output, output_file, mut data) =
+        stage_for_edit(&args.data_file, &args.output, args.zip)?;
 
     let original_nrow = data.num_rows().unwrap_or(0);
     info!("original data: {} rows", original_nrow);
@@ -230,7 +243,7 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
         run_squeeze(&squeeze_args)?;
     }
 
-    finalize_zarr_output(&output_file, &args.output)?;
+    finalize_zarr_output(&output_file, &effective_output)?;
     info!("done");
     Ok(())
 }
@@ -242,12 +255,17 @@ pub fn subset_rows(args: &SubsetRowsArgs) -> anyhow::Result<()> {
 pub fn reorder_rows(args: &ReorderRowsArgs) -> anyhow::Result<()> {
     let row_names_order: Vec<Box<str>> = read_row_names(args.row_file.clone(), MAX_ROW_NAME_IDX)?;
 
-    let (_backend, output_file, mut data) = stage_for_edit(&args.data_file, &args.output)?;
+    let (_backend, effective_output, output_file, mut data) =
+        stage_for_edit(&args.data_file, &args.output, args.zip)?;
 
     data.reorder_rows(&row_names_order)?;
     drop(data);
 
-    finalize_zarr_output(&output_file, &args.output)?;
+    finalize_zarr_output(&output_file, &effective_output)?;
     info!("done");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "subset/tests.rs"]
+mod tests;
