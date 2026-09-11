@@ -156,7 +156,9 @@ impl FeatureNameKind {
         if kinds.iter().any(|k| matches!(k, FeatureNameKind::Mixed)) {
             return FeatureNameKind::Mixed;
         }
-        let gene = kinds.iter().find(|k| matches!(k, FeatureNameKind::Gene { .. }));
+        let gene = kinds
+            .iter()
+            .find(|k| matches!(k, FeatureNameKind::Gene { .. }));
         let locus = kinds
             .iter()
             .find(|k| matches!(k, FeatureNameKind::Locus { .. }));

@@ -184,10 +184,8 @@ pub fn iterate_delta_dense(
         // Each block runs the encoder on `dev`, so the device rule applies:
         // one block in flight off the CPU. Shared with every other block
         // runner through `map_blocks`.
-        let max_conc = crate::topic::common::device_concurrency(
-            dev.is_cpu(),
-            rayon::current_num_threads(),
-        );
+        let max_conc =
+            crate::topic::common::device_concurrency(dev.is_cpu(), rayon::current_num_threads());
         let chunk_sums: Vec<DeltaSums> =
             crate::topic::common::map_blocks(&jobs, max_conc, accumulate)?;
 

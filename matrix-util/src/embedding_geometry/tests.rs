@@ -289,15 +289,31 @@ fn a_shared_per_row_offset_is_removed_by_double_centering_not_column_centering()
         let sig: f32 = (0..r)
             .map(|k| {
                 let score = ((i * (k + 1)) as f32 * 0.37 + k as f32).sin();
-                let pattern = if j / 2 == k { if j % 2 == 0 { 1.0 } else { -1.0 } } else { 0.0 };
+                let pattern = if j / 2 == k {
+                    if j % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                } else {
+                    0.0
+                };
                 score * pattern
             })
             .sum();
         sig + 50.0 * ((i % 7) as f32)
     });
     let g = embedding_geometry(&t);
-    assert!(g.eff_rank_centered < 1.3, "column centering keeps the offset: {}", g.eff_rank_centered);
-    assert!(g.max_vif > 50.0, "the shared offset reads as collinearity: {}", g.max_vif);
+    assert!(
+        g.eff_rank_centered < 1.3,
+        "column centering keeps the offset: {}",
+        g.eff_rank_centered
+    );
+    assert!(
+        g.max_vif > 50.0,
+        "the shared offset reads as collinearity: {}",
+        g.max_vif
+    );
     assert!(
         g.eff_rank_double_centered > 2.0 && g.eff_rank_double_centered <= r as f32 + 0.5,
         "double centering recovers the signal rank: {}",
@@ -311,6 +327,14 @@ fn a_shared_per_row_offset_is_removed_by_double_centering_not_column_centering()
 fn double_centering_costs_a_full_rank_table_one_dimension() {
     let t = balanced_axes(4, 4);
     let g = embedding_geometry(&t);
-    assert!((g.eff_rank_centered - 4.0).abs() < 0.05, "{}", g.eff_rank_centered);
-    assert!((g.eff_rank_double_centered - 3.0).abs() < 0.05, "{}", g.eff_rank_double_centered);
+    assert!(
+        (g.eff_rank_centered - 4.0).abs() < 0.05,
+        "{}",
+        g.eff_rank_centered
+    );
+    assert!(
+        (g.eff_rank_double_centered - 3.0).abs() < 0.05,
+        "{}",
+        g.eff_rank_double_centered
+    );
 }

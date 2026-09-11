@@ -293,9 +293,11 @@ fn select_reference(
         if args.no_pb_reference {
             Err("--no-pb-reference was passed".into())
         } else if manifest.kind == RunKind::Simba {
-            Err("a simba run trains on cells, never on pseudobulks, so there is nothing to \
+            Err(
+                "a simba run trains on cells, never on pseudobulks, so there is nothing to \
                  substitute"
-                .into())
+                    .into(),
+            )
         } else if multiome_recorded(manifest) {
             Err(format!(
                 "{} is a multiome run, whose union column alignment cannot keep carried \
@@ -320,7 +322,10 @@ fn select_reference(
                      carrying was the default)",
                     args.model
                 )),
-                Err(e) => Err(format!("{}'s carried pseudobulks cannot be used: {e}", args.model)),
+                Err(e) => Err(format!(
+                    "{}'s carried pseudobulks cannot be used: {e}",
+                    args.model
+                )),
             }
         };
     let why = match chosen {
