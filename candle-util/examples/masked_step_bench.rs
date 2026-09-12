@@ -11,6 +11,9 @@ use candle_nn::{VarBuilder, VarMap};
 use candle_util::decoder::masked_etm::QueryTarget;
 use candle_util::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
 use candle_util::decoder::query_decoder::{QueryDecoder, QueryInput};
+use candle_util::encoder::scatter_pool::{
+    attention_scores_from_vector, pool_by_scatter, query_over_features,
+};
 use candle_util::fast_index::gather_rows;
 use candle_util::fast_index::scatter_add_cols;
 use candle_util::vae::masked_topic::target_mask_nd;
@@ -127,6 +130,23 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
+    // 5b. The same pool, re-associated: ρq once, scores gathered from that
+    //     vector, weights scattered onto [N, D], one gemm. Nothing [N, K, H].
+    let attn_q = Var::from_tensor(&Tensor::randn(0f32, 0.1, (1, H), &dev)?)?;
+    time(&dev, "scatter pool (fwd+bwd)", || {
+        let rq_d = query_over_features(&features, &attn_q)?;
+        let scores = attention_scores_from_vector(
+            &gate,
+            &indices,
+            &rq_d,
+            &visible,
+            1.0 / (H as f64).sqrt(),
+        )?;
+        let attn = candle_nn::ops::softmax(&scores, 1)?;
+        let pooled = pool_by_scatter(&attn, &gate, &indices, &features)?;
+        let _ = pooled.sum_all()?.backward()?;
+        Ok(())
+    });
     // 6. Query decoder forward, forward+backward.
     let qin = QueryInput {
         indices: &indices,

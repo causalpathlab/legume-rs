@@ -11,6 +11,7 @@ pub mod gaussian;
 pub mod gem_encoder;
 pub mod indexed;
 pub mod joint_softmax;
+pub mod scatter_pool;
 pub mod softmax;
 pub mod softmax_iaf;
 
