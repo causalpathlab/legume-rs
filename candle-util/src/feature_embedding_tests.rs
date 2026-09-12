@@ -158,3 +158,32 @@ fn initialization_separates_the_features() {
         );
     }
 }
+
+/// Projecting the embedding dims must agree with forming the table and
+/// multiplying it — for both variants. This is the dual of `map_rows_linear`
+/// and the one the attention query needs: a right factor folds into the
+/// dictionary, where a row map folds into the membership.
+#[test]
+fn projecting_the_dims_agrees_with_the_whole_table() {
+    let dev = Device::Cpu;
+    let (d, m, h, c) = (5usize, 3usize, 4usize, 2usize);
+    let v = Tensor::from_vec(
+        (0..h * c)
+            .map(|i| (i as f32) * 0.31 - 0.5)
+            .collect::<Vec<f32>>(),
+        (h, c),
+        &dev,
+    )
+    .unwrap();
+    for modules in [0usize, m] {
+        let (_vm, fe) = build(d, modules, h);
+        let got: Vec<Vec<f32>> = fe.project_dims(&v).unwrap().to_vec2().unwrap();
+        let want: Vec<Vec<f32>> = fe.full().unwrap().matmul(&v).unwrap().to_vec2().unwrap();
+        assert_eq!(got.len(), d);
+        for (g, w) in got.iter().zip(&want) {
+            for (a, b) in g.iter().zip(w) {
+                assert!((a - b).abs() < 1e-5, "M = {modules}: {g:?} vs {w:?}");
+            }
+        }
+    }
+}
