@@ -22,6 +22,7 @@ use matrix_util::traits::CandleDataLoaderOps;
 use rayon::prelude::*;
 use std::sync::Arc;
 
+pub mod full_support;
 pub mod graph_adj;
 pub mod masked_epoch;
 pub mod pack;
