@@ -99,3 +99,137 @@ fn the_field_that_decides_the_read_round_trips() {
         "an old model's window must come back as itself"
     );
 }
+
+//////////////////////////////////////////////////////////////
+// The dense block, and how many of them run at once         //
+//////////////////////////////////////////////////////////////
+
+/// One block of the window-free read equals the straightforward dense
+/// conversion of the same sparse columns.
+///
+/// Three things a scatter gets wrong quietly, all planted here: an **empty
+/// column** (a cell with nothing in it must come out as a zero row, not as the
+/// previous cell's row or a shifted one), a column whose **nonzeros are out of
+/// row order** (the block is built by scattering, so nothing may depend on the
+/// order they arrive in), and a **remap that sends two query genes to one
+/// training gene** (the fill has to ADD, or the second silently replaces the
+/// first). The reference below is the obvious `[n, D_train]` fill, written out
+/// so the comparison is against arithmetic rather than against another copy of
+/// the same scatter.
+#[test]
+fn a_dense_block_equals_the_straightforward_conversion() {
+    use crate::candle_core::Device;
+    use nalgebra_sparse::CscMatrix;
+
+    const D_QUERY: usize = 6;
+    const D_TRAIN: usize = 4;
+    const N: usize = 4;
+
+    // Column 1 is empty; column 2's rows are given out of order; column 3
+    // repeats nothing but lands on a remapped gene.
+    let col_offsets = vec![0, 3, 3, 6, 8];
+    let row_indices = vec![
+        0, 2, 5, /* col 2, unsorted: */ 4, 1, 0, /* col 3: */ 3, 5,
+    ];
+    let values = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let x_dn =
+        CscMatrix::try_from_unsorted_csc_data(D_QUERY, N, col_offsets, row_indices, values.clone())
+            .expect("a valid CSC block");
+
+    // Two query genes (0 and 5) land on training gene 0; query gene 4 is not on
+    // the training axis at all and must be dropped, not folded into gene 0.
+    let remap: Vec<Option<usize>> = vec![Some(0), Some(1), Some(2), Some(3), None, Some(0)];
+
+    // `None` means the columns are already on the training axis, so it is read
+    // at the block's own width; the remap is what crosses axes.
+    for (map, d_out) in [(None, D_QUERY), (Some(remap.as_slice()), D_TRAIN)] {
+        // The reference: walk the triplets and add, exactly as the definition
+        // reads, with no tensor in sight.
+        let mut want = vec![vec![0.0f32; d_out]; N];
+        for (r, c, v) in x_dn.triplet_iter() {
+            let g = match map {
+                Some(m) => m[r],
+                None => Some(r),
+            };
+            if let Some(g) = g {
+                want[c][g] += v;
+            }
+        }
+
+        let got: Vec<Vec<f32>> = super::csc_block_to_dense(&x_dn, d_out, map, &Device::Cpu)
+            .expect("the block builds")
+            .to_vec2()
+            .expect("[n, D_out]");
+
+        assert_eq!(got.len(), N, "one row per cell in the block");
+        assert_eq!(
+            got,
+            want,
+            "the block is not the dense conversion (remap: {})",
+            map.is_some()
+        );
+        assert!(
+            got[1].iter().all(|&v| v == 0.0),
+            "the empty column must come out as a zero row"
+        );
+    }
+
+    // Reading an off-axis block without a remap is a wiring mistake, not
+    // something to index past the end of the buffer for.
+    let msg = super::csc_block_to_dense(&x_dn, D_TRAIN, None, &Device::Cpu)
+        .expect_err("D_query > D_train with no remap is not a readable block")
+        .to_string();
+    assert!(
+        msg.contains("gene_remap"),
+        "the refusal must name what is missing; got: {msg}"
+    );
+
+    // ... and the planted cases are actually present, or the test proves nothing.
+    let nnz_per_col: Vec<usize> = (0..N).map(|j| x_dn.col(j).nnz()).collect();
+    assert!(nnz_per_col.contains(&0), "no empty column was planted");
+    let with_remap: Vec<Vec<f32>> =
+        super::csc_block_to_dense(&x_dn, D_TRAIN, Some(&remap), &Device::Cpu)
+            .unwrap()
+            .to_vec2()
+            .unwrap();
+    assert_eq!(
+        with_remap[0][0], 4.0,
+        "query genes 0 and 5 of cell 0 must ADD onto training gene 0"
+    );
+}
+
+/// The dense read holds a handful of blocks at once; the windowed read is left
+/// on the device rule.
+///
+/// A dense block's `[n, D]` working set is the encoder chain over it, and its
+/// own matmul already asks rayon for every core — so running one per thread
+/// costs more than it buys (measured: 395 s of summed block wall wide open
+/// against 19 s held at 8). The windowed `[n, K]` block never had the problem
+/// and must not be slowed down by the fix.
+#[test]
+fn the_dense_read_bounds_how_many_blocks_run_at_once() {
+    use crate::candle_core::Device;
+
+    let cpu = Device::Cpu;
+    let threads = rayon::current_num_threads();
+    let dense = super::masked_block_concurrency(super::MaskedRead::Dense, &cpu, 100, 34008);
+    assert!(
+        (1..=super::DENSE_BLOCKS_IN_FLIGHT).contains(&dense),
+        "a whole-transcriptome dense block must be capped, got {dense}"
+    );
+
+    let w = vec![1.0f32; 8];
+    let windowed = super::masked_block_concurrency(
+        super::MaskedRead::Windowed {
+            context_size: 1000,
+            shortlist_weights: &w,
+        },
+        &cpu,
+        100,
+        34008,
+    );
+    assert_eq!(
+        windowed, threads,
+        "the windowed read keeps the device rule: one block per thread"
+    );
+}

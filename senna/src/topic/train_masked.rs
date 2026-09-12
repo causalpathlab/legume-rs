@@ -7,7 +7,7 @@
 //! writers. The `pub(crate) use` re-exports keep existing call sites
 //! (the `masked_topic` command, `train_cell_embedded`) on stable import paths.
 
-use super::common::sample_collapsed_data;
+use super::common::sample_collapsed_data_dp;
 use crate::embed_common::*;
 
 use candle_core::Tensor;
@@ -17,11 +17,18 @@ use candle_util::encoder::IndexedEmbeddingEncoder;
 pub(crate) use candle_util::vae::masked_topic::IndexedTrainConfig;
 
 /// Materialize per-level `(mixed, batch, target)` `Mat` triples once
-/// per training run.
+/// per training run, in the posterior's own `[D, P]` orientation.
+///
+/// The masked trainer uploads them and slices rows on the device, and that
+/// upload reads a column-major `[D, P]` buffer as `[P, D]` directly — so the
+/// host transpose the `[P, D]` form costs would only be undone again.
 fn build_level_data(
     collapsed_levels: &[CollapsedOut],
 ) -> anyhow::Result<Vec<(Mat, Option<Mat>, Mat)>> {
-    collapsed_levels.iter().map(sample_collapsed_data).collect()
+    collapsed_levels
+        .iter()
+        .map(sample_collapsed_data_dp)
+        .collect()
 }
 
 /// Senna wrapper around [`candle_util::vae::masked_topic::train_masked`] —

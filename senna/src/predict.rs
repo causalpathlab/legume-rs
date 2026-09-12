@@ -2195,7 +2195,7 @@ pub(crate) fn dense_bytes(rows: usize, width: usize, tensors: usize) -> usize {
 ///
 /// `LEGUME_PREDICT_BUDGET_BYTES` overrides the default, following the
 /// `LEGUME_PRELOAD_BUDGET_BYTES` precedent for memory knobs.
-fn dense_block_concurrency(dev: &Device, bytes_per_block: usize) -> usize {
+pub(crate) fn dense_block_concurrency(dev: &Device, bytes_per_block: usize) -> usize {
     let budget = std::env::var("LEGUME_PREDICT_BUDGET_BYTES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

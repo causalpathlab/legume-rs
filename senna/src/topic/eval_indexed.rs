@@ -1,4 +1,4 @@
-use super::common::{expand_delta_for_block, process_blocks};
+use super::common::{expand_delta_for_block, process_blocks_at};
 use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
@@ -188,6 +188,12 @@ pub(crate) fn csc_block_to_dense(
     gene_remap: Option<&[Option<usize>]>,
     dev: &Device,
 ) -> anyhow::Result<Tensor> {
+    anyhow::ensure!(
+        gene_remap.is_some() || x_dn.nrows() <= n_train_features,
+        "a {}-gene block cannot be read onto a {n_train_features}-gene training axis without a \
+         gene_remap: `None` means the columns are already on that axis",
+        x_dn.nrows()
+    );
     let n = x_dn.ncols();
     let mut buf = vec![0f32; n * n_train_features];
     for j in 0..n {
@@ -203,6 +209,54 @@ pub(crate) fn csc_block_to_dense(
         }
     }
     Ok(Tensor::from_vec(buf, (n, n_train_features), dev)?)
+}
+
+/// Live `[n, D]` f32 tensors one **dense** encoder block holds at its peak.
+///
+/// The window-free read densifies the block to `[n, D]`, and the encoder chain
+/// over it is a dozen-odd more of that shape: the Anscombe residual alone
+/// (clean, `a`, its row mean, `r`, the column-mean difference, its square, the
+/// scaled value and its `tanh`) plus the input, the null, the all-visible mask,
+/// the scores, the `-inf` mask, the softmax and the pooling weights. Rounded
+/// up, as `predict`'s `NB_CHAIN_TENSORS` is: over-counting only holds fewer
+/// blocks in flight, under-counting is the thing that bites.
+///
+/// The windowed read packs `[n, K]` instead and is left alone.
+const ENCODER_CHAIN_TENSORS: usize = 16;
+
+/// Dense encoder blocks in flight, whatever the machine.
+///
+/// A block's own matmul asks rayon for every core it can see — candle's
+/// `get_num_threads()` reads `num_cpus`, not the pool it is running inside — so
+/// `B` blocks at once ask for `B × cores` workers, and the elementwise chain
+/// around it competes for the same memory bandwidth. Measured on the latent
+/// write of a 7943-cell fit at `D = 34008` (64 cores), as summed block wall /
+/// blocks in flight: 64 → ~7 s, 39 → 4.9 s, 19 → 4.2 s, **9 → 2.8 s**, 4 → 4.1 s.
+/// The optimum is a handful; below it the cores go idle, above it they fight.
+///
+/// Not a memory number — that ceiling is `dense_block_concurrency`, and both
+/// apply.
+const DENSE_BLOCKS_IN_FLIGHT: usize = 8;
+
+/// How many blocks of this read may be in flight.
+///
+/// The dense read composes two ceilings: the dense-`predict` memory budget
+/// (`LEGUME_PREDICT_BUDGET_BYTES` to raise) and [`DENSE_BLOCKS_IN_FLIGHT`].
+/// Off the CPU the first is already 1, so neither lets the GPU be driven from
+/// several threads. The windowed read keeps the device rule alone: its `[n, K]`
+/// block is ~30× smaller and never showed this.
+fn masked_block_concurrency(read: MaskedRead<'_>, dev: &Device, n: usize, d: usize) -> usize {
+    match read {
+        MaskedRead::Dense => crate::predict::dense_block_concurrency(
+            dev,
+            crate::predict::dense_bytes(n, d, ENCODER_CHAIN_TENSORS),
+        )
+        .min(DENSE_BLOCKS_IN_FLIGHT)
+        .max(1),
+        MaskedRead::Windowed { .. } => {
+            super::common::device_concurrency(dev.is_cpu(), rayon::current_num_threads())
+        }
+    }
 }
 
 /// Config for [`evaluate_latent_masked`] — encoder-only inference for the
@@ -310,9 +364,28 @@ where
     let d_train = config.feature_mean.len();
     let mean_1d = Tensor::from_vec(config.feature_mean.to_vec(), (1, d_train), config.dev)?;
 
-    process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
+    // Where a block's wall clock goes, summed over blocks and reported once.
+    // Read by eye, the dense read looks like a densify cost; measured, the
+    // densify is 3% of it and the encoder forward is 95%. Summed across the
+    // blocks in flight, so these are work, not wall clock.
+    let t_read = std::sync::atomic::AtomicU64::new(0);
+    let t_block = std::sync::atomic::AtomicU64::new(0);
+    let t_fwd = std::sync::atomic::AtomicU64::new(0);
+    let t_cpu = std::sync::atomic::AtomicU64::new(0);
+    let add = |a: &std::sync::atomic::AtomicU64, t: std::time::Instant| {
+        a.fetch_add(
+            t.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    };
+
+    let max_conc =
+        masked_block_concurrency(config.read, config.dev, config.minibatch_size, d_train);
+    let out = process_blocks_at(ntot, kk, config.minibatch_size, max_conc, |block| {
         let (lb, _ub) = block;
+        let t0 = std::time::Instant::now();
         let (x_dn, x0_nd) = read(block)?;
+        add(&t_read, t0);
 
         // Encoder-only inference: `train = false`; the latent alone is
         // written out. Nothing is masked at inference — window-free, that means
@@ -320,9 +393,12 @@ where
         // dense encoder trained on.
         let latent_nk = match config.read {
             MaskedRead::Dense => {
+                let t1 = std::time::Instant::now();
                 let x_nd = csc_block_to_dense(&x_dn, d_train, gene_remap, config.dev)?;
                 let visible = Tensor::ones(x_nd.shape(), candle_core::DType::F32, config.dev)?;
-                masked_encode_dense(
+                add(&t_block, t1);
+                let t2 = std::time::Instant::now();
+                let z = masked_encode_dense(
                     encoder,
                     config.head,
                     &MaskedDenseInput {
@@ -332,7 +408,9 @@ where
                         visible_nd: &visible,
                     },
                     false,
-                )?
+                )?;
+                add(&t_fwd, t2);
+                z
             }
             MaskedRead::Windowed {
                 context_size,
@@ -368,9 +446,25 @@ where
                 )?
             }
         };
+        let t3 = std::time::Instant::now();
         let z_nk = latent_nk.to_device(&candle_core::Device::Cpu)?;
-        Ok((lb, Mat::from_tensor(&z_nk)?))
-    })
+        let r = Mat::from_tensor(&z_nk)?;
+        add(&t_cpu, t3);
+        Ok((lb, r))
+    });
+    let ms = |a: &std::sync::atomic::AtomicU64| {
+        a.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0
+    };
+    log::debug!(
+        "masked eval: {} blocks, {max_conc} in flight; summed block wall — read {:.0} ms, \
+         densify {:.0} ms, forward {:.0} ms, to host {:.0} ms",
+        ntot.div_ceil(config.minibatch_size),
+        ms(&t_read),
+        ms(&t_block),
+        ms(&t_fwd),
+        ms(&t_cpu)
+    );
+    out
 }
 
 /// Config for [`evaluate_holdout_imputation`].
