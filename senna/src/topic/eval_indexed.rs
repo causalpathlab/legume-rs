@@ -8,7 +8,8 @@ use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::fast_index::scatter_add_cols;
 use candle_util::traits::*;
 use candle_util::vae::masked_topic::{
-    decoder_log_theta, masked_encode, LatentHead, MaskedEncoderInput, MaskedLikelihood,
+    decoder_log_theta, dense_module_targets, masked_encode, masked_encode_dense,
+    DenseModuleTargets, LatentHead, MaskedDenseInput, MaskedEncoderInput, MaskedLikelihood,
 };
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -132,14 +133,86 @@ pub(crate) fn gather_null_at_indices(
     Ok(Tensor::from_vec(buf, (n, k), dev)?)
 }
 
+/// How a masked checkpoint's encoder reads a block of cells.
+///
+/// Decided by the model's own metadata, never by what happens to be on disk:
+/// `enc_context_size` is `Some(k)` only for a model trained with a context
+/// window, and such a model must keep scoring through the window it was fitted
+/// under or it is a different model. Everything this build trains is `Dense`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MaskedRead<'a> {
+    /// Window-free: the encoder reads every gene of the block, zeros included.
+    Dense,
+    /// An OLD model: each cell's top-K, ranked by the shortlist weights it was
+    /// trained with.
+    Windowed {
+        context_size: usize,
+        shortlist_weights: &'a [f32],
+    },
+}
+
+impl<'a> MaskedRead<'a> {
+    /// Resolve from a checkpoint's recorded window and its shortlist, if any.
+    pub(crate) fn resolve(
+        enc_context_size: Option<usize>,
+        shortlist_weights: Option<&'a [f32]>,
+    ) -> anyhow::Result<Self> {
+        match enc_context_size {
+            None => Ok(Self::Dense),
+            Some(context_size) => {
+                let shortlist_weights = shortlist_weights.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this model records a context window of {context_size}, so it must be \
+                         scored through the top-K it was trained under — but its \
+                         shortlist_weights.parquet is missing. Reading it without them would \
+                         rank a different context."
+                    )
+                })?;
+                Ok(Self::Windowed {
+                    context_size,
+                    shortlist_weights,
+                })
+            }
+        }
+    }
+}
+
+/// A sparse `[D_query, n]` block as the dense `[n, D_train]` rows the
+/// window-free encoder reads.
+///
+/// `gene_remap` (`Some(new_to_train)`) sends held-out gene ids to training ids;
+/// several query genes can land on one training gene, so the fill ADDS.
+pub(crate) fn csc_block_to_dense(
+    x_dn: &nalgebra_sparse::CscMatrix<f32>,
+    n_train_features: usize,
+    gene_remap: Option<&[Option<usize>]>,
+    dev: &Device,
+) -> anyhow::Result<Tensor> {
+    let n = x_dn.ncols();
+    let mut buf = vec![0f32; n * n_train_features];
+    for j in 0..n {
+        let col = x_dn.col(j);
+        for (&r, &v) in col.row_indices().iter().zip(col.values().iter()) {
+            let Some(g) = (match gene_remap {
+                Some(map) => map.get(r).copied().flatten(),
+                None => Some(r),
+            }) else {
+                continue;
+            };
+            buf[j * n_train_features + g] += v;
+        }
+    }
+    Ok(Tensor::from_vec(buf, (n, n_train_features), dev)?)
+}
+
 /// Config for [`evaluate_latent_masked`] — encoder-only inference for the
 /// masked-imputation embedded topic model (no decoder / no refinement).
 pub(crate) struct EvaluateLatentMaskedConfig<'a> {
     pub dev: &'a Device,
     pub adj_method: &'a AdjMethod,
     pub minibatch_size: usize,
-    pub enc_context_size: usize,
-    pub shortlist_weights: &'a [f32],
+    /// Window-free, or the window an OLD model recorded. See [`MaskedRead`].
+    pub read: MaskedRead<'a>,
     pub feature_mean: &'a [f32],
     /// Latent head to run at inference — must match the head the model was
     /// trained with. The eval path (all genes visible, no decoder) is identical
@@ -234,41 +307,67 @@ where
         + Sync,
 {
     let kk = IndexedEncoderT::dim_latent(encoder);
+    let d_train = config.feature_mean.len();
+    let mean_1d = Tensor::from_vec(config.feature_mean.to_vec(), (1, d_train), config.dev)?;
 
     process_blocks(ntot, kk, config.minibatch_size, config.dev, |block| {
         let (lb, _ub) = block;
         let (x_dn, x0_nd) = read(block)?;
 
-        let ctx = PerGeneContext {
-            feature_mean: Some(config.feature_mean),
-        };
-        let enc_pack = csc_to_indexed(
-            &x_dn,
-            config.enc_context_size,
-            config.shortlist_weights,
-            gene_remap,
-            ctx,
-            config.dev,
-        )?;
-        let enc_values_null = x0_nd
-            .as_ref()
-            .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
-            .transpose()?;
-        let visible = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
         // Encoder-only inference: `train = false`; the latent alone is
-        // written out.
-        let latent_nk = masked_encode(
-            encoder,
-            config.head,
-            &MaskedEncoderInput {
-                indices: &enc_pack.indices,
-                values: &enc_pack.values,
-                values_null: enc_values_null.as_ref(),
-                values_mean: enc_pack.values_mean.as_ref(),
-                visible_mask: &visible,
-            },
-            false,
-        )?;
+        // written out. Nothing is masked at inference — window-free, that means
+        // every gene is visible, zeros included, which is the distribution the
+        // dense encoder trained on.
+        let latent_nk = match config.read {
+            MaskedRead::Dense => {
+                let x_nd = csc_block_to_dense(&x_dn, d_train, gene_remap, config.dev)?;
+                let visible = Tensor::ones(x_nd.shape(), candle_core::DType::F32, config.dev)?;
+                masked_encode_dense(
+                    encoder,
+                    config.head,
+                    &MaskedDenseInput {
+                        x_nd: &x_nd,
+                        x0_nd: x0_nd.as_ref(),
+                        mean_1d: Some(&mean_1d),
+                        visible_nd: &visible,
+                    },
+                    false,
+                )?
+            }
+            MaskedRead::Windowed {
+                context_size,
+                shortlist_weights,
+            } => {
+                let ctx = PerGeneContext {
+                    feature_mean: Some(config.feature_mean),
+                };
+                let enc_pack = csc_to_indexed(
+                    &x_dn,
+                    context_size,
+                    shortlist_weights,
+                    gene_remap,
+                    ctx,
+                    config.dev,
+                )?;
+                let enc_values_null = x0_nd
+                    .as_ref()
+                    .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
+                    .transpose()?;
+                let visible = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
+                masked_encode(
+                    encoder,
+                    config.head,
+                    &MaskedEncoderInput {
+                        indices: &enc_pack.indices,
+                        values: &enc_pack.values,
+                        values_null: enc_values_null.as_ref(),
+                        values_mean: enc_pack.values_mean.as_ref(),
+                        visible_mask: &visible,
+                    },
+                    false,
+                )?
+            }
+        };
         let z_nk = latent_nk.to_device(&candle_core::Device::Cpu)?;
         Ok((lb, Mat::from_tensor(&z_nk)?))
     })
@@ -279,8 +378,8 @@ pub(crate) struct HoldoutEvalConfig<'a> {
     pub dev: &'a Device,
     pub adj_method: &'a AdjMethod,
     pub minibatch_size: usize,
-    pub enc_context_size: usize,
-    pub shortlist_weights: &'a [f32],
+    /// Window-free, or the window an OLD model recorded. See [`MaskedRead`].
+    pub read: MaskedRead<'a>,
     pub feature_mean: &'a [f32],
     /// Latent head the model was trained with (matches the persisted model).
     pub head: LatentHead,
@@ -315,6 +414,8 @@ pub(crate) fn evaluate_holdout_imputation(
 ) -> anyhow::Result<f32> {
     let ntot = data_vec.num_columns();
     let full_kd = decoder.full_logits_kd()?;
+    let d_train = config.feature_mean.len();
+    let mean_1d = Tensor::from_vec(config.feature_mean.to_vec(), (1, d_train), config.dev)?;
 
     let mut llik_sum = 0f64;
     let mut mask_cnt = 0f64;
@@ -325,93 +426,137 @@ pub(crate) fn evaluate_holdout_imputation(
                 expand_delta_for_block(data_vec, delta_bm, config.adj_method, lb, ub, config.dev)
             })
             .transpose()?;
+        let n = ub - lb;
+        let map = decoder.coarsening();
+        let n_obs = decoder.dim_obs();
 
-        let ctx = PerGeneContext {
-            feature_mean: Some(config.feature_mean),
-        };
-        let enc_pack = csc_to_indexed(
-            &x_dn,
-            config.enc_context_size,
-            config.shortlist_weights,
-            None,
-            ctx,
-            config.dev,
-        )?;
-        let values_null = x0_nd
-            .as_ref()
-            .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
-            .transpose()?;
-
-        // Seeded hold-out mask over the cell's real (value>0) top-K positions.
-        // Host-side RNG keyed by `seed ^ lb` so the masked set is deterministic
-        // and identical across heads for a fixed seed.
-        let (n, k) = enc_pack.values.dims2()?;
-        let values_host: Vec<f32> = enc_pack.values.flatten_all()?.to_vec1()?;
-        let mut rng = StdRng::seed_from_u64(config.seed ^ (lb as u64));
-        let mut mask_buf = vec![0f32; n * k];
-        for (slot, &v) in values_host.iter().enumerate() {
-            if v > 0.0 && rng.random::<f64>() < config.mask_fraction {
-                mask_buf[slot] = 1.0;
+        // `(raw latent, module targets)`. The two reads differ only in which
+        // genes the encoder was allowed to look at; the scored set is the
+        // complement of that, derived from the same mask either way.
+        let (raw_z, t) = match config.read {
+            MaskedRead::Dense => {
+                // Hold out a fraction of each cell's OBSERVED genes. Holding
+                // out zeros as well would move the metric without adding
+                // information: the score asks whether the model can put back
+                // what was taken away, and a zero that stays zero is not an
+                // imputation.
+                let x_nd = csc_block_to_dense(&x_dn, d_train, None, config.dev)?;
+                let observed: Vec<f32> = x_nd.flatten_all()?.to_vec1()?;
+                let mut rng = StdRng::seed_from_u64(config.seed ^ (lb as u64));
+                let mut vis = vec![1f32; n * d_train];
+                for (slot, &v) in observed.iter().enumerate() {
+                    if v > 0.0 && rng.random::<f64>() < config.mask_fraction {
+                        vis[slot] = 0.0;
+                    }
+                }
+                let visible_nd = Tensor::from_vec(vis, (n, d_train), config.dev)?;
+                let raw_z = masked_encode_dense(
+                    encoder,
+                    config.head,
+                    &MaskedDenseInput {
+                        x_nd: &x_nd,
+                        x0_nd: x0_nd.as_ref(),
+                        mean_1d: Some(&mean_1d),
+                        visible_nd: &visible_nd,
+                    },
+                    false,
+                )?;
+                // The same aggregation the trainer uses, so the held-out number
+                // is on the training trace's scale.
+                let t = dense_module_targets(map, &x_nd, &visible_nd)?;
+                (raw_z, t)
             }
-        }
-        let masked = Tensor::from_vec(mask_buf, (n, k), config.dev)?;
-        let real = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
-        let visible = (&real - &masked)?;
-
-        // Encode from the visible genes only, mirroring the training split
-        // (including the simplex-head topic smoothing). The held-out metric is
-        // the imputation likelihood alone.
-        let raw_z = masked_encode(
-            encoder,
-            config.head,
-            &MaskedEncoderInput {
-                indices: &enc_pack.indices,
-                values: &enc_pack.values,
-                values_null: values_null.as_ref(),
-                values_mean: enc_pack.values_mean.as_ref(),
-                visible_mask: &visible,
-            },
-            false,
-        )?;
+            MaskedRead::Windowed {
+                context_size,
+                shortlist_weights,
+            } => {
+                let ctx = PerGeneContext {
+                    feature_mean: Some(config.feature_mean),
+                };
+                let enc_pack = csc_to_indexed(
+                    &x_dn,
+                    context_size,
+                    shortlist_weights,
+                    None,
+                    ctx,
+                    config.dev,
+                )?;
+                let values_null = x0_nd
+                    .as_ref()
+                    .map(|x0| gather_null_at_indices(x0, &enc_pack.indices, config.dev))
+                    .transpose()?;
+                // Seeded hold-out mask over the cell's real (value>0) top-K
+                // positions. Host-side RNG keyed by `seed ^ lb` so the masked
+                // set is deterministic and identical across heads.
+                let (n_rows, k) = enc_pack.values.dims2()?;
+                let values_host: Vec<f32> = enc_pack.values.flatten_all()?.to_vec1()?;
+                let mut rng = StdRng::seed_from_u64(config.seed ^ (lb as u64));
+                let mut mask_buf = vec![0f32; n_rows * k];
+                for (slot, &v) in values_host.iter().enumerate() {
+                    if v > 0.0 && rng.random::<f64>() < config.mask_fraction {
+                        mask_buf[slot] = 1.0;
+                    }
+                }
+                let masked = Tensor::from_vec(mask_buf, (n_rows, k), config.dev)?;
+                let real = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
+                let visible = (&real - &masked)?;
+                let raw_z = masked_encode(
+                    encoder,
+                    config.head,
+                    &MaskedEncoderInput {
+                        indices: &enc_pack.indices,
+                        values: &enc_pack.values,
+                        values_null: values_null.as_ref(),
+                        values_mean: enc_pack.values_mean.as_ref(),
+                        visible_mask: &visible,
+                    },
+                    false,
+                )?;
+                // The module view of the block, straight from the sparse columns.
+                let f2c = map.host_fine_to_coarse();
+                let mut dense = vec![0f32; n * n_obs];
+                let mut lib = vec![1f32; n];
+                for (j, col) in (lb..ub).enumerate() {
+                    let c = x_dn.col(col - lb);
+                    for (&r, &v) in c.row_indices().iter().zip(c.values().iter()) {
+                        dense[j * n_obs + f2c[r]] += v;
+                        lib[j] += v;
+                    }
+                }
+                let m_ctx = map.groups_of(&enc_pack.indices)?;
+                let share_ctx = map.log_share_at(&enc_pack.indices)?.exp()?;
+                let t = DenseModuleTargets {
+                    values_nm: Tensor::from_vec(dense, (n, n_obs), config.dev)?,
+                    visible_counts_nm: scatter_add_cols(
+                        &m_ctx,
+                        &(&enc_pack.values * &visible)?,
+                        n_obs,
+                    )?,
+                    visible_share_nm: scatter_add_cols(&m_ctx, &(share_ctx * &visible)?, n_obs)?,
+                    lib_n1: Tensor::from_vec(lib, (n, 1), config.dev)?,
+                };
+                (raw_z, t)
+            }
+        };
         // Must match the training-time decoder coupling exactly, or the
         // held-out number is not comparable to the training trace.
         let log_z = decoder_log_theta(raw_z, config.head, config.topic_smoothing)?;
 
-        // Score what the encoder did not see, matching the training law:
-        // every module's unseen counts (every gene's, under the identity map)
-        // against the module rate scaled by the unseen share, the full
-        // library, and `residual` because these are cells, whose counts still
-        // carry the batch effect. The module view of the block is built on
-        // the host straight from the sparse columns.
-        let map = decoder.coarsening();
-        let n_obs = decoder.dim_obs();
-        let f2c = map.host_fine_to_coarse();
-        let mut dense = vec![0f32; n * n_obs];
-        let mut lib = vec![1f32; n];
-        for (j, col) in (lb..ub).enumerate() {
-            let c = x_dn.col(col - lb);
-            for (&r, &v) in c.row_indices().iter().zip(c.values().iter()) {
-                dense[j * n_obs + f2c[r]] += v;
-                lib[j] += v;
-            }
-        }
-        let values_nm = Tensor::from_vec(dense, (n, n_obs), config.dev)?;
-        let lib_n1 = Tensor::from_vec(lib, (n, 1), config.dev)?;
-        let m_ctx = map.groups_of(&enc_pack.indices)?;
-        let visible_counts = scatter_add_cols(&m_ctx, &(&enc_pack.values * &visible)?, n_obs)?;
-        let share_ctx = map.log_share_at(&enc_pack.indices)?.exp()?;
-        let visible_share = scatter_add_cols(&m_ctx, &(share_ctx * &visible)?, n_obs)?;
-        // The per-gene batch offset averaged into modules by share.
+        // Score what the encoder did not see, matching the training law: every
+        // module's unseen counts (every gene's, under the identity map) against
+        // the module rate scaled by the unseen share, the full library, and
+        // `residual` because these are cells, whose counts still carry the batch
+        // effect.
         let residual_nm = x0_nd
             .as_ref()
             .map(|x0| map.aggregate_columns(&x0.broadcast_mul(&map.log_share_1d().exp()?)?))
             .transpose()?;
         let target = ModuleTarget {
-            values: &values_nm,
-            visible_counts: &visible_counts,
-            visible_share: &visible_share,
+            values: &t.values_nm,
+            visible_counts: &t.visible_counts_nm,
+            visible_share: &t.visible_share_nm,
             residual: residual_nm.as_ref(),
-            lib: &lib_n1,
+            lib: &t.lib_n1,
         };
         let (llik, units) = match config.likelihood {
             MaskedLikelihood::Nb => decoder.score_unseen_modules_nb(&log_z, &target, &full_kd)?,
@@ -429,3 +574,7 @@ pub(crate) fn evaluate_holdout_imputation(
         f32::NAN
     })
 }
+
+#[cfg(test)]
+#[path = "eval_indexed_tests.rs"]
+mod eval_indexed_tests;

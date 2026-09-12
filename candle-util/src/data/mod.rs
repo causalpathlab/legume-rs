@@ -4,11 +4,13 @@
 //! - [`loader_util`]: shared minibatch helpers
 //! - [`joint`]: paired/multi-view loader (joint encoders)
 //! - [`indexed`]: sparse/top-K indexed loader (used by `IndexedEmbeddingEncoder`)
+//! - [`masked_dense`]: window-free masked loader — dense rows, mask over every gene
 
 pub mod indexed;
 pub mod joint;
 pub mod loader;
 pub mod loader_util;
+pub mod masked_dense;
 
 pub use indexed::{
     build_indexed_samples, build_sparse_edges_from_tensor, csc_columns_to_indexed_samples,

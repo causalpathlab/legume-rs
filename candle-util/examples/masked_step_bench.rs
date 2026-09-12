@@ -16,7 +16,6 @@ use candle_util::encoder::scatter_pool::{
 };
 use candle_util::fast_index::gather_rows;
 use candle_util::fast_index::scatter_add_cols;
-use candle_util::vae::masked_topic::target_mask_nd;
 use std::time::Instant;
 
 const N: usize = 100;
@@ -27,6 +26,19 @@ const H: usize = 128;
 const R: usize = 32;
 const T: usize = 8;
 const ITERS: usize = 30;
+
+/// `[N, D]` scored-position mask: 1 everywhere the windowed encoder could not
+/// see. Local to this bench now — the trainer's window is gone, and with it the
+/// scatter this measured; the number is kept so the before/after stays legible.
+fn target_mask_nd(
+    indices: &Tensor,
+    visible: &Tensor,
+    n_features: usize,
+) -> candle_core::Result<Tensor> {
+    let n = indices.dim(0)?;
+    let zeros = Tensor::zeros((n, n_features), visible.dtype(), visible.device())?;
+    zeros.scatter_add(indices, visible, 1)?.affine(-1.0, 1.0)
+}
 
 fn time<F: FnMut() -> candle_core::Result<()>>(dev: &Device, label: &str, mut f: F) {
     // warm-up

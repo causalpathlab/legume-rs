@@ -1,5 +1,5 @@
 use crate::data::indexed::SparseEdgeBatch;
-use crate::encoder::scatter_pool;
+use crate::encoder::{dense_pool, scatter_pool};
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
 use crate::nn::gcn::GcnBlock;
@@ -401,6 +401,74 @@ impl IndexedEmbeddingEncoder {
         self.module_pool(&mem, &a_nk, visible_mask).map(Some)
     }
 
+    /// Pool EVERY feature of a dense minibatch row, zeros included, using only
+    /// the genes the row's mask leaves visible.
+    ///
+    /// The window-free sibling of [`Self::preprocess_indexed_masked`]. There is
+    /// no context and no padding: `visible_nd` is the whole gene axis, and the
+    /// genes it hides are the ones the decoder is scored on. The gate is
+    /// [`anscombe_residual`] — the transform the dense encoders already use —
+    /// so a zero-count gene enters the softmax with a below-mean gate rather
+    /// than not entering it at all. That is the model change; the pooling
+    /// itself is [`crate::encoder::dense_pool`], which agrees with stage 1's
+    /// scatter pool exactly when the visible mask is a cell's support.
+    fn preprocess_dense_masked(
+        &self,
+        x_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
+        mean_1d: Option<&Tensor>,
+        visible_nd: &Tensor,
+    ) -> Result<Tensor> {
+        // The module branch pools by membership over CONTEXT SLOTS; with no
+        // context there are no slots to pool over, and composing a `[D, M]`
+        // membership per row is a different operator, not the same one at
+        // another width. Refuse rather than invent one.
+        if self.features.n_modules() > 0 {
+            candle_core::bail!(
+                "the window-free (dense) masked encoder has no gene-module branch: modules pool \
+                 a cell by membership over its context slots, and without a context window there \
+                 are no slots. Train with --gene-modules 0."
+            );
+        }
+        let h = self.embedding_dim;
+        let a_nd = crate::value_transform::anscombe_residual(x_nd, x0_nd, mean_1d)?; // [N, D]
+
+        let attn_query = self
+            .attn_query
+            .as_ref()
+            .expect("forward_dense_masked requires an attn_pool encoder");
+        // ρq over every feature, once per minibatch; the query is a parameter,
+        // so this is recomputed, never cached.
+        let rq_d = scatter_pool::query_over_features(&self.features, attn_query)?; // [D]
+        let scores_nd =
+            dense_pool::attention_scores_dense(&a_nd, &rq_d, visible_nd, 1.0 / (h as f64).sqrt())?;
+        // The softmax weights sum to 1, so the pooled vector is depth-normalized.
+        let attn_nd = ops::softmax(&scores_nd, 1)?; // [N, D]
+        let pooled_nh = dense_pool::pool_dense(&attn_nd, &a_nd, &self.features)?; // [N, H]
+
+        // A row with nothing visible has an all-−∞ score row, so softmax
+        // degenerates to a uniform average over genes it was told not to look
+        // at. Zero it, exactly as the indexed path does.
+        let has_visible_n1 = visible_nd
+            .sum_keepdim(1)?
+            .gt(0.0)?
+            .to_dtype(pooled_nh.dtype())?; // [N, 1]
+        pooled_nh.broadcast_mul(&has_visible_n1)
+    }
+
+    /// `pool → FC → BN → bn_nl [N, L]`: the trunk both masked reads share.
+    fn trunk_from_pool(&self, pooled: &Tensor, train: bool) -> Result<Tensor> {
+        let fc_nl = self.fc.forward_t(pooled, train)?;
+        self.bn_z.forward_t(&fc_nl, train)
+    }
+
+    /// Clamped per-topic logits from a pooled `[N, H]` — the pre-activation
+    /// every simplex head maps to `log θ`.
+    fn logits_from_pool(&self, pooled: &Tensor, train: bool) -> Result<Tensor> {
+        let bn_nl = self.trunk_from_pool(pooled, train)?;
+        soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)
+    }
+
     /// Shared masked-encoder trunk: visible-pool → FC → BN → `bn_nl [N, L]`.
     /// All three masked heads (softmax / stick-breaking / Gaussian) branch off
     /// this — only the final projection differs — so the pooling + FC + BN wiring
@@ -421,8 +489,7 @@ impl IndexedEmbeddingEncoder {
             values_mean,
             visible_mask,
         )?;
-        let fc_nl = self.fc.forward_t(&h_nh, train)?;
-        self.bn_z.forward_t(&fc_nl, train)
+        self.trunk_from_pool(&h_nh, train)
     }
 
     /// Clamped per-topic logits `z_mean [N, K]` from the masked trunk — the
@@ -523,6 +590,58 @@ impl IndexedEmbeddingEncoder {
             visible_mask,
             train,
         )
+    }
+
+    /// Clamped per-topic logits `z_mean [N, K]` from the DENSE masked trunk.
+    fn dense_masked_logits(
+        &self,
+        x_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
+        mean_1d: Option<&Tensor>,
+        visible_nd: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let pooled = self.preprocess_dense_masked(x_nd, x0_nd, mean_1d, visible_nd)?;
+        self.logits_from_pool(&pooled, train)
+    }
+
+    /// Window-free masked forward → `log θ [N, K_topics]`, the dense sibling of
+    /// [`Self::forward_indexed_masked`].
+    pub fn forward_dense_masked(
+        &self,
+        x_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
+        mean_1d: Option<&Tensor>,
+        visible_nd: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let z_mean_nk = self.dense_masked_logits(x_nd, x0_nd, mean_1d, visible_nd, train)?;
+        ops::log_softmax(&z_mean_nk, 1)
+    }
+
+    /// Window-free **stick-breaking** masked forward → `log θ [N, K]`.
+    pub fn forward_dense_masked_stick(
+        &self,
+        x_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
+        mean_1d: Option<&Tensor>,
+        visible_nd: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        let z_mean_nk = self.dense_masked_logits(x_nd, x0_nd, mean_1d, visible_nd, train)?;
+        crate::vae::stick_breaking_log_simplex(&z_mean_nk)
+    }
+
+    /// Window-free **Gaussian** masked forward → the unconstrained `z [N, K]`.
+    pub fn forward_dense_masked_gaussian(
+        &self,
+        x_nd: &Tensor,
+        x0_nd: Option<&Tensor>,
+        mean_1d: Option<&Tensor>,
+        visible_nd: &Tensor,
+        train: bool,
+    ) -> Result<Tensor> {
+        self.dense_masked_logits(x_nd, x0_nd, mean_1d, visible_nd, train)
     }
 
     /// Compute latent Gaussian parameters from packed indexed input.
