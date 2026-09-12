@@ -231,9 +231,11 @@ struct BankSource<'a> {
 struct BankArgs<'a> {
     pub calib: BankSource<'a>,
     pub query: BankSource<'a>,
-    pub context_size: usize,
+    /// The window an OLD model recorded, with the weights that ranked it.
+    /// `None` for a window-free model: there is no shortlist to rank by, and
+    /// nothing to truncate to — the bank then holds each cell's whole support.
+    pub window: Option<(usize, &'a [f32])>,
     pub feature_mean: &'a [f32],
-    pub shortlist_weights: &'a [f32],
     pub dev: &'a Device,
 }
 
@@ -270,10 +272,29 @@ fn mat_to_tensor(m: &Mat, dev: &Device) -> anyhow::Result<Tensor> {
 fn pack_side(src: &BankSource<'_>, a: &BankArgs<'_>) -> anyhow::Result<(Tensor, Tensor, Tensor)> {
     let ntot = src.data_vec.num_columns();
     let csc = src.data_vec.read_columns_csc(0..ntot)?;
+    // What the bank holds is the SCORED set — the genes each cell's fit is
+    // summed over — not an encoder context. A windowed model truncated it to
+    // the top-K it was fitted under, so it keeps doing that. Window-free there
+    // is nothing to truncate to and nothing to rank by, so the bank packs each
+    // cell's whole support: `nb_llik` already scores exactly `value > 0`, so
+    // the widest support in the block is the tightest width that drops nothing.
+    let uniform: Vec<f32>;
+    let (context_size, weights) = match a.window {
+        Some((k, w)) => (k, w),
+        None => {
+            let widest = (0..csc.ncols())
+                .map(|j| csc.col(j).nnz())
+                .max()
+                .unwrap_or(0)
+                .max(1);
+            uniform = vec![1.0f32; a.feature_mean.len()];
+            (widest, uniform.as_slice())
+        }
+    };
     let pack = csc_to_indexed(
         &csc,
-        a.context_size,
-        a.shortlist_weights,
+        context_size,
+        weights,
         src.gene_remap.map(|r| r.new_to_train.as_slice()),
         PerGeneContext {
             feature_mean: Some(a.feature_mean),
@@ -296,10 +317,13 @@ impl CellBank {
         query: &crate::predict::MaskedScored,
         dev: &Device,
     ) -> anyhow::Result<Self> {
-        let context_size = model
-            .metadata
-            .enc_context_size
-            .ok_or_else(|| anyhow::anyhow!("metadata missing enc_context_size"))?;
+        let window = match (model.metadata.enc_context_size, model.shortlist.as_deref()) {
+            (Some(k), Some(w)) => Some((k, w)),
+            (Some(k), None) => anyhow::bail!(
+                "this model records a context window of {k} but has no shortlist_weights.parquet"
+            ),
+            (None, _) => None,
+        };
         Self::build(BankArgs {
             calib: BankSource {
                 data_vec: &cal.data_vec,
@@ -311,9 +335,8 @@ impl CellBank {
                 z_nk: &query.z_nk,
                 gene_remap: query.gene_remap.as_ref(),
             },
-            context_size,
+            window,
             feature_mean: &model.feature_mean,
-            shortlist_weights: &model.shortlist,
             dev,
         })
     }

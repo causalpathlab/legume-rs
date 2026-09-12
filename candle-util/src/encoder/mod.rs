@@ -7,6 +7,7 @@
 //! - [`indexed`]: sparse top-K `IndexedEmbeddingEncoder` (with optional GCN)
 
 pub mod coarse_pool;
+pub mod dense_pool;
 pub mod gaussian;
 pub mod gem_encoder;
 pub mod indexed;

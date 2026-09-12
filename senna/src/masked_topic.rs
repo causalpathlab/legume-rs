@@ -232,6 +232,10 @@ pub struct MaskedTopicArgs {
                      --max-coarse-features is the other kind,\n\
                      read off the data before training and fixed thereafter.\n\
                      \n\
+                     REFUSED by the window-free encoder: modules pool a cell\n\
+                     by membership over its context slots,\n\
+                     and there is no context any more. Only 0 is accepted.\n\
+                     \n\
                      0 keeps the older free per-gene embedding instead.\n\
                      \n\
                      A continued fit cannot change M, in either direction:\n\
@@ -500,6 +504,11 @@ pub struct MaskedTopicArgs {
                      the row's visible slots and adds a log-residual to its own rate,\n\
                      μ_g = ℓ · (θβ)_g · exp(r_g).\n\
                      The mixture explains what it can; attention carries the rest.\n\
+                     \n\
+                     REFUSED by the window-free encoder: each query attends over\n\
+                     the genes the encoder read, an [N, Q, K] block, and\n\
+                     window-free that is every gene. No --query-extra makes it fit.\n\
+                     \n\
                      Off: today's masked heads, byte for byte."
     )]
     query_decoder: bool,
@@ -589,20 +598,14 @@ pub struct MaskedTopicArgs {
     )]
     seed: u64,
 
-    #[arg(
-        long,
-        default_value_t = 512,
-        help = "Encoder context window (top-K features per cell)",
-        long_help = "Each cell keeps its top-K features by value.\n\
-                     This is the ENCODER's budget only: it bounds how much of a\n\
-                     cell the encoder reads, and a smaller K makes the encoder\n\
-                     cheaper.\n\
-                     \n\
-                     It does not bound what the decoder is scored on. That is\n\
-                     every gene outside this window, over the full feature axis,\n\
-                     so the decoder's cost is set by the feature count instead."
-    )]
-    context_size: usize,
+    /// The context window an OLD run recorded, kept only so `senna update` can
+    /// replay such a manifest.
+    ///
+    /// Not a flag: the encoder reads every gene now, zeros included, so there
+    /// is no window to size. A recorded value is reported and ignored.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_size: Option<usize>,
 
     #[arg(
         long,
@@ -778,6 +781,13 @@ pub(crate) fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind 
 
 pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    args.validate()?;
+    if let Some(k) = args.recorded_context_size() {
+        info!(
+            "this run was recorded with --context-size {k}; the window no longer applies — the \
+             encoder reads every gene, zeros included"
+        );
+    }
 
     let k = args.n_latent_topics;
 
@@ -828,6 +838,19 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             args.gene_modules,
             args.add_embedding_dim,
         )?;
+        // A checkpoint fitted under a context window continues here as a
+        // window-free fit. Every encoder variable is shared between the two
+        // reads — ρ, the FC stack, the batch norm, the z heads, `attn.query` —
+        // so the weights transfer; what changes is which genes reach them.
+        if let Ok(src) = crate::topic::model_metadata::TopicModelMetadata::load(prefix) {
+            if let Some(k) = src.enc_context_size {
+                info!(
+                    "--init-from {prefix} was fitted with a context window of {k}; this run \
+                     continues it window-free (every gene read, zeros included) and records no \
+                     window of its own"
+                );
+            }
+        }
     }
 
     // Resolved before H so the pre-trained dictionary's column count
@@ -1137,9 +1160,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     }
 
     info!(
-        "input: {} genes -> indexed encoder (emb={}, ctx={}) -> {} decoders over {:?} \
-         (unseen modules scored; genes through the query head)",
-        n_features_full, h, args.context_size, num_levels, level_decoder_dims,
+        "input: {} genes -> window-free masked encoder (emb={}, every gene read, zeros \
+         included) -> {} decoders over {:?} (the genes the encoder did not see are scored)",
+        n_features_full, h, num_levels, level_decoder_dims,
     );
 
     // Bulk deconvolution is not supported on the masked-imputation path; the
@@ -1147,19 +1170,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // ignored) is gone. `senna deconvolve --bulk` is the supported route.
 
     let stop = setup_stop_handler();
-
-    info!("Computing NB-Fisher weights for shortlist scoring");
-    // Full gene resolution: the masked head has no feature coarsening.
-    let shortlist_weights: Vec<f32> = crate::refine_weighting::fit_fisher_weights(
-        finest_collapsed,
-        cell_to_pb_per_level
-            .as_deref()
-            .and_then(<[Vec<usize>]>::last)
-            .map(Vec::as_slice),
-        None,
-        &data_vec,
-        args.block_size,
-    )?;
 
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
@@ -1172,12 +1182,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         minibatch_size: args.minibatch_size.unwrap_or(100),
         learning_rate: args.learning_rate,
         topic_smoothing: args.topic_smoothing,
-        enc_context_size: args.context_size,
         stop: &stop,
-        shortlist_weights: &shortlist_weights,
         feature_mean: &feature_mean,
         grad_clip: args.grad_clip,
-        feature_graph: None,
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
         frozen_feature_var: if freeze_rho {
@@ -1200,35 +1207,15 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         latent: head,
         poisson_thin: args.poisson_thin,
         seed: args.seed,
-        query: args
-            .query_decoder
-            .then_some(candle_util::vae::masked_topic::QueryOpts {
-                extra: args.query_extra,
-                penalty: args.query_penalty,
-            }),
+        // Refused at argument validation; the head has no window-free form.
+        query: None,
     };
-    let query_decoder = args
-        .query_decoder
-        .then(|| {
-            candle_util::decoder::query_decoder::QueryDecoder::new(
-                h,
-                args.query_rank,
-                param_builder.pp("dec_query"),
-            )
-        })
-        .transpose()?;
-    if query_decoder.is_some() {
-        info!(
-            "Query decoder ON: rank {}, {} extra queries/row, penalty {}",
-            args.query_rank, args.query_extra, args.query_penalty
-        );
-    }
 
     let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
         &decoders,
-        query_decoder.as_ref(),
+        None,
         &train_config,
         args.mask_fraction,
         &masked_opts,
@@ -1267,8 +1254,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             dev: &dev,
             adj_method: &args.adj_method,
             minibatch_size: args.minibatch_size.unwrap_or(100),
-            enc_context_size: args.context_size,
-            shortlist_weights: &shortlist_weights,
+            read: crate::topic::eval_indexed::MaskedRead::Dense,
             feature_mean: &feature_mean,
             head,
             likelihood: args.masked_likelihood.to_lib(),
@@ -1294,7 +1280,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // so `senna predict` (and `--init-from` re-runs) can rebuild this model.
     use crate::topic::model_metadata::{
         masked_decoder_type, masked_model_type, save_feature_mean, save_parameters,
-        save_shortlist_weights, TopicModelMetadata,
+        TopicModelMetadata,
     };
 
     // No feature graph is persisted on the masked path (GCN diffusion is not
@@ -1313,19 +1299,20 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         adj_method: args.adj_method.as_str().into(),
         has_coarsening,
         embedding_dim: Some(h),
-        enc_context_size: Some(args.context_size),
+        // `None` marks a window-free model: every consumer reads it dense. A
+        // value here means an OLD model, which keeps its indexed evaluation.
+        enc_context_size: None,
         theta_mean: None,
         n_train_cells: Some(data_vec.num_columns()),
         // Round-trips the encoder's FC input width; without it every rebuild site
         // would construct `[L, H]` and `VarMap::load` would reject the checkpoint.
         n_gene_modules: Some(args.gene_modules),
-        query_rank: args.query_decoder.then_some(args.query_rank),
+        query_rank: None,
     };
     metadata.save(&args.out)?;
     if has_coarsening {
         crate::topic::model_metadata::save_coarsening_levels(&level_coarsenings, &args.out)?;
     }
-    save_shortlist_weights(&shortlist_weights, &gene_names, &args.out)?;
     save_feature_mean(&feature_mean, &gene_names, &args.out)?;
 
     // Move VarMap to CPU, then rebuild the encoder from the CPU Vars. The
@@ -1368,8 +1355,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         dev: &cpu_dev,
         adj_method: &args.adj_method,
         minibatch_size: args.minibatch_size.unwrap_or(100),
-        enc_context_size: args.context_size,
-        shortlist_weights: &shortlist_weights,
+        read: crate::topic::eval_indexed::MaskedRead::Dense,
         feature_mean: &feature_mean,
         head,
     };
@@ -1479,10 +1465,26 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                 Some(&topic_names),
             )?;
 
+            // NB-Fisher weights. These used to double as the encoder's top-K
+            // shortlist score; with no window that role is gone, but the
+            // REPORTING weight is a different thing that happens to share a
+            // formula, and dropping it would quietly flatten rare informative
+            // genes in the empirical dictionary. Computed here, beside its only
+            // remaining consumer, and no longer persisted.
+            let fisher_weights: Vec<f32> = crate::refine_weighting::fit_fisher_weights(
+                finest_collapsed,
+                cell_to_pb_per_level
+                    .as_deref()
+                    .and_then(<[Vec<usize>]>::last)
+                    .map(Vec::as_slice),
+                None,
+                &data_vec,
+                args.block_size,
+            )?;
             let beta_emp = crate::empirical_dict::build_empirical_dictionary(
                 &pb_gene_gp,
                 &pb_latent_pk,
-                &shortlist_weights,
+                &fisher_weights,
             );
             beta_emp.to_parquet_with_names(
                 &format!("{}.dictionary_empirical.parquet", args.out),
@@ -1613,6 +1615,40 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     info!("Done");
     Ok(())
+}
+
+impl MaskedTopicArgs {
+    /// The context window a replayed manifest recorded, if any. `None` for
+    /// anything this build wrote.
+    pub(crate) fn recorded_context_size(&self) -> Option<usize> {
+        self.context_size
+    }
+
+    /// Refuse the combinations the window-free encoder cannot express, before
+    /// anything is read.
+    ///
+    /// Both refusals are about the same missing thing: a bounded set of genes
+    /// per cell. The module branch pooled a cell by membership over its context
+    /// SLOTS, and the query head attends from each query gene over the genes
+    /// the encoder read. Neither has a counterpart when the encoder reads all
+    /// of them.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.gene_modules == 0,
+            "--gene-modules {} does not compose with the window-free encoder: modules pool a \
+             cell by membership over its context slots, and there is no context any more — the \
+             encoder reads every gene. Modules are off by default and are being retired; pass \
+             --gene-modules 0.",
+            self.gene_modules
+        );
+        anyhow::ensure!(
+            !self.query_decoder,
+            "--query-decoder needs a bounded read set: each query gene attends over the genes \
+             the encoder read, an [N, Q, K] block, and window-free that is every gene (K = D). \
+             No --query-extra makes it fit. Drop --query-decoder (and --query-extra)."
+        );
+        Ok(())
+    }
 }
 
 impl crate::update::Updatable for MaskedTopicArgs {
