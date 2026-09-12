@@ -134,6 +134,24 @@ impl FeatureEmbedding {
         }
     }
 
+    /// The rows projected through a `[H, C]` right factor — `ρ v` — without
+    /// forming the whole `[D, H]` table.
+    ///
+    /// The dual of [`Self::map_rows_linear`], and deliberately a separate
+    /// method rather than a case of it: a map on the ROWS commutes with
+    /// composition (`f(π μ) = f(π) μ`), so it folds into the membership; a map
+    /// on the embedding DIMS does not, and folds into the dictionary instead
+    /// (`(π μ) v = π (μ v)`). Passing a right factor to `map_rows_linear`
+    /// would not silently do the wrong thing — the shapes disagree — but the
+    /// operation is needed all the same: it is how the encoder's attention
+    /// query reaches every feature in one matvec.
+    pub fn project_dims(&self, v_hc: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Free(rho) => rho.matmul(v_hc),
+            Self::Composed { logits, mu } => sparsemax(logits)?.matmul(&mu.matmul(v_hc)?),
+        }
+    }
+
     /// The rows named by `ids`, composed without forming the whole table.
     ///
     /// The cheap path, and the one training uses: `[n, M]` gathered, projected,

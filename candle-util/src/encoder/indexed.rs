@@ -1,5 +1,5 @@
-use crate::batched_dot::{batched_matvec_shared, batched_weighted_sum};
 use crate::data::indexed::SparseEdgeBatch;
+use crate::encoder::scatter_pool;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
 use crate::nn::gcn::GcnBlock;
@@ -255,13 +255,19 @@ impl IndexedEmbeddingEncoder {
 impl IndexedEmbeddingEncoder {
     /// Pool packed top-K into `[N, H]` using **only the visible slots**.
     ///
-    /// Builds the same value-gated tokens as [`Self::preprocess_indexed`]
-    /// (`a_nk · ρ`), then pools by **single-query attention** (PMA-style)
-    /// rather than a plain sum: attention scores for masked / padding slots
-    /// (`visible_mask [N, K]` == 0) are driven to −∞ so those genes are
-    /// excluded from the softmax — the raw `a_nk` gate is *not* zeroed, so a
-    /// masked gene's value never leaks into the pool. Used by the masked-
-    /// imputation topic model. No GCN branch on this path.
+    /// The same value-gated attention pool as [`Self::preprocess_indexed`]'s
+    /// tokens (`a_nk · ρ`) scored against a learned query, PMA-style: scores
+    /// for masked / padding slots (`visible_mask [N, K]` == 0) are driven to
+    /// −∞ so those genes are excluded from the softmax — the raw `a_nk` gate
+    /// is *not* zeroed, so a masked gene's value never leaks into the pool.
+    /// Used by the masked-imputation topic model. No GCN branch on this path.
+    ///
+    /// Computed by [`crate::encoder::scatter_pool`], which re-associates the
+    /// three sums so no `[N, K, H]` block of gathered rows is ever formed: the
+    /// query meets the feature side once (`ρq [D]`), the scores gather from
+    /// that vector, and the softmax weights scatter onto `[N, D]` before a
+    /// single gemm against ρ. Identical arithmetic in a different order, so
+    /// `K` no longer sizes the backward.
     fn preprocess_indexed_masked(
         &self,
         indices: &Tensor,
@@ -270,35 +276,31 @@ impl IndexedEmbeddingEncoder {
         values_mean: Option<&Tensor>,
         visible_mask: &Tensor,
     ) -> Result<Tensor> {
-        let n = indices.dim(0)?;
-        let k = indices.dim(1)?;
         let h = self.embedding_dim;
 
-        let flat_idx = indices.flatten_all()?;
-        let e_nk_h = self.features.gather(&flat_idx)?.reshape((n, k, h))?; // [N, K, H]
-
-        // Value-gated token per slot (expression × symbol embedding). Note:
-        // `a_nk` uses the raw values for ALL slots; masking is applied to the
-        // attention scores (below), not by zeroing the gate — so a masked
-        // gene is excluded from pooling but its value isn't leaked.
+        // Per-slot Anscombe scalar gate on ρ. Note: `a_nk` uses the raw values
+        // for ALL slots; masking is applied to the attention scores (below),
+        // not by zeroing the gate — so a masked gene is excluded from pooling
+        // but its value isn't leaked.
         let a_nk = anscombe_lite(values, values_null, values_mean)?; // [N, K]
-        let content_nkh = e_nk_h.broadcast_mul(&a_nk.unsqueeze(2)?)?; // [N, K, H]
 
-        // Single-query attention pool (PMA-style, O(K·H)): scores = ⟨token, q⟩/√H,
-        // visible-masked to −∞, softmax over K, then weighted sum. The softmax
-        // weights sum to 1, so the pooled vector is depth-normalized.
         let attn_query = self
             .attn_query
             .as_ref()
             .expect("forward_indexed_masked requires an attn_pool encoder");
-        let scale = (h as f64).sqrt();
-        // Both of these are gemms — see `candle_util::batched_dot`. The scores
-        // share one query across the batch; the pool is the transposed case.
-        let scores_nk =
-            batched_matvec_shared(&content_nkh, attn_query)?.affine(1.0 / scale, 0.0)?; // [N, K]
-        let neg_inf = visible_mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?; // (1−vis)·(−1e9)
-        let attn_nk = ops::softmax(&(scores_nk + neg_inf)?, 1)?; // [N, K]
-        let pooled_nh = batched_weighted_sum(&attn_nk, &content_nkh)?; // [N, H]
+        // ρq over every feature, once per minibatch. The query is a parameter,
+        // so this moves at every step: it is recomputed, never cached.
+        let rq_d = scatter_pool::query_over_features(&self.features, attn_query)?; // [D]
+        let scores_nk = scatter_pool::attention_scores_from_vector(
+            &a_nk,
+            indices,
+            &rq_d,
+            visible_mask,
+            1.0 / (h as f64).sqrt(),
+        )?;
+        // The softmax weights sum to 1, so the pooled vector is depth-normalized.
+        let attn_nk = ops::softmax(&scores_nk, 1)?; // [N, K]
+        let pooled_nh = scatter_pool::pool_by_scatter(&attn_nk, &a_nk, indices, &self.features)?; // [N, H]
 
         // A row with no visible slot (empty cell, or all real genes masked at
         // high mask_fraction) has an all-−∞ score row, so softmax degenerates to
@@ -312,7 +314,7 @@ impl IndexedEmbeddingEncoder {
         let pooled_nh = pooled_nh.broadcast_mul(&has_visible_n1)?; // [N, H]
 
         // Module branch. Disabled ⇒ return exactly what this function always returned.
-        let Some(mem) = self.features.gather_membership(&flat_idx)? else {
+        let Some(mem) = self.features.gather_membership(&indices.flatten_all()?)? else {
             return Ok(pooled_nh);
         };
         let (u_nm, cov_nm) = self.module_pool(&mem, &a_nk, visible_mask)?;
@@ -964,6 +966,122 @@ mod tests {
         for (g, w) in got.iter().zip(&want) {
             for (a, b) in g.iter().zip(w.iter()) {
                 assert!((a - b).abs() < 1e-4, "module space {g:?} vs dense {w:?}");
+            }
+        }
+    }
+
+    /// Build the masked encoder on a fixed parameter fill and return the
+    /// first six values of `forward_indexed_masked` for the whole fixture,
+    /// flattened.
+    fn masked_forward_head(n_gene_modules: usize) -> Vec<f32> {
+        let device = Device::Cpu;
+        let varmap = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &device);
+        let layers = vec![8, 5];
+        let enc = IndexedEmbeddingEncoder::new(
+            IndexedEmbeddingEncoderArgs {
+                n_features: 9,
+                n_topics: 3,
+                embedding_dim: 4,
+                layers: &layers,
+                use_gcn: false,
+                attn_pool: true,
+                n_gene_modules,
+            },
+            &varmap,
+            vb,
+        )
+        .unwrap();
+
+        // The CPU RNG cannot be seeded, so every parameter is overwritten with
+        // a fixed, name-ordered ramp: the fixture is reproducible across runs
+        // and across builds, which is what a pinned output needs.
+        {
+            let data = varmap.data().lock().unwrap();
+            let mut names: Vec<String> = data.keys().cloned().collect();
+            names.sort();
+            for (j, name) in names.iter().enumerate() {
+                let v = &data[name];
+                let vals: Vec<f32> = if name.ends_with("running_var") {
+                    vec![1.0; v.elem_count()]
+                } else if name.ends_with("running_mean") {
+                    vec![0.0; v.elem_count()]
+                } else if name.ends_with("bias") {
+                    // Zero, so the trunk does not drown the pool in its own
+                    // offsets: with biases the output barely moved when the
+                    // pooling changed, and the pin would have had no teeth.
+                    vec![0.0; v.elem_count()]
+                } else {
+                    (0..v.elem_count())
+                        .map(|i| 0.8 * ((i as f32) * 0.61 + j as f32 * 1.7).sin())
+                        .collect()
+                };
+                v.set(&Tensor::from_vec(vals, v.dims().to_vec(), &device).unwrap())
+                    .unwrap();
+            }
+        }
+
+        // Cell 0 names gene 2 twice, cell 1 has two masked slots, cell 2 is
+        // fully masked — the three cases the pooling has to get right.
+        let indices =
+            Tensor::from_vec(vec![2u32, 5, 2, 0, 1, 3, 6, 4, 0, 1, 2, 3], (3, 4), &device).unwrap();
+        let values = Tensor::from_vec(
+            vec![
+                4.0f32, 9.0, 1.0, 16.0, 2.0, 25.0, 7.0, 3.0, 11.0, 5.0, 8.0, 6.0,
+            ],
+            (3, 4),
+            &device,
+        )
+        .unwrap();
+        let visible = Tensor::from_vec(
+            vec![
+                1.0f32, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            (3, 4),
+            &device,
+        )
+        .unwrap();
+
+        enc.forward_indexed_masked(&indices, &values, None, None, &visible, false)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()[..6]
+            .to_vec()
+    }
+
+    /// The re-associated pooling is an identity, so the encoder's output must
+    /// not move. These literals were recorded from this same fixture BEFORE
+    /// `preprocess_indexed_masked` was rewritten, on the commit whose pooling
+    /// gathered an `[N, K, H]` block — that path no longer exists to compare
+    /// against, so the numbers stand in for it.
+    #[test]
+    fn masked_forward_is_unchanged_by_the_rewrite() {
+        let want_free = [
+            -0.7122408f32,
+            -4.017215,
+            -0.71038854,
+            -0.738572,
+            -4.091118,
+            -0.6822394,
+        ];
+        let want_modules = [
+            -0.7417681f32,
+            -3.241218,
+            -0.7244054,
+            -0.75712043,
+            -3.1009138,
+            -0.72159404,
+        ];
+        for (m, want) in [(0usize, want_free), (2, want_modules)] {
+            let got = masked_forward_head(m);
+            println!("M = {m}: {got:?}");
+            for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "M = {m}: log theta [{i}] moved: {a} vs the recorded {b}"
+                );
             }
         }
     }
