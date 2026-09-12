@@ -170,7 +170,8 @@ fn small_visible() -> Tensor {
 #[test]
 fn the_encoder_hidden_set_is_the_decoder_scored_set() {
     let dev = Device::Cpu;
-    let rows = small_rows();
+    // `[D, P]`, the orientation the loader takes.
+    let rows = small_rows().transpose();
     let lv = DenseMaskedLevel::from_mats(&rows, None, &rows, &vec![1.0f32; D], &dev).unwrap();
     let ep = lv
         .begin_epoch(

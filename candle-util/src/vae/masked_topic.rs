@@ -386,7 +386,10 @@ pub fn decoder_log_theta(
     smooth_topics(log_theta, topic_smoothing)
 }
 
-/// Per-level training triple: `(encoder input, optional batch null, decoder target)`.
+/// Per-level training triple: `(encoder input, optional batch null, decoder
+/// target)`, each **`[D, P]`** — genes down, pseudobulk samples across, the
+/// layout the collapsed posterior is sampled in. [`DenseMaskedLevel::from_mats`]
+/// makes the `[P, D]` resident rows out of it without transposing anything.
 ///
 /// All three are borrowed so callers can reuse the same `Mat` as both input
 /// and target without cloning a multi-GB matrix.
@@ -567,7 +570,7 @@ pub fn train_masked(
             "Level {}/{}: {} samples, decoder dim {} over {} genes (masked-imputation ETM)",
             level + 1,
             num_levels,
-            mixed.nrows(),
+            mixed.ncols(),
             decoder.dim_obs(),
             decoder.n_features(),
         );

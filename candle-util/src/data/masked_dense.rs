@@ -17,9 +17,11 @@
 //! the machine does.
 //!
 //! The level's rows are uploaded once and a minibatch is an `index_select` of
-//! them, the way the packed loader worked; only the width changed.
+//! them, the way the packed loader worked; only the width changed. The upload
+//! takes the pseudobulk posterior in its native `[D, P]` layout and transposes
+//! it nowhere — see [`crate::data::loader_util::upload_columns_as_rows`].
 
-use crate::data::loader_util::{bootstrap_indices, upload_to_device};
+use crate::data::loader_util::{bootstrap_indices, upload_columns_as_rows};
 use candle_core::{Device, Tensor};
 use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
@@ -105,26 +107,29 @@ pub struct DenseMaskedMinibatch {
 }
 
 impl DenseMaskedLevel {
-    /// Upload one level's rows. `input`, `target` are `[P, D]`; `null` is the
-    /// per-row batch null at the same shape; `mean` is the per-gene rate `[D]`.
+    /// Upload one level's rows. `input`, `target` are **`[D, P]`** — genes down,
+    /// pseudobulk samples across, the layout the collapsed posterior is sampled
+    /// in; `null` is the batch null at the same shape; `mean` is the per-gene
+    /// rate `[D]`. Each becomes the `[P, D]` resident tensor with no transpose
+    /// on either side of the upload.
     pub fn from_mats(
-        input: &Mat,
-        null: Option<&Mat>,
-        target: &Mat,
+        input_dp: &Mat,
+        null_dp: Option<&Mat>,
+        target_dp: &Mat,
         mean: &[f32],
         dev: &Device,
     ) -> anyhow::Result<Self> {
-        let (p, d) = (input.nrows(), input.ncols());
+        let (d, p) = (input_dp.nrows(), input_dp.ncols());
         anyhow::ensure!(
-            target.nrows() == p && target.ncols() == d,
-            "target rows {}×{} do not match the input's {p}×{d}",
-            target.nrows(),
-            target.ncols()
+            target_dp.nrows() == d && target_dp.ncols() == p,
+            "target rows {}×{} do not match the input's {d}×{p} (genes × samples)",
+            target_dp.nrows(),
+            target_dp.ncols()
         );
-        if let Some(n) = null {
+        if let Some(n) = null_dp {
             anyhow::ensure!(
-                n.nrows() == p && n.ncols() == d,
-                "batch null is {}×{}, expected {p}×{d}",
+                n.nrows() == d && n.ncols() == p,
+                "batch null is {}×{}, expected {d}×{p} (genes × samples)",
                 n.nrows(),
                 n.ncols()
             );
@@ -137,9 +142,11 @@ impl DenseMaskedLevel {
         Ok(Self {
             n_features: d,
             p,
-            input_pd: upload_to_device(input, dev)?,
-            null_pd: null.map(|n| upload_to_device(n, dev)).transpose()?,
-            target_pd: upload_to_device(target, dev)?,
+            input_pd: upload_columns_as_rows(input_dp, dev)?,
+            null_pd: null_dp
+                .map(|n| upload_columns_as_rows(n, dev))
+                .transpose()?,
+            target_pd: upload_columns_as_rows(target_dp, dev)?,
             mean_1d: Tensor::from_vec(mean.to_vec(), (1, d), dev)?,
             dev: dev.clone(),
         })

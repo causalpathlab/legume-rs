@@ -11,6 +11,25 @@ pub(crate) fn upload_to_device<D: ConvertMatOps>(x: &D, device: &Device) -> anyh
     Ok(x.to_tensor(device)?.contiguous()?)
 }
 
+/// Upload a column-major `[D, P]` matrix as the `[P, D]` tensor it already is.
+///
+/// nalgebra stores `[D, P]` column-major — element `(d, p)` at `d + p·D` — which
+/// is byte for byte the row-major layout of `[P, D]`. So a caller holding the
+/// gene-by-sample matrix needs no transpose at all to get sample-by-gene rows:
+/// not the host `DMatrix::transpose()` (a strided copy of the whole matrix), and
+/// not the device `contiguous()` that [`upload_to_device`] pays to undo
+/// `to_tensor`'s transposed view. The two transposes were cancelling.
+pub(crate) fn upload_columns_as_rows(
+    x: &nalgebra::DMatrix<f32>,
+    device: &Device,
+) -> anyhow::Result<Tensor> {
+    Ok(Tensor::from_slice(
+        x.as_slice(),
+        (x.ncols(), x.nrows()),
+        device,
+    )?)
+}
+
 /// Bootstrap-sample `ntot` indices from `[0, n)` with replacement, in
 /// parallel. Shared by `Minibatches::shuffle_minibatch` (CPU path,
 /// `usize`) and the device-resident loaders (`u32`).

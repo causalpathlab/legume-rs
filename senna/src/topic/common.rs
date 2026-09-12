@@ -92,8 +92,28 @@ pub(crate) fn process_blocks<F>(
 where
     F: Fn((usize, usize)) -> anyhow::Result<(usize, Mat)> + Send + Sync,
 {
-    let jobs = create_jobs(ntot, 0, Some(block_size));
     let max_conc = device_concurrency(dev.is_cpu(), rayon::current_num_threads());
+    process_blocks_at(ntot, kk, block_size, max_conc, eval_block)
+}
+
+/// [`process_blocks`] with the number of blocks in flight given rather than
+/// taken from the device alone.
+///
+/// A caller whose block holds a dense `[n, D]` working set needs the second
+/// ceiling the device rule does not know about: every extra block in flight is
+/// another copy of that set, and the encoder chain is a dozen-odd tensors of it.
+/// See `predict::dense_block_concurrency`, which computes the cap.
+pub(crate) fn process_blocks_at<F>(
+    ntot: usize,
+    kk: usize,
+    block_size: usize,
+    max_conc: usize,
+    eval_block: F,
+) -> anyhow::Result<Mat>
+where
+    F: Fn((usize, usize)) -> anyhow::Result<(usize, Mat)> + Send + Sync,
+{
+    let jobs = create_jobs(ntot, 0, Some(block_size));
     let mut chunks: Vec<(usize, Mat)> = map_blocks(&jobs, max_conc, eval_block)?;
 
     chunks.sort_by_key(|&(lb, _)| lb);
@@ -338,20 +358,40 @@ pub(crate) fn compute_level_epochs(total_epochs: usize, num_levels: usize) -> Ve
 pub(crate) fn sample_collapsed_data(
     collapsed: &CollapsedOut,
 ) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
-    let mixed_nd = collapsed.mu_observed.posterior_sample()?.transpose();
+    let (mixed_dn, batch_dn, target_dn) = sample_collapsed_data_dp(collapsed)?;
+    Ok((
+        mixed_dn.transpose(),
+        batch_dn.map(|b| b.transpose()),
+        target_dn.transpose(),
+    ))
+}
 
-    let batch_nd = collapsed.mu_residual.as_ref().map(|x| {
-        let ret: Mat = x.posterior_sample().unwrap();
-        ret.transpose()
-    });
+/// [`sample_collapsed_data`] in the posterior's own `[D, P]` orientation —
+/// genes down, pseudobulk samples across.
+///
+/// The transposes above are a strided copy of the whole matrix each, and a
+/// consumer that uploads the triple to a device does not need them: a
+/// column-major `[D, P]` buffer already IS the row-major `[P, D]` one (see
+/// `candle_util::data::masked_dense`). Callers that want host `[P, D]` matrices
+/// still get them from [`sample_collapsed_data`].
+pub(crate) fn sample_collapsed_data_dp(
+    collapsed: &CollapsedOut,
+) -> anyhow::Result<(Mat, Option<Mat>, Mat)> {
+    let mixed_dn = collapsed.mu_observed.posterior_sample()?;
 
-    let target_nd = if let Some(adj) = &collapsed.mu_adjusted {
-        adj.posterior_sample()?.transpose()
+    let batch_dn = collapsed
+        .mu_residual
+        .as_ref()
+        .map(|x| x.posterior_sample())
+        .transpose()?;
+
+    let target_dn = if let Some(adj) = &collapsed.mu_adjusted {
+        adj.posterior_sample()?
     } else {
-        mixed_nd.clone()
+        mixed_dn.clone()
     };
 
-    Ok((mixed_nd, batch_nd, target_nd))
+    Ok((mixed_dn, batch_dn, target_dn))
 }
 
 /// Per-gene mean rate `μ_d` from a `[D, n_pb]` pseudobulk posterior mean —
