@@ -1,15 +1,22 @@
 //! Tests for the trainer's own stochastic and target-building pieces: the
-//! per-epoch Poisson draw behind `MaskedTrainOpts::poisson_thin`, the seeded
-//! context mask, the mask-rate schedule, the `[N, D]` target mask, the
-//! per-level target table, and that visible genes are never scored.
+//! per-epoch Poisson draw behind `MaskedTrainOpts::poisson_thin`, the epoch
+//! seeding, the dense module targets, that the set the encoder could not see
+//! IS the set the decoder is scored on, and that visible genes are never
+//! scored.
 
-use super::{epoch_seed, poisson_draw, target_mask_nd, EpochAccum, LevelTarget, Mat};
+use super::{dense_module_targets, epoch_seed, poisson_draw, EpochAccum, Mat};
+use crate::data::masked_dense::{DenseMaskedLevel, MaskSchedule, MaskedDraw};
 use crate::decoder::coarsening_map::CoarseningMap;
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget};
 use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use std::collections::HashMap;
+
+/// `[P, D]` host matrix to a device tensor, the way the loader uploads rows.
+fn up(m: &Mat, dev: &Device) -> Tensor {
+    crate::data::loader_util::upload_to_device(m, dev).unwrap()
+}
 
 /////////////////////
 // Poisson thinning //
@@ -114,110 +121,125 @@ fn epoch_seeds_are_distinct_across_epoch_and_level() {
 fn epoch_accumulator_sums_steps_on_device_and_reads_once() {
     let dev = Device::Cpu;
     let mut acc = EpochAccum::new(&dev).unwrap();
-    let steps = [
-        (-3.0f32, 4.0f32, 2.0f32),
-        (-5.0, 4.0, 0.25),
-        (-1.0, 4.0, 0.0),
-    ];
-    for (l, u, r) in steps {
+    for (l, u) in [(-3.0f32, 4.0f32), (-5.0, 4.0), (-1.0, 4.0)] {
         let t = |v: f32| Tensor::new(v, &dev).unwrap();
-        acc.add(&t(l), &t(u), Some(&t(r)), 1.0).unwrap();
+        acc.add(&t(l), &t(u)).unwrap();
     }
-    let (llik, rms) = acc.read().unwrap();
+    let llik = acc.read().unwrap();
     assert!(
         (llik - (-9.0 / 12.0)).abs() < 1e-6,
         "llik per scored {llik}"
     );
-    assert!(
-        (rms - (2.25f32 / 3.0).sqrt()).abs() < 1e-6,
-        "rms residual {rms}"
-    );
     let empty = EpochAccum::new(&dev).unwrap();
-    assert_eq!(empty.read().unwrap(), (0.0, 0.0));
+    assert_eq!(empty.read().unwrap(), 0.0);
 }
 
-////////////////////////
-// Targets and library //
-////////////////////////
+////////////////////////////////////////////////////////////
+// One draw, two consumers: hidden == scored              //
+////////////////////////////////////////////////////////////
 
-/// Three rows over eight genes with a three-slot context. Gene 0 is in no
-/// row's context, so a pad (index 0, visible 0) must never touch it.
-fn small_context() -> (Tensor, Tensor) {
-    #[rustfmt::skip]
-    let idx: Vec<u32> = vec![
-        1, 4, 6,
-        2, 5, 0,   // last slot is a pad
-        3, 7, 1,
-    ];
+const D: usize = 8;
+
+/// Three rows over `D` genes, with real zeros.
+fn small_rows() -> Mat {
+    Mat::from_fn(3, D, |i, j| {
+        if (i + j) % 3 == 0 {
+            0.0
+        } else {
+            ((i * D + j) % 7) as f32
+        }
+    })
+}
+
+fn small_visible() -> Tensor {
     #[rustfmt::skip]
     let vis: Vec<f32> = vec![
-        1.0, 0.0, 1.0,
-        1.0, 1.0, 0.0,
-        0.0, 1.0, 1.0,
+        1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0,
+        1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0,
+        0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0,
     ];
-    (
-        Tensor::from_vec(idx, (3, 3), &Device::Cpu).unwrap(),
-        Tensor::from_vec(vis, (3, 3), &Device::Cpu).unwrap(),
-    )
+    Tensor::from_vec(vis, (3, D), &Device::Cpu).unwrap()
 }
 
+/// THE invariant the window-free path is built on: the genes a row hid from the
+/// encoder are exactly the genes the decoder answers for.
+///
+/// Both come from one `visible_nd` — the encoder is handed it, the decoder's
+/// scored indicator is `1 − visible_share` derived from it — so this test is
+/// what catches the two drifting apart if either side ever recomputes its own.
 #[test]
-fn targets_are_the_complement_of_the_visible_context_including_zeros() {
-    let (idx, vis) = small_context();
-    let mask = to_vec2(&target_mask_nd(&idx, &vis, 8).unwrap());
-    #[rustfmt::skip]
-    let expected: Vec<Vec<f32>> = vec![
-        vec![1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],
-        vec![1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-        vec![1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
-    ];
-    assert_eq!(mask, expected);
+fn the_encoder_hidden_set_is_the_decoder_scored_set() {
+    let dev = Device::Cpu;
+    let rows = small_rows();
+    let lv = DenseMaskedLevel::from_mats(&rows, None, &rows, &vec![1.0f32; D], &dev).unwrap();
+    let ep = lv
+        .begin_epoch(
+            epoch_seed(42, 0, 0),
+            &MaskedDraw {
+                schedule: MaskSchedule::Fixed,
+                mask_fraction: 0.4,
+            },
+            3,
+        )
+        .unwrap();
+    let mb = ep.batch(0).unwrap();
+
+    // What the encoder was handed.
+    let hidden = to_vec2(&mb.visible_nd.affine(-1.0, 1.0).unwrap());
+
+    // What the decoder scores, as `unseen_parts` derives it.
+    let identity = CoarseningMap::identity(D, &dev).unwrap();
+    let t = dense_module_targets(&identity, &mb.target_nd, &mb.visible_nd).unwrap();
+    let scored = to_vec2(
+        &t.visible_share_nm
+            .affine(-1.0, 1.0)
+            .unwrap()
+            .gt(1e-6)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap(),
+    );
+
+    assert_eq!(scored, hidden, "the scored set is not the hidden set");
+    assert!(
+        hidden.iter().flatten().any(|&x| x > 0.0) && hidden.iter().flatten().any(|&x| x == 0.0),
+        "a mask that hides everything or nothing proves nothing"
+    );
 }
 
+/// The library is the whole row's total over every gene, module map or not.
 #[test]
-fn level_target_library_is_the_full_row_total() {
-    let mut rows = Mat::zeros(3, 8);
+fn the_dense_library_is_the_full_row_total() {
+    let dev = Device::Cpu;
+    let rows = small_rows();
+    let target = up(&rows, &dev);
+    let vis = small_visible();
+    let identity = CoarseningMap::identity(D, &dev).unwrap();
+    let t = dense_module_targets(&identity, &target, &vis).unwrap();
+    let lib: Vec<f32> = t.lib_n1.flatten_all().unwrap().to_vec1().unwrap();
     for i in 0..3 {
-        for j in 0..8 {
-            rows[(i, j)] = if (i + j) % 3 == 0 {
-                0.0
-            } else {
-                (i * 8 + j) as f32
-            };
-        }
-    }
-    let lt = LevelTarget::from_mat(
-        &rows,
-        &CoarseningMap::identity(rows.ncols(), &Device::Cpu).unwrap(),
-        &Device::Cpu,
-    )
-    .unwrap();
-    let lib: Vec<f32> = lt.row_lib().flatten_all().unwrap().to_vec1().unwrap();
-    for i in 0..3 {
-        let total: f32 = (0..8).map(|j| rows[(i, j)]).sum::<f32>() + 1.0;
+        let total: f32 = (0..D).map(|j| rows[(i, j)]).sum::<f32>() + 1.0;
         assert!(
             (lib[i] - total).abs() < 1e-5,
             "row {i}: {} vs {total}",
             lib[i]
         );
     }
-    let (vals, l) = lt
-        .rows(&Tensor::new(&[2u32, 0, 2], &Device::Cpu).unwrap())
-        .unwrap();
-    assert_eq!(vals.dims(), &[3, 8]);
-    assert_eq!(
-        to_vec2(&vals)[0],
-        (0..8).map(|j| rows[(2, j)]).collect::<Vec<_>>()
-    );
-    let l: Vec<f32> = l.flatten_all().unwrap().to_vec1().unwrap();
-    assert!((l[1] - lib[0]).abs() < 1e-6);
+    // And the visible counts are the row restricted to what the encoder saw.
+    let vc = to_vec2(&t.visible_counts_nm);
+    let v = to_vec2(&vis);
+    for i in 0..3 {
+        for j in 0..D {
+            let want = rows[(i, j)] * v[i][j];
+            assert!((vc[i][j] - want).abs() < 1e-5, "visible count [{i},{j}]");
+        }
+    }
 }
 
 /// Perturbing a count the encoder saw must not move the loss; perturbing a
-/// scored gene must.
+/// hidden one must.
 #[test]
 fn visible_genes_are_never_scored() {
-    const D: usize = 8;
     const K: usize = 2;
     let dev = Device::Cpu;
     let rho = Tensor::from_vec(
@@ -255,8 +277,7 @@ fn visible_genes_are_never_scored() {
     )
     .unwrap();
 
-    let (idx, vis) = small_context();
-    let mask = target_mask_nd(&idx, &vis, D).unwrap();
+    let vis = small_visible();
     let identity = CoarseningMap::identity(D, &dev).unwrap();
     let mut rows = Mat::zeros(3, D);
     for i in 0..3 {
@@ -265,41 +286,41 @@ fn visible_genes_are_never_scored() {
         }
     }
     let score = |rows: &Mat| -> Vec<f32> {
-        let lt = LevelTarget::from_mat(rows, &identity, &dev).unwrap();
-        let (values, lib) = lt.rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap()).unwrap();
-        let target = MaskedDenseTarget {
-            values: &values,
+        let target = up(&rows, &dev);
+        let t = dense_module_targets(&identity, &target, &vis).unwrap();
+        let mt = ModuleTarget {
+            values: &t.values_nm,
+            visible_counts: &t.visible_counts_nm,
+            visible_share: &t.visible_share_nm,
             residual: None,
-            lib: &lib,
-            mask: &mask,
+            lib: &t.lib_n1,
         };
-        dec.impute_dense_nb(&log_theta, &target, &full_kd)
+        dec.score_unseen_modules_nb(&log_theta, &mt, &full_kd)
             .unwrap()
+            .0
             .to_vec1()
             .unwrap()
     };
     let base = score(&rows);
 
-    // Row 0 sees gene 1: change its count and only the library moves, which the
-    // mask keeps out of the scored positions' likelihood up to the ℓ scale.
+    // Row 0 sees gene 0: changing its count moves only the library, not what is
+    // scored, so the scored positions' likelihood is unchanged up to the ℓ
+    // scale — which is why the comparison holds the library fixed.
     let mut visible_perturbed = rows.clone();
-    visible_perturbed[(0, 1)] += 3.0;
-    let lt = LevelTarget::from_mat(&visible_perturbed, &identity, &dev).unwrap();
-    let (values, _) = lt.rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap()).unwrap();
-    let lib = LevelTarget::from_mat(&rows, &identity, &dev)
-        .unwrap()
-        .rows(&Tensor::new(&[0u32, 1, 2], &dev).unwrap())
-        .unwrap()
-        .1;
-    let target = MaskedDenseTarget {
-        values: &values,
+    visible_perturbed[(0, 0)] += 3.0;
+    let t_pert = dense_module_targets(&identity, &up(&visible_perturbed, &dev), &vis).unwrap();
+    let t_base = dense_module_targets(&identity, &up(&rows, &dev), &vis).unwrap();
+    let mt = ModuleTarget {
+        values: &t_pert.values_nm,
+        visible_counts: &t_pert.visible_counts_nm,
+        visible_share: &t_pert.visible_share_nm,
         residual: None,
-        lib: &lib,
-        mask: &mask,
+        lib: &t_base.lib_n1,
     };
     let same_lib: Vec<f32> = dec
-        .impute_dense_nb(&log_theta, &target, &full_kd)
+        .score_unseen_modules_nb(&log_theta, &mt, &full_kd)
         .unwrap()
+        .0
         .to_vec1()
         .unwrap();
     assert!(
@@ -309,13 +330,13 @@ fn visible_genes_are_never_scored() {
         base[0]
     );
 
-    // Row 0 does not see gene 3: its count is scored.
+    // Row 0 hid gene 1: its count is scored.
     let mut target_perturbed = rows.clone();
-    target_perturbed[(0, 3)] += 3.0;
+    target_perturbed[(0, 1)] += 3.0;
     let moved = score(&target_perturbed);
     assert!(
         (moved[0] - base[0]).abs() > 1e-3,
-        "a scored gene's count did not reach the loss"
+        "a hidden gene's count did not reach the loss"
     );
     assert!((moved[1] - base[1]).abs() < 1e-6, "row 1 must be untouched");
 }
@@ -390,7 +411,19 @@ fn the_gaussian_head_is_deterministic_and_carries_no_kl() {
         vb,
     )
     .unwrap();
-    let (idx, vis) = small_context();
+    #[rustfmt::skip]
+    let idx: Vec<u32> = vec![
+        1, 4, 6,
+        2, 5, 0,   // last slot is a pad
+        3, 7, 1,
+    ];
+    let idx = Tensor::from_vec(idx, (3, 3), &Device::Cpu).unwrap();
+    let vis = Tensor::from_vec(
+        vec![1.0f32, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0],
+        (3, 3),
+        &Device::Cpu,
+    )
+    .unwrap();
     let values = Tensor::from_vec(
         vec![3.0f32, 1.0, 2.0, 4.0, 1.0, 0.0, 2.0, 2.0, 5.0],
         (3, 3),

@@ -341,21 +341,6 @@ pub fn save_parameters(parameters: &candle_nn::VarMap, prefix: &str) -> anyhow::
     Ok(())
 }
 
-/// Save NB-Fisher shortlist weights for masked-topic prediction.
-pub fn save_shortlist_weights(
-    weights: &[f32],
-    gene_names: &[Box<str>],
-    prefix: &str,
-) -> anyhow::Result<()> {
-    use matrix_util::traits::IoOps;
-    let path = format!("{prefix}.shortlist_weights.parquet");
-    let mat = nalgebra::DMatrix::<f32>::from_column_slice(weights.len(), 1, weights);
-    let cols: Vec<Box<str>> = vec!["weight".into()];
-    mat.to_parquet_with_names(&path, (Some(gene_names), Some("gene")), Some(&cols))?;
-    log::info!("Saved shortlist weights to {path}");
-    Ok(())
-}
-
 /// Save per-gene mean expression rate `μ_d` used by the indexed encoder.
 ///
 /// `μ_d` = per-gene mean across pseudobulks at the finest level. The
@@ -393,6 +378,10 @@ pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32
 }
 
 /// Load NB-Fisher shortlist weights from disk; returns (`gene_names`, weights).
+///
+/// Read-only: nothing writes this file any more. It ranked the top-K context a
+/// windowed encoder read, and the encoder reads every gene now — so this exists
+/// to keep OLD models (`enc_context_size: Some(k)`) scoring exactly as they did.
 pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
     use matrix_util::traits::IoOps;
     let path = format!("{prefix}.shortlist_weights.parquet");

@@ -1,29 +1,31 @@
 //! Masked-imputation topic VAE trainer.
 //!
 //! Hosts [`train_masked`] (no-ELBO masked-gene NB imputation; simplex-θ or
-//! Gaussian-z latent), sharing the indexed top-K data loader across levels.
-//! Drives the shared [`IndexedEmbeddingEncoder`] + per-level
-//! [`EmbeddedNbTopicDecoder`] stack against [`IndexedInMemoryData`]
-//! minibatches. The hot loop never materialises `[N, S]` or `[K, D]`;
-//! all gather/scatter happens at the per-batch gene union.
+//! Gaussian-z latent) over the **window-free** dense loader
+//! ([`crate::data::masked_dense`]): the encoder reads every gene of a
+//! minibatch row, zeros included, and the mask is drawn over the whole gene
+//! axis. Drives the shared [`IndexedEmbeddingEncoder`] + per-level
+//! [`EmbeddedNbTopicDecoder`] stack.
+//!
+//! One draw, two consumers: `visible_nd` is what the encoder may look at and
+//! `1 − visible_nd` is what the decoder is scored on, so the hidden set has a
+//! single definition rather than two that have to be kept in step.
 
 use super::{clip_and_step_dense, smooth_topics, TrainScores};
-use crate::data::indexed::masked_epoch::{MaskedDraw, MaskedLevelData, MaskedMinibatch};
-use crate::data::indexed::{labeled_bar, GraphCsr, IndexedInMemoryArgs, IndexedInMemoryData};
+use crate::data::indexed::labeled_bar;
+use crate::data::masked_dense::{DenseMaskedLevel, DenseMaskedMinibatch, MaskedDraw};
 use crate::decoder::coarsening_map::CoarseningMap;
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget, QueryTarget};
-use crate::decoder::query_decoder::{QueryDecoder, QueryInput};
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget};
+use crate::decoder::query_decoder::QueryDecoder;
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
-use crate::fast_index::scatter_add_cols;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
 use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
-pub use crate::data::indexed::masked_epoch::MaskSchedule;
+pub use crate::data::masked_dense::MaskSchedule;
 
 type Mat = DMatrix<f32>;
 
@@ -40,21 +42,13 @@ pub struct IndexedTrainConfig<'a> {
     pub minibatch_size: usize,
     pub learning_rate: f32,
     pub topic_smoothing: f64,
-    pub enc_context_size: usize,
     pub stop: &'a AtomicBool,
-    /// Per-gene weights used to *score* candidates during the encoder's
-    /// top-K shortlist selection. Stored values remain raw counts.
-    pub shortlist_weights: &'a [f32],
-    /// Per-gene Anscombe baseline (length = D_full). When supplied, the
-    /// loader gathers it at each sample's encoder top-K positions; the
-    /// encoder subtracts it from Anscombe-stabilized values before pooling.
+    /// Per-gene mean rate `μ_d` (length = D). The encoder divides by it — with
+    /// the per-row batch null — before the Anscombe residual, so what it reads
+    /// is the cell's deviation from the gene's typical rate.
     pub feature_mean: &'a [f32],
     /// Global L2 gradient norm clip per minibatch (0 = off).
     pub grad_clip: f32,
-    /// Optional feature-feature graph attached to every level loader so
-    /// that the indexed encoder's GCN block sees per-sample sub-adjacency.
-    /// `None` skips the GCN branch and keeps the legacy sum-pool path.
-    pub feature_graph: Option<Arc<GraphCsr>>,
     /// Explicit L2 penalty `λ_ρ · ‖ρ‖_F²` on the feature embedding
     /// matrix ρ ∈ ℝ^{D × H}. Added to the per-minibatch loss before
     /// backward. `0.0` disables.
@@ -152,8 +146,14 @@ pub struct MaskedTrainOpts {
 /// Options of the query-decoder term.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QueryOpts {
-    /// Out-of-context genes drawn uniformly per row as extra queries, zeros
-    /// included, on top of the masked context genes.
+    /// Queries per row, drawn uniformly from the row's HIDDEN genes, zeros
+    /// included.
+    ///
+    /// With no context window there is no "outside the context" left to draw
+    /// from. The hidden set is the whole-axis version of what this used to
+    /// sample — genes the encoder did not read — so the number keeps its
+    /// meaning (how many questions per row) and bounds the head's cost, which
+    /// asking about every hidden gene would not.
     pub extra: usize,
     /// Weight of `mean r²` in the loss: the mixture explains first, the
     /// residual takes the remainder.
@@ -218,64 +218,45 @@ pub fn epoch_seed(seed: u64, epoch: usize, level: usize) -> u64 {
     mix_seed(matrix_util::rand_util::name_seed(seed, "mask"), salt)
 }
 
-/// `[N, D]` scored-position mask: 1 everywhere the encoder could not see.
+/// The decoder's module-level view of ONE dense minibatch.
 ///
-/// The canonical masked-training prediction space. The encoder's budget is the
-/// `[N, K]` context; what the decoder answers for is every *other* gene,
-/// zero-count genes included, so the scored set does not inherit the context's
-/// selection bias toward abundant genes.
-///
-/// Pads carry index 0 with a zero visible flag, so they scatter nothing and
-/// gene 0 stays scored for a row that did not really see it.
-pub fn target_mask_nd(
-    indices: &Tensor,
-    visible: &Tensor,
-    n_features: usize,
-) -> candle_core::Result<Tensor> {
-    let n = indices.dim(0)?;
-    let zeros = Tensor::zeros((n, n_features), visible.dtype(), visible.device())?;
-    zeros.scatter_add(indices, visible, 1)?.affine(-1.0, 1.0)
+/// Built from the same `visible_nd` the encoder pooled under, which is what
+/// makes "the genes the encoder could not see" and "the genes the decoder is
+/// scored on" the same set by construction rather than by two call sites
+/// agreeing: the decoder's scored indicator is `1 − visible_share`, and under
+/// the identity map that is `1 − visible_nd` exactly.
+pub struct DenseModuleTargets {
+    /// `[N, M]` the whole row's counts, summed into modules.
+    pub values_nm: Tensor,
+    /// `[N, M]` the counts at the genes the encoder DID see.
+    pub visible_counts_nm: Tensor,
+    /// `[N, M]` the pinned within-module share the encoder saw.
+    pub visible_share_nm: Tensor,
+    /// `[N, 1]` the row's library over every gene, `+1`.
+    pub lib_n1: Tensor,
 }
 
-/// One level's decoder targets, resident on device as `[P, M]`: the
-/// batch-free rows summed into the decoder's modules (the rows themselves
-/// under the identity map).
+/// Aggregate one dense minibatch into the decoder's modules.
 ///
-/// These are the **batch-free** rows (`mu_adjusted` where a batch-aware
-/// collapse ran). The library is the whole row's total over every gene, so
-/// the NB mean is on the scale of the counts being scored.
-pub struct LevelTarget {
-    values_pm: Tensor,
-    row_lib_p1: Tensor,
-}
-
-impl LevelTarget {
-    /// Aggregate a level's `[P, D]` target rows into the decoder's modules,
-    /// upload, and precompute `Σ_g y_pg + 1` over the full row.
-    pub fn from_mat(rows: &Mat, modules: &CoarseningMap, dev: &Device) -> anyhow::Result<Self> {
-        let values_pm =
-            crate::data::loader_util::upload_to_device(&modules.aggregate_columns_host(rows), dev)?;
-        // Modules partition the genes, so the module totals sum to the row's
-        // total over every gene.
-        let row_lib_p1 = (values_pm.sum_keepdim(1)? + 1.0)?;
-        Ok(Self {
-            values_pm,
-            row_lib_p1,
-        })
-    }
-
-    /// `(values [N, M], lib [N, 1])` for the minibatch's source rows.
-    pub fn rows(&self, row_ids: &Tensor) -> candle_core::Result<(Tensor, Tensor)> {
-        Ok((
-            self.values_pm.index_select(row_ids, 0)?,
-            self.row_lib_p1.index_select(row_ids, 0)?,
-        ))
-    }
-
-    /// Per-row library `[P, 1]`.
-    pub fn row_lib(&self) -> &Tensor {
-        &self.row_lib_p1
-    }
+/// Under the identity map every aggregation is a no-op clone, so a full-
+/// resolution run pays nothing for the generality.
+pub fn dense_module_targets(
+    modules: &CoarseningMap,
+    target_nd: &Tensor,
+    visible_nd: &Tensor,
+) -> candle_core::Result<DenseModuleTargets> {
+    let values_nm = modules.aggregate_columns(target_nd)?;
+    let visible_counts_nm = modules.aggregate_columns(&(target_nd * visible_nd)?)?;
+    let share_1d = modules.log_share_1d().exp()?; // 1 under the identity map
+    let visible_share_nm = modules.aggregate_columns(&visible_nd.broadcast_mul(&share_1d)?)?;
+    // Modules partition the genes, so the module totals sum to the row total.
+    let lib_n1 = (values_nm.sum_keepdim(1)? + 1.0)?;
+    Ok(DenseModuleTargets {
+        values_nm,
+        visible_counts_nm,
+        visible_share_nm,
+        lib_n1,
+    })
 }
 
 /// Borrowed masked-encoder inputs: the per-cell packed top-K plus the
@@ -332,6 +313,52 @@ pub fn masked_encode(
     }
 }
 
+/// Borrowed **window-free** masked-encoder inputs: the dense row, its per-row
+/// batch null, the per-gene mean, and the visible mask over every gene.
+pub struct MaskedDenseInput<'a> {
+    pub x_nd: &'a Tensor,
+    pub x0_nd: Option<&'a Tensor>,
+    pub mean_1d: Option<&'a Tensor>,
+    pub visible_nd: &'a Tensor,
+}
+
+/// Run the window-free masked encoder under `head`, returning the raw per-topic
+/// latent `[N, K]` (`log θ` for the simplex heads, `z` for Gaussian).
+///
+/// The dense sibling of [`masked_encode`]; the single source of truth for the
+/// head → encoder-forward dispatch on the dense path, shared by
+/// [`train_masked`] and senna's encoder-only inference.
+pub fn masked_encode_dense(
+    encoder: &IndexedEmbeddingEncoder,
+    head: LatentHead,
+    input: &MaskedDenseInput,
+    train: bool,
+) -> candle_core::Result<Tensor> {
+    match head {
+        LatentHead::Gaussian => encoder.forward_dense_masked_gaussian(
+            input.x_nd,
+            input.x0_nd,
+            input.mean_1d,
+            input.visible_nd,
+            train,
+        ),
+        LatentHead::StickBreaking => encoder.forward_dense_masked_stick(
+            input.x_nd,
+            input.x0_nd,
+            input.mean_1d,
+            input.visible_nd,
+            train,
+        ),
+        LatentHead::Softmax => encoder.forward_dense_masked(
+            input.x_nd,
+            input.x0_nd,
+            input.mean_1d,
+            input.visible_nd,
+            train,
+        ),
+    }
+}
+
 /// Project a masked-encoder latent onto the **log-simplex** the NB /
 /// multinomial decoder heads consume, then apply `topic_smoothing`.
 ///
@@ -365,23 +392,16 @@ pub fn decoder_log_theta(
 /// and target without cloning a multi-GB matrix.
 pub type LevelData<'a> = (&'a Mat, Option<&'a Mat>, &'a Mat);
 
-/// Build per-level [`IndexedInMemoryData`] loaders from pre-built level data.
-pub fn build_indexed_loaders(
+/// Upload every level's dense rows once (see [`DenseMaskedLevel`]).
+fn resident_dense_levels(
     level_data: &[LevelData],
     config: &IndexedTrainConfig,
-) -> anyhow::Result<Vec<IndexedInMemoryData>> {
+    dev: &Device,
+) -> anyhow::Result<Vec<DenseMaskedLevel>> {
     level_data
         .iter()
-        .map(|&(mixed, batch, _target)| {
-            let mut loader = IndexedInMemoryData::from_dense(IndexedInMemoryArgs {
-                input: mixed,
-                input_null: batch,
-                input_context_size: config.enc_context_size,
-                input_shortlist_weights: config.shortlist_weights,
-                input_mean: Some(config.feature_mean),
-            })?;
-            loader.set_graph_csr(config.feature_graph.clone());
-            Ok(loader)
+        .map(|&(mixed, batch, target)| {
+            DenseMaskedLevel::from_mats(mixed, batch, target, config.feature_mean, dev)
         })
         .collect()
 }
@@ -395,16 +415,12 @@ struct StepLoss {
     llik_sum: Tensor,
     /// Number of scored units.
     units_sum: Tensor,
-    /// Σ w·r² over the queries, query decoder only.
-    r2_sum: Option<Tensor>,
 }
 
 /// Per-epoch sums, kept on the device and read back once.
 pub(crate) struct EpochAccum {
     llik: Tensor,
     scored: Tensor,
-    r2: Tensor,
-    pub queries: f32,
 }
 
 impl EpochAccum {
@@ -413,76 +429,51 @@ impl EpochAccum {
         Ok(Self {
             llik: zero()?,
             scored: zero()?,
-            r2: zero()?,
-            queries: 0.0,
         })
     }
 
-    /// Fold one step in. `queries` is the step's count, known on the host; the
-    /// scored units come from the scorer.
-    pub(crate) fn add(
-        &mut self,
-        llik_sum: &Tensor,
-        units_sum: &Tensor,
-        r2_sum: Option<&Tensor>,
-        queries: f32,
-    ) -> candle_core::Result<()> {
+    /// Fold one step in.
+    pub(crate) fn add(&mut self, llik_sum: &Tensor, units_sum: &Tensor) -> candle_core::Result<()> {
         self.llik = (&self.llik + llik_sum.detach())?;
         self.scored = (&self.scored + units_sum.detach())?;
-        if let Some(r) = r2_sum {
-            self.r2 = (&self.r2 + r.detach())?;
-        }
-        self.queries += queries;
         Ok(())
     }
 
-    /// `(llik per scored unit, rms residual per query)` — the one host read
-    /// of the epoch.
-    pub(crate) fn read(&self) -> candle_core::Result<(f32, f32)> {
-        let per = |t: &Tensor, n: f32| -> candle_core::Result<f32> {
-            Ok(if n > 0.0 {
-                t.to_scalar::<f32>()? / n
-            } else {
-                0.0
-            })
-        };
+    /// llik per scored unit — the one host read of the epoch.
+    pub(crate) fn read(&self) -> candle_core::Result<f32> {
         let scored = self.scored.to_scalar::<f32>()?;
-        Ok((
-            per(&self.llik, scored)?,
-            per(&self.r2, self.queries)?.sqrt(),
-        ))
+        Ok(if scored > 0.0 {
+            self.llik.to_scalar::<f32>()? / scored
+        } else {
+            0.0
+        })
     }
 }
 
 /// One minibatch's full forward loss, shared by the epoch loop and the GPU
 /// memory probe so the probe measures exactly the forward a real step retains.
-/// Everything the step needs — the context, the mask, the gate, the query
-/// set and its targets — arrives in `mb`, drawn by the loader for the epoch.
-#[allow(clippy::too_many_arguments)]
+/// Everything the step needs — the dense row, its null, and the mask — arrives
+/// in `mb`, drawn by the loader for the epoch.
 fn masked_minibatch_loss(
     encoder: &IndexedEmbeddingEncoder,
     decoder: &EmbeddedNbTopicDecoder,
-    query_decoder: Option<&QueryDecoder>,
     config: &IndexedTrainConfig,
     opts: &MaskedTrainOpts,
-    mb: &MaskedMinibatch,
-    n_queries: f32,
-    target: &LevelTarget,
+    mb: &DenseMaskedMinibatch,
+    mean_1d: &Tensor,
 ) -> anyhow::Result<StepLoss> {
-    let base = &mb.base;
     // Masked-VAE: unconstrained `z` (no softmax in the encoder).
     // Masked-topic: simplex `log θ` (softmax or stick-breaking). All
     // deterministic, none with a KL; `decoder_log_theta` below is the only
     // head-specific step before the NB head.
-    let raw_z = masked_encode(
+    let raw_z = masked_encode_dense(
         encoder,
         opts.latent,
-        &MaskedEncoderInput {
-            indices: &base.input_indices,
-            values: &base.input_values,
-            values_null: base.input_values_null.as_ref(),
-            values_mean: base.input_values_mean.as_ref(),
-            visible_mask: &mb.visible,
+        &MaskedDenseInput {
+            x_nd: &mb.x_nd,
+            x0_nd: mb.x0_nd.as_ref(),
+            mean_1d: Some(mean_1d),
+            visible_nd: &mb.visible_nd,
         },
         true,
     )?;
@@ -492,25 +483,20 @@ fn masked_minibatch_loss(
     let log_z = decoder_log_theta(raw_z, opts.latent, config.topic_smoothing)?;
 
     // The module logits `(α − ᾱ)·ρ̄ᵀ + log π` — `[K, M]`, or `[K, D]` under the
-    // identity map — and the module-level view of what the context saw: the
-    // visible slots' target counts and pinned shares summed into modules.
+    // identity map — and the module-level view of what the encoder saw. The
+    // pool and this view read the SAME `visible_nd`, so the scored set is the
+    // hidden set, not a second approximation of it.
     let full_kd = decoder.full_logits_kd()?;
-    let mm = decoder.coarsening();
-    let n_obs = decoder.dim_obs();
-    let m_ctx = mm.groups_of(&base.input_indices)?; // [N, K] module ids
-    let visible_counts = scatter_add_cols(&m_ctx, &(&mb.target_at_context * &mb.visible)?, n_obs)?;
-    let share_ctx = mm.log_share_at(&base.input_indices)?.exp()?;
-    let visible_share = scatter_add_cols(&m_ctx, &(share_ctx * &mb.visible)?, n_obs)?;
-    let (values_nm, lib_n1) = target.rows(&base.row_ids)?;
+    let t = dense_module_targets(decoder.coarsening(), &mb.target_nd, &mb.visible_nd)?;
     // These rows are the batch-FREE targets, so β is fit to composition the
     // collapse already corrected; the per-row offset belongs to cell-level
     // scoring, where counts are mixed.
     let module_target = ModuleTarget {
-        values: &values_nm,
-        visible_counts: &visible_counts,
-        visible_share: &visible_share,
+        values: &t.values_nm,
+        visible_counts: &t.visible_counts_nm,
+        visible_share: &t.visible_share_nm,
         residual: None,
-        lib: &lib_n1,
+        lib: &t.lib_n1,
     };
     let (llik, units) = match opts.likelihood {
         MaskedLikelihood::Nb => {
@@ -525,35 +511,6 @@ fn masked_minibatch_loss(
     // Per scored unit, so every penalty below is on the same scale as the
     // number the epoch log reports.
     let mut loss = llik_sum.neg()?.div(&units_sum.clamp(1.0, f64::INFINITY)?)?;
-    // Query head: each sampled gene reads the visible slots through the query
-    // decoder and is scored at its module's rate times its share times the
-    // residual. The pool above and this read see the same slots through the
-    // same gate; only the question differs.
-    let mut r2_sum = None;
-    if let (Some(qd), Some(qo), Some(qb)) = (query_decoder, opts.query, mb.query.as_ref()) {
-        let read = qd.forward(
-            encoder.features(),
-            &QueryInput {
-                indices: &base.input_indices,
-                gate: &mb.gate,
-                visible: &mb.visible,
-                query_ids: &qb.ids,
-            },
-        )?;
-        let q = QueryTarget {
-            gene_ids: &qb.ids,
-            values: &qb.target,
-            weight: &qb.weight,
-            log_residual: &read.residual,
-            lib: &lib_n1,
-        };
-        let llik_q = decoder.score_queries_nb(&log_z, &q, &full_kd)?;
-        let w = f64::from(n_queries.max(1.0));
-        let r2 = (read.residual.sqr()? * &qb.weight)?.sum_all()?;
-        loss = (loss - llik_q.sum_all()?.affine(1.0 / w, 0.0)?)?;
-        loss = (loss + r2.affine(qo.penalty / w, 0.0)?)?;
-        r2_sum = Some(r2);
-    }
     if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
         // Shrink what is actually free: the dictionary under modules, the table
         // otherwise. Penalizing composed rows would charge every member of a
@@ -570,21 +527,7 @@ fn masked_minibatch_loss(
         loss,
         llik_sum,
         units_sum,
-        r2_sum,
     })
-}
-
-/// Upload every level's packed context once (see [`MaskedLevelData`]).
-fn resident_levels(
-    loaders: &[IndexedInMemoryData],
-    level_data: &[LevelData],
-    dev: &Device,
-) -> anyhow::Result<Vec<MaskedLevelData>> {
-    loaders
-        .iter()
-        .zip(level_data)
-        .map(|(ld, &(_, _, target))| ld.to_device_resident(target, dev))
-        .collect()
 }
 
 /// Masked-imputation training (no ELBO / no KL) for the embedded topic model.
@@ -606,13 +549,15 @@ pub fn train_masked(
     mask_fraction: f64,
     opts: &MaskedTrainOpts,
 ) -> anyhow::Result<TrainScores> {
+    // The query head attends from each query gene over the set the encoder
+    // read: `[N, Q, K]`. Window-free, that read set is the whole gene axis, so
+    // the attention block is `[N, Q, D]` and cannot be formed at all — this is
+    // not a tuning question. Refuse rather than run out of memory mid-epoch.
     anyhow::ensure!(
-        opts.query.is_none() || query_decoder.is_some(),
-        "query options set but no query decoder supplied"
-    );
-    anyhow::ensure!(
-        opts.query.is_none() || opts.likelihood == MaskedLikelihood::Nb,
-        "the query head scores negative-binomial counts; use --masked-likelihood nb with the query decoder"
+        opts.query.is_none() && query_decoder.is_none(),
+        "the query decoder needs a bounded read set: its attention is [N, Q, K] over the genes \
+         the encoder read, and the window-free encoder reads every gene, so K = D. Drop \
+         --query-decoder (and --query-extra), or train a windowed model with an older build."
     );
     let num_levels = level_data.len();
     let total_epochs = config.epochs;
@@ -663,19 +608,11 @@ pub fn train_masked(
     let draw = MaskedDraw {
         schedule: opts.mask_schedule,
         mask_fraction,
-        query_extra: opts.query.map(|q| q.extra),
     };
-    // The loader packs each level's context once and keeps it on the device;
-    // every epoch is one shuffle of that block plus the epoch's draws. The
-    // decoder's targets are the batch-free rows, whole, on device; the scored
-    // set is this trainer's own.
-    let loaders = build_indexed_loaders(level_data, config)?;
-    let mut levels = resident_levels(&loaders, level_data, config.dev)?;
-    let mut level_targets = level_data
-        .iter()
-        .zip(decoders)
-        .map(|(&(_, _, target), dec)| LevelTarget::from_mat(target, dec.coarsening(), config.dev))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    // Each level's dense rows go to the device once; every epoch is one shuffle
+    // of the row order plus the epoch's mask draw. The decoder's targets are
+    // the batch-free rows, whole; the scored set is what the mask hid.
+    let mut levels = resident_dense_levels(level_data, config, config.dev)?;
 
     // On CUDA, optionally shrink the minibatch size to fit free device
     // memory. The probe runs the exact forward a training step retains
@@ -687,20 +624,17 @@ pub fn train_masked(
             crate::device::auto_chunk_size(config.dev, cap, 16.min(cap), frac, |n| {
                 // Cycled, not truncated: training pads the last batch by
                 // resampling, so the probe must measure `n` real rows even
-                // when the level holds fewer. The penalty's normalizer is
-                // irrelevant to the probe's footprint.
+                // when the level holds fewer.
                 let mb = level0
-                    .probe_minibatch(level_data[0].2, n, epoch_seed(opts.seed, 0, 0), &draw)
+                    .probe_minibatch(n, epoch_seed(opts.seed, 0, 0), &draw)
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 let fwd = masked_minibatch_loss(
                     encoder,
                     &decoders[0],
-                    query_decoder,
                     config,
                     opts,
                     &mb,
-                    1.0,
-                    &level_targets[0],
+                    level0.feature_mean_1d(),
                 )
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 Ok(fwd.loss)
@@ -710,10 +644,8 @@ pub fn train_masked(
         _ => config.minibatch_size,
     };
 
-    // Under Poisson thinning the rows are redrawn per epoch; the loader and
-    // the targets are rebuilt from the draw, and the draw is kept alive for
-    // the epoch's gathers.
-    let mut thinned: Vec<(Mat, Option<&Mat>, Mat)> = Vec::new();
+    // Under Poisson thinning the rows are redrawn per epoch and the level is
+    // rebuilt from the draw.
     for epoch in 0..total_epochs {
         // A fresh synthetic-cell draw per epoch, so no row is ever the same
         // twice — the same role the Gamma jitter plays for the dense trainers,
@@ -725,7 +657,7 @@ pub fn train_masked(
             // to `mu_adjusted` — the batch-FREE rates — whenever a batch-aware
             // collapse ran, and reusing the input draw for both would train the
             // decoder to reproduce the batch effect the collapse just removed.
-            thinned = level_data
+            let thinned: Vec<(Mat, Option<&Mat>, Mat)> = level_data
                 .iter()
                 .enumerate()
                 .map(|(level, &(mixed, batch, target))| {
@@ -742,50 +674,26 @@ pub fn train_masked(
                 })
                 .collect();
             let refs: Vec<LevelData> = thinned.iter().map(|(x, b, y)| (x, *b, y)).collect();
-            let loaders = build_indexed_loaders(&refs, config)?;
-            levels = resident_levels(&loaders, &refs, config.dev)?;
-            level_targets = refs
-                .iter()
-                .zip(decoders)
-                .map(|(&(_, _, target), dec)| {
-                    LevelTarget::from_mat(target, dec.coarsening(), config.dev)
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
+            levels = resident_dense_levels(&refs, config, config.dev)?;
         }
-        let epoch_refs: Vec<LevelData> = if opts.poisson_thin {
-            thinned.iter().map(|(x, b, y)| (x, *b, y)).collect()
-        } else {
-            level_data.to_vec()
-        };
 
         let mut acc = EpochAccum::new(config.dev)?;
         let mut skipped_steps = 0usize;
 
         for (level, lv) in levels.iter().enumerate() {
             let decoder = &decoders[level];
-            let ep = lv.begin_epoch(
-                epoch_refs[level].2,
-                epoch_seed(opts.seed, epoch, level),
-                &draw,
-                minibatch_size,
-            )?;
-            for (b, mb) in ep.batches.iter().enumerate() {
+            let ep = lv.begin_epoch(epoch_seed(opts.seed, epoch, level), &draw, minibatch_size)?;
+            for b in 0..ep.n_batches() {
+                let mb = ep.batch(b)?;
                 let fwd = masked_minibatch_loss(
                     encoder,
                     decoder,
-                    query_decoder,
                     config,
                     opts,
-                    mb,
-                    ep.n_queries[b],
-                    &level_targets[level],
+                    &mb,
+                    lv.feature_mean_1d(),
                 )?;
-                acc.add(
-                    &fwd.llik_sum,
-                    &fwd.units_sum,
-                    fwd.r2_sum.as_ref(),
-                    ep.n_queries[b],
-                )?;
+                acc.add(&fwd.llik_sum, &fwd.units_sum)?;
                 let grads = fwd.loss.backward()?;
                 if !clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))? {
                     skipped_steps += 1;
@@ -796,7 +704,7 @@ pub fn train_masked(
             }
         }
 
-        let (per_metric, rms_r) = acc.read()?;
+        let per_metric = acc.read()?;
         llik_trace.push(per_metric);
         prog_bar.set_message(format!("llik={per_metric:.3}"));
         prog_bar.inc(1);
@@ -811,21 +719,11 @@ pub fn train_masked(
                  if this persists."
             );
         }
-        if log::log_enabled!(log::Level::Info) {
-            // Root mean square of the residual per query: how much the query
-            // decoder is carrying beyond the mixture. Near zero on data without
-            // co-expression beyond the topics; the number to watch on real data.
-            let r_msg = if acc.queries > 0.0 {
-                format!(" query rms(r)={rms_r:.4}")
-            } else {
-                String::new()
-            };
-            // Per scored unit: every gene the encoder did not see, or every
-            // module it did not see completely — so this is not comparable
-            // across module maps, nor to a run that scored only the context's
-            // masked share.
-            info!("[epoch {epoch}] masked llik/unit={per_metric:.4}{r_msg}");
-        }
+        // Per scored unit: every gene the encoder did not see, or every
+        // module it did not see completely — so this is not comparable
+        // across module maps, nor to a windowed run, which hid only the
+        // masked share of a top-K context.
+        info!("[epoch {epoch}] masked llik/unit={per_metric:.4}");
         if config.stop.load(Ordering::SeqCst) {
             prog_bar.finish_and_clear();
             info!("Stopping early at epoch {epoch}");
