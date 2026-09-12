@@ -20,8 +20,13 @@ fn rows() -> Mat {
     })
 }
 
+/// The same fixture in the `[D, P]` orientation the loader is handed.
+fn rows_dp() -> Mat {
+    rows().transpose()
+}
+
 fn level() -> DenseMaskedLevel {
-    DenseMaskedLevel::from_mats(&rows(), None, &rows(), &vec![1.0f32; D], &dev()).unwrap()
+    DenseMaskedLevel::from_mats(&rows_dp(), None, &rows_dp(), &vec![1.0f32; D], &dev()).unwrap()
 }
 
 fn draw(frac: f64) -> MaskedDraw {
@@ -149,4 +154,40 @@ fn the_uniform_schedule_varies_the_rate_across_rows() {
     let lo = shares.iter().cloned().fold(f32::INFINITY, f32::min);
     let hi = shares.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     assert!(hi - lo > 0.1, "rates did not vary: {shares:?}");
+}
+
+/// The resident rows are exactly what the host transpose used to upload.
+///
+/// A level is handed the pseudobulk posterior in its natural `[D, P]` layout
+/// and transposes it nowhere: nalgebra's column-major `[D, P]` buffer IS the
+/// row-major `[P, D]` buffer, element `(d, p)` sitting at `d + p·D` in both. The
+/// reference below is the construction this replaced — `DMatrix::transpose()`
+/// on the host, then `to_tensor`'s transposed view made `contiguous()` on the
+/// device — and the two must agree element for element, or every fit quietly
+/// changed while the timing improved.
+#[test]
+fn the_resident_rows_equal_the_old_host_transpose() {
+    use crate::data::loader_util::{upload_columns_as_rows, upload_to_device};
+
+    // Planted `[D, P]`, every entry distinct, so a transposed read cannot pass
+    // by symmetry.
+    let m_dp = Mat::from_fn(D, P, |d, p| (d * P + p) as f32 + 0.5);
+
+    let old = upload_to_device(&m_dp.transpose(), &dev()).unwrap();
+    let new = upload_columns_as_rows(&m_dp, &dev()).unwrap();
+
+    assert_eq!(old.dims(), &[P, D], "the reference is [P, D]");
+    assert_eq!(new.dims(), old.dims(), "the upload changed shape");
+    let old_rows: Vec<Vec<f32>> = old.to_vec2().unwrap();
+    let new_rows: Vec<Vec<f32>> = new.to_vec2().unwrap();
+    assert_eq!(
+        new_rows, old_rows,
+        "the uploaded rows are not the same tensor"
+    );
+    // ... and they are the transpose, not the matrix read row-wise.
+    for p in 0..P {
+        for d in 0..D {
+            assert_eq!(new_rows[p][d], m_dp[(d, p)], "row {p}, gene {d}");
+        }
+    }
 }
