@@ -289,7 +289,7 @@ pub fn grow_tensor(
             let mut slab_shape: Vec<usize> = fresh.dims().to_vec();
             slab_shape[dim] = new - old;
             let slab =
-                Tensor::full(v, slab_shape.as_slice(), fresh.device())?.to_dtype(fresh.dtype())?;
+                Tensor::full(v as f32, slab_shape.as_slice(), fresh.device())?.to_dtype(fresh.dtype())?;
             let mut r: Vec<std::ops::Range<usize>> = fresh.dims().iter().map(|&d| 0..d).collect();
             r[dim] = old..new;
             out = out.slice_assign(&r, &slab)?;
@@ -340,7 +340,7 @@ fn gather_gene_axis(
             Some(v) => {
                 let mut one: Vec<usize> = saved.dims().to_vec();
                 one[dim] = 1;
-                Tensor::full(v, one.as_slice(), dev)?.to_dtype(saved.dtype())?
+                Tensor::full(v as f32, one.as_slice(), dev)?.to_dtype(saved.dtype())?
             }
             // The checkpoint's own mean along this axis. For a parameter the
             // model reads in log space that is the geometric mean of the rate,
