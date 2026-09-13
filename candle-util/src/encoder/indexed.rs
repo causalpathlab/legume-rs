@@ -1,8 +1,6 @@
-use crate::data::indexed::SparseEdgeBatch;
 use crate::encoder::{dense_pool, scatter_pool};
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
 use crate::nn::batch_norm;
-use crate::nn::gcn::GcnBlock;
 use crate::nn::layers::*;
 use crate::traits::indexed::*;
 use crate::value_transform::anscombe_lite;
@@ -24,10 +22,6 @@ pub struct IndexedEmbeddingEncoder {
     /// The feature side. With modules it is a sparse mixture of shared
     /// vectors and no `[D, H]` table exists; without them it is that table.
     features: std::sync::Arc<crate::feature_embedding::FeatureEmbedding>,
-    /// Optional γ-gated GCN block applied to the per-slot value-gated
-    /// embedding `[N, K, H]` before pooling. Present iff
-    /// `IndexedEmbeddingEncoderArgs::use_gcn` was true at construction.
-    gcn: Option<GcnBlock>,
     fc: StackLayers<Linear>,
     bn_z: batch_norm::BatchNorm,
     z_mean: Linear,
@@ -53,12 +47,6 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     pub n_topics: usize,
     pub embedding_dim: usize,
     pub layers: &'a [usize],
-    /// When true, construct a [`GcnBlock`] on the per-slot `[N, K, H]`
-    /// representation. The caller is responsible for providing the
-    /// per-minibatch [`SparseEdgeBatch`] at forward time; when no edge
-    /// batch is supplied the GCN branch is bypassed and the legacy
-    /// sum-pool path is taken.
-    pub use_gcn: bool,
     /// When true, allocate the `attn.query` parameter and use single-query
     /// attention pooling on the masked forward path
     /// ([`IndexedEmbeddingEncoder::forward_indexed_masked`]). Sum-pool users
@@ -92,12 +80,6 @@ impl IndexedEmbeddingEncoder {
             vb.clone(),
         )?);
 
-        let gcn = if args.use_gcn {
-            Some(GcnBlock::new(args.embedding_dim, vb.pp("nn.enc.gcn"))?)
-        } else {
-            None
-        };
-
         // FC stack: (embedding_dim + 2M) -> ... -> final_hidden. The module branch
         // appends `log u` and `log1p(cov)`, hence 2M; at M = 0 this is `embedding_dim`
         // and the layer shapes are unchanged.
@@ -122,7 +104,6 @@ impl IndexedEmbeddingEncoder {
             n_topics: args.n_topics,
             embedding_dim: args.embedding_dim,
             features,
-            gcn,
             fc,
             bn_z,
             z_mean,
@@ -148,19 +129,6 @@ impl IndexedEmbeddingEncoder {
     /// what a caller exports is what the model trains with.
     pub fn feature_module_membership(&self) -> Result<Option<Tensor>> {
         self.features.membership()
-    }
-
-    /// Whether this encoder owns a [`GcnBlock`]. Callers use this to
-    /// decide whether to supply per-minibatch sparse edges.
-    pub fn has_gcn(&self) -> bool {
-        self.gcn.is_some()
-    }
-
-    /// Current per-dim γ ∈ ℝ^H from the GCN block, when wired. Returns
-    /// `None` otherwise. Used for per-epoch training instrumentation —
-    /// caller derives summary stats (L2, max-abs, mean) for logging.
-    pub fn gcn_gamma_vec(&self) -> Result<Option<Vec<f32>>> {
-        self.gcn.as_ref().map(|g| g.gamma_vec()).transpose()
     }
 
     pub fn n_features(&self) -> usize {
@@ -223,7 +191,6 @@ impl IndexedEmbeddingEncoder {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
-        sparse_edges: Option<&SparseEdgeBatch>,
     ) -> Result<Tensor> {
         let n = indices.dim(0)?;
         let k = indices.dim(1)?;
@@ -240,15 +207,7 @@ impl IndexedEmbeddingEncoder {
         // keeps every slot's magnitude information and avoids that.
         let a_nk = anscombe_lite(values, values_null, values_mean)?; // [N, K]
         let v_nkh = e_nk_h.broadcast_mul(&a_nk.unsqueeze(2)?)?; // [N, K, H]
-
-        // γ-gated sparse GCN diffusion. Block is identity at init
-        // (γ=0) so downstream FC+BN sees the no-graph training
-        // distribution; γ grows only as the likelihood needs the graph.
-        let v_pooled_input = match (&self.gcn, sparse_edges) {
-            (Some(gcn), Some(edges)) => gcn.forward(&v_nkh, edges)?,
-            _ => v_nkh,
-        };
-        v_pooled_input.sum(1) // [N, H]
+        v_nkh.sum(1) // [N, H]
     }
 }
 
@@ -260,7 +219,7 @@ impl IndexedEmbeddingEncoder {
     /// for masked / padding slots (`visible_mask [N, K]` == 0) are driven to
     /// −∞ so those genes are excluded from the softmax — the raw `a_nk` gate
     /// is *not* zeroed, so a masked gene's value never leaks into the pool.
-    /// Used by the masked-imputation topic model. No GCN branch on this path.
+    /// Used by the masked-imputation topic model.
     ///
     /// Computed by [`crate::encoder::scatter_pool`], which re-associates the
     /// three sums so no `[N, K, H]` block of gathered rows is ever formed: the
@@ -651,11 +610,9 @@ impl IndexedEmbeddingEncoder {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
-        sparse_edges: Option<&SparseEdgeBatch>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let h_nh =
-            self.preprocess_indexed(indices, values, values_null, values_mean, sparse_edges)?;
+        let h_nh = self.preprocess_indexed(indices, values, values_null, values_mean)?;
         let fc_nl = self.fc.forward_t(&h_nh, train)?;
         let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
 
@@ -673,17 +630,10 @@ impl IndexedEncoderT for IndexedEmbeddingEncoder {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
-        sparse_edges: Option<&SparseEdgeBatch>,
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
-        let (z_mean_nk, z_lnvar_nk) = self.latent_gaussian_params_indexed(
-            indices,
-            values,
-            values_null,
-            values_mean,
-            sparse_edges,
-            train,
-        )?;
+        let (z_mean_nk, z_lnvar_nk) =
+            self.latent_gaussian_params_indexed(indices, values, values_null, values_mean, train)?;
 
         let z_nk = gaussian_reparameterize(&z_mean_nk, &z_lnvar_nk, train)?;
         let log_prob = ops::log_softmax(&z_nk, 1)?;
@@ -721,7 +671,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: false,
                 n_gene_modules: 0,
             },
@@ -735,7 +684,7 @@ mod tests {
         let values = Tensor::from_vec(vec![4.0f32, 9.0, 16.0, 25.0], (2, 2), &device).unwrap();
 
         let h = enc
-            .preprocess_indexed(&indices, &values, None, None, None)
+            .preprocess_indexed(&indices, &values, None, None)
             .unwrap();
         assert_eq!(h.dims(), &[2, embedding_dim]);
         for row in h.to_vec2::<f32>().unwrap() {
@@ -758,7 +707,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: true,
                 n_gene_modules,
             },
@@ -847,7 +795,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: true,
                 n_gene_modules: m,
             },
@@ -908,7 +855,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: true,
                 n_gene_modules: m,
             },
@@ -964,7 +910,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim: 4,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: true,
                 n_gene_modules: 0,
             },
@@ -998,7 +943,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim: h,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: false,
                 n_gene_modules: m,
             },
@@ -1049,7 +993,6 @@ mod tests {
                 n_topics: 2,
                 embedding_dim: h,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: false,
                 n_gene_modules: m,
             },
@@ -1062,7 +1005,7 @@ mod tests {
         let values =
             Tensor::from_vec(vec![4.0f32, 9.0, 1.0, 16.0, 2.0, 25.0], (n, k), &dev).unwrap();
         let pooled = enc
-            .preprocess_indexed(&indices, &values, None, None, None)
+            .preprocess_indexed(&indices, &values, None, None)
             .unwrap();
 
         // Reference: compose every row, select the slots, gate, sum over k.
@@ -1103,7 +1046,6 @@ mod tests {
                 n_topics: 3,
                 embedding_dim: 4,
                 layers: &layers,
-                use_gcn: false,
                 attn_pool: true,
                 n_gene_modules,
             },

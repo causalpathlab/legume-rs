@@ -310,25 +310,48 @@ fn the_hidden_ids_depend_on_the_seed_and_the_row_alone() {
     );
 }
 
-/// A row is never fully hidden or fully visible: the count is clamped to
-/// `[1, D-1]`, so the encoder always has something to read and the decoder
-/// always has something to answer for.
+/// At a rate the CLI admits, a row is never fully hidden or fully visible: the
+/// encoder always has something to read and the decoder always has something to
+/// answer for, and the count is exactly `round(rate · D)` with no reinterpretation.
 #[test]
-fn the_hidden_count_is_clamped_away_from_both_ends() {
+fn an_admissible_rate_hides_the_rounded_fraction_and_no_more() {
     let lv = level();
-    for (frac, want) in [(0.0f64, 1usize), (1.0, D - 1), (0.001, 1), (0.999, D - 1)] {
+    for (frac, want) in [(0.05f64, 2usize), (0.4, 16), (0.95, D - 2)] {
         let ep = lv.begin_epoch(41, &draw(frac), P).unwrap();
         let mb = ep.batch(0).unwrap();
         assert_eq!(
             mb.hidden_ids.dims(),
             &[P, want],
-            "rate {frac} must clamp to {want} hidden"
+            "rate {frac} must hide {want} genes"
         );
         let vis: Vec<Vec<f32>> = mb.visible_nd.to_vec2().unwrap();
         for v in &vis {
             assert_eq!(v.iter().filter(|&&x| x == 0.0).count(), want);
+            assert!(
+                v.iter().any(|&x| x == 1.0),
+                "rate {frac} left nothing visible"
+            );
         }
     }
+}
+
+/// A degenerate rate is a caller bug, not a draw to be silently rounded up to
+/// one gene. The CLI refuses it (`--mask-fraction` and the uniform bounds); the
+/// loader asserts it, so a caller that reaches past the CLI hears about it.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "open interval (0, 1)")]
+fn a_rate_of_zero_trips_the_invariant() {
+    let lv = level();
+    let _ = lv.begin_epoch(41, &draw(0.0), P).unwrap().batch(0);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "open interval (0, 1)")]
+fn a_rate_of_one_trips_the_invariant() {
+    let lv = level();
+    let _ = lv.begin_epoch(41, &draw(1.0), P).unwrap().batch(0);
 }
 
 /// `Uniform` draws the row's rate first, so the COUNT differs across rows. The
@@ -382,4 +405,108 @@ fn the_uniform_schedule_varies_the_hidden_count_across_rows() {
         }
         assert!(h[..c].windows(2).all(|x| x[0] < x[1]), "row {n}: {h:?}");
     }
+}
+
+/// The `[N, D]` visible row the loader used to fill on the host and upload
+/// every minibatch: ones, with a zero at every hidden id.
+fn host_visible(hidden: &[Vec<u32>], d: usize) -> Vec<Vec<f32>> {
+    hidden
+        .iter()
+        .map(|row| {
+            let mut v = vec![1f32; d];
+            for &g in row {
+                v[g as usize] = 0.0;
+            }
+            v
+        })
+        .collect()
+}
+
+/// `hidden_ids` already says everything the visible mask says, so the mask is
+/// derived from it ON THE DEVICE rather than built `[N, D]` on the host and
+/// uploaded every step.
+///
+/// The derivation must not care about the order of a row's ids (a planted
+/// block can be unsorted) nor about a repeat (the `Uniform` schedule pads a
+/// short row with its own last hidden id), so all three shapes are planted
+/// here and checked against the host build kept above as the reference.
+#[test]
+fn the_visible_mask_is_derived_from_the_hidden_ids() {
+    let hidden = vec![
+        vec![0u32, 3, 7], // ascending, as a draw produces it
+        vec![9u32, 1, 4], // unsorted: a scatter must not care
+        vec![5u32, 5, 5], // a padded row repeats its own last hidden id
+    ];
+    let d = 12;
+    let flat: Vec<u32> = hidden.iter().flatten().copied().collect();
+    let ids = Tensor::from_vec(flat, (hidden.len(), 3), &dev()).unwrap();
+    let got: Vec<Vec<f32>> = visible_from_hidden(&ids, d).unwrap().to_vec2().unwrap();
+    assert_eq!(got, host_visible(&hidden, d));
+}
+
+/// A level handed ONE matrix twice holds ONE device buffer.
+///
+/// Without a batch-adjusted target the trainer's `mixed` IS the target, and
+/// uploading it as two resident `[P, D]` tensors doubles the level's device
+/// footprint for two copies of the same numbers. `Tensor` is `Arc`-backed, so
+/// the reused clone carries the same `id()`; two genuinely separate uploads
+/// cannot.
+#[test]
+fn one_matrix_handed_in_twice_is_uploaded_once() {
+    let m = rows_dp();
+    let mean = vec![1.0f32; D];
+    let shared = DenseMaskedLevel::from_mats(&m, None, &m, &mean, &dev()).unwrap();
+    assert_eq!(
+        shared.input_pd.id(),
+        shared.target_pd.id(),
+        "the same Mat handed in as input and target must upload once"
+    );
+
+    // Two distinct matrices — equal in content, so only the identity can tell
+    // them apart — still get one buffer each.
+    let other = rows_dp();
+    let distinct = DenseMaskedLevel::from_mats(&m, None, &other, &mean, &dev()).unwrap();
+    assert_ne!(
+        distinct.input_pd.id(),
+        distinct.target_pd.id(),
+        "two separate Mats must not be collapsed onto one buffer"
+    );
+
+    // And either way the rows read back as the caller's matrix.
+    let want: Vec<Vec<f32>> = rows()
+        .row_iter()
+        .map(|r| r.iter().copied().collect())
+        .collect();
+    for lv in [&shared, &distinct] {
+        let got: Vec<Vec<f32>> = lv.target_pd.to_vec2().unwrap();
+        assert_eq!(got, want);
+    }
+}
+
+/// A valid rate can round onto an edge of a small axis. The CLI refuses the
+/// degenerate RATES; this is the guard on the degenerate ROUNDING, and it must
+/// hold in release builds, where a debug assertion would not.
+#[test]
+fn a_valid_rate_never_hides_everything_or_nothing() {
+    use super::hidden_count;
+    assert_eq!(
+        hidden_count(2, 0.4),
+        1,
+        "0.4 of two genes rounds to one, not zero"
+    );
+    assert_eq!(
+        hidden_count(5, 0.9),
+        4,
+        "0.9 of five genes rounds to all five; one must stay visible"
+    );
+    assert_eq!(
+        hidden_count(3, 0.5),
+        2,
+        "plain rounding when it lands inside the axis"
+    );
+    assert_eq!(
+        hidden_count(34_008, 0.4),
+        13_603,
+        "the production case is untouched by the bound"
+    );
 }

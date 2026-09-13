@@ -26,6 +26,18 @@ use crate::fast_index::{gather_rows, scatter_add_cols};
 use crate::feature_embedding::FeatureEmbedding;
 use candle_core::{Result, Tensor};
 
+/// `scores + (1 − visible)·(−1e9)` — the ONE additive visibility mask.
+///
+/// Written as a single affine `v·1e9 − 1e9`, which is `(1 − v)·(−1e9)`
+/// rearranged and exact for `v ∈ {0, 1}` (`1e9` is representable in `f32`, so
+/// `1e9 − 1e9` is exactly `0` and a visible score is untouched). Both pools —
+/// the slot scorer here and [`super::dense_pool::attention_scores_dense`] —
+/// call this, so a hidden position leaves the softmax with the same weight
+/// whichever path scored it.
+pub fn masked_scores(scores: &Tensor, visible: &Tensor) -> Result<Tensor> {
+    scores + visible.affine(1e9, -1e9)?
+}
+
 /// `s_nk = gate · rq[idx] · scale`, with `-1e9` added where `visible == 0`.
 ///
 /// The gather is from the `[D]` vector `rq`, not from the `[D, H]` table, so
@@ -40,10 +52,9 @@ pub fn attention_scores_from_vector(
     let (n, k) = gate_nk.dims2()?;
     let rq_nk = gather_rows(rq_d, &idx_nk.flatten_all()?.contiguous()?)?.reshape((n, k))?;
     let scores = (gate_nk * rq_nk)?.affine(scale, 0.0)?;
-    // (1 − vis)·(−1e9): the same additive mask the block path used, so a
-    // masked slot leaves the softmax with exactly the weight it had there.
-    let neg_inf = visible_nk.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?;
-    scores + neg_inf
+    // The same additive mask the block path used, so a masked slot leaves the
+    // softmax with exactly the weight it had there.
+    masked_scores(&scores, visible_nk)
 }
 
 /// `pool_nh = scatter_add(attn · gate, idx) ρ`, through the feature side.

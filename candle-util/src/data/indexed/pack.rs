@@ -67,24 +67,6 @@ pub fn pack_indices_values(
     Ok((indices, values))
 }
 
-/// Pack a per-cell row `(per_sample[si][feat])` at `samples[si].indices`
-/// into `[N, K] f32`. Used for the encoder's μ_residual batch null.
-pub(crate) fn pack_null_at_indices(
-    samples: &[IndexedSample],
-    null_rows: &[Vec<f32>],
-    sample_indices: &[usize],
-    k: usize,
-    target_device: &Device,
-) -> anyhow::Result<Tensor> {
-    pack_at_indices(
-        samples,
-        sample_indices,
-        k,
-        target_device,
-        |_, _, si, feat| null_rows[si][feat as usize],
-    )
-}
-
 /// Gather a per-feature `[D]` slice at each cell's top-K positions into
 /// `[N, K] f32`. Used for both encoder gene-mean (`μ_d`) and decoder
 /// NB-Fisher weights — each cell sees the same constant per feature.

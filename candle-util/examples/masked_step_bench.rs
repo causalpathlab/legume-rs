@@ -2,15 +2,19 @@
 //!
 //! Times each piece of the step in isolation, forward and backward, on the
 //! device given by `--device` (`cpu` or `cuda`), at the shapes the sim uses:
-//! N rows, K context slots, Q queries, D genes, H embedding, r query rank,
-//! T topics. Run with
+//! N rows, K context slots, D genes, H embedding, r projection rank, T topics.
+//!
+//! The training step is the DENSE read: scores over every gene, a softmax over
+//! the gene axis, one gemm to pool. Lines marked `legacy:` are the slot-window
+//! path, which now only scores OLD models recorded with a context size — they
+//! stay so the before/after remains legible, not because a step runs them. Run
+//! with
 //! `cargo run --release --features cuda --target-dir target-cuda -p candle-util --example masked_step_bench -- cuda`.
 
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{VarBuilder, VarMap};
-use candle_util::decoder::masked_etm::QueryTarget;
 use candle_util::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget};
-use candle_util::decoder::query_decoder::{QueryDecoder, QueryInput};
+use candle_util::encoder::dense_pool::{attention_scores_dense, pool_dense};
 use candle_util::encoder::scatter_pool::{
     attention_scores_from_vector, pool_by_scatter, query_over_features,
 };
@@ -20,7 +24,6 @@ use std::time::Instant;
 
 const N: usize = 100;
 const K: usize = 512;
-const Q: usize = 282;
 const D: usize = 4000;
 const H: usize = 128;
 const R: usize = 32;
@@ -60,14 +63,13 @@ fn main() -> anyhow::Result<()> {
     } else {
         Device::Cpu
     };
-    println!("device {which}; N={N} K={K} Q={Q} D={D} H={H} r={R} T={T}; {ITERS} iterations");
+    println!("device {which}; N={N} K={K} D={D} H={H} r={R} T={T}; {ITERS} iterations");
 
     let varmap = VarMap::new();
     let vb = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
     let rho = vb.get_with_hints((D, H), "rho", candle_nn::init::DEFAULT_KAIMING_NORMAL)?;
     let features = candle_util::feature_embedding::FeatureEmbedding::fixed(rho.clone());
     let dec = EmbeddedNbTopicDecoder::new(T, std::sync::Arc::clone(&features), vb.pp("dec"))?;
-    let qd = QueryDecoder::new(H, R, vb.pp("dec_query"))?;
     let log_theta = Var::from_tensor(&candle_nn::ops::log_softmax(
         &Tensor::randn(0f32, 1.0, (N, T), &dev)?,
         1,
@@ -80,9 +82,6 @@ fn main() -> anyhow::Result<()> {
     let visible = Tensor::rand(0f32, 1.0, (N, K), &dev)?
         .gt(0.3)?
         .to_dtype(DType::F32)?;
-    let q_host: Vec<u32> = (0..N * Q).map(|i| ((i * 104729) % D) as u32).collect();
-    let query_ids = Tensor::from_vec(q_host, (N, Q), &dev)?;
-    let weight = Tensor::ones((N, Q), DType::F32, &dev)?;
     let values_nd = Tensor::rand(0f32, 20.0, (N, D), &dev)?.floor()?;
     let lib_n1 = (values_nd.sum_keepdim(1)? + 1.0)?;
 
@@ -136,21 +135,53 @@ fn main() -> anyhow::Result<()> {
         let _ = llik.mean_all()?.neg()?.backward()?;
         Ok(())
     });
-    // 4. target_mask_nd scatter alone.
-    time(&dev, "target_mask_nd scatter", || {
+    // 4. THE TRAINING STEP'S ENCODER: the dense read. Scores over every gene
+    //    from the `[D]` query projection, a softmax over the gene axis, and one
+    //    `[N, D]·[D, H]` gemm to pool. The visible mask is derived from the very
+    //    `hidden_ids` block above, exactly as `masked_dense` derives it.
+    let attn_q = Var::from_tensor(&Tensor::randn(0f32, 0.1, (1, H), &dev)?)?;
+    let gate_nd = Tensor::rand(0.5f32, 3.0, (N, D), &dev)?;
+    let visible_nd = {
+        let dh = hidden_ids.dim(1)?;
+        Tensor::ones((N, D), DType::F32, &dev)?.scatter(
+            &hidden_ids,
+            &Tensor::zeros((N, dh), DType::F32, &dev)?,
+            1,
+        )?
+    };
+    time(&dev, "dense pool over every gene (fwd)", || {
+        let rq_d = query_over_features(&features, &attn_q)?;
+        let scores = attention_scores_dense(&gate_nd, &rq_d, &visible_nd, 1.0 / (H as f64).sqrt())?;
+        let attn = candle_nn::ops::softmax(&scores, 1)?;
+        let _ = pool_dense(&attn, &gate_nd, &features)?;
+        Ok(())
+    });
+    time(&dev, "dense pool over every gene (fwd+bwd)", || {
+        let rq_d = query_over_features(&features, &attn_q)?;
+        let scores = attention_scores_dense(&gate_nd, &rq_d, &visible_nd, 1.0 / (H as f64).sqrt())?;
+        let attn = candle_nn::ops::softmax(&scores, 1)?;
+        let pooled = pool_dense(&attn, &gate_nd, &features)?;
+        let _ = pooled.sum_all()?.backward()?;
+        Ok(())
+    });
+
+    println!("-- legacy: old-model scoring only, no training step runs these --");
+
+    // 5. target_mask_nd scatter alone.
+    time(&dev, "legacy: target_mask_nd scatter", || {
         let _ = target_mask_nd(&indices, &visible, D)?;
         Ok(())
     });
 
-    // 5. Token gather like the encoder: [N·K, H] index_select + gate.
-    time(&dev, "encoder token gather [N,K,H] (fwd)", || {
+    // 6. Token gather the way the WINDOWED encoder read a slot block.
+    time(&dev, "legacy: token gather [N,K,H] (fwd)", || {
         let e = rho
             .index_select(&indices.flatten_all()?, 0)?
             .reshape((N, K, H))?;
         let _ = e.broadcast_mul(&gate.unsqueeze(2)?)?;
         Ok(())
     });
-    time(&dev, "encoder token gather [N,K,H] (fwd+bwd)", || {
+    time(&dev, "legacy: token gather [N,K,H] (fwd+bwd)", || {
         let e = rho
             .index_select(&indices.flatten_all()?, 0)?
             .reshape((N, K, H))?;
@@ -159,10 +190,9 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    // 5b. The same pool, re-associated: ρq once, scores gathered from that
+    // 6b. The same pool, re-associated: ρq once, scores gathered from that
     //     vector, weights scattered onto [N, D], one gemm. Nothing [N, K, H].
-    let attn_q = Var::from_tensor(&Tensor::randn(0f32, 0.1, (1, H), &dev)?)?;
-    time(&dev, "scatter pool (fwd+bwd)", || {
+    time(&dev, "legacy: scatter pool (fwd+bwd)", || {
         let rq_d = query_over_features(&features, &attn_q)?;
         let scores = attention_scores_from_vector(
             &gate,
@@ -176,58 +206,17 @@ fn main() -> anyhow::Result<()> {
         let _ = pooled.sum_all()?.backward()?;
         Ok(())
     });
-    // 6. Query decoder forward, forward+backward.
-    let qin = QueryInput {
-        indices: &indices,
-        gate: &gate,
-        visible: &visible,
-        query_ids: &query_ids,
-    };
-    time(&dev, "query decoder (fwd)", || {
-        let _ = qd.forward(&features, &qin)?;
-        Ok(())
-    });
-    time(&dev, "query decoder (fwd+bwd)", || {
-        let read = qd.forward(&features, &qin)?;
-        let _ = read.residual.sum_all()?.backward()?;
-        Ok(())
-    });
-
     // 7. Scatter of per-slot values onto [N, D] (the module view of the context).
-    time(&dev, "scatter_add_cols [N,K]→[N,D] (fwd+bwd)", || {
-        let v = Var::from_tensor(&Tensor::rand(-1f32, 1.0, (N, K), &dev)?)?;
-        let nd = scatter_add_cols(&indices, &v, D)?;
-        let _ = nd.sum_all()?.backward()?;
-        Ok(())
-    });
-
-    // 8. The whole decoder side as the trainer runs it (query on): dense NB
-    //    head plus the gene-level query head.
-    let q_target = Tensor::rand(0f32, 5.0, (N, Q), &dev)?.floor()?;
-    time(&dev, "decoder side, query on (fwd+bwd)", || {
-        let full_kd = dec.full_logits_kd()?;
-        let read = qd.forward(&features, &qin)?;
-        let dense = MaskedDenseTarget {
-            values: &values_nd,
-            residual: None,
-            lib: &lib_n1,
-            hidden_ids: &hidden_ids,
-            hidden_weight: None,
-        };
-        let llik = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
-        let q = QueryTarget {
-            gene_ids: &query_ids,
-            values: &q_target,
-            weight: &weight,
-            log_residual: &read.residual,
-            lib: &lib_n1,
-        };
-        let llik_q = dec.score_queries_nb(&log_theta, &q, &full_kd)?;
-        let pen = (read.residual.sqr()? * &weight)?.sum_all()?;
-        let loss = ((llik.mean_all()?.neg()? - llik_q.mean_all()?)? + pen)?;
-        let _ = loss.backward()?;
-        Ok(())
-    });
+    time(
+        &dev,
+        "legacy: scatter_add_cols [N,K]→[N,D] (fwd+bwd)",
+        || {
+            let v = Var::from_tensor(&Tensor::rand(-1f32, 1.0, (N, K), &dev)?)?;
+            let nd = scatter_add_cols(&indices, &v, D)?;
+            let _ = nd.sum_all()?.backward()?;
+            Ok(())
+        },
+    );
 
     /////////////////////////////////////////////////////////////
     // The same gathers with row-parallel backward kernels      //
