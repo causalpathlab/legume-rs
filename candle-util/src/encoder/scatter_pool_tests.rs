@@ -377,3 +377,29 @@ fn no_intermediate_scales_with_k_times_h() {
         assert_eq!(pool.dims(), &[n, h]);
     }
 }
+
+/// One affine, not two.
+///
+/// [`masked_scores`] is the additive visibility mask both scorers used to
+/// spell out inline as `(1 − v)` then `·(−1e9)`. A softmax is not forgiving
+/// about where `−1e9` lands, so the single affine has to agree with the old
+/// pair BIT for bit on a 0/1 mask, not merely to tolerance.
+#[test]
+fn masked_scores_equals_the_two_affine_form() {
+    let f = fixture();
+    let scores = Tensor::from_vec(ramp(N * K, 0.0, 2.0), (N, K), &f.dev).unwrap();
+    // The form both `attention_scores_from_vector` and `attention_scores_dense`
+    // carried before the helper existed, kept here as the reference.
+    let neg_inf = f
+        .visible
+        .affine(-1.0, 1.0)
+        .unwrap()
+        .affine(-1e9, 0.0)
+        .unwrap();
+    let reference: Vec<Vec<f32>> = (&scores + neg_inf).unwrap().to_vec2().unwrap();
+    let got: Vec<Vec<f32>> = masked_scores(&scores, &f.visible)
+        .unwrap()
+        .to_vec2()
+        .unwrap();
+    assert_eq!(got, reference, "the one-affine mask must be bit-identical");
+}

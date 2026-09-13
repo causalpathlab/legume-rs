@@ -157,7 +157,6 @@ fn rebuild_model(
             n_topics: metadata.n_topics,
             embedding_dim,
             layers: &metadata.encoder_hidden,
-            use_gcn: false,
             attn_pool: true,
             // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
             // errors on a shape mismatch.

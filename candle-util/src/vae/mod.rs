@@ -2,7 +2,7 @@
 //!
 //! - [`topic`]: dense `EncoderModuleT` + `DecoderModuleT` trainer.
 //! - [`masked_topic`]: `IndexedEmbeddingEncoder` + `EmbeddedNbTopicDecoder`
-//!   trainer driven by [`crate::data::indexed::IndexedInMemoryData`].
+//!   trainer driven by [`crate::data::masked_dense::DenseMaskedLevel`].
 //!
 //! Shared utilities (`TrainScores`, `smooth_topics`, `PhaseTimers`,
 //! grad-clipping helpers) live here at the module root.

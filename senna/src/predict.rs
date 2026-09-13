@@ -1650,7 +1650,6 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
             n_topics: a.metadata.n_topics,
             embedding_dim,
             layers: &a.metadata.encoder_hidden,
-            use_gcn: false,
             attn_pool: true,
             // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
             // errors on a shape mismatch.

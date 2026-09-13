@@ -54,27 +54,44 @@ pub struct MaskedDraw {
     pub mask_fraction: f64,
 }
 
-/// One row's draw for the epoch: its hidden gene ids and the visible mask they
-/// imply. The two are one draw read two ways — `visible[g] == 0` exactly at
-/// `hidden` — so the encoder's input and the decoder's scored set cannot drift.
-struct RowDraw {
-    visible: Vec<f32>,
-    /// Ascending, no repeats.
-    hidden: Vec<u32>,
-}
+/// One row's draw for the epoch: the ids it hides, ascending and without
+/// repeats.
+///
+/// The visible mask is not carried alongside them. It is the SAME draw read
+/// the other way — `visible[g] == 0` exactly at `hidden` — so it is derived
+/// from the id block once it is on the device (see [`visible_from_hidden`]),
+/// not filled `D`-long per row on the host and uploaded again every step.
+type RowDraw = Vec<u32>;
 
-/// How many genes a row of `n_features` hides at `rate`: `round(rate · D)`,
-/// clamped to `[1, D-1]`.
+/// How many genes a row of `n_features` hides at `rate`: `round(rate · D)`.
 ///
 /// The count is FIXED rather than binomial, which is what lets a minibatch
 /// carry the hidden set as a `[N, d_h]` id block instead of a ragged list — the
-/// decoder then evaluates its likelihood only where it is scored. The clamp
-/// keeps a row from being fully hidden (the encoder would have nothing to read)
-/// or fully visible (the decoder would have nothing to answer for), so a rate
-/// of 0 or 1 is a degenerate draw, not an empty one.
+/// decoder then evaluates its likelihood only where it is scored.
+///
+/// The rate must lie in the OPEN interval (0, 1) and the count it implies must
+/// leave the encoder something to read and the decoder something to answer for.
+/// The CLI guarantees the interval — `MaskedTopicArgs::validate` refuses 0 and
+/// 1 by name, for `--mask-fraction` and for the uniform schedule's bounds — so
+/// what stands here is a debug assertion, not a clamp: a clamp answers a
+/// degenerate rate with a one-gene draw the caller never asked for, and does it
+/// silently.
 fn hidden_count(n_features: usize, rate: f64) -> usize {
-    let d = n_features.max(2);
-    ((rate * n_features as f64).round() as usize).clamp(1, d - 1)
+    debug_assert!(
+        n_features >= 2,
+        "a {n_features}-gene axis cannot be split into a visible and a hidden part"
+    );
+    debug_assert!(
+        rate > 0.0 && rate < 1.0,
+        "mask rate {rate} is outside the open interval (0, 1); the CLI refuses this"
+    );
+    // Rounding a VALID rate can still land on an edge of a small axis: 0.4 over
+    // two genes rounds to one, over one gene to zero, and 0.9 over five rounds
+    // to all five. That is a property of rounding, not a degenerate request,
+    // so it is bounded here in release builds too: at least one gene hidden,
+    // at least one left visible.
+    let m = (rate * n_features as f64).round() as usize;
+    m.clamp(1, n_features - 1)
 }
 
 /// `m` distinct ids from `0..d`, by Floyd's algorithm: `m` draws, not a
@@ -106,12 +123,23 @@ fn draw_row(row: usize, n_features: usize, epoch_seed: u64, draw: &MaskedDraw) -
     };
     // Every gene is a candidate: a zero-count gene carries information about
     // the cell, and the decoder has always been scored on it.
-    let hidden = floyd_sample(n_features, hidden_count(n_features, rate), &mut rng);
-    let mut visible = vec![1f32; n_features];
-    for &g in &hidden {
-        visible[g as usize] = 0.0;
-    }
-    RowDraw { visible, hidden }
+    floyd_sample(n_features, hidden_count(n_features, rate), &mut rng)
+}
+
+/// `[N, D]` visible mask from `hidden_ids [N, d_h]`: ones with a zero scattered
+/// at every hidden id, built ON the device the ids already live on.
+///
+/// `scatter` OVERWRITES, which is what a repeat needs: the `Uniform` schedule
+/// pads a short row with its own last hidden id, and a `scatter_add` of `−1`
+/// would drive that gene to `−1` instead of leaving it hidden. The ones and the
+/// zeros are freshly built constants, so nothing here joins the gradient graph
+/// — the mask multiplies the encoder's scores, it is not learned.
+fn visible_from_hidden(hidden_ids: &Tensor, n_features: usize) -> candle_core::Result<Tensor> {
+    let (n, dh) = hidden_ids.dims2()?;
+    let dev = hidden_ids.device();
+    let ones = Tensor::ones((n, n_features), candle_core::DType::F32, dev)?;
+    let zeros = Tensor::zeros((n, dh), candle_core::DType::F32, dev)?;
+    ones.scatter(hidden_ids, &zeros, 1)
 }
 
 ////////////////////////////
@@ -194,14 +222,24 @@ impl DenseMaskedLevel {
             "per-gene mean has {} entries, expected {d}",
             mean.len()
         );
+        // With no batch-adjusted target the caller hands the SAME matrix in as
+        // both — the identity the Poisson-thinning branch already tests for —
+        // and uploading it twice holds two resident `[P, D]` copies of one set
+        // of numbers. `Tensor` is `Arc`-backed, so the reuse is a pointer copy.
+        let input_pd = upload_columns_as_rows(input_dp, dev)?;
+        let target_pd = if std::ptr::eq(input_dp, target_dp) {
+            input_pd.clone()
+        } else {
+            upload_columns_as_rows(target_dp, dev)?
+        };
         Ok(Self {
             n_features: d,
             p,
-            input_pd: upload_columns_as_rows(input_dp, dev)?,
+            input_pd,
             null_pd: null_dp
                 .map(|n| upload_columns_as_rows(n, dev))
                 .transpose()?,
-            target_pd: upload_columns_as_rows(target_dp, dev)?,
+            target_pd,
             mean_1d: Tensor::from_vec(mean.to_vec(), (1, d), dev)?,
             dev: dev.clone(),
         })
@@ -302,27 +340,25 @@ impl DenseMaskedEpoch<'_> {
             .map(|&r| draw_row(r as usize, d, self.epoch_seed, &self.draw))
             .collect();
 
-        let mut vis = vec![0f32; len * d];
-        for (row, rd) in draws.iter().enumerate() {
-            vis[row * d..(row + 1) * d].copy_from_slice(&rd.visible);
-        }
+        // The draw as an id block. Ragged only under `Uniform`, where the short
+        // rows are padded with their own last hidden id and weighted 0.
         let cpu = Device::Cpu;
-        let visible_nd = Tensor::from_vec(vis, (len, d), &cpu)?.to_device(&lv.dev)?;
-
-        // The same draw as an id block. Ragged only under `Uniform`, where the
-        // short rows are padded with their own last hidden id and weighted 0.
-        let dh = draws.iter().map(|rd| rd.hidden.len()).max().unwrap_or(1);
-        let ragged = draws.iter().any(|rd| rd.hidden.len() != dh);
+        let dh = draws.iter().map(Vec::len).max().unwrap_or(1);
+        let ragged = draws.iter().any(|rd| rd.len() != dh);
         let mut hid = vec![0u32; len * dh];
         let mut w = vec![0f32; len * dh];
         for (row, rd) in draws.iter().enumerate() {
-            let n_hid = rd.hidden.len();
+            let n_hid = rd.len();
             let slot = &mut hid[row * dh..(row + 1) * dh];
-            slot[..n_hid].copy_from_slice(&rd.hidden);
-            slot[n_hid..].fill(rd.hidden[n_hid - 1]);
+            slot[..n_hid].copy_from_slice(rd);
+            slot[n_hid..].fill(rd[n_hid - 1]);
             w[row * dh..row * dh + n_hid].fill(1.0);
         }
         let hidden_ids = Tensor::from_vec(hid, (len, dh), &cpu)?.to_device(&lv.dev)?;
+        // …and the visible mask FROM that block, on the device. The `[N, D]`
+        // host buffer this used to fill and upload every step said nothing the
+        // `[N, d_h]` ids do not already say.
+        let visible_nd = visible_from_hidden(&hidden_ids, d)?;
         let hidden_weight = if ragged {
             Some(Tensor::from_vec(w, (len, dh), &cpu)?.to_device(&lv.dev)?)
         } else {

@@ -404,7 +404,6 @@ fn the_gaussian_head_is_deterministic_and_carries_no_kl() {
             n_topics: 4,
             embedding_dim: 6,
             layers: &[5],
-            use_gcn: false,
             attn_pool: true,
             n_gene_modules: 0,
         },

@@ -3,6 +3,7 @@ use crate::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
+use candle_util::decoder::coarsening_map::CoarseningMap;
 use candle_util::decoder::masked_etm::ModuleTarget;
 use candle_util::decoder::EmbeddedNbTopicDecoder;
 use candle_util::fast_index::scatter_add_cols;
@@ -467,6 +468,57 @@ where
     out
 }
 
+/// The windowed arm's module view of a block, through the SAME aggregation the
+/// dense arm takes ([`dense_module_targets`]).
+///
+/// The two arms differ in what the ENCODER was allowed to read, not in how the
+/// decoder's targets are formed, and rebuilding the four tensors by hand for
+/// one of them is how the two drift apart. So the block is densified once and
+/// the pack's visible slots are put back on the gene axis: a cell's top-K ids
+/// are distinct, so that scatter places rather than accumulates, and a pad
+/// (id 0, value 0) carries a zero and adds nothing.
+///
+/// Whole-column counts and the library size come from the densified block, not
+/// from the window — the same as before, since the hand build walked every
+/// stored nonzero, window or not.
+fn windowed_module_targets(
+    modules: &CoarseningMap,
+    x_dn: &nalgebra_sparse::CscMatrix<f32>,
+    pack_indices: &Tensor,
+    visible_nk: &Tensor,
+    n_train_features: usize,
+    dev: &Device,
+) -> anyhow::Result<DenseModuleTargets> {
+    let x_nd = csc_block_to_dense(x_dn, n_train_features, None, dev)?;
+    let visible_nd = scatter_add_cols(pack_indices, visible_nk, n_train_features)?;
+    Ok(dense_module_targets(modules, &x_nd, &visible_nd)?)
+}
+
+/// The seeded hold-out draw both evaluation arms take: `1` on a held-out slot,
+/// `0` everywhere else.
+///
+/// Only a position that carries a count is a candidate — holding out a zero
+/// would move the metric without adding information, since the score asks
+/// whether the model can put back what was taken away and a zero that stays
+/// zero is not an imputation. A zero therefore consumes NO draw, which is the
+/// detail that makes the two arms' streams the same stream.
+///
+/// `seed` is the already-combined key (`config.seed ^ lb`): the combination is
+/// the caller's, so that old evaluation numbers keep their positions.
+fn seeded_holdout_mask(values: &[f32], seed: u64, rate: f64) -> Vec<f32> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    values
+        .iter()
+        .map(|&v| {
+            if v > 0.0 && rng.random::<f64>() < rate {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 /// Config for [`evaluate_holdout_imputation`].
 pub(crate) struct HoldoutEvalConfig<'a> {
     pub dev: &'a Device,
@@ -522,7 +574,6 @@ pub(crate) fn evaluate_holdout_imputation(
             .transpose()?;
         let n = ub - lb;
         let map = decoder.coarsening();
-        let n_obs = decoder.dim_obs();
 
         // `(raw latent, module targets)`. The two reads differ only in which
         // genes the encoder was allowed to look at; the scored set is the
@@ -536,13 +587,9 @@ pub(crate) fn evaluate_holdout_imputation(
                 // imputation.
                 let x_nd = csc_block_to_dense(&x_dn, d_train, None, config.dev)?;
                 let observed: Vec<f32> = x_nd.flatten_all()?.to_vec1()?;
-                let mut rng = StdRng::seed_from_u64(config.seed ^ (lb as u64));
-                let mut vis = vec![1f32; n * d_train];
-                for (slot, &v) in observed.iter().enumerate() {
-                    if v > 0.0 && rng.random::<f64>() < config.mask_fraction {
-                        vis[slot] = 0.0;
-                    }
-                }
+                let held =
+                    seeded_holdout_mask(&observed, config.seed ^ (lb as u64), config.mask_fraction);
+                let vis: Vec<f32> = held.iter().map(|m| 1.0 - m).collect();
                 let visible_nd = Tensor::from_vec(vis, (n, d_train), config.dev)?;
                 let raw_z = masked_encode_dense(
                     encoder,
@@ -584,13 +631,11 @@ pub(crate) fn evaluate_holdout_imputation(
                 // set is deterministic and identical across heads.
                 let (n_rows, k) = enc_pack.values.dims2()?;
                 let values_host: Vec<f32> = enc_pack.values.flatten_all()?.to_vec1()?;
-                let mut rng = StdRng::seed_from_u64(config.seed ^ (lb as u64));
-                let mut mask_buf = vec![0f32; n_rows * k];
-                for (slot, &v) in values_host.iter().enumerate() {
-                    if v > 0.0 && rng.random::<f64>() < config.mask_fraction {
-                        mask_buf[slot] = 1.0;
-                    }
-                }
+                let mask_buf = seeded_holdout_mask(
+                    &values_host,
+                    config.seed ^ (lb as u64),
+                    config.mask_fraction,
+                );
                 let masked = Tensor::from_vec(mask_buf, (n_rows, k), config.dev)?;
                 let real = enc_pack.values.gt(0.0)?.to_dtype(candle_core::DType::F32)?;
                 let visible = (&real - &masked)?;
@@ -606,29 +651,17 @@ pub(crate) fn evaluate_holdout_imputation(
                     },
                     false,
                 )?;
-                // The module view of the block, straight from the sparse columns.
-                let f2c = map.host_fine_to_coarse();
-                let mut dense = vec![0f32; n * n_obs];
-                let mut lib = vec![1f32; n];
-                for (j, col) in (lb..ub).enumerate() {
-                    let c = x_dn.col(col - lb);
-                    for (&r, &v) in c.row_indices().iter().zip(c.values().iter()) {
-                        dense[j * n_obs + f2c[r]] += v;
-                        lib[j] += v;
-                    }
-                }
-                let m_ctx = map.groups_of(&enc_pack.indices)?;
-                let share_ctx = map.log_share_at(&enc_pack.indices)?.exp()?;
-                let t = DenseModuleTargets {
-                    values_nm: Tensor::from_vec(dense, (n, n_obs), config.dev)?,
-                    visible_counts_nm: scatter_add_cols(
-                        &m_ctx,
-                        &(&enc_pack.values * &visible)?,
-                        n_obs,
-                    )?,
-                    visible_share_nm: scatter_add_cols(&m_ctx, &(share_ctx * &visible)?, n_obs)?,
-                    lib_n1: Tensor::from_vec(lib, (n, 1), config.dev)?,
-                };
+                // The module view of the block, through the aggregation the
+                // dense arm uses — one path, so the two arms report on one
+                // scale and cannot drift apart.
+                let t = windowed_module_targets(
+                    map,
+                    &x_dn,
+                    &enc_pack.indices,
+                    &visible,
+                    d_train,
+                    config.dev,
+                )?;
                 (raw_z, t)
             }
         };

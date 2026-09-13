@@ -37,8 +37,7 @@ pub fn attention_scores_dense(
     let scores = gate_nd.broadcast_mul(&rq_1d)?.affine(scale, 0.0)?;
     // The same additive mask the indexed path uses, so a hidden gene leaves the
     // softmax with exactly the weight it would have had as a masked slot.
-    let neg_inf = visible_nd.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?;
-    scores + neg_inf
+    super::scatter_pool::masked_scores(&scores, visible_nd)
 }
 
 /// `pool_nh = (attn · gate) ρ`, through the feature side.

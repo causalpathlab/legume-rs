@@ -977,13 +977,10 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let gene_names = data_vec.row_names()?;
 
     // `--feature-network` on the masked path is used for feature *restriction*
-    // only (applied above when building `feature_network`). GCN graph diffusion
-    // is NOT supported by the masked encoder: `forward_indexed_masked` pools the
-    // visible top-K by single-query attention and takes no sparse edges, so a
-    // GcnBlock here would never enter the forward graph (dead weights, no
-    // effect). Diffusion would have to be plumbed through the encoder-only eval
-    // path too (which reads CSC directly, with no edge cache) to keep the latent
-    // train/eval-consistent — out of scope for v1.
+    // only (applied above when building `feature_network`). Graph diffusion is
+    // NOT supported by the masked encoder: the encoder takes no edges at all
+    // any more, and the encoder-only eval path reads CSC directly with no edge
+    // cache, so there is nothing for a network to diffuse over here.
     if args.feature_network.is_some() && args.no_feature_network_restrict {
         warn!(
             "--feature-network with --no-feature-network-restrict has no effect on \
@@ -998,7 +995,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            use_gcn: false,
             attn_pool: true,
             n_gene_modules: args.gene_modules,
         },
@@ -1312,7 +1308,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             n_topics,
             embedding_dim: h,
             layers: &args.encoder_layers,
-            use_gcn: false,
             attn_pool: true,
             n_gene_modules: args.gene_modules,
         },
@@ -1625,17 +1620,40 @@ impl MaskedTopicArgs {
     /// Refuse the combinations the window-free encoder cannot express, before
     /// anything is read.
     ///
-    /// The module branch pooled a cell by membership over its context SLOTS,
-    /// and there is no context any more: the encoder reads every gene.
+    /// The reason modules cannot compose is the encoder's to give, and it gives
+    /// it in full at
+    /// [`candle_util::encoder::IndexedEmbeddingEncoder::forward_dense_masked`].
+    /// What belongs here is only the early refusal, so a run that cannot work
+    /// stops before it reads a single file.
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.gene_modules == 0,
-            "--gene-modules {} does not compose with the window-free encoder: modules pool a \
-             cell by membership over its context slots, and there is no context any more — the \
-             encoder reads every gene. Modules are off by default and are being retired; pass \
-             --gene-modules 0.",
+            "--gene-modules {} is refused by the window-free encoder, which has no context \
+             slots to pool a membership over (its own error says why): pass --gene-modules 0.",
             self.gene_modules
         );
+        // The rate is the model, not a knob with a safe default: 0 hides
+        // nothing and 1 hides everything, and either leaves one side of the
+        // masked objective with no work. The loader used to clamp both back to
+        // a one-gene draw, answering a question nobody asked. `senna
+        // gem-encoder` refuses the same flag by name; this is the open interval
+        // the draw actually needs.
+        let rate_in_unit_interval = |flag: &str, x: f64| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                x > 0.0 && x < 1.0,
+                "{flag} must be in the open interval (0, 1), got {x}: a rate of 0 hides \
+                 nothing for the decoder to impute and a rate of 1 leaves the encoder \
+                 nothing to read."
+            );
+            Ok(())
+        };
+        rate_in_unit_interval("--mask-fraction", self.mask_fraction)?;
+        // Under the uniform schedule it is these bounds, not --mask-fraction,
+        // that become the per-row rate.
+        if matches!(self.mask_schedule, MaskScheduleArg::Uniform) {
+            rate_in_unit_interval("--mask-rate-lo", self.mask_rate_lo)?;
+            rate_in_unit_interval("--mask-rate-hi", self.mask_rate_hi)?;
+        }
         Ok(())
     }
 }

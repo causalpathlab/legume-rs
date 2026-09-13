@@ -1,7 +1,8 @@
 //! Splice-aware indexed loader for `senna gem-encoder`.
 //!
-//! The single-track [`super::IndexedInMemoryData`] selects a per-cell top-K over
-//! the **row** axis. That is wrong here: gem-format inputs carry two rows per
+//! A single-track loader selects a per-cell top-K over the **row** axis
+//! ([`super::top_k::csc_columns_to_indexed_samples`]). That is wrong here:
+//! gem-format inputs carry two rows per
 //! gene (`{gene}/count/spliced` and `{gene}/count/unspliced`), and the model is
 //! gene-keyed — a gene's nascent and mature tracks must be selected *together*
 //! or the pairing the encoder and decoder depend on is broken.

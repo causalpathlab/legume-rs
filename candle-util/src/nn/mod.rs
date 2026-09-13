@@ -13,7 +13,7 @@ pub mod linear;
 pub mod soft_clamp;
 
 pub use batch_norm::{batch_norm, BatchNorm, BatchNormConfig};
-pub use gcn::GcnBlock;
+pub use gcn::{GcnBlock, SparseEdgeBatch};
 pub use layers::{iaf_stack_linear, sparsemax, stack_relu_linear, IAFLayers, StackLayers};
 pub use linear::{
     aggregate_linear, aggregate_linear_hard, log_softmax_linear, log_softmax_linear_nobias,
