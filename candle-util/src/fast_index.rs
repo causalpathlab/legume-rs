@@ -12,6 +12,8 @@
 //! [`index_add_rows`], whose CUDA kernel runs one thread per `(id, column)`
 //! element with an atomic add, and whose own backward is a forward gather.
 //! On the CPU both are plain loops; the results are identical to candle's ops.
+//! Metal has no kernel here, so on that device both fall back to candle's own
+//! `index_select` / `index_add`, which its backend does implement.
 
 use candle_core::backend::BackendStorage;
 use candle_core::{CpuStorage, CustomOp2, CustomOp3, Layout, Result, Shape, Tensor};
@@ -19,6 +21,9 @@ use candle_core::{CpuStorage, CustomOp2, CustomOp3, Layout, Result, Shape, Tenso
 /// `table[ids]` → `[n, H]` for a `[D, H]` table and `[n]` u32 ids, with a
 /// row-parallel backward. A `[D]` table (a per-row bias) gathers to `[n]`.
 pub fn gather_rows(table: &Tensor, ids: &Tensor) -> Result<Tensor> {
+    if table.device().is_metal() {
+        return table.index_select(ids, 0);
+    }
     if table.rank() == 1 {
         return table.unsqueeze(1)?.apply_op2(ids, GatherRows)?.squeeze(1);
     }
@@ -30,6 +35,9 @@ pub fn gather_rows(table: &Tensor, ids: &Tensor) -> Result<Tensor> {
 /// backward can arrive as a transposed view, and `contiguous` is a no-op on
 /// a tensor that already is.
 pub fn index_add_rows(dst: &Tensor, ids: &Tensor, src: &Tensor) -> Result<Tensor> {
+    if dst.device().is_metal() {
+        return dst.index_add(ids, src, 0);
+    }
     dst.contiguous()?
         .apply_op3(&ids.contiguous()?, &src.contiguous()?, IndexAddRows)
 }

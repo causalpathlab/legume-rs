@@ -226,7 +226,7 @@ pub fn sparsemax(z: &Tensor) -> Result<Tensor> {
     let cumsum = z_sorted.cumsum(dim)?;
 
     // Compute 1 + i * z_sorted[i] for i = 1..k
-    let range = Tensor::arange(1.0, (k + 1) as f64, device)?.to_dtype(dtype)?;
+    let range = Tensor::arange(1f32, (k + 1) as f32, device)?.to_dtype(dtype)?;
     // Broadcast range to match z shape
     let shape: Vec<usize> = (0..z.rank())
         .map(|i| if i == dim { k } else { 1 })
