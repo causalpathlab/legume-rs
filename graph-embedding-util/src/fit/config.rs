@@ -294,6 +294,9 @@ pub struct FitOutput {
     /// each with its pseudobulks' batches — the geometry the feature side was
     /// trained against, for batch diagnostics.
     pub pb_embeddings: Vec<super::pb_readout::PbLevelEmbedding>,
+    /// The distilled encoder phase 2 placed the cells with, on the plain path;
+    /// `None` on the splice path, where the block SGD did.
+    pub cell_encoder: Option<super::projection::CellEncoder>,
     /// Per-batch gene fold `log δ_gb` phase 2 divided each batch's cell counts by;
     /// `None` on single-batch data.
     pub batch_gene_fold: Option<super::batch_fold::BatchGeneFold>,

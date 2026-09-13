@@ -22,7 +22,7 @@ pub use lift::{CellLineage, LineageQc};
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
-pub use projection::PbLevelVelocity;
+pub use projection::{CellEncoder, PbLevelVelocity};
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
 use crate::data::UnifiedData;
@@ -35,7 +35,10 @@ use nalgebra::DMatrix;
 
 use config::{stage_params, LINEAGE_WARMUP_FRAC};
 use matrix_util::traits::ConvertMatOps;
-use projection::{project_cells_phase2, project_pbs_phase2, CellBatchFold, PHASE2_RIDGE};
+use projection::{
+    project_cells_phase2, project_pbs_phase2, CellBatchFold, DistillLevel, DistillSpec,
+    PHASE2_RIDGE,
+};
 pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
@@ -408,6 +411,26 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             .feat_factor
             .as_ref()
             .map(|s| s.unspliced_rows.as_slice());
+        // Plain path: the phase-1 pseudobulk tables are the distillation
+        // targets of the encoder that replaces the per-cell solve.
+        anyhow::ensure!(
+            pb_embeddings.len() == cell_to_pb_per_level.len(),
+            "phase 2: {} pseudobulk tables for {} membership levels",
+            pb_embeddings.len(),
+            cell_to_pb_per_level.len()
+        );
+        let distill_levels: Vec<DistillLevel> = pb_embeddings
+            .iter()
+            .zip(&cell_to_pb_per_level)
+            .map(|(pb, c2pb)| DistillLevel {
+                e_pb: &pb.e_pb,
+                cell_to_pb: c2pb,
+            })
+            .collect();
+        let spec = DistillSpec {
+            levels: &distill_levels,
+            seed: config.seed,
+        };
         project_cells_phase2(
             &mut cell_model,
             &varmap,
@@ -418,6 +441,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             batch_fold,
             unspliced,
             config.joint_velocity,
+            Some(&spec),
         )?
     };
 
@@ -498,6 +522,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_lineage,
         lineage_qc,
         pb_embeddings,
+        cell_encoder: phase2.cell_encoder,
     })
 }
 
