@@ -507,6 +507,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         module_dictionary_suffix: None,
         softmax_dictionary_suffix: Some("dictionary.parquet"),
         cell_embedding_suffix: None,
+        cell_encoder_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
         velocity_suffix: None,

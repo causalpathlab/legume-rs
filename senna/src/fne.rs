@@ -240,6 +240,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         module_dictionary_suffix: None,
         softmax_dictionary_suffix: None,
         cell_embedding_suffix: None,
+        cell_encoder_suffix: None,
         default_colour_by: "cluster",
         has_latent: false,
         velocity_suffix: None,

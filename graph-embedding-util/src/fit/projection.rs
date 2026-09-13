@@ -10,9 +10,12 @@ use candle_util::candle_core::Device;
 
 mod block_sgd;
 mod cells;
+mod encoder;
 mod pseudobulk;
 
 pub(crate) use cells::project_cells_phase2;
+pub use encoder::CellEncoder;
+pub(crate) use encoder::{DistillLevel, DistillSpec};
 pub(crate) use pseudobulk::project_pbs_phase2;
 pub use pseudobulk::PbLevelVelocity;
 

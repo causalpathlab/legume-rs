@@ -1,7 +1,6 @@
-use crate::encoder::{dense_pool, scatter_pool};
+use crate::encoder::pooled::{PooledGeneEncoder, PooledGeneEncoderArgs};
+use crate::encoder::scatter_pool;
 use crate::loss::{gaussian_kl_loss, gaussian_reparameterize};
-use crate::nn::batch_norm;
-use crate::nn::layers::*;
 use crate::traits::indexed::*;
 use crate::value_transform::anscombe_lite;
 use candle_core::{Result, Tensor};
@@ -19,20 +18,13 @@ pub struct IndexedEmbeddingEncoder {
     n_features: usize,
     n_topics: usize,
     embedding_dim: usize,
-    /// The feature side. With modules it is a sparse mixture of shared
-    /// vectors and no `[D, H]` table exists; without them it is that table.
-    features: std::sync::Arc<crate::feature_embedding::FeatureEmbedding>,
-    fc: StackLayers<Linear>,
-    bn_z: batch_norm::BatchNorm,
-    z_mean: Linear,
+    /// The shared trunk: the attention query (only with `attn_pool`, so
+    /// sum-pool users neither allocate nor persist `attn.query` and old
+    /// safetensors still load), the FC stack, the batch-norm and the `z_mean`
+    /// head. The dense masked read is its [`PooledGeneEncoder::pool`]; the
+    /// indexed reads pool here and hand the trunk their `[N, H]`.
+    pooled: PooledGeneEncoder,
     z_lnvar: Linear,
-    /// Learned attention query `q [1, H]` for the masked-path attention pool
-    /// (PMA-style single-head). Only used by [`Self::forward_indexed_masked`];
-    /// the legacy sum-pool path ([`Self::preprocess_indexed`]) ignores it.
-    /// `None` unless `attn_pool` was set at construction — so sum-pool users
-    /// (dense/legacy/pinto) neither allocate nor persist this var, and old
-    /// safetensors (lacking `attn.query`) still load.
-    attn_query: Option<Tensor>,
 }
 
 /// Floor on per-module coverage when it is used as a divisor.
@@ -63,16 +55,8 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
 
 impl IndexedEmbeddingEncoder {
     pub fn new(args: IndexedEmbeddingEncoderArgs, varmap: &VarMap, vb: VarBuilder) -> Result<Self> {
-        let bn_config = batch_norm::BatchNormConfig {
-            eps: 1e-4,
-            remove_mean: true,
-            affine: true,
-            momentum: 0.1,
-        };
-
         debug_assert!(!args.layers.is_empty());
 
-        let init_ws = candle_nn::init::DEFAULT_KAIMING_NORMAL;
         let features = std::sync::Arc::new(crate::feature_embedding::FeatureEmbedding::new(
             args.n_features,
             args.n_gene_modules,
@@ -80,46 +64,42 @@ impl IndexedEmbeddingEncoder {
             vb.clone(),
         )?);
 
-        // FC stack: (embedding_dim + 2M) -> ... -> final_hidden. The module branch
-        // appends `log u` and `log1p(cov)`, hence 2M; at M = 0 this is `embedding_dim`
-        // and the layer shapes are unchanged.
-        let fc_dims = args.layers[..args.layers.len() - 1].to_vec();
-        let in_dim = args.embedding_dim + 2 * args.n_gene_modules;
+        // The trunk: FC stack (embedding_dim + 2M) -> ... -> final_hidden, BN,
+        // and the `z_mean` head. The module branch appends `log u` and
+        // `log1p(cov)` to the pool, hence 2M; at M = 0 the layer shapes are
+        // unchanged. Registered under this same `vb`, so the var names are what
+        // they have always been.
+        let pooled = PooledGeneEncoder::new(
+            std::sync::Arc::clone(&features),
+            PooledGeneEncoderArgs {
+                layers: args.layers,
+                out_dim: args.n_topics,
+                attn_pool: args.attn_pool,
+                in_dim_extra: 2 * args.n_gene_modules,
+            },
+            varmap,
+            vb.clone(),
+        )?;
         let out_dim = *args.layers.last().unwrap();
-        let fc = stack_relu_linear(in_dim, out_dim, &fc_dims, vb.pp("nn.enc.fc"))?;
-
-        let bn_z = batch_norm::batch_norm(out_dim, bn_config, varmap, vb.pp("nn.enc.bn_z"))?;
-
-        let z_mean = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.mean"))?;
         let z_lnvar = candle_nn::linear(out_dim, args.n_topics, vb.pp("nn.enc.z.lnvar"))?;
-
-        let attn_query = if args.attn_pool {
-            Some(vb.get_with_hints((1, args.embedding_dim), "attn.query", init_ws)?)
-        } else {
-            None
-        };
 
         Ok(Self {
             n_features: args.n_features,
             n_topics: args.n_topics,
             embedding_dim: args.embedding_dim,
-            features,
-            fc,
-            bn_z,
-            z_mean,
+            pooled,
             z_lnvar,
-            attn_query,
         })
     }
 
     /// Number of learned gene modules `M` (`0` when the branch is disabled).
     pub fn n_gene_modules(&self) -> usize {
-        self.features.n_modules()
+        self.features().n_modules()
     }
 
     /// The module dictionary `[M, H]`, or `None` without modules.
     pub fn module_dictionary(&self) -> Option<&Tensor> {
-        self.features.dictionary()
+        self.features().dictionary()
     }
 
     /// Every feature's module membership `[D, M]`, or `None` when the encoder
@@ -128,7 +108,7 @@ impl IndexedEmbeddingEncoder {
     /// Membership is a parameter, so this is a read rather than a derivation:
     /// what a caller exports is what the model trains with.
     pub fn feature_module_membership(&self) -> Result<Option<Tensor>> {
-        self.features.membership()
+        self.features().membership()
     }
 
     pub fn n_features(&self) -> usize {
@@ -145,7 +125,7 @@ impl IndexedEmbeddingEncoder {
 
     /// The feature side, for a caller that needs to compose rows itself.
     pub fn features(&self) -> &crate::feature_embedding::FeatureEmbedding {
-        &self.features
+        self.pooled.features()
     }
 
     /// A shared handle on the feature side.
@@ -156,7 +136,7 @@ impl IndexedEmbeddingEncoder {
     /// them keep moving.
     #[must_use]
     pub fn features_shared(&self) -> std::sync::Arc<crate::feature_embedding::FeatureEmbedding> {
-        std::sync::Arc::clone(&self.features)
+        self.pooled.features_shared()
     }
 
     /// The composed `[D, H]` table.
@@ -165,7 +145,7 @@ impl IndexedEmbeddingEncoder {
     /// this belongs to export and to callers that genuinely need every row at
     /// once, not to a per-step path.
     pub fn feature_embeddings(&self) -> Result<Tensor> {
-        self.features.full()
+        self.features().full()
     }
 
     /// Pool packed top-K input into `[N, H]`.
@@ -197,7 +177,7 @@ impl IndexedEmbeddingEncoder {
         let h = self.embedding_dim;
 
         let flat_idx = indices.flatten_all()?; // [N*K]
-        let e_nk_h = self.features.gather(&flat_idx)?.reshape((n, k, h))?; // [N, K, H]
+        let e_nk_h = self.features().gather(&flat_idx)?.reshape((n, k, h))?; // [N, K, H]
 
         // Per-slot Anscombe scalar gate on ρ — broadcast across H.
         // `anscombe_lite` divides by (batch null × per-gene mean) then
@@ -244,12 +224,12 @@ impl IndexedEmbeddingEncoder {
         let a_nk = anscombe_lite(values, values_null, values_mean)?; // [N, K]
 
         let attn_query = self
-            .attn_query
-            .as_ref()
+            .pooled
+            .attn_query()
             .expect("forward_indexed_masked requires an attn_pool encoder");
         // ρq over every feature, once per minibatch. The query is a parameter,
         // so this moves at every step: it is recomputed, never cached.
-        let rq_d = scatter_pool::query_over_features(&self.features, attn_query)?; // [D]
+        let rq_d = scatter_pool::query_over_features(self.features(), attn_query)?; // [D]
         let scores_nk = scatter_pool::attention_scores_from_vector(
             &a_nk,
             indices,
@@ -259,7 +239,7 @@ impl IndexedEmbeddingEncoder {
         )?;
         // The softmax weights sum to 1, so the pooled vector is depth-normalized.
         let attn_nk = ops::softmax(&scores_nk, 1)?; // [N, K]
-        let pooled_nh = scatter_pool::pool_by_scatter(&attn_nk, &a_nk, indices, &self.features)?; // [N, H]
+        let pooled_nh = scatter_pool::pool_by_scatter(&attn_nk, &a_nk, indices, self.features())?; // [N, H]
 
         // A row with no visible slot (empty cell, or all real genes masked at
         // high mask_fraction) has an all-−∞ score row, so softmax degenerates to
@@ -273,7 +253,7 @@ impl IndexedEmbeddingEncoder {
         let pooled_nh = pooled_nh.broadcast_mul(&has_visible_n1)?; // [N, H]
 
         // Module branch. Disabled ⇒ return exactly what this function always returned.
-        let Some(mem) = self.features.gather_membership(&indices.flatten_all()?)? else {
+        let Some(mem) = self.features().gather_membership(&indices.flatten_all()?)? else {
             return Ok(pooled_nh);
         };
         let (u_nm, cov_nm) = self.module_pool(&mem, &a_nk, visible_mask)?;
@@ -353,7 +333,7 @@ impl IndexedEmbeddingEncoder {
         values_mean: Option<&Tensor>,
         visible_mask: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        let Some(mem) = self.features.gather_membership(&indices.flatten_all()?)? else {
+        let Some(mem) = self.features().gather_membership(&indices.flatten_all()?)? else {
             return Ok(None);
         };
         let a_nk = anscombe_lite(values, values_null, values_mean)?;
@@ -382,50 +362,27 @@ impl IndexedEmbeddingEncoder {
         // context there are no slots to pool over, and composing a `[D, M]`
         // membership per row is a different operator, not the same one at
         // another width. Refuse rather than invent one.
-        if self.features.n_modules() > 0 {
+        if self.features().n_modules() > 0 {
             candle_core::bail!(
                 "the window-free (dense) masked encoder has no gene-module branch: modules pool \
                  a cell by membership over its context slots, and without a context window there \
                  are no slots. Train with --gene-modules 0."
             );
         }
-        let h = self.embedding_dim;
-        let a_nd = crate::value_transform::anscombe_residual(x_nd, x0_nd, mean_1d)?; // [N, D]
-
-        let attn_query = self
-            .attn_query
-            .as_ref()
-            .expect("forward_dense_masked requires an attn_pool encoder");
-        // ρq over every feature, once per minibatch; the query is a parameter,
-        // so this is recomputed, never cached.
-        let rq_d = scatter_pool::query_over_features(&self.features, attn_query)?; // [D]
-        let scores_nd =
-            dense_pool::attention_scores_dense(&a_nd, &rq_d, visible_nd, 1.0 / (h as f64).sqrt())?;
-        // The softmax weights sum to 1, so the pooled vector is depth-normalized.
-        let attn_nd = ops::softmax(&scores_nd, 1)?; // [N, D]
-        let pooled_nh = dense_pool::pool_dense(&attn_nd, &a_nd, &self.features)?; // [N, H]
-
-        // A row with nothing visible has an all-−∞ score row, so softmax
-        // degenerates to a uniform average over genes it was told not to look
-        // at. Zero it, exactly as the indexed path does.
-        let has_visible_n1 = visible_nd
-            .sum_keepdim(1)?
-            .gt(0.0)?
-            .to_dtype(pooled_nh.dtype())?; // [N, 1]
-        pooled_nh.broadcast_mul(&has_visible_n1)
+        self.pooled.pool(x_nd, x0_nd, mean_1d, Some(visible_nd))
     }
 
-    /// `pool → FC → BN → bn_nl [N, L]`: the trunk both masked reads share.
-    fn trunk_from_pool(&self, pooled: &Tensor, train: bool) -> Result<Tensor> {
-        let fc_nl = self.fc.forward_t(pooled, train)?;
-        self.bn_z.forward_t(&fc_nl, train)
+    /// The `z_mean` head under the masked clamp — the contract of every simplex
+    /// head, in one place.
+    fn clamped_head(&self, bn_nl: &Tensor, train: bool) -> Result<Tensor> {
+        soft_clamp(&self.pooled.head(bn_nl, train)?, MASKED_LOGIT_CLAMP)
     }
 
     /// Clamped per-topic logits from a pooled `[N, H]` — the pre-activation
     /// every simplex head maps to `log θ`.
     fn logits_from_pool(&self, pooled: &Tensor, train: bool) -> Result<Tensor> {
-        let bn_nl = self.trunk_from_pool(pooled, train)?;
-        soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)
+        let bn_nl = self.pooled.trunk(pooled, train)?;
+        self.clamped_head(&bn_nl, train)
     }
 
     /// Shared masked-encoder trunk: visible-pool → FC → BN → `bn_nl [N, L]`.
@@ -448,7 +405,7 @@ impl IndexedEmbeddingEncoder {
             values_mean,
             visible_mask,
         )?;
-        self.trunk_from_pool(&h_nh, train)
+        self.pooled.trunk(&h_nh, train)
     }
 
     /// Clamped per-topic logits `z_mean [N, K]` from the masked trunk — the
@@ -470,7 +427,7 @@ impl IndexedEmbeddingEncoder {
             visible_mask,
             train,
         )?;
-        soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)
+        self.clamped_head(&bn_nl, train)
     }
 
     /// Deterministic masked-encoder forward → `log θ [N, K_topics]`.
@@ -613,10 +570,9 @@ impl IndexedEmbeddingEncoder {
         train: bool,
     ) -> Result<(Tensor, Tensor)> {
         let h_nh = self.preprocess_indexed(indices, values, values_null, values_mean)?;
-        let fc_nl = self.fc.forward_t(&h_nh, train)?;
-        let bn_nl = self.bn_z.forward_t(&fc_nl, train)?;
+        let bn_nl = self.pooled.trunk(&h_nh, train)?;
 
-        let z_mean_nk = soft_clamp(&self.z_mean.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
+        let z_mean_nk = self.clamped_head(&bn_nl, train)?;
         let z_lnvar_nk = soft_clamp(&self.z_lnvar.forward_t(&bn_nl, train)?, MASKED_LOGIT_CLAMP)?;
 
         Ok((z_mean_nk, z_lnvar_nk))

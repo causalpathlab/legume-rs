@@ -484,6 +484,18 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     let has_modules = out.model.modules.is_some();
+    // The map phase 2 placed the cells with, so `predict` places a query by the
+    // same one. One self-contained file: the trunk plus its per-gene mean.
+    let cell_encoder_suffix = match out.cell_encoder.as_ref() {
+        Some(enc) => {
+            let suffix = "cell_encoder.safetensors";
+            let path = format!("{}.{suffix}", args.out);
+            enc.save(&path)?;
+            info!("Wrote the cell encoder to {path}");
+            Some(suffix)
+        }
+        None => None,
+    };
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         train_args: Some(crate::run_manifest::record_train_args(args)?),
         kind: crate::run_manifest::RunKind::Bge,
@@ -525,6 +537,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         // --skip-etm paths — so every geometry consumer finds the H-space
         // embedding at one fixed name.
         cell_embedding_suffix: Some("cell_embedding.parquet"),
+        cell_encoder_suffix,
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         // `latent` is log θ, so it exists only when the ETM actually resolved.
         has_latent: resolve_etm,

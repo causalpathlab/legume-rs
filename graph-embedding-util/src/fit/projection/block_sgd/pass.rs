@@ -231,9 +231,9 @@ pub(super) struct PassSpec<'a> {
 }
 
 /// One pass's per-cell result, indexed by position in `cells` (not by global id).
-pub(super) struct PassOut {
-    pub(super) latent: Vec<f32>,
-    pub(super) intercept: Vec<f32>,
+pub(crate) struct PassOut {
+    pub(crate) latent: Vec<f32>,
+    pub(crate) intercept: Vec<f32>,
 }
 
 pub(super) fn run_pass(

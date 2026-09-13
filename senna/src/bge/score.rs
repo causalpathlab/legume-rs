@@ -27,7 +27,9 @@ use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_util::candle_core::Device;
 use data_beans::sparse_io_vector::SparseIoVec;
-use graph_embedding_util::fit::{FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD};
+use graph_embedding_util::fit::{
+    CellEncoder, FrozenProjection, FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD,
+};
 use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
 use log::info;
 use matrix_util::traits::IoOps;
@@ -55,6 +57,9 @@ pub struct BgeEmbedding {
     /// dropped. `None` for a plain run, where an unseen gene falls back to its
     /// neighbours' row average.
     pub modules: Option<(DMatrix<f32>, DMatrix<f32>)>,
+    /// Path of the run's cell encoder, when phase 2 placed the cells through one;
+    /// `predict` then places a query by the same map instead of the block SGD.
+    pub cell_encoder: Option<String>,
 }
 
 /// How `predict` treats the new data's genes the model never saw.
@@ -194,12 +199,21 @@ impl BgeEmbedding {
             _ => None,
         };
 
+        let cell_encoder = manifest.outputs.cell_encoder.as_deref().map(|rel| {
+            let path = run_manifest::resolve(&dir, rel)
+                .to_string_lossy()
+                .to_string();
+            info!("bge model carries a cell encoder ({path}); queries are placed through it");
+            path
+        });
+
         Ok(Self {
             rho: rho_rm,
             b_feat,
             gene_names: rho.rows,
             h,
             modules,
+            cell_encoder,
         })
     }
 
@@ -300,19 +314,34 @@ impl BgeEmbedding {
         // The whole per-dictionary setup — the transposed design, the live-feature scan,
         // the null normalizer, the learning rate — happens once, here, instead of on
         // every projection call.
-        let projector = FrozenProjector::new(&FrozenProjectionArgs {
-            feat: &self.rho,
-            b_feat: &self.b_feat,
-            h: self.h,
-            lambda: f64::from(PROJECTION_RIDGE_SGD),
-            dev,
-        })?;
+        // The run's own estimator when it has one: the distilled encoder places
+        // the query exactly as it placed the run's cells. The SGD design is
+        // built only when it will be used.
+        let cell_encoder = self
+            .cell_encoder
+            .as_deref()
+            .map(|path| CellEncoder::load(&self.rho, &self.b_feat, self.h, path, dev))
+            .transpose()?;
+        let projector = match cell_encoder {
+            Some(_) => None,
+            None => Some(FrozenProjector::new(&FrozenProjectionArgs {
+                feat: &self.rho,
+                b_feat: &self.b_feat,
+                h: self.h,
+                lambda: f64::from(PROJECTION_RIDGE_SGD),
+                dev,
+            })?),
+        };
 
         // Pass 1: every cell on the matched genes.
         let mut pass = project_all(ProjectAll {
             data_vec: &data_vec,
             remap: &remap.new_to_train,
-            projector: &projector,
+            projector: match (cell_encoder.as_ref(), projector.as_ref()) {
+                (Some(enc), _) => QueryProjector::Encoder(enc),
+                (None, Some(p)) => QueryProjector::Sgd(p),
+                (None, None) => unreachable!("one placer is always built"),
+            },
             side: &side,
             n_model,
             block,
@@ -426,10 +455,12 @@ impl BgeEmbedding {
                     "pass 2: re-projecting every cell with the {} initialized genes observed",
                     unseen.len()
                 );
+                // The union axis is not the trained dictionary, so the
+                // encoder does not apply here; the SGD does.
                 pass = project_all(ProjectAll {
                     data_vec: &data_vec,
                     remap: &remap2,
-                    projector: &projector2,
+                    projector: QueryProjector::Sgd(&projector2),
                     side: &side,
                     n_model,
                     block,
@@ -467,13 +498,52 @@ impl BgeEmbedding {
     }
 }
 
+/// What places a group of query cells on the dictionary: the run's distilled
+/// encoder when it has one, the block SGD otherwise (and always on a union
+/// axis the encoder was not trained on).
+enum QueryProjector<'a> {
+    Sgd(&'a FrozenProjector<'a>),
+    Encoder(&'a CellEncoder),
+}
+
+impl QueryProjector<'_> {
+    fn group_nodes(&self) -> usize {
+        match self {
+            Self::Sgd(p) => p.group_nodes(),
+            Self::Encoder(e) => e.group_nodes(),
+        }
+    }
+
+    /// Place one group of query cells, advancing `bar` by one tick per cell.
+    fn place(
+        &self,
+        group: &EdgeGroup,
+        bar: &indicatif::ProgressBar,
+    ) -> anyhow::Result<FrozenProjection> {
+        let nodes: Vec<(u32, &[u32], &[f32])> = (0..group.len())
+            .map(|j| {
+                let (feat, count) = group.cell(j);
+                (j as u32, feat, count)
+            })
+            .collect();
+        match self {
+            Self::Sgd(p) => p.project(&nodes, group.len(), bar),
+            Self::Encoder(e) => {
+                let out = e.encode_edges(&nodes)?;
+                bar.inc(group.len() as u64);
+                Ok(out)
+            }
+        }
+    }
+}
+
 /// One projection sweep over the query: every cell placed against `projector`
 /// through `remap`, scored by [`multinomial_ll`] on the model's own genes.
 struct ProjectAll<'a> {
     data_vec: &'a SparseIoVec,
     /// New-data row → row of `projector`'s dictionary.
     remap: &'a [Option<usize>],
-    projector: &'a FrozenProjector<'a>,
+    projector: QueryProjector<'a>,
     side: &'a FrozenSide<'a>,
     /// Rows below this belong to the model's own genes and enter the score;
     /// rows at or above it are initialized genes, observed by the projector but
@@ -551,7 +621,7 @@ fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
         }
 
         let n_group = group.len();
-        let proj = project_group(a.projector, &group, &bar)?;
+        let proj = a.projector.place(&group, &bar)?;
         let e_cell = proj.theta;
         b_cell.extend_from_slice(&proj.b_node);
         // `multinomial_ll` walks the whole gene axis twice per cell for the
@@ -591,20 +661,6 @@ fn project_all(a: ProjectAll<'_>) -> anyhow::Result<ProjectAllOut> {
         llik,
         total,
     })
-}
-
-fn project_group(
-    projector: &FrozenProjector,
-    group: &EdgeGroup,
-    bar: &indicatif::ProgressBar,
-) -> anyhow::Result<graph_embedding_util::fit::FrozenProjection> {
-    let nodes: Vec<(u32, &[u32], &[f32])> = (0..group.len())
-        .map(|j| {
-            let (feat, count) = group.cell(j);
-            (j as u32, feat, count)
-        })
-        .collect();
-    projector.project(&nodes, group.len(), bar)
 }
 
 /// One projection group's remapped edges, flat and split.

@@ -679,6 +679,13 @@ pub struct RunOutputs {
     /// `None`; `geometry_latent` falls back for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_embedding: Option<String>,
+    /// `{out}.cell_encoder.safetensors` — the distilled pooled-gene encoder a
+    /// `bge` run placed its cells with (trunk weights plus the per-gene mean it
+    /// divides by). `senna predict` places query cells through it, so a query
+    /// and the run's own cells share one estimator. Absent on runs whose
+    /// phase 2 was the block SGD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_encoder: Option<String>,
     /// `{out}.cell_to_pb.parquet` — N × `num_levels` u32 matrix of the
     /// post-refinement cell→pseudobulk membership per coarsening level
     /// (finest-last to match `collapsed_levels`). Cached so a downstream
@@ -1351,6 +1358,9 @@ pub struct RunDescription<'a> {
     /// command (`bge`, `fne`, `resolve-embedding-space`) — Z always lands
     /// here, never in `latent`. `None` to omit.
     pub cell_embedding_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the cell encoder, e.g.
+    /// `"cell_encoder.safetensors"`. `None` to omit.
+    pub cell_encoder_suffix: Option<&'a str>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
     /// True if the run emits `{basename}.latent.parquet`. Topic-family fits
@@ -1444,6 +1454,9 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if let Some(suf) = desc.softmax_dictionary_suffix {
         m.outputs.softmax_dictionary = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.cell_encoder_suffix {
+        m.outputs.cell_encoder = Some(format!("{basename}.{suf}"));
     }
     if let Some(suf) = desc.cell_embedding_suffix {
         m.outputs.cell_embedding = Some(format!("{basename}.{suf}"));

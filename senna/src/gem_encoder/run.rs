@@ -230,6 +230,7 @@ pub fn run_gem_encoder(args: &GemEncoderArgs) -> anyhow::Result<()> {
         // θ·α, the H-space projection every geometry consumer wants; `latent`
         // below is the K-space log θ and is NOT a metric space.
         cell_embedding_suffix: Some("cell_embedding.parquet"),
+        cell_encoder_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("raw_feature_embedding.parquet"),
         module_membership_suffix: None,

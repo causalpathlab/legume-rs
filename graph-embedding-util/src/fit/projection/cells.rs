@@ -4,6 +4,7 @@
 //! [`super::pseudobulk`]; both drive the same engine.
 
 use super::block_sgd;
+use super::encoder::{self, CellEncoder, DistillSpec};
 use super::CellBatchFold;
 use crate::loss::PerBatchStratifiedCellSampler;
 use crate::model::JointEmbedModel;
@@ -28,6 +29,9 @@ pub(crate) struct Phase2Result {
     /// frames displaces every cell by `‖θ̄‖` — 88 on the reference fit, against a
     /// median `‖θ‖` of 5.6 after centring.
     pub theta_mean: Vec<f32>,
+    /// The distilled encoder that placed the cells, on the plain path; `None`
+    /// when the block SGD did.
+    pub cell_encoder: Option<CellEncoder>,
 }
 
 /// Flatten the per-batch samplers into one `(cell_id, features, counts)` list,
@@ -81,6 +85,11 @@ fn collect_sampler_cells(
 /// per-gene velocity readout comes from the in-model `δ_g` (`--delta-l2`), not a
 /// post-hoc aggregate.
 ///
+/// `distill`, when given on the plain path, replaces the block SGD by the
+/// distilled encoder ([`encoder`]): the phase-1 pseudobulk tables are the
+/// targets, and every cell is encoded in one pass. The splice path (gem) keeps
+/// the SGD regardless.
+///
 /// See [`Phase2Result`] for what comes back.
 #[allow(clippy::too_many_arguments)] // frozen dictionary + samplers + batch fold + splice mask
 pub(crate) fn project_cells_phase2(
@@ -93,6 +102,7 @@ pub(crate) fn project_cells_phase2(
     batch_fold: Option<CellBatchFold>,
     unspliced_rows: Option<&[bool]>,
     joint: bool,
+    distill: Option<&DistillSpec<'_>>,
 ) -> anyhow::Result<Phase2Result> {
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
@@ -103,9 +113,20 @@ pub(crate) fn project_cells_phase2(
     let feat_flat: Vec<f32> = model.e_feat.flatten_all()?.to_vec1()?;
     let cells = collect_sampler_cells(cell_samplers);
 
+    // The plain path with pseudobulk targets goes through the encoder; the
+    // splice path (gem) and a call without targets keep the block SGD.
+    let distill = match unspliced_rows {
+        None => distill,
+        Some(_) => None,
+    };
     info!(
-        "Phase 2 — cell-block Poisson SGD over {n_cells} cells ({} with edges) on {dev:?}, \
+        "Phase 2 — {} over {n_cells} cells ({} with edges) on {dev:?}, \
          full log-partition, ridge λ={lambda}{}",
+        if distill.is_some() {
+            "distilled pooled-gene encoder"
+        } else {
+            "cell-block Poisson SGD"
+        },
         cells.len(),
         match &batch_fold {
             Some(bf) => format!(
@@ -116,24 +137,29 @@ pub(crate) fn project_cells_phase2(
         }
     );
 
-    let out = block_sgd::project_cells(
-        &block_sgd::Phase2Input {
-            feat: &feat_flat,
-            b_feat: &b_feat,
-            h,
-            n_cells,
-            lambda,
-            dev,
-            label: "Phase 2",
-            // Cells: fold the common mode into b_feat (feature co-embedding depends
-            // on it) — see [`block_sgd::Phase2Input::gauge_fix`].
-            gauge_fix: true,
-            joint,
-        },
-        &cells,
-        batch_fold,
-        unspliced_rows,
-    )?;
+    let input = block_sgd::Phase2Input {
+        feat: &feat_flat,
+        b_feat: &b_feat,
+        h,
+        n_cells,
+        lambda,
+        dev,
+        label: "Phase 2",
+        // Cells: fold the common mode into b_feat (feature co-embedding depends
+        // on it) — see [`block_sgd::Phase2Input::gauge_fix`].
+        gauge_fix: true,
+        joint,
+    };
+    let (out, cell_encoder) = match distill {
+        Some(spec) => {
+            let (out, enc) = encoder::project_cells(&input, &cells, batch_fold, spec)?;
+            (out, Some(enc))
+        }
+        None => (
+            block_sgd::project_cells(&input, &cells, batch_fold, unspliced_rows)?,
+            None,
+        ),
+    };
 
     /////////////////////////////////////////////////
     // Fold the gauge shift back into `b_feat`     //
@@ -212,6 +238,7 @@ pub(crate) fn project_cells_phase2(
         cell_nrms,
         velocity: out.velocity,
         theta_mean: out.gauge.theta_mean,
+        cell_encoder,
     })
 }
 

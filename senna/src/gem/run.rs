@@ -815,6 +815,7 @@ fn run_gem_genes_bge(
         // Z, the Euclidean identity θ. Raw — its norm carries library size — so
         // geometry consumers should use cosine or L2-normalize first.
         cell_embedding_suffix: Some("cell_embedding.parquet"),
+        cell_encoder_suffix: None,
         // The co-embedded gene table, on the cell manifold. This is what makes
         // `annotate-by-projection`'s nearest-centroid call well posed; β is NOT
         // on that manifold and goes to `feature_loading` instead.
