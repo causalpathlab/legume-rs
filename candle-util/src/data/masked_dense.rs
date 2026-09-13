@@ -9,12 +9,14 @@
 //! What is left is one draw per row per epoch, over the WHOLE gene axis:
 //!
 //! - the encoder sees `visible_nd`,
-//! - the decoder is scored on `1 − visible_nd`,
+//! - the decoder is scored at `hidden_ids`, which is where `visible_nd` is 0,
 //!
-//! from the same tensor, so "the hidden set" has exactly one meaning. The draw
-//! is keyed on `(epoch seed, source row)` alone — not on the batch size, the
-//! shuffle, or which worker took the row — so a seeded run reproduces whatever
-//! the machine does.
+//! from one draw, so "the hidden set" has exactly one meaning. The count is
+//! FIXED at `round(rate · D)` rather than one Bernoulli per gene, so the hidden
+//! set is a `[N, d_h]` block the decoder's head can gather by instead of a
+//! ragged list it has to mask over. The draw is keyed on `(epoch seed, source
+//! row)` alone — not on the batch size, the shuffle, or which worker took the
+//! row — so a seeded run reproduces whatever the machine does.
 //!
 //! The level's rows are uploaded once and a minibatch is an `index_select` of
 //! them, the way the packed loader worked; only the width changed. The upload
@@ -52,9 +54,47 @@ pub struct MaskedDraw {
     pub mask_fraction: f64,
 }
 
-/// One row's draw for the epoch: its visible mask over `[D]`.
+/// One row's draw for the epoch: its hidden gene ids and the visible mask they
+/// imply. The two are one draw read two ways — `visible[g] == 0` exactly at
+/// `hidden` — so the encoder's input and the decoder's scored set cannot drift.
 struct RowDraw {
     visible: Vec<f32>,
+    /// Ascending, no repeats.
+    hidden: Vec<u32>,
+}
+
+/// How many genes a row of `n_features` hides at `rate`: `round(rate · D)`,
+/// clamped to `[1, D-1]`.
+///
+/// The count is FIXED rather than binomial, which is what lets a minibatch
+/// carry the hidden set as a `[N, d_h]` id block instead of a ragged list — the
+/// decoder then evaluates its likelihood only where it is scored. The clamp
+/// keeps a row from being fully hidden (the encoder would have nothing to read)
+/// or fully visible (the decoder would have nothing to answer for), so a rate
+/// of 0 or 1 is a degenerate draw, not an empty one.
+fn hidden_count(n_features: usize, rate: f64) -> usize {
+    let d = n_features.max(2);
+    ((rate * n_features as f64).round() as usize).clamp(1, d - 1)
+}
+
+/// `m` distinct ids from `0..d`, by Floyd's algorithm: `m` draws, not a
+/// `d`-long permutation, so the cost is the size of the sample rather than the
+/// size of the gene axis.
+fn floyd_sample(d: usize, m: usize, rng: &mut SmallRng) -> Vec<u32> {
+    let mut seen = std::collections::HashSet::with_capacity(m);
+    let mut out = Vec::with_capacity(m);
+    for j in (d - m)..d {
+        let t = rng.random_range(0..=j);
+        let pick = if seen.insert(t) {
+            t
+        } else {
+            seen.insert(j);
+            j
+        };
+        out.push(pick as u32);
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Draw one row. Seeded on `(epoch_seed, row)` alone.
@@ -66,10 +106,12 @@ fn draw_row(row: usize, n_features: usize, epoch_seed: u64, draw: &MaskedDraw) -
     };
     // Every gene is a candidate: a zero-count gene carries information about
     // the cell, and the decoder has always been scored on it.
-    let visible: Vec<f32> = (0..n_features)
-        .map(|_| f32::from(u8::from(rng.random::<f64>() >= rate)))
-        .collect();
-    RowDraw { visible }
+    let hidden = floyd_sample(n_features, hidden_count(n_features, rate), &mut rng);
+    let mut visible = vec![1f32; n_features];
+    for &g in &hidden {
+        visible[g as usize] = 0.0;
+    }
+    RowDraw { visible, hidden }
 }
 
 ////////////////////////////
@@ -102,6 +144,19 @@ pub struct DenseMaskedMinibatch {
     pub x0_nd: Option<Tensor>,
     /// `[N, D]` 1 where the encoder may look.
     pub visible_nd: Tensor,
+    /// `[N, d_h]` u32 hidden gene ids, ascending within a row — the same draw
+    /// as `visible_nd`, in the form the decoder's head gathers by.
+    ///
+    /// Under [`MaskSchedule::Fixed`] every row hides the same `d_h` and the
+    /// block is exact as it stands. Under [`MaskSchedule::Uniform`] the count
+    /// is per-row, so the block is as wide as the widest row and a short row's
+    /// tail repeats its own last hidden id — a real hidden gene, so a gather is
+    /// in range — with `hidden_weight` zero there.
+    pub hidden_ids: Tensor,
+    /// `[N, d_h]` 1 on a drawn slot, 0 on a pad. `None` when every row in the
+    /// batch hides exactly `d_h`, which is the whole of the fixed schedule: the
+    /// head then multiplies by nothing.
+    pub hidden_weight: Option<Tensor>,
     /// `[N, D]` decoder target counts.
     pub target_nd: Tensor,
 }
@@ -254,6 +309,26 @@ impl DenseMaskedEpoch<'_> {
         let cpu = Device::Cpu;
         let visible_nd = Tensor::from_vec(vis, (len, d), &cpu)?.to_device(&lv.dev)?;
 
+        // The same draw as an id block. Ragged only under `Uniform`, where the
+        // short rows are padded with their own last hidden id and weighted 0.
+        let dh = draws.iter().map(|rd| rd.hidden.len()).max().unwrap_or(1);
+        let ragged = draws.iter().any(|rd| rd.hidden.len() != dh);
+        let mut hid = vec![0u32; len * dh];
+        let mut w = vec![0f32; len * dh];
+        for (row, rd) in draws.iter().enumerate() {
+            let n_hid = rd.hidden.len();
+            let slot = &mut hid[row * dh..(row + 1) * dh];
+            slot[..n_hid].copy_from_slice(&rd.hidden);
+            slot[n_hid..].fill(rd.hidden[n_hid - 1]);
+            w[row * dh..row * dh + n_hid].fill(1.0);
+        }
+        let hidden_ids = Tensor::from_vec(hid, (len, dh), &cpu)?.to_device(&lv.dev)?;
+        let hidden_weight = if ragged {
+            Some(Tensor::from_vec(w, (len, dh), &cpu)?.to_device(&lv.dev)?)
+        } else {
+            None
+        };
+
         let row_ids = Tensor::from_vec(ids.to_vec(), len, &lv.dev)?;
         let sel = |t: &Tensor| t.index_select(&row_ids, 0);
         let x_nd = sel(&lv.input_pd)?;
@@ -265,6 +340,8 @@ impl DenseMaskedEpoch<'_> {
             x_nd,
             x0_nd,
             visible_nd,
+            hidden_ids,
+            hidden_weight,
             target_nd,
         })
     }
