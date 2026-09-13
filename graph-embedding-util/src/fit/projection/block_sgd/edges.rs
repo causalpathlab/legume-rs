@@ -72,8 +72,9 @@ impl EdgeTable {
 // Block sizing //
 //////////////////
 
-/// Cells per block for a pass over `f` features.
-pub(super) fn block_cells(f: usize) -> usize {
+/// Cells per block for a pass over `f` features — the encoder path sizes its
+/// dense blocks by the same budget.
+pub(crate) fn block_cells(f: usize) -> usize {
     if f == 0 {
         return 1;
     }

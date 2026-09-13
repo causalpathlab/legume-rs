@@ -23,21 +23,26 @@
 use crate::feature_embedding::FeatureEmbedding;
 use candle_core::{Result, Tensor};
 
-/// `s_nd = gate · rq · scale`, with `-1e9` added where `visible == 0`.
+/// `s_nd = gate · rq · scale`, with `-1e9` added where `visible == 0`; no mask
+/// when `visible_nd` is `None` (every gene visible).
 ///
 /// `rq_d` is `[D]` (see [`super::scatter_pool::query_over_features`]), broadcast
-/// across the rows; `scale` is the caller's `1/√H`.
+/// across the rows; `scale` is the caller's `1/√H`, applied to the `[D]` vector
+/// rather than to the `[N, D]` product.
 pub fn attention_scores_dense(
     gate_nd: &Tensor,
     rq_d: &Tensor,
-    visible_nd: &Tensor,
+    visible_nd: Option<&Tensor>,
     scale: f64,
 ) -> Result<Tensor> {
-    let rq_1d = rq_d.reshape((1, rq_d.elem_count()))?;
-    let scores = gate_nd.broadcast_mul(&rq_1d)?.affine(scale, 0.0)?;
-    // The same additive mask the indexed path uses, so a hidden gene leaves the
-    // softmax with exactly the weight it would have had as a masked slot.
-    super::scatter_pool::masked_scores(&scores, visible_nd)
+    let rq_1d = rq_d.reshape((1, rq_d.elem_count()))?.affine(scale, 0.0)?;
+    let scores = gate_nd.broadcast_mul(&rq_1d)?;
+    match visible_nd {
+        // The same additive mask the indexed path uses, so a hidden gene leaves
+        // the softmax with exactly the weight it would have had as a masked slot.
+        Some(v) => super::scatter_pool::masked_scores(&scores, v),
+        None => Ok(scores),
+    }
 }
 
 /// `pool_nh = (attn · gate) ρ`, through the feature side.

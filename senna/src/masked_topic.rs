@@ -1583,6 +1583,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         module_dictionary_suffix: module_suffixes.map(|(_, d)| d),
         softmax_dictionary_suffix: Some("dictionary.parquet"),
         cell_embedding_suffix: None,
+        cell_encoder_suffix: None,
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,

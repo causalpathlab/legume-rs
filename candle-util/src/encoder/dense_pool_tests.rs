@@ -82,7 +82,8 @@ fn visible_on_support(f: &Fixture) -> Tensor {
 fn dense_path(f: &Fixture, visible_nd: &Tensor) -> (Tensor, Tensor) {
     let rq_d = query_over_features(&f.features, &f.query).unwrap();
     let scores =
-        attention_scores_dense(&f.gate_nd, &rq_d, visible_nd, 1.0 / (H as f64).sqrt()).unwrap();
+        attention_scores_dense(&f.gate_nd, &rq_d, Some(visible_nd), 1.0 / (H as f64).sqrt())
+            .unwrap();
     let attn = ops::softmax(&scores, 1).unwrap();
     let pooled = pool_dense(&attn, &f.gate_nd, &f.features).unwrap();
     let pooled = pooled.broadcast_mul(&has_visible(visible_nd)).unwrap();

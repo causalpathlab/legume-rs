@@ -107,9 +107,10 @@ mod solve;
 
 use edges::EdgeTable;
 use joint::run_joint_pass;
-use pass::{run_pass, PassOut, PassSpec};
+use pass::{run_pass, PassSpec};
 
-pub(crate) use pass::{DictSpec, PassDict};
+pub(crate) use edges::block_cells;
+pub(crate) use pass::{DictSpec, PassDict, PassOut};
 
 /////////////////////////
 // Schedule / tolerance //
@@ -450,8 +451,9 @@ pub(crate) fn project_prepared(
 }
 
 /// Re-gauge the pass results and scatter them onto the global node axis — the tail
-/// both entry points share.
-fn finish(
+/// both entry points share, and the distilled encoder path
+/// ([`super::encoder`]) with them.
+pub(crate) fn finish(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
     pass_a: PassOut,

@@ -151,14 +151,16 @@ fn main() -> anyhow::Result<()> {
     };
     time(&dev, "dense pool over every gene (fwd)", || {
         let rq_d = query_over_features(&features, &attn_q)?;
-        let scores = attention_scores_dense(&gate_nd, &rq_d, &visible_nd, 1.0 / (H as f64).sqrt())?;
+        let scores =
+            attention_scores_dense(&gate_nd, &rq_d, Some(&visible_nd), 1.0 / (H as f64).sqrt())?;
         let attn = candle_nn::ops::softmax(&scores, 1)?;
         let _ = pool_dense(&attn, &gate_nd, &features)?;
         Ok(())
     });
     time(&dev, "dense pool over every gene (fwd+bwd)", || {
         let rq_d = query_over_features(&features, &attn_q)?;
-        let scores = attention_scores_dense(&gate_nd, &rq_d, &visible_nd, 1.0 / (H as f64).sqrt())?;
+        let scores =
+            attention_scores_dense(&gate_nd, &rq_d, Some(&visible_nd), 1.0 / (H as f64).sqrt())?;
         let attn = candle_nn::ops::softmax(&scores, 1)?;
         let pooled = pool_dense(&attn, &gate_nd, &features)?;
         let _ = pooled.sum_all()?.backward()?;
