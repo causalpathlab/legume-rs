@@ -312,3 +312,202 @@ fn the_query_rank_round_trips_with_and_without_a_value() {
     );
     assert!(crate::topic::model_metadata::ensure_query_head_not_wired(back.query_rank).is_err());
 }
+
+/// ONE seeded hold-out draw, shared by both evaluation arms.
+///
+/// The two arms threshold different buffers — the dense arm the `[n, D]` block,
+/// the windowed arm the `[n, K]` pack — but they drew the mask the same way,
+/// spelled out twice. Both spellings are kept inline here as the reference: the
+/// helper has to reproduce them exactly, RNG stream included, or an old
+/// checkpoint's held-out number moves.
+#[test]
+fn both_arms_draw_the_same_holdout_mask() {
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+
+    // A planted buffer with zeros scattered through it: a zero is never held
+    // out and must never consume a draw, which is what pins the RNG stream.
+    let values: Vec<f32> = (0..37)
+        .map(|i| {
+            if i % 4 == 0 {
+                0.0
+            } else {
+                (i % 7) as f32 + 0.5
+            }
+        })
+        .collect();
+    let seed = 42u64;
+    let lb = 512u64;
+    let rate = 0.4;
+
+    // The dense arm as it was written: 1 everywhere, 0 on a held-out slot.
+    let dense_ref = {
+        let mut rng = StdRng::seed_from_u64(seed ^ lb);
+        let mut vis = vec![1f32; values.len()];
+        for (slot, &v) in values.iter().enumerate() {
+            if v > 0.0 && rng.random::<f64>() < rate {
+                vis[slot] = 0.0;
+            }
+        }
+        vis
+    };
+    // The windowed arm as it was written: 0 everywhere, 1 on a held-out slot.
+    let windowed_ref = {
+        let mut rng = StdRng::seed_from_u64(seed ^ lb);
+        let mut mask_buf = vec![0f32; values.len()];
+        for (slot, &v) in values.iter().enumerate() {
+            if v > 0.0 && rng.random::<f64>() < rate {
+                mask_buf[slot] = 1.0;
+            }
+        }
+        mask_buf
+    };
+
+    let held = super::seeded_holdout_mask(&values, seed ^ lb, rate);
+    assert_eq!(held, windowed_ref, "the windowed arm's held-out indicator");
+    let vis: Vec<f32> = held.iter().map(|m| 1.0 - m).collect();
+    assert_eq!(vis, dense_ref, "the dense arm's visible mask");
+    assert!(
+        held.iter().any(|&m| m > 0.0) && held.iter().any(|&m| m == 0.0),
+        "a fixture that holds out everything or nothing proves nothing"
+    );
+}
+
+/// ONE aggregation for both evaluation arms.
+///
+/// The dense arm calls `dense_module_targets`; the windowed arm used to rebuild
+/// the same four tensors by hand from the sparse columns. That hand build is
+/// kept inline below as the reference: routing the windowed arm through the
+/// shared helper must reproduce it exactly, because this path scores OLD
+/// checkpoints and its numbers must not move.
+mod windowed_aggregation {
+    use super::super::{
+        csc_to_indexed, seeded_holdout_mask, windowed_module_targets, PerGeneContext,
+    };
+    use candle_util::candle_core::{DType, Device, Tensor};
+    use candle_util::decoder::coarsening_map::CoarseningMap;
+    use candle_util::fast_index::scatter_add_cols;
+    use candle_util::vae::masked_topic::DenseModuleTargets;
+
+    const D: usize = 8;
+    const N: usize = 4;
+    const M: usize = 5;
+    /// Narrower than the widest column, so genes fall OUTSIDE the window and
+    /// the whole-column tensors and the window tensors have to differ.
+    const K: usize = 3;
+
+    /// `[D, N]` counts: column 2 is empty (a cell with nothing observed) and
+    /// several genes repeat across columns.
+    fn block() -> nalgebra_sparse::CscMatrix<f32> {
+        let mut m = nalgebra::DMatrix::<f32>::zeros(D, N);
+        for (g, j, v) in [
+            (0, 0, 3.0),
+            (1, 0, 7.0),
+            (3, 0, 2.0),
+            (5, 0, 5.0),
+            (1, 1, 4.0),
+            (2, 1, 1.0),
+            (6, 1, 9.0),
+            (7, 1, 6.0),
+            (0, 3, 8.0),
+            (4, 3, 2.0),
+            (7, 3, 3.0),
+        ] {
+            m[(g, j)] = v;
+        }
+        nalgebra_sparse::CscMatrix::from(&m)
+    }
+
+    /// A coarsening with repeated target rows: genes 0,1 share a row, as do
+    /// 3,4 and 6,7. Nothing here may depend on the map being the identity.
+    fn coarsening(dev: &Device) -> CoarseningMap {
+        let f2c = [0usize, 0, 1, 2, 2, 3, 4, 4];
+        let share = [0.5f32, 0.5, 1.0, 0.5, 0.5, 1.0, 0.5, 0.5];
+        CoarseningMap::new(&f2c, &share, dev).unwrap()
+    }
+
+    fn close(got: &Tensor, want: &Tensor, what: &str) {
+        let g: Vec<Vec<f32>> = got.to_vec2().unwrap();
+        let w: Vec<Vec<f32>> = want.to_vec2().unwrap();
+        assert_eq!(g.len(), w.len(), "{what}: row count");
+        for (i, (gr, wr)) in g.iter().zip(&w).enumerate() {
+            assert_eq!(gr.len(), wr.len(), "{what}: row {i} width");
+            for (j, (a, b)) in gr.iter().zip(wr).enumerate() {
+                assert!((a - b).abs() <= 1e-6, "{what}: [{i},{j}] {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_windowed_targets_equal_the_hand_built_ones() {
+        let dev = Device::Cpu;
+        let x_dn = block();
+        let map = coarsening(&dev);
+        let weights = vec![1.0f32; D];
+        let pack =
+            csc_to_indexed(&x_dn, K, &weights, None, PerGeneContext::default(), &dev).unwrap();
+
+        // The arm's own hold-out draw, on the pack it encodes from.
+        let values_host: Vec<f32> = pack.values.flatten_all().unwrap().to_vec1().unwrap();
+        let held = seeded_holdout_mask(&values_host, 7, 0.5);
+        let dims = pack.values.dims2().unwrap();
+        let masked = Tensor::from_vec(held, dims, &dev).unwrap();
+        let real = pack.values.gt(0.0).unwrap().to_dtype(DType::F32).unwrap();
+        let visible = (&real - &masked).unwrap();
+        let vis_host: Vec<f32> = visible.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            vis_host.iter().any(|&v| v > 0.0) && vis_host.iter().any(|&v| v == 0.0),
+            "a fixture with nothing hidden, or nothing visible, proves nothing"
+        );
+
+        // OLD: the four tensors rebuilt by hand from the sparse columns.
+        let f2c = map.host_fine_to_coarse();
+        let mut dense = vec![0f32; N * M];
+        let mut lib = vec![1f32; N];
+        for j in 0..N {
+            let c = x_dn.col(j);
+            for (&r, &v) in c.row_indices().iter().zip(c.values().iter()) {
+                dense[j * M + f2c[r]] += v;
+                lib[j] += v;
+            }
+        }
+        let m_ctx = map.groups_of(&pack.indices).unwrap();
+        let share_ctx = map.log_share_at(&pack.indices).unwrap().exp().unwrap();
+        let want = DenseModuleTargets {
+            values_nm: Tensor::from_vec(dense, (N, M), &dev).unwrap(),
+            visible_counts_nm: scatter_add_cols(&m_ctx, &(&pack.values * &visible).unwrap(), M)
+                .unwrap(),
+            visible_share_nm: scatter_add_cols(&m_ctx, &(share_ctx * &visible).unwrap(), M)
+                .unwrap(),
+            lib_n1: Tensor::from_vec(lib, (N, 1), &dev).unwrap(),
+        };
+
+        // NEW: the dense arm's aggregation, on the densified block and the
+        // pack's visible slots put back on the gene axis.
+        let got = windowed_module_targets(&map, &x_dn, &pack.indices, &visible, D, &dev).unwrap();
+
+        close(&got.values_nm, &want.values_nm, "values_nm");
+        close(
+            &got.visible_counts_nm,
+            &want.visible_counts_nm,
+            "visible_counts_nm",
+        );
+        close(
+            &got.visible_share_nm,
+            &want.visible_share_nm,
+            "visible_share_nm",
+        );
+        close(&got.lib_n1, &want.lib_n1, "lib_n1");
+
+        // The window really is narrower than the data, or the two would agree
+        // for an uninteresting reason.
+        let counts: Vec<Vec<f32>> = want.visible_counts_nm.to_vec2().unwrap();
+        let totals: Vec<Vec<f32>> = want.values_nm.to_vec2().unwrap();
+        let seen: f32 = counts.iter().flatten().sum();
+        let all: f32 = totals.iter().flatten().sum();
+        assert!(
+            seen < all,
+            "every count landed in the window: {seen} vs {all}"
+        );
+    }
+}

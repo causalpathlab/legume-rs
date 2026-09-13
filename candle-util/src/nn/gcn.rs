@@ -58,7 +58,23 @@
 use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
-use crate::data::indexed::SparseEdgeBatch;
+/// Sparse encoding of a minibatch's stacked sub-adjacencies. Replaces
+/// the dense `[B, K, K]` adjacency with three small `[E]` tensors —
+/// `E` is the total number of edges in the minibatch. Consumed by
+/// [`GcnBlock::forward`] via `index_select` + `index_add` instead of a
+/// dense matmul.
+///
+/// Lives here, next to its only consumer: the indexed loader that used to
+/// build these from a feature-feature graph is gone, so a caller that wants
+/// graph diffusion now supplies the three flat tensors itself.
+pub struct SparseEdgeBatch {
+    /// `[E]` u32 — destination flat index `(b * K + kk_u)`.
+    pub dst_flat: Tensor,
+    /// `[E]` u32 — source flat index `(b * K + kk_v)`.
+    pub src_flat: Tensor,
+    /// `[E]` f32 — row-normalised edge weight (incl. self-loops).
+    pub weight: Tensor,
+}
 
 /// One γ-gated GCN diffusion step. The only learnable parameter is the
 /// per-dimension diffusion vector `γ ∈ ℝ^H` (zero-init ⇒ identity at
@@ -120,7 +136,6 @@ impl GcnBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::indexed::SparseEdgeBatch;
     use candle_core::{DType, Device};
     use candle_nn::VarMap;
 

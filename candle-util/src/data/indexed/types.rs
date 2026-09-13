@@ -1,7 +1,6 @@
 //! Public data types for the indexed data loader.
 
 use candle_core::{Device, Tensor};
-use matrix_util::traits::CandleDataLoaderOps;
 
 /// Per-sample: top-K features selected from dense data.
 #[derive(Clone)]
@@ -60,22 +59,4 @@ impl IndexedMinibatchData {
             input_values_mean: opt(&self.input_values_mean)?,
         })
     }
-}
-
-pub struct IndexedInMemoryArgs<'a, D>
-where
-    D: CandleDataLoaderOps,
-{
-    pub input: &'a D,
-    pub input_null: Option<&'a D>,
-    pub input_context_size: usize,
-    /// Per-feature weights used to *score* candidates during top-K selection.
-    /// Stored values remain raw row values. Pass `&[1.0; n_features]` to fall
-    /// back to raw value-only selection.
-    pub input_shortlist_weights: &'a [f32],
-    /// Optional per-feature mean expression rate `μ_d` (length = D). When
-    /// supplied, the loader gathers it for each per-cell top-K position and
-    /// packs it as `input_values_mean [N, K]`, which the encoder composes with
-    /// the batch null as a multiplicative count-rate divisor before Anscombe.
-    pub input_mean: Option<&'a [f32]>,
 }

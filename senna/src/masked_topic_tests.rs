@@ -208,3 +208,67 @@ mod query_unwired {
         assert!(b.recorded_query_flags().is_empty());
     }
 }
+
+/// The mask rate is the model, so the command line owns its bounds.
+///
+/// A rate of 0 hides nothing and a rate of 1 hides everything; the loader used
+/// to clamp both back to a one-gene draw, which answered a question nobody
+/// asked. `senna gem-encoder` already refuses the same flag by name — this is
+/// the masked family catching up, in the OPEN interval the draw actually needs.
+mod mask_fraction_bounds {
+    use super::{Cli, MaskedTopicArgs};
+    use clap::Parser;
+
+    fn parse(extra: &[&str]) -> MaskedTopicArgs {
+        let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).expect("parses").args
+    }
+
+    #[test]
+    fn the_degenerate_rates_are_refused_by_name() {
+        for bad in ["0.0", "1.0"] {
+            let msg = parse(&["--mask-fraction", bad])
+                .validate()
+                .expect_err("a degenerate mask rate must be refused")
+                .to_string();
+            for needle in ["--mask-fraction", "(0, 1)"] {
+                assert!(
+                    msg.contains(needle),
+                    "the message for {bad} must name {needle}; got: {msg}"
+                );
+            }
+        }
+        assert!(parse(&["--mask-fraction", "0.4"]).validate().is_ok());
+    }
+
+    /// The uniform schedule draws a rate per row, so ITS bounds are the ones
+    /// that have to land inside the interval.
+    #[test]
+    fn the_uniform_schedule_bounds_are_refused_by_name() {
+        let uniform = |lo: &str, hi: &str| {
+            parse(&[
+                "--mask-schedule",
+                "uniform",
+                "--mask-rate-lo",
+                lo,
+                "--mask-rate-hi",
+                hi,
+            ])
+            .validate()
+        };
+        for (lo, hi, flag) in [
+            ("0.0", "0.6", "--mask-rate-lo"),
+            ("0.1", "1.0", "--mask-rate-hi"),
+        ] {
+            let msg = uniform(lo, hi)
+                .expect_err("a degenerate uniform bound must be refused")
+                .to_string();
+            assert!(
+                msg.contains(flag) && msg.contains("(0, 1)"),
+                "the message must name {flag} and the interval; got: {msg}"
+            );
+        }
+        assert!(uniform("0.1", "0.6").is_ok());
+    }
+}

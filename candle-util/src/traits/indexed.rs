@@ -1,4 +1,3 @@
-use crate::data::indexed::SparseEdgeBatch;
 use candle_core::{Result, Tensor};
 
 /// Indexed encoder: takes packed `(indices, values)` from the adaptive feature
@@ -17,9 +16,6 @@ pub trait IndexedEncoderT {
     ///   count-rate divisor inside `anscombe_lite`, so the encoder sees the
     ///   Anscombe-stabilized biological deviation from each gene's typical
     ///   rate under the prevailing batch.
-    /// * `sparse_edges` - pre-normalised per-cell sub-adjacency edges
-    ///   (pre-built by [`crate::data::indexed::IndexedInMemoryData::minibatch_sparse_edges`]),
-    ///   supplied when the encoder owns a graph-diffusion block.
     /// * `train` - whether to use dropout/batchnorm
     ///
     /// # Returns `(log_z_nk, kl_loss_n)`
@@ -31,7 +27,6 @@ pub trait IndexedEncoderT {
         values: &Tensor,
         values_null: Option<&Tensor>,
         values_mean: Option<&Tensor>,
-        sparse_edges: Option<&SparseEdgeBatch>,
         train: bool,
     ) -> Result<(Tensor, Tensor)>;
 

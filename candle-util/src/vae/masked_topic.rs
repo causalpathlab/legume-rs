@@ -372,6 +372,10 @@ pub fn decoder_log_theta(
 pub type LevelData<'a> = (&'a Mat, Option<&'a Mat>, &'a Mat);
 
 /// Upload every level's dense rows once (see [`DenseMaskedLevel`]).
+///
+/// A level whose target IS its input — the same `Mat` behind both borrows,
+/// which is what "no batch-adjusted target" looks like here — uploads one
+/// device buffer, not two; [`DenseMaskedLevel::from_mats`] owns that test.
 fn resident_dense_levels(
     level_data: &[LevelData],
     config: &IndexedTrainConfig,
