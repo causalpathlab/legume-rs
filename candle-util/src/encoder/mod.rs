@@ -4,7 +4,7 @@
 //! - [`gaussian`]: dense Gaussian (scVI-style) encoder — raw continuous latent
 //! - [`softmax_iaf`]: log-softmax encoder with IAF flow head
 //! - [`joint_softmax`]: paired/multi-view variant
-//! - [`indexed`]: sparse top-K `IndexedEmbeddingEncoder` (with optional GCN)
+//! - [`indexed`]: sparse top-K `IndexedEmbeddingEncoder`
 
 pub mod coarse_pool;
 pub mod dense_pool;
