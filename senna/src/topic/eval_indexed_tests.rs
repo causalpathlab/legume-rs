@@ -233,3 +233,82 @@ fn the_dense_read_bounds_how_many_blocks_run_at_once() {
         "the windowed read keeps the device rule: one block per thread"
     );
 }
+
+/////////////////////////////////////////////////
+// The query head is no longer wired anywhere  //
+/////////////////////////////////////////////////
+
+/// A model trained with a query decoder cannot be scored by this build.
+///
+/// Its `dec_query.*` tensors ride in the checkpoint, and `VarMap::load` fills
+/// only the vars a rebuild has already registered — anything else is skipped in
+/// silence. With the head unwired nothing registers them, so scoring such a
+/// model would quietly use a different rate from the one it was trained on.
+/// Refuse by name instead.
+#[test]
+fn a_model_with_a_query_head_is_refused_by_name() {
+    use crate::topic::model_metadata::ensure_query_head_not_wired;
+
+    assert!(ensure_query_head_not_wired(None).is_ok());
+    assert!(
+        ensure_query_head_not_wired(Some(0)).is_ok(),
+        "rank 0 is no head at all"
+    );
+    let msg = ensure_query_head_not_wired(Some(32))
+        .expect_err("a model whose weights would be silently skipped must be refused")
+        .to_string();
+    for needle in ["query", "32"] {
+        assert!(
+            msg.contains(needle),
+            "the message must name {needle}; got: {msg}"
+        );
+    }
+}
+
+/// `query_rank` stays deserialisable: an old model records it, this build reads
+/// it back unchanged (so it can refuse), and a model written now has none.
+#[test]
+fn the_query_rank_round_trips_with_and_without_a_value() {
+    use crate::topic::model_metadata::TopicModelMetadata;
+
+    let base = TopicModelMetadata {
+        model_type: crate::topic::model_metadata::MODEL_TYPE_MASKED_VAE.into(),
+        decoder_types: vec!["nb".into()],
+        decoder_weights: vec![1.0],
+        n_features_encoder: 6,
+        n_features_full: 6,
+        n_topics: 2,
+        encoder_hidden: vec![8],
+        num_levels: 1,
+        level_decoder_dims: vec![6],
+        adj_method: "residual".into(),
+        has_coarsening: false,
+        embedding_dim: Some(4),
+        enc_context_size: None,
+        theta_mean: None,
+        n_train_cells: None,
+        n_gene_modules: None,
+        query_rank: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    let plain = dir.path().join("plain").to_string_lossy().into_owned();
+    base.save(&plain).unwrap();
+    assert_eq!(
+        TopicModelMetadata::load(&plain).unwrap().query_rank,
+        None,
+        "a model this build writes has no query head"
+    );
+
+    let old = dir.path().join("old").to_string_lossy().into_owned();
+    let mut m = base;
+    m.query_rank = Some(32);
+    m.save(&old).unwrap();
+    let back = TopicModelMetadata::load(&old).unwrap();
+    assert_eq!(
+        back.query_rank,
+        Some(32),
+        "the field has to survive, or the refusal cannot fire"
+    );
+    assert!(crate::topic::model_metadata::ensure_query_head_not_wired(back.query_rank).is_err());
+}

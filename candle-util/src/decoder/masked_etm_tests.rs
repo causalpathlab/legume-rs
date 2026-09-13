@@ -125,11 +125,13 @@ fn dense_heads_match_an_elementwise_reference() {
     let log_phi = to_vec1(dec.log_phi());
 
     let (values, residual, lib, mask) = (values(), residual(), lib(), mask());
+    let (hidden_ids, hidden_weight) = mask_to_hidden(&mask);
     let target = MaskedDenseTarget {
         values: &values,
         residual: Some(&residual),
         lib: &lib,
-        mask: &mask,
+        hidden_ids: &hidden_ids,
+        hidden_weight: hidden_weight.as_ref(),
     };
     let nb = to_vec1(
         &dec.impute_dense_nb(&log_theta(), &target, &full_kd)
@@ -198,11 +200,13 @@ fn dense_and_indexed_heads_agree_on_the_same_positions() {
         lib: &lib,
         mask: &mask_k,
     };
+    let (hidden_ids, hidden_weight) = mask_to_hidden(&mask);
     let dense = MaskedDenseTarget {
         values: &values,
         residual: Some(&residual),
         lib: &lib,
-        mask: &mask,
+        hidden_ids: &hidden_ids,
+        hidden_weight: hidden_weight.as_ref(),
     };
 
     let nb_i = to_vec1(
@@ -341,11 +345,13 @@ fn module_scorer_matches_the_dense_gene_scorer_under_the_identity_map() {
         residual: None,
         lib: &lib,
     };
+    let (hidden_ids, hidden_weight) = mask_to_hidden(&mask);
     let dense = MaskedDenseTarget {
         values: &values,
         residual: None,
         lib: &lib,
-        mask: &mask,
+        hidden_ids: &hidden_ids,
+        hidden_weight: hidden_weight.as_ref(),
     };
     let (nb, units) = dec
         .score_unseen_modules_nb(&log_theta(), &t, &full_kd)
@@ -617,4 +623,401 @@ fn the_decoder_sees_the_feature_side_as_it_moves() {
         before, after,
         "the decoder is reading a snapshot of the feature side, not the live one"
     );
+}
+
+//////////////////////////////////////////////////////
+// The dense heads score ONLY at the hidden genes    //
+//////////////////////////////////////////////////////
+
+/// `[N, D]` mask → the `(ids, weight)` pair the loader hands the head.
+///
+/// Rows with different hidden counts pad to the widest row by repeating the
+/// row's last hidden id — a real hidden gene, so a gather stays in range — and
+/// the weight is what makes the short rows exact.
+fn mask_to_hidden(mask: &Tensor) -> (Tensor, Option<Tensor>) {
+    let m = mask.to_vec2::<f32>().unwrap();
+    let per_row: Vec<Vec<u32>> = m
+        .iter()
+        .map(|r| {
+            r.iter()
+                .enumerate()
+                .filter(|(_, &v)| v != 0.0)
+                .map(|(g, _)| g as u32)
+                .collect()
+        })
+        .collect();
+    let dh = per_row.iter().map(Vec::len).max().unwrap();
+    let ragged = per_row.iter().any(|r| r.len() != dh);
+    let n = per_row.len();
+    let mut ids = vec![0u32; n * dh];
+    let mut w = vec![0f32; n * dh];
+    for (row, h) in per_row.iter().enumerate() {
+        let slot = &mut ids[row * dh..(row + 1) * dh];
+        slot[..h.len()].copy_from_slice(h);
+        slot[h.len()..].fill(*h.last().unwrap());
+        w[row * dh..row * dh + h.len()].fill(1.0);
+    }
+    let dev = mask.device();
+    (
+        Tensor::from_vec(ids, (n, dh), dev).unwrap(),
+        ragged.then(|| Tensor::from_vec(w, (n, dh), dev).unwrap()),
+    )
+}
+
+/// A planted fixture at `D = 9`, `K = 3`, `N = 4` with its own decoder, so the
+/// hidden-only head is pinned against the full-width masked computation this
+/// replaced rather than against itself.
+mod hidden_only {
+    use super::{mask_to_hidden, MaskedDenseTarget};
+    use crate::decoder::masked_etm::EmbeddedNbTopicDecoder;
+    use crate::loss::nb_log_likelihood_elem;
+    use candle_core::{DType, Device, Tensor, Var};
+    use candle_nn::{ops, VarBuilder, VarMap};
+
+    const D: usize = 9;
+    const H: usize = 4;
+    const K: usize = 3;
+    const N: usize = 4;
+
+    fn dev() -> Device {
+        Device::Cpu
+    }
+
+    fn rho() -> Tensor {
+        let v: Vec<f32> = (0..D * H)
+            .map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.2)
+            .collect();
+        Tensor::from_vec(v, (D, H), &dev()).unwrap()
+    }
+
+    /// `(decoder, α as a Var)`. α lives in a `VarMap` so a backward can reach it.
+    fn decoder() -> (EmbeddedNbTopicDecoder, Var) {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &dev());
+        let features = crate::feature_embedding::FeatureEmbedding::fixed(rho());
+        let dec = EmbeddedNbTopicDecoder::new(K, features, vb.pp("dec")).unwrap();
+        // Spread φ and the background so a head that dropped either would show.
+        let tbl = vm.data().lock().unwrap();
+        let phi: Vec<f32> = (0..D).map(|g| 0.15 * g as f32 - 0.4).collect();
+        tbl["dec.log_phi"]
+            .set(&Tensor::from_vec(phi, (1, D), &dev()).unwrap())
+            .unwrap();
+        let pi: Vec<f32> = (0..D).map(|g| -((g + 2) as f32).ln()).collect();
+        tbl["dec.log_pi"]
+            .set(&Tensor::from_vec(pi, (1, D), &dev()).unwrap())
+            .unwrap();
+        let alpha = tbl["dec.topic.embeddings"].clone();
+        drop(tbl);
+        (dec, alpha)
+    }
+
+    fn log_theta_var() -> Var {
+        let v: Vec<f32> = (0..N * K).map(|i| ((i * 5 % 7) as f32) * 0.4).collect();
+        let t = Tensor::from_vec(v, (N, K), &dev()).unwrap();
+        Var::from_tensor(&ops::log_softmax(&t, 1).unwrap()).unwrap()
+    }
+
+    fn values() -> Tensor {
+        #[rustfmt::skip]
+        let v: Vec<f32> = vec![
+            2.0, 0.0, 5.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0,
+            0.0, 4.0, 0.0, 0.0, 7.0, 1.0, 0.0, 2.0, 0.0,
+            1.0, 1.0, 0.0, 6.0, 0.0, 0.0, 0.0, 0.0, 3.0,
+            0.0, 0.0, 2.0, 0.0, 0.0, 8.0, 1.0, 0.0, 0.0,
+        ];
+        Tensor::from_vec(v, (N, D), &dev()).unwrap()
+    }
+
+    /// 1 = hidden (scored). Four hidden genes in every row, zeros and non-zeros
+    /// alike, so the block is rectangular and needs no weight.
+    fn mask() -> Tensor {
+        #[rustfmt::skip]
+        let m: Vec<f32> = vec![
+            0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+            1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        Tensor::from_vec(m, (N, D), &dev()).unwrap()
+    }
+
+    fn residual() -> Tensor {
+        let r: Vec<f32> = (0..N * D)
+            .map(|i| 0.6 + ((i * 3 % 7) as f32) * 0.1)
+            .collect();
+        Tensor::from_vec(r, (N, D), &dev()).unwrap()
+    }
+
+    fn lib() -> Tensor {
+        Tensor::from_vec(vec![11.0f32, 8.0, 13.0, 6.0], (N, 1), &dev()).unwrap()
+    }
+
+    fn to_vec1(t: &Tensor) -> Vec<f32> {
+        t.flatten_all().unwrap().to_vec1().unwrap()
+    }
+
+    /// The computation this replaced, kept here as the reference: the full
+    /// `[N, D]` elementwise likelihood, multiplied by the mask and summed. Sixty
+    /// percent of it is the visible genes, computed and then zeroed.
+    fn masked_full_width_nb(
+        dec: &EmbeddedNbTopicDecoder,
+        log_theta: &Tensor,
+        full_kd: &Tensor,
+        mask: &Tensor,
+        with_residual: bool,
+    ) -> Tensor {
+        let rate_nd = dec.mixture_rate_nd(log_theta, full_kd).unwrap();
+        let mu = if with_residual {
+            rate_nd.mul(&residual()).unwrap()
+        } else {
+            rate_nd.clone()
+        }
+        .broadcast_mul(&lib())
+        .unwrap();
+        let log_phi = dec.log_phi().broadcast_as(rate_nd.shape()).unwrap();
+        let elem = nb_log_likelihood_elem(&values(), &mu, &log_phi).unwrap();
+        elem.mul(mask).unwrap().sum(1).unwrap()
+    }
+
+    fn masked_full_width_multinomial(
+        dec: &EmbeddedNbTopicDecoder,
+        log_theta: &Tensor,
+        full_kd: &Tensor,
+        mask: &Tensor,
+    ) -> Tensor {
+        let rate_nd = dec.mixture_rate_nd(log_theta, full_kd).unwrap();
+        let ll = (values() * (rate_nd + 1e-20).unwrap().log().unwrap()).unwrap();
+        ll.mul(mask).unwrap().sum(1).unwrap()
+    }
+
+    fn target<'a>(
+        vals: &'a Tensor,
+        res: Option<&'a Tensor>,
+        lib: &'a Tensor,
+        ids: &'a Tensor,
+        w: Option<&'a Tensor>,
+    ) -> MaskedDenseTarget<'a> {
+        MaskedDenseTarget {
+            values: vals,
+            residual: res,
+            lib,
+            hidden_ids: ids,
+            hidden_weight: w,
+        }
+    }
+
+    /// The hidden-only head IS the masked full-width head, to 1e-5, when the
+    /// mask is exactly the hidden set. Nothing about the loss changed; only the
+    /// positions the elementwise terms are evaluated at.
+    #[test]
+    fn the_hidden_only_head_equals_the_masked_full_width_head() {
+        let (dec, _) = decoder();
+        let full_kd = dec.full_logits_kd().unwrap();
+        let log_theta = log_theta_var().as_tensor().clone();
+        let (ids, w) = mask_to_hidden(&mask());
+        assert!(
+            w.is_none(),
+            "this fixture hides the same count in every row"
+        );
+        let (vals, res, l) = (values(), residual(), lib());
+
+        let t = target(&vals, Some(&res), &l, &ids, None);
+        let got = to_vec1(&dec.impute_dense_nb(&log_theta, &t, &full_kd).unwrap());
+        let want = to_vec1(&masked_full_width_nb(
+            &dec,
+            &log_theta,
+            &full_kd,
+            &mask(),
+            true,
+        ));
+        for (n, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "row {n}: NB hidden-only {a} vs masked {b}"
+            );
+        }
+
+        let got = to_vec1(
+            &dec.impute_dense_multinomial(&log_theta, &t, &full_kd)
+                .unwrap(),
+        );
+        let want = to_vec1(&masked_full_width_multinomial(
+            &dec,
+            &log_theta,
+            &full_kd,
+            &mask(),
+        ));
+        for (n, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "row {n}: multinomial hidden-only {a} vs masked {b}"
+            );
+        }
+    }
+
+    /// A ragged hidden set — different counts per row — is exact too: the pad
+    /// slots repeat a real hidden id and the weight zeroes them.
+    #[test]
+    fn a_ragged_hidden_block_is_exact_through_its_weight() {
+        let (dec, _) = decoder();
+        let full_kd = dec.full_logits_kd().unwrap();
+        let log_theta = log_theta_var().as_tensor().clone();
+        #[rustfmt::skip]
+        let m: Vec<f32> = vec![
+            0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0,
+            0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0,
+        ];
+        let mask = Tensor::from_vec(m, (N, D), &dev()).unwrap();
+        let (ids, w) = mask_to_hidden(&mask);
+        let w = w.expect("the rows hide different counts");
+        let (vals, res, l) = (values(), residual(), lib());
+        let t = target(&vals, Some(&res), &l, &ids, Some(&w));
+        let got = to_vec1(&dec.impute_dense_nb(&log_theta, &t, &full_kd).unwrap());
+        let want = to_vec1(&masked_full_width_nb(
+            &dec, &log_theta, &full_kd, &mask, true,
+        ));
+        for (n, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!((a - b).abs() < 1e-5, "row {n}: {a} vs {b}");
+        }
+    }
+
+    /// Same gradients, not just the same number: the head's backward has to
+    /// reach `log θ` and the topic embeddings exactly as the masked one did, or
+    /// the speedup would be a different fit.
+    #[test]
+    fn the_gradients_agree_with_the_masked_full_width_head() {
+        let (dec, alpha) = decoder();
+        let (ids, _) = mask_to_hidden(&mask());
+        let (vals, res, l) = (values(), residual(), lib());
+
+        let grads_of = |hidden_only: bool| -> (Vec<f32>, Vec<f32>) {
+            let lt = log_theta_var();
+            let full_kd = dec.full_logits_kd().unwrap();
+            let llik = if hidden_only {
+                let t = target(&vals, Some(&res), &l, &ids, None);
+                dec.impute_dense_nb(lt.as_tensor(), &t, &full_kd).unwrap()
+            } else {
+                masked_full_width_nb(&dec, lt.as_tensor(), &full_kd, &mask(), true)
+            };
+            let g = llik.sum_all().unwrap().backward().unwrap();
+            (
+                g.get(lt.as_tensor())
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap(),
+                g.get(alpha.as_tensor())
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1()
+                    .unwrap(),
+            )
+        };
+        let (gt_new, ga_new) = grads_of(true);
+        let (gt_old, ga_old) = grads_of(false);
+        assert!(
+            gt_old.iter().any(|g| g.abs() > 1e-3) && ga_old.iter().any(|g| g.abs() > 1e-3),
+            "the reference gradients are ~0, so agreeing with them proves nothing"
+        );
+        for (i, (a, b)) in gt_new.iter().zip(&gt_old).enumerate() {
+            assert!((a - b).abs() < 1e-4, "d/d log_theta[{i}]: {a} vs {b}");
+        }
+        for (i, (a, b)) in ga_new.iter().zip(&ga_old).enumerate() {
+            assert!((a - b).abs() < 1e-4, "d/d alpha[{i}]: {a} vs {b}");
+        }
+    }
+
+    /// A gene the row did not hide contributes nothing. Move its count and the
+    /// score must not budge — that is what "scored only at the hidden genes"
+    /// means, and a head that still summed over the axis would drift.
+    #[test]
+    fn a_visible_genes_count_does_not_enter_the_score() {
+        let (dec, _) = decoder();
+        let full_kd = dec.full_logits_kd().unwrap();
+        let log_theta = log_theta_var().as_tensor().clone();
+        let (ids, _) = mask_to_hidden(&mask());
+        let (res, l) = (residual(), lib());
+
+        let base = values();
+        let t = target(&base, Some(&res), &l, &ids, None);
+        let before = to_vec1(&dec.impute_dense_nb(&log_theta, &t, &full_kd).unwrap());
+        let before_mn = to_vec1(
+            &dec.impute_dense_multinomial(&log_theta, &t, &full_kd)
+                .unwrap(),
+        );
+
+        // Row 0 leaves genes 0, 3, 4, 6, 8 visible; bump every one of them.
+        let mut v = base.to_vec2::<f32>().unwrap();
+        for g in [0usize, 3, 4, 6, 8] {
+            v[0][g] += 17.0;
+        }
+        let bumped = Tensor::from_vec(v.concat(), (N, D), &dev()).unwrap();
+        let t2 = target(&bumped, Some(&res), &l, &ids, None);
+        let after = to_vec1(&dec.impute_dense_nb(&log_theta, &t2, &full_kd).unwrap());
+        let after_mn = to_vec1(
+            &dec.impute_dense_multinomial(&log_theta, &t2, &full_kd)
+                .unwrap(),
+        );
+        assert_eq!(before, after, "a visible gene's count reached the NB score");
+        assert_eq!(
+            before_mn, after_mn,
+            "a visible gene's count reached the multinomial score"
+        );
+    }
+
+    /// The partition normalises over ALL `D` genes, not over the hidden ones.
+    ///
+    /// `β` is a distribution over the whole gene axis; restricting the
+    /// log-partition to the scored columns would renormalise each row's rate to
+    /// sum to one over `d_h` and change every number the head returns. The
+    /// reference builds `log Z_k` on the host from all `D` columns, so a head
+    /// that narrowed it cannot pass.
+    #[test]
+    fn the_partition_is_taken_over_every_gene() {
+        let (dec, _) = decoder();
+        let full_kd = dec.full_logits_kd().unwrap();
+        let log_theta = log_theta_var().as_tensor().clone();
+        let (ids, _) = mask_to_hidden(&mask());
+        let (vals, l) = (values(), lib());
+        let t = target(&vals, None, &l, &ids, None);
+        let got = to_vec1(&dec.impute_dense_nb(&log_theta, &t, &full_kd).unwrap());
+
+        // Host reference: log Z_k over every gene, then θ·β at the hidden ids.
+        let logits = full_kd.to_vec2::<f32>().unwrap();
+        let theta = log_theta.exp().unwrap().to_vec2::<f32>().unwrap();
+        let logz: Vec<f32> = logits
+            .iter()
+            .map(|row| {
+                let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                m + row.iter().map(|&x| (x - m).exp()).sum::<f32>().ln()
+            })
+            .collect();
+        let y = vals.to_vec2::<f32>().unwrap();
+        let libv = to_vec1(&l);
+        let log_phi = to_vec1(dec.log_phi());
+        let idv = ids.to_vec2::<u32>().unwrap();
+        let one = |v: f32| Tensor::new(&[[v]], &dev()).unwrap();
+        for n in 0..N {
+            let mut want = 0f32;
+            for &g in &idv[n] {
+                let g = g as usize;
+                let rate: f32 = (0..K)
+                    .map(|k| theta[n][k] * (logits[k][g] - logz[k]).exp())
+                    .sum();
+                let mu = libv[n] * rate;
+                want += to_vec1(
+                    &nb_log_likelihood_elem(&one(y[n][g]), &one(mu), &one(log_phi[g])).unwrap(),
+                )[0];
+            }
+            assert!(
+                (got[n] - want).abs() < 1e-3,
+                "row {n}: head {} vs a full-axis partition {want}",
+                got[n]
+            );
+        }
+    }
 }

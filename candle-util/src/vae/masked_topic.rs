@@ -15,8 +15,7 @@ use super::{clip_and_step_dense, smooth_topics, TrainScores};
 use crate::data::indexed::labeled_bar;
 use crate::data::masked_dense::{DenseMaskedLevel, DenseMaskedMinibatch, MaskedDraw};
 use crate::decoder::coarsening_map::CoarseningMap;
-use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, ModuleTarget};
-use crate::decoder::query_decoder::QueryDecoder;
+use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget, ModuleTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
@@ -129,35 +128,13 @@ pub struct MaskedTrainOpts {
     /// is near one-hot on whatever distribution it trained on and softer off it,
     /// so this is a likelihood lever, not a remedy for a one-hot latent.
     pub poisson_thin: bool,
-    /// Seed for the trainer's own stochastic draws: the context mask and its
-    /// rate under [`MaskSchedule::Uniform`], the query set — all drawn per
-    /// epoch and keyed on `(epoch, level, row)` — and
+    /// Seed for the trainer's own stochastic draws: the hidden set and its
+    /// rate under [`MaskSchedule::Uniform`] — drawn per epoch and keyed on
+    /// `(epoch, level, row)` — and
     /// [`MaskedTrainOpts::poisson_thin`]'s per-epoch draw. Each is keyed on a
     /// disjoint sub-stream of this seed, so all are reproducible independently
     /// of the thread count, the batch size and the shuffle.
     pub seed: u64,
-    /// `Some`: the query decoder is on — masked and out-of-context genes read
-    /// the visible slots and add a per-gene log-residual to the mixture rate
-    /// (see [`crate::decoder::query_decoder`]). Requires a [`QueryDecoder`]
-    /// handed to [`train_masked`]. `None`: today's heads, byte for byte.
-    pub query: Option<QueryOpts>,
-}
-
-/// Options of the query-decoder term.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct QueryOpts {
-    /// Queries per row, drawn uniformly from the row's HIDDEN genes, zeros
-    /// included.
-    ///
-    /// With no context window there is no "outside the context" left to draw
-    /// from. The hidden set is the whole-axis version of what this used to
-    /// sample — genes the encoder did not read — so the number keeps its
-    /// meaning (how many questions per row) and bounds the head's cost, which
-    /// asking about every hidden gene would not.
-    pub extra: usize,
-    /// Weight of `mean r²` in the loss: the mixture explains first, the
-    /// residual takes the remainder.
-    pub penalty: f64,
 }
 
 impl Default for MaskedTrainOpts {
@@ -168,7 +145,6 @@ impl Default for MaskedTrainOpts {
             latent: LatentHead::Softmax,
             poisson_thin: false,
             seed: 42,
-            query: None,
         }
     }
 }
@@ -207,8 +183,8 @@ fn poisson_draw(rates: &Mat, seed: u64) -> Mat {
 
 ////////////////////////////////////////////////////////
 // Seeded per-step draws: the mask and its rate       //
-/// Seed for one epoch's draws on one level: the context mask, the per-row
-/// mask rate under [`MaskSchedule::Uniform`], and the query set. Keyed on
+/// Seed for one epoch's draws on one level: the hidden set and the per-row
+/// mask rate under [`MaskSchedule::Uniform`]. Keyed on
 /// `(epoch, level)` so a draw depends only on the run seed and where in the
 /// schedule it happens; the row is keyed inside the loader. The `"mask"` name
 /// keeps this in a different sub-stream from the Poisson thinning draw.
@@ -453,6 +429,42 @@ impl EpochAccum {
     }
 }
 
+/// `(llik [N], scored units [N])` at each row's hidden genes — the
+/// full-resolution scorer, where a "module" is a gene and the row's hidden ids
+/// are exactly what the decoder answers for.
+///
+/// The library is the whole row's total (`+1`), as the module form's is: what
+/// changed is where the elementwise likelihood is evaluated, not the mean it is
+/// evaluated at.
+fn score_hidden_genes(
+    decoder: &EmbeddedNbTopicDecoder,
+    log_z: &Tensor,
+    likelihood: MaskedLikelihood,
+    mb: &DenseMaskedMinibatch,
+    full_kd: &Tensor,
+) -> candle_core::Result<(Tensor, Tensor)> {
+    let lib_n1 = (mb.target_nd.sum_keepdim(1)? + 1.0)?;
+    let target = MaskedDenseTarget {
+        values: &mb.target_nd,
+        residual: None,
+        lib: &lib_n1,
+        hidden_ids: &mb.hidden_ids,
+        hidden_weight: mb.hidden_weight.as_ref(),
+    };
+    let llik = match likelihood {
+        MaskedLikelihood::Nb => decoder.impute_dense_nb(log_z, &target, full_kd)?,
+        MaskedLikelihood::Multinomial => {
+            decoder.impute_dense_multinomial(log_z, &target, full_kd)?
+        }
+    };
+    let (n, dh) = mb.hidden_ids.dims2()?;
+    let units = match mb.hidden_weight.as_ref() {
+        Some(w) => w.sum(1)?,
+        None => Tensor::full(dh as f32, n, llik.device())?,
+    };
+    Ok((llik, units))
+}
+
 /// One minibatch's full forward loss, shared by the epoch loop and the GPU
 /// memory probe so the probe measures exactly the forward a real step retains.
 /// Everything the step needs — the dense row, its null, and the mask — arrives
@@ -490,23 +502,33 @@ fn masked_minibatch_loss(
     // pool and this view read the SAME `visible_nd`, so the scored set is the
     // hidden set, not a second approximation of it.
     let full_kd = decoder.full_logits_kd()?;
-    let t = dense_module_targets(decoder.coarsening(), &mb.target_nd, &mb.visible_nd)?;
-    // These rows are the batch-FREE targets, so β is fit to composition the
-    // collapse already corrected; the per-row offset belongs to cell-level
-    // scoring, where counts are mixed.
-    let module_target = ModuleTarget {
-        values: &t.values_nm,
-        visible_counts: &t.visible_counts_nm,
-        visible_share: &t.visible_share_nm,
-        residual: None,
-        lib: &t.lib_n1,
-    };
-    let (llik, units) = match opts.likelihood {
-        MaskedLikelihood::Nb => {
-            decoder.score_unseen_modules_nb(&log_z, &module_target, &full_kd)?
-        }
-        MaskedLikelihood::Multinomial => {
-            decoder.score_unseen_modules_multinomial(&log_z, &module_target, &full_kd)?
+    let (llik, units) = if decoder.coarsening().is_identity() {
+        // Full gene resolution: the scored set IS the row's hidden ids, so the
+        // likelihood is evaluated at `[N, d_h]` and nowhere else. The module
+        // form below is the same number term for term (pinned by
+        // `module_scorer_matches_the_dense_gene_scorer_under_the_identity_map`)
+        // but reaches it by computing every gene and multiplying the visible
+        // majority away.
+        score_hidden_genes(decoder, &log_z, opts.likelihood, mb, &full_kd)?
+    } else {
+        let t = dense_module_targets(decoder.coarsening(), &mb.target_nd, &mb.visible_nd)?;
+        // These rows are the batch-FREE targets, so β is fit to composition the
+        // collapse already corrected; the per-row offset belongs to cell-level
+        // scoring, where counts are mixed.
+        let module_target = ModuleTarget {
+            values: &t.values_nm,
+            visible_counts: &t.visible_counts_nm,
+            visible_share: &t.visible_share_nm,
+            residual: None,
+            lib: &t.lib_n1,
+        };
+        match opts.likelihood {
+            MaskedLikelihood::Nb => {
+                decoder.score_unseen_modules_nb(&log_z, &module_target, &full_kd)?
+            }
+            MaskedLikelihood::Multinomial => {
+                decoder.score_unseen_modules_multinomial(&log_z, &module_target, &full_kd)?
+            }
         }
     };
     let llik_sum = llik.sum_all()?;
@@ -535,33 +557,21 @@ fn masked_minibatch_loss(
 
 /// Masked-imputation training (no ELBO / no KL) for the embedded topic model.
 ///
-/// Per epoch and row, the loader splits the row's top-K genes into
-/// **visible** (encoder input) and **masked**, and draws the query set. The
+/// Per epoch and row, the loader splits the gene axis into **visible**
+/// (encoder input) and **hidden** at a fixed count per row. The
 /// encoder pools the visible genes into a deterministic `log θ`; the
 /// embedded-topic decoder imputes every gene the encoder did not see
-/// (`μ = ℓ·θβ`, times the query decoder's residual where a query exists) and
-/// the loss is the log-likelihood on those positions. No posterior, no KL →
+/// (`μ = ℓ·θβ`) and the loss is the log-likelihood on those positions. No posterior, no KL →
 /// no posterior collapse. Pseudobulk masking also simulates the PB→single-cell
 /// sparsity the amortized encoder must handle at inference.
 pub fn train_masked(
     level_data: &[LevelData],
     encoder: &IndexedEmbeddingEncoder,
     decoders: &[EmbeddedNbTopicDecoder],
-    query_decoder: Option<&QueryDecoder>,
     config: &IndexedTrainConfig,
     mask_fraction: f64,
     opts: &MaskedTrainOpts,
 ) -> anyhow::Result<TrainScores> {
-    // The query head attends from each query gene over the set the encoder
-    // read: `[N, Q, K]`. Window-free, that read set is the whole gene axis, so
-    // the attention block is `[N, Q, D]` and cannot be formed at all — this is
-    // not a tuning question. Refuse rather than run out of memory mid-epoch.
-    anyhow::ensure!(
-        opts.query.is_none() && query_decoder.is_none(),
-        "the query decoder needs a bounded read set: its attention is [N, Q, K] over the genes \
-         the encoder read, and the window-free encoder reads every gene, so K = D. Drop \
-         --query-decoder (and --query-extra), or train a windowed model with an older build."
-    );
     let num_levels = level_data.len();
     let total_epochs = config.epochs;
 

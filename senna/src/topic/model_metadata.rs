@@ -395,6 +395,28 @@ pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Ve
     Ok((result.rows, weights))
 }
 
+/// Refuse a model whose checkpoint carries a query decoder.
+///
+/// The head is no longer wired into the masked family. Its `dec_query.*`
+/// tensors still ride in such a model's checkpoint, and `VarMap::load` fills
+/// only the vars a rebuild has already registered — anything else it skips in
+/// silence. So a build with no query head would load such a model without a
+/// word and score it at a rate the model was never trained at. Say so instead.
+///
+/// `None` (this build's models) and `Some(0)` (a recorded rank of zero, which
+/// is no head) both pass.
+pub fn ensure_query_head_not_wired(query_rank: Option<usize>) -> anyhow::Result<()> {
+    if let Some(r) = query_rank.filter(|&r| r > 0) {
+        anyhow::bail!(
+            "this model was trained with a query decoder (query_rank {r}), which is no longer \
+             wired into the masked family: its dec_query.* weights would be skipped in silence \
+             and the model scored at a rate it was never trained at. Re-train without the query \
+             head, or score it with the build that wrote it."
+        );
+    }
+    Ok(())
+}
+
 /// Load per-gene NB dispersion φ from `{prefix}.dispersion.parquet`.
 /// Returns `None` if the file doesn't exist (e.g. multinomial-only training run).
 pub fn load_dispersion(prefix: &str) -> anyhow::Result<Option<Vec<f32>>> {

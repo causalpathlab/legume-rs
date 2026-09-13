@@ -251,12 +251,10 @@ enum Commands {
                       (--max-coarse-features): each module's unseen mass is scored,\n\
                       and a gene takes a pinned share of its module's rate.\n\
                       \n\
-                      The encoder's window is a compute budget; what the decoder\n\
-                      answers for does not depend on it. Scoring only the window\n\
-                      would ask about abundant genes alone and never about an\n\
-                      absent one, which is far weaker evidence about θ.\n\
-                      --query-decoder adds a gene-level read: a masked or absent\n\
-                      gene attends over the visible context and corrects its own rate.\n\
+                      What the decoder answers for does not depend on what the\n\
+                      encoder read. Scoring only the expressed genes would ask\n\
+                      about abundant ones alone and never about an absent one,\n\
+                      which is far weaker evidence about θ.\n\
                       \n\
                       The masked objective prevents collapse, not a KL bottleneck.\n\
                       So it scales with more data. Inference is encoder-only.\n\

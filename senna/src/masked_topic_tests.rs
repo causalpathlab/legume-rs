@@ -134,23 +134,77 @@ mod window_free {
         assert!(parse(&["--gene-modules", "0"]).validate().is_ok());
     }
 
-    /// The query head attends from each query gene over the genes the encoder
-    /// read. Window-free that set is the whole gene axis, so its `[N, Q, D]`
-    /// attention cannot be formed at any `--query-extra`. Refuse by name.
+    /// Nothing is refused once the query head is unwired.
     #[test]
-    fn the_query_decoder_is_refused_and_the_message_names_both_flags() {
-        let args = parse(&["--query-decoder"]);
-        let msg = args
-            .validate()
-            .expect_err("the query head needs a bounded read set")
-            .to_string();
-        for needle in ["--query-decoder", "--query-extra"] {
+    fn a_plain_window_free_run_validates() {
+        assert!(parse(&[]).validate().is_ok());
+    }
+}
+
+/// The query decoder is not wired into the masked family any more. The library
+/// module stays (for re-wiring later), but nothing reaches it from a command.
+mod query_unwired {
+    use super::{Cli, MaskedTopicArgs};
+    use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
+    use clap::Parser;
+
+    /// None of the four flags is a flag any more. Silently accepting one would
+    /// let a user believe they had turned a head on.
+    #[test]
+    fn the_query_flags_are_not_flags_any_more() {
+        for flag in [
+            vec!["--query-decoder"],
+            vec!["--query-rank", "32"],
+            vec!["--query-extra", "64"],
+            vec!["--query-penalty", "1.0"],
+        ] {
+            let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
+            argv.extend_from_slice(&flag);
             assert!(
-                msg.contains(needle),
-                "the message must name {needle}; got: {msg}"
+                Cli::try_parse_from(argv).is_err(),
+                "{flag:?} must be rejected, not silently ignored"
             );
         }
-        // Off, it costs nothing and nothing is refused.
-        assert!(parse(&[]).validate().is_ok());
+    }
+
+    /// An old run manifest carries all four, and `senna update` has to be able
+    /// to replay it. The values no longer apply; the record must still
+    /// deserialise, and the run says so once — the way a recorded
+    /// `--context-size` is handled.
+    #[test]
+    fn a_fit_recorded_with_the_query_flags_still_replays() {
+        let mut m = RunManifest::new(RunKind::MaskedVae, "old");
+        m.train_args = Some(TrainArgsRecord {
+            senna_version: "0.15.5".into(),
+            args: serde_json::json!({
+                "data_files": ["d.zarr"], "out": "old", "n_latent_topics": 9,
+                "query_decoder": true, "query_rank": 32,
+                "query_extra": 128, "query_penalty": 1.0
+            }),
+        });
+        let a: MaskedTopicArgs = m
+            .train_args_as("old")
+            .expect("a recorded query-decoder setting still parses");
+        assert_eq!(a.n_latent_topics, 9);
+        let named = a.recorded_query_flags();
+        for needle in [
+            "--query-decoder",
+            "--query-rank",
+            "--query-extra",
+            "--query-penalty",
+        ] {
+            assert!(
+                named.contains(&needle),
+                "the replay must name {needle}; got: {named:?}"
+            );
+        }
+        // A manifest this build wrote has none of them and says nothing.
+        let mut m2 = RunManifest::new(RunKind::MaskedVae, "new");
+        m2.train_args = Some(TrainArgsRecord {
+            senna_version: "0.15.6".into(),
+            args: serde_json::json!({ "data_files": ["d.zarr"], "out": "new" }),
+        });
+        let b: MaskedTopicArgs = m2.train_args_as("new").expect("parses");
+        assert!(b.recorded_query_flags().is_empty());
     }
 }
