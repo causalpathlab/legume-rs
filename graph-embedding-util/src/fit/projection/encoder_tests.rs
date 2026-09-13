@@ -190,4 +190,27 @@ fn the_distillation_fits_a_planted_target_on_held_out_pseudobulks() {
     assert!(a.theta[H..]
         .chunks(H)
         .any(|r| r.iter().zip(&first).any(|(p, q)| (p - q).abs() > 1e-3)));
+
+    // The gauge shift folds into the head exactly: every placement moves by
+    // −shift and nothing else, and it survives the save/load round trip.
+    let shift = vec![0.5f32, -1.25, 2.0];
+    encoder.shift_output(&shift).unwrap();
+    let shifted = encoder.encode_edges(&nodes).unwrap();
+    for (row, orig) in shifted.theta.chunks(H).zip(a.theta.chunks(H)) {
+        for k in 0..H {
+            assert!(
+                (row[k] - (orig[k] - shift[k])).abs() < 1e-5,
+                "{} vs {}",
+                row[k],
+                orig[k] - shift[k]
+            );
+        }
+    }
+    encoder.save(&path).unwrap();
+    let again = CellEncoder::load(&feat, &b, H, &path, &dev).unwrap();
+    std::fs::remove_file(&path).ok();
+    let reloaded = again.encode_edges(&nodes).unwrap();
+    for (x, y) in reloaded.theta.iter().zip(&shifted.theta) {
+        assert!((x - y).abs() < 1e-6, "{x} vs {y}");
+    }
 }

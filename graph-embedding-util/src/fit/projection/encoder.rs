@@ -383,6 +383,29 @@ impl CellEncoder {
         Ok(())
     }
 
+    /// Subtract `shift [h]` from every output: `encode(x) ← encode(x) − shift`,
+    /// exactly, by moving it into the head's bias. The gauge fix removes the
+    /// population mean `θ̄` from the run's cells and folds `⟨e_f, θ̄⟩` into
+    /// `b_feat`; the persisted encoder has to place a query in that same frame,
+    /// or a query lands `+θ̄` from the run's own cells and its scores against the
+    /// re-gauged `b_feat` are off by `⟨e_f, θ̄⟩`.
+    pub(crate) fn shift_output(&self, shift: &[f32]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            shift.len() == self.dict.h,
+            "shift has {} entries, h = {}",
+            shift.len(),
+            self.dict.h
+        );
+        let name = format!("{VAR_PREFIX}.nn.enc.z.mean.bias");
+        let vars = self.varmap.data().lock().unwrap();
+        let bias = vars
+            .get(&name)
+            .ok_or_else(|| anyhow::anyhow!("encoder head bias `{name}` missing"))?;
+        let shift_t = Tensor::from_slice(shift, self.dict.h, bias.device())?;
+        bias.set(&(bias.as_tensor() - shift_t)?)?;
+        Ok(())
+    }
+
     /// The per-gene mean the trunk divides by, on the dictionary's axis.
     pub fn feature_mean(&self) -> anyhow::Result<Vec<f32>> {
         Ok(self.mean_1d.flatten_all()?.to_vec1()?)

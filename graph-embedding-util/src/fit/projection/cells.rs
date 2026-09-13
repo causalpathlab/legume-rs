@@ -63,20 +63,19 @@ fn collect_sampler_cells(
 /// partition, leaving `‖θ‖` free to run away along whatever direction the
 /// unobserved features carried.
 ///
-/// On the **bge** path the stored latent (`model.e_cell`) is the **L2 direction**
-/// of the Poisson-MAP embedding — depth-robust and best for that pipeline's
-/// Euclidean clustering (storing the magnitude there blurs cell types: the
-/// magnitude axis ≈ profile specialization, roughly orthogonal to identity, a
-/// measured ~7–11pt purity loss). The **gem** path instead stores the latent
-/// **raw** (magnitude kept) — see below — and normalizes downstream (or uses
-/// cosine) as an explicit clustering choice, so a zero-signal cell can't be turned
-/// into a fabricated unit direction.
+/// The stored latent (`model.e_cell`) is the **raw** embedding on every path —
+/// magnitude kept, no unit-norm. A unit-normed store puts every cell on
+/// `S^{H−1}`, and a layout of that is arcs and rings rather than the free
+/// clouds the same objective gives `simba`; it also made the run's own cells a
+/// different object from the cells the persisted encoder places at predict
+/// time. A consumer that wants direction only takes it (cosine) as an explicit
+/// choice, so a zero-signal cell is never turned into a fabricated unit vector.
 ///
 /// Phase 2 projection. Without `unspliced_rows` (bge): one combined Poisson-MAP
-/// per cell → identity `e_cell`, stored as the L2 direction `dir(θ)`. With
+/// per cell → identity `e_cell`, stored raw. With
 /// `unspliced_rows` (gem β-sharing): identity is resolved by the **spliced** edges
-/// (`e_cell = θ`, mature mRNA = current state) and stored **raw** — no post-hoc
-/// unit-norm, so `‖θ‖` stays the activity/QC signal; then, holding θ fixed, the
+/// (`e_cell = θ`, mature mRNA = current state), so `‖θ‖` stays the
+/// activity/QC signal; then, holding θ fixed, the
 /// cell's **unspliced** edges are fit for an analytic velocity increment `δ`
 /// against the shared `β_g` and stored **raw** too (magnitude = speed, direction =
 /// velocity). δ is a directed Poisson-MAP residual in θ's own frame (not a second
@@ -188,6 +187,11 @@ pub(crate) fn project_cells_phase2(
             .sum();
         *b += shift;
     }
+    // The persisted encoder places predict-time cells; give it the same gauge
+    // so a query and the run's cells share one frame.
+    if let Some(enc) = cell_encoder.as_ref() {
+        enc.shift_output(tm)?;
+    }
     let b_feat_t = Tensor::from_vec(b_feat, n_features, dev)?;
     {
         let vars = varmap.data().lock().unwrap();
@@ -197,30 +201,12 @@ pub(crate) fn project_cells_phase2(
     }
     model.b_feat = b_feat_t;
 
-    // `cell_nrms` is the un-normalized MAP norm the empty-droplet QC keys on, so it
-    // is always read off the RAW θ — before the bge path replaces the stored latent
-    // with its unit direction. Post-gauge-fix this is the distance from the
-    // population mean, which is the more useful "how much signal" reading anyway.
-    let cell_nrms: Vec<f32> = out
-        .theta
-        .chunks_exact(h)
-        .map(|t| t.iter().map(|x| x * x).sum::<f32>().sqrt())
-        .collect();
+    // `cell_nrms` is the MAP norm the empty-droplet QC keys on. Post-gauge-fix
+    // this is the distance from the population mean, which is the more useful
+    // "how much signal" reading anyway.
+    let cell_nrms: Vec<f32> = out.theta.chunks_exact(h).map(norm).collect();
 
-    let mut e_out = out.theta;
-    if unspliced_rows.is_none() {
-        // bge: store the L2 direction — depth-robust and best for that pipeline's
-        // Euclidean clustering. gem keeps the magnitude (see the doc above).
-        // In place — a per-row helper returning a `Vec` would allocate per cell.
-        for row in e_out.chunks_exact_mut(h) {
-            let n = norm(row);
-            if n > 1e-8 {
-                row.iter_mut().for_each(|x| *x /= n);
-            }
-        }
-    }
-
-    let e_t = Tensor::from_vec(e_out, (n_cells, h), dev)?;
+    let e_t = Tensor::from_vec(out.theta, (n_cells, h), dev)?;
     let b_t = Tensor::from_vec(out.b_cell, n_cells, dev)?;
     {
         let vars = varmap.data().lock().unwrap();
@@ -242,7 +228,7 @@ pub(crate) fn project_cells_phase2(
     })
 }
 
-/// Euclidean norm of a slice — the `√Σx²` the bge L2-direction store needs.
+/// Euclidean norm of a slice.
 fn norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
