@@ -191,3 +191,195 @@ fn the_resident_rows_equal_the_old_host_transpose() {
         }
     }
 }
+
+///////////////////////////////
+// Fixed-count hidden draw   //
+///////////////////////////////
+
+/// `row id -> its hidden ids`, collected across every minibatch of an epoch.
+fn hidden_by_row(ep: &DenseMaskedEpoch<'_>) -> std::collections::HashMap<u32, Vec<u32>> {
+    let mut out = std::collections::HashMap::new();
+    for b in 0..ep.n_batches() {
+        let mb = ep.batch(b).unwrap();
+        let ids: Vec<u32> = mb.row_ids.to_vec1().unwrap();
+        let hid: Vec<Vec<u32>> = mb.hidden_ids.to_vec2().unwrap();
+        for (id, h) in ids.iter().zip(hid) {
+            out.insert(*id, h);
+        }
+    }
+    out
+}
+
+/// Every row hides the SAME number of genes, `round(rate · D)`.
+///
+/// The per-gene Bernoulli this replaced gave a binomial count, so the hidden
+/// set was ragged and could not be carried as ids at all. A fixed count is
+/// what makes `[N, d_h]` a shape rather than an average.
+#[test]
+fn every_row_hides_exactly_the_rounded_fraction() {
+    let lv = level();
+    for frac in [0.25f64, 0.4, 0.5, 0.75] {
+        let want = (frac * D as f64).round() as usize;
+        let ep = lv.begin_epoch(3, &draw(frac), P).unwrap();
+        let mb = ep.batch(0).unwrap();
+        assert_eq!(
+            mb.hidden_ids.dims(),
+            &[P, want],
+            "rate {frac}: the hidden block is [N, round(rate·D)]"
+        );
+        assert!(
+            mb.hidden_weight.is_none(),
+            "rate {frac}: a fixed count needs no padding weight"
+        );
+        let vis: Vec<Vec<f32>> = mb.visible_nd.to_vec2().unwrap();
+        for (n, v) in vis.iter().enumerate() {
+            let hidden = v.iter().filter(|&&x| x == 0.0).count();
+            assert_eq!(
+                hidden, want,
+                "rate {frac}, row {n}: hid {hidden}, want {want}"
+            );
+        }
+    }
+}
+
+/// The visible mask and the hidden ids are two views of ONE draw: visible is 1
+/// everywhere except exactly at the hidden ids. Two draws that merely agreed on
+/// average would let the encoder read a gene the decoder is scored on.
+#[test]
+fn the_visible_mask_and_the_hidden_ids_are_one_draw() {
+    let lv = level();
+    let ep = lv.begin_epoch(17, &draw(0.4), 3).unwrap();
+    for b in 0..ep.n_batches() {
+        let mb = ep.batch(b).unwrap();
+        let vis: Vec<Vec<f32>> = mb.visible_nd.to_vec2().unwrap();
+        let hid: Vec<Vec<u32>> = mb.hidden_ids.to_vec2().unwrap();
+        for (n, (v, h)) in vis.iter().zip(&hid).enumerate() {
+            let mut want = vec![1.0f32; D];
+            for &g in h {
+                want[g as usize] = 0.0;
+            }
+            assert_eq!(
+                v, &want,
+                "row {n}: the mask and the ids are different draws"
+            );
+        }
+    }
+}
+
+/// Floyd draws WITHOUT replacement: a row's ids are strictly ascending, so no
+/// gene is scored twice and the block is in gather order.
+#[test]
+fn a_rows_hidden_ids_are_strictly_ascending() {
+    let lv = level();
+    let ep = lv.begin_epoch(23, &draw(0.5), P).unwrap();
+    let mb = ep.batch(0).unwrap();
+    for (n, h) in mb.hidden_ids.to_vec2::<u32>().unwrap().iter().enumerate() {
+        assert!(
+            h.windows(2).all(|w| w[0] < w[1]),
+            "row {n} repeats or unsorts an id: {h:?}"
+        );
+    }
+}
+
+/// The hidden ids, like the mask they agree with, are keyed on `(epoch seed,
+/// source row)` and nothing else.
+#[test]
+fn the_hidden_ids_depend_on_the_seed_and_the_row_alone() {
+    let lv = level();
+    let d = draw(0.4);
+    let a = hidden_by_row(&lv.begin_epoch(1234, &d, 3).unwrap());
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let b = pool.install(|| hidden_by_row(&lv.begin_epoch(1234, &d, 5).unwrap()));
+
+    assert_eq!(a.len(), P, "every source row appears once per epoch");
+    for r in 0..P as u32 {
+        assert_eq!(
+            a.get(&r),
+            b.get(&r),
+            "row {r}: the hidden ids moved with the batch size or the thread count"
+        );
+    }
+    let c = hidden_by_row(&lv.begin_epoch(99, &d, 3).unwrap());
+    assert!(
+        (0..P as u32).any(|r| a.get(&r) != c.get(&r)),
+        "a different epoch seed drew the same hidden ids"
+    );
+}
+
+/// A row is never fully hidden or fully visible: the count is clamped to
+/// `[1, D-1]`, so the encoder always has something to read and the decoder
+/// always has something to answer for.
+#[test]
+fn the_hidden_count_is_clamped_away_from_both_ends() {
+    let lv = level();
+    for (frac, want) in [(0.0f64, 1usize), (1.0, D - 1), (0.001, 1), (0.999, D - 1)] {
+        let ep = lv.begin_epoch(41, &draw(frac), P).unwrap();
+        let mb = ep.batch(0).unwrap();
+        assert_eq!(
+            mb.hidden_ids.dims(),
+            &[P, want],
+            "rate {frac} must clamp to {want} hidden"
+        );
+        let vis: Vec<Vec<f32>> = mb.visible_nd.to_vec2().unwrap();
+        for v in &vis {
+            assert_eq!(v.iter().filter(|&&x| x == 0.0).count(), want);
+        }
+    }
+}
+
+/// `Uniform` draws the row's rate first, so the COUNT differs across rows. The
+/// block is then padded to the widest row and carries the weight that makes the
+/// short rows exact.
+#[test]
+fn the_uniform_schedule_varies_the_hidden_count_across_rows() {
+    let lv = level();
+    let d = MaskedDraw {
+        schedule: MaskSchedule::Uniform { lo: 0.1, hi: 0.9 },
+        mask_fraction: 0.4,
+    };
+    let ep = lv.begin_epoch(5, &d, P).unwrap();
+    let mb = ep.batch(0).unwrap();
+    let vis: Vec<Vec<f32>> = mb.visible_nd.to_vec2().unwrap();
+    let counts: Vec<usize> = vis
+        .iter()
+        .map(|r| r.iter().filter(|&&x| x == 0.0).count())
+        .collect();
+    let lo = *counts.iter().min().unwrap();
+    let hi = *counts.iter().max().unwrap();
+    assert!(
+        hi > lo,
+        "the per-row rate did not move the count: {counts:?}"
+    );
+    assert_eq!(
+        mb.hidden_ids.dims(),
+        &[P, hi],
+        "the block is as wide as the widest row"
+    );
+    let w = mb
+        .hidden_weight
+        .as_ref()
+        .expect("a ragged draw carries the weight that makes the short rows exact")
+        .to_vec2::<f32>()
+        .unwrap();
+    for (n, (row, &c)) in w.iter().zip(&counts).enumerate() {
+        assert_eq!(
+            row.iter().sum::<f32>(),
+            c as f32,
+            "row {n}: the weight must count exactly the row's hidden genes"
+        );
+        assert!(row[..c].iter().all(|&x| x == 1.0) && row[c..].iter().all(|&x| x == 0.0));
+    }
+    // The padded slots still index real hidden genes, so a gather is in range
+    // and the mask agrees with the weighted ids.
+    let hid: Vec<Vec<u32>> = mb.hidden_ids.to_vec2().unwrap();
+    for (n, (h, &c)) in hid.iter().zip(&counts).enumerate() {
+        for &g in h {
+            assert_eq!(vis[n][g as usize], 0.0, "row {n}: id {g} is not hidden");
+        }
+        assert!(h[..c].windows(2).all(|x| x[0] < x[1]), "row {n}: {h:?}");
+    }
+}

@@ -94,14 +94,30 @@ fn main() -> anyhow::Result<()> {
     });
 
     // 2. Dense NB head, forward only.
-    let mask_nd = target_mask_nd(&indices, &visible, D)?;
+    // The hidden block the loader hands the head: a fixed count per row, drawn
+    // without replacement and sorted, as `masked_dense::draw_row` produces it.
+    let hidden_ids = {
+        use rand::seq::SliceRandom;
+        let dh = (0.4 * D as f64).round() as usize;
+        let mut rng = rand::rng();
+        let mut ids = Vec::with_capacity(N * dh);
+        for _ in 0..N {
+            let mut all: Vec<u32> = (0..D as u32).collect();
+            all.shuffle(&mut rng);
+            let mut row = all[..dh].to_vec();
+            row.sort_unstable();
+            ids.extend(row);
+        }
+        Tensor::from_vec(ids, (N, dh), &dev)?
+    };
     time(&dev, "dense NB head (fwd)", || {
         let full_kd = dec.full_logits_kd()?;
         let dense = MaskedDenseTarget {
             values: &values_nd,
             residual: None,
             lib: &lib_n1,
-            mask: &mask_nd,
+            hidden_ids: &hidden_ids,
+            hidden_weight: None,
         };
         let _ = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
         Ok(())
@@ -113,7 +129,8 @@ fn main() -> anyhow::Result<()> {
             values: &values_nd,
             residual: None,
             lib: &lib_n1,
-            mask: &mask_nd,
+            hidden_ids: &hidden_ids,
+            hidden_weight: None,
         };
         let llik = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
         let _ = llik.mean_all()?.neg()?.backward()?;
@@ -194,7 +211,8 @@ fn main() -> anyhow::Result<()> {
             values: &values_nd,
             residual: None,
             lib: &lib_n1,
-            mask: &mask_nd,
+            hidden_ids: &hidden_ids,
+            hidden_weight: None,
         };
         let llik = dec.impute_dense_nb(&log_theta, &dense, &full_kd)?;
         let q = QueryTarget {

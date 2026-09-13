@@ -496,48 +496,27 @@ pub struct MaskedTopicArgs {
     )]
     masked_likelihood: MaskedLikelihoodArg,
 
-    #[arg(
-        long,
-        help = "Query decoder: masked and absent genes read the visible context",
-        long_help = "Query decoder. Each masked context gene, and --query-extra genes\n\
-                     outside the context, becomes a query ρ_g + e_mask that attends over\n\
-                     the row's visible slots and adds a log-residual to its own rate,\n\
-                     μ_g = ℓ · (θβ)_g · exp(r_g).\n\
-                     The mixture explains what it can; attention carries the rest.\n\
-                     \n\
-                     REFUSED by the window-free encoder: each query attends over\n\
-                     the genes the encoder read, an [N, Q, K] block, and\n\
-                     window-free that is every gene. No --query-extra makes it fit.\n\
-                     \n\
-                     Off: today's masked heads, byte for byte."
-    )]
-    query_decoder: bool,
+    /// The query-decoder settings an OLD run recorded, kept only so `senna
+    /// update` can replay such a manifest.
+    ///
+    /// Not flags: the query head is no longer wired into the masked family (the
+    /// library module stays, unreachable, for re-wiring later). Recorded values
+    /// are reported once and ignored — see [`MaskedTopicArgs::recorded_query_flags`].
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query_decoder: Option<bool>,
 
-    #[arg(
-        long,
-        default_value_t = 32,
-        value_name = "R",
-        help = "Query decoder: width of the query, key and value projections",
-        long_help = "Query decoder: width of the query, key and value projections.\n\
-                     The gene-by-gene co-expression the decoder learns has rank at most R\n\
-                     and is never formed."
-    )]
-    query_rank: usize,
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query_rank: Option<usize>,
 
-    #[arg(
-        long,
-        default_value_t = 128,
-        value_name = "Q",
-        help = "Query decoder: genes outside the context drawn per row as extra queries"
-    )]
-    query_extra: usize,
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query_extra: Option<usize>,
 
-    #[arg(
-        long,
-        default_value_t = 1.0,
-        help = "Query decoder: weight of mean r² (the mixture explains first)"
-    )]
-    query_penalty: f64,
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query_penalty: Option<f64>,
 
     #[arg(
         long,
@@ -584,11 +563,11 @@ pub struct MaskedTopicArgs {
         value_name = "N",
         help = "Seed for the masking and thinning draws",
         long_help = "Seed for the stochastic training choices this subcommand owns:\n\
-                     the context mask (and its rate under --mask-schedule uniform),\n\
-                     the query set, and --poisson-thin's per-epoch draw.\n\
+                     the hidden set (and its rate under --mask-schedule uniform),\n\
+                     and --poisson-thin's per-epoch draw.\n\
                      \n\
-                     Each is keyed on its own sub-stream — the mask and the query set\n\
-                     on (seed, epoch, level, row), drawn once per epoch, the thinning\n\
+                     Each is keyed on its own sub-stream — the hidden set on\n\
+                     (seed, epoch, level, row), drawn once per epoch, the thinning\n\
                      draw on (seed, epoch, level, column) — so all are reproducible\n\
                      whatever the thread count, the batch size or the shuffle.\n\
                      \n\
@@ -786,6 +765,14 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         info!(
             "this run was recorded with --context-size {k}; the window no longer applies — the \
              encoder reads every gene, zeros included"
+        );
+    }
+    let recorded_query = args.recorded_query_flags();
+    if !recorded_query.is_empty() {
+        info!(
+            "this run was recorded with {}; the query decoder is no longer wired into the \
+             masked family, so these no longer apply",
+            recorded_query.join(", ")
         );
     }
 
@@ -1207,15 +1194,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         latent: head,
         poisson_thin: args.poisson_thin,
         seed: args.seed,
-        // Refused at argument validation; the head has no window-free form.
-        query: None,
     };
 
     let scores = train_masked(
         &collapsed_levels,
         &base_encoder,
         &decoders,
-        None,
         &train_config,
         args.mask_fraction,
         &masked_opts,
@@ -1624,14 +1608,25 @@ impl MaskedTopicArgs {
         self.context_size
     }
 
+    /// Which query-decoder flags a replayed manifest recorded, by their old
+    /// CLI names. Empty for anything this build wrote.
+    pub(crate) fn recorded_query_flags(&self) -> Vec<&'static str> {
+        [
+            self.query_decoder.is_some().then_some("--query-decoder"),
+            self.query_rank.is_some().then_some("--query-rank"),
+            self.query_extra.is_some().then_some("--query-extra"),
+            self.query_penalty.is_some().then_some("--query-penalty"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     /// Refuse the combinations the window-free encoder cannot express, before
     /// anything is read.
     ///
-    /// Both refusals are about the same missing thing: a bounded set of genes
-    /// per cell. The module branch pooled a cell by membership over its context
-    /// SLOTS, and the query head attends from each query gene over the genes
-    /// the encoder read. Neither has a counterpart when the encoder reads all
-    /// of them.
+    /// The module branch pooled a cell by membership over its context SLOTS,
+    /// and there is no context any more: the encoder reads every gene.
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.gene_modules == 0,
@@ -1640,12 +1635,6 @@ impl MaskedTopicArgs {
              encoder reads every gene. Modules are off by default and are being retired; pass \
              --gene-modules 0.",
             self.gene_modules
-        );
-        anyhow::ensure!(
-            !self.query_decoder,
-            "--query-decoder needs a bounded read set: each query gene attends over the genes \
-             the encoder read, an [N, Q, K] block, and window-free that is every gene (K = D). \
-             No --query-extra makes it fit. Drop --query-decoder (and --query-extra)."
         );
         Ok(())
     }

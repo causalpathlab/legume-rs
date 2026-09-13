@@ -41,13 +41,22 @@ pub struct MaskedNbTarget<'a> {
     pub mask: &'a Tensor,
 }
 
-/// Minibatch target for the **dense** masked heads, laid out over the whole
-/// gene axis rather than a per-row context.
+/// Minibatch target for the **dense** masked heads: the row laid out over the
+/// whole gene axis, plus the ids of the genes it is scored at.
 ///
 /// This is the canonical masked-training shape: the encoder reads a bounded
 /// context, and the decoder is scored over a prediction space that does not
 /// depend on that budget, so a gene the encoder never saw — including one with
 /// a zero count — still teaches the dictionary.
+///
+/// The scored set arrives as **ids**, not as an `[N, D]` indicator. Both say
+/// the same thing, but a mask says it only after the elementwise likelihood has
+/// already been computed over every gene and then multiplied to zero at the
+/// visible ones — the majority of the axis. The ids let the head evaluate the
+/// likelihood where it is scored and nowhere else. The dense parts of the rate
+/// (the `[N, K] × [K, D]` product and the partition over all `D`) are
+/// untouched: the partition is a normalisation over the whole gene axis and
+/// restricting it would change the model, not just its cost.
 pub struct MaskedDenseTarget<'a> {
     /// `[N, D]` observed counts over the full gene axis.
     pub values: &'a Tensor,
@@ -57,8 +66,14 @@ pub struct MaskedDenseTarget<'a> {
     pub residual: Option<&'a Tensor>,
     /// `[N, 1]` per-row library size over the full row.
     pub lib: &'a Tensor,
-    /// `[N, D]` 1 = scored, 0 = withheld (the encoder's visible genes).
-    pub mask: &'a Tensor,
+    /// `[N, d_h]` u32 ids of the scored (hidden) genes, ascending within a row.
+    pub hidden_ids: &'a Tensor,
+    /// `[N, d_h]` 1 on a scored slot, 0 on a pad — needed only when the rows
+    /// hide different counts and the block was padded to the widest of them
+    /// (see [`crate::data::masked_dense::DenseMaskedMinibatch::hidden_ids`]).
+    /// `None` when every row hides exactly `d_h`: then there is nothing to
+    /// multiply by.
+    pub hidden_weight: Option<&'a Tensor>,
 }
 
 /// Minibatch target for the **module-collapsed** head: the row's counts
@@ -412,7 +427,7 @@ impl EmbeddedNbTopicDecoder {
             residual_nk,
             lib_n1,
             &log_phi_nk,
-            mask_nk,
+            Some(mask_nk),
         )
     }
 
@@ -435,38 +450,54 @@ impl EmbeddedNbTopicDecoder {
     ) -> Result<Tensor> {
         let p_nk = self.mixture_rate_nk(log_theta_nk, target.indices, full_kd)?; // [N, K]
                                                                                  // Categorical cross-entropy at masked positions: Σ y_g · log p_g.
-        multinomial_score(target.values, &p_nk, target.mask)
+        multinomial_score(target.values, &p_nk, Some(target.mask))
     }
 
     ////////////////////////////////////////////////////
     // Dense heads — scored over the whole gene axis   //
     ////////////////////////////////////////////////////
 
-    /// Masked NB imputation log-likelihood over the full gene axis → `[N]`.
+    /// Masked NB imputation log-likelihood at the row's hidden genes → `[N]`.
     ///
     /// The dense sibling of [`Self::impute_masked_nb`]: same likelihood, same
-    /// dictionary, but the scored positions come from the caller's `[N, D]`
-    /// mask instead of a per-row context, so a gene with a zero count is a
+    /// dictionary, but the scored positions come from the caller's hidden ids
+    /// instead of a per-row context, so a gene with a zero count is a
     /// first-class observation rather than one the top-K dropped.
+    ///
+    /// The rate is formed over the WHOLE axis — one `[N, K] × [K, D]` product
+    /// against `β` normalised over all `D` genes — and only then gathered to
+    /// `[N, d_h]`. Restricting the product would build an `[N, d_h, K]` block,
+    /// larger than it saves; restricting the partition would renormalise `β`
+    /// over the scored genes and change the model.
     pub fn impute_dense_nb(
         &self,
         log_theta_nk: &Tensor,
         target: &MaskedDenseTarget<'_>,
         full_kd: &Tensor,
     ) -> Result<Tensor> {
-        let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
-        let log_phi_nd = self.log_phi_1d.broadcast_as(rate_nd.shape())?;
+        let ids = target.hidden_ids;
+        let (n, dh) = ids.dims2()?;
+        let rate_h = self
+            .mixture_rate_nd(log_theta_nk, full_kd)?
+            .gather(ids, 1)?;
+        let values_h = target.values.contiguous()?.gather(ids, 1)?;
+        let residual_h = target
+            .residual
+            .map(|r| r.contiguous()?.gather(ids, 1))
+            .transpose()?;
+        let log_phi_h =
+            gather_rows(&self.log_phi_1d.squeeze(0)?, &ids.flatten_all()?)?.reshape((n, dh))?;
         nb_score(
-            target.values,
-            &rate_nd,
-            target.residual,
+            &values_h,
+            &rate_h,
+            residual_h.as_ref(),
             target.lib,
-            &log_phi_nd,
-            target.mask,
+            &log_phi_h,
+            target.hidden_weight,
         )
     }
 
-    /// Masked multinomial imputation log-likelihood over the full gene axis →
+    /// Masked multinomial imputation log-likelihood at the row's hidden genes →
     /// `[N]`. The dense sibling of [`Self::impute_masked_multinomial`].
     pub fn impute_dense_multinomial(
         &self,
@@ -474,8 +505,12 @@ impl EmbeddedNbTopicDecoder {
         target: &MaskedDenseTarget<'_>,
         full_kd: &Tensor,
     ) -> Result<Tensor> {
-        let rate_nd = self.mixture_rate_nd(log_theta_nk, full_kd)?;
-        multinomial_score(target.values, &rate_nd, target.mask)
+        let ids = target.hidden_ids;
+        let rate_h = self
+            .mixture_rate_nd(log_theta_nk, full_kd)?
+            .gather(ids, 1)?;
+        let values_h = target.values.contiguous()?.gather(ids, 1)?;
+        multinomial_score(&values_h, &rate_h, target.hidden_weight)
     }
 
     ////////////////////////////////////////////////////////
@@ -564,15 +599,17 @@ impl EmbeddedNbTopicDecoder {
 
 /// `Σ_{scored} log NB(y | residual · ℓ · rate, φ)`, summed over the last axis.
 ///
-/// Shape-agnostic so the indexed `[N, K]` and dense `[N, D]` heads cannot drift
-/// apart: they differ in which positions they score, never in how.
+/// Shape-agnostic so the indexed `[N, K]` and hidden-only `[N, d_h]` heads
+/// cannot drift apart: they differ in which positions they score, never in how.
+/// `weight` is `None` when every position passed in is scored — the hidden-only
+/// head's normal case, where there is nothing to zero out.
 fn nb_score(
     values: &Tensor,
     rate: &Tensor,
     residual: Option<&Tensor>,
     lib_n1: &Tensor,
     log_phi: &Tensor,
-    mask: &Tensor,
+    weight: Option<&Tensor>,
 ) -> Result<Tensor> {
     // μ = residual · ℓ · rate
     let mu = match residual {
@@ -580,13 +617,22 @@ fn nb_score(
         None => rate.broadcast_mul(lib_n1)?,
     };
     let elem = nb_log_likelihood_elem(values, &mu, log_phi)?;
-    elem.mul(mask)?.sum(elem.rank() - 1)
+    weighted_row_sum(elem, weight)
 }
 
 /// `Σ_{scored} y · log p`, summed over the last axis.
-fn multinomial_score(values: &Tensor, rate: &Tensor, mask: &Tensor) -> Result<Tensor> {
+fn multinomial_score(values: &Tensor, rate: &Tensor, weight: Option<&Tensor>) -> Result<Tensor> {
     let ll = (values * (rate + 1e-20)?.log()?)?;
-    ll.mul(mask)?.sum(ll.rank() - 1)
+    weighted_row_sum(ll, weight)
+}
+
+/// Sum the last axis, weighting first where a weight was given.
+fn weighted_row_sum(elem: Tensor, weight: Option<&Tensor>) -> Result<Tensor> {
+    let last = elem.rank() - 1;
+    match weight {
+        Some(w) => elem.mul(w)?.sum(last),
+        None => elem.sum(last),
+    }
 }
 
 #[cfg(test)]

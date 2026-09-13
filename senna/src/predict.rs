@@ -1577,16 +1577,9 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         .embedding_dim
         .ok_or_else(|| anyhow::anyhow!("masked-topic metadata missing embedding_dim"))?;
 
-    if a.metadata.query_rank.is_some() {
-        // The decoder's weights are in the checkpoint, but scoring here reads
-        // the saved dictionary rather than rebuilding a decoder, so the
-        // per-gene residual `exp(r_g)` is not applied. Say so: the alternative
-        // is a silently different rate from the one the model was trained on.
-        log::warn!(
-            "this model was trained with a query decoder; scoring uses the mixture rate only, \
-             so the per-gene residual it learned is not applied here"
-        );
-    }
+    // Refused, not warned: with the head unwired nothing registers its weights,
+    // so the model would be scored at a rate it was never trained at.
+    crate::topic::model_metadata::ensure_query_head_not_wired(a.metadata.query_rank)?;
     let (training_genes, beta_dk) = load_dictionary(a.model)?;
     let (_fm_genes, feature_mean) = load_feature_mean(a.model)?;
     // Only an OLD model (one that recorded a context window) has a shortlist,
