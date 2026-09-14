@@ -42,6 +42,31 @@ pub(crate) fn l2_sq_kernel(a: &[f32], b: &[f32]) -> f32 {
     sum
 }
 
+/// Squared distances from `q` to the points at positions `lo..hi` of a
+/// dimension-major `[d × stride]` table (`table[dim · stride + p]`), written to
+/// `dist[..hi − lo]`: one streaming pass per dimension and no per-point
+/// horizontal reduction, which is what lets one query against a contiguous
+/// range of points run at memory speed.
+#[multiversion(targets = "simd")]
+pub(crate) fn sqdist_soa_range(
+    table: &[f32],
+    stride: usize,
+    q: &[f32],
+    lo: usize,
+    hi: usize,
+    dist: &mut [f32],
+) {
+    let dist = &mut dist[..hi - lo];
+    dist.fill(0.0);
+    for (dim, &qd) in q.iter().enumerate() {
+        let src = &table[dim * stride + lo..dim * stride + hi];
+        for (a, &v) in dist.iter_mut().zip(src) {
+            let t = qd - v;
+            *a += t * t;
+        }
+    }
+}
+
 /// Squared Euclidean distance with runtime SIMD dispatch. Prefer this over
 /// [`l2_simd`] when only *ranking* matters (the `sqrt` is monotone), e.g.
 /// selecting nearest neighbours or a kernel bandwidth.
