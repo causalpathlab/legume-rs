@@ -370,9 +370,8 @@ enum Commands {
     JointSvd(JointSvdArgs),
 
     #[command(
-        about = "Train graph-based embedding (count-NCE, modality-agnostic).",
+        about = "Train graph-based embedding (modality-agnostic).",
         long_about = "Joint embedding of features and cells in one H-dim space.\n\
-                      It uses discriminative count-NCE.\n\
                       The graph is a sketch-coarsened pseudobulk bipartite graph,\n\
                       over (cell, feature) pairs.\n\
                       \n\
@@ -381,20 +380,15 @@ enum Commands {
                       Any number of count panels works: RNA, ATAC, protein. Scoring is bilinear:\n\
                       `E_f · E_c + b_f + b_c`.\n\
                       \n\
-                      Positives are drawn by a two-stage stratified sampler.\n\
-                      Stage 1 picks a pseudobulk with q(p) ∝ pb_size(p)^alpha_pb.\n\
-                      Stage 2 picks a feature within it, weighted by μ_pf.\n\
-                      Negatives are drawn UNIFORMLY over the pool of expressed\n\
-                      features, and are therefore abundance-independent.\n\
-                      With more than one modality on the axis, that pool is the\n\
-                      positive's OWN modality: a panel that carries most of the\n\
-                      library would otherwise never be contrasted against itself.\n\
+                      Phase 1 fits an exact two-level softmax over gene modules:\n\
+                      every module is scored against every unit on every step,\n\
+                      and each unit's genes are scored exactly within K of its modules\n\
+                      (--modules-per-unit), drawn in proportion to the unit's counts in them.\n\
+                      No negatives are sampled.\n\
+                      Units are the pseudobulks at every collapse level plus a per-pseudobulk\n\
+                      cell subsample (--phase1-cells-per-pb).\n\
                       \n\
                       Training runs in two phases.\n\
-                      Phase 1 fits an exact two-level softmax over gene modules:\n\
-                      every module is scored every step,\n\
-                      and K modules per unit at the gene level (--modules-per-unit).\n\
-                      Units are the pseudobulks at every level plus a per-pseudobulk cell subsample.\n\
                       The module structure is internal to phase 1;\n\
                       the plain path no longer writes module_membership/module_dictionary tables.\n\
                       Phase 2 freezes that and densely fits each cell embedding.\n\

@@ -52,10 +52,12 @@ pub struct BgeArgs {
     #[serde(skip)]
     pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
 
-    /// The parent run this one continues, set by `senna update`. bge carries
-    /// the parent's learned gene modules as its warm start (see
-    /// `parent_modules`); the ETM is re-derived by archetypal analysis each run,
-    /// and the emitted reference's generation counter is chained through here.
+    /// The parent run this one continues, set by `senna update`. Under `senna
+    /// update` the parent's module partition (its membership, argmax per gene,
+    /// unmatched genes initialised through the parent's modules) seeds phase 1;
+    /// module vectors and per-gene residuals are re-learned. The ETM is
+    /// re-derived by archetypal analysis each run, and the emitted reference's
+    /// generation counter is chained through here.
     #[arg(skip)]
     #[serde(skip)]
     pub(crate) init_from: Option<Box<str>>,
@@ -170,7 +172,8 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0.01,
-        help = "AdamW learning rate",
+        help = "Learning rate: the row-wise Adagrad step of phase 1 on the plain path\n\
+                (AdamW on the splice path).",
         alias = "lr"
     )]
     pub(crate) learning_rate: f64,
@@ -178,11 +181,15 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "AdamW decoupled weight decay (all params). Default 0.0 = off.",
-        long_help = "AdamW decoupled weight decay, applied uniformly to every parameter.\n\
-                     That covers E_feat, b_feat, and the per-axis heads.\n\
+        help = "Weight decay: on the plain path a per-row shrink 1 − lr·wd on every row a step\n\
+                touches, before its Adagrad update (AdamW decoupled decay on the splice path).",
+        long_help = "Weight decay: on the plain path (bge) a per-row shrink 1 − lr·wd is applied\n\
+                     to every row a step touches, right before that row's Adagrad update.\n\
+                     \n\
+                     On the splice path (gem) this is AdamW's decoupled weight decay instead,\n\
+                     applied uniformly to every parameter: E_feat, b_feat, and the per-axis heads.\n\
                      Per-step post-update shrinkage; doesn't enter the backward graph.\n\
-                     Default 0.0 (off — plain Adam despite the optimizer name)."
+                     Default 0.0 (off)."
     )]
     pub(crate) weight_decay: f64,
 

@@ -126,7 +126,8 @@ pub fn loss_and_grads(
             let p = s[(i, m)];
             if q[m] > 0.0 {
                 // the module-level loss uses ln p, p being softmax_rows' output
-                loss_module -= f64::from(w[i] * q[m] * (p.ln()));
+                // clamped: an underflowed p would report +inf; the gradient does not use ln p
+                loss_module -= f64::from(w[i] * q[m] * (p.max(f32::MIN_POSITIVE).ln()));
             }
             delta1[(i, m)] = w[i] * (p - q[m]);
         }
@@ -186,7 +187,8 @@ pub fn loss_and_grads(
                 for j in 0..d_m {
                     let p = s[(i, j)];
                     if target[j] > 0.0 {
-                        loss -= f64::from(scale * target[j] * p.ln());
+                        // clamped: an underflowed p would report +inf; the gradient does not use ln p
+                        loss -= f64::from(scale * target[j] * p.max(f32::MIN_POSITIVE).ln());
                     }
                     delta2[(i, j)] = scale * (p - target[j]);
                 }

@@ -7,6 +7,26 @@ pub struct Partition {
     pub members: Vec<Vec<u32>>,
 }
 
+/// Hard labels from a soft membership `[D × M]`: the argmax column per row
+/// (ties → the lowest index), `0` for an all-zero row.
+#[must_use]
+pub fn labels_from_membership(pi: &nalgebra::DMatrix<f32>) -> Vec<u32> {
+    pi.row_iter()
+        .map(|row| {
+            let mut best = 0usize;
+            let mut best_val = f32::NEG_INFINITY;
+            for j in 0..row.ncols() {
+                let v = row[j];
+                if v > best_val {
+                    best_val = v;
+                    best = j;
+                }
+            }
+            best as u32
+        })
+        .collect()
+}
+
 impl Partition {
     pub fn from_labels(labels: &[u32], n_modules: usize) -> Self {
         let mut members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
