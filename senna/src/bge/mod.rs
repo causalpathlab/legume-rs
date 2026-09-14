@@ -311,7 +311,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             nce_objective: ge::loss::NceObjective::Softmax,
             // Learned mixed-membership modules in front of ρ — structural on the hier
             // engine (the module count is the only knob, `--gene-modules M`): on
-            // held-out marrow cells they turned the gain over the training-marginal
+            // held-out cells they turned the gain over the training-marginal
             // null from negative to zero, raised the per-cell rank agreement, and
             // lost less under gene ablation.
             // Under `senna update` the parent's modules are carried as the warm start.

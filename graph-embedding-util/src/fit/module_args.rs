@@ -49,7 +49,10 @@ pub struct GeneModuleArgs {
                      OUTPUTS. {out}.module_membership.parquet (gene x M), \n\
                      {out}.module_dictionary.parquet (M x H), {out}.module_residual.parquet,\n\
                      {out}.module_bias.parquet. The feature dictionary keeps holding the composed\n\
-                     row, so nothing that reads it has to know modules exist."
+                     row, so nothing that reads it has to know modules exist.\n\
+                     senna bge's plain path trains its modules inside phase 1 and writes\n\
+                     neither table; they are written by trainers that keep the module layer\n\
+                     (pinto cage)."
     )]
     pub gene_modules: Option<usize>,
 }
