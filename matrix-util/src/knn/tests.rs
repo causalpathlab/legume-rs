@@ -27,7 +27,7 @@ fn dict_from_approx(points: &[Vec<f32>]) -> ColumnDict<usize> {
 /// Independent ground truth for the top-`k` others of `points[q]`: Euclidean
 /// distances by direct differences in double precision, nearest first, ties
 /// by index. Shared by the dictionary tests and the all-pairs kernel tests.
-pub(super) fn brute_others(points: &[Vec<f32>], q: usize, k: usize) -> (Vec<usize>, Vec<f32>) {
+pub(crate) fn brute_others(points: &[Vec<f32>], q: usize, k: usize) -> (Vec<usize>, Vec<f32>) {
     let mut scored: Vec<(f64, usize)> = points
         .iter()
         .enumerate()

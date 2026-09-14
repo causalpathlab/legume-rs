@@ -30,7 +30,7 @@ pub(super) const EF_SEARCH: usize = 128;
 
 /// Below this many points, use the exact brute-force path: recall = 1.0,
 /// deterministic, and cheaper than an HNSW traversal at small `n`.
-pub(super) const EXACT_THRESHOLD: usize = 8_192;
+pub(crate) const EXACT_THRESHOLD: usize = 8_192;
 
 /// Search backend behind a [`ColumnDict`].
 pub(super) enum Backend {
