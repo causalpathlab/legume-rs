@@ -5,6 +5,8 @@
 pub mod params;
 pub mod partition;
 pub mod step;
+pub mod train;
 pub mod units;
 
+pub use train::{train, HierConfig, HierOutput};
 pub use units::UnitTable;
