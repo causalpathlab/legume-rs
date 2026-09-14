@@ -138,6 +138,10 @@ pub struct FitConfig {
     /// - `k ≥ n_cells`: no pb-sample exceeds `k`, so subsampling is a no-op —
     ///   every cell shapes `E_feat` (legacy all-cells behaviour; slowest).
     pub phase1_cells_per_pb: usize,
+    /// Hierarchical phase 1 (plain path): units per optimizer step.
+    pub hier_units_per_step: usize,
+    /// Hierarchical phase 1: modules drawn per unit per step for the gene-level term.
+    pub hier_modules_per_unit: usize,
     /// Optional per-gene β-sharing feature parameterization. When `Some`, the
     /// feature side is built as [`crate::model::FeatFactor`] (every feature row
     /// reuses its gene's `β_g`) instead of a free `E_feat` table, phase-2 identity

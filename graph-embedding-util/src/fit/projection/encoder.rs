@@ -533,7 +533,11 @@ pub(crate) fn map_targets(
     let mut at = 0usize;
     for level in groups {
         let n = level.len();
-        tables.push(DMatrix::<f32>::from_row_slice(n, h, &out.theta[at * h..(at + n) * h]));
+        tables.push(DMatrix::<f32>::from_row_slice(
+            n,
+            h,
+            &out.theta[at * h..(at + n) * h],
+        ));
         at += n;
     }
     Ok(tables)
@@ -779,7 +783,8 @@ pub(crate) fn refine(
         let mut loss_sum = Tensor::zeros((), DType::F32, dev)?;
         let mut n_steps = 0usize;
         for chunk in order.chunks(REFINE_CELLS_PER_STEP) {
-            let slices: Vec<(&[u32], &[f32])> = chunk.iter().map(|&i| rows[i].as_slices()).collect();
+            let slices: Vec<(&[u32], &[f32])> =
+                chunk.iter().map(|&i| rows[i].as_slices()).collect();
             let (x, totals) = densify(&slices, d);
             let x = Tensor::from_vec(x, (chunk.len(), d), dev)?;
             let t = Tensor::from_slice(&totals, chunk.len(), dev)?;
@@ -875,10 +880,7 @@ pub(crate) fn project_cells(
     let targets: Vec<DistillTargets<'_>> = tables
         .iter()
         .zip(&groups)
-        .map(|(t, g)| DistillTargets {
-            e_pb: t,
-            groups: g,
-        })
+        .map(|(t, g)| DistillTargets { e_pb: t, groups: g })
         .collect();
     let (encoder, stats) = distill(dict, &mean_1d, &targets, &rows, spec.seed, dev)?;
     info!(
@@ -894,9 +896,7 @@ pub(crate) fn project_cells(
     let refined = refine(&encoder, &rows, input.lambda, spec.seed, dev)?;
     info!(
         "Phase 2 (encoder) — refined on {} cells; NLL/count {:.4} → {:.4}",
-        refined.n_cells,
-        refined.nll_per_count_before,
-        refined.nll_per_count_after
+        refined.n_cells, refined.nll_per_count_before, refined.nll_per_count_after
     );
 
     let slices: Vec<(&[u32], &[f32])> = rows.iter().map(FoldedRow::as_slices).collect();

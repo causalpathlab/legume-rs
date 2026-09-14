@@ -26,9 +26,11 @@ pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
 pub use projection::{CellEncoder, PbLevelVelocity};
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
-use crate::data::UnifiedData;
+use crate::data::{Triplet, UnifiedData};
 use crate::model::JointEmbedModel;
 use crate::training::{train_composite, CompositeTrainContext, PbSemTerm};
+use anyhow::Context;
+use candle_util::candle_core::Tensor;
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
 use log::info;
 use matrix_param::traits::Inference;
@@ -119,34 +121,50 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // VarMap and embedding heads //
     ////////////////////////////////
     let varmap = VarMap::new();
+    // Plain path: phase 1 trains by the exact hierarchical softmax (see
+    // `hier`), which owns its own module warm start and composes the dictionary
+    // itself — the gene-module NCE model and its k-means/parent warm start below
+    // are for the splice (β-sharing) path only.
+    let hier_path = config.feat_factor.is_none();
     // Module warm start: k-means over the feature profiles at the finest collapse
     // level, on the same batch-corrected pseudobulk counts phase 1 trains on.
     // Either the k-means labels over this fit's own profiles, or — under a parent
     // (`senna update`) — explicit logits carrying the parent's membership for the
     // matched features and initializing the rest through the parent's modules.
-    let module_warm: Option<models::ModuleWarm> = config.gene_modules.as_ref().map(|g| {
-        let finest = collapsed_levels.last().expect("at least one level");
-        let pb_full = match &finest.mu_adjusted {
-            Some(adj) => adj.posterior_mean(),
-            None => finest.mu_observed.posterior_mean(),
-        };
-        let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
-        match &g.parent {
-            Some(parent) => models::ModuleWarm::Parent {
-                logits: module_warm::parent_module_logits(parent, &profile),
-                mu: parent.mu.clone(),
-            },
-            None => models::ModuleWarm::Labels(module_warm::warm_start_module_labels(
-                &profile,
-                g.n_modules,
-                config.seed,
-            )),
-        }
-    });
+    let module_warm: Option<models::ModuleWarm> = if hier_path {
+        None
+    } else {
+        config.gene_modules.as_ref().map(|g| {
+            let finest = collapsed_levels.last().expect("at least one level");
+            let pb_full = match &finest.mu_adjusted {
+                Some(adj) => adj.posterior_mean(),
+                None => finest.mu_observed.posterior_mean(),
+            };
+            let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
+            match &g.parent {
+                Some(parent) => models::ModuleWarm::Parent {
+                    logits: module_warm::parent_module_logits(parent, &profile),
+                    mu: parent.mu.clone(),
+                },
+                None => models::ModuleWarm::Labels(module_warm::warm_start_module_labels(
+                    &profile,
+                    g.n_modules,
+                    config.seed,
+                )),
+            }
+        })
+    };
     let models::Heads {
         mut cell_model,
-        level_models,
-    } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_ref(), &varmap)?;
+        mut level_models,
+    } = models::build_heads(
+        unified,
+        &pb_blobs,
+        &config,
+        module_warm.as_ref(),
+        !hier_path,
+        &varmap,
+    )?;
 
     ////////////////////////////////
     // Composite axes and trainer //
@@ -195,7 +213,105 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         config.epochs
     };
     let refine_epochs = config.epochs - warmup_epochs;
-    {
+    if hier_path {
+        //////////////////////////////////////////////
+        // Plain path: exact hierarchical softmax    //
+        //////////////////////////////////////////////
+
+        // Units = every level's pseudobulks + the phase-1 cell subsample,
+        // the cells batch-folded like phase 2 folds them.
+        let cell_fold = batch_gene_fold.as_ref().map(|fold| CellBatchFold {
+            fold,
+            cell_to_batch: &unified.batch_membership,
+        });
+        let blobs: Vec<&[Triplet]> = pb_blobs.iter().map(|b| b.triplets.as_slice()).collect();
+        let n_pb_per_level: Vec<usize> = pb_blobs.iter().map(|b| b.n_cells()).collect();
+        let cell_rows: Vec<(u32, &[u32], &[f32])> = ax
+            .phase1_cell_samplers()
+            .iter()
+            .flat_map(|s| {
+                s.active_cells
+                    .iter()
+                    .zip(&s.per_cell)
+                    .map(|(&c, cf)| (c, cf.features.as_slice(), cf.counts.as_slice()))
+            })
+            .collect();
+        let units = hier::UnitTable::from_pseudobulks_and_cells(
+            &blobs,
+            &n_pb_per_level,
+            &cell_rows,
+            cell_fold,
+            n_features,
+        );
+        // Module labels: the k-means warm start over the finest level's profiles
+        // (the same call the module model used), or a single module.
+        let n_modules = config.gene_modules.as_ref().map_or(128, |g| g.n_modules);
+        let labels: Vec<u32> = {
+            let finest = collapsed_levels.last().expect("at least one level");
+            let pb_full = match &finest.mu_adjusted {
+                Some(adj) => adj.posterior_mean(),
+                None => finest.mu_observed.posterior_mean(),
+            };
+            let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
+            module_warm::warm_start_module_labels(&profile, n_modules, config.seed)
+        };
+        let out = hier::train(
+            &units,
+            &labels,
+            h,
+            &hier::HierConfig {
+                n_modules,
+                epochs: warmup_epochs,
+                units_per_step: config.hier_units_per_step,
+                modules_per_unit: config.hier_modules_per_unit,
+                lr: config.learning_rate as f32,
+                weight_decay: config.weight_decay as f32,
+                seed: config.seed,
+            },
+            &stop,
+        )?;
+        // The composed dictionary into the shared feature Vars; each level's
+        // pseudobulk rows into that level head's cell table.
+        let rho_row_major: Vec<f32> = out.rho.transpose().as_slice().to_vec();
+        let rho_t = Tensor::from_slice(&rho_row_major, (n_features, h), &config.device)?;
+        let b_feat_t = Tensor::from_slice(out.b_feat.as_slice(), n_features, &config.device)?;
+        {
+            let vars = varmap.data().lock().unwrap();
+            vars.get(crate::model::E_FEAT_VAR_NAME)
+                .context("e_feat var missing")?
+                .set(&rho_t)?;
+            vars.get("b_feat")
+                .context("b_feat var missing")?
+                .set(&b_feat_t)?;
+        }
+        cell_model.e_feat = rho_t;
+        cell_model.b_feat = b_feat_t;
+        for (l, lm) in level_models.iter_mut().enumerate() {
+            let n_pb = lm.e_cell.dim(0)?;
+            let mut rows = vec![0f32; n_pb * h];
+            for u in 0..units.n_units() {
+                if units.level[u] == l as u8 {
+                    let p = units.source_index[u] as usize;
+                    let row: Vec<f32> = out.e_u.row(u).iter().copied().collect();
+                    rows[p * h..(p + 1) * h].copy_from_slice(&row);
+                }
+            }
+            let e_cell_t = Tensor::from_vec(rows, (n_pb, h), &config.device)?;
+            {
+                let vars = varmap.data().lock().unwrap();
+                vars.get(&format!("pb_l{l}_e_cell"))
+                    .context("pb level e_cell var missing")?
+                    .set(&e_cell_t)?;
+            }
+            lm.e_cell = e_cell_t;
+        }
+        info!(
+            "Phase 1 (hier) — done: loss/unit {:.4}; dictionary {} × {h} composed from {n_modules} \
+             modules",
+            out.final_loss_per_unit, n_features
+        );
+    } else {
+        // Splice path (gem): the composite NCE trainer, unchanged.
         let joint_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
         let mut opt1 = AdamW::new(varmap.all_vars(), adamw_params())?;
         let mut p1 = stage_params(&config);

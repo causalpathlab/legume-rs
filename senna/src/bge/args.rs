@@ -103,6 +103,18 @@ pub struct BgeArgs {
     pub(crate) phase1_cells_per_pb: usize,
 
     #[arg(
+        long = "modules-per-unit",
+        default_value_t = 8,
+        value_name = "K",
+        help = "Modules scored at the gene level per unit per step (phase 1)",
+        long_help = "Phase 1 scores every module exactly, every step.\n\
+                     At the gene level it scores K modules per unit per step,\n\
+                     drawn in proportion to the unit's share of counts in them.\n\
+                     Higher K covers more of a unit's genes per epoch at linear cost."
+    )]
+    pub(crate) modules_per_unit: usize,
+
+    #[arg(
         long = "skip-etm",
         default_value_t = false,
         help = "Skip ETM resolution; emit raw bge embeddings (Z and ρ) only.",
