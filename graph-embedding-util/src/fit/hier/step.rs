@@ -51,7 +51,6 @@ pub struct StepPlan {
 pub struct StepStats {
     pub loss_module: f64,
     pub loss_gene: f64,
-    pub n_pairs: usize,
 }
 
 pub struct Optimizers {
@@ -236,11 +235,9 @@ pub fn loss_and_grads(
     let mut loss_gene = 0f64;
     let mut g_r: Vec<(u32, Vec<f32>)> = Vec::new();
     let mut g_b_g: Vec<(u32, f32)> = Vec::new();
-    let mut n_pairs = 0usize;
     for o in outs {
         loss_gene += o.loss;
         for (i, row) in o.e_rows {
-            n_pairs += 1;
             for k in 0..h {
                 g_e_u[i * h + k] += row[k];
             }
@@ -252,7 +249,6 @@ pub fn loss_and_grads(
         StepStats {
             loss_module,
             loss_gene,
-            n_pairs,
         },
         Grads {
             e_u: g_e_u,
