@@ -5,6 +5,7 @@
 mod axes;
 pub mod batch_fold;
 mod config;
+pub mod hier;
 pub mod lift;
 pub mod lineage;
 mod models;
@@ -442,7 +443,11 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             unspliced,
             config.joint_velocity,
             // DIAGNOSTIC (not for commit): force the block SGD.
-            if std::env::var_os("SENNA_PHASE2_SGD").is_some() { None } else { Some(&spec) },
+            if std::env::var_os("SENNA_PHASE2_SGD").is_some() {
+                None
+            } else {
+                Some(&spec)
+            },
         )?
     };
 
