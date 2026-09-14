@@ -730,12 +730,13 @@ pub(crate) fn refine(
             n_steps += 1;
         }
         bar.inc(1);
+        // The running training loss is the checkpoint reading; the whole-set
+        // NLL is scored once before and once after, not every other epoch.
         if (epoch + 1).is_multiple_of(REFINE_REPORT_EVERY) && epoch + 1 < REFINE_EPOCHS {
             info!(
-                "Phase 2 (encoder) — refine epoch {}: mean per-cell loss {:.2}, NLL/count {:.4}",
+                "Phase 2 (encoder) — refine epoch {}: mean per-cell loss {:.2}",
                 epoch + 1,
                 loss_sum.to_scalar::<f32>()? / n_steps.max(1) as f32,
-                score_all()?
             );
         }
     }

@@ -33,7 +33,6 @@ pub struct HierOutput {
     pub e_u: DMatrix<f32>,
     pub rho: DMatrix<f32>,
     pub b_feat: Vec<f32>,
-    pub partition: Partition,
     /// Mean loss per unit over the last completed epoch; `NaN` when training
     /// stopped before any epoch completed (the tables are still finite).
     pub final_loss_per_unit: f64,
@@ -47,9 +46,26 @@ pub struct HierOutput {
 /// all-zero composition draws no modules, so it has no gene-level pairs; it
 /// stays in `plan.units`, where its module-level term is exactly zero because
 /// its weight (∝ total^½) is zero.
+/// One module picker per unit, built once: a unit's composition never changes
+/// during training. `None` for a unit with no counts.
+pub(crate) fn module_pickers(um: &UnitModules, n_m: usize) -> Vec<Option<WeightedIndex<f64>>> {
+    um.q.chunks_exact(n_m)
+        .map(|q| {
+            if q.iter().all(|&x| x == 0.0) {
+                None
+            } else {
+                Some(
+                    WeightedIndex::new(q.iter().map(|&x| f64::from(x)))
+                        .expect("non-negative, not all zero"),
+                )
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn draw_plan(
     chunk: &[u32],
-    um: &UnitModules,
+    pickers: &[Option<WeightedIndex<f64>>],
     n_m: usize,
     k: usize,
     rng: &mut StdRng,
@@ -58,12 +74,9 @@ pub(crate) fn draw_plan(
     let inv_k = 1.0 / k.max(1) as f32;
     let mut counts: Vec<u32> = vec![0; n_m];
     for &u in chunk {
-        let q = &um.q[u as usize * n_m..(u as usize + 1) * n_m];
-        if q.iter().all(|&x| x == 0.0) {
+        let Some(picker) = pickers[u as usize].as_ref() else {
             continue;
-        }
-        let picker = WeightedIndex::new(q.iter().map(|&x| f64::from(x)))
-            .expect("non-negative, not all zero");
+        };
         counts.iter_mut().for_each(|c| *c = 0);
         for _ in 0..k {
             counts[picker.sample(rng)] += 1;
@@ -106,6 +119,7 @@ pub fn train(
         r: RowAdagrad::new(d, cfg.lr),
     };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
+    let pickers = module_pickers(&um, n_m);
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
     info!(
@@ -119,21 +133,23 @@ pub fn train(
     'epochs: for epoch in 0..cfg.epochs {
         order.shuffle(&mut rng);
         let mut acc = StepStats::default();
+        let mut n_units_seen = 0usize;
         for chunk in order.chunks(cfg.units_per_step.max(1)) {
             if stop.load(Ordering::Relaxed) {
                 info!("Phase 1 (hier) — stop requested at epoch {epoch}");
                 break 'epochs;
             }
-            let plan = draw_plan(chunk, &um, n_m, cfg.modules_per_unit, &mut rng);
+            let plan = draw_plan(chunk, &pickers, n_m, cfg.modules_per_unit, &mut rng);
             let (stats, grads): (StepStats, Grads) =
                 loss_and_grads(&params, units, &um, &part, &plan);
             apply(&mut params, &mut opt, &grads, &plan, cfg.weight_decay);
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
-            acc.n_units += stats.n_units;
             acc.n_pairs += stats.n_pairs;
+            n_units_seen += chunk.len();
         }
-        last_per_unit = (acc.loss_module + acc.loss_gene) / acc.n_units.max(1) as f64;
+        let per_unit = 1.0 / n_units_seen.max(1) as f64;
+        last_per_unit = (acc.loss_module + acc.loss_gene) * per_unit;
         bar.inc(1);
         if (epoch + 1).is_multiple_of(REPORT_EVERY) || epoch + 1 == cfg.epochs {
             let ms = t0.elapsed().as_secs_f64() * 1e3 / ((epoch + 1) * steps_per_epoch) as f64;
@@ -143,8 +159,8 @@ pub fn train(
                 epoch + 1,
                 cfg.epochs,
                 last_per_unit,
-                acc.loss_module / acc.n_units.max(1) as f64,
-                acc.loss_gene / acc.n_units.max(1) as f64,
+                acc.loss_module * per_unit,
+                acc.loss_gene * per_unit,
                 ms
             );
         }
@@ -165,7 +181,6 @@ pub fn train(
         e_u: DMatrix::<f32>::from_row_slice(n_u, h, &params.e_u),
         rho,
         b_feat,
-        partition: part,
         final_loss_per_unit: last_per_unit,
     })
 }
