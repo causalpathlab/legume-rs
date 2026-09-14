@@ -588,19 +588,25 @@ pub fn write_gene_community_param(
     Ok(())
 }
 
+/// Stop the k-means cut once fewer than this fraction of pairs still change
+/// community in an iteration; the tail of Lloyd's algorithm moves a handful of
+/// boundary pairs for no change in the partition worth waiting on.
+const KMEANS_MIN_CHANGED_FRAC: f64 = 1e-4;
+
 /// How the edge latent gets cut into link communities.
 ///
 /// K-means fixes the community count up front; Leiden derives it from the
 /// resolution, so a run that has fewer (or more) distinct interaction regimes
 /// than the latent width is not forced into `K` of them. Both consume the same
-/// `[K_latent × N_pairs]` projection, so every caller can offer either.
+/// `[N_pairs × K_latent]` projection, so every caller can offer either.
 #[derive(Debug, Clone, Copy)]
 pub enum EdgeClustering {
-    /// Lloyd's algorithm on the pairs, `k` fixed. `None` falls back to the
-    /// latent width, read off the matrix rather than passed in beside it.
+    /// Seeded spherical k-means on the pairs, `k` fixed. `None` falls back to
+    /// the latent width, read off the matrix rather than passed in beside it.
     Kmeans {
         n_clusters: Option<usize>,
         max_iter: usize,
+        seed: u64,
     },
     /// Leiden over a cosine kNN graph on the pairs. `target` steers the
     /// resolution toward a community count when the caller has one in mind;
@@ -621,20 +627,30 @@ impl EdgeClustering {
     ///
     /// Pairs as rows because that is the orientation everything else already
     /// has: it is how the latent is written to parquet, how `prop` reads it
-    /// back, and what Leiden wants. Only k-means needs the transpose, and it is
-    /// no longer the default.
+    /// back, and what both clusterers take.
     pub fn cluster(&self, pair_latent_nk: &Mat) -> anyhow::Result<Vec<usize>> {
         Ok(match *self {
             Self::Kmeans {
                 n_clusters,
                 max_iter,
+                seed,
             } => {
-                let num_clusters = n_clusters.unwrap_or(pair_latent_nk.ncols());
-                info!("K-means clustering edges (k={num_clusters})...");
-                pair_latent_nk.transpose().kmeans_columns(KmeansArgs {
-                    num_clusters,
-                    max_iter,
-                })
+                let k = n_clusters.unwrap_or(pair_latent_nk.ncols());
+                info!("Spherical k-means clustering edges (k={k}, seed={seed})...");
+                // Cosine, because the pair latent is a direction (it was
+                // L2-normalized before it got here).
+                matrix_util::kmeans::kmeans_rows_seeded(
+                    pair_latent_nk,
+                    &matrix_util::kmeans::KmeansRowsOpts {
+                        k,
+                        max_iter,
+                        seed,
+                        metric: matrix_util::kmeans::KmeansMetric::Cosine,
+                        min_changed_frac: KMEANS_MIN_CHANGED_FRAC,
+                        init_sample: 0,
+                    },
+                )
+                .labels
             }
             Self::Leiden {
                 knn,

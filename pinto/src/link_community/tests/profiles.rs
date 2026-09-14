@@ -305,3 +305,69 @@ fn edge_profiles_survive_a_short_final_job() {
         }
     }
 }
+
+////////////////////////////////
+// The k-means edge-cut arm  //
+////////////////////////////////
+
+/// `n_per` unit-norm pair latents around each of three planted directions,
+/// rows in planted order.
+fn planted_pair_latent(n_per: usize) -> Mat {
+    let dirs = [
+        [1.0f32, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ];
+    let mut m = Mat::zeros(3 * n_per, 4);
+    for (c, dir) in dirs.iter().enumerate() {
+        for i in 0..n_per {
+            let r = c * n_per + i;
+            let mut norm = 0f32;
+            for j in 0..4 {
+                let jitter = 0.15 * (((r * 7 + j * 13) % 11) as f32 / 11.0 - 0.5);
+                m[(r, j)] = dir[j] + jitter;
+                norm += m[(r, j)].powi(2);
+            }
+            let norm = norm.sqrt();
+            for j in 0..4 {
+                m[(r, j)] /= norm;
+            }
+        }
+    }
+    m
+}
+
+#[test]
+fn kmeans_arm_is_seeded_spherical_and_recovers_planted_directions() {
+    let latent = planted_pair_latent(100);
+    let cut = EdgeClustering::Kmeans {
+        n_clusters: Some(3),
+        max_iter: 50,
+        seed: 1,
+    };
+    let a = cut.cluster(&latent).unwrap();
+    let b = cut.cluster(&latent).unwrap();
+    assert_eq!(a, b, "the same seed must give the same cut");
+    for c in 0..3 {
+        let block = &a[c * 100..(c + 1) * 100];
+        assert!(block.iter().all(|&l| l == block[0]), "direction {c} split");
+    }
+    assert_eq!(realized_communities(&a, a.len()).unwrap(), 3);
+
+    // Spherical: rescaling a row cannot move it to another community.
+    let mut scaled = latent.clone();
+    for (r, mut row) in scaled.row_iter_mut().enumerate() {
+        row *= 0.2 + (r % 7) as f32;
+    }
+    assert_eq!(cut.cluster(&scaled).unwrap(), a);
+
+    // An unset count falls back to the latent width.
+    let by_width = EdgeClustering::Kmeans {
+        n_clusters: None,
+        max_iter: 50,
+        seed: 1,
+    }
+    .cluster(&latent)
+    .unwrap();
+    assert!(by_width.iter().all(|&l| l < 4));
+}

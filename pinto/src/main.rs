@@ -141,7 +141,8 @@ enum Commands {
                       --edge-cluster-method picks the cut.\n\
                       leiden is the default,\n\
                       deciding the count from --leiden-resolution.\n\
-                      kmeans instead uses a fixed --n-edge-clusters.\n\
+                      kmeans instead uses a fixed --n-edge-clusters,\n\
+                      spherical on the pair latent and seeded by --seed.\n\
                       `pinto prop` re-cuts the same latent at a fixed K.\n\n\
                       Outputs:\n\
                       - {out}.delta.parquet: batch effects (when multi-batch)\n\
@@ -173,7 +174,7 @@ enum Commands {
                       Model:\n\
                       \x20 Given latent codes z_e [E x T] from cage or delta-svd:\n\
                       \x20   c_e = the pair's community, cut by leiden (default)\n\
-                      \x20        or by kmeans, argmin_k ||z_e - centroid_k||\n\
+                      \x20        or by spherical kmeans, argmax_k cos(z_e, centroid_k)\n\
                       \x20 For each vertex i:\n\
                       \x20   p_i[k] = |{e incident to i : c_e = k}| / degree(i)\n\
                       \x20 Optionally, cluster-specific gene expression:\n\
@@ -347,7 +348,8 @@ enum Commands {
                       --edge-cluster-method picks the cut.\n\
                       leiden is the default,\n\
                       deciding the count from --leiden-resolution.\n\
-                      kmeans instead uses a fixed --n-edge-clusters.\n\n\
+                      kmeans instead uses a fixed --n-edge-clusters,\n\
+                      spherical on the pair latent and seeded by --seed.\n\n\
                       A cell's embedding is a readout, never a trained table:\n\
                       the propensity-weighted average of its link communities'\n\
                       centroids in the pair-latent space,\n\
