@@ -34,6 +34,8 @@ pub struct HierOutput {
     pub rho: DMatrix<f32>,
     pub b_feat: Vec<f32>,
     pub partition: Partition,
+    /// Mean loss per unit over the last completed epoch; `NaN` when training
+    /// stopped before any epoch completed (the tables are still finite).
     pub final_loss_per_unit: f64,
 }
 
@@ -42,8 +44,9 @@ pub struct HierOutput {
 /// weight = draw multiplicity / `k`. Weights for a unit sum to 1 across the
 /// modules it lands in, so this is an unbiased estimator of the exhaustive
 /// per-module sum — never dedup-and-drop the multiplicity. A unit with an
-/// all-zero composition (no counted genes) is skipped and appears nowhere in
-/// the plan.
+/// all-zero composition draws no modules, so it has no gene-level pairs; it
+/// stays in `plan.units`, where its module-level term is exactly zero because
+/// its weight (∝ total^½) is zero.
 pub(crate) fn draw_plan(
     chunk: &[u32],
     um: &UnitModules,
