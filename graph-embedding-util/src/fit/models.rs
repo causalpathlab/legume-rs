@@ -47,7 +47,6 @@ pub(super) fn build_heads(
     pb_blobs: &[UnifiedData],
     config: &FitConfig,
     module_warm: Option<&ModuleWarm>,
-    modules: bool,
     varmap: &VarMap,
 ) -> anyhow::Result<Heads> {
     let (n_features, n_cells, h) = (
@@ -59,8 +58,14 @@ pub(super) fn build_heads(
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
+    // The module layer is a composite-trainer parameterization: the plain path
+    // (no feat_factor) trains by the hierarchical engine and needs a free
+    // feature table it can write the composed dictionary into.
     let cell_model = match (
-        config.gene_modules.as_ref().filter(|_| modules),
+        config
+            .gene_modules
+            .as_ref()
+            .filter(|_| config.feat_factor.is_some()),
         &config.feat_factor,
     ) {
         (Some(gm), factor) => {

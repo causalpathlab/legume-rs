@@ -1,9 +1,7 @@
 //! Host-side parameter tables and PBG's row-wise Adagrad.
 
-use matrix_util::rand_util::mix_seed;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand_distr::{Distribution, Normal};
+use matrix_util::rand_util::{collect_f32_seeded, mix_seed};
+use rand_distr::Normal;
 
 const INIT_STDEV: f32 = 0.1;
 const ADAGRAD_EPS: f32 = 1e-10;
@@ -18,9 +16,8 @@ pub struct HierParams {
 }
 
 fn randn(n: usize, seed: u64) -> Vec<f32> {
-    let mut rng = StdRng::seed_from_u64(seed);
     let dist = Normal::new(0.0f32, INIT_STDEV).expect("finite stdev");
-    (0..n).map(|_| dist.sample(&mut rng)).collect()
+    collect_f32_seeded(n, dist, seed)
 }
 
 impl HierParams {
@@ -33,12 +30,6 @@ impl HierParams {
             r: randn(n_features * h, mix_seed(seed, 0x5253)),
             b_g: vec![0.0; n_features],
         }
-    }
-    pub fn e_u_row(&self, u: usize) -> &[f32] {
-        &self.e_u[u * self.h..(u + 1) * self.h]
-    }
-    pub fn r_row(&self, g: usize) -> &[f32] {
-        &self.r[g * self.h..(g + 1) * self.h]
     }
 }
 
@@ -67,6 +58,32 @@ impl RowAdagrad {
         for (x, g) in row.iter_mut().zip(grad) {
             *x -= step * g;
         }
+    }
+
+    /// [`Self::update`] for a row that carries a scalar bias alongside it: the
+    /// accumulator sees the mean of `grad²` over the row AND the bias, and both
+    /// move by the same row step. What the callers did by concatenating the
+    /// bias onto a copy of the row, without the copy.
+    pub fn update_with_bias(
+        &mut self,
+        r: usize,
+        row: &mut [f32],
+        bias: &mut f32,
+        grad: &[f32],
+        gbias: f32,
+    ) {
+        debug_assert_eq!(row.len(), grad.len());
+        let n = (grad.len() + 1) as f32;
+        let g2 = (grad.iter().map(|g| g * g).sum::<f32>() + gbias * gbias) / n;
+        if g2 == 0.0 {
+            return;
+        }
+        self.acc[r] += g2;
+        let step = self.lr / (self.acc[r].sqrt() + self.eps);
+        for (x, g) in row.iter_mut().zip(grad) {
+            *x -= step * g;
+        }
+        *bias -= step * gbias;
     }
 }
 

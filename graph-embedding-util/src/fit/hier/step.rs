@@ -51,7 +51,6 @@ pub struct StepPlan {
 pub struct StepStats {
     pub loss_module: f64,
     pub loss_gene: f64,
-    pub n_units: usize,
     pub n_pairs: usize,
 }
 
@@ -133,7 +132,7 @@ pub fn loss_and_grads(
         }
     }
     let g_e_module = &delta1 * &mu; // [B × H]
-    let g_mu = delta1.transpose() * &e_b; // [M × H]
+    let g_mu = delta1.tr_mul(&e_b); // [M × H]
     let g_b_m: Vec<f32> = (0..n_m).map(|m| delta1.column(m).sum()).collect();
 
     ////////////////
@@ -171,6 +170,8 @@ pub fn loss_and_grads(
             softmax_rows(&mut s);
             let mut loss = 0f64;
             let mut delta2 = DMatrix::<f32>::zeros(pairs.len(), d_m); // w_u·(c_k/K) (p − q_g|m)
+                                                                      // One target buffer per module, cleared through the slots it touched.
+            let mut target = vec![0f32; d_m];
             for (i, &(u, wt)) in pairs.iter().enumerate() {
                 let scale = units.weight[u as usize] * wt;
                 // target shares within the module
@@ -180,7 +181,6 @@ pub fn loss_and_grads(
                     .map(|(_, v)| v.as_slice())
                     .unwrap_or(&[]);
                 let n_um = um.n_um[u as usize * n_m + *m as usize];
-                let mut target = vec![0f32; d_m];
                 for &(slot, c) in counts {
                     target[slot as usize] += c / n_um;
                 }
@@ -192,9 +192,12 @@ pub fn loss_and_grads(
                     }
                     delta2[(i, j)] = scale * (p - target[j]);
                 }
+                for &(slot, _) in counts {
+                    target[slot as usize] = 0.0;
+                }
             }
             let g_e = &delta2 * &r_m; // [n × H]
-            let g_r = delta2.transpose() * &e_m; // [d_m × H]
+            let g_r = delta2.tr_mul(&e_m); // [d_m × H]
             let e_rows = pairs
                 .iter()
                 .enumerate()
@@ -249,7 +252,6 @@ pub fn loss_and_grads(
         StepStats {
             loss_module,
             loss_gene,
-            n_units: b,
             n_pairs,
         },
         Grads {
@@ -272,44 +274,38 @@ pub fn apply(
     wd: f32,
 ) {
     let h = params.h;
+    let decay = |row: &mut [f32], lr: f32| {
+        if wd > 0.0 {
+            let f = 1.0 - lr * wd;
+            row.iter_mut().for_each(|x| *x *= f);
+        }
+    };
     for (i, &u) in plan.units.iter().enumerate() {
         let u = u as usize;
         let row = &mut params.e_u[u * h..(u + 1) * h];
-        if wd > 0.0 {
-            let f = 1.0 - opt.e_u.lr * wd;
-            row.iter_mut().for_each(|x| *x *= f);
-        }
+        decay(row, opt.e_u.lr);
         opt.e_u.update(u, row, &grads.e_u[i * h..(i + 1) * h]);
     }
-    let n_m = params.b_m.len();
-    for m in 0..n_m {
-        // bias rides on the module's row: extend the gradient by one entry
-        let mut g: Vec<f32> = grads.mu[m * h..(m + 1) * h].to_vec();
-        g.push(grads.b_m[m]);
-        let mut row: Vec<f32> = params.mu[m * h..(m + 1) * h].to_vec();
-        if wd > 0.0 {
-            let f = 1.0 - opt.mu.lr * wd;
-            row.iter_mut().for_each(|x| *x *= f);
-        }
-        row.push(params.b_m[m]);
-        opt.mu.update(m, &mut row, &g);
-        params.mu[m * h..(m + 1) * h].copy_from_slice(&row[..h]);
-        params.b_m[m] = row[h];
+    for m in 0..params.b_m.len() {
+        let row = &mut params.mu[m * h..(m + 1) * h];
+        decay(row, opt.mu.lr);
+        opt.mu.update_with_bias(
+            m,
+            row,
+            &mut params.b_m[m],
+            &grads.mu[m * h..(m + 1) * h],
+            grads.b_m[m],
+        );
     }
-    let b_g_of: rustc_hash::FxHashMap<u32, f32> = grads.b_g.iter().copied().collect();
-    for (g, gr) in &grads.r {
+    // `grads.r` and `grads.b_g` are emitted in lockstep (one entry per member
+    // gene of each module, in module order), so they zip.
+    debug_assert_eq!(grads.r.len(), grads.b_g.len());
+    for ((g, gr), &(gb_gene, gb)) in grads.r.iter().zip(&grads.b_g) {
+        debug_assert_eq!(*g, gb_gene);
         let gi = *g as usize;
-        let mut grow: Vec<f32> = gr.clone();
-        grow.push(*b_g_of.get(g).unwrap_or(&0.0));
-        let mut row: Vec<f32> = params.r[gi * h..(gi + 1) * h].to_vec();
-        if wd > 0.0 {
-            let f = 1.0 - opt.r.lr * wd;
-            row.iter_mut().for_each(|x| *x *= f);
-        }
-        row.push(params.b_g[gi]);
-        opt.r.update(gi, &mut row, &grow);
-        params.r[gi * h..(gi + 1) * h].copy_from_slice(&row[..h]);
-        params.b_g[gi] = row[h];
+        let row = &mut params.r[gi * h..(gi + 1) * h];
+        decay(row, opt.r.lr);
+        opt.r.update_with_bias(gi, row, &mut params.b_g[gi], gr, gb);
     }
 }
 

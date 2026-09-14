@@ -89,7 +89,8 @@ fn draw_plan_weights_sum_to_one_per_unit() {
         by_module: vec![Vec::new(), Vec::new()],
     };
     let mut rng = StdRng::seed_from_u64(7);
-    let plan = draw_plan(&[0, 1], &um, n_m, 10, &mut rng);
+    let pickers = module_pickers(&um, n_m);
+    let plan = draw_plan(&[0, 1], &pickers, n_m, 10, &mut rng);
     let mut sum_by_unit = std::collections::HashMap::new();
     for (_, pairs) in &plan.pairs_by_module {
         for &(u, w) in pairs {

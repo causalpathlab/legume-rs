@@ -69,22 +69,23 @@ impl UnitModules {
         let slot = part.slot_of();
         let mut n_um = vec![0f32; n_u * m];
         let mut by_module: Vec<Vec<(u32, Vec<(u32, f32)>)>> = Vec::with_capacity(n_u);
+        // One bucket per module, indexed directly; `members` are sorted by gene
+        // and `feats` are too, so each bucket's slots come out ascending.
+        let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); m];
         for u in 0..n_u {
-            // `feats` are sorted by gene, so group by module with a map keyed on module.
-            let mut groups: Vec<(u32, Vec<(u32, f32)>)> = Vec::new();
             for (&g, &c) in units.feats[u].iter().zip(&units.counts[u]) {
-                let mm = part.module_of[g as usize];
-                n_um[u * m + mm as usize] += c;
-                match groups.iter_mut().find(|(k, _)| *k == mm) {
-                    Some((_, v)) => v.push((slot[g as usize], c)),
-                    None => groups.push((mm, vec![(slot[g as usize], c)])),
-                }
+                let mm = part.module_of[g as usize] as usize;
+                n_um[u * m + mm] += c;
+                buckets[mm].push((slot[g as usize], c));
             }
-            groups.sort_unstable_by_key(|(k, _)| *k);
-            for (_, v) in &mut groups {
-                v.sort_unstable_by_key(|&(s, _)| s);
-            }
-            by_module.push(groups);
+            by_module.push(
+                buckets
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(_, v)| !v.is_empty())
+                    .map(|(k, v)| (k as u32, std::mem::take(v)))
+                    .collect(),
+            );
         }
         let mut q = vec![0f32; n_u * m];
         for u in 0..n_u {

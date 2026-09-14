@@ -46,9 +46,6 @@ pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
 
-/// Module count when the caller resolved none; `senna bge` always passes one.
-const DEFAULT_HIER_MODULES: usize = 128;
-
 /// Composite-objective gbe fit — trained in **two phases**.
 ///
 /// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]` —
@@ -167,14 +164,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let models::Heads {
         mut cell_model,
         mut level_models,
-    } = models::build_heads(
-        unified,
-        &pb_blobs,
-        &config,
-        module_warm.as_ref(),
-        !hier_path,
-        &varmap,
-    )?;
+    } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_ref(), &varmap)?;
 
     ////////////////////////////////
     // Composite axes and trainer //
@@ -293,7 +283,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                 let n = config
                     .gene_modules
                     .as_ref()
-                    .map_or(DEFAULT_HIER_MODULES, |g| g.n_modules);
+                    .context("the hierarchical phase 1 needs a module count (gene_modules)")?
+                    .n_modules;
                 (
                     module_warm::warm_start_module_labels(&profile, n, config.seed),
                     n,
@@ -331,16 +322,24 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         }
         cell_model.e_feat = rho_t;
         cell_model.b_feat = b_feat_t;
-        for (l, lm) in level_models.iter_mut().enumerate() {
-            let n_pb = lm.e_cell.dim(0)?;
-            let mut rows = vec![0f32; n_pb * h];
-            for u in 0..units.n_units() {
-                if units.level[u] == l as u8 {
-                    let p = units.source_index[u] as usize;
-                    let row: Vec<f32> = out.e_u.row(u).iter().copied().collect();
-                    rows[p * h..(p + 1) * h].copy_from_slice(&row);
+        // Scatter the pseudobulk rows onto their level heads in one pass over
+        // the units (levels first, then cells, per `UnitTable`).
+        let mut level_rows: Vec<Vec<f32>> = level_models
+            .iter()
+            .map(|lm| lm.e_cell.dim(0).map(|n_pb| vec![0f32; n_pb * h]))
+            .collect::<Result<_, _>>()?;
+        for u in 0..units.n_units() {
+            let l = units.level[u] as usize;
+            if l < level_rows.len() {
+                let p = units.source_index[u] as usize;
+                let dst = &mut level_rows[l][p * h..(p + 1) * h];
+                for (k, x) in out.e_u.row(u).iter().enumerate() {
+                    dst[k] = *x;
                 }
             }
+        }
+        for (l, (lm, rows)) in level_models.iter_mut().zip(level_rows).enumerate() {
+            let n_pb = lm.e_cell.dim(0)?;
             let e_cell_t = Tensor::from_vec(rows, (n_pb, h), &config.device)?;
             {
                 let vars = varmap.data().lock().unwrap();
