@@ -145,7 +145,6 @@ pub fn train(
             apply(&mut params, &mut opt, &grads, &plan, cfg.weight_decay);
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
-            acc.n_pairs += stats.n_pairs;
             n_units_seen += chunk.len();
         }
         let per_unit = 1.0 / n_units_seen.max(1) as f64;

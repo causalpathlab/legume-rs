@@ -50,9 +50,9 @@ pub struct GeneModuleArgs {
                      {out}.module_dictionary.parquet (M x H), {out}.module_residual.parquet,\n\
                      {out}.module_bias.parquet. The feature dictionary keeps holding the composed\n\
                      row, so nothing that reads it has to know modules exist.\n\
-                     senna bge's plain path trains its modules inside phase 1 and writes\n\
-                     neither table; they are written by trainers that keep the module layer\n\
-                     (pinto cage)."
+                     senna bge reads M as the size of a HARD gene partition for its exact\n\
+                     two-level softmax in phase 1 and writes neither table; the mixed-membership\n\
+                     layer above is what pinto cage trains."
     )]
     pub gene_modules: Option<usize>,
 }

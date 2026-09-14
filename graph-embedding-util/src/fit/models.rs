@@ -10,24 +10,9 @@
 
 use super::config::FitConfig;
 use crate::data::UnifiedData;
-use crate::model::{
-    FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ModuleWarmStart,
-    ShareFeaturesArgs,
-};
+use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
 use candle_util::candle_nn::{VarBuilder, VarMap};
 use log::info;
-
-/// How the module membership starts: k-means labels over this fit's own
-/// profiles, or a parent's tables (`senna update`).
-pub(super) enum ModuleWarm {
-    Labels(Vec<u32>),
-    Parent {
-        /// `[D × M]` membership logits (simplex rows; sparsemax reproduces them).
-        logits: nalgebra::DMatrix<f32>,
-        /// `[M × H]` parent module dictionary.
-        mu: nalgebra::DMatrix<f32>,
-    },
-}
 
 /// The primary (per-cell) head and one head per pseudobulk level, coarsest → finest.
 pub(super) struct Heads {
@@ -46,7 +31,6 @@ pub(super) fn build_heads(
     unified: &UnifiedData,
     pb_blobs: &[UnifiedData],
     config: &FitConfig,
-    module_warm: Option<&ModuleWarm>,
     varmap: &VarMap,
 ) -> anyhow::Result<Heads> {
     let (n_features, n_cells, h) = (
@@ -58,87 +42,12 @@ pub(super) fn build_heads(
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
-    // The module layer is a composite-trainer parameterization: the plain path
-    // (no feat_factor) trains by the hierarchical engine and needs a free
-    // feature table it can write the composed dictionary into.
-    let cell_model = match (
-        config
-            .gene_modules
-            .as_ref()
-            .filter(|_| config.feat_factor.is_some()),
-        &config.feat_factor,
-    ) {
-        (Some(gm), factor) => {
-            // Hard errors, not silent no-ops: the module model's `e_feat` is a
-            // composed snapshot, and both of these write or read it as the trained
-            // table.
-            anyhow::ensure!(
-                factor.is_none(),
-                "gene modules are not supported with feat_factor (β-sharing) in this version"
-            );
-            if config.feature_embedding_l2 > 0.0 {
-                info!(
-                    "gene modules: feature_embedding_l2 is ignored; the residual ridge \
-                     ({}) is the module model's per-row shrinkage",
-                    gm.residual_l2
-                );
-            }
-            let (warm, n_modules) = match module_warm {
-                Some(ModuleWarm::Labels(l)) => (
-                    ModuleWarmStart::Labels {
-                        labels: l,
-                        own_mass: gm.init_own_mass,
-                    },
-                    gm.n_modules,
-                ),
-                Some(ModuleWarm::Parent { logits, mu }) => {
-                    anyhow::ensure!(
-                        mu.ncols() == h,
-                        "parent modules are {}-dimensional but this fit uses H={h}; \
-                         set --embedding-dim to match the parent",
-                        mu.ncols()
-                    );
-                    (
-                        ModuleWarmStart::Explicit {
-                            logits,
-                            mu: Some(mu),
-                        },
-                        mu.nrows(),
-                    )
-                }
-                None => (ModuleWarmStart::Uniform, gm.n_modules),
-            };
-            let from_parent = matches!(warm, ModuleWarmStart::Explicit { .. });
-            info!(
-                "learned gene modules: {} features → {} modules (mixed membership{}), \
-                 gene dropout {}, exact module term λ={}, balance λ={}",
-                n_features,
-                n_modules,
-                if from_parent {
-                    ", warm-started from the parent"
-                } else {
-                    ""
-                },
-                gm.gene_dropout,
-                gm.lambda_module,
-                gm.lambda_balance
-            );
-            JointEmbedModel::new_with_modules(
-                ModuleInit {
-                    n_features,
-                    n_cells,
-                    embedding_dim: h,
-                    n_modules,
-                    warm,
-                    b_feat: &zeros_features,
-                    b_cell: &zeros_cells,
-                    seed: config.seed,
-                },
-                varmap,
-                &config.device,
-            )?
-        }
-        (None, Some(spec)) => {
+    // The plain path (no feat_factor) trains by the hierarchical engine, which
+    // writes its composed dictionary into a free feature table; the splice path
+    // shares β across a gene's rows. Gene modules are the hier engine's own
+    // partition, never a head parameterization here.
+    let cell_model = match &config.feat_factor {
+        Some(spec) => {
             anyhow::ensure!(
                 spec.row_to_gene.len() == n_features && spec.unspliced_rows.len() == n_features,
                 "feat_factor row maps (row_to_gene {}, unspliced_rows {}) must match n_features {}",
@@ -187,7 +96,7 @@ pub(super) fn build_heads(
                 &config.device,
             )?
         }
-        (None, None) => JointEmbedModel::new_with_init(
+        None => JointEmbedModel::new_with_init(
             ModelArgs {
                 n_features,
                 n_cells,

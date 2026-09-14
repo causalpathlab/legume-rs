@@ -125,8 +125,7 @@ fn every_touched_gene_row_appears_once_and_untouched_genes_do_not() {
         units: vec![0],
         pairs_by_module: vec![(0, vec![(0, 1.0)])],
     };
-    let (s, g) = loss_and_grads(&p, &units, &um, &part, &plan);
-    assert_eq!(s.n_pairs, 1);
+    let (_, g) = loss_and_grads(&p, &units, &um, &part, &plan);
     let mut genes: Vec<u32> = g.r.iter().map(|(g, _)| *g).collect();
     genes.sort_unstable();
     assert_eq!(genes, vec![0, 1, 3]); // module 0's members
