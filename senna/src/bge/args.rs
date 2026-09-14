@@ -181,8 +181,8 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "Weight decay: on the plain path a per-row shrink 1 − lr·wd on every row a step\n\
-                touches, before its Adagrad update (AdamW decoupled decay on the splice path).",
+        help = "Weight decay: a per-row shrink 1 − lr·wd on every touched row (plain path);\n\
+                AdamW decoupled decay on the splice path.",
         long_help = "Weight decay: on the plain path (bge) a per-row shrink 1 − lr·wd is applied\n\
                      to every row a step touches, right before that row's Adagrad update.\n\
                      \n\
