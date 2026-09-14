@@ -315,32 +315,28 @@ impl BgeEmbedding {
         // the null normalizer, the learning rate — happens once, here, instead of on
         // every projection call.
         // The run's own estimator when it has one: the distilled encoder places
-        // the query exactly as it placed the run's cells. The SGD design is
-        // built only when it will be used.
+        // the query and the SGD polishes it from there, exactly as the run's
+        // cells were placed. Without one the SGD solves from the null model.
         let cell_encoder = self
             .cell_encoder
             .as_deref()
             .map(|path| CellEncoder::load(&self.rho, &self.b_feat, self.h, path, dev))
             .transpose()?;
-        let projector = match cell_encoder {
-            Some(_) => None,
-            None => Some(FrozenProjector::new(&FrozenProjectionArgs {
-                feat: &self.rho,
-                b_feat: &self.b_feat,
-                h: self.h,
-                lambda: f64::from(PROJECTION_RIDGE_SGD),
-                dev,
-            })?),
-        };
+        let projector = FrozenProjector::new(&FrozenProjectionArgs {
+            feat: &self.rho,
+            b_feat: &self.b_feat,
+            h: self.h,
+            lambda: f64::from(PROJECTION_RIDGE_SGD),
+            dev,
+        })?;
 
         // Pass 1: every cell on the matched genes.
         let mut pass = project_all(ProjectAll {
             data_vec: &data_vec,
             remap: &remap.new_to_train,
-            projector: match (cell_encoder.as_ref(), projector.as_ref()) {
-                (Some(enc), _) => QueryProjector::Encoder(enc),
-                (None, Some(p)) => QueryProjector::Sgd(p),
-                (None, None) => unreachable!("one placer is always built"),
+            projector: match cell_encoder.as_ref() {
+                Some(enc) => QueryProjector::Encoder(enc, &projector),
+                None => QueryProjector::Sgd(&projector),
             },
             side: &side,
             n_model,
@@ -498,19 +494,21 @@ impl BgeEmbedding {
     }
 }
 
-/// What places a group of query cells on the dictionary: the run's distilled
-/// encoder when it has one, the block SGD otherwise (and always on a union
-/// axis the encoder was not trained on).
+/// What places a group of query cells on the dictionary: the run's encoder
+/// followed by the SGD polish when the run has one, the block SGD from the null
+/// model otherwise (and always on a union axis the encoder was not trained on).
 enum QueryProjector<'a> {
     Sgd(&'a FrozenProjector<'a>),
-    Encoder(&'a CellEncoder),
+    Encoder(&'a CellEncoder, &'a FrozenProjector<'a>),
 }
 
 impl QueryProjector<'_> {
     fn group_nodes(&self) -> usize {
         match self {
             Self::Sgd(p) => p.group_nodes(),
-            Self::Encoder(e) => e.group_nodes(),
+            // The polish cuts blocks on the SGD's rhythm; the encoder's own block is
+            // no larger, so grouping here keeps both block-aligned.
+            Self::Encoder(e, p) => e.group_nodes().min(p.group_nodes()),
         }
     }
 
@@ -528,10 +526,9 @@ impl QueryProjector<'_> {
             .collect();
         match self {
             Self::Sgd(p) => p.project(&nodes, group.len(), bar),
-            Self::Encoder(e) => {
-                let out = e.encode_edges(&nodes)?;
-                bar.inc(group.len() as u64);
-                Ok(out)
+            Self::Encoder(e, p) => {
+                let warm = e.encode_edges(&nodes)?;
+                p.polish(&nodes, &warm.theta, bar)
             }
         }
     }

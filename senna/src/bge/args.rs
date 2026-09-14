@@ -317,6 +317,21 @@ pub struct BgeArgs {
     pub(crate) nce_objective: NceObjectiveArg,
 
     #[arg(
+        long = "nce-corruption",
+        default_value_t = NceCorruptionArg::Feature,
+        value_enum,
+        help = "Which side the NCE negatives replace: feature or both",
+        long_help = "Which side of a positive (cell, feature) edge the negatives replace.\n\
+                     feature draws negatives on the feature side only.\n\
+                     A pseudobulk row then receives gradient from its own positives alone.\n\
+                     both adds in-batch cell-side negatives, as SIMBA does:\n\
+                     each row also competes with the other rows in the minibatch\n\
+                     for its feature, so every row is pushed apart from every other\n\
+                     on every step."
+    )]
+    pub(crate) nce_corruption: NceCorruptionArg,
+
+    #[arg(
         long,
         default_value_t = 1,
         value_name = "N",

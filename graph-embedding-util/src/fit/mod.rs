@@ -441,7 +441,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             batch_fold,
             unspliced,
             config.joint_velocity,
-            Some(&spec),
+            // DIAGNOSTIC (not for commit): force the block SGD.
+            if std::env::var_os("SENNA_PHASE2_SGD").is_some() { None } else { Some(&spec) },
         )?
     };
 
@@ -510,6 +511,20 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         }
         _ => None,
     };
+
+    // The pseudobulk tables leave in the CELLS' frame: phase 2 moved the cells
+    // by −θ̄ (folded into `b_feat`), and a reader putting the two tables in one
+    // layout — the anchors over the cells they placed — needs them shifted
+    // alike. The in-memory tables served phase 2 (distillation targets, the
+    // cell lift) in the as-trained frame before this point.
+    let mut pb_embeddings = pb_embeddings;
+    for level in &mut pb_embeddings {
+        for mut row in level.e_pb.row_iter_mut() {
+            for (k, x) in row.iter_mut().enumerate() {
+                *x -= phase2.theta_mean[k];
+            }
+        }
+    }
 
     Ok(FitOutput {
         batch_gene_fold,

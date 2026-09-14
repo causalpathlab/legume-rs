@@ -4,7 +4,7 @@
 //! gradient the module docs justify lives here and nowhere else.
 
 use super::pass::{BlockArgs, BlockOut};
-use super::{CHECK_EVERY, LR_FLOOR_FRAC, MAX_STEPS, TOL};
+use super::{CHECK_EVERY, LR_FLOOR_FRAC, TOL};
 use crate::cell_projection::SCORE_CLAMP;
 use candle_util::candle_core::{DType, Tensor};
 use matrix_util::traits::FusedTensorOps;
@@ -83,28 +83,46 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     // Null-model initialisation //
     ///////////////////////////////
 
-    // Θ = 0 and the exact intercept at Θ = 0:
-    //     c = ln(Σ_f n_cf) − ln(Σ_f exp(offset_cf))
+    // Θ at its warm start (zero without one) and the exact intercept given Θ:
+    //     c = ln(Σ_f n_cf) − ln(Σ_f exp(⟨e_f, θ_c⟩ + offset_cf) + dead_mass·1)
     // so step 1 already sits at the right depth and the optimiser only has to
     // learn the deviation. (The Newton path starts from a randn `e_cell` and a
     // zero intercept, which is why its first steps have to move so far.)
-    let log_norm: Vec<f64> = match a.spec.base_theta {
-        // Velocity pass: `offset` already carries `⟨e_f, θ⟩ + β`, so sum it there.
-        Some(_) => offset
-            .clamp(-SCORE_CLAMP, SCORE_CLAMP)?
+    let init_block = a
+        .spec
+        .init_theta
+        .map(|t| Tensor::from_slice(&t[a.start * h..a.end * h], (bc, h), dev))
+        .transpose()?;
+    // Per-row sum of `exp(score)` over the live features, from a `[Bc, F]` score.
+    let row_log_norm = |s: Tensor| -> anyhow::Result<Vec<f64>> {
+        Ok(s.clamp(-SCORE_CLAMP, SCORE_CLAMP)?
             .exp()?
             .sum(1)?
             .to_vec1::<f32>()?
             .iter()
-            .map(|x| f64::from(*x).max(f64::MIN_POSITIVE).ln())
-            .collect(),
+            .map(|x| (f64::from(*x) + dict.dead_mass).max(f64::MIN_POSITIVE).ln())
+            .collect())
+    };
+    let log_norm: Vec<f64> = match (&init_block, a.spec.base_theta) {
+        // Warm start: the row's own `⟨e_f, θ_c⟩` on top of the offset.
+        (Some(t), _) => row_log_norm(
+            t.matmul(&e_aug.narrow(0, 0, h)?.contiguous()?)?
+                .broadcast_add(&offset)?,
+        )?,
+        // Velocity pass: `offset` already carries `⟨e_f, θ⟩ + β`, so sum it there.
+        (None, Some(_)) => row_log_norm(offset.clone())?,
         // Identity pass: Θ = 0 ⇒ every row shares the same Σ_f exp(β_f), hoisted to
         // the pass rather than re-summed over every live feature in every block.
-        None => vec![dict.null_log_norm; bc],
+        (None, None) => vec![dict.null_log_norm; bc],
     };
     // Θ̃ = [Θ | c] — the latent and its intercept in ONE `[Bc, H+1]` parameter, with
-    // the intercept initialised at the null model and the latent at zero.
+    // the intercept initialised at the conditional MLE given the latent.
     let mut theta = vec![0f32; bc * d];
+    if let Some(init) = a.spec.init_theta {
+        for (i, row) in init[a.start * h..a.end * h].chunks_exact(h).enumerate() {
+            theta[i * d..i * d + h].copy_from_slice(row);
+        }
+    }
     for (i, (&n, &lz)) in n_tot.iter().zip(&log_norm).enumerate() {
         theta[i * d + h] = if n > 0.0 {
             (n.ln() - lz).clamp(-SCORE_CLAMP, SCORE_CLAMP) as f32
@@ -172,9 +190,10 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let mut converged = false;
     let mut emitted = 0usize; // cells this block has already reported to the bar
     let loop_start = std::time::Instant::now();
-    for step in 0..MAX_STEPS {
+    let max_steps = a.spec.max_steps;
+    for step in 0..max_steps {
         // Linear decay to a floor so the block settles rather than dithers.
-        let frac = step as f64 / MAX_STEPS as f64;
+        let frac = step as f64 / max_steps as f64;
         let lr = dict.lr0 * (1.0 - frac * (1.0 - LR_FLOOR_FRAC));
 
         // Upper bound only. `exp` overflows f32 at 88 so the ceiling is a real

@@ -13,7 +13,7 @@
 
 use super::edges::{block_cells, EdgeTable};
 use super::solve::solve_block;
-use super::{Phase2Input, GATE_FOLD_EPS, GROUP_BLOCKS, MAX_STEPS, TARGET_DELTA_S};
+use super::{Phase2Input, GATE_FOLD_EPS, GROUP_BLOCKS, TARGET_DELTA_S};
 use candle_util::candle_core::{Device, Tensor};
 use log::info;
 
@@ -172,8 +172,7 @@ impl PassDict {
 
         info!(
             "{} [{}] — {f_live} live features (of {}; {} gate-folded), blocks of \
-             {block_cells}, lr {:.4} (auto: Δs≈{TARGET_DELTA_S}), ≤{MAX_STEPS} steps, \
-             ridge λ={}",
+             {block_cells}, lr {:.4} (auto: Δs≈{TARGET_DELTA_S}), ridge λ={}",
             spec.label,
             spec.pass,
             rows.len(),
@@ -228,6 +227,11 @@ pub(super) struct PassSpec<'a> {
     /// Fixed identity `θ` (host, `[n_kept × h]`) folded into the per-edge offset —
     /// `Some` only on the velocity pass.
     pub(super) base_theta: Option<&'a [f32]>,
+    /// Warm start for the latent (host, `[n_kept × h]`); `None` starts at the
+    /// null model. The intercept starts at its exact conditional MLE either way.
+    pub(super) init_theta: Option<&'a [f32]>,
+    /// Adam step cap per block; the pass's learning-rate decay spans it.
+    pub(super) max_steps: usize,
 }
 
 /// One pass's per-cell result, indexed by position in `cells` (not by global id).
@@ -266,6 +270,7 @@ pub(super) fn run_pass(
                 label: dict.pass,
                 block: b + 1,
                 n_blocks,
+                max_steps: spec.max_steps,
             },
         })?;
         latent[start * h..end * h].copy_from_slice(&block.latent);
@@ -275,12 +280,13 @@ pub(super) fn run_pass(
 
     info!(
         "{} [{}] — {n_kept} node(s) done: ⌀{:.0} steps/block, {} of {} block(s) hit the \
-         {MAX_STEPS}-step cap, mean per-edge deviance {:.4}, {:.0}s total ({:.1} ms/step){}",
+         {}-step cap, mean per-edge deviance {:.4}, {:.0}s total ({:.1} ms/step){}",
         dict.label,
         dict.pass,
         stats.mean_steps(),
         stats.at_cap,
         stats.blocks,
+        spec.max_steps,
         stats.mean_deviance(),
         stats.secs,
         stats.ms_per_step(),
@@ -344,13 +350,15 @@ pub(super) struct BlockProgress<'a> {
     /// 1-based index of the block in flight, and how many this pass has.
     pub(super) block: usize,
     pub(super) n_blocks: usize,
+    /// The pass's step cap, the pro-rata denominator.
+    pub(super) max_steps: usize,
 }
 
 impl BlockProgress<'_> {
     /// Advance the bar to the fraction of `bc` this block's `steps` have earned,
     /// given `emitted` cells already reported for it. Returns the new `emitted`.
     pub(super) fn advance(&self, bc: usize, steps: usize, emitted: usize) -> usize {
-        let want = (bc * steps / MAX_STEPS).min(bc);
+        let want = (bc * steps / self.max_steps).min(bc);
         if want > emitted {
             self.bar.inc((want - emitted) as u64);
         }
@@ -364,7 +372,7 @@ impl BlockProgress<'_> {
             self.block,
             self.n_blocks,
             steps,
-            MAX_STEPS,
+            self.max_steps,
             self.stats.at_cap,
             self.stats.mean_deviance(),
         ));

@@ -87,6 +87,65 @@ fn recovers_planted_cells() {
     }
 }
 
+/// A polish started from the cold solve's own (un-gauged) answer is already at
+/// the optimum: it returns the same latents, and from the null model it reaches
+/// the planted direction as the cold solve does — the objective is one and the
+/// same, only the start and the budget differ.
+#[test]
+fn polish_keeps_a_solved_cell_and_recovers_a_planted_one() {
+    let (h, n_feat) = (8, 300);
+    let (e, b) = dictionary(n_feat, h, 0.4);
+    let planted = [
+        [0.8f32, -0.6, 0.4, 0.2, -0.3, 0.5, 0.1, -0.4],
+        [-0.5f32, 0.7, -0.2, 0.6, 0.1, -0.4, 0.3, 0.2],
+        [0.2f32, 0.1, -0.7, -0.3, 0.5, 0.2, -0.6, 0.4],
+    ];
+    let per_cell: Vec<_> = planted
+        .iter()
+        .enumerate()
+        .map(|(i, t)| rates(&e, &b, h, t, 0.4 + 0.1 * i as f32))
+        .collect();
+    let feats: Vec<Vec<u32>> = per_cell
+        .iter()
+        .map(|c| c.iter().map(|&(f, _)| f).collect())
+        .collect();
+    let counts: Vec<Vec<f32>> = per_cell
+        .iter()
+        .map(|c| c.iter().map(|&(_, n)| n).collect())
+        .collect();
+    let cells: Vec<(u32, &[u32], &[f32])> = (0..per_cell.len())
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+    let dev = Device::Cpu;
+    let input = Phase2Input {
+        feat: &e,
+        b_feat: &b,
+        h,
+        n_cells: cells.len(),
+        lambda: 1e-3,
+        dev: &dev,
+        label: "test",
+        gauge_fix: false,
+        joint: false,
+    };
+
+    let cold = project_cells(&input, &cells, None, None).unwrap();
+    let warm = polish_cells(&input, &cells, None, &cold.theta).unwrap();
+    for (i, want) in planted.iter().enumerate() {
+        let got = &warm.latent[i * h..(i + 1) * h];
+        assert!(
+            cos(got, &cold.theta[i * h..(i + 1) * h]) > 0.999,
+            "cell {i} moved off the cold solve"
+        );
+        assert!(cos(got, want) > 0.97, "cell {i} misaligned");
+    }
+    let from_null = polish_cells(&input, &cells, None, &vec![0f32; cells.len() * h]).unwrap();
+    for (i, want) in planted.iter().enumerate() {
+        let c = cos(&from_null.latent[i * h..(i + 1) * h], want);
+        assert!(c > 0.9, "cell {i} from the null model: cos={c:.3}");
+    }
+}
+
 /// The returned latents really are mean-zero — that is what the co-embedding needs,
 /// and what the caller relies on when folding the shift into `b_feat`.
 #[test]
