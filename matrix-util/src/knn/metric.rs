@@ -16,7 +16,7 @@ const LANES: usize = 16;
 /// `#[multiversion]` entry point calls it and picks up that clone's target
 /// features, letting LLVM autovectorise it to AVX-512 / AVX2+FMA / SSE per clone.
 #[inline(always)]
-pub(super) fn l2_sq_kernel(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn l2_sq_kernel(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "L2 distance on mismatched dimensions");
 
     let mut acc = [0.0f32; LANES];
