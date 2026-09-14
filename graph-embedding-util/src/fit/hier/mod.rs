@@ -4,6 +4,7 @@
 
 pub mod params;
 pub mod partition;
+pub mod step;
 pub mod units;
 
 pub use units::UnitTable;
