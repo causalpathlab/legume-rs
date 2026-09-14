@@ -53,9 +53,10 @@ pub mod ivf;
 pub mod metric;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
-use backend::{build_column_dict, Backend, EF_SEARCH, EXACT_THRESHOLD};
+pub(crate) use backend::EXACT_THRESHOLD;
+use backend::{build_column_dict, Backend, EF_SEARCH};
 pub use metric::l2_simd;
 
 /// A dictionary of named columns backed by a k-nearest-neighbour index.

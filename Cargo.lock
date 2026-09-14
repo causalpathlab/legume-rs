@@ -3550,7 +3550,6 @@ dependencies = [
  "clap",
  "clustering",
  "ctrlc",
- "dashmap",
  "flate2",
  "indicatif",
  "instant-distance",
