@@ -123,13 +123,11 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let varmap = VarMap::new();
     // Plain path: phase 1 trains by the exact hierarchical softmax (see
     // `hier`), which owns its own module warm start and composes the dictionary
-    // itself — the gene-module NCE model and its k-means/parent warm start below
-    // are for the splice (β-sharing) path only.
+    // itself; the splice (β-sharing) path trains by the composite NCE below.
     let hier_path = config.feat_factor.is_none();
     // The finest collapse's feature profile (batch-corrected pseudobulk rates,
-    // gathered onto the unified feature axis) — seeds gene-module membership on
-    // whichever path needs it below: the k-means warm start (splice path) or the
-    // hier engine's own warm start (plain path).
+    // gathered onto the unified feature axis) — seeds the hier engine's module
+    // partition on the plain path.
     let finest_profile = || -> DMatrix<f32> {
         let finest = collapsed_levels.last().expect("at least one level");
         let pb_full = match &finest.mu_adjusted {
@@ -138,33 +136,10 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         };
         setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend)
     };
-    // Module warm start: k-means over the feature profiles at the finest collapse
-    // level, on the same batch-corrected pseudobulk counts phase 1 trains on.
-    // Either the k-means labels over this fit's own profiles, or — under a parent
-    // (`senna update`) — explicit logits carrying the parent's membership for the
-    // matched features and initializing the rest through the parent's modules.
-    let module_warm: Option<models::ModuleWarm> = if hier_path {
-        None
-    } else {
-        config.gene_modules.as_ref().map(|g| {
-            let profile = finest_profile();
-            match &g.parent {
-                Some(parent) => models::ModuleWarm::Parent {
-                    logits: module_warm::parent_module_logits(parent, &profile),
-                    mu: parent.mu.clone(),
-                },
-                None => models::ModuleWarm::Labels(module_warm::warm_start_module_labels(
-                    &profile,
-                    g.n_modules,
-                    config.seed,
-                )),
-            }
-        })
-    };
     let models::Heads {
         mut cell_model,
         mut level_models,
-    } = models::build_heads(unified, &pb_blobs, &config, module_warm.as_ref(), &varmap)?;
+    } = models::build_heads(unified, &pb_blobs, &config, &varmap)?;
 
     ////////////////////////////////
     // Composite axes and trainer //

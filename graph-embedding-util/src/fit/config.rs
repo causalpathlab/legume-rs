@@ -177,12 +177,12 @@ pub struct FitConfig {
     /// `pinto cage`, all as `--nce-objective` — also defaults to `Softmax`; `Logistic`
     /// is opt-in and is the historical bge loss, kept byte-identical when chosen.
     pub nce_objective: crate::loss::NceObjective,
-    /// Learned gene modules in front of the feature embedding
-    /// ([`crate::model::FeatModules`]): `ρ_g = Σ_m π_gm μ_m + r_g` with a learned
-    /// mixed membership, an exact cell–module softmax term, within-module NCE
-    /// negatives and gene dropout at pooling time. `None` (default) = the free
-    /// embedding, byte-identical to a build before this existed. Mutually
-    /// exclusive with `feat_factor`.
+    /// Gene modules. On the plain path (`feat_factor = None`) the hierarchical
+    /// phase 1 reads only `n_modules` and `parent`: `M` sizes its hard gene
+    /// partition and a parent seeds it (`senna update`). The remaining fields
+    /// configure the learned mixed-membership layer
+    /// ([`crate::model::FeatModules`]) that `pinto cage` trains directly;
+    /// `fit()` never builds that layer. Mutually exclusive with `feat_factor`.
     pub gene_modules: Option<GeneModuleConfig>,
 }
 
