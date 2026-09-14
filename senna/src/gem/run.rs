@@ -399,6 +399,8 @@ fn run_gem_genes_bge(
             max_grad_norm: args.train.max_grad_norm,
             cell_weight_mult: None,
             phase1_cells_per_pb: args.collapse.phase1_cells_per_pb,
+            hier_units_per_step: 256,
+            hier_modules_per_unit: 8,
             feat_factor: Some(factor),
             delta_l2,
             lineage_dag: args.train.lineage_dag,
