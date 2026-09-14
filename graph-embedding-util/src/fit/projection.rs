@@ -166,6 +166,22 @@ impl<'a> FrozenProjector<'a> {
         })
     }
 
+    /// The solver input for a group of `n_cells` nodes: this projector's frozen
+    /// side, no gauge fix (see the type doc), no joint pass.
+    fn phase2_input(&self, n_cells: usize) -> block_sgd::Phase2Input<'_> {
+        block_sgd::Phase2Input {
+            feat: self.feat,
+            b_feat: self.b_feat,
+            h: self.h,
+            n_cells,
+            lambda: self.lambda,
+            dev: self.dev,
+            label: "Projection",
+            gauge_fix: false,
+            joint: false,
+        }
+    }
+
     /// Nodes to hand one [`Self::project`] call.
     ///
     /// A whole number of solver blocks, derived from the activation budget this
@@ -194,22 +210,7 @@ impl<'a> FrozenProjector<'a> {
         n_nodes: usize,
         bar: &indicatif::ProgressBar,
     ) -> anyhow::Result<FrozenProjection> {
-        let out = block_sgd::project_prepared(
-            &block_sgd::Phase2Input {
-                feat: self.feat,
-                b_feat: self.b_feat,
-                h: self.h,
-                n_cells: n_nodes,
-                lambda: self.lambda,
-                dev: self.dev,
-                label: "Projection",
-                gauge_fix: false,
-                joint: false,
-            },
-            &self.dict,
-            nodes,
-            bar,
-        )?;
+        let out = block_sgd::project_prepared(&self.phase2_input(n_nodes), &self.dict, nodes, bar)?;
         Ok(FrozenProjection {
             theta: out.theta,
             b_node: out.b_cell,
@@ -226,17 +227,7 @@ impl<'a> FrozenProjector<'a> {
         init: &[f32],
         bar: &indicatif::ProgressBar,
     ) -> anyhow::Result<FrozenProjection> {
-        let input = block_sgd::Phase2Input {
-            feat: self.feat,
-            b_feat: self.b_feat,
-            h: self.h,
-            n_cells: nodes.len(),
-            lambda: self.lambda,
-            dev: self.dev,
-            label: "Projection",
-            gauge_fix: false,
-            joint: false,
-        };
+        let input = self.phase2_input(nodes.len());
         let pass = block_sgd::polish_prepared(&input, &self.dict, nodes, init, bar)?;
         let out = block_sgd::finish(&input, nodes, pass, None);
         Ok(FrozenProjection {
