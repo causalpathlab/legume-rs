@@ -3260,7 +3260,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leiden"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "insta",
@@ -4397,7 +4397,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "approx",
