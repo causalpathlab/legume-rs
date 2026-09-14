@@ -157,6 +157,18 @@ fn the_distillation_fits_a_planted_target_on_held_out_pseudobulks() {
         report.held_out_cosine
     );
 
+    // The likelihood refinement starts from the distilled map and lowers the
+    // cells' own per-count NLL — the objective it trains is the one reported.
+    let refined = refine(&encoder, &folded, 1.0, 3, &dev).unwrap();
+    assert_eq!(refined.n_cells, n_cells);
+    assert!(refined.nll_per_count_before.is_finite() && refined.nll_per_count_after.is_finite());
+    assert!(
+        refined.nll_per_count_after < refined.nll_per_count_before,
+        "NLL/count {} → {}",
+        refined.nll_per_count_before,
+        refined.nll_per_count_after
+    );
+
     // Saved and reloaded on the same dictionary, the trunk places the same
     // rows at the same points: one estimator, both halves.
     let path = std::env::temp_dir().join(format!(

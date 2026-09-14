@@ -152,6 +152,7 @@ pub(super) fn run_joint_pass(
                 label: "joint",
                 block: b + 1,
                 n_blocks,
+                max_steps: MAX_STEPS,
             },
         })?;
         theta[start * h..end * h].copy_from_slice(&out.theta);

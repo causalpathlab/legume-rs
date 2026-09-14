@@ -16,19 +16,42 @@
 //!
 //! # Training pairs
 //!
-//! Every level's fitted table `e_pb [n_pb × H]` is the target; the input is a
+//! The target for a pseudobulk is its **MAP placement** under the frozen
+//! dictionary — its members' folded counts summed and solved by the block SGD
+//! ([`super::block_sgd::project_cells`], every level in one short pass) — not
+//! its phase-1 row. The phase-1 rows are trained by their own sampled edges
+//! and land only loosely where the likelihood puts them (measured: cosine
+//! ≈ 0.4 to the MAP row, the residual full-rank), so an encoder distilled on
+//! them learns noise; the MAP rows are a deterministic function of the counts
+//! the encoder reads. The input is a
 //! **random subset of the pseudobulk's member cells**, their batch-folded counts
 //! averaged. The subset size is log-uniform in `[1, |members|]`, so a size-one
 //! subset is a single cell: the shift from pseudobulk depth to cell depth is in
 //! the training set by construction, not hoped away. A seeded tenth of the
 //! pseudobulks per level is held out and scored on its full membership.
 //!
+//! # Then the cells themselves
+//!
+//! The tables are a few hundred anchors, so a trunk distilled on them places
+//! twenty thousand cells as a smooth function of those anchors: one sheet per
+//! lineage where a per-cell fit resolves states. The distilled trunk is
+//! therefore only the warm start. [`refine`] then trains it on the cells'
+//! own likelihood — the phase-2 objective itself, the full log-partition over
+//! every gene with the intercept profiled out, `N_c·lse_f(s_cf) − Σ_f n_cf·s_cf`
+//! plus the ridge — one `[B,H]·[H,D]` matmul per step, so no negatives are
+//! sampled and nothing is approximated. The block SGD solved that objective
+//! per cell from a cold start and never converged; here every cell's gradient
+//! improves one small map shared by every cell like it.
+//!
 //! # What the cell gets
 //!
-//! `θ_c` from the encoder, and the per-cell intercept `c` as the exact
-//! conditional MLE given `θ_c`: `c = ln n_c − logsumexp_f(θ_c·e_f + b_f)`, one
-//! matmul and a row log-sum-exp — the cost of a single SGD step, not 400. The
-//! gauge fold and the L2 store are the shared tail in [`super::cells`].
+//! `θ_c` from the refined encoder is the warm start, and the block SGD
+//! ([`super::block_sgd::polish_cells`]) finishes it on the exact per-cell
+//! objective under a short step cap: a shared map of any width places a cell
+//! as a function of its neighbours, and the last fraction of the likelihood is
+//! per cell. Started near the optimum of a convex problem, that costs a
+//! quarter of the cold budget. The intercept comes out of the same solve. The
+//! gauge fold is the shared tail in [`super::cells`].
 //!
 //! # One estimator, both halves
 //!
@@ -37,7 +60,7 @@
 //! run's own cells were — the invariant [`super::FrozenProjector`] states for
 //! the SGD path.
 
-use super::block_sgd::{self, PassOut, Phase2Input, Phase2Out};
+use super::block_sgd::{self, Phase2Input, Phase2Out};
 use super::{cell_edges, CellBatchFold, FrozenProjection};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{DType, Device, Tensor};
@@ -69,6 +92,13 @@ const WEIGHT_DECAY: f64 = 1e-4;
 const GRAD_CLIP: f64 = 5.0;
 /// Pseudobulks per optimizer step.
 const ROWS_PER_STEP: usize = 128;
+/// Passes over every cell in the likelihood refinement.
+const REFINE_EPOCHS: usize = 10;
+/// Cells per refinement step: the dense block is `REFINE_CELLS_PER_STEP × D`.
+const REFINE_CELLS_PER_STEP: usize = 256;
+/// A warm start, so a fraction of the distillation rate.
+const REFINE_LEARNING_RATE: f64 = 3e-4;
+const REFINE_REPORT_EVERY: usize = 2;
 /// Share of each level's pseudobulks held out of training and scored on their
 /// full membership.
 const HOLDOUT_FRACTION: f64 = 0.1;
@@ -107,7 +137,8 @@ pub(crate) struct DistillTargets<'a> {
 
 /// One collapse level as the caller holds it.
 pub(crate) struct DistillLevel<'a> {
-    /// `[n_pb × H]` phase-1 table.
+    /// `[n_pb × H]` phase-1 table — read for its row count only; the targets
+    /// are re-solved by [`map_targets`].
     pub e_pb: &'a DMatrix<f32>,
     /// Global cell id → pseudobulk.
     pub cell_to_pb: &'a [usize],
@@ -450,6 +481,64 @@ impl CellEncoder {
     }
 }
 
+/////////////////
+// MAP targets //
+/////////////////
+
+/// Solve every pseudobulk of every level for its MAP placement under the
+/// frozen dictionary: members' folded rows summed, one cold block-SGD pass
+/// over all levels together, no gauge fix (the targets stay in the
+/// dictionary's own frame, which is the frame the encoder reproduces). A
+/// pseudobulk with no member rows keeps a zero row.
+pub(crate) fn map_targets(
+    input: &Phase2Input,
+    rows: &[FoldedRow],
+    groups: &[Vec<Vec<usize>>],
+) -> anyhow::Result<Vec<DMatrix<f32>>> {
+    let (h, d) = (input.h, input.b_feat.len());
+    // Flatten (level, pb) → one node each, in level-major order.
+    let mut feats_all: Vec<Vec<u32>> = Vec::new();
+    let mut counts_all: Vec<Vec<f32>> = Vec::new();
+    for level in groups {
+        for members in level {
+            let mut dense = vec![0f32; d];
+            for &i in members {
+                for (&f, &c) in rows[i].feats.iter().zip(&rows[i].counts) {
+                    dense[f as usize] += c;
+                }
+            }
+            let (f, c): (Vec<u32>, Vec<f32>) = dense
+                .iter()
+                .enumerate()
+                .filter(|&(_, &c)| c > 0.0)
+                .map(|(f, &c)| (f as u32, c))
+                .unzip();
+            feats_all.push(f);
+            counts_all.push(c);
+        }
+    }
+    let n_pb = feats_all.len();
+    let nodes: Vec<(u32, &[u32], &[f32])> = (0..n_pb)
+        .map(|i| (i as u32, feats_all[i].as_slice(), counts_all[i].as_slice()))
+        .collect();
+    let pb_input = Phase2Input {
+        n_cells: n_pb,
+        label: "Phase 2 (pb targets)",
+        gauge_fix: false,
+        joint: false,
+        ..*input
+    };
+    let out = block_sgd::project_cells(&pb_input, &nodes, None, None)?;
+    let mut tables = Vec::with_capacity(groups.len());
+    let mut at = 0usize;
+    for level in groups {
+        let n = level.len();
+        tables.push(DMatrix::<f32>::from_row_slice(n, h, &out.theta[at * h..(at + n) * h]));
+        at += n;
+    }
+    Ok(tables)
+}
+
 //////////////////
 // Distillation //
 //////////////////
@@ -615,6 +704,113 @@ pub(crate) fn distill(
     Ok((cell_encoder, stats))
 }
 
+////////////////
+// Refinement //
+////////////////
+
+/// What the refinement reports back: the per-count negative log-likelihood
+/// over every cell before the first step and after the last.
+pub(crate) struct RefineStats {
+    pub nll_per_count_before: f32,
+    pub nll_per_count_after: f32,
+    pub n_cells: usize,
+}
+
+/// `N_c·logsumexp_f(s_cf) − Σ_f n_cf·s_cf` per row, for a dense block `x [n, D]`
+/// and its scores `s [n, D]`: the multinomial negative log-likelihood with the
+/// intercept profiled out, up to the count-only constant.
+fn multinomial_nll(x: &Tensor, s: &Tensor, totals: &Tensor) -> anyhow::Result<Tensor> {
+    let lse = s.log_sum_exp(1)?; // [n]
+    let data = (x * s)?.sum(1)?; // [n]
+    Ok(((totals * lse)? - data)?)
+}
+
+/// Train the trunk on the cells' own likelihood, starting from the distilled
+/// map. Every cell is visited once per pass in a seeded order; the ridge is
+/// the phase-2 prior `(λ/2)‖θ‖²`, the same one the block SGD carries.
+pub(crate) fn refine(
+    cell_encoder: &CellEncoder,
+    rows: &[FoldedRow],
+    lambda: f64,
+    seed: u64,
+    dev: &Device,
+) -> anyhow::Result<RefineStats> {
+    let d = cell_encoder.dict.d;
+    let dict = &cell_encoder.dict;
+    let mean_t = &cell_encoder.mean_1d;
+    let encoder = &cell_encoder.encoder;
+    let n_cells = rows.len();
+
+    // The whole-population per-count NLL, in evaluation mode; the block size
+    // is the encode block so the dense buffer is bounded the same way.
+    let score_all = || -> anyhow::Result<f32> {
+        let (mut nll, mut total) = (0f64, 0f64);
+        for block in rows.chunks(cell_encoder.group_nodes()) {
+            let slices: Vec<(&[u32], &[f32])> = block.iter().map(FoldedRow::as_slices).collect();
+            let (x, totals) = densify(&slices, d);
+            let x = Tensor::from_vec(x, (block.len(), d), dev)?;
+            let theta = encoder.forward(&x, None, Some(mean_t), None, false)?;
+            let s = theta.matmul(&dict.e_hd)?.broadcast_add(&dict.b_1d)?;
+            let t = Tensor::from_slice(&totals, block.len(), dev)?;
+            nll += f64::from(multinomial_nll(&x, &s, &t)?.sum_all()?.to_scalar::<f32>()?);
+            total += totals.iter().map(|&v| f64::from(v)).sum::<f64>();
+        }
+        Ok((nll / total.max(1.0)) as f32)
+    };
+    let nll_per_count_before = score_all()?;
+    info!(
+        "Phase 2 (encoder) — refining the trunk on {n_cells} cells' likelihood: {REFINE_EPOCHS}          epochs of {REFINE_CELLS_PER_STEP}-cell steps, lr {REFINE_LEARNING_RATE}, ridge λ={lambda};          NLL/count before {nll_per_count_before:.4}"
+    );
+
+    let mut adam = AdamW::new(
+        cell_encoder.varmap.all_vars(),
+        ParamsAdamW {
+            lr: REFINE_LEARNING_RATE,
+            weight_decay: WEIGHT_DECAY,
+            ..Default::default()
+        },
+    )?;
+    let mut order: Vec<usize> = (0..n_cells).collect();
+    let mut rng = StdRng::seed_from_u64(mix_seed(seed, 0x5245_4649_4e45));
+    let half_lambda = lambda / 2.0;
+    let bar = new_progress_bar(REFINE_EPOCHS as u64);
+    for epoch in 0..REFINE_EPOCHS {
+        order.shuffle(&mut rng);
+        let mut loss_sum = Tensor::zeros((), DType::F32, dev)?;
+        let mut n_steps = 0usize;
+        for chunk in order.chunks(REFINE_CELLS_PER_STEP) {
+            let slices: Vec<(&[u32], &[f32])> = chunk.iter().map(|&i| rows[i].as_slices()).collect();
+            let (x, totals) = densify(&slices, d);
+            let x = Tensor::from_vec(x, (chunk.len(), d), dev)?;
+            let t = Tensor::from_slice(&totals, chunk.len(), dev)?;
+            let theta = encoder.forward(&x, None, Some(mean_t), None, true)?;
+            let s = theta.matmul(&dict.e_hd)?.broadcast_add(&dict.b_1d)?;
+            let nll = multinomial_nll(&x, &s, &t)?;
+            let ridge = theta.sqr()?.sum(1)?.affine(half_lambda, 0.0)?;
+            let loss = (nll + ridge)?.mean_all()?;
+            candle_util::grad_clip::clipped_backward_step(&mut adam, &loss, GRAD_CLIP)?;
+            loss_sum = (loss_sum + loss.detach())?;
+            n_steps += 1;
+        }
+        bar.inc(1);
+        if (epoch + 1).is_multiple_of(REFINE_REPORT_EVERY) && epoch + 1 < REFINE_EPOCHS {
+            info!(
+                "Phase 2 (encoder) — refine epoch {}: mean per-cell loss {:.2}, NLL/count {:.4}",
+                epoch + 1,
+                loss_sum.to_scalar::<f32>()? / n_steps.max(1) as f32,
+                score_all()?
+            );
+        }
+    }
+    bar.finish_and_clear();
+    let nll_per_count_after = score_all()?;
+    Ok(RefineStats {
+        nll_per_count_before,
+        nll_per_count_after,
+        n_cells,
+    })
+}
+
 ///////////////
 // Intercept //
 ///////////////
@@ -675,12 +871,12 @@ pub(crate) fn project_cells(
         .iter()
         .map(|lv| members_by_pb(lv.cell_to_pb, &row_cells, lv.e_pb.nrows()))
         .collect();
-    let targets: Vec<DistillTargets<'_>> = spec
-        .levels
+    let tables = map_targets(input, &rows, &groups)?;
+    let targets: Vec<DistillTargets<'_>> = tables
         .iter()
         .zip(&groups)
-        .map(|(lv, g)| DistillTargets {
-            e_pb: lv.e_pb,
+        .map(|(t, g)| DistillTargets {
+            e_pb: t,
             groups: g,
         })
         .collect();
@@ -695,15 +891,26 @@ pub(crate) fn project_cells(
         stats.held_out_cosine
     );
 
-    let slices: Vec<(&[u32], &[f32])> = rows.iter().map(FoldedRow::as_slices).collect();
-    let (latent, intercept) = encoder.encode(&slices)?;
+    let refined = refine(&encoder, &rows, input.lambda, spec.seed, dev)?;
     info!(
-        "Phase 2 (encoder) — {} cell(s) encoded in blocks of {}",
+        "Phase 2 (encoder) — refined on {} cells; NLL/count {:.4} → {:.4}",
+        refined.n_cells,
+        refined.nll_per_count_before,
+        refined.nll_per_count_after
+    );
+
+    let slices: Vec<(&[u32], &[f32])> = rows.iter().map(FoldedRow::as_slices).collect();
+    let (latent, _) = encoder.encode(&slices)?;
+    info!(
+        "Phase 2 (encoder) — {} cell(s) encoded in blocks of {}; polishing each from there",
         rows.len(),
         encoder.group_nodes()
     );
+    // The encoder's placement is the warm start; the block SGD finishes each
+    // cell on the exact objective. `predict` walks the same two steps.
+    let pass = block_sgd::polish_cells(input, cells, batch_fold, &latent)?;
 
-    let out = block_sgd::finish(input, cells, PassOut { latent, intercept }, None);
+    let out = block_sgd::finish(input, cells, pass, None);
     Ok((out, encoder))
 }
 

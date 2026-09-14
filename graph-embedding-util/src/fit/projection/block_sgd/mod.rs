@@ -120,6 +120,9 @@ pub(crate) use pass::{DictSpec, PassDict, PassOut};
 /// convex, so this is a backstop, not the normal exit — the run logs how many
 /// blocks actually hit it.
 const MAX_STEPS: usize = 400;
+/// Step cap for a warm-started solve ([`polish_cells`]): the start is already
+/// near the optimum, so a quarter of the cold budget.
+const POLISH_STEPS: usize = 100;
 
 /// Converged when the relative parameter change `‖ΔΘ‖/‖Θ‖` over the last
 /// [`CHECK_EVERY`] steps drops below this. A parameter criterion, not a loss
@@ -380,6 +383,12 @@ pub(crate) fn project_cells(
                 &PassSpec {
                     edges: &edges_a,
                     base_theta: None,
+                    init_theta: None,
+                    // DIAGNOSTIC (not for commit): override the cold budget.
+                    max_steps: std::env::var("SENNA_SGD_STEPS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(MAX_STEPS),
                 },
                 cells,
                 &bar,
@@ -394,6 +403,8 @@ pub(crate) fn project_cells(
                         &PassSpec {
                             edges: eb,
                             base_theta: Some(&pass_a.latent),
+                            init_theta: None,
+                            max_steps: MAX_STEPS,
                         },
                         cells,
                         &bar,
@@ -443,11 +454,82 @@ pub(crate) fn project_prepared(
         &PassSpec {
             edges: &edges,
             base_theta: None,
+            init_theta: None,
+            max_steps: MAX_STEPS,
         },
         nodes,
         bar,
     )?;
     Ok(finish(input, nodes, pass, None))
+}
+
+/// Finish a warm-started solve: the same per-cell objective as
+/// [`project_cells`] on the plain path, started from `init` (`[n_cells × h]`,
+/// indexed by position in `cells`) and capped at [`POLISH_STEPS`] Adam steps
+/// per block. The per-cell problem is convex, so what the warm start leaves is
+/// the distance to one optimum, not a choice among several. Training-side
+/// entry: builds the dictionary and applies the batch fold.
+pub(crate) fn polish_cells(
+    input: &Phase2Input,
+    cells: &[(u32, &[u32], &[f32])],
+    batch_fold: Option<CellBatchFold>,
+    init: &[f32],
+) -> anyhow::Result<PassOut> {
+    let n_features = input.b_feat.len();
+    let rows: Vec<u32> = (0..n_features as u32).collect();
+    let edges = EdgeTable::build(cells, &rows, n_features, batch_fold);
+    let dict = PassDict::build(&input.dict_spec("polish"), rows)?;
+    let bar = new_progress_bar(cells.len() as u64);
+    bar.enable_steady_tick(std::time::Duration::from_millis(200));
+    let out = polish_pass(input, &dict, &edges, cells, init, &bar);
+    bar.finish_and_clear();
+    out
+}
+
+/// [`polish_cells`] on a dictionary the caller has already built — the
+/// streaming counterpart, as [`project_prepared`] is to [`project_cells`].
+pub(crate) fn polish_prepared(
+    input: &Phase2Input,
+    dict: &PassDict,
+    nodes: &[(u32, &[u32], &[f32])],
+    init: &[f32],
+    bar: &indicatif::ProgressBar,
+) -> anyhow::Result<PassOut> {
+    let edges = EdgeTable::build(nodes, dict.rows(), input.b_feat.len(), None);
+    polish_pass(input, dict, &edges, nodes, init, bar)
+}
+
+fn polish_pass(
+    input: &Phase2Input,
+    dict: &PassDict,
+    edges: &EdgeTable,
+    cells: &[(u32, &[u32], &[f32])],
+    init: &[f32],
+    bar: &indicatif::ProgressBar,
+) -> anyhow::Result<PassOut> {
+    anyhow::ensure!(
+        init.len() == cells.len() * input.h,
+        "phase-2 polish: init has {} entries, expected {} × {}",
+        init.len(),
+        cells.len(),
+        input.h
+    );
+    run_pass(
+        input,
+        dict,
+        &PassSpec {
+            edges,
+            base_theta: None,
+            init_theta: Some(init),
+            // DIAGNOSTIC (not for commit): override the polish budget.
+            max_steps: std::env::var("SENNA_POLISH_STEPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(POLISH_STEPS),
+        },
+        cells,
+        bar,
+    )
 }
 
 /// Re-gauge the pass results and scatter them onto the global node axis — the tail

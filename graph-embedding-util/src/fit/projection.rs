@@ -215,4 +215,33 @@ impl<'a> FrozenProjector<'a> {
             b_node: out.b_cell,
         })
     }
+
+    /// [`Self::project`] from a warm start: `init` is `[n_nodes × h]` indexed
+    /// like `nodes`' ids, and the solve is capped at the polish budget. What
+    /// `senna predict` runs after a run's encoder has placed a group, so a query
+    /// walks the same two steps the run's own cells did.
+    pub fn polish(
+        &self,
+        nodes: &[(u32, &[u32], &[f32])],
+        init: &[f32],
+        bar: &indicatif::ProgressBar,
+    ) -> anyhow::Result<FrozenProjection> {
+        let input = block_sgd::Phase2Input {
+            feat: self.feat,
+            b_feat: self.b_feat,
+            h: self.h,
+            n_cells: nodes.len(),
+            lambda: self.lambda,
+            dev: self.dev,
+            label: "Projection",
+            gauge_fix: false,
+            joint: false,
+        };
+        let pass = block_sgd::polish_prepared(&input, &self.dict, nodes, init, bar)?;
+        let out = block_sgd::finish(&input, nodes, pass, None);
+        Ok(FrozenProjection {
+            theta: out.theta,
+            b_node: out.b_cell,
+        })
+    }
 }

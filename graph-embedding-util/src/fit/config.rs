@@ -173,6 +173,10 @@ pub struct FitConfig {
     /// `pinto cage`, all as `--nce-objective` — also defaults to `Softmax`; `Logistic`
     /// is opt-in and is the historical bge loss, kept byte-identical when chosen.
     pub nce_objective: crate::loss::NceObjective,
+    /// Which side the NCE negatives replace ([`crate::loss::NceCorruption`]).
+    /// `Feature` (default) is the historical loss; `Both` adds in-batch
+    /// cell-side negatives, SIMBA's two-sided contrast.
+    pub nce_corruption: crate::loss::NceCorruption,
     /// Learned gene modules in front of the feature embedding
     /// ([`crate::model::FeatModules`]): `ρ_g = Σ_m π_gm μ_m + r_g` with a learned
     /// mixed membership, an exact cell–module softmax term, within-module NCE
@@ -292,7 +296,8 @@ pub struct FitOutput {
     pub lineage_qc: Option<LineageQc>,
     /// The phase-1 pseudobulk embeddings per collapse level (coarsest → finest),
     /// each with its pseudobulks' batches — the geometry the feature side was
-    /// trained against, for batch diagnostics.
+    /// trained against, for batch diagnostics. In the cells' frame (shifted by
+    /// the phase-2 gauge with them), so they co-plot with `model.e_cell`.
     pub pb_embeddings: Vec<super::pb_readout::PbLevelEmbedding>,
     /// The distilled encoder phase 2 placed the cells with, on the plain path;
     /// `None` on the splice path, where the block SGD did.
@@ -314,6 +319,7 @@ pub(crate) fn stage_params(config: &FitConfig) -> TrainingParams {
         // (single cell axis) both require `Sum`. Each phase sets its own
         // mode explicitly; this default just makes the value well-formed.
         objective: config.nce_objective,
+        corruption: config.nce_corruption,
         feature_embedding_l2: config.feature_embedding_l2,
         max_grad_norm: config.max_grad_norm,
         delta_l2: config.delta_l2,

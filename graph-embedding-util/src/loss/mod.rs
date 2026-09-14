@@ -154,6 +154,24 @@ pub enum NceObjective {
     Softmax,
 }
 
+/// Which side of a positive `(cell, feature)` edge the negatives replace.
+///
+/// `Feature` (default) draws `K` features against the fixed cell — the cell
+/// only ever receives gradient from its own positives. `Both` adds SIMBA's
+/// other half: the cell competes against the **other cells in the minibatch**
+/// for its feature (same-cell pairs masked out), and the two per-edge losses
+/// are summed. On a pseudobulk axis a minibatch covers nearly every row, so
+/// every row is pushed apart from every other on every step — which is what
+/// pins a row whose own positives alone leave it drifting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NceCorruption {
+    /// Feature-side negatives only — the historical bge loss, byte-identical.
+    #[default]
+    Feature,
+    /// Feature-side negatives plus in-batch cell-side negatives.
+    Both,
+}
+
 /// Per-positive **sampled-softmax (InfoNCE)** NCE loss: the positive competes
 /// against its `negs` in a single softmax.
 ///
