@@ -17,25 +17,39 @@ impl UnitTable {
     }
 
     /// Pseudobulk levels first (coarsest → finest, each level's pb index
-    /// order), then cells. A pseudobulk index that never appears in its
-    /// level's edge list is still a row (empty). Counts ≤ 0 are dropped;
-    /// cell counts are divided by their batch's fold when one is given.
+    /// order), then cells. Every pseudobulk index in `0..n_pb_per_level[l]`
+    /// gets a row at level `l`, even if it never appears in that level's edge
+    /// list (empty row). Counts ≤ 0 are dropped; cell counts are divided by
+    /// their batch's fold when one is given.
     #[allow(dead_code)]
     pub(crate) fn from_pseudobulks_and_cells(
         pb_blobs: &[&[Triplet]],
+        n_pb_per_level: &[usize],
         cells: &[(u32, &[u32], &[f32])],
         fold: Option<CellBatchFold<'_>>,
         n_features: usize,
     ) -> Self {
+        assert_eq!(
+            pb_blobs.len(),
+            n_pb_per_level.len(),
+            "pb_blobs and n_pb_per_level must have the same length"
+        );
+
         let mut feats: Vec<Vec<u32>> = Vec::new();
         let mut counts: Vec<Vec<f32>> = Vec::new();
         let mut level: Vec<u8> = Vec::new();
         let mut source_index: Vec<u32> = Vec::new();
 
-        for (l, blob) in pb_blobs.iter().enumerate() {
-            let n_pb = blob.iter().map(|t| t.cell as usize + 1).max().unwrap_or(0);
+        for (l, (blob, &n_pb)) in pb_blobs.iter().zip(n_pb_per_level).enumerate() {
             let mut rows: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_pb];
             for t in blob.iter().filter(|t| t.count > 0.0) {
+                assert!(
+                    (t.cell as usize) < n_pb,
+                    "triplet cell {} exceeds level {}'s count {}",
+                    t.cell,
+                    l,
+                    n_pb
+                );
                 rows[t.cell as usize].push((t.feature, t.count));
             }
             for (p, mut row) in rows.into_iter().enumerate() {
