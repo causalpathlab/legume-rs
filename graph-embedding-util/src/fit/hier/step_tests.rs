@@ -105,6 +105,20 @@ fn analytic_gradients_match_finite_differences() {
 }
 
 #[test]
+fn extreme_softmax_still_reports_a_finite_loss() {
+    let (units, part, um, mut p) = fixture();
+    let plan = plan_all();
+    // Scale e_u to force an extreme (near-degenerate) softmax, underflowing some
+    // p toward 0 for a target with q > 0.
+    for x in &mut p.e_u {
+        *x *= 1e4;
+    }
+    let (s, _) = loss_and_grads(&p, &units, &um, &part, &plan);
+    assert!(s.loss_module.is_finite(), "loss_module: {}", s.loss_module);
+    assert!(s.loss_gene.is_finite(), "loss_gene: {}", s.loss_gene);
+}
+
+#[test]
 fn every_touched_gene_row_appears_once_and_untouched_genes_do_not() {
     let (units, part, um, p) = fixture();
     let plan = StepPlan {

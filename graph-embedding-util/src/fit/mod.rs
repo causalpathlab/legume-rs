@@ -46,6 +46,9 @@ pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
 
+/// Module count when the caller resolved none; `senna bge` always passes one.
+const DEFAULT_HIER_MODULES: usize = 128;
+
 /// Composite-objective gbe fit — trained in **two phases**.
 ///
 /// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]` —
@@ -261,11 +264,42 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             cell_fold,
             n_features,
         );
-        // Module labels: the k-means warm start over the finest level's profiles
-        // (the same call the module model used), or a single module.
-        let n_modules = config.gene_modules.as_ref().map_or(128, |g| g.n_modules);
-        let labels: Vec<u32> =
-            module_warm::warm_start_module_labels(&finest_profile(), n_modules, config.seed);
+        // Module labels: under `senna update`, seeded from the parent's membership
+        // (the argmax of `parent_module_logits`, i.e. the partition `senna update`
+        // claims to carry — matched features take the parent's module, unmatched
+        // ones are initialized through the parent's modules); otherwise the
+        // k-means warm start over the finest level's profiles.
+        let profile = finest_profile();
+        let (labels, n_modules) = match config.gene_modules.as_ref().and_then(|g| g.parent.as_ref())
+        {
+            Some(parent) => {
+                anyhow::ensure!(
+                    parent.mu.ncols() == h,
+                    "parent modules are {}-dimensional but this fit uses H={h}",
+                    parent.mu.ncols()
+                );
+                let logits = module_warm::parent_module_logits(parent, &profile);
+                info!(
+                    "Phase 1 (hier) — module partition seeded from the parent's membership ({} \
+                     modules)",
+                    parent.mu.nrows()
+                );
+                (
+                    hier::partition::labels_from_membership(&logits),
+                    parent.mu.nrows(),
+                )
+            }
+            None => {
+                let n = config
+                    .gene_modules
+                    .as_ref()
+                    .map_or(DEFAULT_HIER_MODULES, |g| g.n_modules);
+                (
+                    module_warm::warm_start_module_labels(&profile, n, config.seed),
+                    n,
+                )
+            }
+        };
         let out = hier::train(
             &units,
             &labels,
