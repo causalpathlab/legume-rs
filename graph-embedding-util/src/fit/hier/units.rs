@@ -21,7 +21,6 @@ impl UnitTable {
     /// gets a row at level `l`, even if it never appears in that level's edge
     /// list (empty row). Counts ≤ 0 are dropped; cell counts are divided by
     /// their batch's fold when one is given.
-    #[allow(dead_code)]
     pub(crate) fn from_pseudobulks_and_cells(
         pb_blobs: &[&[Triplet]],
         n_pb_per_level: &[usize],
