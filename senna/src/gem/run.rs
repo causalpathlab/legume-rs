@@ -416,8 +416,6 @@ fn run_gem_genes_bge(
             // the positive competing against its negatives in one distribution
             // separates cell types better than the per-pair logistic SGNS loss).
             nce_objective: args.model.nce_objective.to_ge(),
-            // gem keeps the historical feature-side loss; the switch is bge's.
-            nce_corruption: ge::loss::NceCorruption::Feature,
             // Learned gene modules are not offered on the β-sharing path yet.
             gene_modules: None,
         };

@@ -205,9 +205,6 @@ pub struct TrainingParams {
     /// Defaults to `Softmax` (InfoNCE). `senna gem`, `senna bge` and `pinto cage` all
     /// expose it as `--nce-objective` and all default to `Softmax`; `Logistic` is opt-in.
     pub objective: crate::loss::NceObjective,
-    /// Which side the negatives replace ([`crate::loss::NceCorruption`]);
-    /// `Feature` is the historical loss, `Both` adds SIMBA's in-batch cell side.
-    pub corruption: crate::loss::NceCorruption,
     /// Explicit L2 penalty `λ · ‖E_feat‖_F²` on the shared feature
     /// embedding, added to the per-step composite loss before backward.
     /// `0.0` disables. Equivalent to a zero-mean Gaussian prior on
@@ -730,16 +727,9 @@ fn single_axis_step(
     };
 
     let mut loss = if axis.cell_axis.is_identity {
-        nce_loss_identity(axis.model, batch, params.objective, params.corruption, dev)?
+        nce_loss_identity(axis.model, batch, params.objective, dev)?
     } else {
-        nce_loss(
-            axis.model,
-            batch,
-            &cc.coarse_to_fine,
-            params.objective,
-            params.corruption,
-            dev,
-        )?
+        nce_loss(axis.model, batch, &cc.coarse_to_fine, params.objective, dev)?
     };
     if let Some(step) = modules {
         if let Some(term) = module_term(axis, cc, rng, step, dev)? {
