@@ -304,6 +304,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             max_grad_norm: args.max_grad_norm,
             cell_weight_mult,
             phase1_cells_per_pb: args.phase1_cells_per_pb,
+            hier_units_per_step: args.batch_size.unwrap_or(256),
+            hier_modules_per_unit: args.modules_per_unit,
             // bge uses a free E_feat (no per-gene β-sharing factorization).
             feat_factor: None,
             // δ_g splice offset is gem-only (needs feat_factor); off for bge.

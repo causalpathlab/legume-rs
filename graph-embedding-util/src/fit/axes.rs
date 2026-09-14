@@ -38,7 +38,7 @@ pub(super) struct AxisData {
 impl AxisData {
     /// The cell samplers that shape `E_feat` in phase 1 — the subsample when there is
     /// one, the full set otherwise.
-    fn phase1_cell_samplers(&self) -> &[PerBatchStratifiedCellSampler] {
+    pub(super) fn phase1_cell_samplers(&self) -> &[PerBatchStratifiedCellSampler] {
         self.phase1_subsample
             .as_deref()
             .unwrap_or(&self.cell_samplers)

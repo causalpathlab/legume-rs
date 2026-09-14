@@ -47,6 +47,7 @@ pub(super) fn build_heads(
     pb_blobs: &[UnifiedData],
     config: &FitConfig,
     module_warm: Option<&ModuleWarm>,
+    modules: bool,
     varmap: &VarMap,
 ) -> anyhow::Result<Heads> {
     let (n_features, n_cells, h) = (
@@ -58,7 +59,10 @@ pub(super) fn build_heads(
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
-    let cell_model = match (&config.gene_modules, &config.feat_factor) {
+    let cell_model = match (
+        config.gene_modules.as_ref().filter(|_| modules),
+        &config.feat_factor,
+    ) {
         (Some(gm), factor) => {
             // Hard errors, not silent no-ops: the module model's `e_feat` is a
             // composed snapshot, and both of these write or read it as the trained
