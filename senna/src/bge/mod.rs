@@ -253,26 +253,6 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                 .map(|&i| w[i])
                 .collect::<Vec<f32>>()
         });
-        // Up-weight matched (multi-modality) cells in the cell-axis sampler so
-        // they anchor the cross-modal alignment. No-op outside --multiome.
-        let cell_weight_mult: Option<Vec<f32>> =
-            if is_multiome && (args.bridge_weight - 1.0).abs() > f32::EPSILON {
-                Some(
-                    unified
-                        .cell_modality
-                        .iter()
-                        .map(|&m| {
-                            if m.count_ones() >= 2 {
-                                args.bridge_weight
-                            } else {
-                                1.0
-                            }
-                        })
-                        .collect(),
-                )
-            } else {
-                None
-            };
         Ok(ge::FitConfig {
             embedding_dim: args.embedding_dim,
             // Greedy batch correction against the carried reference, exactly
@@ -293,16 +273,27 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             epochs: args.epochs,
             batches_per_epoch: args.batches_per_epoch,
             batch_size: args.batch_size.unwrap_or(1024),
-            gpu_mem_fraction: args.batch_size.is_none().then_some(args.gpu_mem_fraction),
-            num_negatives: args.num_negatives,
+            // The composite (splice) trainer's own knob; the hier engine reads
+            // `hier_units_per_step` below instead. `--gpu-mem-fraction` was bge's
+            // knob for it and is gone; 0.6 is the value it always passed.
+            gpu_mem_fraction: args.batch_size.is_none().then_some(0.6),
+            // Composite-trainer-only; `--num-negatives` is gone, 4 is the value
+            // bge always passed.
+            num_negatives: 4,
             learning_rate: args.learning_rate,
             seed: args.seed,
             device: args.device.to_device(args.device_no)?,
             block_size: args.block_size,
-            feature_embedding_l2: args.feature_embedding_l2,
+            // Composite-trainer-only; `--feature-embedding-l2` is gone, 0.0 (off)
+            // is the value bge always passed.
+            feature_embedding_l2: 0.0,
             weight_decay: args.weight_decay,
-            max_grad_norm: args.max_grad_norm,
-            cell_weight_mult,
+            // Composite-trainer-only; `--max-grad-norm` is gone, 1.0 is the value
+            // bge always passed.
+            max_grad_norm: 1.0,
+            // Multiome bridge up-weighting is gone; this was already a no-op at
+            // its default (`--bridge-weight 1.0`).
+            cell_weight_mult: None,
             phase1_cells_per_pb: args.phase1_cells_per_pb,
             hier_units_per_step: args.batch_size.unwrap_or(256),
             hier_modules_per_unit: args.modules_per_unit,
@@ -315,12 +306,14 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             lineage_smooth: false,
             lineage_mst: false,
             joint_velocity: false,
-            nce_objective: args.nce_objective.to_ge(),
-            nce_corruption: args.nce_corruption.to_ge(),
-            // Learned mixed-membership modules in front of ρ — ON by default for bge
-            // (`--no-gene-modules` opts out): on held-out marrow cells they turned the
-            // gain over the training-marginal null from negative to zero, raised the
-            // per-cell rank agreement, and lost less under gene ablation.
+            // Composite-trainer-only; `--nce-objective` is gone, Softmax is the
+            // value bge always passed.
+            nce_objective: ge::loss::NceObjective::Softmax,
+            // Learned mixed-membership modules in front of ρ — structural on the hier
+            // engine (the module count is the only knob, `--gene-modules M`): on
+            // held-out marrow cells they turned the gain over the training-marginal
+            // null from negative to zero, raised the per-cell rank agreement, and
+            // lost less under gene ablation.
             // Under `senna update` the parent's modules are carried as the warm start.
             gene_modules: match args.modules.resolve(Some(DEFAULT_GENE_MODULES))? {
                 Some(mut gm) => {

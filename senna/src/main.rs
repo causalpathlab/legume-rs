@@ -390,8 +390,13 @@ enum Commands {
                       positive's OWN modality: a panel that carries most of the\n\
                       library would otherwise never be contrasted against itself.\n\
                       \n\
-                      Training runs in two phases. Phase 1 embeds features and pseudobulks.\n\
-                      That learns the gene side.\n\
+                      Training runs in two phases.\n\
+                      Phase 1 fits an exact two-level softmax over gene modules:\n\
+                      every module is scored every step,\n\
+                      and K modules per unit at the gene level (--modules-per-unit).\n\
+                      Units are the pseudobulks at every level plus a per-pseudobulk cell subsample.\n\
+                      The module structure is internal to phase 1;\n\
+                      the plain path no longer writes module_membership/module_dictionary tables.\n\
                       Phase 2 freezes that and densely fits each cell embedding.\n\
                       Every cell is swept about once per epoch. The per-cell fit is separable,\n\
                       so it is embarrassingly parallel.\n\

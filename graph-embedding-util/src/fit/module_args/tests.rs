@@ -15,10 +15,6 @@ fn parse(args: &[&str]) -> GeneModuleArgs {
 fn default_on_cli_trains_modules_unless_told_otherwise() {
     let cfg = parse(&[]).resolve(Some(128)).unwrap().unwrap();
     assert_eq!(cfg.n_modules, 128);
-    assert!(parse(&["--no-gene-modules"])
-        .resolve(Some(128))
-        .unwrap()
-        .is_none());
     let cfg = parse(&["--gene-modules", "32"])
         .resolve(Some(128))
         .unwrap()
@@ -40,14 +36,6 @@ fn opt_in_cli_stays_off_without_the_flag() {
 }
 
 #[test]
-fn the_two_flags_conflict() {
-    assert!(Cli::try_parse_from(["x", "--gene-modules", "8", "--no-gene-modules"]).is_err());
-}
-
-#[test]
 fn validation_rejects_bad_knobs() {
     assert!(parse(&["--gene-modules", "1"]).resolve(None).is_err());
-    assert!(parse(&["--gene-modules", "8", "--gene-dropout", "1.0"])
-        .resolve(None)
-        .is_err());
 }

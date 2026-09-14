@@ -16,14 +16,7 @@
 //!
 //! # Training pairs
 //!
-//! The target for a pseudobulk is its **MAP placement** under the frozen
-//! dictionary — its members' folded counts summed and solved by the block SGD
-//! ([`super::block_sgd::project_cells`], every level in one short pass) — not
-//! its phase-1 row. The phase-1 rows are trained by their own sampled edges
-//! and land only loosely where the likelihood puts them (measured: cosine
-//! ≈ 0.4 to the MAP row, the residual full-rank), so an encoder distilled on
-//! them learns noise; the MAP rows are a deterministic function of the counts
-//! the encoder reads. The input is a
+//! Every level's fitted table `e_pb [n_pb × H]` is the target; the input is a
 //! **random subset of the pseudobulk's member cells**, their batch-folded counts
 //! averaged. The subset size is log-uniform in `[1, |members|]`, so a size-one
 //! subset is a single cell: the shift from pseudobulk depth to cell depth is in
@@ -137,8 +130,7 @@ pub(crate) struct DistillTargets<'a> {
 
 /// One collapse level as the caller holds it.
 pub(crate) struct DistillLevel<'a> {
-    /// `[n_pb × H]` phase-1 table — read for its row count only; the targets
-    /// are re-solved by [`map_targets`].
+    /// `[n_pb × H]` phase-1 table.
     pub e_pb: &'a DMatrix<f32>,
     /// Global cell id → pseudobulk.
     pub cell_to_pb: &'a [usize],
@@ -481,68 +473,6 @@ impl CellEncoder {
     }
 }
 
-/////////////////
-// MAP targets //
-/////////////////
-
-/// Solve every pseudobulk of every level for its MAP placement under the
-/// frozen dictionary: members' folded rows summed, one cold block-SGD pass
-/// over all levels together, no gauge fix (the targets stay in the
-/// dictionary's own frame, which is the frame the encoder reproduces). A
-/// pseudobulk with no member rows keeps a zero row.
-pub(crate) fn map_targets(
-    input: &Phase2Input,
-    rows: &[FoldedRow],
-    groups: &[Vec<Vec<usize>>],
-) -> anyhow::Result<Vec<DMatrix<f32>>> {
-    let (h, d) = (input.h, input.b_feat.len());
-    // Flatten (level, pb) → one node each, in level-major order.
-    let mut feats_all: Vec<Vec<u32>> = Vec::new();
-    let mut counts_all: Vec<Vec<f32>> = Vec::new();
-    for level in groups {
-        for members in level {
-            let mut dense = vec![0f32; d];
-            for &i in members {
-                for (&f, &c) in rows[i].feats.iter().zip(&rows[i].counts) {
-                    dense[f as usize] += c;
-                }
-            }
-            let (f, c): (Vec<u32>, Vec<f32>) = dense
-                .iter()
-                .enumerate()
-                .filter(|&(_, &c)| c > 0.0)
-                .map(|(f, &c)| (f as u32, c))
-                .unzip();
-            feats_all.push(f);
-            counts_all.push(c);
-        }
-    }
-    let n_pb = feats_all.len();
-    let nodes: Vec<(u32, &[u32], &[f32])> = (0..n_pb)
-        .map(|i| (i as u32, feats_all[i].as_slice(), counts_all[i].as_slice()))
-        .collect();
-    let pb_input = Phase2Input {
-        n_cells: n_pb,
-        label: "Phase 2 (pb targets)",
-        gauge_fix: false,
-        joint: false,
-        ..*input
-    };
-    let out = block_sgd::project_cells(&pb_input, &nodes, None, None)?;
-    let mut tables = Vec::with_capacity(groups.len());
-    let mut at = 0usize;
-    for level in groups {
-        let n = level.len();
-        tables.push(DMatrix::<f32>::from_row_slice(
-            n,
-            h,
-            &out.theta[at * h..(at + n) * h],
-        ));
-        at += n;
-    }
-    Ok(tables)
-}
-
 //////////////////
 // Distillation //
 //////////////////
@@ -876,11 +806,14 @@ pub(crate) fn project_cells(
         .iter()
         .map(|lv| members_by_pb(lv.cell_to_pb, &row_cells, lv.e_pb.nrows()))
         .collect();
-    let tables = map_targets(input, &rows, &groups)?;
-    let targets: Vec<DistillTargets<'_>> = tables
+    let targets: Vec<DistillTargets<'_>> = spec
+        .levels
         .iter()
         .zip(&groups)
-        .map(|(t, g)| DistillTargets { e_pb: t, groups: g })
+        .map(|(lv, g)| DistillTargets {
+            e_pb: lv.e_pb,
+            groups: g,
+        })
         .collect();
     let (encoder, stats) = distill(dict, &mean_1d, &targets, &rows, spec.seed, dev)?;
     info!(

@@ -137,16 +137,6 @@ pub struct BgeArgs {
     pub(crate) num_topics: Option<usize>,
 
     #[arg(
-        long = "bridge-weight",
-        default_value_t = 1.0,
-        help = "Up-weight matched cells in the cell-axis sampler; 1.0 = off",
-        long_help = "Up-weight matched multi-modality cells in the cell-axis sampler.\n\
-                     They then anchor the cross-modal alignment.\n\
-                     This applies to --multiome only; 1.0 turns it off."
-    )]
-    pub(crate) bridge_weight: f32,
-
-    #[arg(
         long,
         default_value_t = false,
         help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk partition.\n\
@@ -170,35 +160,12 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        help = "Positive edges per batch (unset: 1024, shrunk to fit GPU memory on CUDA)",
-        long_help = "Positive edges per SGD batch.\n\
-                     Unset, the default is 1024 on CPU.\n\
-                     On CUDA the size is chosen automatically:\n\
-                     a short probe measures the memory one step retains,\n\
-                     and shrinks the batch from 1024\n\
-                     when --gpu-mem-fraction of free device memory\n\
-                     cannot hold it (it never grows past 1024:\n\
-                     batch size is not fit-neutral).\n\
-                     Passing a value disables the probe and always wins."
+        help = "Units (pseudobulks + phase-1 cells) per phase-1 step (unset: 256)",
+        long_help = "Units per phase-1 step: the pseudobulks at every collapse level,\n\
+                     plus each pseudobulk's phase-1 cell subsample.\n\
+                     Unset, the default is 256."
     )]
     pub(crate) batch_size: Option<usize>,
-
-    #[arg(
-        long,
-        default_value_t = 0.6,
-        help = "Fraction of free GPU memory the training batch may target",
-        long_help = "Ceiling for the automatic batch sizing on CUDA.\n\
-                     The probe grows the batch\n\
-                     while one step's retained memory,\n\
-                     with half reserved for the backward pass,\n\
-                     fits this fraction of the device memory free at start.\n\
-                     Fractions outside 0.05 to 0.95 are clamped to that range.\n\
-                     Ignored on CPU and when --batch-size is set."
-    )]
-    pub(crate) gpu_mem_fraction: f32,
-
-    #[arg(long, default_value_t = 4, help = "Negative samples per positive")]
-    pub(crate) num_negatives: usize,
 
     #[arg(
         long,
@@ -211,25 +178,6 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "L2 penalty λ on E_feat (row-mean of ‖e_d‖²). Default 0 (off).",
-        long_help = "L2 penalty λ on the shared feature embedding E_feat ∈ ℝ^{D×H}.\n\
-                     It adds λ · mean_d ‖e_d‖² to the per-step composite loss.\n\
-                     The norm is summed over the H latent dims.\n\
-                     The mean is taken over the D rows.\n\
-                     So λ stays scale-invariant across D, but is not diluted by H.\n\
-                     \n\
-                     E_feat is largely self-bounded under the NCE setup,\n\
-                     with its analytical projection, hence the default of 0 (off).\n\
-                     Raise it if E_feat drifts on long/deep runs.\n\
-                     \n\
-                     Note this penalty was previously divided by H as well.\n\
-                     That made it ~H× weaker than the same λ buys today."
-    )]
-    pub(crate) feature_embedding_l2: f32,
-
-    #[arg(
-        long,
-        default_value_t = 0.0,
         help = "AdamW decoupled weight decay (all params). Default 0.0 = off.",
         long_help = "AdamW decoupled weight decay, applied uniformly to every parameter.\n\
                      That covers E_feat, b_feat, and the per-axis heads.\n\
@@ -237,15 +185,6 @@ pub struct BgeArgs {
                      Default 0.0 (off — plain Adam despite the optimizer name)."
     )]
     pub(crate) weight_decay: f64,
-
-    #[arg(
-        long = "max-grad-norm",
-        default_value_t = 1.0,
-        help = "Global-norm gradient clip per AdamW step (0 = off). When > 0,\n\
-                gradients are scaled down if their global L2 norm exceeds this,\n\
-                bounding embedding inflation on NCE loss spikes."
-    )]
-    pub(crate) max_grad_norm: f32,
 
     #[arg(
         long,
@@ -316,32 +255,6 @@ pub struct BgeArgs {
                      pre-processing there."
     )]
     pub(crate) multiome: Vec<Box<str>>,
-
-    #[arg(
-        long = "nce-objective",
-        default_value_t = NceObjectiveArg::Softmax,
-        value_enum,
-        help = "NCE objective: softmax or logistic",
-        long_help = "NCE objective. softmax is InfoNCE, where negatives compete.\n\
-                     It is sharper on dense pseudobulk data, and is the default.\n\
-                     logistic is per-pair SGNS."
-    )]
-    pub(crate) nce_objective: NceObjectiveArg,
-
-    #[arg(
-        long = "nce-corruption",
-        default_value_t = NceCorruptionArg::Feature,
-        value_enum,
-        help = "Which side the NCE negatives replace: feature or both",
-        long_help = "Which side of a positive (cell, feature) edge the negatives replace.\n\
-                     feature draws negatives on the feature side only.\n\
-                     A pseudobulk row then receives gradient from its own positives alone.\n\
-                     both adds in-batch cell-side negatives, as SIMBA does:\n\
-                     each row also competes with the other rows in the minibatch\n\
-                     for its feature, so every row is pushed apart from every other\n\
-                     on every step."
-    )]
-    pub(crate) nce_corruption: NceCorruptionArg,
 
     #[arg(
         long,

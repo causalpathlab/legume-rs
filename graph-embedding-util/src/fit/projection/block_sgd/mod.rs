@@ -384,11 +384,7 @@ pub(crate) fn project_cells(
                     edges: &edges_a,
                     base_theta: None,
                     init_theta: None,
-                    // DIAGNOSTIC (not for commit): override the cold budget.
-                    max_steps: std::env::var("SENNA_SGD_STEPS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(MAX_STEPS),
+                    max_steps: MAX_STEPS,
                 },
                 cells,
                 &bar,
@@ -521,11 +517,7 @@ fn polish_pass(
             edges,
             base_theta: None,
             init_theta: Some(init),
-            // DIAGNOSTIC (not for commit): override the polish budget.
-            max_steps: std::env::var("SENNA_POLISH_STEPS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(POLISH_STEPS),
+            max_steps: POLISH_STEPS,
         },
         cells,
         bar,
