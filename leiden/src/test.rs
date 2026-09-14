@@ -142,3 +142,30 @@ fn edge_weight_par() {
         check_edge_weight_par(&n);
     }
 }
+
+/// The refinement runs its subnetworks in parallel; the labels must not depend
+/// on how many threads did the work, nor differ between two runs of one seed.
+#[test]
+fn iterate_is_the_same_on_any_thread_count() {
+    let mut rng = SmallRng::seed_from_u64(3);
+    let (n, _) = gen_sample_network(&mut rng, 200, 30, 10.0, 0.4);
+    let run = |threads: usize| -> Vec<usize> {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut c = SimpleClustering::init_different_clusters(n.nodes());
+                let mut l = Leiden::new(DEFAULT_RESOLUTION, DEFAULT_RANDOMNESS, Some(11));
+                for _ in 0..10 {
+                    if !l.iterate(&n, &mut c) {
+                        break;
+                    }
+                }
+                (0..n.nodes()).map(|i| c.get(i)).collect()
+            })
+    };
+    let one = run(1);
+    assert_eq!(one, run(6));
+    assert_eq!(one, run(1));
+}
