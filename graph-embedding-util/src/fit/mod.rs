@@ -569,12 +569,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             batch_fold,
             unspliced,
             config.joint_velocity,
-            // DIAGNOSTIC (not for commit): force the block SGD.
-            if std::env::var_os("SENNA_PHASE2_SGD").is_some() {
-                None
-            } else {
-                Some(&spec)
-            },
+            Some(&spec),
         )?
     };
 
