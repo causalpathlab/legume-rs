@@ -5,23 +5,28 @@
 //! p_ug|m = softmax_{g∈m} ( ⟨e_u, r_g⟩ + b_g )            over the genes of m
 //! L₁(u)   = − Σ_m     q_um   · log p_um                  q_um   = n_um / N_u
 //! L₂(u,m) = − Σ_{g∈m} q_ug|m · log p_ug|m                q_ug|m = n_ug / n_um
-//! L = Σ_u w_u [ L₁(u) + (1/K) Σ_{k} L₂(u, m_k) ],        m_k ~ q_u·  (K draws)
+//! L = Σ_u w_u [ L₁(u) + Σ_k (c_k/K)·L₂(u, m_k) ]
 //! ```
+//!
+//! `m_k ~ q_u·` with replacement (K draws); `c_k` is module `m_k`'s draw
+//! multiplicity, so `Σ_k (c_k/K)·L₂(u, m_k)` is an unbiased estimator of
+//! `Σ_m q_um·L₂(u,m)`. `StepPlan` carries each pair's already-computed
+//! weight `c_k/K` — the step never re-derives it from `q_um`.
 //!
 //! With `δ¹ = p − q` at the module level and `δ² = p − q` within a module:
 //!
 //! ```text
-//! ∂L/∂e_u = w_u [ Σ_m δ¹_um μ_m + (1/K) Σ_k Σ_{g∈m_k} δ²_ug r_g ]
-//! ∂L/∂μ_m = Σ_u w_u δ¹_um e_u        ∂L/∂b_m = Σ_u w_u δ¹_um
-//! ∂L/∂r_g = Σ_{u} (w_u/K) δ²_ug e_u  ∂L/∂b_g = Σ_{u} (w_u/K) δ²_ug     (u with m(g) drawn)
+//! ∂L/∂e_u = w_u [ Σ_m δ¹_um μ_m + Σ_k (c_k/K) Σ_{g∈m_k} δ²_ug r_g ]
+//! ∂L/∂μ_m = Σ_u w_u δ¹_um e_u          ∂L/∂b_m = Σ_u w_u δ¹_um
+//! ∂L/∂r_g = Σ_{u} w_u·(c_k/K) δ²_ug e_u  ∂L/∂b_g = Σ_{u} w_u·(c_k/K) δ²_ug   (u with m(g) drawn)
 //! ```
 //!
 //! Positives are the unit's own shares; negatives are everything else in each
 //! partition, in proportion to how far the prediction exceeds the share. No
 //! negative is ever sampled — only the modules a unit is scored in at the gene
-//! level, ∝ its share, which is an unbiased estimator of the full sum. The
-//! within-module work is grouped by module: one gemm per module over the
-//! units drawn into it, so a step touches a gene row at most once.
+//! level, weighted by its draw multiplicity. The within-module work is
+//! grouped by module: one gemm per module over the units drawn into it, so a
+//! step touches a gene row at most once.
 
 use super::params::{HierParams, RowAdagrad};
 use super::partition::{Partition, UnitModules};
@@ -29,14 +34,19 @@ use super::units::UnitTable;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 
-/// The (unit, module) pairs one step evaluates at the gene level, grouped by module.
-#[allow(dead_code)]
+/// The (unit, module) pairs one step evaluates at the gene level, grouped by
+/// module. Each pair carries the module's per-unit draw weight `c_k/K` — the
+/// multiplicity of that module among the unit's K draws, over K; an
+/// exhaustive plan lists every module the unit has counts in at weight 1.0.
+///
+/// Invariants: `units` has no duplicates; each module appears at most once
+/// in `pairs_by_module`; every unit named in a `pairs_by_module` entry is
+/// also present in `units`.
 pub struct StepPlan {
     pub units: Vec<u32>,
-    pub pairs_by_module: Vec<(u32, Vec<u32>)>,
+    pub pairs_by_module: Vec<(u32, Vec<(u32, f32)>)>,
 }
 
-#[allow(dead_code)]
 #[derive(Default, Debug, Clone)]
 pub struct StepStats {
     pub loss_module: f64,
@@ -45,14 +55,12 @@ pub struct StepStats {
     pub n_pairs: usize,
 }
 
-#[allow(dead_code)]
 pub struct Optimizers {
     pub e_u: RowAdagrad,
     pub mu: RowAdagrad,
     pub r: RowAdagrad,
 }
 
-#[allow(dead_code)]
 pub struct Grads {
     pub e_u: Vec<f32>,
     pub mu: Vec<f32>,
@@ -71,33 +79,28 @@ fn gather(table: &[f32], h: usize, idx: &[u32]) -> DMatrix<f32> {
     m
 }
 
-/// In-place row softmax of `s`, returning per-row log-sum-exp.
-fn softmax_rows(s: &mut DMatrix<f32>) -> Vec<f32> {
-    let mut lse = Vec::with_capacity(s.nrows());
+/// In-place row softmax of `s`.
+fn softmax_rows(s: &mut DMatrix<f32>) {
     for mut row in s.row_iter_mut() {
         let mx = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let z: f32 = row.iter().map(|v| (v - mx).exp()).sum();
         let l = mx + z.ln();
         row.iter_mut().for_each(|v| *v = (*v - l).exp());
-        lse.push(l);
     }
-    lse
 }
 
-/// Pure: loss + gradients for `plan`. `modules_per_unit` is the K the plan
-/// was drawn with (the 1/K importance weight).
-#[allow(dead_code)]
+/// Pure: loss + gradients for `plan`. Each gene-level pair in `plan` already
+/// carries its own draw weight (`c_k/K`); this function never re-derives an
+/// importance weight from `q_um`.
 pub fn loss_and_grads(
     params: &HierParams,
     units: &UnitTable,
     um: &UnitModules,
     part: &Partition,
     plan: &StepPlan,
-    modules_per_unit: usize,
 ) -> (StepStats, Grads) {
     let (h, n_m) = (params.h, part.n_modules());
     let b = plan.units.len();
-    let inv_k = 1.0 / modules_per_unit.max(1) as f32;
     let w: Vec<f32> = plan
         .units
         .iter()
@@ -114,7 +117,7 @@ pub fn loss_and_grads(
     for mut row in s.row_iter_mut() {
         row.iter_mut().zip(&params.b_m).for_each(|(v, b)| *v += b);
     }
-    let lse = softmax_rows(&mut s); // s is now p
+    softmax_rows(&mut s); // s is now p (softmax output)
     let mut loss_module = 0f64;
     let mut delta1 = DMatrix::<f32>::zeros(b, n_m); // w_u (p − q)
     for (i, &u) in plan.units.iter().enumerate() {
@@ -122,13 +125,12 @@ pub fn loss_and_grads(
         for m in 0..n_m {
             let p = s[(i, m)];
             if q[m] > 0.0 {
-                // log p = (score − lse); recover the score from p and lse
+                // the module-level loss uses ln p, p being softmax_rows' output
                 loss_module -= f64::from(w[i] * q[m] * (p.ln()));
             }
             delta1[(i, m)] = w[i] * (p - q[m]);
         }
     }
-    let _ = lse;
     let g_e_module = &delta1 * &mu; // [B × H]
     let g_mu = delta1.transpose() * &e_b; // [M × H]
     let g_b_m: Vec<f32> = (0..n_m).map(|m| delta1.column(m).sum()).collect();
@@ -153,11 +155,12 @@ pub fn loss_and_grads(
     let outs: Vec<ModuleOut> = plan
         .pairs_by_module
         .par_iter()
-        .map(|(m, us)| {
+        .map(|(m, pairs)| {
             let members = &part.members[*m as usize];
             let d_m = members.len();
             let r_m = gather(&params.r, h, members); // [d_m × H]
-            let e_m = gather(&params.e_u, h, us); // [n × H]
+            let ids: Vec<u32> = pairs.iter().map(|&(u, _)| u).collect();
+            let e_m = gather(&params.e_u, h, &ids); // [n × H]
             let mut s = &e_m * r_m.transpose(); // [n × d_m]
             for mut row in s.row_iter_mut() {
                 for (j, &g) in members.iter().enumerate() {
@@ -166,11 +169,9 @@ pub fn loss_and_grads(
             }
             softmax_rows(&mut s);
             let mut loss = 0f64;
-            let mut delta2 = DMatrix::<f32>::zeros(us.len(), d_m); // (w_u/K) q_um (p − q_g|m)
-            for (i, &u) in us.iter().enumerate() {
-                let wu = units.weight[u as usize] * inv_k;
-                let q_um = um.q[u as usize * n_m + *m as usize];
-                let scale = wu * q_um;
+            let mut delta2 = DMatrix::<f32>::zeros(pairs.len(), d_m); // w_u·(c_k/K) (p − q_g|m)
+            for (i, &(u, wt)) in pairs.iter().enumerate() {
+                let scale = units.weight[u as usize] * wt;
                 // target shares within the module
                 let counts = um.by_module[u as usize]
                     .iter()
@@ -180,7 +181,7 @@ pub fn loss_and_grads(
                 let n_um = um.n_um[u as usize * n_m + *m as usize];
                 let mut target = vec![0f32; d_m];
                 for &(slot, c) in counts {
-                    target[slot as usize] = c / n_um;
+                    target[slot as usize] += c / n_um;
                 }
                 for j in 0..d_m {
                     let p = s[(i, j)];
@@ -192,10 +193,15 @@ pub fn loss_and_grads(
             }
             let g_e = &delta2 * &r_m; // [n × H]
             let g_r = delta2.transpose() * &e_m; // [d_m × H]
-            let e_rows = us
+            let e_rows = pairs
                 .iter()
                 .enumerate()
-                .map(|(i, u)| (pos_of[u], g_e.row(i).iter().copied().collect()))
+                .map(|(i, &(u, _))| {
+                    let pos = *pos_of
+                        .get(&u)
+                        .expect("every unit drawn into a module is in plan.units");
+                    (pos, g_e.row(i).iter().copied().collect())
+                })
                 .collect();
             let r_rows = members
                 .iter()
@@ -255,8 +261,7 @@ pub fn loss_and_grads(
 }
 
 /// Apply `grads` with the row optimizers (weight decay `wd` on touched rows:
-/// `row *= 1 − lr·wd` before the Adagrad step).
-#[allow(dead_code)]
+/// `row *= 1 − lr·wd` before the Adagrad step; biases never decay).
 pub fn apply(
     params: &mut HierParams,
     opt: &mut Optimizers,
@@ -280,6 +285,10 @@ pub fn apply(
         let mut g: Vec<f32> = grads.mu[m * h..(m + 1) * h].to_vec();
         g.push(grads.b_m[m]);
         let mut row: Vec<f32> = params.mu[m * h..(m + 1) * h].to_vec();
+        if wd > 0.0 {
+            let f = 1.0 - opt.mu.lr * wd;
+            row.iter_mut().for_each(|x| *x *= f);
+        }
         row.push(params.b_m[m]);
         opt.mu.update(m, &mut row, &g);
         params.mu[m * h..(m + 1) * h].copy_from_slice(&row[..h]);
