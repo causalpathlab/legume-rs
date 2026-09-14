@@ -37,6 +37,12 @@ fn composition_is_count_share_per_module_and_by_module_uses_slots() {
 }
 
 #[test]
+fn labels_from_membership_takes_the_row_argmax_with_low_index_ties() {
+    let pi = nalgebra::DMatrix::<f32>::from_row_slice(3, 2, &[0.2, 0.8, 0.9, 0.1, 0.0, 0.0]);
+    assert_eq!(labels_from_membership(&pi), vec![1, 0, 0]);
+}
+
+#[test]
 fn an_empty_unit_has_a_zero_composition_row() {
     let p = Partition::from_labels(&[0, 0], 1);
     let l0 = vec![t(1, 0, 2.0)];

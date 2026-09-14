@@ -314,7 +314,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             // held-out cells they turned the gain over the training-marginal
             // null from negative to zero, raised the per-cell rank agreement, and
             // lost less under gene ablation.
-            // Under `senna update` the parent's modules are carried as the warm start.
+            // Under `senna update` the parent's module PARTITION (its membership,
+            // argmax per gene, unmatched genes initialised through the parent's
+            // modules) seeds phase 1; module vectors and per-gene residuals are
+            // re-learned.
             gene_modules: match args.modules.resolve(Some(DEFAULT_GENE_MODULES))? {
                 Some(mut gm) => {
                     gm.parent = parent_modules(args.init_from.as_deref(), &unified.feature_names)?;
@@ -599,7 +602,8 @@ fn parent_modules(
     );
     let n_matched = remap.new_to_train.iter().filter(|r| r.is_some()).count();
     info!(
-        "update: carrying {} gene modules from {prefix}; {} of {} features match the parent",
+        "update: carrying the parent's {}-module partition from {prefix}; {} of {} features \
+         match the parent",
         mu.nrows(),
         n_matched,
         feature_names.len()

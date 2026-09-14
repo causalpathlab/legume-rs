@@ -693,7 +693,9 @@ pub(crate) fn refine(
     };
     let nll_per_count_before = score_all()?;
     info!(
-        "Phase 2 (encoder) — refining the trunk on {n_cells} cells' likelihood: {REFINE_EPOCHS}          epochs of {REFINE_CELLS_PER_STEP}-cell steps, lr {REFINE_LEARNING_RATE}, ridge λ={lambda};          NLL/count before {nll_per_count_before:.4}"
+        "Phase 2 (encoder) — refining the trunk on {n_cells} cells' likelihood: {REFINE_EPOCHS} \
+         epochs of {REFINE_CELLS_PER_STEP}-cell steps, lr {REFINE_LEARNING_RATE}, ridge λ={lambda}; \
+         NLL/count before {nll_per_count_before:.4}"
     );
 
     let mut adam = AdamW::new(
