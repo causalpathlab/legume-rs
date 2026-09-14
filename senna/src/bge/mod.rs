@@ -314,6 +314,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
             lineage_mst: false,
             joint_velocity: false,
             nce_objective: args.nce_objective.to_ge(),
+            nce_corruption: args.nce_corruption.to_ge(),
             // Learned mixed-membership modules in front of ρ — ON by default for bge
             // (`--no-gene-modules` opts out): on held-out marrow cells they turned the
             // gain over the training-marginal null from negative to zero, raised the

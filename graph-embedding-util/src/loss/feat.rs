@@ -8,7 +8,7 @@
 use crate::data::Triplet;
 use crate::loss::modality::ModalityPools;
 use crate::loss::modules::ModulePools;
-use crate::loss::{logistic_nce, softmax_nce, NceObjective};
+use crate::loss::{logistic_nce, softmax_nce, NceCorruption, NceObjective};
 use crate::model::JointEmbedModel;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{Device, Result, Tensor};
@@ -526,6 +526,7 @@ pub fn nce_loss(
     batch: EdgeBatch,
     cell_coarse_to_fine: &[Vec<usize>],
     objective: NceObjective,
+    corruption: NceCorruption,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -539,7 +540,7 @@ pub fn nce_loss(
     let e_cell_pos = gather_rows(&e_cell_u, &cell_idx_t)?;
     let b_cell_pos = gather_rows(&b_cell_u, &cell_idx_t)?;
 
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, corruption, dev)
 }
 
 /// Fast path for the identity-coarsening case (every "pb-sample" is
@@ -553,6 +554,7 @@ pub fn nce_loss_identity(
     model: &JointEmbedModel,
     batch: EdgeBatch,
     objective: NceObjective,
+    corruption: NceCorruption,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -562,7 +564,7 @@ pub fn nce_loss_identity(
     let cell_idx_t = Tensor::from_slice(&batch.coarse_cells, b, dev)?;
     let e_cell_pos = gather_rows(&model.e_cell, &cell_idx_t)?;
     let b_cell_pos = gather_rows(&model.b_cell, &cell_idx_t)?;
-    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, dev)
+    nce_loss_with_cell_side(model, batch, e_cell_pos, b_cell_pos, objective, corruption, dev)
 }
 
 /// Gather the effective feature rows `[b, H]` for feature indices `idx` on the
@@ -581,13 +583,15 @@ pub fn gather_feature_rows(model: &JointEmbedModel, idx: &Tensor) -> Result<Tens
 /// Shared tail of [`nce_loss`] / [`nce_loss_identity`]: feature-side
 /// gathers, raw bilinear (`E_feat[f] · E_cell[c] + b_feat`) scoring,
 /// unweighted-mean log-σ aggregation over the batch. The cell-side
-/// embeddings come pre-resolved (pooled or directly gathered).
+/// embeddings come pre-resolved (pooled or directly gathered). Under
+/// [`NceCorruption::Both`] the in-batch cell-side term is added per edge.
 fn nce_loss_with_cell_side(
     model: &JointEmbedModel,
     batch: EdgeBatch,
     e_cell_pos: Tensor,
     b_cell_pos: Tensor,
     objective: NceObjective,
+    corruption: NceCorruption,
     dev: &Device,
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
@@ -618,15 +622,49 @@ fn nce_loss_with_cell_side(
     let neg_score =
         JointEmbedModel::score_negatives(&e_feat_neg, &e_cell_pos, &b_feat_neg, &b_cell_pos)?;
 
-    let negs = std::slice::from_ref(&neg_score);
-    let per_edge = match objective {
-        NceObjective::Logistic => logistic_nce(&pos_score, negs)?,
-        NceObjective::Softmax => softmax_nce(&pos_score, negs)?,
+    let nce = |pos: &Tensor, negs: &[Tensor]| match objective {
+        NceObjective::Logistic => logistic_nce(pos, negs),
+        NceObjective::Softmax => softmax_nce(pos, negs),
     };
+    let mut per_edge = nce(&pos_score, std::slice::from_ref(&neg_score))?;
+
+    if corruption == NceCorruption::Both {
+        // Cell-side corruption with in-batch negatives: positive `i`'s feature
+        // scored against every other positive's cell, `S_ij = ⟨e_f_i, e_c_j⟩ +
+        // b_f_i + b_c_j`, so the cell embedding rows compete with each other for
+        // the feature. `b_f_i` is shared across the row and drops out of the
+        // softmax, but is kept so the logistic form sees the same score.
+        // Columns whose cell IS row `i`'s cell — the diagonal, and any repeat
+        // draw of the same cell — are masked to `−∞` (PBG's `−1e9`), so a
+        // positive never competes with itself.
+        let s_bb = e_feat_pos.matmul(&e_cell_pos.t()?)?; // [B, B]
+        let s_bb = s_bb
+            .broadcast_add(&b_feat_pos.unsqueeze(1)?)?
+            .broadcast_add(&b_cell_pos.unsqueeze(0)?)?;
+        let mask = in_batch_cell_mask(&batch.coarse_cells, dev)?;
+        let cell_negs = (s_bb + mask)?;
+        per_edge = (per_edge + nce(&pos_score, std::slice::from_ref(&cell_negs))?)?;
+    }
 
     // Unweighted mean over the batch's positives (pure count-weighted training:
     // the count weighting lives in the sampler's positive draw, not the loss).
     per_edge.mean(0)
+}
+
+/// PBG's mask for in-batch negatives: `−1e9` where column `j`'s cell is row
+/// `i`'s cell (the diagonal, plus repeated draws), `0` elsewhere. `[B, B]`.
+fn in_batch_cell_mask(cells: &[u32], dev: &Device) -> Result<Tensor> {
+    const MASK_NEG: f32 = -1e9;
+    let b = cells.len();
+    let mut m = vec![0f32; b * b];
+    for (i, &ci) in cells.iter().enumerate() {
+        for (j, &cj) in cells.iter().enumerate() {
+            if ci == cj {
+                m[i * b + j] = MASK_NEG;
+            }
+        }
+    }
+    Tensor::from_vec(m, (b, b), dev)
 }
 
 fn unique_with_index(values: &[u32]) -> (Vec<u32>, Vec<u32>) {

@@ -160,6 +160,30 @@ impl NceObjectiveArg {
     }
 }
 
+/// Which side of a positive edge the NCE negatives replace — shared by the
+/// CLIs that train the graph-embedding engine.
+#[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[clap(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum NceCorruptionArg {
+    /// Feature-side negatives only — the historical loss, byte-identical runs.
+    Feature,
+    /// Feature-side negatives plus in-batch cell-side negatives (SIMBA's
+    /// two-sided contrast): each pseudobulk / cell row competes against the
+    /// others in the minibatch for its feature.
+    Both,
+}
+
+impl NceCorruptionArg {
+    #[must_use]
+    pub fn to_ge(&self) -> graph_embedding_util::loss::NceCorruption {
+        match self {
+            NceCorruptionArg::Feature => graph_embedding_util::loss::NceCorruption::Feature,
+            NceCorruptionArg::Both => graph_embedding_util::loss::NceCorruption::Both,
+        }
+    }
+}
+
 /// Batch adjustment method
 #[derive(ValueEnum, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[clap(rename_all = "lowercase")]

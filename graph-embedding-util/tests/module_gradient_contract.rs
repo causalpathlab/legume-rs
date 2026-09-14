@@ -5,7 +5,8 @@
 use candle_util::candle_core::{DType, Device, Tensor, Var};
 use candle_util::candle_nn::VarMap;
 use graph_embedding_util::loss::{
-    module_balance_prior, module_softmax_loss, nce_loss_identity, EdgeBatch, NceObjective,
+    module_balance_prior, module_softmax_loss, nce_loss_identity, EdgeBatch, NceCorruption,
+    NceObjective,
 };
 use graph_embedding_util::model::{
     JointEmbedModel, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME, MODULE_LOGITS_VAR_NAME,
@@ -78,7 +79,7 @@ fn within_module_nce_reaches_residual_and_cells_but_not_mu() {
     let r = var(&vm, MODULE_RESIDUAL_VAR_NAME);
     r.set(&Tensor::rand(-0.5f32, 0.5, (D, H), &dev()).unwrap())
         .unwrap();
-    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
+    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, NceCorruption::Feature, &dev()).unwrap();
     let grads = loss.backward().unwrap();
     let mu = grad_norm(&grads, &var(&vm, MODULE_MU_VAR_NAME)).unwrap_or(0.0);
     assert!(
@@ -114,7 +115,7 @@ fn identical_membership_rows_cancel_mu_even_when_mixed() {
         neg_feats: vec![3, 6],
         n_negatives: 2,
     };
-    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
+    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, NceCorruption::Feature, &dev()).unwrap();
     let grads = loss.backward().unwrap();
     let mu = grad_norm(&grads, &var(&vm, MODULE_MU_VAR_NAME)).unwrap_or(0.0);
     assert!(mu < 1e-5, "identical rows must cancel μ, got {mu}");
@@ -133,7 +134,7 @@ fn within_module_nce_reaches_mu_and_logits_under_mixed_membership() {
         neg_feats: vec![1, 2],
         n_negatives: 2,
     };
-    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
+    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, NceCorruption::Feature, &dev()).unwrap();
     let grads = loss.backward().unwrap();
     assert!(grad_norm(&grads, &var(&vm, MODULE_MU_VAR_NAME)).unwrap() > 1e-4);
     assert!(grad_norm(&grads, &var(&vm, MODULE_LOGITS_VAR_NAME)).unwrap() > 1e-4);
@@ -145,7 +146,7 @@ fn within_module_nce_reaches_mu_and_logits_under_mixed_membership() {
         neg_feats: vec![1, 2],
         n_negatives: 2,
     };
-    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, &dev()).unwrap();
+    let loss = nce_loss_identity(&m, batch, NceObjective::Softmax, NceCorruption::Feature, &dev()).unwrap();
     let grads = loss.backward().unwrap();
     assert!(grads
         .get(var(&vm, MODULE_LOGITS_VAR_NAME).as_tensor())

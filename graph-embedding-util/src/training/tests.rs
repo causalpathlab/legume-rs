@@ -114,6 +114,7 @@ fn batches_per_epoch_resolves_auto_and_explicit() {
         num_negatives: 4,
         seed: 42,
         objective: crate::loss::NceObjective::Softmax,
+        corruption: crate::loss::NceCorruption::Feature,
         feature_embedding_l2: 0.0,
         max_grad_norm: 0.0,
         delta_l2: 0.0,
