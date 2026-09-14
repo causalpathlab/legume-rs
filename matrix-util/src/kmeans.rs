@@ -9,10 +9,11 @@
 //! merely by having a short centroid.
 //!
 //! No `n × k` distance matrix is ever formed: each row's distances to the `k`
-//! centroids are taken in registers and only the argmin survives.
+//! centroids are taken into a per-thread scratch of `k` floats — one streaming
+//! pass per dimension over a dimension-major centroid table — and only the
+//! argmin survives.
 
-use crate::knn::metric::{l2_sq, l2_sq_kernel};
-use multiversion::multiversion;
+use crate::knn::metric::{l2_sq, sqdist_soa_range};
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -107,11 +108,12 @@ pub fn kmeans_rows_seeded(z: &DMatrix<f32>, opts: &KmeansRowsOpts) -> KmeansRows
         ////////////////
         // Fixed-size chunks collected in order: the reduction below sums the
         // partials as they appear, so the result never depends on thread count.
+        let cents_soa = to_soa(&cents, k, d);
         let partials: Vec<Partial> = rows
             .par_chunks(CHUNK_ROWS * d)
             .zip(labels.par_chunks_mut(CHUNK_ROWS))
             .zip(nearest.par_chunks_mut(CHUNK_ROWS))
-            .map(|((xs, ls), ns)| assign_chunk(xs, d, &cents, k, cosine, ls, ns))
+            .map(|((xs, ls), ns)| assign_chunk(xs, d, &cents_soa, k, cosine, ls, ns))
             .collect();
         let mut sums = vec![0f64; k * d];
         let mut counts = vec![0usize; k];
@@ -167,6 +169,45 @@ pub fn kmeans_rows_seeded(z: &DMatrix<f32>, opts: &KmeansRowsOpts) -> KmeansRows
         labels,
         n_iter,
     }
+}
+
+/// Nearest centroid of every row of `z` under `metric`, for a centroid table
+/// fitted elsewhere (say, on a subsample of `z`). Same assignment rule as the
+/// Lloyd step: strict `<` from centroid 0, so ties go to the lowest index.
+/// Under the spherical metric the rows are normalised before comparing.
+pub fn nearest_centroid_rows(
+    z: &DMatrix<f32>,
+    centroids: &DMatrix<f32>,
+    metric: KmeansMetric,
+) -> Vec<usize> {
+    let (n, d, k) = (z.nrows(), z.ncols(), centroids.nrows());
+    assert_eq!(
+        centroids.ncols(),
+        d,
+        "centroids and rows disagree on the dimension"
+    );
+    if n == 0 || k == 0 || d == 0 {
+        return vec![0; n];
+    }
+    let cosine = metric == KmeansMetric::Cosine;
+    let mut zt = z.transpose();
+    if cosine {
+        zt.as_mut_slice().par_chunks_mut(d).for_each(normalise_row);
+    }
+    let rows: &[f32] = zt.as_slice();
+    let cents_soa: Vec<f32> = (0..d)
+        .flat_map(|dim| (0..k).map(move |c| (dim, c)))
+        .map(|(dim, c)| centroids[(c, dim)])
+        .collect();
+    let mut labels = vec![usize::MAX; n];
+    let mut nearest = vec![0f32; n];
+    rows.par_chunks(CHUNK_ROWS * d)
+        .zip(labels.par_chunks_mut(CHUNK_ROWS))
+        .zip(nearest.par_chunks_mut(CHUNK_ROWS))
+        .for_each(|((xs, ls), ns)| {
+            assign_chunk(xs, d, &cents_soa, k, cosine, ls, ns);
+        });
+    labels
 }
 
 /// The degenerate return: `k.max(1)` centroid rows with the column mean in
@@ -272,16 +313,23 @@ fn fold_min_sqdist<'a>(
 // Lloyd step //
 ////////////////
 
+/// Row-major `[k × d]` to dimension-major `[d × k]`.
+fn to_soa(cents: &[f32], k: usize, d: usize) -> Vec<f32> {
+    (0..d)
+        .flat_map(|dim| (0..k).map(move |c| cents[c * d + dim]))
+        .collect()
+}
+
 /// Assign every row of one chunk to its nearest centroid (strict `<` from
 /// centroid 0, so ties go to the lowest index), recording the distance in
-/// `nearest` and returning the chunk's sums, counts and change count. Under
-/// the spherical metric a zero row has no direction and reports distance `0`,
-/// so it is never chosen to re-seed an empty cluster.
-#[multiversion(targets = "simd")]
+/// `nearest` and returning the chunk's sums, counts and change count.
+/// `cents_soa` is the dimension-major `[d × k]` centroid table. Under the
+/// spherical metric a zero row has no direction and reports distance `0`, so
+/// it is never chosen to re-seed an empty cluster.
 fn assign_chunk(
     xs: &[f32],
     d: usize,
-    cents: &[f32],
+    cents_soa: &[f32],
     k: usize,
     cosine: bool,
     labels: &mut [usize],
@@ -290,11 +338,12 @@ fn assign_chunk(
     let mut sums = vec![0f64; k * d];
     let mut counts = vec![0usize; k];
     let mut changed = 0usize;
+    let mut dist = vec![0f32; k];
     for (r, x) in xs.chunks_exact(d).enumerate() {
+        sqdist_soa_range(cents_soa, k, x, 0, k, &mut dist);
         let mut best = 0usize;
         let mut best_d = f32::INFINITY;
-        for c in 0..k {
-            let dd = l2_sq_kernel(x, &cents[c * d..(c + 1) * d]);
+        for (c, &dd) in dist.iter().enumerate() {
             if dd < best_d {
                 best_d = dd;
                 best = c;
