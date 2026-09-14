@@ -49,6 +49,7 @@ use instant_distance::Search;
 pub mod all_pairs;
 mod backend;
 mod exact;
+pub mod ivf;
 pub mod metric;
 
 #[cfg(test)]
