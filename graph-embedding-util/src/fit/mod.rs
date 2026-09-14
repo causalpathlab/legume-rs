@@ -126,6 +126,18 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // itself — the gene-module NCE model and its k-means/parent warm start below
     // are for the splice (β-sharing) path only.
     let hier_path = config.feat_factor.is_none();
+    // The finest collapse's feature profile (batch-corrected pseudobulk rates,
+    // gathered onto the unified feature axis) — seeds gene-module membership on
+    // whichever path needs it below: the k-means warm start (splice path) or the
+    // hier engine's own warm start (plain path).
+    let finest_profile = || -> DMatrix<f32> {
+        let finest = collapsed_levels.last().expect("at least one level");
+        let pb_full = match &finest.mu_adjusted {
+            Some(adj) => adj.posterior_mean(),
+            None => finest.mu_observed.posterior_mean(),
+        };
+        setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend)
+    };
     // Module warm start: k-means over the feature profiles at the finest collapse
     // level, on the same batch-corrected pseudobulk counts phase 1 trains on.
     // Either the k-means labels over this fit's own profiles, or — under a parent
@@ -135,12 +147,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         None
     } else {
         config.gene_modules.as_ref().map(|g| {
-            let finest = collapsed_levels.last().expect("at least one level");
-            let pb_full = match &finest.mu_adjusted {
-                Some(adj) => adj.posterior_mean(),
-                None => finest.mu_observed.posterior_mean(),
-            };
-            let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
+            let profile = finest_profile();
             match &g.parent {
                 Some(parent) => models::ModuleWarm::Parent {
                     logits: module_warm::parent_module_logits(parent, &profile),
@@ -172,12 +179,6 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
     let (use_cell_axis, cell_samplers) = (ax.use_cell_axis, &ax.cell_samplers);
 
-    // Note on biases: the per-CELL bias `b_cell` and the per-PB biases
-    // (`pb_l*_b_cell`) BOTH train in phase 1 — a per-sample bias absorbs
-    // that sample's depth so the shared `E_feat` captures composition, not
-    // library size. `b_cell` is re-fitted analytically in phase 2 and
-    // written alongside `e_cell` (consistent with `senna gem`).
-
     // Two-phase training (always — `ge::fit` is the bge driver only); see
     // the `fit()` doc for the rationale. Shared AdamW hyperparameters:
     let adamw_params = || ParamsAdamW {
@@ -190,15 +191,26 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // Phase 1: joint training //
     /////////////////////////////
 
-    // The cell axis is trained HERE (e_cell + b_cell trainable, as are the
-    // pb `pb_l*_b_cell`) so the per-cell stratified sampler —
-    // which guarantees coverage of rare/shallow cells — shapes `E_feat`.
-    // Without the cell axis, `E_feat` is driven only by pb aggregates and rare
-    // compartments (DC/NK/HSPC) collapse into abundant ones. Phase 2 then
-    // recalibrates e_cell for *every* cell against the fixed `E_feat`.
-    // The axes borrow `cell_model` / `cell_samplers`; confine them to this
-    // block so those borrows are released before the phase-2 projection
-    // takes `&mut cell_model`.
+    // Plain path (`hier_path`, bge): phase 1 trains by the exact hierarchical
+    // softmax (`hier::train`) over units = every level's pseudobulks + the
+    // phase-1 cell subsample. There is no per-unit bias — `pb_l{l}_b_cell`
+    // stays at its zero init — and the composed dictionary is written
+    // straight into the free `e_feat`/`b_feat` (and each level's `e_cell`)
+    // once training finishes, rather than accumulated by SGD alongside a
+    // cell/pb axis.
+    //
+    // Splice path (gem, β-sharing): the composite NCE trainer below. The
+    // cell axis is trained HERE (e_cell + b_cell trainable, as are the pb
+    // `pb_l*_b_cell`) so the per-cell stratified sampler — which guarantees
+    // coverage of rare/shallow cells — shapes `E_feat`; without it, `E_feat`
+    // is driven only by pb aggregates and rare compartments collapse into
+    // abundant ones. Both `b_cell` and `pb_l*_b_cell` train here so a
+    // per-sample bias absorbs that sample's depth, leaving `E_feat` to
+    // capture composition, not library size — `b_cell` is then re-fitted
+    // analytically in phase 2 and written alongside `e_cell` (consistent
+    // with `senna gem`). The axes borrow `cell_model`/`cell_samplers`;
+    // confine them to this block so those borrows are released before the
+    // phase-2 projection takes `&mut cell_model`.
 
     // `--lineage-dag` reallocates the ONE `config.epochs` budget across the warm-up
     // (phase 1) and the refine instead of doubling it. The DAG can only be oriented
@@ -220,22 +232,28 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
 
         // Units = every level's pseudobulks + the phase-1 cell subsample,
         // the cells batch-folded like phase 2 folds them.
-        let cell_fold = batch_gene_fold.as_ref().map(|fold| CellBatchFold {
-            fold,
-            cell_to_batch: &unified.batch_membership,
-        });
+        let cell_fold = batch_gene_fold
+            .as_ref()
+            .map(|fold| fold.cell_fold(&unified.batch_membership));
         let blobs: Vec<&[Triplet]> = pb_blobs.iter().map(|b| b.triplets.as_slice()).collect();
         let n_pb_per_level: Vec<usize> = pb_blobs.iter().map(|b| b.n_cells()).collect();
-        let cell_rows: Vec<(u32, &[u32], &[f32])> = ax
-            .phase1_cell_samplers()
-            .iter()
-            .flat_map(|s| {
-                s.active_cells
-                    .iter()
-                    .zip(&s.per_cell)
-                    .map(|(&c, cf)| (c, cf.features.as_slice(), cf.counts.as_slice()))
-            })
-            .collect();
+        // `--phase1-cells-per-pb 0` ⇒ `use_cell_axis == false` (pure-pb phase 1,
+        // logged above as "cell axis SUPPRESSED"); `phase1_cell_samplers()` would
+        // otherwise fall back to the FULL cell samplers, silently making every
+        // cell a unit. Gate exactly as the composite path does.
+        let cell_rows: Vec<(u32, &[u32], &[f32])> = if ax.use_cell_axis {
+            ax.phase1_cell_samplers()
+                .iter()
+                .flat_map(|s| {
+                    s.active_cells
+                        .iter()
+                        .zip(&s.per_cell)
+                        .map(|(&c, cf)| (c, cf.features.as_slice(), cf.counts.as_slice()))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let units = hier::UnitTable::from_pseudobulks_and_cells(
             &blobs,
             &n_pb_per_level,
@@ -246,15 +264,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         // Module labels: the k-means warm start over the finest level's profiles
         // (the same call the module model used), or a single module.
         let n_modules = config.gene_modules.as_ref().map_or(128, |g| g.n_modules);
-        let labels: Vec<u32> = {
-            let finest = collapsed_levels.last().expect("at least one level");
-            let pb_full = match &finest.mu_adjusted {
-                Some(adj) => adj.posterior_mean(),
-                None => finest.mu_observed.posterior_mean(),
-            };
-            let profile = setup::gather_to_unified_axis(pb_full, n_features, &feature_to_backend);
-            module_warm::warm_start_module_labels(&profile, n_modules, config.seed)
-        };
+        let labels: Vec<u32> =
+            module_warm::warm_start_module_labels(&finest_profile(), n_modules, config.seed);
         let out = hier::train(
             &units,
             &labels,
