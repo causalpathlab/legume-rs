@@ -1,50 +1,115 @@
-//! Per-gene pooling of a gem feature axis for HVG ranking.
+//! Pooled gene-level HVG projection weights for `senna gem`.
 //!
-//! `senna gem`'s HVG selection ranks GENES, not rows: a gene's
-//! `{gene}/count/spliced` and `{gene}/count/unspliced` rows are pooled onto
-//! one entry before the variance-trend ranking runs, so both tracks of a
-//! selected gene carry projection weight together (see `gem::run`'s HVG
-//! block for why).
-//!
-//! This used to go through `gem::rows::build_gene_track_map`, which also
-//! paired tracks for the now-deleted β-sharing engine and tolerated a row
-//! that didn't fit the `{gene}/count/{spliced|unspliced}` grammar by giving
-//! it its own single-track gene id. That tolerance existed for the engine's
-//! sake, not HVG pooling's — a pooled ranking has nowhere harmless to put an
-//! unpooled row, so [`build_gene_index`] rejects one outright, naming it.
+//! Unlike a plain row axis, a gem gene may carry several rows (one per
+//! track: the base count, an unspliced offset, one pair of channel rows per
+//! co-measured modality). HVG selection has to rank GENES, pooling every one
+//! of a gene's rows first — otherwise a gene whose variance shows up only in
+//! a modality track (never in its own counts) would never earn its
+//! projection weight. [`gem_hvg_row_weights`] does that pooling over a
+//! [`TrackPlan`] and hands back a per-ROW weight vector, 1.0 only on the
+//! BASE row (`count/spliced`) of a selected gene — every other row of that
+//! gene, on every other track, carries weight 0. Non-base rows never carry
+//! projection weight regardless of selection: the hierarchical trainer
+//! already restricts its random-projection sketch to base rows when
+//! `n_tracks > 1` (a masked clone of the feature axis), so this is the belt
+//! to that suspender, not a second, independent decision.
 
-use auxiliary_data::feature_rows::parse_feature_row;
+use data_beans::utilities::name_matching::GeneIndex;
+use data_beans_alg::hvg::{
+    load_must_train, select_hvg_by_stats, union_indices, HvgCliArgs, MustTrainFeatures,
+};
+use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
+use graph_embedding_util as ge;
+use log::info;
+use matrix_util::traits::RunningStatOps;
+use rustc_hash::FxHashSet;
 
-/// Per-row gene index over a gem feature axis: `row_to_gene[r]` is the dense
-/// gene id of row `r`, and the returned `Vec<Box<str>>` is the id-ordered
-/// gene keys. `GENE1/count/spliced` and `GENE1/count/unspliced` pool onto the
-/// same id; every row must parse as a feature row ([`parse_feature_row`]), or
-/// this errors naming the row.
-pub(crate) fn build_gene_index(
-    feature_names: &[Box<str>],
-) -> anyhow::Result<(Vec<u32>, Vec<Box<str>>)> {
-    let mut ids: rustc_hash::FxHashMap<Box<str>, u32> = rustc_hash::FxHashMap::default();
-    let mut row_to_gene: Vec<u32> = Vec::with_capacity(feature_names.len());
-    let mut gene_names: Vec<Box<str>> = Vec::new();
-    for name in feature_names {
-        let row = parse_feature_row(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "{name}: not a `{{gene}}/count/{{spliced|unspliced}}` feature row — gem's HVG \
-                 pooling needs every row on the trained axis to parse"
-            )
-        })?;
-        let gid = match ids.get(row.gene) {
-            Some(&g) => g,
-            None => {
-                let g = gene_names.len() as u32;
-                ids.insert(row.gene.into(), g);
-                gene_names.push(row.gene.into());
-                g
-            }
-        };
-        row_to_gene.push(gid);
+use crate::gem::tracks::TrackPlan;
+
+/// Per-row HVG projection weights over a gem feature axis, pooled per gene
+/// across every track. `None` when selection is off and the axis has only
+/// the base track (plain `senna bge` behaviour: no weighting at all).
+///
+/// - `--feature-list-file` REPLACES the ranking with exactly the named
+///   genes, resolved against `plan.gene_names` (lenient matching, see
+///   [`MustTrainFeatures::resolve_with`]).
+/// - Otherwise, when `hvg.n_hvg > 0`, genes are ranked by NB dispersion-trend
+///   excess over pooled per-gene `(mean, variance)`: every row's streaming
+///   stats are computed once, then summed into `plan.row_gene` buckets, so a
+///   gene's base, unspliced and modality rows all contribute to its rank.
+/// - `--must-train-features` UNIONS a curated panel into the selection,
+///   resolved the same way, regardless of which of the two rules produced
+///   the base selection.
+/// - Weights: `w[r] = 1.0` iff `plan.base_rows[r]` and `row_gene[r]` was
+///   selected, else `0.0` — computed over ALL selected genes, `Some` even
+///   when nothing was selected (an all-zero vector), so the caller never has
+///   to re-derive "selection ran but kept nothing" from a `None`.
+/// - Selection off (`n_hvg == 0` and no `--feature-list-file`): `Some` of
+///   the base-row mask when the plan has more than the base track (so
+///   modality/unspliced rows still get weight 0, matching what the trainer
+///   restricts to anyway), else `None` — a plain spliced-only axis has
+///   nothing to mask, matching `senna bge`'s own unweighted default.
+pub(crate) fn gem_hvg_row_weights(
+    unified: &ge::UnifiedData,
+    plan: &TrackPlan,
+    hvg: &HvgCliArgs,
+    block_size: Option<usize>,
+) -> anyhow::Result<Option<Vec<f32>>> {
+    let selection_on = hvg.n_hvg > 0 || hvg.feature_list_file.is_some();
+    if !selection_on {
+        let has_non_base = plan.base_rows.iter().any(|&b| !b);
+        return Ok(has_non_base.then(|| {
+            plan.base_rows
+                .iter()
+                .map(|&b| if b { 1.0 } else { 0.0 })
+                .collect()
+        }));
     }
-    Ok((row_to_gene, gene_names))
+
+    let n_genes = plan.gene_names.len();
+    let gene_index = GeneIndex::build(&plan.gene_names);
+
+    let mut selected: Vec<usize> = if let Some(path) = hvg.feature_list_file.as_deref() {
+        MustTrainFeatures::load(path)?.resolve_with(&gene_index)
+    } else {
+        let stat = streaming_sparse_running_stats(unified.count_backend(), block_size, "gem HVG")?;
+        let (means, vars) = (stat.mean(), stat.variance());
+        let mut gmean = vec![0f32; n_genes];
+        let mut gvar = vec![0f32; n_genes];
+        for (r, (&m, &v)) in means.iter().zip(vars.iter()).enumerate() {
+            gmean[plan.row_gene[r] as usize] += m;
+            gvar[plan.row_gene[r] as usize] += v;
+        }
+        select_hvg_by_stats(&gmean, &gvar, hvg.n_hvg)
+    };
+
+    if let Some(must_train) = load_must_train(hvg.must_train_features.as_deref(), selection_on)? {
+        let forced = must_train.resolve_with(&gene_index);
+        let added = union_indices(&mut selected, &forced);
+        info!(
+            "gem HVG: {added} gene(s) force-added on top of the selection ({} of the {} \
+             matched were already selected)",
+            forced.len() - added,
+            forced.len()
+        );
+    }
+
+    let keep: FxHashSet<usize> = selected.into_iter().collect();
+    let mut w = vec![0.0f32; unified.n_features()];
+    for (r, slot) in w.iter_mut().enumerate() {
+        if plan.base_rows[r] && keep.contains(&(plan.row_gene[r] as usize)) {
+            *slot = 1.0;
+        }
+    }
+    let n_weighted = w.iter().filter(|&&x| x > 0.0).count();
+    info!(
+        "gem HVG (--n-hvg {}): {} of {n_genes} genes selected -> {n_weighted} of {} feature \
+         row(s) carry the projection; every row still trains",
+        hvg.n_hvg,
+        keep.len(),
+        unified.n_features()
+    );
+    Ok(Some(w))
 }
 
 #[cfg(test)]
