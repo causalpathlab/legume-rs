@@ -203,7 +203,8 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lr_scores: Option<String>,
 
-    /// `pinto cage` cell embedding `[N × D]`.
+    /// `pinto cage` cell embedding `[N × D]`: every cell's own placement on
+    /// the gene embedding by the same map that places its pairs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_embedding: Option<String>,
 
@@ -211,9 +212,15 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_bias: Option<String>,
 
-    /// Trained PB (finest-level super-cell) embedding table. cage's
-    /// trained unit is the PB, not the cell; `cell_embedding` above is a
-    /// propensity-weighted readout, not a trained table.
+    /// The pair encoder `pinto cage` fitted (safetensors), which `pinto
+    /// predict` reloads so a new sample is placed by the run's own map.
+    /// Absent on a run that solved every pair exactly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair_encoder: Option<String>,
+
+    /// Trained PB (finest-level super-cell) embedding table: phase 1's
+    /// training unit. Cells and pairs are placed against the gene embedding
+    /// afterwards.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pb_embedding: Option<String>,
 
@@ -486,13 +493,15 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
 /// the same three parquets, `entropy` included.
 ///
 /// `has_batch_effects` is `true` when the run had ≥2 batches and
-/// `{prefix}.delta.parquet` was written. `inputs.k` is the number of edge
-/// clusters, which is what `n_communities` reports — not the embedding
-/// width, which is a different quantity and has no slot here.
+/// `{prefix}.delta.parquet` was written; `has_pair_encoder` when the run
+/// fitted and saved `{prefix}.pair_encoder.safetensors`. `inputs.k` is the
+/// number of edge clusters, which is what `n_communities` reports — not the
+/// embedding width, which is a different quantity and has no slot here.
 pub fn create_cage_metadata(
     inputs: &RunInputs<'_>,
     has_batch_effects: bool,
     splice: Option<SpliceTrackInfo>,
+    has_pair_encoder: bool,
 ) -> PintoMetadata {
     let prefix = inputs.prefix;
 
@@ -520,6 +529,7 @@ pub fn create_cage_metadata(
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
+            pair_encoder: has_pair_encoder.then(|| format!("{prefix}.pair_encoder.safetensors")),
             pb_embedding: Some(format!("{prefix}.pb_embedding.parquet")),
             pb_bias: Some(format!("{prefix}.pb_bias.parquet")),
             cell_pb: Some(format!("{prefix}.cell_pb.parquet")),

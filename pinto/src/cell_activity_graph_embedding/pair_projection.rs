@@ -40,9 +40,18 @@
 //!
 //! # How it is solved
 //!
-//! Each pair is an independent `D+1`-parameter problem, so the solve is rayon-
-//! parallel over pairs (the outermost loop, and the only one — the per-pair
-//! work is scalar) with its own Adam per pair.
+//! Two arms share the objective. The default, [`PairSolver::TrainEncoder`],
+//! amortizes it: a shared encoder ([`encoder`]) reads each endpoint's counts
+//! through the frozen dictionary into a cell code and a small gated mixture
+//! turns two codes into the pair code, trained on this same likelihood and run
+//! once over every pair on the device. The exact arm, [`PairSolver::Exact`],
+//! is the solver below, kept as the reference the encoder is checked against
+//! on a sample of pairs after every fit, and as the fallback for a model saved
+//! without an encoder.
+//!
+//! In the exact arm each pair is an independent `D+1`-parameter problem, so
+//! the solve is rayon-parallel over pairs (the outermost loop, and the only
+//! one — the per-pair work is scalar) with its own Adam per pair.
 //!
 //! Two things make each step cheap:
 //!
@@ -78,8 +87,7 @@
 //!   spatial pair — batch-divided per endpoint, before pooling — does not have.
 //!   Reaching it means widening another crate's API and generalizing that
 //!   abstraction for one caller.
-//! - It is candle/`Device`-coupled. This step runs after cage's training loop
-//!   has released the device, on CPU, and each pair is `D+1` parameters — the
+//! - It is candle/`Device`-coupled, and each pair is `D+1` parameters — the
 //!   arithmetic is nowhere near GEMM-shaped per node.
 //! - The profiled intercept above removes the reason to form the partition at
 //!   all: the gradient needs a normalized weight, not a partition *value*. That
@@ -102,7 +110,10 @@ use rand_distr::Distribution;
 /// bound geu puts on every Poisson fit in the workspace.
 const SCORE_CLAMP: f32 = 30.0;
 
+pub(crate) mod encoder;
 mod scoring;
+use candle_util::candle_core::Device;
+pub use encoder::PairEncoderSpec;
 pub use scoring::PairScore;
 
 /// Target per-step movement of the linear predictor `s`, used to auto-scale the
@@ -145,12 +156,30 @@ impl Default for ProjectionArgs {
     }
 }
 
+/// Which arm places the pairs.
+#[derive(Debug, Clone, Copy)]
+pub enum PairSolver<'a> {
+    /// The per-pair Adam solve, for every pair and every cell.
+    Exact,
+    /// Fit the encoder on this run's pairs, place everything with it, and
+    /// save it to `save_to`.
+    TrainEncoder {
+        spec: &'a PairEncoderSpec,
+        dev: &'a Device,
+        save_to: &'a str,
+    },
+    /// Place everything with an encoder saved by an earlier run.
+    LoadEncoder { path: &'a str, dev: &'a Device },
+}
+
 /// Knobs for [`project_pairs`]: the per-node solve plus how the pair axis is
 /// walked.
 #[derive(Debug, Clone)]
-pub struct PairProjectionArgs {
-    /// Passed through to every per-pair solve.
+pub struct PairProjectionArgs<'a> {
+    /// Passed through to every per-pair solve — the exact arm's steps and
+    /// partition sample, and the ridge both arms share.
     pub projection: ProjectionArgs,
+    pub solver: PairSolver<'a>,
     /// Seed; each pair derives its own stream so the fit is reproducible
     /// regardless of how rayon schedules the work.
     pub seed: u64,
@@ -162,17 +191,10 @@ pub struct PairProjectionArgs {
     /// active axis means a sort per pair, and pairs outnumber cells by an order
     /// of magnitude, so it is opt-in rather than a silent cost.
     pub eval_features: Option<Vec<Box<str>>>,
-}
-
-impl Default for PairProjectionArgs {
-    fn default() -> Self {
-        Self {
-            projection: ProjectionArgs::default(),
-            seed: 42,
-            pair_block: 8192,
-            eval_features: None,
-        }
-    }
+    /// Score every pair's held-out likelihood ([`PairScore`]). Off, `scores`
+    /// comes back empty: the exhaustive pass per pair is only worth paying
+    /// where the numbers are written out.
+    pub score_pairs: bool,
 }
 
 /// Per-endpoint batch division, applied to each cell's counts *before* they are
@@ -187,6 +209,16 @@ pub struct PairBatchDivisor<'a> {
     pub batch_of_cell: &'a [u32],
 }
 
+/// Every cell's own placement, in column order: the MAP of its doubled
+/// profile `2x_c`, whose composition is `x_c`'s — the self-pair, so a cell
+/// sits where the same map puts a pair of two copies of it.
+pub struct CellLatent {
+    /// `[n_cells × D]`.
+    pub latent: Mat,
+    /// Per-cell intercept, `[n_cells]`.
+    pub bias: Vec<f32>,
+}
+
 /// What the projection hands back, in `edges` order.
 pub struct PairLatent {
     /// `[n_pairs × D]` pair embedding `e_uv`.
@@ -195,8 +227,10 @@ pub struct PairLatent {
     /// (clustering is on the composition), but it is the pair's log pooled
     /// depth and worth keeping for diagnostics.
     pub bias: Vec<f32>,
-    /// Held-out predictive score per pair, against the model's own abundance null.
+    /// Held-out predictive score per pair, against the model's own abundance
+    /// null; empty unless [`PairProjectionArgs::score_pairs`].
     pub scores: Vec<PairScore>,
+    pub cells: CellLatent,
 }
 
 /// The frozen side of the projection, flattened once for the inner loop.
@@ -211,6 +245,9 @@ pub struct PairDictionary {
     feat: Vec<f32>,
     /// Empirical log gene abundance, `[n_active]`.
     b: Vec<f32>,
+    /// `exp(b)`: the mean count per cell of each gene, `[n_active]` — the
+    /// encoder gate's divisor.
+    mean: Vec<f32>,
     /// Global gene id → active-list position, `u32::MAX` when inactive.
     local_of_gene: Vec<u32>,
     d: usize,
@@ -247,6 +284,7 @@ impl PairDictionary {
         let mut local_of_gene = vec![u32::MAX; n_genes];
         let mut feat = Vec::with_capacity(active.len() * d);
         let mut b = Vec::with_capacity(active.len());
+        let mut mean = Vec::with_capacity(active.len());
         let mut weights = Vec::with_capacity(active.len());
         for (local, &g) in active.iter().enumerate() {
             local_of_gene[g] = local as u32;
@@ -256,7 +294,9 @@ impl PairDictionary {
             // Mean count per cell, on the log scale the Poisson rate lives on.
             // The pooled-pair factor of two is constant across genes and is
             // absorbed by `β_uv`.
-            b.push((gene_totals[g] / n_cells as f64).ln() as f32);
+            let m = gene_totals[g] / n_cells as f64;
+            b.push(m.ln() as f32);
+            mean.push(m as f32);
             weights.push(gene_totals[g] as f32);
         }
 
@@ -288,6 +328,7 @@ impl PairDictionary {
         Ok(Self {
             feat,
             b,
+            mean,
             local_of_gene,
             d,
             log_z,
@@ -302,11 +343,30 @@ impl PairDictionary {
         self.b.len()
     }
 
+    /// Row-major `[n_active × D]` dictionary.
+    pub(crate) fn feat(&self) -> &[f32] {
+        &self.feat
+    }
+
+    /// Log gene abundance on the active axis.
+    pub(crate) fn b(&self) -> &[f32] {
+        &self.b
+    }
+
+    /// Mean count per cell on the active axis.
+    pub(crate) fn mean(&self) -> &[f32] {
+        &self.mean
+    }
+
+    pub(crate) fn d(&self) -> usize {
+        self.d
+    }
+
     /// Map a `(global gene id, count)` profile onto the active-list positions the
     /// solver and the scorer both index by. Genes with no counts anywhere are dropped:
     /// they carry no information and are not on the partition axis.
     #[must_use]
-    fn to_local(&self, obs: &[(u32, f32)]) -> Vec<(u32, f32)> {
+    pub(crate) fn to_local(&self, obs: &[(u32, f32)]) -> Vec<(u32, f32)> {
         obs.iter()
             .filter_map(|&(g, n)| {
                 let l = *self.local_of_gene.get(g as usize)?;
@@ -328,7 +388,7 @@ impl PairDictionary {
     }
 }
 
-/// Project every cell pair onto cage's frozen gene embedding.
+/// Project every cell pair — and every cell — onto cage's frozen gene embedding.
 ///
 /// `gene_totals` is per GENE, already folded off the row axis — both the
 /// partition and each pair's profile live there, because `e_feat` is per gene
@@ -347,7 +407,7 @@ pub fn project_pairs(
     edges: &[(u32, u32)],
     e_feat: &Mat,
     batch: Option<PairBatchDivisor<'_>>,
-    args: &PairProjectionArgs,
+    args: &PairProjectionArgs<'_>,
     axis: &GeneAxis,
     gene_totals: &[f64],
 ) -> anyhow::Result<PairLatent> {
@@ -371,14 +431,6 @@ pub fn project_pairs(
         "pair projection: {} gene totals, expected {n_genes}",
         gene_totals.len()
     );
-    let n_pairs = edges.len();
-    if n_pairs == 0 {
-        return Ok(PairLatent {
-            latent: Mat::zeros(0, d),
-            bias: Vec::new(),
-            scores: Vec::new(),
-        });
-    }
 
     let dict = PairDictionary::new(e_feat, gene_totals, n_cells)?;
     let scored_positions: Option<Vec<u32>> = match args.eval_features.as_ref() {
@@ -406,6 +458,33 @@ pub fn project_pairs(
             dict.n_active(),
         );
     }
+
+    match args.solver {
+        PairSolver::Exact => project_exact(data, edges, &dict, batch, args, axis, &eval_axis),
+        PairSolver::TrainEncoder { .. } | PairSolver::LoadEncoder { .. } => {
+            project_with_encoder(data, edges, &dict, batch, args, axis, &eval_axis)
+        }
+    }
+}
+
+///////////////////
+// The exact arm //
+///////////////////
+
+/// Every pair, then every cell, by the per-node Adam solve.
+fn project_exact(
+    data: &SparseIoVec,
+    edges: &[(u32, u32)],
+    dict: &PairDictionary,
+    batch: Option<PairBatchDivisor<'_>>,
+    args: &PairProjectionArgs<'_>,
+    axis: &GeneAxis,
+    eval_axis: &scoring::EvalAxis,
+) -> anyhow::Result<PairLatent> {
+    let n_pairs = edges.len();
+    let n_cells = data.num_columns();
+    let n_genes = axis.n_genes();
+    let d = dict.d();
     info!(
         "Pair projection: {} pairs × {} genes → {}-dim, ridge λ={}, {} Adam steps, \
          partition from {} sampled genes",
@@ -426,7 +505,11 @@ pub fn project_pairs(
     // Scored in the same closure as the fit: the pooled profile and the θ it
     // implies are both already in hand there, so this costs one exhaustive pass
     // over the active axis and no extra column reads.
-    let mut scores = vec![PairScore::default(); n_pairs];
+    let mut scores = if args.score_pairs {
+        vec![PairScore::default(); n_pairs]
+    } else {
+        Vec::new()
+    };
 
     let bar = new_progress_bar(n_pairs as u64).with_message("pair projection");
     for (lb, ub) in generate_minibatch_intervals(n_pairs, n_genes, Some(args.pair_block.max(1))) {
@@ -442,38 +525,22 @@ pub fn project_pairs(
         cells.sort_unstable();
         cells.dedup();
         let slab = data.read_columns_csc(cells.iter().copied())?;
-        // The slab's own CSC arrays, borrowed once for the whole block: a
-        // column is a slice of these, so no per-pair view or copy is needed.
-        let (col_offsets, slab_rows, slab_vals) =
-            (slab.col_offsets(), slab.row_indices(), slab.values());
-        let col_of: HashMap<usize, usize> = cells
-            .iter()
-            .enumerate()
-            .map(|(local, &glob)| (glob, local))
-            .collect();
+        let slab = SlabBlock::read(&slab, &cells);
 
-        let solved: Vec<((Vec<f32>, f32), PairScore)> = chunk
+        let solved: Vec<(PairFit, Option<PairScore>)> = chunk
             .par_iter()
             .enumerate()
             .map(|(i, &(u, v))| {
-                let obs = axis.pool_profile(pooled_profile(
-                    SlabCols {
-                        offsets: col_offsets,
-                        rows: slab_rows,
-                        vals: slab_vals,
-                        col_of: &col_of,
-                    },
-                    u,
-                    v,
-                    batch,
-                ));
+                let obs = axis.pool_profile(pooled_profile(slab.borrow(), u, v, batch));
                 // Per-pair stream keyed on the global pair id, so the fit does
                 // not depend on rayon's scheduling.
                 let mut rng = SmallRng::seed_from_u64(
                     args.seed ^ ((lb + i) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                 );
                 let fit = dict.project(&obs, &args.projection, &mut rng);
-                let score = dict.score(&obs, &fit.0, &eval_axis);
+                let score = args
+                    .score_pairs
+                    .then(|| dict.score(&obs, &fit.0, eval_axis));
                 (fit, score)
             })
             .collect();
@@ -484,7 +551,38 @@ pub fn project_pairs(
                 latent[(lb + i, j)] = t;
             }
             bias[lb + i] = beta;
-            scores[lb + i] = score;
+            if let Some(score) = score {
+                scores[lb + i] = score;
+            }
+        }
+    }
+    bar.finish_and_clear();
+
+    // Every cell on its doubled profile — the self-pair — so the cell
+    // embedding is the same quantity the encoder arm writes.
+    let mut cell_latent = Mat::zeros(n_cells, d);
+    let mut cell_bias = vec![0f32; n_cells];
+    let bar = new_progress_bar(n_cells as u64).with_message("cell projection");
+    for (lb, ub) in generate_minibatch_intervals(n_cells, n_genes, Some(args.pair_block.max(1))) {
+        let cells: Vec<usize> = (lb..ub).collect();
+        let slab = data.read_columns_csc(cells.iter().copied())?;
+        let slab = SlabBlock::read(&slab, &cells);
+        let solved: Vec<(Vec<f32>, f32)> = cells
+            .par_iter()
+            .map(|&c| {
+                let obs = axis.pool_profile(doubled_profile(slab.borrow(), c as u32, batch));
+                let mut rng = SmallRng::seed_from_u64(
+                    args.seed ^ (c as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
+                );
+                dict.project(&obs, &args.projection, &mut rng)
+            })
+            .collect();
+        bar.inc(cells.len() as u64);
+        for (i, (theta, beta)) in solved.into_iter().enumerate() {
+            for (j, &t) in theta.iter().enumerate() {
+                cell_latent[(lb + i, j)] = t;
+            }
+            cell_bias[lb + i] = beta;
         }
     }
     bar.finish_and_clear();
@@ -493,6 +591,135 @@ pub fn project_pairs(
         latent,
         bias,
         scores,
+        cells: CellLatent {
+            latent: cell_latent,
+            bias: cell_bias,
+        },
+    })
+}
+
+/////////////////////
+// The encoder arm //
+/////////////////////
+
+/// Every cell's active-axis row, read once in contiguous column blocks: the
+/// corpus the encoder trains on and is applied to.
+fn build_corpus(
+    data: &SparseIoVec,
+    dict: &PairDictionary,
+    batch: Option<PairBatchDivisor<'_>>,
+    axis: &GeneAxis,
+    block: usize,
+) -> anyhow::Result<Vec<encoder::CellRow>> {
+    let n_cells = data.num_columns();
+    let mut corpus: Vec<encoder::CellRow> = Vec::with_capacity(n_cells);
+    let bar = new_progress_bar(n_cells as u64).with_message("reading cells");
+    for (lb, ub) in generate_minibatch_intervals(n_cells, axis.n_genes(), Some(block.max(1))) {
+        let cells: Vec<usize> = (lb..ub).collect();
+        let slab = data.read_columns_csc(cells.iter().copied())?;
+        let slab = SlabBlock::read(&slab, &cells);
+        let rows: Vec<encoder::CellRow> = cells
+            .par_iter()
+            .map(|&c| {
+                let profile = axis.pool_profile(endpoint_counts(slab.borrow(), c as u32, batch));
+                encoder::CellRow::from_profile(dict, &profile)
+            })
+            .collect();
+        corpus.extend(rows);
+        bar.inc(cells.len() as u64);
+    }
+    bar.finish_and_clear();
+    let nnz: usize = corpus.iter().map(|r| r.genes.len()).sum();
+    info!(
+        "Pair encoder corpus: {n_cells} cells, {nnz} counts on the {}-gene active axis ({:.1} MB)",
+        dict.n_active(),
+        (nnz * 8) as f64 / 1e6
+    );
+    Ok(corpus)
+}
+
+/// Every pair and every cell through the encoder — fitted here or loaded.
+fn project_with_encoder(
+    data: &SparseIoVec,
+    edges: &[(u32, u32)],
+    dict: &PairDictionary,
+    batch: Option<PairBatchDivisor<'_>>,
+    args: &PairProjectionArgs<'_>,
+    axis: &GeneAxis,
+    eval_axis: &scoring::EvalAxis,
+) -> anyhow::Result<PairLatent> {
+    let corpus = build_corpus(data, dict, batch, axis, args.pair_block)?;
+
+    let enc = match args.solver {
+        PairSolver::TrainEncoder { spec, dev, save_to } => {
+            let enc = encoder::PairEncoder::build(
+                dict,
+                spec.trunk_width,
+                spec.n_experts,
+                args.seed,
+                dev,
+            )?;
+            let stats = enc.train(&corpus, edges, spec, args.projection.ridge, args.seed)?;
+            info!(
+                "Pair encoder: {} steps over {} epochs; held-out NLL/count after {:.4}",
+                stats.steps, stats.epochs, stats.nll_per_count
+            );
+            enc.save(save_to)?;
+            info!("Wrote {save_to}");
+            enc
+        }
+        PairSolver::LoadEncoder { path, dev } => {
+            let enc = encoder::PairEncoder::load(dict, path, dev)?;
+            info!(
+                "Pair encoder: loaded {path} (L={}, K={})",
+                enc.trunk_width(),
+                enc.n_experts()
+            );
+            enc
+        }
+        PairSolver::Exact => unreachable!("the exact arm has its own path"),
+    };
+
+    let encoded = enc.encode_all(&corpus, edges, args.pair_block, encoder::CELL_BLOCK)?;
+
+    // The amortization gap: how far the shared map sits from the per-pair
+    // optimum, on a seeded sample. Always reported — it is the one number that
+    // says whether the encoder earned its place on this run.
+    let gap = encoder::amortization_gap(
+        dict,
+        &corpus,
+        edges,
+        &encoded.pair_latent,
+        &args.projection,
+        args.seed,
+    );
+    info!(
+        "Pair encoder vs exact MAP on {} pairs: mean cosine {:.3}, NLL ratio {:.4}",
+        gap.n_pairs, gap.mean_cosine, gap.nll_ratio
+    );
+
+    let scores = if args.score_pairs {
+        edges
+            .par_iter()
+            .enumerate()
+            .map(|(i, &(u, v))| {
+                let obs = corpus[u as usize].pooled(&corpus[v as usize]);
+                let z: Vec<f32> = encoded.pair_latent.row(i).iter().copied().collect();
+                dict.score_local(&obs, &z, eval_axis)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(PairLatent {
+        latent: encoded.pair_latent,
+        bias: encoded.pair_bias,
+        scores,
+        cells: CellLatent {
+            latent: encoded.cell_latent,
+            bias: encoded.cell_bias,
+        },
     })
 }
 
@@ -508,8 +735,96 @@ pub(crate) struct SlabCols<'a> {
     pub col_of: &'a HashMap<usize, usize>,
 }
 
+/// A read block: the slab's CSC arrays plus the cell → column map, owned
+/// together so a block borrows them once.
+struct SlabBlock<'a> {
+    offsets: &'a [usize],
+    rows: &'a [usize],
+    vals: &'a [f32],
+    col_of: HashMap<usize, usize>,
+}
+
+impl<'a> SlabBlock<'a> {
+    fn read(slab: &'a nalgebra_sparse::CscMatrix<f32>, cells: &[usize]) -> SlabBlock<'a> {
+        SlabBlock {
+            offsets: slab.col_offsets(),
+            rows: slab.row_indices(),
+            vals: slab.values(),
+            col_of: cells
+                .iter()
+                .enumerate()
+                .map(|(local, &glob)| (glob, local))
+                .collect(),
+        }
+    }
+}
+
+impl SlabBlock<'_> {
+    fn borrow(&self) -> SlabCols<'_> {
+        SlabCols {
+            offsets: self.offsets,
+            rows: self.rows,
+            vals: self.vals,
+            col_of: &self.col_of,
+        }
+    }
+}
+
+/// One cell's `(row, count)` profile as the solver's input: batch-divided,
+/// sorted by row.
+fn endpoint_counts(
+    slab: SlabCols<'_>,
+    cell: u32,
+    batch: Option<PairBatchDivisor<'_>>,
+) -> Vec<(u32, f32)> {
+    let (rows, vals) = endpoint_profile(slab, cell, batch);
+    rows.iter()
+        .zip(vals.iter())
+        .filter(|(_, &x)| x > 0.0)
+        .map(|(&r, &x)| (r as u32, x))
+        .collect()
+}
+
+/// The self-pair: a cell's profile pooled with itself.
+fn doubled_profile(
+    slab: SlabCols<'_>,
+    cell: u32,
+    batch: Option<PairBatchDivisor<'_>>,
+) -> Vec<(u32, f32)> {
+    endpoint_counts(slab, cell, batch)
+        .into_iter()
+        .map(|(r, x)| (r, 2.0 * x))
+        .collect()
+}
+
+/// One endpoint's column of the slab, batch-divided when the run has batches:
+/// the rows and the values, both borrowed from the slab where nothing has to
+/// be recomputed. Every consumer of a cell's counts goes through here, so the
+/// two arms and the pooled read cannot disagree about the division.
+pub(crate) fn endpoint_profile<'a>(
+    slab: SlabCols<'a>,
+    cell: u32,
+    batch: Option<PairBatchDivisor<'_>>,
+) -> (&'a [usize], std::borrow::Cow<'a, [f32]>) {
+    let Some(&col) = slab.col_of.get(&(cell as usize)) else {
+        return (&[], std::borrow::Cow::Borrowed(&[]));
+    };
+    let (s, e) = (slab.offsets[col], slab.offsets[col + 1]);
+    let rows = &slab.rows[s..e];
+    let Some(bd) = batch else {
+        return (rows, std::borrow::Cow::Borrowed(&slab.vals[s..e]));
+    };
+    let mut vals = slab.vals[s..e].to_vec();
+    let b = bd.batch_of_cell[cell as usize] as usize;
+    adjust_by_poisson_ratio(&mut vals, |k| bd.delta[(rows[k], b)]);
+    (rows, std::borrow::Cow::Owned(vals))
+}
+
 /// One pair's `(index, count)` profile — row-keyed before pooling, gene-keyed after.
 type Profile = Vec<(u32, f32)>;
+
+/// One node's solve: `(e_uv, β_uv)`.
+type PairFit = (Vec<f32>, f32);
 
 /// Pooled `(row, count)` profile for one pair, sorted by row index.
 ///
@@ -549,26 +864,8 @@ pub(crate) fn pooled_profile_routed(
     batch: Option<PairBatchDivisor<'_>>,
     is_held: &dyn Fn(u32, usize) -> bool,
 ) -> (Profile, Profile) {
-    // Both slices are borrowed straight out of the slab; only the batch-divided
-    // path needs an owned copy of the values, and nothing ever needs to own the
-    // row indices.
-    let endpoint = |cell: u32| -> (&[usize], std::borrow::Cow<'_, [f32]>) {
-        let Some(&col) = slab.col_of.get(&(cell as usize)) else {
-            return (&[], std::borrow::Cow::Borrowed(&[]));
-        };
-        let (s, e) = (slab.offsets[col], slab.offsets[col + 1]);
-        let rows = &slab.rows[s..e];
-        let Some(bd) = batch else {
-            return (rows, std::borrow::Cow::Borrowed(&slab.vals[s..e]));
-        };
-        let mut vals = slab.vals[s..e].to_vec();
-        let b = bd.batch_of_cell[cell as usize] as usize;
-        adjust_by_poisson_ratio(&mut vals, |k| bd.delta[(rows[k], b)]);
-        (rows, std::borrow::Cow::Owned(vals))
-    };
-
-    let (lr, lv) = endpoint(u);
-    let (rr, rv) = endpoint(v);
+    let (lr, lv) = endpoint_profile(slab, u, batch);
+    let (rr, rv) = endpoint_profile(slab, v, batch);
 
     let mut visible: Vec<(u32, f32)> = Vec::with_capacity(lr.len() + rr.len());
     let mut held: Vec<(u32, f32)> = Vec::new();
