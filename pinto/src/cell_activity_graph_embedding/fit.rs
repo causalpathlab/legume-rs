@@ -43,7 +43,7 @@
 //! history is in `plans/posterior-feature-gate.md`.
 
 use crate::cell_activity_graph_embedding::args::{
-    CellActivityGraphEmbeddingArgs, GeneEmbeddingMode, GeneInitMode, PairSolverArg,
+    CellActivityGraphEmbeddingArgs, GeneEmbeddingMode, GeneInitMode,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_exp_batch_cache, GeneGatedChainSampler,
@@ -52,7 +52,7 @@ use crate::cell_activity_graph_embedding::gene_gating::build_gene_active_fine_ed
 use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_gene_level, CageLossOut};
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, CellLatent, PairBatchDivisor, PairEncoderSpec, PairLatent, PairProjectionArgs,
-    PairSolver, ProjectionArgs,
+    PairSolver,
 };
 use crate::cell_activity_graph_embedding::pretrained;
 use crate::link_community::profiles::{
@@ -1434,22 +1434,8 @@ pub fn fit_cell_activity_graph_embedding(
         delta,
         batch_of_cell: &batch_membership_u32,
     });
-    let encoder_spec = PairEncoderSpec {
-        trunk_width: args.pair_trunk,
-        n_experts: args.pair_experts,
-        epochs: args.pair_epochs,
-        batch: args.pair_batch,
-        train_pairs: args.pair_train_pairs,
-    };
+    let encoder_spec = PairEncoderSpec::default();
     let pair_encoder_path = format!("{}.pair_encoder.safetensors", c.out);
-    let solver = match args.pair_solver {
-        PairSolverArg::Encoder => PairSolver::TrainEncoder {
-            spec: &encoder_spec,
-            dev: &dev,
-            save_to: &pair_encoder_path,
-        },
-        PairSolverArg::Exact => PairSolver::Exact,
-    };
     let PairLatent {
         latent: pair_latent,
         bias: pair_bias,
@@ -1464,12 +1450,12 @@ pub fn fit_cell_activity_graph_embedding(
         &e_gene_out,
         pair_batch,
         &PairProjectionArgs {
-            projection: ProjectionArgs {
-                ridge: args.pair_ridge,
-                steps: args.pair_steps,
-                gene_sample: args.pair_gene_sample,
+            ridge: args.pair_ridge,
+            solver: PairSolver::TrainEncoder {
+                spec: &encoder_spec,
+                dev: &dev,
+                save_to: &pair_encoder_path,
             },
-            solver,
             seed: c.seed,
             pair_block: args.pair_block,
             eval_features: None,
@@ -1564,7 +1550,7 @@ pub fn fit_cell_activity_graph_embedding(
             },
             batch_db.is_some(),
             splice_report,
-            args.pair_solver == PairSolverArg::Encoder,
+            true,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
