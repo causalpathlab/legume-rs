@@ -14,7 +14,9 @@
 
 use super::edges::block_cells;
 use super::*;
+use crate::cell_projection::SCORE_CLAMP;
 use crate::fit::batch_fold::BatchGeneFold;
+use crate::fit::{TrackInfo, TrackSpec};
 use candle_util::candle_core::Device;
 
 fn cos(a: &[f32], b: &[f32]) -> f32 {
@@ -127,7 +129,7 @@ fn polish_keeps_a_solved_cell_and_recovers_a_planted_one() {
     };
 
     let cold = project_cells(&input, &cells, None).unwrap();
-    let warm = polish_cells(&input, &cells, None, &cold.theta).unwrap();
+    let warm = polish_cells(&input, &cells, None, &cold.theta, &TrackSpec::base(n_feat)).unwrap();
     for (i, want) in planted.iter().enumerate() {
         let got = &warm.latent[i * h..(i + 1) * h];
         assert!(
@@ -136,7 +138,14 @@ fn polish_keeps_a_solved_cell_and_recovers_a_planted_one() {
         );
         assert!(cos(got, want) > 0.97, "cell {i} misaligned");
     }
-    let from_null = polish_cells(&input, &cells, None, &vec![0f32; cells.len() * h]).unwrap();
+    let from_null = polish_cells(
+        &input,
+        &cells,
+        None,
+        &vec![0f32; cells.len() * h],
+        &TrackSpec::base(n_feat),
+    )
+    .unwrap();
     for (i, want) in planted.iter().enumerate() {
         let c = cos(&from_null.latent[i * h..(i + 1) * h], want);
         assert!(c > 0.9, "cell {i} from the null model: cos={c:.3}");
@@ -601,4 +610,325 @@ fn project_with(
         fold,
     )
     .expect("phase-2 SGD")
+}
+
+////////////////////////////////
+// Per-track polish (T tracks) //
+////////////////////////////////
+
+/// A two-track feature axis: rows `[0, n)` are track 0, rows `[n, 2n)` track 1,
+/// and row `n + g` names the same gene as row `g`.
+fn two_track_spec(n: usize) -> TrackSpec {
+    TrackSpec {
+        track_of_row: (0..2 * n).map(|r| u32::from(r >= n)).collect(),
+        gene_of_row: (0..2 * n).map(|r| (r % n) as u32).collect(),
+        tracks: vec![
+            TrackInfo {
+                name: "t0".into(),
+                is_count: true,
+            },
+            TrackInfo {
+                name: "t1".into(),
+                is_count: true,
+            },
+        ],
+    }
+}
+
+/// Lay a one-track dictionary down twice — same loadings and same bias on both
+/// tracks, so the ONLY thing separating the two partitions is their intercept.
+fn duplicated(e: &[f32], b: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let mut e2 = e.to_vec();
+    e2.extend_from_slice(e);
+    let mut b2 = b.to_vec();
+    b2.extend_from_slice(b);
+    (e2, b2)
+}
+
+/// Noiseless rates on a two-track axis of `n` rows per track: one shared `theta`,
+/// one intercept per track.
+fn track_rates(
+    e: &[f32],
+    b: &[f32],
+    h: usize,
+    n: usize,
+    theta: &[f32],
+    c: [f32; 2],
+) -> Vec<(u32, f32)> {
+    (0..2 * n)
+        .map(|f| {
+            let ef = &e[f * h..(f + 1) * h];
+            let s: f32 = ef.iter().zip(theta).map(|(a, t)| a * t).sum::<f32>()
+                + b[f]
+                + c[usize::from(f >= n)];
+            (f as u32, s.exp())
+        })
+        .collect()
+}
+
+/// Flatten planted `(feature, count)` rows into the solver's borrowed cell view.
+fn flatten(per_cell: &[Vec<(u32, f32)>]) -> (Vec<Vec<u32>>, Vec<Vec<f32>>) {
+    (
+        per_cell
+            .iter()
+            .map(|c| c.iter().map(|&(f, _)| f).collect())
+            .collect(),
+        per_cell
+            .iter()
+            .map(|c| c.iter().map(|&(_, n)| n).collect())
+            .collect(),
+    )
+}
+
+fn input_for<'a>(
+    e: &'a [f32],
+    b: &'a [f32],
+    h: usize,
+    n_cells: usize,
+    lambda: f64,
+    dev: &'a Device,
+) -> Phase2Input<'a> {
+    Phase2Input {
+        feat: e,
+        b_feat: b,
+        h,
+        n_cells,
+        lambda,
+        dev,
+        label: "test",
+        gauge_fix: false,
+    }
+}
+
+/// The exact objective the per-track solve minimises, evaluated on the host:
+/// `Σ_t [ Σ_{f∈t} exp(s) − Σ_{f∈t} n·s ] + (λ/2)‖Θ‖²`.
+fn track_objective(
+    e: &[f32],
+    b: &[f32],
+    h: usize,
+    per_cell: &[Vec<(u32, f32)>],
+    out: &PassOut,
+    lambda: f64,
+) -> f64 {
+    let n_feat = b.len();
+    let n = n_feat / 2;
+    let mut total = 0f64;
+    for (i, cell) in per_cell.iter().enumerate() {
+        let theta = &out.latent[i * h..(i + 1) * h];
+        let c = [out.intercept[i], out.other_intercepts[0][i]];
+        let mut counts = vec![0f64; n_feat];
+        for &(f, x) in cell {
+            counts[f as usize] = f64::from(x);
+        }
+        for f in 0..n_feat {
+            let ef = &e[f * h..(f + 1) * h];
+            let dot: f32 = ef.iter().zip(theta).map(|(a, t)| a * t).sum();
+            let s = f64::from(dot + b[f] + c[usize::from(f >= n)]);
+            total += s.exp() - counts[f] * s;
+        }
+        total += 0.5 * lambda * theta.iter().map(|x| f64::from(*x * *x)).sum::<f64>();
+    }
+    total
+}
+
+/// The one-track entry must dispatch to the untouched solver: a `TrackSpec::base`
+/// polish and a direct [`polish_prepared`] on the same dictionary agree **byte for
+/// byte**, and report no other intercepts at all.
+#[test]
+fn single_track_polish_through_the_track_entry_is_byte_identical() {
+    let (h, n_feat) = (6, 240);
+    let (e, b) = dictionary(n_feat, h, 0.4);
+    let planted = [
+        [0.7f32, -0.5, 0.4, 0.2, -0.3, 0.1],
+        [-0.3f32, 0.6, -0.2, 0.5, 0.1, -0.4],
+        [0.2f32, 0.1, 0.5, -0.3, 0.4, 0.2],
+    ];
+    let per_cell: Vec<_> = planted
+        .iter()
+        .enumerate()
+        .map(|(i, t)| rates(&e, &b, h, t, 0.2 + 0.1 * i as f32))
+        .collect();
+    let (feats, counts) = flatten(&per_cell);
+    let cells: Vec<(u32, &[u32], &[f32])> = (0..per_cell.len())
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+    let dev = Device::Cpu;
+    let input = input_for(&e, &b, h, cells.len(), 1e-3, &dev);
+    let init = vec![0f32; cells.len() * h];
+
+    let through = polish_cells(&input, &cells, None, &init, &TrackSpec::base(n_feat)).unwrap();
+    let dict = PassDict::build(&input.dict_spec("polish"), (0..n_feat as u32).collect()).unwrap();
+    let direct = polish_prepared(
+        &input,
+        &dict,
+        &cells,
+        &init,
+        &indicatif::ProgressBar::hidden(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        through.latent, direct.latent,
+        "θ differs from the direct call"
+    );
+    assert_eq!(
+        through.intercept, direct.intercept,
+        "the intercept differs from the direct call"
+    );
+    assert!(
+        through.other_intercepts.is_empty(),
+        "a one-track polish must report no other intercepts"
+    );
+}
+
+/// Two tracks over the same gene loadings, separated only by their depth: the
+/// solve must recover one shared `θ` and BOTH intercepts.
+#[test]
+fn two_track_polish_recovers_theta_with_separate_intercepts() {
+    let (h, n) = (6, 220);
+    let (e1, b1) = dictionary(n, h, 0.5);
+    let (e, b) = duplicated(&e1, &b1);
+    let spec = two_track_spec(n);
+    spec.validate(2 * n).unwrap();
+
+    let planted = [
+        [0.8f32, -0.6, 0.4, 0.2, -0.3, 0.5],
+        [-0.5f32, 0.7, -0.2, 0.6, 0.1, -0.4],
+        [0.2f32, 0.1, -0.7, -0.3, 0.5, 0.2],
+    ];
+    let depths = [[0.3f32, 1.6], [0.5, 1.9], [-0.2, 1.3]];
+    let per_cell: Vec<_> = planted
+        .iter()
+        .zip(&depths)
+        .map(|(t, &c)| track_rates(&e, &b, h, n, t, c))
+        .collect();
+    let (feats, counts) = flatten(&per_cell);
+    let cells: Vec<(u32, &[u32], &[f32])> = (0..per_cell.len())
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+    let dev = Device::Cpu;
+    let input = input_for(&e, &b, h, cells.len(), 1e-3, &dev);
+
+    let out = polish_cells(&input, &cells, None, &vec![0f32; cells.len() * h], &spec).unwrap();
+
+    assert_eq!(out.other_intercepts.len(), 1, "one non-base track expected");
+    for (i, want) in planted.iter().enumerate() {
+        let c = cos(&out.latent[i * h..(i + 1) * h], want);
+        assert!(c > 0.97, "cell {i} misaligned (cos={c:.3})");
+        let (g0, g1) = (out.intercept[i], out.other_intercepts[0][i]);
+        assert!(
+            (g0 - depths[i][0]).abs() < 0.1,
+            "cell {i} base intercept {g0:.3} vs planted {:.3}",
+            depths[i][0]
+        );
+        assert!(
+            (g1 - depths[i][1]).abs() < 0.1,
+            "cell {i} track-1 intercept {g1:.3} vs planted {:.3}",
+            depths[i][1]
+        );
+    }
+}
+
+/// A track a cell has no counts on is skipped entirely: its intercept is reported
+/// at the score-clamp floor, and the cell's `θ` is the solution it would have had
+/// on the base rows alone.
+#[test]
+fn a_cell_with_no_counts_on_a_track_skips_it() {
+    let (h, n) = (5, 160);
+    let (e1, b1) = dictionary(n, h, 0.5);
+    let (e, b) = duplicated(&e1, &b1);
+    let spec = two_track_spec(n);
+    let planted = [0.6f32, -0.4, 0.3, 0.5, -0.2];
+
+    // One cell, counts on the base track only.
+    let base_only: Vec<(u32, f32)> = track_rates(&e, &b, h, n, &planted, [0.4, 0.0])
+        .into_iter()
+        .filter(|&(f, _)| (f as usize) < n)
+        .collect();
+    let (feats, counts) = flatten(std::slice::from_ref(&base_only));
+    let cells: Vec<(u32, &[u32], &[f32])> = vec![(0u32, feats[0].as_slice(), counts[0].as_slice())];
+    let dev = Device::Cpu;
+    let two = polish_cells(
+        &input_for(&e, &b, h, 1, 1e-3, &dev),
+        &cells,
+        None,
+        &vec![0f32; h],
+        &spec,
+    )
+    .unwrap();
+
+    assert_eq!(
+        two.other_intercepts[0][0], -SCORE_CLAMP as f32,
+        "an absent track must report the clamp floor"
+    );
+
+    // The same cell on a feature axis of the base rows alone.
+    let one = polish_cells(
+        &input_for(&e1, &b1, h, 1, 1e-3, &dev),
+        &cells,
+        None,
+        &vec![0f32; h],
+        &TrackSpec::base(n),
+    )
+    .unwrap();
+    let worst = two
+        .latent
+        .iter()
+        .zip(&one.latent)
+        .map(|(a, z)| (a - z).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        worst < 1e-4,
+        "the absent track moved θ (max |Δ| = {worst:.2e})"
+    );
+    assert!(
+        (two.intercept[0] - one.intercept[0]).abs() < 1e-4,
+        "the absent track moved the base intercept"
+    );
+}
+
+/// The warm start is honoured: from a point the solver already reached, the same
+/// step budget ends at a strictly lower objective than starting from the null model.
+#[test]
+fn polish_with_tracks_converges_from_a_warm_start() {
+    let (h, n) = (6, 200);
+    let (e1, b1) = dictionary(n, h, 0.5);
+    let (e, b) = duplicated(&e1, &b1);
+    let spec = two_track_spec(n);
+    let planted = [
+        [0.7f32, -0.5, 0.4, 0.2, -0.3, 0.1],
+        [-0.3f32, 0.6, -0.2, 0.5, 0.1, -0.4],
+    ];
+    let depths = [[0.3f32, 1.5], [0.1, 1.8]];
+    let per_cell: Vec<_> = planted
+        .iter()
+        .zip(&depths)
+        .map(|(t, &c)| track_rates(&e, &b, h, n, t, c))
+        .collect();
+    let (feats, counts) = flatten(&per_cell);
+    let cells: Vec<(u32, &[u32], &[f32])> = (0..per_cell.len())
+        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
+        .collect();
+    let dev = Device::Cpu;
+    let input = input_for(&e, &b, h, cells.len(), 1e-3, &dev);
+
+    let cold = polish_cells(&input, &cells, None, &vec![0f32; cells.len() * h], &spec).unwrap();
+    let warm = polish_cells(&input, &cells, None, &cold.latent, &spec).unwrap();
+
+    let cold_obj = track_objective(&e, &b, h, &per_cell, &cold, 1e-3);
+    let warm_obj = track_objective(&e, &b, h, &per_cell, &warm, 1e-3);
+    assert!(
+        warm_obj < cold_obj,
+        "the warm start did not improve on the cold one ({warm_obj:.3} vs {cold_obj:.3})"
+    );
+    for (i, want) in planted.iter().enumerate() {
+        let (cw, cc) = (
+            cos(&warm.latent[i * h..(i + 1) * h], want),
+            cos(&cold.latent[i * h..(i + 1) * h], want),
+        );
+        assert!(
+            cw >= cc,
+            "cell {i}: the warm start moved away from the planted latent ({cw:.4} < {cc:.4})"
+        );
+    }
 }

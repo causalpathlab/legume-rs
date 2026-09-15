@@ -5,6 +5,7 @@
 use super::block_sgd;
 use super::encoder::{self, CellEncoder, DistillSpec};
 use super::CellBatchFold;
+use crate::fit::config::TrackSpec;
 use crate::loss::PerBatchStratifiedCellSampler;
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Device;
@@ -26,6 +27,9 @@ pub(crate) struct Phase2Result {
     /// The distilled encoder that placed the cells, when `distill` was given;
     /// `None` when the block SGD did.
     pub cell_encoder: Option<CellEncoder>,
+    /// The fitted intercept of every NON-base track, `[T - 1][n_cells]`; empty on
+    /// a one-track feature axis. Track 0's is `b_cell`, stored on the model.
+    pub other_intercepts: Vec<Vec<f32>>,
 }
 
 /// Flatten the per-batch samplers into one `(cell_id, features, counts)` list,
@@ -82,6 +86,7 @@ pub(crate) fn project_cells_phase2(
     dev: &Device,
     batch_fold: Option<CellBatchFold>,
     distill: Option<&DistillSpec<'_>>,
+    tracks: &TrackSpec,
 ) -> anyhow::Result<Phase2Result> {
     use anyhow::Context;
     use candle_util::candle_core::Tensor;
@@ -124,10 +129,20 @@ pub(crate) fn project_cells_phase2(
     };
     let (out, cell_encoder) = match distill {
         Some(spec) => {
-            let (out, enc) = encoder::project_cells(&input, &cells, batch_fold, spec)?;
+            let (out, enc) = encoder::project_cells(&input, &cells, batch_fold, spec, tracks)?;
             (out, Some(enc))
         }
-        None => (block_sgd::project_cells(&input, &cells, batch_fold)?, None),
+        None => {
+            // The cold solve is one partition over the whole feature axis, so it
+            // has no per-track intercept to give. Refusing here is what keeps a
+            // multi-track fit from silently losing them.
+            anyhow::ensure!(
+                tracks.is_base(),
+                "phase 2: the cold block SGD is single-partition — a multi-track \
+                 feature axis needs the distilled encoder path"
+            );
+            (block_sgd::project_cells(&input, &cells, batch_fold)?, None)
+        }
     };
 
     /////////////////////////////////////////////////
@@ -184,6 +199,7 @@ pub(crate) fn project_cells_phase2(
         cell_nrms,
         theta_mean: out.gauge.theta_mean,
         cell_encoder,
+        other_intercepts: out.other_intercepts,
     })
 }
 
