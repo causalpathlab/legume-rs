@@ -111,6 +111,74 @@ ifeq (,$(filter $(HDF5),on off))
 $(error Unknown HDF5='$(HDF5)'; valid values are: on, off)
 endif
 
+# CUDA compute capability (consulted only when BACKEND=cuda).
+#
+# candle-kernels resolves the GPU architecture at build time through
+# cudaforge, whose own detection is: $CUDA_COMPUTE_CAP, else `nvidia-smi`.
+# nvidia-smi goes through NVML, which refuses to run whenever the userspace
+# driver library and the loaded kernel module disagree -- the normal state
+# after a driver package update until the next reboot -- and it is absent in
+# containers and on GPU-less build hosts. The build then dies with
+# `ComputeCapDetectionFailed`, and the per-binary fallback below "recovers"
+# by shipping a CPU-only binary on a machine that has a perfectly good GPU.
+#
+# So resolve the capability here and export it, in order of preference:
+#   1. CUDA_COMPUTE_CAP set by the caller (`make install CUDA_COMPUTE_CAP=86`)
+#   2. nvidia-smi, when it works; the answer is cached in $(CUDA_CAP_CACHE)
+#      for the days when it doesn't
+#   3. that cache
+#   4. the kernel module's own record of the GPU model in
+#      /proc/driver/nvidia/gpus/*/information (readable even when NVML is
+#      broken), mapped to its architecture family below. Where a family
+#      spans several capabilities the table rounds DOWN: PTX built for a
+#      lower compute_XX still JIT-compiles on a newer GPU of the same or a
+#      later generation, PTX built for a higher one does not load at all.
+# If all four come up empty the variable stays unset and the CUDA build
+# fails exactly as before, with the hint to pass CUDA_COMPUTE_CAP.
+CUDA_CAP_CACHE := $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/legume-rs/cuda-compute-cap
+
+# GPU model name -> lowest compute capability of that family. Consumer parts
+# match on the series prefix ("RTX 30"), data-centre parts on the model.
+# Order matters where one pattern is a substring of another ("A10" is in
+# "A100"): the more specific family is tested first.
+cuda_cap_from_model = $(strip \
+  $(if $(or $(findstring RTX 50,$(1)),$(findstring Blackwell,$(1))),120, \
+  $(if $(or $(findstring B200,$(1)),$(findstring B100,$(1)),$(findstring GB200,$(1))),100, \
+  $(if $(or $(findstring H100,$(1)),$(findstring H200,$(1)),$(findstring H800,$(1)),$(findstring H20,$(1)),$(findstring GH200,$(1))),90, \
+  $(if $(or $(findstring RTX 40,$(1)),$(findstring L40,$(1)),$(findstring L4,$(1)),$(findstring Ada,$(1))),89, \
+  $(if $(or $(findstring A100,$(1)),$(findstring A800,$(1)),$(findstring A30,$(1))),80, \
+  $(if $(or $(findstring RTX 30,$(1)),$(findstring RTX A,$(1)),$(findstring A10,$(1)),$(findstring A40,$(1)),$(findstring A16,$(1)),$(findstring A2,$(1))),86, \
+  $(if $(or $(findstring RTX 20,$(1)),$(findstring GTX 16,$(1)),$(findstring Quadro RTX,$(1)),$(findstring TITAN RTX,$(1)),$(findstring T4,$(1))),75, \
+  $(if $(or $(findstring V100,$(1)),$(findstring TITAN V,$(1))),70, \
+  $(if $(or $(findstring GTX 10,$(1)),$(findstring P100,$(1)),$(findstring P40,$(1)),$(findstring TITAN X,$(1))),60, \
+  ))))))))))
+
+ifeq ($(BACKEND),cuda)
+ifneq ($(strip $(CUDA_COMPUTE_CAP)),)
+CUDA_CAP_SOURCE := set by caller
+else
+# nvidia-smi prints its NVML complaint on stdout, so accept only a bare
+# "major.minor" line, and normalise "8.6" -> "86" (cudaforge takes either).
+CUDA_CAP_SMI := $(shell timeout 15 nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | head -n1 | tr -d ' ' | grep -E -x '[0-9]+\.[0-9]+' | tr -d .)
+ifneq ($(CUDA_CAP_SMI),)
+CUDA_COMPUTE_CAP := $(CUDA_CAP_SMI)
+CUDA_CAP_SOURCE := nvidia-smi
+$(shell mkdir -p $(dir $(CUDA_CAP_CACHE)) && echo $(CUDA_CAP_SMI) > $(CUDA_CAP_CACHE))
+else ifneq ($(wildcard $(CUDA_CAP_CACHE)),)
+CUDA_COMPUTE_CAP := $(shell cat $(CUDA_CAP_CACHE))
+CUDA_CAP_SOURCE := cached from an earlier nvidia-smi run ($(CUDA_CAP_CACHE))
+else
+CUDA_GPU_MODEL := $(shell sed -n 's/^Model:[[:space:]]*//p' /proc/driver/nvidia/gpus/*/information 2>/dev/null | head -n1)
+CUDA_COMPUTE_CAP := $(call cuda_cap_from_model,$(CUDA_GPU_MODEL))
+CUDA_CAP_SOURCE := $(if $(CUDA_COMPUTE_CAP),from the GPU model '$(CUDA_GPU_MODEL)'; nvidia-smi is not working,not detected$(if $(CUDA_GPU_MODEL),; nvidia-smi is not working and '$(CUDA_GPU_MODEL)' is not in the family table))
+endif
+endif
+ifneq ($(strip $(CUDA_COMPUTE_CAP)),)
+export CUDA_COMPUTE_CAP
+endif
+endif
+
 # Compose --features = $(BACKEND),hdf5 depending on toggles. Empty when both
 # off so we don't pass an empty --features to cargo.
 CARGO_FEATURE_LIST :=
@@ -139,6 +207,14 @@ else
 CARGO_FEATURES_CPU_FALLBACK :=
 endif
 
+# Printed after a failed CUDA build when no compute capability could be
+# resolved: that is the one failure the CPU retry silently papers over.
+ifeq ($(BACKEND)$(strip $(CUDA_COMPUTE_CAP)),cuda)
+CUDA_CAP_HINT := echo "  (no CUDA compute capability could be detected; if the GPU is fine, rerun with CUDA_COMPUTE_CAP=<cap>, e.g. 86)";
+else
+CUDA_CAP_HINT :=
+endif
+
 # Per-binary fallback status is written here so the aggregate `install`
 # target can report what each binary was actually built with.
 INSTALL_STATUS_FILE := $(CURDIR)/.make-install-status
@@ -154,6 +230,9 @@ help:
 	@echo ""
 	@echo "Auto-detected backend on this host: $(DEFAULT_BACKEND)"
 	@echo "Auto-detected HDF5 support:         $(DEFAULT_HDF5)$(if $(HDF5_DETECTED_DIR), (HDF5_DIR=$(HDF5_DETECTED_DIR)))"
+ifeq ($(BACKEND),cuda)
+	@echo "CUDA compute capability:            $(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
+endif
 	@echo ""
 	@echo "Install targets:"
 	@echo "  install              - Install all binaries with auto-detected backend"
@@ -177,6 +256,7 @@ help:
 	@echo "  make <target> BACKEND={cpu|cuda|metal}"
 	@echo "  make <target> HDF5={on|off}      # default = auto-detected above"
 	@echo "  HDF5_DIR=<prefix> make ...       # override the detected prefix"
+	@echo "  make <target> CUDA_COMPUTE_CAP=86 # GPU architecture when nvidia-smi can't say"
 
 all: install
 
@@ -187,6 +267,9 @@ install: _install_status_init $(addprefix install-,$(BINARIES)) _install_status_
 
 _install_status_init:
 	@rm -f $(INSTALL_STATUS_FILE)
+ifeq ($(BACKEND),cuda)
+	@echo "CUDA compute capability: $(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
+endif
 
 _install_status_report:
 	@echo ""
@@ -232,6 +315,7 @@ $(addprefix install-,$(BINARIES)):
 	    else \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
+	        $(CUDA_CAP_HINT) \
 	        echo ""; \
 	        cargo install --locked --path $$bin $(CARGO_FEATURES_CPU_FALLBACK); \
 	        echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
@@ -262,6 +346,9 @@ else
 	cargo build --release --workspace
 endif
 else
+ifeq ($(BACKEND),cuda)
+	@echo "CUDA compute capability: $(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
+endif
 	@for bin in $(BINARIES); do \
 	    if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
 	        echo "Building $$bin (no GPU backend; CPU-only by design)..."; \
@@ -272,6 +359,7 @@ else
 	    if ! cargo build --release -p $$bin $(CARGO_FEATURES); then \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
+	        $(CUDA_CAP_HINT) \
 	        echo ""; \
 	        cargo build --release -p $$bin $(CARGO_FEATURES_CPU_FALLBACK) || exit $$?; \
 	    fi; \
