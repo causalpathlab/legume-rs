@@ -35,19 +35,20 @@ use rustc_hash::FxHashMap;
 /// One track: a `(modality, channel)` pair on the gem feature axis. Every row
 /// of a gene on this track shares the gene's loading; a track other than 0
 /// adds a per-track offset to it (`--offset-l2`).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Track {
     pub id: u32,
     pub modality: Box<str>,
     pub channel: Box<str>,
-    /// Read by [`TrackPlan::to_ge`] (`ge::fit::TrackInfo::is_count`); not
-    /// yet read anywhere else — reserved for Task 5b's driver wiring.
-    #[allow(dead_code)]
+    /// Read by [`TrackPlan::to_ge`] (`ge::fit::TrackInfo::is_count`).
     pub is_count: bool,
 }
 
-/// The row-grammar-derived plan for one gem feature axis.
-#[derive(Debug)]
+/// The row-grammar-derived plan for one gem feature axis. `Clone` so
+/// `senna gem`'s driver call can pass one copy into [`crate::bge::driver::EmbedPlan::tracks`]
+/// and keep the original to build [`super::contrast::write_contrast`]'s
+/// `after_fit` closure from.
+#[derive(Clone, Debug)]
 pub(crate) struct TrackPlan {
     /// `tracks[0]` is always `(count, spliced)` — the base track every gene
     /// must have a row on. `tracks[1]` is `(count, unspliced)` when the axis
@@ -231,17 +232,15 @@ fn rows_error(what: &str, rows: &[usize], feature_names: &[Box<str>]) -> anyhow:
 
 /// The cell-encoder safetensors suffix `senna bge`'s driver writes for one
 /// track: the bare name for track 0 (what `predict` reads by default), else
-/// namespaced by `{modality}.{channel}`. Reserved for Task 5b's driver
-/// wiring; not yet called.
-#[allow(dead_code)]
-pub(crate) fn encoder_suffix(track: &Track) -> String {
-    if track.id == 0 {
+/// namespaced by the ge track `name` (`{modality}/{channel}`) with `/`
+/// replaced by `.`. Takes the raw `(track id, name)` a
+/// `graph_embedding_util::TrackEncoder` carries, rather than gem's own
+/// [`Track`], since the driver saves whatever the engine handed back.
+pub(crate) fn encoder_suffix_for(track: u32, name: &str) -> String {
+    if track == 0 {
         "cell_encoder.safetensors".to_string()
     } else {
-        format!(
-            "cell_encoder.{}.{}.safetensors",
-            track.modality, track.channel
-        )
+        format!("cell_encoder.{}.safetensors", name.replace('/', "."))
     }
 }
 
@@ -249,9 +248,6 @@ pub(crate) fn encoder_suffix(track: &Track) -> String {
 /// `{out}.feature_contrast.parquet`. `None` for a modality this axis does not
 /// recognize. Fixed by the row grammar's own channel vocabulary
 /// (`auxiliary_data::feature_rows`), never guessed from what is on the axis.
-/// Reserved for Task 5b's `{out}.feature_contrast.parquet` writer; not yet
-/// called.
-#[allow(dead_code)]
 pub(crate) fn contrast_channels(modality: &str) -> Option<(&'static str, &'static str)> {
     match modality {
         COUNT => Some((UNSPLICED, SPLICED)),
@@ -265,9 +261,7 @@ pub(crate) fn contrast_channels(modality: &str) -> Option<(&'static str, &'stati
 impl TrackPlan {
     /// The `graph_embedding_util::fit::TrackSpec` this plan describes: track
     /// names are `{modality}/{channel}`, `is_count` iff the modality is
-    /// `count`. Reserved for Task 5b's driver wiring (`FitConfig.tracks`);
-    /// not yet called outside tests.
-    #[allow(dead_code)]
+    /// `count`. What `senna gem`'s driver call passes as `FitConfig.tracks`.
     pub(crate) fn to_ge(&self) -> ge::fit::TrackSpec {
         ge::fit::TrackSpec {
             track_of_row: self.row_track.clone(),
@@ -283,9 +277,9 @@ impl TrackPlan {
         }
     }
 
-    /// The track id of `(modality, channel)`, when this plan has one.
-    /// Reserved for Task 5b's driver wiring; not yet called outside tests.
-    #[allow(dead_code)]
+    /// The track id of `(modality, channel)`, when this plan has one. Used
+    /// by [`super::contrast::contrast_rows`] to locate a modality's two
+    /// contrast channels.
     pub(crate) fn track_of(&self, modality: &str, channel: &str) -> Option<u32> {
         self.tracks
             .iter()

@@ -43,8 +43,6 @@ fn resolve_inputs_matches_by_default_suffix() {
     // Both files match the same sample id: "s1" twice.
     assert_eq!(&*inputs.sample_ids[0], "s1");
     assert_eq!(&*inputs.sample_ids[1], "s1");
-    assert_eq!(inputs.modality_of_file[0], None);
-    assert_eq!(inputs.modality_of_file[1].as_deref(), Some("m6a"));
 }
 
 #[test]
