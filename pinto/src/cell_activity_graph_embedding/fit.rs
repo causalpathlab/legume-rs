@@ -1550,7 +1550,6 @@ pub fn fit_cell_activity_graph_embedding(
             },
             batch_db.is_some(),
             splice_report,
-            true,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
