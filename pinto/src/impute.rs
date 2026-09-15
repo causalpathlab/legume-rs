@@ -246,18 +246,62 @@ fn cage_propensities(
     let (ref_prop, _, _, ref_cells) =
         crate::plot::load::read_propensity(Path::new(ref_prop_path.as_ref()), &none)?;
 
-    // Positional pairing of the reference propensity with the reference
-    // backend is the load-bearing assumption; check it by name, not count.
+    // The retrieval reads reference cells by column, so the propensity's
+    // rows must sit on the backend's column axis: paired by name, since a
+    // run keeps only the cells it could place (those with coordinates, for
+    // one) and the files hold every cell.
     let data_cells = ref_data.column_names()?;
-    anyhow::ensure!(
-        ref_cells == data_cells,
-        "{ref_prop_path}: its {} cells do not match the reference data's {} — \
-         pass the training run's own data files (in training order) as \
-         --reference-data",
-        ref_cells.len(),
-        data_cells.len()
-    );
+    let ref_prop = align_to_columns(&ref_prop_path, ref_prop, &ref_cells, &data_cells)?;
     Ok((query_prop, query_cells, ref_prop, ref_data))
+}
+
+/// `prop`'s rows, named `prop_cells`, moved onto the axis `data_cells`: a
+/// data cell the run never placed gets a zero row, which the retrieval never
+/// returns; a propensity cell absent from the data means the files are not
+/// the run's. The identity when the two axes already agree.
+fn align_to_columns(
+    path: &str,
+    prop: Mat,
+    prop_cells: &[Box<str>],
+    data_cells: &[Box<str>],
+) -> anyhow::Result<Mat> {
+    if prop_cells == data_cells {
+        return Ok(prop);
+    }
+    let col_of: HashMap<&str, usize> = data_cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_ref(), i))
+        .collect();
+    anyhow::ensure!(
+        col_of.len() == data_cells.len(),
+        "{path}: the reference data's cell names are not unique, so its cells cannot be \
+         paired with the propensity's by name — pass the training run's own data files \
+         (in training order) as --reference-data"
+    );
+    let mut aligned = Mat::zeros(data_cells.len(), prop.ncols());
+    let mut missing = 0usize;
+    for (r, cell) in prop_cells.iter().enumerate() {
+        match col_of.get(cell.as_ref()) {
+            Some(&c) => aligned.set_row(c, &prop.row(r)),
+            None => missing += 1,
+        }
+    }
+    anyhow::ensure!(
+        missing == 0,
+        "{path}: {missing} of its {} cells are not in the reference data — pass the \
+         training run's own data files as --reference-data",
+        prop_cells.len()
+    );
+    let unplaced = data_cells.len() - prop_cells.len();
+    if unplaced > 0 {
+        info!(
+            "{unplaced} of the {} reference cells were not placed by the run (no coordinates, \
+             or filtered out) and sit out the retrieval",
+            data_cells.len()
+        );
+    }
+    Ok(aligned)
 }
 
 ///////////////////////////////////////
