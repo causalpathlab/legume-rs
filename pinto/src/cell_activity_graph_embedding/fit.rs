@@ -1474,7 +1474,6 @@ pub fn fit_cell_activity_graph_embedding(
             pair_block: args.pair_block,
             eval_features: None,
             score_pairs: false,
-            polish_steps: args.pair_polish_steps,
         },
         &gene_axis,
         &gene_totals,
@@ -1577,14 +1576,12 @@ pub fn fit_cell_activity_graph_embedding(
 }
 
 /// Min / median / max of a fitted intercept vector, as one log line.
-fn log_intercept_spread(what: &str, mut values: Vec<f32>) {
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    if let (Some(&lo), Some(&hi)) = (values.first(), values.last()) {
+fn log_intercept_spread(what: &str, values: Vec<f32>) {
+    if !values.is_empty() {
+        let q = matrix_util::utils::quantiles(&values, &[0.0, 0.5, 1.0]);
         info!(
             "{what}: min {:.3}, median {:.3}, max {:.3}",
-            lo,
-            values[values.len() / 2],
-            hi
+            q[0], q[1], q[2]
         );
     }
 }

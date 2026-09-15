@@ -5,7 +5,7 @@
 
 use super::fixture::*;
 use crate::cell_activity_graph_embedding::pair_projection::encoder::{
-    pair_nll, CellRow, PairEncoder, PairEncoderSpec,
+    CellRow, PairEncoder, PairEncoderSpec,
 };
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, PairDictionary, PairProjectionArgs, PairSolver, ProjectionArgs,
@@ -115,7 +115,7 @@ fn trained() -> &'static Trained {
         let corpus = corpus_of(&dict, &cells);
         let edges = random_pairs(N_TRAIN_CELLS, 1500, 2);
         let enc = PairEncoder::build(&dict, &corpus, 32, 4, RIDGE, 7, &Device::Cpu).unwrap();
-        enc.train(&corpus, &edges, &spec(20), RIDGE, 7).unwrap();
+        enc.train(&corpus, &edges, &spec(20), 7).unwrap();
         Trained {
             dict,
             cells,
@@ -142,11 +142,11 @@ fn encoder_recovers_the_exact_solvers_pair_latent() {
     for (i, &(u, v)) in held_out.iter().enumerate() {
         let obs = pooled(&cells[u as usize].0, &cells[v as usize].0);
         let (theta, _) = exact(dict, &obs, i as u64);
-        let z: Vec<f32> = out.pair_latent.row(i).iter().copied().collect();
+        let z: Vec<f32> = out.pairs.latent.row(i).iter().copied().collect();
         cos_sum += cosine(&z, &theta);
         // Every gene is active on this fixture, so global ids are positions.
-        nll_enc += f64::from(pair_nll(dict, &obs, &z));
-        nll_exact += f64::from(pair_nll(dict, &obs, &theta));
+        nll_enc += f64::from(dict.nll(&obs, &z));
+        nll_exact += f64::from(dict.nll(&obs, &theta));
     }
     let mean_cos = cos_sum / held_out.len() as f32;
     let ratio = nll_enc / nll_exact;
@@ -170,11 +170,11 @@ fn self_pair_recovers_the_cells_placement() {
     for (c, (profile, _)) in cells.iter().enumerate() {
         let doubled: Vec<(u32, f32)> = profile.iter().map(|&(g, n)| (g, 2.0 * n)).collect();
         let (theta, beta) = exact(dict, &doubled, c as u64);
-        let z: Vec<f32> = out.cell_latent.row(c).iter().copied().collect();
+        let z: Vec<f32> = out.cells.latent.row(c).iter().copied().collect();
         cos_sum += cosine(&z, &theta);
         // The oracle's intercept is for the doubled depth; the cell's own is
         // `ln 2` below it.
-        beta_gap += (out.cell_bias[c] - (beta - 2.0f32.ln())).abs();
+        beta_gap += (out.cells.bias[c] - (beta - 2.0f32.ln())).abs();
     }
     let mean_cos = cos_sum / cells.len() as f32;
     let mean_gap = beta_gap / cells.len() as f32;
@@ -197,8 +197,8 @@ fn pair_code_is_symmetric_end_to_end() {
     let flipped: Vec<(u32, u32)> = edges.iter().map(|&(u, v)| (v, u)).collect();
     let a = enc.encode_all(corpus, edges, 100, 64).unwrap();
     let b = enc.encode_all(corpus, &flipped, 100, 64).unwrap();
-    assert_eq!(a.pair_latent.as_slice(), b.pair_latent.as_slice());
-    assert_eq!(a.pair_bias, b.pair_bias);
+    assert_eq!(a.pairs.latent.as_slice(), b.pairs.latent.as_slice());
+    assert_eq!(a.pairs.bias, b.pairs.bias);
 }
 
 #[test]
@@ -213,8 +213,8 @@ fn blocks_do_not_move_a_cell() {
         .encode_all(corpus, &edges[..1], 64, corpus.len() / 3)
         .unwrap();
     for c in 0..corpus.len() {
-        let a: Vec<f32> = whole.cell_latent.row(c).iter().copied().collect();
-        let b: Vec<f32> = thirds.cell_latent.row(c).iter().copied().collect();
+        let a: Vec<f32> = whole.cells.latent.row(c).iter().copied().collect();
+        let b: Vec<f32> = thirds.cells.latent.row(c).iter().copied().collect();
         assert!(cosine(&a, &b) > 0.999, "cell {c} moved with the block size");
     }
 }
@@ -229,25 +229,18 @@ fn empty_endpoints_land_on_the_origin() {
         ..
     } = trained();
     // Two cells with no counts at all.
-    let mut corpus: Vec<CellRow> = corpus
-        .iter()
-        .map(|r| CellRow {
-            genes: r.genes.clone(),
-            counts: r.counts.clone(),
-            total: r.total,
-        })
-        .collect();
+    let mut corpus = corpus.clone();
     corpus.push(CellRow::from_profile(dict, &[]));
     corpus.push(CellRow::from_profile(dict, &[]));
     let n = corpus.len() as u32;
     let probe = vec![(n - 2, n - 1), edges[0]];
     let out = enc.encode_all(&corpus, &probe, 64, 64).unwrap();
-    assert!(out.pair_latent.row(0).iter().all(|&v| v == 0.0));
-    assert_eq!(out.pair_bias[0], 0.0);
-    assert!(out.pair_latent.row(1).iter().any(|&v| v != 0.0));
+    assert!(out.pairs.latent.row(0).iter().all(|&v| v == 0.0));
+    assert_eq!(out.pairs.bias[0], 0.0);
+    assert!(out.pairs.latent.row(1).iter().any(|&v| v != 0.0));
     for c in [n - 2, n - 1] {
-        assert!(out.cell_latent.row(c as usize).iter().all(|&v| v == 0.0));
-        assert_eq!(out.cell_bias[c as usize], 0.0);
+        assert!(out.cells.latent.row(c as usize).iter().all(|&v| v == 0.0));
+        assert_eq!(out.cells.bias[c as usize], 0.0);
     }
 }
 
@@ -264,15 +257,15 @@ fn save_load_round_trip_is_byte_identical() {
     let path = dir.path().join("enc.safetensors");
     let path = path.to_str().unwrap();
     enc.save(path).unwrap();
-    let back = PairEncoder::load(dict, path, RIDGE, &Device::Cpu).unwrap();
+    let back = PairEncoder::load(dict, path, &Device::Cpu).unwrap();
     assert_eq!(back.trunk_width(), 32);
     assert_eq!(back.n_experts(), 4);
     let a = enc.encode_all(corpus, edges, 100, 64).unwrap();
     let b = back.encode_all(corpus, edges, 100, 64).unwrap();
-    assert_eq!(a.pair_latent.as_slice(), b.pair_latent.as_slice());
-    assert_eq!(a.cell_latent.as_slice(), b.cell_latent.as_slice());
-    assert_eq!(a.pair_bias, b.pair_bias);
-    assert_eq!(a.cell_bias, b.cell_bias);
+    assert_eq!(a.pairs.latent.as_slice(), b.pairs.latent.as_slice());
+    assert_eq!(a.cells.latent.as_slice(), b.cells.latent.as_slice());
+    assert_eq!(a.pairs.bias, b.pairs.bias);
+    assert_eq!(a.cells.bias, b.cells.bias);
 }
 
 /// The pooled global profile of two cells.
@@ -350,7 +343,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
             pair_block: 64,
             eval_features: None,
             score_pairs: true,
-            polish_steps: 0,
         },
         &axis,
         &totals,
@@ -375,7 +367,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
             pair_block: 64,
             eval_features: None,
             score_pairs: false,
-            polish_steps: 0,
         },
         &axis,
         &totals,
@@ -387,67 +378,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         loaded.cells.latent.as_slice()
     );
     assert!(loaded.scores.is_empty());
-
-    // Polishing from the encoder's placement can only move toward the
-    // converged optimum, for pairs and for cells alike.
-    let polished = project_pairs(
-        &data,
-        &edges,
-        &e,
-        None,
-        &PairProjectionArgs {
-            projection: projection.clone(),
-            solver: PairSolver::LoadEncoder {
-                path: saved,
-                dev: &Device::Cpu,
-            },
-            seed: 11,
-            pair_block: 64,
-            eval_features: None,
-            score_pairs: false,
-            polish_steps: 8,
-        },
-        &axis,
-        &totals,
-    )
-    .unwrap();
-    // The run's dictionary: the log abundance is per cell of THIS sample.
-    let dict = PairDictionary::new(&e, &totals, 60).unwrap();
-    let mut before = 0f32;
-    let mut after = 0f32;
-    for (i, &(u, v)) in edges.iter().enumerate() {
-        let obs = pooled(&cells[u as usize].0, &cells[v as usize].0);
-        let (theta, _) = exact(&dict, &obs, i as u64);
-        let a: Vec<f32> = loaded.latent.row(i).iter().copied().collect();
-        let b: Vec<f32> = polished.latent.row(i).iter().copied().collect();
-        before += cosine(&a, &theta);
-        after += cosine(&b, &theta);
-    }
-    let (before, after) = (before / edges.len() as f32, after / edges.len() as f32);
-    eprintln!("polish: cosine to the converged MAP {before:.4} → {after:.4}");
-    assert!(
-        after >= before - 1e-3,
-        "polish moved away: {before} → {after}"
-    );
-    assert!(
-        after > 0.99,
-        "polished pairs are {after} from the converged MAP"
-    );
-    for (c, cell) in cells.iter().enumerate() {
-        let doubled: Vec<(u32, f32)> = cell.0.iter().map(|&(g, n)| (g, 2.0 * n)).collect();
-        let (theta, beta) = exact(&dict, &doubled, c as u64);
-        let z: Vec<f32> = polished.cells.latent.row(c).iter().copied().collect();
-        assert!(cosine(&z, &theta) > 0.98, "cell {c} not settled");
-        let gap = polished.cells.bias[c] - (beta - 2.0f32.ln());
-        assert!(
-            gap.abs() < 0.05,
-            "cell {c}: polished intercept {} vs oracle {} (gap {gap}); ‖z‖ {} vs {}",
-            polished.cells.bias[c],
-            beta - 2.0f32.ln(),
-            norm(&z),
-            norm(&theta)
-        );
-    }
 
     // The exact arm answers the same shape, with every cell placed.
     let exact = project_pairs(
@@ -462,7 +392,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
             pair_block: 64,
             eval_features: None,
             score_pairs: false,
-            polish_steps: 0,
         },
         &axis,
         &totals,
@@ -471,4 +400,61 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
     assert_eq!(exact.cells.latent.nrows(), 60);
     assert!(exact.cells.latent.iter().all(|v| v.is_finite()));
     assert!(exact.cells.bias.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn the_certificate_finishes_what_an_untrained_encoder_gets_wrong() {
+    // An encoder that never trained places pairs from a random map. The
+    // certificate bounds every placement's excess over the optimum, the rows
+    // it puts far out are finished exactly, and so the result as a whole
+    // must sit within a few nats per pair of the optimum regardless.
+    let dir = tempfile::tempdir().unwrap();
+    let cells = planted_cells(60, 21);
+    let data = planted_data(&dir, &cells).unwrap();
+    let e = dictionary_matrix();
+    let (_, totals) = abundances();
+    let rows: Vec<Box<str>> = (0..N_GENES).map(|g| format!("G{g}").into()).collect();
+    let axis = GeneAxis::resolve_or_identity(&rows).unwrap();
+    let edges = random_pairs(60, 300, 4);
+    let saved = dir.path().join("untrained.pair_encoder.safetensors");
+    let spec = spec(0);
+    let out = project_pairs(
+        &data,
+        &edges,
+        &e,
+        None,
+        &PairProjectionArgs {
+            projection: ProjectionArgs {
+                ridge: RIDGE,
+                steps: 300,
+                gene_sample: 0,
+            },
+            solver: PairSolver::TrainEncoder {
+                spec: &spec,
+                dev: &Device::Cpu,
+                save_to: saved.to_str().unwrap(),
+            },
+            seed: 5,
+            pair_block: 64,
+            eval_features: None,
+            score_pairs: false,
+        },
+        &axis,
+        &totals,
+    )
+    .unwrap();
+    let dict = PairDictionary::new(&e, &totals, 60).unwrap();
+    let (mut got, mut best) = (0f64, 0f64);
+    for (i, &(u, v)) in edges.iter().enumerate() {
+        let obs = pooled(&cells[u as usize].0, &cells[v as usize].0);
+        let (theta, _) = exact(&dict, &obs, i as u64);
+        let z: Vec<f32> = out.latent.row(i).iter().copied().collect();
+        got += f64::from(dict.nll(&obs, &z));
+        best += f64::from(dict.nll(&obs, &theta));
+    }
+    let ratio = got / best;
+    assert!(
+        ratio < 1.005,
+        "placements sit {ratio} of the optimum's likelihood"
+    );
 }
