@@ -373,13 +373,34 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         .unwrap_or_default();
     let has_modules = out.model.modules.is_some();
     // The map phase 2 placed the cells with, so `predict` places a query by the
-    // same one. One self-contained file: the trunk plus its per-gene mean.
+    // same one. One self-contained file per map: the trunk plus its per-gene
+    // mean. A one-track fit has exactly one, under the name `predict` reads;
+    // further tracks get a file each, named after the track.
     let cell_encoder_suffix = match out.cell_encoder.as_ref() {
-        Some(enc) => {
+        Some(encs) => {
             let suffix = "cell_encoder.safetensors";
-            let path = format!("{}.{suffix}", knobs.out);
-            enc.save(&path)?;
-            info!("Wrote the cell encoder to {path}");
+            let base = format!("{}.{suffix}", knobs.out);
+            match encs.single() {
+                Some(enc) => {
+                    enc.save(&base)?;
+                    info!("Wrote the cell encoder to {base}");
+                }
+                None => {
+                    for te in encs.iter() {
+                        let path = if te.track == 0 {
+                            base.clone()
+                        } else {
+                            format!(
+                                "{}.cell_encoder.{}.safetensors",
+                                knobs.out,
+                                te.name.replace('/', ".")
+                            )
+                        };
+                        te.encoder.save(&path)?;
+                        info!("Wrote the `{}` cell encoder to {path}", te.name);
+                    }
+                }
+            }
             Some(suffix)
         }
         None => None,
