@@ -27,26 +27,5 @@ pub fn file_sample_id(file: &str, strip: &str) -> anyhow::Result<Box<str>> {
     Ok(strip_sample_id(basename(file)?.as_ref(), strip))
 }
 
-/// Longest `_`-aligned suffix shared by every basename in `names`.
-/// Returns "" with fewer than two inputs, or when no `_`-prefixed suffix
-/// (e.g. `_genes`) is common to all. Greedy from the longest candidate down —
-/// picks the longest `_`-prefixed suffix of `names[0]` that's a suffix of every
-/// other entry.
-pub fn longest_common_underscore_suffix(names: &[Box<str>]) -> Box<str> {
-    if names.len() < 2 {
-        return "".into();
-    }
-    // Candidate `_`-aligned suffixes of the first basename, longest first.
-    let first = names[0].as_ref();
-    let mut candidates: Vec<&str> = first.match_indices('_').map(|(i, _)| &first[i..]).collect();
-    candidates.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    for cand in candidates {
-        if names[1..].iter().all(|n| n.ends_with(cand)) {
-            return cand.into();
-        }
-    }
-    "".into()
-}
-
 #[cfg(test)]
 mod tests;

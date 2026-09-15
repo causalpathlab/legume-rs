@@ -490,30 +490,36 @@ enum Commands {
     #[command(
         name = "gem",
         aliases = ["gem-embedding"],
-        about = "GEM: joint gene-count embedding over the shared bge engine",
-        long_about = "Joint gene-count embedding, over the exact same graph_embedding_util\n\
-                      engine and driver `senna bge` runs: every feature row of the input\n\
-                      (rows = features, no modality split), the bilinear score\n\
-                      e_feat·e_cell + b_feat + b_cell, phase-1 multilevel-pseudobulk training,\n\
+        about = "GEM: joint gene-count and modality-track embedding over the shared bge engine",
+        long_about = "Joint embedding of gene counts and any co-measured modality tracks,\n\
+                      over the exact same graph_embedding_util engine and driver\n\
+                      `senna bge` runs: the bilinear score e_feat·e_cell + b_feat + b_cell,\n\
+                      phase-1 multilevel-pseudobulk training,\n\
                       phase-2 analytical per-cell projection.\n\
                       \n\
-                      Rows follow `{gene}/count/{spliced|unspliced}` and match across files\n\
-                      by exact name, the row itself is the join key. gem is, for now, bge\n\
-                      run over every row of a gene-count matrix; a later task reintroduces\n\
-                      spliced/unspliced as explicit tracks on this same driver.\n\
+                      Positional GENES files hold count rows, `{gene}/count/{spliced|unspliced}`.\n\
+                      --modality files each hold one co-measured modality's two channel rows,\n\
+                      `{gene}/{m6a,atoi,apa}/{channel}`; the modality is read from the rows,\n\
+                      never the file name. Every row is one TRACK:\n\
+                      the base count row shares a gene's loading outright,\n\
+                      and every other track adds a ridge-shrunk offset to it (--offset-l2).\n\
+                      Rows match across files by exact name;\n\
+                      cells match by barcode within a sample (--genes-sample-strip).\n\
                       \n\
-                      Writes the same output set `senna bge` does:\n\
+                      Writes the same output set `senna bge` does,\n\
+                      plus {out}.feature_contrast.parquet (one column per non-base track):\n\
                       {out}.senna.json, {out}.{cell_embedding,dictionary,feature_embedding,\n\
                       feature_loading,feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
                       plus {out}.{latent,topic_embedding}.parquet from the resolved ETM.",
         after_long_help = "\
 	Example:\n\
-  senna gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
-  Multiple samples — pass them positionally, so shell globs work.\n\
+  senna gem out/rep1_genes.zarr.zip -o out/gem\n\n\
+  With a co-measured modality, one file per sample, matched by sample id:\n\n\
+  senna gem out/*_genes.zarr.zip --modality out/*_m6a.zarr.zip -o out/gem\n\n\
+  Multiple gene samples, pass them positionally so shell globs work.\n\
   Each sample becomes a batch via its barcodes' `@batch` tag.\n\n\
   senna gem out/rep1_genes.zarr.zip out/rep2_genes.zarr.zip -o out/gem\n\
-  senna gem out/*_genes.zarr.zip -o out/gem\n\n\
-  The `--genes a,b` flag form still works, but not together with the positional one.")]
+  senna gem out/*_genes.zarr.zip -o out/gem")]
     Gem(GemArgs),
 
     // ─────────── 2. Held-out inference ───────────
@@ -860,7 +866,7 @@ enum Commands {
             https://doi.org/10.1186/s12864-018-4772-0",
         after_long_help = "\
 	Example:\n\
-	senna gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
+	senna gem out/rep1_genes.zarr.zip -o out/gem\n\
   senna lineage -f out/gem -o out/gem"
     )]
     Lineage(LineageArgs),

@@ -7,19 +7,20 @@
 //! now, bge run over every feature row — a later task adds spliced/unspliced
 //! **tracks** on top of this same driver ([`EmbedPlan::tracks`]).
 //!
-//! [`EmbedKnobs`] is the flag surface both commands drive the fit with. The
-//! sketch that first specified this module described it as a `collapse:
-//! &refine_weighting::CollapseArgs` reference, mirroring `BgeArgs`'s own
-//! field — but `gem::args::CollapseArgs` is a distinct, pre-existing type
-//! (different flag names, no `--pb-refine-*` / `--mixture-batch` /
-//! `--emit-pb-reference` surface of its own), and this task's brief is
-//! explicit that gem's arg surface is not to be redesigned beyond its listed
-//! field removals. So the collapse-pipeline knobs are flattened onto
-//! [`EmbedKnobs`] directly as plain values instead of a shared struct
-//! reference: `BgeArgs::knobs` reads them off its own `CollapseArgs`,
-//! `GemArgs::knobs` off its own. Same story for `modules`: gem has no
-//! `--gene-modules` flag yet, so it hands over `None` rather than a
-//! `&ge::GeneModuleArgs` it doesn't have.
+//! [`EmbedKnobs`] is the flag surface both commands drive the fit with.
+//! `GemArgs` now flattens the exact same `refine_weighting::CollapseArgs`
+//! and `ge::GeneModuleArgs` groups `BgeArgs` does (Task 5a), so both
+//! `collapse` and `modules` are shared-by-reference fields here, as the
+//! original sketch had them, and `build_config` reads the raw collapse
+//! numbers (`num_levels`, `sort_dim`, `knn_cells`, `iter_opt`, `proj_dim`)
+//! straight off whichever command's `collapse` this is — no more per-field
+//! renaming. `bulk_batches` / `emit_pb_reference` / `refine` stay separate,
+//! resolved fields: gem does not (yet) apply the carried-pb-reference /
+//! mixture-batch policy those three encode (`GemArgs` has no
+//! `pb_reference` / `init_from` surface and does not implement
+//! `Updatable`), even though the shared struct's own flags now parse on
+//! gem's surface too — so `GemArgs::knobs` still hardcodes them off, exactly
+//! as before this task.
 
 use crate::embed_common::*;
 use crate::pb_reference::ReferenceInput;
@@ -32,13 +33,16 @@ use graph_embedding_util as ge;
 pub(crate) struct EmbedKnobs<'a> {
     pub embedding_dim: usize,
 
-    // Multilevel pseudobulk collapse (see the module doc for why this is
-    // flattened rather than a shared `&CollapseArgs`).
-    pub num_levels: usize,
-    pub sort_dim: usize,
-    pub knn_pb_samples: usize,
-    pub num_opt_iter: usize,
-    pub proj_dim: usize,
+    /// The shared random-projection + multilevel pseudobulk collapse
+    /// pipeline (`--proj-dim`, `--sort-dim`, `--knn-cells`, `--num-levels`,
+    /// `--iter-opt`, `--pb-refine-*`, `--mixture-batch`,
+    /// `--emit-pb-reference` / `--no-emit-pb-reference`). Both commands
+    /// flatten the identical struct now, so `build_config` reads its raw
+    /// numbers straight off this reference either way.
+    pub collapse: &'a crate::refine_weighting::CollapseArgs,
+    /// Resolved separately from `collapse` (see the module doc): gem always
+    /// passes `None` / `false` here regardless of what `--mixture-batch` /
+    /// `--emit-pb-reference` parse to on its own surface.
     pub bulk_batches: Option<&'a [Box<str>]>,
     /// Carry the finest collapse level forward as `{out}.pb_reference.zarr`
     /// (bge: `!--no-emit-pb-reference`; gem has no such flag yet, always
@@ -63,13 +67,17 @@ pub(crate) struct EmbedKnobs<'a> {
     pub device: &'a ComputeDevice,
     pub device_no: usize,
 
-    /// The `--gene-modules` flag group, when this command has one. `None`
-    /// for gem (not offered on its arg surface yet) unconditionally disables
-    /// learned gene modules, matching what it always did.
+    /// The `--gene-modules` flag group. Both commands flatten it now, so
+    /// this is always `Some`; kept `Option` because a caller that never
+    /// resolves gene modules can still pass `None` explicitly.
     pub modules: Option<&'a ge::GeneModuleArgs>,
     /// The module count this command trains when `--gene-modules` is not
-    /// passed explicitly (bge: `Some(DEFAULT_GENE_MODULES)`); meaningless
-    /// when `modules` is `None`.
+    /// passed explicitly. Both commands pass `Some(DEFAULT_GENE_MODULES)`:
+    /// the hierarchical phase 1 has no module-free mode (the hard gene
+    /// partition it scores against is structural, not an optional layer —
+    /// `ge::fit` errors "the hierarchical phase 1 needs a module count"
+    /// without one), so `None` here is not a state either command can
+    /// actually run in.
     pub default_gene_modules: Option<usize>,
 
     pub out: &'a str,
@@ -157,11 +165,11 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
             bulk_batches: knobs.bulk_batches.map(<[Box<str>]>::to_vec),
             emit_finest_collapse: knobs.emit_pb_reference,
-            num_levels: knobs.num_levels,
-            sort_dim: knobs.sort_dim,
-            knn_pb_samples: knobs.knn_pb_samples,
-            num_opt_iter: knobs.num_opt_iter,
-            proj_dim: knobs.proj_dim,
+            num_levels: knobs.collapse.num_levels,
+            sort_dim: knobs.collapse.sort_dim,
+            knn_pb_samples: knobs.collapse.knn_cells,
+            num_opt_iter: knobs.collapse.iter_opt,
+            proj_dim: knobs.collapse.proj_dim,
             hvg_weights,
             refine: knobs.refine.clone(),
             epochs: knobs.epochs,
@@ -588,19 +596,17 @@ fn write_pb_embeddings(
     Ok(())
 }
 
-/// Module count `senna bge` trains unless told otherwise — the policy is this
-/// command's, so it lives here rather than in the shared flag group.
+/// Default module count for the hierarchical phase 1's hard gene partition,
+/// used by both `senna bge` and `senna gem` unless `--gene-modules` overrides
+/// it — the engine has no module-free mode, so this is a shared policy
+/// constant rather than an opt-in default.
 const DEFAULT_GENE_MODULES: usize = 128;
 
 impl super::BgeArgs {
     pub(crate) fn knobs(&self) -> EmbedKnobs<'_> {
         EmbedKnobs {
             embedding_dim: self.embedding_dim,
-            num_levels: self.collapse.num_levels,
-            sort_dim: self.collapse.sort_dim,
-            knn_pb_samples: self.collapse.knn_cells,
-            num_opt_iter: self.collapse.iter_opt,
-            proj_dim: self.collapse.proj_dim,
+            collapse: &self.collapse,
             bulk_batches: self.collapse.mixture_batch.as_deref(),
             emit_pb_reference: self.collapse.emits_pb_reference(),
             // `--no-refine` is gbe-specific (the other subcommands always refine);
@@ -628,48 +634,38 @@ impl super::BgeArgs {
     }
 }
 
-/// gem has no `--modules-per-unit` flag of its own yet (Task 5a's redesign);
-/// this fixes it at the value `run_gem_genes_bge` always passed before this
-/// driver existed.
-const GEM_MODULES_PER_UNIT: usize = 8;
-
 impl crate::gem::args::GemArgs {
     pub(crate) fn knobs(&self) -> EmbedKnobs<'_> {
         EmbedKnobs {
-            embedding_dim: self.model.embedding_dim,
-            num_levels: self.collapse.num_levels,
-            sort_dim: self.collapse.sort_dim,
-            knn_pb_samples: self.collapse.knn_pb,
-            num_opt_iter: self.collapse.num_opt_iter,
-            proj_dim: self.collapse.proj_dim,
-            // gem has no `--mixture-batch` / carried-reference surface yet.
+            embedding_dim: self.embedding_dim,
+            collapse: &self.collapse,
+            // gem has no `senna update` / carried-pb-reference surface yet
+            // (no `pb_reference` / `init_from` fields, no `Updatable` impl),
+            // so these two stay off even though `--mixture-batch` /
+            // `--emit-pb-reference` now parse on gem's shared `collapse`.
             bulk_batches: None,
             emit_pb_reference: false,
-            // gem always refines (no `--no-refine` flag); geu's multilevel
-            // collapse requires a refine spec (it surfaces the per-level
-            // cell→pb maps phase-2 needs) — geu's defaults, same as a
-            // `senna bge` run without `--no-refine`.
-            refine: Some(ge::RefineParams::default()),
+            refine: (!self.no_refine).then(|| self.collapse.pb_refine.to_params()),
             qc: &self.qc,
-            phase1_cells_per_pb: self.collapse.phase1_cells_per_pb,
-            modules_per_unit: GEM_MODULES_PER_UNIT,
-            // gem has no `--skip-etm` flag yet; resolve topics by default,
-            // same as bge.
-            skip_etm: false,
-            num_topics: None,
-            epochs: self.train.epochs,
-            batches_per_epoch: self.train.batches_per_epoch,
-            batch_size: self.train.batch_size,
-            learning_rate: self.train.learning_rate,
-            weight_decay: self.train.weight_decay,
-            // gem has no `--block-size` flag of its own.
-            block_size: None,
-            seed: self.runtime.seed,
-            device: &self.runtime.device,
-            device_no: self.runtime.device_no,
-            // Learned gene modules are not offered on gem's arg surface yet.
-            modules: None,
-            default_gene_modules: None,
+            phase1_cells_per_pb: self.phase1_cells_per_pb,
+            modules_per_unit: self.modules_per_unit,
+            skip_etm: self.skip_etm,
+            num_topics: self.num_topics,
+            epochs: self.epochs,
+            // gem dropped `--batches-per-epoch` (Task 5a); always auto.
+            batches_per_epoch: None,
+            batch_size: self.batch_size,
+            learning_rate: self.learning_rate,
+            weight_decay: self.weight_decay,
+            block_size: self.block_size,
+            seed: self.seed,
+            device: &self.device,
+            device_no: self.device_no,
+            modules: Some(&self.modules),
+            // Same default as bge: the hierarchical phase 1 has no
+            // module-free mode (see `EmbedKnobs::default_gene_modules`'s
+            // doc), so this cannot be `None`.
+            default_gene_modules: Some(DEFAULT_GENE_MODULES),
             out: &self.out,
             batch_files: self.batch_files.as_deref(),
         }
