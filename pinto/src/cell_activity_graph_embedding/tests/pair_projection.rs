@@ -23,7 +23,7 @@ fn projection_recovers_known_pair_embedding() {
     let beta_truth = 2.0f32.ln();
     let obs = counts_from(&e, &b, &truth, beta_truth);
 
-    let (theta, beta, certificate) = dict.solve(&obs, RIDGE);
+    let (theta, beta, gap) = dict.solve(&obs, RIDGE);
 
     assert!(
         cosine(&theta, &truth) > 0.98,
@@ -36,12 +36,9 @@ fn projection_recovers_known_pair_embedding() {
         (beta - beta_truth).abs() < 0.1,
         "intercept off: {beta} vs {beta_truth}"
     );
-    // The bound is `‖∇‖²/(2λ)`, so a near-zero ridge inflates it; small
+    // The certificate is `‖∇‖²/(2λ)`, so a near-zero ridge inflates it; small
     // against the pair's thousands of nats of likelihood is what settled means.
-    assert!(
-        certificate < 1.0,
-        "certificate {certificate} at the optimum"
-    );
+    assert!(gap < 1.0, "{gap} nats above the optimum at the optimum");
 }
 
 #[test]
@@ -77,10 +74,10 @@ fn empty_profile_stays_at_the_origin() {
     let (_, totals) = abundances();
     let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
 
-    let (theta, beta, certificate) = dict.solve(&[], RIDGE);
+    let (theta, beta, gap) = dict.solve(&[], RIDGE);
     assert_eq!(theta, vec![0.0; DIM]);
     assert_eq!(beta, 0.0);
-    assert_eq!(certificate, 0.0);
+    assert_eq!(gap, 0.0);
 
     // A gene that carries no counts anywhere is not on the partition axis, so a
     // profile made only of such genes is empty too — not a direction.
@@ -106,11 +103,8 @@ fn newton_polish_lands_where_the_solve_from_the_origin_lands() {
     let (theta, beta, _) = dict.solve(&obs, RIDGE);
     // From a start well off the optimum.
     let start = [0.1f32, 0.1, -0.1, 0.2];
-    let (polished, beta_polished, certificate) = dict.polish(&obs, RIDGE, &start, 8);
-    assert!(
-        certificate < 1.0,
-        "certificate {certificate} at the optimum"
-    );
+    let (polished, beta_polished, gap) = dict.polish(&obs, RIDGE, &start, 8);
+    assert!(gap < 1.0, "{gap} nats above the optimum after polishing");
     assert!(
         cosine(&polished, &theta) > 0.9999,
         "direction: {polished:?} vs {theta:?}"
@@ -139,10 +133,10 @@ fn a_wild_start_is_walked_back_to_the_same_optimum() {
     let obs = counts_from(&e, &b, &truth, 0.0);
     let (theta, beta, _) = dict.solve(&obs, RIDGE);
     let wild = [-12.0f32, 9.0, -7.0, 11.0];
-    let (back, beta_back, certificate) = dict.polish(&obs, RIDGE, &wild, 64);
+    let (back, beta_back, gap) = dict.polish(&obs, RIDGE, &wild, 64);
     assert!(
-        certificate < 1.0,
-        "certificate {certificate}: the wild start did not settle"
+        gap < 1.0,
+        "{gap} nats above the optimum: the wild start did not settle"
     );
     assert!(
         cosine(&back, &theta) > 0.9999,
