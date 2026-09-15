@@ -93,9 +93,9 @@ fn analytic_gradients_match_finite_differences() {
         assert!(close(n, g.b_m[m]), "b_m[{m}] fd {n} vs {}", g.b_m[m]);
     }
     for &(gene, ref row) in &g.r {
-        for k in 0..2 {
+        for (k, &want) in row.iter().enumerate() {
             let n = fd(&mut p, &|p| &mut p.r[gene as usize * 2 + k]);
-            assert!(close(n, row[k]), "r[{gene},{k}] fd {n} vs {}", row[k]);
+            assert!(close(n, want), "r[{gene},{k}] fd {n} vs {want}");
         }
     }
     for &(gene, gb) in &g.b_g {

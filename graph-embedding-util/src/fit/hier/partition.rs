@@ -57,10 +57,14 @@ impl Partition {
     }
 }
 
+/// A unit's counts within one module: `(module, [(slot, count)])`, slots
+/// ascending, only the modules the unit touches.
+pub type ModuleSlots = Vec<(u32, Vec<(u32, f32)>)>;
+
 pub struct UnitModules {
     pub q: Vec<f32>,
     pub n_um: Vec<f32>,
-    pub by_module: Vec<Vec<(u32, Vec<(u32, f32)>)>>,
+    pub by_module: Vec<ModuleSlots>,
 }
 
 impl UnitModules {
@@ -68,7 +72,7 @@ impl UnitModules {
         let (n_u, m) = (units.n_units(), part.n_modules());
         let slot = part.slot_of();
         let mut n_um = vec![0f32; n_u * m];
-        let mut by_module: Vec<Vec<(u32, Vec<(u32, f32)>)>> = Vec::with_capacity(n_u);
+        let mut by_module: Vec<ModuleSlots> = Vec::with_capacity(n_u);
         // One bucket per module, indexed directly; `members` are sorted by gene
         // and `feats` are too, so each bucket's slots come out ascending.
         let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); m];
