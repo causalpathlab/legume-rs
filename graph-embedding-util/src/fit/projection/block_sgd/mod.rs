@@ -85,8 +85,11 @@
 //! [`edges`] flattens the sampler's edges once per pass and sizes the blocks;
 //! [`pass`] holds the frozen per-pass design ([`pass::PassDict`]) apart from the
 //! block loop that runs nodes against it, and owns the per-block argument/result
-//! types; [`solve`] is the Adam loop for one block. The tuning constants, the
-//! caller-facing types and the entry points stay here.
+//! types; [`solve`] is the Adam loop for one block. [`tracks`] is the same polish
+//! on a MULTI-track feature axis — one Poisson partition and one intercept per
+//! track — which [`polish_cells`] dispatches to when the axis has more than one;
+//! a one-track axis never enters it. The tuning constants, the caller-facing types
+//! and the entry points stay here.
 //!
 //! There are two entry points, differing only in who owns the dictionary.
 //! [`project_cells`] takes a whole node set and builds the design for it;
@@ -95,6 +98,8 @@
 //! the same dictionary.
 
 use super::CellBatchFold;
+use crate::cell_projection::SCORE_CLAMP;
+use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::Device;
 use log::info;
@@ -102,6 +107,7 @@ use log::info;
 mod edges;
 mod pass;
 mod solve;
+mod tracks;
 
 use edges::EdgeTable;
 use pass::{run_pass, PassSpec};
@@ -141,6 +147,22 @@ const TARGET_DELTA_S: f64 = 0.05;
 /// Learning rate floor as a fraction of the initial rate, decayed linearly across
 /// a block's steps so it settles instead of dithering around the optimum.
 const LR_FLOOR_FRAC: f64 = 0.05;
+
+/// Adam's moment decays and its denominator floor, shared by every block loop in
+/// this module ([`solve`] and [`tracks`]).
+///
+/// They live here rather than as literals inside each loop for one reason: the
+/// one-track and per-track solves must not drift apart, and no test can catch
+/// that drift — a one-track axis never enters [`tracks`], so a changed `β₂` in
+/// one loop and not the other would pass the whole suite. The loop *bodies* stay
+/// separate on purpose (sharing them would put a branch on the one-track path);
+/// the numbers they are parameterised by do not.
+///
+/// AdamW with `weight_decay = 0` at both call sites — the ridge is already in the
+/// closed-form gradient, and a decoupled decay would double-count it.
+const BETA1: f64 = 0.9;
+const BETA2: f64 = 0.999;
+const EPS: f64 = 1e-8;
 
 /// Activation budget per block. `Bc` is sized from this and the pass's feature
 /// count so a block's `[Bc, F]` tensors stay bounded regardless of `F`.
@@ -247,8 +269,13 @@ pub(crate) struct Phase2Out {
     /// origin — which, after centring, *is* the population mean, i.e. the right
     /// "no information" position rather than an arbitrary corner of the space.
     pub theta: Vec<f32>,
-    /// Fitted per-cell intercept, `[n_cells]`.
+    /// Fitted per-cell intercept, `[n_cells]` — the base track's on a multi-track
+    /// feature axis.
     pub b_cell: Vec<f32>,
+    /// Tracks `1..T`, one fitted `[n_cells]` intercept each; **empty** on a
+    /// one-track axis. A cell with no counts on the track sits at the score-clamp
+    /// floor, which is what the solver reports for a track it skipped.
+    pub other_intercepts: Vec<Vec<f32>>,
     /// The mean that was removed. The caller **must** fold this into `b_feat`
     /// or the model is changed rather than re-gauged.
     pub gauge: GaugeShift,
@@ -385,12 +412,23 @@ pub(crate) fn project_prepared(
 /// per block. The per-cell problem is convex, so what the warm start leaves is
 /// the distance to one optimum, not a choice among several. Training-side
 /// entry: builds the dictionary and applies the batch fold.
+///
+/// `tracks` selects the objective, and a one-track axis is dispatched away
+/// **before** anything here runs: [`TrackSpec::is_base`] sends it to the
+/// single-partition pass below, untouched and with nothing added to its path.
+/// Any other axis goes to [`tracks::polish_tracks`], which gives each track its
+/// own Poisson partition and its own intercept (see that module for the
+/// objective) and returns them in [`PassOut::other_intercepts`].
 pub(crate) fn polish_cells(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
     batch_fold: Option<CellBatchFold>,
     init: &[f32],
+    tracks: &TrackSpec,
 ) -> anyhow::Result<PassOut> {
+    if !tracks.is_base() {
+        return tracks::polish_tracks(input, cells, batch_fold, init, tracks);
+    }
     let n_features = input.b_feat.len();
     let rows: Vec<u32> = (0..n_features as u32).collect();
     let edges = EdgeTable::build(cells, &rows, n_features, batch_fold);
@@ -484,9 +522,25 @@ pub(crate) fn finish(
         b_cell[cell as usize] = pass.intercept[i];
     }
 
+    // The non-base tracks' intercepts, on the same axis. A cell the pass never
+    // saw has no counts on any track, which is exactly the case the solver
+    // reports at the score-clamp floor — so that, not zero, is the fill.
+    let other_intercepts: Vec<Vec<f32>> = pass
+        .other_intercepts
+        .iter()
+        .map(|track| {
+            let mut global = vec![-SCORE_CLAMP as f32; input.n_cells];
+            for (i, &(cell, _, _)) in cells.iter().enumerate() {
+                global[cell as usize] = track[i];
+            }
+            global
+        })
+        .collect();
+
     Phase2Out {
         theta,
         b_cell,
+        other_intercepts,
         gauge: GaugeShift { theta_mean },
     }
 }

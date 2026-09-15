@@ -55,6 +55,7 @@
 
 use super::block_sgd::{self, Phase2Input, Phase2Out};
 use super::{cell_edges, CellBatchFold, FrozenProjection};
+use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
@@ -761,11 +762,18 @@ pub(crate) fn null_intercept(
 
 /// Project every cell through the distilled encoder. Same inputs and output as
 /// [`block_sgd::project_cells`], plus the trained encoder.
+///
+/// `tracks` is passed straight through to the polish, which is what makes the
+/// finished placement track-aware. The encoder that produces the warm start is
+/// **not** — it pools every row of the feature axis into one read — so on a
+/// multi-track axis the warm start is a single-partition approximation that the
+/// polish then corrects on the exact objective.
 pub(crate) fn project_cells(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
     batch_fold: Option<CellBatchFold>,
     spec: &DistillSpec<'_>,
+    tracks: &TrackSpec,
 ) -> anyhow::Result<(Phase2Out, CellEncoder)> {
     let (h, dev) = (input.h, input.dev);
     let d = input.b_feat.len();
@@ -822,7 +830,7 @@ pub(crate) fn project_cells(
     );
     // The encoder's placement is the warm start; the block SGD finishes each
     // cell on the exact objective. `predict` walks the same two steps.
-    let pass = block_sgd::polish_cells(input, cells, batch_fold, &latent)?;
+    let pass = block_sgd::polish_cells(input, cells, batch_fold, &latent, tracks)?;
 
     let out = block_sgd::finish(input, cells, pass);
     Ok((out, encoder))

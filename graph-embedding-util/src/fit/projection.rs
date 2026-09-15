@@ -216,6 +216,14 @@ impl<'a> FrozenProjector<'a> {
     /// like `nodes`' ids, and the solve is capped at the polish budget. What
     /// `senna predict` runs after a run's encoder has placed a group, so a query
     /// walks the same two steps the run's own cells did.
+    ///
+    /// **Single-track only.** This projector normalises over the whole frozen
+    /// feature axis as ONE Poisson partition with ONE intercept, which is the
+    /// right model for a plain gene axis and the wrong one for a multi-track one
+    /// (the training-side polish gives each track its own partition and
+    /// intercept — see [`block_sgd`]). Carrying a `TrackSpec` through the
+    /// persisted model so a query can be projected track-aware is a follow-up on
+    /// the `senna predict` side, not something this entry point guesses at.
     pub fn polish(
         &self,
         nodes: &[(u32, &[u32], &[f32])],

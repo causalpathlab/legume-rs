@@ -3,8 +3,8 @@
 //! convergence and read back the latents plus the block's deviance. The closed-form
 //! gradient the module docs justify lives here and nowhere else.
 
-use super::pass::{BlockArgs, BlockOut};
-use super::{CHECK_EVERY, LR_FLOOR_FRAC, TOL};
+use super::pass::{adam_step_size, poisson_deviance, BlockArgs, BlockOut};
+use super::{BETA1, BETA2, CHECK_EVERY, EPS, TOL};
 use crate::cell_projection::SCORE_CLAMP;
 use candle_util::candle_core::{DType, Tensor};
 use matrix_util::traits::FusedTensorOps;
@@ -147,7 +147,6 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     // hand-built gradient; Adam on a `[Bc, H+1]` parameter is a handful of
     // elementwise ops on a tensor ~30 000× smaller than the score block, so it is
     // cheaper to write than to work around.
-    let (beta1, beta2, eps) = (0.9f64, 0.999f64, 1e-8f64);
     let mut m = Tensor::zeros((bc, d), DType::F32, dev)?;
     let mut v = Tensor::zeros((bc, d), DType::F32, dev)?;
 
@@ -161,10 +160,6 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let loop_start = std::time::Instant::now();
     let max_steps = a.spec.max_steps;
     for step in 0..max_steps {
-        // Linear decay to a floor so the block settles rather than dithers.
-        let frac = step as f64 / max_steps as f64;
-        let lr = dict.lr0 * (1.0 - frac * (1.0 - LR_FLOOR_FRAC));
-
         // Upper bound only. `exp` overflows f32 at 88 so the ceiling is a real
         // guard; the floor is not, since `exp(−large)` underflowing to 0 is the
         // right answer for a feature the cell does not express.
@@ -187,12 +182,12 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
         }
 
         // AdamW with `weight_decay = 0` — the ridge is already in `g` above, and a
-        // decoupled decay would double-count it.
-        let t = (step + 1) as f64;
-        m = ((&m * beta1)? + (&g * (1.0 - beta1))?)?;
-        v = ((&v * beta2)? + (g.sqr()? * (1.0 - beta2))?)?;
-        let step_size = lr * (1.0 - beta2.powf(t)).sqrt() / (1.0 - beta1.powf(t));
-        theta = (&theta - (&m * step_size)?.broadcast_div(&(v.sqrt()? + eps)?)?)?;
+        // decoupled decay would double-count it. The decayed, bias-corrected step
+        // multiplier is [`adam_step_size`], shared with the per-track loop.
+        m = ((&m * BETA1)? + (&g * (1.0 - BETA1))?)?;
+        v = ((&v * BETA2)? + (g.sqr()? * (1.0 - BETA2))?)?;
+        let step_size = adam_step_size(dict.lr0, step, max_steps);
+        theta = (&theta - (&m * step_size)?.broadcast_div(&(v.sqrt()? + EPS)?)?)?;
 
         steps = step + 1;
         // Converged on `‖ΔΘ‖/‖Θ‖` — a parameter criterion, immune to the
@@ -232,21 +227,10 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     // Two-sided here (unlike the training loop): the deviance takes `ln(n/μ)`, so a
     // rate that underflowed to 0 would report an infinite one.
     let s = s.clamp(-SCORE_CLAMP, SCORE_CLAMP)?;
-    // Poisson deviance over the observed edges, `2·[ n·ln(n/μ) − (n − μ) ]`, reduced
-    // on device so the block's fitted values never cross the bus.
-    //
-    // Computed densely against `N` like the data term, which needs the unobserved
-    // entries — where `n = 0` — to contribute nothing: `n·ln(n/μ)` has the
-    // `n log n → 0` limit there, and `−(n − μ)` is not part of a deviance taken over
-    // observed edges only. `n.max(1)` inside the log keeps `ln 0` out of the graph,
-    // and multiplying by `n` zeroes the term anyway; the mask does the same for the
-    // second piece.
+    // Poisson deviance over this block's observed edges — see [`poisson_deviance`],
+    // which the per-track loop reduces through as well.
     let deviance = if n_edges > 0 {
-        let mu = s.exp()?;
-        let mask = n_t.gt(0f32)?.to_dtype(DType::F32)?;
-        let log_n = n_t.clamp(1f32, f32::MAX)?.log()?;
-        let term = ((&n_t * (log_n - &s)?)? - ((&n_t - &mu)? * &mask)?)?;
-        f64::from(term.sum_all()?.to_scalar::<f32>()?) * 2.0
+        poisson_deviance(&n_t, &s)?
     } else {
         0.0
     };
