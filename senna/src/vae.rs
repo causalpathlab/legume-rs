@@ -595,9 +595,6 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         has_latent: true,
         has_cell_to_pb,
         has_pb_tree,
-        velocity_suffix: None,
-        velocity_factor_suffix: None,
-        delta_feature_embedding_suffix: None,
     })?;
 
     info!("Done");

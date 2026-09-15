@@ -791,9 +791,8 @@ fn run_gem_genes_bge(
     }
 
     // Say what produced this prefix, in the same manifest every other senna
-    // training command writes. gem's tables share names and shapes with
-    // gem-encoder's while meaning something different — `cell_embedding.parquet`
-    // is Euclidean here and a topic membership there — so the `kind` field is
+    // training command writes. `cell_embedding.parquet` is a slot name shared
+    // across kinds with different scales and semantics, so the `kind` field is
     // what stops a downstream step guessing. There is deliberately no `latent`
     // slot: gem's coordinates are not log θ and nothing should `exp()` them.
     let input: Vec<String> = args
@@ -825,9 +824,6 @@ fn run_gem_genes_bge(
         feature_loading_suffix: Some("beta_feature_embedding.parquet"),
         module_membership_suffix: None,
         module_dictionary_suffix: None,
-        velocity_suffix: Some("velocity.parquet"),
-        velocity_factor_suffix: None,
-        delta_feature_embedding_suffix: Some("delta_feature_embedding.parquet"),
         // gem has no topic dictionary and writes no log θ.
         dictionary_suffix: None,
         softmax_dictionary_suffix: None,
@@ -852,9 +848,9 @@ fn run_gem_genes_bge(
 
 /// Build the per-gene β-sharing feature factorization + the id-ordered gene names.
 ///
-/// Interning is [`crate::gem::rows::build_gene_track_map`], the same call
-/// `gem-encoder` makes: rows sharing a `{gene}` key map to one gene id (so both
-/// tracks embed as `β_g`) and the unspliced rows are flagged, so phase 2 can
+/// Interning is [`crate::gem::rows::build_gene_track_map`]: rows sharing a
+/// `{gene}` key map to one gene id (so both tracks embed as `β_g`) and the
+/// unspliced rows are flagged, so phase 2 can
 /// split each cell's edges (identity θ from spliced, velocity increment δ from
 /// unspliced). A row that is not `{gene}/count/{spliced|unspliced}` gets its own
 /// single-track gene id and pairs with nothing, which is what keeps a

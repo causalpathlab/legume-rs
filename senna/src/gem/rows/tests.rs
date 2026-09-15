@@ -1,7 +1,7 @@
-//! Tests for the gene-count row grammar shared by `gem` and `gem-encoder`.
+//! Tests for the gene-count row grammar `senna gem` reads its input through.
 //!
-//! These moved here from `gem_encoder` when the parser did. They belong to the
-//! grammar, not to either model — which is the whole point of the module.
+//! These belong to the grammar, not to the model — which is the whole point
+//! of the module.
 //!
 //! The splitter's own tests moved one crate further down with it, to
 //! `auxiliary-data/src/feature_rows/tests.rs`. What is left here is the part
@@ -43,8 +43,8 @@ fn both_tracks_of_a_gene_share_one_id() {
 /// faba's gene counter emits a pooled `{gene}/count/total` track alongside the
 /// two splice tracks. Under `gem`'s old `rsplit_once("/count/")` it parsed as
 /// `("A", suffix != "unspliced")` = a SECOND MATURE ROW of gene A, so a gene's
-/// spliced signal was counted twice while `gem-encoder`, on the same file,
-/// rejected the row. Same input, two different fits.
+/// spliced signal was counted twice, while a sibling implementation checked
+/// against the same file rejected the row. Same input, two different fits.
 ///
 /// Break the fix by restoring the old body and this fails on both asserts:
 /// `n_genes` collapses to 1 and `total` joins A's id.

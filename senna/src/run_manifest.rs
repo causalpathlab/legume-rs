@@ -222,10 +222,6 @@ pub enum RunKind {
     /// spliced + unspliced gene counts. Euclidean `Z` in `cell_embedding`, a
     /// co-embedded gene table in `feature_embedding`, and a per-cell velocity.
     Gem,
-    /// `senna gem-encoder` — the masked generative sibling of [`RunKind::Gem`].
-    /// Same inputs and the same velocity outputs, but an amortized encoder and
-    /// a simplex latent, so its `latent.parquet` IS log θ.
-    GemEncoder,
     /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
     /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw
     /// gene table in `feature_loading`, SIMBA's fixed-T co-embedded genes in
@@ -273,7 +269,6 @@ impl RunKind {
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
             | RunKind::Gem
-            | RunKind::GemEncoder
             | RunKind::Simba => CellSpace::Embedding,
             // `latent` is log θ and `cell_embedding` is absent, so the geometry
             // table is the simplex itself.
@@ -300,7 +295,6 @@ impl RunKind {
             RunKind::Fne => "fne",
             RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
             RunKind::Gem => "gem",
-            RunKind::GemEncoder => "gem-encoder",
             RunKind::Simba => "simba",
         }
     }
@@ -315,15 +309,8 @@ impl RunKind {
     pub fn is_topic_family(self) -> bool {
         match self {
             // masked-vae belongs here despite its Gaussian latent: the family is
-            // defined by a simplex β, and gem-encoder's log_softmax-over-genes
-            // dictionary is one. It was the first kind that is log-simplex in the
-            // LATENT sense without being topic-family, which inverted the
-            // containment callers had assumed between these two predicates.
-            RunKind::Topic
-            | RunKind::Itopic
-            | RunKind::MaskedVae
-            | RunKind::JointTopic
-            | RunKind::GemEncoder => true,
+            // defined by a simplex β, not by what the latent itself looks like.
+            RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic => true,
             RunKind::Vae
             | RunKind::Svd
             | RunKind::JointSvd
@@ -365,8 +352,7 @@ impl RunKind {
             | RunKind::JointSvd
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem
-            | RunKind::GemEncoder => false,
+            | RunKind::Gem => false,
         }
     }
 
@@ -390,8 +376,7 @@ impl RunKind {
             | RunKind::JointSvd
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem
-            | RunKind::GemEncoder => false,
+            | RunKind::Gem => false,
         }
     }
 
@@ -406,7 +391,7 @@ impl RunKind {
     #[must_use]
     pub fn latent_is_log_simplex(self) -> bool {
         match self {
-            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic | RunKind::GemEncoder => true,
+            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => true,
             RunKind::MaskedVae
             | RunKind::Vae
             | RunKind::Svd
@@ -692,26 +677,6 @@ pub struct RunOutputs {
     /// `senna {topic, masked-topic} --from` chain can skip the
     /// expensive HNSW + binary-sort + DC-SBM refinement step and feed
     /// the precomputed partition straight into the per-PB Gamma fit.
-    /// `{out}.velocity.parquet` — cell × H, the per-cell velocity in the SAME
-    /// space as [`RunOutputs::cell_embedding`], so the two add: `θ + δ` is the
-    /// nascent state. Written by the gem family only. Its norm is a speed, so
-    /// it is signed and unnormalized like `cell_embedding`, not a composition.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub velocity: Option<String>,
-    /// `{out}.velocity_factor.parquet` — cell × K velocity in FACTOR space
-    /// (`gem-encoder` only, where a factor space exists). Not comparable with
-    /// [`RunOutputs::velocity`]; the two live on different axes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub velocity_factor: Option<String>,
-    /// `{out}.delta_feature_embedding.parquet` — gene × H per-gene splice
-    /// offset δ_g, the feature-side counterpart of [`RunOutputs::velocity`].
-    ///
-    /// **The two gem kinds define δ_g against OPPOSITE bases** — `gem` shifts
-    /// spliced → unspliced, `gem-encoder` unspliced → spliced — so the sign is
-    /// only interpretable together with [`RunManifest::kind`]. Consumers that
-    /// compare δ across runs must check it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delta_feature_embedding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_to_pb: Option<String>,
     /// `{out}.pb_tree.json` — the tree behind the finest
@@ -1090,9 +1055,7 @@ pub fn load_for(from: &str) -> anyhow::Result<(RunManifest, PathBuf)> {
     RunManifest::load(Path::new(&derived)).map_err(|e| {
         anyhow::anyhow!(
             "{e}\n\nNeither `{from}` nor `{derived}` is a readable senna manifest. \
-             Prefixes written before the gem commands moved into senna carry a \
-             `{}.gem.json` instead; re-run the producer to get `{derived}`.",
-            derive_out_prefix(from)
+             Re-run the producer to get `{derived}`."
         )
     })
 }
@@ -1264,10 +1227,9 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::MaskedVae
         | RunKind::JointTopic
         | RunKind::Vae
-        // The gem kinds co-embed genes onto the cell manifold, same as bge, so
-        // there is a feature embedding to inherit.
+        // `gem` co-embeds genes onto the cell manifold, same as bge, so there
+        // is a feature embedding to inherit.
         | RunKind::Gem
-        | RunKind::GemEncoder
         | RunKind::Simba => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
@@ -1368,15 +1330,6 @@ pub struct RunDescription<'a> {
     /// set it ONLY when they also resolved topics (`bge` without `--skip-etm`)
     /// — their Z goes to `cell_embedding_suffix` instead.
     pub has_latent: bool,
-    /// Suffix after `{basename}.` for the cell × H velocity parquet, e.g.
-    /// `"velocity.parquet"`. Gem family only; `None` to omit.
-    pub velocity_suffix: Option<&'a str>,
-    /// Suffix after `{basename}.` for the cell × K factor-space velocity, e.g.
-    /// `"velocity_factor.parquet"`. `gem-encoder` only; `None` to omit.
-    pub velocity_factor_suffix: Option<&'a str>,
-    /// Suffix after `{basename}.` for the gene × H per-gene splice offset δ_g,
-    /// e.g. `"delta_feature_embedding.parquet"`. `None` to omit.
-    pub delta_feature_embedding_suffix: Option<&'a str>,
     /// True if the run emits `{basename}.cell_to_pb.parquet` — the
     /// post-refinement cell→pseudobulk membership per coarsening level.
     /// Set by topic-family fits that ran `collapse_columns_multilevel_*`
@@ -1418,15 +1371,6 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     }
     if desc.has_cell_proj {
         m.outputs.cell_proj = Some(format!("{basename}.cell_proj.parquet"));
-    }
-    if let Some(suf) = desc.velocity_suffix {
-        m.outputs.velocity = Some(format!("{basename}.{suf}"));
-    }
-    if let Some(suf) = desc.velocity_factor_suffix {
-        m.outputs.velocity_factor = Some(format!("{basename}.{suf}"));
-    }
-    if let Some(suf) = desc.delta_feature_embedding_suffix {
-        m.outputs.delta_feature_embedding = Some(format!("{basename}.{suf}"));
     }
     if let Some(suf) = desc.pb_gene_suffix {
         m.outputs.pb_gene = Some(format!("{basename}.{suf}"));

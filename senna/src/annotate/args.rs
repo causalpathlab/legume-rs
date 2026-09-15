@@ -445,7 +445,7 @@ pub struct AnnotateProjectionArgs {
                      and averaging the nascent program into it would blur that.\n\
                      \n\
                      topic/svd runs have no genes-on-the-cell-manifold embedding.\n\
-                     Use `annotate-by-enrichment` for those, and for `gem-encoder`."
+                     Use `annotate-by-enrichment` for those."
     )]
     pub from: Box<str>,
 

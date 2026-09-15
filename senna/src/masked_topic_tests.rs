@@ -213,8 +213,8 @@ mod query_unwired {
 ///
 /// A rate of 0 hides nothing and a rate of 1 hides everything; the loader used
 /// to clamp both back to a one-gene draw, which answered a question nobody
-/// asked. `senna gem-encoder` already refuses the same flag by name — this is
-/// the masked family catching up, in the OPEN interval the draw actually needs.
+/// asked. This refuses the flag by name instead, in the OPEN interval the
+/// draw actually needs.
 mod mask_fraction_bounds {
     use super::{Cli, MaskedTopicArgs};
     use clap::Parser;

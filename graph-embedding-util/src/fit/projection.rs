@@ -1,9 +1,8 @@
-//! Phase-2 node projection onto the frozen feature dictionary. The block
-//! Poisson-MAP SGD engine ([`block_sgd`]) is shared by two callers, split by what
-//! they project: [`cells`] (per-cell Phase 2 → `e_cell`) and [`pseudobulk`]
-//! (per-pb velocity readout → `θ_pb`/`δ_pb` landmarks). This root holds only what
-//! both share — the ridge, the per-batch fold, and the per-cell edge divide the
-//! engine calls back into.
+//! Phase-2 node projection onto the frozen feature dictionary: the block
+//! Poisson-MAP SGD engine ([`block_sgd`]), driven by [`cells`] (per-cell Phase 2
+//! → `e_cell`). This root holds what the engine calls back into — the ridge and
+//! the per-batch fold — plus the frozen-dictionary streaming projector
+//! ([`FrozenProjector`]) that `senna predict` uses.
 
 use super::batch_fold::BatchGeneFold;
 use candle_util::candle_core::Device;
@@ -11,13 +10,10 @@ use candle_util::candle_core::Device;
 mod block_sgd;
 mod cells;
 mod encoder;
-mod pseudobulk;
 
 pub(crate) use cells::project_cells_phase2;
 pub use encoder::CellEncoder;
 pub(crate) use encoder::{DistillLevel, DistillSpec};
-pub(crate) use pseudobulk::project_pbs_phase2;
-pub use pseudobulk::PbLevelVelocity;
 
 /// Ridge prior strength λ on `e_cell` in the phase-2 projection.
 ///
@@ -167,7 +163,7 @@ impl<'a> FrozenProjector<'a> {
     }
 
     /// The solver input for a group of `n_cells` nodes: this projector's frozen
-    /// side, no gauge fix (see the type doc), no joint pass.
+    /// side, no gauge fix (see the type doc).
     fn phase2_input(&self, n_cells: usize) -> block_sgd::Phase2Input<'_> {
         block_sgd::Phase2Input {
             feat: self.feat,
@@ -178,7 +174,6 @@ impl<'a> FrozenProjector<'a> {
             dev: self.dev,
             label: "Projection",
             gauge_fix: false,
-            joint: false,
         }
     }
 
@@ -229,7 +224,7 @@ impl<'a> FrozenProjector<'a> {
     ) -> anyhow::Result<FrozenProjection> {
         let input = self.phase2_input(nodes.len());
         let pass = block_sgd::polish_prepared(&input, &self.dict, nodes, init, bar)?;
-        let out = block_sgd::finish(&input, nodes, pass, None);
+        let out = block_sgd::finish(&input, nodes, pass);
         Ok(FrozenProjection {
             theta: out.theta,
             b_node: out.b_cell,

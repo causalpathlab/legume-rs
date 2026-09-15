@@ -55,7 +55,6 @@ mod empirical_dict;
 mod eval_topic;
 mod fne;
 mod gem;
-mod gem_encoder;
 mod geometry;
 mod hvg;
 mod impute;
@@ -100,8 +99,6 @@ use eval_topic::*;
 use fne::{fit_fne, FneArgs};
 use gem::args::GemArgs;
 use gem::run::run_gem_embedding;
-use gem_encoder::args::GemEncoderArgs;
-use gem_encoder::run::run_gem_encoder;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
 use lineage::args::LineageArgs;
@@ -526,10 +523,7 @@ enum Commands {
                       \n\
                       With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
                       It then writes a per-cell pseudotime + fate backbone.\n\
-                      That backbone is a prior for `senna lineage`, not a replacement.\n\
-                      \n\
-                      `{out}.gem.json` records that this prefix came from the EMBEDDING model,\n\
-                      which is how `senna annotate-by-projection` and `senna lineage` pick their statistic.",
+                      That backbone is a prior for `senna lineage`, not a replacement.",
         after_long_help = "\
 	Example:\n\
   senna gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
@@ -539,82 +533,6 @@ enum Commands {
   senna gem out/*_genes.zarr.zip -o out/gem\n\n\
   The `--genes a,b` flag form still works, but not together with the positional one.")]
     Gem(GemArgs),
-
-    #[command(
-        name = "gem-encoder",
-        // `gem-topic`: the cell latent IS a softmax simplex, so this is a
-        // topic model over the two splice tracks — the name people reach for
-        // when they come from `senna topic` rather than from `senna gem`.
-        visible_aliases = ["gem-topic"],
-        aliases = ["gem-enc"],
-        about = "GEM-encoder: a masked generative model of the GEM",
-        long_about = "GEM-encoder — the masked generative sibling of `senna gem`.\n\
-                      \n\
-                      Both fit the same geometry over the same spliced+unspliced counts,\n\
-                      from opposite directions.\n\
-                      `gem` is discriminative (NCE over cell-feature edges).\n\
-                      This is generative and amortized:\n\
-                      an encoder reads a cell\'s top-K GENES with BOTH splice tracks attached,\n\
-                      pools each track over that context (not over the full gene space),\n\
-                      and an embedded-topic decoder imputes whichever track was held out.\n\
-                      \n\
-                      The model runs the biology forward:\n\
-                      u + delta -> s. Nascent pre-mRNA is transcribed first and matures into spliced mRNA,\n\
-                      so the UNSPLICED embedding is the base rho and the spliced one is rho + delta.\n\
-                      Delta is therefore the steady-state splice-ratio offset —\n\
-                      log(splicing / degradation), not a splicing rate —\n\
-                      because that is the combination that survives at steady state (s = (beta/gamma) u).\n\
-                      A gene scores high either by splicing fast or by having stable mature mRNA,\n\
-                      and this model cannot tell those apart.\n\
-                      NOTE this is the OPPOSITE base from `senna gem`,\n\
-                      whose delta shifts spliced -> unspliced;\n\
-                      the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
-                      `{out}.gem.json` records `delta_base`.\n\
-                      \n\
-                      Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
-                      and predicts both from ONE theta. That gives delta a monopoly:\n\
-                      the only thing that can make the two tracks differ is delta itself.\n\
-                      Hiding a whole track instead was tried and removed —\n\
-                      it hands the encoder a competing LATENT delta, which it takes,\n\
-                      and delta degenerates.\n\
-                      \n\
-                      VELOCITY is the cell-level delta = theta_nascent - theta_mature,\n\
-                      each fitted POST HOC to its own track against the frozen dictionaries.\n\
-                      Elliptical slice sampling, warm-started from the encoder,\n\
-                      which also closes the amortization gap.\n\
-                      The model has one latent by design,\n\
-                      so it cannot express that difference while training;\n\
-                      estimating delta first and reading the movement out of it keeps the two from competing.\n\
-                      The per-axis population mean is removed before writing,\n\
-                      and recorded in `{out}.gem.json` as `velocity_common_mode`.\n\
-                      \n\
-                      The latent is a softmax simplex — hence the `gem-topic` alias —\n\
-                      and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
-                      the same contract every senna topic-family run follows.\n\
-                      Pick the loss with `--likelihood nb|multinomial`\n\
-                      \n\
-                      BATCH ADJUSTMENT IS ON BY DEFAULT,\n\
-                      and you should check what your batches are:\n\
-                      with several inputs and no `--batch-files`,\n\
-                      each file's cells are tagged `@<sample>` and that tag becomes the batch —\n\
-                      so on rep{1,2,3}_{wt,mut} the batches are the SIX samples,\n\
-                      and the wt-vs-mut contrast goes out with the donor effects.\n\
-                      Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\
-                      \n\
-                      Pooling is a masked value-weighted sum per track, concatenated;\n\
-                      the attention-slot variant was removed after it measured\n\
-                      3.5x worse on between-cell variance,\n\
-                      and went degenerate whenever a track was hidden.\n\
-                      Ctrl-C stops training gracefully and still writes outputs,\n\
-                      flagged as partial.",
-        after_long_help = "\
-	Example:\n\
-  senna gem-encoder out/rep2_wt_genes.zarr.zip out/rep2_mut_genes.zarr.zip \\\n\
-    -o out/gme -t 20 --device cuda\n\n\
-  senna gem-encoder out/*_genes.zarr.zip -o out/gme --likelihood nb\n\n\
-  Watch |delta| and the splice-ratio r in the log.\n\
-  If delta collapses toward 0, or r is near 0, the velocity is not trustworthy.")]
-    GemEncoder(GemEncoderArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -918,9 +836,9 @@ enum Commands {
         aliases = ["trajectory", "traj"],
         about = "Velocity-oriented lineage + principal curves over a `senna gem` run",
         long_about = "Infer a velocity-oriented lineage over the embeddings from `senna gem`.\n\n\
-            Reads a θ/δ pair by prefix (`-f/--from`), picked by `--theta-from`:\n\
+            Reads θ (and, when present, δ) by prefix (`-f/--from`), picked by `--theta-from`:\n\
             on an EMBEDDING run, cell_embedding.parquet + velocity.parquet (H space);\n\
-            on a TOPIC run, latent.parquet + velocity_factor.parquet (the K-space simplex).\n\
+            on a TOPIC run, latent.parquet alone (the K-space simplex, geometry-only).\n\
             The topic default is deliberate:\n\
             `cell_embedding = θ·α` confines every cell to the convex hull of α's K rows,\n\
             so a diffuse softmax θ compresses the population toward that hull's centroid —\n\
@@ -941,7 +859,6 @@ enum Commands {
             `--no-orient-velocity` ignores velocity entirely.\n\n\
             Root selection (priority order):\n\
             --root-node, --root-cell, --root-type (marker-grounded, needs --markers),\n\
-            --root-from-gem (gem's velocity-DAG source),\n\
             else the velocity-flux source.\n\n\
             The low-coverage modalities are NOT embedded here;\n\
             this produces the lineage ordering that a separate confounder-adjusted test runs against.\n\n\
@@ -1266,7 +1183,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Docs(args) => run_docs(args)?,
         Commands::Gem(args) => run_gem_embedding(args)?,
-        Commands::GemEncoder(args) => run_gem_encoder(args)?,
         Commands::Lineage(args) => run_lineage(args)?,
         Commands::LineagePlot(args) => run_lineage_plot(args)?,
         Commands::Assoc(args) => run_assoc(args)?,

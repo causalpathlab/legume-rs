@@ -208,7 +208,7 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
             }
         ),
         // The graph / co-embedding kinds have no query-side projection at all.
-        RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Gem | RunKind::GemEncoder => {
+        RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Gem => {
             anyhow::bail!(
                 "impute needs a run with a transferable per-cell latent; `{kind}` runs \
                  have no query-side projection here"

@@ -1,10 +1,9 @@
 //! Unit tests for the cell-block phase-2 Poisson SGD.
 //!
-//! The planted-parameter tests mirror `crate::cell_projection`'s
-//! `irls_recovers_planted_cell` / `increment_recovers_planted_velocity`, but
-//! generate counts under the **full-partition** likelihood this solver actually
-//! optimizes: every feature gets its Poisson rate, so a cell's "observed" edge set
-//! is every feature with a nonzero rate rather than a hand-picked subset.
+//! The planted-parameter tests generate counts under the **full-partition**
+//! likelihood this solver actually optimizes: every feature gets its Poisson
+//! rate, so a cell's "observed" edge set is every feature with a nonzero rate
+//! rather than a hand-picked subset.
 //!
 //! Every recovery assertion adds the reported [`GaugeShift`] back before
 //! comparing. The solver deliberately returns latents mean-centred (see
@@ -56,7 +55,7 @@ fn rates(e: &[f32], b: &[f32], h: usize, theta: &[f32], b_c: f32) -> Vec<(u32, f
         .collect()
 }
 
-/// Run `project_cells` over one pass (no splice split, no fold) for a set of planted cells.
+/// Run `project_cells` over one pass (no fold) for a set of planted cells.
 fn project(e: &[f32], b: &[f32], h: usize, per_cell: &[Vec<(u32, f32)>], lambda: f64) -> Phase2Out {
     project_with(e, b, h, per_cell, lambda, None)
 }
@@ -79,7 +78,6 @@ fn recovers_planted_cells() {
         .collect();
 
     let out = project(&e, &b, h, &per_cell, 1e-3);
-    assert!(out.velocity.is_none(), "no splice mask ⇒ no velocity pass");
     for (i, want) in planted.iter().enumerate() {
         let got = ungauge(&out.theta[i * h..(i + 1) * h], &out.gauge.theta_mean);
         let c = cos(&got, want);
@@ -126,10 +124,9 @@ fn polish_keeps_a_solved_cell_and_recovers_a_planted_one() {
         dev: &dev,
         label: "test",
         gauge_fix: false,
-        joint: false,
     };
 
-    let cold = project_cells(&input, &cells, None, None).unwrap();
+    let cold = project_cells(&input, &cells, None).unwrap();
     let warm = polish_cells(&input, &cells, None, &cold.theta).unwrap();
     for (i, want) in planted.iter().enumerate() {
         let got = &warm.latent[i * h..(i + 1) * h];
@@ -228,10 +225,8 @@ fn unseen_cell_stays_at_the_origin() {
             dev: &Device::Cpu,
             label: "Phase 2",
             gauge_fix: true,
-            joint: false,
         },
         &cells,
-        None,
         None,
     )
     .unwrap();
@@ -241,75 +236,6 @@ fn unseen_cell_stays_at_the_origin() {
         "unseen cell moved off the origin"
     );
     assert_eq!(out.b_cell[2], 0.0);
-}
-
-/// Splice path: spliced rows carry `θ*`, unspliced rows carry `θ* + δ*`. The
-/// identity pass must recover θ* from the spliced half and the velocity pass δ*
-/// from the unspliced half with θ held fixed — each up to its own gauge shift.
-#[test]
-fn splice_pass_recovers_theta_and_delta() {
-    let (h, n_half) = (6, 200);
-    let n_feat = n_half * 2; // rows [0, n_half) spliced, [n_half, 2·n_half) unspliced
-    let unspliced_rows: Vec<bool> = (0..n_feat).map(|f| f >= n_half).collect();
-    let (e, b) = dictionary(n_feat, h, 0.4);
-
-    let theta_star = [
-        [0.6f32, -0.4, 0.3, 0.2, -0.5, 0.1],
-        [-0.2f32, 0.7, -0.4, 0.5, 0.2, -0.3],
-        [0.4f32, 0.1, 0.6, -0.3, -0.1, 0.5],
-    ];
-    let delta_star = [
-        [0.25f32, -0.3, 0.15, 0.2, 0.1, -0.2],
-        [-0.15f32, 0.2, 0.3, -0.1, -0.25, 0.1],
-        [0.1f32, 0.15, -0.2, 0.3, 0.2, -0.15],
-    ];
-
-    let mut feats: Vec<Vec<u32>> = Vec::new();
-    let mut counts: Vec<Vec<f32>> = Vec::new();
-    for (t, d) in theta_star.iter().zip(&delta_star) {
-        let nascent: Vec<f32> = t.iter().zip(d).map(|(a, c)| a + c).collect();
-        let (mut fi, mut ci) = (Vec::new(), Vec::new());
-        for f in 0..n_feat {
-            let ef = &e[f * h..(f + 1) * h];
-            let latent: &[f32] = if unspliced_rows[f] { &nascent } else { t };
-            let s: f32 = ef.iter().zip(latent).map(|(a, x)| a * x).sum::<f32>() + b[f] + 0.2;
-            fi.push(f as u32);
-            ci.push(s.exp());
-        }
-        feats.push(fi);
-        counts.push(ci);
-    }
-    let cells: Vec<(u32, &[u32], &[f32])> = (0..3)
-        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
-        .collect();
-
-    let out = project_cells(
-        &Phase2Input {
-            feat: &e,
-            b_feat: &b,
-            h,
-            n_cells: 3,
-            lambda: 1e-3,
-            dev: &Device::Cpu,
-            label: "Phase 2",
-            gauge_fix: true,
-            joint: false,
-        },
-        &cells,
-        None,
-        Some(&unspliced_rows),
-    )
-    .unwrap();
-
-    let vel = out.velocity.as_ref().expect("splice mask ⇒ velocity pass");
-    for i in 0..3 {
-        let th = ungauge(&out.theta[i * h..(i + 1) * h], &out.gauge.theta_mean);
-        let dl = ungauge(&vel[i * h..(i + 1) * h], &out.gauge.delta_mean);
-        let ct = cos(&th, &theta_star[i]);
-        let cd = cos(&dl, &delta_star[i]);
-        assert!(ct > 0.97, "cell {i} identity misaligned (cos={ct:.3})");
-        assert!(cd > 0.95, "cell {i} velocity misaligned (cos={cd:.3})");
-    }
 }
 
 /// `block_cells` must keep a block's activations inside the budget for feature
@@ -365,81 +291,6 @@ fn gate_folding_is_exact_for_zero_rows() {
     }
 }
 
-/// Joint θ+δ (`joint: true`): the SAME planted splice problem as
-/// `splice_pass_recovers_theta_and_delta`, but θ and δ are estimated **together** in one
-/// solve (θ pulled by both tracks). Both must still recover their planted directions.
-#[test]
-fn joint_recovers_theta_and_delta() {
-    let (h, n_half) = (6, 200);
-    let n_feat = n_half * 2; // rows [0, n_half) spliced, [n_half, 2·n_half) unspliced
-    let unspliced_rows: Vec<bool> = (0..n_feat).map(|f| f >= n_half).collect();
-    let (e, b) = dictionary(n_feat, h, 0.4);
-
-    let theta_star = [
-        [0.6f32, -0.4, 0.3, 0.2, -0.5, 0.1],
-        [-0.2f32, 0.7, -0.4, 0.5, 0.2, -0.3],
-        [0.4f32, 0.1, 0.6, -0.3, -0.1, 0.5],
-    ];
-    let delta_star = [
-        [0.25f32, -0.3, 0.15, 0.2, 0.1, -0.2],
-        [-0.15f32, 0.2, 0.3, -0.1, -0.25, 0.1],
-        [0.1f32, 0.15, -0.2, 0.3, 0.2, -0.15],
-    ];
-
-    let mut feats: Vec<Vec<u32>> = Vec::new();
-    let mut counts: Vec<Vec<f32>> = Vec::new();
-    for (t, d) in theta_star.iter().zip(&delta_star) {
-        let nascent: Vec<f32> = t.iter().zip(d).map(|(a, c)| a + c).collect();
-        let (mut fi, mut ci) = (Vec::new(), Vec::new());
-        for f in 0..n_feat {
-            let ef = &e[f * h..(f + 1) * h];
-            let latent: &[f32] = if unspliced_rows[f] { &nascent } else { t };
-            let s: f32 = ef.iter().zip(latent).map(|(a, x)| a * x).sum::<f32>() + b[f] + 0.2;
-            fi.push(f as u32);
-            ci.push(s.exp());
-        }
-        feats.push(fi);
-        counts.push(ci);
-    }
-    let cells: Vec<(u32, &[u32], &[f32])> = (0..3)
-        .map(|i| (i as u32, feats[i].as_slice(), counts[i].as_slice()))
-        .collect();
-
-    let out = project_cells(
-        &Phase2Input {
-            feat: &e,
-            b_feat: &b,
-            h,
-            n_cells: 3,
-            lambda: 1e-3,
-            dev: &Device::Cpu,
-            label: "Phase 2",
-            gauge_fix: true,
-            joint: true,
-        },
-        &cells,
-        None,
-        Some(&unspliced_rows),
-    )
-    .unwrap();
-
-    let vel = out.velocity.as_ref().expect("splice mask ⇒ velocity pass");
-    for i in 0..3 {
-        let th = ungauge(&out.theta[i * h..(i + 1) * h], &out.gauge.theta_mean);
-        let dl = ungauge(&vel[i * h..(i + 1) * h], &out.gauge.delta_mean);
-        let ct = cos(&th, &theta_star[i]);
-        let cd = cos(&dl, &delta_star[i]);
-        assert!(
-            ct > 0.97,
-            "joint cell {i} identity misaligned (cos={ct:.3})"
-        );
-        assert!(
-            cd > 0.95,
-            "joint cell {i} velocity misaligned (cos={cd:.3})"
-        );
-    }
-}
-
 /// The streaming entry point must agree with the one-shot one **exactly**, not
 /// approximately. `project_prepared` skips `project_cells`'s partition/edge setup in
 /// favour of a `PassDict` the caller already holds, so this is the test that the
@@ -482,10 +333,9 @@ fn streaming_entry_matches_the_one_shot_one() {
         dev: &Device::Cpu,
         label: "Projection",
         gauge_fix: false,
-        joint: false,
     };
 
-    let one_shot = project_cells(&input, &nodes, None, None).expect("one-shot");
+    let one_shot = project_cells(&input, &nodes, None).expect("one-shot");
 
     let dict = PassDict::build(
         &DictSpec {
@@ -746,11 +596,9 @@ fn project_with(
             dev: &Device::Cpu,
             label: "Phase 2",
             gauge_fix: true,
-            joint: false,
         },
         &cells,
         fold,
-        None,
     )
     .expect("phase-2 SGD")
 }

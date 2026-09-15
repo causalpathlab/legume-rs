@@ -145,10 +145,10 @@ pub struct SpliceTrackInfo {
     /// Which track the deviation `delta` is measured FROM. Always `"spliced"`
     /// here: `unspliced = beta + delta`, matching `senna gem`.
     ///
-    /// Recorded because the sign is NOT a convention the whole workspace shares.
-    /// `senna gem-encoder` uses the opposite base (`spliced = rho + delta`), so
-    /// two `delta_feature_embedding.parquet` files are comparable only after
-    /// reading this field. Without it the tables look interchangeable and are not.
+    /// Recorded because the sign is NOT a convention every producer is
+    /// guaranteed to share, so two `delta_feature_embedding.parquet` files are
+    /// comparable only after reading this field. Without it the tables look
+    /// interchangeable and are not.
     pub delta_base: String,
 }
 

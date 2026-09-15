@@ -122,7 +122,6 @@ fn every_kind_declares_its_cell_space() {
         RunKind::Fne,
         RunKind::ResolveEmbeddingSpace,
         RunKind::Gem,
-        RunKind::GemEncoder,
     ] {
         assert_eq!(
             k.cell_space(),
@@ -147,13 +146,14 @@ fn every_kind_declares_its_cell_space() {
     }
 }
 
-/// The gem kinds, whose absence from these predicates was the original defect.
+/// `gem`'s own classification on both axes, whose absence from these
+/// predicates was the original defect.
 ///
 /// `gem` writes a Euclidean `cell_embedding` and no latent at all, so `exp()`-ing
-/// it is meaningless. `gem-encoder` is the first kind that is log-simplex in the
-/// LATENT sense while its GEOMETRY table is Euclidean — the two predicates stopped
-/// nesting there, which is exactly what a consumer reading one and assuming the
-/// other gets wrong.
+/// it is meaningless, and it has no topic axis. A kind can be Euclidean on its
+/// geometry table while still being log-simplex on its latent (or vice versa) —
+/// the two predicates do not imply each other — so each is asserted here rather
+/// than assumed from the other.
 #[test]
 fn gem_kinds_are_classified_on_both_axes() {
     assert!(
@@ -161,35 +161,19 @@ fn gem_kinds_are_classified_on_both_axes() {
         "gem writes no latent; exp() of its cell embedding is meaningless"
     );
     assert!(!RunKind::Gem.is_topic_family(), "gem has no topic axis");
-
-    assert!(
-        RunKind::GemEncoder.latent_is_log_simplex(),
-        "gem-encoder's latent.parquet IS log θ"
-    );
-    assert!(
-        RunKind::GemEncoder.is_topic_family(),
-        "its log_softmax-over-genes dictionary is a simplex β"
-    );
-    assert_eq!(
-        RunKind::GemEncoder.cell_space(),
-        CellSpace::Embedding,
-        "but geometry_latent hands back cell_embedding (θ·α), NOT the simplex — \
-         this is the pair that stopped nesting"
-    );
 }
 
 /// The wire strings are a compatibility surface: renaming a variant without
 /// changing them orphans every manifest already on disk.
 #[test]
 fn gem_kinds_round_trip_through_json() {
-    for (k, wire) in [(RunKind::Gem, "gem"), (RunKind::GemEncoder, "gem-encoder")] {
-        assert_eq!(k.as_str(), wire);
-        let json = serde_json::to_string(&k).unwrap();
-        assert!(
-            json.contains(wire),
-            "{k} serializes as {json}, expected {wire}"
-        );
-        let back: RunKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, k);
-    }
+    let (k, wire) = (RunKind::Gem, "gem");
+    assert_eq!(k.as_str(), wire);
+    let json = serde_json::to_string(&k).unwrap();
+    assert!(
+        json.contains(wire),
+        "{k} serializes as {json}, expected {wire}"
+    );
+    let back: RunKind = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, k);
 }

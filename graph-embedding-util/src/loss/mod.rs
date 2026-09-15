@@ -8,8 +8,8 @@
 //!
 //! ## Submodules
 //!
-//! - [`feat`] — cell-feature (bipartite) samplers and NCE losses used by
-//!   `senna gbe` and the chain trainer.
+//! - [`feat`] — the cell-feature (bipartite) cell-axis sampler and the
+//!   feature-row gather every parameterization shares.
 //! - [`cell`] — cell-cell sampling primitives over a caller-provided
 //!   graph (e.g. spatial KNN). Cross-batch and pb-mismatched edges are
 //!   filtered, with per-chain-position sibling pools precomputed.
@@ -49,10 +49,8 @@ pub use lnpdf::{multinomial_ll, FrozenSide, NodeTerm};
 pub use modality::ModalityPools;
 
 pub use feat::{
-    build_stratified_sampler, gather_feature_rows, nce_loss, nce_loss_identity,
-    sample_per_batch_stratified_edge_batch, sample_stratified_edge_batch, CellFeatureSampler,
-    EdgeBatch, FeatPairing, PbFeatureSampler, PerBatchStratifiedCellSampler,
-    PerBatchStratifiedEdgeBatchArgs, StratifiedEdgeBatchArgs, StratifiedSampler,
+    gather_feature_rows, nce_loss_identity, CellFeatureSampler, EdgeBatch,
+    PerBatchStratifiedCellSampler,
 };
 pub use modules::{
     dense_count_block, draw_gene_keep_mask, log_membership_diagnostics, masked_membership,
@@ -90,10 +88,11 @@ pub(super) use candle_util::loss::log_sigmoid;
 /// embeddings to exactly zero. Calibrate λ by its effect on `mean ‖e‖²`
 /// against a λ = 0 control, never by its share of the objective.
 ///
-/// One definition because three callers want it — geu's composite trainer,
-/// `pinto cage`, and (once the gate's Gaussian effect KL goes) `senna gem`,
-/// whose β-sharing means the ridge must point at `f.beta` rather than a free
-/// `E_feat`. `table` is `[rows, H]`; the result is a scalar.
+/// One definition because several callers want it — geu's own
+/// [`crate::model::JointEmbedModel::feature_ridge`], `pinto cage`, and (once
+/// the gate's Gaussian effect KL goes) `senna gem`, whose β-sharing means the
+/// ridge must point at `f.beta` rather than a free `E_feat`. `table` is
+/// `[rows, H]`; the result is a scalar.
 pub fn embedding_ridge(table: &Tensor, lambda: f64) -> Result<Tensor> {
     // `λ · mean_n ‖x_n‖² = λ · trace(XᵀX)/N` through one [D, D] gemm.
     // The elementwise form (`sqr().sum(1).mean_all()`) retained a full

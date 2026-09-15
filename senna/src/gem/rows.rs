@@ -1,16 +1,16 @@
-//! The gene-count row grammar shared by both gem models.
+//! The gene-count row grammar `senna gem` reads its input through.
 //!
-//! `gem` and `gem-encoder` fit different architectures over the *same* input:
-//! a gene-level count matrix whose rows are `{gene}/count/{spliced|unspliced}`.
+//! A gene-level count matrix whose rows are `{gene}/count/{spliced|unspliced}`.
 //! How a row is read — which gene it belongs to, which track it is, and what
 //! happens to a row that is neither — is not an architectural choice, so it is
-//! not one either model gets to make for itself. It lives here and both call it.
+//! not one the model gets to make for itself. It lives here so it is made once.
 //!
 //! That was not always true. `gem` used to match on `/count/` with a bare
 //! `rsplit_once`, which cannot separate "spliced" from "not a count row": a
 //! `{gene}/count/total` row (the pooled gene-QC track faba also emits) parsed as
-//! a *second spliced row* of that gene and was silently added to it, while
-//! `gem-encoder` rejected the same row. Same input, two answers.
+//! a *second spliced row* of that gene and was silently added to it — a sibling
+//! implementation, checked against the same input, rejected the row instead.
+//! Same input, two answers.
 //!
 //! The grammar itself now lives one crate down, in
 //! [`auxiliary_data::feature_rows`], because `pinto` needs the same split for

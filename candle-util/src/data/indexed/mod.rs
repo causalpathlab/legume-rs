@@ -10,7 +10,7 @@
 //! - [`top_k`] — weighted top-K selection (`top_k_indices_weighted`,
 //!   `csc_columns_to_indexed_samples`, `build_indexed_samples`).
 //! - [`pack`] — parallel `[N, K]` pack/gather helpers.
-//! - [`splice_tracks`] — the two-track (spliced / unspliced) gem loader.
+//! - [`splice_tracks`] — the two-track (spliced / unspliced) gem row/gene map.
 //!
 //! The single-track in-memory loader that used to sit here, and the
 //! feature-feature graph it fed the encoder's GCN block from, are gone: the
@@ -27,10 +27,7 @@ pub mod top_k;
 pub mod types;
 
 pub use pack::gather_per_feature_at_indices;
-pub use splice_tracks::{
-    gem_samples_from_csc, top_k_genes_from_row, GemIndexedArgs, GemIndexedData, GemMinibatchData,
-    GemSample, GeneTrackMap,
-};
+pub use splice_tracks::GeneTrackMap;
 pub use top_k::{csc_columns_to_indexed_samples, top_k_indices_weighted};
 pub use types::{IndexedMinibatchData, IndexedSample};
 

@@ -102,7 +102,7 @@ fn a_reference_with_a_different_matching_plan_is_refused() {
 #[test]
 fn kinds_without_a_projection_are_refused_up_front() {
     let dir = tempfile::tempdir().unwrap();
-    for kind in [RunKind::Fne, RunKind::Gem, RunKind::GemEncoder] {
+    for kind in [RunKind::Fne, RunKind::Gem] {
         let prefix = write_manifest(&dir, &format!("run_{kind}"), kind);
         let args = base_args(prefix, "out".into());
         let err = impute_model(&args).unwrap_err();
