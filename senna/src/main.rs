@@ -507,7 +507,8 @@ enum Commands {
                       cells match by barcode within a sample (--genes-sample-strip).\n\
                       \n\
                       Writes the same output set `senna bge` does,\n\
-                      plus {out}.feature_contrast.parquet (one column per non-base track):\n\
+                      plus {out}.feature_contrast.parquet (one row per gene and modality,\n\
+                      columns h0..h{H-1}):\n\
                       {out}.senna.json, {out}.{cell_embedding,dictionary,feature_embedding,\n\
                       feature_loading,feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
                       plus {out}.{latent,topic_embedding}.parquet from the resolved ETM.",
@@ -822,11 +823,14 @@ enum Commands {
     #[command(
         name = "lineage",
         aliases = ["trajectory", "traj"],
-        about = "Velocity-oriented lineage + principal curves over a `senna gem` run",
-        long_about = "Infer a velocity-oriented lineage over the embeddings from `senna gem`.\n\n\
-            Reads θ (and, when present, δ) by prefix (`-f/--from`), picked by `--theta-from`:\n\
-            on an EMBEDDING run, cell_embedding.parquet + velocity.parquet (H space);\n\
+        about = "Geometry-first lineage and principal curves over a `senna gem` run",
+        long_about = "Infer a lineage over the embeddings from `senna gem`.\n\n\
+            Reads θ by prefix (`-f/--from`), picked by `--theta-from`:\n\
+            on an EMBEDDING run, cell_embedding.parquet (H space);\n\
             on a TOPIC run, latent.parquet alone (the K-space simplex, geometry-only).\n\
+            No senna command currently writes {from}.velocity.parquet.\n\
+            When that table is present its δ orients each candidate edge;\n\
+            when it is absent every edge falls back to the geometric MST direction.\n\
             The topic default is deliberate:\n\
             `cell_embedding = θ·α` confines every cell to the convex hull of α's K rows,\n\
             so a diffuse softmax θ compresses the population toward that hull's centroid —\n\
@@ -903,7 +907,8 @@ enum Commands {
             (pooling divergent lineages onto one pseudotime axis weakens the trend reading).\n\
             Skip with --no-celltype.\n\n\
             Not double-dipping:\n\
-            branches come from gem θ + velocity, which never see the modality.\n\n\
+            branches come from gem θ, plus a velocity-oriented δ when a table for it is\n\
+            present, which never see the modality.\n\n\
             Output is tidy:\n\
             `site | gene | subunit | branch` (branch level) or\n\
             `site | gene | subunit | cell_type` (cell-type level —\n\

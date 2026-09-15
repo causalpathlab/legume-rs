@@ -579,6 +579,16 @@ fn predict_bge(args: &PredictArgs, kind: crate::run_manifest::RunKind) -> anyhow
         "a bulk table names genes, a gem axis names {{gene}}/{{modality}}/{{channel}} rows; \
          predict --bulk is not available on a gem run"
     );
+    // The query loader matches files by position, not by gem's per-file
+    // `@sample` tagging (see `crate::multiome_layout::query_load`), so a
+    // second query file lands on disjoint cells instead of being joined by
+    // sample onto the same axis. Refuse rather than silently score wrong
+    // cells.
+    anyhow::ensure!(
+        kind != crate::run_manifest::RunKind::Gem || args.data_files.len() <= 1,
+        "the query loader does not yet join a gene file with modality files for a gem \
+         query; pass one file"
+    );
     if args.batch_files.is_some() {
         log::warn!(
             "--batch-files has no effect on a {kind} run: the projection is per cell against a \

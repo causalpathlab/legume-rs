@@ -62,6 +62,8 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
         "--embedding-dim must be > 0 (got {})",
         args.embedding_dim
     );
+    args.collapse
+        .reject_pb_reference(crate::run_manifest::RunKind::Gem)?;
     Ok(())
 }
 

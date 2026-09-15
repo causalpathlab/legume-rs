@@ -172,8 +172,7 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0.01,
-        help = "Learning rate: the row-wise Adagrad step of phase 1 on the plain path\n\
-                (AdamW on the splice path).",
+        help = "Learning rate: the row-wise Adagrad step of phase 1.",
         alias = "lr"
     )]
     pub(crate) learning_rate: f64,
@@ -181,13 +180,9 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "Weight decay: a per-row shrink 1 − lr·wd on every touched row (plain path);\n\
-                AdamW decoupled decay on the splice path.",
-        long_help = "Weight decay: on the plain path (bge) a per-row shrink 1 − lr·wd is applied\n\
-                     to every row a step touches, right before that row's Adagrad update.\n\
-                     \n\
-                     On the splice path (gem) this is AdamW's decoupled weight decay instead,\n\
-                     applied uniformly to every parameter: E_feat, b_feat, and the per-axis heads.\n\
+        help = "Weight decay: a per-row shrink 1 − lr·wd on every touched row.",
+        long_help = "Weight decay: a per-row shrink 1 − lr·wd is applied to every row a step\n\
+                     touches, right before that row's Adagrad update.\n\
                      Per-step post-update shrinkage; doesn't enter the backward graph.\n\
                      Default 0.0 (off)."
     )]

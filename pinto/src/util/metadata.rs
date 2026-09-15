@@ -143,12 +143,13 @@ pub struct SpliceTrackInfo {
     /// practically empty.
     pub nascent_count_fraction: f64,
     /// Which track the deviation `delta` is measured FROM. Always `"spliced"`
-    /// here: `unspliced = beta + delta`, matching `senna gem`.
+    /// here: `unspliced = beta + delta`, the same convention `senna gem`'s
+    /// contrast table uses.
     ///
     /// Recorded because the sign is NOT a convention every producer is
-    /// guaranteed to share, so two `delta_feature_embedding.parquet` files are
-    /// comparable only after reading this field. Without it the tables look
-    /// interchangeable and are not.
+    /// guaranteed to share, so two contrast tables are comparable only after
+    /// reading this field. Without it the tables look interchangeable and
+    /// are not.
     pub delta_base: String,
 }
 

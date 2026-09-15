@@ -213,6 +213,66 @@ fn genes_only_run_writes_only_the_count_contrast_row() {
     );
 }
 
+/// `--mixture-batch` and an explicit `--emit-pb-reference` both ride on the
+/// shared `CollapseArgs`, but gem's collapse path carries neither a mixture
+/// role nor a consumer for a carried pb reference (`senna update` cannot
+/// continue a gem run). Before this test's fix, `validate_args` never called
+/// `CollapseArgs::reject_pb_reference`, so both flags parsed and were then
+/// silently discarded. A plain invocation (neither flag) must still succeed.
+#[test]
+fn mixture_batch_and_emit_pb_reference_are_refused_but_a_plain_run_still_passes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let genes = genes_file(dir.path());
+
+    let mixture_out = dir.path().join("mixture").to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from([
+        "senna-gem",
+        &genes,
+        "--mixture-batch",
+        "batchA",
+        "-o",
+        &mixture_out,
+    ])
+    .expect("GemArgs parses --mixture-batch");
+    let err =
+        run_gem_embedding(&cli.args).expect_err("--mixture-batch must be refused for a gem run");
+    assert!(
+        err.to_string()
+            .contains("--mixture-batch has no effect on `gem`"),
+        "unexpected error message: {err}"
+    );
+
+    let emit_out = dir.path().join("emit").to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from(["senna-gem", &genes, "--emit-pb-reference", "-o", &emit_out])
+        .expect("GemArgs parses --emit-pb-reference");
+    let err = run_gem_embedding(&cli.args)
+        .expect_err("--emit-pb-reference must be refused for a gem run");
+    assert!(
+        err.to_string()
+            .contains("--emit-pb-reference has no effect on `gem`"),
+        "unexpected error message: {err}"
+    );
+
+    // Neither flag: the guard must not fire on the ordinary path.
+    let plain_out = dir.path().join("plain").to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from([
+        "senna-gem",
+        &genes,
+        "--epochs",
+        "2",
+        "--skip-etm",
+        "--no-emit-pb-reference",
+        "--embedding-dim",
+        "4",
+        "--phase1-cells-per-pb",
+        "0",
+        "-o",
+        &plain_out,
+    ])
+    .expect("GemArgs parses a plain invocation");
+    run_gem_embedding(&cli.args).expect("a plain gem run must still succeed");
+}
+
 /// A spliced-only axis (no `count/unspliced` row anywhere, no `--modality`
 /// file) has exactly one track, so no modality's two contrast channels are
 /// ever both present: the contrast table has zero rows. The files must still
