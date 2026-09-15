@@ -39,8 +39,8 @@ pub struct AnnotateArgs {
                 or its `{prefix}.pinto.json`",
         long_help = "Shared output prefix of a pinto embedding run.\n\
                      Reads `{prefix}.feature_embedding.parquet` + `{prefix}.cell_embedding.parquet`.\n\
-                     From a cage run the cell embedding is a readout,\n\
-                     not a trained table.\n\
+                     From a cage run the cell embedding is each cell's own\n\
+                     placement by the run's pair encoder, not a trained table.\n\
                      To annotate super-cells instead, pass\n\
                      --cell-embedding {prefix}.pb_embedding.parquet\n\
                      together with -o and a NEW prefix,\n\
