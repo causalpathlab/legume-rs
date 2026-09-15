@@ -350,16 +350,16 @@ enum Commands {
                       deciding the count from --leiden-resolution.\n\
                       kmeans instead uses a fixed --n-edge-clusters,\n\
                       spherical on the pair latent and seeded by --seed.\n\n\
-                      A cell's embedding is a readout, never a trained table:\n\
-                      the propensity-weighted average of its link communities'\n\
-                      centroids in the pair-latent space,\n\
+                      A cell's embedding is its own placement on the gene embedding,\n\
+                      by the same map that places its pairs (see --pair-solver),\n\
                       written for `pinto annotate`.\n\
-                      A cell with no pairs gets a zero row.\n\n\
+                      A cell with no counts gets a zero row.\n\n\
                       Outputs:\n\
                       \x20 {out}.pb_embedding.parquet    super-cell × embedding_dim (trained)\n\
                       \x20 {out}.pb_bias.parquet         per-super-cell scalar (trained)\n\
                       \x20 {out}.cell_pb.parquet         cell → finest super-cell id\n\
-                      \x20 {out}.cell_embedding.parquet  cell × embedding_dim (readout)\n\
+                      \x20 {out}.cell_embedding.parquet  cell × embedding_dim (same map as the pairs)\n\
+                      \x20 {out}.pair_encoder.safetensors  the pair encoder, for `pinto predict`\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
                       \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
                       \x20 {out}.gene_bias.parquet       per-gene scalar\n\
@@ -428,12 +428,13 @@ enum Commands {
                       \x20 1. Preprocess the new data as cage does (graph, batches)\n\
                       \x20 2. Align {model}.feature_embedding.parquet to its gene axis by name.\n\
                       \x20    Genes without a model row are dropped, never seeded.\n\
-                      \x20 3. Project every cell pair onto the frozen dictionary, by Poisson MAP.\n\
+                      \x20 3. Place every cell pair, and every cell, on the frozen dictionary\n\
+                      \x20    by the model's pair encoder, or by Poisson MAP without one.\n\
                       \x20 4. Assign each pair to the nearest trained link community.\n\
                       \x20    The centroids are recomputed from {model}.latent\n\
                       \x20    and {model}.link_community; a pair that matches none abstains.\n\
                       \x20 5. Propensity is the incident-edge fraction, per community.\n\
-                      \x20    The cell embedding is the propensity-weighted centroid readout.\n\n\
+                      \x20    The cell embedding is the cell's own placement from step 3.\n\n\
                       Outputs:\n\
                       \x20 {out}.coord_pairs.parquet, {out}.latent.parquet,\n\
                       \x20 {out}.link_community.parquet, {out}.propensity.parquet,\n\

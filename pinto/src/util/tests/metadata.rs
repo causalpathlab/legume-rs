@@ -95,6 +95,7 @@ fn metadata_roundtrip_cage() {
             nascent_count_fraction: 0.23,
             delta_base: DELTA_BASE_SPLICED.to_string(),
         }),
+        true,
     );
     let path = dir.path().join("run.pinto.json");
     meta.write(&path).unwrap();
@@ -103,6 +104,12 @@ fn metadata_roundtrip_cage() {
     assert_eq!(back.n_cells, 1000);
     assert_eq!(back.n_communities, Some(16));
     assert!(back.outputs.cell_embedding.is_some());
+    // The encoder that placed the cells and pairs ships beside them, so
+    // `predict` can place a new sample by the same map.
+    assert_eq!(
+        back.outputs.pair_encoder.as_deref(),
+        Some(format!("{prefix}.pair_encoder.safetensors").as_str())
+    );
     // The trained unit is the PB: pb tables + the cell->pb map ship,
     // and there is no per-cell bias to report.
     assert!(back.outputs.cell_bias.is_none());
@@ -161,7 +168,9 @@ fn metadata_roundtrip_cage_no_batch() {
         },
         false,
         None,
+        false,
     );
+    assert!(meta.outputs.pair_encoder.is_none());
     let json = serde_json::to_string(&meta).unwrap();
     let back: PintoMetadata = serde_json::from_str(&json).unwrap();
     assert!(back.outputs.batch_effects.is_none());
