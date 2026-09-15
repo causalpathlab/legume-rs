@@ -97,12 +97,17 @@ pub fn loss_and_grads(
     part: &Partition,
     plan: &StepPlan,
 ) -> (StepStats, Grads) {
+    assert_eq!(
+        units.n_tracks(),
+        1,
+        "multi-track training is not implemented yet"
+    );
     let (h, n_m) = (params.h, part.n_modules());
     let b = plan.units.len();
     let w: Vec<f32> = plan
         .units
         .iter()
-        .map(|&u| units.weight[u as usize])
+        .map(|&u| units.weight_of(u as usize, 0))
         .collect();
 
     //////////////////
@@ -119,7 +124,8 @@ pub fn loss_and_grads(
     let mut loss_module = 0f64;
     let mut delta1 = DMatrix::<f32>::zeros(b, n_m); // w_u (p − q)
     for (i, &u) in plan.units.iter().enumerate() {
-        let q = &um.q[u as usize * n_m..(u as usize + 1) * n_m];
+        let base = um.idx(u as usize, 0, 0);
+        let q = &um.q[base..base + n_m];
         for m in 0..n_m {
             let p = s[(i, m)];
             if q[m] > 0.0 {
@@ -172,14 +178,14 @@ pub fn loss_and_grads(
                                                                       // One target buffer per module, cleared through the slots it touched.
             let mut target = vec![0f32; d_m];
             for (i, &(u, wt)) in pairs.iter().enumerate() {
-                let scale = units.weight[u as usize] * wt;
+                let scale = units.weight_of(u as usize, 0) * wt;
                 // target shares within the module
                 let counts = um.by_module[u as usize]
                     .iter()
-                    .find(|(k, _)| k == m)
+                    .find(|((t, k), _)| *t == 0 && k == m)
                     .map(|(_, v)| v.as_slice())
                     .unwrap_or(&[]);
-                let n_um = um.n_um[u as usize * n_m + *m as usize];
+                let n_um = um.n_um[um.idx(u as usize, 0, *m as usize)];
                 for &(slot, c) in counts {
                     target[slot as usize] += c / n_um;
                 }

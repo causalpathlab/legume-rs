@@ -106,12 +106,16 @@ pub fn train(
     stop: &AtomicBool,
 ) -> anyhow::Result<HierOutput> {
     anyhow::ensure!(
-        labels.len() == units.n_features,
-        "one module label per feature"
+        units.tracks.is_base(),
+        "multi-track training is not implemented yet"
+    );
+    anyhow::ensure!(
+        labels.len() == units.tracks.n_genes(),
+        "one module label per gene"
     );
     let part = Partition::from_labels(labels, cfg.n_modules);
     let um = UnitModules::new(units, &part);
-    let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.n_features);
+    let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.tracks.n_genes());
     let mut params = HierParams::new(n_u, n_m, d, h, cfg.seed);
     let mut opt = Optimizers {
         e_u: RowAdagrad::new(n_u, cfg.lr),

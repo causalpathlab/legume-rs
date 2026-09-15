@@ -1,6 +1,7 @@
 use super::*;
 use crate::data::Triplet;
 use crate::fit::batch_fold::BatchGeneFold;
+use crate::fit::config::{TrackInfo, TrackSpec};
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
     Triplet {
@@ -99,4 +100,77 @@ fn all_zero_totals_give_all_zero_weights() {
     assert_eq!(u.weight, vec![0.0, 0.0]);
     assert!(!u.weight[0].is_nan());
     assert!(!u.weight[1].is_nan());
+}
+
+/// Row layout `[g0/t0, g1/t0, g0/t1, g1/t1]` — two tracks over two genes.
+fn two_track_spec() -> TrackSpec {
+    let s = TrackSpec {
+        track_of_row: vec![0, 0, 1, 1],
+        gene_of_row: vec![0, 1, 0, 1],
+        tracks: vec![
+            TrackInfo {
+                name: "t0".into(),
+                is_count: true,
+            },
+            TrackInfo {
+                name: "t1".into(),
+                is_count: true,
+            },
+        ],
+    };
+    s.validate(4).unwrap();
+    s
+}
+
+#[test]
+fn the_untracked_constructor_is_the_base_track_spec() {
+    let l0 = vec![t(0, 2, 3.0), t(0, 0, 1.0), t(1, 1, 5.0)];
+    let l1 = vec![t(0, 3, 2.0)];
+    let cf = [1u32, 3];
+    let cc = [4.0f32, 6.0];
+    let cells = vec![(7u32, &cf[..], &cc[..])];
+    let plain = UnitTable::from_pseudobulks_and_cells(&[&l0, &l1], &[2, 1], &cells, None, 4);
+    let tracked = UnitTable::from_pseudobulks_and_cells_tracked(
+        &[&l0, &l1],
+        &[2, 1],
+        &cells,
+        None,
+        4,
+        TrackSpec::base(4),
+    );
+    assert_eq!(plain.n_tracks(), 1);
+    assert_eq!(plain.total, tracked.total);
+    assert_eq!(plain.weight, tracked.weight);
+    assert_eq!(plain.feats, tracked.feats);
+    assert_eq!(plain.counts, tracked.counts);
+}
+
+#[test]
+fn totals_and_weights_are_per_track() {
+    // pb0: 1 + 3 on track 0, 1 on track 1; pb1: 5 + 4 on track 0, 9 on track 1;
+    // pb2: 4 on track 0 and nothing on track 1.
+    let l0 = vec![
+        t(0, 0, 1.0),
+        t(0, 1, 3.0),
+        t(0, 2, 1.0),
+        t(1, 0, 5.0),
+        t(1, 1, 4.0),
+        t(1, 3, 9.0),
+        t(2, 1, 4.0),
+    ];
+    let u =
+        UnitTable::from_pseudobulks_and_cells_tracked(&[&l0], &[3], &[], None, 4, two_track_spec());
+    assert_eq!(u.n_tracks(), 2);
+    assert_eq!(u.total, vec![4.0, 1.0, 9.0, 9.0, 4.0, 0.0]);
+    assert_eq!(u.total_of(1, 0), 9.0);
+    assert_eq!(u.total_of(2, 1), 0.0);
+    // track 1: raw 1, 3, 0 → mean 4/3 → weights 0.75, 2.25, 0
+    assert!((u.weight_of(0, 1) - 0.75).abs() < 1e-6);
+    assert!((u.weight_of(1, 1) - 2.25).abs() < 1e-6);
+    assert_eq!(u.weight_of(2, 1), 0.0);
+    // each track's weights average to one over ALL units
+    for t in 0..2 {
+        let mean: f32 = (0..3).map(|u2| u.weight_of(u2, t)).sum::<f32>() / 3.0;
+        assert!((mean - 1.0).abs() < 1e-6, "track {t} mean {mean}");
+    }
 }
