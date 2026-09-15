@@ -1,9 +1,8 @@
 //! `senna bge` ETM resolution (on by default; disable with `--skip-etm`):
 //! resolve the ETM topic side from a finished bge run (no further training)
 //! and write a topic-model-shaped output layout (`latent` = log θ,
-//! `dictionary` = β). Split out of the bge driver.
+//! `dictionary` = β). Called from the shared [`crate::bge::driver`].
 
-use super::BgeArgs;
 use crate::embed_common::*;
 use graph_embedding_util as ge;
 
@@ -31,7 +30,7 @@ pub(super) fn resolve_etm_topics(
     model: &ge::JointEmbedModel,
     feature_names: &[Box<str>],
     barcodes: &[Box<str>],
-    args: &BgeArgs,
+    out: &str,
     cell_keep_idx: Option<&[usize]>,
     labels: &[usize],
 ) -> anyhow::Result<()> {
@@ -93,7 +92,6 @@ pub(super) fn resolve_etm_topics(
 
     let topic_names = axis_id_names("T", k);
     let h_names = axis_id_names("h", h);
-    let out = &args.out;
 
     // Topic-model layout — latent = log θ, dictionary = β.
     log_theta.to_parquet_with_names(

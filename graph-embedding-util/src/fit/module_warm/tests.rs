@@ -1,5 +1,5 @@
 use super::*;
-use crate::fit::config::ParentModulesOwned;
+use crate::fit::config::{ParentModulesOwned, TrackInfo, TrackSpec};
 
 /// Three planted co-expression blocks over 12 pseudobulks are recovered as three
 /// modules, up to label permutation.
@@ -140,4 +140,53 @@ fn zero_profile_genes_take_the_background_module() {
     assert!(labels[..10].iter().all(|&l| l == labels[0]));
     assert!(labels[10..20].iter().all(|&l| l == labels[10]));
     assert_ne!(labels[0], labels[10]);
+}
+
+/// The warm start clusters GENES, so a multi-track feature axis has to be
+/// reduced to the base track's rows first, re-keyed by gene id.
+#[test]
+fn base_track_profile_is_the_identity_on_a_one_track_axis() {
+    let p = planted();
+    let got = base_track_profile(&p, &TrackSpec::base(p.nrows()));
+    assert_eq!(got, p);
+}
+
+#[test]
+fn base_track_profile_keeps_only_the_base_rows_re_keyed_by_gene() {
+    // 5 feature rows over 3 genes: rows 0..2 are the base track (genes 1, 0 —
+    // deliberately NOT in gene order), rows 2..5 are a second track.
+    let profile = DMatrix::<f32>::from_row_slice(
+        5,
+        2,
+        &[
+            10.0, 11.0, //
+            20.0, 21.0, //
+            30.0, 31.0, //
+            40.0, 41.0, //
+            50.0, 51.0,
+        ],
+    );
+    let tracks = TrackSpec {
+        track_of_row: vec![0, 0, 1, 1, 1],
+        gene_of_row: vec![1, 0, 0, 1, 2],
+        tracks: vec![
+            TrackInfo {
+                name: "t0".into(),
+                is_count: true,
+            },
+            TrackInfo {
+                name: "t1".into(),
+                is_count: true,
+            },
+        ],
+    };
+    let got = base_track_profile(&profile, &tracks);
+    assert_eq!(got.nrows(), 3);
+    assert_eq!(got.ncols(), 2);
+    assert_eq!(got.row(0), profile.row(1)); // gene 0 sits on base row 1
+    assert_eq!(got.row(1), profile.row(0)); // gene 1 on base row 0
+    assert!(
+        got.row(2).iter().all(|&x| x == 0.0),
+        "gene 2 has no base row"
+    );
 }

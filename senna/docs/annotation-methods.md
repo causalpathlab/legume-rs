@@ -17,7 +17,8 @@ driven by `senna annotate-gem` and `senna lineage --markers`.
 | `{out}.feature_embedding.parquet` | feature rows × H | the co-embedded gene vector **e_g** |
 
 Feature rows are keyed `{gene}/count/{spliced,unspliced}`; annotation selects one modality and
-re-keys by gene (`spliced` for the mature-identity track, `unspliced` for the velocity track).
+re-keys by gene (`spliced` is the base track every gene has; `unspliced`, when present, is its
+ridge-shrunk offset track, contrasted against the base in `{out}.feature_contrast.parquet`).
 
 **Annotation does not use the `β_g` dictionary**, and this is load-bearing. A Euclidean
 nearest-centroid call is only meaningful if genes and cells inhabit one metric space. gem couples

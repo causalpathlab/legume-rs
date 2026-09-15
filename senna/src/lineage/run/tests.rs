@@ -6,9 +6,6 @@ fn names(v: &[&str]) -> Vec<Box<str>> {
     v.iter().map(|s| (*s).into()).collect()
 }
 
-// resolve_root_hint signature: (root_node, root_cell, cell_names, labels, k, type_root,
-// gem_root) -> Result<Option<usize>>. Priority: node > cell > type > gem > None.
-
 /// End-to-end recovery on a planted two-lineage sim: two x-chains far apart in y, joined
 /// by the single geometric MST bridge. Velocity flows +x in both, so the bridge (a +y edge)
 /// carries no net flow → abstains → the max-weight branching cuts it into TWO trees, each

@@ -591,13 +591,13 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         softmax_dictionary_suffix: None,
         cell_embedding_suffix: None,
         cell_encoder_suffix: None,
+        feature_contrast_suffix: None,
+        feature_contrast_bias_suffix: None,
+        track_encoder_suffixes: vec![],
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,
         has_pb_tree,
-        velocity_suffix: None,
-        velocity_factor_suffix: None,
-        delta_feature_embedding_suffix: None,
     })?;
 
     info!("Done");

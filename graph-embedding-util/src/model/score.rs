@@ -1,34 +1,15 @@
-//! The bilinear score and the row gathers that feed it.
+//! The bilinear score kernels.
 //!
-//! The hot path from parameter tables to a `[B]` / `[B, K]` score: the cell-axis
-//! mean pool and the four score kernels (feature-cell and cell-cell, positives
-//! and negatives). Feature-side composition lives on [`super::ComposedFeat`].
+//! The hot path from parameter tables to a `[B]` / `[B, K]` score: the four score
+//! kernels (feature-cell and cell-cell, positives and negatives). Feature-side
+//! composition lives on [`super::ComposedFeat`].
 
 use candle_util::batched_dot::batched_matvec;
-use candle_util::candle_core::{Device, Result, Tensor};
+use candle_util::candle_core::{Result, Tensor};
 
-use super::vars::pool_axis;
 use super::JointEmbedModel;
 
 impl JointEmbedModel {
-    /// Mean-pool the cell embedding table over the fine children of a
-    /// list of coarse-block indices. Output `[n_blocks, H]` plus a
-    /// matching `[n_blocks]` bias vector.
-    pub fn pool_cells(
-        &self,
-        coarse_blocks: &[u32],
-        coarse_to_fine: &[Vec<usize>],
-        dev: &Device,
-    ) -> Result<(Tensor, Tensor)> {
-        pool_axis(
-            &self.e_cell,
-            &self.b_cell,
-            coarse_blocks,
-            coarse_to_fine,
-            dev,
-        )
-    }
-
     /// Bilinear score with bias terms.
     ///
     /// `e_f`: `[B, H]` pooled feature embeddings (one row per positive's

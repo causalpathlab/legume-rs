@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 /// orientation of a bulk table; alignment happens downstream.
 ///
 /// A full match on purpose, no `_` arm: a family without a dictionary file
-/// (`fne`, `gem`, ...) must fail here with a clear message, not three calls
-/// deep with a parquet path the user never typed. The depth note rides on the
-/// same match so a new family is classified once, at compile time.
+/// (`fne`, `joint-svd`, ...) must fail here with a clear message, not three
+/// calls deep with a parquet path the user never typed. The depth note rides
+/// on the same match so a new family is classified once, at compile time.
 pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<Box<str>>> {
     if matches!(
         kind,
@@ -45,10 +45,14 @@ pub(crate) fn model_gene_axis(kind: RunKind, model: &str) -> anyhow::Result<Vec<
 /// for every query, bulk or not.
 pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec<Box<str>>> {
     match kind {
-        // bge and simba write no dictionary; their gene axis is the row axis of
-        // the gene table. They and svd project each column against a frozen
-        // table and do not care what depth it came at.
-        RunKind::Bge | RunKind::Simba => {
+        // bge, simba and gem write no dictionary; their gene axis is the row
+        // axis of the gene table (gem's rows are the track grammar,
+        // `{gene}/{modality}/{channel}` — this is exactly the axis a query
+        // must align against, `--bulk` included; `predict_bge` itself is what
+        // refuses `--bulk` on a gem run, with a message this axis alone
+        // could not give). They and svd project each column against a
+        // frozen table and do not care what depth it came at.
+        RunKind::Bge | RunKind::Simba | RunKind::Gem => {
             Ok(crate::bge::score::BgeEmbedding::open(model)?.gene_names)
         }
         RunKind::Svd
@@ -57,11 +61,7 @@ pub(crate) fn model_gene_names(kind: RunKind, model: &str) -> anyhow::Result<Vec
         | RunKind::MaskedVae
         | RunKind::JointTopic
         | RunKind::Vae => Ok(crate::topic::model_metadata::load_dictionary(model)?.0),
-        RunKind::JointSvd
-        | RunKind::Fne
-        | RunKind::ResolveEmbeddingSpace
-        | RunKind::Gem
-        | RunKind::GemEncoder => anyhow::bail!(
+        RunKind::JointSvd | RunKind::Fne | RunKind::ResolveEmbeddingSpace => anyhow::bail!(
             "predict: a {kind} run has no gene dictionary to align a query against, and \
              predict does not score this family"
         ),

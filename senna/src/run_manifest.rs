@@ -218,14 +218,19 @@ pub enum RunKind {
     Bge,
     Fne,
     ResolveEmbeddingSpace,
-    /// `senna gem` — the discriminative joint cell/gene embedding over
-    /// spliced + unspliced gene counts. Euclidean `Z` in `cell_embedding`, a
-    /// co-embedded gene table in `feature_embedding`, and a per-cell velocity.
+    /// `senna gem` — a joint cell/gene embedding over gene counts and any
+    /// co-measured modality tracks, run through the same driver as
+    /// [`RunKind::Bge`]. Every feature row belongs to one TRACK (the base
+    /// gene count plus, per `--modality`, two channel tracks); track 0's
+    /// loading is the gene's own, every other track adds a ridge-shrunk
+    /// offset to it. Downstream it reads exactly like a `bge` run: a frozen
+    /// `(ρ, b_feat)` gene table in `feature_loading` / `feature_bias`,
+    /// Euclidean `Z` in `cell_embedding`, a co-embedded gene table in
+    /// `feature_embedding`. `feature_contrast(.bias).parquet` additionally
+    /// holds each modality's channel contrast, and `track_encoders` (plus
+    /// `cell_encoder` for track 0) names the per-track encoders
+    /// `senna predict` places a query cell with.
     Gem,
-    /// `senna gem-encoder` — the masked generative sibling of [`RunKind::Gem`].
-    /// Same inputs and the same velocity outputs, but an amortized encoder and
-    /// a simplex latent, so its `latent.parquet` IS log θ.
-    GemEncoder,
     /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
     /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw
     /// gene table in `feature_loading`, SIMBA's fixed-T co-embedded genes in
@@ -273,7 +278,6 @@ impl RunKind {
             | RunKind::Fne
             | RunKind::ResolveEmbeddingSpace
             | RunKind::Gem
-            | RunKind::GemEncoder
             | RunKind::Simba => CellSpace::Embedding,
             // `latent` is log θ and `cell_embedding` is absent, so the geometry
             // table is the simplex itself.
@@ -300,7 +304,6 @@ impl RunKind {
             RunKind::Fne => "fne",
             RunKind::ResolveEmbeddingSpace => "resolve-embedding-space",
             RunKind::Gem => "gem",
-            RunKind::GemEncoder => "gem-encoder",
             RunKind::Simba => "simba",
         }
     }
@@ -315,15 +318,8 @@ impl RunKind {
     pub fn is_topic_family(self) -> bool {
         match self {
             // masked-vae belongs here despite its Gaussian latent: the family is
-            // defined by a simplex β, and gem-encoder's log_softmax-over-genes
-            // dictionary is one. It was the first kind that is log-simplex in the
-            // LATENT sense without being topic-family, which inverted the
-            // containment callers had assumed between these two predicates.
-            RunKind::Topic
-            | RunKind::Itopic
-            | RunKind::MaskedVae
-            | RunKind::JointTopic
-            | RunKind::GemEncoder => true,
+            // defined by a simplex β, not by what the latent itself looks like.
+            RunKind::Topic | RunKind::Itopic | RunKind::MaskedVae | RunKind::JointTopic => true,
             RunKind::Vae
             | RunKind::Svd
             | RunKind::JointSvd
@@ -355,7 +351,7 @@ impl RunKind {
     #[must_use]
     pub fn has_frozen_gene_table(self) -> bool {
         match self {
-            RunKind::Bge | RunKind::Simba => true,
+            RunKind::Bge | RunKind::Simba | RunKind::Gem => true,
             RunKind::Topic
             | RunKind::Itopic
             | RunKind::MaskedVae
@@ -364,9 +360,7 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem
-            | RunKind::GemEncoder => false,
+            | RunKind::ResolveEmbeddingSpace => false,
         }
     }
 
@@ -378,7 +372,7 @@ impl RunKind {
     #[must_use]
     pub fn has_gene_bias(self) -> bool {
         match self {
-            RunKind::Bge => true,
+            RunKind::Bge | RunKind::Gem => true,
             RunKind::Simba => false,
             // Not a frozen-gene-table kind; the question does not arise.
             RunKind::Topic
@@ -389,9 +383,7 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem
-            | RunKind::GemEncoder => false,
+            | RunKind::ResolveEmbeddingSpace => false,
         }
     }
 
@@ -406,7 +398,7 @@ impl RunKind {
     #[must_use]
     pub fn latent_is_log_simplex(self) -> bool {
         match self {
-            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic | RunKind::GemEncoder => true,
+            RunKind::Topic | RunKind::Itopic | RunKind::JointTopic => true,
             RunKind::MaskedVae
             | RunKind::Vae
             | RunKind::Svd
@@ -692,26 +684,6 @@ pub struct RunOutputs {
     /// `senna {topic, masked-topic} --from` chain can skip the
     /// expensive HNSW + binary-sort + DC-SBM refinement step and feed
     /// the precomputed partition straight into the per-PB Gamma fit.
-    /// `{out}.velocity.parquet` — cell × H, the per-cell velocity in the SAME
-    /// space as [`RunOutputs::cell_embedding`], so the two add: `θ + δ` is the
-    /// nascent state. Written by the gem family only. Its norm is a speed, so
-    /// it is signed and unnormalized like `cell_embedding`, not a composition.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub velocity: Option<String>,
-    /// `{out}.velocity_factor.parquet` — cell × K velocity in FACTOR space
-    /// (`gem-encoder` only, where a factor space exists). Not comparable with
-    /// [`RunOutputs::velocity`]; the two live on different axes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub velocity_factor: Option<String>,
-    /// `{out}.delta_feature_embedding.parquet` — gene × H per-gene splice
-    /// offset δ_g, the feature-side counterpart of [`RunOutputs::velocity`].
-    ///
-    /// **The two gem kinds define δ_g against OPPOSITE bases** — `gem` shifts
-    /// spliced → unspliced, `gem-encoder` unspliced → spliced — so the sign is
-    /// only interpretable together with [`RunManifest::kind`]. Consumers that
-    /// compare δ across runs must check it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delta_feature_embedding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell_to_pb: Option<String>,
     /// `{out}.pb_tree.json` — the tree behind the finest
@@ -720,6 +692,41 @@ pub struct RunOutputs {
     /// by the topic-family fits whose collapse rewrote the high bits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
+    /// `{out}.feature_contrast.parquet` — `senna gem` only: one row per
+    /// gene-and-modality, the H-space RAW-loading delta between that
+    /// modality's two channel tracks (see [`crate::gem::contrast`]). `None`
+    /// for every other kind, and for an interrupted gem run whose `after_fit`
+    /// hook never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_contrast: Option<String>,
+    /// `{out}.feature_contrast_bias.parquet` — the scalar `b_feat` delta
+    /// paired with [`Self::feature_contrast`], same rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_contrast_bias: Option<String>,
+    /// Per-track cell encoders BEYOND track 0, which stays in
+    /// [`Self::cell_encoder`] so every existing reader keeps working
+    /// unchanged. `senna gem` only, one entry per count track past the
+    /// base; empty for every other kind and for a gem run with a single
+    /// count track. `senna predict` resolves each entry's numeric track id
+    /// at load time by matching [`TrackEncoderSlot::track`] against the
+    /// run's own axis, rather than trusting a stored id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_encoders: Vec<TrackEncoderSlot>,
+}
+
+/// One non-base-track cell encoder a `senna gem` run saved:
+/// [`RunOutputs::track_encoders`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackEncoderSlot {
+    /// The track's name, `{modality}/{channel}` (e.g. `"count/unspliced"`),
+    /// exactly as [`crate::gem::tracks::assign_tracks`] names it. The
+    /// numeric track id is deliberately NOT stored here: it depends on
+    /// which tracks a particular axis carries and in what order, which only
+    /// the loader's own re-derived axis knows.
+    pub track: String,
+    /// The resolved file, `{basename}.{suffix}` — the same convention every
+    /// other `RunOutputs` path slot uses.
+    pub path: String,
 }
 
 impl RunOutputs {
@@ -1090,9 +1097,7 @@ pub fn load_for(from: &str) -> anyhow::Result<(RunManifest, PathBuf)> {
     RunManifest::load(Path::new(&derived)).map_err(|e| {
         anyhow::anyhow!(
             "{e}\n\nNeither `{from}` nor `{derived}` is a readable senna manifest. \
-             Prefixes written before the gem commands moved into senna carry a \
-             `{}.gem.json` instead; re-run the producer to get `{derived}`.",
-            derive_out_prefix(from)
+             Re-run the producer to get `{derived}`."
         )
     })
 }
@@ -1264,16 +1269,24 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
         | RunKind::MaskedVae
         | RunKind::JointTopic
         | RunKind::Vae
-        // The gem kinds co-embed genes onto the cell manifold, same as bge, so
-        // there is a feature embedding to inherit.
+        // `gem` co-embeds genes onto the cell manifold, same as bge, so there
+        // is a feature embedding to inherit.
         | RunKind::Gem
-        | RunKind::GemEncoder
         | RunKind::Simba => {}
         RunKind::Svd | RunKind::JointSvd => anyhow::bail!(
             "--from manifest kind '{}' has no feature embedding to inherit; \
              use a bge / fne / topic-family run as the source",
             m.kind
         ),
+    }
+    if m.kind == RunKind::Gem {
+        anyhow::ensure!(
+            m.data.input.len() == 1,
+            "--from: a gem parent must have loaded a single input file (found {}). gem's \
+             Union load with per-file sample tags cannot be replayed by the disjoint chain \
+             loader --from uses",
+            m.data.input.len()
+        );
     }
     let to_box = |s: &str| -> Box<str> { resolve(&dir, s).to_string_lossy().into_owned().into() };
     let data_files: Vec<Box<str>> = m.data.input.iter().map(|s| to_box(s)).collect();
@@ -1361,6 +1374,18 @@ pub struct RunDescription<'a> {
     /// Suffix after `{basename}.` for the cell encoder, e.g.
     /// `"cell_encoder.safetensors"`. `None` to omit.
     pub cell_encoder_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the gem feature-contrast table, e.g.
+    /// `"feature_contrast.parquet"`. `None` for every writer but the shared
+    /// bge/gem driver, and for an interrupted gem run.
+    pub feature_contrast_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the gem feature-contrast bias column,
+    /// e.g. `"feature_contrast_bias.parquet"`. Paired with the above.
+    pub feature_contrast_bias_suffix: Option<&'a str>,
+    /// `(track name, cell-encoder safetensors suffix)` for every track
+    /// BEYOND track 0 whose encoder phase 2 saved — track 0's own file
+    /// stays in `cell_encoder_suffix`. Empty for every writer but the
+    /// shared bge/gem driver, and for a gem run with a single count track.
+    pub track_encoder_suffixes: Vec<(String, String)>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
     /// True if the run emits `{basename}.latent.parquet`. Topic-family fits
@@ -1368,15 +1393,6 @@ pub struct RunDescription<'a> {
     /// set it ONLY when they also resolved topics (`bge` without `--skip-etm`)
     /// — their Z goes to `cell_embedding_suffix` instead.
     pub has_latent: bool,
-    /// Suffix after `{basename}.` for the cell × H velocity parquet, e.g.
-    /// `"velocity.parquet"`. Gem family only; `None` to omit.
-    pub velocity_suffix: Option<&'a str>,
-    /// Suffix after `{basename}.` for the cell × K factor-space velocity, e.g.
-    /// `"velocity_factor.parquet"`. `gem-encoder` only; `None` to omit.
-    pub velocity_factor_suffix: Option<&'a str>,
-    /// Suffix after `{basename}.` for the gene × H per-gene splice offset δ_g,
-    /// e.g. `"delta_feature_embedding.parquet"`. `None` to omit.
-    pub delta_feature_embedding_suffix: Option<&'a str>,
     /// True if the run emits `{basename}.cell_to_pb.parquet` — the
     /// post-refinement cell→pseudobulk membership per coarsening level.
     /// Set by topic-family fits that ran `collapse_columns_multilevel_*`
@@ -1419,15 +1435,6 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     if desc.has_cell_proj {
         m.outputs.cell_proj = Some(format!("{basename}.cell_proj.parquet"));
     }
-    if let Some(suf) = desc.velocity_suffix {
-        m.outputs.velocity = Some(format!("{basename}.{suf}"));
-    }
-    if let Some(suf) = desc.velocity_factor_suffix {
-        m.outputs.velocity_factor = Some(format!("{basename}.{suf}"));
-    }
-    if let Some(suf) = desc.delta_feature_embedding_suffix {
-        m.outputs.delta_feature_embedding = Some(format!("{basename}.{suf}"));
-    }
     if let Some(suf) = desc.pb_gene_suffix {
         m.outputs.pb_gene = Some(format!("{basename}.{suf}"));
     }
@@ -1467,6 +1474,20 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     if desc.has_pb_tree {
         m.outputs.pb_tree = Some(format!("{basename}.pb_tree.json"));
     }
+    if let Some(suf) = desc.feature_contrast_suffix {
+        m.outputs.feature_contrast = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.feature_contrast_bias_suffix {
+        m.outputs.feature_contrast_bias = Some(format!("{basename}.{suf}"));
+    }
+    m.outputs.track_encoders = desc
+        .track_encoder_suffixes
+        .iter()
+        .map(|(track, suf)| TrackEncoderSlot {
+            track: track.clone(),
+            path: format!("{basename}.{suf}"),
+        })
+        .collect();
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 
     let path = default_path(desc.prefix);

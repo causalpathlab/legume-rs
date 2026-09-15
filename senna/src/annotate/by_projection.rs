@@ -21,8 +21,8 @@
 
 use super::args::AnnotateProjectionArgs;
 use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
-use crate::gem::marker_embedding::select_spliced_rows;
-use crate::run_manifest::{self, RunKind};
+use crate::gem::marker_embedding::load_marker_feature_embedding;
+use crate::run_manifest;
 use anyhow::{Context, Result};
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
@@ -52,37 +52,20 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
             .into_owned()
     };
 
-    // Feature side: genes on the cell manifold (required for projection).
-    let feat_rel = manifest
-        .outputs
-        .feature_embedding
-        .as_deref()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-            "manifest has no `outputs.feature_embedding` — projection needs a co-embedded gene \
-             space (a `senna bge` / `fne` / `resolve-embedding-space` run). For topic/svd runs \
-             use `senna annotate-by-enrichment`."
-        )
-        })?;
+    // Feature side: genes on the cell manifold (required for projection). Reads
+    // `outputs.feature_embedding` off the manifest and, for a `gem` run, keeps
+    // only the spliced rows re-keyed by gene — see `crate::gem::marker_embedding`.
+    let feat = load_marker_feature_embedding(&args.from).with_context(|| {
+        "projection needs a co-embedded gene space (a `senna gem` / `bge` / `fne` / \
+         `resolve-embedding-space` run). For topic/svd runs use `senna annotate-by-enrichment`."
+    })?;
     // Cell side: prefer the explicit cell_embedding; fall back to latent for
     // manifests written before Z moved there unconditionally.
     let cell_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
         anyhow::anyhow!("manifest has neither `outputs.cell_embedding` nor `outputs.latent`")
     })?;
 
-    let feat_path = resolve(feat_rel);
     let cell_path = resolve(cell_rel);
-    let feat = DMatrix::<f32>::from_parquet(&feat_path)
-        .with_context(|| format!("reading feature embedding {feat_path}"))?;
-    // A gem feature embedding is keyed by FEATURE ROW, two per gene. Annotation
-    // is a statement about mature identity, so it reads the SPLICED rows and
-    // re-keys them by gene; matching the panel against the raw table would
-    // average the mature program together with the nascent one under one name.
-    let feat = if matches!(manifest.kind, RunKind::Gem | RunKind::GemEncoder) {
-        select_spliced_rows(feat, &feat_path)?
-    } else {
-        feat
-    };
     let cell = DMatrix::<f32>::from_parquet(&cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
     info!(

@@ -6,8 +6,6 @@ mod axes;
 pub mod batch_fold;
 mod config;
 pub mod hier;
-pub mod lift;
-pub mod lineage;
 mod models;
 pub mod module_args;
 pub mod module_warm;
@@ -18,39 +16,36 @@ mod samplers;
 mod setup;
 
 pub use batch_fold::BatchGeneFold;
-pub use config::{FeatFactorSpec, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned};
-pub use lift::{CellLineage, LineageQc};
+pub use config::{
+    FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned, TrackInfo, TrackSpec,
+};
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
-pub use projection::{CellEncoder, PbLevelVelocity};
+pub use projection::{CellEncoder, CellEncoders, TrackEncoder};
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
 use crate::data::{Triplet, UnifiedData};
-use crate::model::JointEmbedModel;
-use crate::training::{train_composite, CompositeTrainContext, PbSemTerm};
 use anyhow::Context;
 use candle_util::candle_core::Tensor;
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
+use candle_util::candle_nn::VarMap;
 use log::info;
 use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
-use config::{stage_params, LINEAGE_WARMUP_FRAC};
 use matrix_util::traits::ConvertMatOps;
-use projection::{
-    project_cells_phase2, project_pbs_phase2, CellBatchFold, DistillLevel, DistillSpec,
-    PHASE2_RIDGE,
-};
+use projection::{project_cells_phase2, CellBatchFold, DistillLevel, DistillSpec, PHASE2_RIDGE};
 pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
 
-/// Composite-objective gbe fit — trained in **two phases**.
+/// Two-phase fit, shared by `senna bge` and `senna gem` through the same
+/// driver: multilevel-pseudobulk phase 1 over the feature axis (one track,
+/// or several when the caller names tracks), then per-cell phase 2 against
+/// the frozen dictionary.
 ///
-/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]` —
-/// the per-cell bias `b_cell` absorbs library size (consistent with
-/// `senna gem`).
+/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]`; the
+/// per-cell bias `b_cell` absorbs library size.
 ///
 /// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
 /// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-
@@ -77,8 +72,19 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     ///////////////////////////////////////////////
     let n_features = unified.n_features();
     let feature_to_backend = unified.feature_to_backend_row.clone();
-    let pb = setup::build_pseudobulks(unified, &config)?;
-    let num_levels = pb.num_levels();
+    // Row structure of the feature axis: plain genes (every row its own gene)
+    // unless the caller named tracks. Validated HERE, before anything reads it:
+    // the projection below sketches on the base track's rows, so an unchecked
+    // spec would reach the collapse before the error did.
+    let tracks = config
+        .tracks
+        .clone()
+        .unwrap_or_else(|| TrackSpec::base(n_features));
+    tracks
+        .validate(n_features)
+        .context("the fit's track spec does not describe this feature axis")?;
+    let n_tracks = tracks.n_tracks();
+    let pb = setup::build_pseudobulks(unified, &config, &tracks)?;
     let setup::Pseudobulks {
         collapsed_levels,
         cell_to_pb_per_level,
@@ -121,13 +127,11 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // VarMap and embedding heads //
     ////////////////////////////////
     let varmap = VarMap::new();
-    // Plain path: phase 1 trains by the exact hierarchical softmax (see
-    // `hier`), which owns its own module warm start and composes the dictionary
-    // itself; the splice (β-sharing) path trains by the composite NCE below.
-    let hier_path = config.feat_factor.is_none();
+    // Phase 1 trains by the exact hierarchical softmax (see `hier`), which owns
+    // its own module warm start and composes the dictionary itself.
     // The finest collapse's feature profile (batch-corrected pseudobulk rates,
     // gathered onto the unified feature axis) — seeds the hier engine's module
-    // partition on the plain path.
+    // partition.
     let finest_profile = || -> DMatrix<f32> {
         let finest = collapsed_levels.last().expect("at least one level");
         let pb_full = match &finest.mu_adjusted {
@@ -141,230 +145,158 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         mut level_models,
     } = models::build_heads(unified, &pb_blobs, &config, &varmap)?;
 
-    ////////////////////////////////
-    // Composite axes and trainer //
-    ////////////////////////////////
-    let ax = axes::build_axis_data(unified, &pb_blobs, &cell_to_pb_per_level, &config)?;
+    /////////////////
+    // Axis data   //
+    /////////////////
+    let ax = axes::build_axis_data(unified, &cell_to_pb_per_level, &config)?;
     let (use_cell_axis, cell_samplers) = (ax.use_cell_axis, &ax.cell_samplers);
-
-    // Two-phase training (always — `ge::fit` is the bge driver only); see
-    // the `fit()` doc for the rationale. Shared AdamW hyperparameters:
-    let adamw_params = || ParamsAdamW {
-        lr: config.learning_rate,
-        weight_decay: config.weight_decay,
-        ..Default::default()
-    };
 
     /////////////////////////////
     // Phase 1: joint training //
     /////////////////////////////
 
-    // Plain path (`hier_path`, bge): phase 1 trains by the exact hierarchical
-    // softmax (`hier::train`) over units = every level's pseudobulks + the
-    // phase-1 cell subsample. There is no per-unit bias — `pb_l{l}_b_cell`
-    // stays at its zero init — and the composed dictionary is written
-    // straight into the free `e_feat`/`b_feat` (and each level's `e_cell`)
-    // once training finishes, rather than accumulated by SGD alongside a
-    // cell/pb axis.
-    //
-    // Splice path (gem, β-sharing): the composite NCE trainer below. The
-    // cell axis is trained HERE (e_cell + b_cell trainable, as are the pb
-    // `pb_l*_b_cell`) so the per-cell stratified sampler — which guarantees
-    // coverage of rare/shallow cells — shapes `E_feat`; without it, `E_feat`
-    // is driven only by pb aggregates and rare compartments collapse into
-    // abundant ones. Both `b_cell` and `pb_l*_b_cell` train here so a
-    // per-sample bias absorbs that sample's depth, leaving `E_feat` to
-    // capture composition, not library size — `b_cell` is then re-fitted
-    // analytically in phase 2 and written alongside `e_cell` (consistent
-    // with `senna gem`). The axes borrow `cell_model`/`cell_samplers`;
-    // confine them to this block so those borrows are released before the
-    // phase-2 projection takes `&mut cell_model`.
-
-    // `--lineage-dag` reallocates the ONE `config.epochs` budget across the warm-up
-    // (phase 1) and the refine instead of doubling it. The DAG can only be oriented
-    // from a *trained* velocity readout (chicken-and-egg), so a warm-up before the
-    // lineage term is required — but the refine is warm-started, so it needs a
-    // refinement, not a second full-length fit. Off the lineage path phase 1 keeps
-    // the whole budget (`refine_epochs == 0`) and the run is byte-identical.
-    let lineage_on = config.lineage_dag && config.feat_factor.is_some();
-    let warmup_epochs = if lineage_on && config.epochs > 0 {
-        ((LINEAGE_WARMUP_FRAC * config.epochs as f64).round() as usize).clamp(1, config.epochs)
+    // Units = every level's pseudobulks + the phase-1 cell subsample, the cells
+    // batch-folded like phase 2 folds them.
+    let cell_fold = batch_gene_fold
+        .as_ref()
+        .map(|fold| fold.cell_fold(&unified.batch_membership));
+    let blobs: Vec<&[Triplet]> = pb_blobs.iter().map(|b| b.triplets.as_slice()).collect();
+    let n_pb_per_level: Vec<usize> = pb_blobs.iter().map(|b| b.n_cells()).collect();
+    // `--phase1-cells-per-pb 0` ⇒ `use_cell_axis == false` (pure-pb phase 1,
+    // logged above as "cell axis SUPPRESSED"); `phase1_cell_samplers()` would
+    // otherwise fall back to the FULL cell samplers, silently making every
+    // cell a unit.
+    let cell_rows: Vec<(u32, &[u32], &[f32])> = if use_cell_axis {
+        ax.phase1_cell_samplers()
+            .iter()
+            .flat_map(|s| {
+                s.active_cells
+                    .iter()
+                    .zip(&s.per_cell)
+                    .map(|(&c, cf)| (c, cf.features.as_slice(), cf.counts.as_slice()))
+            })
+            .collect()
     } else {
-        config.epochs
+        Vec::new()
     };
-    let refine_epochs = config.epochs - warmup_epochs;
-    if hier_path {
-        //////////////////////////////////////////////
-        // Plain path: exact hierarchical softmax    //
-        //////////////////////////////////////////////
-
-        // Units = every level's pseudobulks + the phase-1 cell subsample,
-        // the cells batch-folded like phase 2 folds them.
-        let cell_fold = batch_gene_fold
-            .as_ref()
-            .map(|fold| fold.cell_fold(&unified.batch_membership));
-        let blobs: Vec<&[Triplet]> = pb_blobs.iter().map(|b| b.triplets.as_slice()).collect();
-        let n_pb_per_level: Vec<usize> = pb_blobs.iter().map(|b| b.n_cells()).collect();
-        // `--phase1-cells-per-pb 0` ⇒ `use_cell_axis == false` (pure-pb phase 1,
-        // logged above as "cell axis SUPPRESSED"); `phase1_cell_samplers()` would
-        // otherwise fall back to the FULL cell samplers, silently making every
-        // cell a unit. Gate exactly as the composite path does.
-        let cell_rows: Vec<(u32, &[u32], &[f32])> = if ax.use_cell_axis {
-            ax.phase1_cell_samplers()
-                .iter()
-                .flat_map(|s| {
-                    s.active_cells
-                        .iter()
-                        .zip(&s.per_cell)
-                        .map(|(&c, cf)| (c, cf.features.as_slice(), cf.counts.as_slice()))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let units = hier::UnitTable::from_pseudobulks_and_cells(
-            &blobs,
-            &n_pb_per_level,
-            &cell_rows,
-            cell_fold,
-            n_features,
-        );
-        // Module labels: under `senna update`, seeded from the parent's membership
-        // (the argmax of `parent_module_logits`, i.e. the partition `senna update`
-        // claims to carry — matched features take the parent's module, unmatched
-        // ones are initialized through the parent's modules); otherwise the
-        // k-means warm start over the finest level's profiles.
-        let profile = finest_profile();
-        let (labels, n_modules) = match config.gene_modules.as_ref().and_then(|g| g.parent.as_ref())
-        {
-            Some(parent) => {
-                anyhow::ensure!(
-                    parent.mu.ncols() == h,
-                    "parent modules are {}-dimensional but this fit uses H={h}",
-                    parent.mu.ncols()
-                );
-                let logits = module_warm::parent_module_logits(parent, &profile);
-                info!(
-                    "Phase 1 (hier) — module partition seeded from the parent's membership ({} \
-                     modules)",
-                    parent.mu.nrows()
-                );
-                (
-                    hier::partition::labels_from_membership(&logits),
-                    parent.mu.nrows(),
-                )
-            }
-            None => {
-                let n = config
-                    .gene_modules
-                    .as_ref()
-                    .context("the hierarchical phase 1 needs a module count (gene_modules)")?
-                    .n_modules;
-                (
-                    module_warm::warm_start_module_labels(&profile, n, config.seed),
+    let units = hier::UnitTable::from_pseudobulks_and_cells_tracked(
+        &blobs,
+        &n_pb_per_level,
+        &cell_rows,
+        cell_fold,
+        n_features,
+        tracks.clone(),
+    );
+    // Module labels: under `senna update`, seeded from the parent's membership
+    // (the argmax of `parent_module_logits`, i.e. the partition `senna update`
+    // claims to carry — matched features take the parent's module, unmatched
+    // ones are initialized through the parent's modules); otherwise the
+    // k-means warm start over the finest level's profiles.
+    let profile = finest_profile();
+    let (labels, n_modules) = match config.gene_modules.as_ref().and_then(|g| g.parent.as_ref()) {
+        Some(parent) => {
+            anyhow::ensure!(
+                tracks.is_base(),
+                "module warm start from a parent needs a single-track feature axis"
+            );
+            anyhow::ensure!(
+                parent.mu.ncols() == h,
+                "parent modules are {}-dimensional but this fit uses H={h}",
+                parent.mu.ncols()
+            );
+            let logits = module_warm::parent_module_logits(parent, &profile);
+            info!(
+                "Phase 1 (hier) — module partition seeded from the parent's membership ({} \
+                 modules)",
+                parent.mu.nrows()
+            );
+            (
+                hier::partition::labels_from_membership(&logits),
+                parent.mu.nrows(),
+            )
+        }
+        None => {
+            let n = config
+                .gene_modules
+                .as_ref()
+                .context("the hierarchical phase 1 needs a module count (gene_modules)")?
+                .n_modules;
+            (
+                // The partition is over GENES, so the warm start reads the
+                // base track's rows re-keyed by gene; identity on one track.
+                module_warm::warm_start_module_labels(
+                    &module_warm::base_track_profile(&profile, &tracks),
                     n,
-                )
+                    config.seed,
+                ),
+                n,
+            )
+        }
+    };
+    let out = hier::train(
+        &units,
+        &labels,
+        h,
+        &hier::HierConfig {
+            n_modules,
+            epochs: config.epochs,
+            units_per_step: config.hier_units_per_step,
+            modules_per_unit: config.hier_modules_per_unit,
+            lr: config.learning_rate as f32,
+            weight_decay: config.weight_decay as f32,
+            seed: config.seed,
+            offset_l2: config.offset_l2,
+        },
+        &stop,
+    )?;
+    // The composed dictionary into the shared feature Vars; each level's
+    // pseudobulk rows into that level head's cell table.
+    let rho_row_major: Vec<f32> = out.rho.transpose().as_slice().to_vec();
+    let rho_t = Tensor::from_slice(&rho_row_major, (n_features, h), &config.device)?;
+    let b_feat_t = Tensor::from_slice(out.b_feat.as_slice(), n_features, &config.device)?;
+    {
+        let vars = varmap.data().lock().unwrap();
+        vars.get(crate::model::E_FEAT_VAR_NAME)
+            .context("e_feat var missing")?
+            .set(&rho_t)?;
+        vars.get("b_feat")
+            .context("b_feat var missing")?
+            .set(&b_feat_t)?;
+    }
+    cell_model.e_feat = rho_t;
+    cell_model.b_feat = b_feat_t;
+    // Scatter the pseudobulk rows onto their level heads in one pass over
+    // the units (levels first, then cells, per `UnitTable`).
+    let mut level_rows: Vec<Vec<f32>> = level_models
+        .iter()
+        .map(|lm| lm.e_cell.dim(0).map(|n_pb| vec![0f32; n_pb * h]))
+        .collect::<Result<_, _>>()?;
+    for u in 0..units.n_units() {
+        let l = units.level[u] as usize;
+        if l < level_rows.len() {
+            let p = units.source_index[u] as usize;
+            let dst = &mut level_rows[l][p * h..(p + 1) * h];
+            for (k, x) in out.e_u.row(u).iter().enumerate() {
+                dst[k] = *x;
             }
-        };
-        let out = hier::train(
-            &units,
-            &labels,
-            h,
-            &hier::HierConfig {
-                n_modules,
-                epochs: warmup_epochs,
-                units_per_step: config.hier_units_per_step,
-                modules_per_unit: config.hier_modules_per_unit,
-                lr: config.learning_rate as f32,
-                weight_decay: config.weight_decay as f32,
-                seed: config.seed,
-            },
-            &stop,
-        )?;
-        // The composed dictionary into the shared feature Vars; each level's
-        // pseudobulk rows into that level head's cell table.
-        let rho_row_major: Vec<f32> = out.rho.transpose().as_slice().to_vec();
-        let rho_t = Tensor::from_slice(&rho_row_major, (n_features, h), &config.device)?;
-        let b_feat_t = Tensor::from_slice(out.b_feat.as_slice(), n_features, &config.device)?;
+        }
+    }
+    for (l, (lm, rows)) in level_models.iter_mut().zip(level_rows).enumerate() {
+        let n_pb = lm.e_cell.dim(0)?;
+        let e_cell_t = Tensor::from_vec(rows, (n_pb, h), &config.device)?;
         {
             let vars = varmap.data().lock().unwrap();
-            vars.get(crate::model::E_FEAT_VAR_NAME)
-                .context("e_feat var missing")?
-                .set(&rho_t)?;
-            vars.get("b_feat")
-                .context("b_feat var missing")?
-                .set(&b_feat_t)?;
+            vars.get(&format!("pb_l{l}_e_cell"))
+                .context("pb level e_cell var missing")?
+                .set(&e_cell_t)?;
         }
-        cell_model.e_feat = rho_t;
-        cell_model.b_feat = b_feat_t;
-        // Scatter the pseudobulk rows onto their level heads in one pass over
-        // the units (levels first, then cells, per `UnitTable`).
-        let mut level_rows: Vec<Vec<f32>> = level_models
-            .iter()
-            .map(|lm| lm.e_cell.dim(0).map(|n_pb| vec![0f32; n_pb * h]))
-            .collect::<Result<_, _>>()?;
-        for u in 0..units.n_units() {
-            let l = units.level[u] as usize;
-            if l < level_rows.len() {
-                let p = units.source_index[u] as usize;
-                let dst = &mut level_rows[l][p * h..(p + 1) * h];
-                for (k, x) in out.e_u.row(u).iter().enumerate() {
-                    dst[k] = *x;
-                }
-            }
-        }
-        for (l, (lm, rows)) in level_models.iter_mut().zip(level_rows).enumerate() {
-            let n_pb = lm.e_cell.dim(0)?;
-            let e_cell_t = Tensor::from_vec(rows, (n_pb, h), &config.device)?;
-            {
-                let vars = varmap.data().lock().unwrap();
-                vars.get(&format!("pb_l{l}_e_cell"))
-                    .context("pb level e_cell var missing")?
-                    .set(&e_cell_t)?;
-            }
-            lm.e_cell = e_cell_t;
-        }
-        info!(
-            "Phase 1 (hier) — done: loss/unit {:.4}; dictionary {} × {h} composed from {n_modules} \
-             modules",
-            out.final_loss_per_unit, n_features
-        );
-    } else {
-        // Splice path (gem): the composite NCE trainer, unchanged.
-        let joint_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
-        let mut opt1 = AdamW::new(varmap.all_vars(), adamw_params())?;
-        let mut p1 = stage_params(&config);
-        p1.epochs = warmup_epochs;
-        let cell_prefix = if use_cell_axis { "cell + " } else { "" };
-        let n_pb_levels = num_levels;
-        if refine_epochs > 0 {
-            info!(
-                "Phase 1 (joint) = LINEAGE WARM-UP — {}/{} epochs; the DAG refine gets the other \
-                 {} (ONE shared epoch budget, NOT doubled). Training features + {}{} pb \
-                 level(s)",
-                warmup_epochs, config.epochs, refine_epochs, cell_prefix, n_pb_levels,
-            );
-        } else {
-            info!(
-                "Phase 1 (joint) — features + {}{} pb level(s), {} epochs",
-                cell_prefix, n_pb_levels, warmup_epochs,
-            );
-        }
-        train_composite(
-            &CompositeTrainContext {
-                axes: &joint_axes,
-                dev: &config.device,
-                stop: &stop,
-                cell_to_pb_per_level: None,
-                lineage_sem: None,
-                lineage_sem_theta: None,
-            },
-            &mut opt1,
-            &p1,
-        )?;
+        lm.e_cell = e_cell_t;
     }
-    // `cell_axis` / `pb_axes` borrows of `cell_model` / `cell_samplers` end
-    // here, freeing them for the phase-2 `&mut` projection below.
+    info!(
+        "Phase 1 (hier) — done: loss/unit {:.4}; dictionary {} × {h} composed from {n_modules} \
+         modules over {n_tracks} track(s)",
+        out.final_loss_per_unit, n_features
+    );
 
     // The trained pseudobulk tables, read before phase 2 takes `&mut cell_model`:
     // one `[n_pb × H]` per level with each pseudobulk's batch.
@@ -392,141 +324,26 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // like a model that trained badly rather than one whose output was never refreshed.
     cell_model.materialize_e_feat()?;
 
-    // Lineage-DAG refine (gem β-sharing only; fixed velocity-KNN structure). The warm-up
-    // phase 1 above yields a trained-enough dictionary: read pb-level velocity
-    // (identity θ_pb + velocity δ_pb, reusing the phase-2 dual solver on the
-    // already-batch-corrected pb aggregates), build a fixed velocity-oriented pb
-    // graph, and run a SECOND phase-1 pass with the velocity-drift SEM residual on
-    // so the shared E_feat picks up lineage geometry. The returned `pb_velocity` is
-    // the FINAL readout (post-refine), consumed by the phase-2 cell lift. Flag off
-    // or non-β-sharing ⇒ `None` and byte-identical training.
-    let mut pb_velocity: Option<Vec<PbLevelVelocity>> = None;
-    let mut refine_loss = 0f32; // final refine loss → QC likelihood-hygiene signal
-    if config.lineage_dag && !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        match config.feat_factor.as_ref() {
-            Some(spec) => {
-                // Warm-up pb velocity, optionally smoothed + confidence-gated (①+②) so
-                // `sign(δ_pb)` is stabilized before it orients the graph / SEM drift.
-                let warmup_vel = maybe_smooth(
-                    pb_velocity_readout(
-                        &cell_model,
-                        &pb_blobs,
-                        &spec.unspliced_rows,
-                        &config.device,
-                    )?,
-                    h,
-                    config.lineage_smooth,
-                );
-
-                // The SAME axis set the warm-up trained — that identity is the point
-                // of the refine, which differs only by its SEM term.
-                let refine_axes = ax.composite_axes(&cell_model, &level_models, unified, &pb_blobs);
-                let mut p2 = stage_params(&config);
-                // Share the `config.epochs` budget: the refine gets what the warm-up
-                // (phase 1) did not, so `--lineage-dag` reallocates rather than doubles.
-                p2.epochs = refine_epochs;
-
-                // Fixed velocity-oriented KNN graph + velocity-drift SEM residual. The
-                // dense KNN graph (each node → its velocity-forward neighbours), built
-                // once from the warm-up readout, shapes E_feat in this single refine
-                // pass; the cell-lift rebuilds the same graph from the final `pb_velocity`.
-                let levels = lineage::build_pb_lineage(
-                    &warmup_vel,
-                    h,
-                    lineage::DEFAULT_LINEAGE_KNN,
-                    config.lineage_mst,
-                );
-                let n_edges: usize = levels.iter().map(|l| l.edges.len()).sum();
-                let mut terms: Vec<Option<PbSemTerm>> = Vec::with_capacity(1 + num_levels);
-                if use_cell_axis {
-                    terms.push(None);
-                }
-                for lvl in &levels {
-                    terms.push(PbSemTerm::new(
-                        lvl,
-                        h,
-                        lineage::DEFAULT_SEM_STEP,
-                        lineage::DEFAULT_SEM_WEIGHT,
-                        &config.device,
-                    )?);
-                }
-                info!(
-                    "Lineage refine (velocity-KNN) = SECOND pass — {}/{} epochs (phase 1's \
-                     remaining budget; SHARED with the warm-up, NOT a second full training). \
-                     Baking lineage into E_feat: {} oriented pb edge(s) across {} level(s); \
-                     velocity-drift SEM residual ON",
-                    refine_epochs,
-                    config.epochs,
-                    n_edges,
-                    levels.len()
-                );
-                // Second lineage term: the θ-pseudotime DAG.
-                let theta_terms = build_theta_sem_terms(
-                    &warmup_vel,
-                    &levels,
-                    h,
-                    use_cell_axis,
-                    num_levels,
-                    &config.device,
-                )?;
-                let mut opt2 = AdamW::new(varmap.all_vars(), adamw_params())?;
-                refine_loss = train_composite(
-                    &CompositeTrainContext {
-                        axes: &refine_axes,
-                        dev: &config.device,
-                        stop: &stop,
-                        cell_to_pb_per_level: None,
-                        lineage_sem: Some(&terms),
-                        lineage_sem_theta: Some(&theta_terms),
-                    },
-                    &mut opt2,
-                    &p2,
-                )?;
-                drop(refine_axes);
-
-                // Refresh the dictionary and read the FINAL pb velocity (post-refine),
-                // smoothed the same way so the cell-lift orients off a denoised field.
-                cell_model.materialize_e_feat()?;
-                pb_velocity = Some(maybe_smooth(
-                    pb_velocity_readout(
-                        &cell_model,
-                        &pb_blobs,
-                        &spec.unspliced_rows,
-                        &config.device,
-                    )?,
-                    h,
-                    config.lineage_smooth,
-                ));
-            }
-            None => {
-                log::warn!(
-                    "lineage_dag set but the model is not β-sharing (feat_factor = None); \
-                     skipping lineage refine"
-                );
-            }
-        }
-    }
-
-    // The first Ctrl+C stops the *major SGD loops* — phase 1 above and the lineage
-    // refine — and nothing else. Every stage from here down is a follow-up routine
-    // that turns the trained dictionary into the run's deliverables, so gating them
-    // on `stop` does not save the user time, it destroys the output. Phase 2
-    // especially: below `--phase1-cells-per-pb n_cells` most cells never train in
-    // phase 1, so their `e_cell` rows are still randn init until phase 2 runs —
-    // skipping it wrote a `cell_embedding.parquet` of pure noise, silently. A
-    // second Ctrl+C aborts the process outright (`matrix_util::stop`), which is the
+    // The first Ctrl+C stops the *major SGD loop* — phase 1 above — and nothing
+    // else. Every stage from here down is a follow-up routine that turns the
+    // trained dictionary into the run's deliverables, so gating it on `stop`
+    // does not save the user time, it destroys the output. Phase 2 especially:
+    // below `--phase1-cells-per-pb n_cells` most cells never train in phase 1,
+    // so their `e_cell` rows are still randn init until phase 2 runs — skipping
+    // it wrote a `cell_embedding.parquet` of pure noise, silently. A second
+    // Ctrl+C aborts the process outright (`matrix_util::stop`), which is the
     // escape hatch for a user who really does want out now.
     if stop.load(std::sync::atomic::Ordering::Relaxed) {
         log::warn!(
             "phase 1 was interrupted — the feature dictionary is short-trained. The follow-up \
-             stages (phase-2 projection, cell-lift) still run, so \
-             the outputs are complete but fit against a partially trained dictionary; treat \
-             this run as a draft. Ctrl+C again to abort outright."
+             stage (phase-2 projection) still runs, so the outputs are complete but fit against \
+             a partially trained dictionary; treat this run as a draft. Ctrl+C again to abort \
+             outright."
         );
     }
 
     // Phase 2: per-cell projection onto the fixed feature side. With
-    // E_feat/b_feat/z/δ held fixed each cell's embedding is independent, so this is
+    // E_feat/b_feat held fixed each cell's embedding is independent, so this is
     // a cell-block Poisson SGD over `e_cell`/`b_cell` alone — see
     // `projection::project_cells_phase2`. The per-cell intercept `b_cell` is fitted
     // and kept.
@@ -539,16 +356,8 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             .as_ref()
             .map(|f| f.cell_fold(&unified.batch_membership));
 
-        // β-sharing (gem): identity is resolved by the SPLICED edges (stored raw),
-        // and a second pass emits the raw velocity increment δ on the cell axis.
-        // Plain (bge): one combined projection = identity (stored as dir), no splice
-        // output.
-        let unspliced = config
-            .feat_factor
-            .as_ref()
-            .map(|s| s.unspliced_rows.as_slice());
-        // Plain path: the phase-1 pseudobulk tables are the distillation
-        // targets of the encoder that replaces the per-cell solve.
+        // The phase-1 pseudobulk tables are the distillation targets of the
+        // encoder that replaces the per-cell solve.
         anyhow::ensure!(
             pb_embeddings.len() == cell_to_pb_per_level.len(),
             "phase 2: {} pseudobulk tables for {} membership levels",
@@ -575,83 +384,16 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             f64::from(PHASE2_RIDGE),
             &config.device,
             batch_fold,
-            unspliced,
-            config.joint_velocity,
             Some(&spec),
+            &tracks,
         )?
-    };
-
-    // cell-lift: phase-2 cell-lineage lift (evaluation only). Runs on the FINAL pb
-    // velocity readout + the now-projected per-cell identity θ_c. Integrate a pb
-    // pseudotime/fate along the fixed velocity-oriented graph at the finest level, then
-    // landmark-blend it to every cell. `None` when lineage-DAG is off or the readout is empty.
-    // Not gated on `stop` — see the phase-2 note above.
-    let mut lineage_qc: Option<LineageQc> = None;
-    let cell_lineage = match &pb_velocity {
-        Some(pbv) if !pbv.is_empty() => {
-            let level = pbv.len() - 1; // finest level: densest landmark tiling
-            let vel = &pbv[level];
-            // Rebuild the velocity-oriented pb graph from the final readout — the same
-            // fixed velocity-KNN the refine used to shape E_feat.
-            let edges = lineage::build_pb_lineage(
-                std::slice::from_ref(vel),
-                h,
-                lineage::DEFAULT_LINEAGE_KNN,
-                config.lineage_mst,
-            )
-            .pop()
-            .map(|l| {
-                l.edges
-                    .into_iter()
-                    .map(|(i, j, w)| (i as usize, j as usize, w))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-            let traj = lift::pb_trajectory(vel, &edges, h, lineage::DEFAULT_SEM_STEP);
-            // Put the cells back in the LANDMARKS' frame before comparing. `vel` was
-            // read by the Newton pb readout above, i.e. before phase 2 gauge-fixed
-            // the cell latents, and pb θ is never re-gauged — so `lift_cells`, which
-            // takes `dist2(θ_c, θ_p)` and projects `θ_c − θ_p` onto the pb velocity,
-            // would otherwise be differencing two different frames and displacing
-            // every cell by `‖θ̄‖` (88 on the reference fit, against a post-centring
-            // median `‖θ‖` of 5.6). See `Phase2Result::theta_mean`.
-            let mut theta_c: Vec<f32> = cell_model.e_cell.flatten_all()?.to_vec1()?;
-            for (k, x) in theta_c.iter_mut().enumerate() {
-                *x += phase2.theta_mean[k % h];
-            }
-            let lin = lift::lift_cells(&theta_c, n_cells, vel, &traj, h, level);
-            // Unsupervised per-run structural diagnostics (decisiveness, coherence, fate
-            // count, ambiguity, likelihood) — for run inspection, not a validated quality
-            // ranker.
-            let qc = lift::compute_lineage_qc(
-                &traj,
-                vel,
-                &lin,
-                refine_loss,
-                h,
-                lineage::DEFAULT_LINEAGE_KNN,
-            );
-            info!(
-                "cell-lift — finest pb level {}: {} nodes, {} root(s), {} fate(s), \
-                 top-source reach {:.2}, velocity-coherence {:.2}",
-                level,
-                vel.n_pb,
-                traj.roots.len(),
-                traj.terminals.len(),
-                qc.root_decisiveness,
-                qc.velocity_coherence,
-            );
-            lineage_qc = Some(qc);
-            Some(lin)
-        }
-        _ => None,
     };
 
     // The pseudobulk tables leave in the CELLS' frame: phase 2 moved the cells
     // by −θ̄ (folded into `b_feat`), and a reader putting the two tables in one
     // layout — the anchors over the cells they placed — needs them shifted
-    // alike. The in-memory tables served phase 2 (distillation targets, the
-    // cell lift) in the as-trained frame before this point.
+    // alike. The in-memory tables served phase 2 (distillation targets) in the
+    // as-trained frame before this point.
     let mut pb_embeddings = pb_embeddings;
     for level in &mut pb_embeddings {
         for mut row in level.e_pb.row_iter_mut() {
@@ -667,76 +409,9 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         finest_collapse,
         varmap,
         cell_nrms: phase2.cell_nrms,
-        cell_velocity: phase2.velocity,
-        pb_velocity,
-        cell_lineage,
-        lineage_qc,
         pb_embeddings,
         cell_encoder: phase2.cell_encoder,
+        // One fitted intercept per NON-base track; empty on a one-track axis.
+        track_intercepts: phase2.other_intercepts,
     })
-}
-
-/// Build the θ-pseudotime DAG's per-axis SEM terms for the lineage refine, aligned
-/// 1:1 with the refine axes ([cell?] + pb levels) like the velocity terms. `vel_levels`
-/// is the velocity-oriented graph, used only to pick each level's root; orientation and
-/// drift come from θ. See [`lineage::build_theta_dag`].
-fn build_theta_sem_terms(
-    warmup_vel: &[PbLevelVelocity],
-    vel_levels: &[lineage::PbLineageLevel],
-    h: usize,
-    use_cell_axis: bool,
-    num_levels: usize,
-    dev: &candle_util::candle_core::Device,
-) -> anyhow::Result<Vec<Option<PbSemTerm>>> {
-    let theta_levels =
-        lineage::build_theta_dag(warmup_vel, vel_levels, h, lineage::DEFAULT_LINEAGE_KNN);
-    let mut terms: Vec<Option<PbSemTerm>> = Vec::with_capacity(1 + num_levels);
-    if use_cell_axis {
-        terms.push(None);
-    }
-    for lvl in &theta_levels {
-        terms.push(PbSemTerm::new(
-            lvl,
-            h,
-            lineage::DEFAULT_SEM_STEP,
-            lineage::DEFAULT_THETA_SEM_WEIGHT,
-            dev,
-        )?);
-    }
-    Ok(terms)
-}
-
-/// Apply the velocity-graph smoothing + confidence gating (①+②) to a pb readout when
-/// `on`; an identity pass-through otherwise. Kept here so both readout sites share one
-/// call and the default constants stay in one place.
-fn maybe_smooth(vel: Vec<PbLevelVelocity>, h: usize, on: bool) -> Vec<PbLevelVelocity> {
-    if on {
-        lineage::smooth_pb_velocity_levels(&vel, h, lineage::DEFAULT_SMOOTH_KNN)
-    } else {
-        vel
-    }
-}
-
-/// Analytic pb-level velocity readout: identity `θ_pb` + velocity `δ_pb` per pb
-/// node per level, reusing the phase-2 dual solver on the (already
-/// batch-corrected) pb aggregates. Requires a materialized `e_feat` dictionary.
-/// Called twice on the lineage-DAG path — once on the warm-up dictionary (to
-/// orient the fixed pb graph) and once after the refine pass (the returned readout).
-fn pb_velocity_readout(
-    model: &JointEmbedModel,
-    pb_blobs: &[UnifiedData],
-    unspliced_rows: &[bool],
-    dev: &candle_util::candle_core::Device,
-) -> anyhow::Result<Vec<PbLevelVelocity>> {
-    let feat_flat = model.e_feat.flatten_all()?.to_vec1()?;
-    let b_feat_v = model.b_feat.to_vec1()?;
-    project_pbs_phase2(
-        &feat_flat,
-        &b_feat_v,
-        model.embedding_dim,
-        pb_blobs,
-        unspliced_rows,
-        f64::from(PHASE2_RIDGE),
-        dev,
-    )
 }

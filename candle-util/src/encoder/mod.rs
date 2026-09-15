@@ -9,7 +9,6 @@
 pub mod coarse_pool;
 pub mod dense_pool;
 pub mod gaussian;
-pub mod gem_encoder;
 pub mod indexed;
 pub mod joint_softmax;
 pub mod pair_head;
@@ -19,7 +18,6 @@ pub mod softmax;
 pub mod softmax_iaf;
 
 pub use gaussian::{GaussianEncoder, GaussianEncoderArgs};
-pub use gem_encoder::{GemEncoderInput, GemIndexedEncoder, GemIndexedEncoderArgs};
 pub use indexed::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 pub use joint_softmax::{LogSoftmaxJointEncoder, LogSoftmaxJointEncoderArgs};
 pub use pair_head::{SymmetricPairHead, SymmetricPairHeadArgs};

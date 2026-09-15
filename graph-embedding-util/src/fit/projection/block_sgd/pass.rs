@@ -13,8 +13,10 @@
 
 use super::edges::{block_cells, EdgeTable};
 use super::solve::solve_block;
-use super::{Phase2Input, GATE_FOLD_EPS, GROUP_BLOCKS, TARGET_DELTA_S};
-use candle_util::candle_core::{Device, Tensor};
+use super::{
+    Phase2Input, BETA1, BETA2, GATE_FOLD_EPS, GROUP_BLOCKS, LR_FLOOR_FRAC, TARGET_DELTA_S,
+};
+use candle_util::candle_core::{DType, Device, Tensor};
 use log::info;
 
 ////////////////////////////////////
@@ -33,9 +35,9 @@ pub(crate) struct DictSpec<'a> {
     /// where the solve reads it.
     pub(crate) lambda: f64,
     pub(crate) dev: &'a Device,
-    /// Log prefix — `"Phase 2"`, `"Projection"`, `"pb velocity readout"`.
+    /// Log prefix — `"Phase 2"`, `"Projection"`.
     pub(crate) label: &'static str,
-    /// This pass's own name within that: `"identity"`, `"velocity"`, `"nodes"`.
+    /// This pass's own name within that: `"identity"`, `"polish"`, `"nodes"`.
     pub(crate) pass: &'static str,
 }
 
@@ -224,9 +226,6 @@ impl PassDict {
 /// against. The dictionary half is [`PassDict`].
 pub(super) struct PassSpec<'a> {
     pub(super) edges: &'a EdgeTable,
-    /// Fixed identity `θ` (host, `[n_kept × h]`) folded into the per-edge offset —
-    /// `Some` only on the velocity pass.
-    pub(super) base_theta: Option<&'a [f32]>,
     /// Warm start for the latent (host, `[n_kept × h]`); `None` starts at the
     /// null model. The intercept starts at its exact conditional MLE either way.
     pub(super) init_theta: Option<&'a [f32]>,
@@ -237,7 +236,13 @@ pub(super) struct PassSpec<'a> {
 /// One pass's per-cell result, indexed by position in `cells` (not by global id).
 pub(crate) struct PassOut {
     pub(crate) latent: Vec<f32>,
+    /// The base track's per-cell intercept — the only one a single-partition pass
+    /// has, and track 0's on a multi-track axis.
     pub(crate) intercept: Vec<f32>,
+    /// Tracks `1..T`, one `[n_kept]` intercept vector each; **empty** on every
+    /// single-partition pass (this one included — see
+    /// [`super::tracks`] for the pass that fills it).
+    pub(crate) other_intercepts: Vec<Vec<f32>>,
 }
 
 pub(super) fn run_pass(
@@ -299,7 +304,56 @@ pub(super) fn run_pass(
             String::new()
         },
     );
-    Ok(PassOut { latent, intercept })
+    Ok(PassOut {
+        latent,
+        intercept,
+        other_intercepts: Vec::new(),
+    })
+}
+
+//////////////////////////////////
+// Shared block-loop quantities //
+//////////////////////////////////
+
+/// Adam's effective step multiplier at `step` of a budget of `max_steps`: the
+/// linearly decayed learning rate times the bias correction.
+///
+/// ```text
+/// lr        = lr0 · (1 − step/max_steps · (1 − LR_FLOOR_FRAC))
+/// step_size = lr · √(1 − β₂^t) / (1 − β₁^t),   t = step + 1
+/// ```
+///
+/// The decay lets a block settle instead of dithering around the optimum. Shared
+/// by [`super::solve`] and [`super::tracks`] because a schedule re-typed in two
+/// loops is a schedule that drifts, and a one-track axis never runs the second
+/// one — nothing would catch it. Scalar only: the loop bodies stay apart.
+pub(super) fn adam_step_size(lr0: f64, step: usize, max_steps: usize) -> f64 {
+    let frac = step as f64 / max_steps as f64;
+    let lr = lr0 * (1.0 - frac * (1.0 - LR_FLOOR_FRAC));
+    let t = (step + 1) as f64;
+    lr * (1.0 - BETA2.powf(t)).sqrt() / (1.0 - BETA1.powf(t))
+}
+
+/// Poisson deviance `2·Σ[ n·ln(n/μ) − (n − μ) ]` over a block's observed edges,
+/// from its dense counts `n_t [Bc, F]` and its **already clamped** scores `s` of
+/// the same shape. Reduced on device, so the block's fitted values never cross
+/// the bus; the one f64 that comes back is the block's total.
+///
+/// Computed densely against `N` like the data term, which needs the unobserved
+/// entries — where `n = 0` — to contribute nothing: `n·ln(n/μ)` has the
+/// `n log n → 0` limit there, and `−(n − μ)` is not part of a deviance taken over
+/// observed edges only. `n.max(1)` inside the log keeps `ln 0` out of the graph,
+/// and multiplying by `n` zeroes the term anyway; the mask does the same for the
+/// second piece.
+///
+/// Both block loops call this. Caller-side guard: skip it when the block has no
+/// observed edges at all.
+pub(super) fn poisson_deviance(n_t: &Tensor, s: &Tensor) -> anyhow::Result<f64> {
+    let mu = s.exp()?;
+    let mask = n_t.gt(0f32)?.to_dtype(DType::F32)?;
+    let log_n = n_t.clamp(1f32, f32::MAX)?.log()?;
+    let term = ((n_t * (log_n - s)?)? - ((n_t - &mu)? * &mask)?)?;
+    Ok(f64::from(term.sum_all()?.to_scalar::<f32>()?) * 2.0)
 }
 
 #[derive(Default)]
@@ -314,14 +368,37 @@ pub(super) struct PassStats {
 }
 
 impl PassStats {
-    fn absorb(&mut self, b: &BlockOut) {
+    /// Fold one finished block's report in. The per-track solve
+    /// ([`super::tracks`]) returns its own block type, so this takes the numbers
+    /// rather than a `BlockOut` — one place that decides what "a block hit the
+    /// cap" and "an edge's share of the deviance" mean, for both loops.
+    pub(super) fn fold(
+        &mut self,
+        steps: usize,
+        converged: bool,
+        clamped: bool,
+        deviance: f64,
+        n_edges: usize,
+        loop_secs: f64,
+    ) {
         self.blocks += 1;
-        self.steps += b.steps;
-        self.at_cap += usize::from(!b.converged);
-        self.clamped += usize::from(b.clamped);
-        self.dev_sum += b.deviance;
-        self.dev_n += b.n_edges as f64;
-        self.secs += b.loop_secs;
+        self.steps += steps;
+        self.at_cap += usize::from(!converged);
+        self.clamped += usize::from(clamped);
+        self.dev_sum += deviance;
+        self.dev_n += n_edges as f64;
+        self.secs += loop_secs;
+    }
+
+    fn absorb(&mut self, b: &BlockOut) {
+        self.fold(
+            b.steps,
+            b.converged,
+            b.clamped,
+            b.deviance,
+            b.n_edges,
+            b.loop_secs,
+        );
     }
     pub(super) fn ms_per_step(&self) -> f64 {
         1e3 * self.secs / self.steps.max(1) as f64

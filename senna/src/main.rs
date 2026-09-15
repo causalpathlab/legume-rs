@@ -55,7 +55,6 @@ mod empirical_dict;
 mod eval_topic;
 mod fne;
 mod gem;
-mod gem_encoder;
 mod geometry;
 mod hvg;
 mod impute;
@@ -100,8 +99,6 @@ use eval_topic::*;
 use fne::{fit_fne, FneArgs};
 use gem::args::GemArgs;
 use gem::run::run_gem_embedding;
-use gem_encoder::args::GemEncoderArgs;
-use gem_encoder::run::run_gem_encoder;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
 use lineage::args::LineageArgs;
@@ -493,128 +490,38 @@ enum Commands {
     #[command(
         name = "gem",
         aliases = ["gem-embedding"],
-        about = "GEM: Geodesic Embedding for RNA Motion in one cell space",
-        long_about = "Geodesic Embedding for RNA Motion: a joint cell-feature embedding.\n\
-                      Motion is the local velocity δ (the tangent);\n\
-                      the lineage is the geodesic path it traces.\n\
-                      Runs over the shared graph_embedding_util engine,\n\
-                      which is modality-agnostic. Fed gene counts (spliced + unspliced) today;\n\
-                      embeds any per-feature count.\n\
+        about = "GEM: joint gene-count and modality-track embedding over the shared bge engine",
+        long_about = "Joint embedding of gene counts and any co-measured modality tracks,\n\
+                      over the exact same graph_embedding_util engine and driver\n\
+                      `senna bge` runs: the bilinear score e_feat·e_cell + b_feat + b_cell,\n\
+                      phase-1 multilevel-pseudobulk training,\n\
+                      phase-2 analytical per-cell projection.\n\
                       \n\
-                      Per-gene β-sharing:\n\
-                      each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
-                      A gene's spliced and unspliced tracks thus share one identity.\n\
-                      Two things are solved JOINTLY by default:\n\
-                      cell identity θ → `{out}.cell_embedding.parquet` (raw),\n\
-                      and the velocity increment δ → `{out}.velocity.parquet`.\n\
-                      so θ is powered by both splice tracks rather than the spliced one alone.\n\
-                      `--sequential-velocity` reverts to the older two-step fit:\n\
-                      θ from the spliced edges, then δ from the unspliced with θ held fixed,\n\
-                      which pins θ to the mature state for a cleaner δ readout.\n\
-                      The nascent state is just θ+δ; ‖δ‖ is speed.\n\
-                      Per-gene velocity is the in-model δ_g → `{out}.delta_feature_embedding.parquet`;\n\
-                      it is written whenever the input carries unspliced rows. `--delta-l2 0`,\n\
-                      the default, applies a mild ridge to keep it identified.\n\
-                      The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
-                      gene-keyed so a marker panel joins against it directly.\n\
+                      Positional GENES files hold count rows, `{gene}/count/{spliced|unspliced}`.\n\
+                      --modality files each hold one co-measured modality's two channel rows,\n\
+                      `{gene}/{m6a,atoi,apa}/{channel}`; the modality is read from the rows,\n\
+                      never the file name. Every row is one TRACK:\n\
+                      the base count row shares a gene's loading outright,\n\
+                      and every other track adds a ridge-shrunk offset to it (--offset-l2).\n\
+                      Rows match across files by exact name;\n\
+                      cells match by barcode within a sample (--genes-sample-strip).\n\
                       \n\
-                      `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
-                      it is the raw per-cell Poisson increment δ_c,\n\
-                      which a shrinkage-toward-origin common mode dominates: δ_c ≈ −0.5·θ,\n\
-                      from fitting sparse unspliced counts absolutely.\n\
-                      Use `{out}.velocity.parquet` for the velocity.\n\
-                      \n\
-                      With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
-                      It then writes a per-cell pseudotime + fate backbone.\n\
-                      That backbone is a prior for `senna lineage`, not a replacement.\n\
-                      \n\
-                      `{out}.gem.json` records that this prefix came from the EMBEDDING model,\n\
-                      which is how `senna annotate-by-projection` and `senna lineage` pick their statistic.",
+                      Writes the same output set `senna bge` does,\n\
+                      plus {out}.feature_contrast.parquet (one row per gene and modality,\n\
+                      columns h0..h{H-1}):\n\
+                      {out}.senna.json, {out}.{cell_embedding,dictionary,feature_embedding,\n\
+                      feature_loading,feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
+                      plus {out}.{latent,topic_embedding}.parquet from the resolved ETM.",
         after_long_help = "\
 	Example:\n\
-  senna gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\
-  Multiple samples — pass them positionally, so shell globs work.\n\
+  senna gem out/rep1_genes.zarr.zip -o out/gem\n\n\
+  With a co-measured modality, one file per sample, matched by sample id:\n\n\
+  senna gem out/*_genes.zarr.zip --modality out/*_m6a.zarr.zip -o out/gem\n\n\
+  Multiple gene samples, pass them positionally so shell globs work.\n\
   Each sample becomes a batch via its barcodes' `@batch` tag.\n\n\
   senna gem out/rep1_genes.zarr.zip out/rep2_genes.zarr.zip -o out/gem\n\
-  senna gem out/*_genes.zarr.zip -o out/gem\n\n\
-  The `--genes a,b` flag form still works, but not together with the positional one.")]
+  senna gem out/*_genes.zarr.zip -o out/gem")]
     Gem(GemArgs),
-
-    #[command(
-        name = "gem-encoder",
-        // `gem-topic`: the cell latent IS a softmax simplex, so this is a
-        // topic model over the two splice tracks — the name people reach for
-        // when they come from `senna topic` rather than from `senna gem`.
-        visible_aliases = ["gem-topic"],
-        aliases = ["gem-enc"],
-        about = "GEM-encoder: a masked generative model of the GEM",
-        long_about = "GEM-encoder — the masked generative sibling of `senna gem`.\n\
-                      \n\
-                      Both fit the same geometry over the same spliced+unspliced counts,\n\
-                      from opposite directions.\n\
-                      `gem` is discriminative (NCE over cell-feature edges).\n\
-                      This is generative and amortized:\n\
-                      an encoder reads a cell\'s top-K GENES with BOTH splice tracks attached,\n\
-                      pools each track over that context (not over the full gene space),\n\
-                      and an embedded-topic decoder imputes whichever track was held out.\n\
-                      \n\
-                      The model runs the biology forward:\n\
-                      u + delta -> s. Nascent pre-mRNA is transcribed first and matures into spliced mRNA,\n\
-                      so the UNSPLICED embedding is the base rho and the spliced one is rho + delta.\n\
-                      Delta is therefore the steady-state splice-ratio offset —\n\
-                      log(splicing / degradation), not a splicing rate —\n\
-                      because that is the combination that survives at steady state (s = (beta/gamma) u).\n\
-                      A gene scores high either by splicing fast or by having stable mature mRNA,\n\
-                      and this model cannot tell those apart.\n\
-                      NOTE this is the OPPOSITE base from `senna gem`,\n\
-                      whose delta shifts spliced -> unspliced;\n\
-                      the two write same-named delta_feature_embedding.parquet files that are NOT comparable.\n\
-                      `{out}.gem.json` records `delta_base`.\n\
-                      \n\
-                      Training masks a fraction of GENES with ONE draw shared by both tracks,\n\
-                      and predicts both from ONE theta. That gives delta a monopoly:\n\
-                      the only thing that can make the two tracks differ is delta itself.\n\
-                      Hiding a whole track instead was tried and removed —\n\
-                      it hands the encoder a competing LATENT delta, which it takes,\n\
-                      and delta degenerates.\n\
-                      \n\
-                      VELOCITY is the cell-level delta = theta_nascent - theta_mature,\n\
-                      each fitted POST HOC to its own track against the frozen dictionaries.\n\
-                      Elliptical slice sampling, warm-started from the encoder,\n\
-                      which also closes the amortization gap.\n\
-                      The model has one latent by design,\n\
-                      so it cannot express that difference while training;\n\
-                      estimating delta first and reading the movement out of it keeps the two from competing.\n\
-                      The per-axis population mean is removed before writing,\n\
-                      and recorded in `{out}.gem.json` as `velocity_common_mode`.\n\
-                      \n\
-                      The latent is a softmax simplex — hence the `gem-topic` alias —\n\
-                      and `{out}.latent.parquet` holds LOG THETA, so theta = exp(row),\n\
-                      the same contract every senna topic-family run follows.\n\
-                      Pick the loss with `--likelihood nb|multinomial`\n\
-                      \n\
-                      BATCH ADJUSTMENT IS ON BY DEFAULT,\n\
-                      and you should check what your batches are:\n\
-                      with several inputs and no `--batch-files`,\n\
-                      each file's cells are tagged `@<sample>` and that tag becomes the batch —\n\
-                      so on rep{1,2,3}_{wt,mut} the batches are the SIX samples,\n\
-                      and the wt-vs-mut contrast goes out with the donor effects.\n\
-                      Pass `--batch-files` with the labels you mean, or `--no-batch-adjust`.\n\
-                      \n\
-                      Pooling is a masked value-weighted sum per track, concatenated;\n\
-                      the attention-slot variant was removed after it measured\n\
-                      3.5x worse on between-cell variance,\n\
-                      and went degenerate whenever a track was hidden.\n\
-                      Ctrl-C stops training gracefully and still writes outputs,\n\
-                      flagged as partial.",
-        after_long_help = "\
-	Example:\n\
-  senna gem-encoder out/rep2_wt_genes.zarr.zip out/rep2_mut_genes.zarr.zip \\\n\
-    -o out/gme -t 20 --device cuda\n\n\
-  senna gem-encoder out/*_genes.zarr.zip -o out/gme --likelihood nb\n\n\
-  Watch |delta| and the splice-ratio r in the log.\n\
-  If delta collapses toward 0, or r is near 0, the velocity is not trustworthy.")]
-    GemEncoder(GemEncoderArgs),
 
     // ─────────── 2. Held-out inference ───────────
     #[command(
@@ -916,11 +823,14 @@ enum Commands {
     #[command(
         name = "lineage",
         aliases = ["trajectory", "traj"],
-        about = "Velocity-oriented lineage + principal curves over a `senna gem` run",
-        long_about = "Infer a velocity-oriented lineage over the embeddings from `senna gem`.\n\n\
-            Reads a θ/δ pair by prefix (`-f/--from`), picked by `--theta-from`:\n\
-            on an EMBEDDING run, cell_embedding.parquet + velocity.parquet (H space);\n\
-            on a TOPIC run, latent.parquet + velocity_factor.parquet (the K-space simplex).\n\
+        about = "Geometry-first lineage and principal curves over a `senna gem` run",
+        long_about = "Infer a lineage over the embeddings from `senna gem`.\n\n\
+            Reads θ by prefix (`-f/--from`), picked by `--theta-from`:\n\
+            on an EMBEDDING run, cell_embedding.parquet (H space);\n\
+            on a TOPIC run, latent.parquet alone (the K-space simplex, geometry-only).\n\
+            No senna command currently writes {from}.velocity.parquet.\n\
+            When that table is present its δ orients each candidate edge;\n\
+            when it is absent every edge falls back to the geometric MST direction.\n\
             The topic default is deliberate:\n\
             `cell_embedding = θ·α` confines every cell to the convex hull of α's K rows,\n\
             so a diffuse softmax θ compresses the population toward that hull's centroid —\n\
@@ -941,7 +851,6 @@ enum Commands {
             `--no-orient-velocity` ignores velocity entirely.\n\n\
             Root selection (priority order):\n\
             --root-node, --root-cell, --root-type (marker-grounded, needs --markers),\n\
-            --root-from-gem (gem's velocity-DAG source),\n\
             else the velocity-flux source.\n\n\
             The low-coverage modalities are NOT embedded here;\n\
             this produces the lineage ordering that a separate confounder-adjusted test runs against.\n\n\
@@ -961,7 +870,7 @@ enum Commands {
             https://doi.org/10.1186/s12864-018-4772-0",
         after_long_help = "\
 	Example:\n\
-	senna gem --genes out/rep1_genes.zarr.zip -o out/gem\n\
+	senna gem out/rep1_genes.zarr.zip -o out/gem\n\
   senna lineage -f out/gem -o out/gem"
     )]
     Lineage(LineageArgs),
@@ -998,7 +907,8 @@ enum Commands {
             (pooling divergent lineages onto one pseudotime axis weakens the trend reading).\n\
             Skip with --no-celltype.\n\n\
             Not double-dipping:\n\
-            branches come from gem θ + velocity, which never see the modality.\n\n\
+            branches come from gem θ, plus a velocity-oriented δ when a table for it is\n\
+            present, which never see the modality.\n\n\
             Output is tidy:\n\
             `site | gene | subunit | branch` (branch level) or\n\
             `site | gene | subunit | cell_type` (cell-type level —\n\
@@ -1266,7 +1176,6 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Docs(args) => run_docs(args)?,
         Commands::Gem(args) => run_gem_embedding(args)?,
-        Commands::GemEncoder(args) => run_gem_encoder(args)?,
         Commands::Lineage(args) => run_lineage(args)?,
         Commands::LineagePlot(args) => run_lineage_plot(args)?,
         Commands::Assoc(args) => run_assoc(args)?,

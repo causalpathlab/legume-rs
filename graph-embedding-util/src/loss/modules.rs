@@ -16,8 +16,8 @@
 //! different gene panel applies.
 //!
 //! [`module_step_loss`], [`module_priors`] and [`log_membership_diagnostics`] are
-//! the pieces every trainer with a module model shares (geu's composite trainer,
-//! `pinto cage`), so the objective is written once.
+//! the pieces every trainer with a module model shares; `pinto cage` is the
+//! current caller, so the objective is written once for it.
 
 use crate::model::FeatModules;
 use candle_util::candle_core::{Device, Result, Tensor};
@@ -134,8 +134,7 @@ pub fn module_softmax_loss(
 /// One trainer step of the exact term: pool the units' dense count block
 /// `[U, D]` through the (dropout-masked, detached) membership `[D, M]`, score
 /// every module against the units' embeddings `[U, H]`, and weight by
-/// `lambda_module`. The one definition both geu's composite trainer and
-/// `pinto cage` call.
+/// `lambda_module`. `pinto cage` calls this.
 pub fn module_step_loss(
     modules: &FeatModules,
     pi_masked: &Tensor,

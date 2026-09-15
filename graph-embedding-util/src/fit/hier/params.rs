@@ -6,6 +6,38 @@ use rand_distr::Normal;
 const INIT_STDEV: f32 = 0.1;
 const ADAGRAD_EPS: f32 = 1e-10;
 
+/// One non-base track's additive offsets from the base model: `Δ^t_m` on the
+/// module dictionary and `δ^t_g` on the gene residual, with their biases.
+/// Zero-initialised, so training starts at the base model and the ridge
+/// (`FitConfig::offset_l2`) keeps the offsets small.
+#[derive(Clone, Debug)]
+pub struct TrackOffset {
+    /// `[M × H]` row-major.
+    pub d_mu: Vec<f32>,
+    /// `[M]`.
+    pub d_b_m: Vec<f32>,
+    /// `[G × H]` row-major.
+    pub d_r: Vec<f32>,
+    /// `[G]`.
+    pub d_b_g: Vec<f32>,
+}
+
+impl TrackOffset {
+    fn zeros(n_modules: usize, n_genes: usize, h: usize) -> Self {
+        Self {
+            d_mu: vec![0.0; n_modules * h],
+            d_b_m: vec![0.0; n_modules],
+            d_r: vec![0.0; n_genes * h],
+            d_b_g: vec![0.0; n_genes],
+        }
+    }
+}
+
+/// The base model's tables plus one offset table per non-base track.
+///
+/// Invariants: `e_u` is `[n_units × h]`, `mu` `[M × h]`, `r` `[G × h]`, all
+/// row-major; `offsets` holds tracks `1..T` in order, so `offsets[t - 1]` is
+/// track `t`'s and the list is empty on a one-track axis.
 pub struct HierParams {
     pub h: usize,
     pub e_u: Vec<f32>,
@@ -13,6 +45,8 @@ pub struct HierParams {
     pub b_m: Vec<f32>,
     pub r: Vec<f32>,
     pub b_g: Vec<f32>,
+    /// Tracks `1..T`; empty at `T == 1`.
+    pub offsets: Vec<TrackOffset>,
 }
 
 fn randn(n: usize, seed: u64) -> Vec<f32> {
@@ -21,15 +55,39 @@ fn randn(n: usize, seed: u64) -> Vec<f32> {
 }
 
 impl HierParams {
-    pub fn new(n_units: usize, n_modules: usize, n_features: usize, h: usize, seed: u64) -> Self {
+    /// The one-track tables: no offsets.
+    pub fn new(n_units: usize, n_modules: usize, n_genes: usize, h: usize, seed: u64) -> Self {
+        Self::new_tracked(n_units, n_modules, n_genes, 1, h, seed)
+    }
+
+    /// [`Self::new`] plus a zero offset table per non-base track. The offsets
+    /// draw nothing from the RNG, so the base tables are identical to
+    /// [`Self::new`]'s for the same seed.
+    pub fn new_tracked(
+        n_units: usize,
+        n_modules: usize,
+        n_genes: usize,
+        n_tracks: usize,
+        h: usize,
+        seed: u64,
+    ) -> Self {
         Self {
             h,
             e_u: randn(n_units * h, mix_seed(seed, 0x4855)),
             mu: randn(n_modules * h, mix_seed(seed, 0x4d55)),
             b_m: vec![0.0; n_modules],
-            r: randn(n_features * h, mix_seed(seed, 0x5253)),
-            b_g: vec![0.0; n_features],
+            r: randn(n_genes * h, mix_seed(seed, 0x5253)),
+            b_g: vec![0.0; n_genes],
+            offsets: (1..n_tracks)
+                .map(|_| TrackOffset::zeros(n_modules, n_genes, h))
+                .collect(),
         }
+    }
+
+    /// Track `t`'s offsets; `None` for the base track and for an unknown one.
+    #[must_use]
+    pub fn offset(&self, t: usize) -> Option<&TrackOffset> {
+        self.offsets.get(t.checked_sub(1)?)
     }
 }
 
