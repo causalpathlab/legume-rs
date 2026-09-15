@@ -7,7 +7,7 @@
 //! flag surface. gem adds its own modality inputs (`GENES...`, `--modality`,
 //! `--genes-sample-strip`) and its own ridge on the per-track feature
 //! offsets (`--offset-l2`). Unlike `BgeArgs`, `GemArgs` does not implement
-//! `Updatable` — `senna update` does not (yet) continue a gem run.
+//! `Updatable`; `senna update` does not (yet) continue a gem run.
 
 use crate::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;

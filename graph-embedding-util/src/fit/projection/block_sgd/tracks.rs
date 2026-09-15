@@ -526,6 +526,8 @@ fn solve_tracks_block(a: TrackBlockArgs) -> anyhow::Result<TrackBlockOut> {
         theta = (&theta - (&m * step_size)?.broadcast_div(&(v.sqrt()? + EPS)?)?)?;
 
         steps = step + 1;
+        // This check is re-typed, not shared, from [`super::solve`]'s
+        // single-partition loop: a change there belongs here too.
         if steps.is_multiple_of(CHECK_EVERY) {
             emitted = a.progress.advance(bc, steps, emitted);
             a.progress.describe(steps);
