@@ -8,7 +8,7 @@
 //! batch-corrected pseudobulk count matrix the fit already built, so this costs
 //! nothing extra.
 
-use super::config::ParentModulesOwned;
+use super::config::{ParentModulesOwned, TrackSpec};
 use log::info;
 use matrix_util::principal_graph::kmeans_centroids_seeded;
 use matrix_util::rand_util::name_seed;
@@ -21,6 +21,34 @@ pub const WARM_PROFILE_MAX_DIM: usize = 1024;
 pub const WARM_SKETCH_DIM: usize = 64;
 /// Lloyd iterations for the warm-start clustering.
 const WARM_KMEANS_ITER: usize = 30;
+
+/// The base track's rows of a `[n_features × S]` profile, re-keyed by gene:
+/// `[n_genes × S]`. The module partition is over GENES, so a multi-track
+/// feature axis is reduced to its base track before clustering — the base track
+/// is the one the model itself is; every other track is an offset from it. A
+/// gene with no base row (never observed on the base track) keeps a zero
+/// profile row, which the warm start already routes to its background module.
+/// Identity on a one-track axis, where row IS gene.
+#[must_use]
+pub fn base_track_profile(profile: &DMatrix<f32>, tracks: &TrackSpec) -> DMatrix<f32> {
+    debug_assert_eq!(
+        profile.nrows(),
+        tracks.track_of_row.len(),
+        "the profile and the track spec describe the same feature axis"
+    );
+    let mut out = DMatrix::<f32>::zeros(tracks.n_genes(), profile.ncols());
+    for (row, (&t, &g)) in tracks
+        .track_of_row
+        .iter()
+        .zip(&tracks.gene_of_row)
+        .enumerate()
+    {
+        if t == 0 {
+            out.set_row(g as usize, &profile.row(row));
+        }
+    }
+    out
+}
 
 /// Cluster the rows of a `[features × pseudobulks]` count profile into `n_modules`
 /// groups. Columns are depth-normalized, `log1p`-transformed, each row centred and

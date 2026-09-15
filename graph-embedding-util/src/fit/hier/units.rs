@@ -42,11 +42,17 @@ impl UnitTable {
         self.weight[u * self.n_tracks() + t]
     }
 
+    /// The plain gene axis: [`Self::from_pseudobulks_and_cells_tracked`] with
+    /// [`TrackSpec::base`]. `fit` always builds a spec (base or not) and calls
+    /// the tracked constructor, so inside this crate this is the tests' handle
+    /// on the untracked path — the parity guard that the two agree.
+    ///
     /// Pseudobulk levels first (coarsest → finest, each level's pb index
     /// order), then cells. Every pseudobulk index in `0..n_pb_per_level[l]`
     /// gets a row at level `l`, even if it never appears in that level's edge
     /// list (empty row). Counts ≤ 0 are dropped; cell counts are divided by
     /// their batch's fold when one is given.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_pseudobulks_and_cells(
         pb_blobs: &[&[Triplet]],
         n_pb_per_level: &[usize],
