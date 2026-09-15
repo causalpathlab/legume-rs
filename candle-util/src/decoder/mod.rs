@@ -13,7 +13,6 @@ pub mod coarsening_map;
 pub mod delta_topic;
 pub mod dyn_decoder;
 pub mod gaussian_nb;
-pub mod gem_etm;
 pub mod joint_topic;
 pub mod masked_etm;
 pub mod nb_mixture;
@@ -28,7 +27,6 @@ pub use bipartite::{
 pub use delta_topic::DeltaTopicDecoder;
 pub use dyn_decoder::{create_dyn_decoder, DynDecoderModuleT};
 pub use gaussian_nb::GaussianNbDecoder;
-pub use gem_etm::{GemEtmDecoder, GemMaskedTarget, Track};
 pub use joint_topic::JointTopicDecoder;
 pub use masked_etm::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 pub use nb_mixture::NbMixtureTopicDecoder;

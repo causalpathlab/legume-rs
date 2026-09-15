@@ -1,5 +1,5 @@
 //! Everything upstream of training: the batch-corrected projection, the multilevel
-//! collapse it feeds, and the per-level pseudobulk views the composite axes are built
+//! collapse it feeds, and the per-level pseudobulk views phase 1's axes are built
 //! from.
 //!
 //! One module because it is one dependency chain — the projection exists only to hash
@@ -28,12 +28,6 @@ pub(super) struct Pseudobulks {
     pub cell_to_pb_per_level: Vec<Vec<usize>>,
     /// One `UnifiedData` per level, on the unified feature axis.
     pub blobs: Vec<UnifiedData>,
-}
-
-impl Pseudobulks {
-    pub fn num_levels(&self) -> usize {
-        self.collapsed_levels.len()
-    }
 }
 
 /// Project, collapse, and materialize the per-level pseudobulk views.

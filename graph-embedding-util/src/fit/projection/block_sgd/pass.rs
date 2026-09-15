@@ -33,9 +33,9 @@ pub(crate) struct DictSpec<'a> {
     /// where the solve reads it.
     pub(crate) lambda: f64,
     pub(crate) dev: &'a Device,
-    /// Log prefix — `"Phase 2"`, `"Projection"`, `"pb velocity readout"`.
+    /// Log prefix — `"Phase 2"`, `"Projection"`.
     pub(crate) label: &'static str,
-    /// This pass's own name within that: `"identity"`, `"velocity"`, `"nodes"`.
+    /// This pass's own name within that: `"identity"`, `"polish"`, `"nodes"`.
     pub(crate) pass: &'static str,
 }
 
@@ -224,9 +224,6 @@ impl PassDict {
 /// against. The dictionary half is [`PassDict`].
 pub(super) struct PassSpec<'a> {
     pub(super) edges: &'a EdgeTable,
-    /// Fixed identity `θ` (host, `[n_kept × h]`) folded into the per-edge offset —
-    /// `Some` only on the velocity pass.
-    pub(super) base_theta: Option<&'a [f32]>,
     /// Warm start for the latent (host, `[n_kept × h]`); `None` starts at the
     /// null model. The intercept starts at its exact conditional MLE either way.
     pub(super) init_theta: Option<&'a [f32]>,

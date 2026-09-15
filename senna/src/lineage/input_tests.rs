@@ -17,17 +17,11 @@ fn write_manifest(prefix: &str, kind: RunKind) {
 }
 
 /// `auto` reads the simplex exactly when the producing run has one.
-///
-/// This used to need two conditions — the kind AND a stamped `latent:
-/// log-theta` — because gem-encoder runs before 2026-07-21 wrote raw logits into
-/// `latent.parquet` under the same model type, so the kind alone could not tell
-/// them apart. Those prefixes carry no `senna.json` at all, so a readable
-/// manifest is now sufficient evidence and the second condition is gone.
 #[test]
 fn auto_reads_the_simplex_only_for_a_run_that_has_one() {
-    // gem-encoder: latent.parquet is log θ.
-    let p = scratch("gem_encoder");
-    write_manifest(&p, RunKind::GemEncoder);
+    // a topic-family run: latent.parquet is log θ.
+    let p = scratch("topic");
+    write_manifest(&p, RunKind::Topic);
     assert_eq!(
         resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
         ThetaFrom::Latent
@@ -63,7 +57,7 @@ fn explicit_latent_refuses_a_run_that_cannot_supply_it() {
     assert!(resolve_theta_from(ThetaFrom::Latent, &p).is_err());
 
     let p = scratch("explicit_ok");
-    write_manifest(&p, RunKind::GemEncoder);
+    write_manifest(&p, RunKind::Topic);
     assert_eq!(
         resolve_theta_from(ThetaFrom::Latent, &p).unwrap(),
         ThetaFrom::Latent
@@ -72,10 +66,10 @@ fn explicit_latent_refuses_a_run_that_cannot_supply_it() {
 
 #[test]
 fn cell_embedding_is_honoured_without_consulting_the_manifest() {
-    // Even on a gem-encoder run, an explicit request stands: it is the escape
+    // Even on a topic run, an explicit request stands: it is the escape
     // hatch for comparing the co-embedding against the simplex.
     let p = scratch("forced_embedding");
-    write_manifest(&p, RunKind::GemEncoder);
+    write_manifest(&p, RunKind::Topic);
     assert_eq!(
         resolve_theta_from(ThetaFrom::CellEmbedding, &p).unwrap(),
         ThetaFrom::CellEmbedding

@@ -760,7 +760,7 @@ pub(crate) fn null_intercept(
 /////////////////
 
 /// Project every cell through the distilled encoder. Same inputs and output as
-/// [`block_sgd::project_cells`] on the plain path, plus the trained encoder.
+/// [`block_sgd::project_cells`], plus the trained encoder.
 pub(crate) fn project_cells(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
@@ -824,7 +824,7 @@ pub(crate) fn project_cells(
     // cell on the exact objective. `predict` walks the same two steps.
     let pass = block_sgd::polish_cells(input, cells, batch_fold, &latent)?;
 
-    let out = block_sgd::finish(input, cells, pass, None);
+    let out = block_sgd::finish(input, cells, pass);
     Ok((out, encoder))
 }
 

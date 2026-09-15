@@ -1,52 +1,21 @@
-//! Loading gem's **gene embedding** for marker annotation — the co-embedded
-//! `{out}.feature_embedding.parquet`, not the `{out}.beta_feature_embedding.parquet` β.
+//! Loading a run's co-embedded **gene** table for marker matching — the
+//! per-run `{out}.feature_embedding.parquet` slot on the run manifest.
 //!
-//! # Why not β
-//!
-//! Marker annotation is a **Euclidean nearest-centroid** call: it builds a prototype from a
-//! type's marker genes and hands each cell to the closest one. That is only meaningful if the
-//! genes and the cells live in the *same metric space*. β and θ do not.
-//!
-//! gem's likelihood couples them through an **inner product** (`⟨β_g, θ_c⟩`), which fixes their
-//! relative *directions* but says nothing about their relative *scale* — the model is free to
-//! make β small and θ large, and it does. Measured on a 15,315-cell cord-blood run:
-//!
-//! | table | rows | mean ‖row‖ | median ‖row‖ |
-//! |---|---|---|---|
-//! | `beta_feature_embedding` | 34,189 | 0.21 | **0.00** |
-//! | `feature_embedding` | 3,695 | 3.11 | 3.05 |
-//! | `cell_embedding` | 15,315 | 30.07 | 26.77 |
-//!
-//! Two things follow, and both are fatal for a distance-based call.
-//!
-//! 1. **The metric degenerates.** With cells ~140× longer than β rows,
-//!    `‖x − c‖² = ‖x‖² − 2⟨x,c⟩ + ‖c‖²` loses its `‖c‖²` term entirely and `‖x‖²` is constant
-//!    across types, so `argmin_t ‖x − c_t‖²` collapses to `argmax_t ⟨x, c_t⟩` — an *unnormalized*
-//!    inner product in which a centroid's **norm** is a free parameter that decides the winner
-//!    almost regardless of its direction. Measured: the rank correlation between a type's
-//!    centroid norm and the share of cells it captures is **+0.93**, and the five types with the
-//!    most scattered (i.e. least meaningful) panels captured **97.7%** of all cells.
-//! 2. **Half of β is not there.** Its median row norm is **zero**: most genes were never trained
-//!    and their post-hoc projection failed its null test, so they contribute nothing to a
-//!    centroid while still counting as "matched" markers.
-//!
-//! `feature_embedding` is the model's own feature vectors — the ones actually fitted — and it is
-//! what `pinto annotate` and `senna annotate-by-projection` have always used. `senna annotate-by-projection` was
-//! the odd one out.
-//!
-//! # The modality split
-//!
-//! gem's feature embedding is keyed by **feature row**, not by gene:
-//! `ENSG00000000971_CFH/count/spliced`, `.../count/unspliced` — a spliced *and* an unspliced row
-//! per gene. A marker panel names genes, so matching it against the raw table would silently pull
-//! **both** rows into the same centroid and average the mature identity together with the nascent
-//! one. [`select_spliced_rows`] therefore keeps the mature rows and strips the suffix back to
-//! the gene key, which is what the marker matcher expects.
+//! A `gem` run's feature axis is keyed by feature ROW, not by gene: a spliced
+//! and an unspliced row per gene. A marker panel names genes, so matching it
+//! against the raw table would silently pull both rows into the same
+//! centroid, averaging the mature identity together with the nascent one.
+//! [`select_spliced_rows`] keeps the mature (spliced) rows and strips the
+//! track suffix back to the gene key, which is what the marker matcher
+//! expects. Every other kind's feature embedding is already gene-keyed and
+//! needs no such split.
 
 use anyhow::{Context, Result};
 use log::info;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::{IoOps, MatWithNames};
+
+use crate::run_manifest::{self, RunKind};
 
 /// The feature-row suffix annotation reads.
 ///
@@ -107,14 +76,30 @@ pub fn select_spliced_rows(
     })
 }
 
-/// [`select_spliced_rows`] against `{prefix}.feature_embedding.parquet`.
-///
-/// For callers that hold only a prefix. Consumers that already loaded the run
-/// manifest should resolve the slot through it and call [`select_modality`]
-/// directly, rather than re-deriving the filename.
-pub fn load_gene_embedding(prefix: &str) -> Result<MatWithNames<DMatrix<f32>>> {
-    let path = format!("{prefix}.feature_embedding.parquet");
+/// Load the marker-matching gene table for a run: resolve `outputs.feature_embedding`
+/// off `{prefix}`'s run manifest and, for a [`RunKind::Gem`] run only, apply
+/// [`select_spliced_rows`]. Every other kind's feature embedding is already
+/// gene-keyed and is returned as read.
+pub(crate) fn load_marker_feature_embedding(prefix: &str) -> Result<MatWithNames<DMatrix<f32>>> {
+    let (manifest, dir) = run_manifest::load_for(prefix)?;
+    let rel = manifest.outputs.feature_embedding.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{prefix}: manifest has no `outputs.feature_embedding` — this needs a co-embedded \
+             gene space (a `senna gem` / `bge` / `fne` / `resolve-embedding-space` run)"
+        )
+    })?;
+    let path = run_manifest::resolve(&dir, rel)
+        .to_string_lossy()
+        .into_owned();
     let feat = DMatrix::<f32>::from_parquet(&path)
         .with_context(|| format!("reading gene embedding {path}"))?;
-    select_spliced_rows(feat, &path)
+    if manifest.kind == RunKind::Gem {
+        select_spliced_rows(feat, &path)
+    } else {
+        Ok(feat)
+    }
 }
+
+#[cfg(test)]
+#[path = "marker_embedding/tests.rs"]
+mod tests;
