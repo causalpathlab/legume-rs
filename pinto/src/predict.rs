@@ -12,16 +12,17 @@
 //!    no dictionary row: it is dropped from the partition rather than seeded
 //!    (this is inference, not a warm start — inventing a row would let a gene
 //!    the model knows nothing about pull on every pair's latent).
-//! 3. Every cell pair is projected onto that dictionary by the same Poisson MAP
-//!    `cage` uses after training (`pair_projection`), giving a pair latent in
-//!    the trained space.
+//! 3. Every cell pair — and every cell — is placed on that dictionary by the
+//!    model's own pair encoder (`{model}.pair_encoder.safetensors`, the map
+//!    that placed the training run's pairs), or by the exact per-pair Poisson
+//!    MAP when the model has none, giving a pair latent in the trained space.
 //! 4. Each pair is assigned to the nearest trained link community by cosine
 //!    against the training centroids — the mean L2-normalized pair latent of
 //!    each community, recomputed here from `{model}.latent.parquet` and
 //!    `{model}.link_community.parquet` so no new artifact is needed.
 //! 5. A cell's propensity is its incident-edge fraction per community, exactly
 //!    the definition `cage` / `lc` / `dsvd` publish, and the cell embedding is
-//!    the propensity-weighted centroid readout `cage` writes.
+//!    the cell's own placement from step 3, as `cage` writes it.
 //!
 //! Outputs mirror `cage`'s inference tables: `{out}.{coord_pairs, latent,
 //! link_community, propensity, gene_community, cell_embedding}.parquet` and a
@@ -30,17 +31,19 @@
 
 use crate::cell_activity_graph_embedding::args::GeneNameMode;
 use crate::cell_activity_graph_embedding::pair_projection::{
-    project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, PairScore, ProjectionArgs,
+    project_pairs, CellLatent, PairBatchDivisor, PairLatent, PairProjectionArgs, PairScore,
+    PairSolver, ProjectionArgs,
 };
 use crate::link_community::outputs::write_partition_outputs;
 use crate::util::cell_pairs::SrtCellPairs;
 use crate::util::common::*;
+use crate::util::device::ComputeDevice;
 use crate::util::metadata::{create_cage_metadata, RunInputs};
 use crate::util::srt_pipeline::{
     preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use graph_embedding_util::embedding_col_names;
 use log::info;
 use matrix_util::common_io::mkdir_parent;
@@ -64,6 +67,24 @@ pub struct PredictArgs {
                      The last two give the community centroids the new pairs are assigned to."
     )]
     pub model: Box<str>,
+
+    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
+    pub device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device index (for cuda)")]
+    pub device_no: usize,
+
+    #[arg(
+        long,
+        default_value_t = PredictPairSolver::Auto,
+        value_enum,
+        help = "How the new sample's pairs and cells are placed on the model's gene embedding",
+        long_help = "auto uses the model's pair encoder ({model}.pair_encoder.safetensors)\n\
+                     when the training run saved one, and the exact per-pair solve otherwise.\n\
+                     encoder insists on the saved encoder and fails without it.\n\
+                     exact solves every pair on its own, as a run without an encoder would."
+    )]
+    pub pair_solver: PredictPairSolver,
 
     #[arg(
         long,
@@ -192,6 +213,35 @@ pub struct PredictArgs {
     pub null_from: Option<Vec<Box<str>>>,
 }
 
+/// Which arm places a predicted sample's pairs.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum PredictPairSolver {
+    Auto,
+    Encoder,
+    Exact,
+}
+
+/// The encoder file to load, if any, given the model prefix and the flag:
+/// `auto` takes the file when it exists, `encoder` demands it, `exact`
+/// ignores it.
+fn resolve_pair_solver(model: &str, flag: PredictPairSolver) -> anyhow::Result<Option<String>> {
+    let path = format!("{model}.pair_encoder.safetensors");
+    let present = Path::new(&path).is_file();
+    Ok(match flag {
+        PredictPairSolver::Exact => None,
+        PredictPairSolver::Auto => present.then_some(path),
+        PredictPairSolver::Encoder => {
+            anyhow::ensure!(
+                present,
+                "--pair-solver encoder: {path} does not exist; the model was fitted without a \
+                 pair encoder — pass --pair-solver exact, or refit it"
+            );
+            Some(path)
+        }
+    })
+}
+
 /// Per-pair community labels from `{model}.link_community.parquet`, **unfiltered**.
 ///
 /// Deliberately not `plot::load::read_link_community`: that is a display loader and
@@ -206,10 +256,8 @@ fn training_communities(path: &str) -> anyhow::Result<Vec<i64>> {
 /// Community centroids from a training run: the mean of the member pairs' L2-normalized
 /// latents, renormalized, `[K × D]`.
 ///
-/// The renormalization is what `assign_to_centroids` needs (it compares cosines), and it
-/// is a real difference from `cage`'s own `propensity_weighted_cell_embedding`, which
-/// leaves centroid length alone so a diffuse community counts for less. Only the
-/// assignment uses these; the cell-embedding readout below rescales back.
+/// The renormalization is what `assign_to_centroids` needs: it compares cosines, and
+/// a diffuse community's short mean must not lose every pair to a tight one.
 fn training_centroids(model: &str) -> anyhow::Result<(Mat, Vec<f32>)> {
     let latent = Mat::from_parquet(&format!("{model}.latent.parquet"))?.mat;
     let communities = training_communities(&format!("{model}.link_community.parquet"))?;
@@ -525,10 +573,27 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         batch_of_cell: &batch_of_cell,
     });
 
+    let dev = args.device.to_device(args.device_no)?;
+    let encoder_path = resolve_pair_solver(&args.model, args.pair_solver)?;
+    let solver = match encoder_path.as_deref() {
+        Some(path) => PairSolver::LoadEncoder { path, dev: &dev },
+        None => PairSolver::Exact,
+    };
+    info!(
+        "Placing pairs by {}",
+        match &encoder_path {
+            Some(path) => format!("the model's pair encoder ({path})"),
+            None => "the exact per-pair solve".to_string(),
+        }
+    );
     let PairLatent {
         latent,
         bias: _,
         scores,
+        cells: CellLatent {
+            latent: cell_latent,
+            bias: _,
+        },
     } = project_pairs(
         &data_vec,
         &fine_edges,
@@ -540,9 +605,11 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
                 steps: args.pair_steps,
                 gene_sample: args.pair_gene_sample,
             },
+            solver,
             seed: c.seed,
             pair_block: args.pair_block,
             eval_features: eval_features.clone(),
+            score_pairs: true,
         },
         &gene_axis,
         &gene_totals,
@@ -608,12 +675,11 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             .flatten(),
     )?;
 
-    // The same readout cage writes: propensity-weighted community centroids.
-    let e_cell = &propensity * &centroids;
-    e_cell.to_parquet_with_names(
+    // Every cell's own placement, by the same map as the pairs — what cage writes.
+    cell_latent.to_parquet_with_names(
         &(c.out.to_string() + ".cell_embedding.parquet"),
         (Some(&cell_names), Some("cell")),
-        Some(&embedding_col_names(e_cell.ncols())),
+        Some(&embedding_col_names(cell_latent.ncols())),
     )?;
 
     let coord_file_str = c.coord_files_joined();
@@ -631,6 +697,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         },
         batch_effects.is_some(),
         None,
+        false,
     );
     meta.command = "predict".to_string();
     let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
@@ -767,3 +834,6 @@ fn training_gene_totals(
     );
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests;

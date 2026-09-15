@@ -21,6 +21,17 @@ pub enum NceObjectiveArg {
     Softmax,
 }
 
+/// Which arm places the pairs on the gene embedding.
+///
+/// No `Display` impl: clap renders `default_value_t` for a `value_enum` field
+/// through `ValueEnum::to_possible_value`.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[clap(rename_all = "lowercase")]
+pub enum PairSolverArg {
+    Encoder,
+    Exact,
+}
+
 impl NceObjectiveArg {
     pub fn to_ge(self) -> graph_embedding_util::loss::NceObjective {
         match self {
@@ -418,6 +429,67 @@ pub struct CellActivityGraphEmbeddingArgs {
         hide = true
     )]
     pub pair_block: usize,
+
+    #[arg(
+        long,
+        default_value_t = PairSolverArg::Encoder,
+        value_enum,
+        help = "How every cell pair (and cell) is placed on the trained gene embedding",
+        long_help = "encoder is the default: one shared encoder reads each cell's counts\n\
+                     through the frozen gene embedding into a cell code,\n\
+                     and a small gated mixture turns two codes into the pair code.\n\
+                     It is trained on this run's pairs against the same likelihood\n\
+                     the exact solver minimises, on --device, then applied to every pair\n\
+                     and every cell in one pass. It is saved as {out}.pair_encoder.safetensors\n\
+                     so `pinto predict` places a new sample by the same map.\n\
+                     A seeded sample of pairs is always re-solved exactly afterwards\n\
+                     and the agreement is logged; the few placements the gradient\n\
+                     bound puts far above the optimum are finished exactly.\n\
+                     \n\
+                     exact solves every pair (and cell) on its own by Adam.\n\
+                     It needs no device and no training, and pays for it per pair."
+    )]
+    pub pair_solver: PairSolverArg,
+
+    #[arg(
+        long,
+        default_value_t = 4,
+        help = "Experts in the pair encoder's head; 1 is a plain linear head",
+        hide = true
+    )]
+    pub pair_experts: usize,
+
+    #[arg(
+        long,
+        default_value_t = 64,
+        help = "Width of the pair encoder's cell code",
+        hide = true
+    )]
+    pub pair_trunk: usize,
+
+    #[arg(
+        long,
+        default_value_t = 3,
+        help = "Passes over the pairs when training the pair encoder",
+        hide = true
+    )]
+    pub pair_epochs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 4096,
+        help = "Pairs per optimizer step when training the pair encoder",
+        hide = true
+    )]
+    pub pair_batch: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Pairs drawn per epoch when training the pair encoder; 0 = every pair",
+        hide = true
+    )]
+    pub pair_train_pairs: usize,
 
     #[arg(
         long = "nce-objective",
