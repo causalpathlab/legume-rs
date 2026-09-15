@@ -70,7 +70,19 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     ///////////////////////////////////////////////
     let n_features = unified.n_features();
     let feature_to_backend = unified.feature_to_backend_row.clone();
-    let pb = setup::build_pseudobulks(unified, &config)?;
+    // Row structure of the feature axis: plain genes (every row its own gene)
+    // unless the caller named tracks. Validated HERE, before anything reads it:
+    // the projection below sketches on the base track's rows, so an unchecked
+    // spec would reach the collapse before the error did.
+    let tracks = config
+        .tracks
+        .clone()
+        .unwrap_or_else(|| TrackSpec::base(n_features));
+    tracks
+        .validate(n_features)
+        .context("the fit's track spec does not describe this feature axis")?;
+    let n_tracks = tracks.n_tracks();
+    let pb = setup::build_pseudobulks(unified, &config, &tracks)?;
     let setup::Pseudobulks {
         collapsed_levels,
         cell_to_pb_per_level,
@@ -165,30 +177,14 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     } else {
         Vec::new()
     };
-    // Row structure of the feature axis: plain genes (every row its own gene)
-    // unless the caller named tracks.
-    let units = match config.tracks.clone() {
-        Some(tracks) => {
-            tracks
-                .validate(n_features)
-                .context("the fit's track spec does not describe this feature axis")?;
-            hier::UnitTable::from_pseudobulks_and_cells_tracked(
-                &blobs,
-                &n_pb_per_level,
-                &cell_rows,
-                cell_fold,
-                n_features,
-                tracks,
-            )
-        }
-        None => hier::UnitTable::from_pseudobulks_and_cells(
-            &blobs,
-            &n_pb_per_level,
-            &cell_rows,
-            cell_fold,
-            n_features,
-        ),
-    };
+    let units = hier::UnitTable::from_pseudobulks_and_cells_tracked(
+        &blobs,
+        &n_pb_per_level,
+        &cell_rows,
+        cell_fold,
+        n_features,
+        tracks.clone(),
+    );
     // Module labels: under `senna update`, seeded from the parent's membership
     // (the argmax of `parent_module_logits`, i.e. the partition `senna update`
     // claims to carry — matched features take the parent's module, unmatched
@@ -197,6 +193,10 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     let profile = finest_profile();
     let (labels, n_modules) = match config.gene_modules.as_ref().and_then(|g| g.parent.as_ref()) {
         Some(parent) => {
+            anyhow::ensure!(
+                tracks.is_base(),
+                "module warm start from a parent needs a single-track feature axis"
+            );
             anyhow::ensure!(
                 parent.mu.ncols() == h,
                 "parent modules are {}-dimensional but this fit uses H={h}",
@@ -220,7 +220,13 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
                 .context("the hierarchical phase 1 needs a module count (gene_modules)")?
                 .n_modules;
             (
-                module_warm::warm_start_module_labels(&profile, n, config.seed),
+                // The partition is over GENES, so the warm start reads the
+                // base track's rows re-keyed by gene; identity on one track.
+                module_warm::warm_start_module_labels(
+                    &module_warm::base_track_profile(&profile, &tracks),
+                    n,
+                    config.seed,
+                ),
                 n,
             )
         }
@@ -237,6 +243,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             lr: config.learning_rate as f32,
             weight_decay: config.weight_decay as f32,
             seed: config.seed,
+            offset_l2: config.offset_l2,
         },
         &stop,
     )?;
@@ -285,7 +292,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     }
     info!(
         "Phase 1 (hier) — done: loss/unit {:.4}; dictionary {} × {h} composed from {n_modules} \
-         modules",
+         modules over {n_tracks} track(s)",
         out.final_loss_per_unit, n_features
     );
 

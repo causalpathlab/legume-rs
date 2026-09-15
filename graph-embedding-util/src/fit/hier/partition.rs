@@ -1,6 +1,7 @@
 //! Hard gene→module partition and each unit's view through it.
 
 use super::units::UnitTable;
+use crate::fit::config::TrackSpec;
 
 /// One module per GENE (not per feature row): tracks of the same gene share a
 /// module. `module_of` is indexed by gene id, `members[m]` lists that module's
@@ -58,6 +59,109 @@ impl Partition {
             }
         }
         slot
+    }
+}
+
+/// Each track's SUPPORT through the gene partition: the genes it has a row
+/// for, and the modules those genes put it in.
+///
+/// A track's rows ARE its feature axis — a gene with no row on track `t` is
+/// OUTSIDE that track's axis, not a gene the track observed zero times — so
+/// track `t`'s softmaxes run over its support only:
+///
+/// ```text
+/// S_t = { g : gene g has a row on track t }
+/// M_t = { m : m ∩ S_t ≠ ∅ }
+/// ```
+///
+/// A track that has a row for EVERY gene is `full` and carries no restriction
+/// at all: it keeps the plain model's columns, empty modules included, exactly
+/// as a one-track axis has them. `modules_of` / `slots_of` / `local_of` return
+/// empty slices for such a track — the caller takes the unrestricted path and
+/// reads [`Partition::members`] directly.
+///
+/// Built once per fit from the [`TrackSpec`] and the partition; nothing here
+/// depends on a unit, a step or a plan.
+pub struct TrackSupport {
+    n_modules: usize,
+    full: Vec<bool>,
+    /// Per track, ascending; empty when that track is `full`.
+    modules: Vec<Vec<u32>>,
+    /// Per `(track, module)` at `t * M + m`, ascending; empty when `full`.
+    slots: Vec<Vec<u32>>,
+    /// Per `(track, module)`: full member slot → its position in `slots`, or
+    /// `u32::MAX` when the track has no row for that member. Empty when `full`.
+    local: Vec<Vec<u32>>,
+}
+
+impl TrackSupport {
+    pub fn new(tracks: &TrackSpec, part: &Partition) -> Self {
+        let (n_t, n_m) = (tracks.n_tracks(), part.n_modules());
+        let n_g = part.module_of.len();
+        let mut has = vec![false; n_t * n_g];
+        for (&t, &g) in tracks.track_of_row.iter().zip(&tracks.gene_of_row) {
+            has[t as usize * n_g + g as usize] = true;
+        }
+        let mut full = vec![false; n_t];
+        let mut modules: Vec<Vec<u32>> = vec![Vec::new(); n_t];
+        let mut slots: Vec<Vec<u32>> = vec![Vec::new(); n_t * n_m];
+        let mut local: Vec<Vec<u32>> = vec![Vec::new(); n_t * n_m];
+        for t in 0..n_t {
+            let row = &has[t * n_g..(t + 1) * n_g];
+            full[t] = row.iter().all(|&b| b);
+            if full[t] {
+                continue;
+            }
+            for (m, members) in part.members.iter().enumerate() {
+                let mut sup = Vec::new();
+                let mut loc = vec![u32::MAX; members.len()];
+                for (j, &g) in members.iter().enumerate() {
+                    if row[g as usize] {
+                        loc[j] = sup.len() as u32;
+                        sup.push(j as u32);
+                    }
+                }
+                if !sup.is_empty() {
+                    modules[t].push(m as u32);
+                }
+                slots[t * n_m + m] = sup;
+                local[t * n_m + m] = loc;
+            }
+        }
+        Self {
+            n_modules: n_m,
+            full,
+            modules,
+            slots,
+            local,
+        }
+    }
+
+    /// Does track `t` have a row for every gene? Then it carries no restriction.
+    #[must_use]
+    pub fn is_full(&self, t: usize) -> bool {
+        self.full.get(t).copied().unwrap_or(true)
+    }
+
+    /// The modules track `t` is scored in, ascending. EMPTY for a `full` track,
+    /// whose modules are `0..M`.
+    #[must_use]
+    pub fn modules_of(&self, t: usize) -> &[u32] {
+        &self.modules[t]
+    }
+
+    /// Module `m`'s member slots track `t` has a row for, ascending. EMPTY for
+    /// a `full` track, whose slots are `0..members[m].len()`.
+    #[must_use]
+    pub fn slots_of(&self, t: usize, m: usize) -> &[u32] {
+        &self.slots[t * self.n_modules + m]
+    }
+
+    /// Full member slot → its position in [`Self::slots_of`], `u32::MAX` when
+    /// the track has no row there. EMPTY for a `full` track (the identity).
+    #[must_use]
+    pub fn local_of(&self, t: usize, m: usize) -> &[u32] {
+        &self.local[t * self.n_modules + m]
     }
 }
 
