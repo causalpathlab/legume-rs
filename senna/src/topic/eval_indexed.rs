@@ -252,8 +252,7 @@ fn masked_block_concurrency(read: MaskedRead<'_>, dev: &Device, n: usize, d: usi
             dev,
             crate::predict::dense_bytes(n, d, ENCODER_CHAIN_TENSORS),
         )
-        .min(DENSE_BLOCKS_IN_FLIGHT)
-        .max(1),
+        .clamp(1, DENSE_BLOCKS_IN_FLIGHT),
         MaskedRead::Windowed { .. } => {
             super::common::device_concurrency(dev.is_cpu(), rayon::current_num_threads())
         }

@@ -288,8 +288,8 @@ pub fn grow_tensor(
         if let Some(v) = new_slab_value(name, axis) {
             let mut slab_shape: Vec<usize> = fresh.dims().to_vec();
             slab_shape[dim] = new - old;
-            let slab =
-                Tensor::full(v as f32, slab_shape.as_slice(), fresh.device())?.to_dtype(fresh.dtype())?;
+            let slab = Tensor::full(v as f32, slab_shape.as_slice(), fresh.device())?
+                .to_dtype(fresh.dtype())?;
             let mut r: Vec<std::ops::Range<usize>> = fresh.dims().iter().map(|&d| 0..d).collect();
             r[dim] = old..new;
             out = out.slice_assign(&r, &slab)?;

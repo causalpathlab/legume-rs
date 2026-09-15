@@ -1,6 +1,6 @@
 [package]
 name = "matrix-util"
-version = "0.5.11"
+version = "0.5.12"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -28,7 +28,6 @@ serde = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 
-dashmap = { workspace = true }
 instant-distance = { workspace = true }
 multiversion = { workspace = true }
 indicatif = { workspace = true }
@@ -57,3 +56,6 @@ default-features = false
 [dependencies.candle-nn]
 version = "0.10"
 default-features = false
+
+[dev-dependencies]
+env_logger = { workspace = true }

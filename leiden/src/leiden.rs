@@ -1,14 +1,17 @@
 use crate::fast_local_moving::FastLocalMoving;
 use crate::local_merging::LocalMerging;
-use crate::{Clustering, Network, ZeroVec};
+use crate::{Clustering, Network, SimpleClustering, ZeroVec};
 use rand::rngs::SmallRng;
-use rand::SeedableRng;
+use rand::{RngExt, SeedableRng};
+use rayon::prelude::*;
 
 /// Perform the Leiden clustering algorithm
 pub struct Leiden {
     resolution: f64,
     randomness: f64,
 
+    /// Drives the sequential local moving, and hands every subnetwork
+    /// refinement its own seed before the refinements run in parallel.
     rng: SmallRng,
 
     local_moving: FastLocalMoving,
@@ -40,8 +43,6 @@ impl Leiden {
             return update;
         }
 
-        let mut local_merging = LocalMerging::new(self.randomness, self.resolution);
-
         let subnetworks = n.create_subnetworks(c);
 
         let nodes_per_cluster = c.nodes_per_cluster();
@@ -53,9 +54,22 @@ impl Leiden {
             .zero_len(subnetworks.len());
         let mut cluster_counter = 0;
 
-        for i in 0..subnetworks.len() {
-            let sub_clustering = local_merging.run(&subnetworks[i], &mut self.rng);
+        // Refine every subnetwork in parallel: they are independent, and each
+        // gets its own stream, seeded in order from the sequential one — a
+        // function of the seed and the call order, however rayon schedules.
+        let seeds: Vec<u64> = (0..subnetworks.len()).map(|_| self.rng.random()).collect();
+        let sub_clusterings: Vec<SimpleClustering> = subnetworks
+            .par_iter()
+            .zip(&seeds)
+            .map_init(
+                || LocalMerging::new(self.randomness, self.resolution),
+                |local_merging, (sub, &seed)| {
+                    local_merging.run(sub, &mut SmallRng::seed_from_u64(seed))
+                },
+            )
+            .collect();
 
+        for (i, sub_clustering) in sub_clusterings.iter().enumerate() {
             for (j, &node) in nodes_per_cluster[i]
                 .iter()
                 .enumerate()
