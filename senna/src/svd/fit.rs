@@ -353,6 +353,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         softmax_dictionary_suffix: None,
         cell_embedding_suffix: None,
         cell_encoder_suffix: None,
+        feature_contrast_suffix: None,
+        feature_contrast_bias_suffix: None,
+        track_encoder_suffixes: vec![],
         // SVD produces no topic / cluster labels on its own; users
         // typically run `senna clustering` next, so the viz column
         // `cluster` is the natural default.

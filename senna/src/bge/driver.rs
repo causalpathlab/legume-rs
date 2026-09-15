@@ -295,6 +295,19 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         }
         None => None,
     };
+    // Track 0's file keeps the `cell_encoder_suffix` slot above, so the
+    // manifest's own `track_encoders` list is every track BEYOND it. Track 0
+    // is always `encs.iter()`'s first entry (`TrackSpec::validate` requires
+    // it to be present and a count track, and `CellEncoders::iter` is
+    // ascending by track), so `skip(1)` is exact regardless of what track 0
+    // happens to be named (`"base"` on bge's one-track axis, a real
+    // modality/channel pair on gem's). Read off before `track_encoders` is
+    // (maybe) moved into `FitArtifacts` below.
+    let track_encoder_suffixes: Vec<(String, String)> = track_encoders
+        .iter()
+        .skip(1)
+        .map(|(name, suf)| (name.to_string(), suf.clone()))
+        .collect();
 
     if interrupted {
         log::warn!(
@@ -415,6 +428,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     let has_modules = out.model.modules.is_some();
+    // `after_fit` (gem's contrast-table writer) only ran in the non-interrupted
+    // branch above; an interrupted run wrote no contrast tables, so the
+    // manifest must not claim it did.
+    let contrast_written = plan.after_fit.is_some() && !interrupted;
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         train_args: Some(plan.train_args),
         kind: plan.kind,
@@ -453,6 +470,9 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // embedding at one fixed name.
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         cell_encoder_suffix,
+        feature_contrast_suffix: contrast_written.then_some("feature_contrast.parquet"),
+        feature_contrast_bias_suffix: contrast_written.then_some("feature_contrast_bias.parquet"),
+        track_encoder_suffixes,
         default_colour_by: if resolve_etm { "topic" } else { "cluster" },
         // `latent` is log θ, so it exists only when the ETM actually resolved.
         has_latent: resolve_etm,

@@ -218,10 +218,18 @@ pub enum RunKind {
     Bge,
     Fne,
     ResolveEmbeddingSpace,
-    /// `senna gem` — a joint cell/gene embedding over gene counts, run
-    /// through the same driver as [`RunKind::Bge`] (rows = features, no
-    /// modality split). Euclidean `Z` in `cell_embedding`, a co-embedded
-    /// gene table in `feature_embedding`.
+    /// `senna gem` — a joint cell/gene embedding over gene counts and any
+    /// co-measured modality tracks, run through the same driver as
+    /// [`RunKind::Bge`]. Every feature row belongs to one TRACK (the base
+    /// gene count plus, per `--modality`, two channel tracks); track 0's
+    /// loading is the gene's own, every other track adds a ridge-shrunk
+    /// offset to it. Downstream it reads exactly like a `bge` run: a frozen
+    /// `(ρ, b_feat)` gene table in `feature_loading` / `feature_bias`,
+    /// Euclidean `Z` in `cell_embedding`, a co-embedded gene table in
+    /// `feature_embedding`. `feature_contrast(.bias).parquet` additionally
+    /// holds each modality's channel contrast, and `track_encoders` (plus
+    /// `cell_encoder` for track 0) names the per-track encoders
+    /// `senna predict` places a query cell with.
     Gem,
     /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
     /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw
@@ -343,7 +351,7 @@ impl RunKind {
     #[must_use]
     pub fn has_frozen_gene_table(self) -> bool {
         match self {
-            RunKind::Bge | RunKind::Simba => true,
+            RunKind::Bge | RunKind::Simba | RunKind::Gem => true,
             RunKind::Topic
             | RunKind::Itopic
             | RunKind::MaskedVae
@@ -352,8 +360,7 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem => false,
+            | RunKind::ResolveEmbeddingSpace => false,
         }
     }
 
@@ -365,7 +372,7 @@ impl RunKind {
     #[must_use]
     pub fn has_gene_bias(self) -> bool {
         match self {
-            RunKind::Bge => true,
+            RunKind::Bge | RunKind::Gem => true,
             RunKind::Simba => false,
             // Not a frozen-gene-table kind; the question does not arise.
             RunKind::Topic
@@ -376,8 +383,7 @@ impl RunKind {
             | RunKind::Svd
             | RunKind::JointSvd
             | RunKind::Fne
-            | RunKind::ResolveEmbeddingSpace
-            | RunKind::Gem => false,
+            | RunKind::ResolveEmbeddingSpace => false,
         }
     }
 
@@ -686,6 +692,41 @@ pub struct RunOutputs {
     /// by the topic-family fits whose collapse rewrote the high bits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pb_tree: Option<String>,
+    /// `{out}.feature_contrast.parquet` — `senna gem` only: one row per
+    /// gene-and-modality, the H-space RAW-loading delta between that
+    /// modality's two channel tracks (see [`crate::gem::contrast`]). `None`
+    /// for every other kind, and for an interrupted gem run whose `after_fit`
+    /// hook never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_contrast: Option<String>,
+    /// `{out}.feature_contrast_bias.parquet` — the scalar `b_feat` delta
+    /// paired with [`Self::feature_contrast`], same rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_contrast_bias: Option<String>,
+    /// Per-track cell encoders BEYOND track 0, which stays in
+    /// [`Self::cell_encoder`] so every existing reader keeps working
+    /// unchanged. `senna gem` only, one entry per count track past the
+    /// base; empty for every other kind and for a gem run with a single
+    /// count track. `senna predict` resolves each entry's numeric track id
+    /// at load time by matching [`TrackEncoderSlot::track`] against the
+    /// run's own axis, rather than trusting a stored id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub track_encoders: Vec<TrackEncoderSlot>,
+}
+
+/// One non-base-track cell encoder a `senna gem` run saved:
+/// [`RunOutputs::track_encoders`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackEncoderSlot {
+    /// The track's name, `{modality}/{channel}` (e.g. `"count/unspliced"`),
+    /// exactly as [`crate::gem::tracks::assign_tracks`] names it. The
+    /// numeric track id is deliberately NOT stored here: it depends on
+    /// which tracks a particular axis carries and in what order, which only
+    /// the loader's own re-derived axis knows.
+    pub track: String,
+    /// The resolved file, `{basename}.{suffix}` — the same convention every
+    /// other `RunOutputs` path slot uses.
+    pub path: String,
 }
 
 impl RunOutputs {
@@ -1238,6 +1279,15 @@ pub fn inherit_from(manifest_path: &str) -> anyhow::Result<InheritedFromManifest
             m.kind
         ),
     }
+    if m.kind == RunKind::Gem {
+        anyhow::ensure!(
+            m.data.input.len() == 1,
+            "--from: a gem parent must have loaded a single input file (found {}). gem's \
+             Union load with per-file sample tags cannot be replayed by the disjoint chain \
+             loader --from uses",
+            m.data.input.len()
+        );
+    }
     let to_box = |s: &str| -> Box<str> { resolve(&dir, s).to_string_lossy().into_owned().into() };
     let data_files: Vec<Box<str>> = m.data.input.iter().map(|s| to_box(s)).collect();
     let batch_files: Vec<Box<str>> = m.data.batch.iter().map(|s| to_box(s)).collect();
@@ -1324,6 +1374,18 @@ pub struct RunDescription<'a> {
     /// Suffix after `{basename}.` for the cell encoder, e.g.
     /// `"cell_encoder.safetensors"`. `None` to omit.
     pub cell_encoder_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the gem feature-contrast table, e.g.
+    /// `"feature_contrast.parquet"`. `None` for every writer but the shared
+    /// bge/gem driver, and for an interrupted gem run.
+    pub feature_contrast_suffix: Option<&'a str>,
+    /// Suffix after `{basename}.` for the gem feature-contrast bias column,
+    /// e.g. `"feature_contrast_bias.parquet"`. Paired with the above.
+    pub feature_contrast_bias_suffix: Option<&'a str>,
+    /// `(track name, cell-encoder safetensors suffix)` for every track
+    /// BEYOND track 0 whose encoder phase 2 saved — track 0's own file
+    /// stays in `cell_encoder_suffix`. Empty for every writer but the
+    /// shared bge/gem driver, and for a gem run with a single count track.
+    pub track_encoder_suffixes: Vec<(String, String)>,
     /// Default `--colour-by` for downstream plot / layout.
     pub default_colour_by: &'a str,
     /// True if the run emits `{basename}.latent.parquet`. Topic-family fits
@@ -1412,6 +1474,20 @@ pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
     if desc.has_pb_tree {
         m.outputs.pb_tree = Some(format!("{basename}.pb_tree.json"));
     }
+    if let Some(suf) = desc.feature_contrast_suffix {
+        m.outputs.feature_contrast = Some(format!("{basename}.{suf}"));
+    }
+    if let Some(suf) = desc.feature_contrast_bias_suffix {
+        m.outputs.feature_contrast_bias = Some(format!("{basename}.{suf}"));
+    }
+    m.outputs.track_encoders = desc
+        .track_encoder_suffixes
+        .iter()
+        .map(|(track, suf)| TrackEncoderSlot {
+            track: track.clone(),
+            path: format!("{basename}.{suf}"),
+        })
+        .collect();
     m.defaults.colour_by = Some(desc.default_colour_by.into());
 
     let path = default_path(desc.prefix);

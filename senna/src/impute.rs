@@ -208,12 +208,18 @@ fn matching_plan(kind: RunKind) -> anyhow::Result<MatchingPlan> {
             }
         ),
         // The graph / co-embedding kinds have no query-side projection at all.
-        RunKind::Fne | RunKind::ResolveEmbeddingSpace | RunKind::Gem => {
+        RunKind::Fne | RunKind::ResolveEmbeddingSpace => {
             anyhow::bail!(
                 "impute needs a run with a transferable per-cell latent; `{kind}` runs \
                  have no query-side projection here"
             )
         }
+        // gem DOES have a query-side projection now, the same frozen-table
+        // projection `senna predict` places a query through; impute's own
+        // matching machinery has just not been extended to a track axis yet.
+        RunKind::Gem => anyhow::bail!(
+            "impute is not wired for gem runs; use `senna predict` against this axis instead"
+        ),
     }
 }
 

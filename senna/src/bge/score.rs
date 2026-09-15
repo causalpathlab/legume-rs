@@ -28,7 +28,8 @@ use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs}
 use candle_util::candle_core::Device;
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
-    CellEncoder, FrozenProjection, FrozenProjectionArgs, FrozenProjector, PROJECTION_RIDGE_SGD,
+    CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector,
+    TrackSpec, PROJECTION_RIDGE_SGD,
 };
 use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
 use log::info;
@@ -59,7 +60,19 @@ pub struct BgeEmbedding {
     pub modules: Option<(DMatrix<f32>, DMatrix<f32>)>,
     /// Path of the run's cell encoder, when phase 2 placed the cells through one;
     /// `predict` then places a query by the same map instead of the block SGD.
+    /// For a gem run this is track 0's file; every other track's file lives in
+    /// [`Self::track_encoders`].
     pub cell_encoder: Option<String>,
+    /// gem's row-grammar track assignment, built once from the gene axis at
+    /// [`Self::open`] time. `None` for bge / simba, whose whole axis is
+    /// implicitly one track.
+    pub tracks: Option<crate::gem::tracks::TrackPlan>,
+    /// `(track id, resolved path)` for every count track BEYOND track 0 whose
+    /// encoder the manifest recorded, the id resolved by matching
+    /// [`crate::run_manifest::TrackEncoderSlot::track`]'s name against
+    /// [`Self::tracks`]. Empty for bge / simba, and for a gem run with a
+    /// single count track.
+    pub track_encoders: Vec<(u32, String)>,
 }
 
 /// How `predict` treats the new data's genes the model never saw.
@@ -139,7 +152,8 @@ impl BgeEmbedding {
         let kind = manifest.kind;
         anyhow::ensure!(
             kind.has_frozen_gene_table(),
-            "{from} is a '{kind}' run; this reader is for `senna bge` / `senna simba` output"
+            "{from} is a '{kind}' run; this reader is for `senna bge` / `senna simba` / \
+             `senna gem` output"
         );
 
         let (rho_path, bias_path) = run_manifest::resolve_feature_loading_for(&manifest, &dir)?;
@@ -207,6 +221,42 @@ impl BgeEmbedding {
             path
         });
 
+        // gem's row-grammar track assignment, re-derived from the gene axis
+        // rather than trusted from the manifest: the axis itself is the
+        // single source of truth for which tracks exist and what rows are on
+        // them, exactly as training re-derived it.
+        let tracks = if kind == run_manifest::RunKind::Gem {
+            Some(crate::gem::tracks::assign_tracks(&rho.rows)?)
+        } else {
+            None
+        };
+        let track_encoders: Vec<(u32, String)> = match &tracks {
+            Some(plan) => manifest
+                .outputs
+                .track_encoders
+                .iter()
+                .map(|slot| {
+                    let id = plan
+                        .tracks
+                        .iter()
+                        .find(|t| format!("{}/{}", t.modality, t.channel) == slot.track)
+                        .map(|t| t.id)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{from}: manifest names track encoder '{}', which this run's \
+                                 axis does not have",
+                                slot.track
+                            )
+                        })?;
+                    let path = run_manifest::resolve(&dir, &slot.path)
+                        .to_string_lossy()
+                        .to_string();
+                    Ok::<(u32, String), anyhow::Error>((id, path))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+
         Ok(Self {
             rho: rho_rm,
             b_feat,
@@ -214,6 +264,8 @@ impl BgeEmbedding {
             h,
             modules,
             cell_encoder,
+            tracks,
+            track_encoders,
         })
     }
 
@@ -317,11 +369,38 @@ impl BgeEmbedding {
         // The run's own estimator when it has one: the distilled encoder places
         // the query and the SGD polishes it from there, exactly as the run's
         // cells were placed. Without one the SGD solves from the null model.
+        //
+        // gem's axis carries tracks, so its encoder set is loaded through
+        // `CellEncoders` instead of the single-dictionary `CellEncoder`:
+        // `encode_edges` means over whichever count tracks a cell has counts
+        // on. `self.cell_encoder` (track 0's file) gates both arms the same
+        // way it always has — no file, no warm start, straight to the SGD.
         let cell_encoder = self
             .cell_encoder
             .as_deref()
+            .filter(|_| self.tracks.is_none())
             .map(|path| CellEncoder::load(&self.rho, &self.b_feat, self.h, path, dev))
             .transpose()?;
+        // Built once and kept alive alongside `track_encoders`: `CellEncoders::load`
+        // needs a `&TrackSpec` to build against, and `QueryProjector::Tracks`'s own
+        // polish step (`FrozenProjector::polish_tracks`) needs the SAME spec again,
+        // so it is computed here rather than inline at either call site.
+        let track_spec = self.tracks.as_ref().map(crate::gem::tracks::TrackPlan::to_ge);
+        let track_encoders = match (&track_spec, self.cell_encoder.as_deref()) {
+            (Some(spec), Some(track0_path)) => {
+                let mut paths: Vec<(u32, String)> = vec![(0, track0_path.to_string())];
+                paths.extend(self.track_encoders.iter().cloned());
+                Some(CellEncoders::load(
+                    &self.rho,
+                    &self.b_feat,
+                    self.h,
+                    spec,
+                    &paths,
+                    dev,
+                )?)
+            }
+            _ => None,
+        };
         let projector = FrozenProjector::new(&FrozenProjectionArgs {
             feat: &self.rho,
             b_feat: &self.b_feat,
@@ -334,9 +413,10 @@ impl BgeEmbedding {
         let mut pass = project_all(ProjectAll {
             data_vec: &data_vec,
             remap: &remap.new_to_train,
-            projector: match cell_encoder.as_ref() {
-                Some(enc) => QueryProjector::Encoder(enc, &projector),
-                None => QueryProjector::Sgd(&projector),
+            projector: match (&track_encoders, &track_spec, cell_encoder.as_ref()) {
+                (Some(encs), Some(spec), _) => QueryProjector::Tracks(encs, &projector, spec),
+                (None, _, Some(enc)) => QueryProjector::Encoder(enc, &projector),
+                _ => QueryProjector::Sgd(&projector),
             },
             side: &side,
             n_model,
@@ -500,6 +580,15 @@ impl BgeEmbedding {
 enum QueryProjector<'a> {
     Sgd(&'a FrozenProjector<'a>),
     Encoder(&'a CellEncoder, &'a FrozenProjector<'a>),
+    /// gem's per-track encoder set: the warm start means over whichever count
+    /// tracks a cell has counts on (`CellEncoders::encode_edges`) instead of
+    /// reading one dictionary, and the polish is
+    /// [`FrozenProjector::polish_tracks`] — the SAME per-track Poisson
+    /// partitions and intercepts phase 2 itself polished these tracks with
+    /// (Task 4a), not the single-partition pass `Encoder` uses. The
+    /// `TrackSpec` is the same one `CellEncoders::load` built the encoder set
+    /// against.
+    Tracks(&'a CellEncoders, &'a FrozenProjector<'a>, &'a TrackSpec),
 }
 
 impl QueryProjector<'_> {
@@ -509,6 +598,7 @@ impl QueryProjector<'_> {
             // The polish cuts blocks on the SGD's rhythm; the encoder's own block is
             // no larger, so grouping here keeps both block-aligned.
             Self::Encoder(e, p) => e.group_nodes().min(p.group_nodes()),
+            Self::Tracks(e, p, _) => e.group_nodes().min(p.group_nodes()),
         }
     }
 
@@ -529,6 +619,10 @@ impl QueryProjector<'_> {
             Self::Encoder(e, p) => {
                 let warm = e.encode_edges(&nodes)?;
                 p.polish(&nodes, &warm.theta, bar)
+            }
+            Self::Tracks(e, p, tracks) => {
+                let warm = e.encode_edges(&nodes)?;
+                p.polish_tracks(&nodes, &warm.theta, tracks, bar)
             }
         }
     }
@@ -701,3 +795,7 @@ impl EdgeGroup {
         self.count.clear();
     }
 }
+
+#[cfg(test)]
+#[path = "score/tests.rs"]
+mod tests;
