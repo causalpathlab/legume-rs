@@ -216,3 +216,32 @@ fn each_bucket_stays_sorted_and_deduped() {
         assert!(bucket.iter().all(|&(_, x)| x > 0.0), "zero entry kept");
     }
 }
+
+#[test]
+fn newton_polish_lands_where_the_converged_solve_lands() {
+    let e = dictionary_matrix();
+    let (b, totals) = abundances();
+    let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
+    let truth = [0.6f32, -0.4, 0.25, 0.0];
+    let obs = counts_from(&e, &b, &truth, 0.3);
+    let mut rng = SmallRng::seed_from_u64(1);
+    let (theta, beta) = dict.project(&obs, &args(1500, 0), &mut rng);
+    // From a start well off the optimum.
+    let start = [0.1f32, 0.1, -0.1, 0.2];
+    let mut rng = SmallRng::seed_from_u64(1);
+    let (polished, beta_polished) = dict.polish(&obs, &args(8, 0), &start, &mut rng);
+    assert!(
+        cosine(&polished, &theta) > 0.9999,
+        "direction: {polished:?} vs {theta:?}"
+    );
+    assert!(
+        (norm(&polished) - norm(&theta)).abs() < 1e-3,
+        "scale: {} vs {}",
+        norm(&polished),
+        norm(&theta)
+    );
+    assert!(
+        (beta_polished - beta).abs() < 1e-3,
+        "intercept: {beta_polished} vs {beta}"
+    );
+}

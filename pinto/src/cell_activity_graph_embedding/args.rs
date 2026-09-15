@@ -443,7 +443,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      and every cell in one pass. It is saved as {out}.pair_encoder.safetensors\n\
                      so `pinto predict` places a new sample by the same map.\n\
                      A seeded sample of pairs is always re-solved exactly afterwards\n\
-                     and the agreement is logged.\n\
+                     and the agreement is logged; the few placements the gradient\n\
+                     bound puts far above the optimum are finished exactly.\n\
                      \n\
                      exact solves every pair (and cell) on its own by Adam.\n\
                      It needs no device and no training, and pays for it per pair."
@@ -476,7 +477,7 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = 1024,
+        default_value_t = 4096,
         help = "Pairs per optimizer step when training the pair encoder",
         hide = true
     )]
@@ -489,6 +490,19 @@ pub struct CellActivityGraphEmbeddingArgs {
         hide = true
     )]
     pub pair_train_pairs: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Newton steps that finish every pair and cell from the encoder's placement; 0 = none",
+        long_help = "Off by default: the encoder's placement is what ships,\n\
+                     and placing a pair is one forward pass however many pairs there are.\n\
+                     A positive count finishes every pair and every cell on the exact\n\
+                     objective by that many Newton steps from the encoder's placement,\n\
+                     which is one pass over the pairs again, at the per-pair optimum.",
+        hide = true
+    )]
+    pub pair_polish_steps: usize,
 
     #[arg(
         long = "nce-objective",

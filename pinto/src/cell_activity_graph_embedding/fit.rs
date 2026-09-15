@@ -1474,6 +1474,7 @@ pub fn fit_cell_activity_graph_embedding(
             pair_block: args.pair_block,
             eval_features: None,
             score_pairs: false,
+            polish_steps: args.pair_polish_steps,
         },
         &gene_axis,
         &gene_totals,

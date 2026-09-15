@@ -195,6 +195,10 @@ pub struct PairProjectionArgs<'a> {
     /// comes back empty: the exhaustive pass per pair is only worth paying
     /// where the numbers are written out.
     pub score_pairs: bool,
+    /// Newton steps the encoder arms finish every pair and cell with, from
+    /// the encoder's placement, on the exact objective; `0` ships the
+    /// encoder's placement as is.
+    pub polish_steps: usize,
 }
 
 /// Per-endpoint batch division, applied to each cell's counts *before* they are
@@ -384,7 +388,21 @@ impl PairDictionary {
         args: &ProjectionArgs,
         rng: &mut SmallRng,
     ) -> (Vec<f32>, f32) {
-        solve_pair(&self.to_local(obs), self, args, rng)
+        solve_pair(&self.to_local(obs), self, args, None, rng)
+    }
+
+    /// Finish one pair from `init` by Newton steps on the exact objective.
+    /// Returns `(e_uv, β_uv)`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn polish(
+        &self,
+        obs: &[(u32, f32)],
+        args: &ProjectionArgs,
+        init: &[f32],
+        rng: &mut SmallRng,
+    ) -> (Vec<f32>, f32) {
+        newton_polish(&self.to_local(obs), self, args, init, rng)
     }
 }
 
@@ -574,7 +592,9 @@ fn project_exact(
                 let mut rng = SmallRng::seed_from_u64(
                     args.seed ^ (c as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
                 );
-                dict.project(&obs, &args.projection, &mut rng)
+                let (theta, beta) = dict.project(&obs, &args.projection, &mut rng);
+                // The cell's own depth, not the doubled one the solve saw.
+                (theta, beta - std::f32::consts::LN_2)
             })
             .collect();
         bar.inc(cells.len() as u64);
@@ -654,8 +674,10 @@ fn project_with_encoder(
         PairSolver::TrainEncoder { spec, dev, save_to } => {
             let enc = encoder::PairEncoder::build(
                 dict,
+                &corpus,
                 spec.trunk_width,
                 spec.n_experts,
+                args.projection.ridge,
                 args.seed,
                 dev,
             )?;
@@ -669,7 +691,7 @@ fn project_with_encoder(
             enc
         }
         PairSolver::LoadEncoder { path, dev } => {
-            let enc = encoder::PairEncoder::load(dict, path, dev)?;
+            let enc = encoder::PairEncoder::load(dict, path, args.projection.ridge, dev)?;
             info!(
                 "Pair encoder: loaded {path} (L={}, K={})",
                 enc.trunk_width(),
@@ -680,23 +702,96 @@ fn project_with_encoder(
         PairSolver::Exact => unreachable!("the exact arm has its own path"),
     };
 
-    let encoded = enc.encode_all(&corpus, edges, args.pair_block, encoder::CELL_BLOCK)?;
+    let mut encoded = enc.encode_all(&corpus, edges, args.pair_block, encoder::CELL_BLOCK)?;
 
     // The amortization gap: how far the shared map sits from the per-pair
     // optimum, on a seeded sample. Always reported — it is the one number that
     // says whether the encoder earned its place on this run.
-    let gap = encoder::amortization_gap(
-        dict,
-        &corpus,
-        edges,
-        &encoded.pair_latent,
-        &args.projection,
-        args.seed,
-    );
+    let report = |what: &str, latent: &Mat| {
+        let gap =
+            encoder::amortization_gap(dict, &corpus, edges, latent, &args.projection, args.seed);
+        info!(
+            "{what} vs the converged MAP on {} pairs: mean cosine {:.3}, NLL ratio {:.5}; \
+             ‖z‖ median/max {:.2}/{:.2} against {:.2}/{:.2}",
+            gap.n_pairs,
+            gap.mean_cosine,
+            gap.nll_ratio,
+            gap.norm_encoder.0,
+            gap.norm_encoder.1,
+            gap.norm_exact.0,
+            gap.norm_exact.1
+        );
+        gap
+    };
+    let warm = report("Pair encoder", &encoded.pair_latent);
     info!(
-        "Pair encoder vs exact MAP on {} pairs: mean cosine {:.3}, NLL ratio {:.4}",
-        gap.n_pairs, gap.mean_cosine, gap.nll_ratio
+        "The solver at its own {}-step budget vs converged: cosine {:.3}",
+        args.projection.steps, warm.solver_self_cosine
     );
+
+    // Every placement carries a guaranteed bound on how many nats above the
+    // optimum it sits (the gradient's, the objective being `λ`-strongly
+    // convex). The rows over `RESCUE_GAP_NATS` — the rare inputs a shared
+    // map extrapolates on — are finished exactly; with a polish budget,
+    // every row is.
+    let spread = |gap: &[f32]| -> (f32, f32, f32) {
+        let mut v: Vec<f32> = gap.iter().copied().filter(|g| g.is_finite()).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        match v.len() {
+            0 => (0.0, 0.0, 0.0),
+            n => (v[n / 2], v[(n * 99) / 100], v[n - 1]),
+        }
+    };
+    let (pm, p99, pmax) = spread(&encoded.pair_gap);
+    let (cm, c99, cmax) = spread(&encoded.cell_gap);
+    info!(
+        "Placement gap bound (nats above the optimum), median/99%/max: pairs {pm:.3}/{p99:.2}/{pmax:.1}, \
+         cells {cm:.3}/{c99:.2}/{cmax:.1}"
+    );
+    let (pair_ids, cell_ids, steps) = if args.polish_steps > 0 {
+        (
+            (0..edges.len()).collect::<Vec<_>>(),
+            (0..corpus.len()).collect::<Vec<_>>(),
+            args.polish_steps,
+        )
+    } else {
+        let over = |gap: &[f32]| -> Vec<usize> {
+            gap.iter()
+                .enumerate()
+                .filter(|(_, &g)| g > RESCUE_GAP_NATS)
+                .map(|(i, _)| i)
+                .collect()
+        };
+        (
+            over(&encoded.pair_gap),
+            over(&encoded.cell_gap),
+            RESCUE_STEPS,
+        )
+    };
+    if !pair_ids.is_empty() || !cell_ids.is_empty() {
+        info!(
+            "Finishing {} pairs and {} cells exactly ({} Newton steps each){}",
+            pair_ids.len(),
+            cell_ids.len(),
+            steps,
+            if args.polish_steps > 0 {
+                String::new()
+            } else {
+                format!(": placed more than {RESCUE_GAP_NATS} nats above the optimum")
+            }
+        );
+        polish(
+            dict,
+            &corpus,
+            edges,
+            &mut encoded,
+            args,
+            &pair_ids,
+            &cell_ids,
+            steps,
+        );
+        report("After finishing", &encoded.pair_latent);
+    }
 
     let scores = if args.score_pairs {
         edges
@@ -721,6 +816,83 @@ fn project_with_encoder(
             bias: encoded.cell_bias,
         },
     })
+}
+
+/// Newton steps at most for a row the encoder left too far from the optimum;
+/// the solve stops early once its gradient is small.
+const RESCUE_STEPS: usize = 32;
+/// A placement whose gap bound exceeds this many nats is finished exactly.
+const RESCUE_GAP_NATS: f32 = 16.0;
+
+/// Finish the listed pairs and cells on the exact objective from the
+/// encoder's placement: the encoder is the warm start, `steps` of Newton per
+/// node settle it where the per-pair solve would. Nothing is read from disk;
+/// the profiles come from the corpus.
+#[allow(clippy::too_many_arguments)]
+fn polish(
+    dict: &PairDictionary,
+    corpus: &[encoder::CellRow],
+    edges: &[(u32, u32)],
+    encoded: &mut encoder::Encoded,
+    args: &PairProjectionArgs<'_>,
+    pair_ids: &[usize],
+    cell_ids: &[usize],
+    steps: usize,
+) {
+    let steps = ProjectionArgs {
+        steps,
+        ..args.projection.clone()
+    };
+    let d = dict.d();
+    let bar = new_progress_bar((pair_ids.len() + cell_ids.len()) as u64).with_message("finishing");
+
+    let pairs: Vec<(Vec<f32>, f32)> = pair_ids
+        .par_iter()
+        .map(|&e| {
+            let (u, v) = edges[e];
+            let obs = corpus[u as usize].pooled(&corpus[v as usize]);
+            let init: Vec<f32> = encoded.pair_latent.row(e).iter().copied().collect();
+            let mut rng =
+                SmallRng::seed_from_u64(args.seed ^ (e as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            newton_polish(&obs, dict, &steps, &init, &mut rng)
+        })
+        .collect();
+    bar.inc(pair_ids.len() as u64);
+    for (&e, (theta, beta)) in pair_ids.iter().zip(pairs) {
+        for (j, &t) in theta.iter().enumerate().take(d) {
+            encoded.pair_latent[(e, j)] = t;
+        }
+        encoded.pair_bias[e] = beta;
+        encoded.pair_gap[e] = 0.0;
+    }
+
+    let cells: Vec<(Vec<f32>, f32)> = cell_ids
+        .par_iter()
+        .map(|&c| {
+            let row = &corpus[c];
+            let obs: Vec<(u32, f32)> = row
+                .genes
+                .iter()
+                .zip(&row.counts)
+                .map(|(&g, &n)| (g, 2.0 * n))
+                .collect();
+            let init: Vec<f32> = encoded.cell_latent.row(c).iter().copied().collect();
+            let mut rng =
+                SmallRng::seed_from_u64(args.seed ^ (c as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            let (theta, beta) = newton_polish(&obs, dict, &steps, &init, &mut rng);
+            // The cell's own depth, not the doubled one the solve saw.
+            (theta, beta - std::f32::consts::LN_2)
+        })
+        .collect();
+    bar.inc(cell_ids.len() as u64);
+    bar.finish_and_clear();
+    for (&c, (theta, beta)) in cell_ids.iter().zip(cells) {
+        for (j, &t) in theta.iter().enumerate().take(d) {
+            encoded.cell_latent[(c, j)] = t;
+        }
+        encoded.cell_bias[c] = beta;
+        encoded.cell_gap[c] = 0.0;
+    }
 }
 
 /// One block's count slab, as the CSC arrays themselves plus the cell → column
@@ -934,7 +1106,149 @@ pub(crate) fn pooled_profile_routed(
     (visible, held)
 }
 
-/// Adam on one pair's `e_uv`, with `β_uv` profiled out each step.
+/// Longest Newton step accepted per iteration, in `e_uv` units: a warm start
+/// far off the optimum takes several damped steps rather than one wild one.
+const NEWTON_STEP_CAP: f32 = 1.0;
+/// Below this gradient norm the polish is done.
+const NEWTON_GRAD_TOL: f32 = 1e-4;
+
+/// Newton on one pair's `e_uv` from a warm start: the objective is strictly
+/// convex with Hessian `N·Cov_p(e) + λI`, a `D × D` solve per step, so a
+/// placement that is already close settles at the optimum in a few steps
+/// where Adam would need hundreds. The partition is the same as the solver's
+/// (sampled under the abundance proposal or exhaustive); `β_uv` is profiled
+/// out at the end. Returns `(e_uv, β_uv)`.
+fn newton_polish(
+    obs: &[(u32, f32)],
+    dict: &PairDictionary,
+    args: &ProjectionArgs,
+    init: &[f32],
+    rng: &mut SmallRng,
+) -> (Vec<f32>, f32) {
+    let d = dict.d;
+    let total: f32 = obs.iter().map(|&(_, n)| n).sum();
+    if obs.is_empty() || !total.is_finite() || total <= 0.0 {
+        return (vec![0f32; d], 0.0);
+    }
+    let mut obs_mean = vec![0f32; d];
+    for &(g, n) in obs {
+        let row = &dict.feat[g as usize * d..(g as usize + 1) * d];
+        for (o, &e) in obs_mean.iter_mut().zip(row) {
+            *o += n * e;
+        }
+    }
+    for o in obs_mean.iter_mut() {
+        *o /= total;
+    }
+
+    let n_active = dict.b.len();
+    let sample = if args.gene_sample == 0 {
+        n_active
+    } else {
+        args.gene_sample.min(n_active)
+    };
+    let exhaustive = sample == n_active;
+    let log_scale = if exhaustive {
+        0.0
+    } else {
+        dict.log_z - (sample as f32).ln()
+    };
+    let log_total = total.ln();
+
+    let mut theta = init.to_vec();
+    let mut genes: Vec<u32> = if exhaustive {
+        (0..sample as u32).collect()
+    } else {
+        vec![0u32; sample]
+    };
+    let mut weights = vec![0f32; sample];
+    let mut pred_mean = vec![0f32; d];
+    let mut hess = nalgebra::DMatrix::<f32>::zeros(d, d);
+    let mut beta = log_total - dict.log_z;
+
+    // One pass more than the steps: the last only profiles `β` at the final
+    // `θ`, so the intercept reported is the one the returned placement implies.
+    let steps = args.steps.max(1);
+    for it in 0..=steps {
+        if !exhaustive {
+            for g in genes.iter_mut() {
+                *g = dict.proposal.sample(rng) as u32;
+            }
+        }
+        // Softmax weights over the partition sample, as in the solver.
+        let mut max_score = f32::NEG_INFINITY;
+        for (w, &g) in weights.iter_mut().zip(&genes) {
+            let g = g as usize;
+            let row = &dict.feat[g * d..(g + 1) * d];
+            let mut a: f32 = row.iter().zip(&theta).map(|(&e, &t)| e * t).sum();
+            if exhaustive {
+                a += dict.b[g];
+            }
+            *w = a.clamp(-SCORE_CLAMP, SCORE_CLAMP);
+            max_score = max_score.max(*w);
+        }
+        let mut w_sum = 0f32;
+        for w in weights.iter_mut() {
+            *w = (*w - max_score).exp();
+            w_sum += *w;
+        }
+        if !w_sum.is_finite() || w_sum <= 0.0 {
+            break;
+        }
+        beta = log_total - (log_scale + max_score + w_sum.ln());
+        if it == steps {
+            break;
+        }
+
+        // Predicted mean and second moment of `e` under the fitted composition.
+        pred_mean.fill(0.0);
+        hess.fill(0.0);
+        for (&w, &g) in weights.iter().zip(&genes) {
+            let w = w / w_sum;
+            let row = &dict.feat[g as usize * d..(g as usize + 1) * d];
+            for (p, &e) in pred_mean.iter_mut().zip(row) {
+                *p += w * e;
+            }
+            for i in 0..d {
+                let wi = w * row[i];
+                for j in 0..=i {
+                    hess[(i, j)] += wi * row[j];
+                }
+            }
+        }
+        // `N·(E[e eᵀ] − p̄ p̄ᵀ) + λI`, symmetric, positive definite.
+        for i in 0..d {
+            for j in 0..=i {
+                let v = total * (hess[(i, j)] - pred_mean[i] * pred_mean[j]);
+                hess[(i, j)] = v;
+                hess[(j, i)] = v;
+            }
+            hess[(i, i)] += args.ridge;
+        }
+        let grad = nalgebra::DVector::<f32>::from_iterator(
+            d,
+            (0..d).map(|j| total * (pred_mean[j] - obs_mean[j]) + args.ridge * theta[j]),
+        );
+        if grad.norm() < NEWTON_GRAD_TOL * total.max(1.0) {
+            break;
+        }
+        let Some(chol) = hess.clone().cholesky() else {
+            break;
+        };
+        let mut step = chol.solve(&grad);
+        let len = step.norm();
+        if len > NEWTON_STEP_CAP {
+            step *= NEWTON_STEP_CAP / len;
+        }
+        for (t, s) in theta.iter_mut().zip(step.iter()) {
+            *t -= s;
+        }
+    }
+    (theta, beta)
+}
+
+/// Adam on one pair's `e_uv`, with `β_uv` profiled out each step, from the
+/// origin or from `init` (the encoder's placement, when it polishes).
 ///
 /// Returns `(e_uv, β_uv)`. A pair with no pooled counts gets the origin: the
 /// likelihood says nothing about it, and the origin is where the ridge puts it.
@@ -942,6 +1256,7 @@ fn solve_pair(
     obs: &[(u32, f32)],
     dict: &PairDictionary,
     args: &ProjectionArgs,
+    init: Option<&[f32]>,
     rng: &mut SmallRng,
 ) -> (Vec<f32>, f32) {
     let d = dict.d;
@@ -971,7 +1286,7 @@ fn solve_pair(
     };
     let exhaustive = sample == n_active;
 
-    let mut theta = vec![0f32; d];
+    let mut theta = init.map_or_else(|| vec![0f32; d], <[f32]>::to_vec);
     let mut m = vec![0f32; d];
     let mut v = vec![0f32; d];
 
