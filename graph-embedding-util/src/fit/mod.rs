@@ -16,7 +16,9 @@ mod samplers;
 mod setup;
 
 pub use batch_fold::BatchGeneFold;
-pub use config::{FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned};
+pub use config::{
+    FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned, TrackInfo, TrackSpec,
+};
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
@@ -163,13 +165,30 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     } else {
         Vec::new()
     };
-    let units = hier::UnitTable::from_pseudobulks_and_cells(
-        &blobs,
-        &n_pb_per_level,
-        &cell_rows,
-        cell_fold,
-        n_features,
-    );
+    // Row structure of the feature axis: plain genes (every row its own gene)
+    // unless the caller named tracks.
+    let units = match config.tracks.clone() {
+        Some(tracks) => {
+            tracks
+                .validate(n_features)
+                .context("the fit's track spec does not describe this feature axis")?;
+            hier::UnitTable::from_pseudobulks_and_cells_tracked(
+                &blobs,
+                &n_pb_per_level,
+                &cell_rows,
+                cell_fold,
+                n_features,
+                tracks,
+            )
+        }
+        None => hier::UnitTable::from_pseudobulks_and_cells(
+            &blobs,
+            &n_pb_per_level,
+            &cell_rows,
+            cell_fold,
+            n_features,
+        ),
+    };
     // Module labels: under `senna update`, seeded from the parent's membership
     // (the argmax of `parent_module_logits`, i.e. the partition `senna update`
     // claims to carry — matched features take the parent's module, unmatched
@@ -382,5 +401,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_nrms: phase2.cell_nrms,
         pb_embeddings,
         cell_encoder: phase2.cell_encoder,
+        // Filled once the non-base tracks train; a one-track fit has none.
+        track_intercepts: Vec::new(),
     })
 }

@@ -13,6 +13,168 @@ pub(crate) const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 /// [`GeneModuleConfig::warmup_epochs`] is not given.
 pub(crate) const MODULE_WARMUP_FRAC: f64 = 0.25;
 
+/// Row structure of the feature axis: every row belongs to one TRACK (a
+/// (modality, channel) pair) and names one GENE. Track 0 is the base track.
+///
+/// Invariants, all checked by [`TrackSpec::validate`]:
+/// - `track_of_row.len() == gene_of_row.len() == n_features`;
+/// - every track id is `< tracks.len()`;
+/// - the gene ids are dense `0..n_genes` (every id in the range is used);
+/// - track 0 is non-empty and is a count track;
+/// - within one track a gene appears at most once (a track holds at most one
+///   row per gene);
+/// - on a ONE-track spec, `gene_of_row` is the identity `0..n_features` — a
+///   one-track axis is the plain gene axis, and the trainer's per-gene tables
+///   are read back as feature rows, so any other ordering would silently
+///   permute them.
+#[derive(Clone, Debug)]
+pub struct TrackSpec {
+    /// row → track id, `len == n_features`, dense `0..n_tracks`, 0 = base.
+    pub track_of_row: Vec<u32>,
+    /// row → gene id, `len == n_features`, dense `0..n_genes`.
+    pub gene_of_row: Vec<u32>,
+    /// Per track, in id order.
+    pub tracks: Vec<TrackInfo>,
+}
+
+/// What one track is: its name and whether it carries counts.
+#[derive(Clone, Debug)]
+pub struct TrackInfo {
+    /// e.g. "count/spliced".
+    pub name: Box<str>,
+    /// A count track gets a distilled encoder in phase 2 (track 0 always is one).
+    pub is_count: bool,
+}
+
+/// Name of the single track [`TrackSpec::base`] builds.
+const BASE_TRACK_NAME: &str = "base";
+
+impl TrackSpec {
+    /// The one-track axis every row of which is its own gene — what a feature
+    /// axis of plain genes is.
+    #[must_use]
+    pub fn base(n_features: usize) -> Self {
+        Self {
+            track_of_row: vec![0; n_features],
+            gene_of_row: (0..n_features as u32).collect(),
+            tracks: vec![TrackInfo {
+                name: BASE_TRACK_NAME.into(),
+                is_count: true,
+            }],
+        }
+    }
+
+    #[must_use]
+    pub fn n_tracks(&self) -> usize {
+        self.tracks.len()
+    }
+
+    /// One past the largest gene id — `0` on an empty axis. Meaningful only on
+    /// a spec that [`Self::validate`] accepted, where the ids are dense.
+    #[must_use]
+    pub fn n_genes(&self) -> usize {
+        self.gene_of_row
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |g| g as usize + 1)
+    }
+
+    /// The one-track axis: row = gene, nothing to compose. Requires the gene
+    /// ids to BE the row ids — the trainer's per-gene tables are read back as
+    /// feature rows, so a permuted one-track spec is not the base axis.
+    #[must_use]
+    pub fn is_base(&self) -> bool {
+        self.n_tracks() == 1 && self.gene_ids_are_the_identity()
+    }
+
+    /// `gene_of_row[i] == i` for every row.
+    fn gene_ids_are_the_identity(&self) -> bool {
+        self.gene_of_row
+            .iter()
+            .enumerate()
+            .all(|(row, &g)| g as usize == row)
+    }
+
+    /// Row ids belonging to track `t`, ascending.
+    #[must_use]
+    pub fn rows_of_track(&self, t: usize) -> Vec<u32> {
+        self.track_of_row
+            .iter()
+            .enumerate()
+            .filter(|&(_, &tr)| tr as usize == t)
+            .map(|(row, _)| row as u32)
+            .collect()
+    }
+
+    /// Track ids carrying counts, ascending. Always contains `0` on a
+    /// validated spec.
+    #[must_use]
+    pub fn count_tracks(&self) -> Vec<usize> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|&(_, t)| t.is_count)
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    /// Check every invariant listed on the struct against a feature axis of
+    /// `n_features` rows.
+    pub fn validate(&self, n_features: usize) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.track_of_row.len() == n_features,
+            "track_of_row has {} entries but the feature axis has {n_features} rows",
+            self.track_of_row.len()
+        );
+        anyhow::ensure!(
+            self.gene_of_row.len() == n_features,
+            "gene_of_row has {} entries but the feature axis has {n_features} rows",
+            self.gene_of_row.len()
+        );
+        let n_t = self.tracks.len();
+        if let Some(&bad) = self.track_of_row.iter().find(|&&t| t as usize >= n_t) {
+            anyhow::bail!("track id {bad} is out of range for {n_t} tracks");
+        }
+        // Dense gene ids: n_genes = max + 1, and every id below it is used.
+        let n_g = self.n_genes();
+        let mut gene_seen = vec![false; n_g];
+        for &g in &self.gene_of_row {
+            gene_seen[g as usize] = true;
+        }
+        if let Some(missing) = gene_seen.iter().position(|&s| !s) {
+            anyhow::bail!("gene ids are not dense: {missing} of {n_g} is never used");
+        }
+        anyhow::ensure!(n_t > 0, "a track spec needs at least the base track");
+        anyhow::ensure!(
+            self.track_of_row.contains(&0),
+            "the base track (0) has no rows"
+        );
+        anyhow::ensure!(
+            self.tracks[0].is_count,
+            "the base track must be a count track"
+        );
+        // At most one row per (track, gene).
+        let mut seen = vec![false; n_t * n_g];
+        for (row, (&t, &g)) in self.track_of_row.iter().zip(&self.gene_of_row).enumerate() {
+            let slot = &mut seen[t as usize * n_g + g as usize];
+            anyhow::ensure!(
+                !*slot,
+                "row {row} repeats gene {g} within track {t}: a track holds at most one row per gene"
+            );
+            *slot = true;
+        }
+        // A one-track axis IS the gene axis: `fit` reads the trainer's per-gene
+        // tables back as feature rows, so any other ordering would permute them
+        // with every shape still valid. Reject it here, at the boundary.
+        anyhow::ensure!(
+            n_t > 1 || self.gene_ids_are_the_identity(),
+            "a one-track spec must name gene `i` on row `i`"
+        );
+        Ok(())
+    }
+}
+
 /// Hyperparameter / configuration bundle for [`fit`]. Constructed by
 /// each caller from its own CLI arguments — this crate doesn't import
 /// `clap`.
@@ -102,6 +264,12 @@ pub struct FitConfig {
     /// membership layer ([`crate::model::FeatModules`]) that `pinto cage`
     /// trains directly; `fit()` never builds that layer.
     pub gene_modules: Option<GeneModuleConfig>,
+    /// Row structure of the feature axis. `None` = every row is its own gene
+    /// ([`TrackSpec::base`], built inside [`fit`]) — what `senna bge` runs.
+    pub tracks: Option<TrackSpec>,
+    /// Ridge on the per-track offsets (`Δ^t_m`, `δ^t_g`), keeping the non-base
+    /// tracks close to the base model. Inert at one track.
+    pub offset_l2: f32,
 }
 
 /// Caller-facing configuration of the learned gene modules.
@@ -189,4 +357,11 @@ pub struct FitOutput {
     /// Per-batch gene fold `log δ_gb` phase 2 divided each batch's cell counts by;
     /// `None` on single-batch data.
     pub batch_gene_fold: Option<super::batch_fold::BatchGeneFold>,
+    /// Per-cell intercept of each non-base track (tracks `1..T`, `[n_cells]`
+    /// each); empty on a one-track axis.
+    pub track_intercepts: Vec<Vec<f32>>,
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;
