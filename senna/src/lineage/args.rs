@@ -25,18 +25,22 @@ pub enum LayoutKind {
 /// Feature space the t-UMAP layout embeds on (`--layout umap`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum LayoutSpace {
-    /// θ only — the identity manifold (current state). The default: the layout is
-    /// the IDENTITY manifold and δ rides on top of it as the velocity arrow field
-    /// (`{out}.velocity_grid_2d.parquet`), rather than being baked into the
-    /// coordinates. Keeps "where cells are" and "where they are going" separable.
+    /// θ only, the identity manifold (current state) and the default. δ rides on
+    /// top of it as the velocity arrow field (`{out}.velocity_grid_2d.parquet`)
+    /// rather than being baked into the coordinates, keeping "where cells are"
+    /// and "where they are going" separable. No senna command currently writes
+    /// a δ table, so this is also what Nascent and Concat fall back to when
+    /// `{from}.velocity.parquet` is absent.
     #[default]
     Identity,
-    /// θ + δ — the NASCENT state (where each cell is heading), baked into the
-    /// coordinates. Splays the manifold toward the fates, but the positions then
-    /// mix identity with velocity, so the arrow field is no longer an independent
-    /// read on the same plot.
+    /// θ + δ, the nascent state (where each cell is heading), baked into the
+    /// coordinates. Splays the manifold toward the fates, but the positions
+    /// then mix identity with motion, so the arrow field stops being an
+    /// independent read of the same plot. Falls back to Identity when no δ
+    /// table is present.
     Nascent,
-    /// [θ | δ] concatenated — identity and velocity as separate cosine channels.
+    /// [θ | δ] concatenated, identity and velocity as separate cosine
+    /// channels. Falls back to Identity when no δ table is present.
     Concat,
 }
 
