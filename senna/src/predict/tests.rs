@@ -609,4 +609,36 @@ mod gem_predict {
             "{err}"
         );
     }
+
+    /// A second query file must be refused, not silently scored against
+    /// disjoint cells: `crate::multiome_layout::query_load` does not apply
+    /// gem's per-file `@sample` tagging, so two files fall back to
+    /// `ColumnAlignment::Disjoint` (see
+    /// `predict_reproduces_the_runs_own_cell_embedding`'s doc comment for the
+    /// confirmed root cause). One file must still succeed.
+    #[test]
+    fn a_second_query_file_is_refused_on_a_gem_run_but_one_file_still_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (genes, out) = fit_gem(dir.path());
+        let m6a = m6a_file(dir.path());
+        let pout = dir.path().join("pred4").to_string_lossy().into_owned();
+
+        let args = parse(&[&genes, &m6a, "--model", &out, "-o", &pout])
+            .expect("PredictArgs parses two query files");
+        let err = match super::predict_model(&args) {
+            Ok(()) => panic!("predict with two query files on a gem run must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains(
+                "the query loader does not yet join a gene file with modality files for a \
+                 gem query"
+            ),
+            "{err}"
+        );
+
+        // One file still succeeds.
+        let args = parse(&[&genes, "--model", &out, "-o", &pout]).expect("PredictArgs parses");
+        super::predict_model(&args).expect("a single query file must still succeed");
+    }
 }
