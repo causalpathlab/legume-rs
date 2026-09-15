@@ -383,6 +383,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             &config.device,
             batch_fold,
             Some(&spec),
+            &tracks,
         )?
     };
 
@@ -408,7 +409,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         cell_nrms: phase2.cell_nrms,
         pb_embeddings,
         cell_encoder: phase2.cell_encoder,
-        // Filled once the non-base tracks train; a one-track fit has none.
-        track_intercepts: Vec::new(),
+        // One fitted intercept per NON-base track; empty on a one-track axis.
+        track_intercepts: phase2.other_intercepts,
     })
 }
