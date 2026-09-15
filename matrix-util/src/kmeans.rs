@@ -22,7 +22,7 @@ use rayon::prelude::*;
 /// Rows per assignment task. Fixed rather than derived from the thread count so
 /// the chunk partition — and with it every float sum — is the same on any
 /// machine.
-pub(crate) const CHUNK_ROWS: usize = 4096;
+const CHUNK_ROWS: usize = 4096;
 
 /// A centroid whose mean falls below this norm under the spherical metric has
 /// no direction and is treated as empty.
@@ -109,24 +109,11 @@ pub fn kmeans_rows_seeded(z: &DMatrix<f32>, opts: &KmeansRowsOpts) -> KmeansRows
         // Fixed-size chunks collected in order: the reduction below sums the
         // partials as they appear, so the result never depends on thread count.
         let cents_soa = to_soa(&cents, k, d);
-        let partials: Vec<Partial> = rows
-            .par_chunks(CHUNK_ROWS * d)
-            .zip(labels.par_chunks_mut(CHUNK_ROWS))
-            .zip(nearest.par_chunks_mut(CHUNK_ROWS))
-            .map(|((xs, ls), ns)| assign_chunk(xs, d, &cents_soa, k, cosine, ls, ns))
-            .collect();
-        let mut sums = vec![0f64; k * d];
-        let mut counts = vec![0usize; k];
-        let mut changed = 0usize;
-        for p in &partials {
-            for (s, &v) in sums.iter_mut().zip(&p.sums) {
-                *s += v;
-            }
-            for (c, &v) in counts.iter_mut().zip(&p.counts) {
-                *c += v;
-            }
-            changed += p.changed;
-        }
+        let Partial {
+            mut sums,
+            mut counts,
+            changed,
+        } = assign_all(rows, d, &cents_soa, k, cosine, &mut labels, &mut nearest);
 
         ///////////////////
         // Centroid step //
@@ -194,19 +181,18 @@ pub fn nearest_centroid_rows(
     if cosine {
         zt.as_mut_slice().par_chunks_mut(d).for_each(normalise_row);
     }
-    let rows: &[f32] = zt.as_slice();
-    let cents_soa: Vec<f32> = (0..d)
-        .flat_map(|dim| (0..k).map(move |c| (dim, c)))
-        .map(|(dim, c)| centroids[(c, dim)])
-        .collect();
+    // A column-major `[k × d]` table IS the dimension-major layout the kernel reads.
     let mut labels = vec![usize::MAX; n];
     let mut nearest = vec![0f32; n];
-    rows.par_chunks(CHUNK_ROWS * d)
-        .zip(labels.par_chunks_mut(CHUNK_ROWS))
-        .zip(nearest.par_chunks_mut(CHUNK_ROWS))
-        .for_each(|((xs, ls), ns)| {
-            assign_chunk(xs, d, &cents_soa, k, cosine, ls, ns);
-        });
+    assign_all(
+        zt.as_slice(),
+        d,
+        centroids.as_slice(),
+        k,
+        cosine,
+        &mut labels,
+        &mut nearest,
+    );
     labels
 }
 
@@ -243,7 +229,7 @@ fn normalise_row(row: &mut [f32]) {
 /// next one drawn ∝ its squared distance to the nearest centroid so far.
 /// Draws come from `SmallRng(seed)`; `init_sample > 0` restricts the candidate
 /// pool to a seeded subsample of that many rows. Returns `[k × d]` row-major.
-pub(crate) fn kmeans_pp_init(
+fn kmeans_pp_init(
     rows: &[f32],
     n: usize,
     d: usize,
@@ -320,6 +306,41 @@ fn to_soa(cents: &[f32], k: usize, d: usize) -> Vec<f32> {
         .collect()
 }
 
+/// One assignment pass over every row: fixed-size chunks in parallel, the
+/// partials summed in chunk order, so the result never depends on the thread
+/// count. `cents_soa` is the dimension-major `[d × k]` centroid table.
+fn assign_all(
+    rows: &[f32],
+    d: usize,
+    cents_soa: &[f32],
+    k: usize,
+    cosine: bool,
+    labels: &mut [usize],
+    nearest: &mut [f32],
+) -> Partial {
+    let partials: Vec<Partial> = rows
+        .par_chunks(CHUNK_ROWS * d)
+        .zip(labels.par_chunks_mut(CHUNK_ROWS))
+        .zip(nearest.par_chunks_mut(CHUNK_ROWS))
+        .map(|((xs, ls), ns)| assign_chunk(xs, d, cents_soa, k, cosine, ls, ns))
+        .collect();
+    let mut total = Partial {
+        sums: vec![0f64; k * d],
+        counts: vec![0usize; k],
+        changed: 0,
+    };
+    for p in &partials {
+        for (s, &v) in total.sums.iter_mut().zip(&p.sums) {
+            *s += v;
+        }
+        for (c, &v) in total.counts.iter_mut().zip(&p.counts) {
+            *c += v;
+        }
+        total.changed += p.changed;
+    }
+    total
+}
+
 /// Assign every row of one chunk to its nearest centroid (strict `<` from
 /// centroid 0, so ties go to the lowest index), recording the distance in
 /// `nearest` and returning the chunk's sums, counts and change count.
@@ -374,7 +395,7 @@ fn assign_chunk(
 /// then zero that row's distance so the next empty cluster takes another. The
 /// pick is a total order (largest distance, then lowest index), so the parallel
 /// reduction is associative and thread-count independent.
-pub(crate) fn reseed_empty_clusters(
+fn reseed_empty_clusters(
     next: &mut [f32],
     counts: &[usize],
     nearest: &mut [f32],
@@ -401,6 +422,43 @@ pub(crate) fn reseed_empty_clusters(
         next[c * d..(c + 1) * d].copy_from_slice(&rows[src * d..(src + 1) * d]);
         nearest[src] = 0.0;
     }
+}
+
+///////////
+// Shims //
+///////////
+
+/// Seeded Euclidean k-means on the rows of `z` (cells × D): kmeans++ from a
+/// `SmallRng(seed)` then Lloyd iterations, returning `(centroids K×D, labels)`.
+/// Reproducible for a given `seed` on any thread count — the substrate
+/// `senna lineage --seed` and bootstrap-support scoring rely on. Empty
+/// clusters are re-seeded from the point currently worst served by its
+/// centroid, so `K` stays non-degenerate; `k ≤ 1` or no rows yields one
+/// centroid (the column mean) and all-zero labels.
+pub fn kmeans_centroids_seeded(
+    z: &DMatrix<f32>,
+    k: usize,
+    max_iter: usize,
+    seed: u64,
+) -> (DMatrix<f32>, Vec<usize>) {
+    let fit = kmeans_rows_seeded(
+        z,
+        &KmeansRowsOpts {
+            k,
+            max_iter,
+            seed,
+            metric: KmeansMetric::Euclidean,
+            min_changed_frac: 0.0,
+            init_sample: 0,
+        },
+    );
+    (fit.centroids, fit.labels)
+}
+
+/// [`kmeans_centroids_seeded`] at a fixed seed, for callers that don't need
+/// seed control.
+pub fn kmeans_centroids(z: &DMatrix<f32>, k: usize, max_iter: usize) -> (DMatrix<f32>, Vec<usize>) {
+    kmeans_centroids_seeded(z, k, max_iter, 42)
 }
 
 #[cfg(test)]

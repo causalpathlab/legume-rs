@@ -55,8 +55,8 @@ pub mod metric;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub(crate) use backend::EXACT_THRESHOLD;
 use backend::{build_column_dict, Backend, EF_SEARCH};
+pub(crate) use backend::{EXACT_THRESHOLD, KNN_SEED};
 pub use metric::l2_simd;
 
 /// A dictionary of named columns backed by a k-nearest-neighbour index.

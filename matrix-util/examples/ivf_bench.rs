@@ -8,20 +8,10 @@ use rand::{RngExt, SeedableRng};
 use rayon::prelude::*;
 use std::time::Instant;
 
-struct Stderr;
-impl log::Log for Stderr {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
-    }
-    fn log(&self, r: &log::Record) {
-        eprintln!("[{}] {}", r.level(), r.args());
-    }
-    fn flush(&self) {}
-}
-
 fn main() {
-    log::set_logger(&Stderr).unwrap();
-    log::set_max_level(log::LevelFilter::Info);
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let a: Vec<String> = std::env::args().collect();
     let n: usize = a.get(1).map_or(2_300_000, |s| s.parse().unwrap());
     let d: usize = a.get(2).map_or(16, |s| s.parse().unwrap());

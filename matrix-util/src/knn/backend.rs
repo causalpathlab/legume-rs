@@ -12,7 +12,7 @@ use std::fmt::{Debug, Display};
 /// and therefore every downstream k-NN graph — bit-for-bit reproducible. This is
 /// the property `hnsw_rs` could not provide and the root fix for the annotate
 /// `--seed` non-reproducibility.
-pub(super) const KNN_SEED: u64 = 20_240_517;
+pub(crate) const KNN_SEED: u64 = 20_240_517;
 
 /// HNSW build-time beam width. Higher = better graph quality at more build cost.
 pub(super) const EF_CONSTRUCTION: usize = 200;
