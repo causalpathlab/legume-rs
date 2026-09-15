@@ -641,9 +641,11 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         },
         batch_effects.is_some(),
         None,
-        false,
     );
     meta.command = "predict".to_string();
+    // A predicted sample is placed by the model's encoder; it is not a model
+    // and carries none of its own.
+    meta.outputs.pair_encoder = None;
     let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
     meta.write(&meta_path)?;
     info!("Wrote {}", meta_path.display());
