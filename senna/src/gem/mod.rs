@@ -1,14 +1,30 @@
-//! `senna gem` — joint gene-count embedding over the shared
-//! `graph_embedding_util` engine: `senna bge`'s driver run over every feature
-//! row of a gene-count matrix (rows = features, no modality split).
+//! `senna gem`: joint embedding of gene counts and any co-measured
+//! modality, over the shared `graph_embedding_util` engine and `senna bge`'s
+//! driver.
 //!
-//! Each row is `{gene}/count/{spliced|unspliced}`, matched across input files
-//! by exact name (the row itself IS the join key). The former per-gene
-//! β-sharing factorization and its analytic splice-velocity readout are gone
-//! with the composite engine that produced them; a future task reintroduces
-//! spliced/unspliced as explicit **tracks** on top of this same driver.
+//! A gem feature axis is one gene axis carrying several TRACKS: the base
+//! gene count (`{gene}/count/spliced`, optionally `{gene}/count/unspliced`),
+//! plus, for every `--modality` file, that modality's two channel rows
+//! (`{gene}/m6a/{methylated,unmethylated}`, `{gene}/atoi/{edited,unedited}`,
+//! `{gene}/apa/{proximal,distal}`). The base track shares a gene's loading
+//! outright; every other track adds a ridge-shrunk offset to it
+//! (`--offset-l2`). [`tracks::assign_tracks`] reads this grammar off the row
+//! names alone (never a file name or load order) and builds the
+//! [`tracks::TrackPlan`] that both `senna gem`'s own per-gene HVG pooling and
+//! the engine's per-track training consume.
+//!
+//! Trained cells carry one encoder per count track (`{out}.cell_encoder.safetensors`
+//! for the base track, `{out}.cell_encoder.{modality}.{channel}.safetensors`
+//! for any other count track). [`contrast::write_contrast`] reads the
+//! finished fit's raw loading and writes one row per gene-and-modality where
+//! both of that modality's channels are present
+//! (`{out}.feature_contrast.parquet`, `{out}.feature_contrast_bias.parquet`).
 
 pub(crate) mod args;
+/// One row per gene-and-modality, contrasting a modality's two channel
+/// tracks on the raw loading: `{out}.feature_contrast.parquet` /
+/// `{out}.feature_contrast_bias.parquet`.
+pub(crate) mod contrast;
 /// Pooled per-gene HVG projection weights over a [`tracks::TrackPlan`]
 /// (every track of a gene shares one selection decision, weight lands only
 /// on the base row). Replaces the deleted `rows` module for the one thing
@@ -19,7 +35,7 @@ pub(crate) mod hvg;
 /// the [`tracks::TrackPlan`].
 pub(crate) mod load;
 /// Loading gem's co-embedded **feature** embedding (`{out}.feature_embedding.parquet`)
-/// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage` —
+/// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage`:
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
 pub mod marker_embedding;
 /// The `senna gem` run: joint gene-count embedding over the shared

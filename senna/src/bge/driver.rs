@@ -3,9 +3,11 @@
 //! manifest. `senna bge`'s own `fit_bge` (`bge/mod.rs`) resolves the
 //! multiome layout, loads the data, and computes its HVG weights, then hands
 //! off to [`fit_embed_family`] here; `senna gem` (`gem/run.rs`) does its own
-//! (simpler) load and HVG pooling and hands off the same way. gem is, for
-//! now, bge run over every feature row — a later task adds spliced/unspliced
-//! **tracks** on top of this same driver ([`EmbedPlan::tracks`]).
+//! (simpler) load and HVG pooling and hands off the same way. bge always
+//! passes `EmbedPlan::tracks = None` (one track, every row its own gene);
+//! gem passes its own row-grammar [`crate::gem::tracks::TrackPlan`], and
+//! hooks its `{out}.feature_contrast.parquet` writer in through
+//! [`EmbedPlan::after_fit`].
 //!
 //! [`EmbedKnobs`] is the flag surface both commands drive the fit with.
 //! `GemArgs` now flattens the exact same `refine_weighting::CollapseArgs`
@@ -96,33 +98,41 @@ pub(crate) struct EmbedPlan<'a> {
     pub multiome: Option<crate::multiome_layout::RunMultiome>,
     /// Full-axis (current feature-axis-indexed) HVG projection weights.
     pub hvg_weights: Option<Vec<f32>>,
-    /// Reserved for the track-aware gem (a later task); `None` = one track.
-    /// Neither read nor set to anything but `None` until that task wires a
-    /// consumer — carried on the plan now so its shape doesn't change later.
-    #[allow(dead_code)]
-    pub tracks: Option<()>,
-    /// Unused until tracks exist; carried through so the field exists on the
-    /// plan before it has a consumer.
-    #[allow(dead_code)]
+    /// Row structure of the feature axis, from [`crate::gem::tracks::assign_tracks`]:
+    /// `senna gem`'s base count track plus any co-measured modality tracks.
+    /// `None` (bge, always) = one track, every row its own gene.
+    pub tracks: Option<crate::gem::tracks::TrackPlan>,
+    /// Ridge on the per-track offsets (`FitConfig.offset_l2`); inert at one
+    /// track. bge always passes `0.0`.
     pub offset_l2: f32,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: crate::run_manifest::TrainArgsRecord,
     /// Called after the module tables are written and before the manifest.
-    /// Always `None` in this task (both callers); reserved for the
-    /// track-aware gem to hook a per-track output writer in here.
+    /// `senna gem` hooks its `{out}.feature_contrast.parquet` writer in
+    /// here; bge always passes `None`.
     #[allow(clippy::type_complexity)]
     pub after_fit: Option<&'a dyn Fn(&FitArtifacts<'_>) -> anyhow::Result<()>>,
 }
 
-/// What [`EmbedPlan::after_fit`] sees. Unused (no caller passes `after_fit`)
-/// until the track-aware gem does; the fields are allowed dead for now.
-#[allow(dead_code)]
+/// What [`EmbedPlan::after_fit`] sees.
 pub(crate) struct FitArtifacts<'a> {
     pub out: &'a ge::FitOutput,
     pub unified: &'a ge::UnifiedData,
+    /// Cell rows kept after QC, when QC ran. Feature-axis writers (the only
+    /// kind `after_fit` has today) don't need it; kept for a future per-cell
+    /// consumer, and to match every other writer in this module's own QC
+    /// contract.
+    #[allow(dead_code)]
     pub qc_keep: Option<&'a [usize]>,
     pub prefix: &'a str,
+    /// `(track name, cell-encoder safetensors suffix)` for every track the
+    /// encoder save just wrote, in [`ge::CellEncoders::iter`] order — empty
+    /// when phase 2 placed cells by block SGD rather than a distilled
+    /// encoder (`out.cell_encoder` was `None`). Not yet read by any
+    /// `after_fit` hook; carried so a later manifest writer can record it.
+    #[allow(dead_code)]
+    pub track_encoders: Vec<(Box<str>, String)>,
 }
 
 /// Run the shared fit: multilevel pseudobulk collapse, phase-1/phase-2
@@ -184,8 +194,11 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             hier_units_per_step: knobs.batch_size.unwrap_or(256),
             hier_modules_per_unit: knobs.modules_per_unit,
             gene_modules,
-            tracks: None,
-            offset_l2: 0.0,
+            tracks: plan
+                .tracks
+                .as_ref()
+                .map(crate::gem::tracks::TrackPlan::to_ge),
+            offset_l2: plan.offset_l2,
         })
     };
 
@@ -261,6 +274,27 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     let interrupted = ge::stop_flag().load(std::sync::atomic::Ordering::Relaxed);
     // ETM topic layout only on a complete, non-interrupted run.
     let resolve_etm = !knobs.skip_etm && !interrupted;
+
+    // The map phase 2 placed the cells with, so `predict` places a query by the
+    // same one. One self-contained file per map: the trunk plus its per-gene
+    // mean. A one-track fit has exactly one, under the name `predict` reads;
+    // further tracks get a file each, named by `encoder_suffix_for`. Written
+    // here (before the interrupted/complete branch below) so `after_fit`
+    // (complete runs only) can see which files were written.
+    let mut track_encoders: Vec<(Box<str>, String)> = Vec::new();
+    let cell_encoder_suffix = match out.cell_encoder.as_ref() {
+        Some(encs) => {
+            for te in encs.iter() {
+                let suffix = crate::gem::tracks::encoder_suffix_for(te.track, &te.name);
+                let path = format!("{}.{suffix}", knobs.out);
+                te.encoder.save(&path)?;
+                info!("Wrote the `{}` cell encoder to {path}", te.name);
+                track_encoders.push((te.name.clone(), suffix));
+            }
+            Some("cell_encoder.safetensors")
+        }
+        None => None,
+    };
 
     if interrupted {
         log::warn!(
@@ -366,6 +400,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 unified: &plan.unified,
                 qc_keep: qc_keep_idx.as_deref(),
                 prefix: knobs.out,
+                track_encoders,
             })?;
         }
     }
@@ -380,39 +415,6 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
     let has_modules = out.model.modules.is_some();
-    // The map phase 2 placed the cells with, so `predict` places a query by the
-    // same one. One self-contained file per map: the trunk plus its per-gene
-    // mean. A one-track fit has exactly one, under the name `predict` reads;
-    // further tracks get a file each, named after the track.
-    let cell_encoder_suffix = match out.cell_encoder.as_ref() {
-        Some(encs) => {
-            let suffix = "cell_encoder.safetensors";
-            let base = format!("{}.{suffix}", knobs.out);
-            match encs.single() {
-                Some(enc) => {
-                    enc.save(&base)?;
-                    info!("Wrote the cell encoder to {base}");
-                }
-                None => {
-                    for te in encs.iter() {
-                        let path = if te.track == 0 {
-                            base.clone()
-                        } else {
-                            format!(
-                                "{}.cell_encoder.{}.safetensors",
-                                knobs.out,
-                                te.name.replace('/', ".")
-                            )
-                        };
-                        te.encoder.save(&path)?;
-                        info!("Wrote the `{}` cell encoder to {path}", te.name);
-                    }
-                }
-            }
-            Some(suffix)
-        }
-        None => None,
-    };
     crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
         train_args: Some(plan.train_args),
         kind: plan.kind,
