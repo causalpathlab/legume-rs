@@ -351,7 +351,7 @@ enum Commands {
                       kmeans instead uses a fixed --n-edge-clusters,\n\
                       spherical on the pair latent and seeded by --seed.\n\n\
                       A cell's embedding is its own placement on the gene embedding,\n\
-                      by the same map that places its pairs (see --pair-solver),\n\
+                      by the same encoder that places its pairs,\n\
                       written for `pinto annotate`.\n\
                       A cell with no counts gets a zero row.\n\n\
                       Outputs:\n\

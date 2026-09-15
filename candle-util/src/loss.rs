@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use core::f64;
 
 use candle_core::{Result, Tensor};

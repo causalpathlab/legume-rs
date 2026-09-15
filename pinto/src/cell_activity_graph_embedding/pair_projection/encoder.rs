@@ -1,12 +1,13 @@
 //! Amortized phase 2: one encoder places every pair, and every cell, on the
 //! frozen dictionary.
 //!
-//! [`super::solve_pair`] solves the same strictly convex problem once per
-//! pair — the multinomial MAP of the pooled counts against `e_feat` — and
-//! pairs outnumber cells by an order of magnitude. The map from counts to
-//! that optimum is smooth, so a small encoder trained on the same objective
-//! places every pair in one forward pass, on the device, and the per-pair
-//! solver becomes the check on it rather than the workhorse.
+//! The exact solver ([`super::newton_polish`]) settles the same strictly
+//! convex problem once per node — the multinomial MAP of the pooled counts
+//! against `e_feat` — and pairs outnumber cells by an order of magnitude.
+//! The map from counts to that optimum is smooth, so a small encoder trained
+//! on the same objective places every pair in one forward pass, on the
+//! device, and the per-pair solver becomes the check on it (and the finisher
+//! of its rare misses) rather than the workhorse.
 //!
 //! The encoder is the `senna bge` phase-2 read applied twice: a cell trunk
 //! reads each endpoint's counts through the dictionary (attention over genes
@@ -54,7 +55,7 @@
 //! no counts is put at the origin afterwards, where the solver puts it: the
 //! gate would otherwise give an empty row a constant code.
 
-use super::{PairDictionary, ProjectionArgs, SCORE_CLAMP};
+use super::{PairDictionary, SCORE_CLAMP};
 use crate::util::common::*;
 use candle_util::candle_core::{DType, Device, Tensor};
 use candle_util::candle_nn::{
@@ -69,7 +70,7 @@ use candle_util::vae::{clip_and_step_dense, PhaseTimers};
 use candle_util::value_transform::anscombe_residual;
 use matrix_util::rand_util::mix_seed;
 use matrix_util::utils::{cosine, quantiles};
-use rand::rngs::{SmallRng, StdRng};
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
 
@@ -96,11 +97,10 @@ pub(crate) const CELL_BLOCK: usize = 4096;
 /// Pairs held out for the per-epoch evaluation line and the closing check
 /// against the exact solver.
 const CHECK_PAIRS: usize = 2048;
-/// Adam steps the closing check gives the exact solver, with the partition
-/// summed exactly: enough to call its answer the optimum.
-const CONVERGED_STEPS: usize = 1500;
 
-/// What the encoder arm takes from the command line.
+/// The encoder's shape and training budget. `cage` runs [`Default`]; the
+/// closing check against the exact solver says how well it did, and a tiny
+/// fixture shrinks it.
 #[derive(Debug, Clone)]
 pub struct PairEncoderSpec {
     /// Width `L` of the cell code.
@@ -111,8 +111,17 @@ pub struct PairEncoderSpec {
     pub epochs: usize,
     /// Pairs per optimizer step.
     pub batch: usize,
-    /// Pairs drawn per epoch; `0` walks every pair.
-    pub train_pairs: usize,
+}
+
+impl Default for PairEncoderSpec {
+    fn default() -> Self {
+        Self {
+            trunk_width: 64,
+            n_experts: 4,
+            epochs: 3,
+            batch: 4096,
+        }
+    }
 }
 
 ////////////
@@ -273,24 +282,6 @@ pub(crate) struct Placement {
 }
 
 impl Placement {
-    /// From exact solves, which sit at the optimum.
-    pub(crate) fn from_fits(d: usize, fits: Vec<(Vec<f32>, f32)>) -> Self {
-        let n = fits.len();
-        let mut latent = Mat::zeros(n, d);
-        let mut bias = vec![0f32; n];
-        for (i, (theta, beta)) in fits.into_iter().enumerate() {
-            for (j, &t) in theta.iter().enumerate().take(d) {
-                latent[(i, j)] = t;
-            }
-            bias[i] = beta;
-        }
-        Self {
-            latent,
-            bias,
-            gap: vec![0f32; n],
-        }
-    }
-
     pub(crate) fn len(&self) -> usize {
         self.bias.len()
     }
@@ -794,22 +785,17 @@ impl PairEncoder {
             self.ridge
         );
 
-        let per_epoch = if spec.train_pairs == 0 {
-            n_pairs
-        } else {
-            spec.train_pairs.min(n_pairs)
-        };
         let mut order: Vec<usize> = (0..n_pairs).collect();
         let mut timers = PhaseTimers::default();
         let (mut steps, mut skipped) = (0usize, 0usize);
         let mut nll_per_count = nll0;
-        let bar = new_progress_bar((spec.epochs * per_epoch.div_ceil(batch)) as u64)
+        let bar = new_progress_bar((spec.epochs * n_pairs.div_ceil(batch)) as u64)
             .with_message("pair encoder");
         for epoch in 0..spec.epochs {
             order.shuffle(&mut StdRng::seed_from_u64(mix_seed(seed, epoch as u64)));
             let mut loss_sum = 0f64;
             let mut n_steps = 0usize;
-            for chunk in order[..per_epoch].chunks(batch) {
+            for chunk in order.chunks(batch) {
                 if chunk.len() < MIN_STEP_PAIRS {
                     bar.inc(1);
                     continue;
@@ -991,13 +977,11 @@ impl PairEncoder {
 // The check against the MAP //
 ///////////////////////////////
 
-/// A seeded sample of pairs solved exactly once — to convergence, and at the
-/// run's own step budget — so any placement of those pairs can be compared
-/// with the optimum.
+/// A seeded sample of pairs solved exactly once, so any placement of those
+/// pairs can be compared with the optimum.
 pub(crate) struct ExactCheck {
-    /// Pair index, converged `θ`, its NLL, its norm, and the cosine of the
-    /// budget solve to it.
-    solved: Vec<(usize, Vec<f32>, f32, f32, f32)>,
+    /// Pair index, its optimum `θ`, the NLL there, and its norm.
+    solved: Vec<(usize, Vec<f32>, f32, f32)>,
     /// Each sampled pair's local profile.
     profiles: Vec<Vec<(u32, f32)>>,
 }
@@ -1017,7 +1001,7 @@ impl ExactCheck {
         dict: &PairDictionary,
         corpus: &[CellRow],
         edges: &[(u32, u32)],
-        args: &ProjectionArgs,
+        ridge: f32,
         seed: u64,
     ) -> Self {
         let mut rng = StdRng::seed_from_u64(mix_seed(seed, 0x0047_4150));
@@ -1028,16 +1012,6 @@ impl ExactCheck {
                 corpus[u as usize].total + corpus[v as usize].total > 0.0
             })
             .collect();
-        let converged = ProjectionArgs {
-            ridge: args.ridge,
-            steps: CONVERGED_STEPS.max(args.steps),
-            gene_sample: 0,
-        };
-        let budget = ProjectionArgs {
-            ridge: args.ridge,
-            steps: args.steps.max(1),
-            gene_sample: 0,
-        };
         let profiles: Vec<Vec<(u32, f32)>> = sample
             .par_iter()
             .map(|&e| {
@@ -1049,18 +1023,10 @@ impl ExactCheck {
             .par_iter()
             .zip(&profiles)
             .map(|(&e, obs)| {
-                let mut rng = SmallRng::seed_from_u64(mix_seed(seed, e as u64));
-                let (theta, _) = super::solve_pair(obs, dict, &converged, &mut rng);
-                let mut rng = SmallRng::seed_from_u64(mix_seed(seed, e as u64));
-                let (theta_budget, _) = super::solve_pair(obs, dict, &budget, &mut rng);
+                let (theta, _, _) = super::solve_exact(obs, dict, ridge);
                 let norm = theta.iter().map(|v| v * v).sum::<f32>().sqrt();
-                (
-                    e,
-                    theta.clone(),
-                    dict.nll(obs, &theta),
-                    norm,
-                    cosine(&theta_budget, &theta),
-                )
+                let nll = dict.nll(obs, &theta);
+                (e, theta, nll, norm)
             })
             .collect();
         Self { solved, profiles }
@@ -1070,12 +1036,6 @@ impl ExactCheck {
         self.solved.len()
     }
 
-    /// Mean cosine between the solver's answer at the run's step budget and
-    /// its converged answer: how well the direction is determined at all.
-    pub(crate) fn solver_self_cosine(&self) -> f32 {
-        self.solved.iter().map(|s| s.4).sum::<f32>() / self.n_pairs().max(1) as f32
-    }
-
     /// Compare a placement of every pair (rows in `edges` order) with the
     /// sample's optima. The dictionary is the one the check was built on.
     pub(crate) fn compare(&self, dict: &PairDictionary, latent: &Mat) -> AmortizationGap {
@@ -1083,7 +1043,7 @@ impl ExactCheck {
             .solved
             .par_iter()
             .zip(&self.profiles)
-            .map(|((e, theta, _, _, _), obs)| {
+            .map(|((e, theta, _, _), obs)| {
                 let z: Vec<f32> = latent.row(*e).iter().copied().collect();
                 (
                     cosine(&z, theta),

@@ -40,38 +40,31 @@
 //!
 //! # How it is solved
 //!
-//! Two arms share the objective. The default, [`PairSolver::TrainEncoder`],
-//! amortizes it: a shared encoder ([`encoder`]) reads each endpoint's counts
-//! through the frozen dictionary into a cell code and a small gated mixture
-//! turns two codes into the pair code, trained on this same likelihood and run
-//! once over every pair on the device. The exact arm, [`PairSolver::Exact`],
-//! is the solver below, kept as the reference the encoder is checked against
-//! on a sample of pairs after every fit, and as the fallback for a model saved
-//! without an encoder.
+//! The encoder ([`encoder`]) amortizes it: a shared trunk reads each
+//! endpoint's counts through the frozen dictionary into a cell code and a
+//! small gated mixture turns two codes into the pair code, trained on this
+//! same likelihood and run once over every pair on the device. Per node the
+//! problem is `D+1` parameters and strictly convex, so the exact solver is
+//! Newton with the partition summed over the active axis
+//! ([`newton_polish`]): the check the encoder is held to on a seeded sample
+//! after every fit, and the finisher for the few placements whose certificate
+//! puts them far from the optimum.
 //!
-//! In the exact arm each pair is an independent `D+1`-parameter problem, so
-//! the solve is rayon-parallel over pairs (the outermost loop, and the only
-//! one — the per-pair work is scalar) with its own Adam per pair.
-//!
-//! Two things make each step cheap:
+//! Two things keep a solve cheap:
 //!
 //! 1. **`β_uv` is profiled out, not descended.** Given `e_uv`, the optimal
 //!    intercept is closed-form (`Σ_g μ_g = N_uv`), so it is solved exactly each
-//!    step and never enters Adam — and by the envelope theorem the gradient of
-//!    the profile objective is just the full gradient evaluated there, so this
-//!    costs nothing in correctness. What is left is the multinomial gradient
-//!    `N_uv · (predicted composition mean − observed composition mean) + λ e_uv`,
-//!    which needs no partition *value*, only a normalized weight — so nothing
-//!    overflows and the ridge is the only thing setting scale.
-//! 2. **The partition is sampled.** Summing `Σ_{g ∈ G} μ_g` exactly costs
-//!    `E × steps × G × D` flops, which is prohibitive at scale; instead each step
-//!    draws [`PairProjectionArgs::gene_sample`] genes ∝ `exp(b_g)`, the
-//!    empirical abundance. Because `exp(b_g)/q_g` is then constant, the
-//!    importance weights cancel and the estimator is exact at `e_uv = 0`,
-//!    leaving only the `⟨e_g, e_uv⟩` deviation to carry variance.
-//!
-//! The data term `Σ_g n_uv,g · e_g` is linear in the parameters, so it is a
-//! constant per pair — computed once, never re-derived inside the loop.
+//!    step and never enters the Newton system — and by the envelope theorem
+//!    the gradient of the profile objective is just the full gradient evaluated
+//!    there, so this costs nothing in correctness. What is left is the
+//!    multinomial gradient
+//!    `N_uv · (predicted composition mean − observed composition mean) + λ e_uv`
+//!    and its Hessian `N_uv · Cov_p(e) + λI`, which need no partition *value*,
+//!    only normalized weights — so nothing overflows and the ridge is the only
+//!    thing setting scale.
+//! 2. **The data term is a constant.** `Σ_g n_uv,g · e_g` is linear in the
+//!    parameters, so it is computed once per node and never re-derived inside
+//!    the loop.
 //!
 //! # Why not geu's block SGD
 //!
@@ -89,10 +82,10 @@
 //!   abstraction for one caller.
 //! - It is candle/`Device`-coupled, and each pair is `D+1` parameters — the
 //!   arithmetic is nowhere near GEMM-shaped per node.
-//! - The profiled intercept above removes the reason to form the partition at
-//!   all: the gradient needs a normalized weight, not a partition *value*. That
-//!   is what makes a sampled estimate sufficient here, and it is a saving the
-//!   exact-partition engine has no way to express.
+//! - The profiled intercept above removes the reason to form the partition
+//!   *value* at all: the gradient and the Hessian need normalized weights, and
+//!   a `D × D` Newton step per node is what a strictly convex `D+1`-parameter
+//!   problem calls for — a saving a block-SGD engine has no way to express.
 //!
 //! If a second caller ever wants this, the right move is to lift the solver,
 //! not to widen the engine — the per-node loop below has no pair-specific
@@ -101,12 +94,7 @@
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use candle_util::candle_core::Device;
-use matrix_util::rand_util::mix_seed;
 use matrix_util::utils::{generate_minibatch_intervals, quantiles};
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
-use rand_distr::weighted::WeightedIndex;
-use rand_distr::Distribution;
 
 /// Clamp on the linear predictor before `exp`. f32 overflows at 88; the same
 /// bound geu puts on every Poisson fit in the workspace.
@@ -117,20 +105,6 @@ mod scoring;
 pub use encoder::PairEncoderSpec;
 pub use scoring::PairScore;
 
-/// Target per-step movement of the linear predictor `s`, used to auto-scale the
-/// learning rate. Adam's per-coordinate step is ≈ `lr`, so `Δs ≈ lr · D · rms(e)`
-/// and `lr = TARGET_DELTA_S / (D · rms(e))`. Without this the rate would have to
-/// be re-tuned for every dictionary scale — `‖e_g‖` is not a fixed quantity.
-const TARGET_DELTA_S: f32 = 0.05;
-
-/// Learning-rate floor as a fraction of the initial rate, decayed linearly over
-/// a pair's steps so the tail settles instead of dithering around the optimum.
-const LR_FLOOR_FRAC: f32 = 0.05;
-
-const ADAM_B1: f32 = 0.9;
-const ADAM_B2: f32 = 0.999;
-const ADAM_EPS: f32 = 1e-8;
-
 /// A placement whose certificate — `‖∇‖²/(2λ)`, an upper bound in nats on
 /// its excess likelihood over the optimum — exceeds this is finished exactly.
 /// The bound is loose (it knows `λ`, not the curvature `N·Cov`), so a row it
@@ -139,46 +113,25 @@ const RESCUE_GAP_NATS: f32 = 16.0;
 /// Newton steps at most for such a row; the solve stops early once its
 /// gradient is small.
 const RESCUE_STEPS: usize = 32;
-/// Longest Newton step accepted per iteration, in `e_uv` units: a warm start
-/// far off the optimum takes several damped steps rather than one wild one.
-const NEWTON_STEP_CAP: f32 = 1.0;
+/// Newton steps at most for a solve from the origin. The objective is
+/// strictly convex and the step is line-searched, so a solve settles well
+/// inside this; the cap only bounds a degenerate row.
+const SOLVE_STEPS: usize = 64;
+/// A Newton step longer than this, in `e_uv` units, is a long way from the
+/// quadratic regime, so it is line-searched: shrunk by halves until it lowers
+/// the objective by at least [`ARMIJO`] of what the linear model promised.
+/// Shorter steps are taken whole — they are where Newton converges
+/// quadratically, and an objective difference that small is inside f32
+/// rounding.
+const NEWTON_LONG_STEP: f32 = 1.0;
+const ARMIJO: f32 = 1e-4;
+const MAX_BACKTRACKS: usize = 20;
 /// Below this gradient norm, relative to the depth, the Newton solve is done.
 const NEWTON_GRAD_TOL: f32 = 1e-4;
 
-/// Salts a cell's stream apart from a pair's with the same index.
-const CELL_STREAM_SALT: u64 = 0x4345_4c4c;
-
-/// Knobs for one node's solve — everything [`PairDictionary::project`] reads,
-/// and nothing it doesn't. Kept apart from [`PairProjectionArgs`] so the solve
-/// boundary doesn't take orchestration parameters (seed, block sizes) it has no
-/// use for.
-#[derive(Debug, Clone)]
-pub struct ProjectionArgs {
-    /// Ridge `λ` on `e_uv` (never on `β_uv`, which must stay free to absorb
-    /// depth).
-    pub ridge: f32,
-    /// Adam steps per pair.
-    pub steps: usize,
-    /// Genes drawn per step to estimate the log-partition. `0` sums every gene
-    /// exactly — correct, and affordable only on small feature axes.
-    pub gene_sample: usize,
-}
-
-impl Default for ProjectionArgs {
-    fn default() -> Self {
-        Self {
-            ridge: 1.0,
-            steps: 300,
-            gene_sample: 512,
-        }
-    }
-}
-
-/// Which arm places the pairs.
+/// Where the encoder that places the pairs comes from.
 #[derive(Debug, Clone, Copy)]
 pub enum PairSolver<'a> {
-    /// The per-pair Adam solve, for every pair and every cell.
-    Exact,
     /// Fit the encoder on this run's pairs, place everything with it, and
     /// save it to `save_to`.
     TrainEncoder {
@@ -190,13 +143,13 @@ pub enum PairSolver<'a> {
     LoadEncoder { path: &'a str, dev: &'a Device },
 }
 
-/// Knobs for [`project_pairs`]: the per-node solve plus how the pair axis is
-/// walked.
+/// Knobs for [`project_pairs`]: the objective's one parameter plus how the
+/// pair axis is walked.
 #[derive(Debug, Clone)]
 pub struct PairProjectionArgs<'a> {
-    /// Passed through to every per-pair solve — the exact arm's steps and
-    /// partition sample, and the ridge both arms share.
-    pub projection: ProjectionArgs,
+    /// Ridge `λ` on `e_uv` (never on `β_uv`, which must stay free to absorb
+    /// depth): the encoder trains against it, and the exact solve uses it.
+    pub ridge: f32,
     pub solver: PairSolver<'a>,
     /// Seed; each pair derives its own stream so the fit is reproducible
     /// regardless of how rayon schedules the work.
@@ -271,10 +224,6 @@ pub struct PairDictionary {
     /// `ln Σ_g exp(b_g)` — the log-partition at `e_uv = 0`. Stored in log space
     /// because every use is a log-space one, and it is fixed for the whole run.
     log_z: f32,
-    /// Draws genes ∝ `exp(b_g)`, making the importance weights cancel.
-    proposal: WeightedIndex<f32>,
-    /// Auto-scaled initial learning rate.
-    lr0: f32,
 }
 
 impl PairDictionary {
@@ -302,7 +251,6 @@ impl PairDictionary {
         let mut feat = Vec::with_capacity(active.len() * d);
         let mut b = Vec::with_capacity(active.len());
         let mut mean = Vec::with_capacity(active.len());
-        let mut weights = Vec::with_capacity(active.len());
         for (local, &g) in active.iter().enumerate() {
             local_of_gene[g] = local as u32;
             for j in 0..d {
@@ -314,7 +262,6 @@ impl PairDictionary {
             let m = gene_totals[g] / n_cells as f64;
             b.push(m.ln() as f32);
             mean.push(m as f32);
-            weights.push(gene_totals[g] as f32);
         }
 
         // `Σ_g exp(b_g)` without ever calling `exp`: `b_g` IS `ln(total_g/n)`,
@@ -333,15 +280,6 @@ impl PairDictionary {
             );
             mean_lib.ln() as f32
         };
-        let proposal = WeightedIndex::new(&weights)
-            .map_err(|e| anyhow::anyhow!("pair projection: gene proposal: {e}"))?;
-
-        let rms = {
-            let ss: f64 = feat.iter().map(|&x| (x as f64) * (x as f64)).sum();
-            ((ss / feat.len().max(1) as f64).sqrt() as f32).max(1e-6)
-        };
-        let lr0 = TARGET_DELTA_S / (d as f32 * rms);
-
         Ok(Self {
             feat,
             b,
@@ -349,8 +287,6 @@ impl PairDictionary {
             local_of_gene,
             d,
             log_z,
-            proposal,
-            lr0,
         })
     }
 
@@ -399,17 +335,12 @@ impl PairDictionary {
         total * lse - data
     }
 
-    /// Project one pair from its `(global gene id, pooled count)` profile.
-    /// Returns `(e_uv, β_uv)`.
+    /// Solve one pair exactly from its `(global gene id, pooled count)`
+    /// profile. Returns `(e_uv, β_uv, certificate)`.
     #[cfg(test)]
     #[must_use]
-    pub fn project(
-        &self,
-        obs: &[(u32, f32)],
-        args: &ProjectionArgs,
-        rng: &mut SmallRng,
-    ) -> (Vec<f32>, f32) {
-        solve_pair(&self.to_local(obs), self, args, rng)
+    pub fn solve(&self, obs: &[(u32, f32)], ridge: f32) -> (Vec<f32>, f32, f32) {
+        solve_exact(&self.to_local(obs), self, ridge)
     }
 
     /// Finish one pair from `init` by Newton steps on the exact objective.
@@ -442,9 +373,9 @@ impl PairDictionary {
 /// contribute a constant `exp(b_g + β)` to the partition and therefore cannot
 /// pull on `e_uv` — no special-casing needed.
 ///
-/// Both arms read every cell once, in contiguous column blocks, into the
-/// corpus the encoder trains on; every pair is then the merge of two rows and
-/// every cell its own doubled row.
+/// Every cell is read once, in contiguous column blocks, into the corpus the
+/// encoder trains on; every pair is then the merge of two rows and every cell
+/// its own doubled row.
 pub fn project_pairs(
     data: &SparseIoVec,
     edges: &[(u32, u32)],
@@ -504,14 +435,13 @@ pub fn project_pairs(
     let corpus = build_corpus(data, &dict, batch, axis, args.pair_block)?;
 
     let encoded = match args.solver {
-        PairSolver::Exact => project_exact(&dict, &corpus, edges, args),
         PairSolver::TrainEncoder { spec, dev, save_to } => {
             let enc = encoder::PairEncoder::build(
                 &dict,
                 &corpus,
                 spec.trunk_width,
                 spec.n_experts,
-                args.projection.ridge,
+                args.ridge,
                 args.seed,
                 dev,
             )?;
@@ -603,8 +533,7 @@ fn build_corpus(
 }
 
 /// One cell's `(row, count)` profile from its CSC column, batch-divided when
-/// the run has batches — the one place a cell's counts are read, so the two
-/// arms cannot disagree about the division.
+/// the run has batches — the one place a cell's counts are read.
 fn endpoint_counts(
     rows: &[usize],
     vals: &[f32],
@@ -623,72 +552,15 @@ fn endpoint_counts(
         .collect()
 }
 
-///////////////////
-// The exact arm //
-///////////////////
-
-/// Every pair, then every cell, by the per-node Adam solve.
-fn project_exact(
-    dict: &PairDictionary,
-    corpus: &[encoder::CellRow],
-    edges: &[(u32, u32)],
-    args: &PairProjectionArgs<'_>,
-) -> encoder::Encoded {
-    info!(
-        "Pair projection: {} pairs and {} cells × {} genes → {}-dim, ridge λ={}, {} Adam steps, \
-         partition from {} sampled genes",
-        edges.len(),
-        corpus.len(),
-        dict.n_active(),
-        dict.d,
-        args.projection.ridge,
-        args.projection.steps,
-        if args.projection.gene_sample == 0 {
-            dict.n_active()
-        } else {
-            args.projection.gene_sample
-        },
-    );
-    let solve = |profiles: Vec<Vec<(u32, f32)>>, seed: u64, bias_shift: f32, what: &'static str| {
-        let bar = new_progress_bar(profiles.len() as u64).with_message(what);
-        let fits: Vec<(Vec<f32>, f32)> = profiles
-            .par_iter()
-            .enumerate()
-            .map(|(i, obs)| {
-                // Per-node stream keyed on the global id, so the fit does not
-                // depend on rayon's scheduling.
-                let mut rng = SmallRng::seed_from_u64(mix_seed(seed, i as u64));
-                let (theta, beta) = solve_pair(obs, dict, &args.projection, &mut rng);
-                (theta, beta + bias_shift)
-            })
-            .collect();
-        bar.finish_and_clear();
-        encoder::Placement::from_fits(dict.d, fits)
-    };
-    let pair_profiles: Vec<Vec<(u32, f32)>> = edges
-        .par_iter()
-        .map(|&(u, v)| corpus[u as usize].pooled(&corpus[v as usize]))
-        .collect();
-    let pairs = solve(pair_profiles, args.seed, 0.0, "pair projection");
-    // Every cell on its doubled profile — the self-pair — so the cell
-    // embedding is the same quantity the encoder arm writes; the intercept
-    // reported is the cell's own depth, not the doubled one the solve saw.
-    let cell_profiles: Vec<Vec<(u32, f32)>> = corpus.par_iter().map(|r| r.doubled()).collect();
-    let cells = solve(
-        cell_profiles,
-        mix_seed(args.seed, CELL_STREAM_SALT),
-        -std::f32::consts::LN_2,
-        "cell projection",
-    );
-    encoder::Encoded { pairs, cells }
-}
-
 /////////////////////
 // The encoder arm //
 /////////////////////
 
 /// Every pair and every cell through the encoder, then the check against the
 /// exact solve and the finishing of the rows the certificate puts far out.
+///
+/// The check is always reported: it is the one number that says whether the
+/// encoder earned its place on this run.
 fn project_with_encoder(
     enc: &encoder::PairEncoder,
     dict: &PairDictionary,
@@ -699,9 +571,8 @@ fn project_with_encoder(
     let mut encoded = enc.encode_all(corpus, edges, args.pair_block, encoder::CELL_BLOCK)?;
 
     // The amortization gap: how far the shared map sits from the per-pair
-    // optimum, on a seeded sample. Always reported — it is the one number that
-    // says whether the encoder earned its place on this run.
-    let check = encoder::ExactCheck::new(dict, corpus, edges, &args.projection, args.seed);
+    // optimum, on a seeded sample.
+    let check = encoder::ExactCheck::new(dict, corpus, edges, args.ridge, args.seed);
     let report = |what: &str, latent: &Mat| {
         let gap = check.compare(dict, latent);
         info!(
@@ -717,11 +588,6 @@ fn project_with_encoder(
         );
     };
     report("Pair encoder", &encoded.pairs.latent);
-    info!(
-        "The solver at its own {}-step budget vs converged: cosine {:.3}",
-        args.projection.steps,
-        check.solver_self_cosine()
-    );
 
     // Every placement carries a certificate; the rows it puts far out — the
     // rare inputs a shared map extrapolates on — are finished exactly.
@@ -732,7 +598,7 @@ fn project_with_encoder(
          cells {:.3}/{:.2}/{:.1}",
         p[0], p[1], p[2], c[0], c[1], c[2]
     );
-    let n_pairs = finish_rows(dict, &mut encoded.pairs, args.projection.ridge, 0.0, |e| {
+    let n_pairs = finish_rows(dict, &mut encoded.pairs, args.ridge, 0.0, |e| {
         let (u, v) = edges[e];
         corpus[u as usize].pooled(&corpus[v as usize])
     });
@@ -740,7 +606,7 @@ fn project_with_encoder(
     let n_cells = finish_rows(
         dict,
         &mut encoded.cells,
-        args.projection.ridge,
+        args.ridge,
         -std::f32::consts::LN_2,
         |c| corpus[c].doubled(),
     );
@@ -789,29 +655,24 @@ fn finish_rows(
 /////////////////
 
 /// One node's objective, set up once: the data half of the gradient (constant
-/// in the parameters), the partition sample, and a composition pass shared by
-/// every solver — Adam, Newton and the certificate.
+/// in the parameters) and a composition pass over the active axis shared by
+/// the Newton step, the objective it line-searches and the certificate.
 struct PairProblem<'a> {
     dict: &'a PairDictionary,
     /// `Σ_g n_g e_g / N`: the observed composition mean.
     obs_mean: Vec<f32>,
     total: f32,
     log_total: f32,
-    /// `ln(z / S)` under the sampled partition, `0` when exhaustive.
-    log_scale: f32,
-    exhaustive: bool,
-    /// The partition sample's active-list positions.
-    genes: Vec<u32>,
-    /// The sample's normalised softmax weights, after [`Self::composition`].
+    /// The active axis's normalised softmax weights, after [`Self::composition`].
     weights: Vec<f32>,
-    /// `Σ_s w_s e_s`: the predicted composition mean, after [`Self::composition`].
+    /// `Σ_g w_g e_g`: the predicted composition mean, after [`Self::composition`].
     pred_mean: Vec<f32>,
 }
 
 impl<'a> PairProblem<'a> {
     /// `None` for a profile with no mass: the likelihood says nothing about
     /// it, and the origin is where the ridge puts it.
-    fn new(obs: &[(u32, f32)], dict: &'a PairDictionary, gene_sample: usize) -> Option<Self> {
+    fn new(obs: &[(u32, f32)], dict: &'a PairDictionary) -> Option<Self> {
         let d = dict.d;
         let total: f32 = obs.iter().map(|&(_, n)| n).sum();
         if obs.is_empty() || !total.is_finite() || total <= 0.0 {
@@ -827,60 +688,32 @@ impl<'a> PairProblem<'a> {
         for o in obs_mean.iter_mut() {
             *o /= total;
         }
-        let n_active = dict.b.len();
-        let sample = if gene_sample == 0 {
-            n_active
-        } else {
-            gene_sample.min(n_active)
-        };
-        let exhaustive = sample == n_active;
         Some(Self {
             dict,
             obs_mean,
             total,
             log_total: total.ln(),
-            log_scale: if exhaustive {
-                0.0
-            } else {
-                dict.log_z - (sample as f32).ln()
-            },
-            exhaustive,
-            // Under the exhaustive mode the "sample" IS the whole active axis,
-            // filled once here.
-            genes: if exhaustive {
-                (0..sample as u32).collect()
-            } else {
-                vec![0u32; sample]
-            },
-            weights: vec![0f32; sample],
+            weights: vec![0f32; dict.n_active()],
             pred_mean: vec![0f32; d],
         })
     }
 
-    /// Re-draw the partition sample (when sampled), then the composition the
-    /// current `θ` predicts: normalised weights over the sample, their mean
-    /// dictionary row, and the intercept `β` that matches the node's mass —
-    /// `Σ_g μ_g = N`, closed form given `θ`. `None` once the weights are not
-    /// finite.
-    fn composition(&mut self, theta: &[f32], rng: &mut SmallRng) -> Option<f32> {
+    /// The composition the current `θ` predicts — normalised weights over the
+    /// active axis and their mean dictionary row — and the log-partition
+    /// `lse_g(⟨e_g, θ⟩ + b_g)`, from which the intercept that matches the
+    /// node's mass is `β = ln N − lse` in closed form. `None` once the weights
+    /// are not finite.
+    fn composition(&mut self, theta: &[f32]) -> Option<f32> {
         let d = self.dict.d;
-        if !self.exhaustive {
-            for g in self.genes.iter_mut() {
-                *g = self.dict.proposal.sample(rng) as u32;
-            }
-        }
-        // `exp(b_g)/q_g` is constant under the abundance proposal, so the
-        // importance weights cancel and only `⟨e_g, θ⟩` varies. The
-        // exhaustive sum has no proposal to cancel, so it carries `b_g`.
         let mut max_score = f32::NEG_INFINITY;
-        for (w, &g) in self.weights.iter_mut().zip(&self.genes) {
-            let g = g as usize;
-            let row = &self.dict.feat[g * d..(g + 1) * d];
-            let mut a: f32 = row.iter().zip(theta).map(|(&e, &t)| e * t).sum();
-            if self.exhaustive {
-                a += self.dict.b[g];
-            }
-            *w = a.clamp(-SCORE_CLAMP, SCORE_CLAMP);
+        for ((w, row), &b) in self
+            .weights
+            .iter_mut()
+            .zip(self.dict.feat.chunks_exact(d))
+            .zip(&self.dict.b)
+        {
+            let a: f32 = row.iter().zip(theta).map(|(&e, &t)| e * t).sum();
+            *w = (a + b).clamp(-SCORE_CLAMP, SCORE_CLAMP);
             max_score = max_score.max(*w);
         }
         let mut w_sum = 0f32;
@@ -892,18 +725,15 @@ impl<'a> PairProblem<'a> {
             return None;
         }
         self.pred_mean.fill(0.0);
-        for (w, &g) in self.weights.iter_mut().zip(&self.genes) {
+        for (w, row) in self.weights.iter_mut().zip(self.dict.feat.chunks_exact(d)) {
             *w /= w_sum;
-            let row = &self.dict.feat[g as usize * d..(g as usize + 1) * d];
             for (p, &e) in self.pred_mean.iter_mut().zip(row) {
                 *p += *w * e;
             }
         }
-        // `Σ_g exp(⟨e_g,θ⟩ + b_g) ≈ (z/S)·Σ_s exp(⟨e_s,θ⟩)` under the abundance
-        // proposal (`log_scale` carries the cancelled weights; zero when the
-        // sum is exhaustive and exact), so `β = ln N − ln(that)`, kept in log
-        // space: no partition value is ever exponentiated at full scale.
-        Some(self.log_total - (self.log_scale + max_score + w_sum.ln()))
+        // Kept in log space: no partition value is ever exponentiated at full
+        // scale.
+        Some(max_score + w_sum.ln())
     }
 
     /// The gradient at the current composition: the multinomial's
@@ -916,59 +746,29 @@ impl<'a> PairProblem<'a> {
             .map(|((&p, &o), &t)| self.total * (p - o) + ridge * t)
             .collect()
     }
-}
 
-/// Adam on one pair's `e_uv` from the origin, with `β_uv` profiled out each
-/// step. Returns `(e_uv, β_uv)`; a pair with no pooled counts gets the origin.
-fn solve_pair(
-    obs: &[(u32, f32)],
-    dict: &PairDictionary,
-    args: &ProjectionArgs,
-    rng: &mut SmallRng,
-) -> (Vec<f32>, f32) {
-    let d = dict.d;
-    let Some(mut problem) = PairProblem::new(obs, dict, args.gene_sample) else {
-        return (vec![0f32; d], 0.0);
-    };
-    let mut theta = vec![0f32; d];
-    let mut m = vec![0f32; d];
-    let mut v = vec![0f32; d];
-    // At `θ = 0` the partition is exactly `z · exp(β)`, so this initialization
-    // already matches the pair's total mass; every later step only corrects it.
-    let mut beta = problem.log_total - dict.log_z;
-
-    // Adam's bias-correction terms are `β₁ᵗ` / `β₂ᵗ`, i.e. one multiply apart
-    // between steps — carried forward rather than re-raised to the power each
-    // step.
-    let (mut b1t, mut b2t) = (1f32, 1f32);
-    let steps = args.steps.max(1);
-    for step in 0..steps {
-        let Some(b) = problem.composition(&theta, rng) else {
-            break;
-        };
-        beta = b;
-        let grad = problem.gradient(&theta, args.ridge);
-        let frac = step as f32 / steps as f32;
-        let lr = dict.lr0 * (1.0 - (1.0 - LR_FLOOR_FRAC) * frac);
-        b1t *= ADAM_B1;
-        b2t *= ADAM_B2;
-        let (bc1, bc2) = (1.0 - b1t, 1.0 - b2t);
-        for j in 0..d {
-            m[j] = ADAM_B1 * m[j] + (1.0 - ADAM_B1) * grad[j];
-            v[j] = ADAM_B2 * v[j] + (1.0 - ADAM_B2) * grad[j] * grad[j];
-            theta[j] -= lr * (m[j] / bc1) / ((v[j] / bc2).sqrt() + ADAM_EPS);
-        }
+    /// The profiled objective at `θ` given its log-partition, up to the
+    /// constant `Σ_g n_g b_g`: `N·lse − N·⟨m, θ⟩ + (λ/2)‖θ‖²`.
+    fn objective(&self, theta: &[f32], ridge: f32, lse: f32) -> f32 {
+        let fit: f32 = self.obs_mean.iter().zip(theta).map(|(&m, &t)| m * t).sum();
+        let sq: f32 = theta.iter().map(|&t| t * t).sum();
+        self.total * (lse - fit) + 0.5 * ridge * sq
     }
-    (theta, beta)
 }
 
-/// Newton on one pair's `e_uv` from a warm start, with the partition summed
-/// exactly: the objective is strictly convex with Hessian `N·Cov_p(e) + λI`, a
-/// `D × D` solve per step, so a placement that is already close settles at
-/// the optimum in a few steps where Adam would need hundreds. Returns
-/// `(e_uv, β_uv, certificate)`, the certificate being `‖∇‖²/(2λ)` at the
-/// returned placement — an upper bound in nats on its excess likelihood over
-/// the optimum.
+/// One node's exact optimum from the origin. Returns `(e_uv, β_uv,
+/// certificate)`; a node with no counts gets the origin.
+fn solve_exact(obs: &[(u32, f32)], dict: &PairDictionary, ridge: f32) -> (Vec<f32>, f32, f32) {
+    newton_polish(obs, dict, ridge, &vec![0f32; dict.d], SOLVE_STEPS)
+}
+
+/// Newton on one node's `e_uv` from `init`, with the partition summed exactly
+/// and `β_uv` profiled out each step. The objective is strictly convex with
+/// Hessian `N·Cov_p(e) + λI`, a `D × D` solve per step: from a warm start it
+/// settles in a few steps, and from the origin a long step is line-searched
+/// so it cannot overshoot. Returns `(e_uv, β_uv, certificate)`, the
+/// certificate being `‖∇‖²/(2λ)` at the returned placement — an upper bound
+/// in nats on its excess likelihood over the optimum.
 fn newton_polish(
     obs: &[(u32, f32)],
     dict: &PairDictionary,
@@ -977,24 +777,23 @@ fn newton_polish(
     max_steps: usize,
 ) -> (Vec<f32>, f32, f32) {
     let d = dict.d;
-    let Some(mut problem) = PairProblem::new(obs, dict, 0) else {
+    let Some(mut problem) = PairProblem::new(obs, dict) else {
         return (vec![0f32; d], 0.0, 0.0);
     };
-    // Exhaustive, so the sample never changes and no stream is drawn from.
-    let mut rng = SmallRng::seed_from_u64(0);
     let mut theta = init.to_vec();
     let mut beta = problem.log_total - dict.log_z;
-    let mut hess = nalgebra::DMatrix::<f32>::zeros(d, d);
     let mut certificate = f32::INFINITY;
+    let Some(mut lse) = problem.composition(&theta) else {
+        return (theta, beta, certificate);
+    };
+    let mut hess = nalgebra::DMatrix::<f32>::zeros(d, d);
 
     // One pass more than the steps: the last only profiles `β` and the
-    // certificate at the final `θ`.
+    // certificate at the final `θ`. The composition is always the one at
+    // `theta` here — every accepted step leaves it there.
     let max_steps = max_steps.max(1);
     for it in 0..=max_steps {
-        let Some(b) = problem.composition(&theta, &mut rng) else {
-            break;
-        };
-        beta = b;
+        beta = problem.log_total - lse;
         let grad = nalgebra::DVector::<f32>::from_vec(problem.gradient(&theta, ridge));
         certificate = grad.norm_squared() / (2.0 * ridge.max(1e-6));
         if it == max_steps || grad.norm() < NEWTON_GRAD_TOL * problem.total.max(1.0) {
@@ -1002,8 +801,7 @@ fn newton_polish(
         }
         // `N·(E[e eᵀ] − p̄ p̄ᵀ) + λI`, symmetric, positive definite.
         hess.fill(0.0);
-        for (&w, &g) in problem.weights.iter().zip(&problem.genes) {
-            let row = &dict.feat[g as usize * d..(g as usize + 1) * d];
+        for (&w, row) in problem.weights.iter().zip(dict.feat.chunks_exact(d)) {
             for i in 0..d {
                 let wi = w * row[i];
                 for j in 0..=i {
@@ -1023,14 +821,44 @@ fn newton_polish(
         let Some(chol) = hess.clone().cholesky() else {
             break;
         };
-        let mut step = chol.solve(&grad);
-        let len = step.norm();
-        if len > NEWTON_STEP_CAP {
-            step *= NEWTON_STEP_CAP / len;
-        }
-        for (t, s) in theta.iter_mut().zip(step.iter()) {
-            *t -= s;
-        }
+        let step = chol.solve(&grad);
+        let trial_at = |t: f32| -> Vec<f32> {
+            theta
+                .iter()
+                .zip(step.iter())
+                .map(|(&th, &s)| th - t * s)
+                .collect()
+        };
+        // A short step is the quadratic regime: take it whole. A long one is
+        // shrunk until it lowers the objective by a fraction of the decrease
+        // the linear model promised (`∇ᵀstep`, positive since `H ≻ 0`).
+        let accepted = if step.norm() <= NEWTON_LONG_STEP {
+            let trial = trial_at(1.0);
+            problem.composition(&trial).map(|l| (trial, l))
+        } else {
+            let f_here = problem.objective(&theta, ridge, lse);
+            let promised = grad.dot(&step);
+            let mut t = NEWTON_LONG_STEP / step.norm();
+            let mut found = None;
+            for _ in 0..MAX_BACKTRACKS {
+                let trial = trial_at(t);
+                if let Some(l) = problem.composition(&trial) {
+                    if problem.objective(&trial, ridge, l) <= f_here - ARMIJO * t * promised {
+                        found = Some((trial, l));
+                        break;
+                    }
+                }
+                t *= 0.5;
+            }
+            found
+        };
+        // Nothing along the step lowers the objective: `theta` is the optimum
+        // to working precision, and `beta` and the certificate are already its.
+        let Some((trial, l)) = accepted else {
+            break;
+        };
+        theta = trial;
+        lse = l;
     }
     (theta, beta, certificate)
 }
