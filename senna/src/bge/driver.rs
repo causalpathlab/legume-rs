@@ -176,6 +176,8 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             hier_units_per_step: knobs.batch_size.unwrap_or(256),
             hier_modules_per_unit: knobs.modules_per_unit,
             gene_modules,
+            tracks: None,
+            offset_l2: 0.0,
         })
     };
 

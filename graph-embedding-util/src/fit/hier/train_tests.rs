@@ -84,6 +84,8 @@ fn draw_plan_weights_sum_to_one_per_unit() {
     let n_m = 3usize;
     // unit 0: composition [0.5, 0.5, 0.0]; unit 1: all-zero (e.g. an empty pb row)
     let um = UnitModules {
+        n_tracks: 1,
+        n_modules: n_m,
         q: vec![0.5, 0.5, 0.0, 0.0, 0.0, 0.0],
         n_um: vec![0.0; 2 * n_m],
         by_module: vec![Vec::new(), Vec::new()],

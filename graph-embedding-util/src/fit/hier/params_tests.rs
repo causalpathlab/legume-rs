@@ -37,3 +37,34 @@ fn a_zero_gradient_leaves_the_row_and_accumulator_untouched() {
     assert_eq!(row, vec![1.0, 2.0]);
     assert_eq!(opt.acc[1], 0.0);
 }
+
+#[test]
+fn the_non_base_tracks_start_at_zero_and_leave_the_base_tables_untouched() {
+    let (n_u, n_m, n_g, h) = (3usize, 2usize, 5usize, 4usize);
+    let plain = HierParams::new(n_u, n_m, n_g, h, 7);
+    let tracked = HierParams::new_tracked(n_u, n_m, n_g, 3, h, 7);
+    // same seed, same draws: the base tables are identical
+    assert_eq!(plain.e_u, tracked.e_u);
+    assert_eq!(plain.mu, tracked.mu);
+    assert_eq!(plain.r, tracked.r);
+    assert_eq!(plain.b_m, tracked.b_m);
+    assert_eq!(plain.b_g, tracked.b_g);
+    // one offset table per non-base track, all zero
+    assert!(plain.offsets.is_empty());
+    assert!(plain.offset(0).is_none());
+    assert!(plain.offset(1).is_none());
+    assert_eq!(tracked.offsets.len(), 2);
+    assert!(tracked.offset(0).is_none());
+    for t in 1..3 {
+        let o = tracked.offset(t).expect("a non-base track has an offset");
+        assert_eq!(o.d_mu.len(), n_m * h);
+        assert_eq!(o.d_b_m.len(), n_m);
+        assert_eq!(o.d_r.len(), n_g * h);
+        assert_eq!(o.d_b_g.len(), n_g);
+        assert!(o.d_mu.iter().all(|&x| x == 0.0));
+        assert!(o.d_b_m.iter().all(|&x| x == 0.0));
+        assert!(o.d_r.iter().all(|&x| x == 0.0));
+        assert!(o.d_b_g.iter().all(|&x| x == 0.0));
+    }
+    assert!(tracked.offset(3).is_none());
+}
