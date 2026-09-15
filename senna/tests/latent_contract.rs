@@ -163,6 +163,22 @@ fn gem_kinds_are_classified_on_both_axes() {
     assert!(!RunKind::Gem.is_topic_family(), "gem has no topic axis");
 }
 
+/// `senna gem` reads exactly like `senna bge` for the frozen-table
+/// predicates: same reader (`BgeEmbedding`), same requirement for a
+/// per-gene bias, so `predict` / `probe` / `deconvolve` route it down the
+/// bge path unchanged.
+#[test]
+fn gem_scores_like_bge() {
+    assert!(
+        RunKind::Gem.has_frozen_gene_table(),
+        "gem's whole gene side is a frozen (ρ, b_feat) table, same as bge"
+    );
+    assert!(
+        RunKind::Gem.has_gene_bias(),
+        "gem fits a per-gene bias exactly as bge does"
+    );
+}
+
 /// The wire strings are a compatibility surface: renaming a variant without
 /// changing them orphans every manifest already on disk.
 #[test]

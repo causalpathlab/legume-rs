@@ -102,7 +102,7 @@ fn a_reference_with_a_different_matching_plan_is_refused() {
 #[test]
 fn kinds_without_a_projection_are_refused_up_front() {
     let dir = tempfile::tempdir().unwrap();
-    for kind in [RunKind::Fne, RunKind::Gem] {
+    for kind in [RunKind::Fne, RunKind::ResolveEmbeddingSpace] {
         let prefix = write_manifest(&dir, &format!("run_{kind}"), kind);
         let args = base_args(prefix, "out".into());
         let err = impute_model(&args).unwrap_err();
@@ -111,6 +111,23 @@ fn kinds_without_a_projection_are_refused_up_front() {
             "{kind}: {err}"
         );
     }
+}
+
+/// gem now has the same frozen-table query-side projection bge/simba use, so
+/// it must NOT be refused with the "no query-side projection" message
+/// anymore; impute's own matching machinery just is not wired for it yet.
+#[test]
+fn a_gem_run_is_refused_with_its_own_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = write_manifest(&dir, "run_gem", RunKind::Gem);
+    let args = base_args(prefix, "out".into());
+    let err = impute_model(&args).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("not wired for gem runs"), "{msg}");
+    assert!(
+        !msg.contains("no query-side projection"),
+        "gem does have a query-side projection now: {msg}"
+    );
 }
 
 #[test]
