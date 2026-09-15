@@ -43,7 +43,7 @@
 //! history is in `plans/posterior-feature-gate.md`.
 
 use crate::cell_activity_graph_embedding::args::{
-    CellActivityGraphEmbeddingArgs, GeneEmbeddingMode, GeneInitMode,
+    CellActivityGraphEmbeddingArgs, GeneEmbeddingMode, GeneInitMode, PairSolverArg,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_exp_batch_cache, GeneGatedChainSampler,
@@ -51,7 +51,8 @@ use crate::cell_activity_graph_embedding::gene_chain_sampler::{
 use crate::cell_activity_graph_embedding::gene_gating::build_gene_active_fine_edges;
 use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_gene_level, CageLossOut};
 use crate::cell_activity_graph_embedding::pair_projection::{
-    project_pairs, PairBatchDivisor, PairLatent, PairProjectionArgs, ProjectionArgs,
+    project_pairs, CellLatent, PairBatchDivisor, PairEncoderSpec, PairLatent, PairProjectionArgs,
+    PairSolver, ProjectionArgs,
 };
 use crate::cell_activity_graph_embedding::pretrained;
 use crate::link_community::profiles::{
@@ -1407,6 +1408,9 @@ pub fn fit_cell_activity_graph_embedding(
         (Some(&gene_names), Some("gene")),
         Some(&[Box::from("b_gene")]),
     )?;
+    // Phase 1's tables are on disk; the encoder below trains on the same
+    // device, so release them first.
+    drop(model);
 
     write_score_trace(&(c.out.to_string() + ".scores.parquet"), &score_trace)?;
 
@@ -1424,15 +1428,36 @@ pub fn fit_cell_activity_graph_embedding(
     // decomposes an edge as `⟨θ_g, e_u ⊙ e_v⟩`, so a Hadamard product is the
     // closed form this generalizes: the projection lets the pair's own expression
     // move it off that point, which is what puts a boundary pair between the
-    // two programs it pools instead of on either endpoint.
+    // two programs it pools instead of on either endpoint. The same pass
+    // places every cell (its self-pair), which is the cell embedding below.
     let pair_batch = batch_db.as_ref().map(|delta| PairBatchDivisor {
         delta,
         batch_of_cell: &batch_membership_u32,
     });
+    let encoder_spec = PairEncoderSpec {
+        trunk_width: args.pair_trunk,
+        n_experts: args.pair_experts,
+        epochs: args.pair_epochs,
+        batch: args.pair_batch,
+        train_pairs: args.pair_train_pairs,
+    };
+    let pair_encoder_path = format!("{}.pair_encoder.safetensors", c.out);
+    let solver = match args.pair_solver {
+        PairSolverArg::Encoder => PairSolver::TrainEncoder {
+            spec: &encoder_spec,
+            dev: &dev,
+            save_to: &pair_encoder_path,
+        },
+        PairSolverArg::Exact => PairSolver::Exact,
+    };
     let PairLatent {
         latent: pair_latent,
         bias: pair_bias,
         scores: _,
+        cells: CellLatent {
+            latent: cell_latent,
+            bias: cell_bias,
+        },
     } = project_pairs(
         &data_vec,
         &fine_edges,
@@ -1444,9 +1469,11 @@ pub fn fit_cell_activity_graph_embedding(
                 steps: args.pair_steps,
                 gene_sample: args.pair_gene_sample,
             },
+            solver,
             seed: c.seed,
             pair_block: args.pair_block,
             eval_features: None,
+            score_pairs: false,
         },
         &gene_axis,
         &gene_totals,
@@ -1455,20 +1482,11 @@ pub fn fit_cell_activity_graph_embedding(
     // just used. Placed here rather than after clustering because it tests the projection,
     // not the cut: a link community is a downstream choice, and folding it in would confuse
     // "does the embedding predict expression" with "did k-means pick a good k".
-    {
-        // `β_uv` is the pair's log pooled depth; it never leaves this function,
-        // but its spread is the cheapest check that the projection saw real data.
-        let mut sorted = pair_bias;
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if let (Some(&lo), Some(&hi)) = (sorted.first(), sorted.last()) {
-            info!(
-                "Pair intercept β: min {:.3}, median {:.3}, max {:.3}",
-                lo,
-                sorted[sorted.len() / 2],
-                hi
-            );
-        }
-    }
+    // `β_uv` is the pair's log pooled depth and `β_c` the cell's; neither
+    // leaves this function, but their spread is the cheapest check that the
+    // projection saw real data.
+    log_intercept_spread("Pair intercept β", pair_bias);
+    log_intercept_spread("Cell intercept β", cell_bias);
 
     let fine_edges_usize: Vec<(usize, usize)> = fine_edges
         .iter()
@@ -1519,26 +1537,15 @@ pub fn fit_cell_activity_graph_embedding(
     )?;
     let n_edge_clusters = prop_out.n_clusters;
 
-    // Cell embedding as an EVALUATION readout — no cell is ever trained.
-    // The math lives beside `PropensityOutputs` in link_community; the
-    // decision to ship it, and the file it lands in, are cage's: for cage
-    // this file is the annotate-consumable table (same D as the gene
-    // embedding, since the latents are projections against it).
-    {
-        let e_cell_readout = crate::link_community::profiles::propensity_weighted_cell_embedding(
-            &pair_latent_nk,
-            &prop_out,
-        );
-        e_cell_readout.to_parquet_with_names(
-            &(c.out.to_string() + ".cell_embedding.parquet"),
-            (Some(&cell_names), Some("cell")),
-            Some(&embedding_col_names(pair_latent_nk.ncols())),
-        )?;
-        info!(
-            "Wrote {}.cell_embedding.parquet (propensity readout)",
-            c.out
-        );
-    }
+    // Cell embedding: every cell's own placement on the gene embedding by the
+    // same map that placed its pairs — the annotate-consumable table (same D
+    // as the gene embedding, since the latents are projections against it).
+    cell_latent.to_parquet_with_names(
+        &(c.out.to_string() + ".cell_embedding.parquet"),
+        (Some(&cell_names), Some("cell")),
+        Some(&embedding_col_names(cell_latent.ncols())),
+    )?;
+    info!("Wrote {}.cell_embedding.parquet", c.out);
 
     // Metadata
     {
@@ -1557,6 +1564,7 @@ pub fn fit_cell_activity_graph_embedding(
             },
             batch_db.is_some(),
             splice_report,
+            args.pair_solver == PairSolverArg::Encoder,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;
@@ -1565,6 +1573,17 @@ pub fn fit_cell_activity_graph_embedding(
 
     info!("Done");
     Ok(())
+}
+
+/// Min / median / max of a fitted intercept vector, as one log line.
+fn log_intercept_spread(what: &str, values: Vec<f32>) {
+    if !values.is_empty() {
+        let q = matrix_util::utils::quantiles(&values, &[0.0, 0.5, 1.0]);
+        info!(
+            "{what}: min {:.3}, median {:.3}, max {:.3}",
+            q[0], q[1], q[2]
+        );
+    }
 }
 
 /// Convert a 2-D `[R × C]` candle Tensor into an `nalgebra::DMatrix<f32>`
