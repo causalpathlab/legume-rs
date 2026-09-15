@@ -190,3 +190,55 @@ fn a_missing_manifest_names_the_flag_as_the_way_out() -> anyhow::Result<()> {
     assert!(err.to_string().contains("--reference-data"), "{err}");
     Ok(())
 }
+
+////////////////////////////////////////////
+// Reference propensity onto the data axis //
+////////////////////////////////////////////
+
+fn names(v: &[&str]) -> Vec<Box<str>> {
+    v.iter().map(|s| (*s).into()).collect()
+}
+
+#[test]
+fn a_reference_cell_the_run_never_placed_gets_a_zero_row() -> anyhow::Result<()> {
+    // The run kept b and d (in that order); the files hold a, b, c, d.
+    let prop = Mat::from_row_slice(2, 2, &[0.7, 0.3, 0.1, 0.9]);
+    let aligned = align_to_columns(
+        "p",
+        prop,
+        &names(&["b", "d"]),
+        &names(&["a", "b", "c", "d"]),
+    )?;
+    assert_eq!(aligned.nrows(), 4);
+    assert_eq!(
+        aligned.row(0).iter().copied().collect::<Vec<_>>(),
+        vec![0.0, 0.0]
+    );
+    assert_eq!(
+        aligned.row(1).iter().copied().collect::<Vec<_>>(),
+        vec![0.7, 0.3]
+    );
+    assert_eq!(
+        aligned.row(2).iter().copied().collect::<Vec<_>>(),
+        vec![0.0, 0.0]
+    );
+    assert_eq!(
+        aligned.row(3).iter().copied().collect::<Vec<_>>(),
+        vec![0.1, 0.9]
+    );
+    Ok(())
+}
+
+#[test]
+fn matching_axes_pass_through_and_foreign_files_are_refused() {
+    let prop = Mat::from_row_slice(2, 1, &[1.0, 2.0]);
+    let same =
+        align_to_columns("p", prop.clone(), &names(&["a", "b"]), &names(&["a", "b"])).unwrap();
+    assert_eq!(same, prop);
+    let err =
+        align_to_columns("p", prop.clone(), &names(&["a", "z"]), &names(&["a", "b"])).unwrap_err();
+    assert!(err.to_string().contains("1 of its 2 cells"), "{err}");
+    let err =
+        align_to_columns("p", prop, &names(&["a", "b"]), &names(&["a", "a", "b"])).unwrap_err();
+    assert!(err.to_string().contains("not unique"), "{err}");
+}
