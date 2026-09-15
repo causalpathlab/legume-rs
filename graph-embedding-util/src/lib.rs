@@ -47,8 +47,8 @@ pub use eval::{
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, warm_start_module_labels, FitConfig, FitOutput, GeneModuleArgs, GeneModuleConfig,
-    ParentModulesOwned, TrackInfo, TrackSpec,
+    fit, warm_start_module_labels, CellEncoders, FitConfig, FitOutput, GeneModuleArgs,
+    GeneModuleConfig, ParentModulesOwned, TrackEncoder, TrackInfo, TrackSpec,
 };
 pub use model::JointEmbedModel;
 pub use multiome_plan::{

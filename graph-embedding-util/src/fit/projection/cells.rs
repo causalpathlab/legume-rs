@@ -3,7 +3,7 @@
 //! block Poisson-MAP SGD ([`block_sgd`]).
 
 use super::block_sgd;
-use super::encoder::{self, CellEncoder, DistillSpec};
+use super::encoder::{self, CellEncoders, DistillSpec};
 use super::CellBatchFold;
 use crate::fit::config::TrackSpec;
 use crate::loss::PerBatchStratifiedCellSampler;
@@ -24,9 +24,10 @@ pub(crate) struct Phase2Result {
     /// in the as-trained (un-gauged) frame, so `fit()` shifts them by this mean
     /// before they leave in the cells' frame.
     pub theta_mean: Vec<f32>,
-    /// The distilled encoder that placed the cells, when `distill` was given;
-    /// `None` when the block SGD did.
-    pub cell_encoder: Option<CellEncoder>,
+    /// The distilled encoders that placed the cells, when `distill` was given;
+    /// `None` when the block SGD did. One per COUNT track — a one-track fit
+    /// holds exactly one, which is what `senna bge` persists.
+    pub cell_encoder: Option<CellEncoders>,
     /// The fitted intercept of every NON-base track, `[T - 1][n_cells]`; empty on
     /// a one-track feature axis. Track 0's is `b_cell`, stored on the model.
     pub other_intercepts: Vec<Vec<f32>>,
@@ -162,10 +163,12 @@ pub(crate) fn project_cells_phase2(
         let shift: f32 = e_f.iter().zip(tm).map(|(e, m)| e * m).sum();
         *b += shift;
     }
-    // The persisted encoder places predict-time cells; give it the same gauge
-    // so a query and the run's cells share one frame.
-    if let Some(enc) = cell_encoder.as_ref() {
-        enc.shift_output(tm)?;
+    // The persisted encoders place predict-time cells; give EVERY track's the
+    // same gauge so a query and the run's cells share one frame (the combined
+    // placement is a mean of them, so a shift missed on one track would move a
+    // cell by a fraction of θ̄).
+    if let Some(encs) = cell_encoder.as_ref() {
+        encs.shift_output(tm)?;
     }
     let b_feat_t = Tensor::from_vec(b_feat, n_features, dev)?;
     {

@@ -22,7 +22,7 @@ pub use config::{
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
-pub use projection::CellEncoder;
+pub use projection::{CellEncoder, CellEncoders, TrackEncoder};
 pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest};
 
 use crate::data::{Triplet, UnifiedData};

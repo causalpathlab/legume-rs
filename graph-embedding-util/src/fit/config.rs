@@ -351,9 +351,10 @@ pub struct FitOutput {
     /// trained against, for batch diagnostics. In the cells' frame (shifted by
     /// the phase-2 gauge with them), so they co-plot with `model.e_cell`.
     pub pb_embeddings: Vec<super::pb_readout::PbLevelEmbedding>,
-    /// The distilled encoder phase 2 placed the cells with, when phase 2 was
-    /// given distillation targets; `None` when the block SGD placed them.
-    pub cell_encoder: Option<super::projection::CellEncoder>,
+    /// The distilled encoders phase 2 placed the cells with, when phase 2 was
+    /// given distillation targets; `None` when the block SGD placed them. One
+    /// per COUNT track of the feature axis.
+    pub cell_encoder: Option<super::projection::CellEncoders>,
     /// Per-batch gene fold `log δ_gb` phase 2 divided each batch's cell counts by;
     /// `None` on single-batch data.
     pub batch_gene_fold: Option<super::batch_fold::BatchGeneFold>,
