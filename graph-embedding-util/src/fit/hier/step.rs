@@ -252,6 +252,9 @@ pub fn loss_and_grads(
             // Unrestricted: every module is a column, empty ones included. At
             // `t == 0` these are the plain model's statements, unchanged.
             // `Borrowed` at t == 0: the base dictionary itself, never `μ + 0`.
+            // Same module-level softmax/gradient math as the restricted arm
+            // below, gathered/scattered through `mods` there instead of run
+            // dense here: a change to one side's math belongs on both.
             let mu_eff: Cow<DMatrix<f32>> = match offset {
                 None => Cow::Borrowed(&mu_base),
                 Some(o) => Cow::Owned(DMatrix::<f32>::from_fn(n_m, h, |m, k| {
@@ -307,6 +310,9 @@ pub fn loss_and_grads(
         // one gene this track has a row for. A module outside M_t is not a
         // negative here — it is off this track's axis — so it gets no column and
         // no gradient. Rows are scattered back onto the full `[M × H]` tables.
+        // Same module-level softmax/gradient math as the unrestricted arm
+        // above, run dense there over every module instead of gathered
+        // through `mods`: a change to one side's math belongs on both.
         let mods = sup.modules_of(t);
         let k_m = mods.len();
         let mu_eff = DMatrix::<f32>::from_fn(k_m, h, |j, k| {
@@ -374,10 +380,9 @@ pub fn loss_and_grads(
         module: u32,
         loss: f64,
         e_rows: Vec<(usize, Vec<f32>)>, // (position in plan, grad row)
-        /// `(gene, slot in `part.members[module]`, grad row)` — the slot is
-        /// carried because a restricted track emits a SUBSET of the members.
-        /// Only the genes THIS track scored, ascending — a subset of the
-        /// module's members on a restricted track, all of them otherwise.
+        /// `(gene, grad row)`. Only the genes THIS track scored, ascending: a
+        /// subset of the module's members on a restricted track, all of them
+        /// otherwise.
         r_rows: Vec<(u32, Vec<f32>)>,
         b_rows: Vec<(u32, f32)>,
     }
@@ -570,6 +575,7 @@ pub fn loss_and_grads(
                         pos_of_gene.insert((o.module, *gene), i);
                     }
                 }
+                debug_assert_eq!(o.r_rows.len(), o.b_rows.len());
                 for ((gene, row), (_, x)) in o.r_rows.into_iter().zip(o.b_rows) {
                     match pos_of_gene.get(&(o.module, gene)).copied() {
                         Some(i) => {
@@ -679,8 +685,8 @@ pub fn apply(
             grads.b_m[m],
         );
     }
-    // `grads.r` and `grads.b_g` are emitted in lockstep (one entry per member
-    // gene of each module, in module order), so they zip.
+    // `grads.r` and `grads.b_g` are emitted in lockstep, one entry per gene
+    // touched by at least one scored track, so they zip.
     debug_assert_eq!(grads.r.len(), grads.b_g.len());
     for ((g, gr), &(gb_gene, gb)) in grads.r.iter().zip(&grads.b_g) {
         debug_assert_eq!(*g, gb_gene);

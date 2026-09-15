@@ -82,12 +82,16 @@ pub fn select_spliced_rows(
 /// gene-keyed and is returned as read.
 pub(crate) fn load_marker_feature_embedding(prefix: &str) -> Result<MatWithNames<DMatrix<f32>>> {
     let (manifest, dir) = run_manifest::load_for(prefix)?;
-    let rel = manifest.outputs.feature_embedding.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "{prefix}: manifest has no `outputs.feature_embedding` — this needs a co-embedded \
+    let rel = manifest
+        .outputs
+        .feature_embedding
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{prefix}: manifest has no `outputs.feature_embedding` — this needs a co-embedded \
              gene space (a `senna gem` / `bge` / `fne` / `resolve-embedding-space` run)"
-        )
-    })?;
+            )
+        })?;
     let path = run_manifest::resolve(&dir, rel)
         .to_string_lossy()
         .into_owned();

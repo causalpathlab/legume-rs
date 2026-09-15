@@ -197,6 +197,9 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
         // loop already pays a device sync, so the update rides along for free, and
         // ~`MAX_STEPS/CHECK_EVERY` ticks per block is plenty of motion without
         // hammering the bar's lock and reformatting its message 400 times.
+        //
+        // This check is re-typed, not shared, in [`super::tracks`]'s per-track
+        // loop: a change here belongs there too.
         if steps.is_multiple_of(CHECK_EVERY) {
             emitted = a.progress.advance(bc, steps, emitted);
             a.progress.describe(steps);

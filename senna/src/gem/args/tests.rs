@@ -185,13 +185,25 @@ fn gem_subcommand_about_has_no_em_dash_and_wraps_under_100_cols() {
     }
 }
 
-/// Sanity check that `render_long_help()` at least runs cleanly end to end
-/// (the full `--help` text, shared groups included, is read by hand per the
-/// task's help-review step — see the task report for the one inherited em
-/// dash from `refine_weighting::CollapseArgs`'s pre-existing
-/// `--mixture-batch` text, which `senna bge --help` already carries too).
+/// `render_long_help()` runs cleanly end to end AND every flattened group
+/// actually reaches the render: one distinctive flag from `GemArgs` itself
+/// plus one from each of `HvgCliArgs`, `refine_weighting::CollapseArgs`,
+/// `QcArgs` and `ge::GeneModuleArgs`, so a group dropped from the flatten (or
+/// renamed out from under this test) fails here instead of only showing up
+/// as a missing flag in `senna gem --help`. The full text, shared groups
+/// included, is still read by hand per the task's help-review step.
 #[test]
 fn full_help_renders() {
     let help = Cli::command().render_long_help().to_string();
-    assert!(help.contains("--offset-l2"));
+    for flag in [
+        "--offset-l2",          // GemArgs
+        "--genes-sample-strip", // GemArgs
+        "--embedding-dim",      // GemArgs
+        "--n-hvg",              // HvgCliArgs
+        "--num-levels",         // refine_weighting::CollapseArgs
+        "--no-qc",              // QcArgs
+        "--gene-modules",       // ge::GeneModuleArgs
+    ] {
+        assert!(help.contains(flag), "gem --help is missing {flag}");
+    }
 }
