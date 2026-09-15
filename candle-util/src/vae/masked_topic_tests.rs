@@ -172,7 +172,7 @@ fn the_encoder_hidden_set_is_the_decoder_scored_set() {
     let dev = Device::Cpu;
     // `[D, P]`, the orientation the loader takes.
     let rows = small_rows().transpose();
-    let lv = DenseMaskedLevel::from_mats(&rows, None, &rows, &vec![1.0f32; D], &dev).unwrap();
+    let lv = DenseMaskedLevel::from_mats(&rows, None, &rows, &[1.0f32; D], &dev).unwrap();
     let ep = lv
         .begin_epoch(
             epoch_seed(42, 0, 0),
@@ -287,7 +287,7 @@ fn visible_genes_are_never_scored() {
         }
     }
     let score = |rows: &Mat| -> Vec<f32> {
-        let target = up(&rows, &dev);
+        let target = up(rows, &dev);
         let t = dense_module_targets(&identity, &target, &vis).unwrap();
         let mt = ModuleTarget {
             values: &t.values_nm,
