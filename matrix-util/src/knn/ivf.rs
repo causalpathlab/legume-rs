@@ -39,6 +39,8 @@ const PARTITION_ITER: usize = 10;
 /// is then assigned once; fitting on all rows would cost a full assignment
 /// pass per Lloyd iteration for a tessellation the probes smooth over anyway.
 const PARTITION_ROWS_PER_CELL: usize = 256;
+/// Rows per cell the k-means++ seeding draws its candidates from.
+const PARTITION_INIT_PER_CELL: usize = 16;
 /// The partition stops once fewer than this fraction of its rows still move.
 const PARTITION_MIN_CHANGED: f64 = 1e-3;
 /// Consecutive queries searched together, so a probed cell is streamed once
@@ -77,29 +79,27 @@ pub fn knn_rows_ivf(x: &DMatrix<f32>, args: &IvfArgs) -> (Vec<Vec<usize>>, Vec<V
     ///////////////
     let t_partition = std::time::Instant::now();
     let train_rows = (PARTITION_ROWS_PER_CELL * n_lists).min(n);
-    let training = if train_rows < n {
-        let mut rng = StdRng::seed_from_u64(args.seed);
-        let mut ids = rand::seq::index::sample(&mut rng, n, train_rows).into_vec();
-        ids.sort_unstable();
-        x.select_rows(&ids)
-    } else {
-        x.clone()
-    };
     let opts = KmeansRowsOpts {
         k: n_lists,
         max_iter: PARTITION_ITER,
         seed: args.seed,
         metric: KmeansMetric::Euclidean,
         min_changed_frac: PARTITION_MIN_CHANGED,
-        init_sample: 0,
+        // The k-means++ pick walks a serial prefix sum over its candidates
+        // once per centroid; a seeded subsample keeps that off the clock.
+        init_sample: PARTITION_INIT_PER_CELL * n_lists,
     };
-    let fit = kmeans_rows_seeded(&training, &opts);
-    let labels = if train_rows < n {
-        nearest_centroid_rows(x, &fit.centroids, opts.metric)
+    let fit = if train_rows < n {
+        let mut rng = StdRng::seed_from_u64(args.seed);
+        let mut ids = rand::seq::index::sample(&mut rng, n, train_rows).into_vec();
+        ids.sort_unstable();
+        let mut fit = kmeans_rows_seeded(&x.select_rows(&ids), &opts);
+        fit.labels = nearest_centroid_rows(x, &fit.centroids, opts.metric);
+        fit
     } else {
-        fit.labels
+        kmeans_rows_seeded(x, &opts)
     };
-    let n_lists = fit.centroids.nrows();
+    let labels = fit.labels;
     let n_probe = args.n_probe.clamp(1, n_lists);
 
     // Inverted lists: row ids grouped by cell, ascending within a cell.
@@ -128,10 +128,8 @@ pub fn knn_rows_ivf(x: &DMatrix<f32>, args: &IvfArgs) -> (Vec<Vec<usize>>, Vec<V
             *v = col[i as usize];
         }
     });
-    let cents_soa: Vec<f32> = (0..d)
-        .flat_map(|dim| (0..n_lists).map(move |c| (dim, c)))
-        .map(|(dim, c)| fit.centroids[(c, dim)])
-        .collect();
+    // A column-major `[n_lists × d]` table is already dimension-major.
+    let cents_soa: &[f32] = fit.centroids.as_slice();
     info!(
         "IVF kNN: {n} rows x {d} into {n_lists} cells fitted on {train_rows} rows in {} Lloyd \
          iterations ({:.1} s); probing {n_probe} per query",
@@ -151,7 +149,7 @@ pub fn knn_rows_ivf(x: &DMatrix<f32>, args: &IvfArgs) -> (Vec<Vec<usize>>, Vec<V
         soa: &soa,
         n,
         d,
-        cents_soa: &cents_soa,
+        cents_soa,
         n_lists,
         order: &order,
         offsets: &offsets,
@@ -208,11 +206,10 @@ struct Scratch {
     /// Squared distances to one range of rows (or to every centroid).
     dist: Vec<f32>,
     probes: Vec<(f32, usize)>,
-    /// Each query's probed cells, sorted.
-    cells: Vec<Vec<usize>>,
+    /// `(cell, query)` for every probe in the block, sorted by cell.
+    hits: Vec<(usize, usize)>,
     /// Each query's short list.
     cand: Vec<Vec<(f32, usize)>>,
-    union: Vec<usize>,
 }
 
 impl Scratch {
@@ -221,13 +218,10 @@ impl Scratch {
             q: vec![0f32; QUERY_BLOCK * d],
             dist: vec![0f32; widest],
             probes: Vec::with_capacity(n_probe + 1),
-            cells: (0..QUERY_BLOCK)
-                .map(|_| Vec::with_capacity(n_probe))
-                .collect(),
+            hits: Vec::with_capacity(QUERY_BLOCK * n_probe),
             cand: (0..QUERY_BLOCK)
                 .map(|_| Vec::with_capacity(k + 1))
                 .collect(),
-            union: Vec::with_capacity(QUERY_BLOCK * n_probe),
         }
     }
 }
@@ -250,13 +244,12 @@ fn search_block(
         q,
         dist,
         probes,
-        cells,
+        hits,
         cand,
-        union,
     } = scratch;
 
     // Coordinates and nearest cells per query, ties by index.
-    union.clear();
+    hits.clear();
     for (i, qi) in q[..b * d].chunks_exact_mut(d).enumerate() {
         for (dim, qd) in qi.iter_mut().enumerate() {
             *qd = index.soa[dim * n + p0 + i];
@@ -266,22 +259,16 @@ fn search_block(
         for (c, &dd) in dist[..index.n_lists].iter().enumerate() {
             keep_smallest(probes, (sort_key(dd), c), n_probe);
         }
-        cells[i].clear();
-        cells[i].extend(probes.iter().map(|&(_, c)| c));
-        cells[i].sort_unstable();
-        union.extend_from_slice(&cells[i]);
+        hits.extend(probes.iter().map(|&(_, c)| (c, i)));
         cand[i].clear();
     }
-    union.sort_unstable();
-    union.dedup();
-
-    // Each probed cell once, scored for the queries that asked for it.
-    for &c in union.iter() {
+    // Grouped by cell: each probed cell is streamed once, for the queries
+    // that asked for it.
+    hits.sort_unstable();
+    for group in hits.chunk_by(|a, b| a.0 == b.0) {
+        let c = group[0].0;
         let (lo, hi) = (index.offsets[c], index.offsets[c + 1]);
-        for i in 0..b {
-            if cells[i].binary_search(&c).is_err() {
-                continue;
-            }
+        for &(_, i) in group {
             let p = p0 + i;
             sqdist_soa_range(index.soa, n, &q[i * d..(i + 1) * d], lo, hi, dist);
             let list = &mut cand[i];

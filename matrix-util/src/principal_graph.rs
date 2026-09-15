@@ -150,40 +150,7 @@ pub fn fit_principal_graph(
     })
 }
 
-/// k-means on the rows of `z` (cells × D); returns `(centroids K×D, labels)`.
-/// Fixed-seed shim over [`kmeans_centroids_seeded`] for callers that don't need
-/// seed control.
-pub fn kmeans_centroids(z: &DMatrix<f32>, k: usize, max_iter: usize) -> (DMatrix<f32>, Vec<usize>) {
-    kmeans_centroids_seeded(z, k, max_iter, 42)
-}
-
-/// Seeded Euclidean k-means on the rows of `z` (cells × D): kmeans++ from a
-/// `SmallRng(seed)` then Lloyd iterations, returning `(centroids K×D, labels)`.
-/// Delegates to [`crate::kmeans::kmeans_rows_seeded`], so the fit is
-/// reproducible for a given `seed` on any thread count — the substrate
-/// `senna lineage --seed` and bootstrap-support scoring rely on. Empty clusters
-/// are re-seeded from the point currently worst served by its centroid, so `K`
-/// stays non-degenerate; `k ≤ 1` or no rows yields one centroid (the column
-/// mean) and all-zero labels.
-pub fn kmeans_centroids_seeded(
-    z: &DMatrix<f32>,
-    k: usize,
-    max_iter: usize,
-    seed: u64,
-) -> (DMatrix<f32>, Vec<usize>) {
-    let fit = crate::kmeans::kmeans_rows_seeded(
-        z,
-        &crate::kmeans::KmeansRowsOpts {
-            k,
-            max_iter,
-            seed,
-            metric: crate::kmeans::KmeansMetric::Euclidean,
-            min_changed_frac: 0.0,
-            init_sample: 0,
-        },
-    );
-    (fit.centroids, fit.labels)
-}
+pub use crate::kmeans::{kmeans_centroids, kmeans_centroids_seeded};
 
 /// `(N×D, K×D) → N×K` matrix of squared Euclidean distances. Fills a
 /// row-major flat buffer in parallel via `par_chunks_exact_mut` (one

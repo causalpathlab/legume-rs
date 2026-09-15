@@ -3550,6 +3550,7 @@ dependencies = [
  "clap",
  "clustering",
  "ctrlc",
+ "env_logger",
  "flate2",
  "indicatif",
  "instant-distance",
