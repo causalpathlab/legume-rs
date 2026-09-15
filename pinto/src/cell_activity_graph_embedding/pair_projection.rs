@@ -796,9 +796,9 @@ fn newton_polish(
     };
     let mut theta = init.to_vec();
     let mut beta = problem.log_total - dict.log_z;
-    let mut certificate = f32::INFINITY;
+    let mut decrement = f32::INFINITY;
     let Some(mut lse) = problem.composition(&theta) else {
-        return (theta, beta, certificate);
+        return (theta, beta, decrement);
     };
     let mut hess = nalgebra::DMatrix::<f32>::zeros(d, d);
 
@@ -832,7 +832,7 @@ fn newton_polish(
             break;
         };
         let step = chol.solve(&grad);
-        certificate = 0.5 * grad.dot(&step);
+        decrement = 0.5 * grad.dot(&step);
         if it == max_steps || grad.norm() < NEWTON_GRAD_TOL * problem.total.max(1.0) {
             break;
         }
@@ -867,12 +867,12 @@ fn newton_polish(
             found
         };
         // Nothing along the step lowers the objective: `theta` is the optimum
-        // to working precision, and `beta` and the certificate are already its.
+        // to working precision, and `beta` and the decrement are already its.
         let Some((trial, l)) = accepted else {
             break;
         };
         theta = trial;
         lse = l;
     }
-    (theta, beta, certificate)
+    (theta, beta, decrement)
 }
