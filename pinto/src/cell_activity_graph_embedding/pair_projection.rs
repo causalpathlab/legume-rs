@@ -145,13 +145,12 @@ pub enum PairSolver<'a> {
     LoadEncoder { path: &'a str, dev: &'a Device },
 }
 
-/// Knobs for [`project_pairs`]: the objective's one parameter plus how the
-/// pair axis is walked.
+/// Knobs for [`project_pairs`]: where the encoder comes from, plus how the
+/// pair axis is walked. The objective's one parameter, the ridge, travels
+/// with the encoder — set in [`PairEncoderSpec`] when it is trained, read
+/// back from the file when it is loaded.
 #[derive(Debug, Clone)]
 pub struct PairProjectionArgs<'a> {
-    /// Ridge `λ` on `e_uv` (never on `β_uv`, which must stay free to absorb
-    /// depth): the encoder trains against it, and the exact solve uses it.
-    pub ridge: f32,
     pub solver: PairSolver<'a>,
     /// Seed; each pair derives its own stream so the fit is reproducible
     /// regardless of how rayon schedules the work.
@@ -449,15 +448,7 @@ pub fn project_pairs(
 
     let encoded = match args.solver {
         PairSolver::TrainEncoder { spec, dev, save_to } => {
-            let enc = encoder::PairEncoder::build(
-                &dict,
-                &corpus,
-                spec.trunk_width,
-                spec.n_experts,
-                args.ridge,
-                args.seed,
-                dev,
-            )?;
+            let enc = encoder::PairEncoder::build(&dict, &corpus, spec, args.seed, dev)?;
             let stats = enc.train(&corpus, edges, spec, args.seed)?;
             info!(
                 "Pair encoder: {} steps; held-out NLL/count after {:.4}",
@@ -585,7 +576,10 @@ fn project_with_encoder(
 
     // The amortization gap: how far the shared map sits from the per-pair
     // optimum, on a seeded sample.
-    let check = encoder::ExactCheck::new(dict, corpus, edges, args.ridge, args.seed);
+    // The ridge is the encoder's: the one it was fitted under, whether this
+    // run trained it or loaded it.
+    let ridge = enc.ridge();
+    let check = encoder::ExactCheck::new(dict, corpus, edges, ridge, args.seed);
     let report = |what: &str, latent: &Mat| {
         let gap = check.compare(dict, latent);
         info!(
@@ -611,7 +605,7 @@ fn project_with_encoder(
          cells {:.3}/{:.2}/{:.1}",
         p[0], p[1], p[2], c[0], c[1], c[2]
     );
-    let n_pairs = finish_rows(dict, &mut encoded.pairs, args.ridge, 0.0, |e| {
+    let n_pairs = finish_rows(dict, &mut encoded.pairs, ridge, 0.0, |e| {
         let (u, v) = edges[e];
         corpus[u as usize].pooled(&corpus[v as usize])
     });
@@ -619,7 +613,7 @@ fn project_with_encoder(
     let n_cells = finish_rows(
         dict,
         &mut encoded.cells,
-        args.ridge,
+        ridge,
         -std::f32::consts::LN_2,
         |c| corpus[c].doubled(),
     );

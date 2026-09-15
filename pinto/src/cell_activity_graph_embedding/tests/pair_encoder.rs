@@ -79,6 +79,7 @@ fn spec(epochs: usize) -> PairEncoderSpec {
         n_experts: 4,
         epochs,
         batch: 128,
+        ridge: RIDGE,
     }
 }
 
@@ -105,7 +106,7 @@ fn trained() -> &'static Trained {
         let cells = planted_cells(N_TRAIN_CELLS, 1);
         let corpus = corpus_of(&dict, &cells);
         let edges = random_pairs(N_TRAIN_CELLS, 1500, 2);
-        let enc = PairEncoder::build(&dict, &corpus, 32, 4, RIDGE, 7, &Device::Cpu).unwrap();
+        let enc = PairEncoder::build(&dict, &corpus, &spec(20), 7, &Device::Cpu).unwrap();
         enc.train(&corpus, &edges, &spec(20), 7).unwrap();
         Trained {
             dict,
@@ -319,7 +320,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         &e,
         None,
         &PairProjectionArgs {
-            ridge: RIDGE,
             solver: PairSolver::TrainEncoder {
                 spec: &spec,
                 dev: &Device::Cpu,
@@ -344,7 +344,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         &e,
         None,
         &PairProjectionArgs {
-            ridge: RIDGE,
             solver: PairSolver::LoadEncoder {
                 path: saved,
                 dev: &Device::Cpu,
@@ -388,7 +387,6 @@ fn the_certificate_finishes_what_an_untrained_encoder_gets_wrong() {
         &e,
         None,
         &PairProjectionArgs {
-            ridge: RIDGE,
             solver: PairSolver::TrainEncoder {
                 spec: &spec,
                 dev: &Device::Cpu,
