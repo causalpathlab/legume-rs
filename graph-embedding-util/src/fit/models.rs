@@ -10,9 +10,8 @@
 
 use super::config::FitConfig;
 use crate::data::UnifiedData;
-use crate::model::{FactoredInit, JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
-use candle_util::candle_nn::{VarBuilder, VarMap};
-use log::info;
+use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
+use candle_util::candle_nn::VarMap;
 
 /// The primary (per-cell) head and one head per pseudobulk level, coarsest → finest.
 pub(super) struct Heads {
@@ -22,11 +21,11 @@ pub(super) struct Heads {
 
 /// Allocate every head against one `VarMap`.
 ///
-/// The primary head allocates the canonical feature-side Vars — `e_feat`/`b_feat` for a
-/// free model, `beta`/`b_feat` when β-sharing factored — and every level head then
-/// shares that feature side while registering its own cell side under a unique
-/// `pb_l{idx}` prefix. AdamW over `varmap.all_vars()` therefore updates the feature side
-/// once and each head's cell side independently.
+/// The primary head allocates the canonical feature-side Vars — `e_feat`/`b_feat`
+/// — and every level head then shares that feature side while registering its
+/// own cell side under a unique `pb_l{idx}` prefix. AdamW over
+/// `varmap.all_vars()` therefore updates the feature side once and each head's
+/// cell side independently.
 pub(super) fn build_heads(
     unified: &UnifiedData,
     pb_blobs: &[UnifiedData],
@@ -38,81 +37,28 @@ pub(super) fn build_heads(
         unified.n_cells(),
         config.embedding_dim,
     );
-    let vs = VarBuilder::from_varmap(varmap, candle_util::candle_core::DType::F32, &config.device);
     let zeros_features = vec![0f32; n_features];
     let zeros_cells = vec![0f32; n_cells];
 
-    // The plain path (no feat_factor) trains by the hierarchical engine, which
-    // writes its composed dictionary into a free feature table; the splice path
-    // shares β across a gene's rows. Gene modules are the hier engine's own
-    // partition, never a head parameterization here.
-    let cell_model = match &config.feat_factor {
-        Some(spec) => {
-            anyhow::ensure!(
-                spec.row_to_gene.len() == n_features && spec.unspliced_rows.len() == n_features,
-                "feat_factor row maps (row_to_gene {}, unspliced_rows {}) must match n_features {}",
-                spec.row_to_gene.len(),
-                spec.unspliced_rows.len(),
-                n_features
-            );
-            // Dense gene ids ⇒ the count is max + 1. Single source of truth: the row→gene
-            // map, with no separately-supplied `n_genes` to keep in sync.
-            let n_genes = spec
-                .row_to_gene
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |m| m as usize + 1);
-            info!(
-                "per-gene β-sharing factorization: {} features → {} genes ({} unspliced rows); \
-                 splice δ recovered post-hoc on the cell axis (dual phase-2 projection)",
-                n_features,
-                n_genes,
-                spec.unspliced_rows.iter().filter(|&&b| b).count(),
-            );
-            // Allocate the ridge-shrunk per-gene splice offset δ_g only when its L2
-            // penalty is on; otherwise plain β-sharing (spliced ≡ unspliced ≡ β_g).
-            let unspliced_rows = (config.delta_l2 > 0.0).then_some(spec.unspliced_rows.as_slice());
-            if unspliced_rows.is_some() {
-                info!(
-                    "δ_g splice offset ON (L2={}): unspliced rows embed as β_g + δ_g",
-                    config.delta_l2
-                );
-            }
-            JointEmbedModel::new_factored(
-                FactoredInit {
-                    n_features,
-                    n_cells,
-                    embedding_dim: h,
-                    n_genes,
-                    row_to_gene: &spec.row_to_gene,
-                    b_feat: &zeros_features,
-                    b_cell: &zeros_cells,
-                    seed: config.seed,
-                    unspliced_rows,
-                },
-                varmap,
-                vs,
-                &config.device,
-            )?
-        }
-        None => JointEmbedModel::new_with_init(
-            ModelArgs {
-                n_features,
-                n_cells,
-                embedding_dim: h,
-                seed: config.seed,
-            },
-            &ModelInit {
-                e_feat: None,
-                e_cell: None,
-                b_feat: &zeros_features,
-                b_cell: &zeros_cells,
-            },
-            varmap,
-            &config.device,
-        )?,
-    };
+    // Phase 1 trains by the hierarchical engine, which writes its composed
+    // dictionary into this free feature table. Gene modules are the hier
+    // engine's own partition, never a head parameterization here.
+    let cell_model = JointEmbedModel::new_with_init(
+        ModelArgs {
+            n_features,
+            n_cells,
+            embedding_dim: h,
+            seed: config.seed,
+        },
+        &ModelInit {
+            e_feat: None,
+            e_cell: None,
+            b_feat: &zeros_features,
+            b_cell: &zeros_cells,
+        },
+        varmap,
+        &config.device,
+    )?;
 
     let mut level_models: Vec<JointEmbedModel> = Vec::with_capacity(pb_blobs.len());
     for (level_idx, pb) in pb_blobs.iter().enumerate() {
@@ -120,25 +66,21 @@ pub(super) fn build_heads(
         let prefix = format!("pb_l{level_idx}");
         // Each level's cell side is keyed by its own `{prefix}_e_cell` name, so one base
         // seed yields an independent reproducible init per level.
-        let level_model = if cell_model.factor.is_some() {
-            cell_model.new_sharing_factor(n_pb, &prefix, varmap, &config.device, config.seed)?
-        } else {
-            JointEmbedModel::new_sharing_features(
-                ShareFeaturesArgs {
-                    n_cells: n_pb,
-                    embedding_dim: h,
-                    shared_e_feat: cell_model.e_feat.clone(),
-                    shared_b_feat: cell_model.b_feat.clone(),
-                    e_cell_init: None,
-                    b_cell_init: &vec![0f32; n_pb],
-                    var_prefix: &prefix,
-                    seed: config.seed,
-                    shared_modules: cell_model.modules.clone(),
-                },
-                varmap,
-                &config.device,
-            )?
-        };
+        let level_model = JointEmbedModel::new_sharing_features(
+            ShareFeaturesArgs {
+                n_cells: n_pb,
+                embedding_dim: h,
+                shared_e_feat: cell_model.e_feat.clone(),
+                shared_b_feat: cell_model.b_feat.clone(),
+                e_cell_init: None,
+                b_cell_init: &vec![0f32; n_pb],
+                var_prefix: &prefix,
+                seed: config.seed,
+                shared_modules: cell_model.modules.clone(),
+            },
+            varmap,
+            &config.device,
+        )?;
         level_models.push(level_model);
     }
     Ok(Heads {

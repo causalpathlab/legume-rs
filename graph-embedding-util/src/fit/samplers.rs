@@ -12,10 +12,10 @@ use rand_distr::weighted::WeightedIndex;
 /// samplers: keep at most `k` cells per pb-sample at EVERY collapse level
 /// (`cell_to_pb_per_level`, coarsest..finest), unioned across levels. The
 /// returned samplers cover only the kept cells; each batch's `cell_picker` is
-/// rebuilt from the kept cells' recomputed degree weights (`degree^alpha_cell ·
-/// mult`, degree recovered from `CellFeatureSampler.counts`), while the
-/// negative marginal (`neg` / `feature_pool`) is cloned unchanged so negatives
-/// stay drawn from the full per-batch feature pool.
+/// rebuilt from the kept cells' recomputed degree weights (`degree^alpha_cell`,
+/// degree recovered from `CellFeatureSampler.counts`), while the negative
+/// marginal (`neg` / `feature_pool`) is cloned unchanged so negatives stay drawn
+/// from the full per-batch feature pool.
 ///
 /// Keeping ≤k per pb at *every* level (not just the finest) lets each level's
 /// partition contribute diverse representatives — robust even when refinement
@@ -27,7 +27,6 @@ pub(crate) fn subsample_cell_samplers_multilevel(
     cell_to_pb_per_level: &[Vec<usize>],
     k: usize,
     alpha_cell: f32,
-    cell_weight_mult: Option<&[f32]>,
     seed: u64,
 ) -> Vec<PerBatchStratifiedCellSampler> {
     let n_cells = cell_to_pb_per_level.first().map_or(0, std::vec::Vec::len);
@@ -70,8 +69,7 @@ pub(crate) fn subsample_cell_samplers_multilevel(
                 }
                 let cf = &s.per_cell[i];
                 let degree: f32 = cf.counts.iter().sum();
-                let mult = cell_weight_mult.map_or(1.0, |m| m[c as usize]);
-                cell_w.push(degree.max(1e-8).powf(alpha_cell) * mult);
+                cell_w.push(degree.max(1e-8).powf(alpha_cell));
                 per_cell.push(cf.clone());
                 active_cells.push(c);
             }
@@ -103,7 +101,6 @@ pub(crate) fn subsample_cell_samplers_multilevel(
 pub(crate) fn build_active_samplers(
     unified: &UnifiedData,
     alpha_cell: f32,
-    cell_weight_mult: Option<&[f32]>,
 ) -> anyhow::Result<Vec<PerBatchStratifiedCellSampler>> {
     // Build the per-batch stratified-cell samplers by **streaming columns**
     // from the backend, never materializing the flat cell↔feature edge list.
@@ -190,8 +187,7 @@ pub(crate) fn build_active_samplers(
                 picker,
             });
             active_cells[b].push(cell);
-            let mult = cell_weight_mult.map_or(1.0, |m| m[cell as usize]);
-            cell_w[b].push(col_deg[lc].max(1e-8).powf(alpha_cell) * mult);
+            cell_w[b].push(col_deg[lc].max(1e-8).powf(alpha_cell));
         }
         pb_bar.inc(slab as u64);
         start = end;

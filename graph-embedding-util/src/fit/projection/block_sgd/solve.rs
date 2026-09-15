@@ -50,41 +50,12 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let n_t = Tensor::from_vec(n_dense, (bc, f_live), dev)?.detach();
     let n_dead_t = Tensor::from_vec(n_dead, bc, dev)?;
 
-    ///////////////////////////////////////////////////////
-    // Fixed per-edge offset, materialized once per block //
-    ///////////////////////////////////////////////////////
-
-    // Everything in the score that does not depend on the trainable parameters,
-    // pre-added into ONE `[Bc, F]` tensor: the frozen feature bias `β`, plus (on
-    // the velocity pass) the frozen identity contribution `⟨e_f, θ_c⟩`.
-    //
-    // `⟨e_f, θ_c⟩` is what makes `δ` a directed residual in `θ`'s own frame rather
-    // than a second projection, and it is constant across the Adam loop, so it is
-    // one matmul *outside* it. Fusing `β` in here too costs nothing extra and
-    // removes a broadcast add from every step — per-op overhead is the binding
-    // constraint (see `BLOCK_ACTIVATION_BYTES`), so op count is worth spending
-    // block memory on.
-    // `[Bc, F]` on the velocity pass (it carries a per-cell term), but only the
-    // `[1, F]` bias row on the identity pass — where materializing the broadcast
-    // would cost a whole extra block-sized tensor and an extra block-sized read on
-    // every step, for no fewer ops. `score` broadcast-adds either shape.
-    let offset = match a.spec.base_theta {
-        Some(theta) => {
-            let t = Tensor::from_slice(&theta[a.start * h..a.end * h], (bc, h), dev)?;
-            // Only the latent rows of `Ẽᵀ` — the ones row is the intercept's, and
-            // the fixed identity carries no intercept of its own.
-            t.matmul(&e_aug.narrow(0, 0, h)?.contiguous()?)?
-                .broadcast_add(&dict.b_row)?
-        }
-        None => dict.b_row.clone(),
-    };
-
     ///////////////////////////////
     // Null-model initialisation //
     ///////////////////////////////
 
     // Θ at its warm start (zero without one) and the exact intercept given Θ:
-    //     c = ln(Σ_f n_cf) − ln(Σ_f exp(⟨e_f, θ_c⟩ + offset_cf) + dead_mass·1)
+    //     c = ln(Σ_f n_cf) − ln(Σ_f exp(⟨e_f, θ_c⟩ + β_f) + dead_mass·1)
     // so step 1 already sits at the right depth and the optimiser only has to
     // learn the deviation. (The Newton path starts from a randn `e_cell` and a
     // zero intercept, which is why its first steps have to move so far.)
@@ -103,17 +74,15 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
             .map(|x| (f64::from(*x) + dict.dead_mass).max(f64::MIN_POSITIVE).ln())
             .collect())
     };
-    let log_norm: Vec<f64> = match (&init_block, a.spec.base_theta) {
-        // Warm start: the row's own `⟨e_f, θ_c⟩` on top of the offset.
-        (Some(t), _) => row_log_norm(
+    let log_norm: Vec<f64> = match &init_block {
+        // Warm start: the row's own `⟨e_f, θ_c⟩` on top of the frozen bias.
+        Some(t) => row_log_norm(
             t.matmul(&e_aug.narrow(0, 0, h)?.contiguous()?)?
-                .broadcast_add(&offset)?,
+                .broadcast_add(&dict.b_row)?,
         )?,
-        // Velocity pass: `offset` already carries `⟨e_f, θ⟩ + β`, so sum it there.
-        (None, Some(_)) => row_log_norm(offset.clone())?,
-        // Identity pass: Θ = 0 ⇒ every row shares the same Σ_f exp(β_f), hoisted to
-        // the pass rather than re-summed over every live feature in every block.
-        (None, None) => vec![dict.null_log_norm; bc],
+        // Θ = 0 ⇒ every row shares the same Σ_f exp(β_f), hoisted to the pass
+        // rather than re-summed over every live feature in every block.
+        None => vec![dict.null_log_norm; bc],
     };
     // Θ̃ = [Θ | c] — the latent and its intercept in ONE `[Bc, H+1]` parameter, with
     // the intercept initialised at the conditional MLE given the latent.
@@ -137,7 +106,7 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     ////////////////////////////////////
 
     // **The data term is LINEAR in the parameters**, so its gradient is a constant:
-    // `Σ_cf n_cf·s_cf` with `s = Θ̃·Ẽᵀ + offset` gives `∂/∂Θ̃ = −N·Ẽ`, computed once
+    // `Σ_cf n_cf·s_cf` with `s = Θ̃·Ẽᵀ + β` gives `∂/∂Θ̃ = −N·Ẽ`, computed once
     // here instead of rebuilt (and back-propagated through) every step. The
     // intercept column of `N·Ẽ` is `Σ_f n_cf`, so the folded rows' `−n·c` term folds
     // straight into it.
@@ -206,7 +175,7 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
         // unaliased, which is what lets the fused path consume it in place.
         let mu = theta
             .matmul(e_aug)?
-            .clamped_exp_add_inplace(&offset, SCORE_CLAMP)?;
+            .clamped_exp_add_inplace(&dict.b_row, SCORE_CLAMP)?;
 
         // ∂L/∂Θ̃ = (μ − N)·Ẽ + λΘ̃, with the constant `N·Ẽ` hoisted above. The
         // intercept column comes out of the same matmul via `Ẽ`'s ones row, and
@@ -257,7 +226,7 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     // Read back + diagnostics //
     /////////////////////////////
 
-    let s = theta.matmul(e_aug)?.broadcast_add(&offset)?;
+    let s = theta.matmul(e_aug)?.broadcast_add(&dict.b_row)?;
     // One scalar, not the `[Bc, F]` block: did the overflow guard ever bind?
     let clamped = s.max_all()?.to_scalar::<f32>()? >= SCORE_CLAMP as f32;
     // Two-sided here (unlike the training loop): the deviance takes `ln(n/μ)`, so a

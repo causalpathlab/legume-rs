@@ -55,8 +55,8 @@ pub enum ThetaFrom {
     Auto,
     /// `{from}.cell_embedding.parquet` + `{from}.velocity.parquet` (H space).
     CellEmbedding,
-    /// `{from}.latent.parquet` (log θ → θ) + `{from}.velocity_factor.parquet`
-    /// (K space, the topic simplex). Topic runs only.
+    /// `{from}.latent.parquet` (log θ → θ), the topic simplex (K space). Topic
+    /// runs only, and geometry-only: no velocity file.
     Latent,
 }
 
@@ -99,7 +99,7 @@ pub struct LineageArgs {
         long,
         short = 'f',
         help_heading = "Input/output",
-        help = "gem / gem-encoder output prefix (which θ table it reads is set by --theta-from)"
+        help = "gem, or topic-family, output prefix (which θ table it reads is set by --theta-from)"
     )]
     pub from: Box<str>,
 
@@ -145,10 +145,10 @@ pub struct LineageArgs {
                      \n\
                      cell-embedding —\n\
                      {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
-                     latent         — {from}.latent.parquet (log θ, exponentiated to the simplex)\n\
-                     .                + {from}.velocity_factor.parquet (K space). Topic runs only.\n\
-                     auto           — latent on a run whose manifest says `gem-encoder` AND stamps\n\
-                     .                `latent: log-theta`; cell-embedding otherwise.\n\
+                     latent         — {from}.latent.parquet (log θ, exponentiated to the simplex).\n\
+                     .                Topic runs only, geometry-only: no velocity file.\n\
+                     auto           — latent on a run whose manifest stamps a log-simplex latent;\n\
+                     .                cell-embedding otherwise.\n\
                      \n\
                      These are different manifolds on a topic run, not two views of one.\n\
                      `cell_embedding = θ·α` places every cell inside the convex hull of α's K rows,\n\
@@ -277,26 +277,10 @@ pub struct LineageArgs {
                      This needs --markers, as in `--root-type HSC_MPP`.\n\
                      \n\
                      It is marker-grounded, so it is robust to unreliable velocity.\n\
-                     It overrides --root-from-gem and the velocity pick.\n\
+                     It overrides the velocity pick.\n\
                      --root-node and --root-cell override it in turn."
     )]
     pub root_type: Option<Box<str>>,
-
-    #[arg(
-        long = "root-from-gem",
-        help_heading = "Root selection",
-        help = "Anchor the root at gem's velocity-DAG source",
-        long_help = "Anchor the root at gem's velocity-DAG source.\n\
-                     That is the modal MST node of the low-τ region,\n\
-                     in {from}.dag_pseudotime.parquet.\n\
-                     It is more robust than the per-edge flux pick,\n\
-                     and lineage still fits the curves.\n\
-                     \n\
-                     --root-node, --root-cell and --root-type override it.\n\
-                     It falls back to the flux root when the file is absent,\n\
-                     or when gem's DAG has no terminal structure; see lineage_qc.json."
-    )]
-    pub root_from_gem: bool,
 
     #[arg(
         long,
