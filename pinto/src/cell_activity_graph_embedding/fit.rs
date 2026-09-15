@@ -4,8 +4,8 @@
 //! contrastive (NCE) prediction of PB-PB adjacency, one gene at a time. No
 //! cell and no cell-cell pair is ever trained on: cells enter once, when
 //! their spatial KNN edges are folded into PB super edges, and reappear only
-//! in evaluation readouts (the per-pair latent, the propensity, and the
-//! propensity-weighted per-cell embedding).
+//! in evaluation readouts (the per-pair latent, the propensity, and each
+//! cell's own placement by the pair encoder).
 //!
 //! ```text
 //! load -> spatial KNN -> batch effects                  util::srt_pipeline
@@ -43,7 +43,7 @@
 //! history is in `plans/posterior-feature-gate.md`.
 
 use crate::cell_activity_graph_embedding::args::{
-    CellActivityGraphEmbeddingArgs, GeneEmbeddingMode, GeneInitMode, PairSolverArg,
+    CellActivityGraphEmbeddingArgs, GeneEmbeddingMode, GeneInitMode,
 };
 use crate::cell_activity_graph_embedding::gene_chain_sampler::{
     build_gene_exp_batch_cache, GeneGatedChainSampler,
@@ -52,7 +52,7 @@ use crate::cell_activity_graph_embedding::gene_gating::build_gene_active_fine_ed
 use crate::cell_activity_graph_embedding::loss::{cage_nce_loss_per_gene_level, CageLossOut};
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, CellLatent, PairBatchDivisor, PairEncoderSpec, PairLatent, PairProjectionArgs,
-    PairSolver, ProjectionArgs,
+    PairSolver,
 };
 use crate::cell_activity_graph_embedding::pretrained;
 use crate::link_community::profiles::{
@@ -1323,8 +1323,8 @@ pub fn fit_cell_activity_graph_embedding(
 
     // Trained PB table [P × D] + bias [P] + the cell -> PB map. The
     // trained unit is the finest-level super-cell; the per-CELL embedding
-    // ships separately, as the propensity-weighted readout emitted after
-    // the propensity pass below.
+    // ships separately, as each cell's own placement by the pair encoder,
+    // written after the propensity pass below.
     // Bare integer row keys (the writer's default), so pb_embedding,
     // pb_bias, and cell_pb's `pb` column all join directly on the id.
     let e_pb_mat = tensor_to_mat(&model.e_cell)?;
@@ -1435,21 +1435,10 @@ pub fn fit_cell_activity_graph_embedding(
         batch_of_cell: &batch_membership_u32,
     });
     let encoder_spec = PairEncoderSpec {
-        trunk_width: args.pair_trunk,
-        n_experts: args.pair_experts,
-        epochs: args.pair_epochs,
-        batch: args.pair_batch,
-        train_pairs: args.pair_train_pairs,
+        ridge: args.pair_ridge,
+        ..PairEncoderSpec::default()
     };
     let pair_encoder_path = format!("{}.pair_encoder.safetensors", c.out);
-    let solver = match args.pair_solver {
-        PairSolverArg::Encoder => PairSolver::TrainEncoder {
-            spec: &encoder_spec,
-            dev: &dev,
-            save_to: &pair_encoder_path,
-        },
-        PairSolverArg::Exact => PairSolver::Exact,
-    };
     let PairLatent {
         latent: pair_latent,
         bias: pair_bias,
@@ -1464,12 +1453,11 @@ pub fn fit_cell_activity_graph_embedding(
         &e_gene_out,
         pair_batch,
         &PairProjectionArgs {
-            projection: ProjectionArgs {
-                ridge: args.pair_ridge,
-                steps: args.pair_steps,
-                gene_sample: args.pair_gene_sample,
+            solver: PairSolver::TrainEncoder {
+                spec: &encoder_spec,
+                dev: &dev,
+                save_to: &pair_encoder_path,
             },
-            solver,
             seed: c.seed,
             pair_block: args.pair_block,
             eval_features: None,
@@ -1564,7 +1552,6 @@ pub fn fit_cell_activity_graph_embedding(
             },
             batch_db.is_some(),
             splice_report,
-            args.pair_solver == PairSolverArg::Encoder,
         );
         let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
         meta.write(&meta_path)?;

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 /// Default `env_logger` filter when verbose mode is on. Promotes everything to
 /// info. (The k-NN backend, instant-distance, emits no `log` output, so no
 /// per-crate pin is needed here.) Override via `RUST_LOG=...`.

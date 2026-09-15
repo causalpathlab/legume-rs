@@ -95,7 +95,6 @@ fn metadata_roundtrip_cage() {
             nascent_count_fraction: 0.23,
             delta_base: DELTA_BASE_SPLICED.to_string(),
         }),
-        true,
     );
     let path = dir.path().join("run.pinto.json");
     meta.write(&path).unwrap();
@@ -168,9 +167,12 @@ fn metadata_roundtrip_cage_no_batch() {
         },
         false,
         None,
-        false,
     );
-    assert!(meta.outputs.pair_encoder.is_none());
+    // The encoder is part of every cage model, batches or not.
+    assert_eq!(
+        meta.outputs.pair_encoder.as_deref(),
+        Some(format!("{prefix}.pair_encoder.safetensors").as_str())
+    );
     let json = serde_json::to_string(&meta).unwrap();
     let back: PintoMetadata = serde_json::from_str(&json).unwrap();
     assert!(back.outputs.batch_effects.is_none());

@@ -32,7 +32,7 @@
 use crate::cell_activity_graph_embedding::args::GeneNameMode;
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, CellLatent, PairBatchDivisor, PairLatent, PairProjectionArgs, PairScore,
-    PairSolver, ProjectionArgs,
+    PairSolver,
 };
 use crate::link_community::outputs::write_partition_outputs;
 use crate::util::cell_pairs::SrtCellPairs;
@@ -43,7 +43,7 @@ use crate::util::srt_pipeline::{
     preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
-use clap::{Args, ValueEnum};
+use clap::Args;
 use graph_embedding_util::embedding_col_names;
 use log::info;
 use matrix_util::common_io::mkdir_parent;
@@ -73,18 +73,6 @@ pub struct PredictArgs {
 
     #[arg(long, default_value_t = 0, help = "Device index (for cuda)")]
     pub device_no: usize,
-
-    #[arg(
-        long,
-        default_value_t = PredictPairSolver::Auto,
-        value_enum,
-        help = "How the new sample's pairs and cells are placed on the model's gene embedding",
-        long_help = "auto uses the model's pair encoder ({model}.pair_encoder.safetensors)\n\
-                     when the training run saved one, and the exact per-pair solve otherwise.\n\
-                     encoder insists on the saved encoder and fails without it.\n\
-                     exact solves every pair on its own, as a run without an encoder would."
-    )]
-    pub pair_solver: PredictPairSolver,
 
     #[arg(
         long,
@@ -141,32 +129,8 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Ridge on the pair latent (as in cage)",
-        hide = true
-    )]
-    pub pair_ridge: f32,
-
-    #[arg(
-        long,
-        default_value_t = 300,
-        help = "Adam steps per pair (as in cage)",
-        hide = true
-    )]
-    pub pair_steps: usize,
-
-    #[arg(
-        long,
-        default_value_t = 512,
-        help = "Genes sampled per step for the projection log-partition; 0 = all",
-        hide = true
-    )]
-    pub pair_gene_sample: usize,
-
-    #[arg(
-        long,
         default_value_t = 8192,
-        help = "Cell pairs per projection read block",
+        help = "Cells per read block and cell pairs per placement pass (memory only)",
         hide = true
     )]
     pub pair_block: usize,
@@ -213,33 +177,17 @@ pub struct PredictArgs {
     pub null_from: Option<Vec<Box<str>>>,
 }
 
-/// Which arm places a predicted sample's pairs.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-#[clap(rename_all = "lowercase")]
-pub enum PredictPairSolver {
-    Auto,
-    Encoder,
-    Exact,
-}
-
-/// The encoder file to load, if any, given the model prefix and the flag:
-/// `auto` takes the file when it exists, `encoder` demands it, `exact`
-/// ignores it.
-fn resolve_pair_solver(model: &str, flag: PredictPairSolver) -> anyhow::Result<Option<String>> {
+/// The model's pair encoder, `{model}.pair_encoder.safetensors`: the one map
+/// that places a sample's pairs and cells, so a model saved without it cannot
+/// be predicted from.
+fn pair_encoder_path(model: &str) -> anyhow::Result<String> {
     let path = format!("{model}.pair_encoder.safetensors");
-    let present = Path::new(&path).is_file();
-    Ok(match flag {
-        PredictPairSolver::Exact => None,
-        PredictPairSolver::Auto => present.then_some(path),
-        PredictPairSolver::Encoder => {
-            anyhow::ensure!(
-                present,
-                "--pair-solver encoder: {path} does not exist; the model was fitted without a \
-                 pair encoder — pass --pair-solver exact, or refit it"
-            );
-            Some(path)
-        }
-    })
+    anyhow::ensure!(
+        Path::new(&path).is_file(),
+        "{path} does not exist: the model was fitted before `pinto cage` saved its pair encoder; \
+         refit it"
+    );
+    Ok(path)
 }
 
 /// Per-pair community labels from `{model}.link_community.parquet`, **unfiltered**.
@@ -574,18 +522,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     });
 
     let dev = args.device.to_device(args.device_no)?;
-    let encoder_path = resolve_pair_solver(&args.model, args.pair_solver)?;
-    let solver = match encoder_path.as_deref() {
-        Some(path) => PairSolver::LoadEncoder { path, dev: &dev },
-        None => PairSolver::Exact,
-    };
-    info!(
-        "Placing pairs by {}",
-        match &encoder_path {
-            Some(path) => format!("the model's pair encoder ({path})"),
-            None => "the exact per-pair solve".to_string(),
-        }
-    );
+    let encoder_path = pair_encoder_path(&args.model)?;
     let PairLatent {
         latent,
         bias: _,
@@ -600,12 +537,10 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         &e_full,
         pair_batch,
         &PairProjectionArgs {
-            projection: ProjectionArgs {
-                ridge: args.pair_ridge,
-                steps: args.pair_steps,
-                gene_sample: args.pair_gene_sample,
+            solver: PairSolver::LoadEncoder {
+                path: &encoder_path,
+                dev: &dev,
             },
-            solver,
             seed: c.seed,
             pair_block: args.pair_block,
             eval_features: eval_features.clone(),
@@ -697,9 +632,11 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         },
         batch_effects.is_some(),
         None,
-        false,
     );
     meta.command = "predict".to_string();
+    // A predicted sample is placed by the model's encoder; it is not a model
+    // and carries none of its own.
+    meta.outputs.pair_encoder = None;
     let meta_path = std::path::PathBuf::from(format!("{}.pinto.json", c.out));
     meta.write(&meta_path)?;
     info!("Wrote {}", meta_path.display());
