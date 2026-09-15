@@ -336,12 +336,15 @@ enum Commands {
                       a nascent-minus-mature contrast -- and the base track that\n\
                       contrast is measured from (delta_base, `senna gem`'s sign).\n\n\
                       After training, cells return in EVALUATION only.\n\
-                      Every CELL PAIR is projected:\n\
-                      The target is the frozen gene embedding.\n\
-                      Its pooled counts x_gu + x_gv are fit by Poisson MAP.\n\
-                      That gives a per-pair latent e_uv.\n\
-                      The solve is rayon-parallel, one D+1 problem per pair,\n\
-                      with a sampled log-partition.\n\n\
+                      Every CELL PAIR is placed on the frozen gene embedding.\n\
+                      Its pooled counts x_gu + x_gv enter through one statistic,\n\
+                      and a small encoder trained on this run's pairs\n\
+                      maps that statistic to the per-pair latent e_uv in one pass.\n\
+                      --pair-ridge sets the prior it is fitted under.\n\
+                      A seeded sample of pairs is always re-solved exactly\n\
+                      and the agreement is logged;\n\
+                      the few placements the certificate puts far out\n\
+                      are finished exactly.\n\n\
                       Clustering those pairs gives link communities.\n\
                       A cell's propensity is its incident-edge fraction.\n\
                       That is the same definition `lc` and `dsvd` use.\n\
@@ -351,7 +354,7 @@ enum Commands {
                       kmeans instead uses a fixed --n-edge-clusters,\n\
                       spherical on the pair latent and seeded by --seed.\n\n\
                       A cell's embedding is its own placement on the gene embedding,\n\
-                      by the same map that places its pairs (see --pair-solver),\n\
+                      by the same encoder that places its pairs,\n\
                       written for `pinto annotate`.\n\
                       A cell with no counts gets a zero row.\n\n\
                       Outputs:\n\
@@ -429,7 +432,8 @@ enum Commands {
                       \x20 2. Align {model}.feature_embedding.parquet to its gene axis by name.\n\
                       \x20    Genes without a model row are dropped, never seeded.\n\
                       \x20 3. Place every cell pair, and every cell, on the frozen dictionary\n\
-                      \x20    by the model's pair encoder, or by Poisson MAP without one.\n\
+                      \x20    by the model's pair encoder ({model}.pair_encoder.safetensors),\n\
+                      \x20    under the ridge it was fitted with. Nothing is optimised per pair.\n\
                       \x20 4. Assign each pair to the nearest trained link community.\n\
                       \x20    The centroids are recomputed from {model}.latent\n\
                       \x20    and {model}.link_community; a pair that matches none abstains.\n\
@@ -480,7 +484,7 @@ enum Commands {
                       \n\
                       The reference data defaults to the files recorded in\n\
                       {model}.pinto.json; --reference-data overrides.\n\
-                      Predict-stage flags (coordinates, -k, pair tuning,\n\
+                      Predict-stage flags (coordinates, -k, --pair-block,\n\
                       eval flags) apply to cage models only.\n\
                       \n\
                       Writes {out}.imputed.parquet (N_query × n_ref_features)."

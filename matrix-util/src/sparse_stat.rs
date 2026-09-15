@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::common_io::{file_ext, write_lines};
 use crate::parquet::{parquet_add_numeric_column, parquet_add_string_column, ParquetWriter};
 use crate::traits::RunningStatOps;
