@@ -4,8 +4,8 @@
 //! contrastive (NCE) prediction of PB-PB adjacency, one gene at a time. No
 //! cell and no cell-cell pair is ever trained on: cells enter once, when
 //! their spatial KNN edges are folded into PB super edges, and reappear only
-//! in evaluation readouts (the per-pair latent, the propensity, and the
-//! propensity-weighted per-cell embedding).
+//! in evaluation readouts (the per-pair latent, the propensity, and each
+//! cell's own placement by the pair encoder).
 //!
 //! ```text
 //! load -> spatial KNN -> batch effects                  util::srt_pipeline
@@ -1323,8 +1323,8 @@ pub fn fit_cell_activity_graph_embedding(
 
     // Trained PB table [P × D] + bias [P] + the cell -> PB map. The
     // trained unit is the finest-level super-cell; the per-CELL embedding
-    // ships separately, as the propensity-weighted readout emitted after
-    // the propensity pass below.
+    // ships separately, as each cell's own placement by the pair encoder,
+    // written after the propensity pass below.
     // Bare integer row keys (the writer's default), so pb_embedding,
     // pb_bias, and cell_pb's `pb` column all join directly on the id.
     let e_pb_mat = tensor_to_mat(&model.e_cell)?;
@@ -1434,7 +1434,10 @@ pub fn fit_cell_activity_graph_embedding(
         delta,
         batch_of_cell: &batch_membership_u32,
     });
-    let encoder_spec = PairEncoderSpec::default();
+    let encoder_spec = PairEncoderSpec {
+        ridge: args.pair_ridge,
+        ..PairEncoderSpec::default()
+    };
     let pair_encoder_path = format!("{}.pair_encoder.safetensors", c.out);
     let PairLatent {
         latent: pair_latent,
@@ -1450,7 +1453,6 @@ pub fn fit_cell_activity_graph_embedding(
         &e_gene_out,
         pair_batch,
         &PairProjectionArgs {
-            ridge: args.pair_ridge,
             solver: PairSolver::TrainEncoder {
                 spec: &encoder_spec,
                 dev: &dev,

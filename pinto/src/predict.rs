@@ -129,16 +129,8 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        default_value_t = 1.0,
-        help = "Ridge on the pair latent (as in cage)",
-        hide = true
-    )]
-    pub pair_ridge: f32,
-
-    #[arg(
-        long,
         default_value_t = 8192,
-        help = "Cell pairs per projection read block",
+        help = "Cells per read block and cell pairs per placement pass (memory only)",
         hide = true
     )]
     pub pair_block: usize,
@@ -545,7 +537,6 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         &e_full,
         pair_batch,
         &PairProjectionArgs {
-            ridge: args.pair_ridge,
             solver: PairSolver::LoadEncoder {
                 path: &encoder_path,
                 dev: &dev,

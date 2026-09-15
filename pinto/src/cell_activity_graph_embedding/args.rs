@@ -380,20 +380,22 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Ridge λ on the per-pair latent in the projection",
-        long_help = "Gaussian prior strength on `e_uv` in the pair projection:\n\
-                     the likelihood the pair encoder trains against, and the exact\n\
-                     per-pair solve it is checked against, both carry it.\n\
-                     The log-partition is summed over every gene. So this is a mild prior,\n\
-                     not the only bound on the fit. The per-pair intercept is never penalized.",
-        hide = true
+        help = "Ridge λ on the per-pair latent; saved with the pair encoder",
+        long_help = "Gaussian prior strength λ on the per-pair latent e_uv.\n\
+                     The pair encoder is trained under it,\n\
+                     the exact per-pair solve it is checked against carries it,\n\
+                     and it is saved with the encoder,\n\
+                     so `pinto predict` and `pinto impute` use the model's value.\n\
+                     The log-partition is summed over every gene,\n\
+                     so this is a mild prior, not the only bound on the fit.\n\
+                     The per-pair intercept is never penalized."
     )]
     pub pair_ridge: f32,
 
     #[arg(
         long,
         default_value_t = 8192,
-        help = "Cell pairs per projection read block (bounds the count slab held at once)",
+        help = "Cells per read block and cell pairs per placement pass (memory only)",
         hide = true
     )]
     pub pair_block: usize,

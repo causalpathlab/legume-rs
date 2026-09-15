@@ -118,6 +118,10 @@ pub struct PairEncoderSpec {
     /// Pairs per optimizer step, at most: a step is also held to
     /// [`BLOCK_ELEMENTS`] on the gene axis.
     pub batch: usize,
+    /// Ridge `λ` on the pair latent (never on the intercept, which must stay
+    /// free to absorb depth): the objective's one parameter, saved with the
+    /// encoder so a loaded one is checked and finished under its own.
+    pub ridge: f32,
 }
 
 impl Default for PairEncoderSpec {
@@ -127,6 +131,7 @@ impl Default for PairEncoderSpec {
             n_experts: 4,
             epochs: 3,
             batch: 4096,
+            ridge: 1.0,
         }
     }
 }
@@ -493,18 +498,16 @@ impl PairEncoder {
     pub(crate) fn build(
         dict: &PairDictionary,
         corpus: &[CellRow],
-        trunk_width: usize,
-        n_experts: usize,
-        ridge: f32,
+        spec: &PairEncoderSpec,
         seed: u64,
         dev: &Device,
     ) -> anyhow::Result<Self> {
         let (mean, std) = stat_moments(dict.d, corpus);
         let this = Self::construct(
             DeviceDict::new(dict, &mean, &std, dev)?,
-            trunk_width,
-            n_experts,
-            ridge,
+            spec.trunk_width,
+            spec.n_experts,
+            spec.ridge,
             dev,
         )?;
         // candle's `VarBuilder` initialises from an unseeded stream; the
