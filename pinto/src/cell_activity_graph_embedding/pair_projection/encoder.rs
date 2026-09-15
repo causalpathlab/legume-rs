@@ -711,7 +711,7 @@ impl PairEncoder {
     /// nodes `stats`, with `∇ = N p̄ − S + λz` and `H = N·Cov_p(e) + λI`
     /// under the composition `p` the scores fit: the composition's mean and
     /// second moment come off the device, the `D × D` solves run here.
-    fn certificate(&self, z: &Tensor, scores: &Tensor, stats: &Stats) -> anyhow::Result<Vec<f32>> {
+    fn decrement(&self, z: &Tensor, scores: &Tensor, stats: &Stats) -> anyhow::Result<Vec<f32>> {
         let d = self.dict.d;
         let p = candle_util::candle_nn::ops::softmax(scores, 1)?; // [B, G]
         let pbar: Vec<f32> = p.matmul(&self.dict.e_gd)?.flatten_all()?.to_vec1()?; // [B, D]
@@ -947,7 +947,7 @@ impl PairEncoder {
             let scores = self.scores(&z)?;
             let lse: Vec<f32> = scores.log_sum_exp(1)?.to_vec1()?;
             // The self-pair's objective is over the doubled profile.
-            let gap = self.certificate(&z, &scores, &own.doubled()?)?;
+            let gap = self.decrement(&z, &scores, &own.doubled()?)?;
             let z_host: Vec<f32> = z.flatten_all()?.to_vec1()?;
             for (i, c) in (lb..ub).enumerate() {
                 let total = corpus[c].total;
@@ -998,7 +998,7 @@ impl PairEncoder {
             let (z, _) = self.pair_code(&h_u, &h_v, &pooled)?;
             let scores = self.scores(&z)?;
             let lse: Vec<f32> = scores.log_sum_exp(1)?.to_vec1()?;
-            let gap = self.certificate(&z, &scores, &pooled)?;
+            let gap = self.decrement(&z, &scores, &pooled)?;
             let z_host: Vec<f32> = z.flatten_all()?.to_vec1()?;
             for (i, &(u, v)) in chunk.iter().enumerate() {
                 let total = corpus[u as usize].total + corpus[v as usize].total;
