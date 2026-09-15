@@ -59,6 +59,16 @@ pub fn topic_likelihood(x_nd: &Tensor, recon_nd: &Tensor) -> Result<Tensor> {
         .sum(x_nd.rank() - 1)
 }
 
+/// Multinomial negative log-likelihood with the intercept profiled out, per
+/// row of a dense block: `N·logsumexp_f(s_f) − Σ_f x_f·s_f` for counts
+/// `x [n, D]`, scores `s [n, D]` and totals `N [n]` — up to the count-only
+/// constant. The phase-2 objective a frozen-dictionary projection minimises.
+pub fn multinomial_nll_profiled(x: &Tensor, s: &Tensor, totals: &Tensor) -> Result<Tensor> {
+    let lse = s.log_sum_exp(1)?;
+    let data = (x * s)?.sum(1)?;
+    (totals * lse)? - data
+}
+
 /// Topic model log-likelihood of multinomial data (log-scale input)
 ///
 /// llik(i) = sum_w x(i,w) * log_recon(i,w)
