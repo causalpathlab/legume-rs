@@ -41,9 +41,11 @@
 //! # How it is solved
 //!
 //! The encoder ([`encoder`]) amortizes it: a shared trunk reads each
-//! endpoint's counts through the frozen dictionary into a cell code and a
-//! small gated mixture turns two codes into the pair code, trained on this
-//! same likelihood and run once over every pair on the device. Per node the
+//! endpoint's sufficient statistic — the counts enter the objective only
+//! through `Σ_g n_g e_g`, `N` and `Σ_g n_g b_g`, three sparse sums — into a
+//! cell code and a small gated mixture turns two codes into the pair code,
+//! trained on this same likelihood and run once over every pair on the
+//! device. Per node the
 //! problem is `D+1` parameters and strictly convex, so the exact solver is
 //! Newton with the partition summed over the active axis
 //! ([`newton_polish`]): the check the encoder is held to on a seeded sample
@@ -105,10 +107,10 @@ mod scoring;
 pub use encoder::PairEncoderSpec;
 pub use scoring::PairScore;
 
-/// A placement whose certificate — `‖∇‖²/(2λ)`, an upper bound in nats on
-/// its excess likelihood over the optimum — exceeds this is finished exactly.
-/// The bound is loose (it knows `λ`, not the curvature `N·Cov`), so a row it
-/// puts this far out is one the shared map extrapolated on.
+/// A placement whose certificate — the Newton decrement, the excess in nats
+/// the local quadratic model puts on it over the optimum — exceeds this is
+/// finished exactly: a row this far out is one the shared map extrapolated
+/// on.
 const RESCUE_GAP_NATS: f32 = 16.0;
 /// Newton steps at most for such a row; the solve stops early once its
 /// gradient is small.
@@ -215,9 +217,6 @@ pub struct PairDictionary {
     feat: Vec<f32>,
     /// Empirical log gene abundance, `[n_active]`.
     b: Vec<f32>,
-    /// `exp(b)`: the mean count per cell of each gene, `[n_active]` — the
-    /// encoder gate's divisor.
-    mean: Vec<f32>,
     /// Global gene id → active-list position, `u32::MAX` when inactive.
     local_of_gene: Vec<u32>,
     d: usize,
@@ -250,7 +249,6 @@ impl PairDictionary {
         let mut local_of_gene = vec![u32::MAX; n_genes];
         let mut feat = Vec::with_capacity(active.len() * d);
         let mut b = Vec::with_capacity(active.len());
-        let mut mean = Vec::with_capacity(active.len());
         for (local, &g) in active.iter().enumerate() {
             local_of_gene[g] = local as u32;
             for j in 0..d {
@@ -261,7 +259,6 @@ impl PairDictionary {
             // absorbed by `β_uv`.
             let m = gene_totals[g] / n_cells as f64;
             b.push(m.ln() as f32);
-            mean.push(m as f32);
         }
 
         // `Σ_g exp(b_g)` without ever calling `exp`: `b_g` IS `ln(total_g/n)`,
@@ -283,7 +280,6 @@ impl PairDictionary {
         Ok(Self {
             feat,
             b,
-            mean,
             local_of_gene,
             d,
             log_z,
@@ -307,6 +303,23 @@ impl PairDictionary {
                 (l != u32::MAX && n > 0.0).then_some((l, n))
             })
             .collect()
+    }
+
+    /// The statistic a local profile enters the objective through:
+    /// `(Σ_g n_g e_g, Σ_g n_g, Σ_g n_g b_g)`.
+    pub(crate) fn statistic(&self, genes: &[u32], counts: &[f32]) -> (Vec<f32>, f32, f32) {
+        let d = self.d;
+        let mut sums = vec![0f32; d];
+        let (mut total, mut offset) = (0f32, 0f32);
+        for (&g, &n) in genes.iter().zip(counts) {
+            let row = &self.feat[g as usize * d..(g as usize + 1) * d];
+            for (s, &e) in sums.iter_mut().zip(row) {
+                *s += n * e;
+            }
+            total += n;
+            offset += n * self.b[g as usize];
+        }
+        (sums, total, offset)
     }
 
     /// The clamped log-rates `⟨e_g, θ⟩ + b_g` over the active axis.
@@ -767,8 +780,9 @@ fn solve_exact(obs: &[(u32, f32)], dict: &PairDictionary, ridge: f32) -> (Vec<f3
 /// Hessian `N·Cov_p(e) + λI`, a `D × D` solve per step: from a warm start it
 /// settles in a few steps, and from the origin a long step is line-searched
 /// so it cannot overshoot. Returns `(e_uv, β_uv, certificate)`, the
-/// certificate being `‖∇‖²/(2λ)` at the returned placement — an upper bound
-/// in nats on its excess likelihood over the optimum.
+/// certificate being the Newton decrement `½ ∇ᵀH⁻¹∇` at the returned
+/// placement — the excess likelihood in nats the local quadratic model puts
+/// on it over the optimum.
 fn newton_polish(
     obs: &[(u32, f32)],
     dict: &PairDictionary,
@@ -795,10 +809,6 @@ fn newton_polish(
     for it in 0..=max_steps {
         beta = problem.log_total - lse;
         let grad = nalgebra::DVector::<f32>::from_vec(problem.gradient(&theta, ridge));
-        certificate = grad.norm_squared() / (2.0 * ridge.max(1e-6));
-        if it == max_steps || grad.norm() < NEWTON_GRAD_TOL * problem.total.max(1.0) {
-            break;
-        }
         // `N·(E[e eᵀ] − p̄ p̄ᵀ) + λI`, symmetric, positive definite.
         hess.fill(0.0);
         for (&w, row) in problem.weights.iter().zip(dict.feat.chunks_exact(d)) {
@@ -822,6 +832,10 @@ fn newton_polish(
             break;
         };
         let step = chol.solve(&grad);
+        certificate = 0.5 * grad.dot(&step);
+        if it == max_steps || grad.norm() < NEWTON_GRAD_TOL * problem.total.max(1.0) {
+            break;
+        }
         let trial_at = |t: f32| -> Vec<f32> {
             theta
                 .iter()
