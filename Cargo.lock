@@ -3260,7 +3260,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "leiden"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "insta",
@@ -3541,7 +3541,7 @@ dependencies = [
 
 [[package]]
 name = "matrix-util"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "anyhow",
  "approx",
@@ -3550,7 +3550,7 @@ dependencies = [
  "clap",
  "clustering",
  "ctrlc",
- "dashmap",
+ "env_logger",
  "flate2",
  "indicatif",
  "instant-distance",
@@ -4398,7 +4398,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "approx",

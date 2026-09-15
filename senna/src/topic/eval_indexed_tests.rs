@@ -368,7 +368,7 @@ fn both_arms_draw_the_same_holdout_mask() {
     let vis: Vec<f32> = held.iter().map(|m| 1.0 - m).collect();
     assert_eq!(vis, dense_ref, "the dense arm's visible mask");
     assert!(
-        held.iter().any(|&m| m > 0.0) && held.iter().any(|&m| m == 0.0),
+        held.iter().any(|&m| m > 0.0) && held.contains(&0.0),
         "a fixture that holds out everything or nothing proves nothing"
     );
 }
@@ -456,7 +456,7 @@ mod windowed_aggregation {
         let visible = (&real - &masked).unwrap();
         let vis_host: Vec<f32> = visible.flatten_all().unwrap().to_vec1().unwrap();
         assert!(
-            vis_host.iter().any(|&v| v > 0.0) && vis_host.iter().any(|&v| v == 0.0),
+            vis_host.iter().any(|&v| v > 0.0) && vis_host.contains(&0.0),
             "a fixture with nothing hidden, or nothing visible, proves nothing"
         );
 

@@ -115,7 +115,7 @@ pub(crate) fn knn_rows_l2_blocked(
 /// non-finite value made a *positive* NaN. `f32::max` would turn NaN into
 /// zero, and an arithmetic NaN may carry the sign bit, which `total_cmp`
 /// orders first; a positive NaN sorts after every finite value.
-fn sort_key(d2: f32) -> f32 {
+pub(super) fn sort_key(d2: f32) -> f32 {
     if d2.is_finite() {
         d2.max(0.0)
     } else {
@@ -123,14 +123,14 @@ fn sort_key(d2: f32) -> f32 {
     }
 }
 
-fn by_distance_then_index(a: &(f32, usize), b: &(f32, usize)) -> Ordering {
+pub(super) fn by_distance_then_index(a: &(f32, usize), b: &(f32, usize)) -> Ordering {
     a.0.total_cmp(&b.0).then(a.1.cmp(&b.1))
 }
 
 /// Insert `item` into the sorted `buf` if it ranks among the `cap` smallest,
 /// keeping `buf` sorted and at most `cap` long. Almost every candidate is
 /// rejected on the one comparison against the current worst.
-fn keep_smallest(buf: &mut Vec<(f32, usize)>, item: (f32, usize), cap: usize) {
+pub(super) fn keep_smallest(buf: &mut Vec<(f32, usize)>, item: (f32, usize), cap: usize) {
     if buf.len() == cap && by_distance_then_index(&item, &buf[cap - 1]) != Ordering::Less {
         return;
     }

@@ -1,14 +1,22 @@
 use crate::graph::WeightedGraph;
+use crate::knn::all_pairs::knn_rows_l2;
+use crate::knn::ivf::{knn_rows_ivf, IvfArgs, DEFAULT_N_PROBE};
+use crate::knn::{EXACT_THRESHOLD, KNN_SEED};
 use crate::knn_match::{ColumnDict, SearchScratch};
 
-use dashmap::DashMap;
 use indicatif::ParallelProgressIterator;
 use log::info;
 use nalgebra::DMatrix;
-use nalgebra_sparse::{CooMatrix, CscMatrix};
+use nalgebra_sparse::CscMatrix;
 use rayon::prelude::*;
 
 const DEFAULT_BLOCK_SIZE: usize = 1000;
+
+/// Up to this many points every row's neighbours come from the exact
+/// all-pairs Gram kernel; beyond it from the inverted-file search. Both are
+/// parallel and thread-count independent; the split is where `O(n²)` stops
+/// being affordable.
+pub const ALL_PAIRS_THRESHOLD: usize = 65_536;
 
 pub struct KnnGraph {
     /// Symmetric CSC adjacency matrix (n_nodes x n_nodes)
@@ -57,12 +65,7 @@ impl KnnGraph {
     /// * `points` - transposed coordinate matrix (d x n), where each column is a point
     /// * `args` - KNN graph construction parameters
     pub fn from_columns(points: &DMatrix<f32>, args: KnnGraphArgs) -> anyhow::Result<KnnGraph> {
-        let nn = points.ncols();
-        let points_vec = points.column_iter().collect::<Vec<_>>();
-        let names = (0..nn).collect::<Vec<_>>();
-
-        let dict = ColumnDict::from_dvector_views(points_vec, names);
-        Self::build_from_dict(dict, nn, &args)
+        Self::from_rows(&points.transpose(), args)
     }
 
     /// Build a KNN graph from row vectors (cells × features).
@@ -70,8 +73,54 @@ impl KnnGraph {
     /// * `data` - matrix (n x d), where each row is a point
     /// * `args` - KNN graph construction parameters
     pub fn from_rows(data: &DMatrix<f32>, args: KnnGraphArgs) -> anyhow::Result<KnnGraph> {
-        let transposed = data.transpose();
-        Self::from_columns(&transposed, args)
+        let nn = data.nrows();
+        let n_neighbours = neighbours_per_point(args.knn, nn);
+        let lists = if nn <= EXACT_THRESHOLD {
+            let transposed = data.transpose();
+            let points_vec = transposed.column_iter().collect::<Vec<_>>();
+            let names = (0..nn).collect::<Vec<_>>();
+            let dict = ColumnDict::from_dvector_views(points_vec, names);
+            search_dict(&dict, nn, n_neighbours, args.block_size)?
+        } else {
+            search_rows(data, n_neighbours)
+        };
+        Self::from_neighbours(nn, &lists, args.reciprocal)
+    }
+
+    /// The graph implied by every point's directed neighbour list.
+    fn from_neighbours(
+        nn: usize,
+        lists: &[NeighbourList],
+        reciprocal: bool,
+    ) -> anyhow::Result<KnnGraph> {
+        let n_triplets: usize = lists.iter().map(|(nb, _)| nb.len()).sum();
+        info!("{n_triplets} triplets by kNN matching");
+        if n_triplets == 0 {
+            return Err(anyhow::anyhow!("empty triplets"));
+        }
+
+        // Filtering and the sort ran silent, which on a large pair graph is a
+        // stretch of nothing between the search bar and the next log line,
+        // and reads as a hang.
+        let filter_spin = crate::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
+            .with_message("filtering edges");
+        let edges = edges_from_neighbours(lists, reciprocal);
+        filter_spin.finish_and_clear();
+        info!(
+            "{} edges after {} matching",
+            edges.len(),
+            if reciprocal { "reciprocal" } else { "union" }
+        );
+
+        let (edge_pairs, distances): (Vec<_>, Vec<_>) = edges.into_iter().unzip();
+        let adjacency = symmetric_adjacency(nn, &edge_pairs, &distances);
+
+        Ok(KnnGraph {
+            adjacency,
+            edges: edge_pairs,
+            distances,
+            n_nodes: nn,
+        })
     }
 
     /// Merge two graphs over the same nodes, keeping every pair exactly once
@@ -126,8 +175,7 @@ impl KnnGraph {
         let canonical = |&(i, j): &(usize, usize)| if i <= j { (i, j) } else { (j, i) };
         // Source as a bitmask, so folding a run is an OR rather than a case
         // analysis: 1 = primary, 2 = secondary, 3 = both.
-        let mut tagged: Vec<((usize, usize), f32, u8)> =
-            Vec::with_capacity(self.edges.len() + other.edges.len());
+        let mut tagged: Vec<TaggedEdge> = Vec::with_capacity(self.edges.len() + other.edges.len());
         tagged.par_extend(
             self.edges
                 .par_iter()
@@ -141,30 +189,19 @@ impl KnnGraph {
                 .zip(b_dist.par_iter())
                 .map(|(e, &d)| (canonical(e), d, 2u8)),
         );
-        tagged.par_sort_unstable_by_key(|&(key, _, _)| key);
-
-        let mut edges = Vec::with_capacity(tagged.len());
-        let mut distances = Vec::with_capacity(tagged.len());
-        let mut source = Vec::with_capacity(tagged.len());
-        for &(key, dist, tag) in tagged.iter() {
-            if edges.last() == Some(&key) {
-                let last = distances.len() - 1;
-                distances[last] = f32::min(distances[last], dist);
-                source[last] |= tag;
-            } else {
-                edges.push(key);
-                distances.push(dist);
-                source.push(tag);
-            }
-        }
-        let source: Vec<EdgeSource> = source
-            .into_iter()
-            .map(|mask| match mask {
+        let folded = fold_tagged_edges(tagged);
+        let mut edges = Vec::with_capacity(folded.len());
+        let mut distances = Vec::with_capacity(folded.len());
+        let mut source = Vec::with_capacity(folded.len());
+        for (key, dist, mask) in folded {
+            edges.push(key);
+            distances.push(dist);
+            source.push(match mask {
                 1 => EdgeSource::Primary,
                 2 => EdgeSource::Secondary,
                 _ => EdgeSource::Both,
-            })
-            .collect();
+            });
+        }
 
         // Derived state, so rebuild rather than merge.
         let adjacency = symmetric_adjacency(n_nodes, &edges, &distances);
@@ -178,135 +215,6 @@ impl KnnGraph {
             },
             source,
         ))
-    }
-
-    fn build_from_dict(
-        dict: ColumnDict<usize>,
-        nn: usize,
-        args: &KnnGraphArgs,
-    ) -> anyhow::Result<KnnGraph> {
-        // `search_others` now returns exactly this many *other* neighbours
-        // (self excluded). Clamp to the available others and floor at 1.
-        let n_neighbours = args.knn.min(nn.saturating_sub(1)).max(1);
-
-        let jobs = create_jobs(nn, args.block_size);
-        let njobs = jobs.len() as u64;
-
-        //////////////////////////////////////////
-        // step 1: searching nearest neighbours //
-        //////////////////////////////////////////
-
-        let triplets: DashMap<(usize, usize), f32> = DashMap::new();
-
-        // Every bar draws through `crate::progress` so it shares the one
-        // `MultiProgress` the log bridge writes above; a bar built straight
-        // from indicatif registers with neither and corrupts the log.
-        let search_bar = crate::progress::new_progress_bar(njobs).with_message("kNN blocks");
-        let search_result = jobs
-            .into_par_iter()
-            .progress_with(search_bar.clone())
-            .try_for_each(|(lb, ub)| -> anyhow::Result<()> {
-                // One scratch per block, reused across the block's queries to
-                // avoid re-growing the approximate index's visited set each call.
-                let mut scratch = SearchScratch::default();
-                for i in lb..ub {
-                    let (_indices, _distances) =
-                        dict.search_others_reuse(&i, n_neighbours, &mut scratch)?;
-                    for (j, d_ij) in _indices.into_iter().zip(_distances) {
-                        triplets.insert((i, j), d_ij);
-                    }
-                }
-                Ok(())
-            });
-        // Clear BEFORE propagating: an error would otherwise leave the
-        // bar ticking over the caller's error output.
-        search_bar.finish_and_clear();
-        search_result?;
-
-        info!("{} triplets by kNN matching", triplets.len());
-
-        if triplets.is_empty() {
-            return Err(anyhow::anyhow!("empty triplets"));
-        }
-
-        //////////////////////////////////////////////////
-        // step 2: edge filtering (reciprocal or union) //
-        //////////////////////////////////////////////////
-
-        // Filtering and the sort below ran silent, which on a large pair
-        // graph is a half-minute of nothing between the search bar and the
-        // next log line, and reads as a hang.
-        // A spinner, not a bar: a per-item increment here is one shared
-        // atomic hit per triplet across every rayon worker, and the
-        // triplet count runs to the tens of millions.
-        let filter_spin = crate::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
-            .with_message("filtering edges");
-        let mut edges: Vec<((usize, usize), f32)> = if args.reciprocal {
-            // Intersection: keep (i,j) only if both i→j and j→i exist
-            triplets
-                .par_iter()
-                .filter_map(|entry| {
-                    let &(i, j) = entry.key();
-                    if i < j && triplets.contains_key(&(j, i)) {
-                        Some(((i, j), *entry.value()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            // Union: keep (i,j) if either i→j or j→i exists, min distance
-            triplets
-                .par_iter()
-                .filter_map(|entry| {
-                    let &(i, j) = entry.key();
-                    if i < j {
-                        let d_ij = *entry.value();
-                        let d_ji = triplets.get(&(j, i)).map(|e| *e).unwrap_or(d_ij);
-                        Some(((i, j), d_ij.min(d_ji)))
-                    } else if i > j && !triplets.contains_key(&(j, i)) {
-                        // Only (i→j) exists with i > j; emit as canonical (j, i)
-                        Some(((j, i), *entry.value()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        filter_spin.finish_and_clear();
-
-        // A parallel sort cannot report position, so this is a spinner:
-        // unbounded work, but visibly alive.
-        let sort_spin = crate::progress::new_spinner("{spinner} [{elapsed_precise}] {msg}")
-            .with_message("sorting and deduplicating edges");
-        edges.par_sort_by_key(|&(ij, _)| ij);
-        edges.dedup();
-        sort_spin.finish_and_clear();
-
-        info!(
-            "{} edges after {} matching",
-            edges.len(),
-            if args.reciprocal {
-                "reciprocal"
-            } else {
-                "union"
-            }
-        );
-
-        ///////////////////////////////////////////////
-        // step 3: construct sparse network backbone //
-        ///////////////////////////////////////////////
-
-        let (edge_pairs, distances): (Vec<_>, Vec<_>) = edges.into_iter().unzip();
-        let adjacency = symmetric_adjacency(nn, &edge_pairs, &distances);
-
-        Ok(KnnGraph {
-            adjacency,
-            edges: edge_pairs,
-            distances,
-            n_nodes: nn,
-        })
     }
 
     /// Get neighbors of a node from the CSC adjacency matrix
@@ -539,17 +447,17 @@ impl KnnGraph {
         let weights = self.fuzzy_kernel_weights();
 
         let mut node_degree = vec![0.0f32; n];
+        let mut n_edges = vec![0usize; n];
         let mut total_edge_weight = 0.0f64;
         for (&(i, j), &w) in self.edges.iter().zip(weights.iter()) {
             node_degree[i] += w;
             node_degree[j] += w;
+            n_edges[i] += 1;
+            n_edges[j] += 1;
             total_edge_weight += w as f64;
         }
 
-        let mut network = leiden::Network::with_capacity(n);
-        for &nd in &node_degree {
-            network.add_node(nd);
-        }
+        let mut network = leiden::Network::with_nodes(&node_degree, &n_edges);
         for (&(i, j), &w) in self.edges.iter().zip(weights.iter()) {
             network.add_edge(i, j, w);
         }
@@ -692,24 +600,165 @@ fn create_jobs(ntot: usize, block_size: usize) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests;
 
-/// The `n x n` symmetric adjacency implied by an undirected edge list.
+/// One point's neighbours: `(indices, distances)`, nearest first.
+type NeighbourList = (Vec<usize>, Vec<f32>);
+
+/// A canonical `(i, j)` key with a distance and a bitmask saying which
+/// inputs listed it.
+type TaggedEdge = ((usize, usize), f32, u8);
+
+/// One flat buffer of canonical keys, one parallel sort and one linear fold:
+/// a run of equal keys keeps the smallest distance and the OR of its masks.
+/// What a keyed map over tens of millions of triplets would do with an
+/// allocation and a contended insert per triplet and a lookup per edge, as a
+/// set operation done in place. The result is sorted by key, and the dedup
+/// has to finish before any CSC build, which SUMS duplicates.
+fn fold_tagged_edges(mut tagged: Vec<TaggedEdge>) -> Vec<TaggedEdge> {
+    tagged.par_sort_unstable_by_key(|&(key, _, _)| key);
+    tagged.dedup_by(|cur, prev| {
+        if cur.0 == prev.0 {
+            prev.1 = prev.1.min(cur.1);
+            prev.2 |= cur.2;
+            true
+        } else {
+            false
+        }
+    });
+    tagged
+}
+
+/// `search_others` returns exactly this many *other* neighbours (self
+/// excluded): the request clamped to the available others, floored at 1.
+fn neighbours_per_point(knn: usize, nn: usize) -> usize {
+    knn.min(nn.saturating_sub(1)).max(1)
+}
+
+/// Every point's neighbours from the exact per-query scan of a
+/// [`ColumnDict`], in parallel blocks — the arm for small point sets.
+fn search_dict(
+    dict: &ColumnDict<usize>,
+    nn: usize,
+    n_neighbours: usize,
+    block_size: usize,
+) -> anyhow::Result<Vec<NeighbourList>> {
+    let jobs = create_jobs(nn, block_size);
+    // Every bar draws through `crate::progress` so it shares the one
+    // `MultiProgress` the log bridge writes above; a bar built straight
+    // from indicatif registers with neither and corrupts the log.
+    let search_bar =
+        crate::progress::new_progress_bar(jobs.len() as u64).with_message("kNN blocks");
+    let result: anyhow::Result<Vec<Vec<NeighbourList>>> = jobs
+        .into_par_iter()
+        .progress_with(search_bar.clone())
+        .map(|(lb, ub)| {
+            // One scratch per block, reused across the block's queries.
+            let mut scratch = SearchScratch::default();
+            (lb..ub)
+                .map(|i| dict.search_others_reuse(&i, n_neighbours, &mut scratch))
+                .collect()
+        })
+        .collect();
+    // Clear BEFORE propagating: an error would otherwise leave the bar
+    // ticking over the caller's error output.
+    search_bar.finish_and_clear();
+    Ok(result?.into_iter().flatten().collect())
+}
+
+/// Every row's neighbours among the other rows, exactly by the all-pairs Gram
+/// kernel up to [`ALL_PAIRS_THRESHOLD`] rows and by the inverted-file search
+/// beyond it.
+fn search_rows(rows: &DMatrix<f32>, n_neighbours: usize) -> Vec<NeighbourList> {
+    let nn = rows.nrows();
+    let (indices, distances) = if nn <= ALL_PAIRS_THRESHOLD {
+        info!("kNN by the exact all-pairs kernel over {nn} points");
+        knn_rows_l2(rows, n_neighbours)
+    } else {
+        info!("kNN by the inverted-file search over {nn} points");
+        knn_rows_ivf(
+            rows,
+            &IvfArgs {
+                k: n_neighbours,
+                n_lists: 0,
+                n_probe: DEFAULT_N_PROBE,
+                seed: KNN_SEED,
+            },
+        )
+    };
+    indices.into_iter().zip(distances).collect()
+}
+
+/// Undirected edges from directed neighbour lists, as `((i, j), distance)`
+/// with `i < j`, sorted. `reciprocal` keeps a pair only when each point
+/// listed the other; otherwise either direction suffices and the smaller of
+/// the two distances is kept.
+pub(crate) fn edges_from_neighbours(
+    lists: &[NeighbourList],
+    reciprocal: bool,
+) -> Vec<((usize, usize), f32)> {
+    // Direction as a bit so a run folds by OR: 1 = listed by the smaller
+    // index, 2 = by the larger.
+    let tagged: Vec<TaggedEdge> = lists
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, (nb, ds))| {
+            nb.iter().zip(ds).map(move |(&j, &d)| {
+                if i < j {
+                    ((i, j), d, 1u8)
+                } else {
+                    ((j, i), d, 2u8)
+                }
+            })
+        })
+        .collect();
+    fold_tagged_edges(tagged)
+        .into_iter()
+        .filter(|&(_, _, mask)| !reciprocal || mask == 3)
+        .map(|(key, dist, _)| (key, dist))
+        .collect()
+}
+
+/// The `n x n` symmetric adjacency implied by an undirected edge list, which
+/// must be canonical (`i < j`), sorted and free of duplicates — what every
+/// constructor here produces.
 ///
-/// Both constructors need this and the invariant is easy to get subtly wrong:
-/// each edge must be pushed in BOTH directions, and exactly once per
-/// direction, because building a `CscMatrix` from a `CooMatrix` SUMS entries
-/// that share a coordinate rather than rejecting them. A duplicate would
-/// silently double that edge's weight.
+/// Each edge lands in BOTH endpoints' columns, exactly once per direction.
+/// Built straight from the edge list — degrees, offsets, one fill — rather
+/// than through a `CooMatrix`, whose conversion sorts every entry of the
+/// whole matrix serially. Sorted input is what makes the fill enough: column
+/// `c` receives its partners below `c` in ascending order as the edges
+/// `(i, c)` pass, then its partners above `c` in ascending order from the run
+/// of edges `(c, j)`.
 pub fn symmetric_adjacency(
     n_nodes: usize,
     edges: &[(usize, usize)],
     distances: &[f32],
 ) -> CscMatrix<f32> {
-    let mut coo = CooMatrix::new(n_nodes, n_nodes);
-    for (&(i, j), &v) in edges.iter().zip(distances.iter()) {
-        coo.push(i, j, v);
-        coo.push(j, i, v);
+    debug_assert!(
+        edges.iter().all(|&(i, j)| i < j) && edges.windows(2).all(|w| w[0] < w[1]),
+        "symmetric adjacency: edges must be canonical, sorted and unique"
+    );
+    let mut offsets = vec![0usize; n_nodes + 1];
+    for &(i, j) in edges {
+        offsets[i + 1] += 1;
+        offsets[j + 1] += 1;
     }
-    CscMatrix::from(&coo)
+    for c in 0..n_nodes {
+        offsets[c + 1] += offsets[c];
+    }
+    let nnz = offsets[n_nodes];
+    let mut row_indices = vec![0usize; nnz];
+    let mut values = vec![0f32; nnz];
+    let mut cursor = offsets[..n_nodes].to_vec();
+    for (&(i, j), &v) in edges.iter().zip(distances) {
+        row_indices[cursor[i]] = j;
+        values[cursor[i]] = v;
+        cursor[i] += 1;
+        row_indices[cursor[j]] = i;
+        values[cursor[j]] = v;
+        cursor[j] += 1;
+    }
+    CscMatrix::try_from_csc_data(n_nodes, n_nodes, offsets, row_indices, values)
+        .expect("symmetric adjacency: canonical sorted edges fill every column in order")
 }
 
 /// Each value replaced by its rank among the others, scaled to `[0, 1]`.

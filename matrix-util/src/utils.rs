@@ -27,6 +27,33 @@ pub fn median(values: &[f32]) -> f32 {
     }
 }
 
+/// Quantiles of a slice at the given probabilities (sorts a copy; each
+/// quantile is the element at `⌊q·(n − 1)⌋`). Empty input gives zeros;
+/// NaN-tolerant like [`median`].
+pub fn quantiles(values: &[f32], qs: &[f64]) -> Vec<f32> {
+    if values.is_empty() {
+        return vec![0.0; qs.len()];
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let last = sorted.len() - 1;
+    qs.iter()
+        .map(|&q| sorted[((q.clamp(0.0, 1.0) * last as f64).floor() as usize).min(last)])
+        .collect()
+}
+
+/// Cosine similarity of two vectors; `0.0` when either has no length.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na > 0.0 && nb > 0.0 {
+        dot / (na * nb)
+    } else {
+        0.0
+    }
+}
+
 /// partition membership vector into groups of indexes
 /// # Arguments
 /// * `membership` - a vector of membership (E.g., cluster assignment)
