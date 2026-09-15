@@ -173,6 +173,14 @@ pub struct PredictArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Newton steps that finish every pair and cell from the encoder's placement; 0 = none",
+        hide = true
+    )]
+    pub pair_polish_steps: usize,
+
+    #[arg(
+        long,
         help = "Skip NB Fisher-info weighting of the gene_community table",
         hide = true
     )]
@@ -610,6 +618,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             pair_block: args.pair_block,
             eval_features: eval_features.clone(),
             score_pairs: true,
+            polish_steps: args.pair_polish_steps,
         },
         &gene_axis,
         &gene_totals,

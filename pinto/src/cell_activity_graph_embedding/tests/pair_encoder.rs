@@ -114,7 +114,7 @@ fn trained() -> &'static Trained {
         let cells = planted_cells(N_TRAIN_CELLS, 1);
         let corpus = corpus_of(&dict, &cells);
         let edges = random_pairs(N_TRAIN_CELLS, 1500, 2);
-        let enc = PairEncoder::build(&dict, 32, 4, 7, &Device::Cpu).unwrap();
+        let enc = PairEncoder::build(&dict, &corpus, 32, 4, RIDGE, 7, &Device::Cpu).unwrap();
         enc.train(&corpus, &edges, &spec(20), RIDGE, 7).unwrap();
         Trained {
             dict,
@@ -264,7 +264,7 @@ fn save_load_round_trip_is_byte_identical() {
     let path = dir.path().join("enc.safetensors");
     let path = path.to_str().unwrap();
     enc.save(path).unwrap();
-    let back = PairEncoder::load(dict, path, &Device::Cpu).unwrap();
+    let back = PairEncoder::load(dict, path, RIDGE, &Device::Cpu).unwrap();
     assert_eq!(back.trunk_width(), 32);
     assert_eq!(back.n_experts(), 4);
     let a = enc.encode_all(corpus, edges, 100, 64).unwrap();
@@ -333,7 +333,7 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         steps: 300,
         gene_sample: 0,
     };
-    let spec = spec(5);
+    let spec = spec(15);
     let fitted = project_pairs(
         &data,
         &edges,
@@ -350,6 +350,7 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
             pair_block: 64,
             eval_features: None,
             score_pairs: true,
+            polish_steps: 0,
         },
         &axis,
         &totals,
@@ -374,6 +375,7 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
             pair_block: 64,
             eval_features: None,
             score_pairs: false,
+            polish_steps: 0,
         },
         &axis,
         &totals,
@@ -385,6 +387,67 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         loaded.cells.latent.as_slice()
     );
     assert!(loaded.scores.is_empty());
+
+    // Polishing from the encoder's placement can only move toward the
+    // converged optimum, for pairs and for cells alike.
+    let polished = project_pairs(
+        &data,
+        &edges,
+        &e,
+        None,
+        &PairProjectionArgs {
+            projection: projection.clone(),
+            solver: PairSolver::LoadEncoder {
+                path: saved,
+                dev: &Device::Cpu,
+            },
+            seed: 11,
+            pair_block: 64,
+            eval_features: None,
+            score_pairs: false,
+            polish_steps: 8,
+        },
+        &axis,
+        &totals,
+    )
+    .unwrap();
+    // The run's dictionary: the log abundance is per cell of THIS sample.
+    let dict = PairDictionary::new(&e, &totals, 60).unwrap();
+    let mut before = 0f32;
+    let mut after = 0f32;
+    for (i, &(u, v)) in edges.iter().enumerate() {
+        let obs = pooled(&cells[u as usize].0, &cells[v as usize].0);
+        let (theta, _) = exact(&dict, &obs, i as u64);
+        let a: Vec<f32> = loaded.latent.row(i).iter().copied().collect();
+        let b: Vec<f32> = polished.latent.row(i).iter().copied().collect();
+        before += cosine(&a, &theta);
+        after += cosine(&b, &theta);
+    }
+    let (before, after) = (before / edges.len() as f32, after / edges.len() as f32);
+    eprintln!("polish: cosine to the converged MAP {before:.4} → {after:.4}");
+    assert!(
+        after >= before - 1e-3,
+        "polish moved away: {before} → {after}"
+    );
+    assert!(
+        after > 0.99,
+        "polished pairs are {after} from the converged MAP"
+    );
+    for (c, cell) in cells.iter().enumerate() {
+        let doubled: Vec<(u32, f32)> = cell.0.iter().map(|&(g, n)| (g, 2.0 * n)).collect();
+        let (theta, beta) = exact(&dict, &doubled, c as u64);
+        let z: Vec<f32> = polished.cells.latent.row(c).iter().copied().collect();
+        assert!(cosine(&z, &theta) > 0.98, "cell {c} not settled");
+        let gap = polished.cells.bias[c] - (beta - 2.0f32.ln());
+        assert!(
+            gap.abs() < 0.05,
+            "cell {c}: polished intercept {} vs oracle {} (gap {gap}); ‖z‖ {} vs {}",
+            polished.cells.bias[c],
+            beta - 2.0f32.ln(),
+            norm(&z),
+            norm(&theta)
+        );
+    }
 
     // The exact arm answers the same shape, with every cell placed.
     let exact = project_pairs(
@@ -399,6 +462,7 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
             pair_block: 64,
             eval_features: None,
             score_pairs: false,
+            polish_steps: 0,
         },
         &axis,
         &totals,
