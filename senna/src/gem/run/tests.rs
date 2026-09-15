@@ -15,57 +15,10 @@
 use super::run_gem_embedding;
 use crate::embed_common::*;
 use crate::gem::args::GemArgs;
+use crate::gem::test_fixtures::{boxes, genes_file, m6a_file, synth, CELLS};
 use crate::run_manifest::{self, RunKind};
 use clap::Parser;
-use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
 use matrix_util::parquet::read_parquet_string_columns_by_name;
-use nalgebra::DMatrix;
-
-fn boxes(names: &[&str]) -> Vec<Box<str>> {
-    names.iter().map(|&s| s.into()).collect()
-}
-
-/// Mirrors `gem::load::tests::synth`: a tiny synthetic zarr backend at
-/// `dir/{stem}.zarr`, one small positive integer per cell so nothing is
-/// near-empty.
-fn synth(dir: &std::path::Path, stem: &str, rows: &[&str], cols: &[&str]) -> Box<str> {
-    let path = dir.join(format!("{stem}.zarr"));
-    let path: Box<str> = path.to_string_lossy().into_owned().into();
-    let m = DMatrix::<f32>::from_fn(rows.len(), cols.len(), |r, c| {
-        (((r * 7 + c * 11 + 3) % 9) + 1) as f32
-    });
-    let mut b = create_sparse_from_dmatrix(&m, Some(&path), Some(&SparseIoBackend::Zarr))
-        .expect("create synthetic backend");
-    b.register_row_names_vec(&boxes(rows));
-    b.register_column_names_vec(&boxes(cols));
-    path
-}
-
-const CELLS: [&str; 6] = ["C1", "C2", "C3", "C4", "C5", "C6"];
-
-/// The genes file every test here shares: GENE1 has both count channels,
-/// GENE2 only `spliced` (no `unspliced` anywhere for GENE2).
-fn genes_file(dir: &std::path::Path) -> Box<str> {
-    synth(
-        dir,
-        "S1_genes",
-        &[
-            "GENE1/count/spliced",
-            "GENE1/count/unspliced",
-            "GENE2/count/spliced",
-        ],
-        &CELLS,
-    )
-}
-
-fn m6a_file(dir: &std::path::Path) -> Box<str> {
-    synth(
-        dir,
-        "S1_m6a",
-        &["GENE1/m6a/methylated", "GENE1/m6a/unmethylated"],
-        &CELLS,
-    )
-}
 
 #[derive(Parser)]
 struct Cli {

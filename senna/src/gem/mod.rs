@@ -46,3 +46,8 @@ pub mod sample_id;
 /// any `--modality` files) into a [`tracks::TrackPlan`] /
 /// `graph_embedding_util::fit::TrackSpec`.
 pub(crate) mod tracks;
+
+/// Synthetic fixture builders shared by `gem::run::tests` and
+/// `predict::tests`'s gem contract test.
+#[cfg(test)]
+pub(crate) mod test_fixtures;

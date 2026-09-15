@@ -388,3 +388,225 @@ mod feature_name_kind_reaches_the_loader {
         assert_eq!(opts.kind, FeatureNameKind::Gene { delim: '_' });
     }
 }
+
+/// End to end: `senna predict` on a `senna gem` run. Reuses the shared gem
+/// synthetic fixture (`crate::gem::test_fixtures`) rather than duplicating
+/// it — the same axis / cell shapes `gem::run::tests` and
+/// `bge::score::tests` already exercise.
+mod gem_predict {
+    use super::parse;
+    use crate::gem::args::GemArgs;
+    use crate::gem::run::run_gem_embedding;
+    use crate::gem::test_fixtures::{genes_file, m6a_file, synth, CELLS};
+    use clap::Parser;
+    use matrix_util::traits::IoOps;
+
+    #[derive(Parser)]
+    struct GemCli {
+        #[command(flatten)]
+        args: GemArgs,
+    }
+
+    /// A tiny mixed-axis (count + m6a) gem fit; returns `(genes file, -o
+    /// prefix)`. GENE1 carries both count channels and both m6a channels;
+    /// GENE2 only `count/spliced`.
+    fn fit_gem(dir: &std::path::Path) -> (Box<str>, String) {
+        let genes = genes_file(dir);
+        let m6a = m6a_file(dir);
+        let out = dir.join("run").to_string_lossy().into_owned();
+        let cli = GemCli::try_parse_from([
+            "senna-gem",
+            &genes,
+            "--modality",
+            &m6a,
+            "--epochs",
+            "2",
+            "--skip-etm",
+            "--no-emit-pb-reference",
+            "--embedding-dim",
+            "4",
+            "--phase1-cells-per-pb",
+            "0",
+            "-o",
+            &out,
+        ])
+        .expect("GemArgs parses");
+        run_gem_embedding(&cli.args).expect("gem run must succeed");
+        (genes, out)
+    }
+
+    #[test]
+    fn predict_on_a_gem_run_writes_one_finite_row_per_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let (genes, out) = fit_gem(dir.path());
+        let pout = dir.path().join("pred").to_string_lossy().into_owned();
+
+        let args = parse(&[&genes, "--model", &out, "-o", &pout]).expect("PredictArgs parses");
+        super::predict_model(&args).expect("predict on a gem run");
+
+        let pred = super::Mat::from_parquet(&format!("{pout}.predictive.parquet"))
+            .expect("read predictive.parquet");
+        assert_eq!(pred.mat.nrows(), CELLS.len(), "one row per cell");
+        assert!(
+            pred.mat.iter().all(|v| v.is_finite()),
+            "every predictive value must be finite: {:?}",
+            pred.mat
+        );
+    }
+
+    /// The bare barcode: gem's training-time union tags every barcode
+    /// `{barcode}@{sample}` whenever it loads more than one file (see
+    /// `gem::load::load_gem_data`), while predict's query loader has no
+    /// notion of gem's per-sample convention and never adds the tag. Strip
+    /// it, so the alignment is on cell identity, not on which loader wrote
+    /// the row name.
+    fn bare_barcode(name: &str) -> &str {
+        name.split('@').next().unwrap_or(name)
+    }
+
+    /// Mean cosine between rows of `a` and `b`, paired by NAME (not
+    /// position) — `predict`'s own row order need not match the training
+    /// run's `cell_embedding.parquet` order.
+    fn mean_paired_cosine_by_name(
+        a: &matrix_util::traits::MatWithNames<super::Mat>,
+        b: &matrix_util::traits::MatWithNames<super::Mat>,
+    ) -> f32 {
+        use std::collections::HashMap;
+        let idx: HashMap<&str, usize> = a
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (bare_barcode(r), i))
+            .collect();
+        let mut total = 0f64;
+        let mut n = 0usize;
+        for (j, name) in b.rows.iter().enumerate() {
+            let i = *idx
+                .get(bare_barcode(name))
+                .unwrap_or_else(|| panic!("row {name} in b is missing from a: {:?}", a.rows));
+            let ra = a.mat.row(i);
+            let rb = b.mat.row(j);
+            let (na, nb) = (ra.norm(), rb.norm());
+            let cos = if na > 1e-10 && nb > 1e-10 {
+                f64::from(ra.dot(&rb) / (na * nb))
+            } else {
+                0.0
+            };
+            total += cos;
+            n += 1;
+        }
+        (total / n as f64) as f32
+    }
+
+    /// Track-aware placement: a query on the run's OWN training data must
+    /// land close to where phase 2 itself placed those same cells
+    /// (`{out}.cell_embedding.parquet`), not merely somewhere finite.
+    ///
+    /// The query here is the genes file alone (both count tracks,
+    /// `count/spliced` + `count/unspliced` — the axis's m6a rows go
+    /// unobserved, same as `a_spliced_only_query_also_succeeds`'s query but
+    /// wider), which already carries the defect this test is for: TWO count
+    /// tracks needing two Poisson partitions and two intercepts, not one.
+    /// A single-partition polish mixes them into one partition with one
+    /// intercept — not what phase 2's own per-track polish
+    /// (`block_sgd::polish_cells`, Task 4a) fit these cells with — so a
+    /// query cell reconstructs somewhere else in H-space. bge itself passes
+    /// this same check at ~1.000 cosine (a query on a bge run's own
+    /// training data is a degenerate, exact instance of "place a cell where
+    /// its own model placed it").
+    ///
+    /// The modality (m6a) file is deliberately NOT added to the query: a
+    /// gem axis's three-field row grammar has no multi-file query-loading
+    /// path today (`multiome_layout::query_load` refuses to treat it as a
+    /// multiome layout by design, so two files fall back to
+    /// `ColumnAlignment::Disjoint` and are read as 12 DISJOINT cells, not 6
+    /// cells glued across feature blocks — confirmed empirically, not
+    /// assumed). Fixing that loader gap is unrelated to the track-aware
+    /// polish this test is for, and is out of this fix round's scope.
+    #[test]
+    fn predict_reproduces_the_runs_own_cell_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let (genes, out) = fit_gem(dir.path());
+        let pout = dir.path().join("pred_repro").to_string_lossy().into_owned();
+
+        let args = parse(&[&genes, "--model", &out, "-o", &pout]).expect("PredictArgs parses");
+        super::predict_model(&args).expect("predict on the run's own training data");
+
+        let train = super::Mat::from_parquet(&format!("{out}.cell_embedding.parquet"))
+            .expect("read the run's own cell_embedding.parquet");
+        let query = super::Mat::from_parquet(&format!("{pout}.latent.parquet"))
+            .expect("read predict's latent.parquet");
+
+        let cos = mean_paired_cosine_by_name(&train, &query);
+        assert!(
+            cos > 0.99,
+            "predict must reproduce the run's own cell placement track-aware \
+             (mean cosine {cos:.4}, want > 0.99)"
+        );
+    }
+
+    /// A query carrying only the base (`count/spliced`) rows — no
+    /// `unspliced`, no `m6a` at all — the shape a real single-modality query
+    /// would have. It must still be placeable: the encoder set's combine
+    /// rule means over whichever count tracks a cell has counts on, and a
+    /// cell with none on `count/unspliced` still has `count/spliced`.
+    #[test]
+    fn a_spliced_only_query_also_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_genes, out) = fit_gem(dir.path());
+        let query = synth(
+            dir.path(),
+            "query",
+            &["GENE1/count/spliced", "GENE2/count/spliced"],
+            &CELLS,
+        );
+        let pout = dir.path().join("pred2").to_string_lossy().into_owned();
+
+        let args = parse(&[&query, "--model", &out, "-o", &pout]).expect("PredictArgs parses");
+        super::predict_model(&args).expect("predict with a spliced-only query must succeed");
+
+        let pred = super::Mat::from_parquet(&format!("{pout}.predictive.parquet"))
+            .expect("read predictive.parquet");
+        assert_eq!(pred.mat.nrows(), CELLS.len());
+        assert!(pred.mat.iter().all(|v| v.is_finite()));
+    }
+
+    /// A well-formed dense bulk table on the run's own gene axis, so
+    /// materialization itself succeeds and the refusal reached is the ONE
+    /// this task added (a gem axis names track-grammar rows, not plain
+    /// genes), not an unrelated orientation failure.
+    #[test]
+    fn predict_bulk_is_refused_on_a_gem_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_genes, out) = fit_gem(dir.path());
+
+        let bulk_rows: Vec<Box<str>> = vec![
+            "GENE1/count/spliced".into(),
+            "GENE1/count/unspliced".into(),
+            "GENE2/count/spliced".into(),
+        ];
+        let bulk_mat = super::Mat::from_row_slice(3, 2, &[3.0, 1.0, 2.0, 4.0, 0.0, 5.0]);
+        let bulk_path = dir.path().join("bulk.parquet");
+        bulk_mat
+            .to_parquet_with_names(
+                bulk_path.to_str().unwrap(),
+                (Some(&bulk_rows), Some("gene")),
+                Some(&[Box::from("s0"), Box::from("s1")]),
+            )
+            .expect("write the bulk table");
+        let bulk_path = bulk_path.to_string_lossy().into_owned();
+
+        let pout = dir.path().join("pred3").to_string_lossy().into_owned();
+        let args = parse(&["--model", &out, "-o", &pout, "--bulk", &bulk_path])
+            .expect("PredictArgs parses");
+        let err = match super::predict_model(&args) {
+            Ok(()) => panic!("predict --bulk on a gem run must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string()
+                .contains("predict --bulk is not available on a gem run"),
+            "{err}"
+        );
+    }
+}

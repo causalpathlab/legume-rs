@@ -468,6 +468,9 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         softmax_dictionary_suffix: None,
         cell_embedding_suffix: Some("cell_embedding.parquet"),
         cell_encoder_suffix: None,
+        feature_contrast_suffix: None,
+        feature_contrast_bias_suffix: None,
+        track_encoder_suffixes: vec![],
         default_colour_by: "cluster",
         // Z is the cell table and lives in cell_embedding; this run emits no
         // log θ of its own (θ is the frozen *input*), so there is no latent.

@@ -569,6 +569,16 @@ fn predict_bge(args: &PredictArgs, kind: crate::run_manifest::RunKind) -> anyhow
          run, whose only inference is the Poisson-MAP projection onto the frozen ρ.",
         args.model
     );
+    // A dense bulk table names plain genes on one axis; a gem model's axis
+    // names track grammar rows instead, so there is no sane orientation to
+    // align a bulk table against. `--bulk`'s own materialization step
+    // resolves a gem run's gene axis just fine (see `bulk::model_gene_axis`),
+    // which is why the refusal has to live here rather than there.
+    anyhow::ensure!(
+        kind != crate::run_manifest::RunKind::Gem || args.bulk.is_empty(),
+        "a bulk table names genes, a gem axis names {{gene}}/{{modality}}/{{channel}} rows; \
+         predict --bulk is not available on a gem run"
+    );
     if args.batch_files.is_some() {
         log::warn!(
             "--batch-files has no effect on a {kind} run: the projection is per cell against a \
