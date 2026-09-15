@@ -10,6 +10,12 @@
 //! whole pass a sequence of two dense matmuls per step instead of a per-cell
 //! Newton solve.
 //!
+//! A one-track feature axis (`senna bge`) solves the single shared partition
+//! below directly. A multi-track axis (`senna gem`'s modality offset tracks)
+//! instead runs the per-track polish in [`tracks`]: one Poisson partition and
+//! one intercept per track, against the same shared latent. See that module's
+//! doc for the per-track objective.
+//!
 //! # The objective
 //!
 //! For a block of `Bc` cells against the frozen dictionary `E [F, H]` / `β [F]`,
@@ -180,11 +186,11 @@ const EPS: f64 = 1e-8;
 /// rescue a per-step regression.
 const BLOCK_ACTIVATION_BYTES: usize = 1536 << 20;
 
-/// Live `[Bc, F]` f32 tensors in flight at once: the dense count matrix `N` and the
-/// velocity pass's offset (both held for the whole block), plus the step's `s`,
-/// `μ` and one temporary. With the gradient taken in closed form there is no
-/// retained autograd graph, so this is far lower than it would be for
-/// `loss.backward()` — which materialises a full-size buffer per operand per op.
+/// Live `[Bc, F]` f32 tensors in flight at once: the dense count matrix `N`
+/// (held for the whole block), plus the step's `s`, `μ` and temporaries. With
+/// the gradient taken in closed form there is no retained autograd graph, so
+/// this is far lower than it would be for `loss.backward()`, which
+/// materialises a full-size buffer per operand per op.
 const LIVE_BLOCK_TENSORS: usize = 8;
 
 /// Ceiling on `Bc` regardless of the budget: past this the per-step overhead is
@@ -364,12 +370,11 @@ pub(crate) fn project_cells(
 }
 
 /// Project one group of nodes against a dictionary the caller has **already**
-/// built — the streaming counterpart of [`project_cells`].
+/// built: the streaming counterpart of [`project_cells`].
 ///
-/// One feature partition (every row of the dictionary), no batch fold and no
-/// splice pass, on the caller's own progress bar: the shape
-/// [`super::FrozenProjector`] needs to walk a query past a frozen side group by
-/// group.
+/// One feature partition (every row of the dictionary) and no batch fold, on
+/// the caller's own progress bar: the shape [`super::FrozenProjector`] needs
+/// to walk a query past a frozen side group by group.
 ///
 /// # Grouping does not change the answer, provided the groups are block-aligned
 ///

@@ -28,8 +28,8 @@ use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs}
 use candle_util::candle_core::Device;
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
-    CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector,
-    TrackSpec, PROJECTION_RIDGE_SGD,
+    CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector, TrackSpec,
+    PROJECTION_RIDGE_SGD,
 };
 use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
 use log::info;
@@ -385,7 +385,10 @@ impl BgeEmbedding {
         // needs a `&TrackSpec` to build against, and `QueryProjector::Tracks`'s own
         // polish step (`FrozenProjector::polish_tracks`) needs the SAME spec again,
         // so it is computed here rather than inline at either call site.
-        let track_spec = self.tracks.as_ref().map(crate::gem::tracks::TrackPlan::to_ge);
+        let track_spec = self
+            .tracks
+            .as_ref()
+            .map(crate::gem::tracks::TrackPlan::to_ge);
         let track_encoders = match (&track_spec, self.cell_encoder.as_deref()) {
             (Some(spec), Some(track0_path)) => {
                 let mut paths: Vec<(u32, String)> = vec![(0, track0_path.to_string())];

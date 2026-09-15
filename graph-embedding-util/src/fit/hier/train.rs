@@ -47,14 +47,6 @@ pub struct HierOutput {
     pub final_loss_per_unit: f64,
 }
 
-/// Draw `k` modules for each unit in `chunk` ∝ its composition `q_u·`, with
-/// replacement, and emit one `(unit, weight)` pair per distinct module drawn,
-/// weight = draw multiplicity / `k`. Weights for a unit sum to 1 across the
-/// modules it lands in, so this is an unbiased estimator of the exhaustive
-/// per-module sum — never dedup-and-drop the multiplicity. A unit with an
-/// all-zero composition draws no modules, so it has no gene-level pairs; it
-/// stays in `plan.units`, where its module-level term is exactly zero because
-/// its weight (∝ total^½) is zero.
 /// One module picker per `(unit, TRACK)`, indexed `u * T + t` — the layout
 /// [`UnitModules::idx`] already uses, so chunking `q` by `n_m` walks the pairs
 /// in that order. Built once: a unit's composition never changes during
@@ -86,6 +78,14 @@ pub(crate) fn per_step_offset_l2(offset_l2: f32, steps_per_epoch: usize) -> f32 
     offset_l2 / steps_per_epoch.max(1) as f32
 }
 
+/// Draw `k` modules for each unit in `chunk` ∝ its composition `q_u·`, with
+/// replacement, and emit one `(unit, weight)` pair per distinct module drawn,
+/// weight = draw multiplicity / `k`. Weights for a unit sum to 1 across the
+/// modules it lands in, so this is an unbiased estimator of the exhaustive
+/// per-module sum — never dedup-and-drop the multiplicity. A unit with an
+/// all-zero composition draws no modules, so it has no gene-level pairs; it
+/// stays in `plan.units`, where its module-level term is exactly zero because
+/// its weight (∝ total^½) is zero.
 pub(crate) fn draw_plan(
     chunk: &[u32],
     pickers: &[Option<WeightedIndex<f64>>],

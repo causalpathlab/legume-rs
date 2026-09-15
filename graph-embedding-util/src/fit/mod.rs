@@ -39,11 +39,13 @@ pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
 };
 
-/// Two-phase `bge` fit.
+/// Two-phase fit, shared by `senna bge` and `senna gem` through the same
+/// driver: multilevel-pseudobulk phase 1 over the feature axis (one track,
+/// or several when the caller names tracks), then per-cell phase 2 against
+/// the frozen dictionary.
 ///
-/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]` —
-/// the per-cell bias `b_cell` absorbs library size (consistent with
-/// `senna gem`).
+/// The bilinear score is `E_feat[f]·E_cell[c] + b_feat[f] + b_cell[c]`; the
+/// per-cell bias `b_cell` absorbs library size.
 ///
 /// **Phase 1 — features + pseudobulks.** Train only the pseudobulk axes
 /// (coarsest..finest from `collapse_columns_multilevel_vec`, pseudobulk-

@@ -34,7 +34,11 @@ fn write_manifest(prefix: &str, kind: RunKind, feature_embedding_basename: Strin
 fn gem_kind_keeps_only_the_spliced_row_per_gene() {
     let dir = tempfile::tempdir().expect("tmp");
     let prefix = dir.path().join("run").to_string_lossy().into_owned();
-    let rows = ["GENE1/count/spliced", "GENE1/count/unspliced", "GENE1/m6a/methylated"];
+    let rows = [
+        "GENE1/count/spliced",
+        "GENE1/count/unspliced",
+        "GENE1/m6a/methylated",
+    ];
     let basename = plant_feature_embedding(&prefix, &rows);
     write_manifest(&prefix, RunKind::Gem, basename);
 
@@ -50,7 +54,11 @@ fn gem_kind_keeps_only_the_spliced_row_per_gene() {
 fn non_gem_kind_passes_the_table_through_untouched() {
     let dir = tempfile::tempdir().expect("tmp");
     let prefix = dir.path().join("run").to_string_lossy().into_owned();
-    let rows = ["GENE1/count/spliced", "GENE1/count/unspliced", "GENE1/m6a/methylated"];
+    let rows = [
+        "GENE1/count/spliced",
+        "GENE1/count/unspliced",
+        "GENE1/m6a/methylated",
+    ];
     let basename = plant_feature_embedding(&prefix, &rows);
     write_manifest(&prefix, RunKind::Bge, basename);
 

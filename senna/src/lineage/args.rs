@@ -143,18 +143,18 @@ pub struct LineageArgs {
         help = "Which table supplies θ: auto, cell-embedding, or latent",
         long_help = "Which per-cell table supplies θ for the fit AND the layout.\n\
                      \n\
-                     cell-embedding —\n\
-                     {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
-                     latent         — {from}.latent.parquet (log θ, exponentiated to the simplex).\n\
-                     .                Topic runs only, geometry-only: no velocity file.\n\
-                     auto           — latent on a run whose manifest stamps a log-simplex latent;\n\
-                     .                cell-embedding otherwise.\n\
+                     cell-embedding: {from}.cell_embedding.parquet\n\
+                     .               plus {from}.velocity.parquet (H space).\n\
+                     latent:         {from}.latent.parquet (log θ, exponentiated to the simplex).\n\
+                     .               Topic runs only, geometry-only: no velocity file.\n\
+                     auto:           latent on a run whose manifest stamps a log-simplex latent,\n\
+                     .               cell-embedding otherwise.\n\
                      \n\
                      These are different manifolds on a topic run, not two views of one.\n\
                      `cell_embedding = θ·α` places every cell inside the convex hull of α's K rows,\n\
                      so a diffuse softmax θ compresses the whole population toward the hull's centroid.\n\
-                     That is a property of the co-embedding map, not of PHATE or UMAP —\n\
-                     which is why a blobby topic layout stays blobby whichever algorithm you pick.\n\
+                     That is a property of the co-embedding map, not of PHATE or UMAP.\n\
+                     A blobby topic layout stays blobby whichever algorithm you pick.\n\
                      Reading the simplex directly avoids the map.\n\
                      \n\
                      `--markers` always scores in cell_embedding's H space regardless,\n\
