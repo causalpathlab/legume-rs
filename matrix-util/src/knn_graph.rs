@@ -1,7 +1,7 @@
 use crate::graph::WeightedGraph;
 use crate::knn::all_pairs::knn_rows_l2;
 use crate::knn::ivf::{knn_rows_ivf, IvfArgs, DEFAULT_N_PROBE};
-use crate::knn::EXACT_THRESHOLD;
+use crate::knn::{EXACT_THRESHOLD, KNN_SEED};
 use crate::knn_match::{ColumnDict, SearchScratch};
 
 use indicatif::ParallelProgressIterator;
@@ -17,10 +17,6 @@ const DEFAULT_BLOCK_SIZE: usize = 1000;
 /// parallel and thread-count independent; the split is where `O(n²)` stops
 /// being affordable.
 pub const ALL_PAIRS_THRESHOLD: usize = 65_536;
-
-/// Seeds the inverted-file partition, so a graph over the same points is the
-/// same graph on every run.
-const IVF_SEED: u64 = 20_240_517;
 
 pub struct KnnGraph {
     /// Symmetric CSC adjacency matrix (n_nodes x n_nodes)
@@ -69,17 +65,7 @@ impl KnnGraph {
     /// * `points` - transposed coordinate matrix (d x n), where each column is a point
     /// * `args` - KNN graph construction parameters
     pub fn from_columns(points: &DMatrix<f32>, args: KnnGraphArgs) -> anyhow::Result<KnnGraph> {
-        let nn = points.ncols();
-        let n_neighbours = neighbours_per_point(args.knn, nn);
-        let lists = if nn <= EXACT_THRESHOLD {
-            let points_vec = points.column_iter().collect::<Vec<_>>();
-            let names = (0..nn).collect::<Vec<_>>();
-            let dict = ColumnDict::from_dvector_views(points_vec, names);
-            search_dict(&dict, nn, n_neighbours, args.block_size)?
-        } else {
-            search_rows(&points.transpose(), n_neighbours)
-        };
-        Self::from_neighbours(nn, &lists, args.reciprocal)
+        Self::from_rows(&points.transpose(), args)
     }
 
     /// Build a KNN graph from row vectors (cells × features).
@@ -189,8 +175,7 @@ impl KnnGraph {
         let canonical = |&(i, j): &(usize, usize)| if i <= j { (i, j) } else { (j, i) };
         // Source as a bitmask, so folding a run is an OR rather than a case
         // analysis: 1 = primary, 2 = secondary, 3 = both.
-        let mut tagged: Vec<((usize, usize), f32, u8)> =
-            Vec::with_capacity(self.edges.len() + other.edges.len());
+        let mut tagged: Vec<TaggedEdge> = Vec::with_capacity(self.edges.len() + other.edges.len());
         tagged.par_extend(
             self.edges
                 .par_iter()
@@ -204,30 +189,19 @@ impl KnnGraph {
                 .zip(b_dist.par_iter())
                 .map(|(e, &d)| (canonical(e), d, 2u8)),
         );
-        tagged.par_sort_unstable_by_key(|&(key, _, _)| key);
-
-        let mut edges = Vec::with_capacity(tagged.len());
-        let mut distances = Vec::with_capacity(tagged.len());
-        let mut source = Vec::with_capacity(tagged.len());
-        for &(key, dist, tag) in tagged.iter() {
-            if edges.last() == Some(&key) {
-                let last = distances.len() - 1;
-                distances[last] = f32::min(distances[last], dist);
-                source[last] |= tag;
-            } else {
-                edges.push(key);
-                distances.push(dist);
-                source.push(tag);
-            }
-        }
-        let source: Vec<EdgeSource> = source
-            .into_iter()
-            .map(|mask| match mask {
+        let folded = fold_tagged_edges(tagged);
+        let mut edges = Vec::with_capacity(folded.len());
+        let mut distances = Vec::with_capacity(folded.len());
+        let mut source = Vec::with_capacity(folded.len());
+        for (key, dist, mask) in folded {
+            edges.push(key);
+            distances.push(dist);
+            source.push(match mask {
                 1 => EdgeSource::Primary,
                 2 => EdgeSource::Secondary,
                 _ => EdgeSource::Both,
-            })
-            .collect();
+            });
+        }
 
         // Derived state, so rebuild rather than merge.
         let adjacency = symmetric_adjacency(n_nodes, &edges, &distances);
@@ -629,6 +603,30 @@ mod tests;
 /// One point's neighbours: `(indices, distances)`, nearest first.
 type NeighbourList = (Vec<usize>, Vec<f32>);
 
+/// A canonical `(i, j)` key with a distance and a bitmask saying which
+/// inputs listed it.
+type TaggedEdge = ((usize, usize), f32, u8);
+
+/// One flat buffer of canonical keys, one parallel sort and one linear fold:
+/// a run of equal keys keeps the smallest distance and the OR of its masks.
+/// What a keyed map over tens of millions of triplets would do with an
+/// allocation and a contended insert per triplet and a lookup per edge, as a
+/// set operation done in place. The result is sorted by key, and the dedup
+/// has to finish before any CSC build, which SUMS duplicates.
+fn fold_tagged_edges(mut tagged: Vec<TaggedEdge>) -> Vec<TaggedEdge> {
+    tagged.par_sort_unstable_by_key(|&(key, _, _)| key);
+    tagged.dedup_by(|cur, prev| {
+        if cur.0 == prev.0 {
+            prev.1 = prev.1.min(cur.1);
+            prev.2 |= cur.2;
+            true
+        } else {
+            false
+        }
+    });
+    tagged
+}
+
 /// `search_others` returns exactly this many *other* neighbours (self
 /// excluded): the request clamped to the available others, floored at 1.
 fn neighbours_per_point(knn: usize, nn: usize) -> usize {
@@ -682,7 +680,7 @@ fn search_rows(rows: &DMatrix<f32>, n_neighbours: usize) -> Vec<NeighbourList> {
                 k: n_neighbours,
                 n_lists: 0,
                 n_probe: DEFAULT_N_PROBE,
-                seed: IVF_SEED,
+                seed: KNN_SEED,
             },
         )
     };
@@ -693,18 +691,13 @@ fn search_rows(rows: &DMatrix<f32>, n_neighbours: usize) -> Vec<NeighbourList> {
 /// with `i < j`, sorted. `reciprocal` keeps a pair only when each point
 /// listed the other; otherwise either direction suffices and the smaller of
 /// the two distances is kept.
-///
-/// One flat buffer of canonical keys, one parallel sort and one linear fold:
-/// a keyed map over tens of millions of directed triplets costs an allocation
-/// and a contended insert per triplet and a second lookup per edge, all for a
-/// set operation a sort does in place.
 pub(crate) fn edges_from_neighbours(
     lists: &[NeighbourList],
     reciprocal: bool,
 ) -> Vec<((usize, usize), f32)> {
     // Direction as a bit so a run folds by OR: 1 = listed by the smaller
     // index, 2 = by the larger.
-    let mut tagged: Vec<((usize, usize), f32, u8)> = lists
+    let tagged: Vec<TaggedEdge> = lists
         .par_iter()
         .enumerate()
         .flat_map_iter(|(i, (nb, ds))| {
@@ -717,40 +710,33 @@ pub(crate) fn edges_from_neighbours(
             })
         })
         .collect();
-    tagged.par_sort_unstable_by_key(|&(key, _, _)| key);
-
-    let mut edges: Vec<((usize, usize), f32)> = Vec::with_capacity(tagged.len());
-    let mut dirs: Vec<u8> = Vec::with_capacity(tagged.len());
-    for &(key, dist, dir) in &tagged {
-        match edges.last_mut() {
-            Some((last_key, last_dist)) if *last_key == key => {
-                *last_dist = last_dist.min(dist);
-                *dirs.last_mut().unwrap() |= dir;
-            }
-            _ => {
-                edges.push((key, dist));
-                dirs.push(dir);
-            }
-        }
-    }
-    if reciprocal {
-        let mut keep = dirs.iter().map(|&d| d == 3);
-        edges.retain(|_| keep.next().unwrap());
-    }
-    edges
+    fold_tagged_edges(tagged)
+        .into_iter()
+        .filter(|&(_, _, mask)| !reciprocal || mask == 3)
+        .map(|(key, dist, _)| (key, dist))
+        .collect()
 }
 
-/// The `n x n` symmetric adjacency implied by an undirected edge list.
+/// The `n x n` symmetric adjacency implied by an undirected edge list, which
+/// must be canonical (`i < j`), sorted and free of duplicates — what every
+/// constructor here produces.
 ///
 /// Each edge lands in BOTH endpoints' columns, exactly once per direction.
-/// Built straight from the edge list — degrees, offsets, a fill, and a sort
-/// of each column's few entries — rather than through a `CooMatrix`, whose
-/// conversion sorts every entry of the whole matrix serially.
+/// Built straight from the edge list — degrees, offsets, one fill — rather
+/// than through a `CooMatrix`, whose conversion sorts every entry of the
+/// whole matrix serially. Sorted input is what makes the fill enough: column
+/// `c` receives its partners below `c` in ascending order as the edges
+/// `(i, c)` pass, then its partners above `c` in ascending order from the run
+/// of edges `(c, j)`.
 pub fn symmetric_adjacency(
     n_nodes: usize,
     edges: &[(usize, usize)],
     distances: &[f32],
 ) -> CscMatrix<f32> {
+    debug_assert!(
+        edges.iter().all(|&(i, j)| i < j) && edges.windows(2).all(|w| w[0] < w[1]),
+        "symmetric adjacency: edges must be canonical, sorted and unique"
+    );
     let mut offsets = vec![0usize; n_nodes + 1];
     for &(i, j) in edges {
         offsets[i + 1] += 1;
@@ -771,28 +757,8 @@ pub fn symmetric_adjacency(
         values[cursor[j]] = v;
         cursor[j] += 1;
     }
-    // Row indices must ascend within a column; each column is a handful of
-    // entries, so the sorts are small and independent.
-    let mut cols: Vec<(&mut [usize], &mut [f32])> = Vec::with_capacity(n_nodes);
-    let (mut rest_rows, mut rest_vals) = (row_indices.as_mut_slice(), values.as_mut_slice());
-    for c in 0..n_nodes {
-        let len = offsets[c + 1] - offsets[c];
-        let (r, rr) = rest_rows.split_at_mut(len);
-        let (v, vv) = rest_vals.split_at_mut(len);
-        cols.push((r, v));
-        rest_rows = rr;
-        rest_vals = vv;
-    }
-    cols.par_iter_mut().for_each(|(r, v)| {
-        let mut pairs: Vec<(usize, f32)> = r.iter().copied().zip(v.iter().copied()).collect();
-        pairs.sort_unstable_by_key(|&(row, _)| row);
-        for (k, (row, val)) in pairs.into_iter().enumerate() {
-            r[k] = row;
-            v[k] = val;
-        }
-    });
     CscMatrix::try_from_csc_data(n_nodes, n_nodes, offsets, row_indices, values)
-        .expect("symmetric adjacency: every edge is pushed once per direction")
+        .expect("symmetric adjacency: canonical sorted edges fill every column in order")
 }
 
 /// Each value replaced by its rank among the others, scaled to `[0, 1]`.

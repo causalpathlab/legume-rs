@@ -508,8 +508,8 @@ fn flat_fold_reproduces_the_keyed_filter_in_both_modes() {
 
 #[test]
 fn direct_csc_matches_the_coo_route() {
-    let edges = vec![(0, 3), (0, 1), (1, 2), (2, 5), (3, 4), (1, 5)];
-    let distances = vec![0.3, 0.1, 0.2, 0.5, 0.4, 0.6];
+    let edges = vec![(0, 1), (0, 3), (1, 2), (1, 5), (2, 5), (3, 4)];
+    let distances = vec![0.1, 0.3, 0.2, 0.6, 0.5, 0.4];
     let got = symmetric_adjacency(6, &edges, &distances);
     let mut coo = nalgebra_sparse::CooMatrix::new(6, 6);
     for (&(i, j), &v) in edges.iter().zip(&distances) {
