@@ -1,19 +1,19 @@
 //! The encoder is checked against the exact solver it amortizes: on planted
 //! data its pair placement and its self-pair (the cell placement) land where
-//! `solve_pair` lands, it is symmetric end to end, a saved encoder reproduces
-//! itself, and empty rows stay at the origin.
+//! the Newton solve lands, it is symmetric end to end, a saved encoder
+//! reproduces itself, and empty rows stay at the origin.
 
 use super::fixture::*;
 use crate::cell_activity_graph_embedding::pair_projection::encoder::{
     CellRow, PairEncoder, PairEncoderSpec,
 };
 use crate::cell_activity_graph_embedding::pair_projection::{
-    project_pairs, PairDictionary, PairProjectionArgs, PairSolver, ProjectionArgs,
+    project_pairs, PairDictionary, PairProjectionArgs, PairSolver,
 };
 use crate::util::common::*;
 use crate::util::gene_axis::GeneAxis;
 use candle_util::candle_core::Device;
-use rand::rngs::{SmallRng, StdRng};
+use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
 const N_TRAIN_CELLS: usize = 150;
@@ -79,21 +79,13 @@ fn spec(epochs: usize) -> PairEncoderSpec {
         n_experts: 4,
         epochs,
         batch: 128,
-        train_pairs: 0,
+        ridge: RIDGE,
     }
 }
 
-fn exact(dict: &PairDictionary, obs: &[(u32, f32)], seed: u64) -> (Vec<f32>, f32) {
-    let mut rng = SmallRng::seed_from_u64(seed);
-    dict.project(
-        obs,
-        &ProjectionArgs {
-            ridge: RIDGE,
-            steps: 1500,
-            gene_sample: 0,
-        },
-        &mut rng,
-    )
+fn exact(dict: &PairDictionary, obs: &[(u32, f32)]) -> (Vec<f32>, f32) {
+    let (theta, beta, _) = dict.solve(obs, RIDGE);
+    (theta, beta)
 }
 
 /// A trained encoder on the planted cells, with the training pairs.
@@ -114,7 +106,7 @@ fn trained() -> &'static Trained {
         let cells = planted_cells(N_TRAIN_CELLS, 1);
         let corpus = corpus_of(&dict, &cells);
         let edges = random_pairs(N_TRAIN_CELLS, 1500, 2);
-        let enc = PairEncoder::build(&dict, &corpus, 32, 4, RIDGE, 7, &Device::Cpu).unwrap();
+        let enc = PairEncoder::build(&dict, &corpus, &spec(20), 7, &Device::Cpu).unwrap();
         enc.train(&corpus, &edges, &spec(20), 7).unwrap();
         Trained {
             dict,
@@ -141,7 +133,7 @@ fn encoder_recovers_the_exact_solvers_pair_latent() {
     let (mut cos_sum, mut nll_enc, mut nll_exact) = (0f32, 0f64, 0f64);
     for (i, &(u, v)) in held_out.iter().enumerate() {
         let obs = pooled(&cells[u as usize].0, &cells[v as usize].0);
-        let (theta, _) = exact(dict, &obs, i as u64);
+        let (theta, _) = exact(dict, &obs);
         let z: Vec<f32> = out.pairs.latent.row(i).iter().copied().collect();
         cos_sum += cosine(&z, &theta);
         // Every gene is active on this fixture, so global ids are positions.
@@ -169,7 +161,7 @@ fn self_pair_recovers_the_cells_placement() {
     let mut beta_gap = 0f32;
     for (c, (profile, _)) in cells.iter().enumerate() {
         let doubled: Vec<(u32, f32)> = profile.iter().map(|&(g, n)| (g, 2.0 * n)).collect();
-        let (theta, beta) = exact(dict, &doubled, c as u64);
+        let (theta, beta) = exact(dict, &doubled);
         let z: Vec<f32> = out.cells.latent.row(c).iter().copied().collect();
         cos_sum += cosine(&z, &theta);
         // The oracle's intercept is for the doubled depth; the cell's own is
@@ -321,11 +313,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
     let edges = random_pairs(60, 300, 3);
     let saved = dir.path().join("run.pair_encoder.safetensors");
     let saved = saved.to_str().unwrap();
-    let projection = ProjectionArgs {
-        ridge: RIDGE,
-        steps: 300,
-        gene_sample: 0,
-    };
     let spec = spec(15);
     let fitted = project_pairs(
         &data,
@@ -333,7 +320,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         &e,
         None,
         &PairProjectionArgs {
-            projection: projection.clone(),
             solver: PairSolver::TrainEncoder {
                 spec: &spec,
                 dev: &Device::Cpu,
@@ -358,7 +344,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         &e,
         None,
         &PairProjectionArgs {
-            projection: projection.clone(),
             solver: PairSolver::LoadEncoder {
                 path: saved,
                 dev: &Device::Cpu,
@@ -378,28 +363,6 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
         loaded.cells.latent.as_slice()
     );
     assert!(loaded.scores.is_empty());
-
-    // The exact arm answers the same shape, with every cell placed.
-    let exact = project_pairs(
-        &data,
-        &edges,
-        &e,
-        None,
-        &PairProjectionArgs {
-            projection,
-            solver: PairSolver::Exact,
-            seed: 11,
-            pair_block: 64,
-            eval_features: None,
-            score_pairs: false,
-        },
-        &axis,
-        &totals,
-    )
-    .unwrap();
-    assert_eq!(exact.cells.latent.nrows(), 60);
-    assert!(exact.cells.latent.iter().all(|v| v.is_finite()));
-    assert!(exact.cells.bias.iter().all(|v| v.is_finite()));
 }
 
 #[test]
@@ -424,11 +387,6 @@ fn the_certificate_finishes_what_an_untrained_encoder_gets_wrong() {
         &e,
         None,
         &PairProjectionArgs {
-            projection: ProjectionArgs {
-                ridge: RIDGE,
-                steps: 300,
-                gene_sample: 0,
-            },
             solver: PairSolver::TrainEncoder {
                 spec: &spec,
                 dev: &Device::Cpu,
@@ -447,7 +405,7 @@ fn the_certificate_finishes_what_an_untrained_encoder_gets_wrong() {
     let (mut got, mut best) = (0f64, 0f64);
     for (i, &(u, v)) in edges.iter().enumerate() {
         let obs = pooled(&cells[u as usize].0, &cells[v as usize].0);
-        let (theta, _) = exact(&dict, &obs, i as u64);
+        let (theta, _) = exact(&dict, &obs);
         let z: Vec<f32> = out.latent.row(i).iter().copied().collect();
         got += f64::from(dict.nll(&obs, &z));
         best += f64::from(dict.nll(&obs, &theta));

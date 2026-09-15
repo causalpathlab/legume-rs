@@ -493,15 +493,15 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
 /// the same three parquets, `entropy` included.
 ///
 /// `has_batch_effects` is `true` when the run had ≥2 batches and
-/// `{prefix}.delta.parquet` was written; `has_pair_encoder` when the run
-/// fitted and saved `{prefix}.pair_encoder.safetensors`. `inputs.k` is the
-/// number of edge clusters, which is what `n_communities` reports — not the
-/// embedding width, which is a different quantity and has no slot here.
+/// `{prefix}.delta.parquet` was written. The pair encoder is part of every
+/// cage model — `predict` and `impute` place a sample with it and nothing
+/// else — so its slot is always filled. `inputs.k` is the number of edge
+/// clusters, which is what `n_communities` reports — not the embedding
+/// width, which is a different quantity and has no slot here.
 pub fn create_cage_metadata(
     inputs: &RunInputs<'_>,
     has_batch_effects: bool,
     splice: Option<SpliceTrackInfo>,
-    has_pair_encoder: bool,
 ) -> PintoMetadata {
     let prefix = inputs.prefix;
 
@@ -529,7 +529,7 @@ pub fn create_cage_metadata(
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
-            pair_encoder: has_pair_encoder.then(|| format!("{prefix}.pair_encoder.safetensors")),
+            pair_encoder: Some(format!("{prefix}.pair_encoder.safetensors")),
             pb_embedding: Some(format!("{prefix}.pb_embedding.parquet")),
             pb_bias: Some(format!("{prefix}.pb_bias.parquet")),
             cell_pb: Some(format!("{prefix}.cell_pb.parquet")),
