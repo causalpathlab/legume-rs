@@ -6,7 +6,7 @@
 //! sampled steps do, and an approximate denominator here would put sampling
 //! noise straight into the number being reported.
 
-use super::{PairDictionary, SCORE_CLAMP};
+use super::PairDictionary;
 use matrix_util::agreement::{agreement_from_log_rate, CellAgreement};
 
 /// The gene axis a run scores over, resolved once.
@@ -39,7 +39,7 @@ impl EvalAxis {
 
 /// One-pass log-sum-exp: rescales the accumulator when a new maximum arrives,
 /// so nothing overflows and the input is walked once.
-fn log_sum_exp(values: impl Iterator<Item = f32>) -> f32 {
+pub(super) fn log_sum_exp(values: impl Iterator<Item = f32>) -> f32 {
     let (mut max, mut acc) = (f32::NEG_INFINITY, 0f32);
     for v in values {
         if v > max {
@@ -90,26 +90,31 @@ impl PairDictionary {
     /// this gene set, which gene is it", which is exactly what senna reports. Two
     /// commands answering the same question is worth more here than each
     /// answering its own.
+    #[cfg(test)]
     #[must_use]
     pub fn score(&self, obs: &[(u32, f32)], theta: &[f32], axis: &EvalAxis) -> PairScore {
-        let local = self.to_local(obs);
+        self.score_local(&self.to_local(obs), theta, axis)
+    }
+
+    /// [`Self::score`] for a profile already on active-list positions.
+    #[must_use]
+    pub(super) fn score_local(
+        &self,
+        local: &[(u32, f32)],
+        theta: &[f32],
+        axis: &EvalAxis,
+    ) -> PairScore {
         if local.is_empty() {
             return PairScore::default();
         }
 
-        let d = self.d;
-        let mut log_rate = vec![0f32; self.b.len()];
-        for (g, lr) in log_rate.iter_mut().enumerate() {
-            let row = &self.feat[g * d..(g + 1) * d];
-            let dot: f32 = row.iter().zip(theta).map(|(&e, &t)| e * t).sum();
-            *lr = (dot + self.b[g]).clamp(-SCORE_CLAMP, SCORE_CLAMP);
-        }
+        let log_rate = self.log_rates(theta);
         let z_model = axis.log_partition(|g| log_rate[g]);
 
         let mut llik = 0f64;
         let mut null_llik = 0f64;
         let mut total = 0f32;
-        for &(gene, x) in &local {
+        for &(gene, x) in local {
             let gene = gene as usize;
             if !axis.scores(gene) {
                 continue;
@@ -132,7 +137,7 @@ impl PairDictionary {
             llik: llik as f32,
             null_llik: null_llik as f32,
             total,
-            agreement: self.agreement(&local, &log_rate, axis),
+            agreement: self.agreement(local, &log_rate, axis),
         }
     }
 

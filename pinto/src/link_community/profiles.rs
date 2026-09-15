@@ -700,42 +700,11 @@ pub struct PropensityReportConfig<'a> {
     pub edge_kind: Option<&'a [i32]>,
 }
 
-/// What the propensity pass hands back to its caller, beyond the files
-/// it writes itself: enough to build derived readouts (see
-/// [`propensity_weighted_cell_embedding`]) without re-clustering.
+/// What the propensity pass hands back to its caller beyond the files it
+/// writes itself.
 pub struct PropensityOutputs {
     /// Realized number of edge communities.
     pub n_clusters: usize,
-    /// `[n_cells x K]` per-cell propensity over edge communities (also
-    /// written to `.propensity.parquet`).
-    pub cell_propensity: Mat,
-    /// Per-edge community label, parallel to `edges`.
-    pub edge_membership: Vec<usize>,
-}
-
-/// A per-cell embedding as a READOUT of the propensity structure: each
-/// cell is its propensity-weighted average of link-community centroids
-/// in the pair-latent space, `e_cell[c] = Σ_k prop[c,k] · μ_k` with
-/// `μ_k` the mean latent of community k's edges. Same width as the
-/// latent (and therefore the gene dictionary it was projected against).
-/// Nothing here is trained; callers decide whether and where to ship it.
-#[must_use]
-pub fn propensity_weighted_cell_embedding(pair_latent_nk: &Mat, out: &PropensityOutputs) -> Mat {
-    let k = out.n_clusters;
-    let d = pair_latent_nk.ncols();
-    let mut centroids = Mat::zeros(k, d);
-    // usize counts: an f32 accumulator stops incrementing at 2^24 edges
-    // in one community and would silently inflate that centroid.
-    let mut counts = vec![0usize; k];
-    for (e, &kc) in out.edge_membership.iter().enumerate() {
-        counts[kc] += 1;
-        let mut row = centroids.row_mut(kc);
-        row += pair_latent_nk.row(e);
-    }
-    for (kc, &cnt) in counts.iter().enumerate() {
-        centroids.row_mut(kc).scale_mut(1.0 / cnt.max(1) as f32);
-    }
-    &out.cell_propensity * &centroids
 }
 
 /// Compute propensity and gene-community statistics from latent pair projections.
@@ -805,11 +774,7 @@ pub fn compute_propensity_and_gene_community_stat(
         out_prefix,
     )?;
 
-    Ok(PropensityOutputs {
-        n_clusters,
-        cell_propensity,
-        edge_membership,
-    })
+    Ok(PropensityOutputs { n_clusters })
 }
 
 /// Gene-network-derived module-pair basis for per-cell-edge features.

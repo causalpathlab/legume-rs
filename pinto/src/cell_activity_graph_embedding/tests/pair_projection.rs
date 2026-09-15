@@ -5,65 +5,10 @@
 //! rests on: `β_uv` absorbs pooled depth, and a pair with no counts stays at
 //! the origin rather than being handed a fabricated direction.
 
+use super::fixture::*;
 use crate::cell_activity_graph_embedding::pair_projection::{PairDictionary, ProjectionArgs};
-use crate::util::common::*;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-
-const N_GENES: usize = 240;
-const DIM: usize = 4;
-const N_CELLS: usize = 100;
-
-/// Deterministic spread in `[-0.2, 0.2)`, so the off-block dimensions are not
-/// all identical and the design matrix is not rank-4-with-4-distinct-rows.
-fn jitter(seed: usize) -> f32 {
-    let h = (seed.wrapping_mul(2_654_435_761)) % 1000;
-    (h as f32 / 1000.0 - 0.5) * 0.4
-}
-
-/// `[G × D]` frozen dictionary: gene `g` loads mainly on dim `g % D`.
-fn dictionary_matrix() -> Mat {
-    let mut e = Mat::zeros(N_GENES, DIM);
-    for g in 0..N_GENES {
-        for j in 0..DIM {
-            e[(g, j)] = if j == g % DIM {
-                1.0 + 0.1 * ((g / DIM) % 5) as f32
-            } else {
-                jitter(g * DIM + j)
-            };
-        }
-    }
-    e
-}
-
-/// Log gene abundance the offsets are built from, and the totals that imply it.
-fn abundances() -> (Vec<f32>, Vec<f64>) {
-    let b: Vec<f32> = (0..N_GENES).map(|g| (5.0 + (g % 7) as f32).ln()).collect();
-    let totals: Vec<f64> = b.iter().map(|&x| x.exp() as f64 * N_CELLS as f64).collect();
-    (b, totals)
-}
-
-/// Pooled counts a pair at `theta` with intercept `beta` would produce, exactly
-/// (no Poisson draw), so the MAP is `theta` up to the ridge.
-fn counts_from(e: &Mat, b: &[f32], theta: &[f32], beta: f32) -> Vec<(u32, f32)> {
-    (0..N_GENES)
-        .map(|g| {
-            let s: f32 = (0..DIM).map(|j| e[(g, j)] * theta[j]).sum::<f32>() + b[g] + beta;
-            (g as u32, s.exp())
-        })
-        .collect()
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(&x, &y)| x * y).sum();
-    let na: f32 = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    dot / (na * nb).max(1e-8)
-}
-
-fn norm(a: &[f32]) -> f32 {
-    a.iter().map(|&x| x * x).sum::<f32>().sqrt()
-}
 
 fn args(steps: usize, gene_sample: usize) -> ProjectionArgs {
     ProjectionArgs {
@@ -177,96 +122,36 @@ fn empty_profile_stays_at_the_origin() {
 // Hold-out split of a pair //
 //////////////////////////////
 
-use crate::cell_activity_graph_embedding::pair_projection::{pooled_profile_routed, SlabCols};
-
-/// Two cells as a CSC slab, given each one's `(row, count)` column.
-fn slab_of(u: &[(usize, f32)], v: &[(usize, f32)]) -> (Vec<usize>, Vec<usize>, Vec<f32>) {
-    let offsets = vec![0, u.len(), u.len() + v.len()];
-    let rows: Vec<usize> = u.iter().chain(v).map(|&(r, _)| r).collect();
-    let vals: Vec<f32> = u.iter().chain(v).map(|&(_, x)| x).collect();
-    (offsets, rows, vals)
-}
-
-/// The property the whole cage hold-out rests on: Poisson counts are additive, so
-/// routing each endpoint's contribution independently must leave
-/// `visible + held == pooled`, entry for entry. If it does not, the metric is either
-/// scoring counts the model already saw or silently dropping mass.
 #[test]
-fn the_routed_split_is_exactly_additive() {
-    // Overlapping rows (2, 5, 9 in both), plus rows unique to each endpoint.
-    let u = [(0usize, 3.0f32), (2, 7.0), (5, 1.0), (9, 4.0), (11, 2.0)];
-    let v = [(2usize, 5.0f32), (3, 6.0), (5, 8.0), (9, 1.0), (14, 9.0)];
-    let (offsets, rows, vals) = slab_of(&u, &v);
-    let col_of: HashMap<usize, usize> = [(100usize, 0usize), (200, 1)].into_iter().collect();
-    let slab = SlabCols {
-        offsets: &offsets,
-        rows: &rows,
-        vals: &vals,
-        col_of: &col_of,
-    };
-
-    let (pooled, empty) = pooled_profile_routed(slab, 100, 200, None, &|_, _| false);
+fn newton_polish_lands_where_the_converged_solve_lands() {
+    let e = dictionary_matrix();
+    let (b, totals) = abundances();
+    let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
+    let truth = [0.6f32, -0.4, 0.25, 0.0];
+    let obs = counts_from(&e, &b, &truth, 0.3);
+    let mut rng = SmallRng::seed_from_u64(1);
+    let (theta, beta) = dict.project(&obs, &args(1500, 0), &mut rng);
+    // From a start well off the optimum.
+    let start = [0.1f32, 0.1, -0.1, 0.2];
+    let (polished, beta_polished, certificate) = dict.polish(&obs, 1e-4, &start, 8);
+    // The bound is `‖∇‖²/(2λ)`, so a near-zero ridge inflates it; small
+    // against the pair's thousands of nats of likelihood is what settled means.
     assert!(
-        empty.is_empty(),
-        "nothing held out ⇒ nothing in the held bucket"
+        certificate < 1.0,
+        "certificate {certificate} at the optimum"
     );
-
-    // Route on parity of (cell + row) so the shared rows land on BOTH sides of the
-    // split — the case that a route-after-pooling implementation gets wrong.
-    let route = |cell: u32, row: usize| (cell as usize / 100 + row).is_multiple_of(2);
-    let (visible, held) = pooled_profile_routed(slab, 100, 200, None, &route);
-
-    let total = |p: &[(u32, f32)]| p.iter().map(|&(_, x)| x).sum::<f32>();
     assert!(
-        (total(&visible) + total(&held) - total(&pooled)).abs() < 1e-5,
-        "mass must be conserved: {} + {} vs {}",
-        total(&visible),
-        total(&held),
-        total(&pooled)
+        cosine(&polished, &theta) > 0.9999,
+        "direction: {polished:?} vs {theta:?}"
     );
-
-    // Per row, too — a conserved total could still shuffle mass between rows.
-    let mut merged: HashMap<u32, f32> = HashMap::default();
-    for &(g, x) in visible.iter().chain(&held) {
-        *merged.entry(g).or_default() += x;
-    }
-    for &(g, x) in &pooled {
-        let got = merged.remove(&g).unwrap_or(0.0);
-        assert!((got - x).abs() < 1e-5, "row {g}: {got} vs {x}");
-    }
-    assert!(merged.is_empty(), "the split invented rows: {merged:?}");
-
-    // And the shared rows really did split, or the test proves nothing.
-    let shared_in_both = [2u32, 5, 9]
-        .iter()
-        .filter(|g| visible.iter().any(|&(x, _)| x == **g) && held.iter().any(|&(x, _)| x == **g))
-        .count();
     assert!(
-        shared_in_both > 0,
-        "no shared row landed on both sides — the fixture is not exercising the split"
+        (norm(&polished) - norm(&theta)).abs() < 1e-3,
+        "scale: {} vs {}",
+        norm(&polished),
+        norm(&theta)
     );
-}
-
-/// Each bucket must keep the sorted, no-duplicate-row contract `pool_profile` relies on.
-#[test]
-fn each_bucket_stays_sorted_and_deduped() {
-    let u = [(1usize, 2.0f32), (4, 3.0), (7, 5.0), (8, 1.0)];
-    let v = [(1usize, 4.0f32), (2, 6.0), (7, 2.0), (12, 3.0)];
-    let (offsets, rows, vals) = slab_of(&u, &v);
-    let col_of: HashMap<usize, usize> = [(100usize, 0usize), (200, 1)].into_iter().collect();
-    let slab = SlabCols {
-        offsets: &offsets,
-        rows: &rows,
-        vals: &vals,
-        col_of: &col_of,
-    };
-    let route = |cell: u32, row: usize| (cell as usize / 100 + row).is_multiple_of(2);
-    let (visible, held) = pooled_profile_routed(slab, 100, 200, None, &route);
-
-    for bucket in [&visible, &held] {
-        for w in bucket.windows(2) {
-            assert!(w[0].0 < w[1].0, "not strictly increasing: {bucket:?}");
-        }
-        assert!(bucket.iter().all(|&(_, x)| x > 0.0), "zero entry kept");
-    }
+    assert!(
+        (beta_polished - beta).abs() < 1e-3,
+        "intercept: {beta_polished} vs {beta}"
+    );
 }

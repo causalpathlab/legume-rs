@@ -10,6 +10,7 @@ pub mod batch_norm;
 pub mod gcn;
 pub mod layers;
 pub mod linear;
+pub mod seed_vars;
 pub mod soft_clamp;
 
 pub use batch_norm::{batch_norm, BatchNorm, BatchNormConfig};
@@ -20,4 +21,5 @@ pub use linear::{
     logsumexp_forward, non_neg_linear, sparsemax_linear, AggregateLinear, NonNegLinear,
     SoftmaxLinear, SparsemaxLinear,
 };
+pub use seed_vars::seed_uniform_vars;
 pub use soft_clamp::{soft_clamp, MASKED_LOGIT_CLAMP};
