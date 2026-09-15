@@ -577,7 +577,12 @@ impl PairEncoder {
             dev,
         )?;
         // Matches by name and ignores the side tensors, which are not vars.
-        this.varmap.load(path)?;
+        this.varmap.load(path).map_err(|e| {
+            anyhow::anyhow!(
+                "{path}: the saved pair encoder does not fit this pinto's network ({e}); the model \
+                 was fitted by an earlier version — rerun `pinto cage`"
+            )
+        })?;
         Ok(this)
     }
 
