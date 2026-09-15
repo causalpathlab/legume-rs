@@ -1,24 +1,23 @@
-//! `senna gem` — **Ge**odesic **E**mbedding + **M**otion: a joint cell-feature embedding
-//! over the shared `graph_embedding_util` engine. Motion is the local velocity δ (the
-//! tangent); the lineage is the geodesic path it traces. The engine is modality-agnostic;
-//! it is fed gene counts (spliced + unspliced) today, but embeds any per-feature count.
+//! `senna gem` — joint gene-count embedding over the shared
+//! `graph_embedding_util` engine: `senna bge`'s driver run over every feature
+//! row of a gene-count matrix (rows = features, no modality split).
 //!
-//! Each feature row `{gene}/count/{spliced|unspliced}` maps to its gene, so a
-//! gene's spliced and unspliced tracks embed identically as `β_g` (β-sharing).
-//! A single Poisson likelihood on counts: cell **identity** is the spliced
-//! projection θ (written raw), and the **velocity** is the raw analytic increment
-//! δ — a Poisson-MAP shift fit to the unspliced edges with θ held fixed (‖δ‖ =
-//! speed) — tracking the spliced↔unspliced dynamics rather than a second (binomial)
-//! likelihood.
+//! Each row is `{gene}/count/{spliced|unspliced}`, matched across input files
+//! by exact name (the row itself IS the join key). The former per-gene
+//! β-sharing factorization and its analytic splice-velocity readout are gone
+//! with the composite engine that produced them; a future task reintroduces
+//! spliced/unspliced as explicit **tracks** on top of this same driver.
 
 pub mod args;
+/// Per-gene pooling of the feature axis for HVG ranking (spliced + unspliced
+/// rows of a gene share one entry). Replaces the deleted `rows` module for
+/// the one thing gem's HVG selection still needs.
+pub(crate) mod hvg;
 /// Loading gem's co-embedded **feature** embedding (`{out}.feature_embedding.parquet`)
 /// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage` —
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
 pub mod marker_embedding;
-/// The `senna gem` run: joint spliced+unspliced gene-count embedding over the shared
-/// `graph_embedding_util` engine (identity θ + velocity δ). Binary entry: [`run::run_gem_embedding`].
-/// The gene-count row grammar both gem models read their input through.
-pub mod rows;
+/// The `senna gem` run: joint gene-count embedding over the shared
+/// `graph_embedding_util` engine (bge, over every feature row). Binary entry: [`run::run_gem_embedding`].
 pub mod run;
 pub mod sample_id;

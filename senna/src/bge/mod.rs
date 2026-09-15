@@ -7,9 +7,11 @@
 //! companion that consumes an explicit feature-feature edge list.
 //! `gbe` remains a clap alias for one release cycle.
 //!
-//! All algorithmic work lives in `graph_embedding_util`. This file
-//! exists only to translate `BgeArgs` → `FitConfig` and write senna's
-//! run manifest after training.
+//! All algorithmic work lives in `graph_embedding_util`. This file resolves
+//! the multiome layout, loads the data, and weights the HVG selection — the
+//! parts of a fit that are bge's own — then hands off to [`driver`], which
+//! trains and writes every output. `senna gem` (`gem::run`) shares that same
+//! driver over its own (simpler) load.
 //!
 //! `--feature-network` (SGC smoothing of `E_feat` through a feature-feature
 //! edge list) was removed along with its implementation: it saw no practical
@@ -21,14 +23,18 @@ use data_beans_alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;
 
 pub(crate) mod args;
+pub(crate) mod driver;
 mod multiome;
 mod resolve_etm;
 pub(crate) mod score;
 pub(crate) mod transfer;
 
 pub use args::BgeArgs;
-use resolve_etm::resolve_etm_topics;
 
+/// Resolve the multiome layout, load the data, and weight the HVG selection —
+/// everything about this fit that is bge's own — then hand off to the shared
+/// [`driver::fit_embed_family`], which trains and writes every output
+/// (`senna gem` hands off to the very same function).
 pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     anyhow::ensure!(
@@ -42,7 +48,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // inputs themselves — the feature axes say which files are the same assay,
     // and the barcode lists say which cells are the same cell. Both routes
     // land on one `MultiomePlan`, so nothing below has two shapes to handle.
-    let plan: Option<ge::MultiomePlan> = if args.multiome.is_empty() {
+    let multiome_plan: Option<ge::MultiomePlan> = if args.multiome.is_empty() {
         multiome::auto_plan(
             &args.data_files,
             args.batch_files.as_ref().map_or(0, Vec::len),
@@ -51,10 +57,10 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     } else {
         multiome::declared_plan(&args.multiome)?
     };
-    if let Some(p) = plan.as_ref() {
+    if let Some(p) = multiome_plan.as_ref() {
         multiome::log_plan(p, !args.multiome.is_empty());
     }
-    let is_multiome = plan.is_some();
+    let is_multiome = multiome_plan.is_some();
 
     // Multiome mixes gene rows (RNA) and locus rows (ATAC peaks) on one axis,
     // so canonicalize per-name via `Mixed` (genes → gene rule, `chrX:s-e` →
@@ -74,8 +80,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 
     // Under a plan the files are re-ordered so each sample group is contiguous
     // — the order `validate_multiome_groups` reads `group_sizes` against.
-    let data_files: &[Box<str>] = match plan.as_ref() {
-        Some(p) => &p.files,
+    let data_files: Vec<Box<str>> = match multiome_plan.as_ref() {
+        Some(p) => p.files.clone(),
         None => {
             anyhow::ensure!(
                 !args.data_files.is_empty(),
@@ -84,12 +90,13 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
                  `--multiome rna.zarr,atac.zarr [--multiome rna2.zarr,atac2.zarr ...]` \n\
                  when the feature axes overlap (spliced vs unspliced, say)."
             );
-            &args.data_files
+            args.data_files.clone()
         }
     };
-    let feature_suffix: Option<Vec<Box<str>>> = plan.as_ref().map(|p| p.modality.clone());
-    let barcode_suffix: Option<Vec<Option<Box<str>>>> =
-        plan.as_ref().and_then(ge::MultiomePlan::barcode_suffix);
+    let feature_suffix: Option<Vec<Box<str>>> = multiome_plan.as_ref().map(|p| p.modality.clone());
+    let barcode_suffix: Option<Vec<Option<Box<str>>>> = multiome_plan
+        .as_ref()
+        .and_then(ge::MultiomePlan::barcode_suffix);
 
     let effective_hvg =
         crate::hvg::resolve_multiome_with_hvg(is_multiome, data_files.len(), &args.hvg);
@@ -108,7 +115,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     );
 
     let mut unified = ge::load_unified_data(ge::LoadUnifiedArgs {
-        data_files: data_files.to_vec(),
+        data_files: data_files.clone(),
         batch_files: batch_files.map(<[Box<str>]>::to_vec),
         feature_kind: Some(feature_kind.clone()),
         preload: args.preload_data,
@@ -143,76 +150,15 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     // Guard barcode identity across groups, so Union loading never merges cells
     // from different samples. A detected layout already tags barcodes by group,
     // which makes this a no-op; a declared one relies on it.
-    if let Some(p) = plan.as_ref() {
+    if let Some(p) = multiome_plan.as_ref() {
         ge::validate_multiome_groups(&p.group_sizes, &unified.barcodes, &unified.cell_modality)?;
     }
-
-    /////////////////////////////
-    // Cell QC (output filter) //
-    /////////////////////////////
-    // The `--qc` near-empty floor + MAD-outlier call is an OUTPUT filter: every
-    // cell + edge still informs the joint embedding / feature dictionary, but
-    // QC-failed cells are dropped from the archetypal analysis and all per-cell
-    // outputs via a write-time `select_rows`. (The separate EB empty-droplet
-    // call below, when `--cell-null-fdr > 0`, instead masks empties out of the
-    // backend and re-fits.) Computed on the full-feature unified count backend,
-    // so n_genes is the per-cell detected-feature count across all modalities.
-    let qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = args.qc.to_config() {
-        if cfg.feature_min_cells > 0 {
-            log::warn!(
-                "--qc-feature-min-cells is ignored by bge (cell-only QC; the \
-                 dictionary keeps all features)"
-            );
-        }
-        // Carried pseudobulks are processed outputs, not cells: they must
-        // neither receive a QC verdict nor sit inside the MAD band statistics
-        // (a few hundred smooth averages drag the robust center and can
-        // guillotine every real cell as an "outlier" — measured 400 of 400).
-        let exempt: Option<Vec<bool>> = args.pb_reference.as_ref().map(|r| {
-            let n = unified.n_cells();
-            let n_real = n.saturating_sub(r.cell_counts.len());
-            (0..n).map(|c| c >= n_real).collect()
-        });
-        let report = data_beans::qc_lib::compute_qc_exempting(
-            unified.count_backend(),
-            &cfg,
-            args.block_size,
-            exempt.as_deref(),
-        )?;
-        let keep = report.emit_idx_unmasked();
-        info!(
-            "QC: {} / {} cells kept for output ({} near-empty, {} MAD-outlier dropped)",
-            keep.len(),
-            unified.n_cells(),
-            report.near_empty.iter().filter(|&&e| e).count(),
-            report.n_cells_dropped,
-        );
-        Some(keep)
-    } else {
-        None
-    };
-
-    // Carried pseudobulks train the model but are not cells; hold them out of
-    // every per-cell artifact (bge does no column masking, so the qc indices
-    // are already in original column order — the same space `exclude_carried`
-    // composes on).
-    let qc_keep_idx = crate::pb_reference::exclude_carried(
-        args.pb_reference.as_ref(),
-        unified.n_cells(),
-        qc_keep_idx,
-    );
 
     // HVG → projection weights (no longer subsets the feature axis).
     // Mirrors senna topic: HVG down-weights uninformative genes for the
     // random projection / pb sketching only; collapse + supergene
-    // coarsening + training read all genes. Caller passes the weights
-    // through `FitConfig.hvg_weights`.
-    // Full-axis HVG weights (backend-row indexed, identity-aligned to the
-    // current feature axis). Subset through `feature_to_backend_row` inside
-    // `build_config` so the same vector serves pass 1 (full) and the post-QC
-    // pass 2 (null features dropped). The feature network is rebuilt per pass
-    // (its graph is aligned to the live feature-name axis), so it lives in the
-    // closure rather than here.
+    // coarsening + training read all genes. The driver subsets this full-axis
+    // vector through `feature_to_backend_row` for the live feature axis.
     //
     // `--must-train-features` is a curated panel kept in the HVG-weighted set.
     let hvg_enabled = effective_hvg.selection_on();
@@ -230,458 +176,22 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         None
     };
 
-    // `--no-refine` is gbe-specific (the other subcommands always refine);
-    // otherwise the shared `--pb-refine-*` flags drive RefineParams.
-    let refine = if args.no_refine {
-        None
-    } else {
-        Some(args.collapse.pb_refine.to_params())
-    };
-
-    // Assemble a `FitConfig` for the CURRENT feature AND cell axes of `unified`,
-    // so the same builder serves pass 1 (full axis), the post-QC feature re-fit
-    // (null features dropped) and the cell-empty re-fit (empties dropped): HVG
-    // weights subset through `feature_to_backend_row`, the feature network
-    // reloads against the live feature names, and the cell-indexed bridge weights
-    // resolve against the live barcodes/cell axis. Everything else is
-    // axis-independent and cloned in.
-    let build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
-        let hvg_weights = hvg_full.as_ref().map(|w| {
-            unified
-                .feature_to_backend_row
-                .iter()
-                .map(|&i| w[i])
-                .collect::<Vec<f32>>()
-        });
-        Ok(ge::FitConfig {
-            embedding_dim: args.embedding_dim,
-            // Greedy batch correction against the carried reference, exactly
-            // as in the other families — see `MultilevelParams::anchor_batches`.
-            anchor_batches: args
-                .pb_reference
-                .is_some()
-                .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
-            bulk_batches: args.collapse.mixture_batch.clone(),
-            emit_finest_collapse: args.collapse.emits_pb_reference(),
-            num_levels: args.collapse.num_levels,
-            sort_dim: args.collapse.sort_dim,
-            knn_pb_samples: args.collapse.knn_cells,
-            num_opt_iter: args.collapse.iter_opt,
-            proj_dim: args.collapse.proj_dim,
-            hvg_weights,
-            refine: refine.clone(),
-            epochs: args.epochs,
-            batches_per_epoch: args.batches_per_epoch,
-            batch_size: args.batch_size.unwrap_or(1024),
-            // The composite (splice) trainer's own knob; the hier engine reads
-            // `hier_units_per_step` below instead. `--gpu-mem-fraction` was bge's
-            // knob for it and is gone; 0.6 is the value it always passed.
-            gpu_mem_fraction: args.batch_size.is_none().then_some(0.6),
-            // Composite-trainer-only; `--num-negatives` is gone, 4 is the value
-            // bge always passed.
-            num_negatives: 4,
-            learning_rate: args.learning_rate,
-            seed: args.seed,
-            device: args.device.to_device(args.device_no)?,
-            block_size: args.block_size,
-            // Composite-trainer-only; `--feature-embedding-l2` is gone, 0.0 (off)
-            // is the value bge always passed.
-            feature_embedding_l2: 0.0,
-            weight_decay: args.weight_decay,
-            // Composite-trainer-only; `--max-grad-norm` is gone, 1.0 is the value
-            // bge always passed.
-            max_grad_norm: 1.0,
-            // Multiome bridge up-weighting is gone; this was already a no-op at
-            // its default (`--bridge-weight 1.0`).
-            cell_weight_mult: None,
-            phase1_cells_per_pb: args.phase1_cells_per_pb,
-            hier_units_per_step: args.batch_size.unwrap_or(256),
-            hier_modules_per_unit: args.modules_per_unit,
-            // bge uses a free E_feat (no per-gene β-sharing factorization).
-            feat_factor: None,
-            // δ_g splice offset is gem-only (needs feat_factor); off for bge.
-            delta_l2: 0.0,
-            // Lineage-DAG is a gem-only (β-sharing) path; off for bge.
-            lineage_dag: false,
-            lineage_smooth: false,
-            lineage_mst: false,
-            joint_velocity: false,
-            // Composite-trainer-only; `--nce-objective` is gone, Softmax is the
-            // value bge always passed.
-            nce_objective: ge::loss::NceObjective::Softmax,
-            // Learned mixed-membership modules in front of ρ — structural on the hier
-            // engine (the module count is the only knob, `--gene-modules M`): on
-            // held-out cells they turned the gain over the training-marginal
-            // null from negative to zero, raised the per-cell rank agreement, and
-            // lost less under gene ablation.
-            // Under `senna update` the parent's module PARTITION (its membership,
-            // argmax per gene, unmatched genes initialised through the parent's
-            // modules) seeds phase 1; module vectors and per-gene residuals are
-            // re-learned.
-            gene_modules: match args.modules.resolve(Some(DEFAULT_GENE_MODULES))? {
-                Some(mut gm) => {
-                    gm.parent = parent_modules(args.init_from.as_deref(), &unified.feature_names)?;
-                    Some(gm)
-                }
-                None => None,
-            },
-        })
-    };
-
-    // Single-pass fit over the full feature axis (no post-hoc null-drop / refit).
-    let cfg = build_config(&unified)?;
-    let out = ge::fit(&mut unified, cfg)?;
-
-    // Carried pseudobulks out, same contract as every other family: the
-    // finest collapse level's evidence rates + per-column cell counts.
-    let pb_reference_suffix = match out.finest_collapse.as_ref() {
-        Some((finest, membership)) => crate::pb_reference::emit_if_requested(
-            args.collapse.emits_pb_reference(),
-            &args.out,
-            finest,
-            Some(std::slice::from_ref(membership)),
-            unified.count_backend().column_multiplicities(),
-            &unified.count_backend().row_names()?,
-            args.init_from.as_deref(),
-            args.pb_reference.as_ref(),
-        )?,
-        None => None,
-    };
-
-    // No per-batch cell QC: it was removed because the per-batch debris cut
-    // behaved incoherently across batches (near-identical depth distributions
-    // produced 0%-vs-44% drops, guillotining real cells). The upfront `--qc` floor
-    // is the only cell filter; bge fits on every cell that passes it.
-
-    // If training was interrupted (Ctrl+C), `fit()` already skipped the heavy phase-2
-    // per-cell projection, so the cell embedding is only partial. Skip the expensive
-    // post-processing too (Leiden clustering + SIMBA co-embed + ETM) — it would grind
-    // for minutes on an un-projected embedding — and write the raw partial outputs so
-    // the run exits promptly with whatever it has.
-    let interrupted = ge::stop_flag().load(std::sync::atomic::Ordering::Relaxed);
-    // ETM topic layout only on a complete, non-interrupted run.
-    let resolve_etm = !args.skip_etm && !interrupted;
-
-    if interrupted {
-        log::warn!(
-            "Interrupted — skipping co-embedding, clustering, and ETM; writing raw partial \
-             outputs (the cell embedding is un-projected). Re-run without interrupting for \
-             full results."
-        );
-        ge::save_outputs_named(
-            &out.model,
-            &ge::OutputContext {
-                feature_names: &unified.feature_names,
-                barcodes: &unified.barcodes,
-                cell_keep_idx: qc_keep_idx.as_deref(),
-            },
-            &args.out,
-            ge::EmbeddingFileNames::SENNA_EMBEDDING,
-        )?;
-    } else {
-        // The SIMBA-style co-embedding and the cluster-seeded ETM share ONE Leiden
-        // clustering of the QC-kept cell embedding: the co-embed uses its median
-        // cluster size as the temperature target, ETM uses the labels as topics —
-        // so the embedding is clustered a single time. The co-embed re-embeds every
-        // feature onto the cell manifold (gene = softmax-over-cells weighted average
-        // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet (the raw
-        // off-manifold ρ is not written). Cells are SIMBA's reference and are
-        // unchanged. Post-hoc only — training (pseudobulk efficiency, phase-2
-        // projection) is untouched.
-        let cpu = candle_core::Device::Cpu;
-        let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
-        let e_cell_cpu = match qc_keep_idx.as_deref() {
-            Some(keep) => {
-                let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
-                let idx_t = candle_core::Tensor::from_vec(idx, keep.len(), &cpu)?;
-                out.model.e_cell.to_device(&cpu)?.index_select(&idx_t, 0)?
-            }
-            None => out.model.e_cell.to_device(&cpu)?,
-        };
-        // Announce the post-training clustering + co-embed so the stretch after
-        // "finalizing outputs" doesn't read as a hang (co-embed itself shows a bar).
-        info!(
-            "Post-training: clustering {} cells + SIMBA co-embedding {} features...",
-            e_cell_cpu.dim(0)?,
-            e_feat_cpu.dim(0)?
-        );
-        let (cell_labels, target_eff) = ge::cell_clusters(&e_cell_cpu, args.num_topics)?;
-
-        // Every gene is trained (no held-out projection), so the co-embed runs
-        // directly on the trained ρ.
-        ge::write_feature_coembedding(
-            &args.out,
-            &e_cell_cpu,
-            &e_feat_cpu,
-            &unified.feature_names,
-            target_eff,
-        )?;
-
-        // Raw ρ, on BOTH paths. This is the model-axis loading that pairs with
-        // the cell embedding in the Poisson rate `exp(ρ_g·z_n + a_g + b_n)` —
-        // NOT interchangeable with the co-embed written just above, which is a
-        // LOSSY derived view of it (a convex combination of cell embeddings;
-        // ρ → co-embed is one-way). ρ used to survive only under `--skip-etm`,
-        // where it borrowed the `dictionary` slot that the ETM path claims for
-        // β, so a default run lost it entirely and rate-reconstruction consumers
-        // (e.g. `senna deconvolve`) had to demand that flag. Purely additive.
-        //
-        // Under `--skip-etm` this DOES duplicate `dictionary` (same bytes, two
-        // files). Kept deliberately: `dictionary`-as-ρ is what
-        // `masked-topic --freeze-feature-embedding` and `annotate` already read.
-        // The tidy end-state is to migrate those consumers onto `feature_loading`
-        // and drop the alias, which is a wider change than this one.
-        let rho_mat = Mat::from_tensor(&e_feat_cpu)?;
-        let rho_h_names = axis_id_names("h", rho_mat.ncols());
-        rho_mat.to_parquet_with_names(
-            &format!("{}.feature_loading.parquet", args.out),
-            (Some(&unified.feature_names), Some("gene")),
-            Some(&rho_h_names),
-        )?;
-
-        // Output layout: the H-space cell embedding Z ALWAYS goes to
-        // {out}.cell_embedding.parquet, on both paths. ETM resolved (default)
-        // additionally emits the topic-model tables (latent = log θ,
-        // dictionary = β); --skip-etm emits no latent at all and keeps
-        // dictionary = ρ. So `latent` means log θ, unconditionally, and
-        // downstream geometry reads cell_embedding via
-        // `RunOutputs::geometry_latent` without having to know which flags ran.
-        // The co-embedded feature_embedding is written above for both paths.
-        if resolve_etm {
-            resolve_etm_topics(
-                &out.model,
-                &unified.feature_names,
-                &unified.barcodes,
-                args,
-                qc_keep_idx.as_deref(),
-                &cell_labels,
-            )?;
-        } else {
-            ge::save_outputs_named(
-                &out.model,
-                &ge::OutputContext {
-                    feature_names: &unified.feature_names,
-                    barcodes: &unified.barcodes,
-                    cell_keep_idx: qc_keep_idx.as_deref(),
-                },
-                &args.out,
-                ge::EmbeddingFileNames::SENNA_EMBEDDING,
-            )?;
-        }
-        // The learned-module tables, on both paths; the composed ρ above already
-        // carries them for every reader that does not care.
-        ge::write_module_tables(&args.out, &out.model, &unified.feature_names)?;
-    }
-
-    let input: Vec<String> = data_files
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect();
-    let batch: Vec<String> = args
-        .batch_files
+    let run_multiome = multiome_plan
         .as_ref()
-        .map(|v| v.iter().map(std::string::ToString::to_string).collect())
-        .unwrap_or_default();
-    let has_modules = out.model.modules.is_some();
-    // The map phase 2 placed the cells with, so `predict` places a query by the
-    // same one. One self-contained file: the trunk plus its per-gene mean.
-    let cell_encoder_suffix = match out.cell_encoder.as_ref() {
-        Some(enc) => {
-            let suffix = "cell_encoder.safetensors";
-            let path = format!("{}.{suffix}", args.out);
-            enc.save(&path)?;
-            info!("Wrote the cell encoder to {path}");
-            Some(suffix)
-        }
-        None => None,
-    };
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        train_args: Some(crate::run_manifest::record_train_args(args)?),
+        .map(crate::multiome_layout::RunMultiome::from_plan);
+
+    driver::fit_embed_family(driver::EmbedPlan {
         kind: crate::run_manifest::RunKind::Bge,
-        prefix: &args.out,
-        data_input: &input,
-        data_batch: &batch,
-        data_input_null: &[],
-        // So `senna layout / plot / impute --from` can re-read these files the
-        // way training did, instead of stacking the modalities as extra cells.
-        data_multiome: plan
-            .as_ref()
-            .map(crate::multiome_layout::RunMultiome::from_plan),
-        // With ETM resolved the dictionary is β (gene × topic); otherwise it IS ρ.
-        //
-        // ρ does NOT go to feature_embedding.parquet — that file is always the SIMBA co-embed (see
-        // below, and `write_feature_coembedding` above). ρ lives on the model's own axis, not on
-        // the cell manifold, so putting it there would hand `annotate-by-projection` an
-        // off-manifold gene table and make its Euclidean nearest-centroid call ill-posed.
-        dictionary_suffix: Some("dictionary.parquet"),
-        has_model: false,
-        has_cell_proj: false,
-        pb_gene_suffix: None,
-        pb_reference_suffix,
-        pb_latent_suffix: None,
-        dictionary_empirical_suffix: None,
-        // The SIMBA co-embed is written as feature_embedding.parquet in BOTH
-        // the ETM and --skip-etm paths, so record it unconditionally (else a
-        // skip-etm run's annotate-by-projection falls back to the raw-ρ
-        // dictionary and ignores the co-embed file on disk).
-        feature_embedding_suffix: Some("feature_embedding.parquet"),
-        feature_loading_suffix: Some("feature_loading.parquet"),
-        // Learned gene modules, when the run trained them; the composed row still
-        // lives in `feature_loading`, so these are additive.
-        module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),
-        module_dictionary_suffix: has_modules.then_some(ge::transfer::MODULE_DICTIONARY_SUFFIX),
-        // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
-        softmax_dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
-        // Z always lands in cell_embedding.parquet — on BOTH the ETM and
-        // --skip-etm paths — so every geometry consumer finds the H-space
-        // embedding at one fixed name.
-        cell_embedding_suffix: Some("cell_embedding.parquet"),
-        cell_encoder_suffix,
-        default_colour_by: if resolve_etm { "topic" } else { "cluster" },
-        // `latent` is log θ, so it exists only when the ETM actually resolved.
-        has_latent: resolve_etm,
-        has_cell_to_pb: false,
-        has_pb_tree: false,
-    })?;
-
-    // The phase-1 pseudobulk embeddings, with each pseudobulk's batch: the
-    // geometry the dictionary was trained against. When the per-cell embedding
-    // separates by batch, this table says whether the separation was already
-    // there before phase 2.
-    write_pb_embeddings(&args.out, &out.pb_embeddings, &unified.batch_names)?;
-    if let Some(fold) = &out.batch_gene_fold {
-        write_batch_gene_fold(&args.out, fold, &unified.feature_names)?;
-    }
-
-    if resolve_etm {
-        info!(
-            "Done — outputs at {}.{{cell_embedding,latent,dictionary,feature_embedding,*_bias}}.parquet \
-             (cell_embedding = Z, latent = log θ)",
-            args.out
-        );
-    } else {
-        info!(
-            "Done — outputs at {}.{{cell_embedding,dictionary,feature_embedding,*_bias}}.parquet \
-             (cell_embedding = Z; no latent — topics were not resolved)",
-            args.out
-        );
-    }
-
-    Ok(())
-}
-
-/// The parent run's module tables for `senna update`'s warm start, matched to
-/// this fit's feature axis by exact name. `None` when there is no parent, or the
-/// parent trained no modules (the fit then warm-starts from its own k-means, as a
-/// fresh run would).
-fn parent_modules(
-    init_from: Option<&str>,
-    feature_names: &[Box<str>],
-) -> anyhow::Result<Option<ge::ParentModulesOwned>> {
-    let Some(prefix) = init_from else {
-        return Ok(None);
-    };
-    let parent = crate::bge::score::BgeEmbedding::open(prefix)?;
-    let rho = parent.rho_matrix();
-    let Some((pi, mu)) = parent.modules else {
-        info!(
-            "update: parent {prefix} trained no gene modules; warm-starting from this fit's own \
-             profiles"
-        );
-        return Ok(None);
-    };
-    // The same flexible matcher `predict` aligns a query with, so a parent whose
-    // names differ by case or suffix still matches.
-    let remap = crate::topic::eval::build_gene_remap_with(
-        &parent.gene_names,
-        feature_names,
-        &crate::topic::eval::QueryNameOpts::default(),
-    );
-    let n_matched = remap.new_to_train.iter().filter(|r| r.is_some()).count();
-    info!(
-        "update: carrying the parent's {}-module partition from {prefix}; {} of {} features \
-         match the parent",
-        mu.nrows(),
-        n_matched,
-        feature_names.len()
-    );
-    Ok(Some(ge::ParentModulesOwned {
-        rho,
-        pi,
-        mu,
-        row_to_parent: remap.new_to_train,
-        knobs: ge::transfer::AlignKnobs::default(),
-    }))
-}
-
-/// Module count `senna bge` trains unless told otherwise — the policy is this
-/// command's, so it lives here rather than in the shared flag group.
-const DEFAULT_GENE_MODULES: usize = 128;
-
-/// `{out}.batch_gene_fold.parquet`: the per-batch gene fold phase 2 divided each
-/// batch's cell counts by, as `log δ_gb`, `[features × batches]`.
-fn write_batch_gene_fold(
-    out: &str,
-    fold: &ge::fit::BatchGeneFold,
-    feature_names: &[Box<str>],
-) -> anyhow::Result<()> {
-    let table = Mat::from_row_slice(fold.n_batches(), fold.n_features, &fold.delta)
-        .map(f32::ln)
-        .transpose();
-    table.to_parquet_with_names(
-        &format!("{out}.batch_gene_fold.parquet"),
-        (Some(feature_names), Some("feature")),
-        Some(&fold.batch_names),
-    )?;
-    info!("Wrote {out}.batch_gene_fold.parquet");
-    Ok(())
-}
-
-/// `{out}.pb_embedding.parquet` (rows `l{level}:pb{i}`, columns `h0..`) and
-/// `{out}.pb_batch.parquet` (level and batch name per row), every level stacked.
-fn write_pb_embeddings(
-    out: &str,
-    levels: &[ge::fit::PbLevelEmbedding],
-    batch_names: &[Box<str>],
-) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_util::concatenate_vertical;
-    use matrix_util::parquet::{write_named_table, Column};
-    if levels.is_empty() {
-        return Ok(());
-    }
-    let h = levels[0].e_pb.ncols();
-    let table = concatenate_vertical(&levels.iter().map(|l| l.e_pb.clone()).collect::<Vec<_>>())?;
-    let n = table.nrows();
-    let mut rows: Vec<Box<str>> = Vec::with_capacity(n);
-    let mut level_col: Vec<i32> = Vec::with_capacity(n);
-    let mut batch_col: Vec<Box<str>> = Vec::with_capacity(n);
-    for (level, l) in levels.iter().enumerate() {
-        for i in 0..l.e_pb.nrows() {
-            rows.push(format!("l{level}:pb{i}").into_boxed_str());
-            level_col.push(level as i32);
-            batch_col.push(match l.batch[i] {
-                u32::MAX => Box::from(""),
-                b => batch_names[b as usize].clone(),
-            });
-        }
-    }
-    table.to_parquet_with_names(
-        &format!("{out}.pb_embedding.parquet"),
-        (Some(&rows), Some("pb")),
-        Some(&axis_id_names("h", h)),
-    )?;
-    write_named_table(
-        &format!("{out}.pb_batch.parquet"),
-        "pb",
-        &rows,
-        &[
-            (Box::from("level"), Column::I32(&level_col)),
-            (Box::from("batch"), Column::Str(&batch_col)),
-        ],
-    )?;
-    info!(
-        "Wrote {out}.pb_embedding.parquet / pb_batch.parquet ({n} pseudobulks over {} levels)",
-        levels.len()
-    );
-    Ok(())
+        knobs: args.knobs(),
+        unified,
+        data_files,
+        multiome: run_multiome,
+        hvg_weights: hvg_full,
+        tracks: None,
+        offset_l2: 0.0,
+        pb_reference: args.pb_reference.as_ref(),
+        init_from: args.init_from.as_deref(),
+        train_args: crate::run_manifest::record_train_args(args)?,
+        after_fit: None,
+    })
 }
