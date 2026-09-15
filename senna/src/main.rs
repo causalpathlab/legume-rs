@@ -490,40 +490,22 @@ enum Commands {
     #[command(
         name = "gem",
         aliases = ["gem-embedding"],
-        about = "GEM: Geodesic Embedding for RNA Motion in one cell space",
-        long_about = "Geodesic Embedding for RNA Motion: a joint cell-feature embedding.\n\
-                      Motion is the local velocity δ (the tangent);\n\
-                      the lineage is the geodesic path it traces.\n\
-                      Runs over the shared graph_embedding_util engine,\n\
-                      which is modality-agnostic. Fed gene counts (spliced + unspliced) today;\n\
-                      embeds any per-feature count.\n\
+        about = "GEM: joint gene-count embedding over the shared bge engine",
+        long_about = "Joint gene-count embedding, over the exact same graph_embedding_util\n\
+                      engine and driver `senna bge` runs: every feature row of the input\n\
+                      (rows = features, no modality split), the bilinear score\n\
+                      e_feat·e_cell + b_feat + b_cell, phase-1 multilevel-pseudobulk training,\n\
+                      phase-2 analytical per-cell projection.\n\
                       \n\
-                      Per-gene β-sharing:\n\
-                      each `{gene}/count/{spliced|unspliced}` row embeds as β_g.\n\
-                      A gene's spliced and unspliced tracks thus share one identity.\n\
-                      Two things are solved JOINTLY by default:\n\
-                      cell identity θ → `{out}.cell_embedding.parquet` (raw),\n\
-                      and the velocity increment δ → `{out}.velocity.parquet`.\n\
-                      so θ is powered by both splice tracks rather than the spliced one alone.\n\
-                      `--sequential-velocity` reverts to the older two-step fit:\n\
-                      θ from the spliced edges, then δ from the unspliced with θ held fixed,\n\
-                      which pins θ to the mature state for a cleaner δ readout.\n\
-                      The nascent state is just θ+δ; ‖δ‖ is speed.\n\
-                      Per-gene velocity is the in-model δ_g → `{out}.delta_feature_embedding.parquet`;\n\
-                      it is written whenever the input carries unspliced rows. `--delta-l2 0`,\n\
-                      the default, applies a mild ridge to keep it identified.\n\
-                      The per-gene identity β_g is `{out}.beta_feature_embedding.parquet`,\n\
-                      gene-keyed so a marker panel joins against it directly.\n\
+                      Rows follow `{gene}/count/{spliced|unspliced}` and match across files\n\
+                      by exact name, the row itself is the join key. gem is, for now, bge\n\
+                      run over every row of a gene-count matrix; a later task reintroduces\n\
+                      spliced/unspliced as explicit tracks on this same driver.\n\
                       \n\
-                      `{out}.velocity_increment.parquet` is a DIAGNOSTIC, not the velocity:\n\
-                      it is the raw per-cell Poisson increment δ_c,\n\
-                      which a shrinkage-toward-origin common mode dominates: δ_c ≈ −0.5·θ,\n\
-                      from fitting sparse unspliced counts absolutely.\n\
-                      Use `{out}.velocity.parquet` for the velocity.\n\
-                      \n\
-                      With `--lineage-dag` it also shapes the embedding along a pseudobulk lineage.\n\
-                      It then writes a per-cell pseudotime + fate backbone.\n\
-                      That backbone is a prior for `senna lineage`, not a replacement.",
+                      Writes the same output set `senna bge` does:\n\
+                      {out}.senna.json, {out}.{cell_embedding,dictionary,feature_embedding,\n\
+                      feature_loading,feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
+                      plus {out}.{latent,topic_embedding}.parquet from the resolved ETM.",
         after_long_help = "\
 	Example:\n\
   senna gem out/rep1_wt_genes.zarr.zip -o out/gem\n\n\

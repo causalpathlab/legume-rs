@@ -218,9 +218,10 @@ pub enum RunKind {
     Bge,
     Fne,
     ResolveEmbeddingSpace,
-    /// `senna gem` — the discriminative joint cell/gene embedding over
-    /// spliced + unspliced gene counts. Euclidean `Z` in `cell_embedding`, a
-    /// co-embedded gene table in `feature_embedding`, and a per-cell velocity.
+    /// `senna gem` — a joint cell/gene embedding over gene counts, run
+    /// through the same driver as [`RunKind::Bge`] (rows = features, no
+    /// modality split). Euclidean `Z` in `cell_embedding`, a co-embedded
+    /// gene table in `feature_embedding`.
     Gem,
     /// `senna simba` — SIMBA's cell × gene node embeddings from the binned
     /// bipartite expression graph. Euclidean `Z` in `cell_embedding`, the raw

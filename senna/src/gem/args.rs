@@ -1,6 +1,6 @@
 use clap::Args;
 
-use crate::embed_common::{ComputeDevice, NceObjectiveArg};
+use crate::embed_common::ComputeDevice;
 
 /// Model dimensions.
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -9,62 +9,9 @@ pub struct ModelArgs {
     #[arg(
         long,
         default_value_t = 128,
-        help = "Embedding dimension H (size of β_g and the cell embedding; default 128)"
+        help = "Embedding dimension H (size of the cell and feature embeddings; default 128)"
     )]
     pub embedding_dim: usize,
-
-    #[arg(
-        long = "delta-l2",
-        default_value_t = 0.0,
-        help = "L2 (ridge) weight on the per-gene splice offset δ_g. 0 = auto:\n\
-                a mild ridge when unspliced rows are present.",
-        long_help = "L2 (ridge) penalty on the per-gene splice offset δ_g.\n\
-                     When 0 (default) and the input carries unspliced rows,\n\
-                     gem auto-applies a mild ridge (L2=1.0),\n\
-                     so a δ_g dictionary is always written for `senna annotate-by-projection --track velocity`;\n\
-                     set an explicit value to override,\n\
-                     or 0 on a spliced-only input keeps δ off. When > 0,\n\
-                     unspliced rows embed as β_g + δ_g with a ridge-shrunk δ_g learned in phase 1:\n\
-                     It absorbs the dense static per-gene nascent structure,\n\
-                     the RNA-velocity γ. Cell identity, the spliced θ, therefore stays clean.\n\
-                     The phase-2 velocity increment δ then becomes γ-calibrated.\n\
-                     That increment is a raw Poisson-MAP shift with θ fixed.\n\
-                     Larger = more shrinkage (δ_g pulled toward 0). Try 0.01–1.0;\n\
-                     δ_g is written to `{out}.delta_feature_embedding.parquet`."
-    )]
-    pub delta_l2: f32,
-
-    #[arg(
-        long = "feature-embedding-l2",
-        default_value_t = 0.1,
-        help = "L2 penalty λ on the per-gene loading β (row-mean of ‖β_g‖²).",
-        long_help = "L2 penalty λ on the per-gene loading β ∈ ℝ^{G×H}.\n\
-                     It adds λ · mean_g ‖β_g‖² to the per-step phase-1 loss.\n\
-                     The norm is summed over the H latent dims.\n\
-                     The mean is taken over the G genes.\n\
-                     So λ stays scale-invariant across G, but is not diluted by H.\n\
-                     \n\
-                     This is β's only shrinkage. It replaced the retired feature gate's\n\
-                     effect prior, and its default has not been calibrated against that;\n\
-                     treat it as a placeholder until an A/B says otherwise.\n\
-                     δ_g has its own ridge, --delta-l2."
-    )]
-    pub feature_embedding_l2: f32,
-
-    #[arg(
-        long = "nce-objective",
-        default_value_t = NceObjectiveArg::Softmax,
-        value_enum,
-        help = "NCE objective for phase-1 training: softmax or logistic",
-        long_help = "Which objective phase-1 SGD trains the feature side with.\n\
-                     \n\
-                     `softmax` is the default: sampled-softmax, or InfoNCE.\n\
-                     The positive competes with its negatives in one distribution.\n\
-                     That separates cell types better on dense pseudobulk counts.\n\
-                     \n\
-                     `logistic` is the per-pair SGNS loss."
-    )]
-    pub nce_objective: NceObjectiveArg,
 }
 
 /// Pseudobulk collapse, phase-1 cell-axis mode, per-file sample identity, and
@@ -80,9 +27,9 @@ pub struct ModelArgs {
 /// is given or barcodes already carry an `@` tag.
 ///
 /// Feature-name canonicalization: gem rows are `{gene}/count/{spliced|unspliced}`
-/// and the per-gene β-sharing factorization depends on that full path, so we
-/// default to **exact** matching. The delim flag is exposed for input files that
-/// carry an `ENSG..._SYMBOL` prefix inside the `{gene}` slot.
+/// and the row IS the join key across files, so we default to **exact**
+/// matching. The delim flag is exposed for input files that carry an
+/// `ENSG..._SYMBOL` prefix inside the `{gene}` slot.
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "matrix_util::clap_defaults::clap_defaults")]
 pub struct CollapseArgs {
@@ -153,13 +100,13 @@ pub struct CollapseArgs {
                      \n\
                      Selects the top-N most variable GENES by NB dispersion trend.\n\
                      Spliced and unspliced are pooled, both tracks of a gene together,\n\
-                     so the β-sharing factorization stays aligned.\n\
+                     so a gene's tracks always carry the same projection weight.\n\
                      The rest get projection weight ZERO.\n\
                      \n\
                      WEIGHTS, DOES NOT DROP.\n\
                      Non-selected genes sit out the basis that the multilevel pseudobulk partition is built from.\n\
                      They stay on the feature axis regardless: still trained,\n\
-                     still present in the dictionary and in the δ_g velocity table.\n\
+                     still present in the dictionary.\n\
                      So the selection shapes WHERE the pseudobulks land.\n\
                      It does not decide which genes the model may use.\n\
                      \n\
@@ -191,7 +138,7 @@ pub struct CollapseArgs {
         long_help = "Force-include list. These genes are UNIONed into the `--n-hvg` selection,\n\
                      so they carry projection weight 1.0 even when their variance does not earn it.\n\
                      Both the spliced and unspliced rows of a named gene come along,\n\
-                     so the β-sharing factorization stays aligned.\n\
+                     so they always carry the same projection weight.\n\
                      \n\
                      NARROWER THAN THE NAME SUGGESTS,\n\
                      since `--n-hvg` started weighting rather than dropping.\n\
@@ -293,32 +240,12 @@ pub struct TrainArgs {
 
     #[arg(
         long,
-        help = "Positive edges per batch (unset: 1024, shrunk to fit GPU memory on CUDA)",
+        help = "Positive edges per batch (unset: auto, shrunk to fit free GPU memory on CUDA)",
         long_help = "Positive edges per SGD batch.\n\
-                     Unset, the default is 1024 on CPU.\n\
-                     On CUDA the size is chosen automatically:\n\
-                     a short probe measures the memory one step retains,\n\
-                     and shrinks the batch from 1024\n\
-                     when --gpu-mem-fraction of free device memory\n\
-                     cannot hold it (it never grows past 1024:\n\
-                     batch size is not fit-neutral).\n\
-                     Passing a value disables the probe and always wins."
+                     Unset, the default is 1024 on CPU; on CUDA it is chosen automatically\n\
+                     from the free device memory. Passing a value always wins."
     )]
     pub batch_size: Option<usize>,
-
-    #[arg(
-        long,
-        default_value_t = 0.6,
-        help = "Fraction of free GPU memory the training batch may target",
-        long_help = "Ceiling for the automatic batch sizing on CUDA.\n\
-                     The probe grows the batch\n\
-                     while one step's retained memory,\n\
-                     with half reserved for the backward pass,\n\
-                     fits this fraction of the device memory free at start.\n\
-                     Fractions outside 0.05 to 0.95 are clamped to that range.\n\
-                     Ignored on CPU and when --batch-size is set."
-    )]
-    pub gpu_mem_fraction: f32,
 
     #[arg(
         long,
@@ -331,90 +258,13 @@ pub struct TrainArgs {
     #[arg(
         long,
         default_value_t = 1e-2,
-        help = "AdamW decoupled weight decay (all phase-1 params). Default 1e-2.",
-        long_help = "AdamW decoupled weight decay,\n\
-                     applied uniformly to every phase-1 parameter: β_g, δ_g, per-axis heads,\n\
-                     biases. Post-update shrinkage `θ ← θ − lr·wd·θ`;\n\
-                     it does NOT enter the backward graph,\n\
-                     so unlike an explicit E_feat L2 it is compatible with β-sharing.\n\
-                     Mild by construction:\n\
-                     the per-step pull is far below the clipped adaptive step,\n\
-                     so it sets an equilibrium scale rather than decaying params away.\n\
-                     0.0 = off (plain Adam)."
+        help = "Weight decay: a per-row shrink 1 − lr·wd applied to every row a step touches.",
+        long_help = "Weight decay: a per-row shrink 1 − lr·wd is applied to every row a phase-1\n\
+                     step touches, right before that row's Adagrad update.\n\
+                     Per-step post-update shrinkage; doesn't enter the backward graph.\n\
+                     Default 1e-2; 0.0 = off."
     )]
     pub weight_decay: f64,
-
-    #[arg(
-        long = "max-grad-norm",
-        default_value_t = 1.0,
-        help = "Global-norm gradient clip for phase-1 AdamW (0 = off). When > 0,\n\
-                each step's gradients are scaled down if their global L2 norm exceeds this,\n\
-                bounding embedding inflation on loss spikes."
-    )]
-    pub max_grad_norm: f32,
-
-    #[arg(
-        long = "lineage-dag",
-        default_value_t = false,
-        help = "Inject developmental structure at pseudobulk scale (experimental; default off).",
-        long_help = "Shape the embedding along a pseudobulk lineage. When set,\n\
-                     gem reads the pb-level velocity (identity θ_pb + velocity δ_pb per pseudobulk per collapse level),\n\
-                     orients a fixed velocity-KNN lineage over the pseudobulks,\n\
-                     and runs a SECOND phase-1 pass with a velocity-drift SEM residual,\n\
-                     so the shared feature dictionary picks up that lineage geometry —\n\
-                     then lifts a per-cell pseudotime + fate (`{out}.dag_pseudotime.parquet` / `{out}.dag_fate.parquet`).\n\
-                     Off by default —\n\
-                     the per-cell embedding is then byte-identical to a plain run;\n\
-                     turning it ON changes the embedding (the second pass).\n\
-                     Only meaningful with spliced+unspliced input (β-sharing)."
-    )]
-    pub lineage_dag: bool,
-
-    #[arg(
-        long = "lineage-smooth",
-        default_value_t = false,
-        help = "Lineage-DAG: smooth the pb velocity readout δ_pb (opt-in).",
-        long_help = "Smooth the pb velocity readout δ_pb over θ-space KNN neighbours before it orients the lineage graph,\n\
-                     stabilizing sign(δ_pb).\n\
-                     A wash on clean data (no noise to remove, and it can blur branch-point velocity),\n\
-                     so it is off by default —\n\
-                     the payoff is on noisy real spliced/unspliced ratios.\n\
-                     Ignored unless `--lineage-dag` is set."
-    )]
-    pub lineage_smooth: bool,
-
-    #[arg(
-        long = "dense-dag",
-        default_value_t = false,
-        help = "Lineage-DAG:\n\
-                use the dense velocity-KNN pb graph instead of the default MST tree (opt-out).",
-        long_help = "Within `--lineage-dag`,\n\
-                     build the pb structure as the dense velocity-KNN graph,\n\
-                     each node → its velocity-forward θ-neighbours,\n\
-                     instead of the DEFAULT minimum spanning tree oriented into a DAG.\n\
-                     The MST is a sparse single-tree lineage, n−1 edges per level,\n\
-                     that gives a better-conditioned embedding: measured,\n\
-                     PC1 lands further from the ‖θ‖ norm axis;\n\
-                     the dense graph keeps more branch edges for the fate readout.\n\
-                     Ignored unless `--lineage-dag` is set."
-    )]
-    pub dense_dag: bool,
-
-    #[arg(
-        long = "sequential-velocity",
-        default_value_t = false,
-        help = "Phase 2: fit identity θ then velocity δ sequentially,\n\
-                not jointly (opt-out).",
-        long_help = "Revert to the SEQUENTIAL phase-2 velocity fit:\n\
-                     identity θ from the spliced edges,\n\
-                     then the velocity increment δ from the unspliced edges with θ held fixed.\n\
-                     The DEFAULT is the JOINT solve — θ and δ estimated together,\n\
-                     θ pulled by both the spliced and unspliced tracks —\n\
-                     which gives a better-powered θ embedding (measured: PC1 further from the ‖θ‖ norm axis).\n\
-                     Use this to pin θ to the mature/spliced state for a cleaner δ velocity readout.\n\
-                     Only meaningful on spliced+unspliced input (β-sharing)."
-    )]
-    pub sequential_velocity: bool,
 }
 
 /// Runtime knobs: data preload, RNG seed, compute device, threads.
@@ -461,11 +311,10 @@ pub struct RuntimeArgs {
 
 /// CLI arguments for `senna gem` (alias `gem-embedding`).
 ///
-/// Joint embedding of gene counts (spliced + unspliced) into one cell/gene
-/// space over the shared `graph_embedding_util` engine. Each row
-/// `{gene}/count/{spliced|unspliced}` embeds as `β_g` (β-sharing); cell identity
-/// is the spliced projection θ and the splice contrast is a velocity δ on the
-/// cell axis (`{out}.velocity.parquet`).
+/// Joint embedding of gene counts over the shared `graph_embedding_util`
+/// engine: the same driver `senna bge` runs, over every feature row of the
+/// input (rows = features, no modality split). Rows follow
+/// `{gene}/count/{spliced|unspliced}` and match across files by exact name.
 ///
 /// Flag conventions mirror `senna bge` where applicable (`-i / --epochs`,
 /// `-b / --batch-files`, `--learning-rate` with `--lr` alias,
@@ -519,7 +368,7 @@ pub struct GemArgs {
         help = "Output prefix",
         long_help = "Output file prefix.\n\
                      \n\
-                     NOTE the per-cell tables (cell_embedding, velocity, ...) may contain FEWER ROWS than the input:\n\
+                     NOTE the per-cell tables (cell_embedding, ...) may contain FEWER ROWS than the input:\n\
                      cell QC drops failing cells from the OUTPUTS, never from the fit —\n\
                      every cell still informs the embedding and the feature dictionary.\n\
                      Join downstream tables by the cell/barcode column, never by row position.\n\
