@@ -1,4 +1,4 @@
-use super::{assign_tracks, contrast_channels, encoder_suffix};
+use super::{assign_tracks, contrast_channels, encoder_suffix_for};
 
 fn names(rows: &[&str]) -> Vec<Box<str>> {
     rows.iter().map(|&s| s.into()).collect()
@@ -136,15 +136,12 @@ fn more_than_ten_offending_rows_are_capped_in_the_message() {
 
 #[test]
 fn encoder_suffix_names_track_zero_bare_and_others_namespaced() {
-    let axis = names(&[
-        "GENE1/count/spliced",
-        "GENE1/m6a/methylated",
-        "GENE1/m6a/unmethylated",
-    ]);
-    let plan = assign_tracks(&axis).expect("assign_tracks");
-    assert_eq!(encoder_suffix(&plan.tracks[0]), "cell_encoder.safetensors");
     assert_eq!(
-        encoder_suffix(&plan.tracks[1]),
+        encoder_suffix_for(0, "count/spliced"),
+        "cell_encoder.safetensors"
+    );
+    assert_eq!(
+        encoder_suffix_for(1, "m6a/methylated"),
         "cell_encoder.m6a.methylated.safetensors"
     );
 }

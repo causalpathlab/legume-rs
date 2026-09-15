@@ -24,18 +24,15 @@ use matrix_util::common_io::basename;
 use crate::gem::sample_id::file_sample_id;
 use crate::gem::tracks::{assign_tracks, TrackPlan};
 
-/// One resolved gem input: every file to load, its matched sample id, and
-/// (for a `--modality` file) which modality it carries. `None` in
-/// `modality_of_file` marks a gene file.
+/// One resolved gem input: every file to load, and its matched sample id.
+/// The load itself doesn't need to know which file carries which modality —
+/// `Union` alignment merges them all the same way, and once loaded, the
+/// modality of a ROW comes from [`crate::gem::tracks::assign_tracks`] reading
+/// the row grammar, not from which file it arrived in.
 #[derive(Debug)]
 pub(crate) struct GemInputs {
     pub files: Vec<Box<str>>,
     pub sample_ids: Vec<Box<str>>,
-    /// Not yet read by `load_gem_data` (the load itself doesn't need to know
-    /// which file is which — `Union` alignment merges them all the same
-    /// way); carried for a later task's per-modality bookkeeping.
-    #[allow(dead_code)]
-    pub modality_of_file: Vec<Option<Box<str>>>,
 }
 
 /// Classify and sample-id-match every input file.
@@ -66,7 +63,6 @@ pub(crate) fn resolve_inputs(
 
     let mut files: Vec<Box<str>> = Vec::with_capacity(all_files.len());
     let mut sample_ids: Vec<Box<str>> = Vec::with_capacity(all_files.len());
-    let mut modality_of_file: Vec<Option<Box<str>>> = Vec::with_capacity(all_files.len());
 
     let mut gene_sample_ids: BTreeSet<Box<str>> = BTreeSet::new();
     // (file, sample id) for every modality file, checked against
@@ -93,7 +89,6 @@ pub(crate) fn resolve_inputs(
             gene_sample_ids.insert(sid.clone());
             files.push(ax.file.clone());
             sample_ids.push(sid);
-            modality_of_file.push(None);
         } else {
             anyhow::ensure!(
                 non_count.len() == 1,
@@ -101,13 +96,11 @@ pub(crate) fn resolve_inputs(
                 ax.file,
                 mods
             );
-            let modality: Box<str> = non_count[0].into();
-            let default_suffix = format!("_{modality}");
+            let default_suffix = format!("_{}", non_count[0]);
             let sid = sample_id_for(&ax.file, strip, &default_suffix)?;
             modality_entries.push((ax.file.clone(), sid.clone()));
             files.push(ax.file.clone());
             sample_ids.push(sid);
-            modality_of_file.push(Some(modality));
         }
     }
 
@@ -124,11 +117,7 @@ pub(crate) fn resolve_inputs(
         gene_sample_ids
     );
 
-    Ok(GemInputs {
-        files,
-        sample_ids,
-        modality_of_file,
-    })
+    Ok(GemInputs { files, sample_ids })
 }
 
 /// Distinct modalities among a file's rows (unparseable rows are skipped
