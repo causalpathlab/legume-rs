@@ -80,6 +80,22 @@ impl Network {
         }
     }
 
+    /// Every node at once, with `weight` and room for `degree` neighbours, so
+    /// the edges that follow never grow an adjacency list.
+    #[must_use]
+    pub fn with_nodes(node_weights: &[f32], degrees: &[usize]) -> Network {
+        assert_eq!(
+            node_weights.len(),
+            degrees.len(),
+            "one degree per node weight"
+        );
+        Network {
+            adj: degrees.iter().map(|&d| Vec::with_capacity(d)).collect(),
+            node_weights: node_weights.to_vec(),
+            edge_count: 0,
+        }
+    }
+
     /// Append a node with `weight`. Returns its node id.
     pub fn add_node(&mut self, weight: f32) -> usize {
         let id = self.node_weights.len();

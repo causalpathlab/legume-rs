@@ -26,7 +26,7 @@ fn rows_dp() -> Mat {
 }
 
 fn level() -> DenseMaskedLevel {
-    DenseMaskedLevel::from_mats(&rows_dp(), None, &rows_dp(), &vec![1.0f32; D], &dev()).unwrap()
+    DenseMaskedLevel::from_mats(&rows_dp(), None, &rows_dp(), &[1.0f32; D], &dev()).unwrap()
 }
 
 fn draw(frac: f64) -> MaskedDraw {
@@ -327,10 +327,7 @@ fn an_admissible_rate_hides_the_rounded_fraction_and_no_more() {
         let vis: Vec<Vec<f32>> = mb.visible_nd.to_vec2().unwrap();
         for v in &vis {
             assert_eq!(v.iter().filter(|&&x| x == 0.0).count(), want);
-            assert!(
-                v.iter().any(|&x| x == 1.0),
-                "rate {frac} left nothing visible"
-            );
+            assert!(v.contains(&1.0), "rate {frac} left nothing visible");
         }
     }
 }

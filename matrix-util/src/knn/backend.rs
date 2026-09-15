@@ -12,7 +12,7 @@ use std::fmt::{Debug, Display};
 /// and therefore every downstream k-NN graph — bit-for-bit reproducible. This is
 /// the property `hnsw_rs` could not provide and the root fix for the annotate
 /// `--seed` non-reproducibility.
-pub(super) const KNN_SEED: u64 = 20_240_517;
+pub(crate) const KNN_SEED: u64 = 20_240_517;
 
 /// HNSW build-time beam width. Higher = better graph quality at more build cost.
 pub(super) const EF_CONSTRUCTION: usize = 200;
@@ -30,7 +30,7 @@ pub(super) const EF_SEARCH: usize = 128;
 
 /// Below this many points, use the exact brute-force path: recall = 1.0,
 /// deterministic, and cheaper than an HNSW traversal at small `n`.
-pub(super) const EXACT_THRESHOLD: usize = 8_192;
+pub(crate) const EXACT_THRESHOLD: usize = 8_192;
 
 /// Search backend behind a [`ColumnDict`].
 pub(super) enum Backend {

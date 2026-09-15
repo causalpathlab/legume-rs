@@ -9,8 +9,8 @@
 use crate::link_community::profiles::EdgeClustering;
 use clap::{Args, ValueEnum};
 
-/// Clusterer for the per-pair latent. `kmeans` fixes the count;
-/// `leiden` discovers it from the graph.
+/// Clusterer for the per-pair latent. `kmeans` (spherical, seeded) fixes the
+/// count; `leiden` discovers it from the graph.
 ///
 /// No `Display` impl: clap renders `default_value_t` for a `value_enum` field
 /// through `ValueEnum::to_possible_value`, so a hand-written one would be a
@@ -38,6 +38,8 @@ pub struct EdgeClusterArgs {
                      the resolution is steered toward it, not fixed at it.\n\
                      \n\
                      kmeans instead fixes the community count at --n-edge-clusters.\n\
+                     It is spherical k-means on the L2-normalized pair latent,\n\
+                     seeded by --seed, so the cut is reproducible.\n\
                      Pick it when you need a specific K, or a run comparable to an older one.\n\
                      Nothing else about the run changes:\n\
                      both consume the same pair latent,\n\
@@ -84,15 +86,17 @@ pub struct EdgeClusterArgs {
 }
 
 impl EdgeClusterArgs {
-    /// Resolve to the algorithm-side enum. An unset `--n-edge-clusters` stays
-    /// `None` in both arms: k-means falls back to the latent width, which
-    /// [`EdgeClustering::cluster`] reads off the matrix it is handed, and for
-    /// Leiden an absent target is exactly what lets the graph decide.
+    /// Resolve to the algorithm-side enum with the run's seed. An unset
+    /// `--n-edge-clusters` stays `None` in both arms: k-means falls back to
+    /// the latent width, which [`EdgeClustering::cluster`] reads off the
+    /// matrix it is handed, and for Leiden an absent target is exactly what
+    /// lets the graph decide.
     pub fn resolve(&self, seed: u64) -> EdgeClustering {
         match self.edge_cluster_method {
             EdgeClusterMethod::Kmeans => EdgeClustering::Kmeans {
                 n_clusters: self.n_edge_clusters,
                 max_iter: self.kmeans_max_iter,
+                seed,
             },
             EdgeClusterMethod::Leiden => EdgeClustering::Leiden {
                 knn: self.leiden_knn,

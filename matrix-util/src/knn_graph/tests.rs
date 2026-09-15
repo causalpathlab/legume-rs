@@ -439,3 +439,120 @@ fn ranking_handles_degenerate_lengths() {
         "no divide by n-1 == 0"
     );
 }
+
+//////////////////////////////////////////////////
+// Neighbour lists → edges, and the search arms //
+//////////////////////////////////////////////////
+
+/// The edge filter as it was written over a keyed map of directed triplets:
+/// the oracle the flat sort-and-fold must reproduce.
+fn keyed_edges(
+    neighbours: &[(Vec<usize>, Vec<f32>)],
+    reciprocal: bool,
+) -> Vec<((usize, usize), f32)> {
+    let mut triplets = std::collections::HashMap::new();
+    for (i, (nb, ds)) in neighbours.iter().enumerate() {
+        for (&j, &d) in nb.iter().zip(ds) {
+            triplets.insert((i, j), d);
+        }
+    }
+    let mut edges: Vec<((usize, usize), f32)> = triplets
+        .iter()
+        .filter_map(|(&(i, j), &d)| {
+            if reciprocal {
+                (i < j && triplets.contains_key(&(j, i))).then_some(((i, j), d))
+            } else if i < j {
+                let d_ji = triplets.get(&(j, i)).copied().unwrap_or(d);
+                Some(((i, j), d.min(d_ji)))
+            } else if !triplets.contains_key(&(j, i)) {
+                Some(((j, i), d))
+            } else {
+                None
+            }
+        })
+        .collect();
+    edges.sort_by_key(|&(ij, _)| ij);
+    edges
+}
+
+/// Hand-built directed lists: reversed duplicates with different distances,
+/// one-sided pairs, and a pair present in both directions with equal distance.
+fn directed_lists() -> Vec<(Vec<usize>, Vec<f32>)> {
+    vec![
+        (vec![1, 2, 4], vec![0.5, 1.5, 3.0]), // 0→1, 0→2, 0→4
+        (vec![0, 3], vec![0.6, 2.0]),         // 1→0 (asymmetric), 1→3
+        (vec![0, 3], vec![1.5, 0.2]),         // 2→0 (symmetric), 2→3
+        (vec![2], vec![0.2]),                 // 3→2 only
+        (vec![3], vec![9.0]),                 // 4→3 one-sided, 4→0 missing
+    ]
+}
+
+#[test]
+fn flat_fold_reproduces_the_keyed_filter_in_both_modes() {
+    let lists = directed_lists();
+    for reciprocal in [false, true] {
+        let got = edges_from_neighbours(&lists, reciprocal);
+        let want = keyed_edges(&lists, reciprocal);
+        assert_eq!(got, want, "reciprocal={reciprocal}");
+    }
+    // Spot checks of what the oracle encodes.
+    let union = edges_from_neighbours(&lists, false);
+    assert!(union.contains(&((0, 1), 0.5)), "min of the two directions");
+    assert!(
+        union.contains(&((3, 4), 9.0)),
+        "one-sided pair kept, canonical order"
+    );
+    let recip = edges_from_neighbours(&lists, true);
+    assert_eq!(recip, vec![((0, 1), 0.5), ((0, 2), 1.5), ((2, 3), 0.2)]);
+}
+
+#[test]
+fn direct_csc_matches_the_coo_route() {
+    let edges = vec![(0, 1), (0, 3), (1, 2), (1, 5), (2, 5), (3, 4)];
+    let distances = vec![0.1, 0.3, 0.2, 0.6, 0.5, 0.4];
+    let got = symmetric_adjacency(6, &edges, &distances);
+    let mut coo = nalgebra_sparse::CooMatrix::new(6, 6);
+    for (&(i, j), &v) in edges.iter().zip(&distances) {
+        coo.push(i, j, v);
+        coo.push(j, i, v);
+    }
+    let want = CscMatrix::from(&coo);
+    assert_eq!(got.col_offsets(), want.col_offsets());
+    assert_eq!(got.row_indices(), want.row_indices());
+    assert_eq!(got.values(), want.values());
+    // A node with no edges keeps an empty column.
+    let got = symmetric_adjacency(3, &[(0, 2)], &[1.0]);
+    assert_eq!(got.col_offsets(), &[0, 1, 1, 2]);
+}
+
+#[test]
+fn the_all_pairs_arm_equals_brute_force_above_the_exact_threshold() {
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
+    let n = EXACT_THRESHOLD + 100;
+    let mut rng = StdRng::seed_from_u64(9);
+    let data = DMatrix::from_fn(n, 4, |_, _| rng.random_range(-1.0f32..1.0));
+    let graph = KnnGraph::from_rows(
+        &data,
+        KnnGraphArgs {
+            knn: 5,
+            block_size: 1000,
+            reciprocal: false,
+        },
+    )
+    .unwrap();
+    // The same graph from a brute-force scan.
+    let points: Vec<Vec<f32>> = (0..n)
+        .map(|i| data.row(i).iter().copied().collect())
+        .collect();
+    let lists: Vec<(Vec<usize>, Vec<f32>)> = (0..n)
+        .into_par_iter()
+        .map(|q| crate::knn::tests::brute_others(&points, q, 5))
+        .collect();
+    let want = edges_from_neighbours(&lists, false);
+    assert_eq!(graph.edges.len(), want.len());
+    for ((e, d), w) in graph.edges.iter().zip(&graph.distances).zip(&want) {
+        assert_eq!(*e, w.0);
+        assert!((d - w.1).abs() < 1e-5);
+    }
+}
