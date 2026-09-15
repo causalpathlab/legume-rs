@@ -220,9 +220,10 @@ where
     );
 
     // Gate on the space of the table just READ, not on what `latent.parquet`
-    // would hold. The two differ: a gem-encoder run has a log-simplex latent AND
-    // a Euclidean `cell_embedding`, and `geometry_latent` returns the latter, so
-    // keying this on `latent_is_log_simplex` exponentiated a Euclidean embedding.
+    // would hold. A kind's `cell_space()` and its `latent_is_log_simplex()` are
+    // separate declarations that do not have to agree, so keying this on
+    // `latent_is_log_simplex` risks exponentiating a Euclidean embedding that
+    // `geometry_latent` handed back instead of the simplex.
     //
     // This used to sniff `max <= 0.0` instead, which mis-handles masked-vae (raw
     // Gaussian `z`, usually max > 0 so it skipped by luck) and is undefined on an

@@ -1,8 +1,9 @@
 //! Entry point for `senna lineage` — velocity-informed lineage inference over a
 //! `senna gem` embedding.
 //!
-//! Reads a θ/δ pair by prefix — `cell_embedding` + `velocity` on an embedding run,
-//! `latent` + `velocity_factor` on a topic one (see [`super::input`]) — fits
+//! Reads θ (and, on an embedding run, δ) by prefix — `cell_embedding` +
+//! `velocity` on an embedding run, `latent` alone (geometry-only) on a topic
+//! one (see [`super::input`]) — fits
 //! **K k-means centroids** on θ and an **MST**
 //! over them ([`matrix_util::principal_graph::mst_from_sqdist`]), tests the velocity
 //! **direction** of every candidate edge ([`crate::lineage::orient`]), and turns that
@@ -76,6 +77,17 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     } = loaded;
     let n = theta_native.nrows();
     anyhow::ensure!(n >= 2, "need ≥ 2 cells, got {n}");
+
+    if velocity.is_none()
+        && crate::run_manifest::load_for(prefix)
+            .ok()
+            .is_some_and(|(m, _)| m.kind == crate::run_manifest::RunKind::Gem)
+    {
+        info!(
+            "gem runs carry no velocity; edges are geometry-only, root with \
+             --root-node/--root-cell/--root-type"
+        );
+    }
 
     // The fit (k-means → MST → curves) and the layout both run on the transformed θ.
     // `theta_native` survives alongside it for the velocity field: arrows are projected
@@ -160,25 +172,11 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // Marker node calls (before rooting, so `--root-type` can ground a root hint). Also
     // writes `{out}.lineage_annot.*`.
     //
-    // The fit above is kind-agnostic — `cell_embedding.parquet` and `velocity.parquet`
-    // are an H-space pair from either producer, so k-means → MST → curves means the same
-    // thing on both. The MARKER call is not: it is the co-embedded nearest-centroid
-    // statistic, which is what `senna annotate-by-projection --mode` exists to arbitrate, and on a topic
-    // model `annotate-by-enrichment` is the right statistic. Say so rather than let the two commands
-    // answer the same question differently without comment.
-    let run_kind = crate::run_manifest::load_for(prefix)
-        .ok()
-        .map(|(m, _)| m.kind);
-    if args.markers.is_some() && run_kind == Some(crate::run_manifest::RunKind::GemEncoder) {
-        warn!(
-            "--markers on a gem-encoder run ({}): the node calls below are the co-embedded \
-             nearest-centroid statistic, which `senna annotate-by-projection` no longer defaults to for \
-             this kind of run. The trajectory itself is unaffected — only the names on its \
-             nodes. For the topic-native cell call, run `senna annotate-by-projection --mode enrichment` \
-             on the same prefix and read the two together.",
-            crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix))
-        );
-    }
+    // The fit above is kind-agnostic — the θ/δ pair means the same thing to
+    // k-means → MST → curves regardless of which run produced it. The MARKER call
+    // is not: it is the co-embedded nearest-centroid statistic, which is what
+    // `senna annotate-by-projection --mode` exists to arbitrate, and on a topic
+    // model `annotate-by-enrichment` is the right statistic instead.
     let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
         (Some(markers), Some(raw)) => Some(compute_node_calls(&AnnotateTrajArgs {
             prefix,
@@ -208,15 +206,11 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     ////////////////////////////////////////////////////////////////
     // max-weight branching: cut + rewire + root into a forest     //
     ////////////////////////////////////////////////////////////////
-    // Optional root hint (user / marker type / gem source) pins one node as a root.
+    // Optional root hint (user or marker type) pins one node as a root.
     let type_root = args
         .root_type
         .as_deref()
         .and_then(|t| node_calls.as_ref().and_then(|c| root_type_node(c, t)));
-    let gem_root = args
-        .root_from_gem
-        .then(|| gem_root_node(prefix, &cell_names, &labels, k))
-        .flatten();
     let root_hint = resolve_root_hint(
         args.root_node,
         args.root_cell.as_deref(),
@@ -224,7 +218,6 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
         &labels,
         k,
         type_root,
-        gem_root,
     )?;
 
     let (arcs, root_affinity) = assemble_arcs(&dirs, k, args.root_affinity, root_hint);

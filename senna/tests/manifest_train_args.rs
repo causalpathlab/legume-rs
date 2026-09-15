@@ -6,7 +6,9 @@
 //! be updated the first time anything touched its manifest — `senna layout`,
 //! `senna clustering`, `senna plot`. Nothing else would look wrong.
 
-use senna::run_manifest::{record_train_args, RunKind, RunManifest, TrainArgsRecord};
+use senna::run_manifest::{
+    record_train_args, RunKind, RunManifest, TrackEncoderSlot, TrainArgsRecord,
+};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -51,6 +53,78 @@ fn train_args_survives_an_unrelated_mutation() {
         .train_args_as("run-b")
         .expect("fit configuration must survive a downstream command touching the manifest");
     assert_eq!(back, fake());
+}
+
+/// Task 5c's three new manifest slots (the gem contrast tables and
+/// per-track cell encoders): write with real values, save, reload, and get
+/// the same values back.
+#[test]
+fn track_encoder_and_contrast_slots_round_trip() {
+    let (_dir, path) = scratch();
+    let mut m = RunManifest::new(RunKind::Gem, "run-e");
+    m.outputs.feature_contrast = Some("run-e.feature_contrast.parquet".into());
+    m.outputs.feature_contrast_bias = Some("run-e.feature_contrast_bias.parquet".into());
+    m.outputs.track_encoders = vec![
+        TrackEncoderSlot {
+            track: "count/unspliced".into(),
+            path: "run-e.cell_encoder.count.unspliced.safetensors".into(),
+        },
+        TrackEncoderSlot {
+            track: "m6a/methylated".into(),
+            path: "run-e.cell_encoder.m6a.methylated.safetensors".into(),
+        },
+    ];
+    m.save(&path).expect("save");
+
+    let (back, _) = RunManifest::load(&path).expect("load");
+    assert_eq!(
+        back.outputs.feature_contrast.as_deref(),
+        Some("run-e.feature_contrast.parquet")
+    );
+    assert_eq!(
+        back.outputs.feature_contrast_bias.as_deref(),
+        Some("run-e.feature_contrast_bias.parquet")
+    );
+    assert_eq!(
+        back.outputs.track_encoders,
+        vec![
+            TrackEncoderSlot {
+                track: "count/unspliced".into(),
+                path: "run-e.cell_encoder.count.unspliced.safetensors".into(),
+            },
+            TrackEncoderSlot {
+                track: "m6a/methylated".into(),
+                path: "run-e.cell_encoder.m6a.methylated.safetensors".into(),
+            },
+        ]
+    );
+}
+
+/// A manifest saved before these three slots existed must still load, with
+/// them at their empty defaults rather than an error. The fixture carries a
+/// non-empty `outputs` object (the realistic shape of an old bge manifest)
+/// so this exercises each NEW field's own `#[serde(default)]`, not just the
+/// whole-section fallback a totally absent `outputs` key would take.
+#[test]
+fn manifest_without_track_encoder_slots_still_loads() {
+    let (_dir, path) = scratch();
+    std::fs::write(
+        &path,
+        r#"{"version":1,"kind":"bge","prefix":"old","data":{"input":["a.zarr"]},
+           "outputs":{"cell_embedding":"old.cell_embedding.parquet",
+                      "feature_loading":"old.feature_loading.parquet"}}"#,
+    )
+    .expect("write legacy manifest");
+
+    let (m, _) = RunManifest::load(&path).expect("a pre-track-encoder manifest must still load");
+    assert_eq!(
+        m.outputs.cell_embedding.as_deref(),
+        Some("old.cell_embedding.parquet"),
+        "an already-present output slot must still survive"
+    );
+    assert!(m.outputs.feature_contrast.is_none());
+    assert!(m.outputs.feature_contrast_bias.is_none());
+    assert!(m.outputs.track_encoders.is_empty());
 }
 
 /// Manifests written before `train_args` existed must still load.

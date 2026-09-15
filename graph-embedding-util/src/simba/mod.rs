@@ -6,7 +6,7 @@
 //! trained as free embeddings with PBG's softmax loss, batch + uniform
 //! negatives on both sides, row-wise Adagrad and stochastic weight decay.
 //!
-//! Self-contained on purpose: this module never touches the composite trainer
+//! Self-contained on purpose: this module never touches the main trainer
 //! (`fit`, `JointEmbedModel`, pseudobulks, gene modules). It borrows only
 //! [`crate::loss::softmax_nce`], the progress bar and the stop flag, so it can
 //! serve as an independent baseline for `senna bge`.

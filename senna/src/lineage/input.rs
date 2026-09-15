@@ -33,16 +33,12 @@ pub(super) struct LoadedTheta {
 /// Resolve `--theta-from auto` against the run manifest.
 ///
 /// `latent` requires a run whose `latent.parquet` is on the probability simplex
-/// — `senna gem-encoder`, not `senna gem`. `gem` writes no latent at all: its
+/// — a topic-family run, not `senna gem`. `gem` writes no latent at all: its
 /// per-cell table is a Euclidean embedding, and `exp()`-ing it would produce a
 /// plausible wrong θ rather than an error.
 ///
-/// The stamped-contract check this used to carry is gone with the file it read.
-/// It existed because gem-encoder runs before 2026-07-21 wrote raw logits into
-/// `latent.parquet` under the same model type, so the kind alone could not tell
-/// them apart. The shared manifest did not exist then, so any prefix that has
-/// one is necessarily newer than that split, and
-/// [`RunKind::latent_is_log_simplex`] now carries the whole answer.
+/// Which kinds stamp a log-simplex latent is a property of the manifest's
+/// `kind`, not of this resolver — see [`RunKind::latent_is_log_simplex`].
 pub(super) fn resolve_theta_from(requested: ThetaFrom, prefix: &str) -> Result<ThetaFrom> {
     // A missing manifest is not fatal for `auto` — it just means the geometry
     // has to be assumed rather than read — so this stays an Option.
@@ -59,8 +55,8 @@ pub(super) fn resolve_theta_from(requested: ThetaFrom, prefix: &str) -> Result<T
             anyhow::ensure!(
                 is_log_theta,
                 "--theta-from latent needs a run whose latent is on the simplex; {manifest} \
-                 reports {}. Only `senna gem-encoder` writes latent.parquet / \
-                 velocity_factor.parquet; `senna gem` writes a Euclidean cell_embedding.",
+                 reports {}. Only a topic-family run stamps a log-simplex latent; \
+                 `senna gem` writes a Euclidean cell_embedding.",
                 kind.map_or_else(|| "no manifest".to_string(), |k| k.to_string())
             );
             Ok(ThetaFrom::Latent)
@@ -118,17 +114,18 @@ pub(super) fn apply_geometry(theta: &DMatrix<f32>, geometry: LatentGeometry) -> 
     }
 }
 
-/// Read the θ/δ pair named by `from`.
+/// Read θ (and, when present, its δ partner) named by `from`.
 ///
 /// On the `latent` path `latent.parquet` holds LOG θ, so it is exponentiated
 /// here — that is the whole content of the `log-theta` contract the resolver
-/// checked. Its δ partner is `velocity_factor.parquet` (K space), not
-/// `velocity.parquet` (H space); pairing θ from one space with δ from the other
-/// would silently produce nonsense, so the two travel together.
+/// checked. A topic run is geometry-only and no topic-family command writes a
+/// velocity file, so only `{prefix}.velocity.parquet` is ever looked for; on
+/// the `latent` path it is ordinarily absent, and the lookup below falls
+/// through to the "absent" warning exactly as `--no-orient-velocity` would.
 pub(super) fn load_theta(prefix: &str, from: ThetaFrom, no_velocity: bool) -> Result<LoadedTheta> {
-    let (theta_file, velocity_file, space) = match from {
-        ThetaFrom::Latent => ("latent", "velocity_factor", "K (topic simplex)"),
-        _ => ("cell_embedding", "velocity", "H (gene-embedding)"),
+    let (theta_file, space) = match from {
+        ThetaFrom::Latent => ("latent", "K (topic simplex)"),
+        _ => ("cell_embedding", "H (gene-embedding)"),
     };
 
     let theta_path = format!("{prefix}.{theta_file}.parquet");
@@ -147,7 +144,7 @@ pub(super) fn load_theta(prefix: &str, from: ThetaFrom, no_velocity: bool) -> Re
         theta.ncols()
     );
 
-    let velocity_path = format!("{prefix}.{velocity_file}.parquet");
+    let velocity_path = format!("{prefix}.velocity.parquet");
     let velocity = if no_velocity {
         None
     } else if Path::new(&velocity_path).exists() {

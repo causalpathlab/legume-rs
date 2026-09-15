@@ -25,18 +25,22 @@ pub enum LayoutKind {
 /// Feature space the t-UMAP layout embeds on (`--layout umap`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum LayoutSpace {
-    /// θ only — the identity manifold (current state). The default: the layout is
-    /// the IDENTITY manifold and δ rides on top of it as the velocity arrow field
-    /// (`{out}.velocity_grid_2d.parquet`), rather than being baked into the
-    /// coordinates. Keeps "where cells are" and "where they are going" separable.
+    /// θ only, the identity manifold (current state) and the default. δ rides on
+    /// top of it as the velocity arrow field (`{out}.velocity_grid_2d.parquet`)
+    /// rather than being baked into the coordinates, keeping "where cells are"
+    /// and "where they are going" separable. No senna command currently writes
+    /// a δ table, so this is also what Nascent and Concat fall back to when
+    /// `{from}.velocity.parquet` is absent.
     #[default]
     Identity,
-    /// θ + δ — the NASCENT state (where each cell is heading), baked into the
-    /// coordinates. Splays the manifold toward the fates, but the positions then
-    /// mix identity with velocity, so the arrow field is no longer an independent
-    /// read on the same plot.
+    /// θ + δ, the nascent state (where each cell is heading), baked into the
+    /// coordinates. Splays the manifold toward the fates, but the positions
+    /// then mix identity with motion, so the arrow field stops being an
+    /// independent read of the same plot. Falls back to Identity when no δ
+    /// table is present.
     Nascent,
-    /// [θ | δ] concatenated — identity and velocity as separate cosine channels.
+    /// [θ | δ] concatenated, identity and velocity as separate cosine
+    /// channels. Falls back to Identity when no δ table is present.
     Concat,
 }
 
@@ -55,8 +59,8 @@ pub enum ThetaFrom {
     Auto,
     /// `{from}.cell_embedding.parquet` + `{from}.velocity.parquet` (H space).
     CellEmbedding,
-    /// `{from}.latent.parquet` (log θ → θ) + `{from}.velocity_factor.parquet`
-    /// (K space, the topic simplex). Topic runs only.
+    /// `{from}.latent.parquet` (log θ → θ), the topic simplex (K space). Topic
+    /// runs only, and geometry-only: no velocity file.
     Latent,
 }
 
@@ -99,7 +103,7 @@ pub struct LineageArgs {
         long,
         short = 'f',
         help_heading = "Input/output",
-        help = "gem / gem-encoder output prefix (which θ table it reads is set by --theta-from)"
+        help = "gem, or topic-family, output prefix (which θ table it reads is set by --theta-from)"
     )]
     pub from: Box<str>,
 
@@ -143,18 +147,18 @@ pub struct LineageArgs {
         help = "Which table supplies θ: auto, cell-embedding, or latent",
         long_help = "Which per-cell table supplies θ for the fit AND the layout.\n\
                      \n\
-                     cell-embedding —\n\
-                     {from}.cell_embedding.parquet + {from}.velocity.parquet (H space).\n\
-                     latent         — {from}.latent.parquet (log θ, exponentiated to the simplex)\n\
-                     .                + {from}.velocity_factor.parquet (K space). Topic runs only.\n\
-                     auto           — latent on a run whose manifest says `gem-encoder` AND stamps\n\
-                     .                `latent: log-theta`; cell-embedding otherwise.\n\
+                     cell-embedding: {from}.cell_embedding.parquet\n\
+                     .               plus {from}.velocity.parquet (H space).\n\
+                     latent:         {from}.latent.parquet (log θ, exponentiated to the simplex).\n\
+                     .               Topic runs only, geometry-only: no velocity file.\n\
+                     auto:           latent on a run whose manifest stamps a log-simplex latent,\n\
+                     .               cell-embedding otherwise.\n\
                      \n\
                      These are different manifolds on a topic run, not two views of one.\n\
                      `cell_embedding = θ·α` places every cell inside the convex hull of α's K rows,\n\
                      so a diffuse softmax θ compresses the whole population toward the hull's centroid.\n\
-                     That is a property of the co-embedding map, not of PHATE or UMAP —\n\
-                     which is why a blobby topic layout stays blobby whichever algorithm you pick.\n\
+                     That is a property of the co-embedding map, not of PHATE or UMAP.\n\
+                     A blobby topic layout stays blobby whichever algorithm you pick.\n\
                      Reading the simplex directly avoids the map.\n\
                      \n\
                      `--markers` always scores in cell_embedding's H space regardless,\n\
@@ -277,26 +281,10 @@ pub struct LineageArgs {
                      This needs --markers, as in `--root-type HSC_MPP`.\n\
                      \n\
                      It is marker-grounded, so it is robust to unreliable velocity.\n\
-                     It overrides --root-from-gem and the velocity pick.\n\
+                     It overrides the velocity pick.\n\
                      --root-node and --root-cell override it in turn."
     )]
     pub root_type: Option<Box<str>>,
-
-    #[arg(
-        long = "root-from-gem",
-        help_heading = "Root selection",
-        help = "Anchor the root at gem's velocity-DAG source",
-        long_help = "Anchor the root at gem's velocity-DAG source.\n\
-                     That is the modal MST node of the low-τ region,\n\
-                     in {from}.dag_pseudotime.parquet.\n\
-                     It is more robust than the per-edge flux pick,\n\
-                     and lineage still fits the curves.\n\
-                     \n\
-                     --root-node, --root-cell and --root-type override it.\n\
-                     It falls back to the flux root when the file is absent,\n\
-                     or when gem's DAG has no terminal structure; see lineage_qc.json."
-    )]
-    pub root_from_gem: bool,
 
     #[arg(
         long,

@@ -25,7 +25,6 @@
 )]
 
 pub mod cell_projection;
-pub mod coarsen;
 pub mod data;
 pub mod eval;
 pub mod feature_qc;
@@ -36,7 +35,6 @@ pub mod multiome_plan;
 pub mod postprocess;
 pub mod progress;
 pub mod simba;
-pub mod training;
 pub mod transfer;
 pub mod type_annotation;
 
@@ -49,8 +47,8 @@ pub use eval::{
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, warm_start_module_labels, CellLineage, FeatFactorSpec, FitConfig, FitOutput,
-    GeneModuleArgs, GeneModuleConfig, LineageQc, ParentModulesOwned, PbLevelVelocity,
+    fit, warm_start_module_labels, CellEncoders, FitConfig, FitOutput, GeneModuleArgs,
+    GeneModuleConfig, ParentModulesOwned, TrackEncoder, TrackInfo, TrackSpec,
 };
 pub use model::JointEmbedModel;
 pub use multiome_plan::{

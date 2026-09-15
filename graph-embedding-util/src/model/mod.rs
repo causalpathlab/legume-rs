@@ -10,12 +10,12 @@
 //! `b_cell` absorbs library size, so it is trained in phase 1, re-fitted
 //! analytically in phase 2, and written out.
 //!
-//! Features are addressed at fine resolution. The cell axis is
-//! coarsened: cell embeddings are mean-pooled (per the batch's chosen
-//! seed coarsening) over the fine children of each touched pb-sample.
+//! Features are addressed at fine resolution, and so is the cell axis: every
+//! score reads a cell's own row of `e_cell` directly, with no coarse→fine
+//! pooling.
 
 use candle_util::candle_core::{Device, Result, Tensor};
-use candle_util::candle_nn::{self, VarBuilder, VarMap};
+use candle_util::candle_nn::VarMap;
 
 mod modules;
 mod score;
@@ -25,13 +25,7 @@ pub use modules::{
     module_logit_for_own_mass, FeatModules, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME,
     MODULE_LOGITS_VAR_NAME, MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
 };
-use vars::{
-    build_feat_factor, register_randn_seeded, register_var_from_mat, register_var_from_slice,
-};
-// Reached only through `tests`' `use super::*` — the live `pool_axis` caller is in
-// `score`.
-#[cfg(test)]
-use vars::{pool_axis, pool_axis_loop};
+use vars::{register_randn_seeded, register_var_from_mat, register_var_from_slice};
 
 /// stdev of the embedding-table randn init (matches the former
 /// `candle_nn::Init::Randn { stdev: 0.1 }`).
@@ -77,104 +71,6 @@ pub struct ShareFeaturesArgs<'a> {
     /// `e_feat`, which for this parameterization is a detached snapshot, and trains a
     /// feature side nothing else sees.
     pub shared_modules: Option<FeatModules>,
-}
-
-/// Inputs for [`JointEmbedModel::new_factored`] — a per-gene β-sharing feature
-/// parameterization (see [`FeatFactor`]). `row_to_gene[r]` is the gene index of
-/// feature row `r` (length `n_features`); rows sharing a gene reuse one `β_g`.
-pub struct FactoredInit<'a> {
-    pub n_features: usize,
-    pub n_cells: usize,
-    pub embedding_dim: usize,
-    pub n_genes: usize,
-    pub row_to_gene: &'a [u32],
-    pub b_feat: &'a [f32],
-    pub b_cell: &'a [f32],
-    /// Base seed for the reproducible randn init of `β` and the cell side.
-    pub seed: u64,
-    /// Per-row unspliced flag (`len == n_features`). When `Some`, a ridge-shrunk
-    /// per-gene `δ_g` Var is allocated and added to the unspliced rows
-    /// (spliced identity + nascent offset); `None` = plain β-sharing.
-    pub unspliced_rows: Option<&'a [bool]>,
-}
-
-/// Optional per-gene β-sharing feature factorization (used by `senna gem`'s
-/// spliced/unspliced model). Instead of a free `e_feat` row per feature, every
-/// feature row reuses a per-GENE base embedding `β [G, H]`:
-///
-///   `e_feat[row] = β[gene(row)]`
-///
-/// so a gene's spliced rows embed as `β_g`. **Optionally** a per-gene splice
-/// offset `δ_g` is carried for the unspliced rows:
-///
-///   `e_feat[row] = β_g + [row is unspliced] · δ_g`
-///
-/// so spliced = current-state identity `β_g` and unspliced = nascent `β_g + δ_g`.
-/// `δ_g` is **L2 (ridge) shrunk** (phase-1 penalty), which resolves the otherwise-
-/// ambiguous split against an equal-and-opposite cell-axis shift: the shrunk
-/// gene-side `δ_g` absorbs the (dense) static per-gene nascent structure (the
-/// "γ"), and the residual dynamics stay on the CELL axis as the phase-2 velocity
-/// increment `δ_cell` (a raw Poisson-MAP shift with θ held fixed; see
-/// `crate::fit::project_cells_phase2`). With
-/// `delta = None` this reduces to plain β-sharing (spliced ≡ unspliced ≡ `β_g`).
-/// `β` / `δ_g` are learnable `Var`s; `row_to_gene` / the unspliced mask are fixed.
-/// The score/loss path composes the row→gene→(β,δ) gathers directly (no
-/// full-table materialization per step); output/co-embed readers use the
-/// `e_feat` field after [`JointEmbedModel::materialize_e_feat`].
-#[derive(Clone)]
-pub struct FeatFactor {
-    /// Per-gene base embedding `[G, H]` (Var).
-    pub beta: Tensor,
-    /// `[n_features]` u32 (device): row → gene index.
-    pub row_to_gene: Tensor,
-    /// Optional per-gene splice offset, present as `(δ_g [G, H] Var, mask [n_features,
-    /// 1])` together (they always co-exist). `δ_g` is added to the **unspliced** rows
-    /// (the `mask` = 1/0 selector); L2-ridge in phase-1. `None` = plain β-sharing
-    /// (spliced ≡ unspliced ≡ `β_g`).
-    pub splice_delta: Option<(Tensor, Tensor)>,
-}
-
-impl ComposedFeat for FeatFactor {
-    /// The full feature embedding `[n_features, H]` from `β` (plus `δ_g` on the
-    /// unspliced rows). Stays in the autograd graph so gradients flow back to the
-    /// `β` / `δ_g` Vars.
-    fn compose(&self) -> Result<Tensor> {
-        // `row_to_gene` IS the whole-table feature→gene gather, and the stored
-        // mask is already on the full feature axis, so this needs no index.
-        let base = self.beta.index_select(&self.row_to_gene, 0)?;
-        match &self.splice_delta {
-            Some((delta, mask)) => {
-                let d = delta.index_select(&self.row_to_gene, 0)?; // [n_features, H]
-                base.add(&d.broadcast_mul(mask)?) // + mask ⊙ δ_g on unspliced rows
-            }
-            None => Ok(base),
-        }
-    }
-
-    /// Rows for the FEATURE indices `idx` — `β_{gene(r)} + mask_r · δ_{gene(r)}`.
-    ///
-    /// Two gathers on the same `idx`: `row_to_gene` maps it onto the per-gene
-    /// tables, and the unspliced mask is feature-indexed so it is gathered by
-    /// `idx` directly. Keeping both keyed on `idx` is what lets this satisfy the
-    /// trait's feature-row contract like the other two parameterizations.
-    fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
-        let genes = self.row_to_gene.index_select(idx, 0)?;
-        let base = self.beta.index_select(&genes, 0)?;
-        match &self.splice_delta {
-            Some((delta, mask)) => {
-                let d = delta.index_select(&genes, 0)?;
-                let m = mask.index_select(idx, 0)?; // [b, 1] unspliced selector
-                base.add(&d.broadcast_mul(&m)?)
-            }
-            None => Ok(base),
-        }
-    }
-
-    /// `β` is the per-gene table that can overfit row by row; `δ_g` has the
-    /// trainer's own `delta_l2`.
-    fn ridge_table(&self) -> Option<&Tensor> {
-        Some(&self.beta)
-    }
 }
 
 /// Inputs for [`JointEmbedModel::new_adapted`] — a fixed-dictionary
@@ -268,24 +164,23 @@ impl FeatAdapter {
 }
 
 pub struct JointEmbedModel {
-    /// Unified feature embedding (genes ∪ peaks). When `factor` is `Some`, this
-    /// is a materialized snapshot of the per-gene `β` gathered to feature rows —
-    /// refreshed by [`Self::materialize_e_feat`] after phase 1 so phase-2 /
+    /// Unified feature embedding (genes ∪ peaks). When `adapter` or `modules` is
+    /// `Some`, this is a materialized snapshot of the composed live parameters —
+    /// refreshed by [`Self::materialize_e_feat`] after training so phase-2 /
     /// outputs read a fixed dictionary; the training loss never reads this field
-    /// for a factored model — it gathers each batch's rows straight from `β`.
+    /// for such a model — it gathers each batch's rows straight from the live
+    /// parameters.
     pub e_feat: Tensor,
     /// The "cell" axis is the CALLER'S trained unit: senna bge/gem pass
     /// cells here; pinto cage passes finest-level pseudobulks.
     pub e_cell: Tensor,
     pub b_feat: Tensor,
     pub b_cell: Tensor,
-    /// Optional per-gene β-sharing feature parameterization (`None` = free `e_feat`).
-    pub factor: Option<FeatFactor>,
     /// Optional fixed-dictionary adapter parameterization (`None` = free
-    /// `e_feat`). Mutually exclusive with `factor` by construction.
+    /// `e_feat`). Mutually exclusive with `modules` by construction.
     pub adapter: Option<FeatAdapter>,
     /// Optional learned-module parameterization (`None` = free `e_feat`): every
-    /// row is `Σ_m π_gm μ_m + r_g`. Mutually exclusive with `factor` and `adapter`.
+    /// row is `Σ_m π_gm μ_m + r_g`. Mutually exclusive with `adapter`.
     /// The `e_feat` field is a detached composed snapshot, as for the adapter.
     pub modules: Option<FeatModules>,
     pub embedding_dim: usize,
@@ -332,7 +227,6 @@ impl JointEmbedModel {
             e_cell,
             b_feat,
             b_cell,
-            factor: None,
             adapter: None,
             modules: None,
             embedding_dim: args.embedding_dim,
@@ -340,8 +234,7 @@ impl JointEmbedModel {
     }
 
     /// The L2 term for whichever gene-side table can overfit row by row under
-    /// this parameterization: the free `e_feat` Var, the factored model's per-gene
-    /// `β` (its `δ_g` has the trainer's own `delta_l2`), the adapter's or the module
+    /// this parameterization: the free `e_feat` Var, the adapter's or the module
     /// model's per-feature residual, or nothing (an adapter without a residual
     /// trains only the shared map).
     ///
@@ -373,19 +266,15 @@ impl JointEmbedModel {
         Ok(())
     }
 
-    /// The composed feature side, when this model has one — the module layer,
-    /// the adapter, or the per-gene β-sharing factor, mutually exclusive by
-    /// construction. `None` only for a FREE model, whose `e_feat` is the trained
-    /// Var itself.
+    /// The composed feature side, when this model has one — the module layer or
+    /// the adapter, mutually exclusive by construction. `None` only for a FREE
+    /// model, whose `e_feat` is the trained Var itself.
     ///
     /// Every consumer that has to ask "which table does this parameterization
     /// actually train" goes through here — the gather, the materialize and the
-    /// ridge — so a fourth parameterization is one `impl`, not three new match
+    /// ridge — so a third parameterization is one `impl`, not two new match
     /// arms in three files.
     pub fn composed(&self) -> Option<&dyn ComposedFeat> {
-        if let Some(f) = &self.factor {
-            return Some(f);
-        }
         if let Some(m) = &self.modules {
             return Some(m);
         }
@@ -459,7 +348,6 @@ impl JointEmbedModel {
             e_cell,
             b_feat,
             b_cell,
-            factor: None,
             adapter: Some(adapter),
             modules: None,
             embedding_dim: args.embedding_dim,
@@ -502,101 +390,10 @@ impl JointEmbedModel {
             e_cell,
             b_feat: shared_b_feat,
             b_cell,
-            factor: None,
             adapter: None,
             modules: shared_modules,
             embedding_dim,
         })
-    }
-
-    /// β-sharing factored constructor: allocate a per-gene `β` Var (randn) plus a
-    /// fresh cell side, and register the fixed `row_to_gene` index tensor. The
-    /// `e_feat` field is seeded with the materialized `β` (gathered to feature
-    /// rows) and refreshed after phase 1 via [`Self::materialize_e_feat`].
-    pub fn new_factored(
-        args: FactoredInit,
-        varmap: &VarMap,
-        vs: VarBuilder,
-        dev: &Device,
-    ) -> Result<Self> {
-        let beta = register_randn_seeded(
-            varmap,
-            dev,
-            "beta",
-            args.n_genes,
-            args.embedding_dim,
-            args.seed,
-        )?;
-        let e_cell = register_randn_seeded(
-            varmap,
-            dev,
-            "e_cell",
-            args.n_cells,
-            args.embedding_dim,
-            args.seed,
-        )?;
-        let b_feat = register_var_from_slice(varmap, dev, "b_feat", args.b_feat)?;
-        let b_cell = register_var_from_slice(varmap, dev, "b_cell", args.b_cell)?;
-
-        // Optional per-gene splice offset δ_g, zero-initialized (so training
-        // starts exactly at β-sharing and δ_g grows only where the data + L2
-        // tradeoff justifies it).
-        let delta = match args.unspliced_rows {
-            Some(_) => Some(vs.get_with_hints(
-                (args.n_genes, args.embedding_dim),
-                "delta",
-                candle_nn::Init::Const(0.0),
-            )?),
-            None => None,
-        };
-        let factor = build_feat_factor(&beta, args.row_to_gene, delta, args.unspliced_rows, dev)?;
-        let e_feat = factor.compose()?.detach();
-        Ok(Self {
-            e_feat,
-            e_cell,
-            b_feat,
-            b_cell,
-            factor: Some(factor),
-            adapter: None,
-            modules: None,
-            embedding_dim: args.embedding_dim,
-        })
-    }
-
-    /// Composite-training constructor for a factored model: share this model's
-    /// `β` / `b_feat` + factor index tensor (so every level trains the SAME
-    /// feature side) and allocate a fresh cell side under `var_prefix`. Delegates
-    /// the cell-var allocation to [`Self::new_sharing_features`] and re-attaches
-    /// the shared [`FeatFactor`].
-    pub fn new_sharing_factor(
-        &self,
-        n_cells: usize,
-        var_prefix: &str,
-        varmap: &VarMap,
-        dev: &Device,
-        seed: u64,
-    ) -> Result<Self> {
-        let factor = self
-            .factor
-            .as_ref()
-            .expect("new_sharing_factor requires a factored parent model");
-        let mut model = Self::new_sharing_features(
-            ShareFeaturesArgs {
-                n_cells,
-                embedding_dim: self.embedding_dim,
-                shared_e_feat: self.e_feat.clone(),
-                shared_b_feat: self.b_feat.clone(),
-                e_cell_init: None,
-                b_cell_init: &vec![0f32; n_cells],
-                var_prefix,
-                seed,
-                shared_modules: None,
-            },
-            varmap,
-            dev,
-        )?;
-        model.factor = Some(factor.clone());
-        Ok(model)
     }
 }
 
