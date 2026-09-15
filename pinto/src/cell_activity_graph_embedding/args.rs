@@ -492,19 +492,6 @@ pub struct CellActivityGraphEmbeddingArgs {
     pub pair_train_pairs: usize,
 
     #[arg(
-        long,
-        default_value_t = 0,
-        help = "Newton steps that finish every pair and cell from the encoder's placement; 0 = none",
-        long_help = "Off by default: the encoder's placement is what ships,\n\
-                     and placing a pair is one forward pass however many pairs there are.\n\
-                     A positive count finishes every pair and every cell on the exact\n\
-                     objective by that many Newton steps from the encoder's placement,\n\
-                     which is one pass over the pairs again, at the per-pair optimum.",
-        hide = true
-    )]
-    pub pair_polish_steps: usize,
-
-    #[arg(
         long = "nce-objective",
         default_value_t = NceObjectiveArg::Softmax,
         value_enum,

@@ -61,7 +61,7 @@ use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use candle_util::encoder::{PooledGeneEncoder, PooledGeneEncoderArgs};
 use candle_util::feature_embedding::FeatureEmbedding;
 use log::info;
-use matrix_util::rand_util::{mix_seed, name_seed};
+use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -259,30 +259,12 @@ pub(crate) fn split_holdout(n: usize, frac: f64, seed: u64) -> (Vec<usize>, Vec<
     (train, held)
 }
 
-/// Re-draw the trunk's linear weights and the query — uniform in `±1/√fan_in`,
-/// biases at zero — each from its own name-keyed sub-stream of `seed`, so a
-/// run replays and adding a var never shifts another's draw. The batch-norm's
-/// affine and running statistics keep their defaults.
+/// Re-draw the trunk's linear weights and the query from `seed`; the
+/// batch-norm's affine and running statistics keep their defaults.
 fn seed_trunk(varmap: &VarMap, seed: u64) -> anyhow::Result<()> {
-    let tbl = varmap.data().lock().unwrap();
-    for (name, var) in tbl.iter() {
-        if name.contains("bn_z") {
-            continue;
-        }
-        let dims = var.dims().to_vec();
-        let n: usize = dims.iter().product();
-        let draw: Vec<f32> = if name.ends_with(".bias") {
-            vec![0f32; n]
-        } else {
-            let bound = (1.0 / *dims.last().unwrap_or(&1) as f64).sqrt();
-            let mut rng = StdRng::seed_from_u64(name_seed(seed, name));
-            (0..n)
-                .map(|_| ((rng.random::<f64>() * 2.0 - 1.0) * bound) as f32)
-                .collect()
-        };
-        var.set(&Tensor::from_vec(draw, dims.as_slice(), var.device())?)?;
-    }
-    Ok(())
+    Ok(candle_util::nn::seed_uniform_vars(varmap, seed, |name| {
+        name.contains("bn_z")
+    })?)
 }
 
 /// A log-uniform subset size in `[1, n]`.
@@ -650,13 +632,9 @@ pub(crate) struct RefineStats {
     pub n_cells: usize,
 }
 
-/// `N_c·logsumexp_f(s_cf) − Σ_f n_cf·s_cf` per row, for a dense block `x [n, D]`
-/// and its scores `s [n, D]`: the multinomial negative log-likelihood with the
-/// intercept profiled out, up to the count-only constant.
+/// The multinomial NLL with the intercept profiled out, per row.
 fn multinomial_nll(x: &Tensor, s: &Tensor, totals: &Tensor) -> anyhow::Result<Tensor> {
-    let lse = s.log_sum_exp(1)?; // [n]
-    let data = (x * s)?.sum(1)?; // [n]
-    Ok(((totals * lse)? - data)?)
+    Ok(candle_util::loss::multinomial_nll_profiled(x, s, totals)?)
 }
 
 /// Train the trunk on the cells' own likelihood, starting from the distilled
