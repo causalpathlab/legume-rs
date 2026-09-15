@@ -92,7 +92,17 @@ impl PairDictionary {
     /// answering its own.
     #[must_use]
     pub fn score(&self, obs: &[(u32, f32)], theta: &[f32], axis: &EvalAxis) -> PairScore {
-        let local = self.to_local(obs);
+        self.score_local(&self.to_local(obs), theta, axis)
+    }
+
+    /// [`Self::score`] for a profile already on active-list positions.
+    #[must_use]
+    pub(crate) fn score_local(
+        &self,
+        local: &[(u32, f32)],
+        theta: &[f32],
+        axis: &EvalAxis,
+    ) -> PairScore {
         if local.is_empty() {
             return PairScore::default();
         }
@@ -109,7 +119,7 @@ impl PairDictionary {
         let mut llik = 0f64;
         let mut null_llik = 0f64;
         let mut total = 0f32;
-        for &(gene, x) in &local {
+        for &(gene, x) in local {
             let gene = gene as usize;
             if !axis.scores(gene) {
                 continue;
@@ -132,7 +142,7 @@ impl PairDictionary {
             llik: llik as f32,
             null_llik: null_llik as f32,
             total,
-            agreement: self.agreement(&local, &log_rate, axis),
+            agreement: self.agreement(local, &log_rate, axis),
         }
     }
 
