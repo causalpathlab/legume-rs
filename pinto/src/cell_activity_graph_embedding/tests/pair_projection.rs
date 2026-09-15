@@ -1,24 +1,16 @@
 //! The pair projection solves a known problem: with the dictionary frozen and the
 //! counts generated from a known `e_uv`, the MAP is that `e_uv`. These tests
-//! generate exactly that and check the solver lands on it — through both the
-//! exhaustive and the sampled partition — plus the two properties the design
-//! rests on: `β_uv` absorbs pooled depth, and a pair with no counts stays at
-//! the origin rather than being handed a fabricated direction.
+//! generate exactly that and check the exact solver lands on it — from the
+//! origin and from a warm start — plus the two properties the design rests on:
+//! `β_uv` absorbs pooled depth, and a pair with no counts stays at the origin
+//! rather than being handed a fabricated direction.
 
 use super::fixture::*;
-use crate::cell_activity_graph_embedding::pair_projection::{PairDictionary, ProjectionArgs};
-use rand::rngs::SmallRng;
-use rand::SeedableRng;
+use crate::cell_activity_graph_embedding::pair_projection::PairDictionary;
 
-fn args(steps: usize, gene_sample: usize) -> ProjectionArgs {
-    ProjectionArgs {
-        // Deliberately near-zero: these tests check that the *likelihood*
-        // recovers the truth, and a working ridge would bias the norm down.
-        ridge: 1e-4,
-        steps,
-        gene_sample,
-    }
-}
+/// Deliberately near-zero: these tests check that the *likelihood* recovers
+/// the truth, and a working ridge would bias the norm down.
+const RIDGE: f32 = 1e-4;
 
 #[test]
 fn projection_recovers_known_pair_embedding() {
@@ -31,8 +23,7 @@ fn projection_recovers_known_pair_embedding() {
     let beta_truth = 2.0f32.ln();
     let obs = counts_from(&e, &b, &truth, beta_truth);
 
-    let mut rng = SmallRng::seed_from_u64(1);
-    let (theta, beta) = dict.project(&obs, &args(1500, 0), &mut rng);
+    let (theta, beta, certificate) = dict.solve(&obs, RIDGE);
 
     assert!(
         cosine(&theta, &truth) > 0.98,
@@ -45,26 +36,11 @@ fn projection_recovers_known_pair_embedding() {
         (beta - beta_truth).abs() < 0.1,
         "intercept off: {beta} vs {beta_truth}"
     );
-}
-
-#[test]
-fn sampled_partition_recovers_the_same_direction() {
-    let e = dictionary_matrix();
-    let (b, totals) = abundances();
-    let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
-
-    let truth = [0.5f32, -0.3, 0.2, 0.1];
-    let obs = counts_from(&e, &b, &truth, 0.0);
-
-    let mut rng = SmallRng::seed_from_u64(2);
-    // A third of the gene axis per step: the proposal cancels `exp(b_g)`, so
-    // what is left is unbiased and only mildly noisy.
-    let (theta, _) = dict.project(&obs, &args(1500, 80), &mut rng);
-
+    // The bound is `‖∇‖²/(2λ)`, so a near-zero ridge inflates it; small
+    // against the pair's thousands of nats of likelihood is what settled means.
     assert!(
-        cosine(&theta, &truth) > 0.95,
-        "sampled partition drifted: cos = {}, theta = {theta:?}",
-        cosine(&theta, &truth)
+        certificate < 1.0,
+        "certificate {certificate} at the optimum"
     );
 }
 
@@ -79,10 +55,8 @@ fn intercept_absorbs_pooled_depth() {
     // Same composition, ten times the depth.
     let deep: Vec<(u32, f32)> = shallow.iter().map(|&(g, n)| (g, n * 10.0)).collect();
 
-    let mut rng = SmallRng::seed_from_u64(3);
-    let (theta_shallow, beta_shallow) = dict.project(&shallow, &args(1500, 0), &mut rng);
-    let mut rng = SmallRng::seed_from_u64(3);
-    let (theta_deep, beta_deep) = dict.project(&deep, &args(1500, 0), &mut rng);
+    let (theta_shallow, beta_shallow, _) = dict.solve(&shallow, RIDGE);
+    let (theta_deep, beta_deep, _) = dict.solve(&deep, RIDGE);
 
     // Depth lands entirely on the intercept…
     assert!(
@@ -103,10 +77,10 @@ fn empty_profile_stays_at_the_origin() {
     let (_, totals) = abundances();
     let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
 
-    let mut rng = SmallRng::seed_from_u64(4);
-    let (theta, beta) = dict.project(&[], &args(100, 0), &mut rng);
+    let (theta, beta, certificate) = dict.solve(&[], RIDGE);
     assert_eq!(theta, vec![0.0; DIM]);
     assert_eq!(beta, 0.0);
+    assert_eq!(certificate, 0.0);
 
     // A gene that carries no counts anywhere is not on the partition axis, so a
     // profile made only of such genes is empty too — not a direction.
@@ -114,28 +88,25 @@ fn empty_profile_stays_at_the_origin() {
     totals_with_dead[0] = 0.0;
     let dict = PairDictionary::new(&e, &totals_with_dead, N_CELLS).expect("dictionary");
     assert_eq!(dict.n_active(), N_GENES - 1);
-    let (theta, _) = dict.project(&[(0, 12.0)], &args(100, 0), &mut rng);
+    let (theta, _, _) = dict.solve(&[(0, 12.0)], RIDGE);
     assert_eq!(theta, vec![0.0; DIM]);
 }
 
-//////////////////////////////
-// Hold-out split of a pair //
-//////////////////////////////
+//////////////////////////////////////
+// Newton from a warm or wild start //
+//////////////////////////////////////
 
 #[test]
-fn newton_polish_lands_where_the_converged_solve_lands() {
+fn newton_polish_lands_where_the_solve_from_the_origin_lands() {
     let e = dictionary_matrix();
     let (b, totals) = abundances();
     let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
     let truth = [0.6f32, -0.4, 0.25, 0.0];
     let obs = counts_from(&e, &b, &truth, 0.3);
-    let mut rng = SmallRng::seed_from_u64(1);
-    let (theta, beta) = dict.project(&obs, &args(1500, 0), &mut rng);
+    let (theta, beta, _) = dict.solve(&obs, RIDGE);
     // From a start well off the optimum.
     let start = [0.1f32, 0.1, -0.1, 0.2];
-    let (polished, beta_polished, certificate) = dict.polish(&obs, 1e-4, &start, 8);
-    // The bound is `‖∇‖²/(2λ)`, so a near-zero ridge inflates it; small
-    // against the pair's thousands of nats of likelihood is what settled means.
+    let (polished, beta_polished, certificate) = dict.polish(&obs, RIDGE, &start, 8);
     assert!(
         certificate < 1.0,
         "certificate {certificate} at the optimum"
@@ -153,5 +124,38 @@ fn newton_polish_lands_where_the_converged_solve_lands() {
     assert!(
         (beta_polished - beta).abs() < 1e-3,
         "intercept: {beta_polished} vs {beta}"
+    );
+}
+
+#[test]
+fn a_wild_start_is_walked_back_to_the_same_optimum() {
+    // Far outside the quadratic regime, in a direction the counts contradict:
+    // every Newton step from here is long, so each is line-searched, and the
+    // solve must still end where the solve from the origin ends.
+    let e = dictionary_matrix();
+    let (b, totals) = abundances();
+    let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
+    let truth = [0.6f32, -0.4, 0.25, 0.0];
+    let obs = counts_from(&e, &b, &truth, 0.0);
+    let (theta, beta, _) = dict.solve(&obs, RIDGE);
+    let wild = [-12.0f32, 9.0, -7.0, 11.0];
+    let (back, beta_back, certificate) = dict.polish(&obs, RIDGE, &wild, 64);
+    assert!(
+        certificate < 1.0,
+        "certificate {certificate}: the wild start did not settle"
+    );
+    assert!(
+        cosine(&back, &theta) > 0.9999,
+        "direction: {back:?} vs {theta:?}"
+    );
+    assert!(
+        (norm(&back) - norm(&theta)).abs() < 1e-3,
+        "scale: {} vs {}",
+        norm(&back),
+        norm(&theta)
+    );
+    assert!(
+        (beta_back - beta).abs() < 1e-3,
+        "intercept: {beta_back} vs {beta}"
     );
 }

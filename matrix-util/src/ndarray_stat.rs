@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{
     common_io::{file_ext, write_lines},
     traits::{IoOps, RunningStatOps},
