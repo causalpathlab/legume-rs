@@ -145,7 +145,7 @@ faba <COMMAND> [OPTIONS]
 
 Run `faba <COMMAND> --help` for the detailed options of each subcommand.
 
-Embedding (`gem`, `gem-encoder`), annotation (`annotate-gem`), trajectory
+Embedding (`gem`), annotation (`annotate-by-projection`), trajectory
 (`lineage`, `lineage-plot`) and modality dynamics (`dyn-assoc`) are `senna`
 subcommands — they read the matrices above by prefix.
 

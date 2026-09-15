@@ -1,7 +1,11 @@
 //! Hard gene→module partition and each unit's view through it.
 
 use super::units::UnitTable;
+use crate::fit::config::TrackSpec;
 
+/// One module per GENE (not per feature row): tracks of the same gene share a
+/// module. `module_of` is indexed by gene id, `members[m]` lists that module's
+/// gene ids in ascending order.
 pub struct Partition {
     pub module_of: Vec<u32>,
     pub members: Vec<Vec<u32>>,
@@ -28,6 +32,7 @@ pub fn labels_from_membership(pi: &nalgebra::DMatrix<f32>) -> Vec<u32> {
 }
 
 impl Partition {
+    /// `labels` is one module per GENE (`labels.len() == n_genes`).
     pub fn from_labels(labels: &[u32], n_modules: usize) -> Self {
         let mut members: Vec<Vec<u32>> = vec![Vec::new(); n_modules];
         for (g, &m) in labels.iter().enumerate() {
@@ -57,52 +62,183 @@ impl Partition {
     }
 }
 
-/// A unit's counts within one module: `(module, [(slot, count)])`, slots
-/// ascending, only the modules the unit touches.
-pub type ModuleSlots = Vec<(u32, Vec<(u32, f32)>)>;
+/// Each track's SUPPORT through the gene partition: the genes it has a row
+/// for, and the modules those genes put it in.
+///
+/// A track's rows ARE its feature axis — a gene with no row on track `t` is
+/// OUTSIDE that track's axis, not a gene the track observed zero times — so
+/// track `t`'s softmaxes run over its support only:
+///
+/// ```text
+/// S_t = { g : gene g has a row on track t }
+/// M_t = { m : m ∩ S_t ≠ ∅ }
+/// ```
+///
+/// A track that has a row for EVERY gene is `full` and carries no restriction
+/// at all: it keeps the plain model's columns, empty modules included, exactly
+/// as a one-track axis has them. `modules_of` / `slots_of` / `local_of` return
+/// empty slices for such a track — the caller takes the unrestricted path and
+/// reads [`Partition::members`] directly.
+///
+/// Built once per fit from the [`TrackSpec`] and the partition; nothing here
+/// depends on a unit, a step or a plan.
+pub struct TrackSupport {
+    n_modules: usize,
+    full: Vec<bool>,
+    /// Per track, ascending; empty when that track is `full`.
+    modules: Vec<Vec<u32>>,
+    /// Per `(track, module)` at `t * M + m`, ascending; empty when `full`.
+    slots: Vec<Vec<u32>>,
+    /// Per `(track, module)`: full member slot → its position in `slots`, or
+    /// `u32::MAX` when the track has no row for that member. Empty when `full`.
+    local: Vec<Vec<u32>>,
+}
 
+impl TrackSupport {
+    pub fn new(tracks: &TrackSpec, part: &Partition) -> Self {
+        let (n_t, n_m) = (tracks.n_tracks(), part.n_modules());
+        let n_g = part.module_of.len();
+        let mut has = vec![false; n_t * n_g];
+        for (&t, &g) in tracks.track_of_row.iter().zip(&tracks.gene_of_row) {
+            has[t as usize * n_g + g as usize] = true;
+        }
+        let mut full = vec![false; n_t];
+        let mut modules: Vec<Vec<u32>> = vec![Vec::new(); n_t];
+        let mut slots: Vec<Vec<u32>> = vec![Vec::new(); n_t * n_m];
+        let mut local: Vec<Vec<u32>> = vec![Vec::new(); n_t * n_m];
+        for t in 0..n_t {
+            let row = &has[t * n_g..(t + 1) * n_g];
+            full[t] = row.iter().all(|&b| b);
+            if full[t] {
+                continue;
+            }
+            for (m, members) in part.members.iter().enumerate() {
+                let mut sup = Vec::new();
+                let mut loc = vec![u32::MAX; members.len()];
+                for (j, &g) in members.iter().enumerate() {
+                    if row[g as usize] {
+                        loc[j] = sup.len() as u32;
+                        sup.push(j as u32);
+                    }
+                }
+                if !sup.is_empty() {
+                    modules[t].push(m as u32);
+                }
+                slots[t * n_m + m] = sup;
+                local[t * n_m + m] = loc;
+            }
+        }
+        Self {
+            n_modules: n_m,
+            full,
+            modules,
+            slots,
+            local,
+        }
+    }
+
+    /// Does track `t` have a row for every gene? Then it carries no restriction.
+    #[must_use]
+    pub fn is_full(&self, t: usize) -> bool {
+        self.full.get(t).copied().unwrap_or(true)
+    }
+
+    /// The modules track `t` is scored in, ascending. EMPTY for a `full` track,
+    /// whose modules are `0..M`.
+    #[must_use]
+    pub fn modules_of(&self, t: usize) -> &[u32] {
+        &self.modules[t]
+    }
+
+    /// Module `m`'s member slots track `t` has a row for, ascending. EMPTY for
+    /// a `full` track, whose slots are `0..members[m].len()`.
+    #[must_use]
+    pub fn slots_of(&self, t: usize, m: usize) -> &[u32] {
+        &self.slots[t * self.n_modules + m]
+    }
+
+    /// Full member slot → its position in [`Self::slots_of`], `u32::MAX` when
+    /// the track has no row there. EMPTY for a `full` track (the identity).
+    #[must_use]
+    pub fn local_of(&self, t: usize, m: usize) -> &[u32] {
+        &self.local[t * self.n_modules + m]
+    }
+}
+
+/// One unit's buckets: per `(track, module)` key, that unit's `(slot, count)`
+/// pairs in the module on that track.
+pub type UnitBuckets = Vec<((u32, u32), Vec<(u32, f32)>)>;
+
+/// Each unit's view through the gene partition, per TRACK.
+///
+/// Invariants: `q` and `n_um` are `[n_units × n_tracks × n_modules]`, indexed
+/// by [`UnitModules::idx`]; `q[idx(u, t, ·)]` sums to 1 when unit `u` has any
+/// counts on track `t` and is all-zero otherwise; `by_module[u]` is sorted by
+/// `(track, module)` and holds only the `(t, m)` pairs the unit has counts in.
 pub struct UnitModules {
+    pub n_tracks: usize,
+    pub n_modules: usize,
+    /// `[n_units × n_tracks × n_modules]`, index `(u*T + t)*M + m`.
     pub q: Vec<f32>,
     pub n_um: Vec<f32>,
-    pub by_module: Vec<ModuleSlots>,
+    /// Per unit, sorted by `(track, module)`: that unit's (slot, count) pairs
+    /// in the module on that track. `slot` is the gene's position in
+    /// `Partition::members[m]`.
+    pub by_module: Vec<UnitBuckets>,
 }
 
 impl UnitModules {
+    /// Flat index of `(unit, track, module)` into [`Self::q`] / [`Self::n_um`].
+    #[must_use]
+    pub fn idx(&self, u: usize, t: usize, m: usize) -> usize {
+        (u * self.n_tracks + t) * self.n_modules + m
+    }
+
     pub fn new(units: &UnitTable, part: &Partition) -> Self {
         let (n_u, m) = (units.n_units(), part.n_modules());
+        let n_t = units.n_tracks();
         let slot = part.slot_of();
-        let mut n_um = vec![0f32; n_u * m];
-        let mut by_module: Vec<ModuleSlots> = Vec::with_capacity(n_u);
-        // One bucket per module, indexed directly; `members` are sorted by gene
-        // and `feats` are too, so each bucket's slots come out ascending.
-        let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); m];
+        let mut n_um = vec![0f32; n_u * n_t * m];
+        let mut by_module: Vec<UnitBuckets> = Vec::with_capacity(n_u);
+        // One bucket per (track, module), indexed directly as `t*M + m`, so the
+        // kept entries come out sorted by `(track, module)`. Within a bucket,
+        // `feats` is ascending and a track's rows follow its genes' order, so
+        // the slots come out ascending too.
+        let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_t * m];
         for u in 0..n_u {
-            for (&g, &c) in units.feats[u].iter().zip(&units.counts[u]) {
-                let mm = part.module_of[g as usize] as usize;
-                n_um[u * m + mm] += c;
-                buckets[mm].push((slot[g as usize], c));
+            for (&row, &c) in units.feats[u].iter().zip(&units.counts[u]) {
+                let t = units.tracks.track_of_row[row as usize] as usize;
+                let g = units.tracks.gene_of_row[row as usize] as usize;
+                let mm = part.module_of[g] as usize;
+                n_um[(u * n_t + t) * m + mm] += c;
+                buckets[t * m + mm].push((slot[g], c));
             }
             by_module.push(
                 buckets
                     .iter_mut()
                     .enumerate()
                     .filter(|(_, v)| !v.is_empty())
-                    .map(|(k, v)| (k as u32, std::mem::take(v)))
+                    .map(|(k, v)| (((k / m) as u32, (k % m) as u32), std::mem::take(v)))
                     .collect(),
             );
         }
-        let mut q = vec![0f32; n_u * m];
+        let mut q = vec![0f32; n_u * n_t * m];
         for u in 0..n_u {
-            let tot = units.total[u];
-            for k in 0..m {
-                q[u * m + k] = if tot > 0.0 {
-                    n_um[u * m + k] / tot
-                } else {
-                    0.0
-                };
+            for t in 0..n_t {
+                let tot = units.total_of(u, t);
+                for k in 0..m {
+                    let i = (u * n_t + t) * m + k;
+                    q[i] = if tot > 0.0 { n_um[i] / tot } else { 0.0 };
+                }
             }
         }
-        Self { q, n_um, by_module }
+        Self {
+            n_tracks: n_t,
+            n_modules: m,
+            q,
+            n_um,
+            by_module,
+        }
     }
 }
 

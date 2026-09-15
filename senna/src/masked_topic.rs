@@ -1584,13 +1584,13 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         softmax_dictionary_suffix: Some("dictionary.parquet"),
         cell_embedding_suffix: None,
         cell_encoder_suffix: None,
+        feature_contrast_suffix: None,
+        feature_contrast_bias_suffix: None,
+        track_encoder_suffixes: vec![],
         default_colour_by: "cluster",
         has_latent: true,
         has_cell_to_pb,
         has_pb_tree,
-        velocity_suffix: None,
-        velocity_factor_suffix: None,
-        delta_feature_embedding_suffix: None,
     })?;
 
     info!("Done");
@@ -1636,9 +1636,8 @@ impl MaskedTopicArgs {
         // The rate is the model, not a knob with a safe default: 0 hides
         // nothing and 1 hides everything, and either leaves one side of the
         // masked objective with no work. The loader used to clamp both back to
-        // a one-gene draw, answering a question nobody asked. `senna
-        // gem-encoder` refuses the same flag by name; this is the open interval
-        // the draw actually needs.
+        // a one-gene draw, answering a question nobody asked. This refuses the
+        // flag by name instead, in the open interval the draw actually needs.
         let rate_in_unit_interval = |flag: &str, x: f64| -> anyhow::Result<()> {
             anyhow::ensure!(
                 x > 0.0 && x < 1.0,

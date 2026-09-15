@@ -7,7 +7,6 @@
 //! Shared utilities (`TrainScores`, `smooth_topics`, `PhaseTimers`,
 //! grad-clipping helpers) live here at the module root.
 
-pub mod masked_gem;
 pub mod masked_topic;
 pub mod topic;
 

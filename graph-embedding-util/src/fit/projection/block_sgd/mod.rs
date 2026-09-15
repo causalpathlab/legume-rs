@@ -1,7 +1,7 @@
-//! Block **Poisson-MAP SGD** over a frozen dictionary (candle) — the shared solver
-//! behind both the per-cell Phase 2 ([`super::cells`]) and the per-pseudobulk
-//! velocity readout ([`super::pseudobulk`]); a "node" below is a cell or a pb
-//! aggregate, whichever the caller passes.
+//! Block **Poisson-MAP SGD** over a frozen dictionary (candle) — the solver
+//! behind the per-cell Phase 2 ([`super::cells`]) and the streaming frozen-
+//! dictionary projector ([`super::FrozenProjector`]); a "node" below is
+//! whichever unit the caller passes (a cell, or a query row at predict time).
 //!
 //! With the feature side frozen, the phase-2 objective is *separable per cell*:
 //! a cell's embedding depends only on its own edges. A **block** of cells is
@@ -9,6 +9,12 @@
 //! is what lets every block carry its own convergence test, and what makes the
 //! whole pass a sequence of two dense matmuls per step instead of a per-cell
 //! Newton solve.
+//!
+//! A one-track feature axis (`senna bge`) solves the single shared partition
+//! below directly. A multi-track axis (`senna gem`'s modality offset tracks)
+//! instead runs the per-track polish in [`tracks`]: one Poisson partition and
+//! one intercept per track, against the same shared latent. See that module's
+//! doc for the per-track objective.
 //!
 //! # The objective
 //!
@@ -85,9 +91,11 @@
 //! [`edges`] flattens the sampler's edges once per pass and sizes the blocks;
 //! [`pass`] holds the frozen per-pass design ([`pass::PassDict`]) apart from the
 //! block loop that runs nodes against it, and owns the per-block argument/result
-//! types; [`solve`] is the Adam loop for one block; [`joint`] is the alternative
-//! single-solve θ+δ path. The tuning constants, the caller-facing types and the
-//! entry points stay here.
+//! types; [`solve`] is the Adam loop for one block. [`tracks`] is the same polish
+//! on a MULTI-track feature axis — one Poisson partition and one intercept per
+//! track — which [`polish_cells`] dispatches to when the axis has more than one;
+//! a one-track axis never enters it. The tuning constants, the caller-facing types
+//! and the entry points stay here.
 //!
 //! There are two entry points, differing only in who owns the dictionary.
 //! [`project_cells`] takes a whole node set and builds the design for it;
@@ -96,17 +104,18 @@
 //! the same dictionary.
 
 use super::CellBatchFold;
+use crate::cell_projection::SCORE_CLAMP;
+use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::Device;
 use log::info;
 
 mod edges;
-mod joint;
 mod pass;
 mod solve;
+mod tracks;
 
 use edges::EdgeTable;
-use joint::run_joint_pass;
 use pass::{run_pass, PassSpec};
 
 pub(crate) use edges::block_cells;
@@ -145,6 +154,22 @@ const TARGET_DELTA_S: f64 = 0.05;
 /// a block's steps so it settles instead of dithering around the optimum.
 const LR_FLOOR_FRAC: f64 = 0.05;
 
+/// Adam's moment decays and its denominator floor, shared by every block loop in
+/// this module ([`solve`] and [`tracks`]).
+///
+/// They live here rather than as literals inside each loop for one reason: the
+/// one-track and per-track solves must not drift apart, and no test can catch
+/// that drift — a one-track axis never enters [`tracks`], so a changed `β₂` in
+/// one loop and not the other would pass the whole suite. The loop *bodies* stay
+/// separate on purpose (sharing them would put a branch on the one-track path);
+/// the numbers they are parameterised by do not.
+///
+/// AdamW with `weight_decay = 0` at both call sites — the ridge is already in the
+/// closed-form gradient, and a decoupled decay would double-count it.
+const BETA1: f64 = 0.9;
+const BETA2: f64 = 0.999;
+const EPS: f64 = 1e-8;
+
 /// Activation budget per block. `Bc` is sized from this and the pass's feature
 /// count so a block's `[Bc, F]` tensors stay bounded regardless of `F`.
 ///
@@ -161,11 +186,11 @@ const LR_FLOOR_FRAC: f64 = 0.05;
 /// rescue a per-step regression.
 const BLOCK_ACTIVATION_BYTES: usize = 1536 << 20;
 
-/// Live `[Bc, F]` f32 tensors in flight at once: the dense count matrix `N` and the
-/// velocity pass's offset (both held for the whole block), plus the step's `s`,
-/// `μ` and one temporary. With the gradient taken in closed form there is no
-/// retained autograd graph, so this is far lower than it would be for
-/// `loss.backward()` — which materialises a full-size buffer per operand per op.
+/// Live `[Bc, F]` f32 tensors in flight at once: the dense count matrix `N`
+/// (held for the whole block), plus the step's `s`, `μ` and temporaries. With
+/// the gradient taken in closed form there is no retained autograd graph, so
+/// this is far lower than it would be for `loss.backward()`, which
+/// materialises a full-size buffer per operand per op.
 const LIVE_BLOCK_TENSORS: usize = 8;
 
 /// Ceiling on `Bc` regardless of the budget: past this the per-step overhead is
@@ -217,20 +242,15 @@ pub(crate) struct Phase2Input<'a> {
     pub lambda: f64,
     pub dev: &'a Device,
     /// Log prefix, so a caller reusing this solver reads honestly: `"Phase 2"`
-    /// for the per-cell projection, `"pb velocity readout"` for the pseudobulk one.
+    /// for the per-cell projection, `"Projection"` for a frozen-dictionary query.
     pub label: &'static str,
     /// Remove the population mean from the latents and report it in [`GaugeShift`].
     /// **Cells set this `true`**: the common mode must leave `θ` and be folded into
     /// `b_feat`, or it lands on the gene centroids and collapses marker annotation.
-    /// **The pb readout sets it `false`**: its landmarks are never co-embedded, and
-    /// the cell-lift differences cells against *raw* pb `θ` — so pb latents stay in
-    /// the as-trained frame and nothing is folded (`GaugeShift` comes back zero).
+    /// A frozen-dictionary query sets it `false`: `b_feat` is already fixed at
+    /// predict time, so re-centring `θ` alone would break its correspondence with
+    /// the dictionary it is scored against (`GaugeShift` comes back zero).
     pub gauge_fix: bool,
-    /// Joint θ+δ solve (β-sharing only). When `true` and `unspliced_rows` is given, one
-    /// SGD estimates identity `θ` and velocity `δ` **together** — θ pulled by both the
-    /// spliced and unspliced tracks — instead of the default sequential θ-then-δ (δ with
-    /// θ held fixed). Ignored without `unspliced_rows`.
-    pub joint: bool,
 }
 
 impl Phase2Input<'_> {
@@ -255,12 +275,14 @@ pub(crate) struct Phase2Out {
     /// origin — which, after centring, *is* the population mean, i.e. the right
     /// "no information" position rather than an arbitrary corner of the space.
     pub theta: Vec<f32>,
-    /// Fitted per-cell intercept, `[n_cells]`.
+    /// Fitted per-cell intercept, `[n_cells]` — the base track's on a multi-track
+    /// feature axis.
     pub b_cell: Vec<f32>,
-    /// Velocity increment `δ`, `[n_cells × h]`, likewise mean-zero; `None` off the
-    /// splice path.
-    pub velocity: Option<Vec<f32>>,
-    /// The means that were removed. The caller **must** fold these into `b_feat`
+    /// Tracks `1..T`, one fitted `[n_cells]` intercept each; **empty** on a
+    /// one-track axis. A cell with no counts on the track sits at the score-clamp
+    /// floor, which is what the solver reports for a track it skipped.
+    pub other_intercepts: Vec<Vec<f32>>,
+    /// The mean that was removed. The caller **must** fold this into `b_feat`
     /// or the model is changed rather than re-gauged.
     pub gauge: GaugeShift,
 }
@@ -294,30 +316,21 @@ pub(crate) struct Phase2Out {
 pub(crate) struct GaugeShift {
     /// Mean identity `θ̄` removed from every solved cell, `[h]`.
     pub theta_mean: Vec<f32>,
-    /// Mean increment `δ̄` removed on the splice path, `[h]`; empty otherwise.
-    pub delta_mean: Vec<f32>,
 }
 
 /// Project every cell onto the frozen dictionary.
 ///
-/// `cells` is the flattened per-node view `(global id, feature ids, counts)` — the
-/// per-cell sampler flattening on the `super::cells` path, one entry per pb node on
-/// the `super::pseudobulk` path. `batch_fold`, when set, divides each cell's
+/// `cells` is the flattened per-node view `(global id, feature ids, counts)` —
+/// the per-cell sampler flattening. `batch_fold`, when set, divides each cell's
 /// counts by its batch's per-gene fold — **once**, while the edges are flattened,
 /// rather than on every solve (see [`crate::fit::batch_fold`]).
 ///
-/// Without `unspliced_rows` (bge) there is one pass over every feature row. With
-/// it (gem β-sharing) there are two: identity `θ` from the spliced edges with the
-/// partition over spliced rows, then — holding `θ` fixed — the velocity increment
-/// `δ` from the unspliced edges with the partition over unspliced rows. That
-/// mirrors the retired analytical increment's semantics exactly:
-/// `δ` is a directed residual in `θ`'s own frame, with its own throwaway
-/// intercept, not a second independent projection.
+/// One pass over every feature row: identity `θ` (and the kept per-cell
+/// intercept).
 pub(crate) fn project_cells(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
     batch_fold: Option<CellBatchFold>,
-    unspliced_rows: Option<&[bool]>,
 ) -> anyhow::Result<Phase2Out> {
     let n_features = input.b_feat.len();
     anyhow::ensure!(
@@ -327,101 +340,41 @@ pub(crate) fn project_cells(
         input.h
     );
 
-    // Per-pass feature partitions on the global feature axis. One pass (all rows)
-    // off the splice path; spliced / unspliced rows otherwise.
-    let (rows_a, rows_b) = match unspliced_rows {
-        None => ((0..n_features as u32).collect::<Vec<_>>(), Vec::new()),
-        Some(un) => {
-            anyhow::ensure!(
-                un.len() == n_features,
-                "phase-2: unspliced mask has {} entries, expected {n_features}",
-                un.len()
-            );
-            let mut spliced = Vec::with_capacity(n_features);
-            let mut unspl = Vec::with_capacity(n_features);
-            for (f, &is_un) in un.iter().enumerate() {
-                if is_un {
-                    unspl.push(f as u32);
-                } else {
-                    spliced.push(f as u32);
-                }
-            }
-            (spliced, unspl)
-        }
-    };
+    let rows: Vec<u32> = (0..n_features as u32).collect();
 
     // Flatten the sampler edges once, applying the batch fold here so no solve
     // ever re-derives them. Grouped by the cell's position in `cells`.
-    let edges_a = EdgeTable::build(cells, &rows_a, n_features, batch_fold);
-    let edges_b =
-        (!rows_b.is_empty()).then(|| EdgeTable::build(cells, &rows_b, n_features, batch_fold));
+    let edges = EdgeTable::build(cells, &rows, n_features, batch_fold);
 
-    // The bar counts **cells**, across both passes, and advances *within* a block
-    // in proportion to that block's Adam steps. Counting whole blocks would tick
-    // maybe 16 times for an entire phase — and the better `Bc` gets for speed, the
-    // coarser that becomes. Cells stay meaningful and the bar keeps moving.
-    let two_pass = !rows_b.is_empty();
-    let bar = new_progress_bar((cells.len() * (1 + usize::from(two_pass))) as u64);
+    // The bar counts **cells** and advances *within* a block in proportion to
+    // that block's Adam steps. Counting whole blocks would tick maybe 16 times
+    // for an entire phase — and the better `Bc` gets for speed, the coarser
+    // that becomes. Cells stay meaningful and the bar keeps moving.
+    let bar = new_progress_bar(cells.len() as u64);
     bar.enable_steady_tick(std::time::Duration::from_millis(200));
 
-    // Estimate θ (and, on the splice path, δ). Two modes:
-    //   • **joint** (β-sharing + `input.joint`): one solve over both partitions with θ
-    //     pulled by the spliced AND unspliced tracks ([`run_joint_pass`]);
-    //   • **sequential** (default): identity θ from the spliced edges, then δ as a
-    //     directed residual with θ held fixed.
-    let (pass_a, pass_b) = match (&edges_b, input.joint) {
-        (Some(eb), true) => {
-            let (pa, pb) = run_joint_pass(input, &rows_a, &edges_a, &rows_b, eb, cells, &bar)?;
-            (pa, Some(pb))
-        }
-        _ => {
-            // Pass 1 — identity θ (and the kept per-cell intercept).
-            let dict_a = PassDict::build(&input.dict_spec("identity"), rows_a)?;
-            let pass_a = run_pass(
-                input,
-                &dict_a,
-                &PassSpec {
-                    edges: &edges_a,
-                    base_theta: None,
-                    init_theta: None,
-                    max_steps: MAX_STEPS,
-                },
-                cells,
-                &bar,
-            )?;
-            // Pass 2 — velocity increment δ, with θ held fixed.
-            let pass_b = match &edges_b {
-                Some(eb) => {
-                    let dict_b = PassDict::build(&input.dict_spec("velocity"), rows_b)?;
-                    Some(run_pass(
-                        input,
-                        &dict_b,
-                        &PassSpec {
-                            edges: eb,
-                            base_theta: Some(&pass_a.latent),
-                            init_theta: None,
-                            max_steps: MAX_STEPS,
-                        },
-                        cells,
-                        &bar,
-                    )?)
-                }
-                None => None,
-            };
-            (pass_a, pass_b)
-        }
-    };
+    let dict = PassDict::build(&input.dict_spec("identity"), rows)?;
+    let pass = run_pass(
+        input,
+        &dict,
+        &PassSpec {
+            edges: &edges,
+            init_theta: None,
+            max_steps: MAX_STEPS,
+        },
+        cells,
+        &bar,
+    )?;
     bar.finish_and_clear();
-    Ok(finish(input, cells, pass_a, pass_b))
+    Ok(finish(input, cells, pass))
 }
 
 /// Project one group of nodes against a dictionary the caller has **already**
-/// built — the streaming counterpart of [`project_cells`].
+/// built: the streaming counterpart of [`project_cells`].
 ///
-/// One feature partition (every row of the dictionary), no batch fold and no
-/// splice pass, on the caller's own progress bar: the shape
-/// [`super::FrozenProjector`] needs to walk a query past a frozen side group by
-/// group.
+/// One feature partition (every row of the dictionary) and no batch fold, on
+/// the caller's own progress bar: the shape [`super::FrozenProjector`] needs
+/// to walk a query past a frozen side group by group.
 ///
 /// # Grouping does not change the answer, provided the groups are block-aligned
 ///
@@ -449,28 +402,38 @@ pub(crate) fn project_prepared(
         dict,
         &PassSpec {
             edges: &edges,
-            base_theta: None,
             init_theta: None,
             max_steps: MAX_STEPS,
         },
         nodes,
         bar,
     )?;
-    Ok(finish(input, nodes, pass, None))
+    Ok(finish(input, nodes, pass))
 }
 
 /// Finish a warm-started solve: the same per-cell objective as
-/// [`project_cells`] on the plain path, started from `init` (`[n_cells × h]`,
+/// [`project_cells`], started from `init` (`[n_cells × h]`,
 /// indexed by position in `cells`) and capped at [`POLISH_STEPS`] Adam steps
 /// per block. The per-cell problem is convex, so what the warm start leaves is
 /// the distance to one optimum, not a choice among several. Training-side
 /// entry: builds the dictionary and applies the batch fold.
+///
+/// `tracks` selects the objective, and a one-track axis is dispatched away
+/// **before** anything here runs: [`TrackSpec::is_base`] sends it to the
+/// single-partition pass below, untouched and with nothing added to its path.
+/// Any other axis goes to [`tracks::polish_tracks`], which gives each track its
+/// own Poisson partition and its own intercept (see that module for the
+/// objective) and returns them in [`PassOut::other_intercepts`].
 pub(crate) fn polish_cells(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
     batch_fold: Option<CellBatchFold>,
     init: &[f32],
+    tracks: &TrackSpec,
 ) -> anyhow::Result<PassOut> {
+    if !tracks.is_base() {
+        return tracks::polish_tracks(input, cells, batch_fold, init, tracks);
+    }
     let n_features = input.b_feat.len();
     let rows: Vec<u32> = (0..n_features as u32).collect();
     let edges = EdgeTable::build(cells, &rows, n_features, batch_fold);
@@ -515,7 +478,6 @@ fn polish_pass(
         dict,
         &PassSpec {
             edges,
-            base_theta: None,
             init_theta: Some(init),
             max_steps: POLISH_STEPS,
         },
@@ -530,63 +492,61 @@ fn polish_pass(
 pub(crate) fn finish(
     input: &Phase2Input,
     cells: &[(u32, &[u32], &[f32])],
-    pass_a: PassOut,
-    pass_b: Option<PassOut>,
+    pass: PassOut,
 ) -> Phase2Out {
     let h = input.h;
     // Fix the gauge (see `GaugeShift`): remove the population mean from each
     // latent. Taken over the SOLVED cells only — a cell with no edges was never
     // placed by the likelihood, and after centring the origin is the population
     // mean, which is exactly where a no-information cell belongs.
-    let (theta_mean, delta_mean) = if input.gauge_fix {
-        let tm = mean_rows(&pass_a.latent, h);
-        let dm = pass_b
-            .as_ref()
-            .map_or_else(Vec::new, |p| mean_rows(&p.latent, h));
+    let theta_mean = if input.gauge_fix {
+        let tm = mean_rows(&pass.latent, h);
         info!(
-            "{} — gauge fix: removed ‖θ̄‖={:.3}{} from the latents into b_feat \
+            "{} — gauge fix: removed ‖θ̄‖={:.3} from the latents into b_feat \
              (exact reparametrisation: every score is unchanged)",
             input.label,
             norm(&tm),
-            if dm.is_empty() {
-                String::new()
-            } else {
-                format!(", ‖δ̄‖={:.3}", norm(&dm))
-            },
         );
-        (tm, dm)
+        tm
     } else {
-        // pb readout: no re-gauge — nothing leaves the latents. Zero means make the
-        // scatter a no-op; the caller ignores the reported (zero) `GaugeShift`.
-        (vec![0f32; h], vec![0f32; h])
+        // A frozen-dictionary query: no re-gauge — nothing leaves the latents. Zero
+        // means make the scatter a no-op; the caller ignores the reported (zero)
+        // `GaugeShift`.
+        vec![0f32; h]
     };
 
     // Scatter the pass results (indexed by position in `cells`) back onto the
     // global cell axis. Cells the samplers never saw keep the zero row.
     let mut theta = vec![0f32; input.n_cells * h];
     let mut b_cell = vec![0f32; input.n_cells];
-    let mut velocity = pass_b.as_ref().map(|_| vec![0f32; input.n_cells * h]);
     for (i, &(cell, _, _)) in cells.iter().enumerate() {
         let (g, l) = (cell as usize * h, i * h);
         for k in 0..h {
-            theta[g + k] = pass_a.latent[l + k] - theta_mean[k];
+            theta[g + k] = pass.latent[l + k] - theta_mean[k];
         }
-        b_cell[cell as usize] = pass_a.intercept[i];
-        if let (Some(v), Some(p)) = (velocity.as_mut(), pass_b.as_ref()) {
-            for k in 0..h {
-                v[g + k] = p.latent[l + k] - delta_mean[k];
-            }
-        }
+        b_cell[cell as usize] = pass.intercept[i];
     }
+
+    // The non-base tracks' intercepts, on the same axis. A cell the pass never
+    // saw has no counts on any track, which is exactly the case the solver
+    // reports at the score-clamp floor — so that, not zero, is the fill.
+    let other_intercepts: Vec<Vec<f32>> = pass
+        .other_intercepts
+        .iter()
+        .map(|track| {
+            let mut global = vec![-SCORE_CLAMP as f32; input.n_cells];
+            for (i, &(cell, _, _)) in cells.iter().enumerate() {
+                global[cell as usize] = track[i];
+            }
+            global
+        })
+        .collect();
 
     Phase2Out {
         theta,
         b_cell,
-        velocity,
-        gauge: GaugeShift {
-            theta_mean,
-            delta_mean,
-        },
+        other_intercepts,
+        gauge: GaugeShift { theta_mean },
     }
 }
 

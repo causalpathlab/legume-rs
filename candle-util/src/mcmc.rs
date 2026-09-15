@@ -152,8 +152,8 @@ pub fn batched_ess_steps(
 ///
 /// # Why the transform is applied inside, not after
 ///
-/// The estimand is usually a nonlinear map of the state: for
-/// [`crate::vae::masked_gem`] it is `θ = softmax(z)`, a composition. Since
+/// The estimand is usually a nonlinear map of the state: for a softmax-latent
+/// model it is `θ = softmax(z)`, a composition. Since
 /// `softmax(mean z) ≠ mean softmax(z)` and only the second is `E[θ]`, averaging
 /// in `z` and mapping afterwards returns a point systematically SHARPER than
 /// the posterior mean, biased toward whichever coordinate leads — worst exactly

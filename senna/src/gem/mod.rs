@@ -1,24 +1,53 @@
-//! `senna gem` — **Ge**odesic **E**mbedding + **M**otion: a joint cell-feature embedding
-//! over the shared `graph_embedding_util` engine. Motion is the local velocity δ (the
-//! tangent); the lineage is the geodesic path it traces. The engine is modality-agnostic;
-//! it is fed gene counts (spliced + unspliced) today, but embeds any per-feature count.
+//! `senna gem`: joint embedding of gene counts and any co-measured
+//! modality, over the shared `graph_embedding_util` engine and `senna bge`'s
+//! driver.
 //!
-//! Each feature row `{gene}/count/{spliced|unspliced}` maps to its gene, so a
-//! gene's spliced and unspliced tracks embed identically as `β_g` (β-sharing).
-//! A single Poisson likelihood on counts: cell **identity** is the spliced
-//! projection θ (written raw), and the **velocity** is the raw analytic increment
-//! δ — a Poisson-MAP shift fit to the unspliced edges with θ held fixed (‖δ‖ =
-//! speed) — tracking the spliced↔unspliced dynamics rather than a second (binomial)
-//! likelihood.
+//! A gem feature axis is one gene axis carrying several TRACKS: the base
+//! gene count (`{gene}/count/spliced`, optionally `{gene}/count/unspliced`),
+//! plus, for every `--modality` file, that modality's two channel rows
+//! (`{gene}/m6a/{methylated,unmethylated}`, `{gene}/atoi/{edited,unedited}`,
+//! `{gene}/apa/{proximal,distal}`). The base track shares a gene's loading
+//! outright; every other track adds a ridge-shrunk offset to it
+//! (`--offset-l2`). [`tracks::assign_tracks`] reads this grammar off the row
+//! names alone (never a file name or load order) and builds the
+//! [`tracks::TrackPlan`] that both `senna gem`'s own per-gene HVG pooling and
+//! the engine's per-track training consume.
+//!
+//! Trained cells carry one encoder per count track (`{out}.cell_encoder.safetensors`
+//! for the base track, `{out}.cell_encoder.{modality}.{channel}.safetensors`
+//! for any other count track). [`contrast::write_contrast`] reads the
+//! finished fit's raw loading and writes one row per gene-and-modality where
+//! both of that modality's channels are present
+//! (`{out}.feature_contrast.parquet`, `{out}.feature_contrast_bias.parquet`).
 
-pub mod args;
+pub(crate) mod args;
+/// One row per gene-and-modality, contrasting a modality's two channel
+/// tracks on the raw loading: `{out}.feature_contrast.parquet` /
+/// `{out}.feature_contrast_bias.parquet`.
+pub(crate) mod contrast;
+/// Pooled per-gene HVG projection weights over a [`tracks::TrackPlan`]
+/// (every track of a gene shares one selection decision, weight lands only
+/// on the base row). Replaces the deleted `rows` module for the one thing
+/// gem's HVG selection still needs.
+pub(crate) mod hvg;
+/// Multi-file input resolution and loading: matches `--modality` files to
+/// gene files by sample id, loads them into one `UnifiedData`, and assigns
+/// the [`tracks::TrackPlan`].
+pub(crate) mod load;
 /// Loading gem's co-embedded **feature** embedding (`{out}.feature_embedding.parquet`)
-/// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage` —
+/// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage`:
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
 pub mod marker_embedding;
-/// The `senna gem` run: joint spliced+unspliced gene-count embedding over the shared
-/// `graph_embedding_util` engine (identity θ + velocity δ). Binary entry: [`run::run_gem_embedding`].
-/// The gene-count row grammar both gem models read their input through.
-pub mod rows;
+/// The `senna gem` run: joint gene-count embedding over the shared
+/// `graph_embedding_util` engine (bge, over every feature row). Binary entry: [`run::run_gem_embedding`].
 pub mod run;
 pub mod sample_id;
+/// Row-grammar track assignment: turns a gem feature axis (gene counts plus
+/// any `--modality` files) into a [`tracks::TrackPlan`] /
+/// `graph_embedding_util::fit::TrackSpec`.
+pub(crate) mod tracks;
+
+/// Synthetic fixture builders shared by `gem::run::tests` and
+/// `predict::tests`'s gem contract test.
+#[cfg(test)]
+pub(crate) mod test_fixtures;
