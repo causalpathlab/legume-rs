@@ -1,6 +1,6 @@
 # Plan — A text-anchored gene space: literature priors, a concept vocabulary, and grounded hypotheses for senna
 
-*Working notes, 2026-09-15. Status: design, no code. Builds on `annotation-ontology-plan.md` (the depth axis) and the deep-research report of the same day (108 agents, 26 primary sources, 23/25 claims verified). Sibling memory: `[[pretrained-llm-leverage-brainstorm]]`.*
+*Working notes, 2026-09-15; revised 2026-09-16 after PR #60 (`gene-text`, typed `senna fne`, shared `--freeze/--init-feature-embedding`) merged. Status: design, no code. Branch `ypp/text-anchored-genes`. Builds on `annotation-ontology-plan.md` (the depth axis) and the deep-research report of the same day (108 agents, 26 primary sources, 23/25 claims verified). Sibling memory: `[[pretrained-llm-leverage-brainstorm]]`.*
 
 ---
 
@@ -28,17 +28,29 @@ senna learns everything from the run in front of it. The axes that stay weak are
 
 Two languages. In the expression language a cell is a sentence over genes and the model places it at `z_c ∈ ℝ^H`. In the text language every concept with a description — gene, Cell Ontology term, pathway, disease, state, transcription factor — has a vector `k ∈ ℝ^{H_text}` from one text encoder. **Genes exist in both**, so they are a parallel lexicon, and the map between the languages is fitted on them (the MUSE setup: Conneau et al., ICLR 2018 — Procrustes on a bilingual lexicon aligns whole vocabularies; CSLS corrects hubness).
 
-The gene dictionary becomes
+The gene dictionary becomes, per gene `g`,
 
 ```
-ρ = diag(s) · (K_text · W₀ + U · V) + b_g        U: [D, r], V: [r, H], r ≪ H
+ρ_g = s_g · ( ρ₀_g + u_g · V ) + b_g        ρ₀: [D, H] frozen;  u_g ∈ ℝ^r,  V ∈ ℝ^{r×H},  r ≪ H
 ```
 
-- `K_text` frozen `[D, H_text]`, centred and whitened.
-- `W₀: H_text → H` the translation map (PCA basis for the probe; trained adapter for the real version).
-- `U·V` a LoRA-shaped, shrunk residual — `r = 0` is "fully prior", `r = H` is "learn from scratch", so the experiment is a rank sweep. LoRA on a gene table has no precedent in single-cell; adapters on transformer backbones do (scPEFT, *Nat Mach Intell* 2025) and beat full fine-tuning on small or shifted data.
-- `diag(s)` and `b_g` are not optional: text tables carry no notion of abundance and a bilinear Poisson decoder needs per-gene magnitude (the DoRA magnitude/direction split, Liu et al., ICML 2024). The topic models currently carry no `b_g`.
-- Unmatched genes (no text) keep a **free** row; they are not dropped.
+- `ρ₀` is the anchor: a `senna fne` table (GO + PPI + words, already at the model's H) or a text table `K_text · W₀` translated from `H_text` to `H` (`K_text` centred and whitened; `W₀` = PCA/Procrustes offline for the probe, the existing `FeatAdapter` when trained).
+- `u_g · V` is a LoRA residual (Hu et al., 2021) — row-side `U: [D, r]` is gathered per gene like every other trained row (the sparse rule), `V: [r, H]` is dense and tiny. `r = 0` is "fully prior", `r = H` is "learn from scratch", so the experiment is a rank sweep. LoRA on a gene table has no precedent in single-cell; adapters on transformer backbones do (scPEFT, *Nat Mach Intell* 2025) and beat full fine-tuning on small or shifted data.
+- **LoRA+** (Hayou, Ghosh & Yu, ICML 2024): same model, but the zero-initialised factor trains at λ× the other's learning rate (λ ≈ 2⁴ in the paper; λ = 1 is plain LoRA). Ours: `u_g ~ N(0, 1/r)`, `V = 0` at start, `lr(V) = λ · lr(U)`. The asymmetry is stronger here than in a transformer: a gene's `u_g` row moves only when the gene is in the batch, `V` moves every step.
+- `diag(s)` and `b_g` are not optional: text tables carry no notion of abundance and a bilinear Poisson decoder needs per-gene magnitude (the DoRA magnitude/direction split, Liu et al., ICML 2024). bge already trains `b_g` under freeze; the masked models carry no `b_g` yet. `s_g` stays off until the probe asks for it.
+- Unmatched genes (no row in the table) keep a **free** row in every mode; they are not dropped.
+
+**The flags** — one shared struct, mutually exclusive, identical on `bge`, `masked-*`, `simba`, `fne`:
+
+```
+--freeze-feature-embedding <PREFIX>   pin ρ = ρ₀; biases train
+--init-feature-embedding   <PREFIX>   start ρ at ρ₀, train it freely
+--lora-feature-embedding   <PREFIX>   pin ρ₀, train ρ = ρ₀ + U·V
+    --lora-rank <r>        default 16
+    --lora-lr-ratio <λ>    LoRA+ ratio; default 16, 1 = plain LoRA
+```
+
+`<PREFIX>` resolves as today (`{prefix}.feature_loading.parquet`, else a signed `.dictionary` / `.feature_embedding`; gene rows only when `feature_types.parquet` is present; canonical-name match; `--embedding-dim 0` takes H from the table).
 
 Once the map exists, every text concept can be translated into the model's space, including ones with no expression counterpart (a disease name), and every model object can be translated out (a topic β as an expression-weighted sum of gene text vectors — scELMo's weighted-average mode).
 
@@ -57,35 +69,44 @@ Anchored genes cannot be dragged into a modality-dominated geometry — the CITE
 Peaks have no description, but they share cells with anchored genes, so free peak rows settle next to the genes and concepts they co-vary with: a functional annotation of a region with no gene assigned by hand. Honest reading: co-placement is **program membership** (trans), not a cis link. The cis call belongs to chickpea (peak-to-gene + GhostKnockoff FDR); the anchored space supplies the *prior*. Optional partial anchor for peaks: motif content as a sentence of TF words, `k_peak = Σ_motifs k_TF`. Validation is expression-independent: CRISPRi enhancer–gene pairs (Fulco et al., *Nat Genet* 2019; Gasperini et al., *Cell* 2019; ENCODE-rE2G, Gschwind et al., bioRxiv 2023).
 
 ### 4.4 Hypothesis sentences — the last mile
-Per cluster, the scored concept set with its abstentions is the evidence; a lightweight LLM **composes, never decides**. Structured JSON in; one or two sentences plus the list of concepts used out; a verifier rejects any sentence naming an entity outside the retrieved set (the RAG citation check). Abstentions are a required slot ("a T cell whose CD4/CD8 identity the data does not resolve"). What makes it a hypothesis rather than a caption is the proposed test — "*HAVCR2* and *LAG3* should be elevated relative to cluster 3" — which the tools can run. Local models (Qwen3-1.7B/4B-Instruct, Phi-4-mini via `candle-transformers`) are sufficient; the composer lives in the same thin binary as the text encoder, never in senna. Prior art to position against: GPTCelltype (Hou & Ji, *Nat Methods* 2024) and scChat hand a marker list to GPT-4; CellWhisperer trains a CLIP-style captioner on paired data. Ours needs no pairs — genes are the pairs — and the composer is sandboxed.
+Per cluster, the scored concept set with its abstentions is the evidence; a lightweight LLM **composes, never decides**. Structured JSON in; one or two sentences plus the list of concepts used out; a verifier rejects any sentence naming an entity outside the retrieved set (the RAG citation check). Abstentions are a required slot ("a T cell whose CD4/CD8 identity the data does not resolve"). What makes it a hypothesis rather than a caption is the proposed test — "*HAVCR2* and *LAG3* should be elevated relative to cluster 3" — which the tools can run. Local models (Qwen3-1.7B/4B-Instruct, Phi-4-mini via `candle-transformers`) are sufficient; the composer lives in `gene-text` beside the text encoder, never in senna. Prior art to position against: GPTCelltype (Hou & Ji, *Nat Methods* 2024) and scChat hand a marker list to GPT-4; CellWhisperer trains a CLIP-style captioner on paired data. Ours needs no pairs — genes are the pairs — and the composer is sandboxed.
 
 ## 5. Ruled out on the way (keep out)
 
 - SCimilarity as a model or index: dense 28k-gene input, label-triplet metric learning with a 0.05 margin, robustness only to noise present in its training atlas, and drift handled by *dropping* cells. Its architecture class (gene table + pooling + MLP) is bge's phase-2 encoder trained on labels instead of on the pb tree; bge additionally has a count likelihood and depth augmentation by construction.
 - Expression-FM gene tables in the prior bank; Geneformer backbone via candle (the only licence-clean one, recorded for completeness); Stack-style in-context cells (parked, +1.8 % margin); remote embedding APIs; Census-embedding joins (parked, undecided reference).
 
-## 6. Objects and seams that already exist
+## 6. Objects and seams that already exist (post PR #60)
 
-- `auxiliary-data::frozen_features::load_frozen_feature_host` — any `[D, H]` parquet with the gene name in row column 0, name canonicalisation (`ENSG…_TGFB1` ≡ `TGFB1`), strict intersection. Reached by `senna masked-topic --init-feature-embedding <prefix>` / `--freeze-feature-embedding <prefix>` via `run_manifest::resolve_feature_loading` (`{prefix}.feature_loading.parquet`). `topic` takes ρ through `--from <manifest>`; `bge` only through `senna update`'s parent manifest.
-- `candle_util::frozen_features::{install_frozen_var_2d, trainable_vars}` — freeze vs. init are the two modes; the LoRA mode is the missing third.
-- `graph-embedding-util::fit::projection::CellEncoders` (post PR #58) — the trunk that places query cells; the second attachment point for the same LoRA primitive (query-side adapter for batch; same self-supervised pb objective, no labels, retrieval-anchored term later).
-- bge phase 1 (`fit/hier`) — exact two-level softmax over a stack of pb partitions; an ontology depth is one more partition.
-- `annotate-by-{projection,enrichment}` with bootstrap + permutation — the shuffled-panel null is the test projection failed and must pass.
-- `--poisson-thin` — the robustness benchmark needs nothing new.
+| Engine | Where ρ lives | Freeze today | LoRA hook |
+|---|---|---|---|
+| bge phase 1 (`graph-embedding-util/src/fit/hier/`) | host `HierParams`: μ_m + r_g; `frozen_rows`, `base_row()` | `apply()` skips μ/r for frozen genes, trains `b_g` | `base_row = ρ₀_g + u_g·V`; `u`, `V` as two more host params with their own AdaGrad rates |
+| masked-* (`senna/src/masked_topic.rs`, `candle-util/src/frozen_features.rs`) | `Var "enc.feature.embeddings"`; `overwrite_var_2d`, `trainable_vars` | name excluded from AdamW | compose `ρ₀ (detached) + U·V`; U, V Vars; two AdamW groups (λ) |
+| fne / simba (`graph-embedding-util/src/fne/`) | `model.e` Var; `PresetRows`; gradient mask before `RowAdagrad::step` | zeroed gradient ⇒ zero step | same composition; U rows on RowAdagrad, V on its own |
+| `FeatAdapter` (`graph-embedding-util/src/model/mod.rs`, used by pinto) | `rho` const `[D, h_src]`, `w` Var `[h_src, H]`, optional full-width residual | — | **is `K_text · W₀ + residual`** — the text→H adapter exists; generalise the residual to `U·V` |
 
-Gaps: the LoRA primitive (~50–100 lines; `candle-lora` wraps `candle_nn::Linear`, ours are candle-util's own); `b_g` for the topic models; an `H_ext → H` adapter (PCA for the probe); "unmatched → free row" in the loader; `--init-feature-embedding` on `topic`/`bge` (one hook each, only if the probe earns it); a thin binary `gene-text-embed --model <hf-id>` (`hf-hub` + `candle-transformers` 0.10.1 + `tokenizers`, kept out of senna's build).
+Also in place: `gene-text` (`qc`, `knn-graph`; `{out}.text_embedding.parquet`, feature→word and text-kNN edge files, `feature_types.parquet`); the typed `senna fne` engine (PPI + derived SNN/PPR relations, `--edges`, GO/GMT memberships, `{out}.feature_embedding.parquet` with all node types); the shared `FeatureEmbeddingArgs` and `feature_preset::load_preset_genes`; `--embedding-dim 0`; `annotate-by-{projection,enrichment}` with bootstrap + permutation; `--poisson-thin`; `CellEncoders` (post PR #58) as the query trunk.
+
+**Gaps, in build order.**
+1. `--lora-feature-embedding`, `--lora-rank`, `--lora-lr-ratio` on the shared struct; `resolve()` returns `Preset::{Init, Freeze, Lora{rank, lr_ratio}}`.
+2. LoRA composition in masked-* (smallest: candle Vars, two optimizers).
+3. Same in hier (`HierParams` + `step.rs::apply`), with the frozen-rows-verbatim test extended to "ρ₀ verbatim, `U·V` moves".
+4. Same in fne/simba.
+5. Resolver accepts `{prefix}.text_embedding.parquet`; when the table's width ≠ H, route through `FeatAdapter` (candle engines) or refuse with a message pointing at the offline projection (hier).
+6. `b_g` in masked-topic (arrives with 2, not separately).
+7. Unmatched genes → free rows in the masked loader (today they are dropped).
 
 ## 7. The probe (before any model code)
 
 All steps in R (vignette convention) or the thin Rust binary; a single-run difference proves nothing on this codebase, so three seeds throughout.
 
-1. **Tables → parquet.** BioConceptVec (PubMed word2vec/fastText — the literal "trained on PubMed" table), GenePT / scGenePT (NCBI, UniProt, GO text), the 2026 open-backbone GenePT release, scELMo. Align to the run's gene axis, report coverage, centre + whiten, PCA to H, pre-fill unmatched genes with the run's own init so nothing is dropped. Write `{prefix}.feature_loading.parquet`.
+1. **Tables → parquet.** Our own `senna fne` table (GO + PPI + words, H = 128, needs no projection) first; then BioConceptVec (PubMed word2vec/fastText — the literal "trained on PubMed" table), GenePT / scGenePT (NCBI, UniProt, GO text), the 2026 open-backbone GenePT release, scELMo. Align to the run's gene axis, report coverage, centre + whiten, PCA to H, pre-fill unmatched genes with the run's own init so nothing is dropped. Write `{prefix}.feature_loading.parquet`.
 2. **Residual diagnostic on existing runs (no training).** Regress a trained bge ρ and a masked-topic ρ on each `K_text`: R², residual singular spectrum (→ the rank), and *which* genes are explained — expect a literature-attention bias (famous genes explained, obscure ones not); this decides whether the prior is about biology or fame.
-3. **Init A/B on `masked-topic`** (flag exists, zero Rust). Random vs each text init. Two claims, measured separately: **convergence** (epochs to the random init's final ELBO) and **optimum** (held-out LL, gene-side AUC, topic coherence, ARI). Track `‖ρ_t − ρ₀‖/‖ρ₀‖` — an init that is washed out in a few epochs has only tested convergence.
+3. **Three-arm A/B on `masked-topic` and `bge`** (`init` and `freeze` exist; `lora` is gap 1–3). Random vs `--init` vs `--freeze` vs `--lora` with r ∈ {4, 16, 64} and λ ∈ {1, 16}, per table. First data point already on record (FNE session, 2026-09-16): `bge --freeze-feature-embedding` on the GO + PPI fne table pinned 19k of 37k BMMNC genes and resolved *less* than plain bge (NK/CD8 island, platelets, tight T lost) — the expected "graph table is coarser than counts" outcome, and not a test of text or of LoRA. LoRA passes when it matches `init` on held-out LL / ARI while keeping gene-side AUC ≥ `freeze` and recovering the structure `freeze` lost. Two claims, measured separately: **convergence** (epochs to the random init's final ELBO) and **optimum** (held-out LL, gene-side AUC, topic coherence, ARI). Track `‖ρ_t − ρ₀‖/‖ρ₀‖` (and, under `lora`, the singular spectrum of `U·V`) — an init that is washed out in a few epochs has only tested convergence.
    - **3b. Projection revived, on BMMNC** (the adversarial bed). Type signatures both ways (marker mean through anchored ρ; type text through `W₀`); the existing permutation null; agreement with `annotate-by-enrichment` and trusted labels. Expect lineage agreement to jump and sibling agreement to stay flat.
    - **3c. Training-free vocabulary.** Name an existing run's topics by nearest concepts; on a dataset with a known state (IFN-stimulated or tumour-infiltrated), do `interferon response` / `exhaustion` surface for the right cells — the result a hierarchy cannot produce.
 4. **CITE-seq ADT check.** Anchored ρ on the multiome run that collapsed: does the gene AUC recover with the ADT rows on their target-gene text.
-5. **Branch.** Convergence only → ship as an init option. Quality → build the anchored form (LoRA primitive, `b_g`, adapter), rank from step 2. Nothing → the idea is dead for the price of a day.
+5. **Branch.** Convergence only → `--init` stays, `--lora` goes (take-back rule). Quality → keep the rank and λ the sweep chose, drop `--lora-lr-ratio` if λ = 1 ties. Nothing → the idea is dead for the price of a day.
 
 **Gene-side truth is expression-side** (held-out co-expression, STRING PPI, CITE-seq pairing) — never GO, which leaks from the text.
 
@@ -94,7 +115,7 @@ All steps in R (vignette convention) or the thin Rust binary; a single-run diffe
 A. **Robustness benchmark** on current bge: Poisson-thin queries to 10–20 %, inject ambient at a few %, measure retrieved-label stability. The primary evaluation axis for everything below and an unpublished gap.
 B. **Ontology levels** in phase 1 (backbone `is_a` path per term for distillation targets; rank-normalised CL cut; partial coverage per level is fine). Leave-one-term-out: a held-out `CD8⁺` cohort must stop at `T cell`, not become `CD4⁺` — under A's noise too.
 C. **`annotate-by-retrieval` + agreement**: kNN vote over our own reference (impute core, IVF index) as one voter beside projection, enrichment, the scTOP-style pb-basis projection, and the ontology nodes; confidence = consensus count; OOD = distance *and* low agreement. Calibration curve; leave-one-type-out; BMMNC.
-D. **LoRA primitive, second attachment**: query-side adapter on `CellEncoders` for batch (rank r regularises against absorbing biology; hold out a cell type and see whether it survives adaptation).
+D. **Same LoRA primitive, second attachment**: query-side adapter on `CellEncoders` for batch (rank r regularises against absorbing biology; hold out a cell type and see whether it survives adaptation).
 E. **Multiome**: anchored genes + free peak rows; enhancer–gene benchmark; prior handed to chickpea.
 F. **Concept sets → hypothesis sentences**, with the template baseline as the control (a reader's ability to identify the cluster; fraction of proposed tests that turn out true).
 G. **MCP server** over senna/pinto outputs — the tool layer the sentences' proposed tests run against; independent of A–F.
@@ -107,4 +128,4 @@ Fame not function (step 2); GO leakage (expression-side truth only); coverage �
 
 1. Reference atlas for B/C: own labelled atlases (trusted labels, matched protocol) vs a Census subset (breadth, CL labels, mixed protocol) — D exists for the mismatch case.
 2. Which existing run's ρ is the test bed for step 2 (BM1, panc8, the multiome run).
-3. Whether the thin text binary is built before or after the probe (the probe does not need it).
+3. Whether `s_g` (DoRA scale) gets a flag before the probe. Recommendation: no — `b_g` first, `s_g` only if the ADT check (step 4) still fails.
