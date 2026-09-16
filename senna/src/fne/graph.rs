@@ -34,16 +34,31 @@ pub(crate) struct NodeText {
     pub text: Option<Box<str>>,
 }
 
-/// `<stem>` of a path for relation names: the file name up to its first dot.
+/// Extensions a relation name never carries; stripped from the end of a
+/// file name, repeatedly (`x.tsv.gz` → `x`). Dots inside the name stay,
+/// so a versioned release like `BIOGRID-Homo_sapiens-5.0.256` keeps its
+/// version.
+const STEM_EXTENSIONS: &[&str] = &[
+    "gz", "bz2", "zst", "tsv", "csv", "txt", "tab", "gaf", "gmt", "obo", "bed",
+];
+
+/// `<stem>` of a path for relation names: the file name minus its known
+/// extensions.
 pub(crate) fn file_stem(path: &str) -> String {
-    let stem = Path::new(path)
+    let mut stem = Path::new(path)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string());
-    stem.split('.')
-        .next()
-        .filter(|s| !s.is_empty())
-        .map_or(stem.clone(), str::to_string)
+    loop {
+        let Some((base, ext)) = stem.rsplit_once('.') else {
+            break;
+        };
+        if base.is_empty() || !STEM_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+            break;
+        }
+        stem.truncate(base.len());
+    }
+    stem
 }
 
 struct TypeNodes {

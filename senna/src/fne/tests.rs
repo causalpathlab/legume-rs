@@ -72,6 +72,23 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
 }
 
 #[test]
+fn the_relation_stem_drops_known_extensions_but_keeps_dots_inside_the_name() {
+    use super::graph::file_stem;
+    assert_eq!(file_stem("/x/y/biogrid.tsv"), "biogrid");
+    assert_eq!(
+        file_stem("BIOGRID-Homo_sapiens-5.0.256.unique_pairs.protein_coding.tsv.gz"),
+        "BIOGRID-Homo_sapiens-5.0.256.unique_pairs.protein_coding"
+    );
+    assert_eq!(file_stem("goa_human.GAF.GZ"), "goa_human");
+    assert_eq!(
+        file_stem("c2.cp.reactome.v2025.1.Hs.symbols.gmt"),
+        "c2.cp.reactome.v2025.1.Hs.symbols"
+    );
+    assert_eq!(file_stem("noext"), "noext");
+    assert_eq!(file_stem(".tsv"), ".tsv", "a bare extension is a name");
+}
+
+#[test]
 fn a_pair_file_becomes_one_undirected_gene_relation_with_weights_and_canonical_names() {
     let dir = tempfile::tempdir().unwrap();
     let p = write(
