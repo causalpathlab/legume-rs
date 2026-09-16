@@ -94,9 +94,21 @@ struct SourceArgs {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "OBO ontologies: term names and definitions"
+        help = "OBO ontologies: term names and definitions (and the hierarchy --gaf propagates through)"
     )]
     obo: Vec<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "GO annotations (GAF): gene→term memberships, propagated up --obo"
+    )]
+    gaf: Vec<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Drop IEA (electronic) annotations from --gaf"
+    )]
+    no_iea: bool,
     #[arg(
         long,
         value_delimiter = ',',
@@ -139,6 +151,9 @@ impl SourceArgs {
         for p in &self.obo {
             c.add_obo(p)?;
         }
+        for p in &self.gaf {
+            c.add_gaf(p, self.no_iea)?;
+        }
         for p in &self.gmt {
             c.add_gmt(p)?;
         }
@@ -148,7 +163,7 @@ impl SourceArgs {
         }
         anyhow::ensure!(
             !c.is_empty(),
-            "no descriptions read; pass --text, --uniprot-tsv, --gene-info, --obo or --gmt"
+            "no descriptions read; pass --text, --uniprot-tsv, --gene-info, --obo, --gaf or --gmt"
         );
         c.log_summary();
         Ok(c)
@@ -470,7 +485,12 @@ fn write_text_embedding(
     )
 }
 
-/// `{out}.feature_word.edges.tsv`: each feature to the words of its text.
+/// `{out}.feature_word.edges.tsv`: each feature to the words of its text,
+/// followed by the gene → term memberships the sources carried, so one
+/// file hands `senna fne --edges` both the text and the structure. The
+/// membership rows use the type pair `gene:term`; every source's rows
+/// form one relation there (`senna fne` names typed-file relations by
+/// type pair), which is what a mixed GMT+GAF run wants.
 fn write_feature_word_edges(p: &Prepared, e: &Encoded, out: &str) -> Result<()> {
     let path = format!("{out}.feature_word.edges.tsv");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
@@ -489,7 +509,16 @@ fn write_feature_word_edges(p: &Prepared, e: &Encoded, out: &str) -> Result<()> 
             }),
         )?;
     }
-    info!("wrote {n_edges} feature–word edges to {path}");
+    let n_members = write_typed_edges(
+        &mut w,
+        p.corpus
+            .memberships()
+            .iter()
+            .map(|m| ("gene", m.gene.as_ref(), "term", m.term.as_ref(), 1.0f32)),
+    )?;
+    info!(
+        "wrote {n_edges} feature–word edges and {n_members} gene→term membership edges to {path}"
+    );
     Ok(())
 }
 
@@ -545,25 +574,39 @@ fn write_knn_edges(corpus: &Corpus, feat: &Tensor, knn: usize, out: &str) -> Res
     let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
     let docs = corpus.docs();
     let mut n_knn = 0usize;
+    let mut n_name_only = 0usize;
     for (i, hit) in hits.iter().enumerate() {
+        // Two labels are not two descriptions: a name-only side gets no
+        // similarity edges rather than links on the words of a title.
+        if !corpus.has_description(i) {
+            n_name_only += 1;
+            continue;
+        }
         n_knn += write_typed_edges(
             &mut w,
-            hit.iter().map(|(j, s)| {
-                let (a, b) = if (&docs[i].ty, &docs[i].feature) <= (&docs[*j].ty, &docs[*j].feature)
-                {
-                    (&docs[i], &docs[*j])
-                } else {
-                    (&docs[*j], &docs[i])
-                };
-                (
-                    a.ty.as_ref(),
-                    a.feature.as_ref(),
-                    b.ty.as_ref(),
-                    b.feature.as_ref(),
-                    s.max(0.0),
-                )
-            }),
+            hit.iter()
+                .filter(|(j, _)| corpus.has_description(*j))
+                .map(|(j, s)| {
+                    let (a, b) =
+                        if (&docs[i].ty, &docs[i].feature) <= (&docs[*j].ty, &docs[*j].feature) {
+                            (&docs[i], &docs[*j])
+                        } else {
+                            (&docs[*j], &docs[i])
+                        };
+                    (
+                        a.ty.as_ref(),
+                        a.feature.as_ref(),
+                        b.ty.as_ref(),
+                        b.feature.as_ref(),
+                        s.max(0.0),
+                    )
+                }),
         )?;
+    }
+    if n_name_only > 0 {
+        info!(
+            "{n_name_only} features have a name but no description and get no text-similarity edges"
+        );
     }
     info!("wrote {n_knn} text-similarity edges to {path}");
     Ok(())

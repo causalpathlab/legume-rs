@@ -124,3 +124,68 @@ fn gmt_sets_use_the_description_unless_it_is_a_url_and_obo_terms_bring_definitio
     );
     assert_eq!(c.retain_with_text(), 0);
 }
+
+#[test]
+fn gmt_and_gaf_memberships_ride_along_with_the_text_and_gaf_propagates_through_the_obo() {
+    let gmt = tmp("SET_A\thttp://x\tTP53\tBAX\nSET_B\tdesc\tMYC\n", ".gmt");
+    let obo = tmp(
+        "format-version: 1.2\n\n[Term]\nid: GO:1\nname: root\n\n[Term]\nid: GO:2\nname: leaf\ndef: \"A leaf.\" [x]\nis_a: GO:1 ! root\n",
+        ".obo",
+    );
+    let mut row = vec![""; 17];
+    row[0] = "UniProtKB";
+    row[1] = "P1";
+    row[2] = "TP53";
+    row[3] = "involved_in";
+    row[4] = "GO:2";
+    row[5] = "PMID:1";
+    row[6] = "IDA";
+    row[8] = "P";
+    row[10] = "TP53";
+    row[11] = "protein";
+    row[12] = "taxon:9606";
+    row[13] = "20200101";
+    row[14] = "UniProt";
+    let gaf = tmp(&format!("!gaf-version: 2.2\n{}\n", row.join("\t")), ".gaf");
+    let mut c = Corpus::new(gene_kind());
+    c.add_gmt(gmt.path().to_str().unwrap()).unwrap();
+    c.add_obo(obo.path().to_str().unwrap()).unwrap();
+    c.add_gaf(gaf.path().to_str().unwrap(), false).unwrap();
+    let mut m: Vec<(String, String)> = c
+        .memberships()
+        .iter()
+        .map(|m| (m.gene.to_string(), m.term.to_string()))
+        .collect();
+    m.sort();
+    // GMT: 3 rows; GAF: TP53 → GO:2 and, propagated, GO:1.
+    assert_eq!(
+        m,
+        vec![
+            ("BAX".into(), "SET_A".into()),
+            ("MYC".into(), "SET_B".into()),
+            ("TP53".into(), "GO:1".into()),
+            ("TP53".into(), "GO:2".into()),
+            ("TP53".into(), "SET_A".into()),
+        ]
+    );
+    let src: std::collections::BTreeSet<&str> =
+        c.memberships().iter().map(|m| m.source.as_ref()).collect();
+    assert_eq!(src.len(), 2, "one source per file");
+    let has = |f: &str| {
+        c.docs()
+            .iter()
+            .position(|d| d.feature.as_ref() == f)
+            .unwrap()
+    };
+    assert!(
+        !c.has_description(has("SET_A")),
+        "URL description is no description"
+    );
+    assert!(c.has_description(has("SET_B")));
+    assert!(c.has_description(has("GO:2")) && !c.has_description(has("GO:1")));
+    assert_eq!(
+        file_stem("/a/b/c2.all.v2026.1.Hs.symbols.gmt"),
+        "c2.all.v2026.1.Hs.symbols"
+    );
+    assert_eq!(file_stem("goa_human.gaf.gz"), "goa_human");
+}
