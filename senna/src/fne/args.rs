@@ -24,6 +24,90 @@ pub struct FneArgs {
 
     #[arg(
         long,
+        default_value_t = 0,
+        help = "PPI QC: drop pair edges whose endpoints share fewer than this many neighbours (0 = off)",
+        long_help = "Quality control on the positional pair files, before anything else:\n\
+                     drop an edge whose two endpoints share fewer than this many neighbours.\n\
+                     An interaction with no corroborating shared partner is likely a noisy hit.\n\
+                     0 keeps every edge."
+    )]
+    pub(crate) ppi_min_shared_neighbors: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "PPI QC: cap each gene's degree, keeping the neighbours with the most shared partners (0 = off)",
+        long_help = "Cap the degree of every gene in the pair files:\n\
+                     a hub keeps only its neighbours with the most shared partners,\n\
+                     and an edge survives when either endpoint keeps it.\n\
+                     Hubs otherwise dominate the embedding, since every batch samples them.\n\
+                     0 keeps every edge."
+    )]
+    pub(crate) ppi_max_degree: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "PPI QC: iteratively drop genes with fewer edges than this (k-core; 0 = off)"
+    )]
+    pub(crate) ppi_min_degree: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Do not derive the second-order (shared-neighbour) relation from the pair files",
+        long_help = "By default every pair file also yields the relation `gene:gene/<stem>/snn`:\n\
+                     for each gene, its --ppi-snn-k co-interactors that are not direct partners,\n\
+                     ranked and weighted by the Jaccard overlap of their neighbourhoods\n\
+                     (shared partners over the union), which discounts the hubs a scale-free\n\
+                     network makes everyone share by chance.\n\
+                     The first-order relation only ever sees direct interactions;\n\
+                     this one lets co-interactors pull together. This flag leaves it out."
+    )]
+    pub(crate) no_ppi_snn: bool,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Co-interactors kept per gene in the shared-neighbour relation"
+    )]
+    pub(crate) ppi_snn_k: usize,
+
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Fewest shared neighbours for a pair to count as co-interactors"
+    )]
+    pub(crate) ppi_snn_min_shared: usize,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Do not derive the diffusion (personalized-PageRank) relation from the pair files",
+        long_help = "By default every pair file also yields the relation `gene:gene/<stem>/ppr`:\n\
+                     for each gene, its --ppi-ppr-k strongest targets under a random walk with restart\n\
+                     (personalized PageRank, forward-push approximation),\n\
+                     weighted by the PageRank mass relative to the gene's strongest target.\n\
+                     This flag leaves it out."
+    )]
+    pub(crate) no_ppi_ppr: bool,
+
+    #[arg(
+        long,
+        default_value_t = 10,
+        help = "Targets kept per gene in the diffusion relation"
+    )]
+    pub(crate) ppi_ppr_k: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.15,
+        help = "Restart probability of the diffusion random walk"
+    )]
+    pub(crate) ppi_ppr_restart: f64,
+
+    #[arg(
+        long,
         value_delimiter = ',',
         help = "Typed edge list(s): lhs_type, lhs, rhs_type, rhs [, weight]",
         long_help = "Typed edge files, comma-separated or repeated.\n\

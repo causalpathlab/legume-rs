@@ -2,7 +2,7 @@
 //! graph, the artifacts carry every node type, and the manifest records
 //! the fit.
 
-use super::graph::{NodeText, TypedGraphBuilder};
+use super::graph::{NodeText, PpiOpts, TypedGraphBuilder};
 use super::{fit_fne, FneArgs};
 use crate::embed_common::Mat;
 use crate::run_manifest::{RunKind, RunManifest};
@@ -55,6 +55,11 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
         "a.tsv,b.tsv",
         "--relation-weight",
         "gene:word=0.5,gene:gene/ppi=2",
+        "--ppi-max-degree",
+        "50",
+        "--ppi-snn-k",
+        "2",
+        "--no-ppi-ppr",
         "--lr",
         "0.05",
         "--feature-name-exact",
@@ -65,6 +70,22 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
     assert_eq!(b.edges.len(), 2);
     assert_eq!(b.relation_weight.len(), 2);
     assert_eq!(b.learning_rate, 0.05);
+    assert_eq!((b.ppi_max_degree, b.ppi_snn_k, b.no_ppi_ppr), (50, 2, true));
+    assert_eq!(b.ppi_ppr_restart, 0.15);
+    // Derived relations are on by default; the QC prunes are off.
+    assert!(!a.no_ppi_snn && !a.no_ppi_ppr);
+    assert_eq!(
+        (a.ppi_snn_k, a.ppi_ppr_k, a.ppi_snn_min_shared),
+        (10, 10, 1)
+    );
+    assert_eq!(
+        (
+            a.ppi_min_shared_neighbors,
+            a.ppi_max_degree,
+            a.ppi_min_degree
+        ),
+        (0, 0, 0)
+    );
     assert!(matches!(b.name_kind(), FeatureNameKind::Exact));
     // The serde default (for manifests missing a field) is the clap default.
     let d: FneArgs = serde_json::from_str("{}").unwrap();
@@ -97,7 +118,7 @@ fn a_pair_file_becomes_one_undirected_gene_relation_with_weights_and_canonical_n
         "# comment\nTP53\tMDM2\t2.0\nMDM2\tTP53\t0.5\nENSG0001_TP53\tTP53\nTP53\tBAX\nonly_one\n",
     );
     let mut b = TypedGraphBuilder::new(gene_kind());
-    b.add_pair_file(&p).unwrap();
+    b.add_pair_file(&p, &PpiOpts::default()).unwrap();
     let g = b.finish().unwrap();
     assert_eq!(g.types.len(), 1);
     assert_eq!(g.types.name(0), "gene");
@@ -121,6 +142,94 @@ fn a_pair_file_becomes_one_undirected_gene_relation_with_weights_and_canonical_n
         .collect();
     pairs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(pairs, vec![(0, 1, 2.0), (0, 2, 1.0)]);
+}
+
+/// Two triangles A,B,C and D,E,F joined by C–D, a pendant G on A, and a
+/// lone noisy edge H–I: the shape every PPI QC rule bites on.
+fn ppi_fixture(dir: &Path) -> String {
+    write(
+        dir,
+        "ppi.tsv",
+        "A\tB\nA\tC\nB\tC\nC\tD\nD\tE\nD\tF\nE\tF\nA\tG\nH\tI\n",
+    )
+}
+
+#[test]
+fn ppi_qc_prunes_uncorroborated_edges_and_the_derived_relations_carry_their_weights() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = ppi_fixture(dir.path());
+    // Shared-neighbour QC at 1: A–G, C–D and H–I have no common partner.
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    b.add_pair_file(
+        &p,
+        &PpiOpts {
+            min_shared_neighbors: 1,
+            ..PpiOpts::default()
+        },
+    )
+    .unwrap();
+    let g = b.finish().unwrap();
+    assert_eq!(g.relations.len(), 1);
+    assert_eq!(
+        g.edges.len(),
+        6,
+        "two triangles survive, the three bridges do not"
+    );
+
+    // No QC, second-order and diffusion relations on top of the raw one.
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    b.add_pair_file(
+        &p,
+        &PpiOpts {
+            snn_k: 10,
+            snn_min_shared: 1,
+            ppr_k: 2,
+            ppr_restart: 0.15,
+            ..PpiOpts::default()
+        },
+    )
+    .unwrap();
+    let g = b.finish().unwrap();
+    let names: Vec<&str> = g.relations.iter().map(|r| r.name.as_ref()).collect();
+    assert_eq!(
+        names,
+        vec!["gene:gene/ppi", "gene:gene/ppi/snn", "gene:gene/ppi/ppr"]
+    );
+    assert!(g.relations.get(1).undirected && g.relations.get(2).undirected);
+    let counts = g.edges.counts_per_relation(3);
+    assert_eq!(counts[0], 9, "raw edges untouched");
+    // SNN pairs: (B,G),(C,G) via A; (A,D),(B,D) via C; (C,E),(C,F) via D.
+    assert_eq!(counts[1], 6);
+    let name = |i: u32| g.node_names[i as usize].as_ref();
+    let w = g.edges.weight.as_ref().expect("weighted relations");
+    for (&rel, &wt) in g.edges.rel.iter().zip(w) {
+        match rel {
+            1 => assert!(
+                wt > 0.0 && wt < 1.0,
+                "Jaccard overlap of two distinct neighbourhoods: {wt}"
+            ),
+            2 => assert!(
+                wt > 0.0 && wt <= 1.0,
+                "ppr weights relative to the strongest target"
+            ),
+            _ => assert_eq!(wt, 1.0),
+        }
+    }
+    // Every node with an edge has PPR targets; H and I only reach each other,
+    // so the undirected fold leaves one pair for them.
+    let ppr_pairs: Vec<(&str, &str)> = (0..g.edges.len())
+        .filter(|&i| g.edges.rel[i] == 2)
+        .map(|i| (name(g.edges.lhs[i]), name(g.edges.rhs[i])))
+        .collect();
+    assert!(ppr_pairs.contains(&("H", "I")) || ppr_pairs.contains(&("I", "H")));
+    assert!(ppr_pairs
+        .iter()
+        .any(|&(a, b)| (a == "A" && b == "B") || (a == "B" && b == "A")));
+    assert!(
+        counts[2] >= 8,
+        "at least one pair per connected node: {}",
+        counts[2]
+    );
 }
 
 #[test]
@@ -267,22 +376,24 @@ fn fne_writes_typed_artifacts_and_a_manifest_and_places_genes_with_their_own_typ
         rels[0],
         vec![
             Box::from("gene:gene/ppi"),
+            Box::from("gene:gene/ppi/snn"),
+            Box::from("gene:gene/ppi/ppr"),
             Box::from("gene:cell_type"),
             Box::from("gene:term")
         ]
     );
-    assert_eq!(rels[2][1].as_ref(), "cell_type");
+    assert_eq!(rels[2][3].as_ref(), "cell_type");
     let rel_num = Mat::from_parquet(&format!("{out}.relations.parquet")).unwrap();
     let col = |c: &str| rel_num.cols.iter().position(|x| x.as_ref() == c).unwrap();
-    assert_eq!(rel_num.mat[(1, col("weight"))], 2.0);
-    assert_eq!(rel_num.mat[(2, col("repeat"))], 3.0);
+    assert_eq!(rel_num.mat[(3, col("weight"))], 2.0);
+    assert_eq!(rel_num.mat[(4, col("repeat"))], 3.0);
     assert_eq!(rel_num.mat[(0, col("repeat"))], 1.0);
     assert_eq!(rel_num.mat[(0, col("n_edges"))], 21.0);
     assert_eq!(
         rel_num.mat[(0, col("n_train"))] + rel_num.mat[(0, col("n_eval"))],
         21.0
     );
-    for r in 0..3 {
+    for r in 0..5 {
         assert!(rel_num.mat[(r, col("train_loss"))].is_finite());
         assert!(rel_num.mat[(r, col("eval_loss"))].is_finite());
     }
@@ -586,6 +697,8 @@ fn fne_takes_every_side_information_source_at_once_and_exports_the_text() {
         rel_names,
         vec![
             "gene:gene/ppi",
+            "gene:gene/ppi/snn",
+            "gene:gene/ppi/ppr",
             "gene:cell_type/markers",
             "gene:term/goa",
             "term:term/part_of",
