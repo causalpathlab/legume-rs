@@ -48,7 +48,7 @@
 use anyhow::{Context, Result};
 use data_beans::utilities::name_matching::{idf_weight, GeneIndex};
 use log::info;
-use matrix_util::common_io::{read_lines_of_words_delim, write_lines, ReadLinesOut};
+use matrix_util::common_io::write_lines;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
 use matrix_util::parquet::{write_named_table, Column};

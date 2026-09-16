@@ -2,9 +2,11 @@
 //! the PBG table, write the artifacts and the manifest.
 
 use super::args::FneArgs;
-use super::graph::TypedGraphBuilder;
-use super::output::write_outputs;
+use super::graph::{file_stem, TypedGraphBuilder};
+use super::output::{write_outputs, write_text_export};
 use crate::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
+use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
+use auxiliary_data::ontology::Ontology;
 use graph_embedding_util::fne::{train, FneConfig};
 use graph_embedding_util::stop::setup_stop_handler;
 use log::info;
@@ -12,9 +14,19 @@ use matrix_util::common_io::mkdir_parent;
 
 pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
+    let any_input = !args.networks.is_empty()
+        || !args.edges.is_empty()
+        || !args.membership.is_empty()
+        || args.gaf.is_some()
+        || !args.gmt.is_empty()
+        || !args.region_gene.is_empty();
     anyhow::ensure!(
-        !args.networks.is_empty() || !args.edges.is_empty(),
-        "fne: no input files; pass gene-gene pair files and/or --edges typed files"
+        any_input,
+        "fne: no input files; pass gene-gene pair files, --edges, --membership, --gaf, --gmt or --region-gene"
+    );
+    anyhow::ensure!(
+        args.gaf.is_none() || args.obo.is_some(),
+        "fne: --gaf needs --obo to propagate the annotations up the ontology"
     );
 
     let mut builder = TypedGraphBuilder::new(args.name_kind());
@@ -24,10 +36,52 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     for path in &args.edges {
         builder.add_typed_file(path)?;
     }
+    for spec in &args.membership {
+        let (ty, path) = spec
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--membership `{spec}`: expected `type=path`"))?;
+        builder.add_membership_file(ty.trim(), path.trim())?;
+    }
+    let onto = match &args.obo {
+        Some(obo) => {
+            let onto = Ontology::load_obo(obo)?;
+            info!("fne: loaded ontology: {} terms from {obo}", onto.len());
+            Some(onto)
+        }
+        None => None,
+    };
+    if let Some(gaf) = &args.gaf {
+        info!(
+            "fne: reading GAF annotations from {gaf} (no_iea={})",
+            args.no_iea
+        );
+        let sets = read_gaf(
+            gaf,
+            &GafOpts {
+                no_iea: args.no_iea,
+            },
+        )?
+        .into_gene_sets(onto.as_ref());
+        builder.add_gene_sets(&sets, &file_stem(gaf), args.min_gene_set, args.max_gene_set);
+    }
+    for gmt in &args.gmt {
+        info!("fne: reading GMT gene sets from {gmt}");
+        let sets = read_gmt(gmt)?;
+        builder.add_gene_sets(&sets, &file_stem(gmt), args.min_gene_set, args.max_gene_set);
+    }
+    if let Some(onto) = &onto {
+        builder.add_ontology(onto);
+    }
+    for path in &args.region_gene {
+        builder.add_region_file(path, args.region_window)?;
+    }
     for spec in &args.relation_weight {
         builder.set_relation_weight(spec)?;
     }
     let graph = builder.finish()?;
+    if let Some(path) = &args.export_text {
+        write_text_export(&graph, path)?;
+    }
     info!(
         "fne: {} nodes in {} types, {} edges in {} relations",
         graph.node_names.len(),
@@ -71,6 +125,10 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         .networks
         .iter()
         .chain(args.edges.iter())
+        .chain(args.membership.iter())
+        .chain(args.gaf.iter())
+        .chain(args.gmt.iter())
+        .chain(args.region_gene.iter())
         .map(ToString::to_string)
         .collect();
     write_run_manifest(&RunDescription {

@@ -4,7 +4,6 @@
 
 use crate::embed_common::Mat;
 use data_beans::utilities::name_matching::GeneIndex;
-use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
 use rustc_hash::FxHashSet as HashSet;
 
 /// Flexible gene-name matching — delegates to the shared implementation in
@@ -20,22 +19,11 @@ pub(crate) struct AnnotInfo {
     pub annot_names: Vec<Box<str>>,
 }
 
-/// Parse a gene/celltype TSV or CSV into `(gene, celltype)` pairs. Blank and
-/// single-token lines are silently skipped. The delimiter can be tab, comma,
-/// or space — whichever splits the first line into at least two tokens.
+/// Parse a gene/celltype TSV or CSV into `(gene, celltype)` pairs — the
+/// shared membership reader, so every gene→label file in the workspace is
+/// read the same way (header and `#` rows skipped, labels verbatim).
 pub(crate) fn read_marker_gene_info(file_path: &str) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
-    let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
-
-    Ok(lines
-        .into_iter()
-        .filter_map(|words| {
-            if words.len() < 2 {
-                None
-            } else {
-                Some((words[0].clone(), words[1].clone()))
-            }
-        })
-        .collect())
+    auxiliary_data::gene_sets::read_membership_pairs(file_path)
 }
 
 /// Reweight binary membership in place: `w_g = ln(C / c_g)` where `c_g` is

@@ -10,6 +10,9 @@
 //! is matched verbatim.
 
 use auxiliary_data::feature_names::FeatureNameKind;
+use auxiliary_data::gene_sets::{read_membership_pairs, GeneSets};
+use auxiliary_data::ontology::{Ontology, Rel};
+use genomic_data::coordinates::{parse_region, tile_windows};
 use graph_embedding_util::fne::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
 use log::{info, warn};
 use matrix_util::common_io::read_lines_of_words_delim;
@@ -19,11 +22,36 @@ use std::path::Path;
 
 /// The node type whose names are canonicalised as gene symbols.
 pub(crate) const GENE_TYPE: &str = "gene";
+/// Ontology terms and gene sets.
+pub(crate) const TERM_TYPE: &str = "term";
+/// Fixed genomic windows.
+pub(crate) const REGION_TYPE: &str = "region";
+
+/// A node's text: a display name and a description, either optional.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NodeText {
+    pub name: Option<Box<str>>,
+    pub text: Option<Box<str>>,
+}
+
+/// `<stem>` of a path for relation names: the file name up to its first dot.
+pub(crate) fn file_stem(path: &str) -> String {
+    let stem = Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    stem.split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map_or(stem.clone(), str::to_string)
+}
 
 struct TypeNodes {
     name: Box<str>,
     names: Vec<Box<str>>,
     index: FxHashMap<Box<str>, u32>,
+    /// Text attached to some of the nodes, by local id.
+    texts: FxHashMap<u32, NodeText>,
 }
 
 struct RelSpec {
@@ -48,6 +76,8 @@ pub(crate) struct TypedGraph {
     pub node_names: Vec<Box<str>>,
     /// Node type name of every global id.
     pub node_types: Vec<Box<str>>,
+    /// `(global id, text)` for every node that carries any, in id order.
+    pub texts: Vec<(u32, NodeText)>,
 }
 
 pub(crate) struct TypedGraphBuilder {
@@ -78,6 +108,7 @@ impl TypedGraphBuilder {
             name: ty.into(),
             names: Vec::new(),
             index: FxHashMap::default(),
+            texts: FxHashMap::default(),
         });
         self.type_index.insert(ty.into(), t);
         t
@@ -149,16 +180,7 @@ impl TypedGraphBuilder {
     /// A gene-gene pair file: `gene1 gene2 [weight]`, its own relation
     /// `gene:gene/<stem>`.
     pub(crate) fn add_pair_file(&mut self, path: &str) -> anyhow::Result<()> {
-        let stem = Path::new(path)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string());
-        let stem = stem
-            .split('.')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map_or(stem.clone(), str::to_string);
-        let rel_name = format!("{GENE_TYPE}:{GENE_TYPE}/{stem}");
+        let rel_name = format!("{GENE_TYPE}:{GENE_TYPE}/{}", file_stem(path));
         let r = self.relation(&rel_name, GENE_TYPE, GENE_TYPE);
         let read = read_lines_of_words_delim(path, detect_delimiter(path), -1)?;
         let mut n_rows = 0usize;
@@ -224,6 +246,193 @@ impl TypedGraphBuilder {
         Ok(())
     }
 
+    /// Attach text to a node (inserting it if new); a later call fills only
+    /// the parts still missing.
+    fn set_text(&mut self, ty: &str, name: &str, text: NodeText) {
+        let (t, i) = self.node(ty, name);
+        let slot = self.types[t].texts.entry(i).or_default();
+        if slot.name.is_none() {
+            slot.name = text.name;
+        }
+        if slot.text.is_none() {
+            slot.text = text.text;
+        }
+    }
+
+    /// A membership file `gene <TAB> label` → relation `gene:<ty>/<stem>`
+    /// with the labels as nodes of type `ty`.
+    pub(crate) fn add_membership_file(&mut self, ty: &str, path: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !ty.is_empty() && ty != GENE_TYPE,
+            "--membership: the label type must be a non-empty name other than `{GENE_TYPE}` (got `{ty}`)"
+        );
+        let pairs = read_membership_pairs(path)?;
+        let rel_name = format!("{GENE_TYPE}:{ty}/{}", file_stem(path));
+        let r = self.relation(&rel_name, GENE_TYPE, ty);
+        for (gene, label) in &pairs {
+            let (_, i) = self.node(GENE_TYPE, gene);
+            let (_, j) = self.node(ty, label);
+            self.add_edge(r, i, j, 1.0);
+        }
+        let rel = &self.relations[r];
+        info!(
+            "fne: {path}: {} membership rows → relation `{}` with {} unique edges over {} `{ty}` labels",
+            pairs.len(),
+            rel.name,
+            rel.edges.len(),
+            self.types[self.type_index[ty]].names.len()
+        );
+        Ok(())
+    }
+
+    /// Gene sets (a GAF after propagation, or a GMT) → relation
+    /// `gene:term/<stem>`; sets outside `[min, max]` members are dropped
+    /// (`max` 0 = no cap). Names and descriptions become term text.
+    pub(crate) fn add_gene_sets(
+        &mut self,
+        sets: &GeneSets,
+        stem: &str,
+        min_members: usize,
+        max_members: usize,
+    ) -> usize {
+        let rel_name = format!("{GENE_TYPE}:{TERM_TYPE}/{stem}");
+        let r = self.relation(&rel_name, GENE_TYPE, TERM_TYPE);
+        let mut terms: Vec<&Box<str>> = sets.term_genes.keys().collect();
+        terms.sort();
+        let mut n_kept = 0usize;
+        for term in terms {
+            let genes = &sets.term_genes[term];
+            let n = genes.len();
+            if n < min_members || (max_members > 0 && n > max_members) {
+                continue;
+            }
+            n_kept += 1;
+            let (_, j) = self.node(TERM_TYPE, term);
+            let mut members: Vec<&Box<str>> = genes.iter().collect();
+            members.sort();
+            for g in members {
+                let (_, i) = self.node(GENE_TYPE, g);
+                self.add_edge(r, i, j, 1.0);
+            }
+            if let Some(desc) = sets.names.get(term) {
+                self.set_text(
+                    TERM_TYPE,
+                    term,
+                    NodeText {
+                        name: Some(desc.clone()),
+                        text: None,
+                    },
+                );
+            }
+        }
+        let rel = &self.relations[r];
+        info!(
+            "fne: gene sets `{stem}`: {n_kept} of {} sets within [{min_members}, {}] members → relation `{}` with {} edges",
+            sets.term_genes.len(),
+            if max_members == 0 {
+                "∞".to_string()
+            } else {
+                max_members.to_string()
+            },
+            rel.name,
+            rel.edges.len()
+        );
+        n_kept
+    }
+
+    /// The ontology's hierarchy over the term nodes already in the graph:
+    /// relations `term:term/is_a` and `term:term/part_of` (child → parent),
+    /// plus the terms' names and definitions as text.
+    pub(crate) fn add_ontology(&mut self, onto: &Ontology) {
+        let Some(&t) = self.type_index.get(TERM_TYPE) else {
+            warn!("fne: --obo given but no term nodes are in the graph; its hierarchy is skipped");
+            return;
+        };
+        let present: Vec<Box<str>> = self.types[t].names.clone();
+        for id in &present {
+            let text = NodeText {
+                name: onto.name(id).map(Box::from),
+                text: onto.def(id).map(Box::from),
+            };
+            if text != NodeText::default() {
+                self.set_text(TERM_TYPE, id, text);
+            }
+        }
+        let r_is_a = self.relation(
+            &format!("{TERM_TYPE}:{TERM_TYPE}/is_a"),
+            TERM_TYPE,
+            TERM_TYPE,
+        );
+        let r_part_of = self.relation(
+            &format!("{TERM_TYPE}:{TERM_TYPE}/part_of"),
+            TERM_TYPE,
+            TERM_TYPE,
+        );
+        let index = &self.types[t].index;
+        let mut edges: Vec<(u32, u32, Rel)> = onto
+            .edges()
+            .filter_map(|(child, parent, rel)| Some((*index.get(child)?, *index.get(parent)?, rel)))
+            .collect();
+        edges.sort_unstable_by_key(|(c, p, rel)| (*c, *p, matches!(rel, Rel::PartOf)));
+        let n = edges.len();
+        for (c, p, rel) in edges {
+            let r = match rel {
+                Rel::IsA => r_is_a,
+                Rel::PartOf => r_part_of,
+            };
+            // Hierarchy edges are directed child → parent; the undirected
+            // dedup of a same-type relation only folds the two directions.
+            self.add_edge(r, c, p, 1.0);
+        }
+        info!(
+            "fne: ontology hierarchy over {} present terms: {n} edges ({} is_a, {} part_of)",
+            present.len(),
+            self.relations[r_is_a].edges.len(),
+            self.relations[r_part_of].edges.len()
+        );
+    }
+
+    /// A region→gene link file `region gene [score]`; every region is tiled
+    /// onto `window`-bp windows and each window links the gene in the
+    /// relation `region:gene/<stem>` with the score as the edge weight.
+    pub(crate) fn add_region_file(&mut self, path: &str, window: i64) -> anyhow::Result<()> {
+        let rel_name = format!("{REGION_TYPE}:{GENE_TYPE}/{}", file_stem(path));
+        let r = self.relation(&rel_name, REGION_TYPE, GENE_TYPE);
+        let read = read_lines_of_words_delim(path, detect_delimiter(path), -1)?;
+        let mut n_rows = 0usize;
+        let mut n_bad = 0usize;
+        for line in &read.lines {
+            if line.len() < 2 || line[0].starts_with('#') {
+                continue;
+            }
+            let Some(region) = parse_region(&line[0]) else {
+                n_bad += 1;
+                continue;
+            };
+            let weight = parse_weight(line.get(2).map(AsRef::as_ref), path)?;
+            let (_, j) = self.node(GENE_TYPE, &line[1]);
+            for w in tile_windows(&region, window) {
+                let (_, i) = self.node(REGION_TYPE, &w.to_string());
+                self.add_edge(r, i, j, weight);
+            }
+            n_rows += 1;
+        }
+        if n_bad > 0 {
+            warn!(
+                "fne: {path}: {n_bad} rows had a region that is not a coordinate and were skipped"
+            );
+        }
+        let rel = &self.relations[r];
+        info!(
+            "fne: {path}: {n_rows} region rows on {}-bp windows → relation `{}` with {} edges over {} windows",
+            window,
+            rel.name,
+            rel.edges.len(),
+            self.types[self.type_index[REGION_TYPE]].names.len()
+        );
+        Ok(())
+    }
+
     /// `name=weight` overrides; an unknown relation name is an error so a
     /// typo cannot silently leave a relation at 1.
     pub(crate) fn set_relation_weight(&mut self, spec: &str) -> anyhow::Result<()> {
@@ -264,6 +473,7 @@ impl TypedGraphBuilder {
         let mut type_specs: Vec<(&str, usize)> = Vec::new();
         let mut node_names: Vec<Box<str>> = Vec::new();
         let mut node_types: Vec<Box<str>> = Vec::new();
+        let mut texts: Vec<(u32, NodeText)> = Vec::new();
         // Types with no nodes (a relation declared them but every row was
         // dropped) are laid out with a placeholder count of zero and pruned.
         let mut kept_types: Vec<usize> = Vec::new();
@@ -272,7 +482,11 @@ impl TypedGraphBuilder {
                 continue;
             }
             kept_types.push(t);
+            let offset = node_names.len() as u32;
             type_specs.push((&nodes.name, nodes.names.len()));
+            let mut with_text: Vec<(&u32, &NodeText)> = nodes.texts.iter().collect();
+            with_text.sort_unstable_by_key(|(i, _)| **i);
+            texts.extend(with_text.into_iter().map(|(i, t)| (offset + *i, t.clone())));
             node_names.extend(nodes.names.iter().cloned());
             node_types.extend(std::iter::repeat_n(nodes.name.clone(), nodes.names.len()));
         }
@@ -322,6 +536,7 @@ impl TypedGraphBuilder {
             edges,
             node_names,
             node_types,
+            texts,
         })
     }
 }

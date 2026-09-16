@@ -135,6 +135,56 @@ pub fn parse_peak_coordinates(peak_names: &[Box<str>]) -> Vec<Option<PeakCoord>>
         .collect()
 }
 
+/// Parse one genomic region name: an interval `chr:start-end` /
+/// `chr_start_end`, or a single position `chr:pos` / `chr_pos` (a SNP),
+/// which becomes the one-base interval `[pos, pos + 1)`. The `chr` prefix
+/// is dropped so `chr1` and `1` name the same chromosome. `None` when the
+/// name is not a coordinate.
+pub fn parse_region(name: &str) -> Option<PeakCoord> {
+    let name = name.trim();
+    let (chr, rest) = name.split_once(':').or_else(|| name.split_once('_'))?;
+    let chr: Box<str> = chr_stripped(chr).into();
+    if chr.is_empty() {
+        return None;
+    }
+    let (s, e) = match rest.split_once('-').or_else(|| rest.split_once('_')) {
+        Some((s, e)) => (s.parse::<i64>().ok()?, e.parse::<i64>().ok()?),
+        None => {
+            let pos = rest.parse::<i64>().ok()?;
+            (pos, pos + 1)
+        }
+    };
+    (e > s).then_some(PeakCoord {
+        chr,
+        start: s,
+        end: e,
+    })
+}
+
+/// Tile a region onto fixed windows `[i·w, (i+1)·w)`: every window the
+/// region overlaps, ascending, on the region's chromosome. A window of 0 is
+/// the region itself.
+pub fn tile_windows(region: &PeakCoord, window: i64) -> Vec<PeakCoord> {
+    if window <= 0 {
+        return vec![region.clone()];
+    }
+    let first = region.start.div_euclid(window);
+    let last = (region.end - 1).max(region.start).div_euclid(window);
+    (first..=last)
+        .map(|i| PeakCoord {
+            chr: region.chr.clone(),
+            start: i * window,
+            end: (i + 1) * window,
+        })
+        .collect()
+}
+
+impl std::fmt::Display for PeakCoord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}-{}", self.chr, self.start, self.end)
+    }
+}
+
 /// Find peaks within a cis window of a gene's TSS.
 pub fn find_cis_peaks(
     gene_tss: &GeneTss,
@@ -247,6 +297,54 @@ pub fn load_gene_loci(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_parse_intervals_and_positions_in_both_spellings_without_the_chr_prefix() {
+        let r = parse_region("chr1:1000-2000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("1", 1000, 2000));
+        let r = parse_region("1_1000_2000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("1", 1000, 2000));
+        let r = parse_region("chrX:5000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("X", 5000, 5001));
+        let r = parse_region("X_5000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("X", 5000, 5001));
+        assert!(parse_region("TP53").is_none());
+        assert!(parse_region("chr1:2000-1000").is_none(), "empty interval");
+        assert!(parse_region(":1-2").is_none());
+        assert_eq!(parse_region("chr2:10-20").unwrap().to_string(), "2:10-20");
+    }
+
+    #[test]
+    fn tiling_covers_every_overlapped_window_and_only_those() {
+        let r = parse_region("chr1:4999-10001").unwrap();
+        let w: Vec<String> = tile_windows(&r, 5000)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(w, vec!["1:0-5000", "1:5000-10000", "1:10000-15000"]);
+        let snp = parse_region("chr1:5000").unwrap();
+        let w: Vec<String> = tile_windows(&snp, 5000)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            w,
+            vec!["1:5000-10000"],
+            "a position at a boundary lands in one window"
+        );
+        let exact = parse_region("chr1:5000-10000").unwrap();
+        assert_eq!(
+            tile_windows(&exact, 5000).len(),
+            1,
+            "an exact window is one window"
+        );
+        assert_eq!(
+            tile_windows(&exact, 0).len(),
+            1,
+            "window 0 keeps the region"
+        );
+        assert_eq!(tile_windows(&exact, 0)[0].to_string(), "1:5000-10000");
+    }
 
     #[test]
     fn load_gene_loci_keeps_strand_and_tss() {

@@ -38,10 +38,104 @@ pub struct FneArgs {
     #[arg(
         long,
         value_delimiter = ',',
+        help = "Membership file(s), `type=path`: gene <TAB> label rows become gene:<type> edges",
+        long_help = "Membership files, `type=path`, comma-separated or repeated,\n\
+                     e.g. `cell_type=markers.tsv` or `tf=tf_targets.tsv`.\n\
+                     Every row is `gene <TAB> label` (tab or comma delimited; a header\n\
+                     and `#` rows are skipped). The labels become nodes of the given\n\
+                     type and the rows the relation `gene:<type>/<file stem>`."
+    )]
+    pub(crate) membership: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        help = "GO annotations (GAF, .gaf or .gaf.gz); needs --obo",
+        long_help = "A GO annotation file. Every gene→term row becomes a gene:term edge,\n\
+                     propagated up the ontology (is_a + part_of, the true-path rule)\n\
+                     when --obo is given, so a gene annotated to a leaf also links to\n\
+                     every ancestor. Terms outside --min/--max-gene-set are dropped."
+    )]
+    pub(crate) gaf: Option<Box<str>>,
+
+    #[arg(
+        long,
+        help = "Ontology (OBO) for --gaf propagation, term:term edges and term text",
+        long_help = "An OBO ontology (go-basic.obo, cl-basic.obo). Besides propagating\n\
+                     --gaf annotations, its hierarchy joins the graph as the relations\n\
+                     `term:term/is_a` and `term:term/part_of` over the terms kept,\n\
+                     and its names and definitions feed --export-text."
+    )]
+    pub(crate) obo: Option<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Drop IEA (electronic) annotations from --gaf"
+    )]
+    pub(crate) no_iea: bool,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Gene-set file(s) (GMT): each set becomes a term node",
+        long_help = "MSigDB-style GMT files, comma-separated or repeated. Every line is\n\
+                     `term <TAB> description <TAB> gene...`; the set's genes link to the\n\
+                     term node in the relation `gene:term/<file stem>`. Sets outside\n\
+                     --min/--max-gene-set are dropped; the description feeds --export-text."
+    )]
+    pub(crate) gmt: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Smallest gene set (GAF/GMT term) kept"
+    )]
+    pub(crate) min_gene_set: usize,
+
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "Largest gene set (GAF/GMT term) kept; 0 = no cap"
+    )]
+    pub(crate) max_gene_set: usize,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Region-gene link file(s): region <TAB> gene [<TAB> score]",
+        long_help = "Genomic region→gene links (eQTL, peak-to-gene, ABC), comma-separated\n\
+                     or repeated. A region is `chr:start-end`, `chr_start_end`, or a\n\
+                     position `chr:pos` / `chr_pos`; `chr` prefixes are dropped. Each\n\
+                     region is tiled onto fixed windows (--region-window) and links its\n\
+                     gene from every window it overlaps, in the relation\n\
+                     `region:gene/<file stem>`; the score column is the edge weight."
+    )]
+    pub(crate) region_gene: Vec<Box<str>>,
+
+    #[arg(
+        long,
+        default_value_t = 5000,
+        help = "Window size (bp) the regions are tiled onto; 0 keeps regions as given"
+    )]
+    pub(crate) region_window: i64,
+
+    #[arg(
+        long,
+        help = "Write `feature <TAB> type <TAB> name <TAB> text` for every node with text",
+        long_help = "Export the text the inputs carry — OBO names and definitions, GMT\n\
+                     descriptions — as `feature <TAB> type <TAB> name <TAB> text`, one row\n\
+                     per node that has any. This is the input of the text encoder that\n\
+                     turns descriptions into gene:word edges."
+    )]
+    pub(crate) export_text: Option<Box<str>>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
         help = "Relation weight override(s), `name=weight`",
         long_help = "Loss weight of a relation, `name=weight`, comma-separated or repeated.\n\
-                     Names are the ones the run logs, e.g. `gene:gene/biogrid=2` or\n\
-                     `gene:word=0.5`. Every relation defaults to 1."
+                     Names are the ones the run logs, e.g. `gene:gene/biogrid=2`,\n\
+                     `gene:term/goa_human=0.5` or `gene:word=0.5`. Every relation defaults to 1."
     )]
     pub(crate) relation_weight: Vec<Box<str>>,
 
