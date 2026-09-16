@@ -16,7 +16,8 @@ pub struct FneArgs {
                      with an optional third column holding a per-edge weight.\n\
                      Lines starting with `#` are skipped;\n\
                      self-loops are dropped and a repeated pair keeps its largest weight.\n\
-                     Every file is its own relation, named `gene:gene/<file stem>`,\n\
+                     Every file is its own relation, named `gene:gene/<file stem>`\n\
+                     (the file name without its .tsv/.csv/.gz extensions),\n\
                      so BioGRID and STRING can be weighted apart with --relation-weight."
     )]
     pub(crate) networks: Vec<Box<str>>,
