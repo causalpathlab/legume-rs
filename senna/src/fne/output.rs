@@ -58,11 +58,10 @@ pub(crate) fn write_outputs(
     )?;
 
     // feature_types.parquet — the node type of every row, same order.
-    write_named_table(
-        &format!("{prefix}.feature_types.parquet"),
-        "feature",
+    auxiliary_data::feature_types::write_feature_types(
+        prefix,
         &graph.node_names,
-        &[(Box::from("type"), Column::Str(&graph.node_types))],
+        &graph.node_types,
     )?;
 
     // relations.parquet — one row per relation.

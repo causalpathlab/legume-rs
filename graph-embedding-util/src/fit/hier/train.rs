@@ -232,16 +232,8 @@ pub fn train(
     // gene `g` on track `t`, ρ_r = μ_{m(g)} + r_g (+ Δ^t_{m(g)} + δ^t_g) and
     // b_r = b_{m(g)} + b_g (+ β^t_{m(g)} + γ^t_g). On the base track the offset
     // terms do not exist and the expression is the plain composed pair.
-    // A pinned gene's row is copied back verbatim rather than re-composed, so
-    // the round trip through `r_g = row − μ_m` costs it no rounding.
-    let frozen = preset.filter(|f| f.freeze);
-    let mut frozen_row_of: Vec<u32> = vec![u32::MAX; d];
-    if let Some(f) = frozen {
-        for (i, &g) in f.gene.iter().enumerate() {
-            frozen_row_of[g as usize] = i as u32;
-        }
-    }
     let mut rho = DMatrix::<f32>::zeros(n_features, h);
+    let mut row_buf = vec![0f32; h];
     let mut b_feat = vec![0f32; n_features];
     for row in 0..n_features {
         let t = units.tracks.track_of_row[row] as usize;
@@ -249,18 +241,9 @@ pub fn train(
         let m = part.module_of[g] as usize;
         match params.offset(t) {
             None => {
-                match (frozen, frozen_row_of[g]) {
-                    (Some(f), i) if i != u32::MAX => {
-                        let i = i as usize;
-                        for k in 0..h {
-                            rho[(row, k)] = f.rows[i * h + k];
-                        }
-                    }
-                    _ => {
-                        for k in 0..h {
-                            rho[(row, k)] = params.mu[m * h + k] + params.r[g * h + k];
-                        }
-                    }
+                params.base_row(g, m, &mut row_buf);
+                for k in 0..h {
+                    rho[(row, k)] = row_buf[k];
                 }
                 b_feat[row] = params.b_m[m] + params.b_g[g];
             }

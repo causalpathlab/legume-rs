@@ -21,12 +21,7 @@ use matrix_util::pair_graph::FeaturePairGraph;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 
-/// The node type whose names are canonicalised as gene symbols.
-pub(crate) const GENE_TYPE: &str = "gene";
-/// Ontology terms and gene sets.
-pub(crate) const TERM_TYPE: &str = "term";
-/// Fixed genomic windows.
-pub(crate) const REGION_TYPE: &str = "region";
+pub(crate) use auxiliary_data::feature_types::{GENE_TYPE, REGION_TYPE, TERM_TYPE};
 
 /// A node's text: a display name and a description, either optional.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
