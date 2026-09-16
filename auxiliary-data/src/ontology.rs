@@ -36,12 +36,15 @@ pub struct Ontology {
     graph: DiGraph<Box<str>, Rel>,
     idx: FxHashMap<Box<str>, NodeIndex>,
     names: FxHashMap<Box<str>, Box<str>>,
+    /// `def:` text per term, unescaped, without the xref list.
+    defs: FxHashMap<Box<str>, Box<str>>,
 }
 
 /// One parsed, non-obsolete OBO term gathered in the first pass.
 struct ParsedTerm {
     id: Box<str>,
     name: Option<Box<str>>,
+    def: Option<Box<str>>,
     /// `is_a` parent ids.
     is_a: Vec<Box<str>>,
     /// `relationship: part_of` parent ids.
@@ -65,12 +68,19 @@ impl Ontology {
             // comment, so trim every extracted token down to the bare value.
             let id: Box<str> = term.id().to_string().trim().into();
             let mut name: Option<Box<str>> = None;
+            let mut def: Option<Box<str>> = None;
             let mut is_a: Vec<Box<str>> = Vec::new();
             let mut part_of: Vec<Box<str>> = Vec::new();
             let mut obsolete = false;
             for line in term.clauses() {
                 match &**line {
                     TermClause::Name(n) => name = Some(n.to_string().trim().into()),
+                    TermClause::Def(d) => {
+                        let text = d.text().as_str().trim();
+                        if !text.is_empty() {
+                            def = Some(text.into());
+                        }
+                    }
                     TermClause::IsObsolete(b) => obsolete = obsolete || *b,
                     TermClause::IsA(parent) => is_a.push(parent.to_string().trim().into()),
                     TermClause::Relationship(rel, target) => {
@@ -85,6 +95,7 @@ impl Ontology {
                 terms.push(ParsedTerm {
                     id,
                     name,
+                    def,
                     is_a,
                     part_of,
                 });
@@ -95,11 +106,15 @@ impl Ontology {
         let mut graph: DiGraph<Box<str>, Rel> = DiGraph::new();
         let mut idx: FxHashMap<Box<str>, NodeIndex> = FxHashMap::default();
         let mut names: FxHashMap<Box<str>, Box<str>> = FxHashMap::default();
+        let mut defs: FxHashMap<Box<str>, Box<str>> = FxHashMap::default();
         for term in &terms {
             let node = graph.add_node(term.id.clone());
             idx.insert(term.id.clone(), node);
             if let Some(n) = &term.name {
                 names.insert(term.id.clone(), n.clone());
+            }
+            if let Some(d) = &term.def {
+                defs.insert(term.id.clone(), d.clone());
             }
         }
         for term in &terms {
@@ -113,7 +128,31 @@ impl Ontology {
             }
         }
 
-        Ok(Self { graph, idx, names })
+        Ok(Self {
+            graph,
+            idx,
+            names,
+            defs,
+        })
+    }
+
+    /// The term's `def:` text (`None` if the term is unknown or undefined).
+    #[must_use]
+    pub fn def(&self, id: &str) -> Option<&str> {
+        self.defs.get(id).map(|d| &**d)
+    }
+
+    /// Every `child → parent` edge with its relation kind, in no particular
+    /// order — the hierarchy as a graph, for callers that embed or draw it
+    /// rather than walk it.
+    pub fn edges(&self) -> impl Iterator<Item = (&str, &str, Rel)> + '_ {
+        self.graph.edge_references().map(|e| {
+            (
+                &*self.graph[e.source()],
+                &*self.graph[e.target()],
+                *e.weight(),
+            )
+        })
     }
 
     /// Number of (non-obsolete) terms.
@@ -190,7 +229,7 @@ mod tests {
             "format-version: 1.2\n\n\
              [Term]\nid: CL:0000000\nname: cell\n\n\
              [Term]\nid: CL:0000542\nname: lymphocyte\nis_a: CL:0000000 ! cell\n\n\
-             [Term]\nid: CL:0000084\nname: T cell\nis_a: CL:0000542 {{is_inferred=\"true\"}} ! lymphocyte\n\n\
+             [Term]\nid: CL:0000084\nname: T cell\ndef: \"A lymphocyte with a \\\"TCR\\\", made in the thymus.\" [GOC:add]\nis_a: CL:0000542 {{is_inferred=\"true\"}} ! lymphocyte\n\n\
              [Term]\nid: CL:0000624\nname: CD4 T\nis_a: CL:0000084 ! T cell\n\n\
              [Term]\nid: CL:0000625\nname: CD8 T\nis_a: CL:0000084 ! T cell\nrelationship: part_of CL:1000000 ! compartment\n\n\
              [Term]\nid: CL:1000000\nname: immune compartment\n\n\
@@ -219,6 +258,29 @@ mod tests {
             assert!(anc.contains(a), "missing ancestor {a}");
         }
         assert!(!anc.contains("CL:0000236"));
+    }
+
+    #[test]
+    fn definitions_are_kept_unescaped_and_the_hierarchy_is_exposed_as_edges() {
+        let f = write_obo();
+        let onto = Ontology::load_obo(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            onto.def("CL:0000084"),
+            Some("A lymphocyte with a \"TCR\", made in the thymus.")
+        );
+        assert_eq!(onto.def("CL:0000000"), None, "no def: line");
+        assert_eq!(onto.def("CL:9999999"), None, "obsolete");
+        let mut edges: Vec<(String, String, Rel)> = onto
+            .edges()
+            .map(|(c, p, r)| (c.to_string(), p.to_string(), r))
+            .collect();
+        edges.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        assert_eq!(edges.len(), 6, "5 is_a + 1 part_of among live terms");
+        assert!(edges.contains(&("CL:0000625".into(), "CL:1000000".into(), Rel::PartOf)));
+        assert!(edges.contains(&("CL:0000084".into(), "CL:0000542".into(), Rel::IsA)));
+        assert!(edges
+            .iter()
+            .all(|(c, p, _)| onto.contains(c) && onto.contains(p)));
     }
 
     #[test]

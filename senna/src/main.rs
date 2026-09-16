@@ -447,7 +447,12 @@ enum Commands {
                       co-expression), each its own relation. --edges takes typed files,\n\
                       `lhs_type lhs rhs_type rhs [weight]`, so genes can link to cell types,\n\
                       ontology terms, genomic windows or words; rows sharing a type pair\n\
-                      form one relation.\n\
+                      form one relation. Dedicated readers cover the common sources:\n\
+                      --membership type=path (gene, label), --gaf with --obo and --gmt\n\
+                      (gene sets, propagated up the ontology, whose hierarchy joins as\n\
+                      term:term edges), and --region-gene (eQTL, peak-to-gene, ABC links\n\
+                      tiled onto fixed windows). --export-text writes the names and\n\
+                      definitions the inputs carry, for the text encoder.\n\
                       \n\
                       Training is PyTorch-BigGraph's recipe, the one `senna simba` uses:\n\
                       a softmax loss over in-batch and uniform negatives on both sides,\n\
