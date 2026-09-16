@@ -149,6 +149,19 @@ pub struct FneArgs {
 
     #[arg(
         long,
+        value_delimiter = ',',
+        help = "Passes over a relation's edges per epoch, `name=k`",
+        long_help = "How many times a relation's training edges are drawn per epoch, `name=k`,\n\
+                     comma-separated or repeated; every relation defaults to 1.\n\
+                     Batches are drawn in proportion to the edges left,\n\
+                     so a small relation beside a large one (a marker panel beside a PPI)\n\
+                     gets few updates per epoch and its nodes stay near their init;\n\
+                     repeating it restores its share without changing the loss weight."
+    )]
+    pub(crate) relation_repeat: Vec<Box<str>>,
+
+    #[arg(
+        long,
         default_value_t = 128,
         alias = "dim-embedding",
         help = "Embedding dimension H"

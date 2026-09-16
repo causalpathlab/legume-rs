@@ -67,6 +67,12 @@ pub struct FneConfig {
     /// positive, so a small relation still reports an eval loss; never more
     /// than leaves one training edge.
     pub eval_min_per_relation: usize,
+    /// Passes over each relation's training edges per epoch, by relation
+    /// index (missing entries count as 1). PBG draws batches in proportion
+    /// to the edges left, so a relation a hundred times smaller than another
+    /// gets a hundred times fewer updates; repeating it restores its share
+    /// without touching the loss weight.
+    pub relation_repeats: Vec<usize>,
     pub seed: u64,
     pub device: Device,
 }
@@ -84,6 +90,7 @@ impl Default for FneConfig {
             wd_interval: 50,
             eval_fraction: 0.05,
             eval_min_per_relation: 1,
+            relation_repeats: Vec::new(),
             seed: 1,
             device: Device::Cpu,
         }

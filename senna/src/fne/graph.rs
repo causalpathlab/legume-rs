@@ -75,6 +75,8 @@ struct RelSpec {
     rhs_type: usize,
     undirected: bool,
     weight: f32,
+    /// Passes over the relation's edges per epoch.
+    repeat: usize,
     /// `(lhs local, rhs local) → edge weight`; a repeated pair keeps the
     /// largest weight.
     edges: FxHashMap<(u32, u32), f32>,
@@ -93,6 +95,8 @@ pub(crate) struct TypedGraph {
     pub node_types: Vec<Box<str>>,
     /// `(global id, text)` for every node that carries any, in id order.
     pub texts: Vec<(u32, NodeText)>,
+    /// Passes per epoch, by relation index.
+    pub relation_repeats: Vec<usize>,
 }
 
 pub(crate) struct TypedGraphBuilder {
@@ -160,6 +164,7 @@ impl TypedGraphBuilder {
             rhs_type,
             undirected: lhs == rhs,
             weight: 1.0,
+            repeat: 1,
             edges: FxHashMap::default(),
             n_self_loops: 0,
             n_repeats: 0,
@@ -477,6 +482,28 @@ impl TypedGraphBuilder {
         Ok(())
     }
 
+    /// `name=k` passes per epoch; an unknown relation name is an error.
+    pub(crate) fn set_relation_repeat(&mut self, spec: &str) -> anyhow::Result<()> {
+        let (name, k) = spec
+            .rsplit_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--relation-repeat `{spec}`: expected `name=k`"))?;
+        let k: usize = k
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("--relation-repeat `{spec}`: {e}"))?;
+        anyhow::ensure!(k >= 1, "--relation-repeat `{spec}`: k must be at least 1");
+        let known: Vec<&str> = self.relations.iter().map(|r| r.name.as_ref()).collect();
+        let r = *self.rel_index.get(name.trim()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--relation-repeat `{spec}`: no relation named `{}`; the run has {}",
+                name.trim(),
+                known.join(", ")
+            )
+        })?;
+        self.relations[r].repeat = k;
+        Ok(())
+    }
+
     pub(crate) fn n_edges(&self) -> usize {
         self.relations.iter().map(|r| r.edges.len()).sum()
     }
@@ -511,6 +538,7 @@ impl TypedGraphBuilder {
         let types = NodeTypeTable::new(&type_specs)?;
 
         let mut relations = Vec::new();
+        let mut relation_repeats = Vec::new();
         let mut edges = TypedEdgeList::default();
         let mut weights: Vec<f32> = Vec::new();
         for spec in &self.relations {
@@ -522,6 +550,7 @@ impl TypedGraphBuilder {
                 continue;
             };
             let r = relations.len() as u16;
+            relation_repeats.push(spec.repeat);
             relations.push(Relation {
                 name: spec.name.clone(),
                 lhs_type: lt as u16,
@@ -554,6 +583,7 @@ impl TypedGraphBuilder {
             node_names,
             node_types,
             texts,
+            relation_repeats,
         })
     }
 }

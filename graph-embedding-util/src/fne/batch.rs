@@ -40,28 +40,38 @@ pub(crate) struct PaddedBatch {
     pub uni_rhs: Vec<u32>,
 }
 
-/// Per-relation queues of edge indices for one epoch.
+/// The queues of edge indices for one epoch: each entry is one pass over
+/// one relation's contiguous (already shuffled) block. A relation that
+/// repeats within an epoch contributes several entries.
 pub(crate) struct EpochBatcher {
-    /// What is left of each relation's block; `start` advances as batches
-    /// are handed out.
-    remaining: Vec<Range<usize>>,
+    /// `(relation, what is left of the block)`; `start` advances as
+    /// batches are handed out.
+    remaining: Vec<(usize, Range<usize>)>,
     batch_size: usize,
 }
 
 impl EpochBatcher {
-    /// One contiguous (already shuffled) block of edge indices per relation,
-    /// in relation order. An empty block is a relation with nothing to
-    /// hand out.
+    /// One block per relation, in relation order, each visited once. An
+    /// empty block is a relation with nothing to hand out.
     pub fn new(blocks: &[Range<usize>], batch_size: usize) -> Self {
+        let entries: Vec<(usize, Range<usize>)> = blocks.iter().cloned().enumerate().collect();
+        Self::from_entries(entries, batch_size)
+    }
+
+    /// Explicit `(relation, block)` entries; a relation listed `k` times is
+    /// drawn `k` times over the epoch. The caller gives each repeat its own
+    /// shuffle by re-shuffling the block between passes, or accepts the
+    /// same order twice.
+    pub fn from_entries(entries: Vec<(usize, Range<usize>)>, batch_size: usize) -> Self {
         Self {
-            remaining: blocks.to_vec(),
+            remaining: entries,
             batch_size: batch_size.max(1),
         }
     }
 
-    /// Edges not yet handed out this epoch.
+    /// Edges not yet handed out this epoch (repeats counted each time).
     pub fn remaining(&self) -> usize {
-        self.remaining.iter().map(Range::len).sum()
+        self.remaining.iter().map(|(_, q)| q.len()).sum()
     }
 
     /// The next single-relation batch, or `None` once the epoch is drained.
@@ -81,17 +91,18 @@ impl EpochBatcher {
         let c = c.max(1);
         // Multinomial over the relations' remaining edge counts.
         let mut x = rng.random_range(0..total);
-        let mut r = self.remaining.len() - 1;
-        for (i, q) in self.remaining.iter().enumerate() {
+        let mut e = self.remaining.len() - 1;
+        for (i, (_, q)) in self.remaining.iter().enumerate() {
             if x < q.len() {
-                r = i;
+                e = i;
                 break;
             }
             x -= q.len();
         }
-        let n_real = self.remaining[r].len().min(self.batch_size);
-        let first = self.remaining[r].start;
-        self.remaining[r].start += n_real;
+        let r = self.remaining[e].0;
+        let n_real = self.remaining[e].1.len().min(self.batch_size);
+        let first = self.remaining[e].1.start;
+        self.remaining[e].1.start += n_real;
 
         let k = n_real.div_ceil(c);
         let p = k * c;

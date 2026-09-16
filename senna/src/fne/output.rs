@@ -84,6 +84,7 @@ pub(crate) fn write_outputs(
     let n_edges = as_i32(|s| s.n_edges);
     let n_train = as_i32(|s| s.n_train);
     let n_eval = as_i32(|s| s.n_eval);
+    let repeat = as_i32(|s| s.repeat);
     let train_loss: Vec<f32> = out
         .per_relation
         .iter()
@@ -105,6 +106,7 @@ pub(crate) fn write_outputs(
             (Box::from("n_edges"), Column::I32(&n_edges)),
             (Box::from("n_train"), Column::I32(&n_train)),
             (Box::from("n_eval"), Column::I32(&n_eval)),
+            (Box::from("repeat"), Column::I32(&repeat)),
             (Box::from("train_loss"), Column::F32(&train_loss)),
             (Box::from("eval_loss"), Column::F32(&eval_loss)),
         ],
