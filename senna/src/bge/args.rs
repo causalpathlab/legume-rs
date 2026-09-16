@@ -68,10 +68,14 @@ pub struct BgeArgs {
     #[arg(
         long,
         default_value_t = 128,
-        help = "Embedding dimension H",
+        help = "Embedding dimension H (0 = the width of a given feature embedding)",
         alias = "dim-embedding"
     )]
     pub(crate) embedding_dim: usize,
+
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) feature_embedding: crate::feature_embedding_args::FeatureEmbeddingArgs,
 
     #[command(flatten)]
     pub(crate) collapse: crate::refine_weighting::CollapseArgs,

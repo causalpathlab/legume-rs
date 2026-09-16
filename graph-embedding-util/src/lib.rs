@@ -29,6 +29,7 @@ pub mod data;
 pub mod eval;
 pub mod feature_qc;
 pub mod fit;
+pub mod fne;
 pub mod loss;
 pub mod model;
 pub mod multiome_plan;

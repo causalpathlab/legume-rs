@@ -2,7 +2,7 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
-use super::params::{HierParams, RowAdagrad};
+use super::params::{HierParams, PresetGenes, RowAdagrad};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{apply, loss_and_grads, Grads, Optimizers, StepPlan, StepStats};
 use super::units::UnitTable;
@@ -133,6 +133,7 @@ pub fn train(
     labels: &[u32],
     h: usize,
     cfg: &HierConfig,
+    preset: Option<&PresetGenes>,
     stop: &AtomicBool,
 ) -> anyhow::Result<HierOutput> {
     anyhow::ensure!(
@@ -148,6 +149,25 @@ pub fn train(
     let n_t = units.n_tracks();
     let n_features = units.n_features;
     let mut params = HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.seed);
+    if let Some(f) = preset {
+        anyhow::ensure!(
+            n_t == 1,
+            "preset gene rows need a single-track feature axis"
+        );
+        params.preset(f, &part.module_of)?;
+        if f.freeze {
+            info!(
+                "Phase 1 (hier) — {} of {d} gene rows pinned; μ pinned to their module means, \
+                 biases and the other rows train",
+                f.gene.len()
+            );
+        } else {
+            info!(
+                "Phase 1 (hier) — {} of {d} gene rows start from the given table and train on",
+                f.gene.len()
+            );
+        }
+    }
     let mut opt = Optimizers {
         e_u: RowAdagrad::new(n_u, cfg.lr),
         mu: RowAdagrad::new(n_m, cfg.lr),
@@ -213,6 +233,7 @@ pub fn train(
     // b_r = b_{m(g)} + b_g (+ β^t_{m(g)} + γ^t_g). On the base track the offset
     // terms do not exist and the expression is the plain composed pair.
     let mut rho = DMatrix::<f32>::zeros(n_features, h);
+    let mut row_buf = vec![0f32; h];
     let mut b_feat = vec![0f32; n_features];
     for row in 0..n_features {
         let t = units.tracks.track_of_row[row] as usize;
@@ -220,8 +241,9 @@ pub fn train(
         let m = part.module_of[g] as usize;
         match params.offset(t) {
             None => {
+                params.base_row(g, m, &mut row_buf);
                 for k in 0..h {
-                    rho[(row, k)] = params.mu[m * h + k] + params.r[g * h + k];
+                    rho[(row, k)] = row_buf[k];
                 }
                 b_feat[row] = params.b_m[m] + params.b_g[g];
             }

@@ -53,6 +53,8 @@ mod embed_common;
 mod embed_diag;
 mod empirical_dict;
 mod eval_topic;
+mod feature_embedding_args;
+mod feature_preset;
 mod fne;
 mod gem;
 mod geometry;
@@ -67,6 +69,7 @@ mod masked_topic;
 mod multiome_layout;
 mod output_helpers;
 mod pb_reference;
+mod pbg_train_args;
 mod postprocess;
 mod predict;
 mod predict_tmle;
@@ -439,27 +442,37 @@ enum Commands {
     Simba(SimbaArgs),
 
     #[command(
-        about = "Latent feature model over a feature-feature edge list.",
-        long_about = "Learns per-feature latent embeddings from an edge list.\n\
+        about = "Typed feature-graph embedding (PyTorch-BigGraph) over edge lists.",
+        long_about = "Learns one embedding per node of a typed feature graph.\n\
                       No expression data is involved.\n\
                       \n\
-                      Input is a TSV/CSV of feature-feature edges. BioGRID, STRING,\n\
-                      KEGG and regulatory networks all fit.\n\
+                      Positional inputs are gene-gene pair files (BioGRID, STRING, KEGG, co-expression),\n\
+                      each its own relation; the --ppi-* flags clean them (shared-neighbour QC,\n\
+                      hub capping, k-core) and derive second-order (--ppi-snn) and diffusion\n\
+                      (--ppi-ppr) relations from them, since the model itself sees direct edges only.\n\
+                      --edges takes typed files, `lhs_type lhs rhs_type rhs [weight]`,\n\
+                      so genes can link to cell types, ontology terms, genomic windows or words;\n\
+                      rows sharing a type pair form one relation.\n\
+                      Dedicated readers cover the common sources:\n\
+                      --membership type=path (gene, label);\n\
+                      --gaf with --obo, and --gmt (gene sets, propagated up the ontology,\n\
+                      whose hierarchy joins as term:term edges);\n\
+                      --region-gene (eQTL, peak-to-gene, ABC links tiled onto fixed windows).\n\
+                      --export-text writes the names and definitions the inputs carry,\n\
+                      for the text encoder.\n\
                       \n\
-                      Embeddings E ∈ ℝ^{D×H} come from a link-prediction model.\n\
-                      That model is a continuous Miller-Griffiths-Jordan.\n  \
-                      \n  \
-                      s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \
+                      Training is PyTorch-BigGraph's recipe, the one `senna simba` uses:\n\
+                      a softmax loss over in-batch and uniform negatives on both sides,\n\
+                      uniform negatives drawn inside the relation's own node types,\n\
+                      row-wise Adagrad and stochastic weight decay.\n\
+                      The score is a plain dot product;\n\
+                      relation and per-edge weights scale the loss.\n\
                       \n\
-                      Training is binary cross-entropy. Negative sampling is degree^α,\n\
-                      the node2vec convention. The model is symmetric by construction.\n\
-                      \n\
-                      Writes {out}.feature_embedding.parquet. feature_bias, gamma,\n\
-                      log_likelihood and senna.json ship too.\n\
-                      \n\
-                      The output shape matches the freeze loader.\n\
-                      That is `senna masked-topic --freeze-feature-embedding`.\n\
-                      An `fne` run is a direct gene-side input downstream."
+                      Writes {out}.feature_embedding.parquet over every node,\n\
+                      with its type in {out}.feature_types.parquet,\n\
+                      plus relations, log_likelihood and senna.json.\n\
+                      The gene rows feed `senna masked-topic --freeze-feature-embedding` directly;\n\
+                      other types are ignored there."
     )]
     Fne(FneArgs),
 
