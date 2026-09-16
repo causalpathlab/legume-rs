@@ -8,9 +8,9 @@ contextual similarity times TF-IDF. The edges feed `senna fne --edges`; the
 pooled vectors are a text prior for the gene side.
 
 ```
-gene-text vocab --uniprot-tsv human.tsv --obo go-basic.obo -o run     # inspect the vocabulary
-gene-text embed --uniprot-tsv human.tsv --obo go-basic.obo -o run     # encode, write edges
-senna fne biogrid.tsv --edges run.feature_word.edges.tsv --relation-weight gene:word=0.5 -o graph
+gene-text qc --uniprot-tsv human.tsv --obo go-basic.obo -o run          # inspect the word cuts (optional)
+gene-text knn-graph --uniprot-tsv human.tsv --obo go-basic.obo -o run   # encode, write the text graph (alias: knn)
+senna fne biogrid.tsv --edges run.feature_word.edges.tsv,run.text_knn.edges.tsv --relation-weight gene:word=0.5 -o graph
 ```
 
 ## Inputs
@@ -42,7 +42,8 @@ then both tails of the document-frequency distribution are cut by quantile
 (`--df-lower-quantile`, `--df-upper-quantile`) with absolute limits on top
 (`--min-df`, `--max-df-frac`). The run prints the df histogram and the words
 on each side of every cut; `{out}.vocab.tsv` lists every candidate with its
-verdict and can be edited and handed back through `embed --vocab-file`.
+verdict and can be edited and handed back through `knn-graph --vocab-file`.
+`knn-graph` runs the same step itself; `qc` only lets you look first.
 
 ## Outputs
 
@@ -50,6 +51,6 @@ verdict and can be edited and handed back through `embed --vocab-file`.
   `--words-per-feature` per feature; weight = max(cos, 0) · (1 + ln tf) · idf.
 - `{out}.feature_word_expanded.edges.tsv` (`--expand-k`) — nearest vocabulary
   words a feature's text lacks, by CSLS.
-- `{out}.text_knn.edges.tsv` (`--text-knn`) — feature–feature text similarity.
+- `{out}.text_knn.edges.tsv` — feature–feature text similarity, `--text-knn` per feature (default 10).
 - `{out}.text_embedding.parquet` — pooled vectors, centred; `{out}.feature_types.parquet`.
 - `{out}.vocab.tsv`, `{out}.feature_text.tsv` — the vocabulary and the corpus as read.

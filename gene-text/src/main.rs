@@ -42,23 +42,29 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     #[command(
-        about = "Build and inspect the word vocabulary, without encoding",
-        long_about = "Tokenise every description, drop stopwords and filler, and cut both tails\n\
-                      of the document-frequency distribution by quantile. Prints the df\n\
-                      histogram, the cuts and the words on each side of them, and writes\n\
-                      {out}.vocab.tsv — tune the stopword list and the quantiles here,\n\
-                      then hand the file to `embed --vocab`."
+        about = "Inspect the word vocabulary and its frequency cuts, without encoding",
+        long_about = "The vocabulary step of `knn-graph` on its own, so the cuts can be\n\
+                      inspected before paying for the model pass: tokenise every description,\n\
+                      drop stopwords and filler, cut both tails of the document-frequency\n\
+                      distribution by quantile. Prints the df histogram, the cuts and the\n\
+                      words on each side of them, and writes {out}.vocab.tsv — tune the\n\
+                      stopword list and the quantiles here, then hand the file to\n\
+                      `knn-graph --vocab-file`. `knn-graph` runs this step itself\n\
+                      when no file is given."
     )]
-    Vocab(VocabCmd),
+    Qc(QcCmd),
     #[command(
-        about = "Encode the descriptions and write feature–word edges and text vectors",
-        long_about = "Runs a BERT-family encoder from the Hugging Face Hub over every\n\
-                      description. Writes {out}.text_embedding.parquet (pooled, centred),\n\
-                      {out}.feature_word.edges.tsv (typed edges for `senna fne --edges`,\n\
-                      weight = contextual cosine × TF-IDF), {out}.vocab.tsv and\n\
-                      {out}.feature_text.tsv (the corpus as read)."
+        alias = "knn",
+        about = "Encode the descriptions and write the text graph: feature–word and feature–feature edges",
+        long_about = "Runs the vocabulary step, then a BERT-family encoder from the Hugging\n\
+                      Face Hub over every description, and writes the text graph:\n\
+                      {out}.feature_word.edges.tsv (each feature to the words of its text,\n\
+                      weight = contextual cosine × TF-IDF) and {out}.text_knn.edges.tsv\n\
+                      (nearest features by text similarity), both typed edge files for\n\
+                      `senna fne --edges`; plus {out}.text_embedding.parquet (pooled,\n\
+                      centred), {out}.vocab.tsv and {out}.feature_text.tsv."
     )]
-    Embed(EmbedCmd),
+    KnnGraph(KnnGraphCmd),
 }
 
 #[derive(Args, Clone)]
@@ -197,7 +203,7 @@ impl VocabArgs {
 }
 
 #[derive(Args)]
-struct VocabCmd {
+struct QcCmd {
     #[command(flatten)]
     sources: SourceArgs,
     #[command(flatten)]
@@ -225,14 +231,14 @@ enum PoolingArg {
 }
 
 #[derive(Args)]
-struct EmbedCmd {
+struct KnnGraphCmd {
     #[command(flatten)]
     sources: SourceArgs,
     #[command(flatten)]
     vocab: VocabArgs,
     #[arg(
         long,
-        help = "Reuse a tuned {out}.vocab.tsv instead of recomputing the cuts"
+        help = "Reuse a tuned {out}.vocab.tsv from `qc` instead of recomputing the cuts"
     )]
     vocab_file: Option<String>,
     #[arg(
@@ -272,8 +278,8 @@ struct EmbedCmd {
     expand_k: usize,
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Also write feature–feature text-similarity edges, this many per feature; 0 = off"
+        default_value_t = 10,
+        help = "Feature–feature text-similarity edges per feature; 0 = off"
     )]
     text_knn: usize,
     #[arg(short, long, required = true, help = "Output prefix")]
@@ -287,8 +293,8 @@ fn main() -> Result<()> {
     )
     .init();
     match cli.cmd {
-        Commands::Vocab(c) => run_vocab(&c),
-        Commands::Embed(c) => run_embed(&c),
+        Commands::Qc(c) => run_qc(&c),
+        Commands::KnnGraph(c) => run_knn_graph(&c),
     }
 }
 
@@ -314,7 +320,7 @@ fn tokenize_corpus(corpus: &Corpus, opts: &TokenizeOpts) -> Vec<(String, Vec<Occ
         .collect()
 }
 
-fn run_vocab(c: &VocabCmd) -> Result<()> {
+fn run_qc(c: &QcCmd) -> Result<()> {
     matrix_util::common_io::mkdir_parent(&c.out)?;
     let corpus = c.sources.corpus()?;
     let opts = c.vocab.tokenize_opts()?;
@@ -334,7 +340,7 @@ fn run_vocab(c: &VocabCmd) -> Result<()> {
     Ok(())
 }
 
-fn run_embed(c: &EmbedCmd) -> Result<()> {
+fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
     matrix_util::common_io::mkdir_parent(&c.out)?;
     let corpus = c.sources.corpus()?;
     let opts = c.vocab.tokenize_opts()?;
