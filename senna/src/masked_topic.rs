@@ -306,48 +306,9 @@ pub struct MaskedTopicArgs {
     )]
     feature_embedding_l2: f32,
 
-    #[arg(
-        long,
-        help = "Freeze a pre-trained per-gene embedding ρ; encoder/decoder ρ fixed",
-        long_help = "Reuse a pre-trained per-gene embedding ρ from a prior senna run.\n\
-                     It loads `{prefix}.feature_embedding.parquet`.\n\
-                     That covers the topic and cell-embedded-topic layouts.\n\
-                     For the gbe layout it loads `{prefix}.dictionary.parquet`.\n\
-                     \n\
-                     Gene names are strict-intersected against this dataset's axis,\n\
-                     under the `--feature-name-kind` rule.\n\
-                     Unmatched genes are dropped from training.\n\
-                     \n\
-                     The encoder and decoder ρ stay fixed. Everything else trains as usual.\n\
-                     That is α, FC, BN, the value embedding and the decoder's topic embeddings.\n\
-                     \n\
-                     This is incompatible with `--feature-network`.\n\
-                     That flag's restriction would move the gene axis.\n\
-                     The frozen ρ pins that axis. It also forces `--feature-embedding-l2 0`.\n\
-                     A frozen ρ needs no shrinkage."
-    )]
-    freeze_feature_embedding: Option<Box<str>>,
-
-    #[arg(
-        long,
-        conflicts_with = "freeze_feature_embedding",
-        help = "Warm-start ρ from a prior senna run; AdamW continues to update it",
-        long_help = "Warm-start ρ from a prior senna run (typically `senna bge`).\n\
-                     Layout resolution matches `--freeze-feature-embedding`.\n\
-                     That means gbe `{prefix}.dictionary.parquet`,\n\
-                     or topic `{prefix}.feature_embedding.parquet`.\n\
-                     The strict gene-name intersection is the same too.\n\
-                     \n\
-                     The difference is that AdamW keeps updating ρ.\n\
-                     This only gives a biology-aware starting point,\n\
-                     in place of a random Kaiming-normal init.\n\
-                     \n\
-                     It pairs well with `senna bge` pre-training.\n\
-                     bge gives a cheap NCE-based gene embedding, robust to batch effects,\n\
-                     used as the warm-start here.\n\
-                     Mutually exclusive with `--freeze-feature-embedding`."
-    )]
-    init_feature_embedding: Option<Box<str>>,
+    #[command(flatten)]
+    #[serde(flatten)]
+    feature_embedding: crate::feature_embedding_args::FeatureEmbeddingArgs,
 
     #[arg(
         long,
@@ -804,14 +765,18 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         args.batch_files.as_deref(),
     );
 
-    let init_feature_embedding: Option<Box<str>> = args.init_feature_embedding.clone();
-    let freeze_feature_embedding: Option<Box<str>> =
-        args.freeze_feature_embedding.clone().or_else(|| {
-            match (init_feature_embedding.is_none(), inherited.as_ref()) {
+    let init_feature_embedding: Option<Box<str>> =
+        args.feature_embedding.init_feature_embedding.clone();
+    let freeze_feature_embedding: Option<Box<str>> = args
+        .feature_embedding
+        .freeze_feature_embedding
+        .clone()
+        .or_else(
+            || match (init_feature_embedding.is_none(), inherited.as_ref()) {
                 (true, Some(inh)) => Some(inh.feature_embedding_prefix.clone()),
                 _ => None,
-            }
-        });
+            },
+        );
     let pretrained_prefix = freeze_feature_embedding
         .as_deref()
         .or(init_feature_embedding.as_deref());

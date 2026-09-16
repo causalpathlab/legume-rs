@@ -14,7 +14,7 @@
 //! and the artifacts.
 
 mod args;
-mod graph;
+pub(crate) mod graph;
 mod output;
 mod run;
 

@@ -247,6 +247,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             seed: config.seed,
             offset_l2: config.offset_l2,
         },
+        config.preset_features.as_ref(),
         &stop,
     )?;
     // The composed dictionary into the shared feature Vars; each level's
