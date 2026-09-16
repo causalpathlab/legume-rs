@@ -12,8 +12,8 @@ pub struct FneArgs {
         help = "Gene-gene edge list(s) (TSV/CSV; two columns per line, optional weight)",
         long_help = "Zero or more positional paths, comma-separated or space-separated.\n\
                      Each file is whitespace/comma/tab-delimited;\n\
-                     every line is a pair of gene names, with an optional third column\n\
-                     holding a per-edge weight.\n\
+                     every line is a pair of gene names,\n\
+                     with an optional third column holding a per-edge weight.\n\
                      Lines starting with `#` are skipped;\n\
                      self-loops are dropped and a repeated pair keeps its largest weight.\n\
                      Every file is its own relation, named `gene:gene/<file stem>`,\n\
@@ -29,7 +29,8 @@ pub struct FneArgs {
                      Every line is `lhs_type <TAB> lhs <TAB> rhs_type <TAB> rhs [<TAB> weight]`,\n\
                      e.g. `gene TP53 term GO:0006915 1.0` or `gene TP53 word apoptosis 0.61`.\n\
                      Rows sharing a type pair form one relation named `lhs_type:rhs_type`,\n\
-                     across every file. A relation whose two types coincide is undirected.\n\
+                     across every file.\n\
+                     A relation whose two types coincide is undirected.\n\
                      Names of type `gene` are canonicalised like the positional files;\n\
                      every other type is matched exactly."
     )]
@@ -41,28 +42,31 @@ pub struct FneArgs {
         help = "Membership file(s), `type=path`: gene <TAB> label rows become gene:<type> edges",
         long_help = "Membership files, `type=path`, comma-separated or repeated,\n\
                      e.g. `cell_type=markers.tsv` or `tf=tf_targets.tsv`.\n\
-                     Every row is `gene <TAB> label` (tab or comma delimited; a header\n\
-                     and `#` rows are skipped). The labels become nodes of the given\n\
-                     type and the rows the relation `gene:<type>/<file stem>`."
+                     Every row is `gene <TAB> label`, tab or comma delimited;\n\
+                     a header and `#` rows are skipped.\n\
+                     The labels become nodes of the given type\n\
+                     and the rows the relation `gene:<type>/<file stem>`."
     )]
     pub(crate) membership: Vec<Box<str>>,
 
     #[arg(
         long,
         help = "GO annotations (GAF, .gaf or .gaf.gz); needs --obo",
-        long_help = "A GO annotation file. Every gene→term row becomes a gene:term edge,\n\
-                     propagated up the ontology (is_a + part_of, the true-path rule)\n\
-                     when --obo is given, so a gene annotated to a leaf also links to\n\
-                     every ancestor. Terms outside --min/--max-gene-set are dropped."
+        long_help = "A GO annotation file.\n\
+                     Every gene→term row becomes a gene:term edge,\n\
+                     propagated up the ontology (is_a + part_of, the true-path rule) when --obo is given,\n\
+                     so a gene annotated to a leaf also links to every ancestor.\n\
+                     Terms outside --min/--max-gene-set are dropped."
     )]
     pub(crate) gaf: Option<Box<str>>,
 
     #[arg(
         long,
         help = "Ontology (OBO) for --gaf propagation, term:term edges and term text",
-        long_help = "An OBO ontology (go-basic.obo, cl-basic.obo). Besides propagating\n\
-                     --gaf annotations, its hierarchy joins the graph as the relations\n\
-                     `term:term/is_a` and `term:term/part_of` over the terms kept,\n\
+        long_help = "An OBO ontology (go-basic.obo, cl-basic.obo).\n\
+                     Besides propagating --gaf annotations,\n\
+                     its hierarchy joins the graph as the relations `term:term/is_a` and `term:term/part_of`\n\
+                     over the terms kept,\n\
                      and its names and definitions feed --export-text."
     )]
     pub(crate) obo: Option<Box<str>>,
@@ -78,10 +82,11 @@ pub struct FneArgs {
         long,
         value_delimiter = ',',
         help = "Gene-set file(s) (GMT): each set becomes a term node",
-        long_help = "MSigDB-style GMT files, comma-separated or repeated. Every line is\n\
-                     `term <TAB> description <TAB> gene...`; the set's genes link to the\n\
-                     term node in the relation `gene:term/<file stem>`. Sets outside\n\
-                     --min/--max-gene-set are dropped; the description feeds --export-text."
+        long_help = "MSigDB-style GMT files, comma-separated or repeated.\n\
+                     Every line is `term <TAB> description <TAB> gene...`;\n\
+                     the set's genes link to the term node in the relation `gene:term/<file stem>`.\n\
+                     Sets outside --min/--max-gene-set are dropped;\n\
+                     the description feeds --export-text."
     )]
     pub(crate) gmt: Vec<Box<str>>,
 
@@ -103,12 +108,13 @@ pub struct FneArgs {
         long,
         value_delimiter = ',',
         help = "Region-gene link file(s): region <TAB> gene [<TAB> score]",
-        long_help = "Genomic region→gene links (eQTL, peak-to-gene, ABC), comma-separated\n\
-                     or repeated. A region is `chr:start-end`, `chr_start_end`, or a\n\
-                     position `chr:pos` / `chr_pos`; `chr` prefixes are dropped. Each\n\
-                     region is tiled onto fixed windows (--region-window) and links its\n\
-                     gene from every window it overlaps, in the relation\n\
-                     `region:gene/<file stem>`; the score column is the edge weight."
+        long_help = "Genomic region→gene links (eQTL, peak-to-gene, ABC), comma-separated or repeated.\n\
+                     A region is `chr:start-end`, `chr_start_end`, or a position `chr:pos` / `chr_pos`;\n\
+                     `chr` prefixes are dropped.\n\
+                     Each region is tiled onto fixed windows (--region-window)\n\
+                     and links its gene from every window it overlaps,\n\
+                     in the relation `region:gene/<file stem>`;\n\
+                     the score column is the edge weight."
     )]
     pub(crate) region_gene: Vec<Box<str>>,
 
@@ -122,10 +128,10 @@ pub struct FneArgs {
     #[arg(
         long,
         help = "Write `feature <TAB> type <TAB> name <TAB> text` for every node with text",
-        long_help = "Export the text the inputs carry — OBO names and definitions, GMT\n\
-                     descriptions — as `feature <TAB> type <TAB> name <TAB> text`, one row\n\
-                     per node that has any. This is the input of the text encoder that\n\
-                     turns descriptions into gene:word edges."
+        long_help = "Export the text the inputs carry (OBO names and definitions, GMT descriptions)\n\
+                     as `feature <TAB> type <TAB> name <TAB> text`,\n\
+                     one row per node that has any.\n\
+                     This is the input of the text encoder that turns descriptions into gene:word edges."
     )]
     pub(crate) export_text: Option<Box<str>>,
 
@@ -134,8 +140,9 @@ pub struct FneArgs {
         value_delimiter = ',',
         help = "Relation weight override(s), `name=weight`",
         long_help = "Loss weight of a relation, `name=weight`, comma-separated or repeated.\n\
-                     Names are the ones the run logs, e.g. `gene:gene/biogrid=2`,\n\
-                     `gene:term/goa_human=0.5` or `gene:word=0.5`. Every relation defaults to 1."
+                     Names are the ones the run logs,\n\
+                     e.g. `gene:gene/biogrid=2`, `gene:term/goa_human=0.5` or `gene:word=0.5`.\n\
+                     Every relation defaults to 1."
     )]
     pub(crate) relation_weight: Vec<Box<str>>,
 
@@ -214,8 +221,8 @@ pub struct FneArgs {
         default_value_t = 0.05,
         help = "Fraction of each relation's edges held out for the eval loss (PBG: 0.05)",
         long_help = "Edges never trained on, scored with the same loss after every epoch.\n\
-                     Held out per relation, so a small relation is never emptied;\n\
-                     drawn once. Pass 0 to train on every edge."
+                     Held out per relation, so a small relation is never emptied; drawn once.\n\
+                     Pass 0 to train on every edge."
     )]
     pub(crate) eval_fraction: f64,
 
