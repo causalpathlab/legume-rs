@@ -43,26 +43,29 @@ struct Cli {
 enum Commands {
     #[command(
         about = "Inspect the word vocabulary and its frequency cuts, without encoding",
-        long_about = "The vocabulary step of `knn-graph` on its own, so the cuts can be\n\
-                      inspected before paying for the model pass: tokenise every description,\n\
-                      drop stopwords and filler, cut both tails of the document-frequency\n\
-                      distribution by quantile. Prints the df histogram, the cuts and the\n\
-                      words on each side of them, and writes {out}.vocab.tsv — tune the\n\
-                      stopword list and the quantiles here, then hand the file to\n\
-                      `knn-graph --vocab-file`. `knn-graph` runs this step itself\n\
-                      when no file is given."
+        long_about = "The vocabulary step of `knn-graph` on its own,\n\
+                      so the cuts can be inspected before paying for the model pass:\n\
+                      tokenise every description, drop stopwords and filler,\n\
+                      cut both tails of the document-frequency distribution by quantile.\n\
+                      Prints the df histogram, the cuts and the words on each side of them,\n\
+                      and writes {out}.vocab.tsv.\n\
+                      Tune the stopword list and the quantiles here,\n\
+                      then hand the file to `knn-graph --vocab-file`.\n\
+                      `knn-graph` runs this step itself when no file is given."
     )]
     Qc(QcCmd),
     #[command(
         alias = "knn",
         about = "Encode the descriptions and write the text graph: feature–word and feature–feature edges",
-        long_about = "Runs the vocabulary step, then a BERT-family encoder from the Hugging\n\
-                      Face Hub over every description, and writes the text graph:\n\
-                      {out}.feature_word.edges.tsv (each feature to the words of its text,\n\
-                      weight = contextual cosine × TF-IDF) and {out}.knn_graph.edges.tsv\n\
-                      (nearest features by text similarity), both typed edge files for\n\
-                      `senna fne --edges`; plus {out}.text_embedding.parquet (pooled,\n\
-                      centred), {out}.vocab.tsv and {out}.feature_text.tsv."
+        long_about = "Runs the vocabulary step,\n\
+                      then a BERT-family encoder from the Hugging Face Hub over every description,\n\
+                      and writes the text graph:\n\
+                      {out}.feature_word.edges.tsv, each feature to the words of its text\n\
+                      (weight = contextual cosine × TF-IDF),\n\
+                      and {out}.knn_graph.edges.tsv, the nearest features by text similarity.\n\
+                      Both are typed edge files for `senna fne --edges`.\n\
+                      Also writes {out}.text_embedding.parquet (pooled, centred),\n\
+                      {out}.vocab.tsv and {out}.feature_text.tsv."
     )]
     KnnGraph(KnnGraphCmd),
 }
