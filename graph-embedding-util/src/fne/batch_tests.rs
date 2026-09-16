@@ -218,7 +218,7 @@ fn a_repeated_relation_is_drawn_that_many_times_per_epoch() {
         }
     }
     let mut batcher = EpochBatcher::from_entries(entries, 5);
-    assert_eq!(batcher.remaining(), 7 + 3 * 12 + 2 * 1);
+    assert_eq!(batcher.remaining(), 7 + 3 * 12 + 2);
     let mut rng = StdRng::seed_from_u64(3);
     let mut seen: HashMap<(u32, u32), usize> = HashMap::new();
     while let Some(b) = batcher.next_batch(&edges, &t, &rels, 4, 2, &mut rng) {
