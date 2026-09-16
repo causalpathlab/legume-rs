@@ -53,6 +53,7 @@ pub(crate) struct EpochBatcher {
 impl EpochBatcher {
     /// One block per relation, in relation order, each visited once. An
     /// empty block is a relation with nothing to hand out.
+    #[cfg(test)]
     pub fn new(blocks: &[Range<usize>], batch_size: usize) -> Self {
         let entries: Vec<(usize, Range<usize>)> = blocks.iter().cloned().enumerate().collect();
         Self::from_entries(entries, batch_size)
