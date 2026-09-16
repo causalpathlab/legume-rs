@@ -30,8 +30,21 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     );
 
     let mut builder = TypedGraphBuilder::new(args.name_kind());
+    let ppi = super::graph::PpiOpts {
+        min_shared_neighbors: args.ppi_min_shared_neighbors,
+        max_degree: args.ppi_max_degree,
+        min_degree: args.ppi_min_degree,
+        snn_k: if args.no_ppi_snn { 0 } else { args.ppi_snn_k },
+        snn_min_shared: args.ppi_snn_min_shared,
+        ppr_k: if args.no_ppi_ppr { 0 } else { args.ppi_ppr_k },
+        ppr_restart: args.ppi_ppr_restart,
+    };
+    anyhow::ensure!(
+        args.ppi_ppr_restart > 0.0 && args.ppi_ppr_restart < 1.0,
+        "fne: --ppi-ppr-restart must lie strictly between 0 and 1"
+    );
     for path in &args.networks {
-        builder.add_pair_file(path)?;
+        builder.add_pair_file(path, &ppi)?;
     }
     for path in &args.edges {
         builder.add_typed_file(path)?;
