@@ -78,7 +78,16 @@ pub fn tokenize(text: &str, opts: &TokenizeOpts) -> Vec<Occurrence> {
     let mut out = Vec::new();
     for (start, w) in text.unicode_word_indices() {
         let lower = w.to_lowercase();
-        if lower.chars().count() < opts.min_chars || !lower.chars().any(char::is_alphabetic) {
+        // Length counts letters and digits (`tp53` is four), and a dotted
+        // abbreviation — every alphabetic run a single letter, as in `e.g`
+        // and `i.e` — is dropped whatever its length.
+        let n_alnum = lower.chars().filter(|c| c.is_alphanumeric()).count();
+        let abbreviation = lower.contains('.')
+            && lower
+                .split(|c: char| !c.is_alphabetic())
+                .filter(|r| !r.is_empty())
+                .all(|r| r.chars().count() == 1);
+        if n_alnum < opts.min_chars || abbreviation || !lower.chars().any(char::is_alphabetic) {
             continue;
         }
         if opts.stopwords.contains(lower.as_str()) {

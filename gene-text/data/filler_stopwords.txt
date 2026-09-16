@@ -85,3 +85,19 @@ however
 although
 which
 whose
+# MSigDB collection prefixes and direction tags: every set name carries one.
+kegg
+reactome
+hallmark
+biocarta
+wp
+pid
+gobp
+gocc
+gomf
+hp
+gsea
+msigdb
+up
+dn
+down
