@@ -444,7 +444,9 @@ enum Commands {
                       No expression data is involved.\n\
                       \n\
                       Positional inputs are gene-gene pair files (BioGRID, STRING, KEGG, co-expression),\n\
-                      each its own relation.\n\
+                      each its own relation; the --ppi-* flags clean them (shared-neighbour QC,\n\
+                      hub capping, k-core) and derive second-order (--ppi-snn) and diffusion\n\
+                      (--ppi-ppr) relations from them, since the model itself sees direct edges only.\n\
                       --edges takes typed files, `lhs_type lhs rhs_type rhs [weight]`,\n\
                       so genes can link to cell types, ontology terms, genomic windows or words;\n\
                       rows sharing a type pair form one relation.\n\

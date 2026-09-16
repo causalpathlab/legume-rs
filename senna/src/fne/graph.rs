@@ -17,6 +17,7 @@ use graph_embedding_util::fne::{NodeTypeTable, Relation, RelationTable, TypedEdg
 use log::{info, warn};
 use matrix_util::common_io::read_lines_of_words_delim;
 use matrix_util::membership::detect_delimiter;
+use matrix_util::pair_graph::FeaturePairGraph;
 use rustc_hash::FxHashMap;
 use std::path::Path;
 
@@ -41,6 +42,39 @@ pub(crate) struct NodeText {
 const STEM_EXTENSIONS: &[&str] = &[
     "gz", "bz2", "zst", "tsv", "csv", "txt", "tab", "gaf", "gmt", "obo", "bed",
 ];
+
+/// What to do with a pair file beyond reading it: QC on the raw edges,
+/// then derived relations. Every field 0 = off.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PpiOpts {
+    pub min_shared_neighbors: usize,
+    pub max_degree: usize,
+    pub min_degree: usize,
+    /// Second-order relation `<stem>/snn`: per gene its `snn_k` strongest
+    /// co-interactors (by Jaccard overlap) sharing ≥ `snn_min_shared`
+    /// neighbours, weight = the Jaccard overlap. `snn_k = 0` = off.
+    pub snn_k: usize,
+    pub snn_min_shared: usize,
+    /// Diffusion relation `<stem>/ppr`: top-k personalized PageRank
+    /// targets per gene, weight = mass / the gene's strongest mass.
+    pub ppr_k: usize,
+    pub ppr_restart: f64,
+}
+
+impl PpiOpts {
+    fn any(&self) -> bool {
+        self.min_shared_neighbors > 0
+            || self.max_degree > 0
+            || self.min_degree > 0
+            || self.snn_k > 0
+            || self.ppr_k > 0
+    }
+}
+
+/// Forward-push tolerance of the PageRank approximation: residual mass per
+/// unit degree below which a node is not pushed. Small enough that the
+/// top-k of a gene with hundreds of partners is resolved.
+const PPR_EPS: f64 = 1e-6;
 
 /// `<stem>` of a path for relation names: the file name minus its known
 /// extensions.
@@ -205,9 +239,10 @@ impl TypedGraphBuilder {
     }
 
     /// A gene-gene pair file: `gene1 gene2 [weight]`, its own relation
-    /// `gene:gene/<stem>`.
-    pub(crate) fn add_pair_file(&mut self, path: &str) -> anyhow::Result<()> {
-        let rel_name = format!("{GENE_TYPE}:{GENE_TYPE}/{}", file_stem(path));
+    /// `gene:gene/<stem>`, then the QC and derived relations of `opts`.
+    pub(crate) fn add_pair_file(&mut self, path: &str, opts: &PpiOpts) -> anyhow::Result<()> {
+        let stem = file_stem(path);
+        let rel_name = format!("{GENE_TYPE}:{GENE_TYPE}/{stem}");
         let r = self.relation(&rel_name, GENE_TYPE, GENE_TYPE);
         let read = read_lines_of_words_delim(path, detect_delimiter(path), -1)?;
         let mut n_rows = 0usize;
@@ -227,7 +262,87 @@ impl TypedGraphBuilder {
             rel.n_self_loops,
             rel.n_repeats
         );
+        if opts.any() {
+            self.refine_pair_relation(r, &stem, opts);
+        }
         Ok(())
+    }
+
+    /// The QC pipeline of `matrix_util::pair_graph` on one pair relation
+    /// (in place), then its second-order and diffusion relations.
+    fn refine_pair_relation(&mut self, r: usize, stem: &str, opts: &PpiOpts) {
+        let t = self.type_index[GENE_TYPE];
+        let mut graph = FeaturePairGraph {
+            feature_names: self.types[t].names.clone(),
+            n_features: self.types[t].names.len(),
+            feature_edges: {
+                let mut e: Vec<(usize, usize)> = self.relations[r]
+                    .edges
+                    .keys()
+                    .map(|&(u, v)| (u as usize, v as usize))
+                    .collect();
+                e.sort_unstable();
+                e
+            },
+        };
+        let before = graph.feature_edges.len();
+        graph.prune_by_shared_neighbors(opts.min_shared_neighbors);
+        graph.cap_per_node_degree(opts.max_degree);
+        graph.prune_by_min_degree(opts.min_degree);
+        if graph.feature_edges.len() != before {
+            let keep: FxHashMap<(u32, u32), ()> = graph
+                .feature_edges
+                .iter()
+                .map(|&(u, v)| ((u as u32, v as u32), ()))
+                .collect();
+            self.relations[r].edges.retain(|k, _| keep.contains_key(k));
+            info!(
+                "fne: relation `{}` after PPI QC: {} of {before} edges kept",
+                self.relations[r].name,
+                self.relations[r].edges.len()
+            );
+        }
+        if opts.snn_k > 0 {
+            let snn = graph.shared_neighbor_edges(opts.snn_min_shared.max(1), opts.snn_k);
+            let rs = self.relation(
+                &format!("{GENE_TYPE}:{GENE_TYPE}/{stem}/snn"),
+                GENE_TYPE,
+                GENE_TYPE,
+            );
+            for &(u, v, c, un) in &snn {
+                self.add_edge(rs, u as u32, v as u32, c as f32 / un.max(1) as f32);
+            }
+            info!(
+                "fne: relation `{}`: {} second-order pairs (top {} per gene by Jaccard, ≥ {} shared neighbours)",
+                self.relations[rs].name,
+                snn.len(),
+                opts.snn_k,
+                opts.snn_min_shared.max(1)
+            );
+        }
+        if opts.ppr_k > 0 {
+            let ppr = graph.personalized_pagerank_top_k(opts.ppr_restart, PPR_EPS, opts.ppr_k);
+            let rp = self.relation(
+                &format!("{GENE_TYPE}:{GENE_TYPE}/{stem}/ppr"),
+                GENE_TYPE,
+                GENE_TYPE,
+            );
+            let mut n = 0usize;
+            for (u, targets) in ppr.iter().enumerate() {
+                let top = targets.first().map_or(0.0, |&(_, m)| m).max(1e-12);
+                for &(v, m) in targets {
+                    self.add_edge(rp, u as u32, v as u32, m / top);
+                    n += 1;
+                }
+            }
+            info!(
+                "fne: relation `{}`: {n} directed top-{} diffusion targets ({} unique pairs; restart {})",
+                self.relations[rp].name,
+                opts.ppr_k,
+                self.relations[rp].edges.len(),
+                opts.ppr_restart
+            );
+        }
     }
 
     /// A typed edge file: `lhs_type lhs rhs_type rhs [weight]`; rows join
