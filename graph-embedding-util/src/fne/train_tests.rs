@@ -494,6 +494,46 @@ fn eval_edges_are_held_out_per_relation_and_an_eval_loss_is_reported_every_epoch
 }
 
 #[test]
+fn a_repeated_relation_trains_more_and_its_stats_say_so() {
+    let (edges, t, rels) = planted_graph();
+    let base = FneConfig {
+        dim: 8,
+        epochs: 5,
+        batch_size: 8,
+        num_batch_negs: 4,
+        num_uniform_negs: 4,
+        wd: Some(0.0),
+        eval_fraction: 0.0,
+        seed: 3,
+        ..FneConfig::default()
+    };
+    let once = train(edges.clone(), t.clone(), rels.clone(), &base).unwrap();
+    let rep = train(
+        edges,
+        t,
+        rels,
+        &FneConfig {
+            relation_repeats: vec![1, 8, 1],
+            ..base.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(once.per_relation[1].repeat, 1);
+    assert_eq!(rep.per_relation[1].repeat, 8);
+    assert_eq!(
+        rep.per_relation[1].n_train, once.per_relation[1].n_train,
+        "repeats do not change the edge counts"
+    );
+    assert!(
+        rep.per_relation[1].train_loss < once.per_relation[1].train_loss,
+        "eight passes over the marker relation fit it better: {} vs {}",
+        rep.per_relation[1].train_loss,
+        once.per_relation[1].train_loss
+    );
+    assert!(rep.per_relation[1].train_loss.is_finite());
+}
+
+#[test]
 fn the_same_seed_gives_the_same_table() {
     let (edges, t, rels) = planted_graph();
     let cfg = FneConfig {

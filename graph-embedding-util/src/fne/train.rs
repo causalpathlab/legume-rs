@@ -22,6 +22,8 @@ pub struct RelationStats {
     pub n_edges: usize,
     pub n_train: usize,
     pub n_eval: usize,
+    /// Passes over the training edges per epoch.
+    pub repeat: usize,
     /// Mean per-edge train loss of the last epoch (weight decay excluded).
     pub train_loss: f64,
     /// Mean per-edge eval loss of the last epoch, when anything was held out.
@@ -82,7 +84,7 @@ impl RelationAcc {
 /// accumulator and whether the stop flag interrupted the pass.
 #[allow(clippy::too_many_arguments)]
 fn drain_blocks(
-    blocks: &[Range<usize>],
+    entries: Vec<(usize, Range<usize>)>,
     edges: &TypedEdgeList,
     types: &NodeTypeTable,
     rels: &RelationTable,
@@ -93,7 +95,7 @@ fn drain_blocks(
     mut step: impl FnMut(&PaddedBatch) -> anyhow::Result<Tensor>,
 ) -> anyhow::Result<(RelationAcc, bool)> {
     let stop = crate::stop::stop_flag();
-    let mut batcher = EpochBatcher::new(blocks, cfg.batch_size);
+    let mut batcher = EpochBatcher::from_entries(entries, cfg.batch_size);
     let mut acc = RelationAcc::new(rels.len(), dev)?;
     while let Some(b) = batcher.next_batch(
         edges,
@@ -179,12 +181,20 @@ pub fn train(
             n_edges: b.len(),
             n_train,
             n_eval,
+            repeat: cfg
+                .relation_repeats
+                .get(per_relation.len())
+                .copied()
+                .unwrap_or(1)
+                .max(1),
             train_loss: f64::NAN,
             eval_loss: None,
         });
     }
     let n_train: usize = per_relation.iter().map(|s| s.n_train).sum();
     let n_eval: usize = per_relation.iter().map(|s| s.n_eval).sum();
+    // Edge visits per epoch, repeats included: the progress bar's length.
+    let n_visits: usize = per_relation.iter().map(|s| s.n_train * s.repeat).sum();
     anyhow::ensure!(
         n_train > 0,
         "fne: no training edges left after the hold-out"
@@ -205,14 +215,19 @@ pub fn train(
     for (r, s) in per_relation.iter().enumerate() {
         let rel = rels.get(r);
         log::info!(
-            "fne relation `{}` ({} → {}, weight {}): {} edges, {} train, {} eval",
+            "fne relation `{}` ({} → {}, weight {}): {} edges, {} train, {} eval{}",
             rel.name,
             types.name(rel.lhs_type as usize),
             types.name(rel.rhs_type as usize),
             rel.weight,
             s.n_edges,
             s.n_train,
-            s.n_eval
+            s.n_eval,
+            if s.repeat > 1 {
+                format!(", {} passes per epoch", s.repeat)
+            } else {
+                String::new()
+            }
         );
     }
 
@@ -225,13 +240,21 @@ pub fn train(
             edges.shuffle_range(b.clone(), &mut rng);
         }
         let mut hits = 0usize;
-        let bar = new_progress_bar(n_train as u64);
+        let bar = new_progress_bar(n_visits as u64);
         bar.set_message(format!("fne epoch {}/{}", epoch + 1, cfg.epochs));
         // The weight-decay draw needs its own RNG stream: the batcher
         // borrows `rng` for the whole pass.
         let mut wd_rng = StdRng::seed_from_u64(cfg.seed ^ (epoch as u64 + 1).rotate_left(32));
+        // A repeated relation is listed once per pass; the passes share the
+        // epoch's shuffle, which the multinomial draw interleaves with the
+        // other relations anyway.
+        let entries: Vec<(usize, Range<usize>)> = train_blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(r, b)| std::iter::repeat_n((r, b.clone()), per_relation[r].repeat))
+            .collect();
         let (acc, interrupted) = drain_blocks(
-            &train_blocks,
+            entries,
             &edges,
             &types,
             &rels,
@@ -260,7 +283,7 @@ pub fn train(
         let train_loss = train_sum / acc.total_seen().max(1) as f64;
         let eval = if n_eval > 0 {
             let (acc, _) = drain_blocks(
-                &eval_blocks,
+                eval_blocks.iter().cloned().enumerate().collect(),
                 &edges,
                 &types,
                 &rels,

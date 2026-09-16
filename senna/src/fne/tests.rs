@@ -147,6 +147,15 @@ fn a_typed_file_groups_rows_by_type_pair_and_matches_non_gene_names_exactly() {
     );
     assert!(b.set_relation_weight("gene:term").is_err(), "no `=`");
     assert!(b.set_relation_weight("gene:term=-1").is_err(), "negative");
+    assert!(b.set_relation_repeat("gene:term=4").is_ok());
+    assert!(
+        b.set_relation_repeat("gene:term=0").is_err(),
+        "at least one pass"
+    );
+    assert!(
+        b.set_relation_repeat("gene:nope=2").is_err(),
+        "unknown relation"
+    );
     let g = b.finish().unwrap();
     let names: Vec<&str> = g.types.names().iter().map(AsRef::as_ref).collect();
     assert_eq!(names, vec!["gene", "term", "cell_type", "word"]);
@@ -167,6 +176,7 @@ fn a_typed_file_groups_rows_by_type_pair_and_matches_non_gene_names_exactly() {
     // 2 gene:term + 1 gene:cell_type (repeat dropped) + 1 term:term (both
     // directions are one undirected edge) + 1 word:gene.
     assert_eq!(g.edges.counts_per_relation(4), vec![2, 1, 1, 1]);
+    assert_eq!(g.relation_repeats, vec![4, 1, 1, 1]);
     assert_eq!(
         g.node_names[g.types.range(2).start as usize].as_ref(),
         "T cell"
@@ -207,6 +217,8 @@ fn fne_writes_typed_artifacts_and_a_manifest_and_places_genes_with_their_own_typ
         &typed,
         "--relation-weight",
         "gene:cell_type=2",
+        "--relation-repeat",
+        "gene:term=3",
         "--embedding-dim",
         "8",
         "-i",
@@ -263,6 +275,8 @@ fn fne_writes_typed_artifacts_and_a_manifest_and_places_genes_with_their_own_typ
     let rel_num = Mat::from_parquet(&format!("{out}.relations.parquet")).unwrap();
     let col = |c: &str| rel_num.cols.iter().position(|x| x.as_ref() == c).unwrap();
     assert_eq!(rel_num.mat[(1, col("weight"))], 2.0);
+    assert_eq!(rel_num.mat[(2, col("repeat"))], 3.0);
+    assert_eq!(rel_num.mat[(0, col("repeat"))], 1.0);
     assert_eq!(rel_num.mat[(0, col("n_edges"))], 21.0);
     assert_eq!(
         rel_num.mat[(0, col("n_train"))] + rel_num.mat[(0, col("n_eval"))],

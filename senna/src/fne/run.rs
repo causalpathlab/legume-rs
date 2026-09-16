@@ -78,6 +78,9 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     for spec in &args.relation_weight {
         builder.set_relation_weight(spec)?;
     }
+    for spec in &args.relation_repeat {
+        builder.set_relation_repeat(spec)?;
+    }
     let mut graph = builder.finish()?;
     if let Some(path) = &args.export_text {
         write_text_export(&graph, path)?;
@@ -102,6 +105,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         wd_interval: args.wd_interval,
         eval_fraction: args.eval_fraction,
         eval_min_per_relation: args.eval_min_per_relation,
+        relation_repeats: graph.relation_repeats.clone(),
         seed: args.seed,
         device: args.device.to_device(args.device_no)?,
     };

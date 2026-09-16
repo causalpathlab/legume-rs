@@ -206,6 +206,39 @@ fn pad_rows_carry_zero_weight_and_are_not_negatives() {
 }
 
 #[test]
+fn a_repeated_relation_is_drawn_that_many_times_per_epoch() {
+    let t = types();
+    let rels = relations(&t);
+    let (edges, blocks) = three_relation_graph(&t);
+    // go (relation 1) three times, marker (relation 2) twice, ppi once.
+    let mut entries = Vec::new();
+    for (r, k) in [(0usize, 1usize), (1, 3), (2, 2)] {
+        for _ in 0..k {
+            entries.push((r, blocks[r].clone()));
+        }
+    }
+    let mut batcher = EpochBatcher::from_entries(entries, 5);
+    assert_eq!(batcher.remaining(), 7 + 3 * 12 + 2 * 1);
+    let mut rng = StdRng::seed_from_u64(3);
+    let mut seen: HashMap<(u32, u32), usize> = HashMap::new();
+    while let Some(b) = batcher.next_batch(&edges, &t, &rels, 4, 2, &mut rng) {
+        for i in 0..b.n_real {
+            *seen.entry((b.lhs[i], b.rhs[i])).or_default() += 1;
+            let r = rels.get(b.rel);
+            assert!(t.range(r.lhs_type as usize).contains(&b.lhs[i]));
+        }
+    }
+    for i in 0..edges.len() {
+        let want = [1, 3, 2][edges.rel[i] as usize];
+        assert_eq!(
+            seen[&(edges.lhs[i], edges.rhs[i])],
+            want,
+            "edge {i} visited {want} times"
+        );
+    }
+}
+
+#[test]
 fn an_empty_block_is_a_relation_with_nothing_to_hand_out() {
     let t = types();
     let rels = relations(&t);
