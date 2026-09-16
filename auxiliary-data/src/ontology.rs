@@ -136,6 +136,11 @@ impl Ontology {
         })
     }
 
+    /// Every (non-obsolete) term id, in no particular order.
+    pub fn ids(&self) -> impl Iterator<Item = &str> + '_ {
+        self.idx.keys().map(|k| &**k)
+    }
+
     /// The term's `def:` text (`None` if the term is unknown or undefined).
     #[must_use]
     pub fn def(&self, id: &str) -> Option<&str> {
