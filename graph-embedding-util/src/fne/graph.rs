@@ -315,3 +315,19 @@ impl TypedEdgeList {
 #[cfg(test)]
 #[path = "graph_tests.rs"]
 mod graph_tests;
+
+/// `pbg_train(auto_wd=True)`: the weight decay SIMBA fits to the edge count,
+/// scaled off two reference graphs (`0.013` at 2,725,781 edges below 5e7
+/// edges, `0.0004` at 59,103,481 edges above), rounded to 6 decimals
+/// (half-away-from-zero here vs numpy's half-to-even: a tie needs the 7th
+/// decimal to be exactly 5, which no edge count of interest produces).
+#[must_use]
+pub fn auto_wd(n_edges: usize) -> f64 {
+    let n = n_edges.max(1) as f64;
+    let wd = if n < 5e7 {
+        0.013 * 2_725_781.0 / n
+    } else {
+        0.0004 * 59_103_481.0 / n
+    };
+    (wd * 1e6).round() / 1e6
+}
