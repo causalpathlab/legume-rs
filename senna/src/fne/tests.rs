@@ -2,11 +2,13 @@
 //! graph, the artifacts carry every node type, and the manifest records
 //! the fit.
 
-use super::graph::TypedGraphBuilder;
+use super::graph::{NodeText, TypedGraphBuilder};
 use super::{fit_fne, FneArgs};
 use crate::embed_common::Mat;
 use crate::run_manifest::{RunKind, RunManifest};
 use auxiliary_data::feature_names::FeatureNameKind;
+use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
+use auxiliary_data::ontology::Ontology;
 use clap::Parser;
 use matrix_util::parquet::read_parquet_string_columns_by_name;
 use matrix_util::traits::IoOps;
@@ -297,4 +299,279 @@ fn fne_refuses_to_run_without_any_input_or_with_no_usable_edges() {
     let loops = write(dir.path(), "loops.tsv", "A\tA\nB\tB\n");
     let only_loops: FneArgs = parse_args(&["fne", &loops, "-o", &out]);
     assert!(fit_fne(&only_loops).is_err());
+}
+
+/// go-basic-shaped OBO: root → process → {apoptosis, proliferation};
+/// apoptosis part_of "death programme"; one definition each on the leaves.
+const OBO: &str = "format-version: 1.2\n\n\
+[Term]\nid: GO:0\nname: biological_process\n\n\
+[Term]\nid: GO:1\nname: cellular process\nis_a: GO:0 ! biological_process\n\n\
+[Term]\nid: GO:2\nname: apoptotic process\ndef: \"A programmed cell death.\" [GOC:x]\nis_a: GO:1 ! cellular process\nrelationship: part_of GO:4 ! death\n\n\
+[Term]\nid: GO:3\nname: cell proliferation\ndef: \"Cells multiply.\" [GOC:y]\nis_a: GO:1 ! cellular process\n\n\
+[Term]\nid: GO:4\nname: death programme\n\n";
+
+/// GAF rows (17 columns; 2 = accession, 3 = symbol, 4 = qualifier, 5 = GO id,
+/// 7 = evidence, 11 = synonyms).
+fn gaf_row(symbol: &str, go: &str, evidence: &str) -> String {
+    let mut cols = vec![""; 17];
+    cols[0] = "UniProtKB";
+    cols[1] = "P00000";
+    cols[2] = symbol;
+    cols[3] = "involved_in";
+    cols[4] = go;
+    cols[5] = "PMID:1";
+    cols[6] = evidence;
+    cols[8] = "P";
+    cols[10] = symbol;
+    cols[11] = "protein";
+    cols[12] = "taxon:9606";
+    cols[13] = "20200101";
+    cols[14] = "UniProt";
+    format!("{}\n", cols.join("\t"))
+}
+
+#[test]
+fn a_membership_file_becomes_a_gene_to_label_relation_named_after_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "markers.tsv",
+        "gene\tcelltype\nCD3E\tT cell\nCD3D\tT cell\nMS4A1\tB cell\nCD3E\tT cell\n",
+    );
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    assert!(
+        b.add_membership_file("gene", &p).is_err(),
+        "labels cannot be genes"
+    );
+    assert!(b.add_membership_file("", &p).is_err());
+    b.add_membership_file("cell_type", &p).unwrap();
+    let g = b.finish().unwrap();
+    let r = g.relations.get(0);
+    assert_eq!(r.name.as_ref(), "gene:cell_type/markers");
+    assert!(!r.undirected);
+    assert_eq!(g.edges.len(), 3, "the repeated row is one edge");
+    assert_eq!(g.types.n_nodes(g.types.index_of("cell_type").unwrap()), 2);
+    assert_eq!(
+        g.node_names[3].as_ref(),
+        "T cell",
+        "labels verbatim, spaces kept"
+    );
+    assert!(g.edges.weight.is_none());
+}
+
+#[test]
+fn gene_sets_from_a_gaf_propagate_up_the_ontology_and_the_hierarchy_joins_as_term_edges() {
+    let dir = tempfile::tempdir().unwrap();
+    let obo = write(dir.path(), "go.obo", OBO);
+    let gaf = write(
+        dir.path(),
+        "goa.gaf",
+        &format!(
+            "!gaf-version: 2.2\n{}{}{}{}",
+            gaf_row("TP53", "GO:2", "IDA"),
+            gaf_row("BAX", "GO:2", "IEA"),
+            gaf_row("MYC", "GO:3", "IDA"),
+            gaf_row("CCND1", "GO:3", "IDA"),
+        ),
+    );
+    let onto = Ontology::load_obo(&obo).unwrap();
+    let sets = read_gaf(&gaf, &GafOpts { no_iea: false })
+        .unwrap()
+        .into_gene_sets(Some(&onto));
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    // Cap at 3 members: the root (4 genes) is dropped, GO:1 (4) too; the
+    // leaves (2) and the part_of parent GO:4 (2) stay; the floor drops nothing.
+    let kept = b.add_gene_sets(&sets, "goa", 1, 3);
+    assert_eq!(kept, 3, "GO:2, GO:3 and GO:4");
+    b.add_ontology(&onto);
+    let g = b.finish().unwrap();
+    let names: Vec<&str> = g.relations.iter().map(|r| r.name.as_ref()).collect();
+    // 2 + 2 + 2 membership edges. GO:2 → GO:1 and GO:3 → GO:1 point at a
+    // dropped term, so no is_a edge survives and that relation is pruned;
+    // GO:2 part_of GO:4 does survive.
+    assert_eq!(names, vec!["gene:term/goa", "term:term/part_of"]);
+    assert_eq!(g.edges.counts_per_relation(2), vec![6, 1]);
+    let term_t = g.types.index_of("term").unwrap();
+    let term_names: Vec<&str> = (g.types.range(term_t))
+        .map(|i| g.node_names[i as usize].as_ref())
+        .collect();
+    assert_eq!(term_names, vec!["GO:2", "GO:3", "GO:4"]);
+    let texts: Vec<(&str, &NodeText)> = g
+        .texts
+        .iter()
+        .map(|(i, t)| (g.node_names[*i as usize].as_ref(), t))
+        .collect();
+    assert_eq!(texts.len(), 3);
+    assert_eq!(
+        texts[0],
+        (
+            "GO:2",
+            &NodeText {
+                name: Some("apoptotic process".into()),
+                text: Some("A programmed cell death.".into())
+            }
+        )
+    );
+    assert_eq!(texts[2].1.text, None, "GO:4 has a name but no definition");
+}
+
+#[test]
+fn gmt_sets_carry_their_description_as_the_term_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let gmt = write(
+        dir.path(),
+        "hallmark.gmt",
+        "HALLMARK_A\tset A description\tTP53\tBAX\tMDM2\nHALLMARK_B\thttp://x\tMYC\nTINY\t\tA\n",
+    );
+    let sets = read_gmt(&gmt).unwrap();
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    let kept = b.add_gene_sets(&sets, "hallmark", 2, 0);
+    assert_eq!(kept, 1, "min 2 members, no cap");
+    let g = b.finish().unwrap();
+    assert_eq!(g.relations.get(0).name.as_ref(), "gene:term/hallmark");
+    assert_eq!(g.edges.len(), 3);
+    assert_eq!(g.texts.len(), 1);
+    assert_eq!(g.texts[0].1.name.as_deref(), Some("set A description"));
+}
+
+#[test]
+fn region_links_tile_onto_windows_and_carry_their_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "abc.tsv",
+        "# region\tgene\tscore\nchr1:4000-6000\tTP53\t0.8\n1_5500\tTP53\nchrX:100-200\tMYC\t0.2\nnot_a_region\tMYC\n",
+    );
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    b.add_region_file(&p, 5000).unwrap();
+    let g = b.finish().unwrap();
+    let r = g.relations.get(0);
+    assert_eq!(r.name.as_ref(), "region:gene/abc");
+    assert_eq!(g.types.name(r.lhs_type as usize), "region");
+    let region_t = g.types.index_of("region").unwrap();
+    let windows: Vec<&str> = (g.types.range(region_t))
+        .map(|i| g.node_names[i as usize].as_ref())
+        .collect();
+    assert_eq!(windows, vec!["1:0-5000", "1:5000-10000", "X:0-5000"]);
+    // chr1:4000-6000 → two windows at 0.8; 1_5500 → the second window at 1.0,
+    // which wins over 0.8 for that pair; chrX → one window at 0.2.
+    let mut edges: Vec<(&str, &str, f32)> = (0..g.edges.len())
+        .map(|i| {
+            (
+                g.node_names[g.edges.lhs[i] as usize].as_ref(),
+                g.node_names[g.edges.rhs[i] as usize].as_ref(),
+                g.edges.edge_weight(i),
+            )
+        })
+        .collect();
+    edges.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(
+        edges,
+        vec![
+            ("1:0-5000", "TP53", 0.8),
+            ("1:5000-10000", "TP53", 1.0),
+            ("X:0-5000", "MYC", 0.2),
+        ]
+    );
+}
+
+#[test]
+fn fne_takes_every_side_information_source_at_once_and_exports_the_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ppi, _typed) = planted_inputs(dir.path());
+    let markers = write(
+        dir.path(),
+        "markers.tsv",
+        "G0\tA\nG1\tA\nG2\tA\nG5\tB\nG6\tB\nG7\tB\n",
+    );
+    let obo = write(dir.path(), "go.obo", OBO);
+    let gaf = write(
+        dir.path(),
+        "goa.gaf",
+        &(0..10)
+            .map(|g| gaf_row(&format!("G{g}"), if g < 5 { "GO:2" } else { "GO:3" }, "IDA"))
+            .collect::<String>(),
+    );
+    let regions = write(
+        dir.path(),
+        "eqtl.tsv",
+        "chr1:1000\tG0\t0.5\nchr1:2000\tG1\nchr2:1000\tG5\n",
+    );
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    let text = dir.path().join("text.tsv").to_string_lossy().into_owned();
+    let args: FneArgs = parse_args(&[
+        "fne",
+        &ppi,
+        "--membership",
+        &format!("cell_type={markers}"),
+        "--gaf",
+        &gaf,
+        "--obo",
+        &obo,
+        "--min-gene-set",
+        "2",
+        "--max-gene-set",
+        "8",
+        "--region-gene",
+        &regions,
+        "--region-window",
+        "5000",
+        "--export-text",
+        &text,
+        "--embedding-dim",
+        "8",
+        "-i",
+        "5",
+        "--batch-size",
+        "16",
+        "--num-batch-negs",
+        "4",
+        "--num-uniform-negs",
+        "4",
+        "--weight-decay",
+        "0",
+        "--eval-fraction",
+        "0",
+        "-o",
+        &out,
+    ]);
+    fit_fne(&args).unwrap();
+    let types = read_parquet_string_columns_by_name(
+        &format!("{out}.feature_types.parquet"),
+        &["feature", "type"],
+    )
+    .unwrap();
+    let mut kinds: Vec<&str> = types[1].iter().map(AsRef::as_ref).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    assert_eq!(kinds, vec!["cell_type", "gene", "region", "term"]);
+    let rels =
+        read_parquet_string_columns_by_name(&format!("{out}.relations.parquet"), &["relation"])
+            .unwrap();
+    let rel_names: Vec<&str> = rels[0].iter().map(AsRef::as_ref).collect();
+    // GO:2 and GO:3 (5 genes each) and GO:1 (10 > 8) — the leaves stay, so do
+    // GO:4 (5) ; is_a edges to the dropped GO:1 vanish, the part_of edge stays.
+    assert_eq!(
+        rel_names,
+        vec![
+            "gene:gene/ppi",
+            "gene:cell_type/markers",
+            "gene:term/goa",
+            "term:term/part_of",
+            "region:gene/eqtl"
+        ]
+    );
+    let exported = std::fs::read_to_string(&text).unwrap();
+    let lines: Vec<&str> = exported.lines().collect();
+    assert_eq!(lines[0], "feature\ttype\tname\ttext");
+    assert!(lines.contains(&"GO:2\tterm\tapoptotic process\tA programmed cell death."));
+    assert!(lines.contains(&"GO:4\tterm\tdeath programme\t"));
+    assert_eq!(lines.len(), 4, "header + three terms with text");
+    let (m, _dir) = RunManifest::load(Path::new(&format!("{out}.senna.json"))).unwrap();
+    assert!(m.data.input.iter().any(|p| p.ends_with("goa.gaf")));
+    assert!(m.data.input.iter().any(|p| p.ends_with("eqtl.tsv")));
+
+    // --gaf without --obo is refused up front.
+    let bad: FneArgs = parse_args(&["fne", "--gaf", &gaf, "-o", &out]);
+    assert!(fit_fne(&bad).is_err());
 }

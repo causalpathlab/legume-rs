@@ -6,6 +6,35 @@ use graph_embedding_util as ge;
 use graph_embedding_util::fne::FneOutput;
 use log::info;
 use matrix_util::parquet::{write_named_table, Column};
+use std::io::Write;
+
+/// `feature <TAB> type <TAB> name <TAB> text`, one row per node carrying
+/// any text; tabs and newlines inside the text are flattened to spaces so
+/// the file stays one row per node. An empty name or text is an empty
+/// field.
+pub(crate) fn write_text_export(graph: &TypedGraph, path: &str) -> anyhow::Result<()> {
+    let flat = |s: &str| s.split(['\t', '\n', '\r']).collect::<Vec<_>>().join(" ");
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(w, "feature\ttype\tname\ttext")?;
+    for (id, text) in &graph.texts {
+        let i = *id as usize;
+        writeln!(
+            w,
+            "{}\t{}\t{}\t{}",
+            graph.node_names[i],
+            graph.node_types[i],
+            text.name.as_deref().map_or(String::new(), flat),
+            text.text.as_deref().map_or(String::new(), flat),
+        )?;
+    }
+    w.flush()?;
+    info!(
+        "fne: wrote text for {} of {} nodes to {path}",
+        graph.texts.len(),
+        graph.node_names.len()
+    );
+    Ok(())
+}
 
 pub(crate) fn write_outputs(
     out: &FneOutput,

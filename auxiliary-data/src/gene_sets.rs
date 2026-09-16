@@ -92,6 +92,35 @@ pub fn read_gmt(path: &str) -> Result<GeneSets> {
     Ok(gs)
 }
 
+/// Parse a two-column membership file — `gene <TAB> label` (a marker panel,
+/// a TF→target list, any gene→category table) — into `(gene, label)` pairs
+/// via the shared, gz-aware line reader (tab or comma delimited). Takes the
+/// first two tokens per line; skips blank lines, `#` comments, a
+/// `gene`/`symbol` header row and rows missing a label. Labels are kept
+/// verbatim; genes are not case-folded.
+pub fn read_membership_pairs(path: &str) -> Result<Vec<(Box<str>, Box<str>)>> {
+    let lines = matrix_util::common_io::read_lines_of_words_delim(path, &['\t', ','][..], -1)
+        .with_context(|| format!("reading membership pairs from {path}"))?
+        .lines;
+    Ok(lines
+        .into_iter()
+        .filter_map(|words| {
+            let gene = words.first()?.trim();
+            let label = words.get(1)?.trim();
+            let gl = gene.to_lowercase();
+            if gene.is_empty()
+                || gene.starts_with('#')
+                || label.is_empty()
+                || gl == "gene"
+                || gl == "symbol"
+            {
+                return None;
+            }
+            Some((Box::from(gene), Box::from(label)))
+        })
+        .collect())
+}
+
 /// Options for [`read_gaf`].
 #[derive(Default, Clone, Copy)]
 pub struct GafOpts {
@@ -336,6 +365,23 @@ impl Reconciled {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn membership_pairs_skip_headers_comments_and_short_rows_and_keep_labels_verbatim() {
+        let f = tmp(
+            "gene\tcelltype\n# note\nCD3E\tT cell\nMS4A1,B cell\nLONELY\n\nSymbol\tx\nCD14\t Monocyte \n",
+            ".tsv",
+        );
+        let pairs = read_membership_pairs(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                (Box::from("CD3E"), Box::from("T cell")),
+                (Box::from("MS4A1"), Box::from("B cell")),
+                (Box::from("CD14"), Box::from("Monocyte")),
+            ]
+        );
+    }
 
     fn tmp(contents: &str, suffix: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
