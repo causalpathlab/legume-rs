@@ -78,7 +78,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     for spec in &args.relation_weight {
         builder.set_relation_weight(spec)?;
     }
-    let graph = builder.finish()?;
+    let mut graph = builder.finish()?;
     if let Some(path) = &args.export_text {
         write_text_export(&graph, path)?;
     }
@@ -105,12 +105,11 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         seed: args.seed,
         device: args.device.to_device(args.device_no)?,
     };
-    let out = train(
-        graph.edges.clone(),
-        graph.types.clone(),
-        graph.relations.clone(),
-        &cfg,
-    )?;
+    // The trainer shuffles the edge list in place; hand it over rather
+    // than copying every edge. The two tables are small and stay with the
+    // graph for the writers.
+    let edges = std::mem::take(&mut graph.edges);
+    let out = train(edges, graph.types.clone(), graph.relations.clone(), &cfg)?;
     if args.weight_decay.is_none() && out.wd > 1.0 {
         log::warn!(
             "fne: the automatic weight decay came out at {:.3}; it is SIMBA's calibration, \

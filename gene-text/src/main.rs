@@ -12,14 +12,15 @@ mod vocab;
 
 use anyhow::Result;
 use auxiliary_data::feature_names::FeatureNameKind;
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use edges::{
     centred_unit, csls_top_k, feature_word_weights, mean_of, score_doc, top_k_cosine,
-    write_typed_edges,
+    write_typed_edges, WordScore,
 };
 use encoder::{Encoder, ModelSpec, Pooling};
 use log::info;
+use matrix_util::progress::new_progress_bar;
 use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 use sources::Corpus;
@@ -311,54 +312,266 @@ fn write_corpus(corpus: &Corpus, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn tokenize_corpus(corpus: &Corpus, opts: &TokenizeOpts) -> Vec<(String, Vec<Occurrence>)> {
-    corpus
+/// The corpus, its sentences and word occurrences, and the vocabulary:
+/// the prelude both subcommands share. Writes `{out}.vocab.tsv` and
+/// `{out}.feature_text.tsv`.
+struct Prepared {
+    corpus: Corpus,
+    sentences: Vec<String>,
+    occurrences: Vec<Vec<Occurrence>>,
+    vocab: Vocabulary,
+}
+
+fn prepare(
+    sources: &SourceArgs,
+    qc: &QcArgs,
+    vocab_file: Option<&str>,
+    out: &str,
+) -> Result<Prepared> {
+    matrix_util::common_io::mkdir_parent(out)?;
+    let corpus = sources.corpus()?;
+    let opts = qc.tokenize_opts()?;
+    let (sentences, occurrences): (Vec<String>, Vec<Vec<Occurrence>>) = corpus
         .docs()
         .par_iter()
         .map(|d| {
             let s = d.sentence();
-            let occ = tokenize(&s, opts);
+            let occ = tokenize(&s, &opts);
             (s, occ)
         })
-        .collect()
+        .unzip();
+    let vocab = match vocab_file {
+        Some(p) => Vocabulary::read_tsv(p, occurrences.len())?,
+        None => Vocabulary::build(&occurrences, &qc.df_opts()),
+    };
+    vocab.write_tsv(&format!("{out}.vocab.tsv"))?;
+    write_corpus(&corpus, &format!("{out}.feature_text.tsv"))?;
+    Ok(Prepared {
+        corpus,
+        sentences,
+        occurrences,
+        vocab,
+    })
 }
 
 fn run_qc(c: &QcCmd) -> Result<()> {
-    matrix_util::common_io::mkdir_parent(&c.out)?;
-    let corpus = c.sources.corpus()?;
-    let opts = c.qc.tokenize_opts()?;
-    let docs = tokenize_corpus(&corpus, &opts);
-    let occ: Vec<Vec<Occurrence>> = docs.into_iter().map(|(_, o)| o).collect();
-    let vocab = Vocabulary::build(&occ, &c.qc.df_opts());
-    vocab.write_tsv(&format!("{}.vocab.tsv", c.out))?;
-    write_corpus(&corpus, &format!("{}.feature_text.tsv", c.out))?;
+    let p = prepare(&c.sources, &c.qc, None, &c.out)?;
     info!(
         "wrote {}.vocab.tsv ({} words kept; rare cut df ≤ {}, common cut df ≥ {}) and {}.feature_text.tsv",
         c.out,
-        vocab.kept.len(),
-        vocab.lower_cut.map_or("off".to_string(), |v| v.to_string()),
-        vocab.upper_cut.map_or("off".to_string(), |v| v.to_string()),
+        p.vocab.kept.len(),
+        p.vocab.lower_cut.map_or("off".to_string(), |v| v.to_string()),
+        p.vocab.upper_cut.map_or("off".to_string(), |v| v.to_string()),
         c.out
     );
     Ok(())
 }
 
-fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
-    matrix_util::common_io::mkdir_parent(&c.out)?;
-    let corpus = c.sources.corpus()?;
-    let opts = c.qc.tokenize_opts()?;
-    let docs = tokenize_corpus(&corpus, &opts);
-    let vocab = match &c.vocab_file {
-        Some(p) => Vocabulary::read_tsv(p, docs.len())?,
-        None => {
-            let occ: Vec<Vec<Occurrence>> = docs.iter().map(|(_, o)| o.clone()).collect();
-            Vocabulary::build(&occ, &c.qc.df_opts())
-        }
-    };
-    vocab.write_tsv(&format!("{}.vocab.tsv", c.out))?;
-    write_corpus(&corpus, &format!("{}.feature_text.tsv", c.out))?;
-    anyhow::ensure!(!vocab.kept.is_empty(), "the vocabulary is empty after QC");
+/// What the encoder pass leaves behind.
+struct Encoded {
+    /// L2-normalised pooled vector per document.
+    pooled: Vec<Vec<f32>>,
+    /// Per document, its `(word, weight)` edges.
+    feature_words: Vec<Vec<(usize, f32)>>,
+    /// Mean contextual vector per vocabulary word, and how many documents
+    /// contributed (0 = never seen in a scored position).
+    word_vecs: Vec<Vec<f32>>,
+    word_n: Vec<u32>,
+}
 
+/// Encode every sentence in batches: pooled vectors, per-feature word
+/// weights, and the running mean vector of every vocabulary word.
+fn encode_corpus(
+    enc: &Encoder,
+    p: &Prepared,
+    batch: usize,
+    words_per_feature: usize,
+) -> Result<Encoded> {
+    let h = enc.hidden();
+    let n = p.sentences.len();
+    let v = p.vocab.kept.len();
+    let mut pooled: Vec<Vec<f32>> = Vec::with_capacity(n);
+    let mut feature_words: Vec<Vec<(usize, f32)>> = Vec::with_capacity(n);
+    let mut word_sum: Vec<Vec<f32>> = vec![vec![0f32; h]; v];
+    let mut word_n: Vec<u32> = vec![0; v];
+    let mut n_missed = 0usize;
+    let bar = new_progress_bar(n as u64);
+    bar.set_message("encoding");
+    let batch = batch.max(1);
+    for (texts, occs) in p.sentences.chunks(batch).zip(p.occurrences.chunks(batch)) {
+        let encs = enc.encode_batch(texts)?;
+        // The model pass is the serial part; scoring the batch's documents
+        // against the vocabulary is independent per document.
+        let scored: Vec<Vec<WordScore>> = encs
+            .par_iter()
+            .zip(occs)
+            .map(|(e, occ)| score_doc(&e.pooled, &e.tokens, occ, &p.vocab))
+            .collect();
+        for ((e, occ), scores) in encs.iter().zip(occs).zip(scored) {
+            n_missed += occ
+                .iter()
+                .filter(|o| p.vocab.index.contains_key(&o.word))
+                .count()
+                - scores.iter().map(|s| s.count as usize).sum::<usize>();
+            for s in &scores {
+                for (a, x) in word_sum[s.word].iter_mut().zip(&s.vec) {
+                    *a += x;
+                }
+                word_n[s.word] += 1;
+            }
+            feature_words.push(feature_word_weights(&scores, &p.vocab, words_per_feature));
+            pooled.push(e.pooled.clone());
+        }
+        bar.inc(texts.len() as u64);
+    }
+    bar.finish_and_clear();
+    if n_missed > 0 {
+        info!("{n_missed} word occurrences fell beyond --max-tokens and were not scored");
+    }
+    let word_vecs = word_sum
+        .into_iter()
+        .zip(&word_n)
+        .map(|(s, &k)| s.into_iter().map(|x| x / k.max(1) as f32).collect())
+        .collect();
+    Ok(Encoded {
+        pooled,
+        feature_words,
+        word_vecs,
+        word_n,
+    })
+}
+
+/// `{out}.text_embedding.parquet`: the pooled vectors, centred; and
+/// `{out}.feature_types.parquet` beside it.
+fn write_text_embedding(
+    corpus: &Corpus,
+    pooled: &[Vec<f32>],
+    center: &[f32],
+    out: &str,
+) -> Result<()> {
+    let (n, h) = (pooled.len(), center.len());
+    let names: Vec<Box<str>> = corpus.docs().iter().map(|d| d.feature.clone()).collect();
+    let cols: Vec<Box<str>> = (0..h).map(|i| format!("t{i}").into_boxed_str()).collect();
+    let flat = pooled
+        .iter()
+        .flat_map(|p| p.iter().zip(center).map(|(x, m)| x - m));
+    let mat = nalgebra::DMatrix::<f32>::from_row_iterator(n, h, flat);
+    mat.to_parquet_with_names(
+        &format!("{out}.text_embedding.parquet"),
+        (Some(&names), Some("feature")),
+        Some(&cols),
+    )?;
+    let types: Vec<Box<str>> = corpus.docs().iter().map(|d| d.ty.clone()).collect();
+    matrix_util::parquet::write_named_table(
+        &format!("{out}.feature_types.parquet"),
+        "feature",
+        &names,
+        &[(Box::from("type"), matrix_util::parquet::Column::Str(&types))],
+    )
+}
+
+/// `{out}.feature_word.edges.tsv`: each feature to the words of its text.
+fn write_feature_word_edges(p: &Prepared, e: &Encoded, out: &str) -> Result<()> {
+    let path = format!("{out}.feature_word.edges.tsv");
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    let mut n_edges = 0usize;
+    for (d, words) in p.corpus.docs().iter().zip(&e.feature_words) {
+        n_edges += write_typed_edges(
+            &mut w,
+            words.iter().map(|(wi, wt)| {
+                (
+                    d.ty.as_ref(),
+                    d.feature.as_ref(),
+                    "word",
+                    p.vocab.kept[*wi].as_ref(),
+                    *wt,
+                )
+            }),
+        )?;
+    }
+    info!("wrote {n_edges} feature–word edges to {path}");
+    Ok(())
+}
+
+/// `{out}.feature_word_expanded.edges.tsv`: for each feature, the
+/// `expand_k` nearest vocabulary words (CSLS) its own text lacks.
+fn write_expanded_edges(
+    p: &Prepared,
+    e: &Encoded,
+    feat: &Tensor,
+    center: &[f32],
+    dev: &Device,
+    expand_k: usize,
+    out: &str,
+) -> Result<()> {
+    let words = centred_unit(&e.word_vecs, center, dev)?;
+    let own_max = e.feature_words.iter().map(Vec::len).max().unwrap_or(0);
+    let hits = csls_top_k(feat, &words, expand_k + own_max, 10)?;
+    let path = format!("{out}.feature_word_expanded.edges.tsv");
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    let mut n_exp = 0usize;
+    for ((d, own), hit) in p.corpus.docs().iter().zip(&e.feature_words).zip(&hits) {
+        let taken: Vec<(usize, f32)> = hit
+            .iter()
+            .filter(|(j, _)| e.word_n[*j] > 0 && !own.iter().any(|(o, _)| o == j))
+            .take(expand_k)
+            .map(|(j, s)| (*j, s.max(0.0)))
+            .collect();
+        n_exp += write_typed_edges(
+            &mut w,
+            taken.iter().map(|(j, s)| {
+                (
+                    d.ty.as_ref(),
+                    d.feature.as_ref(),
+                    "word",
+                    p.vocab.kept[*j].as_ref(),
+                    *s,
+                )
+            }),
+        )?;
+    }
+    info!("wrote {n_exp} expanded feature–word edges (CSLS) to {path}");
+    Ok(())
+}
+
+/// `{out}.knn_graph.edges.tsv`: the `knn` nearest features by text
+/// similarity. Endpoints are ordered by (type, feature) so a gene–term
+/// pair always lands in the one relation `gene:term`, whichever side found
+/// the other, and `senna fne` folds the two directions of a same-type pair
+/// into one edge.
+fn write_knn_edges(corpus: &Corpus, feat: &Tensor, knn: usize, out: &str) -> Result<()> {
+    let hits = top_k_cosine(feat, feat, knn, true)?;
+    let path = format!("{out}.knn_graph.edges.tsv");
+    let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+    let docs = corpus.docs();
+    let mut n_knn = 0usize;
+    for (i, hit) in hits.iter().enumerate() {
+        n_knn += write_typed_edges(
+            &mut w,
+            hit.iter().map(|(j, s)| {
+                let (a, b) = if (&docs[i].ty, &docs[i].feature) <= (&docs[*j].ty, &docs[*j].feature)
+                {
+                    (&docs[i], &docs[*j])
+                } else {
+                    (&docs[*j], &docs[i])
+                };
+                (
+                    a.ty.as_ref(),
+                    a.feature.as_ref(),
+                    b.ty.as_ref(),
+                    b.feature.as_ref(),
+                    s.max(0.0),
+                )
+            }),
+        )?;
+    }
+    info!("wrote {n_knn} text-similarity edges to {path}");
+    Ok(())
+}
+
+fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
+    let p = prepare(&c.sources, &c.qc, c.vocab_file.as_deref(), &c.out)?;
+    anyhow::ensure!(!p.vocab.kept.is_empty(), "the vocabulary is empty after QC");
     let device = match c.device {
         ComputeDevice::Cpu => Device::Cpu,
         ComputeDevice::Cuda => Device::new_cuda(c.device_no)?,
@@ -374,176 +587,26 @@ fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
         PoolingArg::Cls => Pooling::Cls,
     };
     let enc = Encoder::load(&spec, c.max_tokens, pooling, device.clone())?;
-    let h = enc.hidden();
-    let n = docs.len();
-    let v = vocab.kept.len();
+    let e = encode_corpus(&enc, &p, c.batch, c.words_per_feature)?;
 
-    // Encode in batches: pooled vectors, per-feature word weights, and the
-    // running mean vector of every vocabulary word.
-    let mut pooled: Vec<Vec<f32>> = Vec::with_capacity(n);
-    let mut feature_words: Vec<Vec<(usize, f32)>> = Vec::with_capacity(n);
-    let mut word_sum: Vec<Vec<f32>> = vec![vec![0f32; h]; v];
-    let mut word_n: Vec<u32> = vec![0; v];
-    let mut n_missed = 0usize;
-    let bar = indicatif_bar(n as u64);
-    for chunk in docs.chunks(c.batch.max(1)) {
-        let texts: Vec<String> = chunk.iter().map(|(s, _)| s.clone()).collect();
-        let encs = enc.encode_batch(&texts)?;
-        for (e, (_, occ)) in encs.iter().zip(chunk) {
-            let scores = score_doc(&e.pooled, &e.tokens, occ, &vocab);
-            n_missed += occ
-                .iter()
-                .filter(|o| vocab.index.contains_key(&o.word))
-                .count()
-                - scores.iter().map(|s| s.count as usize).sum::<usize>();
-            for s in &scores {
-                for (a, x) in word_sum[s.word].iter_mut().zip(&s.vec) {
-                    *a += x;
-                }
-                word_n[s.word] += 1;
-            }
-            feature_words.push(feature_word_weights(&scores, &vocab, c.words_per_feature));
-            pooled.push(e.pooled.clone());
-        }
-        bar.inc(chunk.len() as u64);
-    }
-    bar.finish_and_clear();
-    if n_missed > 0 {
-        info!("{n_missed} word occurrences fell beyond --max-tokens and were not scored");
-    }
-
-    // text_embedding.parquet: pooled vectors, centred.
-    let center = mean_of(&pooled, h);
-    let names: Vec<Box<str>> = corpus.docs().iter().map(|d| d.feature.clone()).collect();
-    let cols: Vec<Box<str>> = (0..h).map(|i| format!("t{i}").into_boxed_str()).collect();
-    let mut flat = Vec::with_capacity(n * h);
-    for p in &pooled {
-        flat.extend(p.iter().zip(&center).map(|(x, m)| x - m));
-    }
-    let mat = nalgebra::DMatrix::<f32>::from_row_iterator(n, h, flat);
-    mat.to_parquet_with_names(
-        &format!("{}.text_embedding.parquet", c.out),
-        (Some(&names), Some("feature")),
-        Some(&cols),
-    )?;
-    write_named_types(&corpus, &format!("{}.feature_types.parquet", c.out))?;
-
-    // feature_word.edges.tsv
-    let path = format!("{}.feature_word.edges.tsv", c.out);
-    let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
-    let mut n_edges = 0usize;
-    for (d, words) in corpus.docs().iter().zip(&feature_words) {
-        n_edges += write_typed_edges(
-            &mut w,
-            words.iter().map(|(wi, wt)| {
-                (
-                    d.ty.as_ref(),
-                    d.feature.as_ref(),
-                    "word",
-                    vocab.kept[*wi].as_ref(),
-                    *wt,
-                )
-            }),
-        )?;
-    }
-    info!("wrote {n_edges} feature–word edges to {path}");
-
+    let center = mean_of(&e.pooled, enc.hidden());
+    write_text_embedding(&p.corpus, &e.pooled, &center, &c.out)?;
+    write_feature_word_edges(&p, &e, &c.out)?;
     if c.expand_k > 0 || c.knn > 0 {
-        let feat = centred_unit(&pooled, &center, &device)?;
+        let feat = centred_unit(&e.pooled, &center, &device)?;
         if c.expand_k > 0 {
-            let seen: Vec<u32> = word_n.clone();
-            let word_vecs: Vec<Vec<f32>> = word_sum
-                .iter()
-                .zip(&word_n)
-                .map(|(s, &k)| s.iter().map(|x| x / k.max(1) as f32).collect())
-                .collect();
-            let words = centred_unit(&word_vecs, &center, &device)?;
-            let hits = csls_top_k(&feat, &words, c.expand_k + c.words_per_feature, 10)?;
-            let path = format!("{}.feature_word_expanded.edges.tsv", c.out);
-            let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
-            let mut n_exp = 0usize;
-            for ((d, own), hit) in corpus.docs().iter().zip(&feature_words).zip(&hits) {
-                let taken: Vec<(usize, f32)> = hit
-                    .iter()
-                    .filter(|(j, _)| seen[*j] > 0 && !own.iter().any(|(o, _)| o == j))
-                    .take(c.expand_k)
-                    .map(|(j, s)| (*j, s.max(0.0)))
-                    .collect();
-                n_exp += write_typed_edges(
-                    &mut w,
-                    taken.iter().map(|(j, s)| {
-                        (
-                            d.ty.as_ref(),
-                            d.feature.as_ref(),
-                            "word",
-                            vocab.kept[*j].as_ref(),
-                            *s,
-                        )
-                    }),
-                )?;
-            }
-            info!("wrote {n_exp} expanded feature–word edges (CSLS) to {path}");
+            write_expanded_edges(&p, &e, &feat, &center, &device, c.expand_k, &c.out)?;
         }
         if c.knn > 0 {
-            let hits = top_k_cosine(&feat, &feat, c.knn, true)?;
-            let path = format!("{}.knn_graph.edges.tsv", c.out);
-            let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
-            let docs = corpus.docs();
-            let mut n_knn = 0usize;
-            for (i, hit) in hits.iter().enumerate() {
-                // Endpoints ordered by (type, feature) so a gene–term pair
-                // always lands in the one relation `gene:term`, whichever
-                // side found the other, and `senna fne` folds the two
-                // directions of a same-type pair into one edge.
-                n_knn += write_typed_edges(
-                    &mut w,
-                    hit.iter().map(|(j, s)| {
-                        let (a, b) = if (&docs[i].ty, &docs[i].feature)
-                            <= (&docs[*j].ty, &docs[*j].feature)
-                        {
-                            (&docs[i], &docs[*j])
-                        } else {
-                            (&docs[*j], &docs[i])
-                        };
-                        (
-                            a.ty.as_ref(),
-                            a.feature.as_ref(),
-                            b.ty.as_ref(),
-                            b.feature.as_ref(),
-                            s.max(0.0),
-                        )
-                    }),
-                )?;
-            }
-            info!("wrote {n_knn} text-similarity edges to {path}");
+            write_knn_edges(&p.corpus, &feat, c.knn, &c.out)?;
         }
     }
     info!(
-        "done: {n} features × {h} dims in {}.text_embedding.parquet; {} vocabulary words",
-        c.out, v
+        "done: {} features × {} dims in {}.text_embedding.parquet; {} vocabulary words",
+        e.pooled.len(),
+        enc.hidden(),
+        c.out,
+        p.vocab.kept.len()
     );
     Ok(())
-}
-
-fn write_named_types(corpus: &Corpus, path: &str) -> Result<()> {
-    let names: Vec<Box<str>> = corpus.docs().iter().map(|d| d.feature.clone()).collect();
-    let types: Vec<Box<str>> = corpus.docs().iter().map(|d| d.ty.clone()).collect();
-    matrix_util::parquet::write_named_table(
-        path,
-        "feature",
-        &names,
-        &[(Box::from("type"), matrix_util::parquet::Column::Str(&types))],
-    )
-}
-
-fn indicatif_bar(n: u64) -> indicatif::ProgressBar {
-    let bar = indicatif::ProgressBar::new(n);
-    bar.set_style(
-        indicatif::ProgressStyle::with_template(
-            "{msg} {bar:30} {pos}/{len} [{elapsed_precise}<{eta_precise}]",
-        )
-        .expect("template"),
-    );
-    bar.set_message("encoding");
-    bar
 }

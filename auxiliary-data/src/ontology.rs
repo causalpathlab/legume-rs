@@ -5,8 +5,8 @@
 //! This is a thin, reusable wrapper: parse once, then query each term's
 //! ancestors via [`Ontology::ancestors_or_self`] (`is_a` only — the relation a
 //! collapsed-label tree needs) or [`Ontology::ancestors_or_self_with_part_of`]
-//! (`is_a` + `part_of`, the GO "true-path" closure). We never flatten or walk
-//! the full ontology.
+//! (`is_a` + `part_of`, the GO "true-path" closure); [`Ontology::edges`] hands
+//! the whole hierarchy to callers that embed or draw it rather than walk it.
 //!
 //! Prefix-agnostic: any term id is kept (`CL:`, `GO:`, …); edges to
 //! unknown/obsolete targets are dropped, as are obsolete terms. The

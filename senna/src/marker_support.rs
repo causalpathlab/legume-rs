@@ -19,13 +19,6 @@ pub(crate) struct AnnotInfo {
     pub annot_names: Vec<Box<str>>,
 }
 
-/// Parse a gene/celltype TSV or CSV into `(gene, celltype)` pairs — the
-/// shared membership reader, so every gene→label file in the workspace is
-/// read the same way (header and `#` rows skipped, labels verbatim).
-pub(crate) fn read_marker_gene_info(file_path: &str) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
-    auxiliary_data::gene_sets::read_membership_pairs(file_path)
-}
-
 /// Reweight binary membership in place: `w_g = ln(C / c_g)` where `c_g` is
 /// the number of celltypes claiming gene `g`. Genes shared by all celltypes
 /// receive weight 0, which removes them from downstream claim scoring.
@@ -57,7 +50,9 @@ pub(crate) fn build_annotation_matrix(
     marker_gene_path: &str,
     row_names: &[Box<str>],
 ) -> anyhow::Result<AnnotInfo> {
-    let marker_pairs = read_marker_gene_info(marker_gene_path)?;
+    // The shared membership reader: every gene→label file in the workspace
+    // is read the same way (header and `#` rows skipped, labels verbatim).
+    let marker_pairs = auxiliary_data::gene_sets::read_membership_pairs(marker_gene_path)?;
 
     if marker_pairs.is_empty() {
         return Err(anyhow::anyhow!("empty/invalid marker gene information"));

@@ -277,22 +277,35 @@ impl TypedEdgeList {
     /// Stable partition so relation `r`'s edges occupy one contiguous block;
     /// returns the block of each relation.
     pub(crate) fn group_by_relation(&mut self, n_rel: usize) -> Vec<Range<usize>> {
+        // Counting sort: one pass to size the blocks, one to scatter.
         let counts = self.counts_per_relation(n_rel);
-        let mut starts = Vec::with_capacity(n_rel + 1);
+        let mut starts = Vec::with_capacity(n_rel);
         let mut acc = 0usize;
         for &c in &counts {
             starts.push(acc);
             acc += c;
         }
-        let mut order: Vec<u32> = (0..self.len() as u32).collect();
-        order.sort_by_key(|&i| self.rel[i as usize]);
-        let take = |v: &Vec<u32>| order.iter().map(|&i| v[i as usize]).collect::<Vec<u32>>();
-        self.lhs = take(&self.lhs);
-        self.rhs = take(&self.rhs);
-        self.rel = order.iter().map(|&i| self.rel[i as usize]).collect();
-        if let Some(w) = self.weight.take() {
-            self.weight = Some(order.iter().map(|&i| w[i as usize]).collect());
+        let n = self.len();
+        let mut cursor = starts.clone();
+        let mut lhs = vec![0u32; n];
+        let mut rhs = vec![0u32; n];
+        let mut rel = vec![0u16; n];
+        let mut weight = self.weight.as_ref().map(|_| vec![0f32; n]);
+        for i in 0..n {
+            let r = self.rel[i] as usize;
+            let j = cursor[r];
+            cursor[r] += 1;
+            lhs[j] = self.lhs[i];
+            rhs[j] = self.rhs[i];
+            rel[j] = self.rel[i];
+            if let (Some(out), Some(w)) = (weight.as_mut(), self.weight.as_ref()) {
+                out[j] = w[i];
+            }
         }
+        self.lhs = lhs;
+        self.rhs = rhs;
+        self.rel = rel;
+        self.weight = weight;
         (0..n_rel)
             .map(|r| starts[r]..starts[r] + counts[r])
             .collect()
