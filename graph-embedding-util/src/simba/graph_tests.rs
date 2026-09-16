@@ -1,7 +1,7 @@
 use super::*;
+use crate::simba::auto_wd;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
-use rand::{rngs::StdRng, SeedableRng};
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol
@@ -111,35 +111,4 @@ fn edge_list_from_a_tiny_zarr_backend_has_one_edge_per_nonzero_hvg_entry_with_lo
     distinct.sort_unstable();
     distinct.dedup();
     assert_eq!(edges.levels_present(), distinct);
-}
-
-#[test]
-fn shuffle_range_permutes_only_the_requested_range_and_keeps_each_edge_intact() {
-    let n = 12;
-    let mut edges = EdgeList {
-        n_cells: n,
-        n_genes: 2 * n,
-        cell: (0..n as u32).collect(),
-        gene: (0..n as u32).map(|i| 2 * i).collect(),
-        level: (0..n as u8).map(|i| i % 3 + 1).collect(),
-    };
-    let before: Vec<(u32, u32, u8)> = (0..n)
-        .map(|i| (edges.cell[i], edges.gene[i], edges.level[i]))
-        .collect();
-    let mut rng = StdRng::seed_from_u64(7);
-    edges.shuffle_range(0..8, &mut rng);
-    let after: Vec<(u32, u32, u8)> = (0..n)
-        .map(|i| (edges.cell[i], edges.gene[i], edges.level[i]))
-        .collect();
-    assert_eq!(&after[8..], &before[8..], "the tail is untouched");
-    let mut a = after[..8].to_vec();
-    let mut b = before[..8].to_vec();
-    a.sort_unstable();
-    b.sort_unstable();
-    assert_eq!(
-        a, b,
-        "the same edges, each still (cell, gene, level)-paired"
-    );
-    assert_ne!(&after[..8], &before[..8], "the range was actually permuted");
-    assert!(after.iter().all(|&(c, g, _)| g == 2 * c));
 }

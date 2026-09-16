@@ -14,8 +14,6 @@ use super::discretize::{log_norm, Discretization, Histogram};
 use super::HIST_BINS;
 use crate::progress::new_progress_bar;
 use data_beans::sparse_io_vector::SparseIoVec;
-use rand::{Rng, RngExt};
-use std::ops::Range;
 
 /// PBG's `weight` per relation (bin level): `round(linspace(1, 5, n), 2)`
 /// over the levels PRESENT in the graph, ascending. Rust's `round` is
@@ -82,24 +80,7 @@ impl RelationTable {
     }
 }
 
-/// `pbg_train(auto_wd=True)`: the weight decay SIMBA fits to the edge count,
-/// scaled off two reference graphs (`0.013` at 2,725,781 edges below 5e7
-/// edges, `0.0004` at 59,103,481 edges above), rounded to 6 decimals
-/// (half-away-from-zero here vs numpy's half-to-even: a tie needs the 7th
-/// decimal to be exactly 5, which no edge count of interest produces).
-#[must_use]
-pub fn auto_wd(n_edges: usize) -> f64 {
-    let n = n_edges.max(1) as f64;
-    let wd = if n < 5e7 {
-        0.013 * 2_725_781.0 / n
-    } else {
-        0.0004 * 59_103_481.0 / n
-    };
-    (wd * 1e6).round() / 1e6
-}
-
-/// The graph as three parallel arrays (structure of arrays), so an epoch's
-/// shuffle is an in-place permutation with no index vector.
+/// The graph as three parallel arrays (structure of arrays).
 #[derive(Clone, Debug)]
 pub struct EdgeList {
     pub n_cells: usize,
@@ -119,22 +100,6 @@ impl EdgeList {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cell.is_empty()
-    }
-
-    pub(crate) fn swap(&mut self, i: usize, j: usize) {
-        self.cell.swap(i, j);
-        self.gene.swap(i, j);
-        self.level.swap(i, j);
-    }
-
-    /// Fisher–Yates over `range` only; edges outside it stay where they are.
-    pub(crate) fn shuffle_range<R: Rng>(&mut self, range: Range<usize>, rng: &mut R) {
-        let start = range.start;
-        let n = range.end - range.start;
-        for i in (1..n).rev() {
-            let j = rng.random_range(0..=i);
-            self.swap(start + i, start + j);
-        }
     }
 
     /// Distinct levels in the graph, ascending.

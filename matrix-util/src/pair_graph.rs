@@ -19,7 +19,7 @@ use crate::parquet::{parquet_add_bytearray, parquet_add_string_column, ParquetWr
 use log::info;
 use parquet::basic::Type as ParquetType;
 use rayon::prelude::*;
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 
 pub struct FeaturePairGraph {
     pub feature_names: Vec<Box<str>>,
@@ -402,6 +402,159 @@ impl FeaturePairGraph {
         }
     }
 
+    ///////////////////////////////////////////////////////////////
+    // Derived relations: second-order neighbours, diffusion top-k //
+    ///////////////////////////////////////////////////////////////
+
+    /// Second-order edges: unordered pairs `(u, v)` NOT directly linked
+    /// that share at least `min_shared` neighbours, with the count. Where
+    /// [`Self::augment_with_snn`] folds such pairs into the graph
+    /// unweighted, this returns them on their own so a caller can treat
+    /// "co-interactors" as a relation distinct from "interactors",
+    /// weighted by how many partners they share. Each entry is
+    /// `(u, v, shared, union)` so a caller can weight by the raw count or
+    /// by the Jaccard overlap `shared / union`. `top_k > 0` keeps, for
+    /// every node, only its `top_k` co-interactors by Jaccard (ties by
+    /// count, then id) — the degree-normalised choice, since on a
+    /// scale-free graph a raw count is dominated by the hubs every pair
+    /// shares by chance — and a pair survives when either endpoint keeps
+    /// it, which bounds the result at `n · top_k` where "every pair
+    /// sharing one neighbour" would be quadratic. `min_shared = 0` yields
+    /// nothing. Canonical `u < v`, sorted.
+    pub fn shared_neighbor_edges(
+        &self,
+        min_shared: usize,
+        top_k: usize,
+    ) -> Vec<(usize, usize, usize, usize)> {
+        if min_shared == 0 {
+            return Vec::new();
+        }
+        let csr = self.build_adj_csr();
+        let existing: HashSet<(u32, u32)> = self
+            .feature_edges
+            .iter()
+            .map(|&(u, v)| (u as u32, v as u32))
+            .collect();
+        // Per node, every second-order partner with the count, then the
+        // per-node top-k; the union of kept choices is folded to canonical
+        // pairs.
+        let per_node: Vec<Vec<(usize, usize, usize)>> = (0..self.n_features)
+            .into_par_iter()
+            .map(|u| {
+                let ru = csr.row(u);
+                if ru.is_empty() {
+                    return Vec::new();
+                }
+                let mut seen: HashSet<u32> = HashSet::default();
+                let mut local: Vec<(usize, usize, usize)> = Vec::new();
+                for &m in ru {
+                    for &v in csr.row(m as usize) {
+                        let key = if (v as usize) < u {
+                            (v, u as u32)
+                        } else {
+                            (u as u32, v)
+                        };
+                        if v as usize == u || !seen.insert(v) || existing.contains(&key) {
+                            continue;
+                        }
+                        let rv = csr.row(v as usize);
+                        let c = intersect_count(ru, rv);
+                        if c >= min_shared {
+                            local.push((v as usize, c, ru.len() + rv.len() - c));
+                        }
+                    }
+                }
+                if top_k > 0 && local.len() > top_k {
+                    // Jaccard descending: c/un > c'/un' ⇔ c·un' > c'·un.
+                    local.sort_unstable_by(|&(v, c, un), &(v2, c2, un2)| {
+                        (c2 * un).cmp(&(c * un2)).then(c2.cmp(&c)).then(v.cmp(&v2))
+                    });
+                    local.truncate(top_k);
+                }
+                local
+            })
+            .collect();
+        let mut out: Vec<(usize, usize, usize, usize)> = per_node
+            .into_iter()
+            .enumerate()
+            .flat_map(|(u, vs)| {
+                vs.into_iter()
+                    .map(move |(v, c, un)| (u.min(v), u.max(v), c, un))
+            })
+            .collect();
+        out.par_sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Personalized PageRank from every node, truncated to its `k`
+    /// strongest targets (self excluded), by the forward-push
+    /// approximation (Andersen, Chung & Lang 2006): random walk with
+    /// restart probability `alpha` on the unweighted graph, residual mass
+    /// per node pushed until every residual is below `eps · degree`. Local
+    /// and sparse, so the cost per source is `O(1/(eps · alpha))`
+    /// regardless of graph size; sources run in parallel. Scores are the
+    /// PPR mass in `(0, 1]`; the caller decides how to weight them.
+    /// Isolated nodes get an empty list.
+    pub fn personalized_pagerank_top_k(
+        &self,
+        alpha: f64,
+        eps: f64,
+        k: usize,
+    ) -> Vec<Vec<(usize, f32)>> {
+        let csr = self.build_adj_csr();
+        let n = self.n_features;
+        let alpha = alpha.clamp(1e-6, 1.0);
+        let eps = eps.max(1e-12);
+        (0..n)
+            .into_par_iter()
+            .map(|s| {
+                if csr.row(s).is_empty() || k == 0 {
+                    return Vec::new();
+                }
+                // Sparse push with a work queue; `p` and `r` live in hash maps
+                // because a source touches a small neighbourhood.
+                let mut p: FxHashMap<u32, f64> = FxHashMap::default();
+                let mut r: FxHashMap<u32, f64> = FxHashMap::default();
+                r.insert(s as u32, 1.0);
+                let mut queue: Vec<u32> = vec![s as u32];
+                let mut queued: HashSet<u32> = HashSet::default();
+                queued.insert(s as u32);
+                while let Some(u) = queue.pop() {
+                    queued.remove(&u);
+                    let du = csr.row(u as usize).len() as f64;
+                    let ru = r.get(&u).copied().unwrap_or(0.0);
+                    if du == 0.0 || ru < eps * du {
+                        continue;
+                    }
+                    *p.entry(u).or_default() += alpha * ru;
+                    let push = (1.0 - alpha) * ru / du;
+                    r.insert(u, 0.0);
+                    for &v in csr.row(u as usize) {
+                        let rv = r.entry(v).or_default();
+                        *rv += push;
+                        let dv = csr.row(v as usize).len() as f64;
+                        if *rv >= eps * dv && queued.insert(v) {
+                            queue.push(v);
+                        }
+                    }
+                }
+                let mut top: Vec<(usize, f32)> = p
+                    .into_iter()
+                    .filter(|&(v, _)| v as usize != s)
+                    .map(|(v, m)| (v as usize, m as f32))
+                    .collect();
+                top.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.0.cmp(&b.0))
+                });
+                top.truncate(k);
+                top
+            })
+            .collect()
+    }
+
     /// Symmetric adjacency-list view implementing
     /// `crate::graph::WeightedGraph` (for Leiden, SGC, etc.).
     pub fn to_adj_list(&self) -> AdjListGraph {
@@ -470,6 +623,115 @@ pub fn test_graph_from_edges(edges: &[(usize, usize)], n_features: usize) -> Fea
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two triangles {0,1,2} and {3,4,5} joined by the edge (2,3), plus a
+    /// pendant 6 on node 0 and an isolated node 7.
+    fn two_triangles() -> FeaturePairGraph {
+        FeaturePairGraph {
+            feature_names: (0..8).map(|i| format!("g{i}").into_boxed_str()).collect(),
+            n_features: 8,
+            feature_edges: vec![
+                (0, 1),
+                (0, 2),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (3, 5),
+                (4, 5),
+                (0, 6),
+            ],
+        }
+    }
+
+    #[test]
+    fn shared_neighbor_edges_are_second_order_only_with_their_counts() {
+        let g = two_triangles();
+        // Pairs sharing ≥ 1 neighbour that are not directly linked:
+        // (1,6) via 0; (2,6) via 0; (1,3) via 2; (0,3) via 2; (2,4) via 3;
+        // (2,5) via 3. Directly linked pairs (0,1) etc. never appear.
+        let snn = g.shared_neighbor_edges(1, 0);
+        let pairs: Vec<(usize, usize, usize)> = snn.iter().map(|&(u, v, c, _)| (u, v, c)).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (0, 3, 1),
+                (1, 3, 1),
+                (1, 6, 1),
+                (2, 4, 1),
+                (2, 5, 1),
+                (2, 6, 1)
+            ]
+        );
+        assert!(snn
+            .iter()
+            .all(|&(u, v, _, _)| !g.feature_edges.contains(&(u, v))));
+        // union = deg(u) + deg(v) − shared: (1,6) has degrees 2 and 1 → 2.
+        assert!(snn.contains(&(1, 6, 1, 2)));
+        assert!(snn.contains(&(0, 3, 1, 5)), "deg 3 + deg 3 − 1");
+        assert!(
+            g.shared_neighbor_edges(2, 0).is_empty(),
+            "no pair shares two neighbours"
+        );
+        assert!(g.shared_neighbor_edges(0, 10).is_empty());
+        // top-1 per node by Jaccard, and a pair survives when either side
+        // keeps it. Here every pair survives: 2 keeps 6 (union 3 beats the
+        // union-4 ties with 4 and 5), but 4 and 5 each have 2 as their only
+        // candidate, and 3 keeps 1 (union 4) over 0 (union 5) while 0's only
+        // candidate is 3.
+        let top1 = g.shared_neighbor_edges(1, 1);
+        assert_eq!(top1, snn);
+        // Truncation bites on a star: the five leaves pairwise share the hub
+        // (10 pairs, all Jaccard 1/2), and with k = 1 each leaf keeps the
+        // lowest-id other leaf, so only leaf 1's four pairs survive.
+        let star = FeaturePairGraph {
+            feature_names: (0..6).map(|i| format!("g{i}").into_boxed_str()).collect(),
+            n_features: 6,
+            feature_edges: (1..6).map(|i| (0, i)).collect(),
+        };
+        assert_eq!(star.shared_neighbor_edges(1, 0).len(), 10);
+        let s1: Vec<(usize, usize)> = star
+            .shared_neighbor_edges(1, 1)
+            .iter()
+            .map(|&(u, v, _, _)| (u, v))
+            .collect();
+        assert_eq!(s1, vec![(1, 2), (1, 3), (1, 4), (1, 5)]);
+        // A denser case: a 4-clique minus one edge — the missing pair shares 2.
+        let h = FeaturePairGraph {
+            feature_names: (0..4).map(|i| format!("g{i}").into_boxed_str()).collect(),
+            n_features: 4,
+            feature_edges: vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3)],
+        };
+        assert_eq!(h.shared_neighbor_edges(2, 0), vec![(2, 3, 2, 2)]);
+    }
+
+    #[test]
+    fn personalized_pagerank_ranks_the_own_triangle_above_the_far_one_and_skips_isolated_nodes() {
+        let g = two_triangles();
+        let ppr = g.personalized_pagerank_top_k(0.15, 1e-6, 3);
+        assert_eq!(ppr.len(), 8);
+        assert!(ppr[7].is_empty(), "isolated source has no targets");
+        let top0: Vec<usize> = ppr[0].iter().map(|&(v, _)| v).collect();
+        assert!(!top0.contains(&0), "self excluded");
+        assert_eq!(top0.len(), 3);
+        assert!(
+            top0.contains(&1) && top0.contains(&2),
+            "own triangle first: {top0:?}"
+        );
+        assert!(
+            !top0.contains(&4) && !top0.contains(&5),
+            "far triangle beyond the top 3: {top0:?}"
+        );
+        // Scores fall off with the rank and stay in (0, 1].
+        let s0: Vec<f32> = ppr[0].iter().map(|&(_, m)| m).collect();
+        assert!(s0.windows(2).all(|w| w[0] >= w[1]));
+        assert!(s0.iter().all(|&m| m > 0.0 && m <= 1.0));
+        // From node 4, node 2 (two hops via 3) outranks node 0 (three hops).
+        let rank = |src: usize, v: usize| ppr[src].iter().position(|&(t, _)| t == v);
+        let full = g.personalized_pagerank_top_k(0.15, 1e-7, 7);
+        let rank_full = |src: usize, v: usize| full[src].iter().position(|&(t, _)| t == v).unwrap();
+        assert!(rank_full(4, 2) < rank_full(4, 0));
+        assert!(rank(4, 3).is_some() && rank(4, 5).is_some());
+    }
     use std::io::Write;
     use tempfile::NamedTempFile;
 

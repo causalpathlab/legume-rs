@@ -514,7 +514,10 @@ fn update_refits_a_simba_run_on_the_union() {
     let cells = Mat::from_parquet(&format!("{out2}.cell_embedding.parquet")).unwrap();
     assert_eq!((cells.mat.nrows(), cells.mat.ncols()), (80, 8));
     let args: SimbaArgs = m.train_args_as(&out2).unwrap();
-    assert_eq!(args.epochs, 2, "the per-round epoch override is recorded");
+    assert_eq!(
+        args.train.epochs, 2,
+        "the per-round epoch override is recorded"
+    );
 }
 
 /// `deconvolve` takes only the gene axis, the width and the cell embedding
@@ -530,4 +533,37 @@ fn deconvolve_source_loads_a_simba_run() {
     assert_eq!(src.feature_names.len(), 20);
     assert_eq!(src.cell_embedding_paths.len(), 1);
     assert!(src.cell_embedding_paths[0].ends_with("run.cell_embedding.parquet"));
+}
+
+/// `--freeze-feature-embedding` on simba: the gene table of a second run is
+/// the first run's, row for row, while the cells still train.
+#[test]
+fn simba_pins_its_gene_table_to_an_earlier_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, first) = fast_run(dir.path());
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let mut argv = vec![
+        data.as_str(),
+        "--out",
+        &second,
+        "--n-hvg",
+        "0",
+        "--no-qc",
+        "--freeze-feature-embedding",
+        &first,
+        "--embedding-dim",
+        "0",
+        "--seed",
+        "9",
+    ];
+    argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
+    argv.extend_from_slice(&["--epochs", "4"]);
+    run(&argv);
+    let g1 = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
+    let g2 = Mat::from_parquet(&format!("{second}.feature_loading.parquet")).unwrap();
+    assert_eq!(g1.rows, g2.rows);
+    assert_eq!(g1.mat, g2.mat, "the gene table is pinned");
+    let c1 = Mat::from_parquet(&format!("{first}.cell_embedding.parquet")).unwrap();
+    let c2 = Mat::from_parquet(&format!("{second}.cell_embedding.parquet")).unwrap();
+    assert_ne!(c1.mat, c2.mat, "cells train");
 }

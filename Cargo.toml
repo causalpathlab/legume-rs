@@ -12,6 +12,7 @@ members = [
     "enrichment",
     "faba",
     "fagioli",
+    "gene-text",
     "genomic-data",
     "graph-embedding-util",
     "hsblock",

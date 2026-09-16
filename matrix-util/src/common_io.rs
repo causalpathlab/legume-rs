@@ -826,3 +826,29 @@ pub fn remove_all_files(files: &Vec<Box<str>>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Extensions a data file's name is read through, stripped from the end of
+/// the name repeatedly by [`file_stem`]; dots inside the name stay.
+pub const DATA_FILE_EXTENSIONS: &[&str] = &[
+    "gz", "bz2", "zst", "tsv", "csv", "txt", "tab", "gaf", "gmt", "obo", "bed",
+];
+
+/// The file name minus its known extensions
+/// (`a/b/goa_human.gaf.gz` → `goa_human`, `c2.cp.v1.symbols.gmt` → `c2.cp.v1.symbols`):
+/// the name tools derive a relation or a source label from, so they agree.
+pub fn file_stem(path: &str) -> String {
+    let mut stem = std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    loop {
+        let Some((base, ext)) = stem.rsplit_once('.') else {
+            break;
+        };
+        if base.is_empty() || !DATA_FILE_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+            break;
+        }
+        stem.truncate(base.len());
+    }
+    stem
+}
