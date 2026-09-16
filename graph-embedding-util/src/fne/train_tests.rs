@@ -1,8 +1,9 @@
 use super::*;
 use crate::fne::batch::PaddedBatch;
 use crate::fne::graph::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
-use crate::fne::FneConfig;
+use crate::fne::{FneConfig, PresetRows};
 use candle_util::candle_core::{Device, Tensor};
+use matrix_util::traits::SampleOps;
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol
@@ -238,13 +239,18 @@ fn a_two_type_table_reproduces_simbas_seeded_init_exactly() {
     let dev = Device::Cpu;
     let t = NodeTypeTable::new(&[("e_cell", 7), ("e_gene", 5)]).unwrap();
     let ours = FneModel::new(&t, 6, 3, 42, &dev).unwrap();
-    let simba = crate::simba::train::SimbaModel::new(7, 5, 6, 3, 42, &dev).unwrap();
+    // SIMBA's own init: one seeded N(0, INIT_STDEV) table per name.
+    let table = |name: &str, rows: usize| {
+        Tensor::rnorm_seeded(rows, 6, matrix_util::rand_util::name_seed(42, name))
+            .affine(crate::fne::INIT_STDEV, 0.0)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap()
+    };
     let e = ours.e.as_tensor().to_vec2::<f32>().unwrap();
-    let ec = simba.e_cell.as_tensor().to_vec2::<f32>().unwrap();
-    let eg = simba.e_gene.as_tensor().to_vec2::<f32>().unwrap();
     assert_eq!(e.len(), 12);
-    assert_eq!(&e[..7], &ec[..], "cell block bit-identical");
-    assert_eq!(&e[7..], &eg[..], "gene block bit-identical");
+    assert_eq!(&e[..7], &table("e_cell", 7)[..], "cell block bit-identical");
+    assert_eq!(&e[7..], &table("e_gene", 5)[..], "gene block bit-identical");
 }
 
 #[test]
@@ -552,4 +558,87 @@ fn the_same_seed_gives_the_same_table() {
         a.embedding.to_vec2::<f32>().unwrap(),
         b.embedding.to_vec2::<f32>().unwrap()
     );
+}
+
+/// Pinned rows come out exactly as they went in — with the weight decay on,
+/// which would otherwise shrink them — while the other rows train.
+#[test]
+fn preset_rows_are_pinned_under_freeze_and_only_started_from_otherwise() {
+    let (edges, types, rels) = planted_graph();
+    let d = 4;
+    let node: Vec<u32> = vec![0, 3, 7];
+    let rows: Vec<f32> = (0..node.len() * d).map(|i| 0.1 * i as f32 - 0.5).collect();
+    let base = FneConfig {
+        dim: d,
+        epochs: 5,
+        batch_size: 8,
+        num_batch_negs: 4,
+        num_uniform_negs: 2,
+        wd: Some(1e-2),
+        wd_interval: 1,
+        eval_fraction: 0.0,
+        seed: 3,
+        ..FneConfig::default()
+    };
+    let frozen = FneConfig {
+        preset: Some(PresetRows {
+            node: node.clone(),
+            rows: rows.clone(),
+            freeze: true,
+        }),
+        ..base.clone()
+    };
+    let out = train(edges.clone(), types.clone(), rels.clone(), &frozen).unwrap();
+    let e = out.embedding.to_vec2::<f32>().unwrap();
+    for (i, &g) in node.iter().enumerate() {
+        assert_eq!(
+            e[g as usize],
+            rows[i * d..(i + 1) * d],
+            "pinned row {g} moved"
+        );
+    }
+    let untouched = train(edges.clone(), types.clone(), rels.clone(), &base).unwrap();
+    let u = untouched.embedding.to_vec2::<f32>().unwrap();
+    assert_ne!(e[1], u[1], "a free row still trains from the same seed");
+
+    let init = FneConfig {
+        preset: Some(PresetRows {
+            node: node.clone(),
+            rows: rows.clone(),
+            freeze: false,
+        }),
+        ..base.clone()
+    };
+    let moved = train(edges, types, rels, &init).unwrap();
+    let m = moved.embedding.to_vec2::<f32>().unwrap();
+    assert!(
+        node.iter()
+            .enumerate()
+            .any(|(i, &g)| m[g as usize] != rows[i * d..(i + 1) * d]),
+        "started-from rows train on"
+    );
+}
+
+#[test]
+fn preset_rows_must_index_the_table_and_match_d() {
+    let (edges, types, rels) = planted_graph();
+    let cfg = |node: Vec<u32>, rows: Vec<f32>| FneConfig {
+        dim: 4,
+        epochs: 1,
+        preset: Some(PresetRows {
+            node,
+            rows,
+            freeze: true,
+        }),
+        ..FneConfig::default()
+    };
+    let n = types.n_total() as u32;
+    assert!(train(
+        edges.clone(),
+        types.clone(),
+        rels.clone(),
+        &cfg(vec![n], vec![0.0; 4])
+    )
+    .is_err());
+    assert!(train(edges, types, rels, &cfg(vec![0], vec![0.0; 3])).is_err());
 }

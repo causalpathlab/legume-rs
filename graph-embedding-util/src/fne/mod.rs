@@ -15,7 +15,7 @@ pub(crate) mod model;
 pub mod row_adagrad;
 pub mod train;
 
-pub use graph::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
+pub use graph::{auto_wd, NodeTypeTable, Relation, RelationTable, TypedEdgeList};
 pub use row_adagrad::RowAdagrad;
 pub use train::{train, FneOutput, RelationStats};
 
@@ -37,6 +37,17 @@ pub struct EpochStats {
     pub eval_loss: Option<f64>,
     /// Batches that drew the weight-decay term this epoch.
     pub wd_hits: usize,
+}
+
+/// Rows of the table given from outside, by GLOBAL node id: `rows` is
+/// `[node.len() × D]` row-major. The listed nodes start at those rows; under
+/// `freeze` they also take no step (neither the loss's nor the weight
+/// decay's), so they come out of training exactly as given.
+#[derive(Clone, Debug, Default)]
+pub struct PresetRows {
+    pub node: Vec<u32>,
+    pub rows: Vec<f32>,
+    pub freeze: bool,
 }
 
 /// Every knob of the recipe; `Default` is PBG's configuration with the
@@ -73,6 +84,8 @@ pub struct FneConfig {
     /// gets a hundred times fewer updates; repeating it restores its share
     /// without touching the loss weight.
     pub relation_repeats: Vec<usize>,
+    /// Rows given from outside, started from or pinned (see [`PresetRows`]).
+    pub preset: Option<PresetRows>,
     pub seed: u64,
     pub device: Device,
 }
@@ -91,6 +104,7 @@ impl Default for FneConfig {
             eval_fraction: 0.05,
             eval_min_per_relation: 1,
             relation_repeats: Vec::new(),
+            preset: None,
             seed: 1,
             device: Device::Cpu,
         }

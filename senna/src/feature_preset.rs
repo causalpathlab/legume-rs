@@ -1,6 +1,9 @@
-//! `senna bge --{freeze,init}-feature-embedding <prefix>`: the gene rows of an
-//! earlier run's feature table, matched onto this fit's feature axis, for phase
-//! 1 to pin or to start from (see [`ge::fit::hier::PresetGenes`]).
+//! `--{freeze,init}-feature-embedding <prefix>` for every model with a gene
+//! table (`senna bge`, `senna simba`, `senna fne`): the gene rows of an earlier
+//! run's feature table, matched onto the caller's gene axis, to pin or to
+//! start from. The result is bge's [`ge::fit::hier::PresetGenes`] (indices
+//! into the given axis); the PBG commands lift it to their node ids with
+//! [`preset_rows`].
 //!
 //! The source is any run whose prefix resolves through
 //! [`crate::run_manifest::resolve_feature_loading`] — typically `senna fne`,
@@ -75,6 +78,35 @@ pub(crate) fn load_preset_genes(
         if freeze { "pinned" } else { "warm-started" }
     );
     Ok(ge::fit::hier::PresetGenes { gene, rows, freeze })
+}
+
+/// The same rows as [`ge::fne::PresetRows`], each gene index mapped through
+/// `node` (a gene's index on the caller's axis → its node id).
+pub(crate) fn preset_rows(
+    p: ge::fit::hier::PresetGenes,
+    node: impl Fn(u32) -> u32,
+) -> ge::fne::PresetRows {
+    ge::fne::PresetRows {
+        node: p.gene.into_iter().map(node).collect(),
+        rows: p.rows,
+        freeze: p.freeze,
+    }
+}
+
+/// `--embedding-dim` against the preset's width, the loader having refused an
+/// empty match (so the division is exact).
+pub(crate) fn resolve_dim(
+    cli_embedding_dim: usize,
+    preset: Option<&ge::fit::hier::PresetGenes>,
+) -> anyhow::Result<usize> {
+    let preset_h = preset.map(|f| f.rows.len() / f.gene.len());
+    crate::topic::common::resolve_embedding_dim_from_table(cli_embedding_dim, preset_h)?.ok_or_else(
+        || {
+            anyhow::anyhow!(
+                "--embedding-dim 0 takes H from a given feature embedding; none was given"
+            )
+        },
+    )
 }
 
 #[cfg(test)]

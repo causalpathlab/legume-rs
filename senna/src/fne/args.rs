@@ -3,6 +3,7 @@
 //! dimension, so a bare invocation is the published recipe.
 
 use crate::embed_common::*;
+use auxiliary_data::feature_names::FeatureNameKindArg;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "crate::embed_common::clap_defaults")]
@@ -248,81 +249,17 @@ pub struct FneArgs {
         long,
         default_value_t = 128,
         alias = "dim-embedding",
-        help = "Embedding dimension H"
+        help = "Embedding dimension H (0 = the width of a given feature embedding)"
     )]
     pub(crate) embedding_dim: usize,
 
-    #[arg(
-        long,
-        short = 'i',
-        default_value_t = 10,
-        help = "Training epochs (PBG: 10)"
-    )]
-    pub(crate) epochs: usize,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) train: crate::pbg_train_args::PbgTrainArgs,
 
-    #[arg(
-        long,
-        alias = "lr",
-        default_value_t = 0.1,
-        help = "Row-wise Adagrad learning rate (PBG: 0.1)"
-    )]
-    pub(crate) learning_rate: f64,
-
-    #[arg(
-        long,
-        default_value_t = 1000,
-        help = "Edges per batch (PBG: 1000)",
-        long_help = "Edges per batch. Every batch holds ONE relation,\n\
-                     drawn with probability proportional to that relation's remaining edges.\n\
-                     One optimizer step per batch."
-    )]
-    pub(crate) batch_size: usize,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Batch negatives, i.e. the chunk size (PBG: 50)",
-        long_help = "A batch is cut into chunks of this many positives.\n\
-                     Within a chunk every other positive's endpoints are negatives.\n\
-                     A positive never competes with itself."
-    )]
-    pub(crate) num_batch_negs: usize,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Uniform negatives per chunk (PBG: 50)",
-        long_help = "Random nodes drawn per chunk and shared by its positives,\n\
-                     inside the relation's own node types on each side.\n\
-                     Both sides are corrupted."
-    )]
-    pub(crate) num_uniform_negs: usize,
-
-    #[arg(
-        long,
-        help = "Weight decay; omit for SIMBA's automatic value",
-        long_help = "L2 weight decay on the node table.\n\
-                     Omit it for SIMBA's `auto_wd`, which scales a reference value by the edge count.\n\
-                     Pass 0 to disable."
-    )]
-    pub(crate) weight_decay: Option<f64>,
-
-    #[arg(
-        long,
-        default_value_t = 50,
-        help = "Draw the weight decay with probability 1/N per batch (PBG: 50)"
-    )]
-    pub(crate) wd_interval: usize,
-
-    #[arg(
-        long,
-        default_value_t = 0.05,
-        help = "Fraction of each relation's edges held out for the eval loss (PBG: 0.05)",
-        long_help = "Edges never trained on, scored with the same loss after every epoch.\n\
-                     Held out per relation, so a small relation is never emptied; drawn once.\n\
-                     Pass 0 to train on every edge."
-    )]
-    pub(crate) eval_fraction: f64,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) feature_embedding: crate::feature_embedding_args::FeatureEmbeddingArgs,
 
     #[arg(
         long,
@@ -334,29 +271,15 @@ pub struct FneArgs {
 
     #[arg(
         long,
-        default_value_t = '_',
-        help = "Delimiter for canonical gene-name matching",
-        long_help = "Delimiter for canonical gene-name matching.\n\
-                     The last token after splitting on this char is canonical.\n\
-                     So `ENSG00000_TGFB1` and `TGFB1` merge into one node."
+        value_enum,
+        default_value = "gene",
+        help = "How gene names are matched across inputs",
+        long_help = "How gene names are matched across inputs.\n\
+                     `gene` (default) takes the last `_`-separated token as canonical,\n\
+                     so `ENSG00000_TGFB1` and `TGFB1` merge into one node.\n\
+                     `exact` matches names as given. The other rules are `senna masked-topic`'s."
     )]
-    pub(crate) feature_name_delim: char,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable fuzzy gene-name matching (use exact names)"
-    )]
-    pub(crate) feature_name_exact: bool,
-
-    #[arg(long, default_value_t = 1, help = "Random seed")]
-    pub(crate) seed: u64,
-
-    #[arg(long, default_value_t = ComputeDevice::Cpu, value_enum, help = "Compute device")]
-    pub(crate) device: ComputeDevice,
-
-    #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
-    pub(crate) device_no: usize,
+    pub(crate) feature_name_kind: FeatureNameKindArg,
 
     #[arg(
         long,
@@ -375,13 +298,6 @@ pub struct FneArgs {
 
 impl FneArgs {
     pub(crate) fn name_kind(&self) -> auxiliary_data::feature_names::FeatureNameKind {
-        use auxiliary_data::feature_names::FeatureNameKind;
-        if self.feature_name_exact {
-            FeatureNameKind::Exact
-        } else {
-            FeatureNameKind::Gene {
-                delim: self.feature_name_delim,
-            }
-        }
+        self.feature_name_kind.resolve_or_gene()
     }
 }

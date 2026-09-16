@@ -18,7 +18,7 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts, GeneSets};
 use auxiliary_data::ontology::Ontology;
 use log::{info, warn};
-use matrix_util::common_io::open_buf_reader;
+use matrix_util::common_io::{file_stem, open_buf_reader};
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
 
@@ -351,29 +351,6 @@ impl Corpus {
             warn!("corpus: no features with text");
         }
     }
-}
-
-/// Extensions a relation name never carries, stripped from the end of a
-/// file name repeatedly; dots inside the name stay.
-const STEM_EXTENSIONS: &[&str] = &["gz", "bz2", "zst", "tsv", "csv", "txt", "gaf", "gmt", "obo"];
-
-/// The file name minus its known extensions: the relation stem `senna fne`
-/// would give the same file, so the two tools agree on names.
-pub fn file_stem(path: &str) -> String {
-    let mut stem = std::path::Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string());
-    loop {
-        let Some((base, ext)) = stem.rsplit_once('.') else {
-            break;
-        };
-        if base.is_empty() || !STEM_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
-            break;
-        }
-        stem.truncate(base.len());
-    }
-    stem
 }
 
 /// UniProt's `FUNCTION: ... {ECO:...}. ...` → plain sentences.

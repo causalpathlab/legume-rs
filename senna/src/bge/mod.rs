@@ -25,7 +25,6 @@ use graph_embedding_util as ge;
 pub(crate) mod args;
 pub(crate) mod driver;
 mod multiome;
-pub(crate) mod preset;
 mod resolve_etm;
 pub(crate) mod score;
 pub(crate) mod transfer;
@@ -182,7 +181,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
     let preset_features = match args.feature_embedding.resolve() {
-        Some((prefix, freeze)) => Some(preset::load_preset_genes(
+        Some((prefix, freeze)) => Some(crate::feature_preset::load_preset_genes(
             prefix,
             freeze,
             &unified.feature_names,
@@ -190,17 +189,8 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         )?),
         None => None,
     };
-    // The loader refuses an empty match, so the division is exact.
-    let preset_h = preset_features
-        .as_ref()
-        .map(|f| f.rows.len() / f.gene.len());
     let embedding_dim =
-        crate::topic::common::resolve_embedding_dim_from_table(args.embedding_dim, preset_h)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--embedding-dim 0 takes H from a given feature embedding; none was given"
-                )
-            })?;
+        crate::feature_preset::resolve_dim(args.embedding_dim, preset_features.as_ref())?;
 
     driver::fit_embed_family(driver::EmbedPlan {
         kind: crate::run_manifest::RunKind::Bge,

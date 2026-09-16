@@ -2,7 +2,7 @@
 //! the PBG table, write the artifacts and the manifest.
 
 use super::args::FneArgs;
-use super::graph::{file_stem, TypedGraphBuilder};
+use super::graph::TypedGraphBuilder;
 use super::output::{write_outputs, write_text_export};
 use crate::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
@@ -10,6 +10,7 @@ use auxiliary_data::ontology::Ontology;
 use graph_embedding_util::fne::{train, FneConfig};
 use graph_embedding_util::stop::setup_stop_handler;
 use log::info;
+use matrix_util::common_io::file_stem;
 use matrix_util::common_io::mkdir_parent;
 
 pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
@@ -106,28 +107,52 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         graph.relations.len()
     );
 
+    // Gene rows given from outside: matched on the gene type's names, then
+    // lifted to the global ids of those nodes.
+    let gene_nodes: Vec<u32> = (0..graph.node_names.len() as u32)
+        .filter(|&i| graph.node_types[i as usize].as_ref() == super::graph::GENE_TYPE)
+        .collect();
+    let preset_genes = match args.feature_embedding.resolve() {
+        Some((prefix, freeze)) => {
+            let gene_names: Vec<Box<str>> = gene_nodes
+                .iter()
+                .map(|&i| graph.node_names[i as usize].clone())
+                .collect();
+            Some(crate::feature_preset::load_preset_genes(
+                prefix,
+                freeze,
+                &gene_names,
+                &args.name_kind(),
+            )?)
+        }
+        None => None,
+    };
+    let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset_genes.as_ref())?;
+    let preset =
+        preset_genes.map(|p| crate::feature_preset::preset_rows(p, |g| gene_nodes[g as usize]));
     let stop = setup_stop_handler();
     let cfg = FneConfig {
-        dim: args.embedding_dim,
-        epochs: args.epochs,
-        lr: args.learning_rate,
-        batch_size: args.batch_size,
-        num_batch_negs: args.num_batch_negs,
-        num_uniform_negs: args.num_uniform_negs,
-        wd: args.weight_decay,
-        wd_interval: args.wd_interval,
-        eval_fraction: args.eval_fraction,
+        dim,
+        epochs: args.train.epochs,
+        lr: args.train.learning_rate,
+        batch_size: args.train.batch_size,
+        num_batch_negs: args.train.num_batch_negs,
+        num_uniform_negs: args.train.num_uniform_negs,
+        wd: args.train.weight_decay,
+        wd_interval: args.train.wd_interval,
+        eval_fraction: args.train.eval_fraction,
         eval_min_per_relation: args.eval_min_per_relation,
         relation_repeats: graph.relation_repeats.clone(),
-        seed: args.seed,
-        device: args.device.to_device(args.device_no)?,
+        preset,
+        seed: args.train.seed,
+        device: args.train.device.to_device(args.train.device_no)?,
     };
     // The trainer shuffles the edge list in place; hand it over rather
     // than copying every edge. The two tables are small and stay with the
     // graph for the writers.
     let edges = std::mem::take(&mut graph.edges);
     let out = train(edges, graph.types.clone(), graph.relations.clone(), &cfg)?;
-    if args.weight_decay.is_none() && out.wd > 1.0 {
+    if args.train.weight_decay.is_none() && out.wd > 1.0 {
         log::warn!(
             "fne: the automatic weight decay came out at {:.3}; it is SIMBA's calibration, \
              which scales inversely with the edge count and suits graphs of millions of \
@@ -182,7 +207,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         info!(
             "Stopped early — outputs reflect partial training ({} of {} epochs)",
             out.epochs.len(),
-            args.epochs
+            args.train.epochs
         );
     } else {
         info!(

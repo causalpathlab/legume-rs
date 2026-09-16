@@ -1,4 +1,5 @@
 use super::*;
+use matrix_util::common_io::file_stem;
 use std::io::Write;
 
 fn tmp(contents: &str, suffix: &str) -> tempfile::NamedTempFile {

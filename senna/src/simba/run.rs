@@ -94,20 +94,31 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     //////////////
     // Training //
     //////////////
+    let preset = match args.feature_embedding.resolve() {
+        Some((prefix, freeze)) => Some(crate::feature_preset::load_preset_genes(
+            prefix,
+            freeze,
+            &gene_names,
+            &ge::FeatureNameKind::Gene { delim: '_' },
+        )?),
+        None => None,
+    };
+    let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset.as_ref())?;
     let cfg = SimbaConfig {
-        dim: args.embedding_dim,
-        epochs: args.epochs,
-        lr: args.learning_rate,
-        batch_size: args.batch_size,
-        num_batch_negs: args.num_batch_negs,
-        num_uniform_negs: args.num_uniform_negs,
-        wd: args.weight_decay,
-        wd_interval: args.wd_interval,
-        eval_fraction: args.eval_fraction,
+        dim,
+        epochs: args.train.epochs,
+        lr: args.train.learning_rate,
+        batch_size: args.train.batch_size,
+        num_batch_negs: args.train.num_batch_negs,
+        num_uniform_negs: args.train.num_uniform_negs,
+        wd: args.train.weight_decay,
+        wd_interval: args.train.wd_interval,
+        eval_fraction: args.train.eval_fraction,
         n_bins: args.n_bins,
         coembed_t: args.coembed_temp,
-        seed: args.seed,
-        device: args.device.to_device(args.device_no)?,
+        preset_genes: preset.map(|p| crate::feature_preset::preset_rows(p, |g| g)),
+        seed: args.train.seed,
+        device: args.train.device.to_device(args.train.device_no)?,
     };
     let out = run_simba(data, &hvg_rows, &cfg)?;
 
