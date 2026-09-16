@@ -32,28 +32,21 @@ pub(crate) mod batch;
 pub(crate) mod discretize;
 pub(crate) mod graph;
 pub(crate) mod metrics;
-pub(crate) mod row_adagrad;
 pub(crate) mod train;
 
+pub use crate::fne::{EpochStats, RowAdagrad, ADAGRAD_EPS, INIT_STDEV, MASK_NEG};
 pub use discretize::Discretization;
 pub use graph::{auto_wd, EdgeList, RelationTable};
 pub use metrics::{compare_entities, EntityMetrics};
-pub use row_adagrad::RowAdagrad;
-pub use train::{train, EpochStats, TrainOutput};
+pub use train::{train, TrainOutput};
 
 use candle_util::candle_core::{Device, Tensor};
 use data_beans::sparse_io_vector::SparseIoVec;
 
-/// PBG `init_scale`: each coordinate of both tables starts at `N(0, 1e-3)`.
-pub const INIT_STDEV: f64 = 1e-3;
 /// `si.pp.normalize(method='lib_size')` scale factor.
 pub const SCALE_FACTOR: f64 = 1e4;
 /// `si.tl.discretize(max_bins=100)`: bins of the initial histogram.
 pub const HIST_BINS: usize = 100;
-/// PBG's "ignore this negative" score.
-pub const MASK_NEG: f64 = -1e9;
-/// PBG `RowAdagrad` denominator floor.
-pub const ADAGRAD_EPS: f64 = 1e-10;
 /// `si.tl.compare_entities(n_top_cells=50)`.
 pub const N_TOP_CELLS: usize = 50;
 /// `si.tl.compare_entities(T=1)`.

@@ -439,27 +439,26 @@ enum Commands {
     Simba(SimbaArgs),
 
     #[command(
-        about = "Latent feature model over a feature-feature edge list.",
-        long_about = "Learns per-feature latent embeddings from an edge list.\n\
+        about = "Typed feature-graph embedding (PyTorch-BigGraph) over edge lists.",
+        long_about = "Learns one embedding per node of a typed feature graph.\n\
                       No expression data is involved.\n\
                       \n\
-                      Input is a TSV/CSV of feature-feature edges. BioGRID, STRING,\n\
-                      KEGG and regulatory networks all fit.\n\
+                      Positional inputs are gene-gene pair files (BioGRID, STRING, KEGG,\n\
+                      co-expression), each its own relation. --edges takes typed files,\n\
+                      `lhs_type lhs rhs_type rhs [weight]`, so genes can link to cell types,\n\
+                      ontology terms, genomic windows or words; rows sharing a type pair\n\
+                      form one relation.\n\
                       \n\
-                      Embeddings E ∈ ℝ^{D×H} come from a link-prediction model.\n\
-                      That model is a continuous Miller-Griffiths-Jordan.\n  \
-                      \n  \
-                      s(i, j) = (E_i ⊙ γ) · E_j + b_i + b_j\n  \
+                      Training is PyTorch-BigGraph's recipe, the one `senna simba` uses:\n\
+                      a softmax loss over in-batch and uniform negatives on both sides,\n\
+                      uniform negatives drawn inside the relation's own node types,\n\
+                      row-wise Adagrad and stochastic weight decay. The score is a plain\n\
+                      dot product; relation and per-edge weights scale the loss.\n\
                       \n\
-                      Training is binary cross-entropy. Negative sampling is degree^α,\n\
-                      the node2vec convention. The model is symmetric by construction.\n\
-                      \n\
-                      Writes {out}.feature_embedding.parquet. feature_bias, gamma,\n\
-                      log_likelihood and senna.json ship too.\n\
-                      \n\
-                      The output shape matches the freeze loader.\n\
-                      That is `senna masked-topic --freeze-feature-embedding`.\n\
-                      An `fne` run is a direct gene-side input downstream."
+                      Writes {out}.feature_embedding.parquet over every node with its type\n\
+                      in {out}.feature_types.parquet, plus relations, log_likelihood and\n\
+                      senna.json. The gene rows feed `senna masked-topic\n\
+                      --freeze-feature-embedding` directly; other types are ignored there."
     )]
     Fne(FneArgs),
 

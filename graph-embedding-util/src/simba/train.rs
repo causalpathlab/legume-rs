@@ -19,8 +19,7 @@
 
 use super::batch::{EpochBatcher, PaddedBatch};
 use super::graph::{auto_wd, EdgeList, RelationTable};
-use super::row_adagrad::RowAdagrad;
-use super::{SimbaConfig, INIT_STDEV, MASK_NEG};
+use super::{EpochStats, RowAdagrad, SimbaConfig, INIT_STDEV, MASK_NEG};
 use crate::loss::softmax_nce;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
@@ -29,17 +28,6 @@ use matrix_util::traits::SampleOps;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::ops::Range;
 use std::sync::atomic::Ordering;
-
-/// Per-epoch record: losses are per edge, weight decay excluded (PBG's
-/// `Stats.loss`).
-#[derive(Clone, Debug)]
-pub struct EpochStats {
-    pub epoch: usize,
-    pub train_loss: f64,
-    pub eval_loss: Option<f64>,
-    /// Batches that drew the weight-decay term this epoch.
-    pub wd_hits: usize,
-}
 
 pub struct TrainOutput {
     /// `[N, D]` on the CPU, detached.
