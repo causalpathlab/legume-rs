@@ -674,7 +674,14 @@ pub fn apply(
         decay(row, opt.e_u.lr);
         opt.e_u.update(u, row, &grads.e_u[i * h..(i + 1) * h]);
     }
+    // A pinned table takes the bias step alone: the row keeps its value and
+    // its accumulator sees only the bias gradient.
     for m in 0..params.b_m.len() {
+        if params.mu_frozen {
+            opt.mu
+                .update(m, std::slice::from_mut(&mut params.b_m[m]), &[grads.b_m[m]]);
+            continue;
+        }
         let row = &mut params.mu[m * h..(m + 1) * h];
         decay(row, opt.mu.lr);
         opt.mu.update_with_bias(
@@ -691,6 +698,11 @@ pub fn apply(
     for ((g, gr), &(gb_gene, gb)) in grads.r.iter().zip(&grads.b_g) {
         debug_assert_eq!(*g, gb_gene);
         let gi = *g as usize;
+        if params.is_frozen_gene(gi) {
+            opt.r
+                .update(gi, std::slice::from_mut(&mut params.b_g[gi]), &[gb]);
+            continue;
+        }
         let row = &mut params.r[gi * h..(gi + 1) * h];
         decay(row, opt.r.lr);
         opt.r.update_with_bias(gi, row, &mut params.b_g[gi], gr, gb);

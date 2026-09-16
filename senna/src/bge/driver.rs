@@ -105,6 +105,9 @@ pub(crate) struct EmbedPlan<'a> {
     /// Ridge on the per-track offsets (`FitConfig.offset_l2`); inert at one
     /// track. bge always passes `0.0`.
     pub offset_l2: f32,
+    /// Gene rows given up front (`senna bge --{freeze,init}-feature-embedding`),
+    /// pinned or only started from; `None` = every row trains. gem passes `None`.
+    pub preset_features: Option<ge::fit::hier::PresetGenes>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: crate::run_manifest::TrainArgsRecord,
@@ -147,7 +150,8 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // `unified`. Kept as a closure (rather than inlined) even though this
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
-    let build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
+    let mut preset_features = plan.preset_features.take();
+    let mut build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
             unified
                 .feature_to_backend_row
@@ -199,6 +203,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .as_ref()
                 .map(crate::gem::tracks::TrackPlan::to_ge),
             offset_l2: plan.offset_l2,
+            preset_features: preset_features.take(),
         })
     };
 

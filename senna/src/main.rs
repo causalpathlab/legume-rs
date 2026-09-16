@@ -53,6 +53,7 @@ mod embed_common;
 mod embed_diag;
 mod empirical_dict;
 mod eval_topic;
+mod feature_embedding_args;
 mod fne;
 mod gem;
 mod geometry;

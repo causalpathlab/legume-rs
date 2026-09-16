@@ -47,6 +47,24 @@ pub struct HierParams {
     pub b_g: Vec<f32>,
     /// Tracks `1..T`; empty at `T == 1`.
     pub offsets: Vec<TrackOffset>,
+    /// Per gene, whether its residual row is pinned (see [`Self::preset`]).
+    /// Empty when nothing is frozen, so the plain model pays no lookup.
+    pub frozen_gene: Vec<bool>,
+    /// Whether the module dictionary `μ` is pinned. Set together with
+    /// `frozen_gene`; the biases `b_m` / `b_g` always train.
+    pub mu_frozen: bool,
+}
+
+/// Gene rows handed to phase 1 from outside: `rows` is `[gene.len() × H]`
+/// row-major, one row per entry of `gene`, which indexes the gene axis. With
+/// `freeze` every listed gene keeps its row for the whole fit; without it the
+/// rows are the starting point and train on. Unlisted genes train freely
+/// either way.
+#[derive(Clone, Debug)]
+pub struct PresetGenes {
+    pub gene: Vec<u32>,
+    pub rows: Vec<f32>,
+    pub freeze: bool,
 }
 
 fn randn(n: usize, seed: u64) -> Vec<f32> {
@@ -81,7 +99,69 @@ impl HierParams {
             offsets: (1..n_tracks)
                 .map(|_| TrackOffset::zeros(n_modules, n_genes, h))
                 .collect(),
+            frozen_gene: Vec::new(),
+            mu_frozen: false,
         }
+    }
+
+    /// Set the listed genes' composed rows `μ_{m(g)} + r_g` to `preset.rows`.
+    ///
+    /// `μ` becomes the mean of the given rows in each module (a module with no
+    /// given member keeps its random `μ`, which its free members' residuals
+    /// absorb), and each given gene's residual is `r_g = row − μ_m`, so the
+    /// row composes back exactly. Under `preset.freeze` both `μ` and those
+    /// residuals are then pinned; otherwise they train on from there. Free
+    /// genes keep their random residual either way; every bias keeps training.
+    pub fn preset(&mut self, frozen: &PresetGenes, module_of: &[u32]) -> anyhow::Result<()> {
+        let (h, n_genes, n_modules) = (self.h, module_of.len(), self.b_m.len());
+        anyhow::ensure!(
+            frozen.rows.len() == frozen.gene.len() * h,
+            "frozen rows are {} values for {} genes at H={h}",
+            frozen.rows.len(),
+            frozen.gene.len()
+        );
+        let mut count = vec![0usize; n_modules];
+        let mut sum = vec![0f32; n_modules * h];
+        for (i, &g) in frozen.gene.iter().enumerate() {
+            let g = g as usize;
+            anyhow::ensure!(
+                g < n_genes,
+                "frozen gene {g} is outside the {n_genes}-gene axis"
+            );
+            let m = module_of[g] as usize;
+            count[m] += 1;
+            for k in 0..h {
+                sum[m * h + k] += frozen.rows[i * h + k];
+            }
+        }
+        for m in 0..n_modules {
+            if count[m] > 0 {
+                let inv = 1.0 / count[m] as f32;
+                for k in 0..h {
+                    self.mu[m * h + k] = sum[m * h + k] * inv;
+                }
+            }
+        }
+        for (i, &g) in frozen.gene.iter().enumerate() {
+            let g = g as usize;
+            let m = module_of[g] as usize;
+            for k in 0..h {
+                self.r[g * h + k] = frozen.rows[i * h + k] - self.mu[m * h + k];
+            }
+        }
+        if frozen.freeze {
+            self.frozen_gene = vec![false; n_genes];
+            for &g in &frozen.gene {
+                self.frozen_gene[g as usize] = true;
+            }
+            self.mu_frozen = true;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn is_frozen_gene(&self, g: usize) -> bool {
+        self.frozen_gene.get(g).copied().unwrap_or(false)
     }
 
     /// Track `t`'s offsets; `None` for the base track and for an unknown one.

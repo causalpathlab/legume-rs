@@ -25,6 +25,7 @@ use graph_embedding_util as ge;
 pub(crate) mod args;
 pub(crate) mod driver;
 mod multiome;
+pub(crate) mod preset;
 mod resolve_etm;
 pub(crate) mod score;
 pub(crate) mod transfer;
@@ -180,15 +181,51 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
+    let preset_features = match args.feature_embedding.resolve() {
+        Some((prefix, freeze)) => Some(preset::load_preset_genes(
+            prefix,
+            freeze,
+            &unified.feature_names,
+            &feature_kind,
+        )?),
+        None => None,
+    };
+    let preset_h = preset_features
+        .as_ref()
+        .map(|f| f.rows.len() / f.gene.len().max(1));
+    anyhow::ensure!(
+        args.embedding_dim > 0 || preset_h.is_some(),
+        "--embedding-dim 0 takes H from a given feature embedding; none was given"
+    );
+    let embedding_dim = match (preset_h, args.embedding_dim) {
+        (Some(h), 0) => {
+            info!("--embedding-dim taken from the given feature embedding: H = {h}");
+            h
+        }
+        (Some(h), explicit) => {
+            anyhow::ensure!(
+                h == explicit,
+                "--embedding-dim {explicit} disagrees with the given feature embedding (H = {h}); \
+                 pass 0 to take H from it"
+            );
+            explicit
+        }
+        (None, explicit) => explicit,
+    };
+
     driver::fit_embed_family(driver::EmbedPlan {
         kind: crate::run_manifest::RunKind::Bge,
-        knobs: args.knobs(),
+        knobs: driver::EmbedKnobs {
+            embedding_dim,
+            ..args.knobs()
+        },
         unified,
         data_files,
         multiome: run_multiome,
         hvg_weights: hvg_full,
         tracks: None,
         offset_l2: 0.0,
+        preset_features,
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
         train_args: crate::run_manifest::record_train_args(args)?,
