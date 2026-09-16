@@ -21,6 +21,7 @@ use super::graph::NodeTypeTable;
 use super::{INIT_STDEV, MASK_NEG};
 use crate::loss::softmax_nce;
 use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
+use candle_util::fast_index::gather_rows;
 use matrix_util::rand_util::name_seed;
 use matrix_util::traits::SampleOps;
 
@@ -31,6 +32,8 @@ pub(crate) struct ScoreBlocks {
     pub lhs_bat: Tensor,
     pub rhs_uni: Option<Tensor>,
     pub lhs_uni: Option<Tensor>,
+    /// `[k·c]` per-row loss weights, already on the device.
+    pub row_w: Tensor,
 }
 
 pub(crate) struct FneModel {
@@ -81,21 +84,28 @@ impl FneModel {
         let d = self.e.dim(1)?;
         let p = k * c;
         let table = self.e.as_tensor();
-        let lhs = Tensor::from_slice(&b.lhs, p, dev)?;
-        let rhs = Tensor::from_slice(&b.rhs, p, dev)?;
-        let l = table.index_select(&lhs, 0)?.reshape((k, c, d))?;
-        let r = table.index_select(&rhs, 0)?.reshape((k, c, d))?;
+        // Two host→device copies per batch: every id array in one, every
+        // float array in the other, sliced on the device.
+        let ids: Vec<u32> = [&b.lhs[..], &b.rhs[..], &b.uni_lhs[..], &b.uni_rhs[..]].concat();
+        let ids = Tensor::from_slice(&ids, ids.len(), dev)?;
+        let floats: Vec<f32> = [&b.col_valid[..], &b.row_w[..]].concat();
+        let floats = Tensor::from_slice(&floats, floats.len(), dev)?;
+        let l = gather_rows(table, &ids.narrow(0, 0, p)?)?.reshape((k, c, d))?;
+        let r = gather_rows(table, &ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
         let pos = (&l * &r)?.sum(2)?; // [k, c]
                                       // `(1 − valid) · MASK_NEG` on pad columns, plus the cached diagonal.
-        let pad = Tensor::from_slice(&b.col_valid, (k, 1, c), dev)?.affine(-MASK_NEG, MASK_NEG)?;
+        let pad = floats
+            .narrow(0, 0, p)?
+            .reshape((k, 1, c))?
+            .affine(-MASK_NEG, MASK_NEG)?;
+        let row_w = floats.narrow(0, p, p)?;
         let mask = (self.diag_neg.broadcast_as((k, c, c))? + pad.broadcast_as((k, c, c))?)?;
         let rhs_bat = (l.matmul(&r.t()?)? + &mask)?;
         let lhs_bat = (r.matmul(&l.t()?)? + &mask)?;
         let (rhs_uni, lhs_uni) = if u > 0 {
-            let ul_idx = Tensor::from_slice(&b.uni_lhs, k * u, dev)?;
-            let ur_idx = Tensor::from_slice(&b.uni_rhs, k * u, dev)?;
-            let ul = table.index_select(&ul_idx, 0)?.reshape((k, u, d))?;
-            let ur = table.index_select(&ur_idx, 0)?.reshape((k, u, d))?;
+            let ul = gather_rows(table, &ids.narrow(0, 2 * p, k * u)?)?.reshape((k, u, d))?;
+            let ur =
+                gather_rows(table, &ids.narrow(0, 2 * p + k * u, k * u)?)?.reshape((k, u, d))?;
             (Some(l.matmul(&ur.t()?)?), Some(r.matmul(&ul.t()?)?))
         } else {
             (None, None)
@@ -106,6 +116,7 @@ impl FneModel {
             lhs_bat,
             rhs_uni,
             lhs_uni,
+            row_w,
         })
     }
 
@@ -124,8 +135,7 @@ impl FneModel {
             lhs_negs.push(t.reshape((p, b.u))?);
         }
         let per_row = (softmax_nce(&pos, &rhs_negs)? + softmax_nce(&pos, &lhs_negs)?)?;
-        let row_w = Tensor::from_slice(&b.row_w, p, dev)?;
-        (per_row * row_w)?.sum_all()
+        (per_row * s.row_w)?.sum_all()
     }
 
     /// `Σ‖E‖²` — PBG's `l2_norm()` over the node table, through one

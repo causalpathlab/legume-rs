@@ -42,8 +42,9 @@ pub(crate) struct PaddedBatch {
 
 /// Per-relation queues of edge indices for one epoch.
 pub(crate) struct EpochBatcher {
-    queues: Vec<Range<usize>>,
-    next: Vec<usize>,
+    /// What is left of each relation's block; `start` advances as batches
+    /// are handed out.
+    remaining: Vec<Range<usize>>,
     batch_size: usize,
 }
 
@@ -53,19 +54,14 @@ impl EpochBatcher {
     /// hand out.
     pub fn new(blocks: &[Range<usize>], batch_size: usize) -> Self {
         Self {
-            next: vec![0; blocks.len()],
-            queues: blocks.to_vec(),
+            remaining: blocks.to_vec(),
             batch_size: batch_size.max(1),
         }
     }
 
     /// Edges not yet handed out this epoch.
     pub fn remaining(&self) -> usize {
-        self.queues
-            .iter()
-            .zip(&self.next)
-            .map(|(q, &n)| q.len() - n)
-            .sum()
+        self.remaining.iter().map(Range::len).sum()
     }
 
     /// The next single-relation batch, or `None` once the epoch is drained.
@@ -85,19 +81,17 @@ impl EpochBatcher {
         let c = c.max(1);
         // Multinomial over the relations' remaining edge counts.
         let mut x = rng.random_range(0..total);
-        let mut r = self.queues.len() - 1;
-        for (i, q) in self.queues.iter().enumerate() {
-            let rem = q.len() - self.next[i];
-            if x < rem {
+        let mut r = self.remaining.len() - 1;
+        for (i, q) in self.remaining.iter().enumerate() {
+            if x < q.len() {
                 r = i;
                 break;
             }
-            x -= rem;
+            x -= q.len();
         }
-        let rem = self.queues[r].len() - self.next[r];
-        let n_real = rem.min(self.batch_size);
-        let first = self.queues[r].start + self.next[r];
-        self.next[r] += n_real;
+        let n_real = self.remaining[r].len().min(self.batch_size);
+        let first = self.remaining[r].start;
+        self.remaining[r].start += n_real;
 
         let k = n_real.div_ceil(c);
         let p = k * c;
