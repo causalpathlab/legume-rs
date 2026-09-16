@@ -11,7 +11,7 @@ mod sources;
 mod vocab;
 
 use anyhow::Result;
-use auxiliary_data::feature_names::FeatureNameKind;
+use auxiliary_data::feature_names::FeatureNameKindArg;
 use candle_core::{Device, Tensor};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use edges::{
@@ -117,28 +117,16 @@ struct SourceArgs {
     gmt: Vec<String>,
     #[arg(
         long,
-        default_value_t = '_',
-        help = "Delimiter for canonical gene-name matching"
+        value_enum,
+        default_value = "gene",
+        help = "How gene names are matched (`gene`: last `_` token is canonical; `exact`)"
     )]
-    feature_name_delim: char,
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Keep gene names exactly as given"
-    )]
-    feature_name_exact: bool,
+    feature_name_kind: FeatureNameKindArg,
 }
 
 impl SourceArgs {
     fn corpus(&self) -> Result<Corpus> {
-        let kind = if self.feature_name_exact {
-            FeatureNameKind::Exact
-        } else {
-            FeatureNameKind::Gene {
-                delim: self.feature_name_delim,
-            }
-        };
-        let mut c = Corpus::new(kind);
+        let mut c = Corpus::new(self.feature_name_kind.resolve_or_gene());
         for p in &self.text {
             c.add_generic_tsv(p)?;
         }

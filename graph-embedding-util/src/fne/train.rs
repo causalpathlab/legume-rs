@@ -3,12 +3,11 @@
 //! decay, and a per-relation evaluation hold-out scored with the same loss.
 
 use super::batch::{EpochBatcher, PaddedBatch};
-use super::graph::{NodeTypeTable, RelationTable, TypedEdgeList};
+use super::graph::{auto_wd, NodeTypeTable, RelationTable, TypedEdgeList};
 use super::model::FneModel;
 use super::row_adagrad::RowAdagrad;
 use super::{EpochStats, FneConfig};
 use crate::progress::new_progress_bar;
-use crate::simba::auto_wd;
 use candle_util::candle_core::{DType, Device, Tensor};
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::ops::Range;
@@ -231,7 +230,24 @@ pub fn train(
         );
     }
 
-    let model = FneModel::new(&types, cfg.dim, cfg.num_batch_negs, cfg.seed, dev)?;
+    let mut model = FneModel::new(&types, cfg.dim, cfg.num_batch_negs, cfg.seed, dev)?;
+    let grad_mask = match cfg.preset.as_ref() {
+        Some(p) => {
+            let mask = model.apply_preset(p, dev)?;
+            log::info!(
+                "fne: {} of {} rows {}",
+                p.node.len(),
+                types.n_total(),
+                if p.freeze {
+                    "pinned to the given table; the rest train"
+                } else {
+                    "start from the given table and train on"
+                }
+            );
+            mask
+        }
+        None => None,
+    };
     let mut opt = RowAdagrad::new(types.n_total(), cfg.lr, dev)?;
 
     let mut epochs = Vec::with_capacity(cfg.epochs);
@@ -272,7 +288,12 @@ pub fn train(
                 };
                 let grads = total.backward()?;
                 if let Some(g) = grads.get(&model.e) {
-                    opt.step(&model.e, g)?;
+                    // A pinned row's gradient is zeroed, so its Adagrad step
+                    // (loss and weight decay alike) is exactly zero.
+                    match grad_mask.as_ref() {
+                        Some(m) => opt.step(&model.e, &g.broadcast_mul(m)?)?,
+                        None => opt.step(&model.e, g)?,
+                    }
                 }
                 Ok(loss)
             },

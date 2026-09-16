@@ -15,11 +15,10 @@ use auxiliary_data::ontology::{Ontology, Rel};
 use genomic_data::coordinates::{parse_region, tile_windows};
 use graph_embedding_util::fne::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
 use log::{info, warn};
-use matrix_util::common_io::read_lines_of_words_delim;
+use matrix_util::common_io::{file_stem, read_lines_of_words_delim};
 use matrix_util::membership::detect_delimiter;
 use matrix_util::pair_graph::FeaturePairGraph;
 use rustc_hash::FxHashMap;
-use std::path::Path;
 
 pub(crate) use auxiliary_data::feature_types::{GENE_TYPE, REGION_TYPE, TERM_TYPE};
 
@@ -29,14 +28,6 @@ pub(crate) struct NodeText {
     pub name: Option<Box<str>>,
     pub text: Option<Box<str>>,
 }
-
-/// Extensions a relation name never carries; stripped from the end of a
-/// file name, repeatedly (`x.tsv.gz` → `x`). Dots inside the name stay,
-/// so a versioned release like `BIOGRID-Homo_sapiens-5.0.256` keeps its
-/// version.
-const STEM_EXTENSIONS: &[&str] = &[
-    "gz", "bz2", "zst", "tsv", "csv", "txt", "tab", "gaf", "gmt", "obo", "bed",
-];
 
 /// What to do with a pair file beyond reading it: QC on the raw edges,
 /// then derived relations. Every field 0 = off.
@@ -70,25 +61,6 @@ impl PpiOpts {
 /// unit degree below which a node is not pushed. Small enough that the
 /// top-k of a gene with hundreds of partners is resolved.
 const PPR_EPS: f64 = 1e-6;
-
-/// `<stem>` of a path for relation names: the file name minus its known
-/// extensions.
-pub(crate) fn file_stem(path: &str) -> String {
-    let mut stem = Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string());
-    loop {
-        let Some((base, ext)) = stem.rsplit_once('.') else {
-            break;
-        };
-        if base.is_empty() || !STEM_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
-            break;
-        }
-        stem.truncate(base.len());
-    }
-    stem
-}
 
 struct TypeNodes {
     name: Box<str>,

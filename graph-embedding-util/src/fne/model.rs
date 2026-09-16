@@ -72,6 +72,35 @@ impl FneModel {
         Self::assemble(Var::from_tensor(&e)?, c, &dev)
     }
 
+    /// Overwrite the listed rows with `preset.rows` and, under `freeze`,
+    /// return the `[N, 1]` gradient mask that is `0` on those rows.
+    pub(crate) fn apply_preset(
+        &mut self,
+        preset: &super::PresetRows,
+        dev: &Device,
+    ) -> anyhow::Result<Option<Tensor>> {
+        let (n, d) = self.e.dims2()?;
+        anyhow::ensure!(
+            preset.rows.len() == preset.node.len() * d,
+            "fne: preset rows are {} values for {} nodes at D={d}",
+            preset.rows.len(),
+            preset.node.len()
+        );
+        let mut flat = self.e.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+        let mut keep = vec![1f32; n];
+        for (i, &g) in preset.node.iter().enumerate() {
+            let g = g as usize;
+            anyhow::ensure!(g < n, "fne: preset node {g} is outside the {n}-node table");
+            flat[g * d..(g + 1) * d].copy_from_slice(&preset.rows[i * d..(i + 1) * d]);
+            keep[g] = 0.0;
+        }
+        self.e.set(&Tensor::from_vec(flat, (n, d), dev)?)?;
+        Ok(preset
+            .freeze
+            .then(|| Tensor::from_vec(keep, (n, 1), dev))
+            .transpose()?)
+    }
+
     fn assemble(e: Var, c: usize, dev: &Device) -> Result<Self> {
         let diag_neg = Tensor::eye(c.max(1), DType::F32, dev)?
             .affine(MASK_NEG, 0.0)?

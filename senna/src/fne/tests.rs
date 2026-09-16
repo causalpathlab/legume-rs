@@ -38,14 +38,14 @@ fn gene_kind() -> FeatureNameKind {
 fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
     let a: FneArgs = parse_args(&["fne", "-o", "x"]);
     assert_eq!(a.embedding_dim, 128);
-    assert_eq!(a.epochs, 10);
-    assert_eq!(a.learning_rate, 0.1);
-    assert_eq!(a.batch_size, 1000);
-    assert_eq!(a.num_batch_negs, 50);
-    assert_eq!(a.num_uniform_negs, 50);
-    assert_eq!(a.weight_decay, None);
-    assert_eq!(a.wd_interval, 50);
-    assert_eq!(a.eval_fraction, 0.05);
+    assert_eq!(a.train.epochs, 10);
+    assert_eq!(a.train.learning_rate, 0.1);
+    assert_eq!(a.train.batch_size, 1000);
+    assert_eq!(a.train.num_batch_negs, 50);
+    assert_eq!(a.train.num_uniform_negs, 50);
+    assert_eq!(a.train.weight_decay, None);
+    assert_eq!(a.train.wd_interval, 50);
+    assert_eq!(a.train.eval_fraction, 0.05);
     assert!(a.networks.is_empty());
     assert!(a.edges.is_empty());
     let b: FneArgs = parse_args(&[
@@ -62,14 +62,15 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
         "--no-ppi-ppr",
         "--lr",
         "0.05",
-        "--feature-name-exact",
+        "--feature-name-kind",
+        "exact",
         "-o",
         "x",
     ]);
     assert_eq!(b.networks.len(), 2);
     assert_eq!(b.edges.len(), 2);
     assert_eq!(b.relation_weight.len(), 2);
-    assert_eq!(b.learning_rate, 0.05);
+    assert_eq!(b.train.learning_rate, 0.05);
     assert_eq!((b.ppi_max_degree, b.ppi_snn_k, b.no_ppi_ppr), (50, 2, true));
     assert_eq!(b.ppi_ppr_restart, 0.15);
     // Derived relations are on by default; the QC prunes are off.
@@ -94,7 +95,7 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
 
 #[test]
 fn the_relation_stem_drops_known_extensions_but_keeps_dots_inside_the_name() {
-    use super::graph::file_stem;
+    use matrix_util::common_io::file_stem;
     assert_eq!(file_stem("/x/y/biogrid.tsv"), "biogrid");
     assert_eq!(
         file_stem("BIOGRID-Homo_sapiens-5.0.256.unique_pairs.protein_coding.tsv.gz"),
@@ -718,4 +719,78 @@ fn fne_takes_every_side_information_source_at_once_and_exports_the_text() {
     // --gaf without --obo is refused up front.
     let bad: FneArgs = parse_args(&["fne", "--gaf", &gaf, "-o", &out]);
     assert!(fit_fne(&bad).is_err());
+}
+
+/// Freezing to an earlier run's table: the matched gene rows come out of a
+/// second run exactly as the first run wrote them, at the first run's H even
+/// with `--embedding-dim 0`, while the other nodes still train.
+#[test]
+fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ppi, typed) = planted_inputs(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let common = [
+        "--batch-size",
+        "16",
+        "--num-batch-negs",
+        "4",
+        "--num-uniform-negs",
+        "4",
+        "--eval-fraction",
+        "0",
+    ];
+    let mut argv = vec![
+        "fne",
+        &ppi,
+        "--edges",
+        &typed,
+        "--embedding-dim",
+        "6",
+        "-i",
+        "3",
+    ];
+    argv.extend_from_slice(&common);
+    argv.extend_from_slice(&["-o", &first]);
+    let a: FneArgs = parse_args(&argv);
+    fit_fne(&a).unwrap();
+    let mut argv = vec![
+        "fne",
+        &ppi,
+        "--edges",
+        &typed,
+        "--freeze-feature-embedding",
+        &first,
+        "--embedding-dim",
+        "0",
+        "-i",
+        "5",
+        "--seed",
+        "7",
+    ];
+    argv.extend_from_slice(&common);
+    argv.extend_from_slice(&["-o", &second]);
+    let b: FneArgs = parse_args(&argv);
+    fit_fne(&b).unwrap();
+
+    let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let e2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    assert_eq!(e2.mat.ncols(), 6, "H taken from the table");
+    let row = |e: &matrix_util::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
+        let i = e.rows.iter().position(|r| r.as_ref() == name).unwrap();
+        e.mat.row(i).iter().copied().collect()
+    };
+    for g in 0..10 {
+        let name = format!("G{g}");
+        assert_eq!(row(&e1, &name), row(&e2, &name), "{name} is pinned");
+    }
+    assert_ne!(row(&e1, "CT0"), row(&e2, "CT0"), "a cell type still trains");
+    let m: RunManifest =
+        serde_json::from_str(&std::fs::read_to_string(format!("{second}.senna.json")).unwrap())
+            .unwrap();
+    let recorded = &m.train_args.as_ref().unwrap().args;
+    assert_eq!(
+        recorded["freeze_feature_embedding"].as_str(),
+        Some(first.as_str())
+    );
 }
