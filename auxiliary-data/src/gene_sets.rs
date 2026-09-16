@@ -138,11 +138,13 @@ pub struct GafRaw {
 
 /// Parse a GAF (`.gaf` or `.gaf.gz`). Columns (1-based) used: 2 = object id /
 /// accession, 3 = symbol (the gene key), 4 = qualifier (rows with `NOT` are
-/// dropped), 5 = GO id, 7 = evidence code (for `no_iea`), 11 = synonyms. The
-/// symbol, accession, and pipe-split synonyms are kept as match aliases.
+/// dropped), 5 = GO id, 7 = evidence code (for `no_iea`), 11 = synonyms,
+/// 12 = object type (only proteins and genes are kept). The symbol,
+/// accession, and pipe-split synonyms are kept as match aliases.
 pub fn read_gaf(path: &str, opts: &GafOpts) -> Result<GafRaw> {
     let reader = open_buf_reader(path).with_context(|| format!("failed to open GAF: {path}"))?;
     let mut gene2direct: FxHashMap<Box<str>, FxHashSet<Box<str>>> = FxHashMap::default();
+    let mut n_other_objects = 0usize;
     let mut gene_aliases: FxHashMap<Box<str>, FxHashSet<Box<str>>> = FxHashMap::default();
     for line in reader.lines() {
         let line = line?;
@@ -164,6 +166,13 @@ pub fn read_gaf(path: &str, opts: &GafOpts) -> Result<GafRaw> {
         if opts.no_iea && f[6].trim() == "IEA" {
             continue;
         }
+        // Column 12 is the object type; a gene graph places proteins and
+        // genes, not miRNAs, rRNAs or protein complexes, whose GAF symbols
+        // (`hsa-miR-21-5p`, `abeta-42-oligomer_human`) are not gene names.
+        if !matches!(f[11].trim(), "protein" | "gene" | "gene_product" | "") {
+            n_other_objects += 1;
+            continue;
+        }
         let key: Box<str> = symbol.to_uppercase().into();
         let aliases = gene_aliases.entry(key.clone()).or_default();
         aliases.insert(key.clone());
@@ -175,6 +184,11 @@ pub fn read_gaf(path: &str, opts: &GafOpts) -> Result<GafRaw> {
             aliases.insert(syn.to_uppercase().into());
         }
         gene2direct.entry(key).or_default().insert(go.into());
+    }
+    if n_other_objects > 0 {
+        log::info!(
+            "{path}: {n_other_objects} rows on non-protein objects (RNAs, complexes) skipped"
+        );
     }
     Ok(GafRaw {
         gene2direct,
@@ -365,6 +379,41 @@ impl Reconciled {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn gaf_rows_on_rnas_and_complexes_are_skipped() {
+        let row = |sym: &str, go: &str, ty: &str| {
+            let mut c = vec![""; 17];
+            c[0] = "UniProtKB";
+            c[1] = "P1";
+            c[2] = sym;
+            c[3] = "involved_in";
+            c[4] = go;
+            c[5] = "PMID:1";
+            c[6] = "IDA";
+            c[8] = "P";
+            c[10] = sym;
+            c[11] = ty;
+            c[12] = "taxon:9606";
+            c[13] = "20200101";
+            c[14] = "UniProt";
+            format!("{}\n", c.join("\t"))
+        };
+        let text = format!(
+            "!gaf-version: 2.2\n{}{}{}{}",
+            row("TP53", "GO:1", "protein"),
+            row("hsa-miR-21-5p", "GO:1", "miRNA"),
+            row("abeta-42-oligomer_human", "GO:1", "protein_complex"),
+            row("BAX", "GO:2", "gene")
+        );
+        let f = tmp(&text, ".gaf");
+        let gs = read_gaf(f.path().to_str().unwrap(), &GafOpts::default())
+            .unwrap()
+            .into_gene_sets(None);
+        let mut genes: Vec<&str> = gs.gene_aliases.keys().map(|k| k.as_ref()).collect();
+        genes.sort();
+        assert_eq!(genes, vec!["BAX", "TP53"]);
+    }
 
     #[test]
     fn membership_pairs_skip_headers_comments_and_short_rows_and_keep_labels_verbatim() {

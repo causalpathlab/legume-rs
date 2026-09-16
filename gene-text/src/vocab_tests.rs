@@ -203,3 +203,29 @@ fn the_vocabulary_round_trips_through_its_tsv() {
     assert_eq!(back.entries.len(), v.entries.len());
     assert!((back.idf(back.index["mid"]) - v.idf(v.index["mid"])).abs() < 1e-12);
 }
+
+#[test]
+fn abbreviations_and_unit_tokens_fall_with_the_short_words() {
+    let t = tokenize(
+        "kinases, e.g. MAPK, i.e. the 5.8S rRNA, E.coli strains, TP53",
+        &opts(false),
+    );
+    let words: Vec<&str> = t.iter().map(|o| o.word.as_ref()).collect();
+    assert_eq!(
+        words,
+        vec!["kinases", "mapk", "rrna", "e.coli", "strains", "tp53"]
+    );
+}
+
+#[test]
+fn msigdb_collection_prefixes_and_direction_tags_are_filler() {
+    let t = tokenize(
+        "HALLMARK INTERFERON GAMMA RESPONSE UP; REACTOME apoptosis DN; KEGG glycolysis",
+        &opts(false),
+    );
+    let words: Vec<&str> = t.iter().map(|o| o.word.as_ref()).collect();
+    assert_eq!(
+        words,
+        vec!["interferon", "gamma", "apoptosis", "glycolysis"]
+    );
+}

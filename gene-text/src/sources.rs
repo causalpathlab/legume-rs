@@ -15,7 +15,7 @@
 
 use anyhow::{Context, Result};
 use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::gene_sets::read_gmt;
+use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts, GeneSets};
 use auxiliary_data::ontology::Ontology;
 use log::{info, warn};
 use matrix_util::common_io::open_buf_reader;
@@ -47,6 +47,17 @@ impl Doc {
     }
 }
 
+/// A gene → term membership read alongside the text: the structural
+/// relation the text sources carry (GMT sets, GAF annotations), which
+/// `senna fne` needs as `gene:term` edges beside the word edges.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Membership {
+    pub gene: Box<str>,
+    pub term: Box<str>,
+    /// Which relation the edge belongs to: the source file's stem.
+    pub source: Box<str>,
+}
+
 /// Docs keyed by `(type, feature)`; a later source fills only what an
 /// earlier one left empty.
 #[derive(Default)]
@@ -54,6 +65,9 @@ pub struct Corpus {
     docs: Vec<Doc>,
     index: FxHashMap<(Box<str>, Box<str>), usize>,
     name_kind: FeatureNameKind,
+    memberships: Vec<Membership>,
+    /// Loaded `--obo` ontologies, for propagating `--gaf` annotations.
+    ontologies: Vec<Ontology>,
 }
 
 impl Corpus {
@@ -102,6 +116,42 @@ impl Corpus {
     #[must_use]
     pub fn docs(&self) -> &[Doc] {
         &self.docs
+    }
+
+    /// Every gene → term membership the sources carried.
+    #[must_use]
+    pub fn memberships(&self) -> &[Membership] {
+        &self.memberships
+    }
+
+    /// Whether a document has a description beyond its name — the text
+    /// similarity of two name-only documents is the similarity of two
+    /// labels, which is not worth an edge.
+    #[must_use]
+    pub fn has_description(&self, i: usize) -> bool {
+        !self.docs[i].text.is_empty()
+    }
+
+    /// Gene-set members are already symbols (GAF column 3, GMT genes), so
+    /// they are kept as given: the ENSG-delimiter rule would cut
+    /// `TP53_HUMAN`-style keys down to their suffix.
+    fn add_gene_sets(&mut self, sets: &GeneSets, source: &str) -> usize {
+        let mut terms: Vec<&Box<str>> = sets.term_genes.keys().collect();
+        terms.sort();
+        let mut n = 0usize;
+        for term in terms {
+            let mut genes: Vec<&Box<str>> = sets.term_genes[term].iter().collect();
+            genes.sort();
+            for g in genes {
+                self.memberships.push(Membership {
+                    gene: g.clone(),
+                    term: term.clone(),
+                    source: source.into(),
+                });
+                n += 1;
+            }
+        }
+        n
     }
 
     #[must_use]
@@ -225,7 +275,8 @@ impl Corpus {
         Ok(())
     }
 
-    /// Every term of an OBO ontology with its name and definition.
+    /// Every term of an OBO ontology with its name and definition. The
+    /// ontology is kept so a later `--gaf` propagates through it.
     pub fn add_obo(&mut self, path: &str) -> Result<()> {
         let onto = Ontology::load_obo(path)?;
         let mut n = 0usize;
@@ -239,11 +290,32 @@ impl Corpus {
             n += 1;
         }
         info!("{path}: {n} ontology terms with text");
+        self.ontologies.push(onto);
+        Ok(())
+    }
+
+    /// GO annotations: gene → term memberships, propagated up every loaded
+    /// `--obo` (the true-path rule) when one is present. Terms get their
+    /// text from the ontology; a GAF alone yields memberships only.
+    pub fn add_gaf(&mut self, path: &str, no_iea: bool) -> Result<()> {
+        let raw = read_gaf(path, &GafOpts { no_iea })?;
+        let sets = raw.into_gene_sets(self.ontologies.first());
+        let n = self.add_gene_sets(&sets, &file_stem(path));
+        info!(
+            "{path}: {n} gene→term annotations over {} terms{}",
+            sets.n_terms(),
+            if self.ontologies.is_empty() {
+                " (no --obo: not propagated)"
+            } else {
+                ", propagated up the ontology"
+            }
+        );
         Ok(())
     }
 
     /// GMT sets: the description column as text, or nothing when it is a
-    /// URL (MSigDB), in which case the set name is all there is.
+    /// URL (MSigDB), in which case the set name is all there is; and the
+    /// sets' gene memberships.
     pub fn add_gmt(&mut self, path: &str) -> Result<()> {
         let sets = read_gmt(path)?;
         let mut n = 0usize;
@@ -257,7 +329,8 @@ impl Corpus {
             self.push(TERM_TYPE, term, &term.replace('_', " "), desc);
             n += 1;
         }
-        info!("{path}: {n} gene sets");
+        let m = self.add_gene_sets(&sets, &file_stem(path));
+        info!("{path}: {n} gene sets, {m} gene→term memberships");
         Ok(())
     }
 
@@ -279,6 +352,29 @@ impl Corpus {
             warn!("corpus: no features with text");
         }
     }
+}
+
+/// Extensions a relation name never carries, stripped from the end of a
+/// file name repeatedly; dots inside the name stay.
+const STEM_EXTENSIONS: &[&str] = &["gz", "bz2", "zst", "tsv", "csv", "txt", "gaf", "gmt", "obo"];
+
+/// The file name minus its known extensions: the relation stem `senna fne`
+/// would give the same file, so the two tools agree on names.
+pub fn file_stem(path: &str) -> String {
+    let mut stem = std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    loop {
+        let Some((base, ext)) = stem.rsplit_once('.') else {
+            break;
+        };
+        if base.is_empty() || !STEM_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+            break;
+        }
+        stem.truncate(base.len());
+    }
+    stem
 }
 
 /// UniProt's `FUNCTION: ... {ECO:...}. ...` → plain sentences.
