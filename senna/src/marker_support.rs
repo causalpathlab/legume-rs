@@ -4,7 +4,6 @@
 
 use crate::embed_common::Mat;
 use data_beans::utilities::name_matching::GeneIndex;
-use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
 use rustc_hash::FxHashSet as HashSet;
 
 /// Flexible gene-name matching — delegates to the shared implementation in
@@ -18,24 +17,6 @@ pub use data_beans::utilities::name_matching::flexible_name_match as flexible_ge
 pub(crate) struct AnnotInfo {
     pub membership_ga: Mat,
     pub annot_names: Vec<Box<str>>,
-}
-
-/// Parse a gene/celltype TSV or CSV into `(gene, celltype)` pairs. Blank and
-/// single-token lines are silently skipped. The delimiter can be tab, comma,
-/// or space — whichever splits the first line into at least two tokens.
-pub(crate) fn read_marker_gene_info(file_path: &str) -> anyhow::Result<Vec<(Box<str>, Box<str>)>> {
-    let ReadLinesOut { lines, header: _ } = read_lines_of_words_delim(file_path, &['\t', ','], -1)?;
-
-    Ok(lines
-        .into_iter()
-        .filter_map(|words| {
-            if words.len() < 2 {
-                None
-            } else {
-                Some((words[0].clone(), words[1].clone()))
-            }
-        })
-        .collect())
 }
 
 /// Reweight binary membership in place: `w_g = ln(C / c_g)` where `c_g` is
@@ -69,7 +50,9 @@ pub(crate) fn build_annotation_matrix(
     marker_gene_path: &str,
     row_names: &[Box<str>],
 ) -> anyhow::Result<AnnotInfo> {
-    let marker_pairs = read_marker_gene_info(marker_gene_path)?;
+    // The shared membership reader: every gene→label file in the workspace
+    // is read the same way (header and `#` rows skipped, labels verbatim).
+    let marker_pairs = auxiliary_data::gene_sets::read_membership_pairs(marker_gene_path)?;
 
     if marker_pairs.is_empty() {
         return Err(anyhow::anyhow!("empty/invalid marker gene information"));

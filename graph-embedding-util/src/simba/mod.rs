@@ -6,10 +6,11 @@
 //! trained as free embeddings with PBG's softmax loss, batch + uniform
 //! negatives on both sides, row-wise Adagrad and stochastic weight decay.
 //!
-//! Self-contained on purpose: this module never touches the main trainer
-//! (`fit`, `JointEmbedModel`, pseudobulks, gene modules). It borrows only
-//! [`crate::loss::softmax_nce`], the progress bar and the stop flag, so it can
-//! serve as an independent baseline for `senna bge`.
+//! Independent of the main trainer (`fit`, `JointEmbedModel`, pseudobulks,
+//! gene modules) on purpose, so it can serve as a baseline for `senna bge`.
+//! The PBG loop itself is [`crate::fne`]'s typed engine, run here on two node
+//! types (`e_cell`, `e_gene`) and one relation per expression level; this
+//! module owns only the recipe around it.
 //!
 //! Recipe (verified against `pinellolab/simba` and `pinellolab/simba_pbg`):
 //! library-size normalize to [`SCALE_FACTOR`] and `log1p`; discretize the
@@ -21,39 +22,31 @@
 //! softmax co-embedding of genes onto cells and SIMBA's marker metrics.
 //!
 //! Stated deviations from SIMBA/PBG: the 5% evaluation edges are held out once
-//! (PBG re-draws them every epoch); the 1-D k-means is solved exactly by
+//! and per relation (PBG re-draws a global 5% every epoch); the 1-D k-means is solved exactly by
 //! dynamic programming rather than sklearn's seeded local search; and
 //! `si.pp.filter_genes(min_n_cells=3)` is not ported, so library sizes and the
 //! histogram see every gene as loaded (the HVG selection is the gene filter).
 //! The caller co-embeds genes onto the cells it keeps after QC, where SIMBA
 //! uses every cell of the graph.
 
-pub(crate) mod batch;
 pub(crate) mod discretize;
 pub(crate) mod graph;
 pub(crate) mod metrics;
-pub(crate) mod row_adagrad;
 pub(crate) mod train;
 
+pub use crate::fne::{auto_wd, EpochStats, RowAdagrad, ADAGRAD_EPS, INIT_STDEV, MASK_NEG};
 pub use discretize::Discretization;
-pub use graph::{auto_wd, EdgeList, RelationTable};
+pub use graph::{EdgeList, RelationTable};
 pub use metrics::{compare_entities, EntityMetrics};
-pub use row_adagrad::RowAdagrad;
-pub use train::{train, EpochStats, TrainOutput};
+pub use train::{train, TrainOutput};
 
 use candle_util::candle_core::{Device, Tensor};
 use data_beans::sparse_io_vector::SparseIoVec;
 
-/// PBG `init_scale`: each coordinate of both tables starts at `N(0, 1e-3)`.
-pub const INIT_STDEV: f64 = 1e-3;
 /// `si.pp.normalize(method='lib_size')` scale factor.
 pub const SCALE_FACTOR: f64 = 1e4;
 /// `si.tl.discretize(max_bins=100)`: bins of the initial histogram.
 pub const HIST_BINS: usize = 100;
-/// PBG's "ignore this negative" score.
-pub const MASK_NEG: f64 = -1e9;
-/// PBG `RowAdagrad` denominator floor.
-pub const ADAGRAD_EPS: f64 = 1e-10;
 /// `si.tl.compare_entities(n_top_cells=50)`.
 pub const N_TOP_CELLS: usize = 50;
 /// `si.tl.compare_entities(T=1)`.
@@ -85,6 +78,9 @@ pub struct SimbaConfig {
     pub n_bins: usize,
     /// `si.tl.embed(T)` for the caller's co-embedding.
     pub coembed_t: f64,
+    /// Gene rows given from outside, by index into `hvg_rows`: started from,
+    /// or pinned under `freeze` (see [`crate::fne::PresetRows`]).
+    pub preset_genes: Option<crate::fne::PresetRows>,
     pub seed: u64,
     pub device: Device,
 }
@@ -103,6 +99,7 @@ impl Default for SimbaConfig {
             eval_fraction: 0.05,
             n_bins: 5,
             coembed_t: 0.5,
+            preset_genes: None,
             seed: 1,
             device: Device::Cpu,
         }

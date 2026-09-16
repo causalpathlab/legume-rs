@@ -102,37 +102,73 @@ impl GeneAnnotations {
     }
 }
 
-/// Parse peak names in "chr:start-end" or "chr_start_end" format.
+/// The one coordinate grammar: `chr:start-end` / `chr_start_end`, and
+/// (when `allow_position`) a single position `chr:pos` / `chr_pos` as the
+/// one-base interval `[pos, pos + 1)`. The chromosome comes back as
+/// written. `None` when the name is not a coordinate.
+fn parse_coordinate(name: &str, allow_position: bool) -> Option<PeakCoord> {
+    let name = name.trim();
+    let (chr, rest) = name.split_once(':').or_else(|| name.split_once('_'))?;
+    if chr.is_empty() {
+        return None;
+    }
+    let (start, end) = match rest.split_once('-').or_else(|| rest.split_once('_')) {
+        Some((s, e)) => (s.parse::<i64>().ok()?, e.parse::<i64>().ok()?),
+        None if allow_position => {
+            let pos = rest.parse::<i64>().ok()?;
+            (pos, pos + 1)
+        }
+        None => return None,
+    };
+    (end > start).then_some(PeakCoord {
+        chr: chr.into(),
+        start,
+        end,
+    })
+}
+
+/// Parse peak names in "chr:start-end" or "chr_start_end" format, the
+/// chromosome kept verbatim.
 pub fn parse_peak_coordinates(peak_names: &[Box<str>]) -> Vec<Option<PeakCoord>> {
     peak_names
         .iter()
-        .map(|name| {
-            // Try chr:start-end
-            if let Some((chr, rest)) = name.split_once(':') {
-                if let Some((s, e)) = rest.split_once('-') {
-                    if let (Ok(start), Ok(end)) = (s.parse::<i64>(), e.parse::<i64>()) {
-                        return Some(PeakCoord {
-                            chr: chr.into(),
-                            start,
-                            end,
-                        });
-                    }
-                }
-            }
-            // Try chr_start_end
-            let parts: Vec<&str> = name.splitn(3, '_').collect();
-            if parts.len() == 3 {
-                if let (Ok(start), Ok(end)) = (parts[1].parse::<i64>(), parts[2].parse::<i64>()) {
-                    return Some(PeakCoord {
-                        chr: parts[0].into(),
-                        start,
-                        end,
-                    });
-                }
-            }
-            None
+        .map(|name| parse_coordinate(name, false))
+        .collect()
+}
+
+/// Parse one genomic region name: an interval `chr:start-end` /
+/// `chr_start_end`, or a single position `chr:pos` / `chr_pos` (a SNP),
+/// which becomes the one-base interval `[pos, pos + 1)`. The `chr` prefix
+/// is dropped so `chr1` and `1` name the same chromosome. `None` when the
+/// name is not a coordinate.
+pub fn parse_region(name: &str) -> Option<PeakCoord> {
+    let mut r = parse_coordinate(name, true)?;
+    r.chr = chr_stripped(&r.chr).into();
+    Some(r)
+}
+
+/// Tile a region onto fixed windows `[i·w, (i+1)·w)`: every window the
+/// region overlaps, ascending, on the region's chromosome. A window of 0 is
+/// the region itself.
+pub fn tile_windows(region: &PeakCoord, window: i64) -> Vec<PeakCoord> {
+    if window <= 0 {
+        return vec![region.clone()];
+    }
+    let first = region.start.div_euclid(window);
+    let last = (region.end - 1).max(region.start).div_euclid(window);
+    (first..=last)
+        .map(|i| PeakCoord {
+            chr: region.chr.clone(),
+            start: i * window,
+            end: (i + 1) * window,
         })
         .collect()
+}
+
+impl std::fmt::Display for PeakCoord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}-{}", self.chr, self.start, self.end)
+    }
 }
 
 /// Find peaks within a cis window of a gene's TSS.
@@ -247,6 +283,54 @@ pub fn load_gene_loci(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regions_parse_intervals_and_positions_in_both_spellings_without_the_chr_prefix() {
+        let r = parse_region("chr1:1000-2000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("1", 1000, 2000));
+        let r = parse_region("1_1000_2000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("1", 1000, 2000));
+        let r = parse_region("chrX:5000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("X", 5000, 5001));
+        let r = parse_region("X_5000").unwrap();
+        assert_eq!((r.chr.as_ref(), r.start, r.end), ("X", 5000, 5001));
+        assert!(parse_region("TP53").is_none());
+        assert!(parse_region("chr1:2000-1000").is_none(), "empty interval");
+        assert!(parse_region(":1-2").is_none());
+        assert_eq!(parse_region("chr2:10-20").unwrap().to_string(), "2:10-20");
+    }
+
+    #[test]
+    fn tiling_covers_every_overlapped_window_and_only_those() {
+        let r = parse_region("chr1:4999-10001").unwrap();
+        let w: Vec<String> = tile_windows(&r, 5000)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(w, vec!["1:0-5000", "1:5000-10000", "1:10000-15000"]);
+        let snp = parse_region("chr1:5000").unwrap();
+        let w: Vec<String> = tile_windows(&snp, 5000)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            w,
+            vec!["1:5000-10000"],
+            "a position at a boundary lands in one window"
+        );
+        let exact = parse_region("chr1:5000-10000").unwrap();
+        assert_eq!(
+            tile_windows(&exact, 5000).len(),
+            1,
+            "an exact window is one window"
+        );
+        assert_eq!(
+            tile_windows(&exact, 0).len(),
+            1,
+            "window 0 keeps the region"
+        );
+        assert_eq!(tile_windows(&exact, 0)[0].to_string(), "1:5000-10000");
+    }
 
     #[test]
     fn load_gene_loci_keeps_strand_and_tss() {

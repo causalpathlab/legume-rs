@@ -230,29 +230,14 @@ fn report_panel_coverage(
     Ok(())
 }
 
-/// Parse a marker TSV/CSV into `(gene, celltype)` pairs via the shared,
-/// gz-aware `read_lines_of_words_delim` (tab/comma — matching senna's marker
-/// reader). Takes the first two tokens per line, skips a `gene`/`symbol`
-/// header and `#` comments, and maps spaces in cell-type names → `_`.
+/// Parse a marker TSV/CSV into `(gene, celltype)` pairs through the shared
+/// membership reader (header and `#` rows skipped), mapping spaces in
+/// cell-type names → `_`.
 pub(super) fn read_marker_tsv(path: &str) -> Result<Vec<(Box<str>, Box<str>)>> {
-    let ReadLinesOut { lines, .. } = read_lines_of_words_delim(path, &['\t', ','][..], -1)
-        .with_context(|| format!("reading markers {path}"))?;
-    let out: Vec<(Box<str>, Box<str>)> = lines
+    let out: Vec<(Box<str>, Box<str>)> = auxiliary_data::gene_sets::read_membership_pairs(path)
+        .with_context(|| format!("reading markers {path}"))?
         .into_iter()
-        .filter_map(|words| {
-            let gene = words.first()?.trim();
-            let ct = words.get(1)?.trim();
-            let gl = gene.to_lowercase();
-            if gene.is_empty()
-                || gene.starts_with('#')
-                || ct.is_empty()
-                || gl == "gene"
-                || gl == "symbol"
-            {
-                return None;
-            }
-            Some((Box::from(gene), Box::from(ct.replace(' ', "_"))))
-        })
+        .map(|(gene, ct)| (gene, Box::from(ct.replace(' ', "_"))))
         .collect();
     anyhow::ensure!(!out.is_empty(), "no marker pairs parsed from {path}");
     Ok(out)

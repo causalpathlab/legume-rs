@@ -180,15 +180,31 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
+    let preset_features = match args.feature_embedding.resolve() {
+        Some((prefix, freeze)) => Some(crate::feature_preset::load_preset_genes(
+            prefix,
+            freeze,
+            &unified.feature_names,
+            &feature_kind,
+        )?),
+        None => None,
+    };
+    let embedding_dim =
+        crate::feature_preset::resolve_dim(args.embedding_dim, preset_features.as_ref())?;
+
     driver::fit_embed_family(driver::EmbedPlan {
         kind: crate::run_manifest::RunKind::Bge,
-        knobs: args.knobs(),
+        knobs: driver::EmbedKnobs {
+            embedding_dim,
+            ..args.knobs()
+        },
         unified,
         data_files,
         multiome: run_multiome,
         hvg_weights: hvg_full,
         tracks: None,
         offset_l2: 0.0,
+        preset_features,
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
         train_args: crate::run_manifest::record_train_args(args)?,

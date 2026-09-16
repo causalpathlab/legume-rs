@@ -1,4 +1,4 @@
-BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli
+BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli gene-text
 
 # Binaries with no `cuda` / `metal` feature to pass. `faba` reads BAM files and
 # writes sparse matrices; nothing on that path touches a GPU, and the
