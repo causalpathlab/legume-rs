@@ -102,36 +102,37 @@ impl GeneAnnotations {
     }
 }
 
-/// Parse peak names in "chr:start-end" or "chr_start_end" format.
+/// The one coordinate grammar: `chr:start-end` / `chr_start_end`, and
+/// (when `allow_position`) a single position `chr:pos` / `chr_pos` as the
+/// one-base interval `[pos, pos + 1)`. The chromosome comes back as
+/// written. `None` when the name is not a coordinate.
+fn parse_coordinate(name: &str, allow_position: bool) -> Option<PeakCoord> {
+    let name = name.trim();
+    let (chr, rest) = name.split_once(':').or_else(|| name.split_once('_'))?;
+    if chr.is_empty() {
+        return None;
+    }
+    let (start, end) = match rest.split_once('-').or_else(|| rest.split_once('_')) {
+        Some((s, e)) => (s.parse::<i64>().ok()?, e.parse::<i64>().ok()?),
+        None if allow_position => {
+            let pos = rest.parse::<i64>().ok()?;
+            (pos, pos + 1)
+        }
+        None => return None,
+    };
+    (end > start).then_some(PeakCoord {
+        chr: chr.into(),
+        start,
+        end,
+    })
+}
+
+/// Parse peak names in "chr:start-end" or "chr_start_end" format, the
+/// chromosome kept verbatim.
 pub fn parse_peak_coordinates(peak_names: &[Box<str>]) -> Vec<Option<PeakCoord>> {
     peak_names
         .iter()
-        .map(|name| {
-            // Try chr:start-end
-            if let Some((chr, rest)) = name.split_once(':') {
-                if let Some((s, e)) = rest.split_once('-') {
-                    if let (Ok(start), Ok(end)) = (s.parse::<i64>(), e.parse::<i64>()) {
-                        return Some(PeakCoord {
-                            chr: chr.into(),
-                            start,
-                            end,
-                        });
-                    }
-                }
-            }
-            // Try chr_start_end
-            let parts: Vec<&str> = name.splitn(3, '_').collect();
-            if parts.len() == 3 {
-                if let (Ok(start), Ok(end)) = (parts[1].parse::<i64>(), parts[2].parse::<i64>()) {
-                    return Some(PeakCoord {
-                        chr: parts[0].into(),
-                        start,
-                        end,
-                    });
-                }
-            }
-            None
-        })
+        .map(|name| parse_coordinate(name, false))
         .collect()
 }
 
@@ -141,24 +142,9 @@ pub fn parse_peak_coordinates(peak_names: &[Box<str>]) -> Vec<Option<PeakCoord>>
 /// is dropped so `chr1` and `1` name the same chromosome. `None` when the
 /// name is not a coordinate.
 pub fn parse_region(name: &str) -> Option<PeakCoord> {
-    let name = name.trim();
-    let (chr, rest) = name.split_once(':').or_else(|| name.split_once('_'))?;
-    let chr: Box<str> = chr_stripped(chr).into();
-    if chr.is_empty() {
-        return None;
-    }
-    let (s, e) = match rest.split_once('-').or_else(|| rest.split_once('_')) {
-        Some((s, e)) => (s.parse::<i64>().ok()?, e.parse::<i64>().ok()?),
-        None => {
-            let pos = rest.parse::<i64>().ok()?;
-            (pos, pos + 1)
-        }
-    };
-    (e > s).then_some(PeakCoord {
-        chr,
-        start: s,
-        end: e,
-    })
+    let mut r = parse_coordinate(name, true)?;
+    r.chr = chr_stripped(&r.chr).into();
+    Some(r)
 }
 
 /// Tile a region onto fixed windows `[i·w, (i+1)·w)`: every window the

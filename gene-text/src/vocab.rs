@@ -14,95 +14,20 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::{BufRead, Write};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Biomedical filler the general stopword lists miss: words that appear in
-/// most descriptions and say nothing about which gene this is.
-pub const BUILTIN_FILLER: &[&str] = &[
-    "protein",
-    "proteins",
-    "gene",
-    "genes",
-    "involved",
-    "activity",
-    "process",
-    "processes",
-    "function",
-    "functions",
-    "functional",
-    "may",
-    "also",
-    "known",
-    "family",
-    "member",
-    "members",
-    "encodes",
-    "encoded",
-    "encoding",
-    "role",
-    "roles",
-    "plays",
-    "play",
-    "required",
-    "mediated",
-    "mediates",
-    "component",
-    "components",
-    "via",
-    "including",
-    "several",
-    "various",
-    "different",
-    "specific",
-    "type",
-    "types",
-    "well",
-    "one",
-    "two",
-    "three",
-    "high",
-    "low",
-    "level",
-    "levels",
-    "cell",
-    "cells",
-    "cellular",
-    "human",
-    "mouse",
-    "expressed",
-    "expression",
-    "form",
-    "forms",
-    "isoform",
-    "isoforms",
-    "domain",
-    "domains",
-    "containing",
-    "contains",
-    "associated",
-    "associate",
-    "related",
-    "like",
-    "belongs",
-    "found",
-    "acts",
-    "act",
-    "part",
-    "term",
-    "positive",
-    "negative",
-    "response",
-    "involves",
-    "within",
-    "toward",
-    "towards",
-    "either",
-    "whether",
-    "thereby",
-    "thus",
-    "however",
-    "although",
-    "which",
-    "whose",
-];
+/// Biomedical filler the general stopword lists miss, one word per line
+/// (`#` comments): words that appear in most descriptions and say nothing
+/// about which gene this is. A data file, like `--extra-stopwords`, so
+/// tuning it is a word-list edit rather than a code change.
+pub const BUILTIN_FILLER: &str = include_str!("../data/filler_stopwords.txt");
+
+/// The words of a stopword list: one per line, lowercased, `#` comments
+/// and blank lines skipped.
+fn stopword_lines(text: &str) -> impl Iterator<Item = Box<str>> + '_ {
+    text.lines()
+        .map(|l| l.trim().to_lowercase())
+        .filter(|w| !w.is_empty() && !w.starts_with('#'))
+        .map(Box::from)
+}
 
 /// Tokeniser settings.
 #[derive(Clone, Debug)]
@@ -120,21 +45,13 @@ impl TokenizeOpts {
             .iter()
             .map(|w| Box::from(w.to_lowercase()))
             .collect();
-        stopwords.extend(BUILTIN_FILLER.iter().map(|w| Box::from(*w)));
+        stopwords.extend(stopword_lines(BUILTIN_FILLER));
         if let Some(path) = extra {
-            let reader = matrix_util::common_io::open_buf_reader(path)
+            let text = std::fs::read_to_string(path)
                 .with_context(|| format!("opening stopwords {path}"))?;
-            let mut n = 0usize;
-            for line in reader.lines() {
-                let w = line?;
-                let w = w.trim().to_lowercase();
-                if w.is_empty() || w.starts_with('#') {
-                    continue;
-                }
-                stopwords.insert(w.into());
-                n += 1;
-            }
-            info!("{path}: {n} extra stopwords");
+            let before = stopwords.len();
+            stopwords.extend(stopword_lines(&text));
+            info!("{path}: {} extra stopwords", stopwords.len() - before);
         }
         Ok(Self {
             min_chars,
@@ -225,6 +142,13 @@ pub struct VocabEntry {
     pub verdict: Verdict,
 }
 
+/// The kept words of a vocabulary, their df, and the word → index map.
+struct KeptWords {
+    words: Vec<Box<str>>,
+    df: Vec<usize>,
+    index: FxHashMap<Box<str>, usize>,
+}
+
 /// The vocabulary after QC: kept words indexed, every candidate reported.
 pub struct Vocabulary {
     pub entries: Vec<VocabEntry>,
@@ -233,6 +157,8 @@ pub struct Vocabulary {
     pub index: FxHashMap<Box<str>, usize>,
     /// The kept words, in `entries` order.
     pub kept: Vec<Box<str>>,
+    /// `df` of every kept word, parallel to `kept`.
+    pub kept_df: Vec<usize>,
     pub lower_cut: Option<usize>,
     pub upper_cut: Option<usize>,
 }
@@ -240,16 +166,24 @@ pub struct Vocabulary {
 impl Vocabulary {
     #[must_use]
     pub fn idf(&self, word_idx: usize) -> f64 {
-        let df = self.entries_of_kept(word_idx).df as f64;
+        let df = self.kept_df[word_idx] as f64;
         ((1.0 + self.n_docs as f64) / (1.0 + df)).ln()
     }
 
-    fn entries_of_kept(&self, word_idx: usize) -> &VocabEntry {
-        let w = &self.kept[word_idx];
-        self.entries
+    /// The kept words and their df, in `entries` order, plus the word index.
+    fn kept_of(entries: &[VocabEntry]) -> KeptWords {
+        let kept: Vec<&VocabEntry> = entries
             .iter()
-            .find(|e| &e.word == w)
-            .expect("kept word has an entry")
+            .filter(|e| e.verdict == Verdict::Kept)
+            .collect();
+        let words: Vec<Box<str>> = kept.iter().map(|e| e.word.clone()).collect();
+        let df: Vec<usize> = kept.iter().map(|e| e.df).collect();
+        let index = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.clone(), i))
+            .collect();
+        KeptWords { words, df, index }
     }
 
     /// Build from per-document token lists: df counts each word once per
@@ -312,21 +246,17 @@ impl Vocabulary {
             v - n_rare - n_common
         );
         log_tails(&entries);
-        let kept: Vec<Box<str>> = entries
-            .iter()
-            .filter(|e| e.verdict == Verdict::Kept)
-            .map(|e| e.word.clone())
-            .collect();
-        let index = kept
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.clone(), i))
-            .collect();
+        let KeptWords {
+            words: kept,
+            df: kept_df,
+            index,
+        } = Self::kept_of(&entries);
         Self {
             entries,
             n_docs,
             index,
             kept,
+            kept_df,
             lower_cut,
             upper_cut,
         }
@@ -382,16 +312,11 @@ impl Vocabulary {
             });
         }
         entries.sort_by(|a, b| a.df.cmp(&b.df).then_with(|| a.word.cmp(&b.word)));
-        let kept: Vec<Box<str>> = entries
-            .iter()
-            .filter(|e| e.verdict == Verdict::Kept)
-            .map(|e| e.word.clone())
-            .collect();
-        let index = kept
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.clone(), i))
-            .collect();
+        let KeptWords {
+            words: kept,
+            df: kept_df,
+            index,
+        } = Self::kept_of(&entries);
         info!(
             "{path}: {} kept words of {} listed",
             kept.len(),
@@ -402,6 +327,7 @@ impl Vocabulary {
             n_docs,
             index,
             kept,
+            kept_df,
             lower_cut: None,
             upper_cut: None,
         })

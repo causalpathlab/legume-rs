@@ -2,7 +2,7 @@
 //! single-relation batch, RowAdagrad on the flat table, stochastic weight
 //! decay, and a per-relation evaluation hold-out scored with the same loss.
 
-use super::batch::EpochBatcher;
+use super::batch::{EpochBatcher, PaddedBatch};
 use super::graph::{NodeTypeTable, RelationTable, TypedEdgeList};
 use super::model::FneModel;
 use super::row_adagrad::RowAdagrad;
@@ -56,18 +56,63 @@ impl RelationAcc {
         self.seen.iter().sum()
     }
 
-    /// `(Σ over relations, per-relation mean per edge)`; a relation with
-    /// nothing seen reports NaN.
+    /// `(Σ over relations, per-relation mean per edge)` in one device
+    /// sync; a relation with nothing seen reports NaN.
     fn finish(&self) -> anyhow::Result<(f64, Vec<f64>)> {
-        let mut total = 0.0;
-        let mut per = Vec::with_capacity(self.sums.len());
-        for (s, &n) in self.sums.iter().zip(&self.seen) {
-            let v = f64::from(s.to_scalar::<f32>()?);
-            total += v;
-            per.push(if n > 0 { v / n as f64 } else { f64::NAN });
-        }
+        let sums = Tensor::stack(&self.sums, 0)?.to_vec1::<f32>()?;
+        let total: f64 = sums.iter().map(|&v| f64::from(v)).sum();
+        let per = sums
+            .iter()
+            .zip(&self.seen)
+            .map(|(&v, &n)| {
+                if n > 0 {
+                    f64::from(v) / n as f64
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect();
         Ok((total, per))
     }
+}
+
+/// Hand every batch of `blocks` to `step` and accumulate the per-relation
+/// losses it returns — the one loop both training and evaluation drain
+/// through, so their batching can never drift apart. Returns the
+/// accumulator and whether the stop flag interrupted the pass.
+#[allow(clippy::too_many_arguments)]
+fn drain_blocks(
+    blocks: &[Range<usize>],
+    edges: &TypedEdgeList,
+    types: &NodeTypeTable,
+    rels: &RelationTable,
+    cfg: &FneConfig,
+    dev: &Device,
+    rng: &mut StdRng,
+    bar: Option<&indicatif::ProgressBar>,
+    mut step: impl FnMut(&PaddedBatch) -> anyhow::Result<Tensor>,
+) -> anyhow::Result<(RelationAcc, bool)> {
+    let stop = crate::stop::stop_flag();
+    let mut batcher = EpochBatcher::new(blocks, cfg.batch_size);
+    let mut acc = RelationAcc::new(rels.len(), dev)?;
+    while let Some(b) = batcher.next_batch(
+        edges,
+        types,
+        rels,
+        cfg.num_batch_negs,
+        cfg.num_uniform_negs,
+        rng,
+    ) {
+        let loss = step(&b)?;
+        acc.add(b.rel, &loss, b.n_real)?;
+        if let Some(bar) = bar {
+            bar.inc(b.n_real as u64);
+        }
+        if bar.is_some() && stop.load(Ordering::Relaxed) {
+            return Ok((acc, true));
+        }
+    }
+    Ok((acc, false))
 }
 
 pub struct FneOutput {
@@ -173,60 +218,60 @@ pub fn train(
 
     let model = FneModel::new(&types, cfg.dim, cfg.num_batch_negs, cfg.seed, dev)?;
     let mut opt = RowAdagrad::new(types.n_total(), cfg.lr, dev)?;
-    let stop = crate::stop::stop_flag();
 
     let mut epochs = Vec::with_capacity(cfg.epochs);
     for epoch in 0..cfg.epochs {
         for b in &train_blocks {
             edges.shuffle_range(b.clone(), &mut rng);
         }
-        let mut batcher = EpochBatcher::new(&train_blocks, cfg.batch_size);
-        let mut acc = RelationAcc::new(rels.len(), dev)?;
         let mut hits = 0usize;
-        let mut interrupted = false;
         let bar = new_progress_bar(n_train as u64);
         bar.set_message(format!("fne epoch {}/{}", epoch + 1, cfg.epochs));
-        while let Some(b) = batcher.next_batch(
+        // The weight-decay draw needs its own RNG stream: the batcher
+        // borrows `rng` for the whole pass.
+        let mut wd_rng = StdRng::seed_from_u64(cfg.seed ^ (epoch as u64 + 1).rotate_left(32));
+        let (acc, interrupted) = drain_blocks(
+            &train_blocks,
             &edges,
             &types,
             &rels,
-            cfg.num_batch_negs,
-            cfg.num_uniform_negs,
+            cfg,
+            dev,
             &mut rng,
-        ) {
-            let loss = model.batch_loss(&b, dev)?;
-            let total = if wd > 0.0 && rng.random::<f64>() < wd_prob {
-                hits += 1;
-                (&loss + model.frob_sq()?.affine(wd_scale, 0.0)?)?
-            } else {
-                loss.clone()
-            };
-            let grads = total.backward()?;
-            if let Some(g) = grads.get(&model.e) {
-                opt.step(&model.e, g)?;
-            }
-            acc.add(b.rel, &loss, b.n_real)?;
-            bar.inc(b.n_real as u64);
-            if stop.load(Ordering::Relaxed) {
-                interrupted = true;
-                break;
-            }
-        }
+            Some(&bar),
+            |b| {
+                let loss = model.batch_loss(b, dev)?;
+                let total = if wd > 0.0 && wd_rng.random::<f64>() < wd_prob {
+                    hits += 1;
+                    (&loss + model.frob_sq()?.affine(wd_scale, 0.0)?)?
+                } else {
+                    loss.clone()
+                };
+                let grads = total.backward()?;
+                if let Some(g) = grads.get(&model.e) {
+                    opt.step(&model.e, g)?;
+                }
+                Ok(loss)
+            },
+        )?;
         bar.finish_and_clear();
         // Per edge actually seen, so an interrupted epoch is not under-reported.
         let (train_sum, train_per_rel) = acc.finish()?;
         let train_loss = train_sum / acc.total_seen().max(1) as f64;
         let eval = if n_eval > 0 {
-            Some(eval_loss(
-                &model,
-                &edges,
+            let (acc, _) = drain_blocks(
                 &eval_blocks,
+                &edges,
                 &types,
                 &rels,
                 cfg,
                 dev,
                 &mut rng,
-            )?)
+                None,
+                |b| Ok(model.batch_loss(b, dev)?),
+            )?;
+            let (sum, per) = acc.finish()?;
+            Some((sum / n_eval as f64, per))
         } else {
             None
         };
@@ -282,36 +327,6 @@ pub fn train(
         n_train_edges: n_train,
         n_eval_edges: n_eval,
     })
-}
-
-/// Mean per-edge loss over the held-out blocks, same negatives, no update:
-/// `(over every relation, per relation)`.
-#[allow(clippy::too_many_arguments)]
-fn eval_loss(
-    model: &FneModel,
-    edges: &TypedEdgeList,
-    blocks: &[Range<usize>],
-    types: &NodeTypeTable,
-    rels: &RelationTable,
-    cfg: &FneConfig,
-    dev: &Device,
-    rng: &mut StdRng,
-) -> anyhow::Result<(f64, Vec<f64>)> {
-    let n: usize = blocks.iter().map(Range::len).sum::<usize>().max(1);
-    let mut batcher = EpochBatcher::new(blocks, cfg.batch_size);
-    let mut acc = RelationAcc::new(rels.len(), dev)?;
-    while let Some(b) = batcher.next_batch(
-        edges,
-        types,
-        rels,
-        cfg.num_batch_negs,
-        cfg.num_uniform_negs,
-        rng,
-    ) {
-        acc.add(b.rel, &model.batch_loss(&b, dev)?, b.n_real)?;
-    }
-    let (total, per) = acc.finish()?;
-    Ok((total / n as f64, per))
 }
 
 #[cfg(test)]

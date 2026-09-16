@@ -153,6 +153,13 @@ impl TypedGraphBuilder {
         r
     }
 
+    /// One edge from parsed names: resolve both nodes, insert the edge.
+    fn link(&mut self, r: usize, lt: &str, lhs: &str, rt: &str, rhs: &str, weight: f32) {
+        let (_, i) = self.node(lt, lhs);
+        let (_, j) = self.node(rt, rhs);
+        self.add_edge(r, i, j, weight);
+    }
+
     fn add_edge(&mut self, r: usize, lhs: u32, rhs: u32, weight: f32) {
         let rel = &mut self.relations[r];
         let key = if rel.undirected {
@@ -189,9 +196,7 @@ impl TypedGraphBuilder {
                 continue;
             }
             let weight = parse_weight(line.get(2).map(AsRef::as_ref), path)?;
-            let (_, i) = self.node(GENE_TYPE, &line[0]);
-            let (_, j) = self.node(GENE_TYPE, &line[1]);
-            self.add_edge(r, i, j, weight);
+            self.link(r, GENE_TYPE, &line[0], GENE_TYPE, &line[1], weight);
             n_rows += 1;
         }
         let rel = &self.relations[r];
@@ -224,9 +229,7 @@ impl TypedGraphBuilder {
             let rel_name = format!("{lt}:{rt}");
             let r = self.relation(&rel_name, lt, rt);
             let weight = parse_weight(line.get(4).map(AsRef::as_ref), path)?;
-            let (_, i) = self.node(lt, &line[1]);
-            let (_, j) = self.node(rt, &line[3]);
-            self.add_edge(r, i, j, weight);
+            self.link(r, lt, &line[1], rt, &line[3], weight);
             if !touched.contains(&r) {
                 touched.push(r);
             }
@@ -270,9 +273,7 @@ impl TypedGraphBuilder {
         let rel_name = format!("{GENE_TYPE}:{ty}/{}", file_stem(path));
         let r = self.relation(&rel_name, GENE_TYPE, ty);
         for (gene, label) in &pairs {
-            let (_, i) = self.node(GENE_TYPE, gene);
-            let (_, j) = self.node(ty, label);
-            self.add_edge(r, i, j, 1.0);
+            self.link(r, GENE_TYPE, gene, ty, label, 1.0);
         }
         let rel = &self.relations[r];
         info!(
@@ -307,12 +308,10 @@ impl TypedGraphBuilder {
                 continue;
             }
             n_kept += 1;
-            let (_, j) = self.node(TERM_TYPE, term);
             let mut members: Vec<&Box<str>> = genes.iter().collect();
             members.sort();
             for g in members {
-                let (_, i) = self.node(GENE_TYPE, g);
-                self.add_edge(r, i, j, 1.0);
+                self.link(r, GENE_TYPE, g, TERM_TYPE, term, 1.0);
             }
             if let Some(desc) = sets.names.get(term) {
                 self.set_text(
@@ -348,14 +347,21 @@ impl TypedGraphBuilder {
             warn!("fne: --obo given but no term nodes are in the graph; its hierarchy is skipped");
             return;
         };
-        let present: Vec<Box<str>> = self.types[t].names.clone();
-        for id in &present {
+        let n_present = self.types[t].names.len();
+        for i in 0..n_present {
+            let id = &self.types[t].names[i];
             let text = NodeText {
                 name: onto.name(id).map(Box::from),
                 text: onto.def(id).map(Box::from),
             };
             if text != NodeText::default() {
-                self.set_text(TERM_TYPE, id, text);
+                let slot = self.types[t].texts.entry(i as u32).or_default();
+                if slot.name.is_none() {
+                    slot.name = text.name;
+                }
+                if slot.text.is_none() {
+                    slot.text = text.text;
+                }
             }
         }
         let r_is_a = self.relation(
@@ -385,8 +391,7 @@ impl TypedGraphBuilder {
             self.add_edge(r, c, p, 1.0);
         }
         info!(
-            "fne: ontology hierarchy over {} present terms: {n} edges ({} is_a, {} part_of)",
-            present.len(),
+            "fne: ontology hierarchy over {n_present} present terms: {n} edges ({} is_a, {} part_of)",
             self.relations[r_is_a].edges.len(),
             self.relations[r_part_of].edges.len()
         );
@@ -410,10 +415,8 @@ impl TypedGraphBuilder {
                 continue;
             };
             let weight = parse_weight(line.get(2).map(AsRef::as_ref), path)?;
-            let (_, j) = self.node(GENE_TYPE, &line[1]);
             for w in tile_windows(&region, window) {
-                let (_, i) = self.node(REGION_TYPE, &w.to_string());
-                self.add_edge(r, i, j, weight);
+                self.link(r, REGION_TYPE, &w.to_string(), GENE_TYPE, &line[1], weight);
             }
             n_rows += 1;
         }
@@ -475,13 +478,13 @@ impl TypedGraphBuilder {
         let mut node_types: Vec<Box<str>> = Vec::new();
         let mut texts: Vec<(u32, NodeText)> = Vec::new();
         // Types with no nodes (a relation declared them but every row was
-        // dropped) are laid out with a placeholder count of zero and pruned.
-        let mut kept_types: Vec<usize> = Vec::new();
+        // dropped) are pruned; `type_pos[t]` is a type's index after pruning.
+        let mut type_pos: Vec<Option<usize>> = vec![None; self.types.len()];
         for (t, nodes) in self.types.iter().enumerate() {
             if nodes.names.is_empty() {
                 continue;
             }
-            kept_types.push(t);
+            type_pos[t] = Some(type_specs.len());
             let offset = node_names.len() as u32;
             type_specs.push((&nodes.name, nodes.names.len()));
             let mut with_text: Vec<(&u32, &NodeText)> = nodes.texts.iter().collect();
@@ -491,7 +494,6 @@ impl TypedGraphBuilder {
             node_types.extend(std::iter::repeat_n(nodes.name.clone(), nodes.names.len()));
         }
         let types = NodeTypeTable::new(&type_specs)?;
-        let type_pos = |t: usize| -> Option<usize> { kept_types.iter().position(|&k| k == t) };
 
         let mut relations = Vec::new();
         let mut edges = TypedEdgeList::default();
@@ -501,7 +503,7 @@ impl TypedGraphBuilder {
                 warn!("fne: relation `{}` has no edges and is dropped", spec.name);
                 continue;
             }
-            let (Some(lt), Some(rt)) = (type_pos(spec.lhs_type), type_pos(spec.rhs_type)) else {
+            let (Some(lt), Some(rt)) = (type_pos[spec.lhs_type], type_pos[spec.rhs_type]) else {
                 continue;
             };
             let r = relations.len() as u16;
