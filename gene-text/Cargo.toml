@@ -1,0 +1,43 @@
+[package]
+name = "gene-text"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Text side of the feature graph: a small Hugging Face encoder over gene, term and pathway descriptions, a document-frequency vocabulary, and gene–word edges for `senna fne`"
+
+[[bin]]
+name = "gene-text"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "matrix-util/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "matrix-util/metal"]
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+rayon = { workspace = true }
+indicatif = { workspace = true }
+nalgebra = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+candle-core = { version = "0.10" }
+candle-nn = { version = "0.10" }
+candle-transformers = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+hf-hub = "0.4"
+stop-words = "0.10"
+rust-stemmers = "1.2"
+unicode-segmentation = "1.13"
+matrix-util = { workspace = true }
+auxiliary-data = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
