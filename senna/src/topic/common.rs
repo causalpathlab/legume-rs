@@ -1016,15 +1016,17 @@ pub fn setup_feature_network(
 /// topics need H ≥ K); warns when `H < 2K` (β-rank limit, topics may
 /// collapse). The warn-threshold matches the default so the warning
 /// only fires when the user explicitly under-specified.
-pub fn resolve_embedding_dim(
+/// `--embedding-dim` against a pre-trained ρ's width: `0` takes the table's H,
+/// an explicit value must agree with it, and `None` for both is left to the
+/// caller (`Ok(None)`) — the topic models default to `2K`, `bge` refuses.
+pub fn resolve_embedding_dim_from_table(
     cli_embedding_dim: usize,
     pretrained_h: Option<usize>,
-    k: usize,
-) -> anyhow::Result<usize> {
-    let h = match (pretrained_h, cli_embedding_dim) {
+) -> anyhow::Result<Option<usize>> {
+    Ok(match (pretrained_h, cli_embedding_dim) {
         (Some(ph), 0) => {
             info!("--embedding-dim auto-set to pre-trained ρ width H = {ph}");
-            ph
+            Some(ph)
         }
         (Some(ph), explicit) => {
             anyhow::ensure!(
@@ -1032,14 +1034,25 @@ pub fn resolve_embedding_dim(
                 "--embedding-dim ({explicit}) disagrees with the pre-trained ρ H ({ph}). \
                  Either omit --embedding-dim (it will be inferred) or pass {ph} to match."
             );
-            explicit
+            Some(explicit)
         }
-        (None, 0) => {
+        (None, 0) => None,
+        (None, explicit) => Some(explicit),
+    })
+}
+
+pub fn resolve_embedding_dim(
+    cli_embedding_dim: usize,
+    pretrained_h: Option<usize>,
+    k: usize,
+) -> anyhow::Result<usize> {
+    let h = match resolve_embedding_dim_from_table(cli_embedding_dim, pretrained_h)? {
+        Some(h) => h,
+        None => {
             let auto = 2 * k;
             info!("--embedding-dim not set; defaulting to 2 × K = {auto}");
             auto
         }
-        (None, explicit) => explicit,
     };
     anyhow::ensure!(
         h >= k,

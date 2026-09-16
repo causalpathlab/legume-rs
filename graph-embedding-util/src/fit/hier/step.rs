@@ -654,6 +654,12 @@ pub fn loss_and_grads(
 /// `row *= 1 − lr·wd` before the Adagrad step; biases never decay). The offset
 /// tables never decay at all — their shrinkage is the exact ridge already
 /// carried in `grads.offsets`.
+/// The step a pinned row takes: its bias alone, so the row keeps its value and
+/// the row's accumulator sees only the bias gradient.
+fn bias_only_step(opt: &mut RowAdagrad, r: usize, bias: &mut f32, gbias: f32) {
+    opt.update(r, std::slice::from_mut(bias), &[gbias]);
+}
+
 pub fn apply(
     params: &mut HierParams,
     opt: &mut Optimizers,
@@ -674,12 +680,9 @@ pub fn apply(
         decay(row, opt.e_u.lr);
         opt.e_u.update(u, row, &grads.e_u[i * h..(i + 1) * h]);
     }
-    // A pinned table takes the bias step alone: the row keeps its value and
-    // its accumulator sees only the bias gradient.
     for m in 0..params.b_m.len() {
         if params.mu_frozen {
-            opt.mu
-                .update(m, std::slice::from_mut(&mut params.b_m[m]), &[grads.b_m[m]]);
+            bias_only_step(&mut opt.mu, m, &mut params.b_m[m], grads.b_m[m]);
             continue;
         }
         let row = &mut params.mu[m * h..(m + 1) * h];
@@ -699,8 +702,7 @@ pub fn apply(
         debug_assert_eq!(*g, gb_gene);
         let gi = *g as usize;
         if params.is_frozen_gene(gi) {
-            opt.r
-                .update(gi, std::slice::from_mut(&mut params.b_g[gi]), &[gb]);
+            bias_only_step(&mut opt.r, gi, &mut params.b_g[gi], gb);
             continue;
         }
         let row = &mut params.r[gi * h..(gi + 1) * h];

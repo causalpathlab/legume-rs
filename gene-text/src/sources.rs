@@ -22,8 +22,7 @@ use matrix_util::common_io::open_buf_reader;
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
 
-pub const GENE_TYPE: &str = "gene";
-pub const TERM_TYPE: &str = "term";
+pub use auxiliary_data::feature_types::{GENE_TYPE, TERM_TYPE};
 
 /// One feature's text.
 #[derive(Clone, Debug, PartialEq, Eq)]

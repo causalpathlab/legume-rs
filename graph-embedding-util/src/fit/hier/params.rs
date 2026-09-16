@@ -50,6 +50,10 @@ pub struct HierParams {
     /// Per gene, whether its residual row is pinned (see [`Self::preset`]).
     /// Empty when nothing is frozen, so the plain model pays no lookup.
     pub frozen_gene: Vec<bool>,
+    /// The pinned rows as given, `[G × H]` row-major with zeros on free genes:
+    /// what a pinned gene's composed row IS, kept verbatim so the output owes
+    /// nothing to the `μ + r` round trip. Empty when nothing is frozen.
+    pub frozen_rows: Vec<f32>,
     /// Whether the module dictionary `μ` is pinned. Set together with
     /// `frozen_gene`; the biases `b_m` / `b_g` always train.
     pub mu_frozen: bool,
@@ -100,6 +104,7 @@ impl HierParams {
                 .map(|_| TrackOffset::zeros(n_modules, n_genes, h))
                 .collect(),
             frozen_gene: Vec::new(),
+            frozen_rows: Vec::new(),
             mu_frozen: false,
         }
     }
@@ -151,8 +156,12 @@ impl HierParams {
         }
         if frozen.freeze {
             self.frozen_gene = vec![false; n_genes];
-            for &g in &frozen.gene {
-                self.frozen_gene[g as usize] = true;
+            self.frozen_rows = vec![0.0; n_genes * h];
+            for (i, &g) in frozen.gene.iter().enumerate() {
+                let g = g as usize;
+                self.frozen_gene[g] = true;
+                self.frozen_rows[g * h..(g + 1) * h]
+                    .copy_from_slice(&frozen.rows[i * h..(i + 1) * h]);
             }
             self.mu_frozen = true;
         }
@@ -162,6 +171,19 @@ impl HierParams {
     #[inline]
     pub fn is_frozen_gene(&self, g: usize) -> bool {
         self.frozen_gene.get(g).copied().unwrap_or(false)
+    }
+
+    /// Gene `g`'s composed base row: the pinned row when it has one, else
+    /// `μ_{m(g)} + r_g`.
+    pub fn base_row(&self, g: usize, m: usize, out: &mut [f32]) {
+        let h = self.h;
+        if self.is_frozen_gene(g) {
+            out.copy_from_slice(&self.frozen_rows[g * h..(g + 1) * h]);
+        } else {
+            for (k, x) in out.iter_mut().enumerate() {
+                *x = self.mu[m * h + k] + self.r[g * h + k];
+            }
+        }
     }
 
     /// Track `t`'s offsets; `None` for the base track and for an unknown one.
