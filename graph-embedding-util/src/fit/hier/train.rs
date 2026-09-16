@@ -2,7 +2,7 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
-use super::params::{HierParams, RowAdagrad};
+use super::params::{HierParams, PresetGenes, RowAdagrad};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{apply, loss_and_grads, Grads, Optimizers, StepPlan, StepStats};
 use super::units::UnitTable;
@@ -133,6 +133,7 @@ pub fn train(
     labels: &[u32],
     h: usize,
     cfg: &HierConfig,
+    preset: Option<&PresetGenes>,
     stop: &AtomicBool,
 ) -> anyhow::Result<HierOutput> {
     anyhow::ensure!(
@@ -148,6 +149,25 @@ pub fn train(
     let n_t = units.n_tracks();
     let n_features = units.n_features;
     let mut params = HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.seed);
+    if let Some(f) = preset {
+        anyhow::ensure!(
+            n_t == 1,
+            "preset gene rows need a single-track feature axis"
+        );
+        params.preset(f, &part.module_of)?;
+        if f.freeze {
+            info!(
+                "Phase 1 (hier) — {} of {d} gene rows pinned; μ pinned to their module means, \
+                 biases and the other rows train",
+                f.gene.len()
+            );
+        } else {
+            info!(
+                "Phase 1 (hier) — {} of {d} gene rows start from the given table and train on",
+                f.gene.len()
+            );
+        }
+    }
     let mut opt = Optimizers {
         e_u: RowAdagrad::new(n_u, cfg.lr),
         mu: RowAdagrad::new(n_m, cfg.lr),
@@ -212,6 +232,15 @@ pub fn train(
     // gene `g` on track `t`, ρ_r = μ_{m(g)} + r_g (+ Δ^t_{m(g)} + δ^t_g) and
     // b_r = b_{m(g)} + b_g (+ β^t_{m(g)} + γ^t_g). On the base track the offset
     // terms do not exist and the expression is the plain composed pair.
+    // A pinned gene's row is copied back verbatim rather than re-composed, so
+    // the round trip through `r_g = row − μ_m` costs it no rounding.
+    let frozen = preset.filter(|f| f.freeze);
+    let mut frozen_row_of: Vec<u32> = vec![u32::MAX; d];
+    if let Some(f) = frozen {
+        for (i, &g) in f.gene.iter().enumerate() {
+            frozen_row_of[g as usize] = i as u32;
+        }
+    }
     let mut rho = DMatrix::<f32>::zeros(n_features, h);
     let mut b_feat = vec![0f32; n_features];
     for row in 0..n_features {
@@ -220,8 +249,18 @@ pub fn train(
         let m = part.module_of[g] as usize;
         match params.offset(t) {
             None => {
-                for k in 0..h {
-                    rho[(row, k)] = params.mu[m * h + k] + params.r[g * h + k];
+                match (frozen, frozen_row_of[g]) {
+                    (Some(f), i) if i != u32::MAX => {
+                        let i = i as usize;
+                        for k in 0..h {
+                            rho[(row, k)] = f.rows[i * h + k];
+                        }
+                    }
+                    _ => {
+                        for k in 0..h {
+                            rho[(row, k)] = params.mu[m * h + k] + params.r[g * h + k];
+                        }
+                    }
                 }
                 b_feat[row] = params.b_m[m] + params.b_g[g];
             }
