@@ -477,12 +477,7 @@ fn write_text_embedding(
         Some(&cols),
     )?;
     let types: Vec<Box<str>> = corpus.docs().iter().map(|d| d.ty.clone()).collect();
-    matrix_util::parquet::write_named_table(
-        &format!("{out}.feature_types.parquet"),
-        "feature",
-        &names,
-        &[(Box::from("type"), matrix_util::parquet::Column::Str(&types))],
-    )
+    auxiliary_data::feature_types::write_feature_types(out, &names, &types)
 }
 
 /// `{out}.feature_word.edges.tsv`: each feature to the words of its text,

@@ -8,12 +8,11 @@
 //! by the run's `feature_types.parquet` when it exists; a source without one
 //! is taken to be all genes. Genes of this axis with no source row stay free.
 
+use auxiliary_data::feature_types::{read_feature_types, GENE_TYPE};
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use graph_embedding_util as ge;
 use log::info;
-use matrix_util::parquet::read_parquet_string_columns_by_name;
 use rustc_hash::FxHashSet;
-use std::path::Path;
 
 pub(crate) fn load_preset_genes(
     prefix: &str,
@@ -36,26 +35,19 @@ pub(crate) fn load_preset_genes(
     })?;
 
     // Which source rows are genes: the types table, when the run wrote one.
-    let types_path = format!("{prefix}.feature_types.parquet");
-    let gene_src: Option<FxHashSet<usize>> = if Path::new(&types_path).exists() {
-        let cols = read_parquet_string_columns_by_name(&types_path, &["feature", "type"])?;
-        let by_name: FxHashSet<&str> = cols[0]
-            .iter()
-            .zip(&cols[1])
-            .filter(|(_, t)| t.as_ref() == crate::fne::graph::GENE_TYPE)
-            .map(|(n, _)| n.as_ref())
+    let gene_src: Option<FxHashSet<usize>> = read_feature_types(prefix)?.map(|rows| {
+        let gene_names: FxHashSet<Box<str>> = rows
+            .into_iter()
+            .filter(|(_, t)| t.as_ref() == GENE_TYPE)
+            .map(|(n, _)| n)
             .collect();
-        Some(
-            host.src_names
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| by_name.contains(n.as_ref()))
-                .map(|(i, _)| i)
-                .collect(),
-        )
-    } else {
-        None
-    };
+        host.src_names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| gene_names.contains(*n))
+            .map(|(i, _)| i)
+            .collect()
+    });
 
     let h = host.e_feat.ncols();
     let mut gene: Vec<u32> = Vec::new();

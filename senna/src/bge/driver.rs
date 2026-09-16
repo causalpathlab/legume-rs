@@ -150,8 +150,8 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // `unified`. Kept as a closure (rather than inlined) even though this
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
-    let mut preset_features = plan.preset_features.take();
-    let mut build_config = |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
+    let preset_features = plan.preset_features.take();
+    let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
             unified
                 .feature_to_backend_row
@@ -203,7 +203,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .as_ref()
                 .map(crate::gem::tracks::TrackPlan::to_ge),
             offset_l2: plan.offset_l2,
-            preset_features: preset_features.take(),
+            preset_features,
         })
     };
 

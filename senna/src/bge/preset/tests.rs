@@ -1,5 +1,5 @@
 use super::*;
-use matrix_util::parquet::{write_named_table, Column};
+use auxiliary_data::feature_types::write_feature_types;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 
@@ -28,13 +28,7 @@ fn write_fne_like(dir: &std::path::Path, with_types: bool) -> String {
             .iter()
             .map(|s| Box::from(*s))
             .collect();
-        write_named_table(
-            &format!("{prefix}.feature_types.parquet"),
-            "feature",
-            &names,
-            &[(Box::from("type"), Column::Str(&types))],
-        )
-        .unwrap();
+        write_feature_types(&prefix, &names, &types).unwrap();
     }
     prefix
 }

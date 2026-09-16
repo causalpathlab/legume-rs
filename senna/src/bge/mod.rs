@@ -190,28 +190,17 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         )?),
         None => None,
     };
+    // The loader refuses an empty match, so the division is exact.
     let preset_h = preset_features
         .as_ref()
-        .map(|f| f.rows.len() / f.gene.len().max(1));
-    anyhow::ensure!(
-        args.embedding_dim > 0 || preset_h.is_some(),
-        "--embedding-dim 0 takes H from a given feature embedding; none was given"
-    );
-    let embedding_dim = match (preset_h, args.embedding_dim) {
-        (Some(h), 0) => {
-            info!("--embedding-dim taken from the given feature embedding: H = {h}");
-            h
-        }
-        (Some(h), explicit) => {
-            anyhow::ensure!(
-                h == explicit,
-                "--embedding-dim {explicit} disagrees with the given feature embedding (H = {h}); \
-                 pass 0 to take H from it"
-            );
-            explicit
-        }
-        (None, explicit) => explicit,
-    };
+        .map(|f| f.rows.len() / f.gene.len());
+    let embedding_dim =
+        crate::topic::common::resolve_embedding_dim_from_table(args.embedding_dim, preset_h)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--embedding-dim 0 takes H from a given feature embedding; none was given"
+                )
+            })?;
 
     driver::fit_embed_family(driver::EmbedPlan {
         kind: crate::run_manifest::RunKind::Bge,
