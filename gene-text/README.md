@@ -10,7 +10,7 @@ pooled vectors are a text prior for the gene side.
 ```
 gene-text qc --uniprot-tsv human.tsv --obo go-basic.obo -o run          # inspect the word cuts (optional)
 gene-text knn-graph --uniprot-tsv human.tsv --obo go-basic.obo -o run   # encode, write the text graph (alias: knn)
-senna fne biogrid.tsv --edges run.feature_word.edges.tsv,run.text_knn.edges.tsv --relation-weight gene:word=0.5 -o graph
+senna fne biogrid.tsv --edges run.feature_word.edges.tsv,run.knn_graph.edges.tsv --relation-weight gene:word=0.5 -o graph
 ```
 
 ## Inputs
@@ -51,6 +51,6 @@ verdict and can be edited and handed back through `knn-graph --vocab-file`.
   `--words-per-feature` per feature; weight = max(cos, 0) · (1 + ln tf) · idf.
 - `{out}.feature_word_expanded.edges.tsv` (`--expand-k`) — nearest vocabulary
   words a feature's text lacks, by CSLS.
-- `{out}.text_knn.edges.tsv` — feature–feature text similarity, `--text-knn` per feature (default 10).
+- `{out}.knn_graph.edges.tsv` — feature–feature text similarity, `--knn` per feature (default 10).
 - `{out}.text_embedding.parquet` — pooled vectors, centred; `{out}.feature_types.parquet`.
 - `{out}.vocab.tsv`, `{out}.feature_text.tsv` — the vocabulary and the corpus as read.

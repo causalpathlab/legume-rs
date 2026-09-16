@@ -59,7 +59,7 @@ enum Commands {
         long_about = "Runs the vocabulary step, then a BERT-family encoder from the Hugging\n\
                       Face Hub over every description, and writes the text graph:\n\
                       {out}.feature_word.edges.tsv (each feature to the words of its text,\n\
-                      weight = contextual cosine × TF-IDF) and {out}.text_knn.edges.tsv\n\
+                      weight = contextual cosine × TF-IDF) and {out}.knn_graph.edges.tsv\n\
                       (nearest features by text similarity), both typed edge files for\n\
                       `senna fne --edges`; plus {out}.text_embedding.parquet (pooled,\n\
                       centred), {out}.vocab.tsv and {out}.feature_text.tsv."
@@ -152,7 +152,7 @@ impl SourceArgs {
 }
 
 #[derive(Args, Clone)]
-struct VocabArgs {
+struct QcArgs {
     #[arg(long, default_value_t = 3, help = "Shortest word kept (characters)")]
     min_chars: usize,
     #[arg(long, default_value_t = false, help = "Snowball-stem the words")]
@@ -188,11 +188,11 @@ struct VocabArgs {
     max_df_frac: f64,
 }
 
-impl VocabArgs {
+impl QcArgs {
     fn tokenize_opts(&self) -> Result<TokenizeOpts> {
         TokenizeOpts::new(self.min_chars, self.stem, self.extra_stopwords.as_deref())
     }
-    fn qc(&self) -> DfQcOpts {
+    fn df_opts(&self) -> DfQcOpts {
         DfQcOpts {
             lower_quantile: self.df_lower_quantile,
             upper_quantile: self.df_upper_quantile,
@@ -207,7 +207,7 @@ struct QcCmd {
     #[command(flatten)]
     sources: SourceArgs,
     #[command(flatten)]
-    vocab: VocabArgs,
+    qc: QcArgs,
     #[arg(
         short,
         long,
@@ -235,7 +235,7 @@ struct KnnGraphCmd {
     #[command(flatten)]
     sources: SourceArgs,
     #[command(flatten)]
-    vocab: VocabArgs,
+    qc: QcArgs,
     #[arg(
         long,
         help = "Reuse a tuned {out}.vocab.tsv from `qc` instead of recomputing the cuts"
@@ -281,7 +281,7 @@ struct KnnGraphCmd {
         default_value_t = 10,
         help = "Feature–feature text-similarity edges per feature; 0 = off"
     )]
-    text_knn: usize,
+    knn: usize,
     #[arg(short, long, required = true, help = "Output prefix")]
     out: String,
 }
@@ -323,10 +323,10 @@ fn tokenize_corpus(corpus: &Corpus, opts: &TokenizeOpts) -> Vec<(String, Vec<Occ
 fn run_qc(c: &QcCmd) -> Result<()> {
     matrix_util::common_io::mkdir_parent(&c.out)?;
     let corpus = c.sources.corpus()?;
-    let opts = c.vocab.tokenize_opts()?;
+    let opts = c.qc.tokenize_opts()?;
     let docs = tokenize_corpus(&corpus, &opts);
     let occ: Vec<Vec<Occurrence>> = docs.into_iter().map(|(_, o)| o).collect();
-    let vocab = Vocabulary::build(&occ, &c.vocab.qc());
+    let vocab = Vocabulary::build(&occ, &c.qc.df_opts());
     vocab.write_tsv(&format!("{}.vocab.tsv", c.out))?;
     write_corpus(&corpus, &format!("{}.feature_text.tsv", c.out))?;
     info!(
@@ -343,13 +343,13 @@ fn run_qc(c: &QcCmd) -> Result<()> {
 fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
     matrix_util::common_io::mkdir_parent(&c.out)?;
     let corpus = c.sources.corpus()?;
-    let opts = c.vocab.tokenize_opts()?;
+    let opts = c.qc.tokenize_opts()?;
     let docs = tokenize_corpus(&corpus, &opts);
     let vocab = match &c.vocab_file {
         Some(p) => Vocabulary::read_tsv(p, docs.len())?,
         None => {
             let occ: Vec<Vec<Occurrence>> = docs.iter().map(|(_, o)| o.clone()).collect();
-            Vocabulary::build(&occ, &c.vocab.qc())
+            Vocabulary::build(&occ, &c.qc.df_opts())
         }
     };
     vocab.write_tsv(&format!("{}.vocab.tsv", c.out))?;
@@ -445,7 +445,7 @@ fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
     }
     info!("wrote {n_edges} feature–word edges to {path}");
 
-    if c.expand_k > 0 || c.text_knn > 0 {
+    if c.expand_k > 0 || c.knn > 0 {
         let feat = centred_unit(&pooled, &center, &device)?;
         if c.expand_k > 0 {
             let seen: Vec<u32> = word_n.clone();
@@ -481,9 +481,9 @@ fn run_knn_graph(c: &KnnGraphCmd) -> Result<()> {
             }
             info!("wrote {n_exp} expanded feature–word edges (CSLS) to {path}");
         }
-        if c.text_knn > 0 {
-            let hits = top_k_cosine(&feat, &feat, c.text_knn, true)?;
-            let path = format!("{}.text_knn.edges.tsv", c.out);
+        if c.knn > 0 {
+            let hits = top_k_cosine(&feat, &feat, c.knn, true)?;
+            let path = format!("{}.knn_graph.edges.tsv", c.out);
             let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
             let docs = corpus.docs();
             let mut n_knn = 0usize;
