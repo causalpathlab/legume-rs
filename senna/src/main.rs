@@ -443,27 +443,31 @@ enum Commands {
         long_about = "Learns one embedding per node of a typed feature graph.\n\
                       No expression data is involved.\n\
                       \n\
-                      Positional inputs are gene-gene pair files (BioGRID, STRING, KEGG,\n\
-                      co-expression), each its own relation. --edges takes typed files,\n\
-                      `lhs_type lhs rhs_type rhs [weight]`, so genes can link to cell types,\n\
-                      ontology terms, genomic windows or words; rows sharing a type pair\n\
-                      form one relation. Dedicated readers cover the common sources:\n\
-                      --membership type=path (gene, label), --gaf with --obo and --gmt\n\
-                      (gene sets, propagated up the ontology, whose hierarchy joins as\n\
-                      term:term edges), and --region-gene (eQTL, peak-to-gene, ABC links\n\
-                      tiled onto fixed windows). --export-text writes the names and\n\
-                      definitions the inputs carry, for the text encoder.\n\
+                      Positional inputs are gene-gene pair files (BioGRID, STRING, KEGG, co-expression),\n\
+                      each its own relation.\n\
+                      --edges takes typed files, `lhs_type lhs rhs_type rhs [weight]`,\n\
+                      so genes can link to cell types, ontology terms, genomic windows or words;\n\
+                      rows sharing a type pair form one relation.\n\
+                      Dedicated readers cover the common sources:\n\
+                      --membership type=path (gene, label);\n\
+                      --gaf with --obo, and --gmt (gene sets, propagated up the ontology,\n\
+                      whose hierarchy joins as term:term edges);\n\
+                      --region-gene (eQTL, peak-to-gene, ABC links tiled onto fixed windows).\n\
+                      --export-text writes the names and definitions the inputs carry,\n\
+                      for the text encoder.\n\
                       \n\
                       Training is PyTorch-BigGraph's recipe, the one `senna simba` uses:\n\
                       a softmax loss over in-batch and uniform negatives on both sides,\n\
                       uniform negatives drawn inside the relation's own node types,\n\
-                      row-wise Adagrad and stochastic weight decay. The score is a plain\n\
-                      dot product; relation and per-edge weights scale the loss.\n\
+                      row-wise Adagrad and stochastic weight decay.\n\
+                      The score is a plain dot product;\n\
+                      relation and per-edge weights scale the loss.\n\
                       \n\
-                      Writes {out}.feature_embedding.parquet over every node with its type\n\
-                      in {out}.feature_types.parquet, plus relations, log_likelihood and\n\
-                      senna.json. The gene rows feed `senna masked-topic\n\
-                      --freeze-feature-embedding` directly; other types are ignored there."
+                      Writes {out}.feature_embedding.parquet over every node,\n\
+                      with its type in {out}.feature_types.parquet,\n\
+                      plus relations, log_likelihood and senna.json.\n\
+                      The gene rows feed `senna masked-topic --freeze-feature-embedding` directly;\n\
+                      other types are ignored there."
     )]
     Fne(FneArgs),
 
