@@ -122,6 +122,15 @@ impl RowAdagrad {
         bias.set(&bias.as_tensor().sub(&(g_bias * step)?)?)
     }
 
+    /// One update of a bias vector (`[rows]`) from its gradient: the
+    /// accumulator takes `g²` itself, as [`Self::step_with_bias`] does for the
+    /// bias of a pinned row.
+    pub fn step_bias(&mut self, bias: &Var, g_bias: &Tensor) -> Result<()> {
+        let g = g_bias.detach();
+        let step = self.advance(&g.sqr()?)?;
+        bias.set(&bias.as_tensor().sub(&(g * step)?)?)
+    }
+
     /// Per-row `Σ mean_d(grad²)` so far.
     #[must_use]
     pub fn accumulator(&self) -> &Tensor {

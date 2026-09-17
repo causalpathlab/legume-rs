@@ -267,14 +267,23 @@ pub struct FitConfig {
     /// Row structure of the feature axis. `None` = every row is its own gene
     /// ([`TrackSpec::base`], built inside [`fit`]) — what `senna bge` runs.
     pub tracks: Option<TrackSpec>,
-    /// Ridge on the per-track offsets (`Δ^t_m`, `δ^t_g`), keeping the non-base
-    /// tracks close to the base model. Inert at one track.
+    /// Ridge on the per-track offsets (`Δ^t_m`, `u^t_g · V^t`), keeping the
+    /// non-base tracks close to the base model. Inert at one track.
     pub offset_l2: f32,
+    /// Rank of every non-base track's per-gene offset, `δ^t_g = u^t_g · V^t`:
+    /// a track moves its genes inside one shared `offset_rank`-dimensional
+    /// subspace. Its own number, checked against `embedding_dim` (`1..=H`) on
+    /// a tracked axis; inert at one track.
+    pub offset_rank: usize,
     /// Gene rows of the dictionary given before the fit (a `senna fne`
     /// embedding, say): phase 1 starts from them, and under `freeze` pins them
     /// and trains only the rest — the unit side, every bias, and the rows of
-    /// genes not listed. Single-track only.
+    /// genes not listed. On a tracked axis these are the BASE rows (ids on the
+    /// gene axis); every track's offset trains on top.
     pub preset_features: Option<crate::PresetRows>,
+    /// Given offsets on non-base tracks, by gene (see [`crate::PresetOffsets`]);
+    /// empty for none. Requires `preset_features` under a pinning mode.
+    pub preset_offsets: Vec<crate::PresetOffsets>,
 }
 
 /// Caller-facing configuration of the learned gene modules.
