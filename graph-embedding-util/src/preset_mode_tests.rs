@@ -59,3 +59,50 @@ fn the_rank_must_be_strictly_between_zero_and_h() {
     .is_err());
     assert_eq!(PresetMode::Init.lora(), None);
 }
+
+mod lora_args {
+    use super::super::{LoraArgs, LoraSpec};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        lora: LoraArgs,
+    }
+
+    fn parse(argv: &[&str]) -> LoraArgs {
+        Cli::try_parse_from(std::iter::once("x").chain(argv.iter().copied()))
+            .unwrap()
+            .lora
+    }
+
+    #[test]
+    fn nothing_given_is_the_default_spec_and_not_given() {
+        let a = parse(&[]);
+        assert!(!a.is_given());
+        assert_eq!(a.spec(), LoraSpec::default());
+    }
+
+    #[test]
+    fn each_knob_overrides_its_default_alone() {
+        let a = parse(&["--lora-rank", "4"]);
+        assert!(a.is_given());
+        assert_eq!(
+            a.spec(),
+            LoraSpec {
+                rank: 4,
+                ..LoraSpec::default()
+            }
+        );
+        let b = parse(&["--lora-lr-ratio", "1", "--lora-ridge", "0"]);
+        assert!(b.is_given());
+        assert_eq!(
+            b.spec(),
+            LoraSpec {
+                lr_ratio: 1.0,
+                ridge: 0.0,
+                ..LoraSpec::default()
+            }
+        );
+    }
+}
