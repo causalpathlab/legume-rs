@@ -57,6 +57,7 @@ serde = { workspace = true }
 
 # Local-only, for the #[ignore] real-data harnesses (not committed).
 [dev-dependencies]
+serde_json = { workspace = true }
 candle-util = { workspace = true }
 data-beans = { workspace = true }
 matrix-util = { workspace = true }

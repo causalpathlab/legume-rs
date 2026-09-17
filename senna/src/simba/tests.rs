@@ -552,7 +552,7 @@ fn simba_pins_its_gene_table_to_an_earlier_run() {
         "--freeze-feature-embedding",
         &first,
         "--embedding-dim",
-        "0",
+        "auto",
         "--seed",
         "9",
     ];
@@ -590,7 +590,7 @@ fn simba_anchors_its_gene_table_with_a_low_rank_residual() {
         "--lora-lr-ratio",
         "4",
         "--embedding-dim",
-        "0",
+        "auto",
         "--seed",
         "9",
     ];

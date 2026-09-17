@@ -194,10 +194,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 
     driver::fit_embed_family(driver::EmbedPlan {
         kind: crate::run_manifest::RunKind::Bge,
-        knobs: driver::EmbedKnobs {
-            embedding_dim,
-            ..args.knobs()
-        },
+        knobs: args.knobs(embedding_dim),
         unified,
         data_files,
         multiome: run_multiome,
