@@ -1,5 +1,6 @@
 //! Host-side parameter tables and PBG's row-wise Adagrad.
 
+pub use crate::preset_mode::PresetMode;
 use matrix_util::rand_util::{collect_f32_seeded, mix_seed};
 use rand_distr::Normal;
 
@@ -60,15 +61,16 @@ pub struct HierParams {
 }
 
 /// Gene rows handed to phase 1 from outside: `rows` is `[gene.len() × H]`
-/// row-major, one row per entry of `gene`, which indexes the gene axis. With
-/// `freeze` every listed gene keeps its row for the whole fit; without it the
-/// rows are the starting point and train on. Unlisted genes train freely
-/// either way.
+/// row-major, one row per entry of `gene`, which indexes the gene axis. What
+/// happens to a listed gene's row is the [`PresetMode`]: `Freeze` pins it,
+/// `Init` starts from it. `Lora` is refused here — this phase is host code
+/// with a hand-written gradient, and the residual belongs to the candle port
+/// of it. Unlisted genes train freely in every mode.
 #[derive(Clone, Debug)]
 pub struct PresetGenes {
     pub gene: Vec<u32>,
     pub rows: Vec<f32>,
-    pub freeze: bool,
+    pub mode: PresetMode,
 }
 
 fn randn(n: usize, seed: u64) -> Vec<f32> {
@@ -120,6 +122,11 @@ impl HierParams {
     pub fn preset(&mut self, frozen: &PresetGenes, module_of: &[u32]) -> anyhow::Result<()> {
         let (h, n_genes, n_modules) = (self.h, module_of.len(), self.b_m.len());
         anyhow::ensure!(
+            frozen.mode.lora().is_none(),
+            "a LoRA residual on the gene table is not available in this phase yet: \
+             use --freeze-feature-embedding or --init-feature-embedding here"
+        );
+        anyhow::ensure!(
             frozen.rows.len() == frozen.gene.len() * h,
             "frozen rows are {} values for {} genes at H={h}",
             frozen.rows.len(),
@@ -154,7 +161,7 @@ impl HierParams {
                 self.r[g * h + k] = frozen.rows[i * h + k] - self.mu[m * h + k];
             }
         }
-        if frozen.freeze {
+        if frozen.mode.pins() {
             self.frozen_gene = vec![false; n_genes];
             self.frozen_rows = vec![0.0; n_genes * h];
             for (i, &g) in frozen.gene.iter().enumerate() {

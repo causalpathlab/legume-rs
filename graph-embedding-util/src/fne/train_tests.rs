@@ -1,7 +1,7 @@
 use super::*;
 use crate::fne::batch::PaddedBatch;
 use crate::fne::graph::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
-use crate::fne::{FneConfig, PresetRows};
+use crate::fne::{FneConfig, PresetMode, PresetRows};
 use candle_util::candle_core::{Device, Tensor};
 use matrix_util::traits::SampleOps;
 
@@ -584,7 +584,7 @@ fn preset_rows_are_pinned_under_freeze_and_only_started_from_otherwise() {
         preset: Some(PresetRows {
             node: node.clone(),
             rows: rows.clone(),
-            freeze: true,
+            mode: PresetMode::Freeze,
         }),
         ..base.clone()
     };
@@ -605,7 +605,7 @@ fn preset_rows_are_pinned_under_freeze_and_only_started_from_otherwise() {
         preset: Some(PresetRows {
             node: node.clone(),
             rows: rows.clone(),
-            freeze: false,
+            mode: PresetMode::Init,
         }),
         ..base.clone()
     };
@@ -628,7 +628,7 @@ fn preset_rows_must_index_the_table_and_match_d() {
         preset: Some(PresetRows {
             node,
             rows,
-            freeze: true,
+            mode: PresetMode::Freeze,
         }),
         ..FneConfig::default()
     };
@@ -641,4 +641,68 @@ fn preset_rows_must_index_the_table_and_match_d() {
     )
     .is_err());
     assert!(train(edges, types, rels, &cfg(vec![0], vec![0.0; 3])).is_err());
+}
+
+/// Under LoRA the anchored rows come out as the given rows plus a shared
+/// rank-r residual that did move; the free rows train as before.
+#[test]
+fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
+    let (edges, types, rels) = planted_graph();
+    let d = 4;
+    let rank = 1;
+    let node: Vec<u32> = vec![0, 3, 7];
+    let rows: Vec<f32> = (0..node.len() * d).map(|i| 0.1 * i as f32 - 0.5).collect();
+    let base = FneConfig {
+        dim: d,
+        epochs: 5,
+        batch_size: 8,
+        num_batch_negs: 4,
+        num_uniform_negs: 2,
+        wd: Some(1e-2),
+        wd_interval: 1,
+        eval_fraction: 0.0,
+        seed: 3,
+        ..FneConfig::default()
+    };
+    let lora = FneConfig {
+        preset: Some(PresetRows {
+            node: node.clone(),
+            rows: rows.clone(),
+            mode: PresetMode::Lora {
+                rank,
+                lr_ratio: 4.0,
+            },
+        }),
+        ..base.clone()
+    };
+    let out = train(edges.clone(), types.clone(), rels.clone(), &lora).unwrap();
+    let e = out.embedding.to_vec2::<f32>().unwrap();
+    let mut resid = nalgebra::DMatrix::<f32>::zeros(node.len(), d);
+    for (i, &g) in node.iter().enumerate() {
+        for k in 0..d {
+            resid[(i, k)] = e[g as usize][k] - rows[i * d + k];
+        }
+    }
+    let sv = resid.singular_values();
+    assert!(sv[0] > 1e-5, "the residual never moved: {sv}");
+    assert!(
+        sv[rank] <= 1e-4 * sv[0],
+        "the residual is not rank {rank}: singular values {sv}"
+    );
+    let untouched = train(edges.clone(), types.clone(), rels.clone(), &base).unwrap();
+    let u = untouched.embedding.to_vec2::<f32>().unwrap();
+    assert_ne!(e[1], u[1], "a free row still trains from the same seed");
+
+    let full_rank = FneConfig {
+        preset: Some(PresetRows {
+            node,
+            rows,
+            mode: PresetMode::Lora {
+                rank: d,
+                lr_ratio: 1.0,
+            },
+        }),
+        ..base
+    };
+    assert!(train(edges, types, rels, &full_rank).is_err());
 }

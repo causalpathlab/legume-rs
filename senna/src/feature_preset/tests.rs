@@ -1,5 +1,6 @@
 use super::*;
 use auxiliary_data::feature_types::write_feature_types;
+use graph_embedding_util::PresetMode;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 
@@ -45,7 +46,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
         .collect();
     let f = load_preset_genes(
         &prefix,
-        true,
+        PresetMode::Freeze,
         &axis,
         &ge::FeatureNameKind::Gene { delim: '_' },
     )
@@ -65,7 +66,7 @@ fn without_a_types_table_every_row_is_a_candidate() {
         .collect();
     let f = load_preset_genes(
         &prefix,
-        true,
+        PresetMode::Freeze,
         &axis,
         &ge::FeatureNameKind::Gene { delim: '_' },
     )
@@ -80,7 +81,7 @@ fn no_matching_gene_is_an_error() {
     let axis: Vec<Box<str>> = vec![Box::from("ENSG2_MYC")];
     assert!(load_preset_genes(
         &prefix,
-        true,
+        PresetMode::Freeze,
         &axis,
         &ge::FeatureNameKind::Gene { delim: '_' }
     )
@@ -88,19 +89,33 @@ fn no_matching_gene_is_an_error() {
 }
 
 #[test]
-fn the_freeze_switch_is_carried() {
+fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = write_fne_like(dir.path(), true);
     let axis: Vec<Box<str>> = vec![Box::from("ENSG3_TP53")];
     let kind = ge::FeatureNameKind::Gene { delim: '_' };
-    assert!(
-        load_preset_genes(&prefix, true, &axis, &kind)
-            .unwrap()
-            .freeze
-    );
-    assert!(
-        !load_preset_genes(&prefix, false, &axis, &kind)
-            .unwrap()
-            .freeze
-    );
+    for mode in [
+        PresetMode::Freeze,
+        PresetMode::Init,
+        PresetMode::Lora {
+            rank: 2,
+            lr_ratio: 16.0,
+        },
+    ] {
+        assert_eq!(
+            load_preset_genes(&prefix, mode, &axis, &kind).unwrap().mode,
+            mode
+        );
+    }
+    // The table is H = 3 wide: rank 3 is no residual.
+    assert!(load_preset_genes(
+        &prefix,
+        PresetMode::Lora {
+            rank: 3,
+            lr_ratio: 1.0
+        },
+        &axis,
+        &kind
+    )
+    .is_err());
 }

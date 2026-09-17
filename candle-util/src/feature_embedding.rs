@@ -31,9 +31,10 @@
 //! shrinks; a caller that turns it on is choosing the other behaviour.
 
 use crate::fast_index::gather_rows;
+use crate::lora::LoraFactors;
 use crate::nn::layers::sparsemax;
 use candle_core::{Result, Tensor};
-use candle_nn::VarBuilder;
+use candle_nn::{VarBuilder, VarMap};
 
 /// Spread of the membership logits at initialization.
 ///
@@ -47,6 +48,9 @@ const INIT_LOGIT_JITTER: f64 = 0.01;
 pub const FREE_VAR_NAME: &str = "feature.embeddings";
 pub const LOGITS_VAR_NAME: &str = "modules.logits";
 pub const MU_VAR_NAME: &str = "modules.mu";
+/// The prefix the LoRA factors of [`FeatureEmbedding::Lora`] are registered
+/// under: `feature.lora_u` and `feature.lora_v` (see [`crate::lora`]).
+pub const LORA_PREFIX: &str = "feature";
 
 /// The feature side of a model.
 ///
@@ -54,9 +58,17 @@ pub const MU_VAR_NAME: &str = "modules.mu";
 /// `[D, H]` table, kept for `M = 0`, where there are no modules to compose
 /// from — every method below behaves the same way for both, so a caller only
 /// cares which one it has when it wants the membership.
+///
+/// `Lora` is a `[D, H]` table given from outside and held fixed, with a
+/// low-rank residual trained on top ([`crate::lora`]). The base is registered
+/// under [`FREE_VAR_NAME`] like a free table — the owner overwrites it with
+/// the given rows and keeps it out of the optimizer — so a checkpoint's
+/// feature table is the same slot in every variant; [`fold_lora`] folds the
+/// residual into it when training ends.
 pub enum FeatureEmbedding {
     Free(Tensor),
     Composed { logits: Tensor, mu: Tensor },
+    Lora { base: Tensor, lora: LoraFactors },
 }
 
 impl FeatureEmbedding {
@@ -105,11 +117,29 @@ impl FeatureEmbedding {
         })
     }
 
+    /// A fixed table plus a rank-`rank` trained residual (see the `Lora`
+    /// variant and [`crate::lora`] for the initialization).
+    pub fn new_lora(
+        n_features: usize,
+        embedding_dim: usize,
+        rank: usize,
+        vs: VarBuilder,
+    ) -> Result<Self> {
+        Ok(Self::Lora {
+            base: vs.get_with_hints(
+                (n_features, embedding_dim),
+                FREE_VAR_NAME,
+                candle_nn::init::DEFAULT_KAIMING_NORMAL,
+            )?,
+            lora: LoraFactors::new(n_features, embedding_dim, rank, vs.pp(LORA_PREFIX))?,
+        })
+    }
+
     /// Every feature's membership `[D, M]`, rows on the simplex with exact
     /// zeros off it. `None` for a free table, which has no modules.
     pub fn membership(&self) -> Result<Option<Tensor>> {
         match self {
-            Self::Free(_) => Ok(None),
+            Self::Free(_) | Self::Lora { .. } => Ok(None),
             Self::Composed { logits, .. } => Ok(Some(sparsemax(logits)?)),
         }
     }
@@ -131,6 +161,9 @@ impl FeatureEmbedding {
         match self {
             Self::Free(rho) => f(rho),
             Self::Composed { logits, mu } => f(&sparsemax(logits)?)?.matmul(mu),
+            // The composed table is the size of a free one, so forming it here
+            // costs what `Free` already pays; the training path uses `gather`.
+            Self::Lora { base, lora } => f(&(base + lora.residual()?)?),
         }
     }
 
@@ -149,6 +182,7 @@ impl FeatureEmbedding {
         match self {
             Self::Free(rho) => rho.matmul(v_hc),
             Self::Composed { logits, mu } => sparsemax(logits)?.matmul(&mu.matmul(v_hc)?),
+            Self::Lora { base, lora } => base.matmul(v_hc)? + lora.project_dims(v_hc)?,
         }
     }
 
@@ -160,6 +194,7 @@ impl FeatureEmbedding {
         match self {
             Self::Free(rho) => gather_rows(rho, ids),
             Self::Composed { logits, mu } => sparsemax(&gather_rows(logits, ids)?)?.matmul(mu),
+            Self::Lora { base, lora } => gather_rows(base, ids)? + lora.residual_rows(ids)?,
         }
     }
 
@@ -167,7 +202,7 @@ impl FeatureEmbedding {
     /// the whole table. `None` for a free table.
     pub fn gather_membership(&self, ids: &Tensor) -> Result<Option<Tensor>> {
         match self {
-            Self::Free(_) => Ok(None),
+            Self::Free(_) | Self::Lora { .. } => Ok(None),
             Self::Composed { logits, .. } => Ok(Some(sparsemax(&gather_rows(logits, ids)?)?)),
         }
     }
@@ -183,7 +218,7 @@ impl FeatureEmbedding {
     #[must_use]
     pub fn n_features(&self) -> usize {
         match self {
-            Self::Free(rho) => rho.dims()[0],
+            Self::Free(rho) | Self::Lora { base: rho, .. } => rho.dims()[0],
             Self::Composed { logits, .. } => logits.dims()[0],
         }
     }
@@ -192,7 +227,7 @@ impl FeatureEmbedding {
     #[must_use]
     pub fn embedding_dim(&self) -> usize {
         match self {
-            Self::Free(rho) => rho.dims()[1],
+            Self::Free(rho) | Self::Lora { base: rho, .. } => rho.dims()[1],
             Self::Composed { mu, .. } => mu.dims()[1],
         }
     }
@@ -216,12 +251,14 @@ impl FeatureEmbedding {
 
     /// What a ridge penalty should shrink: the dictionary when there is one,
     /// since penalizing the composed rows would charge every feature for the
-    /// same shared vector, and the table itself otherwise.
+    /// same shared vector; the residual's shared factor under LoRA (the base
+    /// is not trained); and the table itself otherwise.
     #[must_use]
     pub fn ridge_table(&self) -> &Tensor {
         match self {
             Self::Free(rho) => rho,
             Self::Composed { mu, .. } => mu,
+            Self::Lora { lora, .. } => &lora.v,
         }
     }
 
@@ -231,7 +268,7 @@ impl FeatureEmbedding {
     #[must_use]
     pub fn device(&self) -> &candle_core::Device {
         match self {
-            Self::Free(rho) => rho.device(),
+            Self::Free(rho) | Self::Lora { base: rho, .. } => rho.device(),
             Self::Composed { logits, .. } => logits.device(),
         }
     }
@@ -239,7 +276,7 @@ impl FeatureEmbedding {
     /// Modules composing each row; 0 for a free table.
     pub fn n_modules(&self) -> usize {
         match self {
-            Self::Free(_) => 0,
+            Self::Free(_) | Self::Lora { .. } => 0,
             Self::Composed { logits, .. } => logits.dims()[1],
         }
     }
@@ -248,10 +285,23 @@ impl FeatureEmbedding {
     #[must_use]
     pub fn dictionary(&self) -> Option<&Tensor> {
         match self {
-            Self::Free(_) => None,
+            Self::Free(_) | Self::Lora { .. } => None,
             Self::Composed { mu, .. } => Some(mu),
         }
     }
+}
+
+/// [`crate::lora::fold`] for the feature table registered under `prefix`:
+/// `{prefix}.feature.embeddings` absorbs `{prefix}.feature.lora_u · lora_v`.
+pub fn fold_lora(varmap: &VarMap, prefix: &str) -> Result<()> {
+    let name = |slot: &str| {
+        if prefix.is_empty() {
+            slot.to_string()
+        } else {
+            format!("{prefix}.{slot}")
+        }
+    };
+    crate::lora::fold(varmap, &name(FREE_VAR_NAME), &name(LORA_PREFIX))
 }
 
 #[cfg(test)]

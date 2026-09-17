@@ -11,12 +11,13 @@
 //! `1 − visible_nd` is what the decoder is scored on, so the hidden set has a
 //! single definition rather than two that have to be kept in step.
 
-use super::{clip_and_step_dense, smooth_topics, TrainScores};
+use super::{clip_and_step_dense_all, smooth_topics, TrainScores};
 use crate::data::indexed::labeled_bar;
 use crate::data::masked_dense::{DenseMaskedLevel, DenseMaskedMinibatch, MaskedDraw};
 use crate::decoder::coarsening_map::CoarseningMap;
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget, ModuleTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
+pub use crate::lora::LoraPlus;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
@@ -62,6 +63,11 @@ pub struct IndexedTrainConfig<'a> {
     /// parameter). The encoder/decoder still reference ρ through the
     /// same `Var`; freezing just keeps the optimizer's hands off.
     pub frozen_feature_var: Option<&'a str>,
+    /// LoRA+ on a feature-side residual: the named `Var` (the shared factor
+    /// `v`) leaves the main optimizer and takes its own AdamW at
+    /// `lr_ratio × learning_rate`. Every other trained `Var`, the row factor
+    /// included, stays on the main one.
+    pub lora_plus: Option<LoraPlus<'a>>,
 }
 
 /// Options specific to [`train_masked`], kept off the shared
@@ -607,16 +613,20 @@ pub fn train_masked(
         .iter()
         .map(String::as_str)
         .chain(config.frozen_feature_var)
+        .chain(config.lora_plus.map(|l| l.v_var))
         .collect();
     let adam_vars: Vec<Var> = crate::frozen_features::trainable_vars(config.parameters, &frozen);
-    let mut adam = AdamW::new(
+    let mut adams = vec![AdamW::new(
         adam_vars,
         candle_nn::ParamsAdamW {
             lr: f64::from(config.learning_rate),
             weight_decay: f64::from(config.weight_decay),
             ..Default::default()
         },
-    )?;
+    )?];
+    if let Some(l) = config.lora_plus {
+        adams.push(l.optimizer(config.parameters, config.learning_rate)?);
+    }
     let prog_bar = labeled_bar("Epochs", total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -712,7 +722,7 @@ pub fn train_masked(
                 )?;
                 acc.add(&fwd.llik_sum, &fwd.units_sum)?;
                 let grads = fwd.loss.backward()?;
-                if !clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))? {
+                if !clip_and_step_dense_all(&mut adams, grads, f64::from(config.grad_clip))? {
                     skipped_steps += 1;
                 }
                 if config.stop.load(Ordering::Relaxed) {

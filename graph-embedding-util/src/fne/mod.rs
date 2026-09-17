@@ -19,6 +19,7 @@ pub use graph::{auto_wd, NodeTypeTable, Relation, RelationTable, TypedEdgeList};
 pub use row_adagrad::RowAdagrad;
 pub use train::{train, FneOutput, RelationStats};
 
+pub use crate::preset_mode::PresetMode;
 use candle_util::candle_core::Device;
 
 /// PBG `init_scale`: each coordinate starts at `N(0, 1e-3)`.
@@ -40,14 +41,16 @@ pub struct EpochStats {
 }
 
 /// Rows of the table given from outside, by GLOBAL node id: `rows` is
-/// `[node.len() × D]` row-major. The listed nodes start at those rows; under
-/// `freeze` they also take no step (neither the loss's nor the weight
-/// decay's), so they come out of training exactly as given.
-#[derive(Clone, Debug, Default)]
+/// `[node.len() × D]` row-major. The listed nodes start at those rows; what
+/// happens next is the [`PresetMode`]: under `Freeze` they take no step
+/// (neither the loss's nor the weight decay's) and come out exactly as
+/// given; under `Lora` the given row is the anchor and a shared low-rank
+/// residual trains on top; under `Init` they train on like any row.
+#[derive(Clone, Debug)]
 pub struct PresetRows {
     pub node: Vec<u32>,
     pub rows: Vec<f32>,
-    pub freeze: bool,
+    pub mode: PresetMode,
 }
 
 /// Every knob of the recipe; `Default` is PBG's configuration with the
