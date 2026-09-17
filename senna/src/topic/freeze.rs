@@ -29,6 +29,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub struct FrozenFeatureSpec {
+    /// The run prefix the table was resolved from.
+    pub source_prefix: String,
     pub dictionary_path: String,
     pub bias_path: Option<String>,
     pub name_kind: FeatureNameKind,
@@ -56,6 +58,7 @@ impl FrozenFeatureSpec {
             None => log::info!("Frozen feature side: {dictionary_path} (bias = 0)"),
         }
         Ok(Self {
+            source_prefix: prefix.to_string(),
             dictionary_path,
             bias_path,
             name_kind,

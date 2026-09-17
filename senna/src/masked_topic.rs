@@ -1034,6 +1034,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // through safetensors); for freeze mode the optimizer excludes it
     // via `trainable_vars` (see `train_masked.rs`), for init mode it
     // keeps updating.
+    let mut carried: Option<crate::carried_rows::CarriedRows> = None;
     if let Some(spec) = pretrained_spec.as_ref() {
         anyhow::ensure!(
             args.init_from.is_none(),
@@ -1041,6 +1042,17 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
              (warm-start would overwrite the pre-trained ρ from a different checkpoint)"
         );
         let host = spec.materialize(&gene_names)?;
+        carried = crate::carried_rows::CarriedRows::from_unmatched(
+            pinned_rho,
+            preset_flag,
+            &host,
+            &gene_names,
+            &spec.name_kind,
+            auxiliary_data::feature_types::read_feature_types(&spec.source_prefix)?
+                .as_deref()
+                .unwrap_or(&[]),
+            &spec.dictionary_path,
+        )?;
         anyhow::ensure!(
             host.h == h,
             "pre-trained feature embedding has H={} but --embedding-dim={}",
@@ -1560,6 +1572,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: None,
+        carried: carried.as_ref(),
         module_membership_suffix: module_suffixes.map(|(m, _)| m),
         module_dictionary_suffix: module_suffixes.map(|(_, d)| d),
         softmax_dictionary_suffix: Some("dictionary.parquet"),
