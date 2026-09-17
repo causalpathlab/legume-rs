@@ -1,5 +1,5 @@
 //! One optimizer step of the exact two-level softmax, over one or more TRACKS
-//! of the same genes.
+//! of the same genes, as a candle forward pass and one `backward()`.
 //!
 //! ```text
 //! S_t = { g : gene g has a row on track t }      M_t = { m : m ∩ S_t ≠ ∅ }
@@ -15,92 +15,59 @@
 //! Every softmax runs over the track's own support `S_t`, never over the whole
 //! gene axis. A track's rows ARE its feature axis — the producer emits a row
 //! only where that channel was observed — so a gene with no row on track `t` is
-//! not "a gene with probability zero on track `t`", it is outside the track's
-//! axis. Scoring it there would make a structural zero a permanent negative:
-//! with one channel carrying rows for a few hundred of tens of thousands of
-//! genes, those negatives would dominate the track's gradient and drive its
-//! per-gene biases toward −∞. So a gene outside `S_t` takes NO gradient from
-//! track `t`, base or offset, and a module outside `M_t` takes none either.
-//! `q^t_um` and `q^t_ug|m` are unchanged in value: counts only exist on the
-//! support, so the restricted sums are the same numbers.
-//!
-//! A track that has a row for EVERY gene is *full* and carries no restriction —
-//! it keeps the plain model's columns, empty modules included. A one-track axis
-//! is exactly that case, so the one-track path never sees the rule at all.
+//! outside the track's axis, not a gene with probability zero there. A gene
+//! outside `S_t` takes NO gradient from track `t`, base or offset, and a module
+//! outside `M_t` takes none either. A track that has a row for every gene is
+//! *full* and carries no restriction; a one-track axis is exactly that case.
 //! [`TrackSupport`] precomputes `S_t` / `M_t` once per fit.
 //!
 //! `m_k ~ q^t_u·` with replacement (K draws); `c^t_k` is module `m_k`'s draw
 //! multiplicity, so `Σ_k (c_k/K)·L₂` is an unbiased estimator of
-//! `Σ_m q_um·L₂`. `StepPlan` carries each pair's already-computed weight
-//! `c_k/K` — the step never re-derives it from `q_um`.
+//! `Σ_m q_um·L₂`. [`StepPlan`] carries each pair's already-computed weight
+//! `c_k/K`; the step never re-derives it from `q_um`.
 //!
 //! The base track (`t == 0`) IS the model; every other track is an additive
-//! OFFSET from it, so a track's effective tables are
+//! OFFSET from it: `μ^t = μ + Δ^t`, `b^t_m = b_m + β^t`, `r^t = r + δ^t`,
+//! `b^t_g = b_g + γ^t`, with the base tables used directly at `t == 0`. The
+//! base tables take the sum over tracks and each offset table its own track's
+//! term — autograd does that split by linearity.
 //!
-//! ```text
-//! μ^t = μ + Δ^t    b^t_m = b_m + β^t    r^t = r + δ^t    b^t_g = b_g + γ^t
-//! ```
+//! # How a step is laid out
 //!
-//! with `Δ⁰ = β⁰ = δ⁰ = γ⁰ ≡ 0` — never materialized: at `t == 0` the base
-//! tables are used directly, so a one-track step is the plain model, statement
-//! for statement.
-//!
-//! With `δ¹ = w^t (p − q)` at the module level and `δ²` within a module:
-//!
-//! ```text
-//! ∂L/∂e_u = Σ_t w^t_u [ Σ_m δ¹_um μ^t_m + Σ_k (c_k/K) Σ_{g∈m_k} δ²_ug r^t_g ]
-//! ∂L/∂μ_m = Σ_t Σ_u δ¹_um e_u      ∂L/∂Δ^t_m = Σ_u δ¹_um e_u   (that track alone)
-//! ∂L/∂r_g = Σ_t Σ_u δ²_ug e_u      ∂L/∂δ^t_g = Σ_u δ²_ug e_u   (that track alone)
-//! ```
-//!
-//! — the BASE tables take the sum over tracks and each offset table takes its
-//! own track's term, by linearity of `base + offset`. The biases follow the
-//! same split.
-//!
-//! Positives are the unit's own shares; negatives are everything else in each
-//! partition, in proportion to how far the prediction exceeds the share. No
-//! negative is ever sampled — only the modules a unit is scored in at the gene
-//! level, weighted by its draw multiplicity. The within-module work is grouped
-//! by `(track, module)`: one gemm per group over the units drawn into it, so a
-//! step touches a gene row at most once PER TRACK — and only on the tracks whose
-//! support holds it.
+//! The host builds ids only: the plan's units, each track's scored modules,
+//! and per `(track, module)` group the member genes the track has rows for,
+//! the units drawn into it with their weights, and the `(unit, gene)` targets.
+//! The module level is one `[B, |M_t|]` product per track. The gene level is
+//! batched: a track's groups are padded to a common unit count and gene count
+//! and scored by one batched matmul, one masked row log-softmax, and one
+//! gather of the target positions — so a step is a few dozen kernels whatever
+//! the number of modules, and no `[G, ·]` table is formed. Groups are bucketed
+//! by member count first, so padding never exceeds a factor of two.
 //!
 //! # Ridge on the offsets
 //!
-//! ```text
-//! λ_step Σ_{t≥1} [ (1/M) Σ_m ‖Δ^t_m‖² + (1/G) Σ_g ‖δ^t_g‖² ]    (biases free)
-//! ```
-//!
-//! exact on the FULL tables every step, not only on the rows the plan touched,
-//! so its gradient reaches every row: `2 λ_step Δ^t_m / M`, `2 λ_step δ^t_g / G`.
-//! `λ_step` is the PER-STEP weight the caller passes: because the penalty lands
-//! at full strength on every step, the trainer hands down
-//! `HierConfig::offset_l2 / steps_per_epoch` (see
-//! [`super::train::per_step_offset_l2`]), so an epoch's steps sum to exactly
-//! `offset_l2 · (mean_m ‖Δ‖² + mean_g ‖δ‖²)` and the knob means the same thing
-//! at every batch size.
-//! **Representation chosen: every `TrackGrads` table is DENSE and flat** —
-//! `r` is a `[G × H]` buffer indexed by gene id, with the ridge already summed
-//! into it, rather than a sparse touched-row list plus a separate ridge plane.
-//! One representation means `apply` has a single loop and the finite-difference
-//! test can read any gene's offset gradient straight off `Grads`; the row
-//! optimizer skips an all-zero gradient row anyway, so an untouched row whose
-//! offset is still zero costs a comparison. Flat rather than keyed because the
-//! key IS the index: a `Vec<(gene, Vec<f32>)>` would allocate `G` row vectors
-//! per track per step on top of the buffer the gradient is accumulated in.
+//! `λ_step Σ_{t≥1} [ (1/M) Σ_m ‖Δ^t_m‖² + (1/G) Σ_g ‖δ^t_g‖² ]` (biases free),
+//! exact on the FULL tables every step. `λ_step` is the PER-STEP weight the
+//! caller passes (`HierConfig::offset_l2 / steps_per_epoch`, see
+//! [`super::train::per_step_offset_l2`]).
 
-use super::params::{HierParams, RowAdagrad};
+use super::params::{HierParams, ADAGRAD_EPS};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
-use nalgebra::DMatrix;
-use rayon::prelude::*;
-use std::borrow::Cow;
+use candle_util::candle_core::backprop::GradStore;
+use candle_util::candle_core::{DType, Device, Result as CResult, Tensor, Var, D};
+use candle_util::candle_nn::ops::log_softmax;
+use candle_util::fast_index::gather_rows;
 
-/// The (unit, module) pairs one step evaluates at the gene level, grouped by
-/// `(track, module)`. Each pair carries the module's per-unit draw weight
-/// `c_k/K` — the multiplicity of that module among the unit's K draws on that
-/// track, over K; an exhaustive plan lists every `(track, module)` the unit has
-/// counts in at weight 1.0.
+/// PBG's mask on a column that must not compete: `exp(−1e9)` is exactly zero.
+const MASK_NEG: f64 = -1e9;
+/// Groups are batched together while the largest member count is at most this
+/// multiple of the smallest, so padding stays bounded.
+const BUCKET_RATIO: usize = 2;
+
+/// The units of one step and, per `(track, module)`, the `(unit, weight)`
+/// pairs drawn into that module on that track — `weight = c_k/K`, the module's
+/// draw multiplicity over the draws.
 ///
 /// Invariants: `units` has no duplicates; each module appears at most once
 /// PER TRACK in `pairs_by_module`; every unit named in a `pairs_by_module`
@@ -111,9 +78,7 @@ pub struct StepPlan {
     pub pairs_by_module: TrackModulePairs,
 }
 
-/// Transparent alias for `StepPlan::pairs_by_module`'s spelled-out type — one
-/// `(unit, draw weight)` list per `(track, module)` key. Named only so the
-/// nesting stays readable.
+/// One `(unit, draw weight)` list per `(track, module)` key.
 pub type TrackModulePairs = Vec<((u32, u32), Vec<(u32, f32)>)>;
 
 #[derive(Default, Debug, Clone)]
@@ -124,88 +89,230 @@ pub struct StepStats {
     pub loss_ridge: f64,
 }
 
-pub struct Optimizers {
-    pub e_u: RowAdagrad,
-    pub mu: RowAdagrad,
-    pub r: RowAdagrad,
-    /// Tracks `1..T`, in order: `(M rows for Δ/β, G rows for δ/γ)`.
-    pub offsets: Vec<(RowAdagrad, RowAdagrad)>,
+fn ids(v: &[u32], dev: &Device) -> CResult<Tensor> {
+    Tensor::from_slice(v, v.len(), dev)
 }
 
-/// One non-base track's own gradients, every table DENSE and flat: `mu` is
-/// `[M × H]` row-major, `b_m` `[M]`, `r` `[G × H]` row-major, `b_g` `[G]` —
-/// indexed by module or gene id, no keys (see the module docs on the ridge
-/// representation, which is what makes them dense).
-pub struct TrackGrads {
-    pub mu: Vec<f32>,
-    pub b_m: Vec<f32>,
-    pub r: Vec<f32>,
-    pub b_g: Vec<f32>,
+fn floats(v: &[f32], dev: &Device) -> CResult<Tensor> {
+    Tensor::from_slice(v, v.len(), dev)
 }
 
-pub struct Grads {
-    pub e_u: Vec<f32>,
-    pub mu: Vec<f32>,
-    pub b_m: Vec<f32>,
-    pub r: Vec<(u32, Vec<f32>)>,
-    pub b_g: Vec<(u32, f32)>,
-    /// Tracks `1..T`, in order; the ridge gradient is already included. Empty
-    /// on a one-track axis.
-    pub offsets: Vec<TrackGrads>,
-}
-
-/// Row-major `[rows × h]` gather of `table` at `idx`.
-fn gather(table: &[f32], h: usize, idx: &[u32]) -> DMatrix<f32> {
-    let mut m = DMatrix::<f32>::zeros(idx.len(), h);
-    for (i, &r) in idx.iter().enumerate() {
-        let r = r as usize;
-        m.row_mut(i).copy_from_slice(&table[r * h..(r + 1) * h]);
-    }
-    m
-}
-
-/// [`gather`] of `base + offset`, both row-major `[· × h]` on the same axis.
-fn gather_sum(base: &[f32], offset: &[f32], h: usize, idx: &[u32]) -> DMatrix<f32> {
-    let mut m = DMatrix::<f32>::zeros(idx.len(), h);
-    for (i, &r) in idx.iter().enumerate() {
-        let r = r as usize;
-        let (b, o) = (&base[r * h..(r + 1) * h], &offset[r * h..(r + 1) * h]);
-        for (k, dst) in m.row_mut(i).iter_mut().enumerate() {
-            *dst = b[k] + o[k];
+/// `e_b · μ_effᵀ + b`, softmaxed over the track's scored modules, weighted by
+/// the units' track weights and their module shares.
+fn module_level(
+    params: &HierParams,
+    units: &UnitTable,
+    um: &UnitModules,
+    sup: &TrackSupport,
+    plan: &StepPlan,
+    e_b: &Tensor,
+    t: usize,
+) -> CResult<Tensor> {
+    let dev = &params.dev;
+    let n_m = um.n_modules;
+    let all: Vec<u32>;
+    let mods: &[u32] = if sup.is_full(t) {
+        all = (0..n_m as u32).collect();
+        &all
+    } else {
+        sup.modules_of(t)
+    };
+    let b = plan.units.len();
+    // w_u · q_um on the scored modules, host-built: [B, |M_t|].
+    let mut wq = vec![0f32; b * mods.len()];
+    for (i, &u) in plan.units.iter().enumerate() {
+        let w = units.weight_of(u as usize, t);
+        let base = um.idx(u as usize, t, 0);
+        for (j, &m) in mods.iter().enumerate() {
+            wq[i * mods.len() + j] = w * um.q[base + m as usize];
         }
     }
-    m
-}
-
-/// `acc = acc + x`, MOVING `x` in when `acc` is still empty. `0 + x == x`
-/// exactly, so this is the same arithmetic as adding into a zero matrix — it
-/// just skips allocating and walking one when there is nothing to add to yet.
-fn accumulate(acc: &mut Option<DMatrix<f32>>, x: DMatrix<f32>) {
-    match acc {
-        None => *acc = Some(x),
-        Some(a) => *a += &x,
+    let wq = Tensor::from_vec(wq, (b, mods.len()), dev)?;
+    let (mut mu_eff, b_eff) = match params.offset(t) {
+        None => (
+            params.mu.as_tensor().clone(),
+            params.b_m.as_tensor().clone(),
+        ),
+        Some(o) => (
+            (params.mu.as_tensor() + o.d_mu.as_tensor())?,
+            (params.b_m.as_tensor() + o.d_b_m.as_tensor())?,
+        ),
+    };
+    if let Some(l) = params.lora.as_ref() {
+        // The module residual: `[M, H]`, the size of the dictionary itself.
+        mu_eff = (mu_eff + l.module_factors().residual()?)?;
     }
+    let (mu_eff, b_eff) = if sup.is_full(t) {
+        (mu_eff, b_eff)
+    } else {
+        let m_ids = ids(mods, dev)?;
+        (gather_rows(&mu_eff, &m_ids)?, gather_rows(&b_eff, &m_ids)?)
+    };
+    let s = e_b
+        .matmul(&mu_eff.t()?)?
+        .broadcast_add(&b_eff.unsqueeze(0)?)?;
+    let logp = log_softmax(&s, D::Minus1)?;
+    (wq * logp)?.sum_all()?.neg()
 }
 
-/// In-place row softmax of `s`.
-fn softmax_rows(s: &mut DMatrix<f32>) {
-    for mut row in s.row_iter_mut() {
-        let mx = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let z: f32 = row.iter().map(|v| (v - mx).exp()).sum();
-        let l = mx + z.ln();
-        row.iter_mut().for_each(|v| *v = (*v - l).exp());
+/// One `(track, module)` group to score: its member genes on the track, the
+/// module id, and the `(unit, weight)` pairs drawn into it.
+type Group<'a> = (Vec<u32>, usize, &'a [(u32, f32)]);
+
+/// One padded batch of gene-level groups on one track.
+struct GeneBatch {
+    n_max: usize,
+    d_max: usize,
+    unit_ids: Vec<u32>,
+    gene_ids: Vec<u32>,
+    col_valid: Vec<f32>,
+    /// Flat positions into the `[P, n_max, d_max]` log-probabilities, and the
+    /// weighted target share at each: `w_u · (c_k/K) · q_ug|m`.
+    target_pos: Vec<u32>,
+    target_val: Vec<f32>,
+}
+
+/// The gene-level loss of every group on track `t`, batched.
+fn gene_level(
+    params: &HierParams,
+    units: &UnitTable,
+    um: &UnitModules,
+    part: &Partition,
+    sup: &TrackSupport,
+    plan: &StepPlan,
+    t: usize,
+) -> CResult<Option<Tensor>> {
+    let dev = &params.dev;
+    // Each group's member genes (restricted to the track's support) and its
+    // `(unit, weight)` pairs; sorted by member count for bucketing.
+    let mut groups: Vec<Group<'_>> = plan
+        .pairs_by_module
+        .iter()
+        .filter(|((tt, _), _)| *tt as usize == t)
+        .map(|((_, m), pairs)| {
+            let members = &part.members[*m as usize];
+            let genes: Vec<u32> = if sup.is_full(t) {
+                members.clone()
+            } else {
+                sup.slots_of(t, *m as usize)
+                    .iter()
+                    .map(|&j| members[j as usize])
+                    .collect()
+            };
+            (genes, *m as usize, pairs.as_slice())
+        })
+        .collect();
+    if groups.is_empty() {
+        return Ok(None);
     }
+    groups.sort_by_key(|(genes, _, _)| genes.len());
+    let mut batches: Vec<GeneBatch> = Vec::new();
+    let mut start = 0;
+    while start < groups.len() {
+        let d_min = groups[start].0.len().max(1);
+        let mut end = start;
+        while end < groups.len() && groups[end].0.len() <= d_min * BUCKET_RATIO {
+            end += 1;
+        }
+        let chunk = &groups[start..end];
+        let d_max = chunk
+            .iter()
+            .map(|(g, _, _)| g.len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let n_max = chunk
+            .iter()
+            .map(|(_, _, p)| p.len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let p_n = chunk.len();
+        let mut unit_ids = vec![0u32; p_n * n_max];
+        let mut gene_ids = vec![0u32; p_n * d_max];
+        let mut col_valid = vec![0f32; p_n * d_max];
+        let mut target_pos: Vec<u32> = Vec::new();
+        let mut target_val: Vec<f32> = Vec::new();
+        for (p, (genes, m, pairs)) in chunk.iter().enumerate() {
+            for (j, &g) in genes.iter().enumerate() {
+                gene_ids[p * d_max + j] = g;
+                col_valid[p * d_max + j] = 1.0;
+            }
+            let restricted = (!sup.is_full(t)).then(|| sup.local_of(t, *m));
+            for (i, &(u, wt)) in pairs.iter().enumerate() {
+                unit_ids[p * n_max + i] = u;
+                let scale = units.weight_of(u as usize, t) * wt;
+                let n_um = um.n_um[um.idx(u as usize, t, *m)];
+                let counts = um.by_module[u as usize]
+                    .iter()
+                    .find(|((tr, k), _)| *tr as usize == t && *k as usize == *m)
+                    .map(|(_, v)| v.as_slice())
+                    .unwrap_or(&[]);
+                for &(slot, c) in counts {
+                    let col = match restricted {
+                        None => slot as usize,
+                        Some(local) => local[slot as usize] as usize,
+                    };
+                    target_pos.push(((p * n_max + i) * d_max + col) as u32);
+                    target_val.push(scale * c / n_um);
+                }
+            }
+        }
+        batches.push(GeneBatch {
+            n_max,
+            d_max,
+            unit_ids,
+            gene_ids,
+            col_valid,
+            target_pos,
+            target_val,
+        });
+        start = end;
+    }
+
+    let h = params.h;
+    let lora = params.lora.as_ref().map(|l| l.gene_factors());
+    let mut total: Option<Tensor> = None;
+    for b in batches {
+        let p_n = b.unit_ids.len() / b.n_max;
+        let u_ids = ids(&b.unit_ids, dev)?;
+        let g_ids = ids(&b.gene_ids, dev)?;
+        let e = gather_rows(params.e_u.as_tensor(), &u_ids)?.reshape((p_n, b.n_max, h))?;
+        let mut r = gather_rows(params.r.as_tensor(), &g_ids)?;
+        let mut bias = gather_rows(params.b_g.as_tensor(), &g_ids)?;
+        if let Some(o) = params.offset(t) {
+            r = (r + gather_rows(o.d_r.as_tensor(), &g_ids)?)?;
+            bias = (bias + gather_rows(o.d_b_g.as_tensor(), &g_ids)?)?;
+        }
+        if let Some(l) = lora.as_ref() {
+            r = (r + l.residual_rows(&g_ids)?)?;
+        }
+        let r = r.reshape((p_n, b.d_max, h))?;
+        // Pad columns take `−1e9`: exactly zero probability, no gradient.
+        let pad = floats(&b.col_valid, dev)?
+            .reshape((p_n, 1, b.d_max))?
+            .affine(-MASK_NEG, MASK_NEG)?;
+        let s = e
+            .matmul(&r.transpose(1, 2)?)?
+            .broadcast_add(&bias.reshape((p_n, 1, b.d_max))?)?
+            .broadcast_add(&pad)?;
+        let logp = log_softmax(&s, D::Minus1)?.flatten_all()?;
+        if b.target_pos.is_empty() {
+            continue;
+        }
+        let picked = gather_rows(&logp, &ids(&b.target_pos, dev)?)?;
+        let loss = (picked * floats(&b.target_val, dev)?)?.sum_all()?.neg()?;
+        total = Some(match total {
+            None => loss,
+            Some(acc) => (acc + loss)?,
+        });
+    }
+    Ok(total)
 }
 
-/// Pure: loss + gradients for `plan`. Each gene-level pair in `plan` already
-/// carries its own draw weight (`c_k/K`); this function never re-derives an
-/// importance weight from `q_um`. `offset_l2` is the ridge on the non-base
-/// tracks' offset tables for THIS step (module docs — the caller divides its
-/// per-epoch weight by `steps_per_epoch`); it is ignored at `T == 1`, where
-/// there are no offsets. `sup` is the precomputed per-track support (module
-/// docs); a full track takes the unrestricted path, which at `t == 0` is the
-/// plain model's.
-pub fn loss_and_grads(
+/// The step's loss as one tensor to differentiate, plus its parts as numbers
+/// for the epoch log. Pure in the parameters: nothing is updated here.
+pub fn step_loss(
     params: &HierParams,
     units: &UnitTable,
     um: &UnitModules,
@@ -213,532 +320,275 @@ pub fn loss_and_grads(
     sup: &TrackSupport,
     plan: &StepPlan,
     offset_l2_step: f32,
-) -> (StepStats, Grads) {
+) -> anyhow::Result<(StepStats, Tensor)> {
     let n_t = units.n_tracks();
-    debug_assert_eq!(
-        params.offsets.len(),
-        n_t.saturating_sub(1),
+    anyhow::ensure!(
+        params.offsets.len() == n_t.saturating_sub(1),
         "one offset table per non-base track"
     );
-    let (h, n_m) = (params.h, part.n_modules());
-    let n_g = params.b_g.len();
-    let b = plan.units.len();
-
-    //////////////////
-    // Module level //
-    //////////////////
-
-    let e_b = gather(&params.e_u, h, &plan.units); // [B × H]
-    let mu_base = DMatrix::<f32>::from_row_slice(n_m, h, &params.mu); // [M × H]
-    let mut loss_module = 0f64;
-    // Summed over tracks, but the FIRST track's result is moved in rather than
-    // added to a zero matrix: at one track that is a plain assignment, with no
-    // extra `[B × H]` / `[M × H]` allocation or pass.
-    let mut g_e_module: Option<DMatrix<f32>> = None;
-    let mut g_mu: Option<DMatrix<f32>> = None;
-    let mut g_b_m = vec![0f32; n_m];
-    // Per non-base track, in track order.
-    let mut off_mu: Vec<Vec<f32>> = Vec::with_capacity(n_t.saturating_sub(1));
-    let mut off_b_m: Vec<Vec<f32>> = Vec::with_capacity(n_t.saturating_sub(1));
-
-    for t in 0..n_t {
-        let w: Vec<f32> = plan
-            .units
-            .iter()
-            .map(|&u| units.weight_of(u as usize, t))
-            .collect();
-        let offset = params.offset(t);
-        if sup.is_full(t) {
-            // Unrestricted: every module is a column, empty ones included. At
-            // `t == 0` these are the plain model's statements, unchanged.
-            // `Borrowed` at t == 0: the base dictionary itself, never `μ + 0`.
-            // Same module-level softmax/gradient math as the restricted arm
-            // below, gathered/scattered through `mods` there instead of run
-            // dense here: a change to one side's math belongs on both.
-            let mu_eff: Cow<DMatrix<f32>> = match offset {
-                None => Cow::Borrowed(&mu_base),
-                Some(o) => Cow::Owned(DMatrix::<f32>::from_fn(n_m, h, |m, k| {
-                    params.mu[m * h + k] + o.d_mu[m * h + k]
-                })),
-            };
-            let mut s = &e_b * mu_eff.transpose(); // [B × M]
-            match offset {
-                None => {
-                    for mut row in s.row_iter_mut() {
-                        row.iter_mut().zip(&params.b_m).for_each(|(v, b)| *v += b);
-                    }
-                }
-                Some(o) => {
-                    for mut row in s.row_iter_mut() {
-                        row.iter_mut()
-                            .zip(params.b_m.iter().zip(&o.d_b_m))
-                            .for_each(|(v, (b, d))| *v += b + d);
-                    }
-                }
-            }
-            softmax_rows(&mut s); // s is now p (softmax output)
-            let mut delta1 = DMatrix::<f32>::zeros(b, n_m); // w_u (p − q)
-            for (i, &u) in plan.units.iter().enumerate() {
-                let base = um.idx(u as usize, t, 0);
-                let q = &um.q[base..base + n_m];
-                for m in 0..n_m {
-                    let p = s[(i, m)];
-                    if q[m] > 0.0 {
-                        // the module-level loss uses ln p, p being softmax_rows' output
-                        // clamped: an underflowed p would report +inf; the gradient does not use ln p
-                        loss_module -= f64::from(w[i] * q[m] * (p.max(f32::MIN_POSITIVE).ln()));
-                    }
-                    delta1[(i, m)] = w[i] * (p - q[m]);
-                }
-            }
-            let g_e_t = &delta1 * &*mu_eff; // [B × H]
-            let g_mu_t = delta1.tr_mul(&e_b); // [M × H]
-            let g_b_m_t: Vec<f32> = (0..n_m).map(|m| delta1.column(m).sum()).collect();
-            for (acc, x) in g_b_m.iter_mut().zip(&g_b_m_t) {
-                *acc += x;
-            }
-            accumulate(&mut g_e_module, g_e_t);
-            if offset.is_some() {
-                off_mu.push(g_mu_t.transpose().as_slice().to_vec());
-                off_b_m.push(g_b_m_t);
-            }
-            accumulate(&mut g_mu, g_mu_t);
-            continue;
-        }
-
-        // Restricted: the softmax runs over M_t, the modules holding at least
-        // one gene this track has a row for. A module outside M_t is not a
-        // negative here — it is off this track's axis — so it gets no column and
-        // no gradient. Rows are scattered back onto the full `[M × H]` tables.
-        // Same module-level softmax/gradient math as the unrestricted arm
-        // above, run dense there over every module instead of gathered
-        // through `mods`: a change to one side's math belongs on both.
-        let mods = sup.modules_of(t);
-        let k_m = mods.len();
-        let mu_eff = DMatrix::<f32>::from_fn(k_m, h, |j, k| {
-            let m = mods[j] as usize;
-            params.mu[m * h + k] + offset.map_or(0.0, |o| o.d_mu[m * h + k])
+    let dev = &params.dev;
+    let e_b = gather_rows(params.e_u.as_tensor(), &ids(&plan.units, dev)?)?;
+    let mut loss_module: Option<Tensor> = None;
+    let mut loss_gene: Option<Tensor> = None;
+    let add = |acc: &mut Option<Tensor>, x: Tensor| -> CResult<()> {
+        *acc = Some(match acc.take() {
+            None => x,
+            Some(a) => (a + x)?,
         });
-        let mut s = &e_b * mu_eff.transpose(); // [B × |M_t|]
-        for mut row in s.row_iter_mut() {
-            for (j, &m) in mods.iter().enumerate() {
-                let m = m as usize;
-                row[j] += params.b_m[m] + offset.map_or(0.0, |o| o.d_b_m[m]);
-            }
-        }
-        softmax_rows(&mut s);
-        let mut delta1 = DMatrix::<f32>::zeros(b, k_m);
-        for (i, &u) in plan.units.iter().enumerate() {
-            let base = um.idx(u as usize, t, 0);
-            for (j, &m) in mods.iter().enumerate() {
-                let q = um.q[base + m as usize];
-                let p = s[(i, j)];
-                if q > 0.0 {
-                    loss_module -= f64::from(w[i] * q * (p.max(f32::MIN_POSITIVE).ln()));
-                }
-                delta1[(i, j)] = w[i] * (p - q);
-            }
-        }
-        accumulate(&mut g_e_module, &delta1 * &mu_eff);
-        let g_mu_sub = delta1.tr_mul(&e_b); // [|M_t| × H]
-        let mut mu_dense = vec![0f32; n_m * h];
-        let mut b_m_dense = vec![0f32; n_m];
-        let g_mu_acc = g_mu.get_or_insert_with(|| DMatrix::<f32>::zeros(n_m, h));
-        for (j, &m) in mods.iter().enumerate() {
-            let m = m as usize;
-            for k in 0..h {
-                let x = g_mu_sub[(j, k)];
-                g_mu_acc[(m, k)] += x;
-                mu_dense[m * h + k] = x;
-            }
-            let bb = delta1.column(j).sum();
-            g_b_m[m] += bb;
-            b_m_dense[m] = bb;
-        }
-        if offset.is_some() {
-            off_mu.push(mu_dense);
-            off_b_m.push(b_m_dense);
+        Ok(())
+    };
+    for t in 0..n_t {
+        add(
+            &mut loss_module,
+            module_level(params, units, um, sup, plan, &e_b, t)?,
+        )?;
+        if let Some(l) = gene_level(params, units, um, part, sup, plan, t)? {
+            add(&mut loss_gene, l)?;
         }
     }
-
-    let g_e_module = g_e_module.unwrap_or_else(|| DMatrix::<f32>::zeros(b, h));
-    let g_mu = g_mu.unwrap_or_else(|| DMatrix::<f32>::zeros(n_m, h));
-
-    ////////////////
-    // Gene level //
-    ////////////////
-
-    // Position of each unit in the plan, for scattering e_u gradients.
-    let pos_of: rustc_hash::FxHashMap<u32, usize> = plan
-        .units
-        .iter()
-        .enumerate()
-        .map(|(i, &u)| (u, i))
-        .collect();
-    struct ModuleOut {
-        track: usize,
-        module: u32,
-        loss: f64,
-        e_rows: Vec<(usize, Vec<f32>)>, // (position in plan, grad row)
-        /// `(gene, grad row)`. Only the genes THIS track scored, ascending: a
-        /// subset of the module's members on a restricted track, all of them
-        /// otherwise.
-        r_rows: Vec<(u32, Vec<f32>)>,
-        b_rows: Vec<(u32, f32)>,
+    let mut loss_ridge: Option<Tensor> = None;
+    if offset_l2_step > 0.0 {
+        let n_m = params.b_m.dims()[0] as f64;
+        let n_g = params.b_g.dims()[0] as f64;
+        for o in &params.offsets {
+            let mu2 = o
+                .d_mu
+                .as_tensor()
+                .sqr()?
+                .sum_all()?
+                .affine(1.0 / n_m, 0.0)?;
+            let r2 = o.d_r.as_tensor().sqr()?.sum_all()?.affine(1.0 / n_g, 0.0)?;
+            add(
+                &mut loss_ridge,
+                (mu2 + r2)?.affine(f64::from(offset_l2_step), 0.0)?,
+            )?;
+        }
     }
-    let outs: Vec<ModuleOut> = plan
-        .pairs_by_module
-        .par_iter()
-        .map(|(key, pairs)| {
-            let (t, m) = (key.0 as usize, key.1);
-            let offset = params.offset(t);
-            let members = &part.members[m as usize];
-            // `None` on an unrestricted track: its columns ARE `members`, in
-            // members order, so nothing is gathered, indexed or allocated.
-            // `Some(slots)` restricts to the member slots this track has rows
-            // for, and `local` maps a full slot back onto those columns.
-            let restricted: Option<(&[u32], &[u32])> = (!sup.is_full(t))
-                .then(|| (sup.slots_of(t, m as usize), sup.local_of(t, m as usize)));
-            let genes: Cow<[u32]> = match restricted {
-                None => Cow::Borrowed(members.as_slice()),
-                Some((slots, _)) => {
-                    Cow::Owned(slots.iter().map(|&j| members[j as usize]).collect())
-                }
-            };
-            let d_m = genes.len();
-            let r_m = match offset {
-                None => gather(&params.r, h, &genes), // [d_m × H]
-                Some(o) => gather_sum(&params.r, &o.d_r, h, &genes),
-            };
-            let ids: Vec<u32> = pairs.iter().map(|&(u, _)| u).collect();
-            let e_m = gather(&params.e_u, h, &ids); // [n × H]
-            let mut s = &e_m * r_m.transpose(); // [n × d_m]
-            match offset {
-                None => {
-                    for mut row in s.row_iter_mut() {
-                        for (j, &g) in genes.iter().enumerate() {
-                            row[j] += params.b_g[g as usize];
-                        }
-                    }
-                }
-                Some(o) => {
-                    for mut row in s.row_iter_mut() {
-                        for (j, &g) in genes.iter().enumerate() {
-                            row[j] += params.b_g[g as usize] + o.d_b_g[g as usize];
-                        }
-                    }
-                }
-            }
-            softmax_rows(&mut s);
-            let mut loss = 0f64;
-            let mut delta2 = DMatrix::<f32>::zeros(pairs.len(), d_m); // w_u·(c_k/K) (p − q_g|m)
-                                                                      // One target buffer per module, cleared through the slots it touched.
-            let mut target = vec![0f32; d_m];
-            for (i, &(u, wt)) in pairs.iter().enumerate() {
-                let scale = units.weight_of(u as usize, t) * wt;
-                // target shares within the module, on this track
-                let counts = um.by_module[u as usize]
-                    .iter()
-                    .find(|((tr, k), _)| *tr as usize == t && *k == m)
-                    .map(|(_, v)| v.as_slice())
-                    .unwrap_or(&[]);
-                let n_um = um.n_um[um.idx(u as usize, t, m as usize)];
-                // Bucket slots index the FULL member list. Two loops rather
-                // than a per-element branch: on an unrestricted track the slot
-                // IS the column.
-                match restricted {
-                    None => {
-                        for &(slot, c) in counts {
-                            target[slot as usize] += c / n_um;
-                        }
-                    }
-                    Some((_, local)) => {
-                        for &(slot, c) in counts {
-                            let col = local[slot as usize];
-                            debug_assert_ne!(col, u32::MAX, "a count exists only where a row does");
-                            target[col as usize] += c / n_um;
-                        }
-                    }
-                }
-                for j in 0..d_m {
-                    let p = s[(i, j)];
-                    if target[j] > 0.0 {
-                        // clamped: an underflowed p would report +inf; the gradient does not use ln p
-                        loss -= f64::from(scale * target[j] * p.max(f32::MIN_POSITIVE).ln());
-                    }
-                    delta2[(i, j)] = scale * (p - target[j]);
-                }
-                match restricted {
-                    None => {
-                        for &(slot, _) in counts {
-                            target[slot as usize] = 0.0;
-                        }
-                    }
-                    Some((_, local)) => {
-                        for &(slot, _) in counts {
-                            target[local[slot as usize] as usize] = 0.0;
-                        }
-                    }
-                }
-            }
-            let g_e = &delta2 * &r_m; // [n × H]
-            let g_r = delta2.tr_mul(&e_m); // [d_m × H]
-            let e_rows = pairs
+    let scalar = |t: &Option<Tensor>| -> CResult<f64> {
+        Ok(match t {
+            None => 0.0,
+            Some(x) => f64::from(x.to_scalar::<f32>()?),
+        })
+    };
+    let stats = StepStats {
+        loss_module: scalar(&loss_module)?,
+        loss_gene: scalar(&loss_gene)?,
+        loss_ridge: scalar(&loss_ridge)?,
+    };
+    let mut total = loss_module.unwrap_or(Tensor::zeros((), DType::F32, dev)?);
+    if let Some(g) = loss_gene {
+        total = (total + g)?;
+    }
+    if let Some(r) = loss_ridge {
+        total = (total + r)?;
+    }
+    Ok((stats, total))
+}
+
+/// Adagrad with one accumulator per row, where a row carries a scalar bias
+/// alongside it: the accumulator sees the mean of `grad²` over the row AND
+/// the bias, and both move by the same row step. A row whose gradient is
+/// masked to zero still moves its bias, with the accumulator seeing the bias
+/// alone — a pinned row's bias trains as if it had no row.
+pub struct RowAdagradBias {
+    acc: Tensor,
+    lr: f64,
+}
+
+impl RowAdagradBias {
+    pub fn new(n_rows: usize, lr: f32, dev: &Device) -> CResult<Self> {
+        Ok(Self {
+            acc: Tensor::zeros(n_rows, DType::F32, dev)?,
+            lr: f64::from(lr),
+        })
+    }
+
+    /// One step of `(row, bias)` from their gradients. `row_mask` is `[n, 1]`
+    /// with `0` on pinned rows; `decay` is the per-step weight-decay factor
+    /// applied to every row whose gradient is nonzero (`1.0` for none).
+    pub fn step(
+        &mut self,
+        row: &Var,
+        bias: &Var,
+        g_row: &Tensor,
+        g_bias: &Tensor,
+        row_mask: Option<&Tensor>,
+        decay: f64,
+    ) -> CResult<()> {
+        let h = row.dims()[1] as f64;
+        let g_row = match row_mask {
+            None => g_row.detach(),
+            Some(m) => g_row.detach().broadcast_mul(m)?,
+        };
+        let g_bias = g_bias.detach();
+        let row_sq = g_row.sqr()?.sum(1)?; // [n]
+                                           // Over the row and the bias where the row trains, the bias alone where
+                                           // it is pinned.
+        let n_eff = match row_mask {
+            None => Tensor::full((h + 1.0) as f32, row_sq.dims()[0], row_sq.device())?,
+            Some(m) => m.squeeze(1)?.affine(h, 1.0)?,
+        };
+        let g2 = (&row_sq + g_bias.sqr()?)?.div(&n_eff)?;
+        self.acc = (&self.acc + g2)?.detach();
+        let step = self
+            .acc
+            .sqrt()?
+            .affine(1.0 / self.lr, f64::from(ADAGRAD_EPS) / self.lr)?
+            .recip()?; // lr / (sqrt(acc) + eps)   [n]
+        let mut new_row = row.as_tensor().clone();
+        if decay != 1.0 {
+            // `row *= decay` on touched rows only: a row the step never scored
+            // keeps its value, as it always has.
+            let touched = row_sq.gt(0f32)?.to_dtype(DType::F32)?;
+            let factor = touched.affine(decay - 1.0, 1.0)?; // 1 on untouched, decay on touched
+            new_row = new_row.broadcast_mul(&factor.unsqueeze(1)?)?;
+        }
+        let new_row = new_row.sub(&g_row.broadcast_mul(&step.unsqueeze(1)?)?)?;
+        row.set(&new_row)?;
+        bias.set(&bias.as_tensor().sub(&(g_bias * step)?)?)
+    }
+}
+
+pub struct Optimizers {
+    pub e_u: crate::fne::RowAdagrad,
+    pub mu: RowAdagradBias,
+    pub r: RowAdagradBias,
+    /// Tracks `1..T`, in order: `(M rows for Δ/β, G rows for δ/γ)`.
+    pub offsets: Vec<(RowAdagradBias, RowAdagradBias)>,
+    /// Under LoRA, in order: `a` (M rows), `V_M`, `u` (G rows), `V_G`; the
+    /// `V`s' learning rate carries the LoRA+ ratio.
+    pub lora: Option<[crate::fne::RowAdagrad; 4]>,
+}
+
+impl Optimizers {
+    pub fn new(params: &HierParams, lr: f32) -> CResult<Self> {
+        let dev = &params.dev;
+        let (n_u, n_m, n_g) = (
+            params.e_u.dims()[0],
+            params.mu.dims()[0],
+            params.r.dims()[0],
+        );
+        Ok(Self {
+            e_u: crate::fne::RowAdagrad::new(n_u, f64::from(lr), dev)?,
+            mu: RowAdagradBias::new(n_m, lr, dev)?,
+            r: RowAdagradBias::new(n_g, lr, dev)?,
+            offsets: params
+                .offsets
                 .iter()
-                .enumerate()
-                .map(|(i, &(u, _))| {
-                    let pos = *pos_of
-                        .get(&u)
-                        .expect("every unit drawn into a module is in plan.units");
-                    (pos, g_e.row(i).iter().copied().collect())
+                .map(|_| {
+                    Ok((
+                        RowAdagradBias::new(n_m, lr, dev)?,
+                        RowAdagradBias::new(n_g, lr, dev)?,
+                    ))
                 })
-                .collect();
-            let r_rows = genes
-                .iter()
-                .enumerate()
-                .map(|(j, &g)| (g, g_r.row(j).iter().copied().collect()))
-                .collect();
-            let b_rows = genes
-                .iter()
-                .enumerate()
-                .map(|(j, &g)| (g, delta2.column(j).sum()))
-                .collect();
-            ModuleOut {
-                track: t,
-                module: m,
-                loss,
-                e_rows,
-                r_rows,
-                b_rows,
-            }
+                .collect::<CResult<_>>()?,
+            lora: match params.lora.as_ref() {
+                Some(l) => {
+                    let fast = f64::from(lr * l.lr_ratio);
+                    Some([
+                        crate::fne::RowAdagrad::new(n_m, f64::from(lr), dev)?,
+                        crate::fne::RowAdagrad::new(l.v_m.dims()[0], fast, dev)?,
+                        crate::fne::RowAdagrad::new(n_g, f64::from(lr), dev)?,
+                        crate::fne::RowAdagrad::new(l.v_g.dims()[0], fast, dev)?,
+                    ])
+                }
+                None => None,
+            },
         })
-        .collect();
-
-    ////////////
-    // Reduce //
-    ////////////
-
-    // The base gene tables take the SUM over tracks, so a module scored on more
-    // than one track has to be merged. The common case — and the WHOLE of the
-    // one-track case — is a module claimed by exactly one group, whose rows are
-    // MOVED into the output untouched, in the group's own order: no buffer, no
-    // copy, byte for byte what the plain model emits. Only a module a second
-    // group also claims is merged, by gene id, and only then is its gene →
-    // position index built. A member no scored track has a row for never
-    // appears at all — so it takes no gradient AND no weight decay, since
-    // `apply` decays what it is handed.
-    let mut g_e_u: Vec<f32> = g_e_module.transpose().as_slice().to_vec(); // row-major [B × H]
-                                                                          // (nalgebra is column-major: transpose().as_slice() walks row-major of the original)
-    let mut loss_gene = 0f64;
-    let mut g_r: Vec<(u32, Vec<f32>)> = Vec::new();
-    let mut g_b_g: Vec<(u32, f32)> = Vec::new();
-    // module → (first index in `g_r`, how many rows) for the group that claimed it.
-    let mut claimed: rustc_hash::FxHashMap<u32, (usize, usize)> = rustc_hash::FxHashMap::default();
-    // (module, gene) → index in `g_r`; filled lazily, only for merged modules.
-    let mut pos_of_gene: rustc_hash::FxHashMap<(u32, u32), usize> =
-        rustc_hash::FxHashMap::default();
-    let mut indexed: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
-
-    // Each non-base track's own gene-side gradient, dense over all G genes.
-    let n_off = n_t.saturating_sub(1);
-    let mut off_r: Vec<Vec<f32>> = (0..n_off).map(|_| vec![0f32; n_g * h]).collect();
-    let mut off_b_g: Vec<Vec<f32>> = (0..n_off).map(|_| vec![0f32; n_g]).collect();
-
-    for o in outs {
-        loss_gene += o.loss;
-        for (i, row) in o.e_rows {
-            for k in 0..h {
-                g_e_u[i * h + k] += row[k];
-            }
-        }
-        if o.track > 0 {
-            let i = o.track - 1;
-            for (gene, row) in &o.r_rows {
-                let g = *gene as usize;
-                for k in 0..h {
-                    off_r[i][g * h + k] += row[k];
-                }
-            }
-            for &(gene, x) in &o.b_rows {
-                off_b_g[i][gene as usize] += x;
-            }
-        }
-        match claimed.get(&o.module).copied() {
-            None => {
-                claimed.insert(o.module, (g_r.len(), o.r_rows.len()));
-                g_r.extend(o.r_rows);
-                g_b_g.extend(o.b_rows);
-            }
-            Some((first, len)) => {
-                if indexed.insert(o.module) {
-                    for (i, (gene, _)) in g_r.iter().enumerate().skip(first).take(len) {
-                        pos_of_gene.insert((o.module, *gene), i);
-                    }
-                }
-                debug_assert_eq!(o.r_rows.len(), o.b_rows.len());
-                for ((gene, row), (_, x)) in o.r_rows.into_iter().zip(o.b_rows) {
-                    match pos_of_gene.get(&(o.module, gene)).copied() {
-                        Some(i) => {
-                            for (acc, v) in g_r[i].1.iter_mut().zip(&row) {
-                                *acc += v;
-                            }
-                            g_b_g[i].1 += x;
-                        }
-                        // The claiming group's track had no row for this gene.
-                        None => {
-                            pos_of_gene.insert((o.module, gene), g_r.len());
-                            g_r.push((gene, row));
-                            g_b_g.push((gene, x));
-                        }
-                    }
-                }
-            }
-        }
     }
-
-    ///////////////////////////
-    // Ridge on the offsets  //
-    ///////////////////////////
-
-    let mut loss_ridge = 0f64;
-    let (ridge_m, ridge_g) = (
-        2.0 * offset_l2_step / n_m.max(1) as f32,
-        2.0 * offset_l2_step / n_g.max(1) as f32,
-    );
-    let sq = |v: &[f32]| v.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>();
-    let offsets: Vec<TrackGrads> = params
-        .offsets
-        .iter()
-        .enumerate()
-        .map(|(i, o)| {
-            loss_ridge += f64::from(offset_l2_step)
-                * (sq(&o.d_mu) / n_m.max(1) as f64 + sq(&o.d_r) / n_g.max(1) as f64);
-            let mut mu = std::mem::take(&mut off_mu[i]);
-            for (x, d) in mu.iter_mut().zip(&o.d_mu) {
-                *x += ridge_m * d;
-            }
-            // Dense over every gene row: the ridge reaches rows the plan never
-            // touched (module docs). Added into the accumulator in place — the
-            // buffer IS the gradient, never copied out row by row.
-            let mut r = std::mem::take(&mut off_r[i]);
-            for (x, d) in r.iter_mut().zip(&o.d_r) {
-                *x += ridge_g * d;
-            }
-            TrackGrads {
-                mu,
-                b_m: std::mem::take(&mut off_b_m[i]),
-                r,
-                b_g: std::mem::take(&mut off_b_g[i]),
-            }
-        })
-        .collect();
-
-    (
-        StepStats {
-            loss_module,
-            loss_gene,
-            loss_ridge,
-        },
-        Grads {
-            e_u: g_e_u,
-            mu: g_mu.transpose().as_slice().to_vec(),
-            b_m: g_b_m,
-            r: g_r,
-            b_g: g_b_g,
-            offsets,
-        },
-    )
 }
 
-/// Apply `grads` with the row optimizers (weight decay `wd` on touched rows:
-/// `row *= 1 − lr·wd` before the Adagrad step; biases never decay). The offset
-/// tables never decay at all — their shrinkage is the exact ridge already
-/// carried in `grads.offsets`.
-/// The step a pinned row takes: its bias alone, so the row keeps its value and
-/// the row's accumulator sees only the bias gradient.
-fn bias_only_step(opt: &mut RowAdagrad, r: usize, bias: &mut f32, gbias: f32) {
-    opt.update(r, std::slice::from_mut(bias), &[gbias]);
-}
-
+/// Apply the gradients of one step with the row optimizers. Weight decay `wd`
+/// multiplies a touched row by `1 − lr·wd` before its Adagrad step; biases
+/// never decay, pinned rows never move, and the offset tables never decay at
+/// all — their shrinkage is the exact ridge already in the gradient.
 pub fn apply(
     params: &mut HierParams,
     opt: &mut Optimizers,
-    grads: &Grads,
-    plan: &StepPlan,
+    grads: &GradStore,
+    lr: f32,
     wd: f32,
-) {
-    let h = params.h;
-    let decay = |row: &mut [f32], lr: f32| {
-        if wd > 0.0 {
-            let f = 1.0 - lr * wd;
-            row.iter_mut().for_each(|x| *x *= f);
+) -> CResult<()> {
+    let dev = params.dev.clone();
+    let decay = if wd > 0.0 {
+        1.0 - f64::from(lr) * f64::from(wd)
+    } else {
+        1.0
+    };
+    let zeros_like = |v: &Var| Tensor::zeros(v.dims(), DType::F32, &dev);
+    let grad = |v: &Var| -> CResult<Tensor> {
+        match grads.get(v) {
+            Some(g) => Ok(g.clone()),
+            None => zeros_like(v),
         }
     };
-    for (i, &u) in plan.units.iter().enumerate() {
-        let u = u as usize;
-        let row = &mut params.e_u[u * h..(u + 1) * h];
-        decay(row, opt.e_u.lr);
-        opt.e_u.update(u, row, &grads.e_u[i * h..(i + 1) * h]);
+    // Units: no bias, decay on touched rows.
+    let g_e = grad(&params.e_u)?;
+    if decay != 1.0 {
+        let touched = g_e.sqr()?.sum(1)?.gt(0f32)?.to_dtype(DType::F32)?;
+        let factor = touched.affine(decay - 1.0, 1.0)?.unsqueeze(1)?;
+        params
+            .e_u
+            .set(&params.e_u.as_tensor().broadcast_mul(&factor)?)?;
     }
-    for m in 0..params.b_m.len() {
-        if params.mu_frozen {
-            bias_only_step(&mut opt.mu, m, &mut params.b_m[m], grads.b_m[m]);
-            continue;
-        }
-        let row = &mut params.mu[m * h..(m + 1) * h];
-        decay(row, opt.mu.lr);
-        opt.mu.update_with_bias(
-            m,
-            row,
-            &mut params.b_m[m],
-            &grads.mu[m * h..(m + 1) * h],
-            grads.b_m[m],
-        );
+    opt.e_u.step(&params.e_u, &g_e)?;
+    // Modules: every row is offered; the optimizer skips a zero gradient.
+    let mu_mask = if params.mu_frozen {
+        Some(Tensor::zeros((params.mu.dims()[0], 1), DType::F32, &dev)?)
+    } else {
+        None
+    };
+    opt.mu.step(
+        &params.mu,
+        &params.b_m,
+        &grad(&params.mu)?,
+        &grad(&params.b_m)?,
+        mu_mask.as_ref(),
+        decay,
+    )?;
+    opt.r.step(
+        &params.r,
+        &params.b_g,
+        &grad(&params.r)?,
+        &grad(&params.b_g)?,
+        params.r_mask.as_ref(),
+        decay,
+    )?;
+    for (o, (opt_mu, opt_r)) in params.offsets.iter().zip(&mut opt.offsets) {
+        opt_mu.step(
+            &o.d_mu,
+            &o.d_b_m,
+            &grad(&o.d_mu)?,
+            &grad(&o.d_b_m)?,
+            None,
+            1.0,
+        )?;
+        opt_r.step(
+            &o.d_r,
+            &o.d_b_g,
+            &grad(&o.d_r)?,
+            &grad(&o.d_b_g)?,
+            None,
+            1.0,
+        )?;
     }
-    // `grads.r` and `grads.b_g` are emitted in lockstep, one entry per gene
-    // touched by at least one scored track, so they zip.
-    debug_assert_eq!(grads.r.len(), grads.b_g.len());
-    for ((g, gr), &(gb_gene, gb)) in grads.r.iter().zip(&grads.b_g) {
-        debug_assert_eq!(*g, gb_gene);
-        let gi = *g as usize;
-        if params.is_frozen_gene(gi) {
-            bias_only_step(&mut opt.r, gi, &mut params.b_g[gi], gb);
-            continue;
-        }
-        let row = &mut params.r[gi * h..(gi + 1) * h];
-        decay(row, opt.r.lr);
-        opt.r.update_with_bias(gi, row, &mut params.b_g[gi], gr, gb);
-    }
-    // Non-base tracks: no weight decay (the ridge is already exact in the
-    // gradient), and every row is offered — the row optimizer skips a row whose
-    // gradient is all zero, which is what an untouched, still-zero offset has.
-    debug_assert_eq!(grads.offsets.len(), params.offsets.len());
-    for ((tg, (opt_mu, opt_r)), off) in grads
-        .offsets
-        .iter()
-        .zip(&mut opt.offsets)
-        .zip(&mut params.offsets)
+    if let (Some(l), Some([opt_a, opt_vm, opt_u, opt_vg])) =
+        (params.lora.as_ref(), opt.lora.as_mut())
     {
-        for m in 0..off.d_b_m.len() {
-            opt_mu.update_with_bias(
-                m,
-                &mut off.d_mu[m * h..(m + 1) * h],
-                &mut off.d_b_m[m],
-                &tg.mu[m * h..(m + 1) * h],
-                tg.b_m[m],
-            );
+        if let Some(g) = grads.get(&l.a) {
+            opt_a.step(&l.a, g)?;
         }
-        debug_assert_eq!(tg.r.len(), tg.b_g.len() * h);
-        for g in 0..tg.b_g.len() {
-            opt_r.update_with_bias(
-                g,
-                &mut off.d_r[g * h..(g + 1) * h],
-                &mut off.d_b_g[g],
-                &tg.r[g * h..(g + 1) * h],
-                tg.b_g[g],
-            );
+        if let Some(g) = grads.get(&l.v_m) {
+            opt_vm.step(&l.v_m, g)?;
+        }
+        if let Some(g) = grads.get(&l.u) {
+            opt_u.step(&l.u, &g.broadcast_mul(&l.u_mask)?)?;
+        }
+        if let Some(g) = grads.get(&l.v_g) {
+            opt_vg.step(&l.v_g, g)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

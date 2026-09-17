@@ -1,55 +1,40 @@
 use super::*;
 
+fn host(v: &Var) -> Vec<f32> {
+    to_host2(v.as_tensor()).unwrap()
+}
+
 #[test]
 fn init_is_seeded_and_biases_are_zero() {
-    let a = HierParams::new(3, 2, 5, 4, 7);
-    let b = HierParams::new(3, 2, 5, 4, 7);
-    let c = HierParams::new(3, 2, 5, 4, 8);
-    assert_eq!(a.e_u, b.e_u);
-    assert_ne!(a.e_u, c.e_u);
-    assert_eq!(a.e_u.len(), 12);
-    assert_eq!(a.mu.len(), 8);
-    assert_eq!(a.r.len(), 20);
-    assert!(a.b_m.iter().all(|&x| x == 0.0) && a.b_g.iter().all(|&x| x == 0.0));
-    // N(0, 0.1²): entries are small
-    assert!(a.e_u.iter().all(|x| x.abs() < 1.0));
-}
-
-#[test]
-fn adagrad_first_step_moves_by_lr_times_sign_and_later_steps_shrink() {
-    let mut opt = RowAdagrad::new(1, 0.5);
-    let mut row = vec![0f32, 0.0];
-    let g = [3f32, -4.0]; // mean(g²) = 12.5, sqrt = 3.5355
-    opt.update(0, &mut row, &g);
-    assert!((row[0] - (-0.5 * 3.0 / 3.5355)).abs() < 1e-4);
-    assert!((row[1] - (0.5 * 4.0 / 3.5355)).abs() < 1e-4);
-    let before = row.clone();
-    opt.update(0, &mut row, &g); // acc doubles → denominator ×√2
-    let d0 = (row[0] - before[0]).abs();
-    assert!((d0 - 0.5 * 3.0 / (2.0f32 * 12.5).sqrt()).abs() < 1e-4);
-}
-
-#[test]
-fn a_zero_gradient_leaves_the_row_and_accumulator_untouched() {
-    let mut opt = RowAdagrad::new(2, 0.1);
-    let mut row = vec![1f32, 2.0];
-    opt.update(1, &mut row, &[0.0, 0.0]);
-    assert_eq!(row, vec![1.0, 2.0]);
-    assert_eq!(opt.acc[1], 0.0);
+    let dev = Device::Cpu;
+    let a = HierParams::new(3, 2, 5, 4, 7, &dev).unwrap();
+    let b = HierParams::new(3, 2, 5, 4, 7, &dev).unwrap();
+    let c = HierParams::new(3, 2, 5, 4, 8, &dev).unwrap();
+    assert_eq!(host(&a.e_u), host(&b.e_u));
+    assert_ne!(host(&a.e_u), host(&c.e_u));
+    assert_eq!(a.e_u.dims(), &[3, 4]);
+    assert_eq!(a.mu.dims(), &[2, 4]);
+    assert_eq!(a.r.dims(), &[5, 4]);
+    assert!(to_host1(a.b_m.as_tensor())
+        .unwrap()
+        .iter()
+        .all(|&x| x == 0.0));
+    assert!(to_host1(a.b_g.as_tensor())
+        .unwrap()
+        .iter()
+        .all(|&x| x == 0.0));
+    assert!(host(&a.e_u).iter().all(|x| x.abs() < 1.0));
 }
 
 #[test]
 fn the_non_base_tracks_start_at_zero_and_leave_the_base_tables_untouched() {
+    let dev = Device::Cpu;
     let (n_u, n_m, n_g, h) = (3usize, 2usize, 5usize, 4usize);
-    let plain = HierParams::new(n_u, n_m, n_g, h, 7);
-    let tracked = HierParams::new_tracked(n_u, n_m, n_g, 3, h, 7);
-    // same seed, same draws: the base tables are identical
-    assert_eq!(plain.e_u, tracked.e_u);
-    assert_eq!(plain.mu, tracked.mu);
-    assert_eq!(plain.r, tracked.r);
-    assert_eq!(plain.b_m, tracked.b_m);
-    assert_eq!(plain.b_g, tracked.b_g);
-    // one offset table per non-base track, all zero
+    let plain = HierParams::new(n_u, n_m, n_g, h, 7, &dev).unwrap();
+    let tracked = HierParams::new_tracked(n_u, n_m, n_g, 3, h, 7, &dev).unwrap();
+    assert_eq!(host(&plain.e_u), host(&tracked.e_u));
+    assert_eq!(host(&plain.mu), host(&tracked.mu));
+    assert_eq!(host(&plain.r), host(&tracked.r));
     assert!(plain.offsets.is_empty());
     assert!(plain.offset(0).is_none());
     assert!(plain.offset(1).is_none());
@@ -57,14 +42,107 @@ fn the_non_base_tracks_start_at_zero_and_leave_the_base_tables_untouched() {
     assert!(tracked.offset(0).is_none());
     for t in 1..3 {
         let o = tracked.offset(t).expect("a non-base track has an offset");
-        assert_eq!(o.d_mu.len(), n_m * h);
-        assert_eq!(o.d_b_m.len(), n_m);
-        assert_eq!(o.d_r.len(), n_g * h);
-        assert_eq!(o.d_b_g.len(), n_g);
-        assert!(o.d_mu.iter().all(|&x| x == 0.0));
-        assert!(o.d_b_m.iter().all(|&x| x == 0.0));
-        assert!(o.d_r.iter().all(|&x| x == 0.0));
-        assert!(o.d_b_g.iter().all(|&x| x == 0.0));
+        assert_eq!(o.d_mu.dims(), &[n_m, h]);
+        assert_eq!(o.d_b_m.dims(), &[n_m]);
+        assert_eq!(o.d_r.dims(), &[n_g, h]);
+        assert_eq!(o.d_b_g.dims(), &[n_g]);
+        assert!(host(&o.d_mu).iter().all(|&x| x == 0.0));
+        assert!(host(&o.d_r).iter().all(|&x| x == 0.0));
     }
     assert!(tracked.offset(3).is_none());
+}
+
+/// A preset row composes back exactly (`μ_m + r_g = row`), the module mean is
+/// the mean of its given rows, and the modes set what they pin.
+#[test]
+fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
+    let dev = Device::Cpu;
+    let (h, module_of) = (2usize, vec![0u32, 0, 1, 1]);
+    let given = PresetGenes {
+        gene: vec![0, 1, 3],
+        rows: vec![1.0, 2.0, 3.0, 4.0, -1.0, 0.5],
+        mode: PresetMode::Freeze,
+    };
+    let mut p = HierParams::new(2, 2, 4, h, 1, &dev).unwrap();
+    p.preset(&given, &module_of).unwrap();
+    let (mu, r) = (host(&p.mu), host(&p.r));
+    assert_eq!(
+        &mu[0..2],
+        &[2.0, 3.0],
+        "module 0 mean of its two given rows"
+    );
+    assert_eq!(
+        &mu[2..4],
+        &[-1.0, 0.5],
+        "module 1 mean of its one given row"
+    );
+    for (i, &g) in given.gene.iter().enumerate() {
+        let m = module_of[g as usize] as usize;
+        for k in 0..h {
+            let composed = mu[m * h + k] + r[g as usize * h + k];
+            assert!((composed - given.rows[i * h + k]).abs() < 1e-6);
+        }
+    }
+    assert!(p.mu_frozen && p.is_frozen_gene(0) && !p.is_frozen_gene(2));
+    let mask = to_host2(p.r_mask.as_ref().unwrap()).unwrap();
+    assert_eq!(mask, vec![0.0, 0.0, 1.0, 0.0]);
+    assert!(p.lora.is_none());
+    let (rho, _) = p.compose(&[0, 0, 0, 0], &[0, 1, 2, 3], &module_of).unwrap();
+    for (i, &g) in given.gene.iter().enumerate() {
+        for k in 0..h {
+            assert_eq!(rho[(g as usize, k)], given.rows[i * h + k], "verbatim");
+        }
+    }
+
+    let mut q = HierParams::new(2, 2, 4, h, 1, &dev).unwrap();
+    q.preset(
+        &PresetGenes {
+            mode: PresetMode::Init,
+            ..given.clone()
+        },
+        &module_of,
+    )
+    .unwrap();
+    assert!(!q.mu_frozen && q.r_mask.is_none() && q.frozen_gene.is_empty());
+
+    let mut l = HierParams::new(2, 2, 4, h, 1, &dev).unwrap();
+    l.preset(
+        &PresetGenes {
+            mode: PresetMode::Lora {
+                rank: 1,
+                lr_ratio: 4.0,
+            },
+            ..given.clone()
+        },
+        &module_of,
+    )
+    .unwrap();
+    let lora = l.lora.as_ref().expect("factors under lora");
+    assert_eq!(lora.u.dims(), &[4, 1]);
+    assert_eq!(lora.v_g.dims(), &[1, h]);
+    assert_eq!(lora.a.dims(), &[2, 1]);
+    assert_eq!(lora.v_m.dims(), &[1, h]);
+    assert!(host(&lora.a).iter().all(|&x| x != 0.0));
+    assert!(host(&lora.v_m).iter().all(|&x| x == 0.0));
+    assert_eq!(to_host2(&lora.u_mask).unwrap(), vec![1.0, 1.0, 0.0, 1.0]);
+    let u = host(&lora.u);
+    assert!(u[0] != 0.0 && u[1] != 0.0 && u[2] == 0.0 && u[3] != 0.0);
+    assert!(
+        host(&lora.v_g).iter().all(|&x| x == 0.0),
+        "the residual starts at nothing"
+    );
+    assert!(l.mu_frozen && l.r_mask.is_some());
+    assert!(HierParams::new(2, 2, 4, h, 1, &dev)
+        .unwrap()
+        .preset(
+            &PresetGenes {
+                mode: PresetMode::Lora {
+                    rank: h,
+                    lr_ratio: 1.0
+                },
+                ..given
+            },
+            &module_of
+        )
+        .is_err());
 }
