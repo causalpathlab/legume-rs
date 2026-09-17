@@ -41,6 +41,7 @@ mod anchor_common;
 mod annotate;
 mod assoc;
 mod bge;
+mod carried_rows;
 mod cluster;
 mod cluster_aggregation;
 mod cluster_bhc;

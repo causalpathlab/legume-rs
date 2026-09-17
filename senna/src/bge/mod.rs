@@ -180,18 +180,11 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
-    let (preset_features, carried) = match args.feature_embedding.resolve()? {
-        Some((prefix, mode)) => {
-            let (rows, carried) = crate::feature_preset::load_preset_genes(
-                prefix,
-                mode,
-                &unified.feature_names,
-                &feature_kind,
-            )?;
-            (Some(rows), carried)
-        }
-        None => (None, None),
-    };
+    let (preset_features, carried) = crate::feature_preset::resolve_preset(
+        args.feature_embedding.resolve()?,
+        &unified.feature_names,
+        &feature_kind,
+    )?;
     let embedding_dim =
         crate::feature_preset::resolve_dim(args.embedding_dim, preset_features.as_ref())?;
 
