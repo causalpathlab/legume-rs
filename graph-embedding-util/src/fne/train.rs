@@ -233,22 +233,26 @@ pub fn train(
     let mut model = FneModel::new(&types, cfg.dim, cfg.num_batch_negs, cfg.seed, dev)?;
     let grad_mask = match cfg.preset.as_ref() {
         Some(p) => {
-            let mask = model.apply_preset(p, dev)?;
+            let mask = model.apply_preset(p, cfg.seed, dev)?;
             log::info!(
                 "fne: {} of {} rows {}",
                 p.node.len(),
                 types.n_total(),
-                if p.freeze {
-                    "pinned to the given table; the rest train"
-                } else {
-                    "start from the given table and train on"
-                }
+                p.mode.describe()
             );
             mask
         }
         None => None,
     };
     let mut opt = RowAdagrad::new(types.n_total(), cfg.lr, dev)?;
+    // LoRA+: `V` at `lr_ratio` times the row factor's rate.
+    let mut opt_lora = match model.lora.as_ref() {
+        Some(l) => Some((
+            RowAdagrad::new(types.n_total(), cfg.lr, dev)?,
+            RowAdagrad::new(l.v.dim(0)?, cfg.lr * f64::from(l.lr_ratio), dev)?,
+        )),
+        None => None,
+    };
 
     let mut epochs = Vec::with_capacity(cfg.epochs);
     for epoch in 0..cfg.epochs {
@@ -293,6 +297,14 @@ pub fn train(
                     match grad_mask.as_ref() {
                         Some(m) => opt.step(&model.e, &g.broadcast_mul(m)?)?,
                         None => opt.step(&model.e, g)?,
+                    }
+                }
+                if let (Some(l), Some((opt_u, opt_v))) = (model.lora.as_ref(), opt_lora.as_mut()) {
+                    if let Some(g) = grads.get(&l.u) {
+                        opt_u.step(&l.u, &g.broadcast_mul(&l.u_mask)?)?;
+                    }
+                    if let Some(g) = grads.get(&l.v) {
+                        opt_v.step(&l.v, g)?;
                     }
                 }
                 Ok(loss)
@@ -361,7 +373,7 @@ pub fn train(
     }
     let cpu = Device::Cpu;
     Ok(FneOutput {
-        embedding: model.e.as_tensor().detach().to_device(&cpu)?,
+        embedding: model.composed()?.to_device(&cpu)?,
         node_types: types,
         relations: rels,
         per_relation,

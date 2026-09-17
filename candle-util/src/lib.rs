@@ -12,6 +12,7 @@ pub mod feature_embedding;
 pub mod frozen_features;
 pub mod grad_clip;
 pub mod grow;
+pub mod lora;
 pub mod loss;
 pub mod mcmc;
 pub mod nn;

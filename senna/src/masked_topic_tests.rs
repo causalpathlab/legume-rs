@@ -272,3 +272,151 @@ mod mask_fraction_bounds {
         assert!(uniform("0.1", "0.6").is_ok());
     }
 }
+
+////////////////////////////////////////////////////////////////
+// --lora-feature-embedding end to end on a planted data set  //
+////////////////////////////////////////////////////////////////
+
+use super::fit_masked_topic_model;
+use crate::embed_common::Mat;
+use candle_util::candle_core;
+use clap::Parser;
+use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
+use matrix_util::traits::IoOps;
+use std::path::Path;
+
+fn parse_masked(argv: &[&str]) -> MaskedTopicArgs {
+    let mut full = vec!["masked-topic"];
+    full.extend_from_slice(argv);
+    Cli::try_parse_from(full).expect("valid argv").args
+}
+
+/// Two groups of cells, each with its own block of high genes and sparse
+/// background elsewhere, large enough for the pseudobulk tree to build.
+fn planted_zarr(dir: &Path) -> String {
+    let (n_genes, n_cells) = (60usize, 200usize);
+    let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
+    for c in 0..n_cells {
+        let grp = usize::from(c >= n_cells / 2);
+        for g in 0..n_genes {
+            let own = usize::from(g >= n_genes / 2) == grp;
+            let x = if own {
+                3 + (c + g) % 4
+            } else if (c * 7 + g) % 5 == 0 {
+                1
+            } else {
+                0
+            };
+            if x > 0 {
+                triplets.push((g as u64, c as u64, x as f32));
+            }
+        }
+    }
+    let nnz = triplets.len();
+    let path = dir.join("planted.zarr").to_string_lossy().into_owned();
+    let mut b = create_sparse_from_triplets(
+        &triplets,
+        (n_genes, n_cells, nnz),
+        Some(&path),
+        Some(&SparseIoBackend::Zarr),
+    )
+    .expect("backend");
+    b.register_row_names_vec(
+        &(0..n_genes)
+            .map(|g| format!("GENE{g}").into_boxed_str())
+            .collect::<Vec<_>>(),
+    );
+    b.register_column_names_vec(
+        &(0..n_cells)
+            .map(|c| format!("c{c}").into_boxed_str())
+            .collect::<Vec<_>>(),
+    );
+    path
+}
+
+/// The safetensors header's tensor names.
+fn checkpoint_keys(prefix: &str) -> Vec<String> {
+    let bytes = std::fs::read(format!("{prefix}.safetensors")).unwrap();
+    let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let hdr: serde_json::Value = serde_json::from_slice(&bytes[8..8 + n]).unwrap();
+    let mut keys: Vec<String> = hdr
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| k.as_str() != "__metadata__")
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Anchored to an earlier run's table, a second run writes that table plus a
+/// residual of exactly the given rank, takes H from the table, and saves a
+/// checkpoint with one feature table equal to what it wrote — no factor
+/// tensors survive the fold, so `predict` reads a plain model.
+#[test]
+fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = planted_zarr(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let common = [
+        "-t",
+        "3",
+        "-i",
+        "3",
+        "--gene-modules",
+        "0",
+        "--minibatch-size",
+        "50",
+    ];
+    let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "8"];
+    argv.extend_from_slice(&common);
+    fit_masked_topic_model(&parse_masked(&argv)).unwrap();
+    let mut argv = vec![
+        data.as_str(),
+        "-o",
+        &second,
+        "--embedding-dim",
+        "0",
+        "--lora-feature-embedding",
+        &first,
+        "--lora-rank",
+        "2",
+        "--lora-lr-ratio",
+        "4",
+        "--seed",
+        "11",
+    ];
+    argv.extend_from_slice(&common);
+    fit_masked_topic_model(&parse_masked(&argv)).unwrap();
+
+    let a = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let b = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    assert_eq!(a.rows, b.rows);
+    assert_eq!(b.mat.ncols(), 8, "H taken from the table");
+    let sv = (&b.mat - &a.mat).singular_values();
+    assert!(sv[0] > 1e-6, "the residual never moved");
+    assert!(sv[2] <= 1e-4 * sv[0], "the residual is not rank 2: {sv}");
+
+    let keys = checkpoint_keys(&second);
+    assert!(keys.iter().any(|k| k == "enc.feature.embeddings"));
+    assert!(
+        !keys.iter().any(|k| k.contains("lora")),
+        "factor tensors survived the fold: {keys:?}"
+    );
+    let saved =
+        candle_core::safetensors::load(format!("{second}.safetensors"), &candle_core::Device::Cpu)
+            .unwrap();
+    let table: Vec<f32> = saved["enc.feature.embeddings"]
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let written: Vec<f32> = (0..b.mat.nrows())
+        .flat_map(|g| b.mat.row(g).iter().copied().collect::<Vec<_>>())
+        .collect();
+    for (x, y) in table.iter().zip(&written) {
+        assert!((x - y).abs() < 1e-5, "checkpoint {x} vs written {y}");
+    }
+}

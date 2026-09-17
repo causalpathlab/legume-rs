@@ -187,3 +187,119 @@ fn projecting_the_dims_agrees_with_the_whole_table() {
         }
     }
 }
+
+///////////////////////////////////////////////////////////
+// LoRA: a fixed base with a shared low-rank residual    //
+///////////////////////////////////////////////////////////
+
+fn build_lora(d: usize, h: usize, rank: usize) -> (VarMap, FeatureEmbedding) {
+    let dev = Device::Cpu;
+    let vm = VarMap::new();
+    let vb = VarBuilder::from_varmap(&vm, DType::F32, &dev);
+    let fe = FeatureEmbedding::new_lora(d, h, rank, vb).expect("lora feature embedding");
+    (vm, fe)
+}
+
+/// At step 0 the residual is nothing: every read is the base. After the
+/// factors are set, gather, project and the full table all agree with
+/// `base + u·v` formed by hand.
+#[test]
+fn lora_reads_agree_with_the_composed_table_and_start_at_the_base() {
+    let (d, h, rank) = (5, 3, 2);
+    let (vm, fe) = build_lora(d, h, rank);
+    let base: Vec<f32> = (0..d * h).map(|i| i as f32 * 0.25 - 1.0).collect();
+    set(&vm, super::FREE_VAR_NAME, base.clone(), (d, h));
+    let full0 = fe
+        .full()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    assert_eq!(full0, base, "v is zero at start, so the table is the base");
+
+    let u: Vec<f32> = (0..d * rank).map(|i| (i as f32 - 4.0) * 0.1).collect();
+    let v: Vec<f32> = (0..rank * h).map(|i| 0.5 - i as f32 * 0.2).collect();
+    set(&vm, "feature.lora_u", u.clone(), (d, rank));
+    set(&vm, "feature.lora_v", v.clone(), (rank, h));
+    let mut expect = base.clone();
+    for g in 0..d {
+        for k in 0..h {
+            for j in 0..rank {
+                expect[g * h + k] += u[g * rank + j] * v[j * h + k];
+            }
+        }
+    }
+    let full = fe
+        .full()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for (a, b) in full.iter().zip(&expect) {
+        assert!((a - b).abs() < 1e-6, "full {a} vs {b}");
+    }
+    let ids = Tensor::from_vec(vec![4u32, 1], 2, &Device::Cpu).unwrap();
+    let rows = fe
+        .gather(&ids)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    let want: Vec<f32> = [4usize, 1]
+        .iter()
+        .flat_map(|&g| expect[g * h..(g + 1) * h].to_vec())
+        .collect();
+    for (a, b) in rows.iter().zip(&want) {
+        assert!((a - b).abs() < 1e-6, "gather {a} vs {b}");
+    }
+    let q = Tensor::from_vec(vec![1.0f32, -2.0, 0.5], (h, 1), &Device::Cpu).unwrap();
+    let proj = fe
+        .project_dims(&q)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    for g in 0..d {
+        let want = expect[g * h] - 2.0 * expect[g * h + 1] + 0.5 * expect[g * h + 2];
+        assert!(
+            (proj[g] - want).abs() < 1e-5,
+            "project {} vs {want}",
+            proj[g]
+        );
+    }
+    assert!(fe.membership().unwrap().is_none());
+    assert_eq!(fe.n_modules(), 0);
+    assert_eq!((fe.n_features(), fe.embedding_dim()), (d, h));
+}
+
+/// The feature-table fold names the slots under the encoder prefix and leaves
+/// one plain table; the mechanics are `lora::fold`'s.
+#[test]
+fn fold_lora_names_the_feature_slots_under_the_prefix() {
+    let (d, h, rank) = (3, 2, 1);
+    let (vm, fe) = build_lora(d, h, rank);
+    set(&vm, super::FREE_VAR_NAME, vec![1.0; d * h], (d, h));
+    set(&vm, "feature.lora_u", vec![1.0, 2.0, 3.0], (d, rank));
+    set(&vm, "feature.lora_v", vec![0.5, -0.5], (rank, h));
+    let before = fe
+        .full()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    super::fold_lora(&vm, "").unwrap();
+    let tbl = vm.data().lock().unwrap();
+    assert_eq!(tbl.len(), 1);
+    let folded = tbl[super::FREE_VAR_NAME]
+        .as_tensor()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+    assert_eq!(folded, before);
+}

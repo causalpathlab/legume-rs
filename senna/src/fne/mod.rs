@@ -7,7 +7,8 @@
 //! edge files name (cell types, ontology terms, genomic windows, words) —
 //! and every input source is one relation of the graph. The result is a
 //! word2vec-shaped `feature_embedding.parquet` over every node, with the
-//! gene rows a direct input to `senna masked-topic --freeze-feature-embedding`.
+//! gene rows a direct input to `--{freeze,init,lora}-feature-embedding` on
+//! `senna bge`, `senna simba` and the masked models.
 //!
 //! Thin by design: the recipe lives in the shared crate; this module owns
 //! the command line, the readers that turn edge files into a typed graph,

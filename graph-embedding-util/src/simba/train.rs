@@ -72,7 +72,7 @@ pub fn train(edges: EdgeList, cfg: &SimbaConfig) -> anyhow::Result<TrainOutput> 
             preset: cfg.preset_genes.as_ref().map(|p| fne::PresetRows {
                 node: p.node.iter().map(|&g| g + gene_offset).collect(),
                 rows: p.rows.clone(),
-                freeze: p.freeze,
+                mode: p.mode,
             }),
             seed: cfg.seed,
             device: cfg.device.clone(),

@@ -181,9 +181,15 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
     let preset_features = match args.feature_embedding.resolve() {
-        Some((prefix, freeze)) => Some(crate::feature_preset::load_preset_genes(
+        Some((_, mode)) if mode.lora().is_some() => anyhow::bail!(
+            "--lora-feature-embedding is not available on `senna bge` yet: its phase 1 runs on \
+             the host with a hand-written gradient, and the residual waits for that phase's \
+             candle port. Use --freeze-feature-embedding or --init-feature-embedding here, or \
+             --lora-feature-embedding on masked-topic, simba or fne."
+        ),
+        Some((prefix, mode)) => Some(crate::feature_preset::load_preset_genes(
             prefix,
-            freeze,
+            mode,
             &unified.feature_names,
             &feature_kind,
         )?),
