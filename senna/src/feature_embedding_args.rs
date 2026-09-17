@@ -28,6 +28,11 @@ pub struct FeatureEmbeddingArgs {
                      A gene with no row: `bge` keeps it as a free, trained row;\n\
                      the masked models drop it from the feature axis.\n\
                      \n\
+                     The table's rows that match no feature of this run — genes the\n\
+                     data lacks and every non-gene row — are carried through unchanged\n\
+                     into the output ρ table, after the trained rows, so the result is\n\
+                     the full table; `{out}.feature_types.parquet` names each row's type.\n\
+                     \n\
                      H is taken from the table when `--embedding-dim` is `auto`;\n\
                      an explicit `--embedding-dim` must agree with it."
     )]
@@ -41,7 +46,8 @@ pub struct FeatureEmbeddingArgs {
         long_help = "Warm-start the per-gene embedding ρ from an earlier run's feature table.\n\
                      The table is found and matched exactly as for\n\
                      `--freeze-feature-embedding`; the difference is that ρ keeps\n\
-                     training from there instead of a random init.\n\
+                     training from there instead of a random init. Its unmatched rows\n\
+                     are not carried through: the trained rows leave the table's space.\n\
                      One of `--freeze-`, `--init-` and `--lora-feature-embedding`."
     )]
     pub init_feature_embedding: Option<Box<str>>,
@@ -55,7 +61,8 @@ pub struct FeatureEmbeddingArgs {
                      per gene (`--lora-rank` numbers) and V shared by every anchored gene.\n\
                      The table is found and matched exactly as for\n\
                      `--freeze-feature-embedding`; the given row ρ₀_g never moves,\n\
-                     and the output ρ carries the residual folded in.\n\
+                     and the output ρ carries the residual folded in; the unmatched\n\
+                     rows are carried through as under `--freeze-feature-embedding`.\n\
                      Rank 0 would be `--freeze-`, rank H would be `--init-feature-embedding`,\n\
                      so both are refused.\n\
                      One of `--freeze-`, `--init-` and `--lora-feature-embedding`."

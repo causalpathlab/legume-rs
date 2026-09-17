@@ -11,6 +11,7 @@
     clippy::many_single_char_names
 )]
 
+pub mod carried_rows;
 pub mod embed_common;
 pub mod multiome_layout;
 pub mod output_helpers;

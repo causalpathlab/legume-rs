@@ -10,20 +10,42 @@
 //! whose table also holds terms, words and cell types. Those rows are skipped
 //! by the run's `feature_types.parquet` when it exists; a source without one
 //! is taken to be all genes. Genes of this axis with no source row stay free.
+//!
+//! Under a pinning mode the rows the match left unused — genes the data lacks
+//! and every non-gene row — come back out as [`CarriedRows`]: appended
+//! unchanged to the run's own ρ table once it is written, with
+//! `feature_types.parquet` naming every row's type, so a run on a narrow
+//! feature axis (a panel) still hands on the full table it was given.
 
-use auxiliary_data::feature_types::{read_feature_types, GENE_TYPE};
+use auxiliary_data::feature_types::{read_feature_types, FeatureType, GENE_TYPE};
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
 use rustc_hash::FxHashSet;
 
+pub(crate) use crate::carried_rows::CarriedRows;
+
+/// The preset of a command's `--{freeze,init,lora}-feature-embedding`, when
+/// one was given: the rows to pin or start from, and the rows to carry.
+pub(crate) fn resolve_preset(
+    resolved: Option<(&str, PresetMode)>,
+    feature_names: &[Box<str>],
+    kind: &ge::FeatureNameKind,
+) -> anyhow::Result<(Option<ge::PresetRows>, Option<CarriedRows>)> {
+    let Some((prefix, mode)) = resolved else {
+        return Ok((None, None));
+    };
+    let (rows, carried) = load_preset_genes(prefix, mode, feature_names, kind)?;
+    Ok((Some(rows), carried))
+}
+
 pub(crate) fn load_preset_genes(
     prefix: &str,
     mode: PresetMode,
     feature_names: &[Box<str>],
     kind: &ge::FeatureNameKind,
-) -> anyhow::Result<ge::PresetRows> {
+) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
     let (dictionary_path, _bias) = crate::run_manifest::resolve_feature_loading(prefix)
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
@@ -35,16 +57,17 @@ pub(crate) fn load_preset_genes(
     })?;
 
     // Which source rows are genes: the types table, when the run wrote one.
-    let gene_src: Option<FxHashSet<usize>> = read_feature_types(prefix)?.map(|rows| {
-        let gene_names: FxHashSet<Box<str>> = rows
-            .into_iter()
+    let src_types: Option<Vec<FeatureType>> = read_feature_types(prefix)?;
+    let gene_src: Option<FxHashSet<usize>> = src_types.as_ref().map(|rows| {
+        let gene_names: FxHashSet<&str> = rows
+            .iter()
             .filter(|(_, t)| t.as_ref() == GENE_TYPE)
-            .map(|(n, _)| n)
+            .map(|(n, _)| n.as_ref())
             .collect();
         host.src_names
             .iter()
             .enumerate()
-            .filter(|(_, n)| gene_names.contains(*n))
+            .filter(|(_, n)| gene_names.contains(n.as_ref()))
             .map(|(i, _)| i)
             .collect()
     });
@@ -75,7 +98,16 @@ pub(crate) fn load_preset_genes(
         feature_names.len(),
         mode.describe()
     );
-    Ok(ge::PresetRows { ids, rows, mode })
+    let carried = CarriedRows::from_unmatched(
+        mode.pins(),
+        flag,
+        &host,
+        feature_names,
+        kind,
+        src_types.as_deref().unwrap_or(&[]),
+        &dictionary_path,
+    )?;
+    Ok((ge::PresetRows { ids, rows, mode }, carried))
 }
 
 /// `--embedding-dim` against the preset's width, the loader having refused an
@@ -95,3 +127,60 @@ pub(crate) fn resolve_dim(
 
 #[cfg(test)]
 mod tests;
+
+/// For the engines' end-to-end tests: a source run wider than the data.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use matrix_util::traits::IoOps;
+    use nalgebra::DMatrix;
+
+    /// The extra rows [`widen`] adds: a gene the data lacks and a term.
+    pub(crate) const EXTRA: [(&str, &str); 2] = [("EXTRA1", "gene"), ("GO:9999999", "term")];
+
+    /// Write `{out}.feature_loading.parquet` = the ρ table at `src_rho_path`
+    /// plus [`EXTRA`], with a types table over every row; returns the extra
+    /// rows' values for the caller to look for in a run's output.
+    pub(crate) fn widen(src_rho_path: &str, out: &str) -> DMatrix<f32> {
+        let t = DMatrix::<f32>::from_parquet(src_rho_path).unwrap();
+        let (n, h) = (t.mat.nrows(), t.mat.ncols());
+        let extra =
+            DMatrix::<f32>::from_fn(EXTRA.len(), h, |i, k| (i + 1) as f32 * 0.25 + k as f32);
+        let mat = matrix_util::dmatrix_util::concatenate_vertical(&[t.mat, extra.clone()]).unwrap();
+        let mut names = t.rows.clone();
+        let mut types: Vec<Box<str>> = vec!["gene".into(); n];
+        for (name, ty) in EXTRA {
+            names.push(name.into());
+            types.push(ty.into());
+        }
+        mat.to_parquet_with_names(
+            &format!("{out}.feature_loading.parquet"),
+            (Some(&names), Some("gene")),
+            Some(&t.cols),
+        )
+        .unwrap();
+        auxiliary_data::feature_types::write_feature_types(out, &names, &types).unwrap();
+        extra
+    }
+
+    /// Assert the run at `out` wrote [`EXTRA`] after its own rows in `rho_path`,
+    /// row for row equal to `extra`, and typed them in its types table.
+    pub(crate) fn assert_carried(out: &str, rho_path: &str, own_rows: usize, extra: &DMatrix<f32>) {
+        let t = DMatrix::<f32>::from_parquet(rho_path).unwrap();
+        assert_eq!(t.mat.nrows(), own_rows + EXTRA.len(), "{rho_path}");
+        for (i, (name, _)) in EXTRA.iter().enumerate() {
+            assert_eq!(t.rows[own_rows + i].as_ref(), *name);
+            assert_eq!(
+                t.mat.row(own_rows + i),
+                extra.row(i),
+                "{name} is carried unchanged"
+            );
+        }
+        let types = auxiliary_data::feature_types::read_feature_types(out)
+            .unwrap()
+            .expect("a types table over every row");
+        assert_eq!(types.len(), own_rows + EXTRA.len());
+        for (i, (name, ty)) in EXTRA.iter().enumerate() {
+            assert_eq!(types[own_rows + i], ((*name).into(), (*ty).into()));
+        }
+    }
+}
