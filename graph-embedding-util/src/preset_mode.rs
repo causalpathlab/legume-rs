@@ -80,22 +80,24 @@ pub struct LoraSpec {
     pub rank: usize,
     /// LoRA+: the shared factor's learning rate over the row factor's.
     pub lr_ratio: f32,
-    /// Per-epoch ridge on the residual's mean row norm² — the shrinkage that
-    /// makes it a residual rather than a second table; `0` = none.
+    /// Per-epoch ridge weight PER ROW on the residual's row norm² — the
+    /// shrinkage that makes it a residual rather than a second table; `0` =
+    /// none. Per row because the data gradient on the shared factor is a sum
+    /// over the rows, so one weight means the same thing at any table size.
     pub ridge: f32,
 }
 
 /// LoRA's usual small rank; a moderate LoRA+ ratio (the paper's 16 belongs to
 /// transformers at far smaller rates and destabilised the shared factor
-/// under AdamW); a ridge strong enough that the residual stays below the
-/// anchor's own scale under a row optimizer, where a weaker one tied on
+/// under AdamW); a per-row ridge strong enough that the residual stays below
+/// the anchor's own scale under a row optimizer, where a weaker one tied on
 /// cell-side structure while letting the residual outgrow the anchor.
 impl Default for LoraSpec {
     fn default() -> Self {
         Self {
             rank: 16,
             lr_ratio: 4.0,
-            ridge: 1000.0,
+            ridge: 0.05,
         }
     }
 }

@@ -365,8 +365,8 @@ pub fn step_loss(
             )?;
         }
     }
-    // The same shrinkage on the two LoRA residuals, each over the rows it
-    // reaches, at this step's weight — in Gram form, so no residual is formed.
+    // The same per-row shrinkage on the two LoRA residuals at this step's
+    // weight — in Gram form, so no residual is formed.
     // Their gradient is how the shared factors are kept from marching off
     // the anchor.
     if let (Some(l), true) = (params.lora.as_ref(), lora_ridge_step > 0.0) {

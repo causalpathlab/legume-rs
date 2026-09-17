@@ -47,7 +47,7 @@ impl TrackOffset {
 pub struct HierLora {
     pub module: PinnedLora,
     pub gene: PinnedLora,
-    /// Per-epoch ridge on each residual's mean row norm² (see
+    /// Per-epoch ridge weight per row on each residual (see
     /// [`LoraSpec::ridge`]); the trainer spreads it over the epoch's steps
     /// like the offset ridge.
     pub ridge: f32,
