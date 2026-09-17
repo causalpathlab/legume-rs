@@ -2,7 +2,7 @@
 //!
 //! Mirrors `senna/src/bge/args.rs` field for field: the same shared groups
 //! (`HvgCliArgs`, `refine_weighting::CollapseArgs`, `QcArgs`,
-//! `ge::GeneModuleArgs`), the same top-level knobs, and the same help text
+//! `ge::FeatureModuleArgs`), the same top-level knobs, and the same help text
 //! for every flag they share, so `senna bge` and `senna gem` read as one
 //! flag surface, including the `--{freeze,init,lora}-feature-embedding`
 //! triple. gem adds its own modality inputs (`GENES...`, `--modality`,
@@ -264,7 +264,7 @@ pub(crate) struct GemArgs {
     pub(crate) device_no: usize,
 
     #[command(flatten)]
-    pub(crate) modules: ge::GeneModuleArgs,
+    pub(crate) modules: ge::FeatureModuleArgs,
 
     #[arg(
         long,

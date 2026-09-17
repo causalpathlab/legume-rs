@@ -795,7 +795,7 @@ pub fn fit_cell_activity_graph_embedding(
             info!(
                 "learned feature modules: {} features → {} modules (mixed membership), feature dropout {}, \
                  exact module term λ={}, balance λ={}",
-                n_features, gm.n_modules, gm.gene_dropout, gm.lambda_module, gm.lambda_balance
+                n_features, gm.n_modules, gm.feature_dropout, gm.lambda_module, gm.lambda_balance
             );
             (
                 JointEmbedModel::new_with_modules(
@@ -1174,10 +1174,10 @@ pub fn fit_cell_activity_graph_embedding(
                     let idx = Tensor::from_vec(picks, u, &dev)?;
                     let x = profile_t.index_select(&idx, 0)?;
                     let pi = m.membership()?;
-                    let pi_masked = if gm.gene_dropout > 0.0 {
+                    let pi_masked = if gm.feature_dropout > 0.0 {
                         let keep = draw_gene_keep_mask(
                             n_features,
-                            gm.gene_dropout,
+                            gm.feature_dropout,
                             &mut rng_master,
                             &dev,
                         )?;

@@ -285,10 +285,10 @@ pub struct BgeArgs {
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub(crate) device_no: usize,
 
-    /// The `--gene-modules` flag group (see `ge::GeneModuleArgs`); on by default
+    /// The `--feature-modules` flag group (see `ge::FeatureModuleArgs`); on by default
     /// here, resolved in `build_config`.
     #[command(flatten)]
-    pub(crate) modules: ge::GeneModuleArgs,
+    pub(crate) modules: ge::FeatureModuleArgs,
 
     #[arg(
         long,

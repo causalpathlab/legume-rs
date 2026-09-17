@@ -10,7 +10,7 @@ use data_beans_alg::refine_multilevel::RefineParams;
 pub(crate) const DEFAULT_STRATIFY_ALPHA_CELL: f32 = 0.5;
 
 /// Fraction of `epochs` the module membership is held at its warm start when
-/// [`GeneModuleConfig::warmup_epochs`] is not given.
+/// [`FeatureModuleConfig::warmup_epochs`] is not given.
 pub(crate) const MODULE_WARMUP_FRAC: f64 = 0.25;
 
 /// Row structure of the feature axis: every row belongs to one TRACK (a
@@ -263,7 +263,7 @@ pub struct FitConfig {
     /// (`senna update`). The remaining fields configure the learned mixed-
     /// membership layer ([`crate::model::FeatModules`]) that `pinto cage`
     /// trains directly; `fit()` never builds that layer.
-    pub gene_modules: Option<GeneModuleConfig>,
+    pub feature_modules: Option<FeatureModuleConfig>,
     /// Row structure of the feature axis. `None` = every row is its own gene
     /// ([`TrackSpec::base`], built inside [`fit`]) — what `senna bge` runs.
     pub tracks: Option<TrackSpec>,
@@ -300,7 +300,7 @@ pub fn validate_offset_rank(offset_rank: usize, h: usize) -> anyhow::Result<()> 
 
 /// Caller-facing configuration of the learned gene modules.
 #[derive(Clone, Debug)]
-pub struct GeneModuleConfig {
+pub struct FeatureModuleConfig {
     /// Number of modules `M`.
     pub n_modules: usize,
     /// Epochs the warm-start membership is held before it trains. `None` = a
@@ -308,7 +308,7 @@ pub struct GeneModuleConfig {
     pub warmup_epochs: Option<usize>,
     /// Per-step probability that a feature is hidden when the module counts are
     /// pooled (`0` = off).
-    pub gene_dropout: f32,
+    pub feature_dropout: f32,
     /// Weight of the exact cell–module term relative to the NCE.
     pub lambda_module: f32,
     /// Weight of the load-balance prior `KL(π̄ ‖ Uniform)`.
@@ -344,7 +344,7 @@ pub struct ParentModulesOwned {
     pub knobs: crate::transfer::AlignKnobs,
 }
 
-impl GeneModuleConfig {
+impl FeatureModuleConfig {
     /// Epochs the warm-start membership is held: the explicit count, else a
     /// quarter of the epochs, at least one and at most all of them. The one
     /// definition every trainer with a module model uses.

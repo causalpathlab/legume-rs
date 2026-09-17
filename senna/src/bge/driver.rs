@@ -11,7 +11,7 @@
 //!
 //! [`EmbedKnobs`] is the flag surface both commands drive the fit with.
 //! `GemArgs` now flattens the exact same `refine_weighting::CollapseArgs`
-//! and `ge::GeneModuleArgs` groups `BgeArgs` does (Task 5a), so both
+//! and `ge::FeatureModuleArgs` groups `BgeArgs` does (Task 5a), so both
 //! `collapse` and `modules` are shared-by-reference fields here, as the
 //! original sketch had them, and `build_config` reads the raw collapse
 //! numbers (`num_levels`, `sort_dim`, `knn_cells`, `iter_opt`, `proj_dim`)
@@ -69,18 +69,18 @@ pub(crate) struct EmbedKnobs<'a> {
     pub device: &'a ComputeDevice,
     pub device_no: usize,
 
-    /// The `--gene-modules` flag group. Both commands flatten it now, so
+    /// The `--feature-modules` flag group. Both commands flatten it now, so
     /// this is always `Some`; kept `Option` because a caller that never
     /// resolves gene modules can still pass `None` explicitly.
-    pub modules: Option<&'a ge::GeneModuleArgs>,
-    /// The module count this command trains when `--gene-modules` is not
-    /// passed explicitly. Both commands pass `Some(DEFAULT_GENE_MODULES)`:
+    pub modules: Option<&'a ge::FeatureModuleArgs>,
+    /// The module count this command trains when `--feature-modules` is not
+    /// passed explicitly. Both commands pass `Some(DEFAULT_FEATURE_MODULES)`:
     /// the hierarchical phase 1 has no module-free mode (the hard gene
     /// partition it scores against is structural, not an optional layer —
     /// `ge::fit` errors "the hierarchical phase 1 needs a module count"
     /// without one), so `None` here is not a state either command can
     /// actually run in.
-    pub default_gene_modules: Option<usize>,
+    pub default_feature_modules: Option<usize>,
 
     pub out: &'a str,
     pub batch_files: Option<&'a [Box<str>]>,
@@ -170,8 +170,8 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .map(|&i| w[i])
                 .collect::<Vec<f32>>()
         });
-        let gene_modules = match knobs.modules {
-            Some(m) => match m.resolve(knobs.default_gene_modules)? {
+        let feature_modules = match knobs.modules {
+            Some(m) => match m.resolve(knobs.default_feature_modules)? {
                 Some(mut gm) => {
                     gm.parent = parent_modules(plan.init_from, &unified.feature_names)?;
                     Some(gm)
@@ -208,7 +208,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             phase1_cells_per_pb: knobs.phase1_cells_per_pb,
             hier_units_per_step: knobs.batch_size.unwrap_or(256),
             hier_modules_per_unit: knobs.modules_per_unit,
-            gene_modules,
+            feature_modules,
             tracks: plan
                 .tracks
                 .as_ref()
@@ -635,10 +635,10 @@ fn write_pb_embeddings(
 }
 
 /// Default module count for the hierarchical phase 1's hard gene partition,
-/// used by both `senna bge` and `senna gem` unless `--gene-modules` overrides
+/// used by both `senna bge` and `senna gem` unless `--feature-modules` overrides
 /// it — the engine has no module-free mode, so this is a shared policy
 /// constant rather than an opt-in default.
-const DEFAULT_GENE_MODULES: usize = 128;
+const DEFAULT_FEATURE_MODULES: usize = 128;
 
 impl super::BgeArgs {
     /// `embedding_dim` is the width resolved against a given feature table.
@@ -666,7 +666,7 @@ impl super::BgeArgs {
             device: &self.device,
             device_no: self.device_no,
             modules: Some(&self.modules),
-            default_gene_modules: Some(DEFAULT_GENE_MODULES),
+            default_feature_modules: Some(DEFAULT_FEATURE_MODULES),
             out: &self.out,
             batch_files: self.batch_files.as_deref(),
         }
@@ -703,9 +703,9 @@ impl crate::gem::args::GemArgs {
             device_no: self.device_no,
             modules: Some(&self.modules),
             // Same default as bge: the hierarchical phase 1 has no
-            // module-free mode (see `EmbedKnobs::default_gene_modules`'s
+            // module-free mode (see `EmbedKnobs::default_feature_modules`'s
             // doc), so this cannot be `None`.
-            default_gene_modules: Some(DEFAULT_GENE_MODULES),
+            default_feature_modules: Some(DEFAULT_FEATURE_MODULES),
             out: &self.out,
             batch_files: self.batch_files.as_deref(),
         }
