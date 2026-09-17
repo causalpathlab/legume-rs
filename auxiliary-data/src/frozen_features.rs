@@ -56,6 +56,9 @@ pub struct FrozenFeatureHost {
     pub h: usize,
 }
 
+/// A rename of source row names, see [`FrozenLoadArgs::source_name_map`].
+pub type SourceNameMap<'a> = &'a dyn Fn(&str) -> Box<str>;
+
 pub struct FrozenLoadArgs<'a> {
     /// Path to the `[D_src, H]` parquet (gbe `dictionary.parquet` or
     /// topic `feature_embedding.parquet`). Row column 0 is the gene name.
@@ -73,6 +76,11 @@ pub struct FrozenLoadArgs<'a> {
     /// matching; [`FeatureNameKind::Gene { delim: '_' }`] is the typical
     /// choice for scRNA gene IDs.
     pub name_kind: FeatureNameKind,
+    /// Applied to every SOURCE row name before canonicalization, and kept as
+    /// the host's `src_names`: how a caller whose axis carries a row grammar
+    /// (`{gene}/count/spliced`) reads a plain gene table, lifting each bare
+    /// name into the grammar first. `None` = the names as read.
+    pub source_name_map: Option<SourceNameMap<'a>>,
 }
 
 pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFeatureHost> {
@@ -108,9 +116,13 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
         }
     };
 
+    let src_names: Vec<Box<str>> = match args.source_name_map {
+        Some(f) => dict.rows.iter().map(|n| f(n)).collect(),
+        None => dict.rows,
+    };
     let mut src_by_canon: FxHashMap<Box<str>, usize> = FxHashMap::default();
     let mut src_dupes = 0usize;
-    for (i, name) in dict.rows.iter().enumerate() {
+    for (i, name) in src_names.iter().enumerate() {
         let canon = args.name_kind.canonicalize(name);
         // First occurrence wins, as documented; `insert` would keep the last.
         if let std::collections::hash_map::Entry::Vacant(e) = src_by_canon.entry(canon) {
@@ -151,8 +163,7 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
     // row grammar ({gene}/{modality}/... ) that matched nothing usually mean
     // the caller fed a channelized or co-embedding artifact; a PARTIAL match
     // would otherwise proceed silently on the plain-name subset.
-    let channelized_unmatched = dict
-        .rows
+    let channelized_unmatched = src_names
         .iter()
         .enumerate()
         .filter(|(i, r)| {
@@ -193,7 +204,7 @@ pub fn load_frozen_feature_host(args: FrozenLoadArgs) -> anyhow::Result<FrozenFe
         keep_target_indices,
         keep_src_indices,
         src_e_feat: dict.mat,
-        src_names: dict.rows,
+        src_names,
         n_src,
         h,
     })
@@ -252,6 +263,7 @@ mod tests {
             bias_path: None,
             target_feature_names: &target,
             name_kind: FeatureNameKind::Exact,
+            source_name_map: None,
         })
         .unwrap();
 
@@ -268,6 +280,57 @@ mod tests {
         assert_eq!(host.e_feat[(1, 0)], 1.0);
         // Row 2: MYC → source row 1.
         assert_eq!(host.e_feat[(2, 1)], 5.0);
+    }
+
+    /// A source of bare gene names read onto an axis that carries the row
+    /// grammar: the map lifts each source name into the grammar before the
+    /// canonical match, and the host reports the lifted names.
+    #[test]
+    fn a_source_name_map_is_applied_before_matching_and_kept_in_src_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let dict_path = dir.path().join("d.parquet").to_str().unwrap().to_string();
+        let src = DMatrix::<f32>::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+        write_test_parquet(
+            &dict_path,
+            &["TGFB1", "MYC/count/unspliced"],
+            "gene",
+            &["h0", "h1"],
+            &src,
+        );
+        let target: Vec<Box<str>> = [
+            "ENSG_TGFB1/count/spliced",
+            "ENSG_MYC/count/spliced",
+            "ENSG_MYC/count/unspliced",
+        ]
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+        let lift = |n: &str| -> Box<str> {
+            if n.contains('/') {
+                n.into()
+            } else {
+                format!("{n}/count/spliced").into()
+            }
+        };
+        let host = load_frozen_feature_host(FrozenLoadArgs {
+            dictionary_path: &dict_path,
+            bias_path: None,
+            target_feature_names: &target,
+            name_kind: FeatureNameKind::Gene { delim: '_' },
+            source_name_map: Some(&lift),
+        })
+        .unwrap();
+        assert_eq!(host.keep_target_indices, vec![0, 2]);
+        assert_eq!(host.keep_src_indices, vec![0, 1]);
+        assert_eq!(
+            host.src_names,
+            vec![
+                Box::<str>::from("TGFB1/count/spliced"),
+                Box::<str>::from("MYC/count/unspliced")
+            ]
+        );
+        assert_eq!(host.e_feat[(0, 0)], 1.0);
+        assert_eq!(host.e_feat[(1, 1)], 4.0);
     }
 
     #[test]
@@ -291,6 +354,7 @@ mod tests {
             bias_path: None,
             target_feature_names: &target,
             name_kind: FeatureNameKind::Gene { delim: '_' },
+            source_name_map: None,
         })
         .unwrap();
 
@@ -313,6 +377,7 @@ mod tests {
             bias_path: None,
             target_feature_names: &target,
             name_kind: FeatureNameKind::Exact,
+            source_name_map: None,
         });
         let err = match result {
             Ok(_) => panic!("expected empty-intersection error"),
@@ -337,6 +402,7 @@ mod tests {
             bias_path: Some(&bias_path),
             target_feature_names: &target,
             name_kind: FeatureNameKind::Exact,
+            source_name_map: None,
         })
         .unwrap();
         // Row 0 of output = target "B" = source row 1.

@@ -12,7 +12,7 @@
 //!   `--modality` file at all (genes-only, writing only the `count`
 //!   contrast row).
 
-use super::run_gem_embedding;
+use super::{run_gem_embedding, validate_offset_rank};
 use crate::embed_common::*;
 use crate::gem::args::GemArgs;
 use crate::gem::test_fixtures::{boxes, genes_file, m6a_file, synth, CELLS};
@@ -59,6 +59,8 @@ fn gem_fits_at_defaults_and_writes_a_gem_manifest() {
         "--no-emit-pb-reference",
         "--embedding-dim",
         "4",
+        "--offset-rank",
+        "2",
         "--phase1-cells-per-pb",
         "0",
         "-o",
@@ -152,6 +154,8 @@ fn n_hvg_zero_run_succeeds() {
         "--no-emit-pb-reference",
         "--embedding-dim",
         "4",
+        "--offset-rank",
+        "2",
         "--phase1-cells-per-pb",
         "0",
         "--n-hvg",
@@ -182,6 +186,8 @@ fn genes_only_run_writes_only_the_count_contrast_row() {
         "--no-emit-pb-reference",
         "--embedding-dim",
         "4",
+        "--offset-rank",
+        "2",
         "--phase1-cells-per-pb",
         "0",
         "-o",
@@ -264,6 +270,8 @@ fn mixture_batch_and_emit_pb_reference_are_refused_but_a_plain_run_still_passes(
         "--no-emit-pb-reference",
         "--embedding-dim",
         "4",
+        "--offset-rank",
+        "2",
         "--phase1-cells-per-pb",
         "0",
         "-o",
@@ -298,6 +306,8 @@ fn spliced_only_run_writes_an_empty_but_present_contrast_pair() {
         "--no-emit-pb-reference",
         "--embedding-dim",
         "4",
+        "--offset-rank",
+        "2",
         "--phase1-cells-per-pb",
         "0",
         "-o",
@@ -363,5 +373,222 @@ fn spliced_only_run_writes_an_empty_but_present_contrast_pair() {
         bias_str_cols.iter().all(Vec::is_empty),
         "feature_contrast_bias.parquet's feature/modality/gene columns must be present but \
          empty: {bias_str_cols:?}"
+    );
+}
+
+/// `--offset-rank` is its own number, checked against the resolved H: the
+/// refusal names both flags, and rank H is legal.
+#[test]
+fn the_offset_rank_is_checked_against_the_resolved_h() {
+    for (rank, h) in [(0usize, 4usize), (5, 4)] {
+        let e = validate_offset_rank(rank, h).unwrap_err().to_string();
+        assert!(
+            e.contains("--offset-rank") && e.contains("--embedding-dim"),
+            "{e}"
+        );
+    }
+    validate_offset_rank(1, 4).unwrap();
+    validate_offset_rank(4, 4).unwrap();
+}
+
+fn tiny_fit(genes: &str, m6a: Option<&str>, out: &str, extra: &[&str]) -> GemArgs {
+    let mut argv = vec!["senna-gem", genes];
+    if let Some(m6a) = m6a {
+        argv.extend_from_slice(&["--modality", m6a]);
+    }
+    argv.extend_from_slice(&[
+        "--epochs",
+        "2",
+        "--skip-etm",
+        "--no-emit-pb-reference",
+        "--phase1-cells-per-pb",
+        "0",
+        "--offset-rank",
+        "2",
+        "-o",
+        out,
+    ]);
+    argv.extend_from_slice(extra);
+    Cli::try_parse_from(argv).expect("GemArgs parses").args
+}
+
+fn row_of(t: &matrix_util::traits::MatWithNames<Mat>, name: &str) -> Vec<f32> {
+    let i = t
+        .rows
+        .iter()
+        .position(|n| n.as_ref() == name)
+        .unwrap_or_else(|| panic!("no row {name} among {:?}", t.rows));
+    t.mat.row(i).iter().copied().collect()
+}
+
+/// A plain gene table (bare names, as `senna bge` writes) as the frozen base:
+/// the matched genes' `count/spliced` rows come out verbatim, their unspliced
+/// rows train as offsets on them, `--embedding-dim auto` takes the table's
+/// width, and a gene the data lacks is carried through under its lifted name
+/// with a type for every row. Four genes with both channels in two modules,
+/// so the unspliced track has softmaxes to learn from (a track with one gene
+/// per module scores one-entry softmaxes and can move nothing).
+#[test]
+fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
+    use matrix_util::traits::IoOps;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let genes = synth(
+        dir.path(),
+        "S1_genes",
+        &[
+            "GENE1/count/spliced",
+            "GENE1/count/unspliced",
+            "GENE2/count/spliced",
+            "GENE2/count/unspliced",
+            "GENE3/count/spliced",
+            "GENE3/count/unspliced",
+            "GENE4/count/spliced",
+            "GENE4/count/unspliced",
+        ],
+        &CELLS,
+    );
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let out = dir.path().join("run").to_string_lossy().into_owned();
+    let h = 4;
+    let names = boxes(&["GENE1", "GENE2", "GENE3", "GENE4", "EXTRA1"]);
+    let table = Mat::from_fn(5, h, |i, k| (i as f32 + 1.0) * 0.25 - k as f32 * 0.1);
+    table
+        .to_parquet_with_names(
+            &format!("{plus}.feature_loading.parquet"),
+            (Some(&names), Some("gene")),
+            None,
+        )
+        .unwrap();
+    let args = tiny_fit(
+        &genes,
+        None,
+        &out,
+        &[
+            "--embedding-dim",
+            "auto",
+            "--freeze-feature-embedding",
+            &plus,
+            "--gene-modules",
+            "2",
+        ],
+    );
+    run_gem_embedding(&args).expect("a gem run on a frozen bare-gene table");
+    let loading = Mat::from_parquet(&format!("{out}.feature_loading.parquet")).unwrap();
+    assert_eq!(loading.mat.ncols(), h, "auto takes the table's width");
+    let given = |i: usize| -> Vec<f32> { table.row(i).iter().copied().collect() };
+    for (i, g) in ["GENE1", "GENE2", "GENE3", "GENE4"].iter().enumerate() {
+        assert_eq!(
+            row_of(&loading, &format!("{g}/count/spliced")),
+            given(i),
+            "{g}"
+        );
+    }
+    assert!(
+        (0..4).any(|i| {
+            let g = i + 1;
+            row_of(&loading, &format!("GENE{g}/count/unspliced")) != given(i)
+        }),
+        "the unspliced rows are offsets on the pinned rows"
+    );
+    assert_eq!(
+        row_of(&loading, "EXTRA1/count/spliced"),
+        given(4),
+        "carried under its lifted name"
+    );
+    assert_eq!(loading.rows.len(), 8 + 1);
+    let types = auxiliary_data::feature_types::read_feature_types(&out)
+        .unwrap()
+        .expect("a type for every row");
+    assert_eq!(types.len(), 9);
+    assert!(std::path::Path::new(&format!("{out}.feature_contrast.parquet")).exists());
+}
+
+/// An earlier gem table as the frozen base (a gem-to-gem chain): every given
+/// row comes out as given on every track, the offsets included; the table's
+/// rows beyond this axis are carried through (a gene under its lifted name,
+/// a term as it is); and under lora the rows move.
+#[test]
+fn an_earlier_gem_table_pins_its_track_rows_and_lora_moves_them() {
+    use crate::feature_preset::test_support::{widen, EXTRA};
+    use matrix_util::traits::IoOps;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let genes = genes_file(dir.path());
+    let m6a = m6a_file(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let third = dir.path().join("third").to_string_lossy().into_owned();
+    run_gem_embedding(&tiny_fit(
+        &genes,
+        Some(&m6a),
+        &first,
+        &["--embedding-dim", "4"],
+    ))
+    .expect("first run");
+    let extra = widen(&format!("{first}.feature_loading.parquet"), &plus);
+
+    run_gem_embedding(&tiny_fit(
+        &genes,
+        Some(&m6a),
+        &second,
+        &[
+            "--embedding-dim",
+            "auto",
+            "--freeze-feature-embedding",
+            &plus,
+        ],
+    ))
+    .expect("second run, frozen to the first");
+    let a = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
+    let b = Mat::from_parquet(&format!("{second}.feature_loading.parquet")).unwrap();
+    for (i, name) in a.rows.iter().enumerate() {
+        for (k, got) in row_of(&b, name).into_iter().enumerate() {
+            assert!(
+                (got - a.mat[(i, k)]).abs() < 1e-6,
+                "{name}[{k}]: {got} vs given {}",
+                a.mat[(i, k)]
+            );
+        }
+    }
+    assert_eq!(b.rows.len(), a.rows.len() + EXTRA.len());
+    let lifted = format!("{}/count/spliced", EXTRA[0].0);
+    assert_eq!(
+        row_of(&b, &lifted),
+        extra.row(0).iter().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        row_of(&b, EXTRA[1].0),
+        extra.row(1).iter().copied().collect::<Vec<_>>(),
+        "a term keeps its name"
+    );
+    let types = auxiliary_data::feature_types::read_feature_types(&second)
+        .unwrap()
+        .expect("types");
+    assert!(types
+        .iter()
+        .any(|(n, t)| n.as_ref() == EXTRA[1].0 && t.as_ref() == EXTRA[1].1));
+
+    run_gem_embedding(&tiny_fit(
+        &genes,
+        Some(&m6a),
+        &third,
+        &[
+            "--embedding-dim",
+            "auto",
+            "--lora-feature-embedding",
+            &plus,
+            "--lora-rank",
+            "1",
+        ],
+    ))
+    .expect("third run, lora on the first");
+    let c = Mat::from_parquet(&format!("{third}.feature_loading.parquet")).unwrap();
+    assert_eq!(c.rows.len(), a.rows.len() + EXTRA.len());
+    assert!(
+        a.rows.iter().enumerate().any(|(i, name)| {
+            let got = row_of(&c, name);
+            (0..4).any(|k| (got[k] - a.mat[(i, k)]).abs() > 1e-6)
+        }),
+        "under lora the rows move"
     );
 }

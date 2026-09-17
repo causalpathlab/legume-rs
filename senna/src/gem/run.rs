@@ -17,7 +17,10 @@
 //! for HVG projection weighting. The plan is handed to the driver as
 //! `FitConfig.tracks` (so phase 1 and phase 2 both train per-track) and,
 //! after the fit, to [`crate::gem::contrast::write_contrast`] (so the
-//! contrast table reads the same RAW loading the fit produced).
+//! contrast table reads the same RAW loading the fit produced). A table
+//! given with `--{freeze,init,lora}-feature-embedding` is resolved onto the
+//! plan by [`crate::gem::preset::resolve_gem_preset`]; `--embedding-dim` is
+//! settled against it, and `--offset-rank` against the settled H.
 
 use crate::bge::driver::{fit_embed_family, EmbedPlan};
 use crate::gem::args::GemArgs;
@@ -39,18 +42,30 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     let (unified, plan) = load_gem_data(&inputs, batch_files, args.preload_data)?;
     let hvg_weights = gem_hvg_row_weights(&unified, &plan, &args.hvg, args.block_size)?;
 
+    let preset = crate::gem::preset::resolve_gem_preset(
+        args.feature_embedding.resolve()?,
+        &unified.feature_names,
+        &plan,
+    )?;
+    let embedding_dim =
+        crate::feature_preset::resolve_dim(args.embedding_dim, preset.base.as_ref())?;
+    anyhow::ensure!(embedding_dim > 0, "--embedding-dim must be > 0");
+    validate_offset_rank(args.offset_rank, embedding_dim)?;
+
     let data_files = inputs.files.clone();
     fit_embed_family(EmbedPlan {
         kind: crate::run_manifest::RunKind::Gem,
-        knobs: args.knobs(),
+        knobs: args.knobs(embedding_dim),
         unified,
         data_files,
         multiome: None,
         hvg_weights,
         tracks: Some(plan.clone()),
         offset_l2: args.offset_l2,
-        preset_features: None,
-        carried: None,
+        offset_rank: args.offset_rank,
+        preset_features: preset.base,
+        preset_offsets: preset.offsets,
+        carried: preset.carried,
         pb_reference: None,
         init_from: None,
         train_args: crate::run_manifest::record_train_args(args)?,
@@ -59,13 +74,18 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
 }
 
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        args.embedding_dim > 0,
-        "--embedding-dim must be > 0 (got {})",
-        args.embedding_dim
-    );
     args.collapse
         .reject_pb_reference(crate::run_manifest::RunKind::Gem)?;
+    Ok(())
+}
+
+/// `--offset-rank` against the settled H: its own number, inside `1..=H`.
+pub(crate) fn validate_offset_rank(rank: usize, h: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=h).contains(&rank),
+        "--offset-rank {rank} must lie in 1..=H, and H={h} here (--embedding-dim); it is the \
+         rank of each track's per-gene offset, not the embedding dimension"
+    );
     Ok(())
 }
 

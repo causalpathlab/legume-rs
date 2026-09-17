@@ -29,8 +29,10 @@
 //! The base track (`t == 0`) IS the model; every other track is an additive
 //! OFFSET from it: `μ^t = μ + Δ^t`, `b^t_m = b_m + β^t`, `r^t = r + δ^t`,
 //! `b^t_g = b_g + γ^t`, with the base tables used directly at `t == 0`. The
-//! base tables take the sum over tracks and each offset table its own track's
-//! term — autograd does that split by linearity.
+//! gene offset is low-rank, `δ^t_g = δ₀_g + u^t_g · V^t` (see
+//! [`super::params::TrackOffset`]), so a track moves its genes inside one
+//! shared subspace. The base tables take the sum over tracks and each offset
+//! its own track's term — autograd does that split by linearity.
 //!
 //! # How a step is laid out
 //!
@@ -46,9 +48,11 @@
 //!
 //! # Ridge on the offsets
 //!
-//! `λ_step Σ_{t≥1} [ (1/M) Σ_m ‖Δ^t_m‖² + (1/G) Σ_g ‖δ^t_g‖² ]` (biases free),
-//! exact on the FULL tables every step. `λ_step` is the PER-STEP weight the
-//! caller passes (`HierConfig::offset_l2 / steps_per_epoch`, see
+//! `λ_step Σ_{t≥1} [ (1/M) Σ_m ‖Δ^t_m‖² + (1/G) Σ_g ‖u^t_g · V^t‖² ]` (biases
+//! and a given `δ₀` free), exact on the FULL tables every step — the gene
+//! term in Gram form ([`candle_util::lora::PinnedLora::ridge`]), so no
+//! `[G, H]` residual is formed. `λ_step` is the PER-STEP weight the caller
+//! passes (`HierConfig::offset_l2 / steps_per_epoch`, see
 //! [`super::train::per_step_offset_l2`]).
 
 use super::params::HierParams;
@@ -297,7 +301,7 @@ fn score_gene_batches(
         let mut r = gather_rows(params.r.as_tensor(), &g_ids)?;
         let mut bias = gather_rows(params.b_g.as_tensor(), &g_ids)?;
         if let Some(o) = params.offset(t) {
-            r = (r + gather_rows(o.d_r.as_tensor(), &g_ids)?)?;
+            r = (r + o.residual_rows(&g_ids)?)?;
             bias = (bias + gather_rows(o.d_b_g.as_tensor(), &g_ids)?)?;
         }
         if let Some(l) = params.lora.as_ref() {
@@ -358,7 +362,7 @@ pub fn step_loss(
         let n_g = params.b_g.dims()[0];
         for o in &params.offsets {
             let mu2 = mean_row_sq(o.d_mu.as_tensor(), n_m)?;
-            let r2 = mean_row_sq(o.d_r.as_tensor(), n_g)?;
+            let r2 = o.d_r.ridge()?.affine(1.0 / n_g as f64, 0.0)?;
             add_into(
                 &mut loss_ridge,
                 (mu2 + r2)?.affine(f64::from(offset_l2_step), 0.0)?,
@@ -401,8 +405,9 @@ pub struct Optimizers {
     pub e_u: RowAdagrad,
     pub mu: RowAdagrad,
     pub r: RowAdagrad,
-    /// Tracks `1..T`, in order: `(M rows for Δ/β, G rows for δ/γ)`.
-    pub offsets: Vec<(RowAdagrad, RowAdagrad)>,
+    /// Tracks `1..T`, in order: `(M rows for Δ/β, G rows for γ, the pair for
+    /// the gene residual's factors)`.
+    pub offsets: Vec<(RowAdagrad, RowAdagrad, PinnedLoraOpt)>,
     /// Under LoRA: the module residual's pair, then the gene residual's.
     pub lora: Option<[PinnedLoraOpt; 2]>,
 }
@@ -423,10 +428,11 @@ impl Optimizers {
             offsets: params
                 .offsets
                 .iter()
-                .map(|_| {
+                .map(|o| {
                     Ok((
                         RowAdagrad::new(n_m, lr, dev)?,
                         RowAdagrad::new(n_g, lr, dev)?,
+                        o.d_r.optimizers(lr, params.offset_lr_ratio, dev)?,
                     ))
                 })
                 .collect::<CResult<_>>()?,
@@ -499,9 +505,12 @@ pub fn apply(
         params.r_mask.as_ref(),
         decay,
     )?;
-    for (o, (opt_mu, opt_r)) in params.offsets.iter().zip(&mut opt.offsets) {
+    for (o, (opt_mu, opt_b, opt_r)) in params.offsets.iter().zip(&mut opt.offsets) {
         pair(opt_mu, &o.d_mu, &o.d_b_m, None, 1.0)?;
-        pair(opt_r, &o.d_r, &o.d_b_g, None, 1.0)?;
+        if let Some(g) = grads.get(&o.d_b_g) {
+            opt_b.step_bias(&o.d_b_g, g)?;
+        }
+        o.d_r.step(opt_r, grads)?;
     }
     if let (Some(l), Some([opt_m, opt_g])) = (params.lora.as_ref(), opt.lora.as_mut()) {
         l.module.step(opt_m, grads)?;
