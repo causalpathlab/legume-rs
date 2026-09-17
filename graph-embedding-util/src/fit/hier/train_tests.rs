@@ -2,6 +2,7 @@ use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
 use crate::fit::hier::units::UnitTable;
+use crate::PresetMode;
 use std::sync::atomic::AtomicBool;
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
@@ -294,7 +295,7 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
     let frozen = PresetGenes {
         gene: gene.clone(),
         rows: rows.clone(),
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     let cfg = HierConfig {
         n_modules: 2,
@@ -353,7 +354,7 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
     let frozen = PresetGenes {
         gene,
         rows: rows.clone(),
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     let cfg = HierConfig {
         n_modules: 2,
@@ -394,13 +395,13 @@ fn frozen_genes_must_be_in_range_and_match_h() {
     let bad_gene = PresetGenes {
         gene: vec![20],
         rows: vec![0.0; 4],
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     assert!(train(&units, &labels, 4, &cfg, Some(&bad_gene), &stop).is_err());
     let bad_h = PresetGenes {
         gene: vec![0],
         rows: vec![0.0; 3],
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     assert!(train(&units, &labels, 4, &cfg, Some(&bad_h), &stop).is_err());
 }
@@ -416,7 +417,7 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
     let preset = PresetGenes {
         gene: gene.clone(),
         rows: rows.clone(),
-        freeze: false,
+        mode: PresetMode::Init,
     };
     let stop = AtomicBool::new(false);
     let cfg0 = HierConfig {
@@ -441,4 +442,32 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         .filter(|&g| (0..h).any(|k| (out.rho[(g, k)] - rows[g * h + k]).abs() > 1e-4))
         .count();
     assert!(moved > 10, "only {moved} of 20 preset rows trained");
+}
+
+/// The residual mode is not offered by this host phase: it is refused up
+/// front, before any table is touched.
+#[test]
+fn a_lora_preset_is_refused_by_the_host_phase() {
+    let (units, labels) = planted_units();
+    let h = 4;
+    let preset = PresetGenes {
+        gene: vec![0, 2],
+        rows: vec![0.0; 2 * h],
+        mode: PresetMode::Lora {
+            rank: 1,
+            lr_ratio: 1.0,
+        },
+    };
+    let cfg = HierConfig {
+        n_modules: 2,
+        epochs: 1,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 3,
+        offset_l2: 0.0,
+    };
+    let stop = AtomicBool::new(false);
+    assert!(train(&units, &labels, h, &cfg, Some(&preset), &stop).is_err());
 }

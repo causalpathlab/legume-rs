@@ -794,3 +794,90 @@ fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
         Some(first.as_str())
     );
 }
+
+/// `--lora-feature-embedding`: the matched gene rows come out of a second run
+/// as the first run's rows plus a shared residual of the given rank, at the
+/// first run's H, while the other nodes train freely; the manifest records
+/// the flag and its knobs.
+#[test]
+fn fne_anchors_gene_rows_with_a_low_rank_residual() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ppi, typed) = planted_inputs(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let common = [
+        "--batch-size",
+        "16",
+        "--num-batch-negs",
+        "4",
+        "--num-uniform-negs",
+        "4",
+        "--eval-fraction",
+        "0",
+    ];
+    let mut argv = vec![
+        "fne",
+        &ppi,
+        "--edges",
+        &typed,
+        "--embedding-dim",
+        "6",
+        "-i",
+        "3",
+    ];
+    argv.extend_from_slice(&common);
+    argv.extend_from_slice(&["-o", &first]);
+    let a: FneArgs = parse_args(&argv);
+    fit_fne(&a).unwrap();
+    let mut argv = vec![
+        "fne",
+        &ppi,
+        "--edges",
+        &typed,
+        "--lora-feature-embedding",
+        &first,
+        "--lora-rank",
+        "1",
+        "--lora-lr-ratio",
+        "4",
+        "--embedding-dim",
+        "0",
+        "-i",
+        "5",
+        "--seed",
+        "7",
+    ];
+    argv.extend_from_slice(&common);
+    argv.extend_from_slice(&["-o", &second]);
+    let b: FneArgs = parse_args(&argv);
+    fit_fne(&b).unwrap();
+
+    let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let e2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    assert_eq!(e2.mat.ncols(), 6, "H taken from the table");
+    let row = |e: &matrix_util::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
+        let i = e.rows.iter().position(|r| r.as_ref() == name).unwrap();
+        e.mat.row(i).iter().copied().collect()
+    };
+    let mut resid = Mat::zeros(10, 6);
+    for g in 0..10 {
+        let name = format!("G{g}");
+        let (r1, r2) = (row(&e1, &name), row(&e2, &name));
+        for k in 0..6 {
+            resid[(g, k)] = r2[k] - r1[k];
+        }
+    }
+    let sv = resid.singular_values();
+    assert!(sv[0] > 1e-6, "the residual never moved");
+    assert!(sv[1] <= 1e-4 * sv[0], "the residual is not rank 1: {sv}");
+    assert_ne!(row(&e1, "CT0"), row(&e2, "CT0"), "a cell type still trains");
+    let m: RunManifest =
+        serde_json::from_str(&std::fs::read_to_string(format!("{second}.senna.json")).unwrap())
+            .unwrap();
+    let recorded = &m.train_args.as_ref().unwrap().args;
+    assert_eq!(
+        recorded["lora_feature_embedding"].as_str(),
+        Some(first.as_str())
+    );
+    assert_eq!(recorded["lora_rank"].as_u64(), Some(1));
+}

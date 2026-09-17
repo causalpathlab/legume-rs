@@ -113,14 +113,14 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         .filter(|&i| graph.node_types[i as usize].as_ref() == super::graph::GENE_TYPE)
         .collect();
     let preset_genes = match args.feature_embedding.resolve() {
-        Some((prefix, freeze)) => {
+        Some((prefix, mode)) => {
             let gene_names: Vec<Box<str>> = gene_nodes
                 .iter()
                 .map(|&i| graph.node_names[i as usize].clone())
                 .collect();
             Some(crate::feature_preset::load_preset_genes(
                 prefix,
-                freeze,
+                mode,
                 &gene_names,
                 &args.name_kind(),
             )?)

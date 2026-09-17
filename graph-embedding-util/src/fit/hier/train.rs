@@ -155,18 +155,11 @@ pub fn train(
             "preset gene rows need a single-track feature axis"
         );
         params.preset(f, &part.module_of)?;
-        if f.freeze {
-            info!(
-                "Phase 1 (hier) — {} of {d} gene rows pinned; μ pinned to their module means, \
-                 biases and the other rows train",
-                f.gene.len()
-            );
-        } else {
-            info!(
-                "Phase 1 (hier) — {} of {d} gene rows start from the given table and train on",
-                f.gene.len()
-            );
-        }
+        info!(
+            "Phase 1 (hier) — {} of {d} gene rows {}",
+            f.gene.len(),
+            f.mode.describe()
+        );
     }
     let mut opt = Optimizers {
         e_u: RowAdagrad::new(n_u, cfg.lr),

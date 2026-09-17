@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "candle-util"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "anyhow",
  "approx",
@@ -2820,7 +2820,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -5632,7 +5632,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "senna"
-version = "0.16.3"
+version = "0.16.4"
 dependencies = [
  "anyhow",
  "approx",

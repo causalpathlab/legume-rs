@@ -22,7 +22,8 @@ use super::{INIT_STDEV, MASK_NEG};
 use crate::loss::softmax_nce;
 use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
 use candle_util::fast_index::gather_rows;
-use matrix_util::rand_util::name_seed;
+use candle_util::lora::LoraFactors;
+use matrix_util::rand_util::{collect_f32_seeded, mix_seed, name_seed};
 use matrix_util::traits::SampleOps;
 
 /// The score blocks of one batch, before the loss.
@@ -41,6 +42,25 @@ pub(crate) struct FneModel {
     pub e: Var,
     /// `−1e9` on the diagonal, `[1, c, c]`, built once.
     diag_neg: Tensor,
+    /// The low-rank residual on the anchored rows, under `PresetMode::Lora`.
+    pub lora: Option<FneLora>,
+}
+
+/// A row's table value is `e_n + u_n · V` (`candle_util::lora`): `u` is
+/// `[N, rank]`, zero and gradient-masked off the anchored rows; `V` is
+/// `[rank, D]` and shared. Held as `Var`s because RowAdagrad steps them.
+pub(crate) struct FneLora {
+    pub u: Var,
+    pub v: Var,
+    /// `[N, 1]`, `1` on the anchored rows.
+    pub u_mask: Tensor,
+    pub lr_ratio: f32,
+}
+
+impl FneLora {
+    fn factors(&self) -> LoraFactors {
+        LoraFactors::from_parts(self.u.as_tensor().clone(), self.v.as_tensor().clone())
+    }
 }
 
 impl FneModel {
@@ -72,14 +92,18 @@ impl FneModel {
         Self::assemble(Var::from_tensor(&e)?, c, &dev)
     }
 
-    /// Overwrite the listed rows with `preset.rows` and, under `freeze`,
-    /// return the `[N, 1]` gradient mask that is `0` on those rows.
+    /// Overwrite the listed rows with `preset.rows` and, when the mode pins
+    /// them, return the `[N, 1]` gradient mask that is `0` on those rows.
+    /// Under `Lora` the residual factors are set up as well: `u` drawn on the
+    /// anchored rows from `seed`, `V` zero.
     pub(crate) fn apply_preset(
         &mut self,
         preset: &super::PresetRows,
+        seed: u64,
         dev: &Device,
     ) -> anyhow::Result<Option<Tensor>> {
         let (n, d) = self.e.dims2()?;
+        preset.mode.validate(d)?;
         anyhow::ensure!(
             preset.rows.len() == preset.node.len() * d,
             "fne: preset rows are {} values for {} nodes at D={d}",
@@ -95,32 +119,74 @@ impl FneModel {
             keep[g] = 0.0;
         }
         self.e.set(&Tensor::from_vec(flat, (n, d), dev)?)?;
+        if let Some((rank, lr_ratio)) = preset.mode.lora() {
+            let dist =
+                rand_distr::Normal::new(0.0f32, (1.0 / rank as f32).sqrt()).expect("finite stdev");
+            let draw =
+                collect_f32_seeded(preset.node.len() * rank, dist, mix_seed(seed, 0x4c4f_5241));
+            let mut u = vec![0f32; n * rank];
+            for (i, &g) in preset.node.iter().enumerate() {
+                let g = g as usize;
+                u[g * rank..(g + 1) * rank].copy_from_slice(&draw[i * rank..(i + 1) * rank]);
+            }
+            let u_mask: Vec<f32> = keep.iter().map(|k| 1.0 - k).collect();
+            self.lora = Some(FneLora {
+                u: Var::from_tensor(&Tensor::from_vec(u, (n, rank), dev)?)?,
+                v: Var::zeros((rank, d), DType::F32, dev)?,
+                u_mask: Tensor::from_vec(u_mask, (n, 1), dev)?,
+                lr_ratio,
+            });
+        }
         Ok(preset
-            .freeze
+            .mode
+            .pins()
             .then(|| Tensor::from_vec(keep, (n, 1), dev))
             .transpose()?)
+    }
+
+    /// The rows named by `ids`, `[ids, D]`: the table's, plus the low-rank
+    /// residual on anchored rows. Every lookup in the model goes through here.
+    fn rows(&self, ids: &Tensor) -> Result<Tensor> {
+        let rows = gather_rows(self.e.as_tensor(), ids)?;
+        match self.lora.as_ref() {
+            None => Ok(rows),
+            Some(l) => rows + l.factors().residual_rows(ids)?,
+        }
+    }
+
+    /// The whole `[N, D]` table with the residual folded in — for the output
+    /// only; training never forms it.
+    pub(crate) fn composed(&self) -> Result<Tensor> {
+        let e = self.e.as_tensor().detach();
+        match self.lora.as_ref() {
+            None => Ok(e),
+            Some(l) => e + l.factors().residual()?.detach(),
+        }
     }
 
     fn assemble(e: Var, c: usize, dev: &Device) -> Result<Self> {
         let diag_neg = Tensor::eye(c.max(1), DType::F32, dev)?
             .affine(MASK_NEG, 0.0)?
             .unsqueeze(0)?;
-        Ok(Self { e, diag_neg })
+        Ok(Self {
+            e,
+            diag_neg,
+            lora: None,
+        })
     }
 
     pub(crate) fn score_blocks(&self, b: &PaddedBatch, dev: &Device) -> Result<ScoreBlocks> {
         let (k, c, u) = (b.k, b.c, b.u);
         let d = self.e.dim(1)?;
         let p = k * c;
-        let table = self.e.as_tensor();
         // Two host→device copies per batch: every id array in one, every
         // float array in the other, sliced on the device.
         let ids: Vec<u32> = [&b.lhs[..], &b.rhs[..], &b.uni_lhs[..], &b.uni_rhs[..]].concat();
         let ids = Tensor::from_slice(&ids, ids.len(), dev)?;
         let floats: Vec<f32> = [&b.col_valid[..], &b.row_w[..]].concat();
         let floats = Tensor::from_slice(&floats, floats.len(), dev)?;
-        let l = gather_rows(table, &ids.narrow(0, 0, p)?)?.reshape((k, c, d))?;
-        let r = gather_rows(table, &ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
+        let l = self.rows(&ids.narrow(0, 0, p)?)?.reshape((k, c, d))?;
+        let r = self.rows(&ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
         let pos = (&l * &r)?.sum(2)?; // [k, c]
                                       // `(1 − valid) · MASK_NEG` on pad columns, plus the cached diagonal.
         let pad = floats
@@ -132,9 +198,12 @@ impl FneModel {
         let rhs_bat = (l.matmul(&r.t()?)? + &mask)?;
         let lhs_bat = (r.matmul(&l.t()?)? + &mask)?;
         let (rhs_uni, lhs_uni) = if u > 0 {
-            let ul = gather_rows(table, &ids.narrow(0, 2 * p, k * u)?)?.reshape((k, u, d))?;
-            let ur =
-                gather_rows(table, &ids.narrow(0, 2 * p + k * u, k * u)?)?.reshape((k, u, d))?;
+            let ul = self
+                .rows(&ids.narrow(0, 2 * p, k * u)?)?
+                .reshape((k, u, d))?;
+            let ur = self
+                .rows(&ids.narrow(0, 2 * p + k * u, k * u)?)?
+                .reshape((k, u, d))?;
             (Some(l.matmul(&ur.t()?)?), Some(r.matmul(&ul.t()?)?))
         } else {
             (None, None)
