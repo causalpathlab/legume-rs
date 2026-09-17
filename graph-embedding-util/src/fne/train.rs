@@ -245,18 +245,15 @@ pub fn train(
         None => None,
     };
     let mut opt = RowAdagrad::new(types.n_total(), cfg.lr, dev)?;
-    let mut opt_lora = match model.lora.as_ref() {
-        Some(l) => Some(l.optimizers(cfg.lr, dev)?),
-        None => None,
+    let lora_spec = cfg.preset.as_ref().and_then(|p| p.mode.lora());
+    let mut opt_lora = match (model.lora.as_ref(), lora_spec) {
+        (Some(l), Some(spec)) => Some(l.optimizers(cfg.lr, spec.lr_ratio, dev)?),
+        _ => None,
     };
     // The per-epoch LoRA ridge, spread over the epoch's batches.
-    let ridge_step = cfg
-        .preset
-        .as_ref()
-        .and_then(|p| p.mode.lora())
-        .map_or(0.0, |l| {
-            f64::from(l.ridge) / n_visits.div_ceil(cfg.batch_size.max(1)).max(1) as f64
-        });
+    let ridge_step = lora_spec.map_or(0.0, |l| {
+        f64::from(l.ridge) / n_visits.div_ceil(cfg.batch_size.max(1)).max(1) as f64
+    });
 
     let mut epochs = Vec::with_capacity(cfg.epochs);
     for epoch in 0..cfg.epochs {

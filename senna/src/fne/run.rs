@@ -112,7 +112,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     let gene_nodes: Vec<u32> = (0..graph.node_names.len() as u32)
         .filter(|&i| graph.node_types[i as usize].as_ref() == super::graph::GENE_TYPE)
         .collect();
-    let preset_genes = match args.feature_embedding.resolve() {
+    let preset_genes = match args.feature_embedding.resolve()? {
         Some((prefix, mode)) => {
             let gene_names: Vec<Box<str>> = gene_nodes
                 .iter()

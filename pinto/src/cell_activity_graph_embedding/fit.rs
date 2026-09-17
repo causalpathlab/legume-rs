@@ -75,7 +75,8 @@ use candle_util::candle_core::Tensor;
 // separately (`loss.backward()` then `clip_and_step_dense`) so the phase timers
 // can attribute them apart.
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
-use candle_util::vae::{clip_and_step_dense, PhaseTimers};
+use candle_util::frozen_features::trainable_vars;
+use candle_util::vae::{clip_and_step_dense_all, PhaseTimers};
 use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
@@ -87,6 +88,7 @@ use graph_embedding_util::loss::{
 };
 use graph_embedding_util::model::{
     AdapterInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ModuleWarmStart,
+    E_FEAT_VAR_NAME,
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
@@ -164,7 +166,13 @@ pub fn fit_cell_activity_graph_embedding(
     let c = &args.common;
     mkdir_parent(&c.out)?;
 
-    anyhow::ensure!(args.embedding_dim > 0, "embedding-dim must be > 0");
+    // The width: the flag, else a pinned dictionary's, read from its footer
+    // before any data is opened.
+    let dictionary_width = match args.gene_embedding.as_deref() {
+        Some(path) => Some(pretrained::dictionary_width(path)?),
+        None => None,
+    };
+    let embedding_dim = args.resolve_embedding_dim(dictionary_width)?;
     // Chain levels, resolved and validated BEFORE any data is loaded: the
     // trained unit is the finest coarsening level, so chain entries must
     // be strictly coarser. Unset adapts to the hierarchy depth (up to
@@ -205,12 +213,6 @@ pub fn fit_cell_activity_graph_embedding(
         !(module_cfg.is_some() && args.gene_embedding.is_some()),
         "--gene-modules learns the gene side through a module layer and --gene-embedding \
          installs a pre-trained one; the two parameterizations are exclusive. Drop one."
-    );
-    anyhow::ensure!(
-        !(args.gene_adapter_residual && args.gene_embedding_mode != GeneEmbeddingMode::Adapt),
-        "--gene-adapter-residual is the adapter's per-gene correction and only \
-         --gene-embedding-mode adapt trains one; under freeze or free the flag \
-         would be read and ignored. Drop it, or use the adapt mode."
     );
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
@@ -488,7 +490,7 @@ pub fn fit_cell_activity_graph_embedding(
             data: &data_vec,
             all_cell_labels: &ml.all_cell_labels,
             graph: &graph,
-            embedding_dim: args.embedding_dim,
+            embedding_dim,
             gene_axis: &gene_axis,
         },
     )?;
@@ -714,17 +716,14 @@ pub fn fit_cell_activity_graph_embedding(
                     GeneInitMode::Neighbor => None,
                 },
             })?;
-            // adapt decouples the two widths; freeze/free install rows verbatim
-            // and so need them equal.
+            // The width was resolved from this file's footer; the loader's
+            // count must agree, or the two read the file differently.
             if args.gene_embedding_mode != GeneEmbeddingMode::Adapt {
                 anyhow::ensure!(
-                    pre.h() == args.embedding_dim,
-                    "--gene-embedding is {} dimensions wide but --embedding-dim is {}; \
-                     set --embedding-dim {}, or use --gene-embedding-mode adapt, \
-                     which allows the widths to differ",
+                    pre.h() == embedding_dim,
+                    "--gene-embedding loaded {} dimensions wide but the run resolved {}",
                     pre.h(),
-                    args.embedding_dim,
-                    pre.h()
+                    embedding_dim
                 );
             }
             pretrained::write_init_report(&c.out, &pre.records)?;
@@ -747,12 +746,12 @@ pub fn fit_cell_activity_graph_embedding(
     // fall back from. The adapter arm has no table init and ignores it.
     if let Some(w) = &e_pb_warm {
         anyhow::ensure!(
-            w.nrows() == n_pb && w.ncols() == args.embedding_dim,
+            w.nrows() == n_pb && w.ncols() == embedding_dim,
             "collapse SVD [{} x {}] does not match the trained PB table [{} x {}]",
             w.nrows(),
             w.ncols(),
             n_pb,
-            args.embedding_dim
+            embedding_dim
         );
     }
     let e_pb_init: Option<&Mat> = e_pb_warm.as_ref();
@@ -772,6 +771,7 @@ pub fn fit_cell_activity_graph_embedding(
         ),
         (None, _) => info!("PB table starts from seeded random init (no collapse SVD)"),
     }
+    let lora_spec = (args.gene_embedding_mode == GeneEmbeddingMode::Lora).then(|| args.lora.spec());
     let (mut model, frozen_gene) = match (&pretrained_gene, args.gene_embedding_mode) {
         // Learned gene modules: every gene row is `Σ_m π_gm μ_m + r_g`, warm-started
         // from a k-means over the pseudobulk profiles. Same detached-snapshot
@@ -799,7 +799,7 @@ pub fn fit_cell_activity_graph_embedding(
                     ModuleInit {
                         n_features: n_genes,
                         n_cells: n_pb,
-                        embedding_dim: args.embedding_dim,
+                        embedding_dim,
                         n_modules: gm.n_modules,
                         warm: ModuleWarmStart::Labels {
                             labels: &labels,
@@ -822,7 +822,7 @@ pub fn fit_cell_activity_graph_embedding(
             JointEmbedModel::new_adapted(
                 AdapterInit {
                     n_cells: n_pb,
-                    embedding_dim: args.embedding_dim,
+                    embedding_dim,
                     rho: &p.e_gene,
                     b_feat: &b_feat_init,
                     b_cell: &b_pb_init,
@@ -839,7 +839,7 @@ pub fn fit_cell_activity_graph_embedding(
                 ModelArgs {
                     n_features: n_genes,
                     n_cells: n_pb,
-                    embedding_dim: args.embedding_dim,
+                    embedding_dim,
                     seed: c.seed,
                 },
                 &ModelInit {
@@ -852,7 +852,7 @@ pub fn fit_cell_activity_graph_embedding(
                 &dev,
             )?;
             let frozen = match (pre, mode) {
-                (Some(p), GeneEmbeddingMode::Freeze) => {
+                (Some(p), GeneEmbeddingMode::Freeze | GeneEmbeddingMode::Lora) => {
                     let fetch = |name: &str| {
                         varmap
                             .data()
@@ -876,8 +876,15 @@ pub fn fit_cell_activity_graph_embedding(
                         None
                     };
                     let n_frozen = p.n_matched();
+                    let residual = match lora_spec {
+                        Some(l) => format!(
+                            " under a rank-{} residual (LoRA+ ratio {}, ridge {} per row per epoch)",
+                            l.rank, l.lr_ratio, l.ridge
+                        ),
+                        None => String::new(),
+                    };
                     info!(
-                        "Gene embedding FROZEN: {} dictionary rows fixed, {} neighbor-seeded rows trainable{}",
+                        "Gene embedding PINNED: {} dictionary rows fixed{residual}, {} neighbor-seeded rows trainable{}",
                         n_frozen,
                         n_genes - n_frozen,
                         if bias.is_some() {
@@ -890,16 +897,38 @@ pub fn fit_cell_activity_graph_embedding(
                 }
                 _ => None,
             };
+            // The residual rides on the pinned rows: the factors join the map
+            // beside `e_feat`, `u` drawn on the matched genes only.
+            let model = match (pre, lora_spec) {
+                (Some(p), Some(l)) => {
+                    model.with_lora(&varmap, &dev, l.rank, &p.matched_ids(), c.seed)?
+                }
+                _ => model,
+            };
             (model, frozen)
         }
     };
-    let mut opt = AdamW::new(
-        varmap.all_vars(),
+    // One AdamW over the map, or two under LoRA: the shared factor `v` leaves
+    // the main group for its own at the LoRA+ rate.
+    let lora_v_name = candle_util::lora::factor_names(E_FEAT_VAR_NAME).1;
+    let lora_plus = lora_spec.map(|l| candle_util::lora::LoraPlus {
+        v_var: &lora_v_name,
+        lr_ratio: l.lr_ratio,
+        ridge: l.ridge,
+    });
+    let mut adams = vec![AdamW::new(
+        match lora_plus {
+            Some(_) => trainable_vars(&varmap, &[&lora_v_name]),
+            None => varmap.all_vars(),
+        },
         ParamsAdamW {
             lr: args.lr as f64,
             ..Default::default()
         },
-    )?;
+    )?];
+    if let Some(lp) = &lora_plus {
+        adams.push(lp.optimizer(&varmap, args.lr)?);
+    }
 
     //////////////////////
     // 8. Training loop //
@@ -973,6 +1002,10 @@ pub fn fit_cell_activity_graph_embedding(
         trainable_genes.len()
     };
     let steps_per_epoch = genes_per_epoch_actual.div_ceil(gene_batch_size);
+    // The LoRA ridge is a per-epoch weight; every step takes its share.
+    if let (Some(l), Some(lp)) = (model.lora.as_mut(), lora_plus.as_ref()) {
+        l.ridge_step = f64::from(lp.ridge) / steps_per_epoch.max(1) as f64;
+    }
     let total_steps = args.epochs * steps_per_epoch.max(1);
     let train_bar = new_progress_bar(total_steps as u64).with_message("training steps");
 
@@ -1106,18 +1139,21 @@ pub fn fit_cell_activity_graph_embedding(
             if args.embedding_l2 > 0.0 {
                 // geu's ridge, not a local copy: the reduction is the whole
                 // content of this penalty and it was wrong here in the same way.
-                let lam = args.embedding_l2 as f64;
-                total = (total + embedding_ridge(&model.e_cell, lam)?)?;
-                // Which gene-side table gets the L2 is a model property
-                // (`feature_ridge`: the free table, the adapter's residual, or
-                // nothing). Freeze is the one cage-local exception: a fixed
-                // table needs no shrinkage, and the ridge would only push
-                // gradient at rows the restore below reverts anyway.
-                if frozen_gene.is_none() {
-                    if let Some(ridge) = model.feature_ridge(lam)? {
-                        total = (total + ridge)?;
-                    }
-                }
+                total = (total + embedding_ridge(&model.e_cell, args.embedding_l2 as f64)?)?;
+            }
+            // Which gene-side shrinkage applies is a model property
+            // (`feature_ridge`: the free table or the adapter's residual at
+            // the table ridge, the anchored model's own residual ridge, or
+            // nothing). Pinned rows are the one cage-local exception: the
+            // table ridge would only push gradient at rows the restore below
+            // reverts anyway, so it is off under freeze and lora.
+            let table_lam = if frozen_gene.is_some() {
+                0.0
+            } else {
+                args.embedding_l2 as f64
+            };
+            if let Some(ridge) = model.feature_ridge(table_lam)? {
+                total = (total + ridge)?;
             }
             // Exact pseudobulk–module term + membership priors, once per optimizer
             // step, through the same functions geu's composite trainer uses: draw
@@ -1165,7 +1201,7 @@ pub fn fit_cell_activity_graph_embedding(
             // at all, and without this the bar would still reach 100% and the
             // phase timings would still look normal — the instrumentation would
             // make the failure less visible rather than more.
-            let stepped = clip_and_step_dense(&mut opt, grads, f64::from(args.grad_clip))?;
+            let stepped = clip_and_step_dense_all(&mut adams, grads, f64::from(args.grad_clip))?;
             if !stepped {
                 skipped_steps += 1;
             }
@@ -1331,7 +1367,7 @@ pub fn fit_cell_activity_graph_embedding(
     e_pb_mat.to_parquet_with_names(
         &(c.out.to_string() + ".pb_embedding.parquet"),
         (None, Some("pb")),
-        Some(&embedding_col_names(args.embedding_dim)),
+        Some(&embedding_col_names(embedding_dim)),
     )?;
 
     let b_pb_mat = tensor_to_mat_1d(&model.b_cell)?;
@@ -1380,7 +1416,7 @@ pub fn fit_cell_activity_graph_embedding(
     e_gene_out.to_parquet_with_names(
         &(c.out.to_string() + ".feature_embedding.parquet"),
         (Some(&gene_names), Some("feature")),
-        Some(&embedding_col_names(args.embedding_dim)),
+        Some(&embedding_col_names(embedding_dim)),
     )?;
     // Learned-module tables (no-op without modules); the feature embedding above
     // already holds the composed row.
@@ -1398,7 +1434,7 @@ pub fn fit_cell_activity_graph_embedding(
         w_out.to_parquet_with_names(
             &(c.out.to_string() + ".adapter.parquet"),
             (Some(&src_names), Some("source_dim")),
-            Some(&embedding_col_names(args.embedding_dim)),
+            Some(&embedding_col_names(embedding_dim)),
         )?;
         info!("Wrote {}.adapter.parquet", c.out);
     }
@@ -1493,7 +1529,7 @@ pub fn fit_cell_activity_graph_embedding(
     pair_latent_nk.to_parquet_with_names(
         &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
-        Some(&embedding_col_names(args.embedding_dim)),
+        Some(&embedding_col_names(embedding_dim)),
     )?;
 
     // Cluster the pairs -> per-edge community -> cell propensity (incident-edge

@@ -5,7 +5,7 @@
 //! help and the "one of the three" rule read the same everywhere.
 
 use clap::Args;
-use graph_embedding_util::{LoraSpec, PresetMode};
+use graph_embedding_util::{LoraArgs, PresetMode};
 
 #[derive(Args, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FeatureEmbeddingArgs {
@@ -28,7 +28,7 @@ pub struct FeatureEmbeddingArgs {
                      A gene with no row: `bge` keeps it as a free, trained row;\n\
                      the masked models drop it from the feature axis.\n\
                      \n\
-                     H is taken from the table when `--embedding-dim` is 0;\n\
+                     H is taken from the table when `--embedding-dim` is `auto`;\n\
                      an explicit `--embedding-dim` must agree with it."
     )]
     pub freeze_feature_embedding: Option<Box<str>>,
@@ -62,67 +62,33 @@ pub struct FeatureEmbeddingArgs {
     )]
     pub lora_feature_embedding: Option<Box<str>>,
 
-    #[arg(
-        long,
-        value_name = "R",
-        requires = "lora_feature_embedding",
-        help = "Rank of the LoRA residual (with --lora-feature-embedding; default 16)",
-        long_help = "Rank of the LoRA residual, with `--lora-feature-embedding`; default 16.\n\
-                     On `bge`, whose gene table is a module dictionary plus per-gene\n\
-                     residuals, the same rank serves two residuals: one on the module\n\
-                     dictionary (a module's genes move together) and one on the gene\n\
-                     rows (a gene moves on its own)."
-    )]
-    pub lora_rank: Option<usize>,
-
-    #[arg(
-        long,
-        value_name = "RATIO",
-        requires = "lora_feature_embedding",
-        help = "LoRA+: the shared factor V trains at this multiple of the learning rate; 1 = plain LoRA (default 4)",
-        long_help = "LoRA+: the shared factor V, which starts at zero and is touched by every\n\
-                     step, trains at this multiple of the learning rate; the per-gene\n\
-                     factor u keeps the base rate. 1 is plain LoRA; the default is 4."
-    )]
-    pub lora_lr_ratio: Option<f32>,
-
-    #[arg(
-        long,
-        value_name = "LAMBDA",
-        requires = "lora_feature_embedding",
-        help = "Ridge on the LoRA residual, per epoch and per anchored row (default 0.05)",
-        long_help = "Ridge on the LoRA residual: `λ · Σ_g ‖u_g·V‖²` per epoch, spread over\n\
-                     the epoch's steps, on each residual (bge: module and gene). Per row,\n\
-                     because the data gradient on the shared factor is a sum over the\n\
-                     anchored rows, so one weight means the same thing at any table size.\n\
-                     The shrinkage that keeps the shared factor from marching off the\n\
-                     anchor under a row optimizer. 0 is none; the default keeps the\n\
-                     residual below the anchor's own scale."
-    )]
-    pub lora_ridge: Option<f32>,
+    /// `--lora-rank`, `--lora-lr-ratio`, `--lora-ridge`; read with
+    /// `--lora-feature-embedding` only.
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub lora: LoraArgs,
 }
 
 impl FeatureEmbeddingArgs {
     /// The run prefix given by whichever flag was used, and what to do with
-    /// its rows.
-    pub fn resolve(&self) -> Option<(&str, PresetMode)> {
+    /// its rows. A LoRA knob given without `--lora-feature-embedding` is
+    /// refused here: the knobs are a shared group and clap cannot tie them to
+    /// this struct's own flag.
+    pub fn resolve(&self) -> anyhow::Result<Option<(&str, PresetMode)>> {
+        self.lora.refuse_unless_selected(
+            self.lora_feature_embedding.is_some(),
+            "--lora-feature-embedding",
+        )?;
+        if let Some(p) = self.lora_feature_embedding.as_deref() {
+            return Ok(Some((p, PresetMode::Lora(self.lora.spec()))));
+        }
         if let Some(p) = self.freeze_feature_embedding.as_deref() {
-            return Some((p, PresetMode::Freeze));
+            return Ok(Some((p, PresetMode::Freeze)));
         }
-        if let Some(p) = self.init_feature_embedding.as_deref() {
-            return Some((p, PresetMode::Init));
-        }
-        let d = LoraSpec::default();
-        self.lora_feature_embedding.as_deref().map(|p| {
-            (
-                p,
-                PresetMode::Lora(LoraSpec {
-                    rank: self.lora_rank.unwrap_or(d.rank),
-                    lr_ratio: self.lora_lr_ratio.unwrap_or(d.lr_ratio),
-                    ridge: self.lora_ridge.unwrap_or(d.ridge),
-                }),
-            )
-        })
+        Ok(self
+            .init_feature_embedding
+            .as_deref()
+            .map(|p| (p, PresetMode::Init)))
     }
 }
 

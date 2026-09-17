@@ -357,3 +357,12 @@ fn membership_init_without_tables_falls_back_to_the_neighbour_rule() -> anyhow::
     assert_eq!(out.records[2].neighbor_gene.as_deref(), Some("G2"));
     Ok(())
 }
+
+/// The width is the count of value columns, whatever the name column is called.
+#[test]
+fn dictionary_width_counts_the_value_columns() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = write_dictionary(&dir, "dict", &names(&["G1", "G2"]), 5, 0.0)?;
+    assert_eq!(super::pretrained::dictionary_width(&path)?, 5);
+    Ok(())
+}

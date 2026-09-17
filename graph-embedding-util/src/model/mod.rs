@@ -16,6 +16,8 @@
 
 use candle_util::candle_core::{Device, Result, Tensor};
 use candle_util::candle_nn::VarMap;
+use candle_util::fast_index::gather_rows;
+use candle_util::lora::PinnedLora;
 
 mod modules;
 mod score;
@@ -130,8 +132,19 @@ pub trait ComposedFeat {
     fn compose(&self) -> Result<Tensor>;
     /// Composed rows for `idx`, `[b, H]`, on the live parameters.
     fn compose_rows(&self, idx: &Tensor) -> Result<Tensor>;
-    /// The per-row table that can overfit row by row and takes the ridge, if any.
-    fn ridge_table(&self) -> Option<&Tensor>;
+    /// The shrinkage on whatever this parameterization can overfit row by
+    /// row: the per-row residual at `table_lam` (none at `0`), or, for a
+    /// residual with a weight of its own, that. `None` when nothing applies.
+    fn ridge(&self, table_lam: f64) -> Result<Option<Tensor>>;
+}
+
+/// The table ridge at `lam`, or none at `0`.
+fn table_ridge(table: &Tensor, lam: f64) -> Result<Option<Tensor>> {
+    if lam > 0.0 {
+        Ok(Some(crate::loss::embedding_ridge(table, lam)?))
+    } else {
+        Ok(None)
+    }
 }
 
 impl ComposedFeat for FeatAdapter {
@@ -151,12 +164,59 @@ impl ComposedFeat for FeatAdapter {
         Ok(rows)
     }
 
-    fn ridge_table(&self) -> Option<&Tensor> {
-        self.residual.as_ref()
+    fn ridge(&self, table_lam: f64) -> Result<Option<Tensor>> {
+        match &self.residual {
+            Some(r) => table_ridge(r, table_lam),
+            None => Ok(None),
+        }
     }
 }
 
 impl FeatAdapter {
+    /// The full composed table `[n_features, H]`, on the live parameters.
+    pub fn compose(&self) -> Result<Tensor> {
+        ComposedFeat::compose(self)
+    }
+}
+
+/// Anchored feature side: `e_feat[g] = base[g] + u_g · v` on the anchored
+/// rows and `base[g]` elsewhere. `base` is the model's own `e_feat` Var (the
+/// caller pins its anchored rows, by a post-step restore, and lets the rest
+/// train); the factors are a [`PinnedLora`] whose `u` is masked to the
+/// anchored rows inside the composition, so a free row's factor never gets
+/// gradient. The residual has a ridge of its own, `ridge_step ·
+/// Σ_g ‖u_g · v‖²` per step, in place of the table ridge.
+pub struct FeatLora {
+    /// The trained table, `[n_features, H]`, shared with the model's `e_feat`
+    /// Var at construction (a clone of the same storage).
+    pub base: Tensor,
+    pub lora: PinnedLora,
+    /// The residual's ridge weight per optimizer step; the trainer sets it
+    /// once it knows its steps per epoch. `0` = none.
+    pub ridge_step: f64,
+}
+
+impl ComposedFeat for FeatLora {
+    fn compose(&self) -> Result<Tensor> {
+        self.base.add(&self.lora.residual_masked()?)
+    }
+
+    fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
+        gather_rows(&self.base, idx)?.add(&self.lora.residual_rows_masked(idx)?)
+    }
+
+    /// The residual's own ridge; the table ridge does not apply to an
+    /// anchored table.
+    fn ridge(&self, _table_lam: f64) -> Result<Option<Tensor>> {
+        if self.ridge_step > 0.0 {
+            Ok(Some((self.lora.ridge()? * self.ridge_step)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl FeatLora {
     /// The full composed table `[n_features, H]`, on the live parameters.
     pub fn compose(&self) -> Result<Tensor> {
         ComposedFeat::compose(self)
@@ -183,6 +243,9 @@ pub struct JointEmbedModel {
     /// row is `Σ_m π_gm μ_m + r_g`. Mutually exclusive with `adapter`.
     /// The `e_feat` field is a detached composed snapshot, as for the adapter.
     pub modules: Option<FeatModules>,
+    /// Optional LoRA residual on an anchored `e_feat` (`None` = no residual):
+    /// see [`FeatLora`]. Exclusive with the other two by construction.
+    pub lora: Option<FeatLora>,
     pub embedding_dim: usize,
 }
 
@@ -228,26 +291,24 @@ impl JointEmbedModel {
             b_feat,
             b_cell,
             adapter: None,
+            lora: None,
             modules: None,
             embedding_dim: args.embedding_dim,
         })
     }
 
-    /// The L2 term for whichever gene-side table can overfit row by row under
-    /// this parameterization: the free `e_feat` Var, the adapter's or the module
-    /// model's per-feature residual, or nothing (an adapter without a residual
+    /// The shrinkage on whichever gene-side table can overfit row by row under
+    /// this parameterization: the free `e_feat` Var or the adapter's / module
+    /// model's per-feature residual at `table_lam` (none at `0`), the anchored
+    /// model's own residual ridge, or nothing (an adapter without a residual
     /// trains only the shared map).
     ///
     /// Owning this here keeps a trainer from ridging `e_feat` on a model where
     /// that field is a detached snapshot, which is silently inert.
-    pub fn feature_ridge(&self, lam: f64) -> Result<Option<Tensor>> {
-        let table = match self.composed() {
-            Some(c) => c.ridge_table(),
-            None => Some(&self.e_feat),
-        };
-        match table {
-            Some(t) => Ok(Some(crate::loss::embedding_ridge(t, lam)?)),
-            None => Ok(None),
+    pub fn feature_ridge(&self, table_lam: f64) -> Result<Option<Tensor>> {
+        match self.composed() {
+            Some(c) => c.ridge(table_lam),
+            None => table_ridge(&self.e_feat, table_lam),
         }
     }
 
@@ -278,7 +339,46 @@ impl JointEmbedModel {
         if let Some(m) = &self.modules {
             return Some(m);
         }
+        if let Some(l) = &self.lora {
+            return Some(l);
+        }
         self.adapter.as_ref().map(|a| a as &dyn ComposedFeat)
+    }
+
+    /// Put a rank-`rank` LoRA residual on the free `e_feat` of this model, on
+    /// the rows `anchored` (ids into the feature axis): the factors are
+    /// registered in `varmap` beside the table under the shared LoRA names
+    /// ([`candle_util::lora::factor_names`] of [`E_FEAT_VAR_NAME`]), `u`
+    /// drawn on the anchored rows from `seed`, `v` at zero. The caller pins
+    /// the anchored rows of `e_feat` itself and gives `v` its LoRA+ group.
+    /// Refused on a model whose feature side is already composed.
+    pub fn with_lora(
+        mut self,
+        varmap: &VarMap,
+        dev: &Device,
+        rank: usize,
+        anchored: &[u32],
+        seed: u64,
+    ) -> Result<Self> {
+        if self.composed().is_some() {
+            candle_util::candle_core::bail!(
+                "with_lora: the feature side is already a composed parameterization"
+            );
+        }
+        let n_features = self.e_feat.dims()[0];
+        let lora = PinnedLora::new(n_features, self.embedding_dim, rank, anchored, seed, dev)?;
+        let (u_name, v_name) = candle_util::lora::factor_names(E_FEAT_VAR_NAME);
+        {
+            let mut tbl = varmap.data().lock().unwrap();
+            tbl.insert(u_name, lora.u.clone());
+            tbl.insert(v_name, lora.v.clone());
+        }
+        self.lora = Some(FeatLora {
+            base: self.e_feat.clone(),
+            lora,
+            ridge_step: 0.0,
+        });
+        Ok(self)
     }
 
     /// Fixed-dictionary adapter constructor: upload `rho` as a constant,
@@ -350,6 +450,7 @@ impl JointEmbedModel {
             b_cell,
             adapter: Some(adapter),
             modules: None,
+            lora: None,
             embedding_dim: args.embedding_dim,
         })
     }
@@ -391,6 +492,7 @@ impl JointEmbedModel {
             b_feat: shared_b_feat,
             b_cell,
             adapter: None,
+            lora: None,
             modules: shared_modules,
             embedding_dim,
         })
@@ -402,6 +504,9 @@ mod tests;
 
 #[cfg(test)]
 mod adapter_tests;
+
+#[cfg(test)]
+mod lora_tests;
 
 #[cfg(test)]
 mod module_tests;
