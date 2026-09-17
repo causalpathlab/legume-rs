@@ -1,7 +1,7 @@
 //! Data-driven anchor-based β prior for topic models.
 //!
-//! Finds archetypal pseudobulks ("anchors") via a greedy Gram-Schmidt /
-//! Arora-style vertex-selection pass on the finest collapsed level, then
+//! Picks anchor pseudobulks by a greedy Gram-Schmidt pass on the finest
+//! collapsed level (the most mutually orthogonal profiles), then
 //! converts those anchor PBs into a dense `[D_full, K]` simplex prior used
 //! both for β initialization and as an optional training-time cross-entropy
 //! penalty.

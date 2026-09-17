@@ -16,9 +16,10 @@ use graph_embedding_util as ge;
 /// topics directly (matching the `senna topic` / `masked-topic` conventions:
 /// `latent` = log θ, `dictionary` = β).
 ///
-/// Archetypal analysis on the cell embedding `Z [N,H]` yields archetypes
-/// `α [K,H]` (= topic embeddings) and per-cell simplex weights `θ [N,K]`
-/// (= topic proportions); the dictionary is `β = log_softmax_d(ρ·αᵀ)`,
+/// The cell clusters the driver computed on the cell embedding `Z [N,H]`
+/// give the topics: `α [K,H]` is each cluster's normalised centroid (= topic
+/// embeddings), `θ [N,K]` a softmax of every cell's alignment with them
+/// (= topic proportions), and the dictionary is `β = log_softmax_d(ρ·αᵀ)`,
 /// the same factorization the ETM decoder uses. Writes:
 ///   - `{out}.latent.parquet`           log θ [N,K]   (topic proportions)
 ///   - `{out}.dictionary.parquet`       β    [D,K]   (each topic column a gene simplex)
@@ -34,7 +35,7 @@ pub(super) fn resolve_etm_topics(
     cell_keep_idx: Option<&[usize]>,
     labels: &[usize],
 ) -> anyhow::Result<()> {
-    use matrix_util::archetypal::topic_dictionary;
+    use matrix_util::topic_dictionary::topic_dictionary;
 
     let cpu = candle_core::Device::Cpu;
     let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]

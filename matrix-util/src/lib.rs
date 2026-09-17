@@ -1,5 +1,4 @@
 pub mod agreement;
-pub mod archetypal;
 pub mod branching;
 pub mod clap_defaults;
 pub mod clustering;
@@ -36,6 +35,7 @@ pub mod tensor_io;
 pub mod tensor_util;
 #[cfg(test)]
 mod test_support;
+pub mod topic_dictionary;
 pub mod traits;
 pub mod umap;
 pub mod utils;

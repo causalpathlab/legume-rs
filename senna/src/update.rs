@@ -594,7 +594,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
             // bge DOES continue something: `rebase` hands it the parent prefix and
             // `build_config` loads that run's learned gene modules as this run's
             // warm start. What it does not continue is the ETM, which is
-            // re-derived by archetypal analysis every run.
+            // re-derived from the cell clusters every run.
             info!(
                 "bge: continuing from {} (its gene modules warm-start this fit when it trained \
                  any); the ETM is re-derived on the union",

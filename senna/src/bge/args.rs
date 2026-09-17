@@ -56,7 +56,7 @@ pub struct BgeArgs {
     /// update` the parent's module partition (its membership, argmax per gene,
     /// unmatched genes initialised through the parent's modules) seeds phase 1;
     /// module vectors and per-gene residuals are re-learned. The ETM is
-    /// re-derived by archetypal analysis each run, and the emitted reference's
+    /// re-derived from the cell clusters each run, and the emitted reference's
     /// generation counter is chained through here.
     #[arg(skip)]
     #[serde(skip)]

@@ -231,7 +231,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // Cell QC (output filter) //
     /////////////////////////////
     // Every cell + edge still informs the joint embedding / feature
-    // dictionary; QC-failed cells are dropped from the archetypal analysis
+    // dictionary; QC-failed cells are dropped from the topic readout
     // and all per-cell outputs via a write-time `select_rows`.
     let qc_keep_idx: Option<Vec<usize>> = if let Some(cfg) = knobs.qc.to_config() {
         if cfg.feature_min_cells > 0 {

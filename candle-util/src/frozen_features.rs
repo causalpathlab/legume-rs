@@ -10,11 +10,10 @@
 //!   `VarMap`. Constructed via [`FrozenFeatureSide::from_parts`] and
 //!   handed to `JointEmbedModel` directly. `AdamW::new(varmap.all_vars())`
 //!   never sees them.
-//! - **topic-style freeze**: register as `Var`s in the same `VarMap` the
-//!   encoder uses, so the frozen weights round-trip through safetensors
-//!   save/load. Installed via [`install_frozen_var_2d`], and the caller
-//!   excludes the var name from the optimizer's parameter set via
-//!   [`trainable_vars`].
+//! - **topic-style freeze**: the encoder's own `Var` in its `VarMap` is
+//!   overwritten in place via [`overwrite_var_2d`], so the frozen weights
+//!   round-trip through safetensors save/load, and the caller excludes the
+//!   var name from the optimizer's parameter set via [`trainable_vars`].
 
 use candle_core::{Device, Result, Tensor, Var};
 use candle_nn::VarMap;
@@ -61,34 +60,6 @@ impl FrozenFeatureSide {
             h,
         })
     }
-}
-
-/// Install `data` as a fresh `Var` named `name` in `varmap` and return
-/// its underlying Tensor. Used to seed an encoder's `feature_embeddings`
-/// slot with pre-trained values so the `VarMap → safetensors` round-trip
-/// preserves them. The caller must also pass `name` to [`trainable_vars`]
-/// when constructing AdamW, otherwise the optimizer will treat it as a
-/// normal trainable parameter.
-pub fn install_frozen_var_2d(
-    varmap: &VarMap,
-    name: &str,
-    data: &DMatrix<f32>,
-    dev: &Device,
-) -> Result<Tensor> {
-    let d = data.nrows();
-    let h = data.ncols();
-    let mut row_major = Vec::with_capacity(d * h);
-    for i in 0..d {
-        for j in 0..h {
-            row_major.push(data[(i, j)]);
-        }
-    }
-    let var = Var::from_tensor(&Tensor::from_vec(row_major, (d, h), dev)?)?;
-    {
-        let mut tbl = varmap.data().lock().unwrap();
-        tbl.insert(name.to_string(), var.clone());
-    }
-    Ok(var.as_tensor().clone())
 }
 
 /// Overwrite the data of an EXISTING `Var` registered in `varmap` under
@@ -209,34 +180,6 @@ mod tests {
         assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let b: Vec<f32> = frozen.b_feat.to_vec1().unwrap();
         assert_eq!(b, vec![0.1, 0.2, 0.3]);
-    }
-
-    #[test]
-    fn install_then_trainable_partition() {
-        let dev = dev();
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, candle_core::DType::F32, &dev);
-
-        // Two regular Vars
-        let _w1 = vb
-            .get_with_hints((2, 3), "layer1.weight", candle_nn::Init::Const(0.0))
-            .unwrap();
-        let _w2 = vb
-            .get_with_hints((3, 4), "layer2.weight", candle_nn::Init::Const(0.0))
-            .unwrap();
-
-        // One installed frozen Var
-        let m = DMatrix::<f32>::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
-        let installed = install_frozen_var_2d(&varmap, "feature.embeddings", &m, &dev).unwrap();
-        let flat: Vec<f32> = installed.flatten_all().unwrap().to_vec1().unwrap();
-        assert_eq!(flat, vec![1.0, 2.0, 3.0, 4.0]);
-
-        // VarMap holds all 3
-        assert_eq!(varmap.all_vars().len(), 3);
-
-        // trainable_vars excludes the frozen one
-        let trainable = trainable_vars(&varmap, &["feature.embeddings"]);
-        assert_eq!(trainable.len(), 2);
     }
 
     #[test]
