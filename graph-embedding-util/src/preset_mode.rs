@@ -67,6 +67,35 @@ impl PresetMode {
     }
 }
 
+/// Rows of a table given from outside, by row id on the engine's own axis
+/// (genes for the hierarchical phase, nodes for the PBG engine): `rows` is
+/// `[ids.len() × H]` row-major, one row per entry of `ids`. What happens to a
+/// listed row is the [`PresetMode`]; unlisted rows train freely in every mode.
+#[derive(Clone, Debug)]
+pub struct PresetRows {
+    pub ids: Vec<u32>,
+    pub rows: Vec<f32>,
+    pub mode: PresetMode,
+}
+
+impl PresetRows {
+    /// The same rows on another axis: every id mapped through `f`.
+    #[must_use]
+    pub fn map_ids(self, f: impl Fn(u32) -> u32) -> Self {
+        Self {
+            ids: self.ids.into_iter().map(f).collect(),
+            rows: self.rows,
+            mode: self.mode,
+        }
+    }
+
+    /// Width of the rows, the loader having refused an empty match.
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.rows.len() / self.ids.len().max(1)
+    }
+}
+
 #[cfg(test)]
 #[path = "preset_mode_tests.rs"]
 mod preset_mode_tests;

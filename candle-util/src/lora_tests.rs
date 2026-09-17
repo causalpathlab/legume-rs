@@ -166,3 +166,76 @@ fn the_lora_plus_group_steps_v_alone_at_the_scaled_rate() {
     .optimizer(&vm, 0.1)
     .is_err());
 }
+
+/// A pinned residual draws `u` on the pinned rows only, masks its gradient
+/// to them, starts `v` at zero, and steps `v` faster by the ratio.
+#[test]
+fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
+    use super::PinnedLora;
+    let dev = Device::Cpu;
+    let l = PinnedLora::new(4, 3, 1, &[0, 2], 4.0, 7, &dev).unwrap();
+    let u =
+        l.u.as_tensor()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+    assert!(u[0] != 0.0 && u[1] == 0.0 && u[2] != 0.0 && u[3] == 0.0);
+    assert_eq!(
+        l.u_mask.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
+        vec![1., 0., 1., 0.]
+    );
+    assert!(l
+        .residual()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap()
+        .iter()
+        .all(|&x| x == 0.0));
+    let other = PinnedLora::new(4, 3, 1, &[0, 2], 4.0, 8, &dev).unwrap();
+    assert_ne!(
+        u,
+        other
+            .u
+            .as_tensor()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap(),
+        "seeded"
+    );
+    assert!(PinnedLora::new(4, 3, 1, &[4], 1.0, 7, &dev).is_err());
+    // Move v off zero so u gets a gradient too, then step from a loss that
+    // reaches every row of u.
+    l.v.set(&Tensor::from_vec(vec![0.5f32, -0.5, 1.0], (1, 3), &dev).unwrap())
+        .unwrap();
+    let mut opt = l.optimizers(0.1, &dev).unwrap();
+    let loss = (l.residual().unwrap() + 1.0)
+        .unwrap()
+        .sqr()
+        .unwrap()
+        .sum_all()
+        .unwrap();
+    let grads = loss.backward().unwrap();
+    l.step(&mut opt, &grads).unwrap();
+    let u2 =
+        l.u.as_tensor()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+    assert!(u2[0] != u[0] && u2[2] != u[2], "pinned rows' factors moved");
+    assert!(
+        u2[1] == 0.0 && u2[3] == 0.0,
+        "free rows' factors are masked"
+    );
+    let v2 =
+        l.v.as_tensor()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+    assert!((v2[0] - 0.5).abs() > 0.3, "v took the larger step: {v2:?}");
+}

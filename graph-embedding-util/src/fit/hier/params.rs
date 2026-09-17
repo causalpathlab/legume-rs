@@ -8,15 +8,13 @@
 
 pub use crate::preset_mode::PresetMode;
 use candle_util::candle_core::{DType, Device, Result as CResult, Tensor, Var};
-use candle_util::lora::LoraFactors;
+use candle_util::lora::PinnedLora;
 use matrix_util::rand_util::{collect_f32_seeded, mix_seed};
 use nalgebra::DMatrix;
 use rand_distr::Normal;
 
 /// Spread of every random init.
 pub const INIT_STDEV: f32 = 0.1;
-/// Adagrad denominator floor (PBG's value).
-pub const ADAGRAD_EPS: f32 = 1e-10;
 
 /// One non-base track's additive offsets from the base tables.
 pub struct TrackOffset {
@@ -44,29 +42,11 @@ impl TrackOffset {
 /// Two residuals of one rank on the two pinned tables ([`candle_util::lora`]):
 /// `μ_m = μ₀_m + a_m · V_M` moves a module's genes together, and
 /// `r_g = r₀_g + u_g · V_G` moves a gene on its own, so a pinned gene's row is
-/// `ρ₀_g + a_{m(g)} · V_M + u_g · V_G`. `a` is `[M, rank]`, `u` `[G, rank]`
-/// (zero and gradient-masked off the pinned genes), the `V`s `[rank, H]`
-/// and shared. Held as `Var`s because the row optimizer steps them.
+/// `ρ₀_g + a_{m(g)} · V_M + u_g · V_G`. The module residual is on every module
+/// (all of `μ` is pinned); the gene residual is masked to the pinned genes.
 pub struct HierLora {
-    pub a: Var,
-    pub v_m: Var,
-    pub u: Var,
-    pub v_g: Var,
-    /// `[G, 1]`, `1` on the pinned genes.
-    pub u_mask: Tensor,
-    pub lr_ratio: f32,
-}
-
-impl HierLora {
-    /// The module residual's factors.
-    pub fn module_factors(&self) -> LoraFactors {
-        LoraFactors::from_parts(self.a.as_tensor().clone(), self.v_m.as_tensor().clone())
-    }
-
-    /// The gene residual's factors.
-    pub fn gene_factors(&self) -> LoraFactors {
-        LoraFactors::from_parts(self.u.as_tensor().clone(), self.v_g.as_tensor().clone())
-    }
+    pub module: PinnedLora,
+    pub gene: PinnedLora,
 }
 
 /// The base model's tables plus one offset table per non-base track.
@@ -84,12 +64,12 @@ pub struct HierParams {
     pub b_g: Var,
     /// Tracks `1..T`; empty at `T == 1`.
     pub offsets: Vec<TrackOffset>,
-    /// `[G, 1]` gradient mask on `r`, `0` on pinned genes. `None` when nothing
-    /// is pinned, so the plain model pays no multiply.
+    /// `[G, 1]` gradient mask on `r`, `0` on pinned genes, and `[M, 1]` on
+    /// `μ`, all zero (the whole dictionary is pinned with the rows). `None`
+    /// when nothing is pinned, so the plain model pays no multiply. The biases
+    /// `b_m` / `b_g` always train.
     pub r_mask: Option<Tensor>,
-    /// Whether the module dictionary `μ` is pinned. Set together with
-    /// `frozen_gene`; the biases `b_m` / `b_g` always train.
-    pub mu_frozen: bool,
+    pub mu_mask: Option<Tensor>,
     /// Per gene, whether its row is pinned (see [`Self::preset`]). Empty when
     /// nothing is pinned.
     pub frozen_gene: Vec<bool>,
@@ -98,18 +78,14 @@ pub struct HierParams {
     pub frozen_rows: Vec<f32>,
     /// The low-rank residual on the pinned genes, under [`PresetMode::Lora`].
     pub lora: Option<HierLora>,
+    /// The seed the tables were drawn from; the LoRA row factors draw from it too.
+    pub seed: u64,
 }
 
-/// Gene rows handed to phase 1 from outside: `rows` is `[gene.len() × H]`
-/// row-major, one row per entry of `gene`, which indexes the gene axis. What
-/// happens to a listed gene's row is the [`PresetMode`]; unlisted genes train
-/// freely in every mode.
-#[derive(Clone, Debug)]
-pub struct PresetGenes {
-    pub gene: Vec<u32>,
-    pub rows: Vec<f32>,
-    pub mode: PresetMode,
-}
+pub use crate::preset_mode::PresetRows;
+
+/// Phase 1's name for [`PresetRows`]: the ids index the gene axis.
+pub type PresetGenes = PresetRows;
 
 fn randn(n: usize, stdev: f32, seed: u64) -> Vec<f32> {
     let dist = Normal::new(0.0f32, stdev).expect("finite stdev");
@@ -185,10 +161,11 @@ impl HierParams {
                 .map(|_| TrackOffset::zeros(n_modules, n_genes, h, dev))
                 .collect::<CResult<_>>()?,
             r_mask: None,
-            mu_frozen: false,
+            mu_mask: None,
             frozen_gene: Vec::new(),
             frozen_rows: Vec::new(),
             lora: None,
+            seed,
         })
     }
 
@@ -204,17 +181,23 @@ impl HierParams {
     pub fn preset(&mut self, frozen: &PresetGenes, module_of: &[u32]) -> anyhow::Result<()> {
         let (h, n_genes, n_modules) = (self.h, module_of.len(), self.b_m.dims()[0]);
         frozen.mode.validate(h)?;
+        // A preset is a statement about the base rows; the offset tracks would
+        // train against a residual the output never carries.
         anyhow::ensure!(
-            frozen.rows.len() == frozen.gene.len() * h,
+            self.offsets.is_empty(),
+            "preset gene rows need a single-track feature axis"
+        );
+        anyhow::ensure!(
+            frozen.rows.len() == frozen.ids.len() * h,
             "frozen rows are {} values for {} genes at H={h}",
             frozen.rows.len(),
-            frozen.gene.len()
+            frozen.ids.len()
         );
         let mut mu = to_host2(self.mu.as_tensor())?;
         let mut r = to_host2(self.r.as_tensor())?;
         let mut count = vec![0usize; n_modules];
         let mut sum = vec![0f32; n_modules * h];
-        for (i, &g) in frozen.gene.iter().enumerate() {
+        for (i, &g) in frozen.ids.iter().enumerate() {
             let g = g as usize;
             anyhow::ensure!(
                 g < n_genes,
@@ -234,7 +217,7 @@ impl HierParams {
                 }
             }
         }
-        for (i, &g) in frozen.gene.iter().enumerate() {
+        for (i, &g) in frozen.ids.iter().enumerate() {
             let g = g as usize;
             let m = module_of[g] as usize;
             for k in 0..h {
@@ -248,42 +231,36 @@ impl HierParams {
             self.frozen_gene = vec![false; n_genes];
             self.frozen_rows = vec![0.0; n_genes * h];
             let mut keep = vec![1f32; n_genes];
-            for (i, &g) in frozen.gene.iter().enumerate() {
+            for (i, &g) in frozen.ids.iter().enumerate() {
                 let g = g as usize;
                 self.frozen_gene[g] = true;
                 keep[g] = 0.0;
                 self.frozen_rows[g * h..(g + 1) * h]
                     .copy_from_slice(&frozen.rows[i * h..(i + 1) * h]);
             }
-            self.mu_frozen = true;
-            let u_mask: Vec<f32> = keep.iter().map(|k| 1.0 - k).collect();
             self.r_mask = Some(Tensor::from_vec(keep, (n_genes, 1), &self.dev)?);
+            self.mu_mask = Some(Tensor::zeros((n_modules, 1), DType::F32, &self.dev)?);
             if let Some((rank, lr_ratio)) = frozen.mode.lora() {
-                // Row factors random, the shared `V`s zero: both residuals
-                // start at nothing and the first steps move the `V`s.
-                let stdev = (1.0 / rank as f32).sqrt();
-                let draw = randn(
-                    frozen.gene.len() * rank,
-                    stdev,
-                    mix_seed(0x4c4f_5241, frozen.gene.len() as u64),
-                );
-                let mut u = vec![0f32; n_genes * rank];
-                for (i, &g) in frozen.gene.iter().enumerate() {
-                    let g = g as usize;
-                    u[g * rank..(g + 1) * rank].copy_from_slice(&draw[i * rank..(i + 1) * rank]);
-                }
-                let a = randn(
-                    n_modules * rank,
-                    stdev,
-                    mix_seed(0x4c4f_524d, n_modules as u64),
-                );
+                let all_modules: Vec<u32> = (0..n_modules as u32).collect();
                 self.lora = Some(HierLora {
-                    a: var2(a, n_modules, rank, &self.dev)?,
-                    v_m: Var::zeros((rank, h), DType::F32, &self.dev)?,
-                    u: var2(u, n_genes, rank, &self.dev)?,
-                    v_g: Var::zeros((rank, h), DType::F32, &self.dev)?,
-                    u_mask: Tensor::from_vec(u_mask, (n_genes, 1), &self.dev)?,
-                    lr_ratio,
+                    module: PinnedLora::new(
+                        n_modules,
+                        h,
+                        rank,
+                        &all_modules,
+                        lr_ratio,
+                        mix_seed(self.seed, 0x4c4f_524d),
+                        &self.dev,
+                    )?,
+                    gene: PinnedLora::new(
+                        n_genes,
+                        h,
+                        rank,
+                        &frozen.ids,
+                        lr_ratio,
+                        self.seed,
+                        &self.dev,
+                    )?,
                 });
             }
         }
@@ -322,8 +299,8 @@ impl HierParams {
         let (mod_shift, gene_shift): (Option<Vec<f32>>, Option<Vec<f32>>) = match self.lora.as_ref()
         {
             Some(l) => (
-                Some(to_host2(&l.module_factors().residual()?)?),
-                Some(to_host2(&l.gene_factors().residual()?)?),
+                Some(to_host2(&l.module.residual()?)?),
+                Some(to_host2(&l.gene.residual()?)?),
             ),
             None => (None, None),
         };

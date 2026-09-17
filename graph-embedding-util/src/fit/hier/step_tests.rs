@@ -284,7 +284,14 @@ fn total(
     plan: &StepPlan,
     l2: f32,
 ) -> (f64, Tensor) {
-    let (s, loss) = step_loss(p, units, um, part, sup, plan, l2).unwrap();
+    let ctx = StepCtx {
+        units,
+        um,
+        part,
+        sup,
+        plan,
+    };
+    let (s, loss) = step_loss(p, &ctx, l2).unwrap();
     (s.loss_module + s.loss_gene + s.loss_ridge, loss)
 }
 
@@ -343,7 +350,18 @@ fn the_step_loss_matches_the_f64_reference_with_tracks_and_ridge() {
         (got - want).abs() < 1e-4 * (1.0 + want.abs()),
         "{got} vs {want}"
     );
-    let (s, _) = step_loss(&p, &units, &um, &part, &sup, &plan, OFFSET_L2).unwrap();
+    let (s, _) = step_loss(
+        &p,
+        &StepCtx {
+            units: &units,
+            um: &um,
+            part: &part,
+            sup: &sup,
+            plan: &plan,
+        },
+        OFFSET_L2,
+    )
+    .unwrap();
     assert!(s.loss_ridge > 0.0, "the moved offsets carry a ridge");
 }
 
@@ -413,8 +431,30 @@ fn pair_weight_scales_the_gene_level_term() {
             pr.1 = 0.5;
         }
     }
-    let (a, _) = step_loss(&p, &units, &um, &part, &sup, &one, 0.0).unwrap();
-    let (b, _) = step_loss(&p, &units, &um, &part, &sup, &half, 0.0).unwrap();
+    let (a, _) = step_loss(
+        &p,
+        &StepCtx {
+            units: &units,
+            um: &um,
+            part: &part,
+            sup: &sup,
+            plan: &one,
+        },
+        0.0,
+    )
+    .unwrap();
+    let (b, _) = step_loss(
+        &p,
+        &StepCtx {
+            units: &units,
+            um: &um,
+            part: &part,
+            sup: &sup,
+            plan: &half,
+        },
+        0.0,
+    )
+    .unwrap();
     assert!((b.loss_gene - 0.5 * a.loss_gene).abs() < 1e-5);
     assert!((b.loss_module - a.loss_module).abs() < 1e-6);
 }
@@ -498,7 +538,7 @@ fn weight_decay_shrinks_touched_rows_only_and_never_the_offsets() {
 fn pinned_rows_hold_while_their_biases_train() {
     let (units, part, um, sup, mut p) = fixture();
     let given = PresetGenes {
-        gene: vec![0, 3],
+        ids: vec![0, 3],
         rows: vec![0.5, -0.5, 0.25, 0.75],
         mode: PresetMode::Freeze,
     };
@@ -532,5 +572,50 @@ fn pinned_rows_hold_while_their_biases_train() {
     assert!(
         b1[0] != b0[0] || b1[3] != b0[3],
         "a pinned gene's bias still trains"
+    );
+}
+
+/// Autograd against central differences on the four LoRA factors, with the
+/// shared factors moved off zero so the row factors see a gradient too.
+#[test]
+fn autograd_matches_finite_differences_on_the_lora_factors() {
+    let (units, part, um, sup, mut p) = fixture();
+    let given = PresetGenes {
+        ids: vec![0, 3, 4],
+        rows: vec![0.5, -0.5, 0.25, 0.75, -0.3, 0.1],
+        mode: PresetMode::Lora {
+            rank: 1,
+            lr_ratio: 1.0,
+        },
+    };
+    p.preset(&given, &part.module_of).unwrap();
+    let l = p.lora.as_ref().unwrap();
+    for v in [&l.module.v, &l.gene.v] {
+        v.set(&Tensor::from_vec(vec![0.2f32, -0.4], (1, 2), &Device::Cpu).unwrap())
+            .unwrap();
+    }
+    let plan = plan_all();
+    let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, 0.0);
+    let grads = loss.backward().unwrap();
+    let loss_at = || total(&p, &units, &um, &part, &sup, &plan, 0.0).0;
+    let l = p.lora.as_ref().unwrap();
+    for (name, var, flat) in [
+        ("a", &l.module.u, 1usize),
+        ("v_m", &l.module.v, 0),
+        ("u", &l.gene.u, 3),
+        ("v_g", &l.gene.v, 1),
+    ] {
+        let analytic = f64::from(grad_of(&grads, var)[flat]);
+        let numeric = finite_difference(var, flat, 1e-3, &loss_at);
+        assert!(
+            (analytic - numeric).abs() < 2e-3 * (1.0 + analytic.abs()),
+            "{name}[{flat}]: autograd {analytic} vs finite difference {numeric}"
+        );
+        assert!(analytic != 0.0, "{name} receives a gradient");
+    }
+    // A free gene's `u` row is masked at the step, not in the gradient itself.
+    assert_eq!(
+        to_host2(&l.gene.u_mask).unwrap(),
+        vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0]
     );
 }

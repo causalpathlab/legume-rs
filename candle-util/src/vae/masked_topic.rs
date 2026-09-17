@@ -57,17 +57,21 @@ pub struct IndexedTrainConfig<'a> {
     /// (not just ρ). Post-step parameter shrinkage that doesn't enter the
     /// loss/backward graph. `0.0` disables.
     pub weight_decay: f32,
-    /// When `Some(name)`, exclude the named `Var` from AdamW (used to
-    /// freeze ρ when its values came from a prior senna run) and skip
-    /// the `rho_l2` term (no point regularizing a non-trainable
-    /// parameter). The encoder/decoder still reference ρ through the
-    /// same `Var`; freezing just keeps the optimizer's hands off.
-    pub frozen_feature_var: Option<&'a str>,
-    /// LoRA+ on a feature-side residual: the named `Var` (the shared factor
-    /// `v`) leaves the main optimizer and takes its own AdamW at
-    /// `lr_ratio × learning_rate`. Every other trained `Var`, the row factor
-    /// included, stays on the main one.
-    pub lora_plus: Option<LoraPlus<'a>>,
+    /// The feature table's anchor, when a prior run supplied it: the named
+    /// `Var` (the encoder's `feature.embeddings`) stays out of AdamW and out of
+    /// the ridge, and under LoRA its shared factor takes its own group at the
+    /// LoRA+ rate. The encoder/decoder still reference the table through the
+    /// same `Var`; anchoring keeps the optimizer's hands off.
+    pub feature_anchor: Option<FeatureAnchor<'a>>,
+}
+
+/// See [`IndexedTrainConfig::feature_anchor`].
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureAnchor<'a> {
+    /// The pinned table's `Var`.
+    pub base_var: &'a str,
+    /// The LoRA+ split for the residual's shared factor, when there is one.
+    pub lora: Option<LoraPlus<'a>>,
 }
 
 /// Options specific to [`train_masked`], kept off the shared
@@ -546,7 +550,7 @@ fn masked_minibatch_loss(
     // Per scored unit, so every penalty below is on the same scale as the
     // number the epoch log reports.
     let mut loss = llik_sum.neg()?.div(&units_sum.clamp(1.0, f64::INFINITY)?)?;
-    if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
+    if config.feature_embedding_l2 > 0.0 && config.feature_anchor.is_none() {
         // Shrink what is actually free: the dictionary under modules, the table
         // otherwise. Penalizing composed rows would charge every member of a
         // module for the same shared vector.
@@ -612,8 +616,8 @@ pub fn train_masked(
     let frozen: Vec<&str> = pinned
         .iter()
         .map(String::as_str)
-        .chain(config.frozen_feature_var)
-        .chain(config.lora_plus.map(|l| l.v_var))
+        .chain(config.feature_anchor.map(|a| a.base_var))
+        .chain(config.feature_anchor.and_then(|a| a.lora).map(|l| l.v_var))
         .collect();
     let adam_vars: Vec<Var> = crate::frozen_features::trainable_vars(config.parameters, &frozen);
     let mut adams = vec![AdamW::new(
@@ -624,7 +628,7 @@ pub fn train_masked(
             ..Default::default()
         },
     )?];
-    if let Some(l) = config.lora_plus {
+    if let Some(l) = config.feature_anchor.and_then(|a| a.lora) {
         adams.push(l.optimizer(config.parameters, config.learning_rate)?);
     }
     let prog_bar = labeled_bar("Epochs", total_epochs as u64);

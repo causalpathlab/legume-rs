@@ -5,10 +5,10 @@
 use super::batch::{EpochBatcher, PaddedBatch};
 use super::graph::{auto_wd, NodeTypeTable, RelationTable, TypedEdgeList};
 use super::model::FneModel;
-use super::row_adagrad::RowAdagrad;
 use super::{EpochStats, FneConfig};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{DType, Device, Tensor};
+use candle_util::optim::RowAdagrad;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::ops::Range;
 use std::sync::atomic::Ordering;
@@ -236,7 +236,7 @@ pub fn train(
             let mask = model.apply_preset(p, cfg.seed, dev)?;
             log::info!(
                 "fne: {} of {} rows {}",
-                p.node.len(),
+                p.ids.len(),
                 types.n_total(),
                 p.mode.describe()
             );
@@ -245,12 +245,8 @@ pub fn train(
         None => None,
     };
     let mut opt = RowAdagrad::new(types.n_total(), cfg.lr, dev)?;
-    // LoRA+: `V` at `lr_ratio` times the row factor's rate.
     let mut opt_lora = match model.lora.as_ref() {
-        Some(l) => Some((
-            RowAdagrad::new(types.n_total(), cfg.lr, dev)?,
-            RowAdagrad::new(l.v.dim(0)?, cfg.lr * f64::from(l.lr_ratio), dev)?,
-        )),
+        Some(l) => Some(l.optimizers(cfg.lr, dev)?),
         None => None,
     };
 
@@ -299,13 +295,8 @@ pub fn train(
                         None => opt.step(&model.e, g)?,
                     }
                 }
-                if let (Some(l), Some((opt_u, opt_v))) = (model.lora.as_ref(), opt_lora.as_mut()) {
-                    if let Some(g) = grads.get(&l.u) {
-                        opt_u.step(&l.u, &g.broadcast_mul(&l.u_mask)?)?;
-                    }
-                    if let Some(g) = grads.get(&l.v) {
-                        opt_v.step(&l.v, g)?;
-                    }
+                if let (Some(l), Some(opt_l)) = (model.lora.as_ref(), opt_lora.as_mut()) {
+                    l.step(opt_l, &grads)?;
                 }
                 Ok(loss)
             },

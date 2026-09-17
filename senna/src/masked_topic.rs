@@ -777,7 +777,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             }),
         };
     let pretrained_prefix = preset_mode.as_ref().map(|(p, _)| p.as_ref());
-    let freeze_rho = preset_mode.as_ref().is_some_and(|(_, m)| m.pins());
+    let pinned_rho = preset_mode.as_ref().is_some_and(|(_, m)| m.pins());
     let lora = preset_mode.as_ref().and_then(|(_, m)| m.lora());
     let preset_flag = preset_mode
         .as_ref()
@@ -823,7 +823,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                  to seed, freeze or anchor. Drop one of the two.",
                 args.gene_modules,
             );
-            if freeze_rho {
+            if pinned_rho {
                 anyhow::ensure!(
                     args.feature_network.is_none(),
                     "{preset_flag} is incompatible with --feature-network \
@@ -1064,7 +1064,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
                  V at {ratio}× the rate, with α + FC + BN",
                 spec.dictionary_path, n_features_full, h
             );
-        } else if freeze_rho {
+        } else if pinned_rho {
             info!(
                 "Freeze mode: ρ seeded from {} (D={}, H={}); encoder/decoders share frozen ρ, \
                  only α + FC + BN train",
@@ -1139,14 +1139,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         grad_clip: args.grad_clip,
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
-        frozen_feature_var: if freeze_rho {
-            Some("enc.feature.embeddings")
-        } else {
-            None
-        },
-        lora_plus: lora.map(|(_, lr_ratio)| candle_util::lora::LoraPlus {
-            v_var: "enc.feature.lora_v",
-            lr_ratio,
+        feature_anchor: pinned_rho.then_some(candle_util::vae::masked_topic::FeatureAnchor {
+            base_var: "enc.feature.embeddings",
+            lora: lora.map(|(_, lr_ratio)| candle_util::lora::LoraPlus {
+                v_var: "enc.feature.lora_v",
+                lr_ratio,
+            }),
         }),
     };
 
@@ -1236,11 +1234,6 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         TopicModelMetadata,
     };
 
-    // A LoRA residual is folded into the table before anything is saved, so
-    // the checkpoint is a plain free table for `predict` and `--init-from`.
-    // Every table written above was read through the composed encoder; from
-    // here on that encoder must not be read again (its factors are gone).
-    candle_util::feature_embedding::fold_lora(&parameters, "enc")?;
     // No feature graph is persisted on the masked path (GCN diffusion is not
     // wired into the masked encoder — see the encoder construction above).
     save_parameters(&parameters, &args.out)?;

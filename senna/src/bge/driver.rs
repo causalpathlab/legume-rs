@@ -107,7 +107,7 @@ pub(crate) struct EmbedPlan<'a> {
     pub offset_l2: f32,
     /// Gene rows given up front (`senna bge --{freeze,init}-feature-embedding`),
     /// pinned or only started from; `None` = every row trains. gem passes `None`.
-    pub preset_features: Option<ge::fit::hier::PresetGenes>,
+    pub preset_features: Option<ge::PresetRows>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: crate::run_manifest::TrainArgsRecord,
