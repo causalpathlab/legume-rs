@@ -139,6 +139,7 @@ fn the_lora_plus_group_steps_v_alone_at_the_scaled_rate() {
     let plus = LoraPlus {
         v_var: "lora_v",
         lr_ratio: 4.0,
+        ridge: 0.0,
     };
     let mut adam = plus.optimizer(&vm, 0.1).unwrap();
     assert!((adam.learning_rate() - 0.4).abs() < 1e-6);
@@ -161,7 +162,8 @@ fn the_lora_plus_group_steps_v_alone_at_the_scaled_rate() {
     );
     assert!(LoraPlus {
         v_var: "nope",
-        lr_ratio: 1.0
+        lr_ratio: 1.0,
+        ridge: 0.0
     }
     .optimizer(&vm, 0.1)
     .is_err());
@@ -238,4 +240,36 @@ fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
             .to_vec1::<f32>()
             .unwrap();
     assert!((v2[0] - 0.5).abs() > 0.3, "v took the larger step: {v2:?}");
+}
+
+/// The Gram-form ridge is the dense residual's mean row norm² over `n` rows,
+/// and a pinned residual divides by its pinned count.
+#[test]
+fn the_ridge_equals_the_dense_residuals_mean_row_norm() {
+    use super::PinnedLora;
+    let dev = Device::Cpu;
+    let l = PinnedLora::new(5, 3, 2, &[0, 2, 4], 1.0, 3, &dev).unwrap();
+    l.v.set(&Tensor::from_vec(vec![0.5f32, -0.5, 1.0, 0.2, 0.1, -0.3], (2, 3), &dev).unwrap())
+        .unwrap();
+    let dense = l
+        .residual()
+        .unwrap()
+        .sqr()
+        .unwrap()
+        .sum_all()
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap();
+    let ridge = l.ridge().unwrap().to_scalar::<f32>().unwrap();
+    assert!(
+        (ridge - dense / 3.0).abs() < 1e-5,
+        "{ridge} vs {}",
+        dense / 3.0
+    );
+    assert_eq!(l.n_pinned, 3);
+    let grads = l.ridge().unwrap().backward().unwrap();
+    assert!(
+        grads.get(&l.u).is_some() && grads.get(&l.v).is_some(),
+        "the ridge reaches both factors"
+    );
 }

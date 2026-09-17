@@ -3,6 +3,7 @@ pub use candle_core;
 pub use candle_nn;
 
 pub mod batched_dot;
+pub mod convert;
 pub mod data;
 pub mod decoder;
 pub mod device;

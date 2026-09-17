@@ -19,7 +19,7 @@ pub use candle_util::optim::{RowAdagrad, ADAGRAD_EPS};
 pub use graph::{auto_wd, NodeTypeTable, Relation, RelationTable, TypedEdgeList};
 pub use train::{train, FneOutput, RelationStats};
 
-pub use crate::preset_mode::{PresetMode, PresetRows};
+pub use crate::preset_mode::{LoraSpec, PresetMode, PresetRows};
 use candle_util::candle_core::Device;
 
 /// PBG `init_scale`: each coordinate starts at `N(0, 1e-3)`.

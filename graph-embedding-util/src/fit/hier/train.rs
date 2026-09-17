@@ -2,12 +2,13 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
-use super::params::{to_host2, HierParams, PresetGenes};
+use super::params::{HierParams, PresetGenes};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
 use super::units::UnitTable;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::Device;
+use candle_util::convert::to_host;
 use log::info;
 use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
@@ -169,6 +170,12 @@ pub fn train(
         );
     }
     let mut opt = Optimizers::new(&params, cfg.lr)?;
+    let ctx = StepCtx {
+        units,
+        um: &um,
+        part: &part,
+        sup: &sup,
+    };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let pickers = module_pickers(&um, n_m);
     let mut order: Vec<u32> = (0..n_u as u32).collect();
@@ -197,15 +204,8 @@ pub fn train(
                 break 'epochs;
             }
             let plan = draw_plan(chunk, &pickers, n_m, n_t, cfg.modules_per_unit, &mut rng);
-            let ctx = StepCtx {
-                units,
-                um: &um,
-                part: &part,
-                sup: &sup,
-                plan: &plan,
-            };
             let (stats, loss): (StepStats, _) =
-                step_loss(&params, &ctx, offset_l2_step, lora_ridge_step)?;
+                step_loss(&params, &ctx, &plan, offset_l2_step, lora_ridge_step)?;
             let grads = loss.backward()?;
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;
@@ -239,7 +239,7 @@ pub fn train(
         &units.tracks.gene_of_row,
         &part.module_of,
     )?;
-    let e_u_host = to_host2(params.e_u.as_tensor())?;
+    let e_u_host = to_host(params.e_u.as_tensor())?;
     let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
     Ok(HierOutput {
         e_u,

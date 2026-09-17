@@ -1,7 +1,7 @@
 use super::*;
 use crate::fne::batch::PaddedBatch;
 use crate::fne::graph::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
-use crate::fne::{FneConfig, PresetMode, PresetRows};
+use crate::fne::{FneConfig, LoraSpec, PresetMode, PresetRows};
 use candle_util::candle_core::{Device, Tensor};
 use matrix_util::traits::SampleOps;
 
@@ -668,11 +668,11 @@ fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
         preset: Some(PresetRows {
             ids: node.clone(),
             rows: rows.clone(),
-            mode: PresetMode::Lora {
+            mode: PresetMode::Lora(LoraSpec {
                 rank,
                 lr_ratio: 4.0,
                 ridge: 0.0,
-            },
+            }),
         }),
         ..base.clone()
     };
@@ -698,11 +698,11 @@ fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
         preset: Some(PresetRows {
             ids: node,
             rows,
-            mode: PresetMode::Lora {
+            mode: PresetMode::Lora(LoraSpec {
                 rank: d,
                 lr_ratio: 1.0,
                 ridge: 0.0,
-            },
+            }),
         }),
         ..base
     };

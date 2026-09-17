@@ -1,6 +1,6 @@
 use super::*;
 use auxiliary_data::feature_types::write_feature_types;
-use graph_embedding_util::PresetMode;
+use graph_embedding_util::{LoraSpec, PresetMode};
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 
@@ -97,11 +97,11 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
     for mode in [
         PresetMode::Freeze,
         PresetMode::Init,
-        PresetMode::Lora {
+        PresetMode::Lora(LoraSpec {
             rank: 2,
             lr_ratio: 16.0,
             ridge: 0.0,
-        },
+        }),
     ] {
         assert_eq!(
             load_preset_genes(&prefix, mode, &axis, &kind).unwrap().mode,
@@ -111,11 +111,11 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
     // The table is H = 3 wide: rank 3 is no residual.
     assert!(load_preset_genes(
         &prefix,
-        PresetMode::Lora {
+        PresetMode::Lora(LoraSpec {
             rank: 3,
             lr_ratio: 1.0,
             ridge: 0.0
-        },
+        }),
         &axis,
         &kind
     )
