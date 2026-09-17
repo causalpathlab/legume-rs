@@ -76,7 +76,7 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
     // internal hard gene partition but never builds the *learned* module
     // layer (`model.modules` stays `None` on this path — see
     // `FitConfig::gene_modules`'s doc), so `write_module_tables` is a no-op
-    // regardless of `--gene-modules`; no ETM tables (`--skip-etm`); no
+    // regardless of `--feature-modules`; no ETM tables (`--skip-etm`); no
     // `pb_reference.zarr` (`--no-emit-pb-reference`).
     let mut actual: Vec<String> = std::fs::read_dir(dir.path())
         .expect("read the run directory")

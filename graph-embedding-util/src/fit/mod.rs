@@ -17,10 +17,10 @@ mod setup;
 
 pub use batch_fold::BatchGeneFold;
 pub use config::{
-    validate_offset_rank, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned, TrackInfo,
+    validate_offset_rank, FeatureModuleConfig, FitConfig, FitOutput, ParentModulesOwned, TrackInfo,
     TrackSpec,
 };
-pub use module_args::GeneModuleArgs;
+pub use module_args::FeatureModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};
 pub use pb_readout::{majority_batch_per_pb, PbLevelEmbedding};
 pub use projection::{CellEncoder, CellEncoders, TrackEncoder};
@@ -194,7 +194,11 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // ones are initialized through the parent's modules); otherwise the
     // k-means warm start over the finest level's profiles.
     let profile = finest_profile();
-    let (labels, n_modules) = match config.gene_modules.as_ref().and_then(|g| g.parent.as_ref()) {
+    let (labels, n_modules) = match config
+        .feature_modules
+        .as_ref()
+        .and_then(|g| g.parent.as_ref())
+    {
         Some(parent) => {
             anyhow::ensure!(
                 tracks.is_base(),
@@ -218,9 +222,9 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
         }
         None => {
             let n = config
-                .gene_modules
+                .feature_modules
                 .as_ref()
-                .context("the hierarchical phase 1 needs a module count (gene_modules)")?
+                .context("the hierarchical phase 1 needs a module count (feature_modules)")?
                 .n_modules;
             (
                 // The partition is over GENES, so the warm start reads the

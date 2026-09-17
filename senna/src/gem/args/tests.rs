@@ -189,7 +189,7 @@ fn gem_subcommand_about_has_no_em_dash_and_wraps_under_100_cols() {
 /// `render_long_help()` runs cleanly end to end AND every flattened group
 /// actually reaches the render: one distinctive flag from `GemArgs` itself
 /// plus one from each of `HvgCliArgs`, `refine_weighting::CollapseArgs`,
-/// `QcArgs` and `ge::GeneModuleArgs`, so a group dropped from the flatten (or
+/// `QcArgs` and `ge::FeatureModuleArgs`, so a group dropped from the flatten (or
 /// renamed out from under this test) fails here instead of only showing up
 /// as a missing flag in `senna gem --help`. The full text, shared groups
 /// included, is still read by hand per the task's help-review step.
@@ -203,7 +203,7 @@ fn full_help_renders() {
         "--n-hvg",              // HvgCliArgs
         "--num-levels",         // refine_weighting::CollapseArgs
         "--no-qc",              // QcArgs
-        "--gene-modules",       // ge::GeneModuleArgs
+        "--feature-modules",    // ge::FeatureModuleArgs
     ] {
         assert!(help.contains(flag), "gem --help is missing {flag}");
     }
