@@ -185,13 +185,26 @@ pub fn clip_grads_and_step<O: Optimizer>(
 /// norm was not finite (see [`apply_global_l2_clip`]).
 pub fn clip_and_step_dense(
     adam: &mut AdamW,
+    grads: candle_core::backprop::GradStore,
+    max_norm: f64,
+) -> anyhow::Result<bool> {
+    clip_and_step_dense_all(std::slice::from_mut(adam), grads, max_norm)
+}
+
+/// [`clip_and_step_dense`] over several optimizers that partition the
+/// parameters (each holds its own `Var`s; the clip is on the whole gradient
+/// once, then every optimizer takes its step from the same store).
+pub fn clip_and_step_dense_all(
+    adams: &mut [AdamW],
     mut grads: candle_core::backprop::GradStore,
     max_norm: f64,
 ) -> anyhow::Result<bool> {
     if max_norm > 0.0 && !apply_global_l2_clip(&mut grads, max_norm)? {
         return Ok(false);
     }
-    adam.step(&grads)?;
+    for adam in adams.iter_mut() {
+        adam.step(&grads)?;
+    }
     Ok(true)
 }
 

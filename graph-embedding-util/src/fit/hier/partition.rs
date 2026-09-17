@@ -194,6 +194,18 @@ impl UnitModules {
         (u * self.n_tracks + t) * self.n_modules + m
     }
 
+    /// The `(slot, count)` pairs of unit `u` in module `m` on track `t`; empty
+    /// when the unit has no counts there. `by_module[u]` is sorted by
+    /// `(track, module)`, so this is a binary search.
+    #[must_use]
+    pub fn counts_of(&self, u: usize, t: usize, m: usize) -> &[(u32, f32)] {
+        let key = (t as u32, m as u32);
+        match self.by_module[u].binary_search_by_key(&key, |(k, _)| *k) {
+            Ok(i) => self.by_module[u][i].1.as_slice(),
+            Err(_) => &[],
+        }
+    }
+
     pub fn new(units: &UnitTable, part: &Partition) -> Self {
         let (n_u, m) = (units.n_units(), part.n_modules());
         let n_t = units.n_tracks();

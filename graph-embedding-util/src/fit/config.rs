@@ -1,4 +1,3 @@
-use super::hier;
 use crate::model::JointEmbedModel;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
@@ -275,7 +274,7 @@ pub struct FitConfig {
     /// embedding, say): phase 1 starts from them, and under `freeze` pins them
     /// and trains only the rest — the unit side, every bias, and the rows of
     /// genes not listed. Single-track only.
-    pub preset_features: Option<hier::PresetGenes>,
+    pub preset_features: Option<crate::PresetRows>,
 }
 
 /// Caller-facing configuration of the learned gene modules.

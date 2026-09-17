@@ -406,6 +406,7 @@ fn the_gaussian_head_is_deterministic_and_carries_no_kl() {
             layers: &[5],
             attn_pool: true,
             n_gene_modules: 0,
+            lora_rank: 0,
         },
         &varmap,
         vb,

@@ -27,6 +27,9 @@ use auxiliary_data::feature_names::FeatureNameKindArg;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 
 /// Name of the per-gene embedding ρ in a masked checkpoint.
+/// The encoder's `VarBuilder` prefix; its feature table and LoRA factors
+/// live under it.
+pub(crate) const ENCODER_PREFIX: &str = "enc";
 pub(crate) const RHO_TENSOR: &str = "enc.feature.embeddings";
 
 /// This run's genes aligned onto an `--init-from` source run's: `None` when

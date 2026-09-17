@@ -765,22 +765,24 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         args.batch_files.as_deref(),
     );
 
-    let init_feature_embedding: Option<Box<str>> =
-        args.feature_embedding.init_feature_embedding.clone();
-    let freeze_feature_embedding: Option<Box<str>> = args
-        .feature_embedding
-        .freeze_feature_embedding
-        .clone()
-        .or_else(
-            || match (init_feature_embedding.is_none(), inherited.as_ref()) {
-                (true, Some(inh)) => Some(inh.feature_embedding_prefix.clone()),
-                _ => None,
-            },
-        );
-    let pretrained_prefix = freeze_feature_embedding
-        .as_deref()
-        .or(init_feature_embedding.as_deref());
-    let freeze_rho = freeze_feature_embedding.is_some();
+    // The flag given, else the parent manifest's table, pinned.
+    let preset_mode: Option<(Box<str>, graph_embedding_util::PresetMode)> =
+        match args.feature_embedding.resolve() {
+            Some((p, m)) => Some((Box::from(p), m)),
+            None => inherited.as_ref().map(|inh| {
+                (
+                    inh.feature_embedding_prefix.clone(),
+                    graph_embedding_util::PresetMode::Freeze,
+                )
+            }),
+        };
+    let pretrained_prefix = preset_mode.as_ref().map(|(p, _)| p.as_ref());
+    let pinned_rho = preset_mode.as_ref().is_some_and(|(_, m)| m.pins());
+    let lora = preset_mode.as_ref().and_then(|(_, m)| m.lora());
+    let preset_flag = preset_mode
+        .as_ref()
+        .map(|(_, m)| crate::feature_embedding_args::flag_name(*m))
+        .unwrap_or_default();
     // Whether this run's feature side is the checkpoint's is decidable from the
     // checkpoint's metadata, so ask now rather than after the import and the
     // collapse. Re-checked inside the warm start, which every entry point takes.
@@ -816,21 +818,16 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             // to be factorized into a membership and a dictionary first.
             anyhow::ensure!(
                 args.gene_modules == 0,
-                "--{} does not compose with --gene-modules {}: with modules a gene's embedding \
-                 is a learned mixture of shared vectors, so there is no per-gene table to seed \
-                 or freeze. Drop one of the two.",
-                if freeze_rho {
-                    "freeze-feature-embedding"
-                } else {
-                    "init-feature-embedding"
-                },
+                "{preset_flag} does not compose with --gene-modules {}: with modules a gene's \
+                 embedding is a learned mixture of shared vectors, so there is no per-gene table \
+                 to seed, freeze or anchor. Drop one of the two.",
                 args.gene_modules,
             );
-            if freeze_rho {
+            if pinned_rho {
                 anyhow::ensure!(
                     args.feature_network.is_none(),
-                    "--freeze-feature-embedding is incompatible with --feature-network \
-                     (network restriction would change the gene axis that the frozen ρ pins)"
+                    "{preset_flag} is incompatible with --feature-network \
+                     (network restriction would change the gene axis that the pinned ρ holds)"
                 );
             }
             // Pre-train inputs are gene-keyed; row names aren't available yet.
@@ -962,9 +959,10 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             layers: &args.encoder_layers,
             attn_pool: true,
             n_gene_modules: args.gene_modules,
+            lora_rank: lora.map_or(0, |l| l.rank),
         },
         &parameters,
-        param_builder.pp("enc"),
+        param_builder.pp(crate::topic::gene_axis::ENCODER_PREFIX),
     )?;
 
     // Per-level decoders: all at D_full, levels differ in N (sample coarsening).
@@ -1056,11 +1054,18 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         );
         candle_util::frozen_features::overwrite_var_2d(
             &parameters,
-            "enc.feature.embeddings",
+            crate::topic::gene_axis::RHO_TENSOR,
             &host.e_feat,
             &dev,
         )?;
-        if freeze_rho {
+        if let Some(l) = lora {
+            let (rank, ratio) = (l.rank, l.lr_ratio);
+            info!(
+                "LoRA: ρ anchored to {} (D={}, H={}); a rank-{rank} residual trains on top, \
+                 V at {ratio}× the rate, with α + FC + BN",
+                spec.dictionary_path, n_features_full, h
+            );
+        } else if pinned_rho {
             info!(
                 "Freeze mode: ρ seeded from {} (D={}, H={}); encoder/decoders share frozen ρ, \
                  only α + FC + BN train",
@@ -1119,6 +1124,11 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     let stop = setup_stop_handler();
 
+    let lora_v_name = candle_util::lora::factor_names(&candle_util::lora::join(
+        crate::topic::gene_axis::ENCODER_PREFIX,
+        candle_util::feature_embedding::LORA_PREFIX,
+    ))
+    .1;
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -1135,11 +1145,14 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         grad_clip: args.grad_clip,
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
-        frozen_feature_var: if freeze_rho {
-            Some("enc.feature.embeddings")
-        } else {
-            None
-        },
+        feature_anchor: pinned_rho.then_some(candle_util::vae::masked_topic::FeatureAnchor {
+            base_var: crate::topic::gene_axis::RHO_TENSOR,
+            lora: lora.map(|l| candle_util::lora::LoraPlus {
+                v_var: &lora_v_name,
+                lr_ratio: l.lr_ratio,
+                ridge: l.ridge,
+            }),
+        }),
     };
 
     use candle_util::vae::masked_topic::{MaskSchedule, MaskedTrainOpts};
@@ -1275,9 +1288,10 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             layers: &args.encoder_layers,
             attn_pool: true,
             n_gene_modules: args.gene_modules,
+            lora_rank: 0,
         },
         &parameters,
-        cpu_vb.pp("enc"),
+        cpu_vb.pp(crate::topic::gene_axis::ENCODER_PREFIX),
     )?;
 
     info!("Writing down the latent states");

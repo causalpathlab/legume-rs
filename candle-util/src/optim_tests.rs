@@ -1,5 +1,5 @@
-use super::*;
-use candle_util::candle_core::{DType, Device, Tensor, Var};
+use super::RowAdagrad;
+use candle_core::{DType, Device, Tensor, Var};
 
 fn approx(a: f32, b: f32, tol: f32) -> bool {
     (a - b).abs() <= tol
@@ -108,4 +108,36 @@ fn the_accumulator_does_not_retain_the_gradients_autograd_graph() {
         reach.get(&source).is_none(),
         "the accumulator retains the gradient's graph"
     );
+}
+
+/// A row and its bias share one accumulator; a masked row keeps its value
+/// while its bias moves with the bias-only accumulator; decay reaches only
+/// the rows that carried a gradient.
+#[test]
+fn a_row_and_its_bias_share_the_accumulator_and_a_mask_pins_the_row_alone() {
+    let dev = Device::Cpu;
+    let row =
+        Var::from_tensor(&Tensor::from_vec(vec![1f32, 2., 3., 4., 5., 6.], (3, 2), &dev).unwrap())
+            .unwrap();
+    let bias = Var::from_tensor(&Tensor::from_vec(vec![0f32, 0., 0.], 3, &dev).unwrap()).unwrap();
+    let g_row = Tensor::from_vec(vec![1f32, -1., 0., 0., 2., 2.], (3, 2), &dev).unwrap();
+    let g_bias = Tensor::from_vec(vec![1f32, 0., 3.], 3, &dev).unwrap();
+    let mask = Tensor::from_vec(vec![1f32, 1., 0.], (3, 1), &dev).unwrap(); // row 2 pinned
+    let mut opt = RowAdagrad::new(3, 0.1, &dev).unwrap();
+    opt.step_with_bias(&row, &bias, &g_row, &g_bias, Some(&mask), 0.5)
+        .unwrap();
+    let p = row.as_tensor().to_vec2::<f32>().unwrap();
+    let b = bias.as_tensor().to_vec1::<f32>().unwrap();
+    // row 0: acc = (1 + 1 + 1) / 3 = 1 → step 0.1; decayed to half first
+    assert!(approx(p[0][0], 0.5 - 0.1, 1e-6) && approx(p[0][1], 1.0 + 0.1, 1e-6));
+    assert!(approx(b[0], -0.1, 1e-6));
+    // row 1: no gradient at all — untouched, no decay, bias still
+    assert_eq!(p[1], vec![3., 4.]);
+    assert_eq!(b[1], 0.0);
+    // row 2: pinned — the row keeps its value; the bias alone drives the
+    // accumulator (9 / 1) so it moves by 0.1 · 3 / 3
+    assert_eq!(p[2], vec![5., 6.]);
+    assert!(approx(b[2], -0.1, 1e-6));
+    let acc = opt.accumulator().to_vec1::<f32>().unwrap();
+    assert!(approx(acc[0], 1.0, 1e-6) && acc[1] == 0.0 && approx(acc[2], 9.0, 1e-6));
 }

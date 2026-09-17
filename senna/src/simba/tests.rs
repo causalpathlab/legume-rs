@@ -567,3 +567,45 @@ fn simba_pins_its_gene_table_to_an_earlier_run() {
     let c2 = Mat::from_parquet(&format!("{second}.cell_embedding.parquet")).unwrap();
     assert_ne!(c1.mat, c2.mat, "cells train");
 }
+
+/// `--lora-feature-embedding` on simba: the second run's gene table is the
+/// first run's plus a residual of the given rank that did move, at the first
+/// run's H, while the cells still train.
+#[test]
+fn simba_anchors_its_gene_table_with_a_low_rank_residual() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, first) = fast_run(dir.path());
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let mut argv = vec![
+        data.as_str(),
+        "--out",
+        &second,
+        "--n-hvg",
+        "0",
+        "--no-qc",
+        "--lora-feature-embedding",
+        &first,
+        "--lora-rank",
+        "1",
+        "--lora-lr-ratio",
+        "4",
+        "--embedding-dim",
+        "0",
+        "--seed",
+        "9",
+    ];
+    argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
+    argv.extend_from_slice(&["--epochs", "4"]);
+    run(&argv);
+    let g1 = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
+    let g2 = Mat::from_parquet(&format!("{second}.feature_loading.parquet")).unwrap();
+    assert_eq!(g1.rows, g2.rows);
+    assert_eq!(g1.mat.ncols(), g2.mat.ncols(), "H taken from the table");
+    let resid = &g2.mat - &g1.mat;
+    let sv = resid.singular_values();
+    assert!(sv[0] > 1e-6, "the residual never moved");
+    assert!(sv[1] <= 1e-4 * sv[0], "the residual is not rank 1: {sv}");
+    let c1 = Mat::from_parquet(&format!("{first}.cell_embedding.parquet")).unwrap();
+    let c2 = Mat::from_parquet(&format!("{second}.cell_embedding.parquet")).unwrap();
+    assert_ne!(c1.mat, c2.mat, "cells train");
+}

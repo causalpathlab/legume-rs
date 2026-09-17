@@ -12,21 +12,18 @@
 pub(crate) mod batch;
 pub mod graph;
 pub(crate) mod model;
-pub mod row_adagrad;
 pub mod train;
 
+pub use candle_util::masking::MASK_NEG;
+pub use candle_util::optim::{RowAdagrad, ADAGRAD_EPS};
 pub use graph::{auto_wd, NodeTypeTable, Relation, RelationTable, TypedEdgeList};
-pub use row_adagrad::RowAdagrad;
 pub use train::{train, FneOutput, RelationStats};
 
+pub use crate::preset_mode::{LoraSpec, PresetMode, PresetRows};
 use candle_util::candle_core::Device;
 
 /// PBG `init_scale`: each coordinate starts at `N(0, 1e-3)`.
 pub const INIT_STDEV: f64 = 1e-3;
-/// PBG's "ignore this negative" score.
-pub const MASK_NEG: f64 = -1e9;
-/// PBG `RowAdagrad` denominator floor.
-pub const ADAGRAD_EPS: f64 = 1e-10;
 
 /// Per-epoch record: losses are per edge, weight decay excluded (PBG's
 /// `Stats.loss`).
@@ -37,17 +34,6 @@ pub struct EpochStats {
     pub eval_loss: Option<f64>,
     /// Batches that drew the weight-decay term this epoch.
     pub wd_hits: usize,
-}
-
-/// Rows of the table given from outside, by GLOBAL node id: `rows` is
-/// `[node.len() × D]` row-major. The listed nodes start at those rows; under
-/// `freeze` they also take no step (neither the loss's nor the weight
-/// decay's), so they come out of training exactly as given.
-#[derive(Clone, Debug, Default)]
-pub struct PresetRows {
-    pub node: Vec<u32>,
-    pub rows: Vec<f32>,
-    pub freeze: bool,
 }
 
 /// Every knob of the recipe; `Default` is PBG's configuration with the

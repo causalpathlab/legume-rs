@@ -69,11 +69,10 @@ pub fn train(edges: EdgeList, cfg: &SimbaConfig) -> anyhow::Result<TrainOutput> 
             eval_min_per_relation: 0,
             relation_repeats: Vec::new(),
             // Gene-local indices become global ids behind the cell block.
-            preset: cfg.preset_genes.as_ref().map(|p| fne::PresetRows {
-                node: p.node.iter().map(|&g| g + gene_offset).collect(),
-                rows: p.rows.clone(),
-                freeze: p.freeze,
-            }),
+            preset: cfg
+                .preset_genes
+                .clone()
+                .map(|p| p.map_ids(|g| g + gene_offset)),
             seed: cfg.seed,
             device: cfg.device.clone(),
         },

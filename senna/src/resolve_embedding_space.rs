@@ -1,8 +1,8 @@
 //! `senna resolve-embedding-space` (alias `rest`) — **R**esolve **E**mbedding
 //! **S**pace for **T**opic-models.
 //!
-//! The mirror of `senna bge`'s retired `--freeze-feature-embedding` with the
-//! roles flipped: instead of freezing a gene embedding and learning cells,
+//! The mirror of `senna bge --freeze-feature-embedding` with the roles
+//! flipped: instead of freezing a gene embedding and learning cells,
 //! this **freezes the cell topic proportions θ** from a finished `senna topic`
 //! / `masked-topic` run and **learns a shared cell+gene H-dimensional
 //! embedding** against the raw counts. The point is to recast a *good* topic

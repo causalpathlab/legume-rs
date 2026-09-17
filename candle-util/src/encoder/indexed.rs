@@ -51,18 +51,36 @@ pub struct IndexedEmbeddingEncoderArgs<'a> {
     /// `0` disables it entirely: no new var, unchanged FC input width, byte-identical
     /// safetensors. Callers that do not want it pass `0`.
     pub n_gene_modules: usize,
+    /// Rank of a LoRA residual on the feature table (`0`: none). The table
+    /// becomes [`crate::feature_embedding::FeatureEmbedding::Lora`]; the owner
+    /// seeds its base and keeps it out of the optimizer. Not with modules.
+    pub lora_rank: usize,
 }
 
 impl IndexedEmbeddingEncoder {
     pub fn new(args: IndexedEmbeddingEncoderArgs, varmap: &VarMap, vb: VarBuilder) -> Result<Self> {
         debug_assert!(!args.layers.is_empty());
 
-        let features = std::sync::Arc::new(crate::feature_embedding::FeatureEmbedding::new(
-            args.n_features,
-            args.n_gene_modules,
-            args.embedding_dim,
-            vb.clone(),
-        )?);
+        let features = std::sync::Arc::new(if args.lora_rank > 0 {
+            if args.n_gene_modules > 0 {
+                candle_core::bail!(
+                    "a LoRA residual on the feature table does not compose with gene modules"
+                );
+            }
+            crate::feature_embedding::FeatureEmbedding::new_lora(
+                args.n_features,
+                args.embedding_dim,
+                args.lora_rank,
+                vb.clone(),
+            )?
+        } else {
+            crate::feature_embedding::FeatureEmbedding::new(
+                args.n_features,
+                args.n_gene_modules,
+                args.embedding_dim,
+                vb.clone(),
+            )?
+        });
 
         // The trunk: FC stack (embedding_dim + 2M) -> ... -> final_hidden, BN,
         // and the `z_mean` head. The module branch appends `log u` and
@@ -629,6 +647,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: false,
                 n_gene_modules: 0,
+                lora_rank: 0,
             },
             &varmap,
             vb,
@@ -665,6 +684,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: true,
                 n_gene_modules,
+                lora_rank: 0,
             },
             &varmap,
             vb.pp("enc"),
@@ -753,6 +773,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: true,
                 n_gene_modules: m,
+                lora_rank: 0,
             },
             &varmap,
             vb.pp("enc"),
@@ -813,6 +834,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: true,
                 n_gene_modules: m,
+                lora_rank: 0,
             },
             &varmap,
             vb.pp("enc"),
@@ -868,6 +890,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: true,
                 n_gene_modules: 0,
+                lora_rank: 0,
             },
             &varmap,
             vb.pp("enc"),
@@ -901,6 +924,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: false,
                 n_gene_modules: m,
+                lora_rank: 0,
             },
             &vm,
             vb,
@@ -951,6 +975,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: false,
                 n_gene_modules: m,
+                lora_rank: 0,
             },
             &vm,
             vb,
@@ -1004,6 +1029,7 @@ mod tests {
                 layers: &layers,
                 attn_pool: true,
                 n_gene_modules,
+                lora_rank: 0,
             },
             &varmap,
             vb,
