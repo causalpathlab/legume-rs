@@ -4,10 +4,12 @@
 //! (`HvgCliArgs`, `refine_weighting::CollapseArgs`, `QcArgs`,
 //! `ge::GeneModuleArgs`), the same top-level knobs, and the same help text
 //! for every flag they share, so `senna bge` and `senna gem` read as one
-//! flag surface. gem adds its own modality inputs (`GENES...`, `--modality`,
-//! `--genes-sample-strip`) and its own ridge on the per-track feature
-//! offsets (`--offset-l2`). Unlike `BgeArgs`, `GemArgs` does not implement
-//! `Updatable`; `senna update` does not (yet) continue a gem run.
+//! flag surface, including the `--{freeze,init,lora}-feature-embedding`
+//! triple. gem adds its own modality inputs (`GENES...`, `--modality`,
+//! `--genes-sample-strip`) and its own knobs on the per-track feature
+//! offsets: their rank (`--offset-rank`) and ridge (`--offset-l2`). Unlike
+//! `BgeArgs`, `GemArgs` does not implement `Updatable`; `senna update` does
+//! not (yet) continue a gem run.
 
 use crate::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
@@ -71,11 +73,16 @@ pub(crate) struct GemArgs {
 
     #[arg(
         long,
-        default_value_t = 128,
-        help = "Embedding dimension H",
+        default_value_t = graph_embedding_util::EmbeddingDim::Fixed(128),
+        value_name = "H|auto",
+        help = "Embedding dimension H (auto = the width of a given feature embedding)",
         alias = "dim-embedding"
     )]
-    pub(crate) embedding_dim: usize,
+    pub(crate) embedding_dim: graph_embedding_util::EmbeddingDim,
+
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub(crate) feature_embedding: crate::feature_embedding_args::FeatureEmbeddingArgs,
 
     #[command(flatten)]
     pub(crate) collapse: crate::refine_weighting::CollapseArgs,
@@ -216,6 +223,23 @@ pub(crate) struct GemArgs {
                      0 disables it."
     )]
     pub(crate) offset_l2: f32,
+
+    #[arg(
+        long = "offset-rank",
+        default_value_t = graph_embedding_util::LoraSpec::default().rank,
+        value_name = "R",
+        help = "Rank of each track's per-gene offset (1..=H); not the embedding dimension",
+        long_help = "Rank of every non-base track's per-gene offset.\n\
+                     Every row of a gene shares the gene's loading; each track other than\n\
+                     count/spliced adds an offset to it, and that offset is low-rank:\n\
+                     δ_g = u_g · V, with u_g per gene (R numbers) and V shared by every gene\n\
+                     of the track, so a track moves its genes inside one R-dimensional subspace.\n\
+                     \n\
+                     R is its own number. It must lie in 1..=H, where H is --embedding-dim,\n\
+                     and it is never taken from H; R = H leaves the offset unrestricted.\n\
+                     --offset-l2 is the ridge on the offset."
+    )]
+    pub(crate) offset_rank: usize,
 
     #[arg(
         long,
