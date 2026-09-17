@@ -151,12 +151,7 @@ pub fn train(
         "one module label per gene"
     );
     if units.n_tracks() > 1 {
-        anyhow::ensure!(
-            (1..=h).contains(&cfg.offset_rank),
-            "the track offsets' rank {} must lie in 1..=H (H={h}); it is the rank of each \
-             track's per-gene offset, not the embedding dimension",
-            cfg.offset_rank
-        );
+        crate::fit::config::validate_offset_rank(cfg.offset_rank, h)?;
     }
     let part = Partition::from_labels(labels, cfg.n_modules);
     let um = UnitModules::new(units, &part);

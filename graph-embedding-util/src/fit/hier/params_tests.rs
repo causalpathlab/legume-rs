@@ -50,7 +50,8 @@ fn the_non_base_tracks_start_at_zero_and_leave_the_base_tables_untouched() {
         assert_eq!(o.d_b_g.dims(), &[n_g]);
         assert!(as_vec(&o.d_mu).iter().all(|&x| x == 0.0));
         assert!(o.delta_host().unwrap().iter().all(|&x| x == 0.0));
-        assert!(o.d_r_base.is_none() && o.pinned.is_empty());
+        assert!(o.d_r_given.is_none());
+        assert!(o.pinned_genes().unwrap().iter().all(|&p| !p));
     }
     assert!(tracked.offset(3).is_none());
 }
@@ -183,7 +184,7 @@ fn a_given_offset_base_composes_on_its_track_and_the_mode_sets_its_pin() {
     p.preset(&given, &module_of).unwrap();
     p.preset_offsets(&offsets, PresetMode::Freeze).unwrap();
     let o = &p.offsets[0];
-    assert_eq!(o.pinned, vec![true, false, false, true]);
+    assert_eq!(o.pinned_genes().unwrap(), vec![true, false, false, true]);
     assert_eq!(
         to_host(&o.d_r.u_mask).unwrap(),
         vec![0.0, 1.0, 1.0, 0.0],
@@ -229,7 +230,10 @@ fn a_given_offset_base_composes_on_its_track_and_the_mode_sets_its_pin() {
         .unwrap();
         q.preset_offsets(&offsets, mode).unwrap();
         let o = &q.offsets[0];
-        assert!(o.pinned.is_empty(), "{mode:?}: nothing pinned on the track");
+        assert!(
+            o.pinned_genes().unwrap().iter().all(|&p| !p),
+            "{mode:?}: nothing pinned on the track"
+        );
         assert_eq!(to_host(&o.d_r.u_mask).unwrap(), vec![1.0; 4]);
         let (rho, _) = q.compose(&track_of_row, &gene_of_row, &module_of).unwrap();
         assert!(
