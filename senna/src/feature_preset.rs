@@ -81,17 +81,16 @@ pub(crate) fn load_preset_genes(
 /// `--embedding-dim` against the preset's width, the loader having refused an
 /// empty match (so the division is exact).
 pub(crate) fn resolve_dim(
-    cli_embedding_dim: usize,
+    cli_embedding_dim: ge::EmbeddingDim,
     preset: Option<&ge::PresetRows>,
 ) -> anyhow::Result<usize> {
-    let preset_h = preset.map(ge::PresetRows::width);
-    crate::topic::common::resolve_embedding_dim_from_table(cli_embedding_dim, preset_h)?.ok_or_else(
-        || {
+    cli_embedding_dim
+        .resolve(preset.map(ge::PresetRows::width))?
+        .ok_or_else(|| {
             anyhow::anyhow!(
-                "--embedding-dim 0 takes H from a given feature embedding; none was given"
+                "--embedding-dim auto takes H from a given feature embedding; none was given"
             )
-        },
-    )
+        })
 }
 
 #[cfg(test)]

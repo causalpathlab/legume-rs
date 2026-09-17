@@ -28,7 +28,7 @@ pub struct FeatureEmbeddingArgs {
                      A gene with no row: `bge` keeps it as a free, trained row;\n\
                      the masked models drop it from the feature axis.\n\
                      \n\
-                     H is taken from the table when `--embedding-dim` is 0;\n\
+                     H is taken from the table when `--embedding-dim` is `auto`;\n\
                      an explicit `--embedding-dim` must agree with it."
     )]
     pub freeze_feature_embedding: Option<Box<str>>,
@@ -75,11 +75,12 @@ impl FeatureEmbeddingArgs {
     /// refused here: the knobs are a shared group and clap cannot tie them to
     /// this struct's own flag.
     pub fn resolve(&self) -> anyhow::Result<Option<(&str, PresetMode)>> {
+        self.lora.refuse_unless_selected(
+            self.lora_feature_embedding.is_some(),
+            "--lora-feature-embedding",
+        )?;
         if let Some(p) = self.lora_feature_embedding.as_deref() {
             return Ok(Some((p, PresetMode::Lora(self.lora.spec()))));
-        }
-        if let Some(flag) = self.lora.given_flag() {
-            anyhow::bail!("{flag} is read with --lora-feature-embedding only");
         }
         if let Some(p) = self.freeze_feature_embedding.as_deref() {
             return Ok(Some((p, PresetMode::Freeze)));

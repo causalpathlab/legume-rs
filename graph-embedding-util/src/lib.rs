@@ -26,6 +26,7 @@
 
 pub mod cell_projection;
 pub mod data;
+pub mod embedding_dim;
 pub mod eval;
 pub mod feature_qc;
 pub mod fit;
@@ -43,6 +44,7 @@ pub mod type_annotation;
 pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
+pub use embedding_dim::EmbeddingDim;
 pub use eval::{
     embedding_col_names, save_embedding, save_outputs, save_outputs_named,
     write_feature_coembedding, write_module_tables, EmbeddingFileNames, OutputContext,
