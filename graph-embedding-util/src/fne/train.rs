@@ -5,10 +5,10 @@
 use super::batch::{EpochBatcher, PaddedBatch};
 use super::graph::{auto_wd, NodeTypeTable, RelationTable, TypedEdgeList};
 use super::model::FneModel;
-use super::row_adagrad::RowAdagrad;
 use super::{EpochStats, FneConfig};
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::{DType, Device, Tensor};
+use candle_util::optim::RowAdagrad;
 use rand::{rngs::StdRng, RngExt, SeedableRng};
 use std::ops::Range;
 use std::sync::atomic::Ordering;
@@ -233,22 +233,30 @@ pub fn train(
     let mut model = FneModel::new(&types, cfg.dim, cfg.num_batch_negs, cfg.seed, dev)?;
     let grad_mask = match cfg.preset.as_ref() {
         Some(p) => {
-            let mask = model.apply_preset(p, dev)?;
+            let mask = model.apply_preset(p, cfg.seed, dev)?;
             log::info!(
                 "fne: {} of {} rows {}",
-                p.node.len(),
+                p.ids.len(),
                 types.n_total(),
-                if p.freeze {
-                    "pinned to the given table; the rest train"
-                } else {
-                    "start from the given table and train on"
-                }
+                p.mode.describe()
             );
             mask
         }
         None => None,
     };
     let mut opt = RowAdagrad::new(types.n_total(), cfg.lr, dev)?;
+    let mut opt_lora = match model.lora.as_ref() {
+        Some(l) => Some(l.optimizers(cfg.lr, dev)?),
+        None => None,
+    };
+    // The per-epoch LoRA ridge, spread over the epoch's batches.
+    let ridge_step = cfg
+        .preset
+        .as_ref()
+        .and_then(|p| p.mode.lora())
+        .map_or(0.0, |l| {
+            f64::from(l.ridge) / n_visits.div_ceil(cfg.batch_size.max(1)).max(1) as f64
+        });
 
     let mut epochs = Vec::with_capacity(cfg.epochs);
     for epoch in 0..cfg.epochs {
@@ -286,6 +294,10 @@ pub fn train(
                 } else {
                     loss.clone()
                 };
+                let total = match model.lora.as_ref() {
+                    Some(l) if ridge_step > 0.0 => (total + l.ridge()?.affine(ridge_step, 0.0)?)?,
+                    _ => total,
+                };
                 let grads = total.backward()?;
                 if let Some(g) = grads.get(&model.e) {
                     // A pinned row's gradient is zeroed, so its Adagrad step
@@ -294,6 +306,9 @@ pub fn train(
                         Some(m) => opt.step(&model.e, &g.broadcast_mul(m)?)?,
                         None => opt.step(&model.e, g)?,
                     }
+                }
+                if let (Some(l), Some(opt_l)) = (model.lora.as_ref(), opt_lora.as_mut()) {
+                    l.step(opt_l, &grads)?;
                 }
                 Ok(loss)
             },
@@ -361,7 +376,7 @@ pub fn train(
     }
     let cpu = Device::Cpu;
     Ok(FneOutput {
-        embedding: model.e.as_tensor().detach().to_device(&cpu)?,
+        embedding: model.composed()?.to_device(&cpu)?,
         node_types: types,
         relations: rels,
         per_relation,

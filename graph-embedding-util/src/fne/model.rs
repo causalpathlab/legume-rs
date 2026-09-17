@@ -22,6 +22,8 @@ use super::{INIT_STDEV, MASK_NEG};
 use crate::loss::softmax_nce;
 use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
 use candle_util::fast_index::gather_rows;
+use candle_util::lora::PinnedLora;
+use candle_util::masking::additive_pad_mask;
 use matrix_util::rand_util::name_seed;
 use matrix_util::traits::SampleOps;
 
@@ -41,6 +43,8 @@ pub(crate) struct FneModel {
     pub e: Var,
     /// `−1e9` on the diagonal, `[1, c, c]`, built once.
     diag_neg: Tensor,
+    /// The low-rank residual on the anchored rows, under `PresetMode::Lora`.
+    pub lora: Option<PinnedLora>,
 }
 
 impl FneModel {
@@ -72,69 +76,108 @@ impl FneModel {
         Self::assemble(Var::from_tensor(&e)?, c, &dev)
     }
 
-    /// Overwrite the listed rows with `preset.rows` and, under `freeze`,
-    /// return the `[N, 1]` gradient mask that is `0` on those rows.
+    /// Overwrite the listed rows with `preset.rows` and, when the mode pins
+    /// them, return the `[N, 1]` gradient mask that is `0` on those rows.
+    /// Under `Lora` the residual factors are set up as well: `u` drawn on the
+    /// anchored rows from `seed`, `V` zero.
     pub(crate) fn apply_preset(
         &mut self,
         preset: &super::PresetRows,
+        seed: u64,
         dev: &Device,
     ) -> anyhow::Result<Option<Tensor>> {
         let (n, d) = self.e.dims2()?;
+        preset.mode.validate(d)?;
         anyhow::ensure!(
-            preset.rows.len() == preset.node.len() * d,
+            preset.rows.len() == preset.ids.len() * d,
             "fne: preset rows are {} values for {} nodes at D={d}",
             preset.rows.len(),
-            preset.node.len()
+            preset.ids.len()
         );
         let mut flat = self.e.as_tensor().flatten_all()?.to_vec1::<f32>()?;
         let mut keep = vec![1f32; n];
-        for (i, &g) in preset.node.iter().enumerate() {
+        for (i, &g) in preset.ids.iter().enumerate() {
             let g = g as usize;
             anyhow::ensure!(g < n, "fne: preset node {g} is outside the {n}-node table");
             flat[g * d..(g + 1) * d].copy_from_slice(&preset.rows[i * d..(i + 1) * d]);
             keep[g] = 0.0;
         }
         self.e.set(&Tensor::from_vec(flat, (n, d), dev)?)?;
+        if let Some(l) = preset.mode.lora() {
+            self.lora = Some(PinnedLora::new(
+                n,
+                d,
+                l.rank,
+                &preset.ids,
+                l.lr_ratio,
+                seed,
+                dev,
+            )?);
+        }
         Ok(preset
-            .freeze
+            .mode
+            .pins()
             .then(|| Tensor::from_vec(keep, (n, 1), dev))
             .transpose()?)
+    }
+
+    /// The rows named by `ids`, `[ids, D]`: the table's, plus the low-rank
+    /// residual on anchored rows. Every lookup in the model goes through here.
+    fn rows(&self, ids: &Tensor) -> Result<Tensor> {
+        let rows = gather_rows(self.e.as_tensor(), ids)?;
+        match self.lora.as_ref() {
+            None => Ok(rows),
+            Some(l) => rows + l.residual_rows(ids)?,
+        }
+    }
+
+    /// The whole `[N, D]` table with the residual folded in — for the output
+    /// only; training never forms it.
+    pub(crate) fn composed(&self) -> Result<Tensor> {
+        let e = self.e.as_tensor().detach();
+        match self.lora.as_ref() {
+            None => Ok(e),
+            Some(l) => e + l.residual()?.detach(),
+        }
     }
 
     fn assemble(e: Var, c: usize, dev: &Device) -> Result<Self> {
         let diag_neg = Tensor::eye(c.max(1), DType::F32, dev)?
             .affine(MASK_NEG, 0.0)?
             .unsqueeze(0)?;
-        Ok(Self { e, diag_neg })
+        Ok(Self {
+            e,
+            diag_neg,
+            lora: None,
+        })
     }
 
     pub(crate) fn score_blocks(&self, b: &PaddedBatch, dev: &Device) -> Result<ScoreBlocks> {
         let (k, c, u) = (b.k, b.c, b.u);
         let d = self.e.dim(1)?;
         let p = k * c;
-        let table = self.e.as_tensor();
         // Two host→device copies per batch: every id array in one, every
         // float array in the other, sliced on the device.
         let ids: Vec<u32> = [&b.lhs[..], &b.rhs[..], &b.uni_lhs[..], &b.uni_rhs[..]].concat();
         let ids = Tensor::from_slice(&ids, ids.len(), dev)?;
         let floats: Vec<f32> = [&b.col_valid[..], &b.row_w[..]].concat();
         let floats = Tensor::from_slice(&floats, floats.len(), dev)?;
-        let l = gather_rows(table, &ids.narrow(0, 0, p)?)?.reshape((k, c, d))?;
-        let r = gather_rows(table, &ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
+        let l = self.rows(&ids.narrow(0, 0, p)?)?.reshape((k, c, d))?;
+        let r = self.rows(&ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
         let pos = (&l * &r)?.sum(2)?; // [k, c]
                                       // `(1 − valid) · MASK_NEG` on pad columns, plus the cached diagonal.
-        let pad = floats
-            .narrow(0, 0, p)?
-            .reshape((k, 1, c))?
-            .affine(-MASK_NEG, MASK_NEG)?;
+        let pad = additive_pad_mask(&floats.narrow(0, 0, p)?.reshape((k, 1, c))?)?;
         let row_w = floats.narrow(0, p, p)?;
         let mask = (self.diag_neg.broadcast_as((k, c, c))? + pad.broadcast_as((k, c, c))?)?;
         let rhs_bat = (l.matmul(&r.t()?)? + &mask)?;
         let lhs_bat = (r.matmul(&l.t()?)? + &mask)?;
         let (rhs_uni, lhs_uni) = if u > 0 {
-            let ul = gather_rows(table, &ids.narrow(0, 2 * p, k * u)?)?.reshape((k, u, d))?;
-            let ur =
-                gather_rows(table, &ids.narrow(0, 2 * p + k * u, k * u)?)?.reshape((k, u, d))?;
+            let ul = self
+                .rows(&ids.narrow(0, 2 * p, k * u)?)?
+                .reshape((k, u, d))?;
+            let ur = self
+                .rows(&ids.narrow(0, 2 * p + k * u, k * u)?)?
+                .reshape((k, u, d))?;
             (Some(l.matmul(&ur.t()?)?), Some(r.matmul(&ul.t()?)?))
         } else {
             (None, None)

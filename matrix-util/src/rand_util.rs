@@ -97,6 +97,12 @@ pub fn entropy_seed() -> u64 {
     rand::rng().random()
 }
 
+/// `n` draws from `N(0, stdev²)` under `seed`, as `f32`.
+pub fn normal_f32_seeded(n: usize, stdev: f32, seed: u64) -> Vec<f32> {
+    let dist = rand_distr::Normal::new(0.0f32, stdev).expect("finite stdev");
+    collect_f32_seeded(n, dist, seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

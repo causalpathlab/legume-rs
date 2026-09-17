@@ -2,6 +2,7 @@ use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
 use crate::fit::hier::units::UnitTable;
+use crate::{LoraSpec, PresetMode};
 use std::sync::atomic::AtomicBool;
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
@@ -39,6 +40,7 @@ fn planted_programs_separate_units_and_genes() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &stop).unwrap();
@@ -73,6 +75,7 @@ fn the_stop_flag_ends_training_early_with_finite_output() {
         weight_decay: 0.0,
         seed: 1,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let stop = AtomicBool::new(true);
     let out = train(&units, &[0, 0], 2, &cfg, None, &stop).unwrap();
@@ -139,6 +142,7 @@ fn single_track_output_is_identical_through_both_constructors() {
         weight_decay: 0.0,
         seed: 17,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let labels = vec![0u32, 0, 1, 1];
     let stop = AtomicBool::new(false);
@@ -217,6 +221,7 @@ fn planted_two_track_programs() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.01,
+        device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &stop).unwrap();
@@ -292,9 +297,9 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
         .collect();
     let frozen = PresetGenes {
-        gene: gene.clone(),
+        ids: gene.clone(),
         rows: rows.clone(),
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     let cfg = HierConfig {
         n_modules: 2,
@@ -305,6 +310,7 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         weight_decay: 0.01,
         seed: 3,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &stop).unwrap();
@@ -320,8 +326,8 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
     // A free gene's row is not its random init: the module mean of the frozen
     // rows plus a residual that trained.
     let free_rho: Vec<f32> = out.rho.row(1).iter().copied().collect();
-    let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed);
-    let init_r: Vec<f32> = init.r[h..2 * h].to_vec();
+    let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed, &Device::Cpu).unwrap();
+    let init_r: Vec<f32> = to_host(init.r.as_tensor()).unwrap()[h..2 * h].to_vec();
     assert!(free_rho
         .iter()
         .zip(&init_r)
@@ -351,9 +357,9 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         })
         .collect();
     let frozen = PresetGenes {
-        gene,
+        ids: gene,
         rows: rows.clone(),
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     let cfg = HierConfig {
         n_modules: 2,
@@ -364,6 +370,7 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &stop).unwrap();
@@ -389,18 +396,19 @@ fn frozen_genes_must_be_in_range_and_match_h() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
     let bad_gene = PresetGenes {
-        gene: vec![20],
+        ids: vec![20],
         rows: vec![0.0; 4],
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     assert!(train(&units, &labels, 4, &cfg, Some(&bad_gene), &stop).is_err());
     let bad_h = PresetGenes {
-        gene: vec![0],
+        ids: vec![0],
         rows: vec![0.0; 3],
-        freeze: true,
+        mode: PresetMode::Freeze,
     };
     assert!(train(&units, &labels, 4, &cfg, Some(&bad_h), &stop).is_err());
 }
@@ -414,9 +422,9 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
     let gene: Vec<u32> = (0..20u32).collect();
     let rows: Vec<f32> = (0..20 * h).map(|i| 0.01 * i as f32 - 0.4).collect();
     let preset = PresetGenes {
-        gene: gene.clone(),
+        ids: gene.clone(),
         rows: rows.clone(),
-        freeze: false,
+        mode: PresetMode::Init,
     };
     let stop = AtomicBool::new(false);
     let cfg0 = HierConfig {
@@ -428,6 +436,7 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        device: Device::Cpu,
     };
     let start = train(&units, &labels, h, &cfg0, Some(&preset), &stop).unwrap();
     for g in 0..20 {
@@ -441,4 +450,72 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         .filter(|&g| (0..h).any(|k| (out.rho[(g, k)] - rows[g * h + k]).abs() > 1e-4))
         .count();
     assert!(moved > 10, "only {moved} of 20 preset rows trained");
+}
+
+/// Under LoRA the anchored genes move only through two shared rank-r
+/// residuals, one per module and one per gene: `out − given` on those genes
+/// is not zero and has rank ≤ 2r (H = 4 leaves room at rank 1), and the free
+/// genes and the biases still train. Rank ≥ H is refused.
+#[test]
+fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
+    let (units, labels) = planted_units();
+    let h = 4;
+    let rank = 1;
+    let gene: Vec<u32> = (0..20u32).filter(|g| g % 2 == 0).collect();
+    let rows: Vec<f32> = gene
+        .iter()
+        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
+        .collect();
+    let preset = |mode| PresetGenes {
+        ids: gene.clone(),
+        rows: rows.clone(),
+        mode,
+    };
+    let cfg = HierConfig {
+        n_modules: 2,
+        epochs: 50,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.01,
+        seed: 3,
+        offset_l2: 0.0,
+        device: Device::Cpu,
+    };
+    let stop = AtomicBool::new(false);
+    let lora = preset(PresetMode::Lora(LoraSpec {
+        rank,
+        lr_ratio: 4.0,
+        ridge: 0.0,
+    }));
+    let out = train(&units, &labels, h, &cfg, Some(&lora), &stop).unwrap();
+    let mut resid = nalgebra::DMatrix::<f32>::zeros(gene.len(), h);
+    for (i, &g) in gene.iter().enumerate() {
+        for k in 0..h {
+            resid[(i, k)] = out.rho[(g as usize, k)] - rows[i * h + k];
+        }
+    }
+    let sv = resid.singular_values();
+    assert!(sv[0] > 1e-4, "the residual never moved: {sv}");
+    assert!(
+        sv[2 * rank] <= 1e-4 * sv[0],
+        "the residual is not rank {}: singular values {sv}",
+        2 * rank
+    );
+    let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed, &Device::Cpu).unwrap();
+    let init_r = to_host(init.r.as_tensor()).unwrap();
+    let free_rho: Vec<f32> = out.rho.row(1).iter().copied().collect();
+    assert!(free_rho
+        .iter()
+        .zip(&init_r[h..2 * h])
+        .any(|(a, b)| (a - b).abs() > 1e-6));
+    assert!(gene.iter().any(|&g| out.b_feat[g as usize].abs() > 1e-6));
+    assert!(out.final_loss_per_unit.is_finite());
+
+    let full_rank = preset(PresetMode::Lora(LoraSpec {
+        rank: h,
+        lr_ratio: 1.0,
+        ridge: 0.0,
+    }));
+    assert!(train(&units, &labels, h, &cfg, Some(&full_rank), &stop).is_err());
 }
