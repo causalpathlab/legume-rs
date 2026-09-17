@@ -14,19 +14,26 @@ fn parse(argv: &[&str]) -> Result<FeatureEmbeddingArgs, clap::Error> {
 
 #[test]
 fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
-    assert_eq!(parse(&[]).unwrap().resolve(), None);
+    assert_eq!(parse(&[]).unwrap().resolve().unwrap(), None);
     assert_eq!(
         parse(&["--freeze-feature-embedding", "a"])
             .unwrap()
-            .resolve(),
+            .resolve()
+            .unwrap(),
         Some(("a", PresetMode::Freeze))
     );
     assert_eq!(
-        parse(&["--init-feature-embedding", "b"]).unwrap().resolve(),
+        parse(&["--init-feature-embedding", "b"])
+            .unwrap()
+            .resolve()
+            .unwrap(),
         Some(("b", PresetMode::Init))
     );
     assert_eq!(
-        parse(&["--lora-feature-embedding", "c"]).unwrap().resolve(),
+        parse(&["--lora-feature-embedding", "c"])
+            .unwrap()
+            .resolve()
+            .unwrap(),
         Some((
             "c",
             PresetMode::Lora(LoraSpec {
@@ -46,7 +53,8 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
             "1"
         ])
         .unwrap()
-        .resolve(),
+        .resolve()
+        .unwrap(),
         Some((
             "c",
             PresetMode::Lora(LoraSpec {
@@ -81,13 +89,30 @@ fn the_three_flags_exclude_each_other_and_the_knobs_need_lora() {
         "b"
     ])
     .is_err());
-    assert!(parse(&["--lora-rank", "4"]).is_err());
-    assert!(parse(&["--lora-lr-ratio", "2"]).is_err());
-    assert!(parse(&["--lora-ridge", "1"]).is_err());
+    // The knobs parse anywhere (the group is shared with models that select
+    // LoRA another way) and are refused at resolution without the flag.
+    for knob in [
+        ["--lora-rank", "4"],
+        ["--lora-lr-ratio", "2"],
+        ["--lora-ridge", "1"],
+    ] {
+        let err = parse(&knob).unwrap().resolve().unwrap_err().to_string();
+        assert!(
+            err.contains(knob[0]) && err.contains("--lora-feature-embedding"),
+            "{err}"
+        );
+        assert!(
+            parse(&[&["--freeze-feature-embedding", "a"][..], &knob[..]].concat())
+                .unwrap()
+                .resolve()
+                .is_err()
+        );
+    }
     assert_eq!(
         parse(&["--lora-feature-embedding", "c", "--lora-ridge", "2.5"])
             .unwrap()
             .resolve()
+            .unwrap()
             .and_then(|(_, m)| m.lora())
             .map(|l| l.ridge),
         Some(2.5)

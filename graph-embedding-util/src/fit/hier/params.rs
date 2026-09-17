@@ -47,6 +47,8 @@ impl TrackOffset {
 pub struct HierLora {
     pub module: PinnedLora,
     pub gene: PinnedLora,
+    /// LoRA+: the shared factors' learning rate over the row factors'.
+    pub lr_ratio: f32,
     /// Per-epoch ridge weight per row on each residual (see
     /// [`LoraSpec::ridge`]); the trainer spreads it over the epoch's steps
     /// like the offset ridge.
@@ -245,19 +247,11 @@ impl HierParams {
                         h,
                         rank,
                         &all_modules,
-                        lr_ratio,
                         mix_seed(self.seed, 0x4c4f_524d),
                         &self.dev,
                     )?,
-                    gene: PinnedLora::new(
-                        n_genes,
-                        h,
-                        rank,
-                        &frozen.ids,
-                        lr_ratio,
-                        self.seed,
-                        &self.dev,
-                    )?,
+                    gene: PinnedLora::new(n_genes, h, rank, &frozen.ids, self.seed, &self.dev)?,
+                    lr_ratio,
                     ridge: spec.ridge,
                 });
             }

@@ -89,12 +89,19 @@ impl PretrainedGeneEmbedding {
             .collect()
     }
 
-    /// How many rows came from the dictionary.
-    pub fn n_matched(&self) -> usize {
+    /// The rows that came from the dictionary, as ids into the gene axis.
+    pub fn matched_ids(&self) -> Vec<u32> {
         self.records
             .iter()
-            .filter(|r| r.init == InitKind::Matched)
-            .count()
+            .enumerate()
+            .filter(|(_, r)| r.init == InitKind::Matched)
+            .map(|(g, _)| g as u32)
+            .collect()
+    }
+
+    /// How many rows came from the dictionary.
+    pub fn n_matched(&self) -> usize {
+        self.matched_ids().len()
     }
 }
 
@@ -119,6 +126,15 @@ pub struct PretrainedArgs<'a> {
     /// genes, row = `π̂ μ`. Falls back to the neighbour rule when the tables are
     /// absent. `None` = the neighbour rule.
     pub membership_init: Option<graph_embedding_util::transfer::AlignKnobs>,
+}
+
+/// The dictionary's width, from the file's footer: the count of its value
+/// columns. What `--embedding-dim` takes when a pinned dictionary is given
+/// and no width is, before any data is opened.
+pub fn dictionary_width(dictionary_path: &str) -> anyhow::Result<usize> {
+    let h = matrix_util::parquet::parquet_numeric_column_count(dictionary_path)?;
+    anyhow::ensure!(h > 0, "{dictionary_path} has no value columns");
+    Ok(h)
 }
 
 /// Load, align, and fill. See the module doc for the contract; every path

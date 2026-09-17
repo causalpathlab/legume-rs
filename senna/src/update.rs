@@ -48,7 +48,7 @@ pub(crate) struct Rebase {
     /// Per-round epoch override; `None` keeps the recorded count.
     pub epochs: Option<usize>,
     /// The parent's own K and H. Growth resolves against these rather than
-    /// against the recorded arguments, because a recorded `--embedding-dim 0`
+    /// against the recorded arguments, because a recorded `--embedding-dim auto`
     /// means "auto = 2K" — which would silently resize ρ the moment K grows.
     pub parent_topics: usize,
     pub parent_embedding_dim: Option<usize>,
@@ -489,7 +489,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     };
     // Only the checkpointed families have anything to grow, and the parent's
     // own K / H are the base to grow from — the recorded arguments may say
-    // `--embedding-dim 0`, meaning "auto", which would track the grown K.
+    // `--embedding-dim auto`, meaning "auto", which would track the grown K.
     let (parent_topics, parent_embedding_dim) = if growth.is_none() {
         (0, None)
     } else {

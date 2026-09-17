@@ -26,6 +26,7 @@
 
 pub mod cell_projection;
 pub mod data;
+pub mod embedding_dim;
 pub mod eval;
 pub mod feature_qc;
 pub mod fit;
@@ -43,6 +44,7 @@ pub mod type_annotation;
 pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
 pub use data_beans_alg::refine_multilevel::RefineParams;
+pub use embedding_dim::EmbeddingDim;
 pub use eval::{
     embedding_col_names, save_embedding, save_outputs, save_outputs_named,
     write_feature_coembedding, write_module_tables, EmbeddingFileNames, OutputContext,
@@ -57,7 +59,7 @@ pub use multiome_plan::{
     detect_multiome_plan, plan_from_axes, read_file_axes, FileAxes, MultiomePlan,
 };
 pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_fixed_t};
-pub use preset_mode::{LoraSpec, PresetMode, PresetRows};
+pub use preset_mode::{LoraArgs, LoraSpec, PresetMode, PresetRows};
 
 /// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
 /// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same

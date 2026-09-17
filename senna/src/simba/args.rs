@@ -40,11 +40,12 @@ pub struct SimbaArgs {
 
     #[arg(
         long,
-        default_value_t = 50,
+        default_value_t = graph_embedding_util::EmbeddingDim::Fixed(50),
+        value_name = "D|auto",
         alias = "dim-embedding",
-        help = "Embedding dimension D (SIMBA: 50; 0 = the width of a given feature embedding)"
+        help = "Embedding dimension D (SIMBA: 50; auto = the width of a given feature embedding)"
     )]
-    pub(crate) embedding_dim: usize,
+    pub(crate) embedding_dim: graph_embedding_util::EmbeddingDim,
 
     #[command(flatten)]
     #[serde(flatten)]

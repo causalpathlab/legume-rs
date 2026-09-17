@@ -6,7 +6,7 @@ description.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.7.0"
+version = "0.7.1"
 
 [lib]
 name = "graph_embedding_util"
@@ -57,6 +57,7 @@ serde = { workspace = true }
 
 # Local-only, for the #[ignore] real-data harnesses (not committed).
 [dev-dependencies]
+serde_json = { workspace = true }
 candle-util = { workspace = true }
 data-beans = { workspace = true }
 matrix-util = { workspace = true }
