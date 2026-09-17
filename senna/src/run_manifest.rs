@@ -1115,7 +1115,7 @@ pub fn default_path(prefix: &str) -> String {
 pub struct InheritedFromManifest {
     pub data_files: Vec<Box<str>>,
     pub batch_files: Vec<Box<str>>,
-    /// `--init-feature-embedding` / `--freeze-feature-embedding` prefix.
+    /// `--{freeze,init,lora}-feature-embedding` prefix.
     /// Resolved to the manifest's `prefix` after directory resolution;
     /// the spec resolver downstream will probe `{prefix}.dictionary.parquet`
     /// (bge/fne layout) or `{prefix}.feature_embedding.parquet`

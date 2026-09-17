@@ -4,7 +4,7 @@
 
 use super::params::{to_host2, HierParams, PresetGenes};
 use super::partition::{Partition, TrackSupport, UnitModules};
-use super::step::{apply, step_loss, Optimizers, StepPlan, StepStats};
+use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
 use super::units::UnitTable;
 use crate::progress::new_progress_bar;
 use candle_util::candle_core::Device;
@@ -160,7 +160,7 @@ pub fn train(
         params.preset(f, &part.module_of)?;
         info!(
             "Phase 1 (hier) — {} of {d} gene rows {}",
-            f.gene.len(),
+            f.ids.len(),
             f.mode.describe()
         );
     }
@@ -189,8 +189,14 @@ pub fn train(
                 break 'epochs;
             }
             let plan = draw_plan(chunk, &pickers, n_m, n_t, cfg.modules_per_unit, &mut rng);
-            let (stats, loss): (StepStats, _) =
-                step_loss(&params, units, &um, &part, &sup, &plan, offset_l2_step)?;
+            let ctx = StepCtx {
+                units,
+                um: &um,
+                part: &part,
+                sup: &sup,
+                plan: &plan,
+            };
+            let (stats, loss): (StepStats, _) = step_loss(&params, &ctx, offset_l2_step)?;
             let grads = loss.backward()?;
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;

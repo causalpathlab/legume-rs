@@ -59,7 +59,7 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
     let dev = Device::Cpu;
     let (h, module_of) = (2usize, vec![0u32, 0, 1, 1]);
     let given = PresetGenes {
-        gene: vec![0, 1, 3],
+        ids: vec![0, 1, 3],
         rows: vec![1.0, 2.0, 3.0, 4.0, -1.0, 0.5],
         mode: PresetMode::Freeze,
     };
@@ -76,19 +76,19 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
         &[-1.0, 0.5],
         "module 1 mean of its one given row"
     );
-    for (i, &g) in given.gene.iter().enumerate() {
+    for (i, &g) in given.ids.iter().enumerate() {
         let m = module_of[g as usize] as usize;
         for k in 0..h {
-            let composed = mu[m * h + k] + r[g as usize * h + k];
+            let composed: f32 = mu[m * h + k] + r[g as usize * h + k];
             assert!((composed - given.rows[i * h + k]).abs() < 1e-6);
         }
     }
-    assert!(p.mu_frozen && p.is_frozen_gene(0) && !p.is_frozen_gene(2));
+    assert!(p.mu_mask.is_some() && p.is_frozen_gene(0) && !p.is_frozen_gene(2));
     let mask = to_host2(p.r_mask.as_ref().unwrap()).unwrap();
     assert_eq!(mask, vec![0.0, 0.0, 1.0, 0.0]);
     assert!(p.lora.is_none());
     let (rho, _) = p.compose(&[0, 0, 0, 0], &[0, 1, 2, 3], &module_of).unwrap();
-    for (i, &g) in given.gene.iter().enumerate() {
+    for (i, &g) in given.ids.iter().enumerate() {
         for k in 0..h {
             assert_eq!(rho[(g as usize, k)], given.rows[i * h + k], "verbatim");
         }
@@ -103,7 +103,7 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
         &module_of,
     )
     .unwrap();
-    assert!(!q.mu_frozen && q.r_mask.is_none() && q.frozen_gene.is_empty());
+    assert!(q.mu_mask.is_none() && q.r_mask.is_none() && q.frozen_gene.is_empty());
 
     let mut l = HierParams::new(2, 2, 4, h, 1, &dev).unwrap();
     l.preset(
@@ -118,20 +118,23 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
     )
     .unwrap();
     let lora = l.lora.as_ref().expect("factors under lora");
-    assert_eq!(lora.u.dims(), &[4, 1]);
-    assert_eq!(lora.v_g.dims(), &[1, h]);
-    assert_eq!(lora.a.dims(), &[2, 1]);
-    assert_eq!(lora.v_m.dims(), &[1, h]);
-    assert!(host(&lora.a).iter().all(|&x| x != 0.0));
-    assert!(host(&lora.v_m).iter().all(|&x| x == 0.0));
-    assert_eq!(to_host2(&lora.u_mask).unwrap(), vec![1.0, 1.0, 0.0, 1.0]);
-    let u = host(&lora.u);
+    assert_eq!(lora.gene.u.dims(), &[4, 1]);
+    assert_eq!(lora.gene.v.dims(), &[1, h]);
+    assert_eq!(lora.module.u.dims(), &[2, 1]);
+    assert_eq!(lora.module.v.dims(), &[1, h]);
+    assert!(host(&lora.module.u).iter().all(|&x| x != 0.0));
+    assert!(host(&lora.module.v).iter().all(|&x| x == 0.0));
+    assert_eq!(
+        to_host2(&lora.gene.u_mask).unwrap(),
+        vec![1.0, 1.0, 0.0, 1.0]
+    );
+    let u = host(&lora.gene.u);
     assert!(u[0] != 0.0 && u[1] != 0.0 && u[2] == 0.0 && u[3] != 0.0);
     assert!(
-        host(&lora.v_g).iter().all(|&x| x == 0.0),
+        host(&lora.gene.v).iter().all(|&x| x == 0.0),
         "the residual starts at nothing"
     );
-    assert!(l.mu_frozen && l.r_mask.is_some());
+    assert!(l.mu_mask.is_some() && l.r_mask.is_some());
     assert!(HierParams::new(2, 2, 4, h, 1, &dev)
         .unwrap()
         .preset(

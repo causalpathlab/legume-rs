@@ -22,8 +22,9 @@ use super::{INIT_STDEV, MASK_NEG};
 use crate::loss::softmax_nce;
 use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
 use candle_util::fast_index::gather_rows;
-use candle_util::lora::LoraFactors;
-use matrix_util::rand_util::{collect_f32_seeded, mix_seed, name_seed};
+use candle_util::lora::PinnedLora;
+use candle_util::masking::additive_pad_mask;
+use matrix_util::rand_util::name_seed;
 use matrix_util::traits::SampleOps;
 
 /// The score blocks of one batch, before the loss.
@@ -43,24 +44,7 @@ pub(crate) struct FneModel {
     /// `−1e9` on the diagonal, `[1, c, c]`, built once.
     diag_neg: Tensor,
     /// The low-rank residual on the anchored rows, under `PresetMode::Lora`.
-    pub lora: Option<FneLora>,
-}
-
-/// A row's table value is `e_n + u_n · V` (`candle_util::lora`): `u` is
-/// `[N, rank]`, zero and gradient-masked off the anchored rows; `V` is
-/// `[rank, D]` and shared. Held as `Var`s because RowAdagrad steps them.
-pub(crate) struct FneLora {
-    pub u: Var,
-    pub v: Var,
-    /// `[N, 1]`, `1` on the anchored rows.
-    pub u_mask: Tensor,
-    pub lr_ratio: f32,
-}
-
-impl FneLora {
-    fn factors(&self) -> LoraFactors {
-        LoraFactors::from_parts(self.u.as_tensor().clone(), self.v.as_tensor().clone())
-    }
+    pub lora: Option<PinnedLora>,
 }
 
 impl FneModel {
@@ -105,14 +89,14 @@ impl FneModel {
         let (n, d) = self.e.dims2()?;
         preset.mode.validate(d)?;
         anyhow::ensure!(
-            preset.rows.len() == preset.node.len() * d,
+            preset.rows.len() == preset.ids.len() * d,
             "fne: preset rows are {} values for {} nodes at D={d}",
             preset.rows.len(),
-            preset.node.len()
+            preset.ids.len()
         );
         let mut flat = self.e.as_tensor().flatten_all()?.to_vec1::<f32>()?;
         let mut keep = vec![1f32; n];
-        for (i, &g) in preset.node.iter().enumerate() {
+        for (i, &g) in preset.ids.iter().enumerate() {
             let g = g as usize;
             anyhow::ensure!(g < n, "fne: preset node {g} is outside the {n}-node table");
             flat[g * d..(g + 1) * d].copy_from_slice(&preset.rows[i * d..(i + 1) * d]);
@@ -120,22 +104,15 @@ impl FneModel {
         }
         self.e.set(&Tensor::from_vec(flat, (n, d), dev)?)?;
         if let Some((rank, lr_ratio)) = preset.mode.lora() {
-            let dist =
-                rand_distr::Normal::new(0.0f32, (1.0 / rank as f32).sqrt()).expect("finite stdev");
-            let draw =
-                collect_f32_seeded(preset.node.len() * rank, dist, mix_seed(seed, 0x4c4f_5241));
-            let mut u = vec![0f32; n * rank];
-            for (i, &g) in preset.node.iter().enumerate() {
-                let g = g as usize;
-                u[g * rank..(g + 1) * rank].copy_from_slice(&draw[i * rank..(i + 1) * rank]);
-            }
-            let u_mask: Vec<f32> = keep.iter().map(|k| 1.0 - k).collect();
-            self.lora = Some(FneLora {
-                u: Var::from_tensor(&Tensor::from_vec(u, (n, rank), dev)?)?,
-                v: Var::zeros((rank, d), DType::F32, dev)?,
-                u_mask: Tensor::from_vec(u_mask, (n, 1), dev)?,
+            self.lora = Some(PinnedLora::new(
+                n,
+                d,
+                rank,
+                &preset.ids,
                 lr_ratio,
-            });
+                seed,
+                dev,
+            )?);
         }
         Ok(preset
             .mode
@@ -150,7 +127,7 @@ impl FneModel {
         let rows = gather_rows(self.e.as_tensor(), ids)?;
         match self.lora.as_ref() {
             None => Ok(rows),
-            Some(l) => rows + l.factors().residual_rows(ids)?,
+            Some(l) => rows + l.residual_rows(ids)?,
         }
     }
 
@@ -160,7 +137,7 @@ impl FneModel {
         let e = self.e.as_tensor().detach();
         match self.lora.as_ref() {
             None => Ok(e),
-            Some(l) => e + l.factors().residual()?.detach(),
+            Some(l) => e + l.residual()?.detach(),
         }
     }
 
@@ -189,10 +166,7 @@ impl FneModel {
         let r = self.rows(&ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
         let pos = (&l * &r)?.sum(2)?; // [k, c]
                                       // `(1 − valid) · MASK_NEG` on pad columns, plus the cached diagonal.
-        let pad = floats
-            .narrow(0, 0, p)?
-            .reshape((k, 1, c))?
-            .affine(-MASK_NEG, MASK_NEG)?;
+        let pad = additive_pad_mask(&floats.narrow(0, 0, p)?.reshape((k, 1, c))?)?;
         let row_w = floats.narrow(0, p, p)?;
         let mask = (self.diag_neg.broadcast_as((k, c, c))? + pad.broadcast_as((k, c, c))?)?;
         let rhs_bat = (l.matmul(&r.t()?)? + &mask)?;

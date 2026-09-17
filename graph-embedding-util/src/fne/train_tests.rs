@@ -582,7 +582,7 @@ fn preset_rows_are_pinned_under_freeze_and_only_started_from_otherwise() {
     };
     let frozen = FneConfig {
         preset: Some(PresetRows {
-            node: node.clone(),
+            ids: node.clone(),
             rows: rows.clone(),
             mode: PresetMode::Freeze,
         }),
@@ -603,7 +603,7 @@ fn preset_rows_are_pinned_under_freeze_and_only_started_from_otherwise() {
 
     let init = FneConfig {
         preset: Some(PresetRows {
-            node: node.clone(),
+            ids: node.clone(),
             rows: rows.clone(),
             mode: PresetMode::Init,
         }),
@@ -626,7 +626,7 @@ fn preset_rows_must_index_the_table_and_match_d() {
         dim: 4,
         epochs: 1,
         preset: Some(PresetRows {
-            node,
+            ids: node,
             rows,
             mode: PresetMode::Freeze,
         }),
@@ -666,7 +666,7 @@ fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
     };
     let lora = FneConfig {
         preset: Some(PresetRows {
-            node: node.clone(),
+            ids: node.clone(),
             rows: rows.clone(),
             mode: PresetMode::Lora {
                 rank,
@@ -695,7 +695,7 @@ fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
 
     let full_rank = FneConfig {
         preset: Some(PresetRows {
-            node,
+            ids: node,
             rows,
             mode: PresetMode::Lora {
                 rank: d,

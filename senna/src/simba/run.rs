@@ -116,7 +116,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         eval_fraction: args.train.eval_fraction,
         n_bins: args.n_bins,
         coembed_t: args.coembed_temp,
-        preset_genes: preset.map(|p| crate::feature_preset::preset_rows(p, |g| g)),
+        preset_genes: preset,
         seed: args.train.seed,
         device: args.train.device.to_device(args.train.device_no)?,
     };

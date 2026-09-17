@@ -80,7 +80,7 @@ pub struct SimbaConfig {
     pub coembed_t: f64,
     /// Gene rows given from outside, by index into `hvg_rows`: started from,
     /// pinned, or anchored with a low-rank residual (see [`crate::fne::PresetRows`]).
-    pub preset_genes: Option<crate::fne::PresetRows>,
+    pub preset_genes: Option<crate::PresetRows>,
     pub seed: u64,
     pub device: Device,
 }

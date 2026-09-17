@@ -294,14 +294,12 @@ impl FeatureEmbedding {
 /// [`crate::lora::fold`] for the feature table registered under `prefix`:
 /// `{prefix}.feature.embeddings` absorbs `{prefix}.feature.lora_u · lora_v`.
 pub fn fold_lora(varmap: &VarMap, prefix: &str) -> Result<()> {
-    let name = |slot: &str| {
-        if prefix.is_empty() {
-            slot.to_string()
-        } else {
-            format!("{prefix}.{slot}")
-        }
-    };
-    crate::lora::fold(varmap, &name(FREE_VAR_NAME), &name(LORA_PREFIX))
+    use crate::lora::join;
+    crate::lora::fold(
+        varmap,
+        &join(prefix, FREE_VAR_NAME),
+        &join(prefix, LORA_PREFIX),
+    )
 }
 
 #[cfg(test)]
