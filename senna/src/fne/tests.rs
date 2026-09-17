@@ -37,7 +37,10 @@ fn gene_kind() -> FeatureNameKind {
 #[test]
 fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
     let a: FneArgs = parse_args(&["fne", "-o", "x"]);
-    assert_eq!(a.embedding_dim, 128);
+    assert_eq!(
+        a.embedding_dim,
+        graph_embedding_util::EmbeddingDim::Fixed(128)
+    );
     assert_eq!(a.train.epochs, 10);
     assert_eq!(a.train.learning_rate, 0.1);
     assert_eq!(a.train.batch_size, 1000);
@@ -90,7 +93,10 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
     assert!(matches!(b.name_kind(), FeatureNameKind::Exact));
     // The serde default (for manifests missing a field) is the clap default.
     let d: FneArgs = serde_json::from_str("{}").unwrap();
-    assert_eq!(d.embedding_dim, 128);
+    assert_eq!(
+        d.embedding_dim,
+        graph_embedding_util::EmbeddingDim::Fixed(128)
+    );
 }
 
 #[test]
@@ -723,7 +729,7 @@ fn fne_takes_every_side_information_source_at_once_and_exports_the_text() {
 
 /// Freezing to an earlier run's table: the matched gene rows come out of a
 /// second run exactly as the first run wrote them, at the first run's H even
-/// with `--embedding-dim 0`, while the other nodes still train.
+/// with `--embedding-dim auto`, while the other nodes still train.
 #[test]
 fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
     let dir = tempfile::tempdir().unwrap();
@@ -762,7 +768,7 @@ fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
         "--freeze-feature-embedding",
         &first,
         "--embedding-dim",
-        "0",
+        "auto",
         "-i",
         "5",
         "--seed",
@@ -841,7 +847,7 @@ fn fne_anchors_gene_rows_with_a_low_rank_residual() {
         "--lora-lr-ratio",
         "4",
         "--embedding-dim",
-        "0",
+        "auto",
         "-i",
         "5",
         "--seed",

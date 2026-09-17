@@ -101,10 +101,7 @@ impl PretrainedGeneEmbedding {
 
     /// How many rows came from the dictionary.
     pub fn n_matched(&self) -> usize {
-        self.records
-            .iter()
-            .filter(|r| r.init == InitKind::Matched)
-            .count()
+        self.matched_ids().len()
     }
 }
 

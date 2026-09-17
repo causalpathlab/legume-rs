@@ -132,8 +132,19 @@ pub trait ComposedFeat {
     fn compose(&self) -> Result<Tensor>;
     /// Composed rows for `idx`, `[b, H]`, on the live parameters.
     fn compose_rows(&self, idx: &Tensor) -> Result<Tensor>;
-    /// The per-row table that can overfit row by row and takes the ridge, if any.
-    fn ridge_table(&self) -> Option<&Tensor>;
+    /// The shrinkage on whatever this parameterization can overfit row by
+    /// row: the per-row residual at `table_lam` (none at `0`), or, for a
+    /// residual with a weight of its own, that. `None` when nothing applies.
+    fn ridge(&self, table_lam: f64) -> Result<Option<Tensor>>;
+}
+
+/// The table ridge at `lam`, or none at `0`.
+fn table_ridge(table: &Tensor, lam: f64) -> Result<Option<Tensor>> {
+    if lam > 0.0 {
+        Ok(Some(crate::loss::embedding_ridge(table, lam)?))
+    } else {
+        Ok(None)
+    }
 }
 
 impl ComposedFeat for FeatAdapter {
@@ -153,8 +164,11 @@ impl ComposedFeat for FeatAdapter {
         Ok(rows)
     }
 
-    fn ridge_table(&self) -> Option<&Tensor> {
-        self.residual.as_ref()
+    fn ridge(&self, table_lam: f64) -> Result<Option<Tensor>> {
+        match &self.residual {
+            Some(r) => table_ridge(r, table_lam),
+            None => Ok(None),
+        }
     }
 }
 
@@ -170,27 +184,35 @@ impl FeatAdapter {
 /// caller pins its anchored rows, by a post-step restore, and lets the rest
 /// train); the factors are a [`PinnedLora`] whose `u` is masked to the
 /// anchored rows inside the composition, so a free row's factor never gets
-/// gradient. The residual is shrunk by [`Self::ridge`] at the LoRA ridge
-/// weight, not by the table ridge, so [`ComposedFeat::ridge_table`] is `None`.
+/// gradient. The residual has a ridge of its own, `ridge_step ·
+/// Σ_g ‖u_g · v‖²` per step, in place of the table ridge.
 pub struct FeatLora {
     /// The trained table, `[n_features, H]`, shared with the model's `e_feat`
     /// Var at construction (a clone of the same storage).
     pub base: Tensor,
     pub lora: PinnedLora,
+    /// The residual's ridge weight per optimizer step; the trainer sets it
+    /// once it knows its steps per epoch. `0` = none.
+    pub ridge_step: f64,
 }
 
 impl ComposedFeat for FeatLora {
     fn compose(&self) -> Result<Tensor> {
-        self.base.add(&self.lora.masked_factors()?.residual()?)
+        self.base.add(&self.lora.residual_masked()?)
     }
 
     fn compose_rows(&self, idx: &Tensor) -> Result<Tensor> {
-        let rows = gather_rows(&self.base, idx)?;
-        rows.add(&self.lora.masked_factors()?.residual_rows(idx)?)
+        gather_rows(&self.base, idx)?.add(&self.lora.residual_rows_masked(idx)?)
     }
 
-    fn ridge_table(&self) -> Option<&Tensor> {
-        None
+    /// The residual's own ridge; the table ridge does not apply to an
+    /// anchored table.
+    fn ridge(&self, _table_lam: f64) -> Result<Option<Tensor>> {
+        if self.ridge_step > 0.0 {
+            Ok(Some((self.lora.ridge()? * self.ridge_step)?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -198,12 +220,6 @@ impl FeatLora {
     /// The full composed table `[n_features, H]`, on the live parameters.
     pub fn compose(&self) -> Result<Tensor> {
         ComposedFeat::compose(self)
-    }
-
-    /// The residual's summed row norm² over the anchored rows, without forming
-    /// it (see [`candle_util::lora::LoraFactors::ridge`]).
-    pub fn ridge(&self) -> Result<Tensor> {
-        self.lora.masked_factors()?.ridge()
     }
 }
 
@@ -281,21 +297,18 @@ impl JointEmbedModel {
         })
     }
 
-    /// The L2 term for whichever gene-side table can overfit row by row under
-    /// this parameterization: the free `e_feat` Var, the adapter's or the module
-    /// model's per-feature residual, or nothing (an adapter without a residual
+    /// The shrinkage on whichever gene-side table can overfit row by row under
+    /// this parameterization: the free `e_feat` Var or the adapter's / module
+    /// model's per-feature residual at `table_lam` (none at `0`), the anchored
+    /// model's own residual ridge, or nothing (an adapter without a residual
     /// trains only the shared map).
     ///
     /// Owning this here keeps a trainer from ridging `e_feat` on a model where
     /// that field is a detached snapshot, which is silently inert.
-    pub fn feature_ridge(&self, lam: f64) -> Result<Option<Tensor>> {
-        let table = match self.composed() {
-            Some(c) => c.ridge_table(),
-            None => Some(&self.e_feat),
-        };
-        match table {
-            Some(t) => Ok(Some(crate::loss::embedding_ridge(t, lam)?)),
-            None => Ok(None),
+    pub fn feature_ridge(&self, table_lam: f64) -> Result<Option<Tensor>> {
+        match self.composed() {
+            Some(c) => c.ridge(table_lam),
+            None => table_ridge(&self.e_feat, table_lam),
         }
     }
 
@@ -353,15 +366,7 @@ impl JointEmbedModel {
             );
         }
         let n_features = self.e_feat.dims()[0];
-        let lora = PinnedLora::new(
-            n_features,
-            self.embedding_dim,
-            rank,
-            anchored,
-            1.0,
-            seed,
-            dev,
-        )?;
+        let lora = PinnedLora::new(n_features, self.embedding_dim, rank, anchored, seed, dev)?;
         let (u_name, v_name) = candle_util::lora::factor_names(E_FEAT_VAR_NAME);
         {
             let mut tbl = varmap.data().lock().unwrap();
@@ -371,6 +376,7 @@ impl JointEmbedModel {
         self.lora = Some(FeatLora {
             base: self.e_feat.clone(),
             lora,
+            ridge_step: 0.0,
         });
         Ok(self)
     }

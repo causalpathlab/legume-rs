@@ -76,7 +76,10 @@ mod embedding_dim {
     fn without_a_dictionary_the_flag_or_the_default_decides() {
         assert_eq!(dim(&[], None).unwrap(), DEFAULT_EMBEDDING_DIM);
         assert_eq!(dim(&["--embedding-dim", "32"], None).unwrap(), 32);
-        assert!(dim(&["--embedding-dim", "0"], None).is_err());
+        assert_eq!(
+            dim(&["--embedding-dim", "auto"], None).unwrap(),
+            DEFAULT_EMBEDDING_DIM
+        );
     }
 
     #[test]

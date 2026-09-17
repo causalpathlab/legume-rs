@@ -147,7 +147,8 @@ fn an_optimizer_step_leaves_the_unanchored_factors_at_zero() {
     assert_ne!(after[2], before[2]);
 }
 
-/// The ridge is the residual's summed row norm² over the anchored rows.
+/// The ridge is the residual's summed row norm² over the anchored rows, at
+/// the residual's own step weight.
 #[test]
 fn the_ridge_is_the_anchored_residuals_summed_row_norm() {
     let (m, vm) = build();
@@ -157,13 +158,21 @@ fn the_ridge_is_the_anchored_residuals_summed_row_norm() {
         .unwrap();
     let u = var(&vm, &u_name).to_vec2::<f32>().unwrap();
     let want: f32 = [0usize, 2].iter().map(|&g| u[g][0] * u[g][0] * 25.0).sum();
+    let mut m = m;
+    m.lora.as_mut().unwrap().ridge_step = 0.5;
+    // The table ridge does not apply to an anchored table: only the
+    // residual's own weight counts.
     let got = m
-        .lora
-        .as_ref()
+        .feature_ridge(7.0)
         .unwrap()
-        .ridge()
         .unwrap()
         .to_scalar::<f32>()
         .unwrap();
-    assert!((got - want).abs() < 1e-4 * want.max(1.0), "{got} vs {want}");
+    assert!(
+        (got - 0.5 * want).abs() < 1e-4 * want.max(1.0),
+        "{got} vs {}",
+        0.5 * want
+    );
+    m.lora.as_mut().unwrap().ridge_step = 0.0;
+    assert!(m.feature_ridge(7.0).unwrap().is_none());
 }

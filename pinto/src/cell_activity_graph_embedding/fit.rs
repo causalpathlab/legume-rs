@@ -1003,9 +1003,9 @@ pub fn fit_cell_activity_graph_embedding(
     };
     let steps_per_epoch = genes_per_epoch_actual.div_ceil(gene_batch_size);
     // The LoRA ridge is a per-epoch weight; every step takes its share.
-    let lora_ridge_step = lora_plus.map_or(0.0, |lp| {
-        f64::from(lp.ridge) / steps_per_epoch.max(1) as f64
-    });
+    if let (Some(l), Some(lp)) = (model.lora.as_mut(), lora_plus.as_ref()) {
+        l.ridge_step = f64::from(lp.ridge) / steps_per_epoch.max(1) as f64;
+    }
     let total_steps = args.epochs * steps_per_epoch.max(1);
     let train_bar = new_progress_bar(total_steps as u64).with_message("training steps");
 
@@ -1139,22 +1139,21 @@ pub fn fit_cell_activity_graph_embedding(
             if args.embedding_l2 > 0.0 {
                 // geu's ridge, not a local copy: the reduction is the whole
                 // content of this penalty and it was wrong here in the same way.
-                let lam = args.embedding_l2 as f64;
-                total = (total + embedding_ridge(&model.e_cell, lam)?)?;
-                // Which gene-side table gets the L2 is a model property
-                // (`feature_ridge`: the free table, the adapter's residual, or
-                // nothing). Freeze is the one cage-local exception: a fixed
-                // table needs no shrinkage, and the ridge would only push
-                // gradient at rows the restore below reverts anyway.
-                if frozen_gene.is_none() {
-                    if let Some(ridge) = model.feature_ridge(lam)? {
-                        total = (total + ridge)?;
-                    }
-                }
+                total = (total + embedding_ridge(&model.e_cell, args.embedding_l2 as f64)?)?;
             }
-            // The residual's own shrinkage, on the anchored rows' factors.
-            if let (Some(l), true) = (&model.lora, lora_ridge_step > 0.0) {
-                total = (total + (l.ridge()? * lora_ridge_step)?)?;
+            // Which gene-side shrinkage applies is a model property
+            // (`feature_ridge`: the free table or the adapter's residual at
+            // the table ridge, the anchored model's own residual ridge, or
+            // nothing). Pinned rows are the one cage-local exception: the
+            // table ridge would only push gradient at rows the restore below
+            // reverts anyway, so it is off under freeze and lora.
+            let table_lam = if frozen_gene.is_some() {
+                0.0
+            } else {
+                args.embedding_l2 as f64
+            };
+            if let Some(ridge) = model.feature_ridge(table_lam)? {
+                total = (total + ridge)?;
             }
             // Exact pseudobulk–module term + membership priors, once per optimizer
             // step, through the same functions geu's composite trainer uses: draw

@@ -115,15 +115,17 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         value_name = "H",
-        help = "Cell embedding dimensionality (default 16, or a pinned dictionary's width)",
-        long_help = "Cell embedding dimensionality. Default 16.\n\
+        default_value_t = graph_embedding_util::EmbeddingDim::Auto,
+        value_name = "H|auto",
+        help = "Cell embedding dimensionality (auto = a pinned dictionary's width, else 16)",
+        long_help = "Cell embedding dimensionality. auto is the default.\n\
                      With --gene-embedding under freeze, free or lora the rows are\n\
-                     installed verbatim, so the width is the dictionary's and this\n\
-                     flag may be left out; given, it must agree.\n\
-                     The adapt mode maps the dictionary into its own width, so the\n\
-                     default holds there."
+                     installed verbatim, so auto is the dictionary's width and a\n\
+                     given width must agree with it.\n\
+                     Otherwise auto is 16; the adapt mode maps the dictionary into\n\
+                     this run's own width."
     )]
-    pub embedding_dim: Option<usize>,
+    pub embedding_dim: graph_embedding_util::EmbeddingDim,
 
     #[arg(
         long,
@@ -580,12 +582,10 @@ impl CellActivityGraphEmbeddingArgs {
              --gene-embedding-mode adapt trains one; under another mode the flag \
              would be read and ignored. Drop it, or use the adapt mode."
         );
-        if self.gene_embedding_mode != GeneEmbeddingMode::Lora {
-            if let Some(flag) = self.lora.given_flag() {
-                anyhow::bail!("{flag} is read under --gene-embedding-mode lora only");
-            }
-        }
-        Ok(())
+        self.lora.refuse_unless_selected(
+            self.gene_embedding_mode == GeneEmbeddingMode::Lora,
+            "--gene-embedding-mode lora",
+        )
     }
 
     /// The embedding width this run trains at: the flag, else a pinned
@@ -599,21 +599,10 @@ impl CellActivityGraphEmbeddingArgs {
         let pinned = dictionary_width.filter(|_| {
             self.gene_embedding.is_some() && self.gene_embedding_mode != GeneEmbeddingMode::Adapt
         });
-        let dim = match (self.embedding_dim, pinned) {
-            (Some(d), Some(h)) => {
-                anyhow::ensure!(
-                    d == h,
-                    "--gene-embedding is {h} dimensions wide but --embedding-dim is {d}; \
-                     leave --embedding-dim out to take the dictionary's width, or use \
-                     --gene-embedding-mode adapt, which allows the widths to differ"
-                );
-                d
-            }
-            (Some(d), None) => d,
-            (None, Some(h)) => h,
-            (None, None) => DEFAULT_EMBEDDING_DIM,
-        };
-        anyhow::ensure!(dim > 0, "embedding-dim must be > 0");
+        let dim = self
+            .embedding_dim
+            .resolve(pinned)?
+            .unwrap_or(DEFAULT_EMBEDDING_DIM);
         if self.gene_embedding_mode == GeneEmbeddingMode::Lora {
             graph_embedding_util::PresetMode::Lora(self.lora.spec()).validate(dim)?;
         }

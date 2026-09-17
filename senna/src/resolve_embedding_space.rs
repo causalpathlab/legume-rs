@@ -93,10 +93,11 @@ pub struct RestArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Embedding dimension H (0 = K, the topic count)",
+        default_value_t = graph_embedding_util::EmbeddingDim::Auto,
+        value_name = "H|auto",
+        help = "Embedding dimension H (auto = K, the topic count)",
         long_help = "Dimensionality H of the shared cell+gene space.\n\
-                     The default of 0 uses K, the number of topics in θ.\n\
+                     The default, auto, uses K, the number of topics in θ.\n\
                      \n\
                      Training runs against the counts, not a closed-form SVD of β.\n\
                      So H may be set LARGER than K.\n\
@@ -105,7 +106,7 @@ pub struct RestArgs {
                      H < K compresses instead.\n\
                      At H = K the geometry nearly recasts the topic dictionary."
     )]
-    embedding_dim: usize,
+    embedding_dim: graph_embedding_util::EmbeddingDim,
 
     #[arg(
         short = 'i',
@@ -294,11 +295,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     let k = theta_mat.mat.ncols();
     anyhow::ensure!(k > 0, "θ ({theta_path}) has zero columns");
     let theta_full = theta_mat.mat.map(f32::exp); // log θ → θ
-    let h = if args.embedding_dim == 0 {
-        k
-    } else {
-        args.embedding_dim
-    };
+    let h = args.embedding_dim.resolve(None)?.unwrap_or(k);
 
     let data_files = inherit_paths(args.data_files.as_deref(), &manifest.data.input, &dir);
     anyhow::ensure!(

@@ -105,7 +105,8 @@ impl Default for LoraSpec {
 /// The three LoRA knobs as a clap group, for every command that anchors a
 /// table: each is optional and falls back to [`LoraSpec::default`]. The
 /// command that flattens this decides which of its own flags selects the LoRA
-/// mode, and refuses a knob given without it through [`Self::is_given`].
+/// mode and tells [`Self::refuse_unless_selected`], since clap cannot tie a
+/// shared group to one host's flag.
 #[derive(clap::Args, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LoraArgs {
     #[arg(
@@ -146,15 +147,17 @@ pub struct LoraArgs {
 }
 
 impl LoraArgs {
-    /// Whether any knob was given on the command line.
-    #[must_use]
-    pub fn is_given(&self) -> bool {
-        self.lora_rank.is_some() || self.lora_lr_ratio.is_some() || self.lora_ridge.is_some()
+    /// Refuse a knob given while `selector` (the host's flag or mode that
+    /// reads the knobs) is not in effect.
+    pub fn refuse_unless_selected(&self, selected: bool, selector: &str) -> anyhow::Result<()> {
+        match self.given_flag() {
+            Some(flag) if !selected => anyhow::bail!("{flag} is read with {selector} only"),
+            _ => Ok(()),
+        }
     }
 
     /// The flag of the first knob given, for a refusal message.
-    #[must_use]
-    pub fn given_flag(&self) -> Option<&'static str> {
+    fn given_flag(&self) -> Option<&'static str> {
         if self.lora_rank.is_some() {
             Some("--lora-rank")
         } else if self.lora_lr_ratio.is_some() {

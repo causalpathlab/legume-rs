@@ -431,7 +431,10 @@ impl Optimizers {
                 })
                 .collect::<CResult<_>>()?,
             lora: match params.lora.as_ref() {
-                Some(l) => Some([l.module.optimizers(lr, dev)?, l.gene.optimizers(lr, dev)?]),
+                Some(l) => Some([
+                    l.module.optimizers(lr, l.lr_ratio, dev)?,
+                    l.gene.optimizers(lr, l.lr_ratio, dev)?,
+                ]),
                 None => None,
             },
         })

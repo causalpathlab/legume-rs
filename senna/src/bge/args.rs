@@ -67,11 +67,12 @@ pub struct BgeArgs {
 
     #[arg(
         long,
-        default_value_t = 128,
-        help = "Embedding dimension H (0 = the width of a given feature embedding)",
+        default_value_t = graph_embedding_util::EmbeddingDim::Fixed(128),
+        value_name = "H|auto",
+        help = "Embedding dimension H (auto = the width of a given feature embedding)",
         alias = "dim-embedding"
     )]
-    pub(crate) embedding_dim: usize,
+    pub(crate) embedding_dim: graph_embedding_util::EmbeddingDim,
 
     #[command(flatten)]
     #[serde(flatten)]

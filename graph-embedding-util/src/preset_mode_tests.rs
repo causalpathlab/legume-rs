@@ -77,16 +77,27 @@ mod lora_args {
     }
 
     #[test]
-    fn nothing_given_is_the_default_spec_and_not_given() {
+    fn nothing_given_is_the_default_spec_and_passes_either_way() {
         let a = parse(&[]);
-        assert!(!a.is_given());
+        assert!(a.refuse_unless_selected(false, "--x").is_ok());
+        assert!(a.refuse_unless_selected(true, "--x").is_ok());
         assert_eq!(a.spec(), LoraSpec::default());
+    }
+
+    #[test]
+    fn a_knob_is_refused_unless_its_selector_is_in_effect_naming_both() {
+        let a = parse(&["--lora-ridge", "1"]);
+        assert!(a.refuse_unless_selected(true, "--x").is_ok());
+        let err = a
+            .refuse_unless_selected(false, "--x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--lora-ridge") && err.contains("--x"), "{err}");
     }
 
     #[test]
     fn each_knob_overrides_its_default_alone() {
         let a = parse(&["--lora-rank", "4"]);
-        assert!(a.is_given());
         assert_eq!(
             a.spec(),
             LoraSpec {
@@ -95,7 +106,6 @@ mod lora_args {
             }
         );
         let b = parse(&["--lora-lr-ratio", "1", "--lora-ridge", "0"]);
-        assert!(b.is_given());
         assert_eq!(
             b.spec(),
             LoraSpec {
