@@ -112,22 +112,15 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     let gene_nodes: Vec<u32> = (0..graph.node_names.len() as u32)
         .filter(|&i| graph.node_types[i as usize].as_ref() == super::graph::GENE_TYPE)
         .collect();
-    let (preset_genes, carried) = match args.feature_embedding.resolve()? {
-        Some((prefix, mode)) => {
-            let gene_names: Vec<Box<str>> = gene_nodes
-                .iter()
-                .map(|&i| graph.node_names[i as usize].clone())
-                .collect();
-            let (rows, carried) = crate::feature_preset::load_preset_genes(
-                prefix,
-                mode,
-                &gene_names,
-                &args.name_kind(),
-            )?;
-            (Some(rows), carried)
-        }
-        None => (None, None),
-    };
+    let gene_names: Vec<Box<str>> = gene_nodes
+        .iter()
+        .map(|&i| graph.node_names[i as usize].clone())
+        .collect();
+    let (preset_genes, carried) = crate::feature_preset::resolve_preset(
+        args.feature_embedding.resolve()?,
+        &gene_names,
+        &args.name_kind(),
+    )?;
     let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset_genes.as_ref())?;
     let preset = preset_genes.map(|p| p.map_ids(|g| gene_nodes[g as usize]));
     let stop = setup_stop_handler();
@@ -161,12 +154,6 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         );
     }
     write_outputs(&out, &graph, &args.out)?;
-    if let Some(c) = &carried {
-        c.append_to(
-            &args.out,
-            &format!("{}.feature_embedding.parquet", args.out),
-        )?;
-    }
 
     let input: Vec<String> = args
         .networks
@@ -195,6 +182,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: None,
+        carried: carried.as_ref(),
         module_membership_suffix: None,
         module_dictionary_suffix: None,
         softmax_dictionary_suffix: None,
