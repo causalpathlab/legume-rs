@@ -609,3 +609,40 @@ fn simba_anchors_its_gene_table_with_a_low_rank_residual() {
     let c2 = Mat::from_parquet(&format!("{second}.cell_embedding.parquet")).unwrap();
     assert_ne!(c1.mat, c2.mat, "cells train");
 }
+
+/// A pinned table wider than the data: its unmatched rows come out after the
+/// data's genes, unchanged, with a types table over every row.
+#[test]
+fn simba_carries_the_unmatched_rows_of_a_pinned_table_through() {
+    use crate::feature_preset::test_support::{assert_carried, widen};
+    let dir = tempfile::tempdir().unwrap();
+    let (data, first) = fast_run(dir.path());
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let extra = widen(&format!("{first}.feature_loading.parquet"), &plus);
+    let mut argv = vec![
+        data.as_str(),
+        "--out",
+        &second,
+        "--n-hvg",
+        "0",
+        "--no-qc",
+        "--freeze-feature-embedding",
+        &plus,
+        "--embedding-dim",
+        "auto",
+    ];
+    argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
+    argv.extend_from_slice(&["--epochs", "2"]);
+    run(&argv);
+    let g1 = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
+    assert_carried(
+        &second,
+        &format!("{second}.feature_loading.parquet"),
+        g1.rows.len(),
+        &extra,
+    );
+    // The co-embed stays on the data's genes: it is a view onto the cells.
+    let co = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    assert_eq!(co.rows, g1.rows);
+}
