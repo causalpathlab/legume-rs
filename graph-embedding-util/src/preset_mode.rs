@@ -192,6 +192,20 @@ pub struct PresetRows {
     pub mode: PresetMode,
 }
 
+/// The offset of one non-base track given from outside, by gene id: `rows`
+/// is `[ids.len() × H]` row-major, `δ₀` for gene `ids[i]` on `track` — the
+/// given track row minus the given base row of the same gene. What happens
+/// to it follows the base rows' [`PresetMode`]: under `Freeze` it is fixed
+/// and the track's low-rank residual skips the gene, so the composed track
+/// row is the given row verbatim; under `Lora` and `Init` the residual trains
+/// on top of it.
+#[derive(Clone, Debug)]
+pub struct PresetOffsets {
+    pub track: u32,
+    pub ids: Vec<u32>,
+    pub rows: Vec<f32>,
+}
+
 impl PresetRows {
     /// The same rows on another axis: every id mapped through `f`.
     #[must_use]

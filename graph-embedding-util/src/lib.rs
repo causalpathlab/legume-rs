@@ -51,15 +51,15 @@ pub use eval::{
 };
 pub use feature_qc::{hvg_feature_qc, FeatureQcConfig, FeatureQcResult};
 pub use fit::{
-    fit, warm_start_module_labels, CellEncoders, FitConfig, FitOutput, GeneModuleArgs,
-    GeneModuleConfig, ParentModulesOwned, TrackEncoder, TrackInfo, TrackSpec,
+    fit, validate_offset_rank, warm_start_module_labels, CellEncoders, FitConfig, FitOutput,
+    GeneModuleArgs, GeneModuleConfig, ParentModulesOwned, TrackEncoder, TrackInfo, TrackSpec,
 };
 pub use model::JointEmbedModel;
 pub use multiome_plan::{
     detect_multiome_plan, plan_from_axes, read_file_axes, FileAxes, MultiomePlan,
 };
 pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_fixed_t};
-pub use preset_mode::{LoraArgs, LoraSpec, PresetMode, PresetRows};
+pub use preset_mode::{LoraArgs, LoraSpec, PresetMode, PresetOffsets, PresetRows};
 
 /// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
 /// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same

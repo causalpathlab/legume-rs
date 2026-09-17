@@ -174,6 +174,7 @@ pub fn load_pretrained_gene_embedding(
         bias_path: args.bias_path,
         target_feature_names: args.gene_names,
         name_kind: args.name_kind,
+        source_name_map: None,
     })?;
     let h = host.h;
     let n_matched = host.keep_target_indices.len();

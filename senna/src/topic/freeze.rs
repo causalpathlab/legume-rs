@@ -126,6 +126,7 @@ impl FrozenFeatureSpec {
             bias_path: self.bias_path.as_deref(),
             target_feature_names: post_load_gene_names,
             name_kind: self.name_kind.clone(),
+            source_name_map: None,
         })
     }
 }

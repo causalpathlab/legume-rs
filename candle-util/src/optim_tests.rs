@@ -141,3 +141,22 @@ fn a_row_and_its_bias_share_the_accumulator_and_a_mask_pins_the_row_alone() {
     let acc = opt.accumulator().to_vec1::<f32>().unwrap();
     assert!(approx(acc[0], 1.0, 1e-6) && acc[1] == 0.0 && approx(acc[2], 9.0, 1e-6));
 }
+
+/// A bias-only step: the accumulator takes the squared gradient itself (one
+/// column, no mean), and the entry moves by `lr · g / sqrt(acc)` — what
+/// `step_with_bias` does for the bias of a pinned row.
+#[test]
+fn a_bias_only_step_matches_the_closed_form() {
+    let dev = Device::Cpu;
+    let bias = Var::from_tensor(&Tensor::from_vec(vec![1f32, 2., 3.], 3, &dev).unwrap()).unwrap();
+    let grad = Tensor::from_vec(vec![2f32, 0., -1.], 3, &dev).unwrap();
+    let mut opt = RowAdagrad::new(3, 0.1, &dev).unwrap();
+    opt.step_bias(&bias, &grad).unwrap();
+    let b = bias.as_tensor().to_vec1::<f32>().unwrap();
+    // acc = g² = [4, 0, 1]: entry 0 is 1 − 0.1·2/2, entry 2 is 3 + 0.1·1/1.
+    assert!(approx(b[0], 0.9, 1e-6), "{b:?}");
+    assert!(approx(b[1], 2.0, 1e-6), "{b:?}");
+    assert!(approx(b[2], 3.1, 1e-6), "{b:?}");
+    let acc = opt.accumulator().to_vec1::<f32>().unwrap();
+    assert!(approx(acc[0], 4.0, 1e-6) && approx(acc[1], 0.0, 1e-6) && approx(acc[2], 1.0, 1e-6));
+}
