@@ -86,7 +86,8 @@ pub type TrackModulePairs = Vec<((u32, u32), Vec<(u32, f32)>)>;
 pub struct StepStats {
     pub loss_module: f64,
     pub loss_gene: f64,
-    /// The offset ridge AT THIS STEP's weight; exactly `0` on a one-track axis.
+    /// The offset ridge and the LoRA ridge AT THIS STEP's weight; exactly `0`
+    /// on a one-track axis without a residual.
     pub loss_ridge: f64,
 }
 
@@ -321,6 +322,7 @@ pub fn step_loss(
     params: &HierParams,
     ctx: &StepCtx<'_>,
     offset_l2_step: f32,
+    lora_ridge_step: f32,
 ) -> anyhow::Result<(StepStats, Tensor)> {
     let plan = ctx.plan;
     let n_t = ctx.units.n_tracks();
@@ -364,6 +366,26 @@ pub fn step_loss(
                 (mu2 + r2)?.affine(f64::from(offset_l2_step), 0.0)?,
             )?;
         }
+    }
+    // The same shrinkage on the two LoRA residuals: mean row norm² of each,
+    // over the rows it reaches, at this step's weight. Their gradient is how
+    // the shared factors are kept from marching off the anchor.
+    if let (Some(l), true) = (params.lora.as_ref(), lora_ridge_step > 0.0) {
+        let n_m = params.b_m.dims()[0] as f64;
+        let gene2 = l
+            .gene
+            .residual()?
+            .sqr()?
+            .sum_all()?
+            .affine(1.0 / l.n_pinned.max(1) as f64, 0.0)?;
+        let mod2 = match mu_lora.as_ref() {
+            Some(r) => r.sqr()?.sum_all()?.affine(1.0 / n_m, 0.0)?,
+            None => Tensor::zeros((), DType::F32, dev)?,
+        };
+        add(
+            &mut loss_ridge,
+            (gene2 + mod2)?.affine(f64::from(lora_ridge_step), 0.0)?,
+        )?;
     }
     // One host sync for the three numbers.
     let zero = || Tensor::zeros((), DType::F32, dev);

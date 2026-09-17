@@ -31,7 +31,8 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
             "c",
             PresetMode::Lora {
                 rank: 16,
-                lr_ratio: 4.0
+                lr_ratio: 4.0,
+                ridge: 0.0
             }
         ))
     );
@@ -50,7 +51,8 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
             "c",
             PresetMode::Lora {
                 rank: 4,
-                lr_ratio: 1.0
+                lr_ratio: 1.0,
+                ridge: 0.0
             }
         ))
     );
@@ -81,10 +83,20 @@ fn the_three_flags_exclude_each_other_and_the_knobs_need_lora() {
     .is_err());
     assert!(parse(&["--lora-rank", "4"]).is_err());
     assert!(parse(&["--lora-lr-ratio", "2"]).is_err());
+    assert!(parse(&["--lora-ridge", "1"]).is_err());
+    assert_eq!(
+        parse(&["--lora-feature-embedding", "c", "--lora-ridge", "2.5"])
+            .unwrap()
+            .resolve()
+            .and_then(|(_, m)| m.lora())
+            .map(|l| l.ridge),
+        Some(2.5)
+    );
     assert_eq!(
         flag_name(PresetMode::Lora {
             rank: 1,
-            lr_ratio: 1.0
+            lr_ratio: 1.0,
+            ridge: 0.0
         }),
         "--lora-feature-embedding"
     );

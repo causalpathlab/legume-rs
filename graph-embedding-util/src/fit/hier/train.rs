@@ -159,9 +159,13 @@ pub fn train(
         );
         params.preset(f, &part.module_of)?;
         info!(
-            "Phase 1 (hier) — {} of {d} gene rows {}",
+            "Phase 1 (hier) — {} of {d} gene rows {}{}",
             f.ids.len(),
-            f.mode.describe()
+            f.mode.describe(),
+            f.mode.lora().map_or(String::new(), |l| format!(
+                " (rank {}, V at {}× the rate, ridge {})",
+                l.rank, l.lr_ratio, l.ridge
+            ))
         );
     }
     let mut opt = Optimizers::new(&params, cfg.lr)?;
@@ -170,6 +174,10 @@ pub fn train(
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
+    let lora_ridge_step = params
+        .lora
+        .as_ref()
+        .map_or(0.0, |l| per_step_offset_l2(l.ridge, steps_per_epoch));
     info!(
         "Phase 1 (hier) — {n_u} units × {d} genes on {n_t} track(s) ({n_features} feature rows) \
          in {n_m} modules, H={h}: {} epochs × {steps_per_epoch} steps of {} units, K={} \
@@ -196,7 +204,8 @@ pub fn train(
                 sup: &sup,
                 plan: &plan,
             };
-            let (stats, loss): (StepStats, _) = step_loss(&params, &ctx, offset_l2_step)?;
+            let (stats, loss): (StepStats, _) =
+                step_loss(&params, &ctx, offset_l2_step, lora_ridge_step)?;
             let grads = loss.backward()?;
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;

@@ -111,6 +111,7 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
             mode: PresetMode::Lora {
                 rank: 1,
                 lr_ratio: 4.0,
+                ridge: 0.0,
             },
             ..given.clone()
         },
@@ -141,7 +142,8 @@ fn preset_rows_compose_back_exactly_and_the_mode_sets_the_pins() {
             &PresetGenes {
                 mode: PresetMode::Lora {
                     rank: h,
-                    lr_ratio: 1.0
+                    lr_ratio: 1.0,
+                    ridge: 0.0
                 },
                 ..given
             },

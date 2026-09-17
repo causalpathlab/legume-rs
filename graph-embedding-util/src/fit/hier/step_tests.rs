@@ -291,7 +291,7 @@ fn total(
         sup,
         plan,
     };
-    let (s, loss) = step_loss(p, &ctx, l2).unwrap();
+    let (s, loss) = step_loss(p, &ctx, l2, 0.0).unwrap();
     (s.loss_module + s.loss_gene + s.loss_ridge, loss)
 }
 
@@ -360,6 +360,7 @@ fn the_step_loss_matches_the_f64_reference_with_tracks_and_ridge() {
             plan: &plan,
         },
         OFFSET_L2,
+        0.0,
     )
     .unwrap();
     assert!(s.loss_ridge > 0.0, "the moved offsets carry a ridge");
@@ -441,6 +442,7 @@ fn pair_weight_scales_the_gene_level_term() {
             plan: &one,
         },
         0.0,
+        0.0,
     )
     .unwrap();
     let (b, _) = step_loss(
@@ -452,6 +454,7 @@ fn pair_weight_scales_the_gene_level_term() {
             sup: &sup,
             plan: &half,
         },
+        0.0,
         0.0,
     )
     .unwrap();
@@ -586,6 +589,7 @@ fn autograd_matches_finite_differences_on_the_lora_factors() {
         mode: PresetMode::Lora {
             rank: 1,
             lr_ratio: 1.0,
+            ridge: 0.0,
         },
     };
     p.preset(&given, &part.module_of).unwrap();
