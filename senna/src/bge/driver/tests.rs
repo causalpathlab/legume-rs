@@ -113,3 +113,48 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
     let (manifest, _dir) = run_manifest::load_for(&out).expect("load the manifest back");
     assert_eq!(manifest.kind, RunKind::Bge, "manifest kind must be bge");
 }
+
+/// A pinned table wider than the data: its unmatched rows come out after the
+/// data's genes in `feature_loading` (ρ), unchanged, with a types table over
+/// every row; the co-embed keeps the data's genes.
+#[test]
+fn bge_carries_the_unmatched_rows_of_a_pinned_table_through() {
+    use crate::feature_preset::test_support::{assert_carried, widen};
+    use matrix_util::traits::IoOps;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = synthetic_backend(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    fit_bge(&parse(&data, &first)).expect("first run");
+    let extra = widen(&format!("{first}.feature_loading.parquet"), &plus);
+    let args = Cli::try_parse_from([
+        "senna-bge",
+        &data,
+        "-o",
+        &second,
+        "--epochs",
+        "2",
+        "--skip-etm",
+        "--no-emit-pb-reference",
+        "--embedding-dim",
+        "auto",
+        "--freeze-feature-embedding",
+        &plus,
+    ])
+    .expect("BgeArgs parses")
+    .args;
+    fit_bge(&args).expect("second run");
+    assert_carried(
+        &second,
+        &format!("{second}.feature_loading.parquet"),
+        N_GENES,
+        &extra,
+    );
+    let co = DMatrix::<f32>::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    assert_eq!(
+        co.rows.len(),
+        N_GENES,
+        "the co-embed stays on the data's genes"
+    );
+}

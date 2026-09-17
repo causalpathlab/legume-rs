@@ -108,6 +108,9 @@ pub(crate) struct EmbedPlan<'a> {
     /// Gene rows given up front (`senna bge --{freeze,init}-feature-embedding`),
     /// pinned or only started from; `None` = every row trains. gem passes `None`.
     pub preset_features: Option<ge::PresetRows>,
+    /// The given table's rows that matched no feature, appended to the
+    /// written ρ so the output is the full table.
+    pub carried: Option<crate::carried_rows::CarriedRows>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: crate::run_manifest::TrainArgsRecord,
@@ -151,6 +154,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
     let preset_features = plan.preset_features.take();
+    let carried = plan.carried.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
             unified
@@ -464,6 +468,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // the ETM and --skip-etm paths, so record it unconditionally.
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("feature_loading.parquet"),
+        carried: carried.as_ref(),
         // Learned gene modules, when the run trained them; the composed row still
         // lives in `feature_loading`, so these are additive.
         module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),

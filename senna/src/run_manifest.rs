@@ -1356,6 +1356,11 @@ pub struct RunDescription<'a> {
     /// [`RunOutputs::feature_loading`] for why this is separate from
     /// `feature_embedding_suffix`.
     pub feature_loading_suffix: Option<&'a str>,
+    /// The given feature table's rows that matched no feature of this run,
+    /// to append to the ρ file (`feature_loading_suffix`, else
+    /// `feature_embedding_suffix`) before the manifest is written — so every
+    /// engine's carry-through is this one field.
+    pub carried: Option<&'a crate::carried_rows::CarriedRows>,
     /// e.g. `"module_membership.parquet"` for a gene-module run; `None` to omit.
     pub module_membership_suffix: Option<&'a str>,
     /// e.g. `"module_dictionary.parquet"`; paired with the membership.
@@ -1410,6 +1415,13 @@ pub struct RunDescription<'a> {
 /// the manifest's own directory — even when the run directory is moved
 /// after writing.
 pub fn write_run_manifest(desc: &RunDescription<'_>) -> anyhow::Result<()> {
+    if let Some(c) = desc.carried {
+        let suffix = desc
+            .feature_loading_suffix
+            .or(desc.feature_embedding_suffix)
+            .ok_or_else(|| anyhow::anyhow!("{}: no ρ file to carry rows into", desc.prefix))?;
+        c.append_to(desc.prefix, suffix)?;
+    }
     let basename = Path::new(desc.prefix).file_name().map_or_else(
         || desc.prefix.to_string(),
         |s| s.to_string_lossy().into_owned(),

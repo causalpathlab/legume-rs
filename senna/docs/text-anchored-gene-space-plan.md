@@ -50,6 +50,8 @@ The gene dictionary becomes, per gene `g`,
     --lora-lr-ratio <λ>    LoRA+ ratio; default 4 (16 hurt under AdamW on sim), 1 = plain LoRA
 ```
 
+Under `freeze` and `lora` the table's rows that match no feature of the run — genes the data lacks (a panel) and every non-gene row — are carried through unchanged into the run's ρ output after the trained rows, with `{out}.feature_types.parquet` naming each row's type, so a run on a narrow axis hands on the full table. `init` does not carry them: its trained rows leave the table's space. A carried row the run wrote itself (a term both graphs hold) is superseded by the run's own.
+
 `<PREFIX>` resolves as today (`{prefix}.feature_loading.parquet`, else a signed `.dictionary` / `.feature_embedding`; gene rows only when `feature_types.parquet` is present; canonical-name match; `--embedding-dim auto` takes H from the table).
 
 Once the map exists, every text concept can be translated into the model's space, including ones with no expression counterpart (a disease name), and every model object can be translated out (a topic β as an expression-weighted sum of gene text vectors — scELMo's weighted-average mode).

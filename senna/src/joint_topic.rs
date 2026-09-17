@@ -503,6 +503,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
         feature_loading_suffix: None,
+        carried: None,
         module_membership_suffix: None,
         module_dictionary_suffix: None,
         softmax_dictionary_suffix: Some("dictionary.parquet"),
