@@ -9,6 +9,9 @@ use graph_embedding_util::PresetMode;
 
 /// LoRA's usual small rank.
 pub const DEFAULT_LORA_RANK: usize = 16;
+/// The LoRA ridge, per epoch on each residual's mean row norm². None until the
+/// probe says otherwise.
+pub const DEFAULT_LORA_RIDGE: f32 = 0.0;
 /// The LoRA+ ratio. The paper's larger value belongs to transformers at far
 /// smaller learning rates; under AdamW at ours it destabilises the shared
 /// factor, and a moderate ratio was the one that beat both freeze and init
@@ -93,6 +96,18 @@ pub struct FeatureEmbeddingArgs {
                      factor u keeps the base rate. 1 is plain LoRA; the default is 4."
     )]
     pub lora_lr_ratio: Option<f32>,
+
+    #[arg(
+        long,
+        value_name = "LAMBDA",
+        requires = "lora_feature_embedding",
+        help = "Ridge on the LoRA residual, per epoch on its mean row norm² (bge; default 0)",
+        long_help = "Ridge on the LoRA residual: `λ · mean_g ‖u_g·V‖²` per epoch, spread over\n\
+                     the epoch's steps like bge's offset ridge, on each residual (module and\n\
+                     gene). The shrinkage that keeps the shared factor from marching off\n\
+                     the anchor under a row optimizer. 0 is none. Read by `bge`."
+    )]
+    pub lora_ridge: Option<f32>,
 }
 
 impl FeatureEmbeddingArgs {
@@ -111,6 +126,7 @@ impl FeatureEmbeddingArgs {
                 PresetMode::Lora {
                     rank: self.lora_rank.unwrap_or(DEFAULT_LORA_RANK),
                     lr_ratio: self.lora_lr_ratio.unwrap_or(DEFAULT_LORA_LR_RATIO),
+                    ridge: self.lora_ridge.unwrap_or(DEFAULT_LORA_RIDGE),
                 },
             )
         })

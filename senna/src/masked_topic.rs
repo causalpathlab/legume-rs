@@ -959,7 +959,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             layers: &args.encoder_layers,
             attn_pool: true,
             n_gene_modules: args.gene_modules,
-            lora_rank: lora.map_or(0, |(rank, _)| rank),
+            lora_rank: lora.map_or(0, |l| l.rank),
         },
         &parameters,
         param_builder.pp("enc"),
@@ -1058,7 +1058,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             &host.e_feat,
             &dev,
         )?;
-        if let Some((rank, ratio)) = lora {
+        if let Some(l) = lora {
+            let (rank, ratio) = (l.rank, l.lr_ratio);
             info!(
                 "LoRA: ρ anchored to {} (D={}, H={}); a rank-{rank} residual trains on top, \
                  V at {ratio}× the rate, with α + FC + BN",
@@ -1141,9 +1142,9 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         weight_decay: args.weight_decay,
         feature_anchor: pinned_rho.then_some(candle_util::vae::masked_topic::FeatureAnchor {
             base_var: "enc.feature.embeddings",
-            lora: lora.map(|(_, lr_ratio)| candle_util::lora::LoraPlus {
+            lora: lora.map(|l| candle_util::lora::LoraPlus {
                 v_var: "enc.feature.lora_v",
-                lr_ratio,
+                lr_ratio: l.lr_ratio,
             }),
         }),
     };

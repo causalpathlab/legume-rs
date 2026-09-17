@@ -16,7 +16,13 @@
 pub enum PresetMode {
     Init,
     Freeze,
-    Lora { rank: usize, lr_ratio: f32 },
+    Lora {
+        rank: usize,
+        lr_ratio: f32,
+        /// Per-epoch ridge on the residual's mean row norm² (the shrinkage
+        /// that makes it a residual rather than a second table); `0` = none.
+        ridge: f32,
+    },
 }
 
 impl PresetMode {
@@ -28,9 +34,17 @@ impl PresetMode {
 
     /// The LoRA settings, when this is that mode.
     #[must_use]
-    pub fn lora(&self) -> Option<(usize, f32)> {
+    pub fn lora(&self) -> Option<LoraSpec> {
         match *self {
-            Self::Lora { rank, lr_ratio } => Some((rank, lr_ratio)),
+            Self::Lora {
+                rank,
+                lr_ratio,
+                ridge,
+            } => Some(LoraSpec {
+                rank,
+                lr_ratio,
+                ridge,
+            }),
             _ => None,
         }
     }
@@ -49,7 +63,12 @@ impl PresetMode {
 
     /// Refuse a rank that degenerates to another mode or exceeds the width.
     pub fn validate(&self, h: usize) -> anyhow::Result<()> {
-        if let Self::Lora { rank, lr_ratio } = *self {
+        if let Self::Lora {
+            rank,
+            lr_ratio,
+            ridge,
+        } = *self
+        {
             anyhow::ensure!(
                 rank >= 1,
                 "a LoRA residual needs rank ≥ 1 (rank 0 is freeze)"
@@ -62,9 +81,21 @@ impl PresetMode {
                 lr_ratio.is_finite() && lr_ratio > 0.0,
                 "the LoRA+ learning-rate ratio must be positive, got {lr_ratio}"
             );
+            anyhow::ensure!(
+                ridge.is_finite() && ridge >= 0.0,
+                "the LoRA ridge must be non-negative, got {ridge}"
+            );
         }
         Ok(())
     }
+}
+
+/// The settings of [`PresetMode::Lora`], unpacked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoraSpec {
+    pub rank: usize,
+    pub lr_ratio: f32,
+    pub ridge: f32,
 }
 
 /// Rows of a table given from outside, by row id on the engine's own axis

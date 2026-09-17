@@ -103,13 +103,13 @@ impl FneModel {
             keep[g] = 0.0;
         }
         self.e.set(&Tensor::from_vec(flat, (n, d), dev)?)?;
-        if let Some((rank, lr_ratio)) = preset.mode.lora() {
+        if let Some(l) = preset.mode.lora() {
             self.lora = Some(PinnedLora::new(
                 n,
                 d,
-                rank,
+                l.rank,
                 &preset.ids,
-                lr_ratio,
+                l.lr_ratio,
                 seed,
                 dev,
             )?);
