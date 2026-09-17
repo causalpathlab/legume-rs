@@ -486,6 +486,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
     let lora = preset(PresetMode::Lora {
         rank,
         lr_ratio: 4.0,
+        ridge: 0.0,
     });
     let out = train(&units, &labels, h, &cfg, Some(&lora), &stop).unwrap();
     let mut resid = nalgebra::DMatrix::<f32>::zeros(gene.len(), h);
@@ -514,6 +515,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
     let full_rank = preset(PresetMode::Lora {
         rank: h,
         lr_ratio: 1.0,
+        ridge: 0.0,
     });
     assert!(train(&units, &labels, h, &cfg, Some(&full_rank), &stop).is_err());
 }

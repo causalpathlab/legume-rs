@@ -671,6 +671,7 @@ fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
             mode: PresetMode::Lora {
                 rank,
                 lr_ratio: 4.0,
+                ridge: 0.0,
             },
         }),
         ..base.clone()
@@ -700,6 +701,7 @@ fn lora_preset_rows_carry_a_shared_rank_r_residual_over_the_given_rows() {
             mode: PresetMode::Lora {
                 rank: d,
                 lr_ratio: 1.0,
+                ridge: 0.0,
             },
         }),
         ..base

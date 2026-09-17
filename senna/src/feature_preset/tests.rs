@@ -100,6 +100,7 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
         PresetMode::Lora {
             rank: 2,
             lr_ratio: 16.0,
+            ridge: 0.0,
         },
     ] {
         assert_eq!(
@@ -112,7 +113,8 @@ fn the_mode_is_carried_and_a_rank_the_table_cannot_hold_is_refused() {
         &prefix,
         PresetMode::Lora {
             rank: 3,
-            lr_ratio: 1.0
+            lr_ratio: 1.0,
+            ridge: 0.0
         },
         &axis,
         &kind

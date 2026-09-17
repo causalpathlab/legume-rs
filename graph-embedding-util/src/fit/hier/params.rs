@@ -47,6 +47,12 @@ impl TrackOffset {
 pub struct HierLora {
     pub module: PinnedLora,
     pub gene: PinnedLora,
+    /// Per-epoch ridge on each residual's mean row norm² (see
+    /// [`crate::preset_mode::PresetMode::Lora`]); the trainer spreads it over
+    /// the epoch's steps like the offset ridge.
+    pub ridge: f32,
+    /// How many gene rows the gene residual reaches: the ridge's divisor.
+    pub n_pinned: usize,
 }
 
 /// The base model's tables plus one offset table per non-base track.
@@ -240,7 +246,8 @@ impl HierParams {
             }
             self.r_mask = Some(Tensor::from_vec(keep, (n_genes, 1), &self.dev)?);
             self.mu_mask = Some(Tensor::zeros((n_modules, 1), DType::F32, &self.dev)?);
-            if let Some((rank, lr_ratio)) = frozen.mode.lora() {
+            if let Some(spec) = frozen.mode.lora() {
+                let (rank, lr_ratio) = (spec.rank, spec.lr_ratio);
                 let all_modules: Vec<u32> = (0..n_modules as u32).collect();
                 self.lora = Some(HierLora {
                     module: PinnedLora::new(
@@ -261,6 +268,8 @@ impl HierParams {
                         self.seed,
                         &self.dev,
                     )?,
+                    ridge: spec.ridge,
+                    n_pinned: frozen.ids.len(),
                 });
             }
         }
