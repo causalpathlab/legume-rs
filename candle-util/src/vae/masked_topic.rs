@@ -11,12 +11,13 @@
 //! `1 − visible_nd` is what the decoder is scored on, so the hidden set has a
 //! single definition rather than two that have to be kept in step.
 
-use super::{clip_and_step_dense, smooth_topics, TrainScores};
+use super::{clip_and_step_dense_all, smooth_topics, TrainScores};
 use crate::data::indexed::labeled_bar;
 use crate::data::masked_dense::{DenseMaskedLevel, DenseMaskedMinibatch, MaskedDraw};
 use crate::decoder::coarsening_map::CoarseningMap;
 use crate::decoder::masked_etm::{EmbeddedNbTopicDecoder, MaskedDenseTarget, ModuleTarget};
 use crate::encoder::indexed::IndexedEmbeddingEncoder;
+pub use crate::lora::LoraPlus;
 use candle_core::{DType, Device, Tensor, Var};
 use candle_nn::{AdamW, Optimizer};
 use log::{info, warn};
@@ -56,12 +57,21 @@ pub struct IndexedTrainConfig<'a> {
     /// (not just ρ). Post-step parameter shrinkage that doesn't enter the
     /// loss/backward graph. `0.0` disables.
     pub weight_decay: f32,
-    /// When `Some(name)`, exclude the named `Var` from AdamW (used to
-    /// freeze ρ when its values came from a prior senna run) and skip
-    /// the `rho_l2` term (no point regularizing a non-trainable
-    /// parameter). The encoder/decoder still reference ρ through the
-    /// same `Var`; freezing just keeps the optimizer's hands off.
-    pub frozen_feature_var: Option<&'a str>,
+    /// The feature table's anchor, when a prior run supplied it: the named
+    /// `Var` (the encoder's `feature.embeddings`) stays out of AdamW and out of
+    /// the ridge, and under LoRA its shared factor takes its own group at the
+    /// LoRA+ rate. The encoder/decoder still reference the table through the
+    /// same `Var`; anchoring keeps the optimizer's hands off.
+    pub feature_anchor: Option<FeatureAnchor<'a>>,
+}
+
+/// See [`IndexedTrainConfig::feature_anchor`].
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureAnchor<'a> {
+    /// The pinned table's `Var`.
+    pub base_var: &'a str,
+    /// The LoRA+ split for the residual's shared factor, when there is one.
+    pub lora: Option<LoraPlus<'a>>,
 }
 
 /// Options specific to [`train_masked`], kept off the shared
@@ -480,6 +490,7 @@ fn masked_minibatch_loss(
     opts: &MaskedTrainOpts,
     mb: &DenseMaskedMinibatch,
     mean_1d: &Tensor,
+    ridge_step: f64,
 ) -> anyhow::Result<StepLoss> {
     // Masked-VAE: unconstrained `z` (no softmax in the encoder).
     // Masked-topic: simplex `log θ` (softmax or stick-breaking). All
@@ -540,7 +551,14 @@ fn masked_minibatch_loss(
     // Per scored unit, so every penalty below is on the same scale as the
     // number the epoch log reports.
     let mut loss = llik_sum.neg()?.div(&units_sum.clamp(1.0, f64::INFINITY)?)?;
-    if config.feature_embedding_l2 > 0.0 && config.frozen_feature_var.is_none() {
+    // An anchored table's residual is shrunk instead: its ridge at this
+    // step's weight (the caller spreads the per-epoch weight over the steps).
+    if ridge_step > 0.0 {
+        if let Some(r) = encoder.features().lora_ridge()? {
+            loss = (loss + r.affine(ridge_step, 0.0)?)?;
+        }
+    }
+    if config.feature_embedding_l2 > 0.0 && config.feature_anchor.is_none() {
         // Shrink what is actually free: the dictionary under modules, the table
         // otherwise. Penalizing composed rows would charge every member of a
         // module for the same shared vector.
@@ -606,17 +624,21 @@ pub fn train_masked(
     let frozen: Vec<&str> = pinned
         .iter()
         .map(String::as_str)
-        .chain(config.frozen_feature_var)
+        .chain(config.feature_anchor.map(|a| a.base_var))
+        .chain(config.feature_anchor.and_then(|a| a.lora).map(|l| l.v_var))
         .collect();
     let adam_vars: Vec<Var> = crate::frozen_features::trainable_vars(config.parameters, &frozen);
-    let mut adam = AdamW::new(
+    let mut adams = vec![AdamW::new(
         adam_vars,
         candle_nn::ParamsAdamW {
             lr: f64::from(config.learning_rate),
             weight_decay: f64::from(config.weight_decay),
             ..Default::default()
         },
-    )?;
+    )?];
+    if let Some(l) = config.feature_anchor.and_then(|a| a.lora) {
+        adams.push(l.optimizer(config.parameters, config.learning_rate)?);
+    }
     let prog_bar = labeled_bar("Epochs", total_epochs as u64);
 
     let mut llik_trace = Vec::with_capacity(total_epochs);
@@ -652,6 +674,7 @@ pub fn train_masked(
                     opts,
                     &mb,
                     level0.feature_mean_1d(),
+                    0.0,
                 )
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 Ok(fwd.loss)
@@ -700,6 +723,10 @@ pub fn train_masked(
         for (level, lv) in levels.iter().enumerate() {
             let decoder = &decoders[level];
             let ep = lv.begin_epoch(epoch_seed(opts.seed, epoch, level), &draw, minibatch_size)?;
+            // The per-epoch LoRA ridge, spread over every level's batches.
+            let ridge_step = config.feature_anchor.and_then(|a| a.lora).map_or(0.0, |l| {
+                f64::from(l.ridge) / (levels.len() * ep.n_batches().max(1)) as f64
+            });
             for b in 0..ep.n_batches() {
                 let mb = ep.batch(b)?;
                 let fwd = masked_minibatch_loss(
@@ -709,10 +736,11 @@ pub fn train_masked(
                     opts,
                     &mb,
                     lv.feature_mean_1d(),
+                    ridge_step,
                 )?;
                 acc.add(&fwd.llik_sum, &fwd.units_sum)?;
                 let grads = fwd.loss.backward()?;
-                if !clip_and_step_dense(&mut adam, grads, f64::from(config.grad_clip))? {
+                if !clip_and_step_dense_all(&mut adams, grads, f64::from(config.grad_clip))? {
                     skipped_steps += 1;
                 }
                 if config.stop.load(Ordering::Relaxed) {

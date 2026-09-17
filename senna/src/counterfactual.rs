@@ -161,6 +161,7 @@ fn rebuild_model(
             // Must match the checkpoint: M widens the first FC layer, and `VarMap::load`
             // errors on a shape mismatch.
             n_gene_modules: metadata.gene_modules(),
+            lora_rank: 0,
         },
         &parameters,
         vb.pp("enc"),

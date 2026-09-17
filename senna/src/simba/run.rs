@@ -95,9 +95,9 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     // Training //
     //////////////
     let preset = match args.feature_embedding.resolve() {
-        Some((prefix, freeze)) => Some(crate::feature_preset::load_preset_genes(
+        Some((prefix, mode)) => Some(crate::feature_preset::load_preset_genes(
             prefix,
-            freeze,
+            mode,
             &gene_names,
             &ge::FeatureNameKind::Gene { delim: '_' },
         )?),
@@ -116,7 +116,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         eval_fraction: args.train.eval_fraction,
         n_bins: args.n_bins,
         coembed_t: args.coembed_temp,
-        preset_genes: preset.map(|p| crate::feature_preset::preset_rows(p, |g| g)),
+        preset_genes: preset,
         seed: args.train.seed,
         device: args.train.device.to_device(args.train.device_no)?,
     };

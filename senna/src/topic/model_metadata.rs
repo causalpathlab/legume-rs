@@ -334,7 +334,12 @@ pub fn load_dictionary(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, nalgebra:
 }
 
 /// Save `VarMap` parameters as safetensors.
+/// A LoRA residual on the encoder's feature table is folded into the table
+/// first, so the checkpoint is a plain free table for `predict` and
+/// `--init-from`; a map without factors is left alone. Every table written
+/// through the composed encoder must be written BEFORE this call.
 pub fn save_parameters(parameters: &candle_nn::VarMap, prefix: &str) -> anyhow::Result<()> {
+    candle_util::feature_embedding::fold_lora(parameters, crate::topic::gene_axis::ENCODER_PREFIX)?;
     let path = format!("{prefix}.safetensors");
     parameters.save(&path)?;
     log::info!("Saved model parameters to {path}");

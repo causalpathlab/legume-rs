@@ -2,11 +2,13 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
-use super::params::{HierParams, PresetGenes, RowAdagrad};
+use super::params::{HierParams, PresetGenes};
 use super::partition::{Partition, TrackSupport, UnitModules};
-use super::step::{apply, loss_and_grads, Grads, Optimizers, StepPlan, StepStats};
+use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
 use super::units::UnitTable;
 use crate::progress::new_progress_bar;
+use candle_util::candle_core::Device;
+use candle_util::convert::to_host;
 use log::info;
 use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
@@ -33,6 +35,8 @@ pub struct HierConfig {
     /// `offset_l2 · (mean_m ‖Δ‖² + mean_g ‖δ‖²)` whatever `units_per_step` is.
     /// Inert on a one-track axis, which has no offsets.
     pub offset_l2: f32,
+    /// Where the tables live and the steps run.
+    pub device: Device,
 }
 
 pub struct HierOutput {
@@ -148,39 +152,39 @@ pub fn train(
     let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.tracks.n_genes());
     let n_t = units.n_tracks();
     let n_features = units.n_features;
-    let mut params = HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.seed);
+    let mut params = HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.seed, &cfg.device)?;
     if let Some(f) = preset {
         anyhow::ensure!(
             n_t == 1,
             "preset gene rows need a single-track feature axis"
         );
         params.preset(f, &part.module_of)?;
-        if f.freeze {
-            info!(
-                "Phase 1 (hier) — {} of {d} gene rows pinned; μ pinned to their module means, \
-                 biases and the other rows train",
-                f.gene.len()
-            );
-        } else {
-            info!(
-                "Phase 1 (hier) — {} of {d} gene rows start from the given table and train on",
-                f.gene.len()
-            );
-        }
+        info!(
+            "Phase 1 (hier) — {} of {d} gene rows {}{}",
+            f.ids.len(),
+            f.mode.describe(),
+            f.mode.lora().map_or(String::new(), |l| format!(
+                " (rank {}, V at {}× the rate, ridge {})",
+                l.rank, l.lr_ratio, l.ridge
+            ))
+        );
     }
-    let mut opt = Optimizers {
-        e_u: RowAdagrad::new(n_u, cfg.lr),
-        mu: RowAdagrad::new(n_m, cfg.lr),
-        r: RowAdagrad::new(d, cfg.lr),
-        offsets: (1..n_t)
-            .map(|_| (RowAdagrad::new(n_m, cfg.lr), RowAdagrad::new(d, cfg.lr)))
-            .collect(),
+    let mut opt = Optimizers::new(&params, cfg.lr)?;
+    let ctx = StepCtx {
+        units,
+        um: &um,
+        part: &part,
+        sup: &sup,
     };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let pickers = module_pickers(&um, n_m);
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
+    let lora_ridge_step = params
+        .lora
+        .as_ref()
+        .map_or(0.0, |l| per_step_offset_l2(l.ridge, steps_per_epoch));
     info!(
         "Phase 1 (hier) — {n_u} units × {d} genes on {n_t} track(s) ({n_features} feature rows) \
          in {n_m} modules, H={h}: {} epochs × {steps_per_epoch} steps of {} units, K={} \
@@ -200,9 +204,10 @@ pub fn train(
                 break 'epochs;
             }
             let plan = draw_plan(chunk, &pickers, n_m, n_t, cfg.modules_per_unit, &mut rng);
-            let (stats, grads): (StepStats, Grads) =
-                loss_and_grads(&params, units, &um, &part, &sup, &plan, offset_l2_step);
-            apply(&mut params, &mut opt, &grads, &plan, cfg.weight_decay);
+            let (stats, loss): (StepStats, _) =
+                step_loss(&params, &ctx, &plan, offset_l2_step, lora_ridge_step)?;
+            let grads = loss.backward()?;
+            apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
             acc.loss_ridge += stats.loss_ridge;
@@ -228,38 +233,16 @@ pub fn train(
     }
     bar.finish_and_clear();
 
-    // Compose the flat dictionary, one row per FEATURE ROW: for row `r` naming
-    // gene `g` on track `t`, ρ_r = μ_{m(g)} + r_g (+ Δ^t_{m(g)} + δ^t_g) and
-    // b_r = b_{m(g)} + b_g (+ β^t_{m(g)} + γ^t_g). On the base track the offset
-    // terms do not exist and the expression is the plain composed pair.
-    let mut rho = DMatrix::<f32>::zeros(n_features, h);
-    let mut row_buf = vec![0f32; h];
-    let mut b_feat = vec![0f32; n_features];
-    for row in 0..n_features {
-        let t = units.tracks.track_of_row[row] as usize;
-        let g = units.tracks.gene_of_row[row] as usize;
-        let m = part.module_of[g] as usize;
-        match params.offset(t) {
-            None => {
-                params.base_row(g, m, &mut row_buf);
-                for k in 0..h {
-                    rho[(row, k)] = row_buf[k];
-                }
-                b_feat[row] = params.b_m[m] + params.b_g[g];
-            }
-            Some(o) => {
-                for k in 0..h {
-                    rho[(row, k)] = params.mu[m * h + k]
-                        + params.r[g * h + k]
-                        + o.d_mu[m * h + k]
-                        + o.d_r[g * h + k];
-                }
-                b_feat[row] = params.b_m[m] + params.b_g[g] + o.d_b_m[m] + o.d_b_g[g];
-            }
-        }
-    }
+    // The composed dictionary, one row per FEATURE ROW (see `HierParams::compose`).
+    let (rho, b_feat) = params.compose(
+        &units.tracks.track_of_row,
+        &units.tracks.gene_of_row,
+        &part.module_of,
+    )?;
+    let e_u_host = to_host(params.e_u.as_tensor())?;
+    let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
     Ok(HierOutput {
-        e_u: DMatrix::<f32>::from_row_slice(n_u, h, &params.e_u),
+        e_u,
         rho,
         b_feat,
         final_loss_per_unit: last_per_unit,

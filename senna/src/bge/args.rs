@@ -138,7 +138,7 @@ pub struct BgeArgs {
 
     #[arg(
         long = "num-topics",
-        help = "ETM topics K (omit to auto-select via SPA-anchor residual-elbow sweep)."
+        help = "ETM topics K (omit to take one topic per cell cluster)."
     )]
     pub(crate) num_topics: Option<usize>,
 

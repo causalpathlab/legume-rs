@@ -1,5 +1,5 @@
-//! Helper for the `--freeze-feature-embedding` flow shared by
-//! `senna {masked-topic, cell-embedded-topic}`.
+//! Helper for the `--{freeze,init,lora}-feature-embedding` flow of the
+//! masked models.
 //!
 //! Two-phase: the senna data loader applies a feature mask BEFORE we
 //! know the post-load gene order, but we need the post-load gene order
