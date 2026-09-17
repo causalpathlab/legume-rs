@@ -420,3 +420,50 @@ fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving(
         assert!((x - y).abs() < 1e-5, "checkpoint {x} vs written {y}");
     }
 }
+
+/// A pinned table wider than the data: its unmatched rows come out after the
+/// data's genes, unchanged, with a types table over every row; the model's
+/// own per-gene tables stay on the data's axis.
+#[test]
+fn masked_topic_carries_the_unmatched_rows_of_a_pinned_table_through() {
+    use crate::feature_preset::test_support::{assert_carried, widen};
+    let dir = tempfile::tempdir().unwrap();
+    let data = planted_zarr(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let common = [
+        "-t",
+        "3",
+        "-i",
+        "2",
+        "--gene-modules",
+        "0",
+        "--minibatch-size",
+        "50",
+    ];
+    let mut argv = vec![data.as_str(), "-o", &first, "--embedding-dim", "8"];
+    argv.extend_from_slice(&common);
+    fit_masked_topic_model(&parse_masked(&argv)).unwrap();
+    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
+    let mut argv = vec![
+        data.as_str(),
+        "-o",
+        &second,
+        "--embedding-dim",
+        "auto",
+        "--freeze-feature-embedding",
+        &plus,
+    ];
+    argv.extend_from_slice(&common);
+    fit_masked_topic_model(&parse_masked(&argv)).unwrap();
+    let a = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    assert_carried(
+        &second,
+        &format!("{second}.feature_embedding.parquet"),
+        a.rows.len(),
+        &extra,
+    );
+    let d = Mat::from_parquet(&format!("{second}.dictionary.parquet")).unwrap();
+    assert_eq!(d.rows, a.rows, "the dictionary stays on the data's genes");
+}

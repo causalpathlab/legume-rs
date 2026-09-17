@@ -94,14 +94,17 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     //////////////
     // Training //
     //////////////
-    let preset = match args.feature_embedding.resolve()? {
-        Some((prefix, mode)) => Some(crate::feature_preset::load_preset_genes(
-            prefix,
-            mode,
-            &gene_names,
-            &ge::FeatureNameKind::Gene { delim: '_' },
-        )?),
-        None => None,
+    let (preset, carried) = match args.feature_embedding.resolve()? {
+        Some((prefix, mode)) => {
+            let (rows, carried) = crate::feature_preset::load_preset_genes(
+                prefix,
+                mode,
+                &gene_names,
+                &ge::FeatureNameKind::Gene { delim: '_' },
+            )?;
+            (Some(rows), carried)
+        }
+        None => (None, None),
     };
     let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset.as_ref())?;
     let cfg = SimbaConfig {
@@ -146,12 +149,11 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         "cell",
     )?;
     // Row axis `gene`, as bge labels its raw gene table.
-    ge::save_embedding(
-        &format!("{prefix}.feature_loading.parquet"),
-        &out.e_gene,
-        &gene_names,
-        "gene",
-    )?;
+    let rho_path = format!("{prefix}.feature_loading.parquet");
+    ge::save_embedding(&rho_path, &out.e_gene, &gene_names, "gene")?;
+    if let Some(c) = &carried {
+        c.append_to(prefix, &rho_path)?;
+    }
     // SIMBA's `si.tl.embed`: genes onto the (kept) cells at a fixed T.
     let coembed = ge::feature_coembedding_fixed_t(&e_cell, &out.e_gene, cfg.coembed_t)?;
     ge::save_embedding(
