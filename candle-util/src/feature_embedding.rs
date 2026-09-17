@@ -249,11 +249,11 @@ impl FeatureEmbedding {
         std::sync::Arc::new(Self::Free(rho))
     }
 
-    /// Under `Lora`, the residual's mean row norm² over the table's rows,
-    /// without forming the residual; `None` for the other variants.
+    /// Under `Lora`, the residual's summed row norm², without forming the
+    /// residual; `None` for the other variants.
     pub fn lora_ridge(&self) -> Result<Option<Tensor>> {
         match self {
-            Self::Lora { base, lora } => Ok(Some(lora.ridge(base.dims()[0])?)),
+            Self::Lora { lora, .. } => Ok(Some(lora.ridge()?)),
             _ => Ok(None),
         }
     }

@@ -32,7 +32,7 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
             PresetMode::Lora(LoraSpec {
                 rank: 16,
                 lr_ratio: 4.0,
-                ridge: 1000.0
+                ridge: 0.05
             })
         ))
     );
@@ -52,7 +52,7 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
             PresetMode::Lora(LoraSpec {
                 rank: 4,
                 lr_ratio: 1.0,
-                ridge: 1000.0
+                ridge: 0.05
             })
         ))
     );

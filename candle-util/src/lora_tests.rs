@@ -242,8 +242,8 @@ fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
     assert!((v2[0] - 0.5).abs() > 0.3, "v took the larger step: {v2:?}");
 }
 
-/// The Gram-form ridge is the dense residual's mean row norm² over `n` rows,
-/// and a pinned residual divides by its pinned count.
+/// The Gram-form ridge is the dense residual's summed row norm², and it
+/// reaches both factors.
 #[test]
 fn the_ridge_equals_the_dense_residuals_mean_row_norm() {
     use super::PinnedLora;
@@ -261,11 +261,7 @@ fn the_ridge_equals_the_dense_residuals_mean_row_norm() {
         .to_scalar::<f32>()
         .unwrap();
     let ridge = l.ridge().unwrap().to_scalar::<f32>().unwrap();
-    assert!(
-        (ridge - dense / 3.0).abs() < 1e-5,
-        "{ridge} vs {}",
-        dense / 3.0
-    );
+    assert!((ridge - dense).abs() < 1e-5, "{ridge} vs {dense}");
     assert_eq!(l.n_pinned, 3);
     let grads = l.ridge().unwrap().backward().unwrap();
     assert!(

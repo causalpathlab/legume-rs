@@ -88,14 +88,16 @@ impl LoraFactors {
         self.u.matmul(&self.v)
     }
 
-    /// `‖u·v‖²_F / n`, the residual's mean row norm² over `n` rows, without
+    /// `‖u·v‖²_F = Σ_rows ‖u_g·v‖²`, the residual's summed row norm², without
     /// forming the residual: `‖u·v‖²_F = Σ (uᵀu) ⊙ (v vᵀ)` on two `[rank, rank]`
-    /// Grams. Rows of `u` that are zero contribute nothing, so on a pinned
-    /// table `n` is the pinned count. The ridge every engine adds.
-    pub fn ridge(&self, n: usize) -> Result<Tensor> {
+    /// Grams. A sum, not a mean, on purpose: the data gradient on the shared
+    /// factor `v` is itself a sum over the rows, so a ridge weight per row is
+    /// the one that means the same thing whatever the table's size. Rows of
+    /// `u` that are zero contribute nothing. The ridge every engine adds.
+    pub fn ridge(&self) -> Result<Tensor> {
         let uu = self.u.t()?.matmul(&self.u)?;
         let vv = self.v.matmul(&self.v.t()?)?;
-        (uu * vv)?.sum_all()?.affine(1.0 / n.max(1) as f64, 0.0)
+        (uu * vv)?.sum_all()
     }
 }
 
@@ -169,10 +171,10 @@ impl PinnedLora {
         self.factors().residual()
     }
 
-    /// The residual's mean row norm² over the pinned rows, without forming it
-    /// (see [`LoraFactors::ridge`]).
+    /// The residual's summed row norm² over the pinned rows, without forming
+    /// it (see [`LoraFactors::ridge`]).
     pub fn ridge(&self) -> Result<Tensor> {
-        self.factors().ridge(self.n_pinned)
+        self.factors().ridge()
     }
 
     /// The row optimizers: `u` at `lr`, `v` at `lr_ratio × lr` (LoRA+).
@@ -209,7 +211,7 @@ pub struct LoraPlus<'a> {
     /// The full name of `v` in the map (`"{prefix}.lora_v"`).
     pub v_var: &'a str,
     pub lr_ratio: f32,
-    /// Per-epoch ridge on the residual's mean row norm² (see
+    /// Per-epoch ridge weight per row on the residual's row norm² (see
     /// [`LoraFactors::ridge`]); the trainer spreads it over the epoch's steps.
     pub ridge: f32,
 }
