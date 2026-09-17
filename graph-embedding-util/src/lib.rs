@@ -57,7 +57,7 @@ pub use multiome_plan::{
     detect_multiome_plan, plan_from_axes, read_file_axes, FileAxes, MultiomePlan,
 };
 pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_fixed_t};
-pub use preset_mode::{LoraSpec, PresetMode, PresetRows};
+pub use preset_mode::{LoraArgs, LoraSpec, PresetMode, PresetRows};
 
 /// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
 /// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same

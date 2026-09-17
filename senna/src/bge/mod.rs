@@ -180,7 +180,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
-    let preset_features = match args.feature_embedding.resolve() {
+    let preset_features = match args.feature_embedding.resolve()? {
         Some((prefix, mode)) => Some(crate::feature_preset::load_preset_genes(
             prefix,
             mode,

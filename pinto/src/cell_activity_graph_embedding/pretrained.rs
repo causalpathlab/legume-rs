@@ -89,6 +89,16 @@ impl PretrainedGeneEmbedding {
             .collect()
     }
 
+    /// The rows that came from the dictionary, as ids into the gene axis.
+    pub fn matched_ids(&self) -> Vec<u32> {
+        self.records
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.init == InitKind::Matched)
+            .map(|(g, _)| g as u32)
+            .collect()
+    }
+
     /// How many rows came from the dictionary.
     pub fn n_matched(&self) -> usize {
         self.records

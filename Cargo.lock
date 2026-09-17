@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "candle-util"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "anyhow",
  "approx",
@@ -2820,7 +2820,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -4796,7 +4796,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinto"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "approx",
@@ -5632,7 +5632,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "senna"
-version = "0.16.4"
+version = "0.16.5"
 dependencies = [
  "anyhow",
  "approx",

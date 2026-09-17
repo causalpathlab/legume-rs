@@ -161,6 +161,17 @@ impl PinnedLora {
         LoraFactors::from_parts(self.u.as_tensor().clone(), self.v.as_tensor().clone())
     }
 
+    /// The factors with `u` masked to the pinned rows INSIDE the graph, for a
+    /// trainer whose optimizer sees every row (AdamW over a `VarMap`): a free
+    /// row's factor then gets no gradient and stays at its zero init, where
+    /// [`Self::step`] would have masked the gradient by hand.
+    pub fn masked_factors(&self) -> Result<LoraFactors> {
+        Ok(LoraFactors::from_parts(
+            self.u.broadcast_mul(&self.u_mask)?,
+            self.v.as_tensor().clone(),
+        ))
+    }
+
     /// The residual on the rows named by `ids`, `[ids, H]`.
     pub fn residual_rows(&self, ids: &Tensor) -> Result<Tensor> {
         self.factors().residual_rows(ids)

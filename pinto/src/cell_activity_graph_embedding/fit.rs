@@ -75,7 +75,8 @@ use candle_util::candle_core::Tensor;
 // separately (`loss.backward()` then `clip_and_step_dense`) so the phase timers
 // can attribute them apart.
 use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
-use candle_util::vae::{clip_and_step_dense, PhaseTimers};
+use candle_util::frozen_features::trainable_vars;
+use candle_util::vae::{clip_and_step_dense_all, PhaseTimers};
 use data_beans_alg::gene_weighting::save_fisher_weights;
 use data_beans_alg::hvg::select_hvg_streaming;
 use data_beans_alg::random_projection::RandProjOps;
@@ -87,6 +88,7 @@ use graph_embedding_util::loss::{
 };
 use graph_embedding_util::model::{
     AdapterInit, JointEmbedModel, ModelArgs, ModelInit, ModuleInit, ModuleWarmStart,
+    E_FEAT_VAR_NAME,
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use matrix_util::common_io::mkdir_parent;
@@ -206,12 +208,7 @@ pub fn fit_cell_activity_graph_embedding(
         "--gene-modules learns the gene side through a module layer and --gene-embedding \
          installs a pre-trained one; the two parameterizations are exclusive. Drop one."
     );
-    anyhow::ensure!(
-        !(args.gene_adapter_residual && args.gene_embedding_mode != GeneEmbeddingMode::Adapt),
-        "--gene-adapter-residual is the adapter's per-gene correction and only \
-         --gene-embedding-mode adapt trains one; under freeze or free the flag \
-         would be read and ignored. Drop it, or use the adapt mode."
-    );
+    args.validate_gene_embedding()?;
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
     // load up front.
@@ -772,6 +769,7 @@ pub fn fit_cell_activity_graph_embedding(
         ),
         (None, _) => info!("PB table starts from seeded random init (no collapse SVD)"),
     }
+    let lora_spec = (args.gene_embedding_mode == GeneEmbeddingMode::Lora).then(|| args.lora.spec());
     let (mut model, frozen_gene) = match (&pretrained_gene, args.gene_embedding_mode) {
         // Learned gene modules: every gene row is `Σ_m π_gm μ_m + r_g`, warm-started
         // from a k-means over the pseudobulk profiles. Same detached-snapshot
@@ -852,7 +850,7 @@ pub fn fit_cell_activity_graph_embedding(
                 &dev,
             )?;
             let frozen = match (pre, mode) {
-                (Some(p), GeneEmbeddingMode::Freeze) => {
+                (Some(p), GeneEmbeddingMode::Freeze | GeneEmbeddingMode::Lora) => {
                     let fetch = |name: &str| {
                         varmap
                             .data()
@@ -876,8 +874,15 @@ pub fn fit_cell_activity_graph_embedding(
                         None
                     };
                     let n_frozen = p.n_matched();
+                    let residual = match lora_spec {
+                        Some(l) => format!(
+                            " under a rank-{} residual (LoRA+ ratio {}, ridge {} per row per epoch)",
+                            l.rank, l.lr_ratio, l.ridge
+                        ),
+                        None => String::new(),
+                    };
                     info!(
-                        "Gene embedding FROZEN: {} dictionary rows fixed, {} neighbor-seeded rows trainable{}",
+                        "Gene embedding PINNED: {} dictionary rows fixed{residual}, {} neighbor-seeded rows trainable{}",
                         n_frozen,
                         n_genes - n_frozen,
                         if bias.is_some() {
@@ -890,16 +895,38 @@ pub fn fit_cell_activity_graph_embedding(
                 }
                 _ => None,
             };
+            // The residual rides on the pinned rows: the factors join the map
+            // beside `e_feat`, `u` drawn on the matched genes only.
+            let model = match (pre, lora_spec) {
+                (Some(p), Some(l)) => {
+                    model.with_lora(&varmap, &dev, l.rank, &p.matched_ids(), c.seed)?
+                }
+                _ => model,
+            };
             (model, frozen)
         }
     };
-    let mut opt = AdamW::new(
-        varmap.all_vars(),
+    // One AdamW over the map, or two under LoRA: the shared factor `v` leaves
+    // the main group for its own at the LoRA+ rate.
+    let lora_v_name = candle_util::lora::factor_names(E_FEAT_VAR_NAME).1;
+    let lora_plus = lora_spec.map(|l| candle_util::lora::LoraPlus {
+        v_var: &lora_v_name,
+        lr_ratio: l.lr_ratio,
+        ridge: l.ridge,
+    });
+    let mut adams = vec![AdamW::new(
+        match lora_plus {
+            Some(_) => trainable_vars(&varmap, &[&lora_v_name]),
+            None => varmap.all_vars(),
+        },
         ParamsAdamW {
             lr: args.lr as f64,
             ..Default::default()
         },
-    )?;
+    )?];
+    if let Some(lp) = &lora_plus {
+        adams.push(lp.optimizer(&varmap, args.lr)?);
+    }
 
     //////////////////////
     // 8. Training loop //
@@ -973,6 +1000,10 @@ pub fn fit_cell_activity_graph_embedding(
         trainable_genes.len()
     };
     let steps_per_epoch = genes_per_epoch_actual.div_ceil(gene_batch_size);
+    // The LoRA ridge is a per-epoch weight; every step takes its share.
+    let lora_ridge_step = lora_plus.map_or(0.0, |lp| {
+        f64::from(lp.ridge) / steps_per_epoch.max(1) as f64
+    });
     let total_steps = args.epochs * steps_per_epoch.max(1);
     let train_bar = new_progress_bar(total_steps as u64).with_message("training steps");
 
@@ -1119,6 +1150,10 @@ pub fn fit_cell_activity_graph_embedding(
                     }
                 }
             }
+            // The residual's own shrinkage, on the anchored rows' factors.
+            if let (Some(l), true) = (&model.lora, lora_ridge_step > 0.0) {
+                total = (total + (l.ridge()? * lora_ridge_step)?)?;
+            }
             // Exact pseudobulk–module term + membership priors, once per optimizer
             // step, through the same functions geu's composite trainer uses: draw
             // `units_per_step` pseudobulks uniformly, pool their count rows through
@@ -1165,7 +1200,7 @@ pub fn fit_cell_activity_graph_embedding(
             // at all, and without this the bar would still reach 100% and the
             // phase timings would still look normal — the instrumentation would
             // make the failure less visible rather than more.
-            let stepped = clip_and_step_dense(&mut opt, grads, f64::from(args.grad_clip))?;
+            let stepped = clip_and_step_dense_all(&mut adams, grads, f64::from(args.grad_clip))?;
             if !stepped {
                 skipped_steps += 1;
             }

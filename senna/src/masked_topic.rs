@@ -767,7 +767,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     // The flag given, else the parent manifest's table, pinned.
     let preset_mode: Option<(Box<str>, graph_embedding_util::PresetMode)> =
-        match args.feature_embedding.resolve() {
+        match args.feature_embedding.resolve()? {
             Some((p, m)) => Some((Box::from(p), m)),
             None => inherited.as_ref().map(|inh| {
                 (

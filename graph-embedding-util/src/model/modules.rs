@@ -279,6 +279,7 @@ impl JointEmbedModel {
             b_feat,
             b_cell,
             adapter: None,
+            lora: None,
             modules: Some(modules),
             embedding_dim: h,
         })
