@@ -4,10 +4,10 @@ use clap::Parser;
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
-    modules: GeneModuleArgs,
+    modules: FeatureModuleArgs,
 }
 
-fn parse(args: &[&str]) -> GeneModuleArgs {
+fn parse(args: &[&str]) -> FeatureModuleArgs {
     Cli::parse_from(std::iter::once("x").chain(args.iter().copied())).modules
 }
 
@@ -15,7 +15,7 @@ fn parse(args: &[&str]) -> GeneModuleArgs {
 fn default_on_cli_trains_modules_unless_told_otherwise() {
     let cfg = parse(&[]).resolve(Some(128)).unwrap().unwrap();
     assert_eq!(cfg.n_modules, 128);
-    let cfg = parse(&["--gene-modules", "32"])
+    let cfg = parse(&["--feature-modules", "32"])
         .resolve(Some(128))
         .unwrap()
         .unwrap();
@@ -26,7 +26,7 @@ fn default_on_cli_trains_modules_unless_told_otherwise() {
 fn opt_in_cli_stays_off_without_the_flag() {
     assert!(parse(&[]).resolve(None).unwrap().is_none());
     assert_eq!(
-        parse(&["--gene-modules", "16"])
+        parse(&["--feature-modules", "16"])
             .resolve(None)
             .unwrap()
             .unwrap()
@@ -37,5 +37,5 @@ fn opt_in_cli_stays_off_without_the_flag() {
 
 #[test]
 fn validation_rejects_bad_knobs() {
-    assert!(parse(&["--gene-modules", "1"]).resolve(None).is_err());
+    assert!(parse(&["--feature-modules", "1"]).resolve(None).is_err());
 }

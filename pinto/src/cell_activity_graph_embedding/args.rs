@@ -546,13 +546,13 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(alias = "gene-init-similarity-floor")]
     pub feature_init_similarity_floor: f32,
 
-    /// The `--feature-modules` flag group (see `graph_embedding_util::GeneModuleArgs`).
+    /// The `--feature-modules` flag group (see `graph_embedding_util::FeatureModuleArgs`).
     /// Cage has no feature-negative NCE, so the within-module negatives do not apply
     /// here; the composition, the exact pseudobulk–module term, the feature dropout
     /// and the warm start do. The residual takes `--embedding-l2` like every other
     /// feature-side table in cage.
     #[command(flatten)]
-    pub modules: graph_embedding_util::GeneModuleArgs,
+    pub modules: graph_embedding_util::FeatureModuleArgs,
 }
 
 /// How a feature with no dictionary row is initialized.

@@ -467,7 +467,7 @@ fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
             "auto",
             "--freeze-feature-embedding",
             &plus,
-            "--gene-modules",
+            "--feature-modules",
             "2",
         ],
     );
