@@ -7,8 +7,11 @@
 //! plus, for every `--modality` file, that modality's two channel rows
 //! (`{gene}/m6a/{methylated,unmethylated}`, `{gene}/atoi/{edited,unedited}`,
 //! `{gene}/apa/{proximal,distal}`). The base track shares a gene's loading
-//! outright; every other track adds a ridge-shrunk offset to it
-//! (`--offset-l2`). [`tracks::assign_tracks`] reads this grammar off the row
+//! outright; every other track adds a low-rank, ridge-shrunk offset to it
+//! (`--offset-rank`, `--offset-l2`), so a track moves its genes inside one
+//! shared subspace. A table given with `--{freeze,init,lora}-feature-embedding`
+//! is read onto the grammar by [`preset::resolve_gem_preset`]: bare names are
+//! spliced rows. [`tracks::assign_tracks`] reads this grammar off the row
 //! names alone (never a file name or load order) and builds the
 //! [`tracks::TrackPlan`] that both `senna gem`'s own per-gene HVG pooling and
 //! the engine's per-track training consume.
@@ -38,6 +41,9 @@ pub(crate) mod load;
 /// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage`:
 /// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
 pub mod marker_embedding;
+/// `--{freeze,init,lora}-feature-embedding` read onto the row grammar: base
+/// rows, per-track offsets, carried rows.
+pub(crate) mod preset;
 /// The `senna gem` run: joint gene-count embedding over the shared
 /// `graph_embedding_util` engine (bge, over every feature row). Binary entry: [`run::run_gem_embedding`].
 pub mod run;

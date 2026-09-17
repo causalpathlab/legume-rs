@@ -105,9 +105,15 @@ pub(crate) struct EmbedPlan<'a> {
     /// Ridge on the per-track offsets (`FitConfig.offset_l2`); inert at one
     /// track. bge always passes `0.0`.
     pub offset_l2: f32,
-    /// Gene rows given up front (`senna bge --{freeze,init}-feature-embedding`),
-    /// pinned or only started from; `None` = every row trains. gem passes `None`.
+    /// Rank of the per-track gene offsets (`FitConfig.offset_rank`); inert at
+    /// one track. gem's `--offset-rank`; bge passes the LoRA default.
+    pub offset_rank: usize,
+    /// Gene rows given up front (`--{freeze,init,lora}-feature-embedding`),
+    /// pinned or only started from; `None` = every row trains. On gem's
+    /// tracked axis these are the base rows, ids on the gene axis.
     pub preset_features: Option<ge::PresetRows>,
+    /// Given offsets on non-base tracks (gem only); empty for none.
+    pub preset_offsets: Vec<ge::PresetOffsets>,
     /// The given table's rows that matched no feature, appended to the
     /// written ρ so the output is the full table.
     pub carried: Option<crate::carried_rows::CarriedRows>,
@@ -154,6 +160,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
     let preset_features = plan.preset_features.take();
+    let preset_offsets = std::mem::take(&mut plan.preset_offsets);
     let carried = plan.carried.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
@@ -207,7 +214,9 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 .as_ref()
                 .map(crate::gem::tracks::TrackPlan::to_ge),
             offset_l2: plan.offset_l2,
+            offset_rank: plan.offset_rank,
             preset_features,
+            preset_offsets,
         })
     };
 
@@ -668,9 +677,10 @@ impl super::BgeArgs {
 }
 
 impl crate::gem::args::GemArgs {
-    pub(crate) fn knobs(&self) -> EmbedKnobs<'_> {
+    /// `embedding_dim` is the width resolved against a given feature table.
+    pub(crate) fn knobs(&self, embedding_dim: usize) -> EmbedKnobs<'_> {
         EmbedKnobs {
-            embedding_dim: self.embedding_dim,
+            embedding_dim,
             collapse: &self.collapse,
             // gem has no `senna update` / carried-pb-reference surface yet
             // (no `pb_reference` / `init_from` fields, no `Updatable` impl),

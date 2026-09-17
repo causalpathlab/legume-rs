@@ -1,14 +1,16 @@
 //! The phase-1 tables as candle `Var`s: unit embeddings, the module
-//! dictionary, the per-gene residuals, their biases, and one offset table per
+//! dictionary, the per-gene residuals, their biases, and one offset per
 //! non-base track. Rows given from outside are pinned through gradient masks
 //! (a masked row's gradient is zero, so its Adagrad step is zero) and, for the
 //! output, kept verbatim so a pinned row owes nothing to the `μ + r` round
-//! trip. A LoRA residual on the gene rows is the shared
-//! [`candle_util::lora`] primitive, read through one gather per step.
+//! trip. A LoRA residual on the gene rows, and every track's per-gene offset,
+//! is the shared [`candle_util::lora`] primitive, read through one gather per
+//! step.
 
-pub use crate::preset_mode::{LoraSpec, PresetMode};
+pub use crate::preset_mode::{LoraSpec, PresetMode, PresetOffsets};
 use candle_util::candle_core::{DType, Device, Result as CResult, Tensor, Var};
 use candle_util::convert::to_host;
+use candle_util::fast_index::gather_rows;
 use candle_util::lora::PinnedLora;
 use matrix_util::rand_util::{mix_seed, normal_f32_seeded};
 use nalgebra::DMatrix;
@@ -16,26 +18,79 @@ use nalgebra::DMatrix;
 /// Spread of every random init.
 pub const INIT_STDEV: f32 = 0.1;
 
-/// One non-base track's additive offsets from the base tables.
+/// Seed salt of track `t`'s offset residual: `OFFSET_SALT + t`.
+const OFFSET_SALT: u64 = 0x4f46_4653;
+
+/// One non-base track's additive offsets from the base tables. The module
+/// offset `Δ` is a full `[M, H]` table; the gene offset is a LOW-RANK residual
+/// `δ_g = δ₀_g + u_g · V` ([`candle_util::lora`], every gene a row) on top of
+/// an optional given base `δ₀` (see [`HierParams::preset_offsets`]). So a
+/// track's row of a gene is the gene's base row moved inside the
+/// `rank`-dimensional subspace `V` spans — one subspace per track, shared by
+/// every gene on it.
 pub struct TrackOffset {
     /// `[M, H]`.
     pub d_mu: Var,
     /// `[M]`.
     pub d_b_m: Var,
-    /// `[G, H]`.
-    pub d_r: Var,
+    /// The trained part of the gene offset: `u` `[G, rank]`, `V` `[rank, H]`.
+    pub d_r: PinnedLora,
+    /// The given part `δ₀`, `[G, H]` with zeros off the given genes; `None`
+    /// when nothing was given. A given gene the residual skips (its `u` row
+    /// masked off, see [`Self::pinned_genes`]) is pinned: its composed track
+    /// row is `base row + δ₀` verbatim.
+    pub d_r_given: Option<Tensor>,
     /// `[G]`.
     pub d_b_g: Var,
 }
 
 impl TrackOffset {
-    fn zeros(n_modules: usize, n_genes: usize, h: usize, dev: &Device) -> CResult<Self> {
+    fn new(
+        n_modules: usize,
+        n_genes: usize,
+        h: usize,
+        rank: usize,
+        seed: u64,
+        dev: &Device,
+    ) -> CResult<Self> {
+        let all: Vec<u32> = (0..n_genes as u32).collect();
         Ok(Self {
             d_mu: Var::zeros((n_modules, h), DType::F32, dev)?,
             d_b_m: Var::zeros(n_modules, DType::F32, dev)?,
-            d_r: Var::zeros((n_genes, h), DType::F32, dev)?,
+            d_r: PinnedLora::new(n_genes, h, rank, &all, seed, dev)?,
+            d_r_given: None,
             d_b_g: Var::zeros(n_genes, DType::F32, dev)?,
         })
+    }
+
+    /// The gene offset on the rows named by `ids`, `[ids, H]`:
+    /// `δ₀[ids] + u[ids] · V`. In the graph, so the factors take gradient.
+    pub fn residual_rows(&self, ids: &Tensor) -> CResult<Tensor> {
+        let r = self.d_r.residual_rows(ids)?;
+        match self.d_r_given.as_ref() {
+            Some(b) => r + gather_rows(b, ids)?,
+            None => Ok(r),
+        }
+    }
+
+    /// The whole gene offset `[G, H]` on the host, row-major: `δ₀ + u · V`.
+    pub fn delta_host(&self) -> CResult<Vec<f32>> {
+        let r = self.d_r.residual()?;
+        let t = match self.d_r_given.as_ref() {
+            Some(b) => (r + b)?,
+            None => r,
+        };
+        to_host(&t)
+    }
+
+    /// Per gene, whether its offset is pinned: read off the residual's own
+    /// mask, which is what silences the gradient (a masked-off `u` row is
+    /// exactly a given `δ₀` under freeze).
+    pub fn pinned_genes(&self) -> CResult<Vec<bool>> {
+        Ok(to_host(&self.d_r.u_mask)?
+            .into_iter()
+            .map(|active| active == 0.0)
+            .collect())
     }
 }
 
@@ -84,6 +139,10 @@ pub struct HierParams {
     pub frozen_rows: Vec<f32>,
     /// The low-rank residual on the pinned genes, under [`PresetMode::Lora`].
     pub lora: Option<HierLora>,
+    /// Rank of every track offset's gene residual (see [`TrackOffset`]).
+    pub offset_rank: usize,
+    /// LoRA+ ratio of the track offsets' shared factors.
+    pub offset_lr_ratio: f32,
     /// The seed the tables were drawn from; the LoRA row factors draw from it too.
     pub seed: u64,
 }
@@ -102,7 +161,8 @@ fn var2(data: Vec<f32>, rows: usize, cols: usize, dev: &Device) -> CResult<Var> 
     Var::from_tensor(&Tensor::from_vec(data, (rows, cols), dev)?)
 }
 
-/// One non-base track's offsets on the host: `(d_mu, d_b_m, d_r, d_b_g)`.
+/// One non-base track's offsets on the host: `(Δ, β, δ, γ)`, with `δ` the
+/// dense gene offset `δ₀ + u · V` ([`TrackOffset::delta_host`]).
 pub type HostOffset = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 
 impl HierParams {
@@ -115,17 +175,20 @@ impl HierParams {
         seed: u64,
         dev: &Device,
     ) -> CResult<Self> {
-        Self::new_tracked(n_units, n_modules, n_genes, 1, h, seed, dev)
+        Self::new_tracked(n_units, n_modules, n_genes, 1, h, 1, seed, dev)
     }
 
     /// Base tables drawn from `seed` (the same draws whatever `n_tracks` is),
-    /// plus a zero offset table per non-base track.
+    /// plus a zero offset per non-base track, its gene residual of rank
+    /// `offset_rank` (unused at one track; the trainer checks it against `h`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_tracked(
         n_units: usize,
         n_modules: usize,
         n_genes: usize,
         n_tracks: usize,
         h: usize,
+        offset_rank: usize,
         seed: u64,
         dev: &Device,
     ) -> CResult<Self> {
@@ -153,13 +216,24 @@ impl HierParams {
             )?,
             b_g: Var::zeros(n_genes, DType::F32, dev)?,
             offsets: (1..n_tracks)
-                .map(|_| TrackOffset::zeros(n_modules, n_genes, h, dev))
+                .map(|t| {
+                    TrackOffset::new(
+                        n_modules,
+                        n_genes,
+                        h,
+                        offset_rank,
+                        mix_seed(seed, OFFSET_SALT + t as u64),
+                        dev,
+                    )
+                })
                 .collect::<CResult<_>>()?,
             r_mask: None,
             mu_frozen: false,
             frozen_gene: Vec::new(),
             frozen_rows: Vec::new(),
             lora: None,
+            offset_rank,
+            offset_lr_ratio: LoraSpec::default().lr_ratio,
             seed,
         })
     }
@@ -176,12 +250,6 @@ impl HierParams {
     pub fn preset(&mut self, frozen: &PresetGenes, module_of: &[u32]) -> anyhow::Result<()> {
         let (h, n_genes, n_modules) = (self.h, module_of.len(), self.b_m.dims()[0]);
         frozen.mode.validate(h)?;
-        // A preset is a statement about the base rows; the offset tracks would
-        // train against a residual the output never carries.
-        anyhow::ensure!(
-            self.offsets.is_empty(),
-            "preset gene rows need a single-track feature axis"
-        );
         anyhow::ensure!(
             frozen.rows.len() == frozen.ids.len() * h,
             "frozen rows are {} values for {} genes at H={h}",
@@ -264,6 +332,72 @@ impl HierParams {
         self.frozen_gene.get(g).copied().unwrap_or(false)
     }
 
+    /// Give `δ₀` on the non-base tracks: for each entry, `rows[i]` becomes the
+    /// base of gene `ids[i]`'s offset on `track`. Under `Freeze` the residual
+    /// skips those genes and their composed track rows are `base row + δ₀`
+    /// verbatim, so a pinned offset needs the gene's base row pinned too
+    /// ([`Self::preset`] first); under `Lora` and `Init` the residual trains
+    /// on top of `δ₀` on every gene. One entry per track.
+    pub fn preset_offsets(
+        &mut self,
+        entries: &[PresetOffsets],
+        mode: PresetMode,
+    ) -> anyhow::Result<()> {
+        let (h, n_genes) = (self.h, self.b_g.dims()[0]);
+        let is_freeze = matches!(mode, PresetMode::Freeze);
+        let mut track_given = vec![false; self.offsets.len() + 1];
+        for entry in entries {
+            let t = entry.track as usize;
+            anyhow::ensure!(
+                (1..=self.offsets.len()).contains(&t),
+                "offset rows on track {t}: the axis has {} non-base track(s)",
+                self.offsets.len()
+            );
+            anyhow::ensure!(!track_given[t], "offset rows for track {t} given twice");
+            track_given[t] = true;
+            anyhow::ensure!(
+                entry.rows.len() == entry.ids.len() * h,
+                "offset rows on track {t} are {} values for {} genes at H={h}",
+                entry.rows.len(),
+                entry.ids.len()
+            );
+            let mut delta0 = vec![0f32; n_genes * h];
+            let mut gene_given = vec![false; n_genes];
+            for (i, &g) in entry.ids.iter().enumerate() {
+                let g = g as usize;
+                anyhow::ensure!(
+                    g < n_genes,
+                    "offset gene {g} is outside the {n_genes}-gene axis"
+                );
+                anyhow::ensure!(!gene_given[g], "offset gene {g} given twice on track {t}");
+                anyhow::ensure!(
+                    !is_freeze || self.is_frozen_gene(g),
+                    "a pinned offset on gene {g} needs the gene's base row pinned too"
+                );
+                gene_given[g] = true;
+                delta0[g * h..(g + 1) * h].copy_from_slice(&entry.rows[i * h..(i + 1) * h]);
+            }
+            let o = &mut self.offsets[t - 1];
+            o.d_r_given = Some(Tensor::from_vec(delta0, (n_genes, h), &self.dev)?);
+            if is_freeze {
+                // The residual skips the given genes: rebuilt with only the
+                // others active, so their `u` rows are masked off.
+                let active: Vec<u32> = (0..n_genes as u32)
+                    .filter(|&g| !gene_given[g as usize])
+                    .collect();
+                o.d_r = PinnedLora::new(
+                    n_genes,
+                    h,
+                    self.offset_rank,
+                    &active,
+                    mix_seed(self.seed, OFFSET_SALT + t as u64),
+                    &self.dev,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Track `t`'s offsets; `None` for the base track and for an unknown one.
     #[must_use]
     pub fn offset(&self, t: usize) -> Option<&TrackOffset> {
@@ -271,10 +405,12 @@ impl HierParams {
     }
 
     /// The composed dictionary, one row per FEATURE ROW: for row `f` naming
-    /// gene `g` on track `t`, `ρ_f = μ_{m(g)} + r_g (+ Δ^t_{m(g)} + δ^t_g)` and
-    /// `b_f = b_{m(g)} + b_g (+ β^t_{m(g)} + γ^t_g)`. A pinned gene's base row
-    /// is the given row verbatim, plus its module's and its own LoRA shift
-    /// when there is one (a preset needs one track, so no offset applies).
+    /// gene `g` on track `t`, `ρ_f = base_g (+ Δ^t_{m(g)} + δ^t_g)` and
+    /// `b_f = b_{m(g)} + b_g (+ β^t_{m(g)} + γ^t_g)`, where the base row is
+    /// `μ_{m(g)} + r_g`, or for a pinned gene the given row verbatim plus its
+    /// module's and its own LoRA shift when there is one. A pinned offset
+    /// (see [`Self::preset_offsets`]) makes the track row `base_g + δ₀_g`
+    /// verbatim, without the module offset.
     pub fn compose(
         &self,
         track_of_row: &[u32],
@@ -303,40 +439,47 @@ impl HierParams {
                 Ok((
                     to_host(o.d_mu.as_tensor())?,
                     to_host(o.d_b_m.as_tensor())?,
-                    to_host(o.d_r.as_tensor())?,
+                    o.delta_host()?,
                     to_host(o.d_b_g.as_tensor())?,
                 ))
             })
             .collect::<CResult<_>>()?;
+        let pinned_offset: Vec<Vec<bool>> = self
+            .offsets
+            .iter()
+            .map(TrackOffset::pinned_genes)
+            .collect::<CResult<_>>()?;
+        // The base row of gene `g` in module `m`, column `k`.
+        let base = |g: usize, m: usize, k: usize| -> f32 {
+            let shift = mod_shift.as_ref().map_or(0.0, |d| d[m * h + k]);
+            if self.is_frozen_gene(g) {
+                self.frozen_rows[g * h + k]
+                    + shift
+                    + gene_shift.as_ref().map_or(0.0, |d| d[g * h + k])
+            } else {
+                // A free gene in a pinned module still sits on the module's
+                // shifted mean.
+                mu[m * h + k] + shift + r[g * h + k]
+            }
+        };
         let mut rho = DMatrix::<f32>::zeros(n_features, h);
         let mut b_feat = vec![0f32; n_features];
         for row in 0..n_features {
             let t = track_of_row[row] as usize;
             let g = gene_of_row[row] as usize;
             let m = module_of[g] as usize;
-            match t.checked_sub(1).and_then(|i| offsets.get(i)) {
+            match t.checked_sub(1).map(|i| (&offsets[i], &pinned_offset[i])) {
                 None => {
-                    if self.is_frozen_gene(g) {
-                        for k in 0..h {
-                            rho[(row, k)] = self.frozen_rows[g * h + k]
-                                + mod_shift.as_ref().map_or(0.0, |d| d[m * h + k])
-                                + gene_shift.as_ref().map_or(0.0, |d| d[g * h + k]);
-                        }
-                    } else {
-                        // A free gene in a pinned module still sits on the
-                        // module's shifted mean.
-                        for k in 0..h {
-                            rho[(row, k)] = mu[m * h + k]
-                                + mod_shift.as_ref().map_or(0.0, |d| d[m * h + k])
-                                + r[g * h + k];
-                        }
+                    for k in 0..h {
+                        rho[(row, k)] = base(g, m, k);
                     }
                     b_feat[row] = b_m[m] + b_g[g];
                 }
-                Some((d_mu, d_b_m, d_r, d_b_g)) => {
+                Some(((d_mu, d_b_m, d_r, d_b_g), pinned)) => {
+                    let module_shift = if pinned[g] { 0.0 } else { 1.0 };
                     for k in 0..h {
                         rho[(row, k)] =
-                            mu[m * h + k] + r[g * h + k] + d_mu[m * h + k] + d_r[g * h + k];
+                            base(g, m, k) + module_shift * d_mu[m * h + k] + d_r[g * h + k];
                     }
                     b_feat[row] = b_m[m] + b_g[g] + d_b_m[m] + d_b_g[g];
                 }

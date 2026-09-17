@@ -2,7 +2,7 @@
 //! per unit ∝ its share, one [`step`] per chunk of units; the composed
 //! dictionary at the end.
 
-use super::params::{HierParams, PresetGenes};
+use super::params::{HierParams, PresetGenes, PresetMode, PresetOffsets};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
 use super::units::UnitTable;
@@ -35,6 +35,11 @@ pub struct HierConfig {
     /// `offset_l2 · (mean_m ‖Δ‖² + mean_g ‖δ‖²)` whatever `units_per_step` is.
     /// Inert on a one-track axis, which has no offsets.
     pub offset_l2: f32,
+    /// Rank of every non-base track's gene offset `u · V` (see
+    /// [`super::params::TrackOffset`]): its own number, never derived from
+    /// `h`; `1..=h` on a tracked axis, `h` being an unrestricted offset.
+    /// Inert on a one-track axis.
+    pub offset_rank: usize,
     /// Where the tables live and the steps run.
     pub device: Device,
 }
@@ -138,12 +143,16 @@ pub fn train(
     h: usize,
     cfg: &HierConfig,
     preset: Option<&PresetGenes>,
+    preset_offsets: &[PresetOffsets],
     stop: &AtomicBool,
 ) -> anyhow::Result<HierOutput> {
     anyhow::ensure!(
         labels.len() == units.tracks.n_genes(),
         "one module label per gene"
     );
+    if units.n_tracks() > 1 {
+        crate::fit::config::validate_offset_rank(cfg.offset_rank, h)?;
+    }
     let part = Partition::from_labels(labels, cfg.n_modules);
     let um = UnitModules::new(units, &part);
     // Each track's support through the partition: built once here, never per
@@ -152,12 +161,9 @@ pub fn train(
     let (n_u, n_m, d) = (units.n_units(), part.n_modules(), units.tracks.n_genes());
     let n_t = units.n_tracks();
     let n_features = units.n_features;
-    let mut params = HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.seed, &cfg.device)?;
+    let mut params =
+        HierParams::new_tracked(n_u, n_m, d, n_t, h, cfg.offset_rank, cfg.seed, &cfg.device)?;
     if let Some(f) = preset {
-        anyhow::ensure!(
-            n_t == 1,
-            "preset gene rows need a single-track feature axis"
-        );
         params.preset(f, &part.module_of)?;
         info!(
             "Phase 1 (hier) — {} of {d} gene rows {}{}",
@@ -167,6 +173,29 @@ pub fn train(
                 " (rank {}, V at {}× the rate, ridge {})",
                 l.rank, l.lr_ratio, l.ridge
             ))
+        );
+    }
+    if !preset_offsets.is_empty() {
+        let mode = preset.map_or(PresetMode::Init, |f| f.mode);
+        params.preset_offsets(preset_offsets, mode)?;
+        info!(
+            "Phase 1 (hier) — track offsets given for {} gene rows on {} track(s), {}",
+            preset_offsets.iter().map(|p| p.ids.len()).sum::<usize>(),
+            preset_offsets.len(),
+            if matches!(mode, PresetMode::Freeze) {
+                "pinned verbatim"
+            } else {
+                "as the start of the offset"
+            }
+        );
+    }
+    if n_t > 1 {
+        info!(
+            "Phase 1 (hier) — {} non-base track(s), each gene offset a rank-{} residual on \
+             the base row (V at {}× the rate)",
+            n_t - 1,
+            cfg.offset_rank,
+            params.offset_lr_ratio
         );
     }
     let mut opt = Optimizers::new(&params, cfg.lr)?;
