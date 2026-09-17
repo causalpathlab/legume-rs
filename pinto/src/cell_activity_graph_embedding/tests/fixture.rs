@@ -1,9 +1,9 @@
 //! The planted-truth fixture the pair-projection tests share: a frozen
-//! dictionary, gene abundances, and the counts a known pair latent produces.
+//! dictionary, feature abundances, and the counts a known pair latent produces.
 
 use crate::util::common::*;
 
-pub(super) const N_GENES: usize = 240;
+pub(super) const N_FEATURES: usize = 240;
 pub(super) const DIM: usize = 4;
 pub(super) const N_CELLS: usize = 100;
 
@@ -14,10 +14,10 @@ pub(super) fn jitter(seed: usize) -> f32 {
     (h as f32 / 1000.0 - 0.5) * 0.4
 }
 
-/// `[G × D]` frozen dictionary: gene `g` loads mainly on dim `g % D`.
+/// `[G × D]` frozen dictionary: feature `g` loads mainly on dim `g % D`.
 pub(super) fn dictionary_matrix() -> Mat {
-    let mut e = Mat::zeros(N_GENES, DIM);
-    for g in 0..N_GENES {
+    let mut e = Mat::zeros(N_FEATURES, DIM);
+    for g in 0..N_FEATURES {
         for j in 0..DIM {
             e[(g, j)] = if j == g % DIM {
                 1.0 + 0.1 * ((g / DIM) % 5) as f32
@@ -29,9 +29,11 @@ pub(super) fn dictionary_matrix() -> Mat {
     e
 }
 
-/// Log gene abundance the offsets are built from, and the totals that imply it.
+/// Log feature abundance the offsets are built from, and the totals that imply it.
 pub(super) fn abundances() -> (Vec<f32>, Vec<f64>) {
-    let b: Vec<f32> = (0..N_GENES).map(|g| (5.0 + (g % 7) as f32).ln()).collect();
+    let b: Vec<f32> = (0..N_FEATURES)
+        .map(|g| (5.0 + (g % 7) as f32).ln())
+        .collect();
     let totals: Vec<f64> = b.iter().map(|&x| x.exp() as f64 * N_CELLS as f64).collect();
     (b, totals)
 }
@@ -39,7 +41,7 @@ pub(super) fn abundances() -> (Vec<f32>, Vec<f64>) {
 /// Pooled counts a pair at `theta` with intercept `beta` would produce, exactly
 /// (no Poisson draw), so the MAP is `theta` up to the ridge.
 pub(super) fn counts_from(e: &Mat, b: &[f32], theta: &[f32], beta: f32) -> Vec<(u32, f32)> {
-    (0..N_GENES)
+    (0..N_FEATURES)
         .map(|g| {
             let s: f32 = (0..DIM).map(|j| e[(g, j)] * theta[j]).sum::<f32>() + b[g] + beta;
             (g as u32, s.exp())

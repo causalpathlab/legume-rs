@@ -4,10 +4,10 @@
 //! coarsens them by cell-level cluster labels, and refines the projection
 //! basis via community centroids.
 
-use crate::gene_network::graph::GenePairGraph;
+use crate::feature_network::graph::FeaturePairGraph;
 use crate::link_community::model::LinkProfileStore;
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use data_beans_alg::cell_pairs::collapse_pairs;
 use matrix_param::io::ParamIo;
 use matrix_util::utils::generate_minibatch_intervals;
@@ -17,15 +17,15 @@ use rayon::prelude::*;
 /// Compute per-ROW total counts from sparse data.
 ///
 /// Returns a vector of length `n_rows` with the sum of all entries per row.
-/// A caller that means genes folds this through [`GeneAxis::pool_totals`]: on
-/// a splice-channelized matrix a row is one track of a gene, not a gene.
+/// A caller that means features folds this through [`FeatureAxis::pool_totals`]: on
+/// a splice-channelized matrix a row is one track of a feature, not a feature.
 pub fn compute_row_totals(
     data: &SparseIoVec,
     block_size: Option<usize>,
 ) -> anyhow::Result<Vec<f64>> {
-    let n_genes = data.num_rows();
+    let n_features = data.num_rows();
     let n_cells = data.num_columns();
-    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_features, block_size);
 
     // Accumulate with `try_fold` + `try_reduce`, NOT `map().collect()`.
     //
@@ -33,14 +33,14 @@ pub fn compute_row_totals(
     // the sum afterwards, so peak memory scales with the job count. The job count is
     // set by `default_block_size`, which derives the block from the FEATURE count
     // to bound read work, and is blind to how much each job allocates. At 18k
-    // genes it hits the 100-cell floor, so half a million cells becomes ~5000
+    // features it hits the 100-cell floor, so half a million cells becomes ~5000
     // jobs, each carrying a full dense accumulator. Folding bounds the live
     // accumulators by the worker count instead, which is ~80x fewer here, and the
     // partials were being summed immediately anyway.
     let totals = jobs
         .par_iter()
         .try_fold(
-            || vec![0.0f64; n_genes],
+            || vec![0.0f64; n_features],
             |mut acc, &(lb, ub)| -> anyhow::Result<Vec<f64>> {
                 let x = data.read_columns_csc(lb..ub)?;
                 for col in 0..x.ncols() {
@@ -53,7 +53,7 @@ pub fn compute_row_totals(
             },
         )
         .try_reduce(
-            || vec![0.0f64; n_genes],
+            || vec![0.0f64; n_features],
             |mut a, b| {
                 for (x, y) in a.iter_mut().zip(b.iter()) {
                     *x += *y;
@@ -66,14 +66,18 @@ pub fn compute_row_totals(
 
 /// Zero out rows of a basis matrix for features below a count threshold.
 ///
-/// `totals` is indexed like the basis rows. When the caller has a gene axis it
-/// passes per-gene totals spread back over the rows, so a gene is kept or
+/// `totals` is indexed like the basis rows. When the caller has a feature axis it
+/// passes per-feature totals spread back over the rows, so a feature is kept or
 /// dropped as a unit rather than losing whichever track happens to fall short.
 ///
 /// Returns the number of basis rows that were kept (not zeroed).
-pub fn filter_basis_by_gene_count(basis: &mut Mat, gene_totals: &[f64], min_count: f32) -> usize {
+pub fn filter_basis_by_feature_count(
+    basis: &mut Mat,
+    feature_totals: &[f64],
+    min_count: f32,
+) -> usize {
     let mut n_kept = 0usize;
-    for (g, &total) in gene_totals.iter().enumerate().take(basis.nrows()) {
+    for (g, &total) in feature_totals.iter().enumerate().take(basis.nrows()) {
         if total < min_count as f64 {
             basis.row_mut(g).fill(0.0);
         } else {
@@ -115,12 +119,12 @@ pub(crate) fn read_unique_cells_for_edges(
 /// Each chunk runs its own `read_unique_cells_for_edges` + per-edge
 /// `basis^T · (x_i + x_j)` projection, then chunks are concatenated in
 /// order. I/O is the dominant cost so chunk size is sized by
-/// `generate_minibatch_intervals` against the gene-axis dimension.
+/// `generate_minibatch_intervals` against the feature-axis dimension.
 ///
-/// * `data` - Sparse expression data [n_genes × n_cells]
+/// * `data` - Sparse expression data [n_features × n_cells]
 /// * `edge_indices` - Subset of edge indices to process
 /// * `all_edges` - Full edge list from KNN graph
-/// * `basis` - Projection basis [n_genes × proj_dim]
+/// * `basis` - Projection basis [n_features × proj_dim]
 /// * `block_size` - Edges per parallel chunk (None ⇒ adaptive default)
 pub fn build_projection_profiles_for_edges(
     data: &SparseIoVec,
@@ -162,20 +166,20 @@ pub fn build_projection_profiles_for_edges(
         .try_for_each(|(out_em, &(edge_begin, edge_end))| -> anyhow::Result<()> {
             let job_edges = &edges[edge_begin..edge_end];
             let (x_gc, col_of_cell) = read_unique_cells_for_edges(data, job_edges)?;
-            let n_genes = x_gc.nrows();
+            let n_features = x_gc.nrows();
             // The pooled endpoint profile `x_u + x_v`, reused across edges.
-            let mut pooled_g = DVec::zeros(n_genes);
+            let mut pooled_g = DVec::zeros(n_features);
 
             for (job_edge, &(cell_u, cell_v)) in job_edges.iter().enumerate() {
                 pooled_g.fill(0.0);
                 for read_col in [col_of_cell[&cell_u], col_of_cell[&cell_v]] {
                     let cell_counts = x_gc.col(read_col);
-                    for (&gene, &count) in cell_counts
+                    for (&feature, &count) in cell_counts
                         .row_indices()
                         .iter()
                         .zip(cell_counts.values().iter())
                     {
-                        pooled_g[gene] += count;
+                        pooled_g[feature] += count;
                     }
                 }
 
@@ -194,19 +198,19 @@ pub fn build_projection_profiles_for_edges(
 
 /// Coarsen fine-cell raw expression to pb-samples.
 ///
-/// Returns an `[n_genes × n_pb_samples]` dense matrix whose column `c`
+/// Returns an `[n_features × n_pb_samples]` dense matrix whose column `c`
 /// holds `Σ_{i: cell_labels[i] == c} x_fine[:, i]` — i.e. the total
-/// gene counts pooled across every fine cell assigned to pb-sample `c`.
+/// feature counts pooled across every fine cell assigned to pb-sample `c`.
 ///
 /// The return buffer is dense (not sparse) because the pb-sample expression
-/// is dense by construction: any gene expressed in any fine cell within a
+/// is dense by construction: any feature expressed in any fine cell within a
 /// cluster contributes to that cluster's column.
 pub fn coarsen_cell_expression_dense(
     data: &SparseIoVec,
     cell_labels: &[usize],
     n_pb_samples: usize,
 ) -> anyhow::Result<Mat> {
-    let n_genes = data.num_rows();
+    let n_features = data.num_rows();
     // Checked, not `debug_assert`ed. The loop below is driven by `cell_labels`
     // rather than by the column count, so a short label vector would silently
     // drop the unlabelled tail in a release build instead of failing. The old
@@ -220,15 +224,15 @@ pub fn coarsen_cell_expression_dense(
 
     // Nothing to coarsen into, and `par_chunks_mut` panics on a zero-width
     // chunk, so leave before either can bite.
-    if n_genes == 0 || n_pb_samples == 0 {
-        return Ok(Mat::zeros(n_genes, n_pb_samples));
+    if n_features == 0 || n_pb_samples == 0 {
+        return Ok(Mat::zeros(n_features, n_pb_samples));
     }
 
     // One job per CHUNK OF PB SAMPLES, not per slab of cells.
     //
     // Blocking by cells is what made this expensive: any cell in a slab can
     // belong to any pb sample, so every job had to carry the full dense
-    // `[n_genes x n_pb_samples]` accumulator, and holding one per job put a
+    // `[n_features x n_pb_samples]` accumulator, and holding one per job put a
     // half-million-cell run past 200 GB by the third cascade level. Keyed by pb
     // sample, a job owns only the columns it writes, so the accumulator no
     // longer grows as the cascade coarsens.
@@ -276,10 +280,10 @@ pub fn coarsen_cell_expression_dense(
         cursor[pb] += 1;
     }
 
-    let mut super_expr_gp = Mat::zeros(n_genes, n_pb_samples);
+    let mut super_expr_gp = Mat::zeros(n_features, n_pb_samples);
     super_expr_gp
         .as_mut_slice()
-        .par_chunks_mut(n_genes * pb_per_job)
+        .par_chunks_mut(n_features * pb_per_job)
         .enumerate()
         .try_for_each(|(job, out_gp)| -> anyhow::Result<()> {
             let pb_begin = job * pb_per_job;
@@ -297,17 +301,17 @@ pub fn coarsen_cell_expression_dense(
             // Walk the samples this job owns and consume their runs in step, so
             // the pb id never has to be stored per column.
             for pb_local in 0..(pb_end - pb_begin) {
-                let col_offset = pb_local * n_genes;
+                let col_offset = pb_local * n_features;
                 let run = (starts[pb_begin + pb_local] - read_begin)
                     ..(starts[pb_begin + pb_local + 1] - read_begin);
                 for read_col in run {
                     let cell_counts = x_gc.col(read_col);
-                    for (&gene, &count) in cell_counts
+                    for (&feature, &count) in cell_counts
                         .row_indices()
                         .iter()
                         .zip(cell_counts.values().iter())
                     {
-                        out_gp[col_offset + gene] += count;
+                        out_gp[col_offset + feature] += count;
                     }
                 }
             }
@@ -453,46 +457,46 @@ pub fn shannon_entropy_rows(propensity: &Mat) -> DVec {
     out
 }
 
-/// Compute community-specific gene expression statistics via Poisson-Gamma.
+/// Compute community-specific feature expression statistics via Poisson-Gamma.
 ///
 /// Given cell propensity [N × K] and sparse expression data [G × N],
-/// computes weighted gene sums `X @ propensity^T` and fits a Poisson-Gamma
-/// to get posterior gene expression rates per community. Before calibration the
+/// computes weighted feature sums `X @ propensity^T` and fits a Poisson-Gamma
+/// to get posterior feature expression rates per community. Before calibration the
 /// sufficient statistic is reweighted row-wise by NB Fisher-info weights
 /// `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`, matching the weighting used during
 /// DC-Poisson clustering so clustering and reporting stay consistent.
 ///
-/// Writes `{out_prefix}.gene_community.parquet` (genes × K). When
-/// `gene_weights` is `Some`, those precomputed NB Fisher-info weights are
-/// applied to the per-(gene, community) sufficient statistic; otherwise they
+/// Writes `{out_prefix}.feature_community.parquet` (features × K). When
+/// `feature_weights` is `Some`, those precomputed NB Fisher-info weights are
+/// applied to the per-(feature, community) sufficient statistic; otherwise they
 /// are recomputed from the data (extra full-data scan).
-pub fn compute_gene_community_stat(
+pub fn compute_feature_community_stat(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
-    gene_weights: Option<&[f32]>,
-    axis: Option<&GeneAxis>,
+    feature_weights: Option<&[f32]>,
+    axis: Option<&FeatureAxis>,
     block_size: Option<usize>,
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     let param =
-        fit_gene_community_param(cell_propensity, data_vec, gene_weights, axis, block_size)?;
+        fit_feature_community_param(cell_propensity, data_vec, feature_weights, axis, block_size)?;
     let row_names = data_vec.row_names()?;
-    let names = axis.map_or(&row_names[..], GeneAxis::gene_names);
-    write_gene_community_param(&param, names, out_prefix)
+    let names = axis.map_or(&row_names[..], FeatureAxis::feature_names);
+    write_feature_community_param(&param, names, out_prefix)
 }
 
-/// Fit the Poisson-Gamma posterior over gene × community without writing to disk.
+/// Fit the Poisson-Gamma posterior over feature × community without writing to disk.
 ///
 /// Returns the calibrated `GammaMatrix` so callers can reuse the posterior
 /// (e.g. to compute pairwise community similarity for cosine merging) without
 /// re-reading the parquet output. The sufficient statistic is row-scaled by
 /// NB Fisher-info weights `w_g = 1 / (1 + π_g · s̄ · φ(μ_g))`, matching
-/// `compute_gene_community_stat`.
-pub fn fit_gene_community_param(
+/// `compute_feature_community_stat`.
+pub fn fit_feature_community_param(
     cell_propensity: &Mat,
     data_vec: &SparseIoVec,
-    gene_weights: Option<&[f32]>,
-    axis: Option<&GeneAxis>,
+    feature_weights: Option<&[f32]>,
+    axis: Option<&FeatureAxis>,
     block_size: Option<usize>,
 ) -> anyhow::Result<matrix_param::dmatrix_gamma::GammaMatrix> {
     use matrix_param::dmatrix_gamma::GammaMatrix;
@@ -501,16 +505,16 @@ pub fn fit_gene_community_param(
     let n_rows = data_vec.num_rows();
     // Folding after the accumulation is exact, not an approximation: the
     // statistic is linear in the counts and the propensity is per cell, so
-    // summing a gene's rows before or after the multiply gives the same matrix.
-    let n_genes = axis.map_or(n_rows, GeneAxis::n_genes);
+    // summing a feature's rows before or after the multiply gives the same matrix.
+    let n_features = axis.map_or(n_rows, FeatureAxis::n_features);
     let n_cells = data_vec.num_columns();
     let k = cell_propensity.ncols();
 
-    info!("Computing gene-community statistics...");
+    info!("Computing feature-community statistics...");
     let prop_kn = cell_propensity.transpose();
     let jobs = generate_minibatch_intervals(n_cells, n_rows, block_size);
 
-    let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-community blocks");
+    let prog_bar = new_progress_bar(jobs.len() as u64).with_message("feature-community blocks");
     // Folded, not collected: see `compute_row_totals`. Each accumulator here is
     // `[n_rows x k]`, so the same job-count blowup applies.
     let (mut sum_gk, n_k_sum) = jobs
@@ -545,44 +549,44 @@ pub fn fit_gene_community_param(
     }
 
     let owned_w;
-    let w: &[f32] = match gene_weights {
+    let w: &[f32] = match feature_weights {
         Some(w) => w,
         None => {
-            info!("Computing NB Fisher-info weights for gene-community stats");
+            info!("Computing NB Fisher-info weights for feature-community stats");
             owned_w = compute_nb_fisher_weights(data_vec, block_size)?;
             &owned_w
         }
     };
     anyhow::ensure!(
         w.len() == sum_gk.nrows(),
-        "gene-community weights are on the wrong axis: {} weights for {} rows. \
-         Folding the statistic to genes means the weights must be per gene too.",
+        "feature-community weights are on the wrong axis: {} weights for {} rows. \
+         Folding the statistic to features means the weights must be per feature too.",
         w.len(),
         sum_gk.nrows()
     );
-    apply_gene_weights(&mut sum_gk, w);
+    apply_feature_weights(&mut sum_gk, w);
 
-    let mut gamma_param = GammaMatrix::new((n_genes, k), 1.0, 1.0);
-    let denom_gk = DVec::from_element(n_genes, 1.0) * &n_1k;
+    let mut gamma_param = GammaMatrix::new((n_features, k), 1.0, 1.0);
+    let denom_gk = DVec::from_element(n_features, 1.0) * &n_1k;
     gamma_param.update_stat(&sum_gk, &denom_gk);
     gamma_param.calibrate();
 
     Ok(gamma_param)
 }
 
-/// Write a fitted gene-community posterior to `<out_prefix>.gene_community.parquet`
-/// in melted (gene, community, mean, sd, log_mean, log_sd) form.
-pub fn write_gene_community_param(
+/// Write a fitted feature-community posterior to `<out_prefix>.feature_community.parquet`
+/// in melted (feature, community, mean, sd, log_mean, log_sd) form.
+pub fn write_feature_community_param(
     param: &matrix_param::dmatrix_gamma::GammaMatrix,
-    gene_names: &[Box<str>],
+    feature_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
     use matrix_param::traits::Inference;
     let k = param.posterior_mean().ncols();
     let community_names: Vec<Box<str>> = (0..k).map(|i| format!("C{i}").into_boxed_str()).collect();
     param.to_melted_parquet(
-        &(out_prefix.to_string() + ".gene_community.parquet"),
-        (Some(gene_names), Some("gene")),
+        &(out_prefix.to_string() + ".feature_community.parquet"),
+        (Some(feature_names), Some("feature")),
         (Some(&community_names), Some("community")),
     )?;
     Ok(())
@@ -686,14 +690,14 @@ pub fn realized_communities(edge_membership: &[usize], n_edges: usize) -> anyhow
     Ok(n)
 }
 
-/// Config for `compute_propensity_and_gene_community_stat`.
+/// Config for `compute_propensity_and_feature_community_stat`.
 pub struct PropensityReportConfig<'a> {
     pub clustering: EdgeClustering,
     pub block_size: Option<usize>,
-    /// The GENE unit axis for the gene-community table, when the caller has
+    /// The FEATURE unit axis for the feature-community table, when the caller has
     /// one. `None` keeps the table on the matrix's own rows, which is what a
     /// caller wants when a row is already the unit it reports.
-    pub gene_axis: Option<&'a GeneAxis>,
+    pub feature_axis: Option<&'a FeatureAxis>,
     /// Per-edge provenance, parallel to `edges`, when the pair graph was
     /// augmented. `None` omits the column, keeping an unaugmented run
     /// byte-identical.
@@ -707,18 +711,18 @@ pub struct PropensityOutputs {
     pub n_clusters: usize,
 }
 
-/// Compute propensity and gene-community statistics from latent pair projections.
+/// Compute propensity and feature-community statistics from latent pair projections.
 ///
 /// 1. Cluster `pair_latent_kn` (K_latent × N_pairs) → edge cluster labels
 /// 2. Propensity: soft cell membership from edge clusters [N_cells × K_clusters]
-/// 3. Gene-community stat: Poisson-Gamma gene expression rates per community [G × K_clusters]
+/// 3. Feature-community stat: Poisson-Gamma feature expression rates per community [G × K_clusters]
 ///
 /// Writes `{out_prefix}.propensity.parquet`, `{out_prefix}.link_community.parquet`
-/// and `{out_prefix}.gene_community.parquet`. Returns [`PropensityOutputs`]; its
+/// and `{out_prefix}.feature_community.parquet`. Returns [`PropensityOutputs`]; its
 /// `n_clusters` is the count actually realized — what Leiden discovers, and what
 /// k-means gives when it leaves a cluster empty. Callers should report THAT in
 /// their manifest rather than the count they asked for.
-pub fn compute_propensity_and_gene_community_stat(
+pub fn compute_propensity_and_feature_community_stat(
     pair_latent_nk: &Mat,
     edges: &[(usize, usize)],
     data_vec: &SparseIoVec,
@@ -729,14 +733,14 @@ pub fn compute_propensity_and_gene_community_stat(
     let PropensityReportConfig {
         clustering,
         block_size,
-        gene_axis,
+        feature_axis,
         edge_kind,
     } = *cfg;
 
     // 1. Cluster the latent edge vectors
     let edge_membership = clustering.cluster(pair_latent_nk)?;
 
-    // Everything downstream — propensity width, the gene × community stat, the
+    // Everything downstream — propensity width, the feature × community stat, the
     // manifest — keys on the realized count.
     let n_clusters = realized_communities(&edge_membership, edges.len())?;
 
@@ -764,12 +768,12 @@ pub fn compute_propensity_and_gene_community_stat(
         edge_kind,
     )?;
 
-    // 3. Gene-community stat
-    compute_gene_community_stat(
+    // 3. Feature-community stat
+    compute_feature_community_stat(
         &cell_propensity,
         data_vec,
         None,
-        gene_axis,
+        feature_axis,
         block_size,
         out_prefix,
     )?;
@@ -777,9 +781,9 @@ pub fn compute_propensity_and_gene_community_stat(
     Ok(PropensityOutputs { n_clusters })
 }
 
-/// Gene-network-derived module-pair basis for per-cell-edge features.
+/// Feature-network-derived module-pair basis for per-cell-edge features.
 ///
-/// Constructed once after gene-module resolution: walks the gene-gene edge
+/// Constructed once after feature-module resolution: walks the feature-feature edge
 /// list, buckets each edge by its endpoints' module labels, and keeps the
 /// canonical `(a ≤ b)` pairs with positive weight. Each kept pair gets a
 /// contiguous index `0..n_pairs` and a precomputed null factor
@@ -797,7 +801,7 @@ pub struct PairAdjEntry {
 
 pub struct ModulePairBasis {
     pub n_modules: usize,
-    pub module_of_gene: Vec<Option<usize>>,
+    pub module_of_feature: Vec<Option<usize>>,
     /// `pair_adj[a]` is the sorted list of neighbor modules that form a
     /// canonical pair `(min(a,b), max(a,b))`. Stored under BOTH endpoints so
     /// the per-edge intersection walk can start from either side; a
@@ -807,13 +811,13 @@ pub struct ModulePairBasis {
 }
 
 impl ModulePairBasis {
-    /// Build the basis from the gene network + per-gene module labels.
+    /// Build the basis from the feature network + per-feature module labels.
     ///
-    /// Genes with `module_of_gene[g] == None` contribute nothing. Gene-gene
+    /// Features with `module_of_feature[g] == None` contribute nothing. Feature-feature
     /// edges with both endpoints in some module accumulate to `B[a,b]`; the
     /// resulting module degrees seed the modularity null.
-    pub fn build(graph: &GenePairGraph, module_of_gene: Vec<Option<usize>>) -> Self {
-        let n_modules = module_of_gene
+    pub fn build(graph: &FeaturePairGraph, module_of_feature: Vec<Option<usize>>) -> Self {
+        let n_modules = module_of_feature
             .iter()
             .filter_map(|m| *m)
             .max()
@@ -823,7 +827,7 @@ impl ModulePairBasis {
         let mut pair_weights: HashMap<(u32, u32), f64> = Default::default();
         let mut deg = vec![0.0f64; n_modules];
         for &(u, v) in &graph.feature_edges {
-            let (Some(mu), Some(mv)) = (module_of_gene[u], module_of_gene[v]) else {
+            let (Some(mu), Some(mv)) = (module_of_feature[u], module_of_feature[v]) else {
                 continue;
             };
             let (a, b) = if mu <= mv {
@@ -832,7 +836,7 @@ impl ModulePairBasis {
                 (mv as u32, mu as u32)
             };
             *pair_weights.entry((a, b)).or_insert(0.0) += 1.0;
-            // Each undirected gene-gene edge contributes 1 to each endpoint's module degree.
+            // Each undirected feature-feature edge contributes 1 to each endpoint's module degree.
             deg[mu] += 1.0;
             deg[mv] += 1.0;
         }
@@ -877,40 +881,40 @@ impl ModulePairBasis {
 
         ModulePairBasis {
             n_modules,
-            module_of_gene,
+            module_of_feature,
             pair_adj,
             n_pairs,
         }
     }
 }
 
-/// Pre-collapse per-cell gene expression into per-cell module expression.
+/// Pre-collapse per-cell feature expression into per-cell module expression.
 ///
 /// Returns `(module_expr, cell_totals)` where:
 ///   - `module_expr` is `n_modules × n_cells` dense (column-major): each
 ///     column is `x_{c,m} = Σ_{g ∈ m} x_{c,g}` for cell `c`. Modules with
-///     no surviving genes stay zero.
+///     no surviving features stay zero.
 ///   - `cell_totals[c] = Σ_m x_{c,m}` — the per-cell total used as the null
 ///     scale in the residual.
 ///
 /// One streaming pass over the sparse expression matrix.
 pub fn build_module_expression(
     data: &SparseIoVec,
-    module_of_gene: &[Option<usize>],
+    module_of_feature: &[Option<usize>],
     n_modules: usize,
-    gene_weights: Option<&[f32]>,
+    feature_weights: Option<&[f32]>,
     block_size: Option<usize>,
 ) -> anyhow::Result<(Mat, Vec<f32>)> {
     let n_cells = data.num_columns();
-    let n_genes = data.num_rows();
-    debug_assert_eq!(module_of_gene.len(), n_genes);
-    if let Some(w) = gene_weights {
-        debug_assert_eq!(w.len(), n_genes);
+    let n_features = data.num_rows();
+    debug_assert_eq!(module_of_feature.len(), n_features);
+    if let Some(w) = feature_weights {
+        debug_assert_eq!(w.len(), n_features);
     }
 
     // Dense column-major: rows = modules, columns = cells. Small compared
     // to the raw matrix (typical n_modules is 10² range).
-    let jobs = generate_minibatch_intervals(n_cells, n_genes, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, n_features, block_size);
     let prog_bar = new_progress_bar(jobs.len() as u64).with_message("module-expression blocks");
 
     let partials: Vec<(usize, Mat, Vec<f32>)> = jobs
@@ -924,8 +928,8 @@ pub fn build_module_expression(
             for col in 0..block_len {
                 let s = x.col(col);
                 for (&row, &val) in s.row_indices().iter().zip(s.values().iter()) {
-                    if let Some(m) = module_of_gene[row] {
-                        let v = match gene_weights {
+                    if let Some(m) = module_of_feature[row] {
+                        let v = match feature_weights {
                             Some(w) => val * w[row],
                             None => val,
                         };

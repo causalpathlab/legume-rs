@@ -51,15 +51,15 @@ use serde::Deserialize;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-/// Per-cell expression for L and R genes used by significant pairs.
+/// Per-cell expression for L and R features used by significant pairs.
 /// Each Vec is indexed by the cell-table position (`cells.names`); cells
 /// missing from `--data` get `0.0` so the orientation comparison falls
 /// back to the canonical direction for those edges.
 pub type LrExpression = HashMap<Box<str>, Vec<f32>>;
 
 /// Walk the LR JSON's significant rows, collect the union of (ligand,
-/// receptor) gene names, and pull a single per-cell expression vector
-/// per gene aligned to `cells.names`. Returns `None` when no
+/// receptor) feature names, and pull a single per-cell expression vector
+/// per feature aligned to `cells.names`. Returns `None` when no
 /// significant pair was found.
 pub fn prefetch_lr_expression(
     data: &SparseIoVec,
@@ -84,7 +84,7 @@ pub fn prefetch_lr_expression(
         .iter()
         .map(|n| cell_col_index.get(n).copied())
         .collect();
-    let rows = markers::fetch_gene_rows_aligned(data, &names, &data_col_ixs)?;
+    let rows = markers::fetch_feature_rows_aligned(data, &names, &data_col_ixs)?;
     Ok(Some(names.into_iter().zip(rows).collect()))
 }
 
@@ -256,7 +256,7 @@ pub struct LrResult {
     pub receiver_community: Option<i32>,
     pub ligand: String,
     pub receptor: String,
-    /// Backend-row-name versions of ligand/receptor (post gene resolution)
+    /// Backend-row-name versions of ligand/receptor (post feature resolution)
     /// for direct lookup against expression `row_names()`. Optional for
     /// backward compatibility with older JSON sidecars.
     #[serde(default)]
@@ -1298,7 +1298,7 @@ pub fn emit_lr_bipartite(
     }
 
     // Major community per ligand / per receptor = community with max |z|
-    // across the kept edges involving that gene.
+    // across the kept edges involving that feature.
     let mut l_major: HashMap<&str, (i32, f32)> = HashMap::default();
     let mut r_major: HashMap<&str, (i32, f32)> = HashMap::default();
     for ((l, r), (c, z, _)) in &edges {
@@ -1491,7 +1491,7 @@ pub fn emit_lr_bipartite(
     }
     let _ = writeln!(svg, "  </g>");
 
-    // Endpoint dots colored by each gene's major community.
+    // Endpoint dots colored by each feature's major community.
     let _ = writeln!(svg, "  <g id=\"dots\">");
     for &n in &ligands {
         let (c, _) = l_major[n];

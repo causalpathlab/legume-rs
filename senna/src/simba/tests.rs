@@ -170,11 +170,11 @@ fn the_hvg_selection_hard_subsets_the_embedded_genes() {
     let mut argv = vec![data.as_str(), "--out", &out, "--n-hvg", "10", "--no-qc"];
     argv.extend_from_slice(&FAST);
     run(&argv);
-    let genes = Mat::from_parquet(&format!("{out}.feature_loading.parquet")).unwrap();
+    let genes = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
     assert_eq!(genes.mat.nrows(), 10);
     let all: Vec<String> = (0..20).map(|g| format!("GENE{g}")).collect();
     assert!(genes.rows.iter().all(|r| all.contains(&r.to_string())));
-    let coembed = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
+    let coembed = Mat::from_parquet(&format!("{out}.feature_coembedding.parquet")).unwrap();
     assert_eq!(coembed.rows, genes.rows);
     let bins = Mat::from_parquet(&format!("{out}.simba_bins.parquet")).unwrap();
     let n_edges: f32 = (0..bins.mat.nrows()).map(|r| bins.mat[(r, 4)]).sum();
@@ -210,7 +210,7 @@ fn cell_qc_filters_the_outputs_and_keeps_barcodes_aligned() {
     for c in 0..40 {
         assert!(rows.contains(&format!("c{c}")), "cell c{c} present");
     }
-    let coembed = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
+    let coembed = Mat::from_parquet(&format!("{out}.feature_coembedding.parquet")).unwrap();
     assert!(coembed.mat.iter().all(|v| v.is_finite()));
 }
 
@@ -224,7 +224,7 @@ fn simba_writes_bge_shaped_artifacts_and_a_manifest_downstream_commands_can_open
     argv.extend_from_slice(&["--epochs", "5"]);
     run(&argv);
 
-    for suffix in ["cell_embedding", "feature_loading", "feature_embedding"] {
+    for suffix in ["cell_embedding", "feature_embedding", "feature_coembedding"] {
         let m = Mat::from_parquet(&format!("{out}.{suffix}.parquet")).expect(suffix);
         assert_eq!(m.mat.ncols(), 8, "{suffix} has h0..h7");
         assert!(m.mat.iter().all(|v| v.is_finite()), "{suffix} is finite");
@@ -234,11 +234,11 @@ fn simba_writes_bge_shaped_artifacts_and_a_manifest_downstream_commands_can_open
     let cells = Mat::from_parquet(&format!("{out}.cell_embedding.parquet")).unwrap();
     assert_eq!(cells.mat.nrows(), 40);
     assert_eq!(cells.rows.len(), 40);
-    let genes = Mat::from_parquet(&format!("{out}.feature_loading.parquet")).unwrap();
+    let genes = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
     assert_eq!(genes.mat.nrows(), 20);
     assert_eq!(genes.rows[0].as_ref(), "GENE0");
     assert_eq!(genes.rows[19].as_ref(), "GENE19");
-    let coembed = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
+    let coembed = Mat::from_parquet(&format!("{out}.feature_coembedding.parquet")).unwrap();
     assert_eq!(coembed.rows, genes.rows, "co-embed rows are the same genes");
 
     let scores = Mat::from_parquet(&format!("{out}.feature_scores.parquet")).unwrap();
@@ -309,7 +309,7 @@ fn bge_embedding_opens_a_simba_run_with_a_zero_gene_bias() {
     let (_data, out) = fast_run(dir.path());
     let model = crate::bge::score::BgeEmbedding::open(&out).expect("opens a simba run");
     assert_eq!(model.h, 8);
-    let genes = Mat::from_parquet(&format!("{out}.feature_loading.parquet")).unwrap();
+    let genes = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
     assert_eq!(model.gene_names, genes.rows);
     assert_eq!(model.b_feat.len(), 20);
     assert!(model.b_feat.iter().all(|&b| b == 0.0), "no gene bias");
@@ -327,7 +327,7 @@ fn open_still_refuses_a_bge_run_without_its_bias() {
     let (_data, _out) = fast_run(dir.path());
     let bgeish = dir.path().join("bgeish").to_string_lossy().into_owned();
     let mut m = RunManifest::new(RunKind::Bge, &bgeish);
-    m.outputs.feature_loading = Some("run.feature_loading.parquet".into());
+    m.outputs.feature_embedding = Some("run.feature_embedding.parquet".into());
     m.save(Path::new(&format!("{bgeish}.senna.json"))).unwrap();
     let err = match crate::bge::score::BgeEmbedding::open(&bgeish) {
         Ok(_) => panic!("a bge run without its bias must not open"),
@@ -450,7 +450,7 @@ fn bulk_gene_axis_is_the_simba_gene_table() {
     let dir = tempfile::tempdir().unwrap();
     let (_data, out) = fast_run(dir.path());
     let axis = crate::predict::bulk::model_gene_axis(RunKind::Simba, &out).unwrap();
-    let genes = Mat::from_parquet(&format!("{out}.feature_loading.parquet")).unwrap();
+    let genes = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
     assert_eq!(axis, genes.rows);
 }
 
@@ -559,8 +559,8 @@ fn simba_pins_its_gene_table_to_an_earlier_run() {
     argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
     argv.extend_from_slice(&["--epochs", "4"]);
     run(&argv);
-    let g1 = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
-    let g2 = Mat::from_parquet(&format!("{second}.feature_loading.parquet")).unwrap();
+    let g1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let g2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
     assert_eq!(g1.rows, g2.rows);
     assert_eq!(g1.mat, g2.mat, "the gene table is pinned");
     let c1 = Mat::from_parquet(&format!("{first}.cell_embedding.parquet")).unwrap();
@@ -597,8 +597,8 @@ fn simba_anchors_its_gene_table_with_a_low_rank_residual() {
     argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
     argv.extend_from_slice(&["--epochs", "4"]);
     run(&argv);
-    let g1 = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
-    let g2 = Mat::from_parquet(&format!("{second}.feature_loading.parquet")).unwrap();
+    let g1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let g2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
     assert_eq!(g1.rows, g2.rows);
     assert_eq!(g1.mat.ncols(), g2.mat.ncols(), "H taken from the table");
     let resid = &g2.mat - &g1.mat;
@@ -619,7 +619,7 @@ fn simba_carries_the_unmatched_rows_of_a_pinned_table_through() {
     let (data, first) = fast_run(dir.path());
     let plus = dir.path().join("plus").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
-    let extra = widen(&format!("{first}.feature_loading.parquet"), &plus);
+    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
     let mut argv = vec![
         data.as_str(),
         "--out",
@@ -635,14 +635,14 @@ fn simba_carries_the_unmatched_rows_of_a_pinned_table_through() {
     argv.extend_from_slice(&FAST_EXCEPT_EPOCHS[2..]);
     argv.extend_from_slice(&["--epochs", "2"]);
     run(&argv);
-    let g1 = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
+    let g1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
     assert_carried(
         &second,
-        &format!("{second}.feature_loading.parquet"),
+        &format!("{second}.feature_embedding.parquet"),
         g1.rows.len(),
         &extra,
     );
     // The co-embed stays on the data's genes: it is a view onto the cells.
-    let co = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    let co = Mat::from_parquet(&format!("{second}.feature_coembedding.parquet")).unwrap();
     assert_eq!(co.rows, g1.rows);
 }

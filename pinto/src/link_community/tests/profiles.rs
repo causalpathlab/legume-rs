@@ -1,4 +1,4 @@
-use crate::gene_network::graph::test_graph_from_edges;
+use crate::feature_network::graph::test_graph_from_edges;
 use crate::link_community::profiles::*;
 use crate::util::common::*;
 
@@ -53,7 +53,7 @@ use test_graph_from_edges as make_graph;
 
 #[test]
 fn test_module_pair_basis_counts_and_degrees() {
-    // 4 genes, 2 modules: {0,1} -> 0, {2,3} -> 1.
+    // 4 features, 2 modules: {0,1} -> 0, {2,3} -> 1.
     // Edges: (0,1) internal to mod 0, (2,3) internal to mod 1, (1,2) cross.
     let graph = make_graph(&[(0, 1), (2, 3), (1, 2)], 4);
     let mods = vec![Some(0), Some(0), Some(1), Some(1)];
@@ -70,8 +70,8 @@ fn test_module_pair_basis_counts_and_degrees() {
 }
 
 #[test]
-fn test_module_pair_basis_drops_unmodule_genes() {
-    // Gene 3 has no module (e.g., k-core-trimmed). Edges touching it are ignored.
+fn test_module_pair_basis_drops_unmodule_features() {
+    // Feature 3 has no module (e.g., k-core-trimmed). Edges touching it are ignored.
     let graph = make_graph(&[(0, 1), (0, 3), (1, 3)], 4);
     let mods = vec![Some(0), Some(0), None, None];
     let basis = ModulePairBasis::build(&graph, mods);
@@ -100,7 +100,7 @@ fn test_module_pair_profiles_residual() {
     // 2 modules, 2 cells. Pair (0,1) has null_ab = deg(0)*deg(1)/(2W)^2.
     // Construct so the residual is a known positive value.
     //
-    // One gene-gene edge crossing modules 0 and 1: (0,1) with genes in each.
+    // One feature-feature edge crossing modules 0 and 1: (0,1) with features in each.
     // deg(0) = 1, deg(1) = 1, 2W = 2, null_{0,1} = 1*1 / 4 = 0.25.
     //
     // Cell 0: x_{0,0}=2, x_{0,1}=0 → X_0 = 2
@@ -159,7 +159,7 @@ fn backend_from(
         Some(&SparseIoBackend::Zarr),
     )
     .unwrap();
-    let rows: Vec<Box<str>> = (0..n_rows).map(|g| format!("GENE{g}").into()).collect();
+    let rows: Vec<Box<str>> = (0..n_rows).map(|g| format!("FEATURE{g}").into()).collect();
     backend.register_row_names_vec(&rows);
     let cols: Vec<Box<str>> = (0..n_cols).map(|i| format!("c{i}").into()).collect();
     backend.register_column_names_vec(&cols);
@@ -170,7 +170,7 @@ fn backend_from(
 
 /// Jobs are keyed by a chunk of pb-samples while `par_chunks_mut` splits the
 /// output column-major, so the two partitions have to agree exactly. They only
-/// do because `n_genes` divides the chunk width. Break that correspondence —
+/// do because `n_features` divides the chunk width. Break that correspondence —
 /// write to the global pb column rather than the job-local one — and this test
 /// fails.
 ///
@@ -178,35 +178,35 @@ fn backend_from(
 /// multiple of the chunking, so a cell's pb-sample is unrelated to its position.
 #[test]
 fn coarsening_by_pb_chunks_equals_the_brute_force_pooling() {
-    let (n_genes, n_cells, n_pb) = (30usize, 517usize, 53usize);
+    let (n_features, n_cells, n_pb) = (30usize, 517usize, 53usize);
 
     let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
     for c in 0..n_cells {
         for k in 0..3usize {
-            let g = (c * 7 + k * 11 + 3) % n_genes;
+            let g = (c * 7 + k * 11 + 3) % n_features;
             // Integer-valued, so summation order cannot introduce rounding.
             let v = (((c * 13 + g * 3 + k) % 9) + 1) as f32;
             triplets.push((g as u64, c as u64, v));
         }
     }
     let dir = tempfile::tempdir().unwrap();
-    let data = backend_from(&dir, triplets.clone(), n_genes, n_cells);
+    let data = backend_from(&dir, triplets.clone(), n_features, n_cells);
     let labels: Vec<usize> = (0..n_cells).map(|c| (c * 17 + 5) % n_pb).collect();
 
-    // The generator never repeats a `(gene, cell)` key, so the triplets can be
+    // The generator never repeats a `(feature, cell)` key, so the triplets can be
     // accumulated straight into the reference.
-    let mut expected = Mat::zeros(n_genes, n_pb);
+    let mut expected = Mat::zeros(n_features, n_pb);
     for &(r, c, v) in &triplets {
         expected[(r as usize, labels[c as usize])] += v;
     }
 
     let actual = coarsen_cell_expression_dense(&data, &labels, n_pb).unwrap();
-    assert_eq!((actual.nrows(), actual.ncols()), (n_genes, n_pb));
-    for g in 0..n_genes {
+    assert_eq!((actual.nrows(), actual.ncols()), (n_features, n_pb));
+    for g in 0..n_features {
         for p in 0..n_pb {
             assert!(
                 (actual[(g, p)] - expected[(g, p)]).abs() < 1e-3,
-                "gene {g}, pb {p}: {} != {}",
+                "feature {g}, pb {p}: {} != {}",
                 actual[(g, p)],
                 expected[(g, p)]
             );
@@ -252,20 +252,20 @@ fn degenerate_widths_return_empty_rather_than_panicking() {
 /// zip misaligns; this catches that.
 #[test]
 fn edge_profiles_survive_a_short_final_job() {
-    let (n_genes, n_cells, m) = (5usize, 20usize, 4usize);
+    let (n_features, n_cells, m) = (5usize, 20usize, 4usize);
 
     let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
     for c in 0..n_cells {
-        for g in 0..n_genes {
+        for g in 0..n_features {
             if (c + g) % 3 != 0 {
                 triplets.push((g as u64, c as u64, (((c * 5 + g * 2) % 7) + 1) as f32));
             }
         }
     }
     let dir = tempfile::tempdir().unwrap();
-    let data = backend_from(&dir, triplets.clone(), n_genes, n_cells);
+    let data = backend_from(&dir, triplets.clone(), n_features, n_cells);
 
-    let mut dense = Mat::zeros(n_genes, n_cells);
+    let mut dense = Mat::zeros(n_features, n_cells);
     for &(r, c, v) in &triplets {
         dense[(r as usize, c as usize)] = v;
     }
@@ -276,8 +276,8 @@ fn edge_profiles_survive_a_short_final_job() {
         .collect();
     let edge_indices: Vec<usize> = (0..edges.len()).collect();
 
-    let mut basis = Mat::zeros(n_genes, m);
-    for g in 0..n_genes {
+    let mut basis = Mat::zeros(n_features, m);
+    for g in 0..n_features {
         for d in 0..m {
             basis[(g, d)] = (((g * 3 + d * 2) % 5) as f32) - 2.0;
         }

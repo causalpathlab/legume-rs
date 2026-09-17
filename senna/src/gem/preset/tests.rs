@@ -8,13 +8,13 @@ fn names(rows: &[&str]) -> Vec<Box<str>> {
     rows.iter().map(|&s| s.into()).collect()
 }
 
-/// A source run at `dir/src`: `{src}.feature_loading.parquet` over `rows`,
+/// A source run at `dir/src`: `{src}.feature_embedding.parquet` over `rows`,
 /// H = 2, row `i` = `[i, 10 + i]`.
 fn write_source(dir: &std::path::Path, rows: &[&str]) -> String {
     let prefix = dir.join("src").to_string_lossy().into_owned();
     let m = DMatrix::<f32>::from_fn(rows.len(), 2, |i, k| i as f32 + 10.0 * k as f32);
     m.to_parquet_with_names(
-        &format!("{prefix}.feature_loading.parquet"),
+        &format!("{prefix}.feature_embedding.parquet"),
         (Some(&names(rows)), Some("gene")),
         None,
     )

@@ -23,7 +23,9 @@ pub struct PintoMetadata {
     pub coord_file: Option<String>,
 
     pub n_cells: usize,
-    pub n_genes: usize,
+    /// One per feature-axis entry. Older files wrote it as `n_genes`.
+    #[serde(alias = "n_genes")]
+    pub n_features: usize,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub n_edges: Option<usize>,
@@ -37,8 +39,8 @@ pub struct PintoMetadata {
     pub graph: Option<GraphParams>,
 
     /// Present only when the input's feature axis carried
-    /// `{gene}/count/{spliced,unspliced}` rows. Absent means "no channels",
-    /// which is not the same as "no genes identified" — see
+    /// `{feature}/count/{spliced,unspliced}` rows. Absent means "no channels",
+    /// which is not the same as "no features identified" — see
     /// [`SpliceTrackInfo::n_delta_identified`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub splice: Option<SpliceTrackInfo>,
@@ -126,14 +128,14 @@ pub const DELTA_BASE_SPLICED: &str = "spliced";
 
 /// What a splice-channelized input's two tracks can pin.
 ///
-/// `n_genes` on the parent counts GENES; a channelized matrix has two rows per
-/// gene and every gene-side output is on the gene axis, so `n_rows` is the only
+/// `n_features` on the parent counts FEATURES; a channelized matrix has two rows per
+/// feature and every feature-side output is on the feature axis, so `n_rows` is the only
 /// place the matrix's own shape survives.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SpliceTrackInfo {
-    /// Matrix rows behind the parent's `n_genes`.
+    /// Matrix rows behind the parent's `n_features`.
     pub n_rows: usize,
-    /// Genes carrying counts on BOTH tracks — the only ones for which a
+    /// Features carrying counts on BOTH tracks — the only ones for which a
     /// nascent-minus-mature contrast is identified at all. With no spliced
     /// counts only `beta + delta` is pinned; with no unspliced counts `delta`
     /// enters no likelihood term and would come straight from the prior.
@@ -173,8 +175,8 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_community: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_community: Option<String>,
+    #[serde(alias = "gene_community", skip_serializing_if = "Option::is_none")]
+    pub feature_community: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<String>,
@@ -186,7 +188,7 @@ pub struct OutputFiles {
     /// cut. Absent when no collapses pass `--merge-cut` (in that case the
     /// draft is the final partition). The merged consensus partition itself
     /// is published under the bare prefix
-    /// (`{prefix}.{propensity,link_community,gene_community}.parquet`), so this
+    /// (`{prefix}.{propensity,link_community,feature_community}.parquet`), so this
     /// struct only points at the auxiliary tree + cut files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dict_merge: Option<DictMergeFiles>,
@@ -205,7 +207,7 @@ pub struct OutputFiles {
     pub lr_scores: Option<String>,
 
     /// `pinto cage` cell embedding `[N × D]`: every cell's own placement on
-    /// the gene embedding by the same map that places its pairs.
+    /// the feature embedding by the same map that places its pairs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_embedding: Option<String>,
 
@@ -220,7 +222,7 @@ pub struct OutputFiles {
     pub pair_encoder: Option<String>,
 
     /// Trained PB (finest-level super-cell) embedding table: phase 1's
-    /// training unit. Cells and pairs are placed against the gene embedding
+    /// training unit. Cells and pairs are placed against the feature embedding
     /// afterwards.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pb_embedding: Option<String>,
@@ -232,7 +234,7 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_pb: Option<String>,
 
-    /// `pinto cage` feature (gene) embedding `[G × D]` — same shared
+    /// `pinto cage` feature (feature) embedding `[G × D]` — same shared
     /// D-dim space as `cell_embedding`. Cosine similarity between
     /// feature rows is directly interpretable. The trained effects as-is:
     /// the selection gated the gradient, so it is already expressed here
@@ -240,14 +242,14 @@ pub struct OutputFiles {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feature_embedding: Option<String>,
 
-    /// `pinto cage` per-gene bias `[G]`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_bias: Option<String>,
+    /// `pinto cage` per-feature bias `[G]`.
+    #[serde(alias = "gene_bias", skip_serializing_if = "Option::is_none")]
+    pub feature_bias: Option<String>,
 
     /// Legacy slot: hard cluster labels `[N × 1]` from a run that
     /// clustered CELLS directly. No subcommand writes it now — cage
     /// clusters cell PAIRS and publishes `propensity` /
-    /// `link_community` / `gene_community` like `lc` and `dsvd`. Kept so
+    /// `link_community` / `feature_community` like `lc` and `dsvd`. Kept so
     /// manifests written by older runs still round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clusters: Option<String>,
@@ -259,7 +261,7 @@ pub struct OutputFiles {
 #[derive(Clone, Copy, Debug)]
 pub struct DictMergeSummary {
     pub min_nnz: usize,
-    pub genes_scored: usize,
+    pub features_scored: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -273,9 +275,9 @@ pub struct DictMergeFiles {
     /// outputs without it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_nnz: Option<usize>,
-    /// How many genes cleared that cutoff.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub genes_scored: Option<usize>,
+    /// How many features cleared that cutoff.
+    #[serde(alias = "genes_scored", skip_serializing_if = "Option::is_none")]
+    pub features_scored: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -289,8 +291,8 @@ pub struct LevelInfo {
     /// `discover_levels` falls back from gracefully.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_community: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gene_community: Option<String>,
+    #[serde(alias = "gene_community", skip_serializing_if = "Option::is_none")]
+    pub feature_community: Option<String>,
     /// `Some(true)` if the propensity parquet at this level carries an
     /// `entropy` column (post-Phase-1 runs). `None` for older runs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,7 +348,7 @@ pub fn lc_level_info(prefix: &str, level_index: usize) -> LevelInfo {
         level_index,
         propensity: format!("{prefix}.{tag}.propensity.parquet"),
         link_community: Some(format!("{prefix}.{tag}.link_community.parquet")),
-        gene_community: Some(format!("{prefix}.{tag}.gene_community.parquet")),
+        feature_community: Some(format!("{prefix}.{tag}.feature_community.parquet")),
         entropy_present: Some(true),
     }
 }
@@ -363,7 +365,7 @@ pub fn final_level_info(prefix: &str, level_index: usize) -> LevelInfo {
         level_index,
         propensity: format!("{prefix}.propensity.parquet"),
         link_community: Some(format!("{prefix}.link_community.parquet")),
-        gene_community: Some(format!("{prefix}.gene_community.parquet")),
+        feature_community: Some(format!("{prefix}.feature_community.parquet")),
         entropy_present: Some(true),
     }
 }
@@ -378,7 +380,7 @@ pub struct RunInputs<'a> {
     pub coord_file: Option<&'a str>,
     pub coord_columns: &'a [Box<str>],
     pub n_cells: usize,
-    pub n_genes: usize,
+    pub n_features: usize,
     pub n_edges: usize,
     /// Number of communities (lc) / clusters (dsvd) — same K dim either way.
     pub k: usize,
@@ -407,7 +409,7 @@ pub fn create_lc_metadata(
         merges: format!("{prefix}.dict_merges.parquet"),
         cut: format!("{prefix}.dict_merges.cut.parquet"),
         min_nnz: Some(m.min_nnz),
-        genes_scored: Some(m.genes_scored),
+        features_scored: Some(m.features_scored),
     });
 
     let mut levels: Vec<LevelInfo> = cascade_level_indices
@@ -429,7 +431,7 @@ pub fn create_lc_metadata(
         data_files: Some(inputs.data_files.iter().map(|s| s.to_string()).collect()),
         coord_file: inputs.coord_file.map(|s| s.to_string()),
         n_cells: inputs.n_cells,
-        n_genes: inputs.n_genes,
+        n_features: inputs.n_features,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
         graph: Some(inputs.graph.clone()),
@@ -439,7 +441,7 @@ pub fn create_lc_metadata(
             coord_columns: coord_columns_field(inputs.coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: Some(format!("{prefix}.link_community.parquet")),
-            gene_community: Some(format!("{prefix}.gene_community.parquet")),
+            feature_community: Some(format!("{prefix}.feature_community.parquet")),
             scores: Some(format!("{prefix}.scores.parquet")),
             dict_merge,
             ..Default::default()
@@ -470,7 +472,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
         data_files: Some(inputs.data_files.iter().map(|s| s.to_string()).collect()),
         coord_file: inputs.coord_file.map(|s| s.to_string()),
         n_cells: inputs.n_cells,
-        n_genes: inputs.n_genes,
+        n_features: inputs.n_features,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
         graph: Some(inputs.graph.clone()),
@@ -479,7 +481,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
             coord_pairs: Some(format!("{prefix}.coord_pairs.parquet")),
             coord_columns: coord_columns_field(inputs.coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
-            gene_community: Some(format!("{prefix}.gene_community.parquet")),
+            feature_community: Some(format!("{prefix}.feature_community.parquet")),
             batch_effects: Some(format!("{prefix}.delta.parquet")),
             ..Default::default()
         },
@@ -488,7 +490,7 @@ pub fn create_dsvd_metadata(inputs: &RunInputs<'_>) -> PintoMetadata {
 }
 
 /// Helper for `pinto cage` runs. One `final` level, in the same shape
-/// `lc` / `dsvd` publish: cage projects every cell pair onto its frozen gene
+/// `lc` / `dsvd` publish: cage projects every cell pair onto its frozen feature
 /// embedding, clusters those pairs into link communities, and derives cell
 /// propensity from incident-edge fractions — so the level's slots point at
 /// the same three parquets, `entropy` included.
@@ -516,7 +518,7 @@ pub fn create_cage_metadata(
         data_files: Some(inputs.data_files.iter().map(|s| s.to_string()).collect()),
         coord_file: inputs.coord_file.map(|s| s.to_string()),
         n_cells: inputs.n_cells,
-        n_genes: inputs.n_genes,
+        n_features: inputs.n_features,
         n_edges: Some(inputs.n_edges),
         n_communities: Some(inputs.k),
         graph: Some(inputs.graph.clone()),
@@ -526,7 +528,7 @@ pub fn create_cage_metadata(
             coord_columns: coord_columns_field(inputs.coord_columns),
             propensity: Some(format!("{prefix}.propensity.parquet")),
             link_community: Some(format!("{prefix}.link_community.parquet")),
-            gene_community: Some(format!("{prefix}.gene_community.parquet")),
+            feature_community: Some(format!("{prefix}.feature_community.parquet")),
             scores: Some(format!("{prefix}.scores.parquet")),
             batch_effects: has_batch_effects.then(|| format!("{prefix}.delta.parquet")),
             cell_embedding: Some(format!("{prefix}.cell_embedding.parquet")),
@@ -535,7 +537,7 @@ pub fn create_cage_metadata(
             pb_bias: Some(format!("{prefix}.pb_bias.parquet")),
             cell_pb: Some(format!("{prefix}.cell_pb.parquet")),
             feature_embedding: Some(format!("{prefix}.feature_embedding.parquet")),
-            gene_bias: Some(format!("{prefix}.gene_bias.parquet")),
+            feature_bias: Some(format!("{prefix}.feature_bias.parquet")),
             ..Default::default()
         },
         levels: Some(levels),
@@ -557,7 +559,7 @@ pub fn create_prop_metadata(
         level_index: 0,
         propensity: format!("{prefix}.propensity.parquet"),
         link_community: Some(format!("{prefix}.link_community.parquet")),
-        gene_community: None,
+        feature_community: None,
         entropy_present: Some(true),
     }];
 
@@ -569,7 +571,7 @@ pub fn create_prop_metadata(
         data_files: expr_files.map(|fs| fs.iter().map(|s| s.to_string()).collect()),
         coord_file: coord_pair_file.map(|s| s.to_string()),
         n_cells: n_vertices,
-        n_genes: 0,
+        n_features: 0,
         n_edges: None,
         graph: None,
         n_communities: Some(n_clusters),

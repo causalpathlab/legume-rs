@@ -1,5 +1,5 @@
 //! What the profile projection must guarantee: a cell whose counts sit on
-//! one community's genes lands on that community, gene matching goes
+//! one community's features lands on that community, feature matching goes
 //! through the canonicalizer (not raw row names), and cells the model
 //! cannot see keep a zero row instead of a made-up assignment.
 
@@ -9,20 +9,20 @@ use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 fn make_data(
     dir: &tempfile::TempDir,
     name: &str,
-    gene_names: &[&str],
+    feature_names: &[&str],
     triplets: &[(u64, u64, f32)],
     n_cells: usize,
 ) -> anyhow::Result<SparseIoVec> {
     let path = dir.path().join(name);
     let mut backend = create_sparse_from_triplets(
         triplets,
-        (gene_names.len(), n_cells, triplets.len()),
+        (feature_names.len(), n_cells, triplets.len()),
         Some(path.to_str().unwrap()),
         Some(&SparseIoBackend::Zarr),
     )?;
-    let genes: Vec<Box<str>> = gene_names.iter().map(|s| Box::from(*s)).collect();
+    let features: Vec<Box<str>> = feature_names.iter().map(|s| Box::from(*s)).collect();
     let cells: Vec<Box<str>> = (0..n_cells).map(|i| format!("cell_{i}").into()).collect();
-    backend.register_row_names_vec(&genes);
+    backend.register_row_names_vec(&features);
     backend.register_column_names_vec(&cells);
     let mut data_vec = SparseIoVec::new();
     data_vec.push(std::sync::Arc::from(backend), None)?;
@@ -42,15 +42,15 @@ fn disjoint_profiles() -> (Mat, Vec<Box<str>>) {
             0.0, 6.0, // d
         ],
     );
-    let genes: Vec<Box<str>> = vec!["a".into(), "b".into(), "c".into(), "d".into()];
-    (profiles, genes)
+    let features: Vec<Box<str>> = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+    (profiles, features)
 }
 
 #[test]
 fn pure_cells_land_on_their_community() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let (profiles, genes) = disjoint_profiles();
-    // cell_0 expresses only C0 genes, cell_1 only C1 genes, cell_2 both.
+    let (profiles, features) = disjoint_profiles();
+    // cell_0 expresses only C0 features, cell_1 only C1 features, cell_2 both.
     let data = make_data(
         &dir,
         "q.zarr",
@@ -68,7 +68,7 @@ fn pure_cells_land_on_their_community() -> anyhow::Result<()> {
     let prop = project_profile_propensity(
         &data,
         &profiles,
-        &genes,
+        &features,
         &auxiliary_data::feature_names::FeatureNameKind::Exact,
         100,
         None,
@@ -87,10 +87,10 @@ fn pure_cells_land_on_their_community() -> anyhow::Result<()> {
 }
 
 #[test]
-fn gene_matching_goes_through_the_canonicalizer() -> anyhow::Result<()> {
+fn feature_matching_goes_through_the_canonicalizer() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let (profiles, genes) = disjoint_profiles();
-    // Query rows carry `<ensembl>_<symbol>` names; the Gene kind resolves
+    let (profiles, features) = disjoint_profiles();
+    // Query rows carry `<ensembl>_<symbol>` names; the Feature kind resolves
     // them onto the model's bare symbols.
     let data = make_data(
         &dir,
@@ -102,7 +102,7 @@ fn gene_matching_goes_through_the_canonicalizer() -> anyhow::Result<()> {
     let prop = project_profile_propensity(
         &data,
         &profiles,
-        &genes,
+        &features,
         &auxiliary_data::feature_names::FeatureNameKind::Gene { delim: '_' },
         100,
         None,
@@ -115,8 +115,8 @@ fn gene_matching_goes_through_the_canonicalizer() -> anyhow::Result<()> {
 #[test]
 fn a_cell_off_the_model_axis_keeps_a_zero_row() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let (profiles, genes) = disjoint_profiles();
-    // cell_0 expresses only a gene the model never saw; cell_1 is normal.
+    let (profiles, features) = disjoint_profiles();
+    // cell_0 expresses only a feature the model never saw; cell_1 is normal.
     let data = make_data(
         &dir,
         "off.zarr",
@@ -127,7 +127,7 @@ fn a_cell_off_the_model_axis_keeps_a_zero_row() -> anyhow::Result<()> {
     let prop = project_profile_propensity(
         &data,
         &profiles,
-        &genes,
+        &features,
         &auxiliary_data::feature_names::FeatureNameKind::Exact,
         100,
         None,
@@ -139,14 +139,14 @@ fn a_cell_off_the_model_axis_keeps_a_zero_row() -> anyhow::Result<()> {
 }
 
 #[test]
-fn no_shared_gene_is_an_error_not_a_uniform_guess() -> anyhow::Result<()> {
+fn no_shared_feature_is_an_error_not_a_uniform_guess() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let (profiles, genes) = disjoint_profiles();
+    let (profiles, features) = disjoint_profiles();
     let data = make_data(&dir, "none.zarr", &["x", "y"], &[(0, 0, 1.0)], 1)?;
     assert!(project_profile_propensity(
         &data,
         &profiles,
-        &genes,
+        &features,
         &auxiliary_data::feature_names::FeatureNameKind::Exact,
         10,
         None,

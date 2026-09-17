@@ -1,27 +1,27 @@
-//! Contract of the pre-trained gene-embedding loader, stated as equalities.
+//! Contract of the pre-trained feature-embedding loader, stated as equalities.
 //!
-//! The loader aligns an external `gene x H` dictionary to the run's own gene
+//! The loader aligns an external `feature x H` dictionary to the run's own feature
 //! axis, and every defect it guards against is an ordering or identity
 //! mistake: rows silently following the dictionary's order instead of the
-//! run's, an unmatched gene left at an arbitrary init instead of the closest
+//! run's, an unmatched feature left at an arbitrary init instead of the closest
 //! matched profile, or a co-embed artifact (track-suffixed rows) accepted as
 //! if it were a dictionary. Each test pins one of those with exact values.
 
-use super::pretrained::{load_pretrained_gene_embedding, InitKind, PretrainedArgs};
+use super::pretrained::{load_pretrained_feature_embedding, InitKind, PretrainedArgs};
 use crate::util::common::Mat;
 use auxiliary_data::feature_names::FeatureNameKind;
 use matrix_util::traits::IoOps;
 
-/// Write a small dictionary parquet: rows named by `genes`, `h` columns of
+/// Write a small dictionary parquet: rows named by `features`, `h` columns of
 /// values `base + row * 10 + col`, so every row is unique and recognizable.
 fn write_dictionary(
     dir: &tempfile::TempDir,
     tag: &str,
-    genes: &[Box<str>],
+    features: &[Box<str>],
     h: usize,
     base: f32,
 ) -> anyhow::Result<String> {
-    let d = genes.len();
+    let d = features.len();
     let m = Mat::from_fn(d, h, |r, c| base + (r * 10 + c) as f32);
     let cols: Vec<Box<str>> = (0..h).map(|c| format!("H{c}").into()).collect();
     let path = dir
@@ -29,7 +29,7 @@ fn write_dictionary(
         .join(format!("{tag}.parquet"))
         .to_string_lossy()
         .into_owned();
-    m.to_parquet_with_names(&path, (Some(genes), Some("gene")), Some(&cols))?;
+    m.to_parquet_with_names(&path, (Some(features), Some("feature")), Some(&cols))?;
     Ok(path)
 }
 
@@ -37,53 +37,53 @@ fn names(list: &[&str]) -> Vec<Box<str>> {
     list.iter().map(|s| (*s).into()).collect()
 }
 
-/// The run's gene axis, deliberately in a different order from the
-/// dictionary, with an UNMATCHED gene first so the matched positions are
+/// The run's feature axis, deliberately in a different order from the
+/// dictionary, with an UNMATCHED feature first so the matched positions are
 /// shifted: an implementation that writes dictionary rows at their compact
 /// (loader) index instead of their target index cannot pass this.
 #[test]
-fn rows_follow_the_runs_gene_axis_not_the_dictionarys() -> anyhow::Result<()> {
+fn rows_follow_the_runs_feature_axis_not_the_dictionarys() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G3", "G1", "G2"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 4, 100.0)?;
+    let dict_features = names(&["G3", "G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 4, 100.0)?;
 
-    let run_genes = names(&["G9", "G1", "G2", "G3"]);
+    let run_features = names(&["G9", "G1", "G2", "G3"]);
     let profiles = Mat::zeros(4, 2);
-    let out = load_pretrained_gene_embedding(PretrainedArgs {
+    let out = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: None,
     })?;
 
     assert_eq!(out.h(), 4);
-    assert_eq!(out.e_gene.nrows(), 4);
+    assert_eq!(out.e_feat.nrows(), 4);
     assert_eq!(out.frozen_row_mask(), vec![0.0, 1.0, 1.0, 1.0]);
     // Dictionary row for G1 is dictionary-row 1 => values 100 + 10 + col,
     // and it must land on run-axis row 1 (after the unmatched G9), not row 0.
     for c in 0..4 {
-        assert_eq!(out.e_gene[(1, c)], 100.0 + 10.0 + c as f32, "G1 col {c}");
-        assert_eq!(out.e_gene[(2, c)], 100.0 + 20.0 + c as f32, "G2 col {c}");
-        assert_eq!(out.e_gene[(3, c)], 100.0 + c as f32, "G3 col {c}");
+        assert_eq!(out.e_feat[(1, c)], 100.0 + 10.0 + c as f32, "G1 col {c}");
+        assert_eq!(out.e_feat[(2, c)], 100.0 + 20.0 + c as f32, "G2 col {c}");
+        assert_eq!(out.e_feat[(3, c)], 100.0 + c as f32, "G3 col {c}");
     }
     assert!(
-        out.b_gene.iter().all(|&b| b == 0.0),
+        out.b_feat.iter().all(|&b| b == 0.0),
         "no bias file => zeros"
     );
     Ok(())
 }
 
-/// An unmatched gene must be seeded from the matched gene whose count profile
-/// it resembles most, and the report must say which gene and how strongly.
+/// An unmatched feature must be seeded from the matched feature whose count profile
+/// it resembles most, and the report must say which feature and how strongly.
 #[test]
-fn unmatched_gene_takes_the_closest_matched_profile_neighbor() -> anyhow::Result<()> {
+fn unmatched_feature_takes_the_closest_matched_profile_neighbor() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1", "G2"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 3, 0.0)?;
+    let dict_features = names(&["G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 3, 0.0)?;
 
-    let run_genes = names(&["G1", "G2", "G9"]);
+    let run_features = names(&["G1", "G2", "G9"]);
     // G9's profile is parallel to G2's (cosine 1) and orthogonal to G1's.
     let profiles = Mat::from_row_slice(
         3,
@@ -94,27 +94,27 @@ fn unmatched_gene_takes_the_closest_matched_profile_neighbor() -> anyhow::Result
             0.0, 2.0, // G9
         ],
     );
-    let out = load_pretrained_gene_embedding(PretrainedArgs {
+    let out = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: None,
     })?;
 
     assert_eq!(out.frozen_row_mask(), vec![1.0, 1.0, 0.0]);
     // G9's row equals G2's dictionary row (0 + 10 + col).
     for c in 0..3 {
-        assert_eq!(out.e_gene[(2, c)], 10.0 + c as f32, "G9 col {c}");
+        assert_eq!(out.e_feat[(2, c)], 10.0 + c as f32, "G9 col {c}");
     }
     let rec = &out.records[2];
     assert_eq!(rec.init, InitKind::Neighbor);
-    assert_eq!(rec.neighbor_gene.as_deref(), Some("G2"));
+    assert_eq!(rec.neighbor_feature.as_deref(), Some("G2"));
     assert!((rec.cosine - 1.0).abs() < 1e-6, "cosine {}", rec.cosine);
-    // Matched genes report themselves as matched, with no neighbor.
+    // Matched features report themselves as matched, with no neighbor.
     assert_eq!(out.records[0].init, InitKind::Matched);
-    assert!(out.records[0].neighbor_gene.is_none());
+    assert!(out.records[0].neighbor_feature.is_none());
     Ok(())
 }
 
@@ -123,17 +123,17 @@ fn unmatched_gene_takes_the_closest_matched_profile_neighbor() -> anyhow::Result
 #[test]
 fn track_suffixed_rows_are_rejected_with_the_offending_name() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1/count/spliced", "G1/count/unspliced"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 2, 0.0)?;
+    let dict_features = names(&["G1/count/spliced", "G1/count/unspliced"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 2, 0.0)?;
 
-    let run_genes = names(&["G1"]);
+    let run_features = names(&["G1"]);
     let profiles = Mat::zeros(1, 2);
-    let err = load_pretrained_gene_embedding(PretrainedArgs {
+    let err = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: None,
     })
     .err()
@@ -146,43 +146,43 @@ fn track_suffixed_rows_are_rejected_with_the_offending_name() -> anyhow::Result<
     Ok(())
 }
 
-/// An unmatched gene whose profile is all zero has no closest neighbor; it
-/// takes the matched-row mean and reports no neighbor gene.
+/// An unmatched feature whose profile is all zero has no closest neighbor; it
+/// takes the matched-row mean and reports no neighbor feature.
 #[test]
-fn zero_profile_gene_takes_the_matched_mean() -> anyhow::Result<()> {
+fn zero_profile_feature_takes_the_matched_mean() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1", "G2"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 2, 0.0)?;
+    let dict_features = names(&["G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 2, 0.0)?;
 
-    let run_genes = names(&["G1", "G2", "G9"]);
+    let run_features = names(&["G1", "G2", "G9"]);
     let profiles = Mat::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-    let out = load_pretrained_gene_embedding(PretrainedArgs {
+    let out = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: None,
     })?;
 
     // Mean of rows (0,1) and (10,11) is (5,6).
-    assert_eq!(out.e_gene[(2, 0)], 5.0);
-    assert_eq!(out.e_gene[(2, 1)], 6.0);
+    assert_eq!(out.e_feat[(2, 0)], 5.0);
+    assert_eq!(out.e_feat[(2, 1)], 6.0);
     let rec = &out.records[2];
     assert_eq!(rec.init, InitKind::Neighbor);
     assert!(
-        rec.neighbor_gene.is_none(),
+        rec.neighbor_feature.is_none(),
         "mean seeding names no neighbor"
     );
     Ok(())
 }
 
-/// A bias parquet fills matched genes; unmatched genes stay at zero.
+/// A bias parquet fills matched features; unmatched features stay at zero.
 #[test]
-fn bias_loads_for_matched_genes_and_zeros_elsewhere() -> anyhow::Result<()> {
+fn bias_loads_for_matched_features_and_zeros_elsewhere() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1", "G2"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 2, 0.0)?;
+    let dict_features = names(&["G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 2, 0.0)?;
     let bias = Mat::from_row_slice(2, 1, &[7.0, 8.0]);
     let bias_path = dir
         .path()
@@ -191,40 +191,40 @@ fn bias_loads_for_matched_genes_and_zeros_elsewhere() -> anyhow::Result<()> {
         .into_owned();
     bias.to_parquet_with_names(
         &bias_path,
-        (Some(&dict_genes), Some("gene")),
+        (Some(&dict_features), Some("feature")),
         Some(&names(&["bias"])),
     )?;
 
-    let run_genes = names(&["G2", "G9"]);
+    let run_features = names(&["G2", "G9"]);
     let profiles = Mat::from_row_slice(2, 2, &[1.0, 0.0, 1.0, 0.0]);
-    let out = load_pretrained_gene_embedding(PretrainedArgs {
+    let out = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: Some(&bias_path),
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: None,
     })?;
 
-    assert_eq!(out.b_gene, vec![8.0, 0.0]);
+    assert_eq!(out.b_feat, vec![8.0, 0.0]);
     Ok(())
 }
 
 /// No overlap at all is a hard error, not an empty model.
 #[test]
-fn zero_matched_genes_is_a_hard_error() -> anyhow::Result<()> {
+fn zero_matched_features_is_a_hard_error() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1", "G2"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 2, 0.0)?;
+    let dict_features = names(&["G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 2, 0.0)?;
 
-    let run_genes = names(&["G8", "G9"]);
+    let run_features = names(&["G8", "G9"]);
     let profiles = Mat::zeros(2, 2);
-    assert!(load_pretrained_gene_embedding(PretrainedArgs {
+    assert!(load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: None,
     })
     .is_err());
@@ -258,15 +258,15 @@ fn restore_puts_frozen_rows_back_and_leaves_trainable_rows_alone() -> anyhow::Re
     Ok(())
 }
 
-/// With the dictionary's module tables beside it, an unmatched gene is placed
+/// With the dictionary's module tables beside it, an unmatched feature is placed
 /// through the membership of its profile neighbours: `π̂ μ`, without the
 /// neighbour's residual. Here the dictionary IS `π μ` (zero residual), so the
 /// initialized row equals its neighbour's row exactly, and the record says how.
 #[test]
-fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyhow::Result<()> {
+fn unmatched_feature_is_initialized_through_the_modules_when_tables_exist() -> anyhow::Result<()> {
     use graph_embedding_util::transfer::AlignKnobs;
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1", "G2"]);
+    let dict_features = names(&["G1", "G2"]);
     // π: G1 → module 0, G2 → module 1; μ: two distinct rows; ρ = π μ.
     let pi = Mat::from_row_slice(2, 2, &[1.0, 0.0, 0.0, 1.0]);
     let mu = Mat::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -274,17 +274,21 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
     let cols: Vec<Box<str>> = (0..3).map(|c| format!("h{c}").into()).collect();
     let dict_path = dir
         .path()
-        .join("run.feature_loading.parquet")
+        .join("run.feature_embedding.parquet")
         .to_string_lossy()
         .into_owned();
-    rho.to_parquet_with_names(&dict_path, (Some(&dict_genes), Some("gene")), Some(&cols))?;
+    rho.to_parquet_with_names(
+        &dict_path,
+        (Some(&dict_features), Some("feature")),
+        Some(&cols),
+    )?;
     let mcols: Vec<Box<str>> = (0..2).map(|c| format!("m{c}").into()).collect();
     let mnames = names(&["m0", "m1"]);
     pi.to_parquet_with_names(
         &dir.path()
             .join("run.module_membership.parquet")
             .to_string_lossy(),
-        (Some(&dict_genes), Some("feature")),
+        (Some(&dict_features), Some("feature")),
         Some(&mcols),
     )?;
     mu.to_parquet_with_names(
@@ -295,7 +299,7 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
         Some(&cols),
     )?;
 
-    let run_genes = names(&["G1", "G2", "G9"]);
+    let run_features = names(&["G1", "G2", "G9"]);
     // Depth-equal pseudobulks; G9's profile is G2's shape.
     let profiles = Mat::from_row_slice(
         3,
@@ -306,12 +310,12 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
             2.0, 18.0, 2.0, 18.0, // G9 ~ G2
         ],
     );
-    let out = load_pretrained_gene_embedding(PretrainedArgs {
+    let out = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &dict_path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: Some(AlignKnobs {
             k: 1,
             similarity_floor: 0.5,
@@ -320,13 +324,13 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
     assert_eq!(out.frozen_row_mask(), vec![1.0, 1.0, 0.0]);
     for c in 0..3 {
         assert!(
-            (out.e_gene[(2, c)] - rho[(1, c)]).abs() < 1e-6,
+            (out.e_feat[(2, c)] - rho[(1, c)]).abs() < 1e-6,
             "G9 col {c}"
         );
     }
     let rec = &out.records[2];
     assert_eq!(rec.init, InitKind::Membership);
-    assert_eq!(rec.neighbor_gene.as_deref(), Some("G2"));
+    assert_eq!(rec.neighbor_feature.as_deref(), Some("G2"));
     assert!(rec.cosine > 0.99, "cosine {}", rec.cosine);
     assert_eq!(out.records[0].init, InitKind::Matched);
     Ok(())
@@ -338,23 +342,23 @@ fn unmatched_gene_is_initialized_through_the_modules_when_tables_exist() -> anyh
 fn membership_init_without_tables_falls_back_to_the_neighbour_rule() -> anyhow::Result<()> {
     use graph_embedding_util::transfer::AlignKnobs;
     let dir = tempfile::tempdir()?;
-    let dict_genes = names(&["G1", "G2"]);
-    let path = write_dictionary(&dir, "dict", &dict_genes, 3, 0.0)?;
-    let run_genes = names(&["G1", "G2", "G9"]);
+    let dict_features = names(&["G1", "G2"]);
+    let path = write_dictionary(&dir, "dict", &dict_features, 3, 0.0)?;
+    let run_features = names(&["G1", "G2", "G9"]);
     let profiles = Mat::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 0.0, 2.0]);
-    let out = load_pretrained_gene_embedding(PretrainedArgs {
+    let out = load_pretrained_feature_embedding(PretrainedArgs {
         dictionary_path: &path,
         bias_path: None,
-        gene_names: &run_genes,
+        feature_names: &run_features,
         name_kind: FeatureNameKind::Exact,
-        gene_profiles: &|| Ok(profiles.clone()),
+        feature_profiles: &|| Ok(profiles.clone()),
         membership_init: Some(AlignKnobs {
             k: 3,
             similarity_floor: 0.5,
         }),
     })?;
     assert_eq!(out.records[2].init, InitKind::Neighbor);
-    assert_eq!(out.records[2].neighbor_gene.as_deref(), Some("G2"));
+    assert_eq!(out.records[2].neighbor_feature.as_deref(), Some("G2"));
     Ok(())
 }
 

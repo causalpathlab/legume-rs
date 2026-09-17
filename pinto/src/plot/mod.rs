@@ -1,16 +1,16 @@
 #![allow(clippy::too_many_arguments)]
 //! `pinto plot` — publication-quality spatial scatter for link-community /
-//! dsvd / propensity outputs, with optional marker-gene overlays.
+//! dsvd / propensity outputs, with optional marker-feature overlays.
 //!
 //! Shares rasterizer / palette / SVG emission with senna via
 //! `plot-utils`. The only pinto-specific pieces live here:
 //!
 //! - [`discover`] — find `{prefix}.L*.propensity.parquet` siblings
 //! - [`load`] — read `coord_pairs.parquet` + propensity +
-//!   link_community + gene_community
+//!   link_community + feature_community
 //! - [`partition`] — split cells by `left_batch` into cores (≥1)
 //! - [`viridis`] — robust-percentile log standardization + viridis LUT
-//! - [`markers`] — top-N gene ranking + chunked row extraction from
+//! - [`markers`] — top-N feature ranking + chunked row extraction from
 //!   `data-beans::SparseIoVec`
 //! - [`render`] — per-(level, core) `TopicLayer` builders + shared
 //!   SVG→PNG/PDF emitter
@@ -97,7 +97,7 @@ impl LevelKind {
 
 use discover::{discover_levels, LevelSelector};
 use load::{
-    read_cells_from_coord_pairs, read_gene_community, read_link_community, read_propensity,
+    read_cells_from_coord_pairs, read_feature_community, read_link_community, read_propensity,
     remap_batch_labels, resolve_batch_name_map,
 };
 use partition::partition_cells;
@@ -195,11 +195,11 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
             .join(", ")
     );
 
-    // One gene_community (shared across all levels) — fine for now; if a
+    // One feature_community (shared across all levels) — fine for now; if a
     // level carries its own, we swap below.
-    let final_gene_community_path = PathBuf::from(format!("{prefix}.gene_community.parquet"));
-    let global_gt = if final_gene_community_path.exists() {
-        Some(read_gene_community(&final_gene_community_path)?)
+    let final_feature_community_path = PathBuf::from(format!("{prefix}.feature_community.parquet"));
+    let global_gt = if final_feature_community_path.exists() {
+        Some(read_feature_community(&final_feature_community_path)?)
     } else {
         None
     };
@@ -225,7 +225,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
         None => None,
     };
     // Only the cell-name → data-beans column index map is needed at plot
-    // time — gene lookup is done per-backend inside `fetch_gene_rows_aligned`
+    // time — feature lookup is done per-backend inside `fetch_feature_rows_aligned`
     // using each backend's row_names().
     let cell_col_index: Option<HashMap<Box<str>, usize>> = match &expr_data {
         Some(d) => Some(
@@ -324,9 +324,9 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                 }
             }
 
-            // Per-level gene_community (fall back to global).
-            let gene_community = match level.gene_community.as_ref() {
-                Some(p) if p.exists() => Some(read_gene_community(p)?),
+            // Per-level feature_community (fall back to global).
+            let feature_community = match level.feature_community.as_ref() {
+                Some(p) if p.exists() => Some(read_feature_community(p)?),
                 _ => global_gt.clone(),
             };
 
@@ -438,7 +438,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 ent,
                                 &aligned_dominant,
                                 edges_only,
-                                gene_community.as_ref(),
+                                feature_community.as_ref(),
                                 &ifc_stub,
                             )?;
                             local_emitted.extend(written);
@@ -453,16 +453,16 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                     }
                 }
 
-                // Marker genes — final + draft only (intermediate skips per LevelKind).
+                // Marker features — final + draft only (intermediate skips per LevelKind).
                 // `continue` here would discard the propensity + mesh files
                 // already pushed into `local_emitted` earlier in this
                 // iteration, so missing-prereq cases use match + skip
                 // instead. The `extend` after this block then runs
                 // unconditionally and never loses figures.
                 if !lra_only && level_kind != LevelKind::Intermediate && args.top_markers > 0 {
-                    match (gene_community.as_ref(), expr_data.as_ref()) {
+                    match (feature_community.as_ref(), expr_data.as_ref()) {
                         (None, _) => log::warn!(
-                            "[{}] no gene_community parquet — skipping markers",
+                            "[{}] no feature_community parquet — skipping markers",
                             level.tag,
                         ),
                         (_, None) => log::warn!(
@@ -470,7 +470,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                              (pass `--data <expr.h5/.zarr>` to enable)",
                             level.tag,
                         ),
-                        (Some((gt, gene_names)), Some(data)) => {
+                        (Some((gt, feature_names)), Some(data)) => {
                             let ccol_ix = cell_col_index
                                 .as_ref()
                                 .expect("cell index built alongside data");
@@ -486,7 +486,7 @@ pub fn make_srt_plot(args: &SrtPlotArgs) -> anyhow::Result<()> {
                                 &aligned_dominant,
                                 &colors,
                                 gt,
-                                gene_names,
+                                feature_names,
                                 data,
                                 ccol_ix,
                                 &marker_hulls_by_c,
@@ -910,7 +910,7 @@ fn emit_marker_figures(
     dominant: &[i64],
     colors: &ColorBook,
     gt: &Mat,
-    gene_names: &[Box<str>],
+    feature_names: &[Box<str>],
     data: &SparseIoVec,
     cell_col_index: &HashMap<Box<str>, usize>,
     hulls_by_community: &HashMap<i64, Vec<plot_utils::svg_emit::TopicLayer>>,
@@ -928,7 +928,7 @@ fn emit_marker_figures(
         if !kept_communities.contains(&k) {
             continue;
         }
-        for (_, gname) in markers::top_n_markers(gt, gene_names, k, args.top_markers) {
+        for (_, gname) in markers::top_n_markers(gt, feature_names, k, args.top_markers) {
             plan.push((k, gname));
         }
     }
@@ -936,7 +936,7 @@ fn emit_marker_figures(
         return Ok(());
     }
 
-    // Unique marker names (different communities may pick the same gene).
+    // Unique marker names (different communities may pick the same feature).
     let mut uniq_names: Vec<Box<str>> = plan.iter().map(|(_, g)| g.clone()).collect();
     uniq_names.sort();
     uniq_names.dedup();
@@ -961,7 +961,7 @@ fn emit_marker_figures(
     }
 
     // Single thin (markers × cells) slab per backend via SparseIo::read_rows_*.
-    let rows = markers::fetch_gene_rows_aligned(data, &uniq_names, &data_col_ixs)?;
+    let rows = markers::fetch_feature_rows_aligned(data, &uniq_names, &data_col_ixs)?;
 
     for (k, gname) in plan {
         let local = name_to_local[&gname];
@@ -1016,7 +1016,7 @@ fn emit_marker_figures(
 }
 
 /// Hinton-style summary: union of top markers (rows) × communities (columns),
-/// box area encodes mean expression of that gene in cells dominated by that
+/// box area encodes mean expression of that feature in cells dominated by that
 /// community. Rows and columns are diagonalized so high-activity blocks line
 /// up along the main diagonal.
 #[allow(clippy::too_many_arguments)]
@@ -1026,22 +1026,22 @@ fn emit_marker_summary(
     core: &partition::CoreSpec,
     dominant: &[i64],
     colors: &ColorBook,
-    gene_names: &[Box<str>],
+    feature_names: &[Box<str>],
     expr_rows: &[Vec<f32>],
     level_tag: &str,
     out_prefix: &str,
     emitted: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
-    let n_genes = gene_names.len();
+    let n_features = feature_names.len();
     let k = colors.k();
-    if n_genes == 0 || k == 0 {
+    if n_features == 0 || k == 0 {
         return Ok(());
     }
 
-    // Mean expression per (gene, community), where each cell contributes to
+    // Mean expression per (feature, community), where each cell contributes to
     // its argmax community only. Cells with no community (-1 / out of range)
     // are dropped.
-    let mut mean = vec![0.0f32; n_genes * k];
+    let mut mean = vec![0.0f32; n_features * k];
     let mut cnt = vec![0u32; k];
     for (local, &i) in core.cell_ixs.iter().enumerate() {
         let c = dominant.get(i).copied().unwrap_or(-1);
@@ -1063,12 +1063,12 @@ fn emit_marker_summary(
             continue;
         }
         let inv = 1.0 / cnt[c] as f32;
-        for g in 0..n_genes {
+        for g in 0..n_features {
             mean[g * k + c] *= inv;
         }
     }
 
-    let (row_order, col_order) = plot_utils::diagonalize_order(&mean, n_genes, k);
+    let (row_order, col_order) = plot_utils::diagonalize_order(&mean, n_features, k);
     let _ = cells; // kept for symmetry with other figure emitters; unused
 
     let col_labels: Vec<Box<str>> = (0..k).map(|c| format!("C{c}").into_boxed_str()).collect();
@@ -1082,7 +1082,7 @@ fn emit_marker_summary(
         .collect();
 
     let opts = plot_utils::HintonOpts {
-        row_labels: Some(gene_names),
+        row_labels: Some(feature_names),
         col_labels: Some(&col_labels),
         row_order: Some(&row_order),
         col_order: Some(&col_order),
@@ -1100,7 +1100,7 @@ fn emit_marker_summary(
         grid_color: (220, 220, 220),
         color_legend: Some(&color_legend),
     };
-    let svg = plot_utils::render_hinton(&mean, n_genes, k, &opts);
+    let svg = plot_utils::render_hinton(&mean, n_features, k, &opts);
 
     let plot_dir = PathBuf::from(format!("{}.plots", out_prefix));
     let stub = core
@@ -1121,7 +1121,7 @@ fn emit_marker_summary(
     }
     if args.png {
         let p = with_ext("png");
-        let size = plot_utils::hinton_size(n_genes, k, &opts);
+        let size = plot_utils::hinton_size(n_features, k, &opts);
         plot_utils::render_png(&svg, size.width_px, size.height_px, &p)?;
         emitted.push(p);
     }

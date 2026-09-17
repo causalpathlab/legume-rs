@@ -20,7 +20,7 @@
 //!
 //! so the counts enter the objective only through `(S, N, c)`, three exact
 //! sums over a cell's nonzeros, and pool additively over a pair. Nothing here
-//! is ever dense over the genes on the count side: the corpus carries each
+//! is ever dense over the features on the count side: the corpus carries each
 //! cell's `(S, N, c)`, a step's input is `[2B, D + 1]`, and the one `G`-wide
 //! tensor is the partition `lse_g` — a GEMM output on the device, the same
 //! sum the exact solver forms, never an upload.
@@ -31,7 +31,7 @@
 //! `h`; the head — a gated mixture of linear experts over
 //! `[(h_u + h_v)/2 ‖ h_u ⊙ h_v ‖ the pair's own statistic]` — turns two codes
 //! into the pair code `z_uv`. Symmetric by construction, and with no
-//! per-gene parameter, so the trained encoder transfers to any re-aligned
+//! per-feature parameter, so the trained encoder transfers to any re-aligned
 //! axis. Normalisation is per row (layer norm), never per batch: a batch
 //! norm's running variance for a unit that rarely fires sits near zero, and
 //! the rare input that fires it is then blown up at inference — the wild
@@ -116,7 +116,7 @@ pub struct PairEncoderSpec {
     /// steps whatever its pair count. `0` does not train.
     pub epochs: usize,
     /// Pairs per optimizer step, at most: a step is also held to
-    /// [`BLOCK_ELEMENTS`] on the gene axis.
+    /// [`BLOCK_ELEMENTS`] on the feature axis.
     pub batch: usize,
     /// Ridge `λ` on the pair latent (never on the intercept, which must stay
     /// free to absorb depth): the objective's one parameter, saved with the
@@ -150,7 +150,7 @@ fn rows_within_budget(g: usize, cap: usize) -> usize {
 /// with the statistic the objective reads them through.
 #[derive(Clone)]
 pub(crate) struct CellRow {
-    pub genes: Vec<u32>,
+    pub features: Vec<u32>,
     pub counts: Vec<f32>,
     /// `N = Σ_g n_g`.
     pub total: f32,
@@ -161,18 +161,18 @@ pub(crate) struct CellRow {
 }
 
 impl CellRow {
-    /// From a `(global gene, count)` profile sorted by gene with no
-    /// duplicates — what [`crate::util::gene_axis::GeneAxis::pool_profile`]
-    /// hands out — keeping the genes the dictionary carries.
+    /// From a `(global feature, count)` profile sorted by feature with no
+    /// duplicates — what [`crate::util::feature_axis::FeatureAxis::pool_profile`]
+    /// hands out — keeping the features the dictionary carries.
     pub(crate) fn from_profile(dict: &PairDictionary, profile: &[(u32, f32)]) -> Self {
         debug_assert!(
             profile.windows(2).all(|w| w[0].0 < w[1].0),
-            "a cell profile must be sorted by gene with no duplicates"
+            "a cell profile must be sorted by feature with no duplicates"
         );
-        let (genes, counts): (Vec<u32>, Vec<f32>) = dict.to_local(profile).into_iter().unzip();
-        let (sums, total, offset) = dict.statistic(&genes, &counts);
+        let (features, counts): (Vec<u32>, Vec<f32>) = dict.to_local(profile).into_iter().unzip();
+        let (sums, total, offset) = dict.statistic(&features, &counts);
         Self {
-            genes,
+            features,
             counts,
             total,
             sums,
@@ -182,33 +182,33 @@ impl CellRow {
 
     /// The pooled `(position, count)` profile of two rows, sorted.
     pub(crate) fn pooled(&self, other: &CellRow) -> Vec<(u32, f32)> {
-        let mut out = Vec::with_capacity(self.genes.len() + other.genes.len());
+        let mut out = Vec::with_capacity(self.features.len() + other.features.len());
         let (mut i, mut j) = (0usize, 0usize);
-        while i < self.genes.len() && j < other.genes.len() {
-            match self.genes[i].cmp(&other.genes[j]) {
+        while i < self.features.len() && j < other.features.len() {
+            match self.features[i].cmp(&other.features[j]) {
                 std::cmp::Ordering::Less => {
-                    out.push((self.genes[i], self.counts[i]));
+                    out.push((self.features[i], self.counts[i]));
                     i += 1;
                 }
                 std::cmp::Ordering::Greater => {
-                    out.push((other.genes[j], other.counts[j]));
+                    out.push((other.features[j], other.counts[j]));
                     j += 1;
                 }
                 std::cmp::Ordering::Equal => {
-                    out.push((self.genes[i], self.counts[i] + other.counts[j]));
+                    out.push((self.features[i], self.counts[i] + other.counts[j]));
                     i += 1;
                     j += 1;
                 }
             }
         }
         out.extend(
-            self.genes[i..]
+            self.features[i..]
                 .iter()
                 .copied()
                 .zip(self.counts[i..].iter().copied()),
         );
         out.extend(
-            other.genes[j..]
+            other.features[j..]
                 .iter()
                 .copied()
                 .zip(other.counts[j..].iter().copied()),
@@ -218,7 +218,7 @@ impl CellRow {
 
     /// The self-pair: the row pooled with itself.
     pub(crate) fn doubled(&self) -> Vec<(u32, f32)> {
-        self.genes
+        self.features
             .iter()
             .zip(&self.counts)
             .map(|(&g, &n)| (g, 2.0 * n))
@@ -919,7 +919,7 @@ impl PairEncoder {
 
     /// Place every cell, then every pair, in evaluation mode. `cell_block`
     /// cells share one pass and `pair_block` pairs one, at most: both are
-    /// held to [`BLOCK_ELEMENTS`] on the gene axis.
+    /// held to [`BLOCK_ELEMENTS`] on the feature axis.
     pub(crate) fn encode_all(
         &self,
         corpus: &[CellRow],

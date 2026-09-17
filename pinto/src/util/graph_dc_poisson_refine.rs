@@ -6,7 +6,7 @@
 //! - [`ConnectivityGuard`] — rejects moves that would disconnect the
 //!   source cluster's induced subgraph on the entity axis.
 //! - [`DcPoissonContext`] — bundles the reusable per-axis state (entity
-//!   map, gene-weighted profiles, guard) so it is built once for the whole
+//!   map, feature-weighted profiles, guard) so it is built once for the whole
 //!   coarsening dendrogram and reused per level.
 //!
 //! Entry points: [`DcPoissonContext::build`] + [`refine_level_dc_poisson`].
@@ -169,22 +169,22 @@ impl MoveGuard for ConnectivityGuard {
     }
 }
 
-/// Build per-entity sparse gene sums by streaming cells in blocks.
+/// Build per-entity sparse feature sums by streaming cells in blocks.
 ///
 /// Stays sparse throughout: each block accumulates a per-entity
-/// `Vec<(gene, value)>` stream directly from the cell's CSC row indices,
-/// then sorts + merges duplicate genes. Block partials are merged
-/// sparse-to-sparse. Avoids the `Vec<f32>[num_genes]`-per-entity dense
+/// `Vec<(feature, value)>` stream directly from the cell's CSC row indices,
+/// then sorts + merges duplicate features. Block partials are merged
+/// sparse-to-sparse. Avoids the `Vec<f32>[num_features]`-per-entity dense
 /// accumulators the naïve approach would allocate.
-pub fn build_entity_gene_sums(
+pub fn build_entity_feature_sums(
     data: &SparseIoVec,
     cell_to_entity: &[usize],
     num_entities: usize,
-    num_genes: usize,
+    num_features: usize,
     block_size: Option<usize>,
 ) -> anyhow::Result<Vec<Vec<(usize, f32)>>> {
     let n_cells = data.num_columns();
-    let jobs = generate_minibatch_intervals(n_cells, num_genes, block_size);
+    let jobs = generate_minibatch_intervals(n_cells, num_features, block_size);
 
     // The fold changes the ORDER these f32 values are added in, since a worker
     // merges its own run and the runs then combine along a work-stealing split.
@@ -217,7 +217,7 @@ pub fn build_entity_gene_sums(
                         bucket.push((row as u32, val));
                     }
                 }
-                // Sort + coalesce duplicate genes within each entity's block buffer.
+                // Sort + coalesce duplicate features within each entity's block buffer.
                 for bucket in local.iter_mut() {
                     if bucket.len() > 1 {
                         bucket.sort_unstable_by_key(|&(g, _)| g);
@@ -258,14 +258,14 @@ pub fn build_entity_gene_sums(
         .map(|bucket| {
             bucket
                 .into_iter()
-                .map(|(gene, value)| (gene as usize, value))
+                .map(|(feature, value)| (feature as usize, value))
                 .collect()
         })
         .collect())
 }
 
-/// Merge two gene-sorted sparse vectors into a single gene-sorted sparse
-/// vector with summed values at shared gene indices.
+/// Merge two feature-sorted sparse vectors into a single feature-sorted sparse
+/// vector with summed values at shared feature indices.
 fn merge_sorted_sparse(a: &[(u32, f32)], b: &[(u32, f32)]) -> Vec<(u32, f32)> {
     if a.is_empty() {
         return b.to_vec();
@@ -340,7 +340,7 @@ fn compute_siblings_per_entity(
 ///
 /// Entities are fixed across the coarsening dendrogram (typically the
 /// finest-cut cluster IDs); only their group assignment varies by level.
-/// So the gene-weighted profiles and entity-level adjacency can be built
+/// So the feature-weighted profiles and entity-level adjacency can be built
 /// once and reused for every level's refinement sweep.
 pub struct DcPoissonContext<'a> {
     pub graph: &'a KnnGraph,
@@ -358,12 +358,12 @@ impl<'a> DcPoissonContext<'a> {
         graph: &'a KnnGraph,
         cell_to_entity: Vec<usize>,
         num_entities: usize,
-        num_genes: usize,
+        num_features: usize,
         feature_weighting: FeatureWeighting,
     ) -> anyhow::Result<Self> {
-        let gene_sums =
-            build_entity_gene_sums(data, &cell_to_entity, num_entities, num_genes, None)?;
-        let mut profiles = Profiles::from_gene_sums(&gene_sums, num_genes);
+        let feature_sums =
+            build_entity_feature_sums(data, &cell_to_entity, num_entities, num_features, None)?;
+        let mut profiles = Profiles::from_gene_sums(&feature_sums, num_features);
         profiles.apply_feature_weighting(feature_weighting);
         let guard = ConnectivityGuard::new(graph, &cell_to_entity, num_entities);
         Ok(Self {

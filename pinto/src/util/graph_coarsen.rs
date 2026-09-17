@@ -560,7 +560,7 @@ pub struct SeedingParams<'a> {
 pub struct DcPoissonConfig<'a> {
     pub params: data_beans_alg::dc_poisson::RefineParams,
     pub data: &'a SparseIoVec,
-    pub num_genes: usize,
+    pub num_features: usize,
 }
 
 /// Configuration for multi-level graph coarsening.
@@ -576,7 +576,7 @@ pub struct CoarsenConfig<'a> {
     /// Optional degree-corrected modularity-gain veto on merge proposals.
     /// `None` disables the veto (legacy behaviour — accept any sim).
     pub modularity_veto: Option<ModularityVeto>,
-    /// Optional gene-level DC-Poisson refinement per level.
+    /// Optional feature-level DC-Poisson refinement per level.
     pub dc_poisson: Option<DcPoissonConfig<'a>>,
 }
 
@@ -722,7 +722,7 @@ pub fn graph_coarsen_multilevel(
                     graph,
                     cell_to_entity,
                     n_coarsen,
-                    cfg.num_genes,
+                    cfg.num_features,
                     cfg.params.feature_weighting,
                 )
                 .expect("DC-Poisson context build failed"),
@@ -814,7 +814,7 @@ pub fn graph_coarsen_multilevel(
             );
         }
 
-        // Gene-level DC-Poisson refinement (second opinion on raw counts).
+        // Feature-level DC-Poisson refinement (second opinion on raw counts).
         if let (Some(ctx), Some(cfg)) = (dc_poisson_ctx.as_ref(), dc_poisson.as_ref()) {
             use rand::SeedableRng;
             let level_seed = cfg

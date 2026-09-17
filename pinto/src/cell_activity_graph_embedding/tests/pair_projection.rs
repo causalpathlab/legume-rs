@@ -17,7 +17,7 @@ fn projection_recovers_known_pair_embedding() {
     let e = dictionary_matrix();
     let (b, totals) = abundances();
     let dict = PairDictionary::new(&e, &totals, N_CELLS).expect("dictionary");
-    assert_eq!(dict.n_active(), N_GENES);
+    assert_eq!(dict.n_active(), N_FEATURES);
 
     let truth = [0.6f32, -0.4, 0.25, 0.0];
     let beta_truth = 2.0f32.ln();
@@ -79,12 +79,12 @@ fn empty_profile_stays_at_the_origin() {
     assert_eq!(beta, 0.0);
     assert_eq!(gap, 0.0);
 
-    // A gene that carries no counts anywhere is not on the partition axis, so a
-    // profile made only of such genes is empty too — not a direction.
+    // A feature that carries no counts anywhere is not on the partition axis, so a
+    // profile made only of such features is empty too — not a direction.
     let mut totals_with_dead = totals.clone();
     totals_with_dead[0] = 0.0;
     let dict = PairDictionary::new(&e, &totals_with_dead, N_CELLS).expect("dictionary");
-    assert_eq!(dict.n_active(), N_GENES - 1);
+    assert_eq!(dict.n_active(), N_FEATURES - 1);
     let (theta, _, _) = dict.solve(&[(0, 12.0)], RIDGE);
     assert_eq!(theta, vec![0.0; DIM]);
 }

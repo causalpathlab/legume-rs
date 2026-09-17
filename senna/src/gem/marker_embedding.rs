@@ -76,27 +76,45 @@ pub fn select_spliced_rows(
     })
 }
 
-/// Load the marker-matching gene table for a run: resolve `outputs.feature_embedding`
-/// off `{prefix}`'s run manifest and, for a [`RunKind::Gem`] run only, apply
-/// [`select_spliced_rows`]. Every other kind's feature embedding is already
-/// gene-keyed and is returned as read.
+/// Load the marker-matching gene table for a run: `outputs.feature_coembedding`
+/// off `{prefix}`'s run manifest — genes on the cell manifold, which is what a
+/// Euclidean nearest-centroid call against the cells needs. A run that never
+/// co-embeds (`fne`, the masked family) has only `outputs.feature_embedding`,
+/// its ρ, which shares the cells' space by construction and is used as is. A
+/// run that DOES co-embed but recorded none (an interrupted `bge` / `gem`)
+/// is refused: its ρ is the off-manifold cloud, and matching markers on it
+/// would be ill-posed. For a [`RunKind::Gem`] run only, [`select_spliced_rows`]
+/// is applied; every other kind's table is already gene-keyed and is
+/// returned as read.
 pub(crate) fn load_marker_feature_embedding(prefix: &str) -> Result<MatWithNames<DMatrix<f32>>> {
     let (manifest, dir) = run_manifest::load_for(prefix)?;
-    let rel = manifest
-        .outputs
-        .feature_embedding
-        .as_deref()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{prefix}: manifest has no `outputs.feature_embedding` — this needs a co-embedded \
-             gene space (a `senna gem` / `bge` / `fne` / `resolve-embedding-space` run)"
-            )
-        })?;
+    let coembeds = matches!(
+        manifest.kind,
+        RunKind::Bge | RunKind::Gem | RunKind::Simba | RunKind::ResolveEmbeddingSpace
+    );
+    let (slot, rel) = match (
+        manifest.outputs.feature_coembedding.as_deref(),
+        manifest.outputs.feature_embedding.as_deref(),
+    ) {
+        (Some(rel), _) => ("feature_coembedding", rel),
+        (None, Some(_)) if coembeds => anyhow::bail!(
+            "{prefix}: a {} run with no `outputs.feature_coembedding` — the co-embed was not \
+             written (an interrupted run?), and its raw gene embedding ρ is not on the cell \
+             manifold. Re-run the fit to completion.",
+            manifest.kind
+        ),
+        (None, Some(rel)) => ("feature_embedding", rel),
+        (None, None) => anyhow::bail!(
+            "{prefix}: manifest has neither `outputs.feature_coembedding` nor \
+             `outputs.feature_embedding` — this needs a gene embedding (a `senna gem` / `bge` / \
+             `fne` / `resolve-embedding-space` run)"
+        ),
+    };
     let path = run_manifest::resolve(&dir, rel)
         .to_string_lossy()
         .into_owned();
     let feat = DMatrix::<f32>::from_parquet(&path)
-        .with_context(|| format!("reading gene embedding {path}"))?;
+        .with_context(|| format!("reading gene embedding {path} (`outputs.{slot}`)"))?;
     if manifest.kind == RunKind::Gem {
         select_spliced_rows(feat, &path)
     } else {

@@ -9,7 +9,7 @@ use crate::util::common::*;
 /// is -1 once each row is centred.
 ///
 /// Noise rows: no group structure at all, but a LARGE per-column swing shared by
-/// every noise row. This is what an undetected gene looks like after the
+/// every noise row. This is what an undetected feature looks like after the
 /// Poisson-Gamma fit -- its log-rate is set by each community's exposure rather
 /// than by data, so it is both uninformative AND high-variance. Because cosine is
 /// dominated by the largest-magnitude rows, these rows decide the merge unless
@@ -42,8 +42,8 @@ fn dictionary_with_loud_noise(
 }
 
 #[test]
-fn loud_undetected_genes_hijack_the_merge_when_not_filtered() {
-    // 20 real genes against 200 loud noise genes at 5x amplitude.
+fn loud_undetected_features_hijack_the_merge_when_not_filtered() {
+    // 20 real features against 200 loud noise features at 5x amplitude.
     let (m, keep) = dictionary_with_loud_noise(20, 200, 5.0);
 
     // Unfiltered: the noise direction dominates, so the true pair (0,1) is NOT
@@ -56,7 +56,7 @@ fn loud_undetected_genes_hijack_the_merge_when_not_filtered() {
         "unfiltered merge should be hijacked by the loud noise rows"
     );
 
-    // Filtered to the detected genes: the true pair merges first, at cosine 1.
+    // Filtered to the detected features: the true pair merges first, at cosine 1.
     let filtered = cosine_merge(&m, Some(&keep));
     assert_eq!(
         (filtered[0].left, filtered[0].right),
@@ -119,11 +119,11 @@ fn a_full_mask_matches_passing_none() {
 // tree shape and cut invariants, mask-free //
 ////////////////////////////////////////////////
 
-/// Build an `(n_genes × k)` matrix from K column vectors.
+/// Build an `(n_features × k)` matrix from K column vectors.
 fn mat_from_columns(cols: &[Vec<f32>]) -> Mat {
-    let n_genes = cols[0].len();
+    let n_features = cols[0].len();
     let k = cols.len();
-    Mat::from_fn(n_genes, k, |g, j| cols[j][g])
+    Mat::from_fn(n_features, k, |g, j| cols[j][g])
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn merges_two_identical_columns_first() {
 
 #[test]
 fn tree_shape_invariants() {
-    // Random-ish 6 columns over 8 genes. Just check structural invariants.
+    // Random-ish 6 columns over 8 features. Just check structural invariants.
     let cols: Vec<Vec<f32>> = (0..6)
         .map(|j| {
             (0..8)

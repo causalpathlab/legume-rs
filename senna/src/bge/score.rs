@@ -9,13 +9,13 @@
 //! declaration at the crate root.
 //!
 //! **ρ lives in more than one place, and only one resolver knows the rules.**
-//! [`crate::run_manifest::resolve_feature_loading_for`] exists because three consumers each
+//! [`crate::run_manifest::resolve_feature_embedding_for`] exists because three consumers each
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
 //! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
 //! [`graph_embedding_util::loss::multinomial_ll`] consume.
 //!
-//! `--skip-etm` is **not** required. It used to be, before `feature_loading.parquet` always
+//! `--skip-etm` is **not** required. It used to be, before the ρ slot always
 //! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
 //! itself as working with or without the flag.
 
@@ -156,7 +156,7 @@ impl BgeEmbedding {
              `senna gem` output"
         );
 
-        let (rho_path, bias_path) = run_manifest::resolve_feature_loading_for(&manifest, &dir)?;
+        let (rho_path, bias_path) = run_manifest::resolve_feature_embedding_for(&manifest, &dir)?;
         let rho = DMatrix::<f32>::from_parquet(&rho_path)
             .with_context(|| format!("reading per-gene loading ρ {rho_path}"))?;
         // Catches a manifest that points at a log-simplex β instead of signed ρ — the exact

@@ -1,8 +1,8 @@
 //! `{out}.feature_contrast.parquet` / `{out}.feature_contrast_bias.parquet`:
 //! one row per gene-and-modality, contrasting that modality's two channel
-//! tracks on the RAW loading (`model.e_feat`, the same object
-//! `{out}.feature_loading.parquet` holds), not the SIMBA co-embed
-//! (`{out}.feature_embedding.parquet`), which is a lossy convex-combination
+//! tracks on the RAW embedding (`model.e_feat`, the same object
+//! `{out}.feature_embedding.parquet` holds), not the SIMBA co-embed
+//! (`{out}.feature_coembedding.parquet`), which is a lossy convex-combination
 //! view of the cell manifold that a subtraction is not well posed on.
 //!
 //! Every modality on the axis contrasts a fixed `(numerator, denominator)`

@@ -2,7 +2,7 @@
 //!
 //! Auto-discovers pinto output files from a prefix (or its
 //! `{prefix}.pinto.json` manifest, preferred), optionally reading
-//! raw expression (`--data`) for marker-gene overlays AND for per-edge
+//! raw expression (`--data`) for marker-feature overlays AND for per-edge
 //! L→R direction inference in the LR-activity overlay. Every plot
 //! dimension (width, aspect, dot size, etc.) is user-overridable, with
 //! batteries-included defaults.
@@ -14,9 +14,9 @@
 //!
 //! Sub-modes:
 //! - Default: community / propensity-argmax / per-community heatmap /
-//!   mesh / marker-gene plots (per (level, core)).
+//!   mesh / marker-feature plots (per (level, core)).
 //! - `--show-interfaces`: per-cell entropy as a grayscale + size
-//!   signal, plus a TSV legend with neighborhood + top-gene info.
+//!   signal, plus a TSV legend with neighborhood + top-feature info.
 //! - LR-activity overlay (auto when an `lr_activity.json` sidecar is
 //!   linked in the metadata): per significant LR pair, a quiver of
 //!   directional arrows along edges incident to a boundary cell, color
@@ -35,7 +35,7 @@ pub enum LrColorMode {
     /// Outgoing/incoming/internal/external vs. community hull.
     Direction,
     /// Pair-centered co-detection deviation: is this contact one where
-    /// both genes are detected, relative to how often that happens
+    /// both features are detected, relative to how often that happens
     /// on this pair's contacts. The same co-detection notion as
     /// `lra --edge-scores-only`, computed per edge for display
     /// (plot does not read that table).
@@ -144,18 +144,18 @@ pub struct SrtPlotArgs {
     #[arg(long, help = "Skip the mesh (cell-cell edge) plot")]
     pub no_mesh: bool,
 
-    // ─── Marker genes ─────────────────────────────────────────────────────
+    // ─── Marker features ─────────────────────────────────────────────────────
     #[arg(
         long,
         default_value_t = 3,
-        help = "Top-N marker genes per community (0 disables marker plots)"
+        help = "Top-N marker features per community (0 disables marker plots)"
     )]
     pub top_markers: usize,
 
     #[arg(
         long,
         default_value_t = 8,
-        help = "Log-scale color bins for the marker-gene heatmap plot",
+        help = "Log-scale color bins for the marker-feature heatmap plot",
         hide = true
     )]
     pub heat_bins: usize,
@@ -176,7 +176,7 @@ pub struct SrtPlotArgs {
         long_help = "Detection floor for rendering a marker plot.\n\
                      It is the fraction of core cells with non-zero expression.\n\
                      The default of 0.02 means 2%.\n\
-                     This skips sparse genes whose heatmap is mostly empty.",
+                     This skips sparse features whose heatmap is mostly empty.",
         hide = true
     )]
     pub marker_min_frac: f32,
@@ -263,10 +263,10 @@ pub struct SrtPlotArgs {
     #[arg(
         long,
         default_value_t = 5,
-        help = "Top-N marker genes per neighbor community in interface panel legends",
+        help = "Top-N marker features per neighbor community in interface panel legends",
         hide = true
     )]
-    pub interface_top_genes: usize,
+    pub interface_top_features: usize,
 
     #[arg(
         long,
@@ -447,7 +447,7 @@ pub struct SrtPlotArgs {
                      \n\
                      `direction` colours by in, out and internal classes.\n\
                      `coexpr` colours by pair-centred co-detection deviation:\n\
-                     red where both genes are detected across the contact,\n\
+                     red where both features are detected across the contact,\n\
                      blue where at most one side is,\n\
                      centred on how often this pair co-occurs at all.\n\
                      It shares the co-detection notion\n\

@@ -22,10 +22,12 @@ pub use std::sync::{Arc, Mutex};
 // `new_progress_bar(n).with_message(..)`; the template belongs to the helper.
 pub use auxiliary_data::logging::{init_logger, new_progress_bar};
 
-// NB Fisher-info gene weighting helpers moved to
+// NB Fisher-info feature weighting helpers moved to
 // `data_beans_alg::gene_weighting` so senna / chickpea / pinto share one
 // implementation. Re-exported here for backwards compatibility within pinto.
-pub use data_beans_alg::gene_weighting::{apply_gene_weights, compute_nb_fisher_weights};
+pub use data_beans_alg::gene_weighting::{
+    apply_gene_weights as apply_feature_weights, compute_nb_fisher_weights,
+};
 
 /// take names from parquet file
 /// * `file_path` - file path

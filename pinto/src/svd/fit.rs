@@ -1,11 +1,11 @@
 use crate::link_community::profiles::{
-    compute_propensity_and_gene_community_stat, PropensityReportConfig,
+    compute_propensity_and_feature_community_stat, PropensityReportConfig,
 };
 use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{
-    preprocess_srt, topology_graph, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+    preprocess_srt, topology_graph, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use data_beans_alg::cell_pairs::CellPairs;
 use data_beans_alg::random_projection::*;
@@ -40,16 +40,16 @@ struct FusedDeltaInput<'a> {
     pair_to_sample: &'a [usize],
 }
 
-/// Accumulated shared/difference statistics per gene per sample.
+/// Accumulated shared/difference statistics per feature per sample.
 ///
-/// For each cell pair (left, right) and each gene g:
+/// For each cell pair (left, right) and each feature g:
 ///   shared_g = log1p(x_left_g) + log1p(x_right_g)
 ///   diff_g   = |log1p(x_left_g) - log1p(x_right_g)|
 pub(crate) struct PairDeltaCollapsedStat {
     shared_ds: Mat,
     diff_ds: Mat,
     size_s: DVec,
-    n_genes: usize,
+    n_features: usize,
     n_samples: usize,
 }
 
@@ -69,12 +69,12 @@ impl PairDeltaCollapsedStat {
         )
     }
 
-    pub(crate) fn new(n_genes: usize, n_samples: usize) -> Self {
+    pub(crate) fn new(n_features: usize, n_samples: usize) -> Self {
         Self {
-            shared_ds: Mat::zeros(n_genes, n_samples),
-            diff_ds: Mat::zeros(n_genes, n_samples),
+            shared_ds: Mat::zeros(n_features, n_samples),
+            diff_ds: Mat::zeros(n_features, n_samples),
             size_s: DVec::zeros(n_samples),
-            n_genes,
+            n_features,
             n_samples,
         }
     }
@@ -84,7 +84,7 @@ impl PairDeltaCollapsedStat {
         hyper_param: Option<(f32, f32)>,
     ) -> anyhow::Result<PairDeltaParameters> {
         let (a0, b0) = hyper_param.unwrap_or((1_f32, 1_f32));
-        let shape = (self.n_genes, self.n_samples);
+        let shape = (self.n_features, self.n_samples);
 
         let mut shared = GammaMatrix::new(shape, a0, b0);
         let mut diff = GammaMatrix::new(shape, a0, b0);
@@ -116,7 +116,7 @@ pub(crate) struct PairDeltaParameters {
 /// 2. Estimate batch effects
 /// 3. Build spatial cell-cell KNN graph
 /// 4. Random projection → assign pairs to samples
-/// 5. Collapse: compute shared/diff per gene per sample
+/// 5. Collapse: compute shared/diff per feature per sample
 /// 6. Fit Poisson-Gamma on each channel
 /// 7. SVD on vertically stacked [shared; diff] posterior log means
 /// 8. Nystrom projection → per-pair latent codes
@@ -140,18 +140,18 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         spatial_graph,
         edge_source,
         cell_proj: _,
-        gene_axis: _,
+        feature_axis: _,
         row_weights: _,
         row_stats: _,
-        gene_weights: _,
-        gene_stats: _,
+        feature_weights: _,
+        feature_stats: _,
         n_cells,
-        n_rows: n_genes,
+        n_rows: n_features,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: false,
         batch_effects: true,
-        gene_axis: GeneAxisMode::Rows,
+        feature_axis: FeatureAxisMode::Rows,
         // `dsvd` takes its own projection because it asks for a different one:
         // it batch-corrects unconditionally, where preprocessing corrects only
         // when batch effects were estimated. On a single-batch run those two
@@ -166,7 +166,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         feature_kind: None,
     })?;
     let has_coords = c.has_coordinates();
-    let gene_names = data_vec.row_names()?;
+    let feature_names = data_vec.row_names()?;
 
     // Wrap graph with data for pair-level operations
     let srt_cell_pairs = SrtCellPairs::with_graph(
@@ -215,7 +215,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     // Only the FINEST level is ever read (the Poisson-Gamma fit below),
     // so only that one is accumulated. The coarser levels cost
-    // `n_genes x n_samples` dense accumulators EACH, and every one of
+    // `n_features x n_samples` dense accumulators EACH, and every one of
     // them also multiplied the work done while the pass below holds its
     // lock; they were built and dropped unused.
     let finest_samples = *ml
@@ -230,7 +230,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         "Accumulating pair-delta statistics at the finest level ({} samples of {:?})",
         finest_samples, ml.all_num_samples
     );
-    let mut collapsed = PairDeltaCollapsedStat::new(n_genes, finest_samples);
+    let mut collapsed = PairDeltaCollapsedStat::new(n_features, finest_samples);
 
     let fused_input = FusedDeltaInput {
         batch_effect: batch_ref,
@@ -261,11 +261,11 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let basis_dk = nystrom_basis(&u_dk, &s_k);
 
     // Write dictionary
-    let dict_row_names: Vec<Box<str>> = gene_names
+    let dict_row_names: Vec<Box<str>> = feature_names
         .iter()
         .map(|g| format!("{}@shared", g).into_boxed_str())
         .chain(
-            gene_names
+            feature_names
                 .iter()
                 .map(|g| format!("{}@diff", g).into_boxed_str()),
         )
@@ -273,7 +273,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 
     u_dk.to_parquet_with_names(
         &(c.out.to_string() + ".basis.parquet"),
-        (Some(&dict_row_names), Some("gene")),
+        (Some(&dict_row_names), Some("feature")),
         None,
     )?;
 
@@ -283,8 +283,8 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     let mut pair_latent_kn = Mat::zeros(args.n_latent_topics, srt_cell_pairs.inner.num_pairs());
 
     let nystrom_input = NystromPairInput {
-        basis_shared: basis_dk.rows(0, n_genes).clone_owned(),
-        basis_diff: basis_dk.rows(n_genes, n_genes).clone_owned(),
+        basis_shared: basis_dk.rows(0, n_features).clone_owned(),
+        basis_diff: basis_dk.rows(n_features, n_features).clone_owned(),
         batch_effect: batch_db,
     };
 
@@ -316,7 +316,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
     // variance to keep, which is no reason for the pairs to fall into exactly
     // that many interaction regimes. `pinto prop` still re-cuts the same latent
     // at a fixed K when you want one.
-    let n_clusters = compute_propensity_and_gene_community_stat(
+    let n_clusters = compute_propensity_and_feature_community_stat(
         &pair_latent_nk,
         edges,
         &data_vec,
@@ -324,9 +324,9 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
         &PropensityReportConfig {
             clustering: args.edge_clustering.resolve(c.seed),
             block_size: c.block_size,
-            // `dsvd` never resolves a gene axis (it stacks its two channels on
-            // the row axis), so its gene-community table stays row-keyed.
-            gene_axis: None,
+            // `dsvd` never resolves a feature axis (it stacks its two channels on
+            // the row axis), so its feature-community table stays row-keyed.
+            feature_axis: None,
             edge_kind: srt_cell_pairs.edge_kind.as_deref(),
         },
         &c.out,
@@ -342,7 +342,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
             coord_file: coord_file_str.as_deref(),
             coord_columns: &coordinate_names,
             n_cells,
-            n_genes: data_vec.num_rows(),
+            n_features: data_vec.num_rows(),
             n_edges: edges.len(),
             graph: (&knn).into(),
             k: n_clusters,
@@ -357,7 +357,7 @@ pub fn fit_srt_delta_svd(args: &SrtDeltaSvdArgs) -> anyhow::Result<()> {
 }
 
 /// Block visitor: read each pair's two columns once, merge their sparse
-/// gene sets, and scatter the touched genes into the finest level's stats.
+/// feature sets, and scatter the touched features into the finest level's stats.
 fn fused_pair_delta_visitor(
     bound: (usize, usize),
     data: &CellPairs,
@@ -388,7 +388,7 @@ fn fused_pair_delta_visitor(
         y_right.adjust_by_division_of_selected_inplace(delta_db, &right_batches);
     }
 
-    // Per-pair SPARSE contributions: a pair touches its nonzero genes, not
+    // Per-pair SPARSE contributions: a pair touches its nonzero features, not
     // all of them, and the lock below only pays for what it touches.
     // The two CSC columns arrive with sorted, unique row indices, so the
     // union is a two-pointer merge with no map and no per-pair allocation
@@ -438,8 +438,8 @@ fn fused_pair_delta_visitor(
         offsets.push(entries.len());
     }
 
-    // Scatter under the lock. Held only for the touched genes of one
-    // level, where it used to cover every gene row of every level.
+    // Scatter under the lock. Held only for the touched features of one
+    // level, where it used to cover every feature row of every level.
     let mut stats = arc_stats.lock().expect("lock fused delta stats");
     for local_idx in 0..n_pairs {
         let sample = input.pair_to_sample[lb + local_idx];
@@ -463,10 +463,10 @@ struct NystromPairInput {
 
 /// Nystrom projection visitor: project each pair onto the split basis.
 ///
-/// For each pair and each gene present in either cell:
+/// For each pair and each feature present in either cell:
 ///   shared = log1p(x_left) + log1p(x_right)
 ///   diff   = |log1p(x_left) - log1p(x_right)|
-///   proj  += shared * basis_shared[gene] + diff * basis_diff[gene]
+///   proj  += shared * basis_shared[feature] + diff * basis_diff[feature]
 fn nystrom_pair_delta_visitor(
     bound: (usize, usize),
     data: &CellPairs,
@@ -506,26 +506,26 @@ fn nystrom_pair_delta_visitor(
         let mut proj_k = DVec::zeros(n_topics);
         let mut left_visited: HashSet<usize> = Default::default();
 
-        for (&gene, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
+        for (&feature, &val) in left_col.row_indices().iter().zip(left_col.values().iter()) {
             let log_left = val.ln_1p();
-            let log_right = right_log.get(&gene).copied().unwrap_or(0.0);
+            let log_right = right_log.get(&feature).copied().unwrap_or(0.0);
             let sigma = log_left + log_right;
             let delta = (log_left - log_right).abs();
-            proj_k += sigma * &shared_in.basis_shared.row(gene).transpose();
-            proj_k += delta * &shared_in.basis_diff.row(gene).transpose();
-            left_visited.insert(gene);
+            proj_k += sigma * &shared_in.basis_shared.row(feature).transpose();
+            proj_k += delta * &shared_in.basis_diff.row(feature).transpose();
+            left_visited.insert(feature);
         }
 
-        // Right-only genes: log_left = 0 → sigma = log_right, delta = log_right
-        for (&gene, _) in right_col
+        // Right-only features: log_left = 0 → sigma = log_right, delta = log_right
+        for (&feature, _) in right_col
             .row_indices()
             .iter()
             .zip(right_col.values().iter())
         {
-            if !left_visited.contains(&gene) {
-                let log_right = right_log[&gene];
-                proj_k += log_right * &shared_in.basis_shared.row(gene).transpose();
-                proj_k += log_right * &shared_in.basis_diff.row(gene).transpose();
+            if !left_visited.contains(&feature) {
+                let log_right = right_log[&feature];
+                proj_k += log_right * &shared_in.basis_shared.row(feature).transpose();
+                proj_k += log_right * &shared_in.basis_diff.row(feature).transpose();
             }
         }
 

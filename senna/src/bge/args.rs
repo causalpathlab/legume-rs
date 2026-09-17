@@ -296,10 +296,11 @@ pub struct BgeArgs {
         required = true,
         help = "Output prefix",
         long_help = "Output prefix. It produces {out}.cell_embedding.parquet, which is Z,\n\
-                     {out}.dictionary.parquet, {out}.feature_embedding.parquet,\n\
+                     {out}.feature_embedding.parquet, which is the raw gene table,\n\
+                     {out}.feature_coembedding.parquet, the genes on the cell manifold,\n\
                      {out}.feature_bias.parquet, {out}.cell_bias.parquet, and {out}.senna.json.\n\
-                     Unless --skip-etm, it adds two more:\n\
-                     {out}.latent.parquet and {out}.topic_embedding.parquet."
+                     Unless --skip-etm, it adds three more:\n\
+                     {out}.latent.parquet, {out}.dictionary.parquet and {out}.topic_embedding.parquet."
     )]
     pub(crate) out: Box<str>,
 }

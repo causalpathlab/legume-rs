@@ -46,7 +46,7 @@ pub(crate) struct EmbedKnobs<'a> {
     /// passes `None` / `false` here regardless of what `--mixture-batch` /
     /// `--emit-pb-reference` parse to on its own surface.
     pub bulk_batches: Option<&'a [Box<str>]>,
-    /// Carry the finest collapse level forward as `{out}.pb_reference.zarr`
+    /// Carry the finest collapse level forward as `{out}.pb_reference.zarr.zip`
     /// (bge: `!--no-emit-pb-reference`; gem has no such flag yet, always
     /// `false`).
     pub emit_pb_reference: bool,
@@ -327,6 +327,26 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         .map(|(name, suf)| (name.to_string(), suf.clone()))
         .collect();
 
+    // Raw ρ → {out}.feature_embedding.parquet, on EVERY path (complete or
+    // interrupted). This is the model-axis embedding that pairs with the cell
+    // embedding in the Poisson rate `exp(ρ_g·z_n + a_g + b_n)` — NOT
+    // interchangeable with the SIMBA co-embed written on the complete path
+    // below, which is a LOSSY derived view of it (a convex combination of cell
+    // embeddings; ρ → co-embed is one-way). The manifest always names this
+    // file, and the carry-through appends into it, so it must exist even when
+    // the run was cut short.
+    let cpu = candle_core::Device::Cpu;
+    let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
+    ge::save_embedding(
+        &format!("{}.feature_embedding.parquet", knobs.out),
+        &e_feat_cpu,
+        &plan.unified.feature_names,
+        "feature",
+    )?;
+    // The learned-module tables, likewise on both paths; the composed ρ above
+    // already carries them for every reader that does not care.
+    ge::write_module_tables(knobs.out, &out.model, &plan.unified.feature_names)?;
+
     if interrupted {
         log::warn!(
             "Interrupted — skipping co-embedding, clustering, and ETM; writing raw partial \
@@ -349,12 +369,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // cluster size as the temperature target, ETM uses the labels as topics —
         // so the embedding is clustered a single time. The co-embed re-embeds every
         // feature onto the cell manifold (gene = softmax-over-cells weighted average
-        // of cell embeddings) and OVERRIDES {out}.feature_embedding.parquet (the raw
-        // off-manifold ρ is not written). Cells are SIMBA's reference and are
+        // of cell embeddings) into {out}.feature_coembedding.parquet, beside the
+        // raw off-manifold ρ above. Cells are SIMBA's reference and are
         // unchanged. Post-hoc only — training (pseudobulk efficiency, phase-2
         // projection) is untouched.
-        let cpu = candle_core::Device::Cpu;
-        let e_feat_cpu = out.model.e_feat.to_device(&cpu)?; // [D, H] raw ρ
         let e_cell_cpu = match qc_keep_idx.as_deref() {
             Some(keep) => {
                 let idx: Vec<u32> = keep.iter().map(|&i| i as u32).collect();
@@ -382,24 +400,10 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             target_eff,
         )?;
 
-        // Raw ρ, on BOTH paths. This is the model-axis loading that pairs with
-        // the cell embedding in the Poisson rate `exp(ρ_g·z_n + a_g + b_n)` —
-        // NOT interchangeable with the co-embed written just above, which is a
-        // LOSSY derived view of it (a convex combination of cell embeddings;
-        // ρ → co-embed is one-way).
-        let rho_mat = Mat::from_tensor(&e_feat_cpu)?;
-        let rho_h_names = axis_id_names("h", rho_mat.ncols());
-        rho_mat.to_parquet_with_names(
-            &format!("{}.feature_loading.parquet", knobs.out),
-            (Some(&plan.unified.feature_names), Some("gene")),
-            Some(&rho_h_names),
-        )?;
-
         // Output layout: the H-space cell embedding Z ALWAYS goes to
         // {out}.cell_embedding.parquet, on both paths. ETM resolved (default)
         // additionally emits the topic-model tables (latent = log θ,
-        // dictionary = β); --skip-etm emits no latent at all and keeps
-        // dictionary = ρ.
+        // dictionary = β); --skip-etm emits neither.
         if resolve_etm {
             super::resolve_etm::resolve_etm_topics(
                 &out.model,
@@ -421,10 +425,6 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
                 ge::EmbeddingFileNames::SENNA_EMBEDDING,
             )?;
         }
-        // The learned-module tables, on both paths; the composed ρ above already
-        // carries them for every reader that does not care.
-        ge::write_module_tables(knobs.out, &out.model, &plan.unified.feature_names)?;
-
         if let Some(f) = plan.after_fit {
             f(&FitArtifacts {
                 out: &out,
@@ -460,26 +460,23 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // So `senna layout / plot / impute --from` can re-read these files the
         // way training did, instead of stacking the modalities as extra cells.
         data_multiome: plan.multiome,
-        // With ETM resolved the dictionary is β (gene × topic); otherwise it IS ρ.
-        //
-        // ρ does NOT go to feature_embedding.parquet — that file is always the SIMBA co-embed. ρ
-        // lives on the model's own axis, not on the cell manifold, so putting it there would hand
-        // `annotate-by-projection` an off-manifold gene table and make its Euclidean
-        // nearest-centroid call ill-posed.
-        dictionary_suffix: Some("dictionary.parquet"),
+        // With ETM resolved the dictionary is β (gene × topic); without it
+        // there is none — ρ is `feature_embedding`, never this slot.
+        dictionary_suffix: resolve_etm.then_some("dictionary.parquet"),
         has_model: false,
         has_cell_proj: false,
         pb_gene_suffix: None,
         pb_reference_suffix,
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
-        // The SIMBA co-embed is written as feature_embedding.parquet in BOTH
-        // the ETM and --skip-etm paths, so record it unconditionally.
+        // ρ on every path; the SIMBA co-embed only on a complete run — an
+        // interrupted one skipped it, so the manifest must not name a file
+        // that is not there.
         feature_embedding_suffix: Some("feature_embedding.parquet"),
-        feature_loading_suffix: Some("feature_loading.parquet"),
+        feature_coembedding_suffix: (!interrupted).then_some("feature_coembedding.parquet"),
         carried: carried.as_ref(),
         // Learned gene modules, when the run trained them; the composed row still
-        // lives in `feature_loading`, so these are additive.
+        // lives in `feature_embedding`, so these are additive.
         module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),
         module_dictionary_suffix: has_modules.then_some(ge::transfer::MODULE_DICTIONARY_SUFFIX),
         // ETM resolved => `dictionary` holds the log-simplex β; --skip-etm => it is ρ.
@@ -510,14 +507,14 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
 
     if resolve_etm {
         info!(
-            "Done — outputs at {}.{{cell_embedding,latent,dictionary,feature_embedding,*_bias}}.parquet \
-             (cell_embedding = Z, latent = log θ)",
+            "Done — outputs at {}.{{cell_embedding,latent,dictionary,feature_embedding,feature_coembedding,*_bias}}.parquet \
+             (cell_embedding = Z, feature_embedding = ρ, latent = log θ)",
             knobs.out
         );
     } else {
         info!(
-            "Done — outputs at {}.{{cell_embedding,dictionary,feature_embedding,*_bias}}.parquet \
-             (cell_embedding = Z; no latent — topics were not resolved)",
+            "Done — outputs at {}.{{cell_embedding,feature_embedding,feature_coembedding,*_bias}}.parquet \
+             (cell_embedding = Z, feature_embedding = ρ; no latent — topics were not resolved)",
             knobs.out
         );
     }
