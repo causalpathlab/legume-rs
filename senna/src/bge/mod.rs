@@ -180,14 +180,17 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(crate::multiome_layout::RunMultiome::from_plan);
 
-    let preset_features = match args.feature_embedding.resolve()? {
-        Some((prefix, mode)) => Some(crate::feature_preset::load_preset_genes(
-            prefix,
-            mode,
-            &unified.feature_names,
-            &feature_kind,
-        )?),
-        None => None,
+    let (preset_features, carried) = match args.feature_embedding.resolve()? {
+        Some((prefix, mode)) => {
+            let (rows, carried) = crate::feature_preset::load_preset_genes(
+                prefix,
+                mode,
+                &unified.feature_names,
+                &feature_kind,
+            )?;
+            (Some(rows), carried)
+        }
+        None => (None, None),
     };
     let embedding_dim =
         crate::feature_preset::resolve_dim(args.embedding_dim, preset_features.as_ref())?;
@@ -202,6 +205,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         tracks: None,
         offset_l2: 0.0,
         preset_features,
+        carried,
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
         train_args: crate::run_manifest::record_train_args(args)?,

@@ -887,3 +887,70 @@ fn fne_anchors_gene_rows_with_a_low_rank_residual() {
     );
     assert_eq!(recorded["lora_rank"].as_u64(), Some(1));
 }
+
+/// A source table wider than the graph: the rows no node matched — a gene
+/// the graph lacks and a term — come out after the graph's own rows,
+/// unchanged, and the types table keeps the graph's own node types.
+#[test]
+fn fne_carries_the_unmatched_rows_of_a_pinned_table_through() {
+    use crate::feature_preset::test_support::{assert_carried, widen, EXTRA};
+    let dir = tempfile::tempdir().unwrap();
+    let (ppi, typed) = planted_inputs(dir.path());
+    let first = dir.path().join("first").to_string_lossy().into_owned();
+    let plus = dir.path().join("plus").to_string_lossy().into_owned();
+    let second = dir.path().join("second").to_string_lossy().into_owned();
+    let common = [
+        "--batch-size",
+        "16",
+        "--num-batch-negs",
+        "4",
+        "--num-uniform-negs",
+        "4",
+        "--eval-fraction",
+        "0",
+        "-i",
+        "2",
+    ];
+    let mut argv = vec!["fne", &ppi, "--edges", &typed, "--embedding-dim", "6"];
+    argv.extend_from_slice(&common);
+    argv.extend_from_slice(&["-o", &first]);
+    fit_fne(&parse_args(&argv)).unwrap();
+    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
+
+    for mode in ["--freeze-feature-embedding", "--lora-feature-embedding"] {
+        let out = format!("{second}-{}", &mode[2..6]);
+        let mut argv = vec![
+            "fne",
+            &ppi,
+            "--edges",
+            &typed,
+            mode,
+            &plus,
+            "--embedding-dim",
+            "auto",
+        ];
+        if mode.starts_with("--lora") {
+            argv.extend_from_slice(&["--lora-rank", "1"]);
+        }
+        argv.extend_from_slice(&common);
+        argv.extend_from_slice(&["-o", &out]);
+        fit_fne(&parse_args(&argv)).unwrap();
+        let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+        let rho = format!("{out}.feature_embedding.parquet");
+        assert_carried(&out, &rho, e1.rows.len(), &extra);
+        let types = auxiliary_data::feature_types::read_feature_types(&out)
+            .unwrap()
+            .unwrap();
+        let ct0 = types.iter().find(|(n, _)| n.as_ref() == "CT0").unwrap();
+        assert_eq!(
+            ct0.1.as_ref(),
+            "cell_type",
+            "the graph's own types are kept"
+        );
+        // The source's own CT0 / GO:0 rows are superseded by this run's: one row each.
+        let e2 = Mat::from_parquet(&rho).unwrap();
+        for n in ["CT0", "GO:0", EXTRA[0].0] {
+            assert_eq!(e2.rows.iter().filter(|r| r.as_ref() == n).count(), 1, "{n}");
+        }
+    }
+}

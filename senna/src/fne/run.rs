@@ -112,20 +112,21 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     let gene_nodes: Vec<u32> = (0..graph.node_names.len() as u32)
         .filter(|&i| graph.node_types[i as usize].as_ref() == super::graph::GENE_TYPE)
         .collect();
-    let preset_genes = match args.feature_embedding.resolve()? {
+    let (preset_genes, carried) = match args.feature_embedding.resolve()? {
         Some((prefix, mode)) => {
             let gene_names: Vec<Box<str>> = gene_nodes
                 .iter()
                 .map(|&i| graph.node_names[i as usize].clone())
                 .collect();
-            Some(crate::feature_preset::load_preset_genes(
+            let (rows, carried) = crate::feature_preset::load_preset_genes(
                 prefix,
                 mode,
                 &gene_names,
                 &args.name_kind(),
-            )?)
+            )?;
+            (Some(rows), carried)
         }
-        None => None,
+        None => (None, None),
     };
     let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset_genes.as_ref())?;
     let preset = preset_genes.map(|p| p.map_ids(|g| gene_nodes[g as usize]));
@@ -160,6 +161,12 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         );
     }
     write_outputs(&out, &graph, &args.out)?;
+    if let Some(c) = &carried {
+        c.append_to(
+            &args.out,
+            &format!("{}.feature_embedding.parquet", args.out),
+        )?;
+    }
 
     let input: Vec<String> = args
         .networks

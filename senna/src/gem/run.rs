@@ -50,6 +50,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         tracks: Some(plan.clone()),
         offset_l2: args.offset_l2,
         preset_features: None,
+        carried: None,
         pb_reference: None,
         init_from: None,
         train_args: crate::run_manifest::record_train_args(args)?,

@@ -1034,13 +1034,23 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // through safetensors); for freeze mode the optimizer excludes it
     // via `trainable_vars` (see `train_masked.rs`), for init mode it
     // keeps updating.
-    if let Some(spec) = pretrained_spec.as_ref() {
+    let mut carried: Option<crate::feature_preset::CarriedRows> = None;
+    if let (Some(spec), Some(prefix)) = (pretrained_spec.as_ref(), pretrained_prefix) {
         anyhow::ensure!(
             args.init_from.is_none(),
             "ρ pre-training is incompatible with --init-from \
              (warm-start would overwrite the pre-trained ρ from a different checkpoint)"
         );
         let host = spec.materialize(&gene_names)?;
+        if pinned_rho {
+            carried = crate::feature_preset::CarriedRows::from_host(
+                &host,
+                &gene_names,
+                &spec.name_kind,
+                prefix,
+                &spec.dictionary_path,
+            )?;
+        }
         anyhow::ensure!(
             host.h == h,
             "pre-trained feature embedding has H={} but --embedding-dim={}",
@@ -1187,6 +1197,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let finest_decoder = decoders.last().unwrap();
     write_masked_dictionary(finest_decoder, &gene_names, &args.out)?;
     write_feature_embedding(&base_encoder.feature_embeddings()?, &gene_names, &args.out)?;
+    if let Some(c) = &carried {
+        c.append_to(
+            &args.out,
+            &format!("{}.feature_embedding.parquet", args.out),
+        )?;
+    }
     // Learned gene modules, in the shape the graph-embedding family writes
     // them, so one reader serves both.
     let module_suffixes =

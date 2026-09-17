@@ -108,6 +108,9 @@ pub(crate) struct EmbedPlan<'a> {
     /// Gene rows given up front (`senna bge --{freeze,init}-feature-embedding`),
     /// pinned or only started from; `None` = every row trains. gem passes `None`.
     pub preset_features: Option<ge::PresetRows>,
+    /// The given table's rows that matched no feature, appended to the
+    /// written ρ so the output is the full table.
+    pub carried: Option<crate::feature_preset::CarriedRows>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: crate::run_manifest::TrainArgsRecord,
@@ -151,6 +154,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // task's callers run it once, matching `fit_bge`'s own shape from before
     // the extraction.
     let preset_features = plan.preset_features.take();
+    let carried = plan.carried.take();
     let build_config = move |unified: &ge::UnifiedData| -> anyhow::Result<ge::FitConfig> {
         let hvg_weights = plan.hvg_weights.as_ref().map(|w| {
             unified
@@ -376,11 +380,15 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // ρ → co-embed is one-way).
         let rho_mat = Mat::from_tensor(&e_feat_cpu)?;
         let rho_h_names = axis_id_names("h", rho_mat.ncols());
+        let rho_path = format!("{}.feature_loading.parquet", knobs.out);
         rho_mat.to_parquet_with_names(
-            &format!("{}.feature_loading.parquet", knobs.out),
+            &rho_path,
             (Some(&plan.unified.feature_names), Some("gene")),
             Some(&rho_h_names),
         )?;
+        if let Some(c) = &carried {
+            c.append_to(knobs.out, &rho_path)?;
+        }
 
         // Output layout: the H-space cell embedding Z ALWAYS goes to
         // {out}.cell_embedding.parquet, on both paths. ETM resolved (default)
