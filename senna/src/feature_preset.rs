@@ -49,17 +49,17 @@ pub(crate) fn load_preset_genes(
     load_preset_rows(prefix, mode, feature_names, kind, None)
 }
 
-/// [`load_preset_genes`] with `lift`: when given, every gene row of the source
-/// (a row its types table calls a gene, or every row when it wrote none) is
-/// renamed by it before the match, and comes out so named among the carried
-/// rows — how `senna gem` reads a plain gene table onto its row grammar. The
-/// result's ids index `feature_names`.
+/// [`load_preset_genes`] with `rename_source`: when given, every gene row of
+/// the source (a row its types table calls a gene, or every row when it wrote
+/// none) is renamed by it before the match, and comes out so named among the
+/// carried rows — how `senna gem` reads a plain gene table onto its row
+/// grammar. The result's ids index `feature_names`.
 pub(crate) fn load_preset_rows(
     prefix: &str,
     mode: PresetMode,
     feature_names: &[Box<str>],
     kind: &ge::FeatureNameKind,
-    lift: Option<SourceNameMap<'_>>,
+    rename_source: Option<SourceNameMap<'_>>,
 ) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
     let (dictionary_path, _bias) = crate::run_manifest::resolve_feature_loading(prefix)
@@ -73,10 +73,9 @@ pub(crate) fn load_preset_rows(
             .map(|(n, _)| n.as_ref())
             .collect()
     });
-    let lift_gene = |n: &str| -> Box<str> {
-        match (lift, gene_names.as_ref()) {
-            (Some(f), Some(genes)) if genes.contains(n) => f(n),
-            (Some(f), None) => f(n),
+    let rename_gene = |n: &str| -> Box<str> {
+        match rename_source {
+            Some(f) if gene_names.as_ref().is_none_or(|genes| genes.contains(n)) => f(n),
             _ => n.into(),
         }
     };
@@ -85,14 +84,14 @@ pub(crate) fn load_preset_rows(
         bias_path: None,
         target_feature_names: feature_names,
         name_kind: kind.clone(),
-        source_name_map: lift.map(|_| &lift_gene as SourceNameMap<'_>),
+        source_name_map: rename_source.map(|_| &rename_gene as SourceNameMap<'_>),
     })?;
     let gene_src: Option<FxHashSet<usize>> = gene_names.as_ref().map(|genes| {
-        let lifted: FxHashSet<Box<str>> = genes.iter().map(|n| lift_gene(n)).collect();
+        let renamed: FxHashSet<Box<str>> = genes.iter().map(|n| rename_gene(n)).collect();
         host.src_names
             .iter()
             .enumerate()
-            .filter(|(_, n)| lifted.contains(*n))
+            .filter(|(_, n)| renamed.contains(*n))
             .map(|(i, _)| i)
             .collect()
     });

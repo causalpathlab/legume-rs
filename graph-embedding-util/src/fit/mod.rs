@@ -17,7 +17,8 @@ mod setup;
 
 pub use batch_fold::BatchGeneFold;
 pub use config::{
-    FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned, TrackInfo, TrackSpec,
+    validate_offset_rank, FitConfig, FitOutput, GeneModuleConfig, ParentModulesOwned, TrackInfo,
+    TrackSpec,
 };
 pub use module_args::GeneModuleArgs;
 pub use module_warm::{parent_module_logits, warm_start_module_labels};

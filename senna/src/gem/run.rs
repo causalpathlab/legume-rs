@@ -79,14 +79,11 @@ fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `--offset-rank` against the settled H: its own number, inside `1..=H`.
+/// `--offset-rank` against the settled H, by the engine's own rule, with the
+/// two flags named.
 pub(crate) fn validate_offset_rank(rank: usize, h: usize) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        (1..=h).contains(&rank),
-        "--offset-rank {rank} must lie in 1..=H, and H={h} here (--embedding-dim); it is the \
-         rank of each track's per-gene offset, not the embedding dimension"
-    );
-    Ok(())
+    graph_embedding_util::validate_offset_rank(rank, h)
+        .map_err(|e| anyhow::anyhow!("--offset-rank {rank} against --embedding-dim {h}: {e}"))
 }
 
 #[cfg(test)]
