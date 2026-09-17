@@ -6,12 +6,12 @@
 //! trip. A LoRA residual on the gene rows is the shared
 //! [`candle_util::lora`] primitive, read through one gather per step.
 
-pub use crate::preset_mode::PresetMode;
+pub use crate::preset_mode::{LoraSpec, PresetMode};
 use candle_util::candle_core::{DType, Device, Result as CResult, Tensor, Var};
+use candle_util::convert::to_host;
 use candle_util::lora::PinnedLora;
-use matrix_util::rand_util::{collect_f32_seeded, mix_seed};
+use matrix_util::rand_util::{mix_seed, normal_f32_seeded};
 use nalgebra::DMatrix;
-use rand_distr::Normal;
 
 /// Spread of every random init.
 pub const INIT_STDEV: f32 = 0.1;
@@ -48,11 +48,9 @@ pub struct HierLora {
     pub module: PinnedLora,
     pub gene: PinnedLora,
     /// Per-epoch ridge on each residual's mean row norm² (see
-    /// [`crate::preset_mode::PresetMode::Lora`]); the trainer spreads it over
-    /// the epoch's steps like the offset ridge.
+    /// [`LoraSpec::ridge`]); the trainer spreads it over the epoch's steps
+    /// like the offset ridge.
     pub ridge: f32,
-    /// How many gene rows the gene residual reaches: the ridge's divisor.
-    pub n_pinned: usize,
 }
 
 /// The base model's tables plus one offset table per non-base track.
@@ -70,12 +68,12 @@ pub struct HierParams {
     pub b_g: Var,
     /// Tracks `1..T`; empty at `T == 1`.
     pub offsets: Vec<TrackOffset>,
-    /// `[G, 1]` gradient mask on `r`, `0` on pinned genes, and `[M, 1]` on
-    /// `μ`, all zero (the whole dictionary is pinned with the rows). `None`
-    /// when nothing is pinned, so the plain model pays no multiply. The biases
-    /// `b_m` / `b_g` always train.
+    /// `[G, 1]` gradient mask on `r`, `0` on pinned genes. `None` when nothing
+    /// is pinned, so the plain model pays no multiply.
     pub r_mask: Option<Tensor>,
-    pub mu_mask: Option<Tensor>,
+    /// Whether the module dictionary `μ` is pinned, as a whole, with the rows.
+    /// The biases `b_m` / `b_g` always train.
+    pub mu_frozen: bool,
     /// Per gene, whether its row is pinned (see [`Self::preset`]). Empty when
     /// nothing is pinned.
     pub frozen_gene: Vec<bool>,
@@ -94,8 +92,7 @@ pub use crate::preset_mode::PresetRows;
 pub type PresetGenes = PresetRows;
 
 fn randn(n: usize, stdev: f32, seed: u64) -> Vec<f32> {
-    let dist = Normal::new(0.0f32, stdev).expect("finite stdev");
-    collect_f32_seeded(n, dist, seed)
+    normal_f32_seeded(n, stdev, seed)
 }
 
 /// A `[rows, cols]` `Var` from row-major host data.
@@ -105,16 +102,6 @@ fn var2(data: Vec<f32>, rows: usize, cols: usize, dev: &Device) -> CResult<Var> 
 
 /// One non-base track's offsets on the host: `(d_mu, d_b_m, d_r, d_b_g)`.
 pub type HostOffset = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
-
-/// Row-major host copy of a 2-D tensor.
-pub fn to_host2(t: &Tensor) -> CResult<Vec<f32>> {
-    t.flatten_all()?.to_vec1::<f32>()
-}
-
-/// Host copy of a 1-D tensor.
-pub fn to_host1(t: &Tensor) -> CResult<Vec<f32>> {
-    t.to_vec1::<f32>()
-}
 
 impl HierParams {
     /// The one-track tables: no offsets.
@@ -167,7 +154,7 @@ impl HierParams {
                 .map(|_| TrackOffset::zeros(n_modules, n_genes, h, dev))
                 .collect::<CResult<_>>()?,
             r_mask: None,
-            mu_mask: None,
+            mu_frozen: false,
             frozen_gene: Vec::new(),
             frozen_rows: Vec::new(),
             lora: None,
@@ -199,8 +186,8 @@ impl HierParams {
             frozen.rows.len(),
             frozen.ids.len()
         );
-        let mut mu = to_host2(self.mu.as_tensor())?;
-        let mut r = to_host2(self.r.as_tensor())?;
+        let mut mu = to_host(self.mu.as_tensor())?;
+        let mut r = to_host(self.r.as_tensor())?;
         let mut count = vec![0usize; n_modules];
         let mut sum = vec![0f32; n_modules * h];
         for (i, &g) in frozen.ids.iter().enumerate() {
@@ -236,16 +223,19 @@ impl HierParams {
         if frozen.mode.pins() {
             self.frozen_gene = vec![false; n_genes];
             self.frozen_rows = vec![0.0; n_genes * h];
-            let mut keep = vec![1f32; n_genes];
             for (i, &g) in frozen.ids.iter().enumerate() {
                 let g = g as usize;
                 self.frozen_gene[g] = true;
-                keep[g] = 0.0;
                 self.frozen_rows[g * h..(g + 1) * h]
                     .copy_from_slice(&frozen.rows[i * h..(i + 1) * h]);
             }
+            let keep: Vec<f32> = self
+                .frozen_gene
+                .iter()
+                .map(|&pinned| if pinned { 0.0 } else { 1.0 })
+                .collect();
             self.r_mask = Some(Tensor::from_vec(keep, (n_genes, 1), &self.dev)?);
-            self.mu_mask = Some(Tensor::zeros((n_modules, 1), DType::F32, &self.dev)?);
+            self.mu_frozen = true;
             if let Some(spec) = frozen.mode.lora() {
                 let (rank, lr_ratio) = (spec.rank, spec.lr_ratio);
                 let all_modules: Vec<u32> = (0..n_modules as u32).collect();
@@ -269,7 +259,6 @@ impl HierParams {
                         &self.dev,
                     )?,
                     ridge: spec.ridge,
-                    n_pinned: frozen.ids.len(),
                 });
             }
         }
@@ -300,16 +289,16 @@ impl HierParams {
     ) -> anyhow::Result<(DMatrix<f32>, Vec<f32>)> {
         let h = self.h;
         let n_features = track_of_row.len();
-        let mu = to_host2(self.mu.as_tensor())?;
-        let r = to_host2(self.r.as_tensor())?;
-        let b_m = to_host1(self.b_m.as_tensor())?;
-        let b_g = to_host1(self.b_g.as_tensor())?;
+        let mu = to_host(self.mu.as_tensor())?;
+        let r = to_host(self.r.as_tensor())?;
+        let b_m = to_host(self.b_m.as_tensor())?;
+        let b_g = to_host(self.b_g.as_tensor())?;
         // Per module and per gene, the residual shifts on the host.
         let (mod_shift, gene_shift): (Option<Vec<f32>>, Option<Vec<f32>>) = match self.lora.as_ref()
         {
             Some(l) => (
-                Some(to_host2(&l.module.residual()?)?),
-                Some(to_host2(&l.gene.residual()?)?),
+                Some(to_host(&l.module.residual()?)?),
+                Some(to_host(&l.gene.residual()?)?),
             ),
             None => (None, None),
         };
@@ -318,10 +307,10 @@ impl HierParams {
             .iter()
             .map(|o| {
                 Ok((
-                    to_host2(o.d_mu.as_tensor())?,
-                    to_host1(o.d_b_m.as_tensor())?,
-                    to_host2(o.d_r.as_tensor())?,
-                    to_host1(o.d_b_g.as_tensor())?,
+                    to_host(o.d_mu.as_tensor())?,
+                    to_host(o.d_b_m.as_tensor())?,
+                    to_host(o.d_r.as_tensor())?,
+                    to_host(o.d_b_g.as_tensor())?,
                 ))
             })
             .collect::<CResult<_>>()?;

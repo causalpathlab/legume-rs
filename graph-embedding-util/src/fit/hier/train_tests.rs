@@ -2,7 +2,7 @@ use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
 use crate::fit::hier::units::UnitTable;
-use crate::PresetMode;
+use crate::{LoraSpec, PresetMode};
 use std::sync::atomic::AtomicBool;
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
@@ -327,7 +327,7 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
     // rows plus a residual that trained.
     let free_rho: Vec<f32> = out.rho.row(1).iter().copied().collect();
     let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed, &Device::Cpu).unwrap();
-    let init_r: Vec<f32> = to_host2(init.r.as_tensor()).unwrap()[h..2 * h].to_vec();
+    let init_r: Vec<f32> = to_host(init.r.as_tensor()).unwrap()[h..2 * h].to_vec();
     assert!(free_rho
         .iter()
         .zip(&init_r)
@@ -483,11 +483,11 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
-    let lora = preset(PresetMode::Lora {
+    let lora = preset(PresetMode::Lora(LoraSpec {
         rank,
         lr_ratio: 4.0,
         ridge: 0.0,
-    });
+    }));
     let out = train(&units, &labels, h, &cfg, Some(&lora), &stop).unwrap();
     let mut resid = nalgebra::DMatrix::<f32>::zeros(gene.len(), h);
     for (i, &g) in gene.iter().enumerate() {
@@ -503,7 +503,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         2 * rank
     );
     let init = HierParams::new(units.n_units(), 2, 20, h, cfg.seed, &Device::Cpu).unwrap();
-    let init_r = to_host2(init.r.as_tensor()).unwrap();
+    let init_r = to_host(init.r.as_tensor()).unwrap();
     let free_rho: Vec<f32> = out.rho.row(1).iter().copied().collect();
     assert!(free_rho
         .iter()
@@ -512,10 +512,10 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
     assert!(gene.iter().any(|&g| out.b_feat[g as usize].abs() > 1e-6));
     assert!(out.final_loss_per_unit.is_finite());
 
-    let full_rank = preset(PresetMode::Lora {
+    let full_rank = preset(PresetMode::Lora(LoraSpec {
         rank: h,
         lr_ratio: 1.0,
         ridge: 0.0,
-    });
+    }));
     assert!(train(&units, &labels, h, &cfg, Some(&full_rank), &stop).is_err());
 }

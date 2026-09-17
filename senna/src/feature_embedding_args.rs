@@ -5,21 +5,7 @@
 //! help and the "one of the three" rule read the same everywhere.
 
 use clap::Args;
-use graph_embedding_util::PresetMode;
-
-/// LoRA's usual small rank.
-pub const DEFAULT_LORA_RANK: usize = 16;
-/// The LoRA ridge, per epoch on each residual's mean row norm². Strong enough
-/// that the residual stays below the anchor's own scale: without it the shared
-/// factor marches off the anchor under a row optimizer, and a weaker ridge
-/// tied this one on cell-side structure while letting the residual outgrow
-/// the anchor.
-pub const DEFAULT_LORA_RIDGE: f32 = 1000.0;
-/// The LoRA+ ratio. The paper's larger value belongs to transformers at far
-/// smaller learning rates; under AdamW at ours it destabilises the shared
-/// factor, and a moderate ratio was the one that beat both freeze and init
-/// on an imperfect anchor.
-pub const DEFAULT_LORA_LR_RATIO: f32 = 4.0;
+use graph_embedding_util::{LoraSpec, PresetMode};
 
 #[derive(Args, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FeatureEmbeddingArgs {
@@ -124,14 +110,15 @@ impl FeatureEmbeddingArgs {
         if let Some(p) = self.init_feature_embedding.as_deref() {
             return Some((p, PresetMode::Init));
         }
+        let d = LoraSpec::default();
         self.lora_feature_embedding.as_deref().map(|p| {
             (
                 p,
-                PresetMode::Lora {
-                    rank: self.lora_rank.unwrap_or(DEFAULT_LORA_RANK),
-                    lr_ratio: self.lora_lr_ratio.unwrap_or(DEFAULT_LORA_LR_RATIO),
-                    ridge: self.lora_ridge.unwrap_or(DEFAULT_LORA_RIDGE),
-                },
+                PresetMode::Lora(LoraSpec {
+                    rank: self.lora_rank.unwrap_or(d.rank),
+                    lr_ratio: self.lora_lr_ratio.unwrap_or(d.lr_ratio),
+                    ridge: self.lora_ridge.unwrap_or(d.ridge),
+                }),
             )
         })
     }
@@ -143,7 +130,7 @@ pub fn flag_name(mode: PresetMode) -> &'static str {
     match mode {
         PresetMode::Freeze => "--freeze-feature-embedding",
         PresetMode::Init => "--init-feature-embedding",
-        PresetMode::Lora { .. } => "--lora-feature-embedding",
+        PresetMode::Lora(_) => "--lora-feature-embedding",
     }
 }
 

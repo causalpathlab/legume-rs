@@ -24,7 +24,7 @@ use crate::optim::RowAdagrad;
 use candle_core::backprop::GradStore;
 use candle_core::{DType, Device, Result, Tensor, Var};
 use candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
-use matrix_util::rand_util::{collect_f32_seeded, mix_seed};
+use matrix_util::rand_util::{mix_seed, normal_f32_seeded};
 
 /// The salt the row factor of a pinned table is drawn under, mixed with the
 /// run's seed.
@@ -87,6 +87,16 @@ impl LoraFactors {
     pub fn residual(&self) -> Result<Tensor> {
         self.u.matmul(&self.v)
     }
+
+    /// `‖u·v‖²_F / n`, the residual's mean row norm² over `n` rows, without
+    /// forming the residual: `‖u·v‖²_F = Σ (uᵀu) ⊙ (v vᵀ)` on two `[rank, rank]`
+    /// Grams. Rows of `u` that are zero contribute nothing, so on a pinned
+    /// table `n` is the pinned count. The ridge every engine adds.
+    pub fn ridge(&self, n: usize) -> Result<Tensor> {
+        let uu = self.u.t()?.matmul(&self.u)?;
+        let vv = self.v.matmul(&self.v.t()?)?;
+        (uu * vv)?.sum_all()?.affine(1.0 / n.max(1) as f64, 0.0)
+    }
 }
 
 /// A residual on a table SOME of whose rows are pinned: `u` is drawn on the
@@ -99,6 +109,8 @@ pub struct PinnedLora {
     pub v: Var,
     /// `[N, 1]`, `1` on the pinned rows.
     pub u_mask: Tensor,
+    /// How many rows are pinned: the ridge's divisor.
+    pub n_pinned: usize,
     pub lr_ratio: f32,
 }
 
@@ -118,9 +130,11 @@ impl PinnedLora {
         if rank == 0 {
             candle_core::bail!("a LoRA residual needs rank ≥ 1");
         }
-        let dist =
-            rand_distr::Normal::new(0.0f32, (1.0 / rank as f32).sqrt()).expect("finite stdev");
-        let draw = collect_f32_seeded(pinned.len() * rank, dist, mix_seed(seed, ROW_FACTOR_SALT));
+        let draw = normal_f32_seeded(
+            pinned.len() * rank,
+            (1.0 / rank as f32).sqrt(),
+            mix_seed(seed, ROW_FACTOR_SALT),
+        );
         let mut u = vec![0f32; n_rows * rank];
         let mut mask = vec![0f32; n_rows];
         for (i, &g) in pinned.iter().enumerate() {
@@ -135,6 +149,7 @@ impl PinnedLora {
             u: Var::from_tensor(&Tensor::from_vec(u, (n_rows, rank), dev)?)?,
             v: Var::zeros((rank, dim), DType::F32, dev)?,
             u_mask: Tensor::from_vec(mask, (n_rows, 1), dev)?,
+            n_pinned: pinned.len(),
             lr_ratio,
         })
     }
@@ -152,6 +167,12 @@ impl PinnedLora {
     /// The whole `[N, H]` residual, for output and folding.
     pub fn residual(&self) -> Result<Tensor> {
         self.factors().residual()
+    }
+
+    /// The residual's mean row norm² over the pinned rows, without forming it
+    /// (see [`LoraFactors::ridge`]).
+    pub fn ridge(&self) -> Result<Tensor> {
+        self.factors().ridge(self.n_pinned)
     }
 
     /// The row optimizers: `u` at `lr`, `v` at `lr_ratio × lr` (LoRA+).
@@ -188,6 +209,9 @@ pub struct LoraPlus<'a> {
     /// The full name of `v` in the map (`"{prefix}.lora_v"`).
     pub v_var: &'a str,
     pub lr_ratio: f32,
+    /// Per-epoch ridge on the residual's mean row norm² (see
+    /// [`LoraFactors::ridge`]); the trainer spreads it over the epoch's steps.
+    pub ridge: f32,
 }
 
 impl LoraPlus<'_> {

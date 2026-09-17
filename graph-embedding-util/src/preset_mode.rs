@@ -16,13 +16,7 @@
 pub enum PresetMode {
     Init,
     Freeze,
-    Lora {
-        rank: usize,
-        lr_ratio: f32,
-        /// Per-epoch ridge on the residual's mean row norm² (the shrinkage
-        /// that makes it a residual rather than a second table); `0` = none.
-        ridge: f32,
-    },
+    Lora(LoraSpec),
 }
 
 impl PresetMode {
@@ -35,16 +29,8 @@ impl PresetMode {
     /// The LoRA settings, when this is that mode.
     #[must_use]
     pub fn lora(&self) -> Option<LoraSpec> {
-        match *self {
-            Self::Lora {
-                rank,
-                lr_ratio,
-                ridge,
-            } => Some(LoraSpec {
-                rank,
-                lr_ratio,
-                ridge,
-            }),
+        match self {
+            Self::Lora(spec) => Some(*spec),
             _ => None,
         }
     }
@@ -55,19 +41,17 @@ impl PresetMode {
         match self {
             Self::Init => "start from the given table and train on",
             Self::Freeze => "pinned to the given table; the rest train",
-            Self::Lora { .. } => {
-                "anchored to the given table with a low-rank residual; the rest train"
-            }
+            Self::Lora(_) => "anchored to the given table with a low-rank residual; the rest train",
         }
     }
 
     /// Refuse a rank that degenerates to another mode or exceeds the width.
     pub fn validate(&self, h: usize) -> anyhow::Result<()> {
-        if let Self::Lora {
+        if let Self::Lora(LoraSpec {
             rank,
             lr_ratio,
             ridge,
-        } = *self
+        }) = *self
         {
             anyhow::ensure!(
                 rank >= 1,
@@ -90,12 +74,30 @@ impl PresetMode {
     }
 }
 
-/// The settings of [`PresetMode::Lora`], unpacked.
+/// The settings of [`PresetMode::Lora`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LoraSpec {
     pub rank: usize,
+    /// LoRA+: the shared factor's learning rate over the row factor's.
     pub lr_ratio: f32,
+    /// Per-epoch ridge on the residual's mean row norm² — the shrinkage that
+    /// makes it a residual rather than a second table; `0` = none.
     pub ridge: f32,
+}
+
+/// LoRA's usual small rank; a moderate LoRA+ ratio (the paper's 16 belongs to
+/// transformers at far smaller rates and destabilised the shared factor
+/// under AdamW); a ridge strong enough that the residual stays below the
+/// anchor's own scale under a row optimizer, where a weaker one tied on
+/// cell-side structure while letting the residual outgrow the anchor.
+impl Default for LoraSpec {
+    fn default() -> Self {
+        Self {
+            rank: 16,
+            lr_ratio: 4.0,
+            ridge: 1000.0,
+        }
+    }
 }
 
 /// Rows of a table given from outside, by row id on the engine's own axis

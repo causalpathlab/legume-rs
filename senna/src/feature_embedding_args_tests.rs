@@ -1,6 +1,6 @@
 use super::{flag_name, FeatureEmbeddingArgs};
 use clap::Parser;
-use graph_embedding_util::PresetMode;
+use graph_embedding_util::{LoraSpec, PresetMode};
 
 #[derive(Parser)]
 struct Cli {
@@ -29,11 +29,11 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
         parse(&["--lora-feature-embedding", "c"]).unwrap().resolve(),
         Some((
             "c",
-            PresetMode::Lora {
+            PresetMode::Lora(LoraSpec {
                 rank: 16,
                 lr_ratio: 4.0,
                 ridge: 1000.0
-            }
+            })
         ))
     );
     assert_eq!(
@@ -49,11 +49,11 @@ fn each_flag_resolves_to_its_mode_and_lora_carries_its_knobs() {
         .resolve(),
         Some((
             "c",
-            PresetMode::Lora {
+            PresetMode::Lora(LoraSpec {
                 rank: 4,
                 lr_ratio: 1.0,
                 ridge: 1000.0
-            }
+            })
         ))
     );
 }
@@ -93,11 +93,11 @@ fn the_three_flags_exclude_each_other_and_the_knobs_need_lora() {
         Some(2.5)
     );
     assert_eq!(
-        flag_name(PresetMode::Lora {
+        flag_name(PresetMode::Lora(LoraSpec {
             rank: 1,
             lr_ratio: 1.0,
             ridge: 0.0
-        }),
+        })),
         "--lora-feature-embedding"
     );
 }

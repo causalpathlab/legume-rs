@@ -249,6 +249,15 @@ impl FeatureEmbedding {
         std::sync::Arc::new(Self::Free(rho))
     }
 
+    /// Under `Lora`, the residual's mean row norm² over the table's rows,
+    /// without forming the residual; `None` for the other variants.
+    pub fn lora_ridge(&self) -> Result<Option<Tensor>> {
+        match self {
+            Self::Lora { base, lora } => Ok(Some(lora.ridge(base.dims()[0])?)),
+            _ => Ok(None),
+        }
+    }
+
     /// What a ridge penalty should shrink: the dictionary when there is one,
     /// since penalizing the composed rows would charge every feature for the
     /// same shared vector; the residual's shared factor under LoRA (the base

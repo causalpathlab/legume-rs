@@ -1,9 +1,12 @@
 use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
-use crate::fit::hier::params::{to_host1, to_host2, HostOffset, PresetGenes, PresetMode};
+use crate::fit::hier::params::{HostOffset, PresetGenes, PresetMode};
 use crate::fit::hier::partition::{Partition, TrackSupport, UnitModules};
 use crate::fit::hier::units::UnitTable;
+use crate::LoraSpec;
+use candle_util::candle_core::Device;
+use candle_util::convert::to_host;
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
     Triplet {
@@ -32,20 +35,20 @@ struct Host {
 fn host(p: &HierParams) -> Host {
     Host {
         h: p.h,
-        e_u: to_host2(p.e_u.as_tensor()).unwrap(),
-        mu: to_host2(p.mu.as_tensor()).unwrap(),
-        b_m: to_host1(p.b_m.as_tensor()).unwrap(),
-        r: to_host2(p.r.as_tensor()).unwrap(),
-        b_g: to_host1(p.b_g.as_tensor()).unwrap(),
+        e_u: to_host(p.e_u.as_tensor()).unwrap(),
+        mu: to_host(p.mu.as_tensor()).unwrap(),
+        b_m: to_host(p.b_m.as_tensor()).unwrap(),
+        r: to_host(p.r.as_tensor()).unwrap(),
+        b_g: to_host(p.b_g.as_tensor()).unwrap(),
         offsets: p
             .offsets
             .iter()
             .map(|o| {
                 (
-                    to_host2(o.d_mu.as_tensor()).unwrap(),
-                    to_host1(o.d_b_m.as_tensor()).unwrap(),
-                    to_host2(o.d_r.as_tensor()).unwrap(),
-                    to_host1(o.d_b_g.as_tensor()).unwrap(),
+                    to_host(o.d_mu.as_tensor()).unwrap(),
+                    to_host(o.d_b_m.as_tensor()).unwrap(),
+                    to_host(o.d_r.as_tensor()).unwrap(),
+                    to_host(o.d_b_g.as_tensor()).unwrap(),
                 )
             })
             .collect(),
@@ -289,9 +292,8 @@ fn total(
         um,
         part,
         sup,
-        plan,
     };
-    let (s, loss) = step_loss(p, &ctx, l2, 0.0).unwrap();
+    let (s, loss) = step_loss(p, &ctx, plan, l2, 0.0).unwrap();
     (s.loss_module + s.loss_gene + s.loss_ridge, loss)
 }
 
@@ -357,8 +359,8 @@ fn the_step_loss_matches_the_f64_reference_with_tracks_and_ridge() {
             um: &um,
             part: &part,
             sup: &sup,
-            plan: &plan,
         },
+        &plan,
         OFFSET_L2,
         0.0,
     )
@@ -439,8 +441,8 @@ fn pair_weight_scales_the_gene_level_term() {
             um: &um,
             part: &part,
             sup: &sup,
-            plan: &one,
         },
+        &one,
         0.0,
         0.0,
     )
@@ -452,8 +454,8 @@ fn pair_weight_scales_the_gene_level_term() {
             um: &um,
             part: &part,
             sup: &sup,
-            plan: &half,
         },
+        &half,
         0.0,
         0.0,
     )
@@ -493,15 +495,15 @@ fn weight_decay_shrinks_touched_rows_only_and_never_the_offsets() {
     // A negligible optimizer rate, so the decay is all that moves a row; the
     // decay factor itself comes from the rate handed to `apply`.
     let mut opt = Optimizers::new(&p, 1e-7).unwrap();
-    let r0 = to_host2(p.r.as_tensor()).unwrap();
-    let b0 = to_host1(p.b_g.as_tensor()).unwrap();
-    let e0 = to_host2(p.e_u.as_tensor()).unwrap();
-    let off0 = to_host2(p.offsets[0].d_r.as_tensor()).unwrap();
+    let r0 = to_host(p.r.as_tensor()).unwrap();
+    let b0 = to_host(p.b_g.as_tensor()).unwrap();
+    let e0 = to_host(p.e_u.as_tensor()).unwrap();
+    let off0 = to_host(p.offsets[0].d_r.as_tensor()).unwrap();
     let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, OFFSET_L2);
     let grads = loss.backward().unwrap();
     apply(&mut p, &mut opt, &grads, 0.5, 0.2).unwrap();
     let h = p.h;
-    let r1 = to_host2(p.r.as_tensor()).unwrap();
+    let r1 = to_host(p.r.as_tensor()).unwrap();
     for g in [0usize, 2, 3, 5, 6] {
         for k in 0..h {
             assert!(
@@ -519,15 +521,15 @@ fn weight_decay_shrinks_touched_rows_only_and_never_the_offsets() {
             );
         }
     }
-    for (a, b) in to_host1(p.b_g.as_tensor()).unwrap().iter().zip(&b0) {
+    for (a, b) in to_host(p.b_g.as_tensor()).unwrap().iter().zip(&b0) {
         assert!((a - b).abs() < 1e-5, "biases never decay");
     }
-    let e1 = to_host2(p.e_u.as_tensor()).unwrap();
+    let e1 = to_host(p.e_u.as_tensor()).unwrap();
     for k in 0..h {
         assert!((e1[k] - 0.9 * e0[k]).abs() < 1e-5);
         assert_eq!(e1[3 * h + k], e0[3 * h + k], "unit 3 was not in the plan");
     }
-    for (a, b) in to_host2(p.offsets[0].d_r.as_tensor())
+    for (a, b) in to_host(p.offsets[0].d_r.as_tensor())
         .unwrap()
         .iter()
         .zip(&off0)
@@ -548,16 +550,16 @@ fn pinned_rows_hold_while_their_biases_train() {
     p.preset(&given, &part.module_of).unwrap();
     let plan = plan_all();
     let mut opt = Optimizers::new(&p, 0.2).unwrap();
-    let r0 = to_host2(p.r.as_tensor()).unwrap();
-    let mu0 = to_host2(p.mu.as_tensor()).unwrap();
-    let b0 = to_host1(p.b_g.as_tensor()).unwrap();
+    let r0 = to_host(p.r.as_tensor()).unwrap();
+    let mu0 = to_host(p.mu.as_tensor()).unwrap();
+    let b0 = to_host(p.b_g.as_tensor()).unwrap();
     for _ in 0..5 {
         let (_, loss) = total(&p, &units, &um, &part, &sup, &plan, 0.0);
         let grads = loss.backward().unwrap();
         apply(&mut p, &mut opt, &grads, 0.2, 0.01).unwrap();
     }
     let h = p.h;
-    let r1 = to_host2(p.r.as_tensor()).unwrap();
+    let r1 = to_host(p.r.as_tensor()).unwrap();
     for g in [0usize, 3] {
         assert_eq!(
             &r1[g * h..(g + 1) * h],
@@ -567,11 +569,11 @@ fn pinned_rows_hold_while_their_biases_train() {
     }
     assert_ne!(&r1[2 * h..3 * h], &r0[2 * h..3 * h], "a free row trains");
     assert_eq!(
-        to_host2(p.mu.as_tensor()).unwrap(),
+        to_host(p.mu.as_tensor()).unwrap(),
         mu0,
         "μ is pinned with the rows"
     );
-    let b1 = to_host1(p.b_g.as_tensor()).unwrap();
+    let b1 = to_host(p.b_g.as_tensor()).unwrap();
     assert!(
         b1[0] != b0[0] || b1[3] != b0[3],
         "a pinned gene's bias still trains"
@@ -586,11 +588,11 @@ fn autograd_matches_finite_differences_on_the_lora_factors() {
     let given = PresetGenes {
         ids: vec![0, 3, 4],
         rows: vec![0.5, -0.5, 0.25, 0.75, -0.3, 0.1],
-        mode: PresetMode::Lora {
+        mode: PresetMode::Lora(LoraSpec {
             rank: 1,
             lr_ratio: 1.0,
             ridge: 0.0,
-        },
+        }),
     };
     p.preset(&given, &part.module_of).unwrap();
     let l = p.lora.as_ref().unwrap();
@@ -619,7 +621,7 @@ fn autograd_matches_finite_differences_on_the_lora_factors() {
     }
     // A free gene's `u` row is masked at the step, not in the gradient itself.
     assert_eq!(
-        to_host2(&l.gene.u_mask).unwrap(),
+        to_host(&l.gene.u_mask).unwrap(),
         vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0]
     );
 }

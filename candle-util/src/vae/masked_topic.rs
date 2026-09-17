@@ -490,6 +490,7 @@ fn masked_minibatch_loss(
     opts: &MaskedTrainOpts,
     mb: &DenseMaskedMinibatch,
     mean_1d: &Tensor,
+    ridge_step: f64,
 ) -> anyhow::Result<StepLoss> {
     // Masked-VAE: unconstrained `z` (no softmax in the encoder).
     // Masked-topic: simplex `log θ` (softmax or stick-breaking). All
@@ -550,6 +551,13 @@ fn masked_minibatch_loss(
     // Per scored unit, so every penalty below is on the same scale as the
     // number the epoch log reports.
     let mut loss = llik_sum.neg()?.div(&units_sum.clamp(1.0, f64::INFINITY)?)?;
+    // An anchored table's residual is shrunk instead: its ridge at this
+    // step's weight (the caller spreads the per-epoch weight over the steps).
+    if ridge_step > 0.0 {
+        if let Some(r) = encoder.features().lora_ridge()? {
+            loss = (loss + r.affine(ridge_step, 0.0)?)?;
+        }
+    }
     if config.feature_embedding_l2 > 0.0 && config.feature_anchor.is_none() {
         // Shrink what is actually free: the dictionary under modules, the table
         // otherwise. Penalizing composed rows would charge every member of a
@@ -666,6 +674,7 @@ pub fn train_masked(
                     opts,
                     &mb,
                     level0.feature_mean_1d(),
+                    0.0,
                 )
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 Ok(fwd.loss)
@@ -714,6 +723,10 @@ pub fn train_masked(
         for (level, lv) in levels.iter().enumerate() {
             let decoder = &decoders[level];
             let ep = lv.begin_epoch(epoch_seed(opts.seed, epoch, level), &draw, minibatch_size)?;
+            // The per-epoch LoRA ridge, spread over every level's batches.
+            let ridge_step = config.feature_anchor.and_then(|a| a.lora).map_or(0.0, |l| {
+                f64::from(l.ridge) / (levels.len() * ep.n_batches().max(1)) as f64
+            });
             for b in 0..ep.n_batches() {
                 let mb = ep.batch(b)?;
                 let fwd = masked_minibatch_loss(
@@ -723,6 +736,7 @@ pub fn train_masked(
                     opts,
                     &mb,
                     lv.feature_mean_1d(),
+                    ridge_step,
                 )?;
                 acc.add(&fwd.llik_sum, &fwd.units_sum)?;
                 let grads = fwd.loss.backward()?;

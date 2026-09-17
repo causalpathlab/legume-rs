@@ -55,8 +55,9 @@ use super::params::HierParams;
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
 use candle_util::candle_core::backprop::GradStore;
-use candle_util::candle_core::{DType, Device, Result as CResult, Tensor, Var, WithDType, D};
+use candle_util::candle_core::{DType, Result as CResult, Tensor, Var, D};
 use candle_util::candle_nn::ops::log_softmax;
+use candle_util::convert::{add_into, to_1d};
 use candle_util::fast_index::gather_rows;
 use candle_util::lora::PinnedLoraOpt;
 use candle_util::masking::additive_pad_mask;
@@ -92,27 +93,17 @@ pub struct StepStats {
 }
 
 /// What every step reads and never writes: the unit table, the partition and
-/// the per-fit views built from them, plus this step's plan.
+/// the per-fit views built from them. Built once per fit; the plan is per step.
 pub struct StepCtx<'a> {
     pub units: &'a UnitTable,
     pub um: &'a UnitModules,
     pub part: &'a Partition,
     pub sup: &'a TrackSupport,
-    pub plan: &'a StepPlan,
 }
 
-/// A 1-D device tensor from a host slice.
-fn to_1d<T: WithDType>(v: &[T], dev: &Device) -> CResult<Tensor> {
-    Tensor::from_slice(v, v.len(), dev)
-}
-
-/// `acc += x`, starting from nothing.
-fn add(acc: &mut Option<Tensor>, x: Tensor) -> CResult<()> {
-    *acc = Some(match acc.take() {
-        None => x,
-        Some(a) => (a + x)?,
-    });
-    Ok(())
+/// `‖t‖²_F / n`: a table's mean row norm² over `n` rows.
+fn mean_row_sq(t: &Tensor, n: usize) -> CResult<Tensor> {
+    t.sqr()?.sum_all()?.affine(1.0 / n.max(1) as f64, 0.0)
 }
 
 /// `e_b · μ_effᵀ + b`, softmaxed over the track's scored modules, weighted by
@@ -121,11 +112,12 @@ fn add(acc: &mut Option<Tensor>, x: Tensor) -> CResult<()> {
 fn module_level(
     params: &HierParams,
     ctx: &StepCtx<'_>,
+    plan: &StepPlan,
     e_b: &Tensor,
     mu_lora: Option<&Tensor>,
     t: usize,
 ) -> CResult<Tensor> {
-    let (units, um, sup, plan) = (ctx.units, ctx.um, ctx.sup, ctx.plan);
+    let (units, um, sup) = (ctx.units, ctx.um, ctx.sup);
     let dev = &params.dev;
     let n_m = um.n_modules;
     let all: Vec<u32>;
@@ -187,20 +179,11 @@ struct GeneBatch {
     target_val: Vec<f32>,
 }
 
-/// The `(slot, count)` pairs of unit `u` in module `m` on track `t`;
-/// `by_module[u]` is sorted by `(track, module)`.
-fn counts_of(um: &UnitModules, u: usize, t: usize, m: usize) -> &[(u32, f32)] {
-    let key = (t as u32, m as u32);
-    match um.by_module[u].binary_search_by_key(&key, |(k, _)| *k) {
-        Ok(i) => um.by_module[u][i].1.as_slice(),
-        Err(_) => &[],
-    }
-}
-
-/// Track `t`'s groups, bucketed by member count and padded.
-fn build_gene_batches(ctx: &StepCtx<'_>, t: usize) -> Vec<GeneBatch> {
-    let (units, um, part, sup, plan) = (ctx.units, ctx.um, ctx.part, ctx.sup, ctx.plan);
-    let mut groups: Vec<Group<'_>> = plan
+/// Track `t`'s groups: member genes on the track's support, module id, drawn
+/// units; sorted by member count so bucketing is a linear walk.
+fn track_groups<'a>(ctx: &'a StepCtx<'a>, plan: &'a StepPlan, t: usize) -> Vec<Group<'a>> {
+    let (part, sup) = (ctx.part, ctx.sup);
+    let mut groups: Vec<Group<'a>> = plan
         .pairs_by_module
         .iter()
         .filter(|((tt, _), _)| *tt as usize == t)
@@ -218,59 +201,79 @@ fn build_gene_batches(ctx: &StepCtx<'_>, t: usize) -> Vec<GeneBatch> {
         })
         .collect();
     groups.sort_by_key(|(genes, _, _)| genes.len());
-    let mut batches = Vec::new();
+    groups
+}
+
+/// Consecutive runs of sorted groups whose member counts stay within
+/// [`BUCKET_RATIO`] of the run's smallest.
+fn bucket<'a, 'g>(groups: &'g [Group<'a>]) -> Vec<&'g [Group<'a>]> {
+    let mut chunks = Vec::new();
     let mut start = 0;
     while start < groups.len() {
         let d_min = groups[start].0.len().max(1);
-        let end = start
-            + groups[start..]
-                .iter()
-                .take_while(|(g, _, _)| g.len() <= d_min * BUCKET_RATIO)
-                .count();
-        let chunk = &groups[start..end];
-        let d_max = chunk
+        let len = groups[start..]
             .iter()
-            .map(|(g, _, _)| g.len())
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        let n_max = chunk
-            .iter()
-            .map(|(_, _, p)| p.len())
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        let p_n = chunk.len();
-        let mut b = GeneBatch {
-            n_max,
-            d_max,
-            unit_ids: vec![0; p_n * n_max],
-            gene_ids: vec![0; p_n * d_max],
-            col_valid: vec![0.0; p_n * d_max],
-            target_pos: Vec::new(),
-            target_val: Vec::new(),
-        };
-        for (p, (genes, m, pairs)) in chunk.iter().enumerate() {
-            for (j, &g) in genes.iter().enumerate() {
-                b.gene_ids[p * d_max + j] = g;
-                b.col_valid[p * d_max + j] = 1.0;
-            }
-            let local = (!sup.is_full(t)).then(|| sup.local_of(t, *m));
-            for (i, &(u, wt)) in pairs.iter().enumerate() {
-                b.unit_ids[p * n_max + i] = u;
-                let scale = units.weight_of(u as usize, t) * wt;
-                let n_um = um.n_um[um.idx(u as usize, t, *m)];
-                for &(slot, c) in counts_of(um, u as usize, t, *m) {
-                    let col = local.map_or(slot as usize, |l| l[slot as usize] as usize);
-                    b.target_pos.push(((p * n_max + i) * d_max + col) as u32);
-                    b.target_val.push(scale * c / n_um);
-                }
+            .take_while(|(g, _, _)| g.len() <= d_min * BUCKET_RATIO)
+            .count();
+        chunks.push(&groups[start..start + len]);
+        start += len;
+    }
+    chunks
+}
+
+/// One padded batch from a bucket of groups on track `t`.
+fn fill_batch(ctx: &StepCtx<'_>, chunk: &[Group<'_>], t: usize) -> GeneBatch {
+    let (units, um, sup) = (ctx.units, ctx.um, ctx.sup);
+    let d_max = chunk
+        .iter()
+        .map(|(g, _, _)| g.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let n_max = chunk
+        .iter()
+        .map(|(_, _, p)| p.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let p_n = chunk.len();
+    let n_pairs: usize = chunk.iter().map(|(_, _, p)| p.len()).sum();
+    let mut b = GeneBatch {
+        n_max,
+        d_max,
+        unit_ids: vec![0; p_n * n_max],
+        gene_ids: vec![0; p_n * d_max],
+        col_valid: vec![0.0; p_n * d_max],
+        target_pos: Vec::with_capacity(n_pairs * 4),
+        target_val: Vec::with_capacity(n_pairs * 4),
+    };
+    for (p, (genes, m, pairs)) in chunk.iter().enumerate() {
+        for (j, &g) in genes.iter().enumerate() {
+            b.gene_ids[p * d_max + j] = g;
+            b.col_valid[p * d_max + j] = 1.0;
+        }
+        let local = (!sup.is_full(t)).then(|| sup.local_of(t, *m));
+        for (i, &(u, wt)) in pairs.iter().enumerate() {
+            b.unit_ids[p * n_max + i] = u;
+            let scale = units.weight_of(u as usize, t) * wt;
+            let n_um = um.n_um[um.idx(u as usize, t, *m)];
+            for &(slot, c) in um.counts_of(u as usize, t, *m) {
+                let col = local.map_or(slot as usize, |l| l[slot as usize] as usize);
+                b.target_pos.push(((p * n_max + i) * d_max + col) as u32);
+                b.target_val.push(scale * c / n_um);
             }
         }
-        batches.push(b);
-        start = end;
     }
-    batches
+    b
+}
+
+/// Track `t`'s groups, bucketed by member count and padded.
+fn build_gene_batches(ctx: &StepCtx<'_>, plan: &StepPlan, t: usize) -> Vec<GeneBatch> {
+    let groups = track_groups(ctx, plan, t);
+    bucket(&groups)
+        .into_iter()
+        .map(|chunk| fill_batch(ctx, chunk, t))
+        .collect()
 }
 
 /// The gene-level loss of track `t`'s batches: one batched matmul, one masked
@@ -308,7 +311,7 @@ fn score_gene_batches(
             .broadcast_add(&pad)?;
         let logp = log_softmax(&s, D::Minus1)?.flatten_all()?;
         let picked = gather_rows(&logp, &to_1d(&b.target_pos, dev)?)?;
-        add(
+        add_into(
             &mut total,
             (picked * to_1d(&b.target_val, dev)?)?.sum_all()?.neg()?,
         )?;
@@ -321,10 +324,10 @@ fn score_gene_batches(
 pub fn step_loss(
     params: &HierParams,
     ctx: &StepCtx<'_>,
+    plan: &StepPlan,
     offset_l2_step: f32,
     lora_ridge_step: f32,
 ) -> anyhow::Result<(StepStats, Tensor)> {
-    let plan = ctx.plan;
     let n_t = ctx.units.n_tracks();
     anyhow::ensure!(
         params.offsets.len() == n_t.saturating_sub(1),
@@ -340,51 +343,36 @@ pub fn step_loss(
     let mut loss_module: Option<Tensor> = None;
     let mut loss_gene: Option<Tensor> = None;
     for t in 0..n_t {
-        add(
+        add_into(
             &mut loss_module,
-            module_level(params, ctx, &e_b, mu_lora.as_ref(), t)?,
+            module_level(params, ctx, plan, &e_b, mu_lora.as_ref(), t)?,
         )?;
-        let batches = build_gene_batches(ctx, t);
+        let batches = build_gene_batches(ctx, plan, t);
         if let Some(l) = score_gene_batches(params, &batches, t)? {
-            add(&mut loss_gene, l)?;
+            add_into(&mut loss_gene, l)?;
         }
     }
     let mut loss_ridge: Option<Tensor> = None;
     if offset_l2_step > 0.0 {
-        let n_m = params.b_m.dims()[0] as f64;
-        let n_g = params.b_g.dims()[0] as f64;
+        let n_m = params.b_m.dims()[0];
+        let n_g = params.b_g.dims()[0];
         for o in &params.offsets {
-            let mu2 = o
-                .d_mu
-                .as_tensor()
-                .sqr()?
-                .sum_all()?
-                .affine(1.0 / n_m, 0.0)?;
-            let r2 = o.d_r.as_tensor().sqr()?.sum_all()?.affine(1.0 / n_g, 0.0)?;
-            add(
+            let mu2 = mean_row_sq(o.d_mu.as_tensor(), n_m)?;
+            let r2 = mean_row_sq(o.d_r.as_tensor(), n_g)?;
+            add_into(
                 &mut loss_ridge,
                 (mu2 + r2)?.affine(f64::from(offset_l2_step), 0.0)?,
             )?;
         }
     }
-    // The same shrinkage on the two LoRA residuals: mean row norm² of each,
-    // over the rows it reaches, at this step's weight. Their gradient is how
-    // the shared factors are kept from marching off the anchor.
+    // The same shrinkage on the two LoRA residuals, each over the rows it
+    // reaches, at this step's weight — in Gram form, so no residual is formed.
+    // Their gradient is how the shared factors are kept from marching off
+    // the anchor.
     if let (Some(l), true) = (params.lora.as_ref(), lora_ridge_step > 0.0) {
-        let n_m = params.b_m.dims()[0] as f64;
-        let gene2 = l
-            .gene
-            .residual()?
-            .sqr()?
-            .sum_all()?
-            .affine(1.0 / l.n_pinned.max(1) as f64, 0.0)?;
-        let mod2 = match mu_lora.as_ref() {
-            Some(r) => r.sqr()?.sum_all()?.affine(1.0 / n_m, 0.0)?,
-            None => Tensor::zeros((), DType::F32, dev)?,
-        };
-        add(
+        add_into(
             &mut loss_ridge,
-            (gene2 + mod2)?.affine(f64::from(lora_ridge_step), 0.0)?,
+            (l.gene.ridge()? + l.module.ridge()?)?.affine(f64::from(lora_ridge_step), 0.0)?,
         )?;
     }
     // One host sync for the three numbers.
@@ -468,14 +456,15 @@ pub fn apply(
         1.0
     };
     if let Some(g) = grads.get(&params.e_u) {
+        let row_sq = g.sqr()?.sum(1)?;
         if decay != 1.0 {
-            let touched = g.sqr()?.sum(1)?.gt(0f32)?.to_dtype(DType::F32)?;
+            let touched = row_sq.gt(0f32)?.to_dtype(DType::F32)?;
             let factor = touched.affine(decay - 1.0, 1.0)?.unsqueeze(1)?;
             params
                 .e_u
                 .set(&params.e_u.as_tensor().broadcast_mul(&factor)?)?;
         }
-        opt.e_u.step(&params.e_u, g)?;
+        opt.e_u.step_with_row_sq(&params.e_u, g, &row_sq)?;
     }
     let pair = |opt: &mut RowAdagrad,
                 row: &Var,
@@ -488,11 +477,16 @@ pub fn apply(
         }
         Ok(())
     };
+    // The whole dictionary is pinned or none of it: an all-zero mask.
+    let mu_mask = params
+        .mu_frozen
+        .then(|| Tensor::zeros((params.mu.dims()[0], 1), DType::F32, &params.dev))
+        .transpose()?;
     pair(
         &mut opt.mu,
         &params.mu,
         &params.b_m,
-        params.mu_mask.as_ref(),
+        mu_mask.as_ref(),
         decay,
     )?;
     pair(
