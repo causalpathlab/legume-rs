@@ -297,7 +297,7 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
         .collect();
     let frozen = PresetGenes {
-        gene: gene.clone(),
+        ids: gene.clone(),
         rows: rows.clone(),
         mode: PresetMode::Freeze,
     };
@@ -357,7 +357,7 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         })
         .collect();
     let frozen = PresetGenes {
-        gene,
+        ids: gene,
         rows: rows.clone(),
         mode: PresetMode::Freeze,
     };
@@ -400,13 +400,13 @@ fn frozen_genes_must_be_in_range_and_match_h() {
     };
     let stop = AtomicBool::new(false);
     let bad_gene = PresetGenes {
-        gene: vec![20],
+        ids: vec![20],
         rows: vec![0.0; 4],
         mode: PresetMode::Freeze,
     };
     assert!(train(&units, &labels, 4, &cfg, Some(&bad_gene), &stop).is_err());
     let bad_h = PresetGenes {
-        gene: vec![0],
+        ids: vec![0],
         rows: vec![0.0; 3],
         mode: PresetMode::Freeze,
     };
@@ -422,7 +422,7 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
     let gene: Vec<u32> = (0..20u32).collect();
     let rows: Vec<f32> = (0..20 * h).map(|i| 0.01 * i as f32 - 0.4).collect();
     let preset = PresetGenes {
-        gene: gene.clone(),
+        ids: gene.clone(),
         rows: rows.clone(),
         mode: PresetMode::Init,
     };
@@ -467,7 +467,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
         .collect();
     let preset = |mode| PresetGenes {
-        gene: gene.clone(),
+        ids: gene.clone(),
         rows: rows.clone(),
         mode,
     };

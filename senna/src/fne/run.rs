@@ -128,8 +128,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         None => None,
     };
     let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset_genes.as_ref())?;
-    let preset =
-        preset_genes.map(|p| crate::feature_preset::preset_rows(p, |g| gene_nodes[g as usize]));
+    let preset = preset_genes.map(|p| p.map_ids(|g| gene_nodes[g as usize]));
     let stop = setup_stop_handler();
     let cfg = FneConfig {
         dim,

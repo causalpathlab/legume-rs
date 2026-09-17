@@ -20,8 +20,15 @@
 //! a plain one and no reader needs to know LoRA was involved.
 
 use crate::fast_index::gather_rows;
-use candle_core::{Result, Tensor};
+use crate::optim::RowAdagrad;
+use candle_core::backprop::GradStore;
+use candle_core::{DType, Device, Result, Tensor, Var};
 use candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
+use matrix_util::rand_util::{collect_f32_seeded, mix_seed};
+
+/// The salt the row factor of a pinned table is drawn under, mixed with the
+/// run's seed.
+const ROW_FACTOR_SALT: u64 = 0x4c4f_5241;
 
 /// Registered names of the factors, relative to the table's prefix.
 pub const U_VAR_NAME: &str = "lora_u";
@@ -82,6 +89,98 @@ impl LoraFactors {
     }
 }
 
+/// A residual on a table SOME of whose rows are pinned: `u` is drawn on the
+/// pinned rows only and gradient-masked to them, `v` is shared and starts at
+/// zero. The engines that pin rows from outside (the hierarchical phase of
+/// bge, the PBG engine of fne and simba) hold one of these per residual and
+/// step it with [`Self::step`]; a free row has a zero `u` row that never moves.
+pub struct PinnedLora {
+    pub u: Var,
+    pub v: Var,
+    /// `[N, 1]`, `1` on the pinned rows.
+    pub u_mask: Tensor,
+    pub lr_ratio: f32,
+}
+
+impl PinnedLora {
+    /// `u ~ N(0, 1/rank)` on `pinned` (ids into the `N` rows), zero elsewhere;
+    /// `v = 0`. The draw is seeded from `seed` under this module's salt; a
+    /// second residual of the same run passes a seed mixed with its own salt.
+    pub fn new(
+        n_rows: usize,
+        dim: usize,
+        rank: usize,
+        pinned: &[u32],
+        lr_ratio: f32,
+        seed: u64,
+        dev: &Device,
+    ) -> Result<Self> {
+        if rank == 0 {
+            candle_core::bail!("a LoRA residual needs rank ≥ 1");
+        }
+        let dist =
+            rand_distr::Normal::new(0.0f32, (1.0 / rank as f32).sqrt()).expect("finite stdev");
+        let draw = collect_f32_seeded(pinned.len() * rank, dist, mix_seed(seed, ROW_FACTOR_SALT));
+        let mut u = vec![0f32; n_rows * rank];
+        let mut mask = vec![0f32; n_rows];
+        for (i, &g) in pinned.iter().enumerate() {
+            let g = g as usize;
+            if g >= n_rows {
+                candle_core::bail!("pinned row {g} is outside the {n_rows}-row table");
+            }
+            u[g * rank..(g + 1) * rank].copy_from_slice(&draw[i * rank..(i + 1) * rank]);
+            mask[g] = 1.0;
+        }
+        Ok(Self {
+            u: Var::from_tensor(&Tensor::from_vec(u, (n_rows, rank), dev)?)?,
+            v: Var::zeros((rank, dim), DType::F32, dev)?,
+            u_mask: Tensor::from_vec(mask, (n_rows, 1), dev)?,
+            lr_ratio,
+        })
+    }
+
+    #[must_use]
+    pub fn factors(&self) -> LoraFactors {
+        LoraFactors::from_parts(self.u.as_tensor().clone(), self.v.as_tensor().clone())
+    }
+
+    /// The residual on the rows named by `ids`, `[ids, H]`.
+    pub fn residual_rows(&self, ids: &Tensor) -> Result<Tensor> {
+        self.factors().residual_rows(ids)
+    }
+
+    /// The whole `[N, H]` residual, for output and folding.
+    pub fn residual(&self) -> Result<Tensor> {
+        self.factors().residual()
+    }
+
+    /// The row optimizers: `u` at `lr`, `v` at `lr_ratio × lr` (LoRA+).
+    pub fn optimizers(&self, lr: f64, dev: &Device) -> Result<PinnedLoraOpt> {
+        Ok(PinnedLoraOpt {
+            u: RowAdagrad::new(self.u.dims()[0], lr, dev)?,
+            v: RowAdagrad::new(self.v.dims()[0], lr * f64::from(self.lr_ratio), dev)?,
+        })
+    }
+
+    /// One step of both factors from `grads`: `u`'s gradient masked to the
+    /// pinned rows, `v`'s as it is. A factor the loss never reached is left.
+    pub fn step(&self, opt: &mut PinnedLoraOpt, grads: &GradStore) -> Result<()> {
+        if let Some(g) = grads.get(&self.u) {
+            opt.u.step(&self.u, &g.broadcast_mul(&self.u_mask)?)?;
+        }
+        if let Some(g) = grads.get(&self.v) {
+            opt.v.step(&self.v, g)?;
+        }
+        Ok(())
+    }
+}
+
+/// The two row optimizers of a [`PinnedLora`].
+pub struct PinnedLoraOpt {
+    pub u: RowAdagrad,
+    pub v: RowAdagrad,
+}
+
 /// The LoRA+ learning-rate split, for a trainer that builds its optimizers
 /// from a `VarMap`: the named `v` leaves the main group and gets its own.
 #[derive(Clone, Copy, Debug)]
@@ -113,17 +212,21 @@ impl LoraPlus<'_> {
     }
 }
 
+/// `"{prefix}.{slot}"`, or `slot` alone under an empty prefix — candle's own
+/// `VarBuilder` path rule.
+#[must_use]
+pub fn join(prefix: &str, slot: &str) -> String {
+    if prefix.is_empty() {
+        slot.to_string()
+    } else {
+        format!("{prefix}.{slot}")
+    }
+}
+
 /// The factor names under a table prefix: `("{prefix}.lora_u", "{prefix}.lora_v")`.
 #[must_use]
 pub fn factor_names(prefix: &str) -> (String, String) {
-    let name = |slot: &str| {
-        if prefix.is_empty() {
-            slot.to_string()
-        } else {
-            format!("{prefix}.{slot}")
-        }
-    };
-    (name(U_VAR_NAME), name(V_VAR_NAME))
+    (join(prefix, U_VAR_NAME), join(prefix, V_VAR_NAME))
 }
 
 /// Fold the residual into the base and drop the factors from the map: the

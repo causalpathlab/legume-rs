@@ -51,7 +51,7 @@ fn gene_rows_match_the_axis_by_canonical_name_and_other_types_are_left_out() {
         &ge::FeatureNameKind::Gene { delim: '_' },
     )
     .unwrap();
-    assert_eq!(f.gene, vec![0, 3]);
+    assert_eq!(f.ids, vec![0, 3]);
     // GATA1 is source row 1, TP53 source row 0.
     assert_eq!(f.rows, vec![0.5, 1.0, 1.5, -1.0, -0.5, 0.0]);
 }
@@ -71,7 +71,7 @@ fn without_a_types_table_every_row_is_a_candidate() {
         &ge::FeatureNameKind::Gene { delim: '_' },
     )
     .unwrap();
-    assert_eq!(f.gene, vec![0, 1]);
+    assert_eq!(f.ids, vec![0, 1]);
 }
 
 #[test]
