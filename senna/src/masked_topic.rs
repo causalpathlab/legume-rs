@@ -962,7 +962,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             lora_rank: lora.map_or(0, |l| l.rank),
         },
         &parameters,
-        param_builder.pp("enc"),
+        param_builder.pp(crate::topic::gene_axis::ENCODER_PREFIX),
     )?;
 
     // Per-level decoders: all at D_full, levels differ in N (sample coarsening).
@@ -1054,7 +1054,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         );
         candle_util::frozen_features::overwrite_var_2d(
             &parameters,
-            "enc.feature.embeddings",
+            crate::topic::gene_axis::RHO_TENSOR,
             &host.e_feat,
             &dev,
         )?;
@@ -1124,6 +1124,11 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     let stop = setup_stop_handler();
 
+    let lora_v_name = candle_util::lora::factor_names(&candle_util::lora::join(
+        crate::topic::gene_axis::ENCODER_PREFIX,
+        candle_util::feature_embedding::LORA_PREFIX,
+    ))
+    .1;
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -1141,10 +1146,11 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
         feature_anchor: pinned_rho.then_some(candle_util::vae::masked_topic::FeatureAnchor {
-            base_var: "enc.feature.embeddings",
+            base_var: crate::topic::gene_axis::RHO_TENSOR,
             lora: lora.map(|l| candle_util::lora::LoraPlus {
-                v_var: "enc.feature.lora_v",
+                v_var: &lora_v_name,
                 lr_ratio: l.lr_ratio,
+                ridge: l.ridge,
             }),
         }),
     };
@@ -1285,7 +1291,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             lora_rank: 0,
         },
         &parameters,
-        cpu_vb.pp("enc"),
+        cpu_vb.pp(crate::topic::gene_axis::ENCODER_PREFIX),
     )?;
 
     info!("Writing down the latent states");

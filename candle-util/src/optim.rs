@@ -59,8 +59,16 @@ impl RowAdagrad {
 
     /// One update of `var` (`[rows, D]`) from its dense gradient.
     pub fn step(&mut self, var: &Var, grad: &Tensor) -> Result<()> {
+        let row_sq = grad.sqr()?.sum(1)?;
+        self.step_with_row_sq(var, grad, &row_sq)
+    }
+
+    /// [`Self::step`] for a caller that already holds `Σ_d grad²` per row
+    /// (`[rows]`), so the square is taken once.
+    pub fn step_with_row_sq(&mut self, var: &Var, grad: &Tensor, row_sq: &Tensor) -> Result<()> {
         let grad = grad.detach();
-        let step = self.advance(&grad.sqr()?.mean(1)?)?;
+        let h = var.dims()[1] as f64;
+        let step = self.advance(&row_sq.detach().affine(1.0 / h, 0.0)?)?;
         var.set(
             &var.as_tensor()
                 .sub(&grad.broadcast_mul(&step.unsqueeze(1)?)?)?,

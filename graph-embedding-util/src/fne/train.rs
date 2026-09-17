@@ -249,6 +249,14 @@ pub fn train(
         Some(l) => Some(l.optimizers(cfg.lr, dev)?),
         None => None,
     };
+    // The per-epoch LoRA ridge, spread over the epoch's batches.
+    let ridge_step = cfg
+        .preset
+        .as_ref()
+        .and_then(|p| p.mode.lora())
+        .map_or(0.0, |l| {
+            f64::from(l.ridge) / n_visits.div_ceil(cfg.batch_size.max(1)).max(1) as f64
+        });
 
     let mut epochs = Vec::with_capacity(cfg.epochs);
     for epoch in 0..cfg.epochs {
@@ -285,6 +293,10 @@ pub fn train(
                     (&loss + model.frob_sq()?.affine(wd_scale, 0.0)?)?
                 } else {
                     loss.clone()
+                };
+                let total = match model.lora.as_ref() {
+                    Some(l) if ridge_step > 0.0 => (total + l.ridge()?.affine(ridge_step, 0.0)?)?,
+                    _ => total,
                 };
                 let grads = total.backward()?;
                 if let Some(g) = grads.get(&model.e) {
