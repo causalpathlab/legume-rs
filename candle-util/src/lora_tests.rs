@@ -175,7 +175,7 @@ fn the_lora_plus_group_steps_v_alone_at_the_scaled_rate() {
 fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
     use super::PinnedLora;
     let dev = Device::Cpu;
-    let l = PinnedLora::new(4, 3, 1, &[0, 2], 4.0, 7, &dev).unwrap();
+    let l = PinnedLora::new(4, 3, 1, &[0, 2], 7, &dev).unwrap();
     let u =
         l.u.as_tensor()
             .flatten_all()
@@ -196,7 +196,7 @@ fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
         .unwrap()
         .iter()
         .all(|&x| x == 0.0));
-    let other = PinnedLora::new(4, 3, 1, &[0, 2], 4.0, 8, &dev).unwrap();
+    let other = PinnedLora::new(4, 3, 1, &[0, 2], 8, &dev).unwrap();
     assert_ne!(
         u,
         other
@@ -208,12 +208,12 @@ fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
             .unwrap(),
         "seeded"
     );
-    assert!(PinnedLora::new(4, 3, 1, &[4], 1.0, 7, &dev).is_err());
+    assert!(PinnedLora::new(4, 3, 1, &[4], 7, &dev).is_err());
     // Move v off zero so u gets a gradient too, then step from a loss that
     // reaches every row of u.
     l.v.set(&Tensor::from_vec(vec![0.5f32, -0.5, 1.0], (1, 3), &dev).unwrap())
         .unwrap();
-    let mut opt = l.optimizers(0.1, &dev).unwrap();
+    let mut opt = l.optimizers(0.1, 4.0, &dev).unwrap();
     let loss = (l.residual().unwrap() + 1.0)
         .unwrap()
         .sqr()
@@ -248,7 +248,7 @@ fn a_pinned_residual_moves_only_the_pinned_rows_and_v_faster() {
 fn the_ridge_equals_the_dense_residuals_mean_row_norm() {
     use super::PinnedLora;
     let dev = Device::Cpu;
-    let l = PinnedLora::new(5, 3, 2, &[0, 2, 4], 1.0, 3, &dev).unwrap();
+    let l = PinnedLora::new(5, 3, 2, &[0, 2, 4], 3, &dev).unwrap();
     l.v.set(&Tensor::from_vec(vec![0.5f32, -0.5, 1.0, 0.2, 0.1, -0.3], (2, 3), &dev).unwrap())
         .unwrap();
     let dense = l

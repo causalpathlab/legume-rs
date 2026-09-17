@@ -549,8 +549,9 @@ pub struct MaskedTopicArgs {
 
     #[arg(
         long,
-        default_value_t = 128,
-        help = "Per-feature embedding dimension H (default 128; 0 = auto = 2 × n-latent-topics)",
+        default_value_t = graph_embedding_util::EmbeddingDim::Fixed(128),
+        value_name = "H|auto",
+        help = "Per-feature embedding dimension H (default 128; auto = a given feature embedding's width, else 2 × n-latent-topics)",
         long_help = "Dimension H of the per-gene embedding ρ ∈ ℝ^{D×H}.\n\
                      ρ is shared between the encoder and the decoder.\n\
                      The encoder value-weights a pool over each cell's top-K.\n\
@@ -559,9 +560,10 @@ pub struct MaskedTopicArgs {
                      \n\
                      β has rank ≤ H, so H must be at least K. K is --n-latent-topics.\n\
                      Otherwise K independent topics are not representable. Default 128;\n\
-                     pass 0 to auto-resolve to 2K instead. H < K errors at startup."
+                     `auto` takes the width of a given feature embedding, else 2K.\n\
+                     H < K errors at startup."
     )]
-    embedding_dim: usize,
+    embedding_dim: graph_embedding_util::EmbeddingDim,
 
     #[arg(
         long,
@@ -767,7 +769,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     // The flag given, else the parent manifest's table, pinned.
     let preset_mode: Option<(Box<str>, graph_embedding_util::PresetMode)> =
-        match args.feature_embedding.resolve() {
+        match args.feature_embedding.resolve()? {
             Some((p, m)) => Some((Box::from(p), m)),
             None => inherited.as_ref().map(|inh| {
                 (
@@ -1646,12 +1648,17 @@ impl crate::update::Updatable for MaskedTopicArgs {
         self.pb_reference = r.reference;
         // Only when growth was asked for; otherwise the recorded sizes replay
         // verbatim. Both axes are pinned together even if only one grows: a
-        // recorded `--embedding-dim 0` means "auto = 2K", which would otherwise
+        // recorded `--embedding-dim auto` means "2K", which would otherwise
         // track the grown K and silently resize ρ.
         if !r.growth.is_none() {
             self.n_latent_topics = r.parent_topics + r.growth.add_topics;
             self.add_topics = r.growth.add_topics;
-            self.embedding_dim = r.parent_embedding_dim.unwrap_or(0) + r.growth.add_embedding_dim;
+            self.embedding_dim = match r.parent_embedding_dim {
+                Some(h) => {
+                    graph_embedding_util::EmbeddingDim::Fixed(h + r.growth.add_embedding_dim)
+                }
+                None => self.embedding_dim,
+            };
             self.add_embedding_dim = r.growth.add_embedding_dim;
         }
         // See `TopicArgs::rebase` — the inherited partition cannot cover new cells.

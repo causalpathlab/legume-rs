@@ -630,9 +630,10 @@ fn write_pb_embeddings(
 const DEFAULT_GENE_MODULES: usize = 128;
 
 impl super::BgeArgs {
-    pub(crate) fn knobs(&self) -> EmbedKnobs<'_> {
+    /// `embedding_dim` is the width resolved against a given feature table.
+    pub(crate) fn knobs(&self, embedding_dim: usize) -> EmbedKnobs<'_> {
         EmbedKnobs {
-            embedding_dim: self.embedding_dim,
+            embedding_dim,
             collapse: &self.collapse,
             bulk_batches: self.collapse.mixture_batch.as_deref(),
             emit_pb_reference: self.collapse.emits_pb_reference(),

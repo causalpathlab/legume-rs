@@ -94,7 +94,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     //////////////
     // Training //
     //////////////
-    let preset = match args.feature_embedding.resolve() {
+    let preset = match args.feature_embedding.resolve()? {
         Some((prefix, mode)) => Some(crate::feature_preset::load_preset_genes(
             prefix,
             mode,

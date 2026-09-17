@@ -102,18 +102,20 @@ impl LoraFactors {
 }
 
 /// A residual on a table SOME of whose rows are pinned: `u` is drawn on the
-/// pinned rows only and gradient-masked to them, `v` is shared and starts at
-/// zero. The engines that pin rows from outside (the hierarchical phase of
-/// bge, the PBG engine of fne and simba) hold one of these per residual and
-/// step it with [`Self::step`]; a free row has a zero `u` row that never moves.
+/// pinned rows only, `v` is shared and starts at zero, and a free row has a
+/// zero `u` row that never moves. Two trainers use it: the row-optimizer
+/// engines (the hierarchical phase of bge, the PBG engine of fne and simba)
+/// step it with [`Self::step`], which masks `u`'s gradient by hand; a trainer
+/// whose optimizer sees every row (AdamW over a `VarMap`) composes through
+/// [`Self::residual_rows_masked`], where the mask sits in the graph, so a free
+/// row's factor gets an exact-zero gradient and stays at its zero init.
 pub struct PinnedLora {
     pub u: Var,
     pub v: Var,
     /// `[N, 1]`, `1` on the pinned rows.
     pub u_mask: Tensor,
-    /// How many rows are pinned: the ridge's divisor.
+    /// How many rows are pinned.
     pub n_pinned: usize,
-    pub lr_ratio: f32,
 }
 
 impl PinnedLora {
@@ -125,7 +127,6 @@ impl PinnedLora {
         dim: usize,
         rank: usize,
         pinned: &[u32],
-        lr_ratio: f32,
         seed: u64,
         dev: &Device,
     ) -> Result<Self> {
@@ -152,13 +153,27 @@ impl PinnedLora {
             v: Var::zeros((rank, dim), DType::F32, dev)?,
             u_mask: Tensor::from_vec(mask, (n_rows, 1), dev)?,
             n_pinned: pinned.len(),
-            lr_ratio,
         })
     }
 
     #[must_use]
     pub fn factors(&self) -> LoraFactors {
         LoraFactors::from_parts(self.u.as_tensor().clone(), self.v.as_tensor().clone())
+    }
+
+    /// The residual on the rows named by `ids` with the mask IN the graph:
+    /// `(u[ids] ⊙ mask[ids]) · v`, `[ids, H]`. Gather first, then mask, so
+    /// the cost is the chunk's, not the table's.
+    pub fn residual_rows_masked(&self, ids: &Tensor) -> Result<Tensor> {
+        gather_rows(&self.u, ids)?
+            .broadcast_mul(&gather_rows(&self.u_mask, ids)?)?
+            .matmul(&self.v)
+    }
+
+    /// The whole `[N, H]` residual with the mask in the graph, for a trainer
+    /// that materializes the composed table once.
+    pub fn residual_masked(&self) -> Result<Tensor> {
+        self.u.broadcast_mul(&self.u_mask)?.matmul(&self.v)
     }
 
     /// The residual on the rows named by `ids`, `[ids, H]`.
@@ -172,16 +187,17 @@ impl PinnedLora {
     }
 
     /// The residual's summed row norm² over the pinned rows, without forming
-    /// it (see [`LoraFactors::ridge`]).
+    /// it (see [`LoraFactors::ridge`]). No mask: a free row's factor is zero
+    /// by construction and stays so under either trainer, so it adds nothing.
     pub fn ridge(&self) -> Result<Tensor> {
         self.factors().ridge()
     }
 
     /// The row optimizers: `u` at `lr`, `v` at `lr_ratio × lr` (LoRA+).
-    pub fn optimizers(&self, lr: f64, dev: &Device) -> Result<PinnedLoraOpt> {
+    pub fn optimizers(&self, lr: f64, lr_ratio: f32, dev: &Device) -> Result<PinnedLoraOpt> {
         Ok(PinnedLoraOpt {
             u: RowAdagrad::new(self.u.dims()[0], lr, dev)?,
-            v: RowAdagrad::new(self.v.dims()[0], lr * f64::from(self.lr_ratio), dev)?,
+            v: RowAdagrad::new(self.v.dims()[0], lr * f64::from(lr_ratio), dev)?,
         })
     }
 

@@ -176,8 +176,8 @@ impl ComposedFeat for FeatModules {
 
     /// The residual is the only per-row table; `μ` is shared and the membership
     /// is a simplex, so neither can overfit row by row.
-    fn ridge_table(&self) -> Option<&Tensor> {
-        Some(&self.residual)
+    fn ridge(&self, table_lam: f64) -> Result<Option<Tensor>> {
+        super::table_ridge(&self.residual, table_lam)
     }
 }
 
@@ -279,6 +279,7 @@ impl JointEmbedModel {
             b_feat,
             b_cell,
             adapter: None,
+            lora: None,
             modules: Some(modules),
             embedding_dim: h,
         })

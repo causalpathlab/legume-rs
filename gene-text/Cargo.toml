@@ -15,6 +15,9 @@ path = "src/main.rs"
 
 [features]
 default = []
+# No HDF5 reader here; accepted as a no-op so one install line, with the
+# workspace's usual feature set, serves every binary.
+hdf5 = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "matrix-util/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "matrix-util/metal"]
 

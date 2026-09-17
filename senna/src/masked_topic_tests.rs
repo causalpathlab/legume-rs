@@ -378,7 +378,7 @@ fn masked_topic_anchors_rho_with_a_low_rank_residual_and_folds_it_before_saving(
         "-o",
         &second,
         "--embedding-dim",
-        "0",
+        "auto",
         "--lora-feature-embedding",
         &first,
         "--lora-rank",

@@ -112,8 +112,20 @@ pub struct CellActivityGraphEmbeddingArgs {
     )]
     pub no_dc_poisson: bool,
 
-    #[arg(long, default_value_t = 16, help = "Cell embedding dimensionality")]
-    pub embedding_dim: usize,
+    #[arg(
+        long,
+        value_name = "H",
+        default_value_t = graph_embedding_util::EmbeddingDim::Auto,
+        value_name = "H|auto",
+        help = "Cell embedding dimensionality (auto = a pinned dictionary's width, else 16)",
+        long_help = "Cell embedding dimensionality. auto is the default.\n\
+                     With --gene-embedding under freeze, free or lora the rows are\n\
+                     installed verbatim, so auto is the dictionary's width and a\n\
+                     given width must agree with it.\n\
+                     Otherwise auto is 16; the adapt mode maps the dictionary into\n\
+                     this run's own width."
+    )]
+    pub embedding_dim: graph_embedding_util::EmbeddingDim,
 
     #[arg(
         long,
@@ -423,7 +435,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Genes are matched under --gene-name-mode.\n\
                      A gene with no dictionary row is seeded from the matched gene\n\
                      with the most similar count profile and listed in\n\
-                     {out}.gene_embedding_init.parquet. Under freeze and free such\n\
+                     {out}.gene_embedding_init.parquet. Under freeze, free and lora such\n\
                      rows train; under adapt a seeded gene follows its seed through\n\
                      the shared map until --gene-adapter-residual gives it its own\n\
                      correction."
@@ -460,9 +472,22 @@ pub struct CellActivityGraphEmbeddingArgs {
                      \n\
                      free initializes from the dictionary and then trains every row.\n\
                      Also requires the widths to match. This is the fallback\n\
-                     when the shared map underfits."
+                     when the shared map underfits.\n\
+                     \n\
+                     lora keeps every dictionary-matched row fixed, as freeze does,\n\
+                     and trains a low-rank residual on top of those rows:\n\
+                     row_g = dictionary_g + u_g · V, with u_g per gene (--lora-rank numbers)\n\
+                     and V shared by every matched gene, at the LoRA+ rate\n\
+                     (--lora-lr-ratio) and under --lora-ridge.\n\
+                     Neighbor-seeded rows still train. Requires the widths to match.\n\
+                     The written feature embedding carries the residual folded in."
     )]
     pub gene_embedding_mode: GeneEmbeddingMode,
+
+    /// `--lora-rank`, `--lora-lr-ratio`, `--lora-ridge`; read under
+    /// `--gene-embedding-mode lora` only.
+    #[command(flatten)]
+    pub lora: graph_embedding_util::LoraArgs,
 
     #[arg(
         long,
@@ -539,4 +564,48 @@ pub enum GeneEmbeddingMode {
     Freeze,
     /// Initialize from the dictionary, then train every row.
     Free,
+    /// Dictionary-matched rows stay fixed under a low-rank residual;
+    /// neighbor-seeded rows train.
+    Lora,
+}
+
+/// The width when neither the flag nor a pinned dictionary decides it.
+pub const DEFAULT_EMBEDDING_DIM: usize = 16;
+
+impl CellActivityGraphEmbeddingArgs {
+    /// The rules between `--gene-embedding-mode` and the flags only one mode
+    /// reads, checked before any data is opened.
+    pub fn validate_gene_embedding(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !(self.gene_adapter_residual && self.gene_embedding_mode != GeneEmbeddingMode::Adapt),
+            "--gene-adapter-residual is the adapter's per-gene correction and only \
+             --gene-embedding-mode adapt trains one; under another mode the flag \
+             would be read and ignored. Drop it, or use the adapt mode."
+        );
+        self.lora.refuse_unless_selected(
+            self.gene_embedding_mode == GeneEmbeddingMode::Lora,
+            "--gene-embedding-mode lora",
+        )
+    }
+
+    /// The embedding width this run trains at: the flag, else a pinned
+    /// dictionary's width (`dictionary_width`, when `--gene-embedding` is
+    /// given), else the default. A pinned dictionary (every mode but adapt)
+    /// installs its rows verbatim, so a flag that disagrees with it is
+    /// refused; the adapter maps into its own width. The LoRA rank is checked
+    /// against the resolved width here, the one place it is known.
+    pub fn resolve_embedding_dim(&self, dictionary_width: Option<usize>) -> anyhow::Result<usize> {
+        self.validate_gene_embedding()?;
+        let pinned = dictionary_width.filter(|_| {
+            self.gene_embedding.is_some() && self.gene_embedding_mode != GeneEmbeddingMode::Adapt
+        });
+        let dim = self
+            .embedding_dim
+            .resolve(pinned)?
+            .unwrap_or(DEFAULT_EMBEDDING_DIM);
+        if self.gene_embedding_mode == GeneEmbeddingMode::Lora {
+            graph_embedding_util::PresetMode::Lora(self.lora.spec()).validate(dim)?;
+        }
+        Ok(dim)
+    }
 }
