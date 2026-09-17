@@ -286,6 +286,18 @@ pub struct FitConfig {
     pub preset_offsets: Vec<crate::PresetOffsets>,
 }
 
+/// The one rule on [`FitConfig::offset_rank`]: `1..=h`, `h` being the
+/// embedding dimension it is never derived from. The trainer applies it on a
+/// tracked axis; a command applies it to its flags as soon as `h` is settled.
+pub fn validate_offset_rank(offset_rank: usize, h: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=h).contains(&offset_rank),
+        "the track offsets' rank {offset_rank} must lie in 1..=H (H={h}); it is the rank of \
+         each track's per-gene offset, not the embedding dimension"
+    );
+    Ok(())
+}
+
 /// Caller-facing configuration of the learned gene modules.
 #[derive(Clone, Debug)]
 pub struct GeneModuleConfig {

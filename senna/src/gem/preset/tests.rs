@@ -1,4 +1,4 @@
-use super::{lift_name, resolve_gem_preset};
+use super::{resolve_gem_preset, row_name_of};
 use crate::gem::tracks::assign_tracks;
 use graph_embedding_util::PresetMode;
 use matrix_util::traits::IoOps;
@@ -32,18 +32,18 @@ fn axis() -> Vec<Box<str>> {
 }
 
 #[test]
-fn lift_name_maps_a_bare_name_onto_the_spliced_row_only() {
-    assert_eq!(lift_name("GENE1").as_ref(), "GENE1/count/spliced");
+fn row_name_of_maps_a_bare_name_onto_the_spliced_row_only() {
+    assert_eq!(row_name_of("GENE1").as_ref(), "GENE1/count/spliced");
     assert_eq!(
-        lift_name("ENSG1_GENE1").as_ref(),
+        row_name_of("ENSG1_GENE1").as_ref(),
         "ENSG1_GENE1/count/spliced"
     );
     assert_eq!(
-        lift_name("GENE1/m6a/methylated").as_ref(),
+        row_name_of("GENE1/m6a/methylated").as_ref(),
         "GENE1/m6a/methylated"
     );
     assert_eq!(
-        lift_name("GENE1/count/unspliced").as_ref(),
+        row_name_of("GENE1/count/unspliced").as_ref(),
         "GENE1/count/unspliced"
     );
 }

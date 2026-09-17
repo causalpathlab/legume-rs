@@ -33,7 +33,7 @@ pub(crate) struct GemPreset {
 
 /// A source name onto the row grammar: a bare name is the gene's
 /// `count/spliced` row; a name already in the grammar is itself.
-pub(crate) fn lift_name(name: &str) -> Box<str> {
+pub(crate) fn row_name_of(name: &str) -> Box<str> {
     if parse_feature_row(name).is_some() {
         name.into()
     } else {
@@ -60,19 +60,19 @@ pub(crate) fn resolve_gem_preset(
         mode,
         feature_names,
         &kind,
-        Some(&lift_name),
+        Some(&row_name_of),
     )?;
     let h = rows.width();
 
     let mut base_ids: Vec<u32> = Vec::new();
     let mut base_rows: Vec<f32> = Vec::new();
-    let mut base_at: FxHashMap<u32, usize> = FxHashMap::default();
+    let mut base_index: FxHashMap<u32, usize> = FxHashMap::default();
     let mut by_track: BTreeMap<u32, Vec<(u32, usize)>> = BTreeMap::new();
     for (i, &row) in rows.ids.iter().enumerate() {
         let r = row as usize;
         let (t, g) = (plan.row_track[r], plan.row_gene[r]);
-        if t == 0 {
-            base_at.insert(g, base_ids.len());
+        if plan.base_rows[r] {
+            base_index.insert(g, base_ids.len());
             base_ids.push(g);
             base_rows.extend_from_slice(&rows.rows[i * h..(i + 1) * h]);
         } else {
@@ -85,17 +85,17 @@ pub(crate) fn resolve_gem_preset(
          (a bare gene name is read as that row)"
     );
     let mut offsets: Vec<ge::PresetOffsets> = Vec::new();
-    let mut orphans = 0usize;
+    let mut n_without_base = 0usize;
     for (t, entries) in by_track {
         let mut ids: Vec<u32> = Vec::new();
         let mut delta: Vec<f32> = Vec::new();
         for (g, i) in entries {
-            match base_at.get(&g) {
+            match base_index.get(&g) {
                 Some(&j) => {
                     ids.push(g);
                     delta.extend((0..h).map(|k| rows.rows[i * h + k] - base_rows[j * h + k]));
                 }
-                None => orphans += 1,
+                None => n_without_base += 1,
             }
         }
         if !ids.is_empty() {
@@ -106,9 +106,9 @@ pub(crate) fn resolve_gem_preset(
             });
         }
     }
-    if orphans > 0 {
+    if n_without_base > 0 {
         warn!(
-            "{flag}: {orphans} given track rows belong to genes with no given base row and are \
+            "{flag}: {n_without_base} given track rows belong to genes with no given base row and are \
              ignored: a track's offset is relative to the gene's base row"
         );
     }

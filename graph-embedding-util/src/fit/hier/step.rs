@@ -362,10 +362,10 @@ pub fn step_loss(
         let n_g = params.b_g.dims()[0];
         for o in &params.offsets {
             let mu2 = mean_row_sq(o.d_mu.as_tensor(), n_m)?;
-            let r2 = o.d_r.ridge()?.affine(1.0 / n_g as f64, 0.0)?;
+            let gene2 = o.d_r.ridge()?.affine(1.0 / n_g as f64, 0.0)?;
             add_into(
                 &mut loss_ridge,
-                (mu2 + r2)?.affine(f64::from(offset_l2_step), 0.0)?,
+                (mu2 + gene2)?.affine(f64::from(offset_l2_step), 0.0)?,
             )?;
         }
     }
