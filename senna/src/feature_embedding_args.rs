@@ -90,12 +90,14 @@ pub struct FeatureEmbeddingArgs {
         long,
         value_name = "LAMBDA",
         requires = "lora_feature_embedding",
-        help = "Ridge on the LoRA residual, per epoch on its mean row norm² (bge; default 1000)",
-        long_help = "Ridge on the LoRA residual: `λ · mean_g ‖u_g·V‖²` per epoch, spread over\n\
-                     the epoch's steps like bge's offset ridge, on each residual (module and\n\
-                     gene). The shrinkage that keeps the shared factor from marching off\n\
-                     the anchor under a row optimizer. 0 is none; the default keeps the\n\
-                     residual below the anchor's own scale. Read by `bge`."
+        help = "Ridge on the LoRA residual, per epoch and per anchored row (default 0.05)",
+        long_help = "Ridge on the LoRA residual: `λ · Σ_g ‖u_g·V‖²` per epoch, spread over\n\
+                     the epoch's steps, on each residual (bge: module and gene). Per row,\n\
+                     because the data gradient on the shared factor is a sum over the\n\
+                     anchored rows, so one weight means the same thing at any table size.\n\
+                     The shrinkage that keeps the shared factor from marching off the\n\
+                     anchor under a row optimizer. 0 is none; the default keeps the\n\
+                     residual below the anchor's own scale."
     )]
     pub lora_ridge: Option<f32>,
 }
