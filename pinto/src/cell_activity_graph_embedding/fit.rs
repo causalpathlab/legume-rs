@@ -166,7 +166,13 @@ pub fn fit_cell_activity_graph_embedding(
     let c = &args.common;
     mkdir_parent(&c.out)?;
 
-    anyhow::ensure!(args.embedding_dim > 0, "embedding-dim must be > 0");
+    // The width: the flag, else a pinned dictionary's, read from its footer
+    // before any data is opened.
+    let dictionary_width = match args.gene_embedding.as_deref() {
+        Some(path) => Some(pretrained::dictionary_width(path)?),
+        None => None,
+    };
+    let embedding_dim = args.resolve_embedding_dim(dictionary_width)?;
     // Chain levels, resolved and validated BEFORE any data is loaded: the
     // trained unit is the finest coarsening level, so chain entries must
     // be strictly coarser. Unset adapts to the hierarchy depth (up to
@@ -208,7 +214,6 @@ pub fn fit_cell_activity_graph_embedding(
         "--gene-modules learns the gene side through a module layer and --gene-embedding \
          installs a pre-trained one; the two parameterizations are exclusive. Drop one."
     );
-    args.validate_gene_embedding()?;
     // Peek the first data file's row names so `auto` can dispatch
     // FeatureNameKind::auto_detect without paying for a full sparse
     // load up front.
@@ -485,7 +490,7 @@ pub fn fit_cell_activity_graph_embedding(
             data: &data_vec,
             all_cell_labels: &ml.all_cell_labels,
             graph: &graph,
-            embedding_dim: args.embedding_dim,
+            embedding_dim,
             gene_axis: &gene_axis,
         },
     )?;
@@ -711,17 +716,14 @@ pub fn fit_cell_activity_graph_embedding(
                     GeneInitMode::Neighbor => None,
                 },
             })?;
-            // adapt decouples the two widths; freeze/free install rows verbatim
-            // and so need them equal.
+            // The width was resolved from this file's footer; the loader's
+            // count must agree, or the two read the file differently.
             if args.gene_embedding_mode != GeneEmbeddingMode::Adapt {
                 anyhow::ensure!(
-                    pre.h() == args.embedding_dim,
-                    "--gene-embedding is {} dimensions wide but --embedding-dim is {}; \
-                     set --embedding-dim {}, or use --gene-embedding-mode adapt, \
-                     which allows the widths to differ",
+                    pre.h() == embedding_dim,
+                    "--gene-embedding loaded {} dimensions wide but the run resolved {}",
                     pre.h(),
-                    args.embedding_dim,
-                    pre.h()
+                    embedding_dim
                 );
             }
             pretrained::write_init_report(&c.out, &pre.records)?;
@@ -744,12 +746,12 @@ pub fn fit_cell_activity_graph_embedding(
     // fall back from. The adapter arm has no table init and ignores it.
     if let Some(w) = &e_pb_warm {
         anyhow::ensure!(
-            w.nrows() == n_pb && w.ncols() == args.embedding_dim,
+            w.nrows() == n_pb && w.ncols() == embedding_dim,
             "collapse SVD [{} x {}] does not match the trained PB table [{} x {}]",
             w.nrows(),
             w.ncols(),
             n_pb,
-            args.embedding_dim
+            embedding_dim
         );
     }
     let e_pb_init: Option<&Mat> = e_pb_warm.as_ref();
@@ -797,7 +799,7 @@ pub fn fit_cell_activity_graph_embedding(
                     ModuleInit {
                         n_features: n_genes,
                         n_cells: n_pb,
-                        embedding_dim: args.embedding_dim,
+                        embedding_dim,
                         n_modules: gm.n_modules,
                         warm: ModuleWarmStart::Labels {
                             labels: &labels,
@@ -820,7 +822,7 @@ pub fn fit_cell_activity_graph_embedding(
             JointEmbedModel::new_adapted(
                 AdapterInit {
                     n_cells: n_pb,
-                    embedding_dim: args.embedding_dim,
+                    embedding_dim,
                     rho: &p.e_gene,
                     b_feat: &b_feat_init,
                     b_cell: &b_pb_init,
@@ -837,7 +839,7 @@ pub fn fit_cell_activity_graph_embedding(
                 ModelArgs {
                     n_features: n_genes,
                     n_cells: n_pb,
-                    embedding_dim: args.embedding_dim,
+                    embedding_dim,
                     seed: c.seed,
                 },
                 &ModelInit {
@@ -1366,7 +1368,7 @@ pub fn fit_cell_activity_graph_embedding(
     e_pb_mat.to_parquet_with_names(
         &(c.out.to_string() + ".pb_embedding.parquet"),
         (None, Some("pb")),
-        Some(&embedding_col_names(args.embedding_dim)),
+        Some(&embedding_col_names(embedding_dim)),
     )?;
 
     let b_pb_mat = tensor_to_mat_1d(&model.b_cell)?;
@@ -1415,7 +1417,7 @@ pub fn fit_cell_activity_graph_embedding(
     e_gene_out.to_parquet_with_names(
         &(c.out.to_string() + ".feature_embedding.parquet"),
         (Some(&gene_names), Some("feature")),
-        Some(&embedding_col_names(args.embedding_dim)),
+        Some(&embedding_col_names(embedding_dim)),
     )?;
     // Learned-module tables (no-op without modules); the feature embedding above
     // already holds the composed row.
@@ -1433,7 +1435,7 @@ pub fn fit_cell_activity_graph_embedding(
         w_out.to_parquet_with_names(
             &(c.out.to_string() + ".adapter.parquet"),
             (Some(&src_names), Some("source_dim")),
-            Some(&embedding_col_names(args.embedding_dim)),
+            Some(&embedding_col_names(embedding_dim)),
         )?;
         info!("Wrote {}.adapter.parquet", c.out);
     }
@@ -1528,7 +1530,7 @@ pub fn fit_cell_activity_graph_embedding(
     pair_latent_nk.to_parquet_with_names(
         &(c.out.to_string() + ".latent.parquet"),
         (None, Some("cell_pair")),
-        Some(&embedding_col_names(args.embedding_dim)),
+        Some(&embedding_col_names(embedding_dim)),
     )?;
 
     // Cluster the pairs -> per-edge community -> cell propensity (incident-edge
