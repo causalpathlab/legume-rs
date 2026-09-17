@@ -109,7 +109,7 @@ fn a_record_missing_offset_l2_replays_with_the_clap_default() {
 /// Every flag `gem/args.rs` declares directly (excludes the flattened shared
 /// groups `hvg` / `collapse` / `qc` / `modules`, whose help text belongs to
 /// their own source files and is governed there, not here).
-const GEM_OWN_ARG_IDS: [&str; 21] = [
+const GEM_OWN_ARG_IDS: [&str; 22] = [
     "genes",
     "modality_files",
     "batch_files",
@@ -127,6 +127,7 @@ const GEM_OWN_ARG_IDS: [&str; 21] = [
     "block_size",
     "preload_data",
     "offset_l2",
+    "offset_rank",
     "seed",
     "device",
     "device_no",
@@ -206,4 +207,58 @@ fn full_help_renders() {
     ] {
         assert!(help.contains(flag), "gem --help is missing {flag}");
     }
+}
+
+/// The feature-embedding triple, `--embedding-dim auto` and `--offset-rank`
+/// parse on gem exactly as on bge; the rank has its own default and is never
+/// read off the embedding dimension.
+#[test]
+fn the_feature_embedding_triple_the_auto_dim_and_the_offset_rank_parse() {
+    use graph_embedding_util::{EmbeddingDim, LoraSpec, PresetMode};
+    let a = parse(&["a.zarr", "-o", "out"]);
+    assert_eq!(a.offset_rank, LoraSpec::default().rank);
+    assert_eq!(a.embedding_dim, EmbeddingDim::Fixed(128));
+    assert!(a.feature_embedding.resolve().unwrap().is_none());
+
+    let a = parse(&[
+        "a.zarr",
+        "-o",
+        "out",
+        "--freeze-feature-embedding",
+        "prev",
+        "--embedding-dim",
+        "auto",
+        "--offset-rank",
+        "3",
+    ]);
+    assert_eq!(a.offset_rank, 3);
+    assert_eq!(a.embedding_dim, EmbeddingDim::Auto);
+    assert!(matches!(
+        a.feature_embedding.resolve().unwrap(),
+        Some(("prev", PresetMode::Freeze))
+    ));
+
+    let a = parse(&[
+        "a.zarr",
+        "-o",
+        "out",
+        "--lora-feature-embedding",
+        "prev",
+        "--lora-rank",
+        "4",
+    ]);
+    assert!(matches!(
+        a.feature_embedding.resolve().unwrap(),
+        Some(("prev", PresetMode::Lora(s))) if s.rank == 4
+    ));
+    assert!(try_parse(&[
+        "a.zarr",
+        "-o",
+        "out",
+        "--freeze-feature-embedding",
+        "p",
+        "--init-feature-embedding",
+        "q",
+    ])
+    .is_err());
 }

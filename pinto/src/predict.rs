@@ -347,6 +347,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         bias_path: None,
         target_feature_names: &gene_names,
         name_kind: feature_kind.clone(),
+        source_name_map: None,
     })?;
     let n_matched = host.keep_target_indices.len();
     // The MODEL's full feature count, from the dictionary file. NOT

@@ -2,7 +2,7 @@ use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
 use crate::fit::hier::units::UnitTable;
-use crate::{LoraSpec, PresetMode};
+use crate::{LoraSpec, PresetMode, PresetOffsets};
 use std::sync::atomic::AtomicBool;
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
@@ -40,10 +40,11 @@ fn planted_programs_separate_units_and_genes() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, 4, &cfg, None, &stop).unwrap();
+    let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
     assert_eq!(out.rho.nrows(), 20);
     let cos = |a: &[f32], b: &[f32]| {
         let d: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
@@ -75,10 +76,11 @@ fn the_stop_flag_ends_training_early_with_finite_output() {
         weight_decay: 0.0,
         seed: 1,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(true);
-    let out = train(&units, &[0, 0], 2, &cfg, None, &stop).unwrap();
+    let out = train(&units, &[0, 0], 2, &cfg, None, &[], &stop).unwrap();
     assert!(out.rho.iter().all(|v| v.is_finite()));
 }
 
@@ -142,6 +144,7 @@ fn single_track_output_is_identical_through_both_constructors() {
         weight_decay: 0.0,
         seed: 17,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let labels = vec![0u32, 0, 1, 1];
@@ -155,8 +158,8 @@ fn single_track_output_is_identical_through_both_constructors() {
         4,
         TrackSpec::base(4),
     );
-    let a = train(&plain, &labels, 3, &cfg, None, &stop).unwrap();
-    let b = train(&tracked, &labels, 3, &cfg, None, &stop).unwrap();
+    let a = train(&plain, &labels, 3, &cfg, None, &[], &stop).unwrap();
+    let b = train(&tracked, &labels, 3, &cfg, None, &[], &stop).unwrap();
     assert_eq!(a.e_u, b.e_u);
     assert_eq!(a.rho, b.rho);
     assert_eq!(a.b_feat, b.b_feat);
@@ -167,8 +170,10 @@ fn single_track_output_is_identical_through_both_constructors() {
 /// gene's track-1 row must therefore sit on the other unit group's side, and
 /// the move from its track-0 row must point along the planted contrast between
 /// the two unit groups' embeddings.
-#[test]
-fn planted_two_track_programs() {
+/// Twenty units in two programs over twenty genes on two tracks; track 1
+/// swaps the programs, so every gene's track-1 row sits a planted shift away
+/// from its track-0 row. Returns the units, the module labels and `n_g`.
+fn planted_two_track_units() -> (UnitTable, Vec<u32>, u32) {
     let (n_g, n_u) = (20u32, 20u32);
     let mut trip = Vec::new();
     for u in 0..n_u {
@@ -212,6 +217,12 @@ fn planted_two_track_programs() {
         tracks,
     );
     let labels: Vec<u32> = (0..n_g).map(|g| u32::from(g >= 10)).collect();
+    (units, labels, n_g)
+}
+
+#[test]
+fn planted_two_track_programs() {
+    let (units, labels, n_g) = planted_two_track_units();
     let cfg = HierConfig {
         n_modules: 2,
         epochs: 200,
@@ -221,12 +232,13 @@ fn planted_two_track_programs() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.01,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, 4, &cfg, None, &stop).unwrap();
-    assert_eq!(out.rho.nrows(), n_features);
-    assert_eq!(out.b_feat.len(), n_features);
+    let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
+    assert_eq!(out.rho.nrows(), 2 * n_g as usize);
+    assert_eq!(out.b_feat.len(), 2 * n_g as usize);
 
     // The planted contrast: where the second unit group sits, minus the first.
     let group_mean = |lo: usize, hi: usize| -> Vec<f32> {
@@ -310,10 +322,11 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         weight_decay: 0.01,
         seed: 3,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, h, &cfg, Some(&frozen), &stop).unwrap();
+    let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
     for (i, &g) in gene.iter().enumerate() {
         for k in 0..h {
             assert_eq!(
@@ -370,10 +383,11 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
-    let out = train(&units, &labels, h, &cfg, Some(&frozen), &stop).unwrap();
+    let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
     for g in 0..20 {
         for k in 0..h {
             assert_eq!(out.rho[(g, k)], rows[g * h + k]);
@@ -396,6 +410,7 @@ fn frozen_genes_must_be_in_range_and_match_h() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
@@ -404,13 +419,13 @@ fn frozen_genes_must_be_in_range_and_match_h() {
         rows: vec![0.0; 4],
         mode: PresetMode::Freeze,
     };
-    assert!(train(&units, &labels, 4, &cfg, Some(&bad_gene), &stop).is_err());
+    assert!(train(&units, &labels, 4, &cfg, Some(&bad_gene), &[], &stop).is_err());
     let bad_h = PresetGenes {
         ids: vec![0],
         rows: vec![0.0; 3],
         mode: PresetMode::Freeze,
     };
-    assert!(train(&units, &labels, 4, &cfg, Some(&bad_h), &stop).is_err());
+    assert!(train(&units, &labels, 4, &cfg, Some(&bad_h), &[], &stop).is_err());
 }
 
 /// With `freeze: false` the given rows are only the starting point: training
@@ -436,16 +451,17 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         weight_decay: 0.0,
         seed: 3,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
-    let start = train(&units, &labels, h, &cfg0, Some(&preset), &stop).unwrap();
+    let start = train(&units, &labels, h, &cfg0, Some(&preset), &[], &stop).unwrap();
     for g in 0..20 {
         for k in 0..h {
             assert!((start.rho[(g, k)] - rows[g * h + k]).abs() < 1e-6);
         }
     }
     let cfg = HierConfig { epochs: 50, ..cfg0 };
-    let out = train(&units, &labels, h, &cfg, Some(&preset), &stop).unwrap();
+    let out = train(&units, &labels, h, &cfg, Some(&preset), &[], &stop).unwrap();
     let moved = (0..20)
         .filter(|&g| (0..h).any(|k| (out.rho[(g, k)] - rows[g * h + k]).abs() > 1e-4))
         .count();
@@ -480,6 +496,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         weight_decay: 0.01,
         seed: 3,
         offset_l2: 0.0,
+        offset_rank: 2,
         device: Device::Cpu,
     };
     let stop = AtomicBool::new(false);
@@ -488,7 +505,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         lr_ratio: 4.0,
         ridge: 0.0,
     }));
-    let out = train(&units, &labels, h, &cfg, Some(&lora), &stop).unwrap();
+    let out = train(&units, &labels, h, &cfg, Some(&lora), &[], &stop).unwrap();
     let mut resid = nalgebra::DMatrix::<f32>::zeros(gene.len(), h);
     for (i, &g) in gene.iter().enumerate() {
         for k in 0..h {
@@ -517,5 +534,124 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         lr_ratio: 1.0,
         ridge: 0.0,
     }));
-    assert!(train(&units, &labels, h, &cfg, Some(&full_rank), &stop).is_err());
+    assert!(train(&units, &labels, h, &cfg, Some(&full_rank), &[], &stop).is_err());
+}
+
+/// The track offsets' rank is its own number, never H: outside `1..=H` on a
+/// tracked axis the trainer refuses and names both; at one track it is inert.
+#[test]
+fn the_offset_rank_is_checked_against_h_on_a_tracked_axis() {
+    let (units, labels, _) = planted_two_track_units();
+    let cfg = |rank: usize| HierConfig {
+        n_modules: 2,
+        epochs: 1,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 3,
+        offset_l2: 0.01,
+        offset_rank: rank,
+        device: Device::Cpu,
+    };
+    let stop = AtomicBool::new(false);
+    for rank in [0usize, 5] {
+        let e = match train(&units, &labels, 4, &cfg(rank), None, &[], &stop) {
+            Ok(_) => panic!("rank {rank} outside 1..=H was accepted"),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("rank") && e.contains("H=4"), "{e}");
+    }
+    assert!(
+        train(&units, &labels, 4, &cfg(4), None, &[], &stop).is_ok(),
+        "rank H is legal"
+    );
+    let (one, labels1) = planted_units();
+    assert!(
+        train(&one, &labels1, 4, &cfg(9), None, &[], &stop).is_ok(),
+        "one track: no offset, no rank to check"
+    );
+}
+
+/// A preset on a two-track axis: the pinned base rows come out verbatim, a
+/// given offset base on track 1 comes out as `row + δ₀` verbatim under
+/// freeze, the other genes' track-1 rows still move off their base rows, and
+/// under lora the given offset is a start rather than a pin.
+#[test]
+fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
+    let (units, labels, n_g) = planted_two_track_units();
+    let h = 4;
+    let gene: Vec<u32> = (0..n_g).filter(|g| g % 2 == 0).collect();
+    let rows: Vec<f32> = gene
+        .iter()
+        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
+        .collect();
+    let frozen = PresetGenes {
+        ids: gene.clone(),
+        rows: rows.clone(),
+        mode: PresetMode::Freeze,
+    };
+    let off_ids = vec![0u32, 4];
+    let off_rows = vec![0.3f32, -0.1, 0.2, 0.0, -0.2, 0.1, 0.4, -0.3];
+    let offsets = vec![PresetOffsets {
+        track: 1,
+        ids: off_ids.clone(),
+        rows: off_rows.clone(),
+    }];
+    let cfg = HierConfig {
+        n_modules: 2,
+        epochs: 50,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 3,
+        offset_l2: 0.01,
+        offset_rank: 2,
+        device: Device::Cpu,
+    };
+    let stop = AtomicBool::new(false);
+    let out = train(&units, &labels, h, &cfg, Some(&frozen), &offsets, &stop).unwrap();
+    let n_g = n_g as usize;
+    for (i, &g) in gene.iter().enumerate() {
+        for k in 0..h {
+            assert_eq!(out.rho[(g as usize, k)], rows[i * h + k], "base row {g}");
+        }
+    }
+    for (i, &g) in off_ids.iter().enumerate() {
+        let j = gene.iter().position(|&x| x == g).unwrap();
+        for k in 0..h {
+            let want = rows[j * h + k] + off_rows[i * h + k];
+            assert!(
+                (out.rho[(g as usize + n_g, k)] - want).abs() < 1e-6,
+                "gene {g} on track 1: {} vs given {want}",
+                out.rho[(g as usize + n_g, k)]
+            );
+        }
+    }
+    assert!(
+        (0..h).any(|k| (out.rho[(1 + n_g, k)] - out.rho[(1, k)]).abs() > 1e-4),
+        "a free gene's track-1 row moves off its base row"
+    );
+    assert!(out.final_loss_per_unit.is_finite());
+
+    let lora = PresetGenes {
+        mode: PresetMode::Lora(LoraSpec {
+            rank: 1,
+            lr_ratio: 4.0,
+            ridge: 0.0,
+        }),
+        ..frozen.clone()
+    };
+    let out = train(&units, &labels, h, &cfg, Some(&lora), &offsets, &stop).unwrap();
+    assert!(
+        off_ids.iter().enumerate().any(|(i, &g)| {
+            (0..h).any(|k| {
+                (out.rho[(g as usize + n_g, k)] - out.rho[(g as usize, k)] - off_rows[i * h + k])
+                    .abs()
+                    > 1e-4
+            })
+        }),
+        "under lora the given offset moves on from δ₀"
+    );
 }

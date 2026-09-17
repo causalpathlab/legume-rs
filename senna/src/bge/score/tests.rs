@@ -44,6 +44,8 @@ fn fit_gem(dir: &std::path::Path) -> String {
         "--no-emit-pb-reference",
         "--embedding-dim",
         "4",
+        "--offset-rank",
+        "2",
         "--phase1-cells-per-pb",
         "0",
         "-o",

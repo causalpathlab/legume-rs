@@ -18,7 +18,7 @@
 //! feature axis (a panel) still hands on the full table it was given.
 
 use auxiliary_data::feature_types::{read_feature_types, FeatureType, GENE_TYPE};
-use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
+use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs, SourceNameMap};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
@@ -46,28 +46,52 @@ pub(crate) fn load_preset_genes(
     feature_names: &[Box<str>],
     kind: &ge::FeatureNameKind,
 ) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
+    load_preset_rows(prefix, mode, feature_names, kind, None)
+}
+
+/// [`load_preset_genes`] with `rename_source`: when given, every gene row of
+/// the source (a row its types table calls a gene, or every row when it wrote
+/// none) is renamed by it before the match, and comes out so named among the
+/// carried rows — how `senna gem` reads a plain gene table onto its row
+/// grammar. The result's ids index `feature_names`.
+pub(crate) fn load_preset_rows(
+    prefix: &str,
+    mode: PresetMode,
+    feature_names: &[Box<str>],
+    kind: &ge::FeatureNameKind,
+    rename_source: Option<SourceNameMap<'_>>,
+) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
     let (dictionary_path, _bias) = crate::run_manifest::resolve_feature_loading(prefix)
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
+
+    // Which source rows are genes: the types table, when the run wrote one.
+    let src_types: Option<Vec<FeatureType>> = read_feature_types(prefix)?;
+    let gene_names: Option<FxHashSet<&str>> = src_types.as_ref().map(|rows| {
+        rows.iter()
+            .filter(|(_, t)| t.as_ref() == GENE_TYPE)
+            .map(|(n, _)| n.as_ref())
+            .collect()
+    });
+    let rename_gene = |n: &str| -> Box<str> {
+        match rename_source {
+            Some(f) if gene_names.as_ref().is_none_or(|genes| genes.contains(n)) => f(n),
+            _ => n.into(),
+        }
+    };
     let host = load_frozen_feature_host(FrozenLoadArgs {
         dictionary_path: &dictionary_path,
         bias_path: None,
         target_feature_names: feature_names,
         name_kind: kind.clone(),
+        source_name_map: rename_source.map(|_| &rename_gene as SourceNameMap<'_>),
     })?;
-
-    // Which source rows are genes: the types table, when the run wrote one.
-    let src_types: Option<Vec<FeatureType>> = read_feature_types(prefix)?;
-    let gene_src: Option<FxHashSet<usize>> = src_types.as_ref().map(|rows| {
-        let gene_names: FxHashSet<&str> = rows
-            .iter()
-            .filter(|(_, t)| t.as_ref() == GENE_TYPE)
-            .map(|(n, _)| n.as_ref())
-            .collect();
+    let gene_src: Option<FxHashSet<usize>> = gene_names.as_ref().map(|genes| {
+        let renamed: FxHashSet<Box<str>> = genes.iter().map(|n| rename_gene(n)).collect();
         host.src_names
             .iter()
             .enumerate()
-            .filter(|(_, n)| gene_names.contains(n.as_ref()))
+            .filter(|(_, n)| renamed.contains(*n))
             .map(|(i, _)| i)
             .collect()
     });
