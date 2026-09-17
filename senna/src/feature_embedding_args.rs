@@ -9,9 +9,12 @@ use graph_embedding_util::PresetMode;
 
 /// LoRA's usual small rank.
 pub const DEFAULT_LORA_RANK: usize = 16;
-/// The LoRA ridge, per epoch on each residual's mean row norm². None until the
-/// probe says otherwise.
-pub const DEFAULT_LORA_RIDGE: f32 = 0.0;
+/// The LoRA ridge, per epoch on each residual's mean row norm². Strong enough
+/// that the residual stays below the anchor's own scale: without it the shared
+/// factor marches off the anchor under a row optimizer, and a weaker ridge
+/// tied this one on cell-side structure while letting the residual outgrow
+/// the anchor.
+pub const DEFAULT_LORA_RIDGE: f32 = 1000.0;
 /// The LoRA+ ratio. The paper's larger value belongs to transformers at far
 /// smaller learning rates; under AdamW at ours it destabilises the shared
 /// factor, and a moderate ratio was the one that beat both freeze and init
@@ -101,11 +104,12 @@ pub struct FeatureEmbeddingArgs {
         long,
         value_name = "LAMBDA",
         requires = "lora_feature_embedding",
-        help = "Ridge on the LoRA residual, per epoch on its mean row norm² (bge; default 0)",
+        help = "Ridge on the LoRA residual, per epoch on its mean row norm² (bge; default 1000)",
         long_help = "Ridge on the LoRA residual: `λ · mean_g ‖u_g·V‖²` per epoch, spread over\n\
                      the epoch's steps like bge's offset ridge, on each residual (module and\n\
                      gene). The shrinkage that keeps the shared factor from marching off\n\
-                     the anchor under a row optimizer. 0 is none. Read by `bge`."
+                     the anchor under a row optimizer. 0 is none; the default keeps the\n\
+                     residual below the anchor's own scale. Read by `bge`."
     )]
     pub lora_ridge: Option<f32>,
 }
