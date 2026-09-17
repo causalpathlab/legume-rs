@@ -66,8 +66,6 @@ pub struct FeatureEmbeddingArgs {
                      and the output ρ carries the residual folded in.\n\
                      Rank 0 would be `--freeze-`, rank H would be `--init-feature-embedding`,\n\
                      so both are refused.\n\
-                     Available on the candle engines (masked-topic, simba, fne); `bge` refuses it\n\
-                     until its phase 1 runs on candle.\n\
                      One of `--freeze-`, `--init-` and `--lora-feature-embedding`."
     )]
     pub lora_feature_embedding: Option<Box<str>>,
@@ -76,7 +74,12 @@ pub struct FeatureEmbeddingArgs {
         long,
         value_name = "R",
         requires = "lora_feature_embedding",
-        help = "Rank of the LoRA residual (with --lora-feature-embedding; default 16)"
+        help = "Rank of the LoRA residual (with --lora-feature-embedding; default 16)",
+        long_help = "Rank of the LoRA residual, with `--lora-feature-embedding`; default 16.\n\
+                     On `bge`, whose gene table is a module dictionary plus per-gene\n\
+                     residuals, the same rank serves two residuals: one on the module\n\
+                     dictionary (a module's genes move together) and one on the gene\n\
+                     rows (a gene moves on its own)."
     )]
     pub lora_rank: Option<usize>,
 

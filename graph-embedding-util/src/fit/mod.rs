@@ -246,6 +246,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             weight_decay: config.weight_decay as f32,
             seed: config.seed,
             offset_l2: config.offset_l2,
+            device: config.device.clone(),
         },
         config.preset_features.as_ref(),
         &stop,
