@@ -45,6 +45,21 @@ pub fn first_string_column(file_path: &str) -> anyhow::Result<Option<usize>> {
         .position(|f| f.get_physical_type() == ParquetType::BYTE_ARRAY))
 }
 
+/// How many numeric (non-string) columns a parquet file has: the width of a
+/// named table, read from the footer without decoding a row.
+pub fn parquet_numeric_column_count(file_path: &str) -> anyhow::Result<usize> {
+    let file = File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    Ok(reader
+        .metadata()
+        .file_metadata()
+        .schema()
+        .get_fields()
+        .iter()
+        .filter(|f| f.get_physical_type() != ParquetType::BYTE_ARRAY)
+        .count())
+}
+
 /// Read one string (`BYTE_ARRAY`) column out of a parquet file.
 ///
 /// [`ParquetReader`] is a *matrix* reader: it needs at least one numeric column

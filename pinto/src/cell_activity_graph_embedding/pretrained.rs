@@ -131,6 +131,15 @@ pub struct PretrainedArgs<'a> {
     pub membership_init: Option<graph_embedding_util::transfer::AlignKnobs>,
 }
 
+/// The dictionary's width, from the file's footer: the count of its value
+/// columns. What `--embedding-dim` takes when a pinned dictionary is given
+/// and no width is, before any data is opened.
+pub fn dictionary_width(dictionary_path: &str) -> anyhow::Result<usize> {
+    let h = matrix_util::parquet::parquet_numeric_column_count(dictionary_path)?;
+    anyhow::ensure!(h > 0, "{dictionary_path} has no value columns");
+    Ok(h)
+}
+
 /// Load, align, and fill. See the module doc for the contract; every path
 /// through this function leaves `e_gene` fully populated and `records`
 /// parallel to `gene_names`.
