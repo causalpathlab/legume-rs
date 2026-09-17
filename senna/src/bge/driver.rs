@@ -110,7 +110,7 @@ pub(crate) struct EmbedPlan<'a> {
     pub preset_features: Option<ge::PresetRows>,
     /// The given table's rows that matched no feature, appended to the
     /// written ρ so the output is the full table.
-    pub carried: Option<crate::feature_preset::CarriedRows>,
+    pub carried: Option<crate::carried_rows::CarriedRows>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
     pub train_args: crate::run_manifest::TrainArgsRecord,
@@ -380,15 +380,11 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // ρ → co-embed is one-way).
         let rho_mat = Mat::from_tensor(&e_feat_cpu)?;
         let rho_h_names = axis_id_names("h", rho_mat.ncols());
-        let rho_path = format!("{}.feature_loading.parquet", knobs.out);
         rho_mat.to_parquet_with_names(
-            &rho_path,
+            &format!("{}.feature_loading.parquet", knobs.out),
             (Some(&plan.unified.feature_names), Some("gene")),
             Some(&rho_h_names),
         )?;
-        if let Some(c) = &carried {
-            c.append_to(knobs.out, &rho_path)?;
-        }
 
         // Output layout: the H-space cell embedding Z ALWAYS goes to
         // {out}.cell_embedding.parquet, on both paths. ETM resolved (default)
@@ -472,6 +468,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
         // the ETM and --skip-etm paths, so record it unconditionally.
         feature_embedding_suffix: Some("feature_embedding.parquet"),
         feature_loading_suffix: Some("feature_loading.parquet"),
+        carried: carried.as_ref(),
         // Learned gene modules, when the run trained them; the composed row still
         // lives in `feature_loading`, so these are additive.
         module_membership_suffix: has_modules.then_some(ge::transfer::MODULE_MEMBERSHIP_SUFFIX),

@@ -17,17 +17,28 @@
 //! `feature_types.parquet` naming every row's type, so a run on a narrow
 //! feature axis (a panel) still hands on the full table it was given.
 
-use auxiliary_data::feature_types::{read_feature_types, write_feature_types, GENE_TYPE};
-use auxiliary_data::frozen_features::{
-    load_frozen_feature_host, FrozenFeatureHost, FrozenLoadArgs,
-};
+use auxiliary_data::feature_types::{read_feature_types, FeatureType, GENE_TYPE};
+use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
-use matrix_util::parquet::peek_parquet_field_names;
-use matrix_util::traits::IoOps;
-use nalgebra::DMatrix;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
+
+pub(crate) use crate::carried_rows::CarriedRows;
+
+/// The preset of a command's `--{freeze,init,lora}-feature-embedding`, when
+/// one was given: the rows to pin or start from, and the rows to carry.
+pub(crate) fn resolve_preset(
+    resolved: Option<(&str, PresetMode)>,
+    feature_names: &[Box<str>],
+    kind: &ge::FeatureNameKind,
+) -> anyhow::Result<(Option<ge::PresetRows>, Option<CarriedRows>)> {
+    let Some((prefix, mode)) = resolved else {
+        return Ok((None, None));
+    };
+    let (rows, carried) = load_preset_genes(prefix, mode, feature_names, kind)?;
+    Ok((Some(rows), carried))
+}
 
 pub(crate) fn load_preset_genes(
     prefix: &str,
@@ -46,16 +57,17 @@ pub(crate) fn load_preset_genes(
     })?;
 
     // Which source rows are genes: the types table, when the run wrote one.
-    let gene_src: Option<FxHashSet<usize>> = read_feature_types(prefix)?.map(|rows| {
-        let gene_names: FxHashSet<Box<str>> = rows
-            .into_iter()
+    let src_types: Option<Vec<FeatureType>> = read_feature_types(prefix)?;
+    let gene_src: Option<FxHashSet<usize>> = src_types.as_ref().map(|rows| {
+        let gene_names: FxHashSet<&str> = rows
+            .iter()
             .filter(|(_, t)| t.as_ref() == GENE_TYPE)
-            .map(|(n, _)| n)
+            .map(|(n, _)| n.as_ref())
             .collect();
         host.src_names
             .iter()
             .enumerate()
-            .filter(|(_, n)| gene_names.contains(*n))
+            .filter(|(_, n)| gene_names.contains(n.as_ref()))
             .map(|(i, _)| i)
             .collect()
     });
@@ -86,151 +98,16 @@ pub(crate) fn load_preset_genes(
         feature_names.len(),
         mode.describe()
     );
-    let carried = if mode.pins() {
-        CarriedRows::from_host(&host, feature_names, kind, prefix, &dictionary_path)?
-    } else {
-        info!(
-            "{flag}: the rows of {dictionary_path} that matched nothing are not carried \
-             through, since the trained rows leave the table's space"
-        );
-        None
-    };
+    let carried = CarriedRows::from_unmatched(
+        mode.pins(),
+        flag,
+        &host,
+        feature_names,
+        kind,
+        src_types.as_deref().unwrap_or(&[]),
+        &dictionary_path,
+    )?;
     Ok((ge::PresetRows { ids, rows, mode }, carried))
-}
-
-/// The rows of a given table that pin nothing on this run's feature axis,
-/// kept to write back beside the trained table. Only meaningful when the
-/// matched rows stay in the table's space (freeze, lora): then the trained
-/// rows and these sit in one space, and the output is the full table.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CarriedRows {
-    pub names: Vec<Box<str>>,
-    /// One per row, from the source run's types table (`gene` without one).
-    pub types: Vec<Box<str>>,
-    /// `[n, H]`, in source order.
-    pub rows: DMatrix<f32>,
-    /// The file the rows came from, for the log.
-    pub source: String,
-}
-
-impl CarriedRows {
-    /// Every source row the match left unused whose name (raw, or canonical
-    /// under `kind`) is not a feature of `target_names` either — a duplicate
-    /// canonical row of a matched gene, or a word that also names a feature,
-    /// would otherwise come out twice. `None` when nothing is left over.
-    pub(crate) fn from_host(
-        host: &FrozenFeatureHost,
-        target_names: &[Box<str>],
-        kind: &ge::FeatureNameKind,
-        source_prefix: &str,
-        dictionary_path: &str,
-    ) -> anyhow::Result<Option<Self>> {
-        let used: FxHashSet<usize> = host.keep_src_indices.iter().copied().collect();
-        let taken: FxHashSet<Box<str>> = target_names
-            .iter()
-            .flat_map(|n| [n.clone(), kind.canonicalize(n)])
-            .collect();
-        let src_types: FxHashMap<Box<str>, Box<str>> = read_feature_types(source_prefix)?
-            .map(|rows| rows.into_iter().collect())
-            .unwrap_or_default();
-        let idx: Vec<usize> = host
-            .src_names
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| {
-                !used.contains(i) && !taken.contains(*n) && !taken.contains(&kind.canonicalize(n))
-            })
-            .map(|(i, _)| i)
-            .collect();
-        if idx.is_empty() {
-            return Ok(None);
-        }
-        let names: Vec<Box<str>> = idx.iter().map(|&i| host.src_names[i].clone()).collect();
-        let types: Vec<Box<str>> = names
-            .iter()
-            .map(|n| {
-                src_types
-                    .get(n)
-                    .cloned()
-                    .unwrap_or_else(|| GENE_TYPE.into())
-            })
-            .collect();
-        let rows = host.src_e_feat.select_rows(idx.iter());
-        Ok(Some(Self {
-            names,
-            types,
-            rows,
-            source: dictionary_path.to_string(),
-        }))
-    }
-
-    /// Append these rows to the ρ table the run wrote at `rho_path`, keeping
-    /// its row axis and column names, and write `{out_prefix}.feature_types.parquet`
-    /// over every row: the run's own rows keep the types it wrote, or are all
-    /// `gene` when it wrote none. A carried row whose name the run wrote
-    /// itself (a term or cell type both graphs hold, say) is superseded by
-    /// the run's own, trained row.
-    pub(crate) fn append_to(&self, out_prefix: &str, rho_path: &str) -> anyhow::Result<()> {
-        let fields = peek_parquet_field_names(rho_path)?;
-        let row_axis = fields
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("{rho_path}: no columns"))?;
-        let table = DMatrix::<f32>::from_parquet(rho_path)?;
-        let (n, h) = (table.mat.nrows(), table.mat.ncols());
-        anyhow::ensure!(
-            h == self.rows.ncols(),
-            "{rho_path} is {h} wide but the carried rows of {} are {}",
-            self.source,
-            self.rows.ncols()
-        );
-        let own: FxHashSet<&str> = table.rows.iter().map(AsRef::as_ref).collect();
-        let keep: Vec<usize> = (0..self.names.len())
-            .filter(|&i| !own.contains(self.names[i].as_ref()))
-            .collect();
-        let superseded = self.names.len() - keep.len();
-        if keep.is_empty() {
-            info!(
-                "Nothing of {} to carry through: the run wrote all {superseded} of its unmatched rows itself",
-                self.source
-            );
-            return Ok(());
-        }
-        let own_types: Vec<Box<str>> = match read_feature_types(out_prefix)? {
-            Some(rows) => {
-                anyhow::ensure!(
-                    rows.len() == n && rows.iter().zip(&table.rows).all(|((a, _), b)| a == b),
-                    "{}: rows disagree with {rho_path}",
-                    auxiliary_data::feature_types::feature_types_path(out_prefix)
-                );
-                rows.into_iter().map(|(_, t)| t).collect()
-            }
-            None => vec![GENE_TYPE.into(); n],
-        };
-
-        let m = keep.len();
-        let mut mat = DMatrix::<f32>::zeros(n + m, h);
-        mat.rows_mut(0, n).copy_from(&table.mat);
-        mat.rows_mut(n, m)
-            .copy_from(&self.rows.select_rows(keep.iter()));
-        let mut names = table.rows;
-        names.extend(keep.iter().map(|&i| self.names[i].clone()));
-        mat.to_parquet_with_names(rho_path, (Some(&names), Some(row_axis)), Some(&table.cols))?;
-        let mut types = own_types;
-        types.extend(keep.iter().map(|&i| self.types[i].clone()));
-        write_feature_types(out_prefix, &names, &types)?;
-        let n_gene = keep
-            .iter()
-            .filter(|&&i| self.types[i].as_ref() == GENE_TYPE)
-            .count();
-        info!(
-            "Carried {m} rows of {} through unchanged into {rho_path} ({n_gene} gene, {} other; \
-             {superseded} superseded by the run's own rows); every row's type is in {}",
-            self.source,
-            m - n_gene,
-            auxiliary_data::feature_types::feature_types_path(out_prefix)
-        );
-        Ok(())
-    }
 }
 
 /// `--embedding-dim` against the preset's width, the loader having refused an
@@ -268,9 +145,7 @@ pub(crate) mod test_support {
         let (n, h) = (t.mat.nrows(), t.mat.ncols());
         let extra =
             DMatrix::<f32>::from_fn(EXTRA.len(), h, |i, k| (i + 1) as f32 * 0.25 + k as f32);
-        let mut mat = DMatrix::<f32>::zeros(n + EXTRA.len(), h);
-        mat.rows_mut(0, n).copy_from(&t.mat);
-        mat.rows_mut(n, EXTRA.len()).copy_from(&extra);
+        let mat = matrix_util::dmatrix_util::concatenate_vertical(&[t.mat, extra.clone()]).unwrap();
         let mut names = t.rows.clone();
         let mut types: Vec<Box<str>> = vec!["gene".into(); n];
         for (name, ty) in EXTRA {
