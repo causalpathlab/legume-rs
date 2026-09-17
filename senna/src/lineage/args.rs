@@ -347,7 +347,7 @@ pub struct LineageArgs {
                      run over the MST-node grouping,\n\
                      so the call carries the same permutation-calibrated confidence.\n\
                      pub(super) Input: a `gene<TAB>celltype` TSV (tab/comma/space delimited).\n\
-                     Reads the co-embedded gene vectors from `{from}.feature_embedding.parquet` (spliced rows),\n\
+                     Reads the co-embedded gene vectors from `{from}.feature_coembedding.parquet` (spliced rows),\n\
                      and raw θ from `{from}.cell_embedding.parquet`.\n\
                      Writes `{out}.lineage_annot.*`, the per-cell calls keyed by MST node,\n\
                      and `{out}.trajectory_annotation.parquet`:\n\

@@ -30,13 +30,12 @@ struct Cli {
 /// no pb reference) path, shared with `bge::driver::tests`'s own guard: see
 /// that test's comment for why gene modules never populate
 /// `module_membership`/`module_dictionary` here.
-const BGE_PARQUET_SUFFIXES: [&str; 8] = [
+const BGE_PARQUET_SUFFIXES: [&str; 7] = [
     "cell_embedding",
     "cell_bias",
     "feature_embedding",
-    "feature_loading",
+    "feature_coembedding",
     "feature_bias",
-    "dictionary",
     "pb_embedding",
     "pb_batch",
 ];
@@ -100,11 +99,11 @@ fn gem_fits_at_defaults_and_writes_a_gem_manifest() {
     let (manifest, _dir) = run_manifest::load_for(&out).expect("load the manifest back");
     assert_eq!(manifest.kind, RunKind::Gem, "manifest kind must be gem");
 
-    // feature_loading rows are exactly the feature axis rows (the union of
+    // feature_embedding rows are exactly the feature axis rows (the union of
     // the two input files, 5 rows).
     let loading =
-        Mat::from_parquet_with_row_names(&format!("{out}.feature_loading.parquet"), Some(0))
-            .expect("read feature_loading back");
+        Mat::from_parquet_with_row_names(&format!("{out}.feature_embedding.parquet"), Some(0))
+            .expect("read feature_embedding back");
     let mut rows = loading.rows;
     rows.sort();
     let mut expected_rows = boxes(&[
@@ -117,7 +116,7 @@ fn gem_fits_at_defaults_and_writes_a_gem_manifest() {
     expected_rows.sort();
     assert_eq!(
         rows, expected_rows,
-        "feature_loading rows must be the feature axis rows"
+        "feature_embedding rows must be the feature axis rows"
     );
 
     // The contrast table: GENE1/count and GENE1/m6a, GENE2 skipped on both
@@ -454,7 +453,7 @@ fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
     let table = Mat::from_fn(5, h, |i, k| (i as f32 + 1.0) * 0.25 - k as f32 * 0.1);
     table
         .to_parquet_with_names(
-            &format!("{plus}.feature_loading.parquet"),
+            &format!("{plus}.feature_embedding.parquet"),
             (Some(&names), Some("gene")),
             None,
         )
@@ -473,7 +472,7 @@ fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
         ],
     );
     run_gem_embedding(&args).expect("a gem run on a frozen bare-gene table");
-    let loading = Mat::from_parquet(&format!("{out}.feature_loading.parquet")).unwrap();
+    let loading = Mat::from_parquet(&format!("{out}.feature_embedding.parquet")).unwrap();
     assert_eq!(loading.mat.ncols(), h, "auto takes the table's width");
     let given = |i: usize| -> Vec<f32> { table.row(i).iter().copied().collect() };
     for (i, g) in ["GENE1", "GENE2", "GENE3", "GENE4"].iter().enumerate() {
@@ -525,7 +524,7 @@ fn an_earlier_gem_table_pins_its_track_rows_and_lora_moves_them() {
         &["--embedding-dim", "4"],
     ))
     .expect("first run");
-    let extra = widen(&format!("{first}.feature_loading.parquet"), &plus);
+    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
 
     run_gem_embedding(&tiny_fit(
         &genes,
@@ -539,8 +538,8 @@ fn an_earlier_gem_table_pins_its_track_rows_and_lora_moves_them() {
         ],
     ))
     .expect("second run, frozen to the first");
-    let a = Mat::from_parquet(&format!("{first}.feature_loading.parquet")).unwrap();
-    let b = Mat::from_parquet(&format!("{second}.feature_loading.parquet")).unwrap();
+    let a = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
+    let b = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
     for (i, name) in a.rows.iter().enumerate() {
         for (k, got) in row_of(&b, name).into_iter().enumerate() {
             assert!(
@@ -582,7 +581,7 @@ fn an_earlier_gem_table_pins_its_track_rows_and_lora_moves_them() {
         ],
     ))
     .expect("third run, lora on the first");
-    let c = Mat::from_parquet(&format!("{third}.feature_loading.parquet")).unwrap();
+    let c = Mat::from_parquet(&format!("{third}.feature_embedding.parquet")).unwrap();
     assert_eq!(c.rows.len(), a.rows.len() + EXTRA.len());
     assert!(
         a.rows.iter().enumerate().any(|(i, name)| {

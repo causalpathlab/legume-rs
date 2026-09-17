@@ -11,20 +11,20 @@
 //!   the reference propensity is the training run's own
 //!   `{model}.propensity.parquet`. Both sides are incident-edge fractions
 //!   over the same trained communities.
-//! - **lc / dsvd** (no frozen gene dictionary): each cell's propensity is
-//!   estimated from `{model}.gene_community.parquet` by a per-cell EM fit
+//! - **lc / dsvd** (no frozen feature dictionary): each cell's propensity is
+//!   estimated from `{model}.feature_community.parquet` by a per-cell EM fit
 //!   of a multinomial mixture over the community expression profiles —
 //!   and it is estimated the SAME way for the reference cells, so the two
 //!   sides come from one map rather than comparing an edge-based
 //!   propensity against an expression-based one. The query's profile
-//!   columns are renormalized over its matched genes (a panel observes a
+//!   columns are renormalized over its matched features (a panel observes a
 //!   window of each profile; conditioning on that window is what makes
 //!   the per-cell likelihood proper).
 //!
 //! The retrieval itself (kNN over propensity rows, softmax distance
 //! weights, streamed weighted average of reference counts) lives in
 //! [`data_beans_alg::retrieval_impute`]. A cell with no pairs (cage) or
-//! no counts on any model gene (profiles) has a zero propensity row and
+//! no counts on any model feature (profiles) has a zero propensity row and
 //! is skipped rather than matched arbitrarily.
 //!
 //! Writes `{out}.imputed.parquet` (`N_query` × `n_ref_features`), plus
@@ -153,12 +153,12 @@ pub fn run_impute(args: &ImputeArgs) -> anyhow::Result<()> {
         },
     )?;
 
-    let ref_gene_names = ref_data.row_names()?;
+    let ref_feature_names = ref_data.row_names()?;
     let imputed_path = format!("{}.imputed.parquet", c.out);
     imputed.to_parquet_with_names(
         &imputed_path,
         (Some(&query_cells), Some("cell")),
-        Some(&ref_gene_names),
+        Some(&ref_feature_names),
     )?;
     info!(
         "Wrote imputed {} × {} matrix to {imputed_path}",
@@ -308,7 +308,7 @@ fn align_to_columns(
 // lc / dsvd: profile projection    //
 ///////////////////////////////////////
 
-/// Estimate BOTH sides' propensities from the model's gene-community
+/// Estimate BOTH sides' propensities from the model's feature-community
 /// profiles, one EM per cell, then write the query's under `{out}`.
 fn profile_propensities(
     args: &ImputeArgs,
@@ -324,14 +324,15 @@ fn profile_propensities(
         );
     }
 
-    let gc_path = format!("{model}.gene_community.parquet");
+    let gc_path = format!("{model}.feature_community.parquet");
     anyhow::ensure!(
         Path::new(&gc_path).is_file(),
-        "{model}: gene_community.parquet does not exist — not an lc / dsvd model prefix"
+        "{model}: feature_community.parquet does not exist — not an lc / dsvd model prefix"
     );
-    let (profiles, model_genes) = crate::plot::load::read_gene_community(Path::new(&gc_path))?;
+    let (profiles, model_features) =
+        crate::plot::load::read_feature_community(Path::new(&gc_path))?;
     info!(
-        "lc/dsvd model: projecting propensities through {} gene × {} community profiles",
+        "lc/dsvd model: projecting propensities through {} feature × {} community profiles",
         profiles.nrows(),
         profiles.ncols()
     );
@@ -340,13 +341,13 @@ fn profile_propensities(
     let query_data = open_backends("query", &c.data_files, c.preload_data)?;
     let feature_kind = args
         .predict
-        .gene_name_mode
+        .feature_name_mode
         .resolve_kind(&query_data.row_names()?);
     let query_cells = query_data.column_names()?;
     let query_prop = project_profile_propensity(
         &query_data,
         &profiles,
-        &model_genes,
+        &model_features,
         &feature_kind,
         args.profile_em_iters,
         c.block_size,
@@ -365,7 +366,7 @@ fn profile_propensities(
     let ref_prop = project_profile_propensity(
         &ref_data,
         &profiles,
-        &model_genes,
+        &model_features,
         &feature_kind,
         args.profile_em_iters,
         c.block_size,
@@ -375,9 +376,9 @@ fn profile_propensities(
 }
 
 struct ProfileEmParam {
-    /// `[K, G_matched]` per-community gene probabilities, TRANSPOSED so a
-    /// gene's K values are one contiguous column, renormalized over the
-    /// matched genes (f64 for the per-cell EM accumulators).
+    /// `[K, G_matched]` per-community feature probabilities, TRANSPOSED so a
+    /// feature's K values are one contiguous column, renormalized over the
+    /// matched features (f64 for the per-cell EM accumulators).
     p_t: nalgebra::DMatrix<f64>,
     /// data row → matched-profile column.
     row_to_matched: Vec<Option<usize>>,
@@ -389,30 +390,30 @@ struct ProfileEmParam {
 ///
 /// Per cell: `π ← Σ_g x_g · r_g` with responsibilities
 /// `r_{g,k} ∝ π_k p̃_k(g)`, iterated to convergence. `p̃_k` is the profile
-/// conditioned on this dataset's matched genes. A cell with no counts on
-/// any matched gene keeps a zero row (skipped by the retrieval core).
+/// conditioned on this dataset's matched features. A cell with no counts on
+/// any matched feature keeps a zero row (skipped by the retrieval core).
 fn project_profile_propensity(
     data: &SparseIoVec,
     profiles: &Mat,
-    model_genes: &[Box<str>],
+    model_features: &[Box<str>],
     feature_kind: &auxiliary_data::feature_names::FeatureNameKind,
     iters: usize,
     block_size: Option<usize>,
     what: &str,
 ) -> anyhow::Result<Mat> {
     let k = profiles.ncols();
-    let data_genes = data.row_names()?;
+    let data_features = data.row_names()?;
 
-    // Model gene → profile row, on canonicalized names.
-    let model_idx: HashMap<Box<str>, usize> = model_genes
+    // Model feature → profile row, on canonicalized names.
+    let model_idx: HashMap<Box<str>, usize> = model_features
         .iter()
         .enumerate()
         .map(|(i, g)| (g.clone(), i))
         .collect();
     let mut matched_profile_rows: Vec<usize> = Vec::new();
-    let mut row_to_matched: Vec<Option<usize>> = vec![None; data_genes.len()];
+    let mut row_to_matched: Vec<Option<usize>> = vec![None; data_features.len()];
     let mut seen: HashMap<usize, usize> = HashMap::default();
-    for (row, name) in data_genes.iter().enumerate() {
+    for (row, name) in data_features.iter().enumerate() {
         let key = feature_kind.canonicalize(name);
         if let Some(&g) = model_idx.get(&key) {
             let slot = *seen.entry(g).or_insert_with(|| {
@@ -424,20 +425,20 @@ fn project_profile_propensity(
     }
     anyhow::ensure!(
         !matched_profile_rows.is_empty(),
-        "{what}: none of its {} genes match the model's {} — check --gene-name-mode",
-        data_genes.len(),
-        model_genes.len()
+        "{what}: none of its {} features match the model's {} — check --feature-name-mode",
+        data_features.len(),
+        model_features.len()
     );
     info!(
-        "{what}: {} of the model's {} genes are present across {} cells",
+        "{what}: {} of the model's {} features are present across {} cells",
         matched_profile_rows.len(),
-        model_genes.len(),
+        model_features.len(),
         data.num_columns()
     );
 
     // Condition each community's profile on the matched window and drop the
     // rest: `p̃_k(g) = λ_gk / Σ_{g∈matched} λ_gk`. Stored [K, G_matched] so
-    // the EM's per-gene access is one contiguous column.
+    // the EM's per-feature access is one contiguous column.
     let g_m = matched_profile_rows.len();
     let mut p_t = nalgebra::DMatrix::<f64>::zeros(k, g_m);
     for (slot, &g) in matched_profile_rows.iter().enumerate() {
@@ -512,7 +513,7 @@ fn profile_em_visitor(
                     denom += resp[c];
                 }
                 if denom <= 0.0 {
-                    continue; // gene absent from every community
+                    continue; // feature absent from every community
                 }
                 let f = x / denom;
                 for c in 0..k {

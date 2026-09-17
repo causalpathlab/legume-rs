@@ -1,5 +1,5 @@
-use crate::cell_activity_graph_embedding::gene_gating::{
-    fold_active_edges_to_super, GeneActiveEdges,
+use crate::cell_activity_graph_embedding::feature_gating::{
+    fold_active_edges_to_super, FeatureActiveEdges,
 };
 
 /// Weights of fine edges landing on the same super edge must SUM; the
@@ -9,31 +9,31 @@ fn fold_sums_weights_and_drops_intra_pb_edges() {
     // 4 fine edges; edges 0 and 2 map to super edge 1, edge 1 to super
     // edge 0, edge 3 is intra-PB.
     let fine_to_super = vec![Some(1usize), Some(0), Some(1), None];
-    let activities = GeneActiveEdges {
-        gene_active_edges: vec![vec![0u32, 1, 2, 3], vec![1, 3]],
-        gene_active_edge_weights: vec![vec![0.5f32, 2.0, 0.25, 9.0], vec![4.0, 9.0]],
+    let activities = FeatureActiveEdges {
+        feature_active_edges: vec![vec![0u32, 1, 2, 3], vec![1, 3]],
+        feature_active_edge_weights: vec![vec![0.5f32, 2.0, 0.25, 9.0], vec![4.0, 9.0]],
     };
     let folded = fold_active_edges_to_super(activities, &fine_to_super);
-    assert_eq!(folded.gene_active_edges[0], vec![0u32, 1]);
-    assert_eq!(folded.gene_active_edge_weights[0], vec![2.0f32, 0.75]);
-    // Gene 1: only edge 1 survives (edge 3 is intra-PB).
-    assert_eq!(folded.gene_active_edges[1], vec![0u32]);
-    assert_eq!(folded.gene_active_edge_weights[1], vec![4.0f32]);
+    assert_eq!(folded.feature_active_edges[0], vec![0u32, 1]);
+    assert_eq!(folded.feature_active_edge_weights[0], vec![2.0f32, 0.75]);
+    // Feature 1: only edge 1 survives (edge 3 is intra-PB).
+    assert_eq!(folded.feature_active_edges[1], vec![0u32]);
+    assert_eq!(folded.feature_active_edge_weights[1], vec![4.0f32]);
 }
 
-/// A gene whose every active fine edge is intra-PB ends up with an
+/// A feature whose every active fine edge is intra-PB ends up with an
 /// EMPTY super-edge list, which the cache builder must treat as "this
-/// (gene, batch) never samples" rather than erroring.
+/// (feature, batch) never samples" rather than erroring.
 #[test]
-fn fully_internal_gene_folds_to_empty() {
+fn fully_internal_feature_folds_to_empty() {
     let fine_to_super = vec![None, None];
-    let activities = GeneActiveEdges {
-        gene_active_edges: vec![vec![0u32, 1]],
-        gene_active_edge_weights: vec![vec![1.0f32, 1.0]],
+    let activities = FeatureActiveEdges {
+        feature_active_edges: vec![vec![0u32, 1]],
+        feature_active_edge_weights: vec![vec![1.0f32, 1.0]],
     };
     let folded = fold_active_edges_to_super(activities, &fine_to_super);
-    assert!(folded.gene_active_edges[0].is_empty());
-    assert!(folded.gene_active_edge_weights[0].is_empty());
+    assert!(folded.feature_active_edges[0].is_empty());
+    assert!(folded.feature_active_edge_weights[0].is_empty());
 }
 
 use crate::cell_activity_graph_embedding::pb_frame::build_pb_frame;

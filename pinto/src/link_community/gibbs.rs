@@ -351,10 +351,10 @@ impl LinkGibbsSampler {
 
         for sweep in 0..num_sweeps {
             let sweep_seed = base_seed.wrapping_mul(sweep as u64 + 1);
-            let gene_sum_snap = &global_stats.gene_sum;
+            let feature_sum_snap = &global_stats.feature_sum;
             let size_sum_snap = &global_stats.size_sum;
             let edge_count_snap = &global_stats.edge_count;
-            let log_gene_snap = &global_stats.log_gene;
+            let log_feature_snap = &global_stats.log_feature;
             let log_size_offset_snap = &global_stats.log_size_offset;
 
             // Dirichlet log-weights snapshot (recomputed each sweep)
@@ -378,11 +378,11 @@ impl LinkGibbsSampler {
                         k,
                         m: profiles.m,
                         n_edges: sub_stores[c].n_edges,
-                        gene_sum: gene_sum_snap.clone(),
+                        feature_sum: feature_sum_snap.clone(),
                         size_sum: size_sum_snap.clone(),
                         edge_count: edge_count_snap.clone(),
                         membership: indices.iter().map(|&e| membership[e]).collect(),
-                        log_gene: log_gene_snap.clone(),
+                        log_feature: log_feature_snap.clone(),
                         log_size_offset: log_size_offset_snap.clone(),
                     };
 

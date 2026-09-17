@@ -177,7 +177,7 @@ pub(super) fn load_theta(prefix: &str, from: ThetaFrom, no_velocity: bool) -> Re
 /// Read `cell_embedding.parquet` for the `--markers` node calls.
 ///
 /// Marker scoring is a nearest-centroid statistic against the CO-EMBEDDED gene
-/// vectors in `feature_embedding.parquet`, which live in H space. So it reads
+/// vectors in `feature_coembedding.parquet`, which live in H space. So it reads
 /// this table even when the trajectory itself was fitted on the K-space simplex:
 /// the two answer different questions and only one of them needs the gene
 /// vectors to share a metric with the cells.

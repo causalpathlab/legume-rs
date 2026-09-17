@@ -1,21 +1,21 @@
 //! The regression Stage 0 exists to prevent, stated end to end.
 //!
 //! `cage` scored a splice-channelized matrix as if each channel row were its own
-//! gene: the gene axis doubled, and a gene's positives were drawn from half its
-//! evidence twice over rather than from the gene once. The property that says it
+//! feature: the feature axis doubled, and a feature's positives were drawn from half its
+//! evidence twice over rather than from the feature once. The property that says it
 //! is fixed is an EQUALITY — a two-channel matrix must produce exactly the
-//! activities of the single-channel matrix whose counts are its per-gene sums.
+//! activities of the single-channel matrix whose counts are its per-feature sums.
 
-use super::gene_gating::{build_gene_active_fine_edges, ActivityNorm, GeneActiveEdges};
+use super::feature_gating::{build_feature_active_fine_edges, ActivityNorm, FeatureActiveEdges};
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 
 const N_CELLS: usize = 6;
 const EDGES: [(u32, u32); 5] = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5)];
 
-/// `(gene, cell) -> (spliced, unspliced)`. Deliberately uneven: some cells carry
-/// only one track, which is where a per-row activity and a per-gene one differ
+/// `(feature, cell) -> (spliced, unspliced)`. Deliberately uneven: some cells carry
+/// only one track, which is where a per-row activity and a per-feature one differ
 /// most.
 const COUNTS: [(usize, usize, f32, f32); 10] = [
     (0, 0, 5.0, 2.0),
@@ -51,9 +51,9 @@ fn write(
     Ok(v)
 }
 
-/// One row per gene, holding `spliced + unspliced`.
+/// One row per feature, holding `spliced + unspliced`.
 fn pooled_input(dir: &tempfile::TempDir) -> anyhow::Result<SparseIoVec> {
-    let rows: Vec<Box<str>> = (0..3).map(|g| format!("GENE{g}").into()).collect();
+    let rows: Vec<Box<str>> = (0..3).map(|g| format!("FEATURE{g}").into()).collect();
     let triplets: Vec<(u64, u64, f32)> = COUNTS
         .iter()
         .map(|&(g, c, s, u)| (g as u64, c as u64, s + u))
@@ -61,14 +61,14 @@ fn pooled_input(dir: &tempfile::TempDir) -> anyhow::Result<SparseIoVec> {
     write(dir, "pooled", &rows, &triplets)
 }
 
-/// Two rows per gene. The row ORDER is interleaved and puts a gene's nascent row
+/// Two rows per feature. The row ORDER is interleaved and puts a feature's nascent row
 /// before its mature one, because nothing about the grammar promises otherwise
 /// and a fold that only works on sorted rows would pass a friendlier fixture.
 fn channelized_input(dir: &tempfile::TempDir) -> anyhow::Result<SparseIoVec> {
     let mut rows: Vec<Box<str>> = Vec::new();
     for g in 0..3 {
-        rows.push(format!("GENE{g}/count/unspliced").into());
-        rows.push(format!("GENE{g}/count/spliced").into());
+        rows.push(format!("FEATURE{g}/count/unspliced").into());
+        rows.push(format!("FEATURE{g}/count/spliced").into());
     }
     let mut triplets: Vec<(u64, u64, f32)> = Vec::new();
     for &(g, c, s, u) in COUNTS.iter() {
@@ -83,32 +83,36 @@ fn channelized_input(dir: &tempfile::TempDir) -> anyhow::Result<SparseIoVec> {
     write(dir, "channelized", &rows, &triplets)
 }
 
-fn activities(data: &SparseIoVec, norm: ActivityNorm) -> anyhow::Result<GeneActiveEdges> {
-    let axis = GeneAxis::resolve(&data.row_names()?)?;
-    build_gene_active_fine_edges(data, &EDGES, None, norm, &axis)
+fn activities(data: &SparseIoVec, norm: ActivityNorm) -> anyhow::Result<FeatureActiveEdges> {
+    let axis = FeatureAxis::resolve(&data.row_names()?)?;
+    build_feature_active_fine_edges(data, &EDGES, None, norm, &axis)
 }
 
-/// Break it by indexing `gene_active_edges` with the row instead of the gene and
-/// this fails on the very first assert: six entries where there are three genes.
+/// Break it by indexing `feature_active_edges` with the row instead of the feature and
+/// this fails on the very first assert: six entries where there are three features.
 #[test]
 fn two_channels_give_exactly_the_pooled_single_channel_activities() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let pooled = pooled_input(&dir)?;
     let channelized = channelized_input(&dir)?;
 
-    // The axis itself, first: same genes, same order, from row names alone.
-    let axis = GeneAxis::resolve(&channelized.row_names()?)?;
+    // The axis itself, first: same features, same order, from row names alone.
+    let axis = FeatureAxis::resolve(&channelized.row_names()?)?;
     assert!(axis.is_channelized());
-    assert_eq!(axis.gene_names(), pooled.row_names()?.as_slice());
+    assert_eq!(axis.feature_names(), pooled.row_names()?.as_slice());
 
     for norm in [ActivityNorm::Log1p, ActivityNorm::L1, ActivityNorm::L2] {
         let a = activities(&pooled, norm)?;
         let b = activities(&channelized, norm)?;
 
-        assert_eq!(a.gene_active_edges.len(), 3, "{norm:?}: one entry per gene");
-        assert_eq!(b.gene_active_edges, a.gene_active_edges, "{norm:?}");
         assert_eq!(
-            b.gene_active_edge_weights, a.gene_active_edge_weights,
+            a.feature_active_edges.len(),
+            3,
+            "{norm:?}: one entry per feature"
+        );
+        assert_eq!(b.feature_active_edges, a.feature_active_edges, "{norm:?}");
+        assert_eq!(
+            b.feature_active_edge_weights, a.feature_active_edge_weights,
             "{norm:?}"
         );
     }
@@ -123,15 +127,15 @@ fn pooling_happens_on_counts_not_on_log1p_activities() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let a = activities(&channelized_input(&dir)?, ActivityNorm::Log1p)?;
 
-    // GENE0 at cell 0 is (spliced 5, unspliced 2); edge (0,1) has GENE0 active
+    // FEATURE0 at cell 0 is (spliced 5, unspliced 2); edge (0,1) has FEATURE0 active
     // at both endpoints, where cell 1 is (3, 0).
     let w = 7f32.ln_1p() * 3f32.ln_1p();
     let wrong = (5f32.ln_1p() + 2f32.ln_1p()) * 3f32.ln_1p();
-    let e0 = a.gene_active_edges[0]
+    let e0 = a.feature_active_edges[0]
         .iter()
         .position(|&e| e == 0)
-        .expect("GENE0 is active on edge (0, 1)");
-    let got = a.gene_active_edge_weights[0][e0];
+        .expect("FEATURE0 is active on edge (0, 1)");
+    let got = a.feature_active_edge_weights[0][e0];
 
     assert!((got - w).abs() < 1e-6, "expected {w}, got {got}");
     assert!(

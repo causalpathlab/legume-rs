@@ -1,4 +1,4 @@
-//! `{prefix}.pb_reference.zarr` — a run's pseudobulks, carried forward so the
+//! `{prefix}.pb_reference.zarr.zip` — a run's pseudobulks, carried forward so the
 //! next `senna update` does not have to re-read the cells they came from.
 //!
 //! **Why a backend and not a serialized statistic.** Every family trains only
@@ -40,12 +40,25 @@ use crate::embed_common::*;
 use serde::{Deserialize, Serialize};
 
 /// Suffixes under the run's `--out` prefix.
-pub const BACKEND_SUFFIX: &str = "pb_reference.zarr";
+pub const BACKEND_SUFFIX: &str = "pb_reference.zarr.zip";
 pub const SIDECAR_SUFFIX: &str = "pb_reference.json";
+/// What runs before the archive convention wrote: an unzipped directory.
+const LEGACY_BACKEND_SUFFIX: &str = "pb_reference.zarr";
 
 #[must_use]
 pub fn backend_path(prefix: &str) -> String {
     format!("{prefix}.{BACKEND_SUFFIX}")
+}
+
+/// The reference a parent actually has on disk: the `.zarr.zip` archive, or
+/// the unzipped `.zarr` directory an older binary left, or `None`.
+fn existing_backend_path(prefix: &str) -> Option<String> {
+    [
+        backend_path(prefix),
+        format!("{prefix}.{LEGACY_BACKEND_SUFFIX}"),
+    ]
+    .into_iter()
+    .find(|p| std::path::Path::new(p).exists())
 }
 
 #[must_use]
@@ -127,7 +140,7 @@ pub fn cell_counts_from(
     Ok(counts)
 }
 
-/// Write this run's pseudobulks as `{prefix}.pb_reference.{zarr,json}`.
+/// Write this run's pseudobulks as `{prefix}.pb_reference.{zarr.zip,json}`.
 ///
 /// `cell_to_pb_finest` is the finest level of the run's cell → pb membership,
 /// and `column_weight` is each column's multiplicity — see
@@ -266,16 +279,22 @@ pub fn write(
         100.0 * density
     );
 
+    // Written as a directory, then zipped into the archive the manifest names;
+    // the handle is dropped first so the directory is fully flushed.
     let path = backend_path(prefix);
+    let zarr_dir = format!("{prefix}.{LEGACY_BACKEND_SUFFIX}");
     remove_file(&path)?;
+    remove_file(&zarr_dir)?;
     let mut backend = create_sparse_from_triplets(
         &triplets,
         (n_genes, n_pb, triplets.len()),
-        Some(&path),
+        Some(&zarr_dir),
         Some(&SparseIoBackend::Zarr),
     )?;
     backend.register_row_names_vec(gene_names);
     backend.register_column_names_vec(&axis_id_names(COLUMN_PREFIX, n_pb));
+    drop(backend);
+    data_beans::zarr_io::finalize_zarr_output(&zarr_dir, &path)?;
 
     let n_passthrough = (0..n_pb).filter(|&pb| pure_carried(pb)).count();
     let meta = PbReferenceMeta {
@@ -485,11 +504,12 @@ pub fn prepare(parent: &str, out: &str) -> anyhow::Result<Option<ReferenceInput>
     let Some(meta) = read_meta(parent)? else {
         return Ok(None);
     };
-    let backend = backend_path(parent);
-    anyhow::ensure!(
-        std::path::Path::new(&backend).exists(),
-        "{parent} records carried pseudobulks but {backend} is missing"
-    );
+    let backend = existing_backend_path(parent).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{parent} records carried pseudobulks but {} is missing",
+            backend_path(parent)
+        )
+    })?;
 
     // The loader takes batch labels as a file, one line per column.
     let batch_file = format!("{out}.pb_reference_batch.txt");

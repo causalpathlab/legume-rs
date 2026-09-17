@@ -92,9 +92,8 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
         "cell_embedding",
         "cell_bias",
         "feature_embedding",
-        "feature_loading",
+        "feature_coembedding",
         "feature_bias",
-        "dictionary",
         "pb_embedding",
         "pb_batch",
     ]
@@ -115,7 +114,7 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
 }
 
 /// A pinned table wider than the data: its unmatched rows come out after the
-/// data's genes in `feature_loading` (ρ), unchanged, with a types table over
+/// data's genes in `feature_embedding` (ρ), unchanged, with a types table over
 /// every row; the co-embed keeps the data's genes.
 #[test]
 fn bge_carries_the_unmatched_rows_of_a_pinned_table_through() {
@@ -127,7 +126,7 @@ fn bge_carries_the_unmatched_rows_of_a_pinned_table_through() {
     let plus = dir.path().join("plus").to_string_lossy().into_owned();
     let second = dir.path().join("second").to_string_lossy().into_owned();
     fit_bge(&parse(&data, &first)).expect("first run");
-    let extra = widen(&format!("{first}.feature_loading.parquet"), &plus);
+    let extra = widen(&format!("{first}.feature_embedding.parquet"), &plus);
     let args = Cli::try_parse_from([
         "senna-bge",
         &data,
@@ -147,11 +146,12 @@ fn bge_carries_the_unmatched_rows_of_a_pinned_table_through() {
     fit_bge(&args).expect("second run");
     assert_carried(
         &second,
-        &format!("{second}.feature_loading.parquet"),
+        &format!("{second}.feature_embedding.parquet"),
         N_GENES,
         &extra,
     );
-    let co = DMatrix::<f32>::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
+    let co =
+        DMatrix::<f32>::from_parquet(&format!("{second}.feature_coembedding.parquet")).unwrap();
     assert_eq!(
         co.rows.len(),
         N_GENES,

@@ -55,7 +55,7 @@ use crate::lr_activity::outputs::{
     pvalue_histogram, write_lr_activity, write_lr_activity_json, LrActivityRow, StratumEntry,
 };
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use data_beans::convert::try_open_or_convert;
 use data_beans_alg::gene_weighting::fisher_weights_from_stats;
 use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
@@ -114,10 +114,10 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // splice-channelized matrix: the resolver aliases on `--gene-delimiter`
     // (default `_`) and never on `/`, so `GENE1` does not reach
     // `GENE1/count/spliced` and every pair is dropped.
-    let gene_axis = GeneAxis::resolve_or_identity(&row_names)?;
-    let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
-    let n_genes = gene_axis.n_genes();
-    if gene_axis.is_channelized() {
+    let feature_axis = FeatureAxis::resolve_or_identity(&row_names)?;
+    let gene_names: Vec<Box<str>> = feature_axis.feature_names().to_vec();
+    let n_genes = feature_axis.n_features();
+    if feature_axis.is_channelized() {
         info!(
             "Feature axis: {} rows carry splice channels over {} genes; a \
              ligand or receptor is scored on its gene, both tracks summed",
@@ -265,7 +265,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     // NB precisions further down, so a separate totals pass would be a second
     // full read of the matrix for a number already in hand.
     info!("Computing per-gene statistics...");
-    let (_, gene_stats) = gene_axis.running_stats(&data_vec, c.block_size, "NB-Fisher")?;
+    let (_, gene_stats) = feature_axis.running_stats(&data_vec, c.block_size, "NB-Fisher")?;
     let gene_sum: Vec<f32> = gene_stats.sum().to_vec();
     let fisher_all = fisher_weights_from_stats(&gene_stats, n_cells);
     let pre_filter_n = resolved_pairs.len();
@@ -307,7 +307,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
     let mut rows_to_read: Vec<usize> = Vec::with_capacity(lr_genes.len());
     let mut row_owner: Vec<usize> = Vec::with_capacity(lr_genes.len());
     for r in 0..row_names.len() {
-        if let Some(&local) = gene_to_local.get(&gene_axis.gene_of_row(r)) {
+        if let Some(&local) = gene_to_local.get(&feature_axis.feature_of_row(r)) {
             rows_to_read.push(r);
             row_owner.push(local);
         }
@@ -472,7 +472,7 @@ pub fn fit_srt_lr_activity(args: &SrtLrActivityArgs) -> anyhow::Result<()> {
         if !active_strata.contains(&(c as u32)) {
             continue;
         }
-        apply_gene_weights(&mut collapse.log_mean[c], &fisher_lr);
+        apply_feature_weights(&mut collapse.log_mean[c], &fisher_lr);
     }
 
     ////////////////////////////////////////////////////

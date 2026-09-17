@@ -1,4 +1,4 @@
-//! The rules between `--gene-embedding-mode` and the flags that only one mode
+//! The rules between `--feature-embedding-mode` and the flags that only one mode
 //! reads, checked before any data is opened.
 
 use crate::cell_activity_graph_embedding::args::CellActivityGraphEmbeddingArgs;
@@ -23,45 +23,49 @@ fn parse(argv: &[&str]) -> CellActivityGraphEmbeddingArgs {
 #[test]
 fn the_lora_knobs_need_the_lora_mode() {
     let ok = parse(&[
-        "--gene-embedding",
+        "--feature-embedding",
         "d.parquet",
-        "--gene-embedding-mode",
+        "--feature-embedding-mode",
         "lora",
         "--lora-rank",
         "4",
     ]);
-    assert!(ok.validate_gene_embedding().is_ok());
+    assert!(ok.validate_feature_embedding().is_ok());
     let bare = parse(&[
-        "--gene-embedding",
+        "--feature-embedding",
         "d.parquet",
-        "--gene-embedding-mode",
+        "--feature-embedding-mode",
         "lora",
     ]);
-    assert!(bare.validate_gene_embedding().is_ok());
+    assert!(bare.validate_feature_embedding().is_ok());
     let wrong = parse(&[
-        "--gene-embedding",
+        "--feature-embedding",
         "d.parquet",
-        "--gene-embedding-mode",
+        "--feature-embedding-mode",
         "freeze",
         "--lora-rank",
         "4",
     ]);
-    let err = wrong.validate_gene_embedding().unwrap_err().to_string();
+    let err = wrong.validate_feature_embedding().unwrap_err().to_string();
     assert!(err.contains("--lora-rank"), "{err}");
 }
 
 #[test]
 fn the_adapter_residual_needs_the_adapt_mode() {
-    let ok = parse(&["--gene-embedding", "d.parquet", "--gene-adapter-residual"]);
-    assert!(ok.validate_gene_embedding().is_ok());
-    let wrong = parse(&[
-        "--gene-embedding",
+    let ok = parse(&[
+        "--feature-embedding",
         "d.parquet",
-        "--gene-embedding-mode",
-        "lora",
-        "--gene-adapter-residual",
+        "--feature-adapter-residual",
     ]);
-    assert!(wrong.validate_gene_embedding().is_err());
+    assert!(ok.validate_feature_embedding().is_ok());
+    let wrong = parse(&[
+        "--feature-embedding",
+        "d.parquet",
+        "--feature-embedding-mode",
+        "lora",
+        "--feature-adapter-residual",
+    ]);
+    assert!(wrong.validate_feature_embedding().is_err());
 }
 
 mod embedding_dim {
@@ -86,9 +90,9 @@ mod embedding_dim {
     fn a_pinned_dictionary_sets_the_width_and_a_conflicting_flag_is_refused() {
         for mode in ["freeze", "free", "lora"] {
             let a = [
-                "--gene-embedding",
+                "--feature-embedding",
                 "d.parquet",
-                "--gene-embedding-mode",
+                "--feature-embedding-mode",
                 mode,
             ];
             assert_eq!(dim(&a, Some(128)).unwrap(), 128, "{mode}");
@@ -102,7 +106,7 @@ mod embedding_dim {
 
     #[test]
     fn the_adapter_keeps_its_own_width() {
-        let a = ["--gene-embedding", "d.parquet"];
+        let a = ["--feature-embedding", "d.parquet"];
         assert_eq!(dim(&a, Some(128)).unwrap(), DEFAULT_EMBEDDING_DIM);
         assert_eq!(
             dim(&[&a[..], &["--embedding-dim", "32"]].concat(), Some(128)).unwrap(),
@@ -113,9 +117,9 @@ mod embedding_dim {
     #[test]
     fn the_lora_rank_is_validated_against_the_resolved_width() {
         let a = [
-            "--gene-embedding",
+            "--feature-embedding",
             "d.parquet",
-            "--gene-embedding-mode",
+            "--feature-embedding-mode",
             "lora",
         ];
         assert!(dim(&a, Some(128)).is_ok());

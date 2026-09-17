@@ -9,14 +9,14 @@
 use super::PairDictionary;
 use matrix_util::agreement::{agreement_from_log_rate, CellAgreement};
 
-/// The gene axis a run scores over, resolved once.
+/// The feature axis a run scores over, resolved once.
 pub struct EvalAxis {
     /// Positions the CORRELATIONS run over; `None` leaves them `NaN`. Also the
     /// marker for "the user restricted the axis" — when absent, everything active
     /// is scored by the likelihood but nothing is correlated, because a sort per
     /// pair is not a cost to pay by default.
     correlated: Option<Vec<u32>>,
-    /// Positions the likelihood normalises over — every active gene when the
+    /// Positions the likelihood normalises over — every active feature when the
     /// user did not restrict the axis.
     normalised_over: Vec<u32>,
     /// Membership by active-list position — a bitmap, not a hash set.
@@ -27,8 +27,8 @@ pub struct EvalAxis {
 
 impl EvalAxis {
     #[must_use]
-    fn scores(&self, gene: usize) -> bool {
-        self.is_scored.get(gene).copied().unwrap_or(false)
+    fn scores(&self, feature: usize) -> bool {
+        self.is_scored.get(feature).copied().unwrap_or(false)
     }
 
     /// Streaming log-sum-exp of `f` over the scored positions.
@@ -58,7 +58,7 @@ pub(super) fn log_sum_exp(values: impl Iterator<Item = f32>) -> f32 {
 #[derive(Clone, Copy, Debug)]
 pub struct PairScore {
     pub llik: f32,
-    /// The same likelihood under `b_g` alone — the gene abundances with no
+    /// The same likelihood under `b_g` alone — the feature abundances with no
     /// pair-specific embedding. Every pair scores against this floor, so the
     /// difference is what the latent bought.
     pub null_llik: f32,
@@ -86,8 +86,8 @@ impl PairDictionary {
     /// `eval` restricts the whole score — likelihood, null and correlations — to a
     /// fixed set of active-list positions. Restricting the likelihood too is what
     /// makes it comparable with `senna predict`: renormalising over the scored
-    /// genes turns it into the conditional multinomial "given a count landed in
-    /// this gene set, which gene is it", which is exactly what senna reports. Two
+    /// features turns it into the conditional multinomial "given a count landed in
+    /// this feature set, which feature is it", which is exactly what senna reports. Two
     /// commands answering the same question is worth more here than each
     /// answering its own.
     #[cfg(test)]
@@ -114,20 +114,20 @@ impl PairDictionary {
         let mut llik = 0f64;
         let mut null_llik = 0f64;
         let mut total = 0f32;
-        for &(gene, x) in local {
-            let gene = gene as usize;
-            if !axis.scores(gene) {
+        for &(feature, x) in local {
+            let feature = feature as usize;
+            if !axis.scores(feature) {
                 continue;
             }
             total += x;
             // Floored at the SHARED constant, not left to the logit clamp: the
             // clamp bounds the un-normalised score, so after subtracting the
-            // partition a starved gene could be charged roughly twice senna's
+            // partition a starved feature could be charged roughly twice senna's
             // floor, and the cross-engine ranking column would punish the same
             // event differently per binary.
             let floor = matrix_util::agreement::LOG_PROB_FLOOR;
-            llik += f64::from(x) * f64::from(log_rate[gene] - z_model).max(floor);
-            null_llik += f64::from(x) * f64::from(self.b[gene] - axis.z_null).max(floor);
+            llik += f64::from(x) * f64::from(log_rate[feature] - z_model).max(floor);
+            null_llik += f64::from(x) * f64::from(self.b[feature] - axis.z_null).max(floor);
         }
         if !total.is_finite() || total <= 0.0 {
             return PairScore::default();
@@ -145,7 +145,7 @@ impl PairDictionary {
     ///
     /// The observed side is densified onto that axis rather than the sparse
     /// profile being correlated directly: a held-out profile is mostly zeros, and
-    /// those zeros are data — a model that puts mass on an unobserved gene has to
+    /// those zeros are data — a model that puts mass on an unobserved feature has to
     /// be charged for it.
     ///
     /// The log-rate is handed over as-is; `agreement_from_log_rate` renormalises
@@ -158,8 +158,8 @@ impl PairDictionary {
             };
         };
         let mut dense_obs = vec![0f32; self.b.len()];
-        for &(gene, x) in local {
-            dense_obs[gene as usize] += x;
+        for &(feature, x) in local {
+            dense_obs[feature as usize] += x;
         }
         let observed: Vec<f32> = axis.iter().map(|&g| dense_obs[g as usize]).collect();
         let log_rate_on_axis: Vec<f32> = axis.iter().map(|&g| log_rate[g as usize]).collect();
@@ -199,19 +199,19 @@ impl PairDictionary {
 
     /// Map feature names to active-list positions for `--eval-features`.
     #[must_use]
-    pub fn eval_positions(&self, gene_names: &[Box<str>], wanted: &[Box<str>]) -> Vec<u32> {
+    pub fn eval_positions(&self, feature_names: &[Box<str>], wanted: &[Box<str>]) -> Vec<u32> {
         // Lowercased on both sides HERE, not by the caller — splitting the rule
         // across two sites is how one side forgets it. Same key senna's resolver
-        // and the gene remap use: a panel that differs from the data only in
-        // case names the same genes.
+        // and the feature remap use: a panel that differs from the data only in
+        // case names the same features.
         let wanted_lower: std::collections::HashSet<String> =
             wanted.iter().map(|n| n.to_lowercase()).collect();
-        gene_names
+        feature_names
             .iter()
             .enumerate()
             .filter(|(_, n)| wanted_lower.contains(&n.to_lowercase()))
-            .filter_map(|(gene, _)| {
-                let position = *self.local_of_gene.get(gene)?;
+            .filter_map(|(feature, _)| {
+                let position = *self.local_of_feature.get(feature)?;
                 (position != u32::MAX).then_some(position)
             })
             .collect()

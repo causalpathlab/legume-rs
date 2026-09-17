@@ -14,7 +14,7 @@ driven by `senna annotate-gem` and `senna lineage --markers`.
 | output | rows | meaning |
 |---|---|---|
 | `{out}.cell_embedding.parquet` | cells × H | the latent cell coordinate **θ_c** |
-| `{out}.feature_embedding.parquet` | feature rows × H | the co-embedded gene vector **e_g** |
+| `{out}.feature_coembedding.parquet` | feature rows × H | the co-embedded gene vector **e_g** (ρ re-placed onto the cell manifold; the raw ρ is `{out}.feature_embedding.parquet`) |
 
 Feature rows are keyed `{gene}/count/{spliced,unspliced}`; annotation selects one modality and
 re-keys by gene (`spliced` is the base track every gene has; `unspliced`, when present, is its
@@ -37,7 +37,7 @@ largely irrespective of its direction. Measured on an untrained panel, the rank 
 between a type's centroid norm and the share of cells it captured was **+0.93**.
 
 > **Prerequisite — the panel must be on the trained feature axis.** A marker that never entered
-> the fit is not merely down-weighted, it is *absent* from `{out}.feature_embedding.parquet`, and
+> the fit is not merely down-weighted, it is *absent* from `{out}.feature_coembedding.parquet`, and
 > a type that entered with 20 markers and scores on 1 still produces a confident-looking call.
 > Measured with a mismatched panel (44% of markers trained): spurious assignment to types absent
 > from the tissue ran at 59.7%; with the matching panel (97% trained) it fell to **18.9%**.

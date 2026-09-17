@@ -494,15 +494,15 @@ pub fn read_link_community(path: &Path) -> anyhow::Result<(Vec<EdgePair>, Vec<i6
     Ok((pairs, community, total_counts))
 }
 
-/// Read a gene_community parquet: G × K. Returns (mat, gene_names).
+/// Read a feature_community parquet: G × K. Returns (mat, feature_names).
 ///
 /// `pinto lc` writes this file in *melted* form (one row per
-/// gene-community pair, with columns `gene`, `community`, `mean`, `sd`,
+/// feature-community pair, with columns `feature`, `community`, `mean`, `sd`,
 /// `log_mean`, `log_sd`). We pivot the `mean` column back to a wide
 /// G × K matrix here so downstream code can index `gt[(g, k)]` as
-/// "posterior mean for gene g in community k". Communities are sorted
+/// "posterior mean for feature g in community k". Communities are sorted
 /// numerically by their string label (the writer emits `"0".."K-1"`).
-pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
+pub fn read_feature_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 path: {path:?}"))?;
@@ -516,35 +516,39 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         .map(|(i, f)| (f.name().to_string().into_boxed_str(), i))
         .collect();
 
-    // lc writes long format: (gene, community, mean) triples. cage /
+    // lc writes long format: (feature, community, mean) triples. cage /
     // cage-mcmc write `feature_dictionary.parquet` in wide format:
     // one row per feature, one column per cluster. Dispatch on schema.
-    let has_long = name_to_idx.contains_key("gene")
+    // The row-name column is `feature`; older files wrote `gene`.
+    let name_col = ["feature", "gene"]
+        .into_iter()
+        .find(|c| name_to_idx.contains_key(*c));
+    let has_long = name_col.is_some()
         && name_to_idx.contains_key("community")
         && name_to_idx.contains_key("mean");
     if !has_long {
-        return read_gene_community_wide(path, &reader, &name_to_idx);
+        return read_feature_community_wide(path, &reader, &name_to_idx);
     }
-    let gene_idx = name_to_idx[&Box::<str>::from("gene")];
+    let feature_idx = name_to_idx[&Box::<str>::from(name_col.unwrap_or("feature"))];
     let community_idx = name_to_idx[&Box::<str>::from("community")];
     let mean_idx = name_to_idx[&Box::<str>::from("mean")];
 
-    let mut gene_pos: HashMap<Box<str>, usize> = HashMap::default();
-    let mut gene_names: Vec<Box<str>> = Vec::new();
+    let mut feature_pos: HashMap<Box<str>, usize> = HashMap::default();
+    let mut feature_names: Vec<Box<str>> = Vec::new();
     let mut community_pos: HashMap<Box<str>, usize> = HashMap::default();
     let mut community_labels: Vec<Box<str>> = Vec::new();
     let mut triples: Vec<(usize, usize, f32)> = Vec::new();
 
     for record in reader.get_row_iter(None)? {
         let row = record?;
-        let gene = row.get_string(gene_idx)?.clone().into_boxed_str();
+        let feature = row.get_string(feature_idx)?.clone().into_boxed_str();
         let community = row.get_string(community_idx)?.clone().into_boxed_str();
         let mean = row
             .get_float(mean_idx)
             .or_else(|_| row.get_double(mean_idx).map(|v| v as f32))?;
-        let g_pos = *gene_pos.entry(gene.clone()).or_insert_with(|| {
-            gene_names.push(gene.clone());
-            gene_names.len() - 1
+        let g_pos = *feature_pos.entry(feature.clone()).or_insert_with(|| {
+            feature_names.push(feature.clone());
+            feature_names.len() - 1
         });
         let c_pos = *community_pos.entry(community.clone()).or_insert_with(|| {
             community_labels.push(community.clone());
@@ -564,7 +568,7 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         .map(|(i, lab)| {
             let c = parse_community_col_name(lab).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{path_str}: gene_community `community` label {lab:?} is not a community ID \
+                    "{path_str}: feature_community `community` label {lab:?} is not a community ID \
                      (expected \"C{{c}}\" or bare integer)."
                 )
             })?;
@@ -575,7 +579,7 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     if let Some(&(c0, _)) = parsed.first() {
         if c0 < 0 {
             anyhow::bail!(
-                "{path_str}: gene_community has negative community ID {c0}; expected non-negative integers."
+                "{path_str}: feature_community has negative community ID {c0}; expected non-negative integers."
             );
         }
     }
@@ -587,7 +591,7 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         .collect();
     if !missing.is_empty() {
         log::warn!(
-            "{path_str}: gene_community is missing communities {missing:?} \
+            "{path_str}: feature_community is missing communities {missing:?} \
              (have 0..{} with gaps); zero-filling so plot indices stay aligned.",
             n_communities.saturating_sub(1),
         );
@@ -598,28 +602,28 @@ pub fn read_gene_community(path: &Path) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         .map(|&(c, old_i)| (old_i, c as usize))
         .collect();
 
-    let n_genes = gene_names.len();
-    let mut mat = Mat::zeros(n_genes, n_communities);
+    let n_features = feature_names.len();
+    let mut mat = Mat::zeros(n_features, n_communities);
     for (g, c_old, v) in triples {
         let c_new = new_index[&c_old];
         mat[(g, c_new)] = v;
     }
-    Ok((mat, gene_names))
+    Ok((mat, feature_names))
 }
 
 /// Wide-format `feature_dictionary.parquet` (cage / cage-mcmc):
-/// one row per feature, row-name column `feature`/`gene`, plus
+/// one row per feature, row-name column `feature`/`feature`, plus
 /// per-cluster columns (`cluster_<k>` / `C<k>` / bare ints). Returns
 /// `[G × K]` matrix and feature names; matrix column j corresponds to
 /// the cluster ID parsed from the column name (zero-filled gaps).
-fn read_gene_community_wide(
+fn read_feature_community_wide(
     path: &Path,
     reader: &SerializedFileReader<File>,
     name_to_idx: &HashMap<Box<str>, usize>,
 ) -> anyhow::Result<(Mat, Vec<Box<str>>)> {
     let path_str = path.to_str().unwrap_or("<non-utf8>");
 
-    // Row-name column: tolerate `feature` (cage) or `gene` (legacy).
+    // Row-name column: `feature`, or `gene` from an older run.
     let name_col_label: Box<str> = if name_to_idx.contains_key(&Box::<str>::from("feature")) {
         "feature".into()
     } else if name_to_idx.contains_key(&Box::<str>::from("gene")) {
@@ -653,7 +657,7 @@ fn read_gene_community_wide(
     );
     let n_communities = (max_c + 1) as usize;
 
-    let mut gene_names: Vec<Box<str>> = Vec::new();
+    let mut feature_names: Vec<Box<str>> = Vec::new();
     let mut rows: Vec<Vec<f32>> = Vec::new();
     for record in reader.get_row_iter(None)? {
         let row = record?;
@@ -666,18 +670,18 @@ fn read_gene_community_wide(
                 .unwrap_or(0.0);
             r[c as usize] = v;
         }
-        gene_names.push(g);
+        feature_names.push(g);
         rows.push(r);
     }
 
-    let n_genes = gene_names.len();
-    let mut mat = Mat::zeros(n_genes, n_communities);
+    let n_features = feature_names.len();
+    let mut mat = Mat::zeros(n_features, n_communities);
     for (i, r) in rows.into_iter().enumerate() {
         for (j, v) in r.into_iter().enumerate() {
             mat[(i, j)] = v;
         }
     }
-    Ok((mat, gene_names))
+    Ok((mat, feature_names))
 }
 
 /// Map "0","1",… numeric batch labels to the friendly basenames of the

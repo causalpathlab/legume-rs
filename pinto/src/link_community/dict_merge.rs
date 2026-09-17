@@ -1,13 +1,13 @@
-//! Cosine-similarity agglomerative merging over the gene × community
+//! Cosine-similarity agglomerative merging over the feature × community
 //! dictionary.
 //!
-//! In `pinto lc`, each fitted link community has a posterior gene-expression
-//! profile (the "dictionary atom") produced by `compute_gene_community_stat`.
+//! In `pinto lc`, each fitted link community has a posterior feature-expression
+//! profile (the "dictionary atom") produced by `compute_feature_community_stat`.
 //! Many fine link communities share a near-identical profile — they encode
 //! the same cell type or program sitting at different spatial locations or
 //! neighbourhoods. To recover a consistent cell-type-level annotation we
 //! collapse such columns by hierarchical agglomerative merging on cosine
-//! similarity of per-gene-centred log-rates.
+//! similarity of per-feature-centred log-rates.
 //!
 //! The output `Vec<BhcMerge>` reuses the merge-tree node type from
 //! `data_beans_alg::bhc` purely as a binary-merge-tree carrier. The
@@ -26,8 +26,8 @@ pub use data_beans_alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
 use matrix_util::traits::MatOps;
 
 /// Build an agglomerative average-linkage merge tree over the K columns of
-/// `post_log_mean` (gene × community posterior log-mean) using cosine
-/// similarity of per-gene-centred community vectors.
+/// `post_log_mean` (feature × community posterior log-mean) using cosine
+/// similarity of per-feature-centred community vectors.
 ///
 /// Returns `K - 1` merges in increasing-id order. Each merge records the
 /// cosine similarity at which the two children were joined in `log_bf`.
@@ -35,64 +35,64 @@ use matrix_util::traits::MatOps;
 /// using a cosine-similarity threshold (e.g. 0.9 = collapse columns whose
 /// merge happened at cosine ≥ 0.9).
 ///
-/// `keep_genes` is a per-row mask of genes to score on, indexed like
+/// `keep_features` is a per-row mask of features to score on, indexed like
 /// `post_log_mean`'s rows; `None` uses every row. Its length must equal
 /// `post_log_mean.nrows()`.
-/// Passing the detected-gene mask is strongly recommended — see the comment on
-/// step 0 for what leaving undetected genes in does to the similarity.
+/// Passing the detected-feature mask is strongly recommended — see the comment on
+/// step 0 for what leaving undetected features in does to the similarity.
 ///
-/// Returns an empty vector for `K < 2`, or when the mask keeps no genes.
-pub fn cosine_merge(post_log_mean: &Mat, keep_genes: Option<&[bool]>) -> Vec<BhcMerge> {
+/// Returns an empty vector for `K < 2`, or when the mask keeps no features.
+pub fn cosine_merge(post_log_mean: &Mat, keep_features: Option<&[bool]>) -> Vec<BhcMerge> {
     let k = post_log_mean.ncols();
     if k < 2 {
         return Vec::new();
     }
 
-    // 0. Restrict to informative genes.
+    // 0. Restrict to informative features.
     //
-    // UNDETECTED GENES DOMINATE THIS SIMILARITY IF LEFT IN, and not because they
-    // are flat — because they are the LOUDEST rows. A gene with no counts gets a
+    // UNDETECTED FEATURES DOMINATE THIS SIMILARITY IF LEFT IN, and not because they
+    // are flat — because they are the LOUDEST rows. A feature with no counts gets a
     // Poisson-Gamma posterior driven entirely by each community's exposure, and
     // `log` of a near-zero rate swings hard between communities, while a
-    // well-measured gene's log-rate is stable. Measured, the
-    // centred row sum-of-squares was ~13x LARGER for zero-count genes than for
-    // genes seen in >= 20 spots (medians 235 vs 18.5), and
+    // well-measured feature's log-rate is stable. Measured, the
+    // centred row sum-of-squares was ~13x LARGER for zero-count features than for
+    // features seen in >= 20 spots (medians 235 vs 18.5), and
     // `spearman(row SS, nnz) = -0.986`. Cosine is dominated by the
-    // largest-magnitude rows, so 19k noise genes outvoted 17.7k real ones: 43% of
+    // largest-magnitude rows, so 19k noise features outvoted 17.7k real ones: 43% of
     // community pairs scored >= 0.9 and the default cut collapsed 50 communities
     // to 4, with 97% of cells in one — a segmentation at chance (1.03x a
     // neighbour-agreement null, against 11.1x before the merge).
     //
     // Filtering by DETECTION is the only criterion that works here. Two plausible
     // alternatives are both backwards, and were measured to be so:
-    //   * NB-Fisher `gene_weights` (already computed upstream) give undetected
-    //     genes weight exactly 1.0 and well-detected ones a median of 0.878 —
-    //     they are built to suppress high-dispersion housekeeping genes, which is
+    //   * NB-Fisher `feature_weights` (already computed upstream) give undetected
+    //     features weight exactly 1.0 and well-detected ones a median of 0.878 —
+    //     they are built to suppress high-dispersion housekeeping features, which is
     //     the opposite question.
     //   * Filtering on low dictionary variance keeps precisely the noise, per the
     //     inverted correlation above.
-    // A mismatched mask would silently score a truncated gene set, which looks
+    // A mismatched mask would silently score a truncated feature set, which looks
     // like a plausible tree and is not one.
-    if let Some(mask) = keep_genes {
+    if let Some(mask) = keep_features {
         assert_eq!(
             mask.len(),
             post_log_mean.nrows(),
-            "keep_genes must be indexed like post_log_mean's rows"
+            "keep_features must be indexed like post_log_mean's rows"
         );
     }
     let rows: Vec<usize> = (0..post_log_mean.nrows())
-        .filter(|&g| keep_genes.is_none_or(|mask| mask[g]))
+        .filter(|&g| keep_features.is_none_or(|mask| mask[g]))
         .collect();
     let n_kept = rows.len();
     if n_kept == 0 {
         return Vec::new();
     }
 
-    // 1. Per-gene centring (subtract row mean across communities), so a gene's
+    // 1. Per-feature centring (subtract row mean across communities), so a feature's
     //    shared level across communities drops out and only its contrast
     //    survives. NOTE this is NOT a Pearson correlation between communities —
     //    that would need the COLUMNS centred too. Column centring was measured to
-    //    add nothing once the gene filter above is applied.
+    //    add nothing once the feature filter above is applied.
     let mut z = Mat::zeros(n_kept, k);
     for (gi, &g) in rows.iter().enumerate() {
         let mu: f32 = post_log_mean.row(g).iter().sum::<f32>() / k as f32;

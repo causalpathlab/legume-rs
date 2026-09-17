@@ -275,9 +275,9 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
     }
 
     if let Some(data_files) = args.expr_data_files.as_ref() {
-        info!("Estimate cluster-specific gene expressions");
+        info!("Estimate cluster-specific feature expressions");
         let data_vec = read_expr_data(data_files)?;
-        let genes = data_vec.row_names()?;
+        let features = data_vec.row_names()?;
         let data_vertices = data_vec.column_names()?;
 
         let jobs = matrix_util::utils::generate_minibatch_intervals(
@@ -286,20 +286,20 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             args.block_size,
         );
 
-        let prog_bar = new_progress_bar(jobs.len() as u64).with_message("gene-module blocks");
-        // Folded, not collected: `sum_dk` is `[n_genes x k]` no matter how few
+        let prog_bar = new_progress_bar(jobs.len() as u64).with_message("feature-module blocks");
+        // Folded, not collected: `sum_dk` is `[n_features x k]` no matter how few
         // cells a job reads, so collecting one per job makes peak memory scale
         // with the job count. `generate_minibatch_intervals` sizes a block to
         // bound READ work and knows nothing about that, so a wide, sparse input
         // lands on the small-block floor and produces thousands of jobs. Same
-        // shape as `fit_gene_community_param`.
+        // shape as `fit_feature_community_param`.
         let (mut sum_dk, n_k_sum) = jobs
             .par_iter()
             .progress_with(prog_bar.clone())
             .try_fold(
                 || {
                     (
-                        Mat::zeros(genes.len(), prop_kn.nrows()),
+                        Mat::zeros(features.len(), prop_kn.nrows()),
                         DVec::zeros(prop_kn.nrows()),
                     )
                 },
@@ -321,7 +321,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
             .try_reduce(
                 || {
                     (
-                        Mat::zeros(genes.len(), prop_kn.nrows()),
+                        Mat::zeros(features.len(), prop_kn.nrows()),
                         DVec::zeros(prop_kn.nrows()),
                     )
                 },
@@ -334,9 +334,9 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         prog_bar.finish_and_clear();
         let n_1k = n_k_sum.transpose();
 
-        info!("Applying NB Fisher-info weighting to gene-cluster stats");
+        info!("Applying NB Fisher-info weighting to feature-cluster stats");
         let w = compute_nb_fisher_weights(&data_vec, args.block_size)?;
-        apply_gene_weights(&mut sum_dk, &w);
+        apply_feature_weights(&mut sum_dk, &w);
 
         let mut gamma_param = GammaMatrix::new((sum_dk.nrows(), sum_dk.ncols()), 1.0, 1.0);
 
@@ -346,8 +346,8 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         gamma_param.calibrate();
 
         gamma_param.to_melted_parquet(
-            &(args.out.to_string() + ".genes.parquet"),
-            (Some(&genes), Some("gene")),
+            &(args.out.to_string() + ".features.parquet"),
+            (Some(&features), Some("feature")),
             (None, Some("community")),
         )?;
     }

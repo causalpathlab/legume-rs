@@ -26,7 +26,7 @@ pub fn embed_diag(args: &EmbedDiagArgs) -> anyhow::Result<()> {
 }
 
 /// A digest of a file's bytes, used to recognise ONE table recorded under two
-/// manifest slots. `bge --skip-etm` writes ρ to `{out}.feature_loading.parquet`
+/// manifest slots. A v1 `bge --skip-etm` wrote ρ to `{out}.feature_loading.parquet`
 /// **and** `{out}.dictionary.parquet` — two distinct files with identical
 /// content — so comparing paths, canonical or not, does not catch it, and the
 /// report shows one table as two independent findings that happen to agree.

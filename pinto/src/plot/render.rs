@@ -365,7 +365,7 @@ pub fn build_propensity_community_heatmap_layers(
     )
 }
 
-/// Marker gene heatmap (type 1): color = viridis bin on log-scale
+/// Marker feature heatmap (type 1): color = viridis bin on log-scale
 /// expression, point size fixed. Every cell drawn.
 pub fn build_marker_heatmap_layers(
     frame: &Frame,

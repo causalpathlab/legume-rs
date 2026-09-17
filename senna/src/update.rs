@@ -373,11 +373,14 @@ fn multiome_in_args(args: &serde_json::Value) -> bool {
 /// one: the backend `update` itself appended, recognised by the name the tool
 /// gives it.
 fn carried_reference_among(recorded: &[Box<str>]) -> Option<&str> {
+    // Either the `.zarr.zip` archive or the unzipped `.zarr` directory an
+    // older binary wrote; the archive suffix extends the directory one.
     let suffix = format!(".{}", crate::pb_reference::BACKEND_SUFFIX);
+    let legacy = suffix.trim_end_matches(".zip");
     recorded
         .iter()
         .map(AsRef::as_ref)
-        .find(|p: &&str| p.ends_with(&suffix))
+        .find(|p: &&str| p.ends_with(&suffix) || p.ends_with(legacy))
 }
 
 pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
