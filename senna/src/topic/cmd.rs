@@ -702,7 +702,7 @@ fn write_topic_manifest(
         pb_latent_suffix: Some("pb_latent.parquet"),
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: None,
-        feature_loading_suffix: None,
+        feature_coembedding_suffix: None,
         carried: None,
         module_membership_suffix: None,
         module_dictionary_suffix: None,

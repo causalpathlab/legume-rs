@@ -1,5 +1,5 @@
 //! Log-scale standardization with robust percentile clipping, plus a
-//! grayscale color ramp. Shared by the marker-gene heatmap plot, the
+//! grayscale color ramp. Shared by the marker-feature heatmap plot, the
 //! per-community propensity heatmap plot, and the size-mapping path
 //! for the community-colored marker plot.
 //!
@@ -66,7 +66,7 @@ pub fn log1p_vec(values: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// Percentile-clipped, log-scaled bucket assignment for the marker-gene
+/// Percentile-clipped, log-scaled bucket assignment for the marker-feature
 /// heatmap plot.
 ///
 /// Returns `bucket[i]` ∈ `0..bins`, where bin 0 is dimmest. Outlier

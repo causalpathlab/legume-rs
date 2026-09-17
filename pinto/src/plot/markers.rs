@@ -1,21 +1,21 @@
-//! Marker gene ranking + chunked row extraction.
+//! Marker feature ranking + chunked row extraction.
 //!
-//! Ranking: for community `k`, rank genes by descending `gene_community[g, k]`,
-//! breaking ties by *specificity* (prefer genes with low activity in
-//! other communities). Skips all-zero genes so we don't ship empty PDFs.
+//! Ranking: for community `k`, rank features by descending `feature_community[g, k]`,
+//! breaking ties by *specificity* (prefer features with low activity in
+//! other communities). Skips all-zero features so we don't ship empty PDFs.
 //!
 //! Row extraction: data-beans is column-major (cells are columns), so
-//! a "gene row for N cells" pass reads cells in blocks and harvests
-//! the requested gene rows from each CSC block. This amortizes block
-//! I/O across all marker genes in a single pass.
+//! a "feature row for N cells" pass reads cells in blocks and harvests
+//! the requested feature rows from each CSC block. This amortizes block
+//! I/O across all marker features in a single pass.
 
 use crate::util::common::*;
 
-/// Return up to `n` marker gene indices (into gt row-ids) + names for
+/// Return up to `n` marker feature indices (into gt row-ids) + names for
 /// community `k`. Empty if community has no signal.
 pub fn top_n_markers(
     gt: &Mat,
-    gene_names: &[Box<str>],
+    feature_names: &[Box<str>],
     k: usize,
     n: usize,
 ) -> Vec<(usize, Box<str>)> {
@@ -51,42 +51,42 @@ pub fn top_n_markers(
         .into_iter()
         .take(n)
         .map(|(_, _, g)| {
-            let name = gene_names
+            let name = feature_names
                 .get(g)
                 .cloned()
-                .unwrap_or_else(|| format!("gene_{g}").into_boxed_str());
+                .unwrap_or_else(|| format!("feature_{g}").into_boxed_str());
             (g, name)
         })
         .collect()
 }
 
-/// Fetch per-cell expression for `gene_names` and an **aligned**
+/// Fetch per-cell expression for `feature_names` and an **aligned**
 /// per-cell slot list.
 ///
 /// `data_col_ixs[i] = Some(c)` means "use data-beans column `c` for
 /// output slot `i`"; `None` leaves slot `i` at `0.0`. The return value
-/// has one `Vec<f32>` per gene, each of length `data_col_ixs.len()`,
+/// has one `Vec<f32>` per feature, each of length `data_col_ixs.len()`,
 /// positionally aligned with `core.cell_ixs`.
 ///
 /// Internally we delegate row reads to each backend's `read_rows_csc`
 /// (part of the `SparseIo` trait) so we touch only the rows we need
-/// instead of loading every gene per cell chunk. That's the fast path
-/// for typical top_markers × K ≈ 50 genes × hundreds-of-thousands of
+/// instead of loading every feature per cell chunk. That's the fast path
+/// for typical top_markers × K ≈ 50 features × hundreds-of-thousands of
 /// cells.
-pub fn fetch_gene_rows_aligned(
+pub fn fetch_feature_rows_aligned(
     data: &SparseIoVec,
-    gene_names: &[Box<str>],
+    feature_names: &[Box<str>],
     data_col_ixs: &[Option<usize>],
 ) -> anyhow::Result<Vec<Vec<f32>>> {
     let n_cells = data_col_ixs.len();
-    let n_genes = gene_names.len();
-    if n_genes == 0 || n_cells == 0 {
-        return Ok((0..n_genes).map(|_| vec![0.0; n_cells]).collect());
+    let n_features = feature_names.len();
+    if n_features == 0 || n_cells == 0 {
+        return Ok((0..n_features).map(|_| vec![0.0; n_cells]).collect());
     }
 
-    let mut out: Vec<Vec<f32>> = (0..n_genes).map(|_| vec![0.0; n_cells]).collect();
+    let mut out: Vec<Vec<f32>> = (0..n_features).map(|_| vec![0.0; n_cells]).collect();
 
-    // For each backend: translate gene *names* → backend-local row
+    // For each backend: translate feature *names* → backend-local row
     // indices, read just those rows (cheap), and scatter values into
     // slots whose `data_col_ixs` falls in this backend's column range.
     let mut col_cursor = 0usize;
@@ -120,11 +120,11 @@ pub fn fetch_gene_rows_aligned(
 
         // Backend row_names → ix so we can translate marker names to
         // backend-local row ids. We also register the canonicalized
-        // alias (e.g. `ENSG..._SAMD11_Gene` → `SAMD11`) for each row
+        // alias (e.g. `ENSG..._SAMD11_Feature` → `SAMD11`) for each row
         // so marker names produced by cage/lc (which run through
-        // `FeatureNameKind::auto_detect → Gene { delim: '_' }`) line
+        // `FeatureNameKind::auto_detect → Feature { delim: '_' }`) line
         // up with the raw data's long row names. Without this, plot
-        // marker overlays read 0/N for every gene.
+        // marker overlays read 0/N for every feature.
         let row_names = backend.row_names()?;
         let mut row_ix: HashMap<Box<str>, usize> = HashMap::default();
         let kind = auxiliary_data::feature_names::FeatureNameKind::auto_detect(&row_names);
@@ -136,35 +136,35 @@ pub fn fetch_gene_rows_aligned(
                     row_ix.entry(canon).or_insert(i);
                 }
             }
-            // A splice-channelized row is `{gene}/count/{track}`, and no
-            // `FeatureNameKind` splits on `/` — it aliases on the gene
-            // delimiter or parses a locus. So a gene-keyed table (which is what
+            // A splice-channelized row is `{feature}/count/{track}`, and no
+            // `FeatureNameKind` splits on `/` — it aliases on the feature
+            // delimiter or parses a locus. So a feature-keyed table (which is what
             // `lc` writes) would resolve to nothing here and every marker panel
             // would render blank, with no error.
             //
             // Deliberately the SPLICED track alone, not the two summed: a
             // marker panel is asking about cell identity, and identity is
             // carried by steady-state message rather than by what was being
-            // transcribed at the moment of capture. The gene-level dictionary
+            // transcribed at the moment of capture. The feature-level dictionary
             // that selected the marker pools both tracks; this panel does not,
             // and that difference is intended rather than an artifact of which
             // row happened to come first.
-            if let Some((gene, is_nascent)) = auxiliary_data::feature_rows::split_count_row(n) {
+            if let Some((feature, is_nascent)) = auxiliary_data::feature_rows::split_count_row(n) {
                 if !is_nascent {
-                    row_ix.entry(gene.into()).or_insert(i);
+                    row_ix.entry(feature.into()).or_insert(i);
                 }
             }
         }
 
-        let mut local_row_per_gene: Vec<Option<usize>> = Vec::with_capacity(n_genes);
-        let mut present_rows: Vec<usize> = Vec::with_capacity(n_genes);
-        for g in gene_names {
+        let mut local_row_per_feature: Vec<Option<usize>> = Vec::with_capacity(n_features);
+        let mut present_rows: Vec<usize> = Vec::with_capacity(n_features);
+        for g in feature_names {
             match row_ix.get(g) {
                 Some(&r) => {
-                    local_row_per_gene.push(Some(present_rows.len()));
+                    local_row_per_feature.push(Some(present_rows.len()));
                     present_rows.push(r);
                 }
-                None => local_row_per_gene.push(None),
+                None => local_row_per_feature.push(None),
             }
         }
         if present_rows.is_empty() {
@@ -177,7 +177,7 @@ pub fn fetch_gene_rows_aligned(
         // + zarr both stream rows by stripe).
         let slab = backend.read_rows_ndarray(present_rows.clone())?;
 
-        for (g, maybe_local_row) in local_row_per_gene.iter().enumerate() {
+        for (g, maybe_local_row) in local_row_per_feature.iter().enumerate() {
             let Some(lr) = maybe_local_row else { continue };
             for &(out_slot, lc) in &backend_cells {
                 out[g][out_slot] = slab[[*lr, lc]];

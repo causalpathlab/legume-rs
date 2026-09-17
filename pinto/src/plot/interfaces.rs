@@ -6,7 +6,7 @@
 //! by the cell's entropy quantile within the core (lowest → 0, highest
 //! → the full hex tile). The TSV lists, for each focal cell (top
 //! quantile), its dominant community, its 1- and 2-hop neighbor counts,
-//! and the top-N marker genes per neighbor community.
+//! and the top-N marker features per neighbor community.
 //!
 //! Driven by `--show-interfaces`. Silently skipped for any (level, core)
 //! whose propensity parquet has no `entropy` column (older runs).
@@ -35,7 +35,7 @@ pub fn render_interfaces(
     entropy: &[f32],
     dominant: &[i64],
     edges: Option<&[EdgePair]>,
-    gene_community: Option<&(Mat, Vec<Box<str>>)>,
+    feature_community: Option<&(Mat, Vec<Box<str>>)>,
     out_stub: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     if entropy.len() != cells.n() {
@@ -86,8 +86,8 @@ pub fn render_interfaces(
         entropy,
         dominant,
         &neighborhoods,
-        gene_community,
-        args.interface_top_genes,
+        feature_community,
+        args.interface_top_features,
     )?;
     emitted.push(tsv_path);
 
@@ -305,14 +305,14 @@ fn write_interface_tsv(
     entropy: &[f32],
     dominant: &[i64],
     neighborhoods: &[Neighborhood],
-    gene_community: Option<&(Mat, Vec<Box<str>>)>,
-    top_genes: usize,
+    feature_community: Option<&(Mat, Vec<Box<str>>)>,
+    top_features: usize,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
     writeln!(
         f,
-        "focal_cell\tentropy\tdominant_community\tn_1hop\tn_2hop\tneighbor_communities\ttop_genes_per_neighbor_community"
+        "focal_cell\tentropy\tdominant_community\tn_1hop\tn_2hop\tneighbor_communities\ttop_features_per_neighbor_community"
     )?;
 
     for (focal_idx, nbrs) in focal.iter().zip(neighborhoods.iter()) {
@@ -334,12 +334,12 @@ fn write_interface_tsv(
             .collect::<Vec<_>>()
             .join(",");
 
-        let genes_str: String = match gene_community {
+        let features_str: String = match feature_community {
             Some((gt, names)) => comm_pairs
                 .iter()
                 .filter(|(c, _)| *c >= 0 && (*c as usize) < gt.ncols())
                 .map(|(c, _)| {
-                    let top = markers::top_n_markers(gt, names, *c as usize, top_genes);
+                    let top = markers::top_n_markers(gt, names, *c as usize, top_features);
                     let g = top
                         .iter()
                         .map(|(_, n)| n.as_ref())
@@ -354,7 +354,7 @@ fn write_interface_tsv(
 
         writeln!(
             f,
-            "{name}\t{h:.6}\t{dom}\t{}\t{}\t{comm_str}\t{genes_str}",
+            "{name}\t{h:.6}\t{dom}\t{}\t{}\t{comm_str}\t{features_str}",
             nbrs.one_hop.len(),
             nbrs.two_hop.len(),
         )?;

@@ -1571,7 +1571,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         // `dictionary_empirical.or(dictionary)`), because the factorization flattens rare genes.
         dictionary_empirical_suffix: Some("dictionary_empirical.parquet"),
         feature_embedding_suffix: Some("feature_embedding.parquet"),
-        feature_loading_suffix: None,
+        feature_coembedding_suffix: None,
         carried: carried.as_ref(),
         module_membership_suffix: module_suffixes.map(|(m, _)| m),
         module_dictionary_suffix: module_suffixes.map(|(_, d)| d),

@@ -5,10 +5,10 @@ use crate::run_manifest::{default_path, RunKind, RunManifest};
 use matrix_util::traits::IoOps;
 use std::path::Path;
 
-/// Plant `{prefix}.feature_embedding.parquet` with the given row names and
+/// Plant `{prefix}.feature_coembedding.parquet` with the given row names and
 /// return its basename, the way a manifest records it.
-fn plant_feature_embedding(prefix: &str, rows: &[&str]) -> String {
-    let path = format!("{prefix}.feature_embedding.parquet");
+fn plant_feature_coembedding(prefix: &str, rows: &[&str]) -> String {
+    let path = format!("{prefix}.feature_coembedding.parquet");
     let mat = DMatrix::<f32>::from_fn(rows.len(), 2, |i, j| (i * 2 + j) as f32);
     let row_names: Vec<Box<str>> = rows.iter().map(|&s| s.into()).collect();
     let cols: Vec<Box<str>> = vec!["h0".into(), "h1".into()];
@@ -21,9 +21,9 @@ fn plant_feature_embedding(prefix: &str, rows: &[&str]) -> String {
         .into_owned()
 }
 
-fn write_manifest(prefix: &str, kind: RunKind, feature_embedding_basename: String) {
+fn write_manifest(prefix: &str, kind: RunKind, coembedding_basename: String) {
     let mut m = RunManifest::new(kind, prefix);
-    m.outputs.feature_embedding = Some(feature_embedding_basename);
+    m.outputs.feature_coembedding = Some(coembedding_basename);
     m.save(Path::new(&default_path(prefix)))
         .expect("save manifest");
 }
@@ -39,7 +39,7 @@ fn gem_kind_keeps_only_the_spliced_row_per_gene() {
         "GENE1/count/unspliced",
         "GENE1/m6a/methylated",
     ];
-    let basename = plant_feature_embedding(&prefix, &rows);
+    let basename = plant_feature_coembedding(&prefix, &rows);
     write_manifest(&prefix, RunKind::Gem, basename);
 
     let feat = load_marker_feature_embedding(&prefix).expect("load");
@@ -59,7 +59,7 @@ fn non_gem_kind_passes_the_table_through_untouched() {
         "GENE1/count/unspliced",
         "GENE1/m6a/methylated",
     ];
-    let basename = plant_feature_embedding(&prefix, &rows);
+    let basename = plant_feature_coembedding(&prefix, &rows);
     write_manifest(&prefix, RunKind::Bge, basename);
 
     let feat = load_marker_feature_embedding(&prefix).expect("load");
@@ -72,4 +72,34 @@ fn non_gem_kind_passes_the_table_through_untouched() {
             assert_eq!(feat.mat[(i, j)], (i * 2 + j) as f32);
         }
     }
+}
+
+/// A kind that co-embeds but recorded no co-embed (an interrupted run) is
+/// refused: its ρ is off the cell manifold. A kind that never co-embeds
+/// (`fne`) matches on its ρ, which is the only gene table it has.
+#[test]
+fn a_coembedding_kind_without_its_coembed_is_refused_and_fne_uses_rho() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let prefix = dir.path().join("run").to_string_lossy().into_owned();
+    let rho = format!("{prefix}.feature_embedding.parquet");
+    let mat = DMatrix::<f32>::from_fn(2, 2, |i, j| (i * 2 + j) as f32);
+    let rows: Vec<Box<str>> = vec!["GENE1".into(), "GENE2".into()];
+    mat.to_parquet_with_names(&rho, (Some(&rows), Some("feature")), None)
+        .expect("write ρ");
+    let basename = "run.feature_embedding.parquet".to_string();
+
+    let mut m = RunManifest::new(RunKind::Bge, &prefix);
+    m.outputs.feature_embedding = Some(basename.clone());
+    m.save(Path::new(&default_path(&prefix))).expect("save");
+    let err = load_marker_feature_embedding(&prefix)
+        .err()
+        .expect("an interrupted bge run must be refused")
+        .to_string();
+    assert!(err.contains("feature_coembedding"), "{err}");
+
+    let mut m = RunManifest::new(RunKind::Fne, &prefix);
+    m.outputs.feature_embedding = Some(basename);
+    m.save(Path::new(&default_path(&prefix))).expect("save");
+    let feat = load_marker_feature_embedding(&prefix).expect("fne matches on ρ");
+    assert_eq!(feat.rows, rows);
 }

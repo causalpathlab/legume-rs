@@ -1,6 +1,6 @@
-//! Per-pair Poisson-MAP projection onto cage's frozen gene embedding.
+//! Per-pair Poisson-MAP projection onto cage's frozen feature embedding.
 //!
-//! cage trains cells and genes into one shared `D`-dim space by predicting
+//! cage trains cells and features into one shared `D`-dim space by predicting
 //! spatial adjacency. What the rest of pinto consumes, though, is a *pair*
 //! latent: `lc` / `dsvd` cluster cell pairs into link communities and derive a
 //! cell's propensity from the mix its incident edges carry. This module
@@ -25,8 +25,8 @@
 //!   rotation freedom that sank the free-edge-embedding experiment cannot
 //!   exist here, and the objective (Poisson NLL + ridge) is strictly convex in
 //!   `e_uv`.
-//! - `b_g` is the **empirical** log gene abundance, not cage's `b_feat`. The
-//!   trained gene bias came out of a logistic NCE and is a graph-popularity
+//! - `b_g` is the **empirical** log feature abundance, not cage's `b_feat`. The
+//!   trained feature bias came out of a logistic NCE and is a graph-popularity
 //!   term, not a log-rate; this likelihood needs a log-rate. Fixing `b_g` to
 //!   data also closes the gauge freedom geu's phase 2 has to correct for
 //!   (`θ ← θ − v`, `b_g ← b_g + ⟨e_g, v⟩` leaves every score identical *only*
@@ -36,7 +36,7 @@
 //! - `β_uv` is a free scalar per pair. It absorbs the pooled library size, so
 //!   `e_uv` carries composition only — the job `b_cell` does in bge/gem phase 2
 //!   ("always fitted … keeping `e_c` depth-corrected"). With `β_uv` free the
-//!   Poisson MAP *is* the multinomial MAP over the pair's gene composition.
+//!   Poisson MAP *is* the multinomial MAP over the pair's feature composition.
 //!
 //! # How it is solved
 //!
@@ -78,7 +78,7 @@
 //! are:
 //!
 //! - Its entry point is `pub(crate)`, and its batch divisor is wired to bge /
-//!   gem's pseudobulk hierarchy (the per-batch gene fold `δ` indexed by each cell's batch), which a
+//!   gem's pseudobulk hierarchy (the per-batch feature fold `δ` indexed by each cell's batch), which a
 //!   spatial pair — batch-divided per endpoint, before pooling — does not have.
 //!   Reaching it means widening another crate's API and generalizing that
 //!   abstraction for one caller.
@@ -94,7 +94,7 @@
 //! arithmetic in it.
 
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use candle_util::candle_core::Device;
 use matrix_util::utils::{generate_minibatch_intervals, quantiles};
 
@@ -174,7 +174,7 @@ pub struct PairProjectionArgs<'a> {
 /// clusters edges by batch, since every edge is within-batch by construction.
 #[derive(Copy, Clone)]
 pub struct PairBatchDivisor<'a> {
-    /// `[n_genes × n_batches]` multiplicative batch effect `δ`.
+    /// `[n_features × n_batches]` multiplicative batch effect `δ`.
     pub delta: &'a Mat,
     /// Cell → its column of `delta`.
     pub batch_of_cell: &'a [u32],
@@ -206,18 +206,18 @@ pub struct PairLatent {
 
 /// The frozen side of the projection, flattened once for the inner loop.
 ///
-/// `e_feat` is `[G × D]` column-major (nalgebra), so a per-gene row read is
+/// `e_feat` is `[G × D]` column-major (nalgebra), so a per-feature row read is
 /// strided — every solve would walk the matrix against the cache. Rows are
-/// copied out row-major once here instead, restricted to genes that carry any
-/// count at all (a gene with zero total appears in no pair's profile and
+/// copied out row-major once here instead, restricted to features that carry any
+/// count at all (a feature with zero total appears in no pair's profile and
 /// contributes `exp(-∞) = 0` to the partition).
 pub struct PairDictionary {
     /// Row-major `[n_active × D]`.
     feat: Vec<f32>,
-    /// Empirical log gene abundance, `[n_active]`.
+    /// Empirical log feature abundance, `[n_active]`.
     b: Vec<f32>,
-    /// Global gene id → active-list position, `u32::MAX` when inactive.
-    local_of_gene: Vec<u32>,
+    /// Global feature id → active-list position, `u32::MAX` when inactive.
+    local_of_feature: Vec<u32>,
     d: usize,
     /// `ln Σ_g exp(b_g)` — the log-partition at `e_uv = 0`. Stored in log space
     /// because every use is a log-space one, and it is fixed for the whole run.
@@ -225,43 +225,45 @@ pub struct PairDictionary {
 }
 
 impl PairDictionary {
-    /// Build the frozen side from cage's `[G × D]` gene embedding and the
-    /// per-gene count totals over all cells (`n_cells` turns those totals into
+    /// Build the frozen side from cage's `[G × D]` feature embedding and the
+    /// per-feature count totals over all cells (`n_cells` turns those totals into
     /// the per-cell mean the log-rate offset needs).
-    pub fn new(e_feat: &Mat, gene_totals: &[f64], n_cells: usize) -> anyhow::Result<Self> {
-        let n_genes = gene_totals.len();
+    pub fn new(e_feat: &Mat, feature_totals: &[f64], n_cells: usize) -> anyhow::Result<Self> {
+        let n_features = feature_totals.len();
         let d = e_feat.ncols();
         anyhow::ensure!(
-            e_feat.nrows() == n_genes,
-            "pair projection: e_feat has {} rows, expected {n_genes}",
+            e_feat.nrows() == n_features,
+            "pair projection: e_feat has {} rows, expected {n_features}",
             e_feat.nrows()
         );
         anyhow::ensure!(d > 0, "pair projection: empty embedding dimension");
         anyhow::ensure!(n_cells > 0, "pair projection: no cells");
 
-        let active: Vec<usize> = (0..n_genes).filter(|&g| gene_totals[g] > 0.0).collect();
+        let active: Vec<usize> = (0..n_features)
+            .filter(|&g| feature_totals[g] > 0.0)
+            .collect();
         anyhow::ensure!(
             !active.is_empty(),
-            "pair projection: every gene has zero total count"
+            "pair projection: every feature has zero total count"
         );
 
-        let mut local_of_gene = vec![u32::MAX; n_genes];
+        let mut local_of_feature = vec![u32::MAX; n_features];
         let mut feat = Vec::with_capacity(active.len() * d);
         let mut b = Vec::with_capacity(active.len());
         for (local, &g) in active.iter().enumerate() {
-            local_of_gene[g] = local as u32;
+            local_of_feature[g] = local as u32;
             for j in 0..d {
                 feat.push(e_feat[(g, j)]);
             }
             // Mean count per cell, on the log scale the Poisson rate lives on.
-            // The pooled-pair factor of two is constant across genes and is
+            // The pooled-pair factor of two is constant across features and is
             // absorbed by `β_uv`.
-            let m = gene_totals[g] / n_cells as f64;
+            let m = feature_totals[g] / n_cells as f64;
             b.push(m.ln() as f32);
         }
 
         // `Σ_g exp(b_g)` without ever calling `exp`: `b_g` IS `ln(total_g/n)`,
-        // so the summands are the gene means themselves and the sum is the mean
+        // so the summands are the feature means themselves and the sum is the mean
         // library size. Accumulating those in f64 is exact where
         // `Σ exp(ln(mean))` would round-trip every term through two
         // transcendentals — and no max-subtraction is needed, since the naive
@@ -269,7 +271,7 @@ impl PairDictionary {
         // sum of per-cell mean counts.
         let log_z = {
             let mean_lib: f64 =
-                active.iter().map(|&g| gene_totals[g]).sum::<f64>() / n_cells as f64;
+                active.iter().map(|&g| feature_totals[g]).sum::<f64>() / n_cells as f64;
             anyhow::ensure!(
                 mean_lib > 0.0 && mean_lib.is_finite(),
                 "pair projection: mean library size is {mean_lib}, expected a positive finite value"
@@ -279,26 +281,26 @@ impl PairDictionary {
         Ok(Self {
             feat,
             b,
-            local_of_gene,
+            local_of_feature,
             d,
             log_z,
         })
     }
 
-    /// Number of genes carrying counts — the axis the partition runs over.
+    /// Number of features carrying counts — the axis the partition runs over.
     #[must_use]
     pub fn n_active(&self) -> usize {
         self.b.len()
     }
 
-    /// Map a `(global gene id, count)` profile onto the active-list positions the
-    /// solver and the scorer both index by. Genes with no counts anywhere are dropped:
+    /// Map a `(global feature id, count)` profile onto the active-list positions the
+    /// solver and the scorer both index by. Features with no counts anywhere are dropped:
     /// they carry no information and are not on the partition axis.
     #[must_use]
     fn to_local(&self, obs: &[(u32, f32)]) -> Vec<(u32, f32)> {
         obs.iter()
             .filter_map(|&(g, n)| {
-                let l = *self.local_of_gene.get(g as usize)?;
+                let l = *self.local_of_feature.get(g as usize)?;
                 (l != u32::MAX && n > 0.0).then_some((l, n))
             })
             .collect()
@@ -306,11 +308,11 @@ impl PairDictionary {
 
     /// The statistic a local profile enters the objective through:
     /// `(Σ_g n_g e_g, Σ_g n_g, Σ_g n_g b_g)`.
-    pub(crate) fn statistic(&self, genes: &[u32], counts: &[f32]) -> (Vec<f32>, f32, f32) {
+    pub(crate) fn statistic(&self, features: &[u32], counts: &[f32]) -> (Vec<f32>, f32, f32) {
         let d = self.d;
         let mut sums = vec![0f32; d];
         let (mut total, mut offset) = (0f32, 0f32);
-        for (&g, &n) in genes.iter().zip(counts) {
+        for (&g, &n) in features.iter().zip(counts) {
             let row = &self.feat[g as usize * d..(g as usize + 1) * d];
             for (s, &e) in sums.iter_mut().zip(row) {
                 *s += n * e;
@@ -347,7 +349,7 @@ impl PairDictionary {
         total * lse - data
     }
 
-    /// Solve one pair exactly from its `(global gene id, pooled count)`
+    /// Solve one pair exactly from its `(global feature id, pooled count)`
     /// profile. Returns `(e_uv, β_uv, certificate)`.
     #[cfg(test)]
     #[must_use]
@@ -370,18 +372,18 @@ impl PairDictionary {
     }
 }
 
-/// Project every cell pair — and every cell — onto cage's frozen gene embedding.
+/// Project every cell pair — and every cell — onto cage's frozen feature embedding.
 ///
-/// `gene_totals` is per GENE, already folded off the row axis — both the
-/// partition and each pair's profile live there, because `e_feat` is per gene
-/// and a channelized matrix's two rows are one gene's pooled count rather than
+/// `feature_totals` is per FEATURE, already folded off the row axis — both the
+/// partition and each pair's profile live there, because `e_feat` is per feature
+/// and a channelized matrix's two rows are one feature's pooled count rather than
 /// two categories of the multinomial. It is passed in rather than computed here
 /// because it is a whole-matrix streaming pass and the caller has already made
 /// it for the splice report.
 ///
-/// `e_feat` is cage's trained `[G × D]` gene embedding, used as-is: the
+/// `e_feat` is cage's trained `[G × D]` feature embedding, used as-is: the
 /// selection gate is already expressed in its values, so re-applying `pip` here
-/// would shrink the same selection twice. Genes the gate drove to `‖e_g‖ ≈ 0`
+/// would shrink the same selection twice. Features the gate drove to `‖e_g‖ ≈ 0`
 /// contribute a constant `exp(b_g + β)` to the partition and therefore cannot
 /// pull on `e_uv` — no special-casing needed.
 ///
@@ -394,37 +396,37 @@ pub fn project_pairs(
     e_feat: &Mat,
     batch: Option<PairBatchDivisor<'_>>,
     args: &PairProjectionArgs<'_>,
-    axis: &GeneAxis,
-    gene_totals: &[f64],
+    axis: &FeatureAxis,
+    feature_totals: &[f64],
 ) -> anyhow::Result<PairLatent> {
-    let n_genes = axis.n_genes();
+    let n_features = axis.n_features();
     let n_cells = data.num_columns();
     let d = e_feat.ncols();
     anyhow::ensure!(
         axis.n_rows() == data.num_rows(),
-        "pair projection: gene axis has {} rows, data has {}",
+        "pair projection: feature axis has {} rows, data has {}",
         axis.n_rows(),
         data.num_rows()
     );
     anyhow::ensure!(
-        e_feat.nrows() == n_genes,
-        "pair projection: e_feat has {} rows, data has {n_genes} genes",
+        e_feat.nrows() == n_features,
+        "pair projection: e_feat has {} rows, data has {n_features} features",
         e_feat.nrows()
     );
     anyhow::ensure!(d > 0, "pair projection: empty embedding dimension");
     anyhow::ensure!(
-        gene_totals.len() == n_genes,
-        "pair projection: {} gene totals, expected {n_genes}",
-        gene_totals.len()
+        feature_totals.len() == n_features,
+        "pair projection: {} feature totals, expected {n_features}",
+        feature_totals.len()
     );
 
-    let dict = PairDictionary::new(e_feat, gene_totals, n_cells)?;
+    let dict = PairDictionary::new(e_feat, feature_totals, n_cells)?;
     let scored_positions: Option<Vec<u32>> = match args.eval_features.as_ref() {
         Some(names) => {
-            let positions = dict.eval_positions(axis.gene_names(), names);
+            let positions = dict.eval_positions(axis.feature_names(), names);
             anyhow::ensure!(
                 !positions.is_empty(),
-                "--eval-features matched no gene that carries counts in this sample"
+                "--eval-features matched no feature that carries counts in this sample"
             );
             info!(
                 "Agreement axis: {} of {} named features carry counts here",
@@ -438,9 +440,9 @@ pub fn project_pairs(
     // Resolved once for the whole run: the membership bitmap and the null's
     // log-partition are the same for every pair.
     let eval_axis = dict.eval_axis(scored_positions);
-    if dict.n_active() < n_genes {
+    if dict.n_active() < n_features {
         info!(
-            "Pair projection: {} of {n_genes} genes carry counts; the rest sit out the partition",
+            "Pair projection: {} of {n_features} features carry counts; the rest sit out the partition",
             dict.n_active(),
         );
     }
@@ -505,13 +507,13 @@ fn build_corpus(
     data: &SparseIoVec,
     dict: &PairDictionary,
     batch: Option<PairBatchDivisor<'_>>,
-    axis: &GeneAxis,
+    axis: &FeatureAxis,
     block: usize,
 ) -> anyhow::Result<Vec<encoder::CellRow>> {
     let n_cells = data.num_columns();
     let mut corpus: Vec<encoder::CellRow> = Vec::with_capacity(n_cells);
     let bar = new_progress_bar(n_cells as u64).with_message("reading cells");
-    for (lb, ub) in generate_minibatch_intervals(n_cells, axis.n_genes(), Some(block.max(1))) {
+    for (lb, ub) in generate_minibatch_intervals(n_cells, axis.n_features(), Some(block.max(1))) {
         let slab = data.read_columns_csc(lb..ub)?;
         let (offsets, rows, vals) = (slab.col_offsets(), slab.row_indices(), slab.values());
         let block_rows: Vec<encoder::CellRow> = (lb..ub)
@@ -527,9 +529,9 @@ fn build_corpus(
         bar.inc((ub - lb) as u64);
     }
     bar.finish_and_clear();
-    let nnz: usize = corpus.iter().map(|r| r.genes.len()).sum();
+    let nnz: usize = corpus.iter().map(|r| r.features.len()).sum();
     info!(
-        "Pair corpus: {n_cells} cells, {nnz} counts on the {}-gene active axis ({:.1} MB)",
+        "Pair corpus: {n_cells} cells, {nnz} counts on the {}-feature active axis ({:.1} MB)",
         dict.n_active(),
         (nnz * 8) as f64 / 1e6
     );

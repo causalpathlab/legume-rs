@@ -11,7 +11,7 @@ use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, PairDictionary, PairProjectionArgs, PairSolver,
 };
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use candle_util::candle_core::Device;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -136,7 +136,7 @@ fn encoder_recovers_the_exact_solvers_pair_latent() {
         let (theta, _) = exact(dict, &obs);
         let z: Vec<f32> = out.pairs.latent.row(i).iter().copied().collect();
         cos_sum += cosine(&z, &theta);
-        // Every gene is active on this fixture, so global ids are positions.
+        // Every feature is active on this fixture, so global ids are positions.
         nll_enc += f64::from(dict.nll(&obs, &z));
         nll_exact += f64::from(dict.nll(&obs, &theta));
     }
@@ -262,7 +262,7 @@ fn save_load_round_trip_is_byte_identical() {
 
 /// The pooled global profile of two cells.
 fn pooled(a: &[(u32, f32)], b: &[(u32, f32)]) -> Vec<(u32, f32)> {
-    let mut dense = vec![0f32; N_GENES];
+    let mut dense = vec![0f32; N_FEATURES];
     for &(g, n) in a.iter().chain(b) {
         dense[g as usize] += n;
     }
@@ -278,7 +278,7 @@ fn pooled(a: &[(u32, f32)], b: &[(u32, f32)]) -> Vec<(u32, f32)> {
 // Through `project_pairs`, from disk //
 ////////////////////////////////////////
 
-/// A sparse matrix of the planted cells, one row per gene.
+/// A sparse matrix of the planted cells, one row per feature.
 fn planted_data(dir: &tempfile::TempDir, cells: &[PlantedCell]) -> anyhow::Result<SparseIoVec> {
     let triplets: Vec<(u64, u64, f32)> = cells
         .iter()
@@ -288,11 +288,11 @@ fn planted_data(dir: &tempfile::TempDir, cells: &[PlantedCell]) -> anyhow::Resul
     let path = dir.path().join("planted.zarr");
     let mut backend = create_sparse_from_triplets(
         &triplets,
-        (N_GENES, cells.len(), triplets.len()),
+        (N_FEATURES, cells.len(), triplets.len()),
         Some(path.to_str().unwrap()),
         Some(&SparseIoBackend::Zarr),
     )?;
-    let rows: Vec<Box<str>> = (0..N_GENES).map(|g| format!("G{g}").into()).collect();
+    let rows: Vec<Box<str>> = (0..N_FEATURES).map(|g| format!("G{g}").into()).collect();
     backend.register_row_names_vec(&rows);
     let names: Vec<Box<str>> = (0..cells.len()).map(|c| format!("c{c}").into()).collect();
     backend.register_column_names_vec(&names);
@@ -308,8 +308,8 @@ fn the_saved_encoder_reproduces_the_runs_pairs_and_cells() {
     let data = planted_data(&dir, &cells).unwrap();
     let e = dictionary_matrix();
     let (_, totals) = abundances();
-    let rows: Vec<Box<str>> = (0..N_GENES).map(|g| format!("G{g}").into()).collect();
-    let axis = GeneAxis::resolve_or_identity(&rows).unwrap();
+    let rows: Vec<Box<str>> = (0..N_FEATURES).map(|g| format!("G{g}").into()).collect();
+    let axis = FeatureAxis::resolve_or_identity(&rows).unwrap();
     let edges = random_pairs(60, 300, 3);
     let saved = dir.path().join("run.pair_encoder.safetensors");
     let saved = saved.to_str().unwrap();
@@ -376,8 +376,8 @@ fn the_certificate_finishes_what_an_untrained_encoder_gets_wrong() {
     let data = planted_data(&dir, &cells).unwrap();
     let e = dictionary_matrix();
     let (_, totals) = abundances();
-    let rows: Vec<Box<str>> = (0..N_GENES).map(|g| format!("G{g}").into()).collect();
-    let axis = GeneAxis::resolve_or_identity(&rows).unwrap();
+    let rows: Vec<Box<str>> = (0..N_FEATURES).map(|g| format!("G{g}").into()).collect();
+    let axis = FeatureAxis::resolve_or_identity(&rows).unwrap();
     let edges = random_pairs(60, 300, 4);
     let saved = dir.path().join("untrained.pair_encoder.safetensors");
     let spec = spec(0);

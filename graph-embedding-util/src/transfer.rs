@@ -474,11 +474,11 @@ pub const MODULE_RESIDUAL_SUFFIX: &str = "module_residual.parquet";
 pub const MODULE_BIAS_SUFFIX: &str = "module_bias.parquet";
 
 /// The module-table paths beside a dictionary file: strip the dictionary's own
-/// suffix (`feature_loading`, `dictionary`, `feature_embedding`, or a bare
-/// `.parquet`) to the run prefix, then append the table suffixes.
+/// suffix (`feature_embedding`, `dictionary`, an older run's `feature_loading`,
+/// or a bare `.parquet`) to the run prefix, then append the table suffixes.
 #[must_use]
 pub fn module_table_paths(dictionary_path: &str) -> (String, String) {
-    let stem = ["feature_loading", "dictionary", "feature_embedding"]
+    let stem = ["feature_embedding", "dictionary", "feature_loading"]
         .iter()
         .find_map(|slot| dictionary_path.strip_suffix(&format!(".{slot}.parquet")))
         .or_else(|| dictionary_path.strip_suffix(".parquet"))

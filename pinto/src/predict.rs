@@ -1,16 +1,16 @@
 //! `pinto predict` — apply a trained `cage` run to a new sample.
 //!
-//! What crosses samples is the gene side and the community dictionary; the
+//! What crosses samples is the feature side and the community dictionary; the
 //! geometry is local and is rebuilt from the new sample's own coordinates:
 //!
 //! 1. The new data goes through the same preprocessing as `cage` — coordinates,
 //!    batch labels, the cell-cell KNN graph (spatial under `-c`, expression
 //!    otherwise) — with the same flags, so the pairs are what `cage` would have
 //!    built on this sample.
-//! 2. The frozen gene embedding `{model}.feature_embedding.parquet` is aligned
-//!    to the new sample's gene axis by name. A gene the model never saw gets
+//! 2. The frozen feature embedding `{model}.feature_embedding.parquet` is aligned
+//!    to the new sample's feature axis by name. A feature the model never saw gets
 //!    no dictionary row: it is dropped from the partition rather than seeded
-//!    (this is inference, not a warm start — inventing a row would let a gene
+//!    (this is inference, not a warm start — inventing a row would let a feature
 //!    the model knows nothing about pull on every pair's latent).
 //! 3. Every cell pair — and every cell — is placed on that dictionary by the
 //!    model's own pair encoder (`{model}.pair_encoder.safetensors`, the map
@@ -25,11 +25,11 @@
 //!    the cell's own placement from step 3, as `cage` writes it.
 //!
 //! Outputs mirror `cage`'s inference tables: `{out}.{coord_pairs, latent,
-//! link_community, propensity, gene_community, cell_embedding}.parquet` and a
+//! link_community, propensity, feature_community, cell_embedding}.parquet` and a
 //! `{out}.pinto.json` manifest, so `pinto plot` and `pinto annotate` read a
 //! predicted sample as they would a fitted one.
 
-use crate::cell_activity_graph_embedding::args::GeneNameMode;
+use crate::cell_activity_graph_embedding::args::FeatureNameMode;
 use crate::cell_activity_graph_embedding::pair_projection::{
     project_pairs, CellLatent, PairBatchDivisor, PairLatent, PairProjectionArgs, PairScore,
     PairSolver,
@@ -40,7 +40,7 @@ use crate::util::common::*;
 use crate::util::device::ComputeDevice;
 use crate::util::metadata::{create_cage_metadata, RunInputs};
 use crate::util::srt_pipeline::{
-    preprocess_srt, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+    preprocess_srt, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use clap::Args;
@@ -61,7 +61,7 @@ pub struct PredictArgs {
         required = true,
         help = "Trained `pinto cage` prefix (reads its feature_embedding, latent, link_community)",
         long_help = "Trained `pinto cage` run prefix. Reads:\n  \
-                     {model}.feature_embedding.parquet  gene × D frozen dictionary\n  \
+                     {model}.feature_embedding.parquet  feature × D frozen dictionary\n  \
                      {model}.latent.parquet             training pair latent (E × D)\n  \
                      {model}.link_community.parquet     training pair → community\n\
                      The last two give the community centroids the new pairs are assigned to."
@@ -76,56 +76,59 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        default_value_t = GeneNameMode::Auto,
+        default_value_t = FeatureNameMode::Auto,
         value_enum,
-        help = "Gene-name canonicalization for matching the model's genes to the new sample"
+        help = "Feature-name canonicalization for matching the model's features to the new sample"
     )]
-    pub gene_name_mode: GeneNameMode,
+    #[arg(alias = "gene-name-mode")]
+    pub feature_name_mode: FeatureNameMode,
 
     #[arg(
         long,
         default_value_t = 0.0,
         value_name = "FRACTION",
-        help = "Refuse to predict below this share of the model's genes (0 = no gate)",
-        long_help = "Gene coverage is always reported.\n\
+        help = "Refuse to predict below this share of the model's features (0 = no gate)",
+        long_help = "Feature coverage is always reported.\n\
                      This turns it into a hard floor.\n\
                      \n\
-                     The share is of the MODEL's genes, not this sample's,\n\
+                     The share is of the MODEL's features, not this sample's,\n\
                      so a whole-transcriptome query is not penalized\n\
-                     for carrying genes the model never had.\n\
+                     for carrying features the model never had.\n\
                      \n\
-                     Zero mapped genes is always refused — that is a naming failure."
+                     Zero mapped features is always refused — that is a naming failure."
     )]
-    pub min_gene_overlap: f32,
+    pub min_feature_overlap: f32,
 
     #[arg(
         long,
-        help = "Drop genes the model never saw instead of initializing them through its modules",
-        long_help = "Genes of this sample that the model never saw are placed through the model's\n\
+        help = "Drop features the model never saw instead of initializing them through its modules",
+        long_help = "Features of this sample that the model never saw are placed through the model's\n\
                      learned modules (needs {model}.module_membership.parquet and\n\
                      {model}.module_dictionary.parquet): membership averaged over the closest\n\
-                     matched genes by count profile over pseudobulks of this sample, row =\n\
+                     matched features by count profile over pseudobulks of this sample, row =\n\
                      membership times the module dictionary, with their own counts on the\n\
-                     partition axis and provenance in {out}.gene_embedding_init.parquet.\n\
+                     partition axis and provenance in {out}.feature_embedding_init.parquet.\n\
                      This flag restores the historical drop: no row, not on the axis."
     )]
-    pub no_init_genes: bool,
+    pub no_init_features: bool,
 
     #[arg(
         long,
         default_value_t = graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
         value_name = "K",
-        help = "membership init: matched genes whose memberships are averaged"
+        help = "membership init: matched features whose memberships are averaged"
     )]
-    pub gene_init_neighbours: usize,
+    #[arg(alias = "gene-init-neighbours")]
+    pub feature_init_neighbours: usize,
 
     #[arg(
         long,
         default_value_t = graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
         value_name = "S",
-        help = "membership init: below this best profile similarity a gene takes the diffuse prior"
+        help = "membership init: below this best profile similarity a feature takes the diffuse prior"
     )]
-    pub gene_init_similarity_floor: f32,
+    #[arg(alias = "gene-init-similarity-floor")]
+    pub feature_init_similarity_floor: f32,
 
     #[arg(
         long,
@@ -137,14 +140,14 @@ pub struct PredictArgs {
 
     #[arg(
         long,
-        help = "Skip NB Fisher-info weighting of the gene_community table",
+        help = "Skip NB Fisher-info weighting of the feature_community table",
         hide = true
     )]
     pub no_fisher_weights: bool,
 
     /// Restrict the agreement correlations to these features (one name per line).
     ///
-    /// Off by default because a pair-level correlation sorts the gene axis once
+    /// Off by default because a pair-level correlation sorts the feature axis once
     /// per pair, and a sample has far more pairs than cells. Pass the same file
     /// here and to `senna predict --eval-features` and the two commands'
     /// `spearman` / `pearson_log1p` columns are the same measurement.
@@ -155,10 +158,10 @@ pub struct PredictArgs {
     )]
     pub eval_features: Option<Box<str>>,
 
-    /// Training data, read once for the per-gene totals the frozen dictionary
+    /// Training data, read once for the per-feature totals the frozen dictionary
     /// needs.
     ///
-    /// Those totals are not only the null: they become `b_g`, the per-gene log
+    /// Those totals are not only the null: they become `b_g`, the per-feature log
     /// abundance that is HALF of the pair log-rate `b_g + <e_g, e_uv>`. Taken
     /// from the query, as they were before this flag existed, the prediction is
     /// anchored on the very data it is scored against and the likelihood is not
@@ -172,7 +175,7 @@ pub struct PredictArgs {
         long,
         value_name = "FILE",
         num_args = 1..,
-        help = "Training data supplying the per-gene totals (b_g) and the null; pass the train half"
+        help = "Training data supplying the per-feature totals (b_g) and the null; pass the train half"
     )]
     pub null_from: Option<Vec<Box<str>>>,
 }
@@ -268,7 +271,7 @@ fn training_centroids(model: &str) -> anyhow::Result<(Mat, Vec<f32>)> {
 
 /// Nearest live centroid by cosine, for every (already L2-normalized) pair latent.
 ///
-/// `None` where the pair cannot be assigned: a pair with no counts on any model gene
+/// `None` where the pair cannot be assigned: a pair with no counts on any model feature
 /// projects to the origin and is equidistant from everything, and a community with no
 /// training pairs has a zero centroid that would otherwise capture every pair whose
 /// cosine to all live centroids is negative. Both abstain rather than silently landing
@@ -308,7 +311,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     anyhow::ensure!(!c.data_files.is_empty(), "predict: no data files given");
 
     let peek_names = data_beans::convert::try_open_or_convert(&c.data_files[0])?.row_names()?;
-    let feature_kind = args.gene_name_mode.resolve_kind(&peek_names);
+    let feature_kind = args.feature_name_mode.resolve_kind(&peek_names);
 
     let SrtPreprocessed {
         data_vec,
@@ -319,9 +322,9 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         graph,
         knn,
         edge_source,
-        gene_axis,
+        feature_axis,
         row_stats,
-        gene_weights,
+        feature_weights,
         n_cells,
         n_rows: _,
         cell_proj,
@@ -330,22 +333,22 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         common: c,
         fisher_weights: !args.no_fisher_weights,
         batch_effects: true,
-        gene_axis: GeneAxisMode::Strict,
+        feature_axis: FeatureAxisMode::Strict,
         cell_projection: true,
         feature_kind: Some(feature_kind.clone()),
     })?;
-    let gene_axis = gene_axis.expect("GeneAxisMode::Strict must yield Some");
+    let feature_axis = feature_axis.expect("FeatureAxisMode::Strict must yield Some");
     let cell_names = data_vec.column_names()?;
-    let gene_names: Vec<Box<str>> = gene_axis.gene_names().to_vec();
-    let n_genes = gene_axis.n_genes();
+    let feature_names: Vec<Box<str>> = feature_axis.feature_names().to_vec();
+    let n_features = feature_axis.n_features();
 
-    // The frozen gene side, on THIS sample's gene axis. Unmatched genes keep a
+    // The frozen feature side, on THIS sample's feature axis. Unmatched features keep a
     // zero row and a zero total, which `PairDictionary` reads as "not on the
     // partition axis" — dropped, not invented.
     let host = load_frozen_feature_host(FrozenLoadArgs {
         dictionary_path: &format!("{}.feature_embedding.parquet", args.model),
         bias_path: None,
-        target_feature_names: &gene_names,
+        target_feature_names: &feature_names,
         name_kind: feature_kind.clone(),
         source_name_map: None,
     })?;
@@ -353,44 +356,44 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     // The MODEL's full feature count, from the dictionary file. NOT
     // `e_feat.nrows()`, which is the count AFTER the intersection and therefore
     // always equals `n_matched` — a coverage built from it is identically 1 and
-    // `--min-gene-overlap` can never fire.
+    // `--min-feature-overlap` can never fire.
     let n_model = host.n_src;
-    // The share of the MODEL's genes this sample carries — the same denominator
-    // senna's identically-named flag uses. Dividing by the query's gene count
-    // instead would refuse a whole-transcriptome sample containing every panel gene.
+    // The share of the MODEL's features this sample carries — the same denominator
+    // senna's identically-named flag uses. Dividing by the query's feature count
+    // instead would refuse a whole-transcriptome sample containing every panel feature.
     let coverage = n_matched as f32 / n_model.max(1) as f32;
     info!(
-        "Gene alignment: {n_matched} of the model's {n_model} genes are present here \
-         ({:.1}% coverage; this sample has {n_genes} genes, D = {})",
+        "Feature alignment: {n_matched} of the model's {n_model} features are present here \
+         ({:.1}% coverage; this sample has {n_features} features, D = {})",
         100.0 * coverage,
         host.h
     );
     anyhow::ensure!(
         n_matched > 0,
-        "predict: none of the {n_genes} genes match the model's dictionary — check \
-         --gene-name-mode"
+        "predict: none of the {n_features} features match the model's dictionary — check \
+         --feature-name-mode"
     );
     anyhow::ensure!(
-        coverage >= args.min_gene_overlap,
-        "predict: only {:.1}% of the model's genes are present, below --min-gene-overlap {:.1}%",
+        coverage >= args.min_feature_overlap,
+        "predict: only {:.1}% of the model's features are present, below --min-feature-overlap {:.1}%",
         100.0 * coverage,
-        100.0 * args.min_gene_overlap
+        100.0 * args.min_feature_overlap
     );
-    let mut e_full = Mat::zeros(n_genes, host.h);
+    let mut e_full = Mat::zeros(n_features, host.h);
     for (i, &g) in host.keep_target_indices.iter().enumerate() {
         e_full.row_mut(g).copy_from(&host.e_feat.row(i));
     }
-    // Which genes are on the partition axis: every matched gene, plus — unless
-    // `--no-init-genes` — the genes the model never saw, placed through its
+    // Which features are on the partition axis: every matched feature, plus — unless
+    // `--no-init-features` — the features the model never saw, placed through its
     // modules by the same loader cage trains from.
-    let mut on_axis: Vec<bool> = vec![false; n_genes];
+    let mut on_axis: Vec<bool> = vec![false; n_features];
     for &g in &host.keep_target_indices {
         on_axis[g] = true;
     }
-    if !args.no_init_genes && n_matched < n_genes {
+    if !args.no_init_features && n_matched < n_features {
         use crate::cell_activity_graph_embedding::pretrained;
         // Profiles over pseudobulks of THIS sample: k-means on its random
-        // projection, then per-gene sums per cluster.
+        // projection, then per-feature sums per cluster.
         let build_profiles = || -> anyhow::Result<Mat> {
             let proj = cell_proj
                 .as_ref()
@@ -402,25 +405,25 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             let row_profiles = crate::link_community::profiles::coarsen_cell_expression_dense(
                 &data_vec, &labels, n_pb,
             )?;
-            Ok(gene_axis
+            Ok(feature_axis
                 .pool_rows_opt(&row_profiles)
                 .unwrap_or(row_profiles))
         };
-        let pre = pretrained::load_pretrained_gene_embedding(pretrained::PretrainedArgs {
+        let pre = pretrained::load_pretrained_feature_embedding(pretrained::PretrainedArgs {
             dictionary_path: &format!("{}.feature_embedding.parquet", args.model),
             bias_path: None,
-            gene_names: &gene_names,
+            feature_names: &feature_names,
             name_kind: feature_kind.clone(),
-            gene_profiles: &build_profiles,
+            feature_profiles: &build_profiles,
             membership_init: Some(graph_embedding_util::transfer::AlignKnobs {
-                k: args.gene_init_neighbours,
-                similarity_floor: args.gene_init_similarity_floor,
+                k: args.feature_init_neighbours,
+                similarity_floor: args.feature_init_similarity_floor,
             }),
         })?;
         let mut n_init = 0usize;
         for (g, r) in pre.records.iter().enumerate() {
             if r.init == pretrained::InitKind::Membership {
-                e_full.row_mut(g).copy_from(&pre.e_gene.row(g));
+                e_full.row_mut(g).copy_from(&pre.e_feat.row(g));
                 on_axis[g] = true;
                 n_init += 1;
             }
@@ -428,23 +431,23 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         if n_init > 0 {
             pretrained::write_init_report(&c.out, &pre.records)?;
             info!(
-                "{n_init} genes the model never saw were initialized through its modules and \
-                 join the partition axis (see {}.gene_embedding_init.parquet)",
+                "{n_init} features the model never saw were initialized through its modules and \
+                 join the partition axis (see {}.feature_embedding_init.parquet)",
                 c.out
             );
         } else {
             info!(
-                "no module tables beside {}.feature_embedding.parquet: genes the model never \
+                "no module tables beside {}.feature_embedding.parquet: features the model never \
                  saw stay off the partition axis",
                 args.model
             );
         }
     }
-    let mut gene_totals = match args.null_from.as_deref() {
-        Some(files) => training_gene_totals(files, c, &feature_kind, &gene_names)?,
+    let mut feature_totals = match args.null_from.as_deref() {
+        Some(files) => training_feature_totals(files, c, &feature_kind, &feature_names)?,
         None => {
             log::warn!(
-                "no --null-from: per-gene totals come from the QUERY, so the pair log-rate \
+                "no --null-from: per-feature totals come from the QUERY, so the pair log-rate \
                  is anchored on the data being scored and llik is not held out. Pass the \
                  training half"
             );
@@ -454,10 +457,10 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
                     crate::link_community::profiles::compute_row_totals(&data_vec, c.block_size)?
                 }
             };
-            gene_axis.pool_totals(&row_totals)
+            feature_axis.pool_totals(&row_totals)
         }
     };
-    for (g, t) in gene_totals.iter_mut().enumerate() {
+    for (g, t) in feature_totals.iter_mut().enumerate() {
         if !on_axis[g] {
             *t = 0.0;
         }
@@ -466,7 +469,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     let eval_features: Option<Vec<Box<str>>> = match args.eval_features.as_deref() {
         // The same reader `senna predict --eval-features` uses. The help on both
         // commands tells the user to pass ONE file to both; parsing it two ways
-        // meant a two-column panel scored senna on the right genes and matched
+        // meant a two-column panel scored senna on the right features and matched
         // nothing here.
         Some(path) => Some(
             matrix_util::common_io::read_name_list(path)
@@ -478,7 +481,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     let (centroids, centroid_counts) = training_centroids(&args.model)?;
     anyhow::ensure!(
         centroids.ncols() == host.h,
-        "{}: the pair latent is {}-dim but the gene dictionary is {}-dim",
+        "{}: the pair latent is {}-dim but the feature dictionary is {}-dim",
         args.model,
         centroids.ncols(),
         host.h
@@ -500,7 +503,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         .map(|&(i, j)| (i as u32, j as u32))
         .collect();
     let n_edges = fine_edges.len();
-    info!("{n_cells} cells, {n_genes} genes, {n_edges} pairs");
+    info!("{n_cells} cells, {n_features} features, {n_edges} pairs");
     anyhow::ensure!(
         n_edges > 0,
         "predict: this sample yielded no cell pairs, so there is nothing to predict — \
@@ -547,8 +550,8 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             eval_features: eval_features.clone(),
             score_pairs: true,
         },
-        &gene_axis,
-        &gene_totals,
+        &feature_axis,
+        &feature_totals,
     )?;
 
     // Composition only, as in cage: L2-normalize each pair before the cut.
@@ -590,10 +593,10 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
     anyhow::ensure!(
         !labels.is_empty(),
         "predict: no pair could be assigned to a trained community — check that the \
-         model and this sample share genes (see the coverage line above)"
+         model and this sample share features (see the coverage line above)"
     );
 
-    let (propensity, _gene_community) = write_partition_outputs(
+    let (propensity, _feature_community) = write_partition_outputs(
         &c.out,
         &kept_edges,
         &labels,
@@ -601,8 +604,8 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         k,
         &cell_names,
         &data_vec,
-        gene_weights.as_deref(),
-        &gene_axis,
+        feature_weights.as_deref(),
+        &feature_axis,
         c.block_size,
         // The edge-kind column is per-EDGE and `kept_edges` is a subset, so it can only
         // be forwarded when nothing abstained.
@@ -626,7 +629,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
             coord_file: coord_file_str.as_deref(),
             coord_columns: &coordinate_names,
             n_cells,
-            n_genes,
+            n_features,
             n_edges,
             graph: (&knn).into(),
             k,
@@ -651,7 +654,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
 /// The `eval_` prefix is not decoration. senna's `predictive.parquet` also has a
 /// bare `llik` / `llik_per_count`, and those are the *backend's own*
 /// decoder-dependent likelihood, which must not be compared across families. The
-/// `eval_` columns are the multinomial over the scored genes, which is what both
+/// `eval_` columns are the multinomial over the scored features, which is what both
 /// commands agree on. Writing pinto's comparable number under the bare name
 /// would put two different estimands in one column of two files that share a
 /// filename — a benchmark reading `llik_per_count` from both would rank an NB
@@ -713,23 +716,23 @@ fn write_predictive(out: &str, scores: &[PairScore]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Per-gene totals from the training half, on this sample's gene axis.
+/// Per-feature totals from the training half, on this sample's feature axis.
 ///
-/// The training data gets its own [`GeneAxis`], so a channelized training matrix
-/// pools the same way this one does before the two are matched by name. A gene
+/// The training data gets its own [`FeatureAxis`], so a channelized training matrix
+/// pools the same way this one does before the two are matched by name. A feature
 /// the training half never saw keeps a zero total, which `PairDictionary` reads
-/// as "not on the partition axis" and drops -- the same treatment a gene with no
+/// as "not on the partition axis" and drops -- the same treatment a feature with no
 /// counts here gets, and the honest one: the model has no abundance for it.
-fn training_gene_totals(
+fn training_feature_totals(
     files: &[Box<str>],
     common: &crate::util::input::SrtInputArgs,
     feature_kind: &auxiliary_data::feature_names::FeatureNameKind,
-    target_genes: &[Box<str>],
+    target_features: &[Box<str>],
 ) -> anyhow::Result<Vec<f64>> {
     // The query's row names were canonicalized on the way in, by the same
-    // `--gene-name-mode` this uses. Without applying it here the two sides are
+    // `--feature-name-mode` this uses. Without applying it here the two sides are
     // spelled differently and nothing matches — which is exactly the failure this
-    // hit first, and it surfaced as "shares no expressed gene" rather than as a
+    // hit first, and it surfaced as "shares no expressed feature" rather than as a
     // naming problem.
     let mut loaded = data_beans::sparse_io_vector::SparseIoVec::new();
     if let Some(canon) = feature_kind.clone().into_canonicalizer() {
@@ -744,17 +747,17 @@ fn training_gene_totals(
         }
         loaded.push(std::sync::Arc::from(data), None)?;
     }
-    let axis = crate::util::gene_axis::GeneAxis::resolve(&loaded.row_names()?)?;
+    let axis = crate::util::feature_axis::FeatureAxis::resolve(&loaded.row_names()?)?;
     let per_row = crate::link_community::profiles::compute_row_totals(&loaded, common.block_size)?;
-    let per_gene = axis.pool_totals(&per_row);
+    let per_feature = axis.pool_totals(&per_row);
 
     let total_of: HashMap<&str, f64> = axis
-        .gene_names()
+        .feature_names()
         .iter()
         .map(std::convert::AsRef::as_ref)
-        .zip(per_gene.iter().copied())
+        .zip(per_feature.iter().copied())
         .collect();
-    let out: Vec<f64> = target_genes
+    let out: Vec<f64> = target_features
         .iter()
         .map(|g| total_of.get(g.as_ref()).copied().unwrap_or(0.0))
         .collect();
@@ -762,12 +765,12 @@ fn training_gene_totals(
     let matched = out.iter().filter(|&&t| t > 0.0).count();
     anyhow::ensure!(
         matched > 0,
-        "--null-from shares no expressed gene with this sample after canonicalizing names \
-         with --gene-name-mode; check that it points at the training data for this model"
+        "--null-from shares no expressed feature with this sample after canonicalizing names \
+         with --feature-name-mode; check that it points at the training data for this model"
     );
     info!(
-        "Training totals: {matched} of {} genes carry counts in the training half ({} cells)",
-        target_genes.len(),
+        "Training totals: {matched} of {} features carry counts in the training half ({} cells)",
+        target_features.len(),
         loaded.num_columns()
     );
     Ok(out)

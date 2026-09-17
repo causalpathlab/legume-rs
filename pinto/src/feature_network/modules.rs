@@ -1,20 +1,20 @@
-//! Gene-module resolution on the gene-gene network.
+//! Feature-module resolution on the feature-feature network.
 //!
 //! Two stages:
-//!   1. Iterative degree trim ("k-core"): drop genes with current-subgraph
+//!   1. Iterative degree trim ("k-core"): drop features with current-subgraph
 //!      degree below `min_degree`, re-count, repeat until stable.
 //!   2. Leiden on the surviving subgraph, via
 //!      [`matrix_util::knn_graph::run_leiden`].
 //!
-//! Genes dropped by the trim get `None` as their module label; surviving
-//! genes get `Some(m)` with `m` contiguous starting at 0.
+//! Features dropped by the trim get `None` as their module label; surviving
+//! features get `Some(m)` with `m` contiguous starting at 0.
 
-use crate::gene_network::graph::GenePairGraph;
+use crate::feature_network::graph::FeaturePairGraph;
 use log::info;
 
-/// Per-gene degree within the subgraph induced by `keep` (count only edges
+/// Per-feature degree within the subgraph induced by `keep` (count only edges
 /// with both endpoints kept).
-fn subgraph_degrees(graph: &GenePairGraph, keep: &[bool]) -> Vec<usize> {
+fn subgraph_degrees(graph: &FeaturePairGraph, keep: &[bool]) -> Vec<usize> {
     let mut deg = vec![0usize; graph.n_features];
     for &(u, v) in &graph.feature_edges {
         if keep[u] && keep[v] {
@@ -25,11 +25,11 @@ fn subgraph_degrees(graph: &GenePairGraph, keep: &[bool]) -> Vec<usize> {
     deg
 }
 
-/// Iteratively trim genes with in-subgraph degree below `min_degree`.
+/// Iteratively trim features with in-subgraph degree below `min_degree`.
 ///
-/// Returns a boolean mask of length `graph.n_features`: `true` means the gene
+/// Returns a boolean mask of length `graph.n_features`: `true` means the feature
 /// survives, `false` means it was dropped in some round.
-pub fn kcore_trim(graph: &GenePairGraph, min_degree: usize) -> Vec<bool> {
+pub fn kcore_trim(graph: &FeaturePairGraph, min_degree: usize) -> Vec<bool> {
     let n = graph.n_features;
     let mut alive = vec![true; n];
     if min_degree == 0 {
@@ -56,25 +56,25 @@ pub fn kcore_trim(graph: &GenePairGraph, min_degree: usize) -> Vec<bool> {
     }
     let n_alive = alive.iter().filter(|&&b| b).count();
     info!(
-        "k-core trim (min_degree={}): {}/{} genes retained after {} round(s)",
+        "k-core trim (min_degree={}): {}/{} features retained after {} round(s)",
         min_degree, n_alive, n, round
     );
     alive
 }
 
-/// Run Leiden on the subgraph induced by `keep` and return per-gene
-/// module labels (`None` for trimmed or isolated genes).
+/// Run Leiden on the subgraph induced by `keep` and return per-feature
+/// module labels (`None` for trimmed or isolated features).
 ///
 /// Module labels are contiguous `0..n_modules`.
-pub fn leiden_gene_modules(
-    graph: &GenePairGraph,
+pub fn leiden_feature_modules(
+    graph: &FeaturePairGraph,
     keep: &[bool],
     resolution: f64,
     seed: u64,
 ) -> Vec<Option<usize>> {
     assert_eq!(keep.len(), graph.n_features);
 
-    // Restrict to non-isolated kept genes: a kept gene with all its
+    // Restrict to non-isolated kept features: a kept feature with all its
     // neighbors trimmed away would produce a singleton Leiden module with
     // no signal — drop those to None for cleaner output.
     let sub_degrees = subgraph_degrees(graph, keep);
@@ -92,7 +92,7 @@ pub fn leiden_gene_modules(
     let n_sub = sub_of.iter().filter(|o| o.is_some()).count();
 
     if n_sub == 0 {
-        info!("leiden_gene_modules: empty subgraph");
+        info!("leiden_feature_modules: empty subgraph");
         return vec![None; graph.n_features];
     }
 
@@ -129,7 +129,7 @@ pub fn leiden_gene_modules(
         }
     }
     info!(
-        "leiden_gene_modules: {} modules over {} genes (resolution={:.3})",
+        "leiden_feature_modules: {} modules over {} features (resolution={:.3})",
         n_modules, n_sub, resolution
     );
     out
@@ -138,7 +138,7 @@ pub fn leiden_gene_modules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gene_network::graph::test_graph_from_edges as graph_from_edges;
+    use crate::feature_network::graph::test_graph_from_edges as graph_from_edges;
 
     #[test]
     fn test_kcore_min_degree_zero_keeps_all() {
@@ -184,7 +184,7 @@ mod tests {
         // Two disjoint triangles: {0,1,2} and {3,4,5}.
         let g = graph_from_edges(&[(0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)], 6);
         let keep = vec![true; 6];
-        let mods = leiden_gene_modules(&g, &keep, 1.0, 42);
+        let mods = leiden_feature_modules(&g, &keep, 1.0, 42);
         let m0 = mods[0].unwrap();
         let m3 = mods[3].unwrap();
         assert_ne!(
@@ -198,11 +198,11 @@ mod tests {
     }
 
     #[test]
-    fn test_leiden_trimmed_genes_get_none() {
+    fn test_leiden_trimmed_features_get_none() {
         // Triangle {0,1,2} + leaf 3 attached to 0.
         let g = graph_from_edges(&[(0, 1), (0, 2), (1, 2), (0, 3)], 4);
         let keep = vec![true, true, true, false];
-        let mods = leiden_gene_modules(&g, &keep, 1.0, 1);
+        let mods = leiden_feature_modules(&g, &keep, 1.0, 1);
         assert!(mods[3].is_none());
         assert!(mods[0].is_some());
     }

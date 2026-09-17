@@ -1,6 +1,6 @@
 mod annotate;
 mod cell_activity_graph_embedding;
-mod gene_network;
+mod feature_network;
 mod impute;
 mod link_community;
 mod lr_activity;
@@ -59,7 +59,7 @@ fn print_logo() {
                   SUBCOMMANDS:\n\n\
                   \x20 lc    Link community model (recommended)\n\
                   \x20       Assigns each cell-cell edge to a community via collapsed\n\
-                  \x20       Gibbs sampling on compressed all-gene edge profiles.\n\n\
+                  \x20       Gibbs sampling on compressed all-feature edge profiles.\n\n\
                   \x20 dsvd  Delta-SVD model\n\
                   \x20       Cell-pair shared/difference analysis via Poisson-Gamma\n\
                   \x20       SVD on pseudobulk co-expression.\n\n\
@@ -76,7 +76,7 @@ fn print_logo() {
                   \x20 # Delta-SVD:\n\
                   \x20 pinto dsvd data.h5 -c coords.csv -o results\n\n\
                   INPUT FILES:\n\n\
-                  \x20 Data:   .h5 or .zarr (genes x cells, sparse). Multiple files\n\
+                  \x20 Data:   .h5 or .zarr (features x cells, sparse). Multiple files\n\
                   \x20         comma-separated for multi-sample: s1.h5,s2.h5\n\
                   \x20 Coords: CSV/TSV/parquet, first column = barcode, rest = x,y,...\n\
                   \x20         Default columns: pxl_row_in_fullres,pxl_col_in_fullres\n\
@@ -104,16 +104,16 @@ struct Cli {
 enum Commands {
     #[command(
         alias = "dsvd",
-        about = "Gene-level shared/difference analysis by SVD",
-        long_about = "Gene-level cell-cell interaction analysis by SVD.\n\
+        about = "Feature-level shared/difference analysis by SVD",
+        long_about = "Feature-level cell-cell interaction analysis by SVD.\n\
                       It uses shared and difference channels.\n\n\
                       Model:\n\
-                      \x20 For each cell pair e=(i,j) and gene g:\n\
+                      \x20 For each cell pair e=(i,j) and feature g:\n\
                       \x20   sigma_e^g = log1p(x_ig) + log1p(x_jg)    shared\n\
                       \x20   delta_e^g = |log1p(x_ig) - log1p(x_jg)|  difference\n\
                       \x20 Pairs grouped into S pseudobulk samples via\n\
                       \x20 graph-constrained coarsening.\n\
-                      \x20 Per sample s, gene g:\n\
+                      \x20 Per sample s, feature g:\n\
                       \x20   Y_s^g = sum_{e in s} sigma_e^g  (or delta_e^g)\n\
                       \x20   Y_s^g | mu_g ~ Poisson(n_s * mu_g)\n\
                       \x20   mu_g ~ Gamma(a0, b0)   collapsed out\n\n\
@@ -123,10 +123,10 @@ enum Commands {
                       \x20 2. Estimate batch effects delta [G x B]\n\
                       \x20 3. Build KNN graph -> E cell pairs\n\
                       \x20    (spatial KNN from coordinates, or expression KNN\n\
-                      \x20     from random-projected gene expression)\n\
+                      \x20     from random-projected feature expression)\n\
                       \x20 4. Random projection of cells [N x P]\n\
                       \x20 5. Graph coarsening -> assign pairs to S samples\n\
-                      \x20 6. Collapse: accumulate sigma/delta per gene per sample\n\
+                      \x20 6. Collapse: accumulate sigma/delta per feature per sample\n\
                       \x20    Sigma[g,s] += log1p(x_ig) + log1p(x_jg)\n\
                       \x20    Delta[g,s] += |log1p(x_ig) - log1p(x_jg)|\n\
                       \x20 7. Fit Poisson-Gamma -> posterior log means\n\
@@ -152,10 +152,10 @@ enum Commands {
                       - {out}.propensity.parquet: cell propensity (N x K)\n\
                       \x20 Columns: 0 .. K-1, cluster (argmax), entropy (Shannon, nats).\n\
                       - {out}.link_community.parquet: per-edge community labels\n\
-                      - {out}.gene_community.parquet: gene-community Poisson-Gamma statistics (G x K).\n\
+                      - {out}.feature_community.parquet: feature-community Poisson-Gamma statistics (G x K).\n\
                       \x20 Rows are scaled by the NB Fisher-info weight\n\
                       \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g)), which attenuates\n\
-                      \x20 high-mean high-dispersion genes. There is no flag for it.\n\
+                      \x20 high-mean high-dispersion features. There is no flag for it.\n\
                       - {out}.pinto.json: information-flow manifest used by\n\
                       \x20 `pinto plot` and `pinto lr-activity` (lists every parquet)."
     )]
@@ -177,7 +177,7 @@ enum Commands {
                       \x20        or by spherical kmeans, argmax_k cos(z_e, centroid_k)\n\
                       \x20 For each vertex i:\n\
                       \x20   p_i[k] = |{e incident to i : c_e = k}| / degree(i)\n\
-                      \x20 Optionally, cluster-specific gene expression:\n\
+                      \x20 Optionally, cluster-specific feature expression:\n\
                       \x20   mu_{g,k} ~ Gamma(a0, b0) with pseudocount sums\n\n\
                       Algorithm:\n\
                       \x20 1. Load latent codes Z [E x T] from .latent.parquet\n\
@@ -187,7 +187,7 @@ enum Commands {
                       \x20    p_i[k] = count(c_e=k for e incident to i) / deg(i)\n\
                       \x20 5. dominant_cluster[i] = argmax_k p_i[k]\n\
                       \x20 6. If expression data provided:\n\
-                      \x20    weighted gene sums per cluster -> Poisson-Gamma\n\n\
+                      \x20    weighted feature sums per cluster -> Poisson-Gamma\n\n\
                       Inputs (all passed by flag; there is no positional arg):\n\
                       - -z/--latent-data-file: .latent.parquet (from cage or delta-svd)\n\
                       - -e/--coord-pair-file: .coord_pairs.parquet (cell pair names)\n\
@@ -197,7 +197,7 @@ enum Commands {
                       \x20 Columns: C0 .. C{K-1}, cluster (argmax),\n\
                       \x20 entropy (Shannon, nats), plus optional coord trailer.\n\
                       - {out}.link_community.parquet: per-edge community labels\n\
-                      - {out}.genes.parquet: cluster-specific gene expression (with -d/--expr-data-files).\n\
+                      - {out}.features.parquet: cluster-specific feature expression (with -d/--expr-data-files).\n\
                       \x20 Rows are scaled by the NB Fisher-info weight\n\
                       \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g)). There is no flag for it.\n\
                       - {out}.pinto.json: information-flow manifest used by\n\
@@ -219,52 +219,52 @@ enum Commands {
                       \x20 pinto lc data.h5 -c coords.csv -o out --n-communities 25\n\n\
                       \x20 # Expression-only (no coordinates):\n\
                       \x20 pinto lc data.h5 -o out\n\n\
-                      \x20 # With external gene-gene network:\n\
+                      \x20 # With external feature-feature network:\n\
                       \x20 pinto lc data.h5 -c coords.csv -o out \\\n\
-                      \x20   --gene-network biogrid_pairs.tsv\n\n\
+                      \x20   --feature-network biogrid_pairs.tsv\n\n\
                       \x20 # Multi-sample with batch correction:\n\
                       \x20 pinto lc s1.h5,s2.h5 -c c1.csv,c2.csv -o out\n\n\
                       INPUT FILES:\n\n\
-                      \x20 data.h5 / data.zarr   Genes-by-cells sparse matrix.\n\
+                      \x20 data.h5 / data.zarr   Features-by-cells sparse matrix.\n\
                       \x20                        Convert from MTX: data-beans from-mtx in.mtx out.h5\n\
                       \x20 -c coords.csv          Cell coordinates (barcode,x,y).\n\
                       \x20                        Omit for expression-only mode.\n\n\
                       EDGE PROFILE MODES:\n\n\
-                      \x20 Compressed all-gene profile (default):\n\
+                      \x20 Compressed all-feature profile (default):\n\
                       \x20   y_e = W^T(x_i + x_j), W = rows × --proj-dim Gaussian basis.\n\
-                      \x20   Rows, not genes: on a {gene}/count/{spliced,unspliced}\n\
-                      \x20   matrix there are two rows per gene, and both carry the\n\
-                      \x20   same gene-level count filter and NB weight so a gene is\n\
+                      \x20   Rows, not features: on a {feature}/count/{spliced,unspliced}\n\
+                      \x20   matrix there are two rows per feature, and both carry the\n\
+                      \x20   same feature-level count filter and NB weight so a feature is\n\
                       \x20   never split across the projection.\n\
-                      \x20   Every profile dim is a full linear combination of ALL genes\n\
-                      \x20   (no genes dropped); M = proj-dim just compresses the gene axis.\n\
-                      \x20   Optionally zero basis rows for genes below --min-gene-count.\n\n\
-                      \x20 Gene-network module-pair profile (--gene-network file.tsv):\n\
-                      \x20   External gene-gene edges (two-column TSV), optionally SNN-\n\
-                      \x20   augmented, k-core-trimmed, Leiden-clustered into gene modules.\n\
+                      \x20   Every profile dim is a full linear combination of ALL features\n\
+                      \x20   (no features dropped); M = proj-dim just compresses the feature axis.\n\
+                      \x20   Optionally zero basis rows for features below --min-feature-count.\n\n\
+                      \x20 Feature-network module-pair profile (--feature-network file.tsv):\n\
+                      \x20   External feature-feature edges (two-column TSV), optionally SNN-\n\
+                      \x20   augmented, k-core-trimmed, Leiden-clustered into feature modules.\n\
                       \x20   Edge profile is SPARSE over module-pairs (a, b) with entries\n\
                       \x20   max(0, x_{i,a}·x_{j,b} + x_{i,b}·x_{j,a} − X_i·X_j · deg(a)·deg(b)/(2W)²).\n\
-                      \x20   Controls: --snn-min-shared, --gene-trim-min-degree,\n\
-                      \x20   --gene-modules-resolution.\n\n\
+                      \x20   Controls: --snn-min-shared, --feature-trim-min-degree,\n\
+                      \x20   --feature-modules-resolution.\n\n\
                       ALGORITHM:\n\n\
                       \x20 1. Build spatial KNN graph (or expression KNN if no coords)\n\
                       \x20 2. Batch effect estimation (multi-sample only)\n\
                       \x20 3. Multi-level graph coarsening\n\
-                      \x20 4. Resolve gene modules (projection or SNN + k-core + Leiden)\n\
+                      \x20 4. Resolve feature modules (projection or SNN + k-core + Leiden)\n\
                       \x20 5. Build sparse edge profiles (projection or module-pair residual)\n\
                       \x20 6. V-cycle Gibbs + greedy across coarsening levels\n\
                       \x20 7. Component-EM + greedy on full fine-resolution edges\n\
-                      \x20 8. Extract cell propensity + gene-community statistics (+ cosine dictionary merge)\n\n\
+                      \x20 8. Extract cell propensity + feature-community statistics (+ cosine dictionary merge)\n\n\
                       See `pinto lc --help` for individual flag docs.\n\n\
                       OUTPUT FILES:\n\n\
                       \x20 {out}.propensity.parquet      Cell community membership [N × K]\n\
                       \x20                                Columns: 0 .. K-1, plus `entropy`\n\
                       \x20                                (Shannon entropy of each row, nats).\n\
-                      \x20 {out}.gene_community.parquet      Gene-community rates [G × K]\n\
+                      \x20 {out}.feature_community.parquet      Feature-community rates [G × K]\n\
                       \x20                                (rows scaled by the NB Fisher-info weight\n\
                       \x20                                 w_g = 1/(1 + π_g·s̄·φ(μ_g)); no flag)\n\
-                      \x20                                Keyed by the bare GENE name: on a matrix of\n\
-                      \x20                                {gene}/count/{spliced,unspliced} rows the two\n\
+                      \x20                                Keyed by the bare FEATURE name: on a matrix of\n\
+                      \x20                                {feature}/count/{spliced,unspliced} rows the two\n\
                       \x20                                tracks are pooled. `cage` keeps its own copy of\n\
                       \x20                                this table on the matrix rows instead.\n\
                       \x20 {out}.link_community.parquet  Edge community assignments [E × 3]\n\
@@ -275,7 +275,7 @@ enum Commands {
                       \x20                                plug-in Poisson DC-SBM log-likelihood\n\
                       \x20                                Σ_kg f(D_kg) − Σ_k f(V_k) with\n\
                       \x20                                f(x)=x·ln x, where D_kg is the\n\
-                      \x20                                edge-weighted gene degree in community k\n\
+                      \x20                                edge-weighted feature degree in community k\n\
                       \x20                                and V_k = Σ_g D_kg is its volume\n\
                       \x20                                (equivalently −Σ_k V_k · H(p_k), nats).\n\
                       \x20                                Higher = better; `score/total_mass`\n\
@@ -283,10 +283,10 @@ enum Commands {
                       \x20                                mass-weighted mean per-community\n\
                       \x20                                log-likelihood per edge unit.\n\
                       \x20 {out}.delta.parquet           Batch effects (multi-sample only)\n\
-                      \x20 {out}.gene_graph.parquet      Gene-gene pairs (gene-pair mode only)\n\
+                      \x20 {out}.feature_graph.parquet      Feature-feature pairs (feature-pair mode only)\n\
                       \x20 {out}.L{l}.*.parquet          Per-cascade-level outputs (unless --no-level-outputs)\n\
                       \x20 {out}.draft.*.parquet         Pre-merge fine partition (when dictionary merge collapsed)\n\
-                      \x20 {out}.dict_merges.parquet     Cosine merge tree over the gene-community dictionary\n\
+                      \x20 {out}.dict_merges.parquet     Cosine merge tree over the feature-community dictionary\n\
                       \x20 {out}.dict_merges.cut.parquet Fine→super community remap from --merge-cut\n\
                       \x20 {out}.pinto.json           Information-flow manifest:\n\
                       \x20                                lists every parquet, level tags,\n\
@@ -304,39 +304,39 @@ enum Commands {
                       The trained unit is a finest-level super-cell (PB).\n\
                       Cell-cell KNN edges fold into PB super edges up front;\n\
                       no cell and no cell pair is ever trained on.\n\
-                      cage visits one gene at a time.\n\
-                      Each gene defines a per-cell activity vector,\n\
+                      cage visits one feature at a time.\n\
+                      Each feature defines a per-cell activity vector,\n\
                       folded onto the super edges it touches.\n\
                       That gates a shared multi-scale PB hierarchy.\n\n\
                       Chain levels differ only in their negative pools.\n\
                       This is embedding-only. There is no count decoder.\n\n\
-                      NOTE --n-hvg no longer subsets the trained gene axis.\n\
+                      NOTE --n-hvg no longer subsets the trained feature axis.\n\
                       It weights the random projection instead.\n\
                       That projection builds the coarsening hierarchy.\n\
                       senna bge and senna gem do the same.\n\
-                      Every gene is present in every output table; a gene\n\
+                      Every feature is present in every output table; a feature\n\
                       TRAINS only if it is active on a super edge.\n\
-                      A gene whose activity sits entirely inside super-cells\n\
+                      A feature whose activity sits entirely inside super-cells\n\
                       keeps its initialization; the log counts them.\n\
-                      Use --genes-per-epoch to cap per-epoch cost instead.\n\n\
+                      Use --features-per-epoch to cap per-epoch cost instead.\n\n\
                       SPLICE CHANNELS are recognised on the feature axis.\n\
-                      Rows named {gene}/count/spliced pair with their\n\
-                      {gene}/count/unspliced counterpart.\n\
-                      A gene's two rows are ONE gene everywhere the model fits.\n\
+                      Rows named {feature}/count/spliced pair with their\n\
+                      {feature}/count/unspliced counterpart.\n\
+                      A feature's two rows are ONE feature everywhere the model fits.\n\
                       Their counts are summed before the log1p activity.\n\
-                      Gene-side output tables are keyed by the bare gene name.\n\
-                      {out}.gene_community.parquet stays on the matrix rows,\n\
-                      so it still lists a gene's two channels separately.\n\
-                      --n-hvg counts ROWS, then widens to whole genes,\n\
-                      so a gene is never half-weighted in the projection.\n\
+                      Feature-side output tables are keyed by the bare feature name.\n\
+                      {out}.feature_community.parquet stays on the matrix rows,\n\
+                      so it still lists a feature's two channels separately.\n\
+                      --n-hvg counts ROWS, then widens to whole features,\n\
+                      so a feature is never half-weighted in the projection.\n\
                       A matrix mixing channel rows with plain rows is rejected.\n\
-                      A {gene}/count/total row is the usual cause.\n\n\
-                      With both tracks present, the manifest reports how many genes\n\
+                      A {feature}/count/total row is the usual cause.\n\n\
+                      With both tracks present, the manifest reports how many features\n\
                       carry counts on BOTH tracks -- the structural precondition for\n\
                       a nascent-minus-mature contrast -- and the base track that\n\
                       contrast is measured from (delta_base, `senna gem`'s sign).\n\n\
                       After training, cells return in EVALUATION only.\n\
-                      Every CELL PAIR is placed on the frozen gene embedding.\n\
+                      Every CELL PAIR is placed on the frozen feature embedding.\n\
                       Its pooled counts x_gu + x_gv enter through one statistic,\n\
                       and a small encoder trained on this run's pairs\n\
                       maps that statistic to the per-pair latent e_uv in one pass.\n\
@@ -353,7 +353,7 @@ enum Commands {
                       deciding the count from --leiden-resolution.\n\
                       kmeans instead uses a fixed --n-edge-clusters,\n\
                       spherical on the pair latent and seeded by --seed.\n\n\
-                      A cell's embedding is its own placement on the gene embedding,\n\
+                      A cell's embedding is its own placement on the feature embedding,\n\
                       by the same encoder that places its pairs,\n\
                       written for `pinto annotate`.\n\
                       A cell with no counts gets a zero row.\n\n\
@@ -365,12 +365,12 @@ enum Commands {
                       \x20 {out}.pair_encoder.safetensors  the pair encoder, for `pinto predict`\n\
                       \x20 {out}.feature_embedding.parquet  feature × embedding_dim\n\
                       \x20 {out}.pseudobulk_cells.parquet  cell × (coords, super-cell, e_pb)\n\
-                      \x20 {out}.gene_bias.parquet       per-gene scalar\n\
+                      \x20 {out}.feature_bias.parquet       per-feature scalar\n\
                       \x20 {out}.coord_pairs.parquet     cell pair list, tagged by kind\n\
                       \x20 {out}.latent.parquet          cell pair × embedding_dim\n\
                       \x20 {out}.propensity.parquet      cell × K, + cluster, entropy\n\
                       \x20 {out}.link_community.parquet  per-edge community\n\
-                      \x20 {out}.gene_community.parquet  gene × K Poisson-Gamma rates\n\
+                      \x20 {out}.feature_community.parquet  feature × K Poisson-Gamma rates\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.fisher_weights.parquet  per-ROW NB precisions w_r\n\
                       \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
@@ -407,7 +407,7 @@ enum Commands {
     #[command(
         about = "Apply a trained cage run to a new sample",
         long_about = "Apply a trained `pinto cage` run to a new sample.\n\
-                      The gene side and the community dictionary transfer;\n\
+                      The feature side and the community dictionary transfer;\n\
                       the geometry is rebuilt from the new sample's own coordinates.\n\n\
                       TYPICAL USE -- score a trained run on a held-out half:\n\
                       \x20 data-beans split data.zarr -o cv --test-frac 0.2 \\\n\
@@ -416,7 +416,7 @@ enum Commands {
                       \x20 pinto predict cv.test.zarr.zip --model model -o pred \\\n\
                       \x20     -c positions.csv --null-from cv.train.zarr.zip \\\n\
                       \x20     --eval-features panel.txt\n\n\
-                      ALWAYS pass --null-from the TRAINING half. Those per-gene\n\
+                      ALWAYS pass --null-from the TRAINING half. Those per-feature\n\
                       totals are not only the null: they are b_g, half of the\n\
                       pair log-rate b_g + <e_g, e_uv>. Taken from the query the\n\
                       prediction is anchored on the data being scored, and llik\n\
@@ -426,11 +426,11 @@ enum Commands {
                       cells are near-duplicates, so a random split leaves every\n\
                       test cell ringed by training cells.\n\n\
                       Pass the same --eval-features file to every arm, and to\n\
-                      `senna predict`, or the arms are graded on different genes.\n\n\
+                      `senna predict`, or the arms are graded on different features.\n\n\
                       Steps:\n\
                       \x20 1. Preprocess the new data as cage does (graph, batches)\n\
-                      \x20 2. Align {model}.feature_embedding.parquet to its gene axis by name.\n\
-                      \x20    Genes without a model row are dropped, never seeded.\n\
+                      \x20 2. Align {model}.feature_embedding.parquet to its feature axis by name.\n\
+                      \x20    Features without a model row are dropped, never seeded.\n\
                       \x20 3. Place every cell pair, and every cell, on the frozen dictionary\n\
                       \x20    by the model's pair encoder ({model}.pair_encoder.safetensors),\n\
                       \x20    under the ridge it was fitted with. Nothing is optimised per pair.\n\
@@ -442,7 +442,7 @@ enum Commands {
                       Outputs:\n\
                       \x20 {out}.coord_pairs.parquet, {out}.latent.parquet,\n\
                       \x20 {out}.link_community.parquet, {out}.propensity.parquet,\n\
-                      \x20 {out}.gene_community.parquet, {out}.cell_embedding.parquet,\n\
+                      \x20 {out}.feature_community.parquet, {out}.cell_embedding.parquet,\n\
                       \x20 {out}.pinto.json (command = predict), readable by\n\
                       \x20 `pinto plot` and `pinto annotate` like a fitted run,\n\
                       \x20 {out}.predictive.parquet, one row per cell PAIR.\n\n\
@@ -451,7 +451,7 @@ enum Commands {
                       --eval-features, spearman and pearson_log1p -- the same\n\
                       column names `senna predict` uses for the same quantities,\n\
                       so one script reads both.\n\n\
-                      The likelihood is a multinomial over the scored genes, so\n\
+                      The likelihood is a multinomial over the scored features, so\n\
                       eval_llik_per_count is nats per observed count. A pair pools\n\
                       two cells, but nats per count does not care how many cells\n\
                       went in. Rank on eval_llik_per_count MINUS\n\
@@ -461,9 +461,9 @@ enum Commands {
                       A pair with no counts carries NaN; filter total > 0 before\n\
                       averaging a *_per_count column.\n\n\
                       --eval-features restricts the likelihood AND the\n\
-                      correlations to those genes, which is what makes the number\n\
+                      correlations to those features, which is what makes the number\n\
                       comparable with senna's. It is off by default because a\n\
-                      pair-level correlation sorts the gene axis once per pair,\n\
+                      pair-level correlation sorts the feature axis once per pair,\n\
                       and a sample has far more pairs than cells. Pass the same\n\
                       file to both commands."
     )]
@@ -475,7 +475,7 @@ enum Commands {
                       1. Place the query cells on the model's community propensity.\n  \
                       \x20  A cage model runs the full `pinto predict` pipeline\n  \
                       \x20  (its usual outputs land under {out}); lc / dsvd models\n  \
-                      \x20  project each cell onto the gene_community profiles\n  \
+                      \x20  project each cell onto the feature_community profiles\n  \
                       \x20  by a per-cell EM fit — and project the reference\n  \
                       \x20  cells the same way, so both sides come from one map.\n  \
                       2. For each query cell, find its nearest reference cells\n  \
@@ -507,7 +507,7 @@ enum Commands {
                       \x20 propensity/{level}.argmax.propensity.pdf  size ∝ propensity, color = argmax\n\
                       \x20 propensity/{level}.community{k}.pdf       per-community soft-membership\n\
                       \x20 mesh/{level}.pdf                          cell-cell edges (lc only)\n\
-                      \x20 markers/{level}.community{k}.{gene}.pdf   log1p expr heatmap\n\
+                      \x20 markers/{level}.community{k}.{feature}.pdf   log1p expr heatmap\n\
                       \x20                                           with that community's hull outline\n\
                       Intermediate `L*` levels:\n\
                       \x20 propensity/{level}.argmax.propensity.pdf  only\n\
@@ -522,9 +522,9 @@ enum Commands {
                       \x20                 interior cells fade to 0.\n\
                       \x20 interfaces.tsv  Per focal cell: dominant community,\n\
                       \x20                 1- and 2-hop neighbor mix, top-N marker\n\
-                      \x20                 genes per neighbor community.\n\
+                      \x20                 features per neighbor community.\n\
                       \x20 Tunables: --entropy-quantile, --neighborhood-hops,\n\
-                      \x20            --max-interface-cells, --interface-top-genes.\n\n\
+                      \x20            --max-interface-cells, --interface-top-features.\n\n\
                       LR-ACTIVITY OVERLAY (auto-discovered):\n\n\
                       \x20 When the .pinto.json carries an `outputs.lr_activity`\n\
                       \x20 path (set automatically by `pinto lr-activity`), one\n\
@@ -550,7 +550,7 @@ enum Commands {
                       \x20     log((R+1)/(L+1)) on a red↔blue ramp.\n\
                       \x20     With --lr-color-mode=coexpr, the ramp shows co-detection\n\
                       \x20     instead, centered on the per-pair edge mean:\n\
-                      \x20     red where both genes are detected across the contact,\n\
+                      \x20     red where both features are detected across the contact,\n\
                       \x20     blue where only one side is.\n\
                       \x20     That is the same co-detection notion\n\
                       \x20     the `lra --edge-scores-only` table is built on\n\
@@ -581,16 +581,16 @@ enum Commands {
                       DESIGN:\n\
                       \x20 1. Cells are collapsed into pseudobulk samples =\n\
                       \x20    (batch × propensity-bin), where the propensity bin is the\n\
-                      \x20    sign-LSH binary code of an SVD'd random projection of gene\n\
+                      \x20    sign-LSH binary code of an SVD'd random projection of feature\n\
                       \x20    expression (data-beans-alg::binary_sort_columns).\n\
                       \x20 2. Each cell carries soft membership over the link communities:\n\
                       \x20    the fraction of its within-community edge instances in each.\n\
                       \x20 3. Per (community, sample) we accumulate membership-weighted\n\
-                      \x20    gene sums for the LR genes: one pseudobulk profile per\n\
+                      \x20    feature sums for the LR features: one pseudobulk profile per\n\
                       \x20    sample per community, with weight w = membership mass.\n\
                       \x20 4. Statistic per (batch, community, LR pair): weighted covariance\n\
                       \x20    of `log1p(w_g · pb_mean)` between L and R across samples,\n\
-                      \x20    sample-weighted by w. Per-gene `w_g` are NB-Fisher-info\n\
+                      \x20    sample-weighted by w. Per-feature `w_g` are NB-Fisher-info\n\
                       \x20    weights (same as propensity / lc).\n\
                       \x20 5. Null: sample-level permutation of L within propensity-stratified\n\
                       \x20    buckets (top --shuffle-stratify-dim bits of the propensity\n\
@@ -614,8 +614,8 @@ enum Commands {
                       \x20               {prefix}.coord_pairs.parquet, and back-fills\n\
                       \x20               the lr_activity path into {prefix}.pinto.json\n\
                       \x20               so `pinto plot` can auto-discover it).\n\
-                      \x20 --lr-pairs    two-column TSV/CSV: ligand gene, receptor gene.\n\
-                      \x20               Gene names are resolved against the data\n\
+                      \x20 --lr-pairs    two-column TSV/CSV: ligand feature, receptor feature.\n\
+                      \x20               Feature names are resolved against the data\n\
                       \x20               row-names; the resolved canonical names are\n\
                       \x20               persisted in the JSON sidecar.\n\n\
                       KEY KNOBS:\n\n\

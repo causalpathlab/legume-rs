@@ -1,12 +1,12 @@
 //! The scorer's contract: the null is the abundance multinomial, the model
 //! reduces to exactly that null when the latent is off, and a latent aligned
-//! with a gene has to earn its likelihood on a profile concentrated there.
+//! with a feature has to earn its likelihood on a profile concentrated there.
 
 use super::*;
 use crate::util::common::Mat;
 
-/// Three genes, two latent dimensions. Gene 0 loads on dim 0, gene 1 on dim 1,
-/// gene 2 on neither — so a θ can be pointed at one gene at a time.
+/// Three features, two latent dimensions. Feature 0 loads on dim 0, feature 1 on dim 1,
+/// feature 2 on neither — so a θ can be pointed at one feature at a time.
 fn fixture() -> PairDictionary {
     let e_feat = Mat::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     let totals = vec![300.0, 200.0, 500.0];
@@ -32,9 +32,9 @@ fn a_zero_latent_scores_exactly_the_abundance_null() {
 }
 
 #[test]
-fn a_latent_aimed_at_the_observed_gene_beats_the_null() {
+fn a_latent_aimed_at_the_observed_feature_beats_the_null() {
     let dict = fixture();
-    // Everything observed on gene 0, and θ points at gene 0's dimension.
+    // Everything observed on feature 0, and θ points at feature 0's dimension.
     let obs = [(0u32, 10.0f32)];
     let good = dict.score(&obs, &[2.0, 0.0], &dict.eval_axis(None));
     let bad = dict.score(&obs, &[-2.0, 0.0], &dict.eval_axis(None));
@@ -84,13 +84,13 @@ fn agreement_needs_an_evaluation_axis() {
 
 #[test]
 fn eval_axis_drops_names_that_carry_no_counts() {
-    // Gene 3 has zero total, so it never enters the active list and cannot be
-    // scored — naming it must not shift the other genes' positions.
+    // Feature 3 has zero total, so it never enters the active list and cannot be
+    // scored — naming it must not shift the other features' positions.
     let e_feat = Mat::from_row_slice(4, 2, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
     let dict = PairDictionary::new(&e_feat, &[300.0, 200.0, 500.0, 0.0], 100).expect("dictionary");
     let names: Vec<Box<str>> = vec!["a".into(), "b".into(), "c".into(), "dead".into()];
     // Deliberately cased differently from the data: the panel and the data may
-    // disagree on case while naming the same genes.
+    // disagree on case while naming the same features.
     let wanted: Vec<Box<str>> = vec!["A".into(), "DEAD".into()];
     assert_eq!(dict.eval_positions(&names, &wanted), vec![0]);
 }
@@ -98,10 +98,10 @@ fn eval_axis_drops_names_that_carry_no_counts() {
 #[test]
 fn an_eval_axis_restricts_the_likelihood_and_the_total() {
     // Comparability with senna depends on this: given `--eval-features`, the
-    // likelihood is the CONDITIONAL multinomial over the scored genes, and counts
+    // likelihood is the CONDITIONAL multinomial over the scored features, and counts
     // outside that set are in neither the numerator nor the denominator.
     //
-    // The expected value is the two-gene conditional worked out by hand from the
+    // The expected value is the two-feature conditional worked out by hand from the
     // fixture's b = ln(total / n_cells) and theta = (1, -1):
     //   logit = (1 + ln3, -1 + ln2), z = ln(e^logit0 + e^logit1)
     //   llik  = 4(logit0 - z) + 6(logit1 - z), over 10 counts.
@@ -110,7 +110,10 @@ fn an_eval_axis_restricts_the_likelihood_and_the_total() {
     let axis: Vec<u32> = vec![0, 1];
 
     let s = dict.score(&obs, &[1.0, -1.0], &dict.eval_axis(Some(axis.clone())));
-    assert_eq!(s.total, 10.0, "gene 2's counts are outside the scored set");
+    assert_eq!(
+        s.total, 10.0,
+        "feature 2's counts are outside the scored set"
+    );
     assert!(
         (s.llik / s.total - -1.529_661_8).abs() < 1e-4,
         "got {}",
@@ -120,10 +123,10 @@ fn an_eval_axis_restricts_the_likelihood_and_the_total() {
 
 #[test]
 fn the_restricted_score_ignores_everything_off_its_axis() {
-    // What "restricted" has to mean: nothing outside the scored genes may move
+    // What "restricted" has to mean: nothing outside the scored features may move
     // the number. Without this the correlations and the likelihood would drift
-    // with a gene the user deliberately excluded, and two methods carrying
-    // different unscored genes would not be comparable after all.
+    // with a feature the user deliberately excluded, and two methods carrying
+    // different unscored features would not be comparable after all.
     let dict = fixture();
     let axis: Vec<u32> = vec![0, 1];
     let theta = [0.6f32, -0.2];
@@ -142,7 +145,7 @@ fn the_restricted_score_ignores_everything_off_its_axis() {
 }
 
 #[test]
-fn the_restricted_null_normalises_over_the_same_genes_as_the_model() {
+fn the_restricted_null_normalises_over_the_same_features_as_the_model() {
     // If model and null used different partitions their difference would be an
     // artifact of that mismatch rather than of the latent.
     let dict = fixture();
@@ -157,21 +160,21 @@ fn the_restricted_null_normalises_over_the_same_genes_as_the_model() {
     );
 }
 
-/// A model that puts ~no mass on an observed gene must be charged the same
+/// A model that puts ~no mass on an observed feature must be charged the same
 /// penalty in both engines. senna floors the probability at LOG_PROB_FLOOR
 /// nats; before this test, pinto's logit clamp let the charge run to roughly
 /// twice that, so `eval_llik_per_count` — the documented cross-engine ranking
 /// column — punished the same event differently depending on the binary.
 #[test]
-fn a_starved_gene_is_charged_the_shared_floor() {
+fn a_starved_feature_is_charged_the_shared_floor() {
     let dict = fixture();
-    // theta drives gene 0's logit to the clamp floor while gene 1 takes all the
-    // mass; every observed count sits on the starved gene.
+    // theta drives feature 0's logit to the clamp floor while feature 1 takes all the
+    // mass; every observed count sits on the starved feature.
     let s = dict.score(&[(0u32, 10.0f32)], &[-100.0, 100.0], &dict.eval_axis(None));
     let per_count = f64::from(s.llik) / f64::from(s.total);
     assert!(
         (per_count - matrix_util::agreement::LOG_PROB_FLOOR).abs() < 1e-3,
-        "starved-gene charge {per_count} nats/count; the shared floor is {}",
+        "starved-feature charge {per_count} nats/count; the shared floor is {}",
         matrix_util::agreement::LOG_PROB_FLOOR
     );
 }

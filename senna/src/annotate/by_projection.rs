@@ -3,7 +3,7 @@
 //!
 //! A thin senna front-end over the shared firm term-ORA core
 //! ([`graph_embedding_util::type_annotation::annotate_embeddings_ora`]): it
-//! reads `outputs.feature_embedding` (genes on the cell manifold) + the cell
+//! reads `outputs.feature_coembedding` (genes on the cell manifold) + the cell
 //! embedding (`outputs.cell_embedding`, else `outputs.latent`) from the run
 //! manifest and hands them to the firm routine — Euclidean nearest-centroid
 //! assignment → distance-outlier QC → Leiden clustering → cluster × term
@@ -53,7 +53,7 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
     };
 
     // Feature side: genes on the cell manifold (required for projection). Reads
-    // `outputs.feature_embedding` off the manifest and, for a `gem` run, keeps
+    // `outputs.feature_coembedding` off the manifest and, for a `gem` run, keeps
     // only the spliced rows re-keyed by gene — see `crate::gem::marker_embedding`.
     let feat = load_marker_feature_embedding(&args.from).with_context(|| {
         "projection needs a co-embedded gene space (a `senna gem` / `bge` / `fne` / \

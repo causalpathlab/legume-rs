@@ -8,8 +8,8 @@
 //! optional TreeBH Cell-Ontology calling). The embedding-grounded twin of
 //! `senna annotate-by-projection` and `senna annotate-gem`.
 //!
-//! Input is a co-embedded (gene, cell) pair in one inner-product space:
-//! `{prefix}.feature_embedding.parquet` (gene × D) + `{prefix}.cell_embedding.parquet`
+//! Input is a co-embedded (feature, cell) pair in one inner-product space:
+//! `{prefix}.feature_embedding.parquet` (feature × D) + `{prefix}.cell_embedding.parquet`
 //! (cell × D). `pinto cage` writes them directly, and any future embedding
 //! output that follows the same contract annotates the same way. Pass a
 //! shared `--from` prefix, or point `--feature-embedding` and
@@ -53,7 +53,7 @@ pub struct AnnotateArgs {
 
     #[arg(
         long,
-        help = "Explicit gene × D feature-embedding parquet (overrides `{from}.feature_embedding.parquet`)"
+        help = "Explicit feature × D feature-embedding parquet (overrides `{from}.feature_embedding.parquet`)"
     )]
     pub feature_embedding: Option<Box<str>>,
 
@@ -66,7 +66,7 @@ pub struct AnnotateArgs {
     #[arg(
         long,
         short = 'm',
-        help = "Marker TSV: `gene<TAB>celltype` per line (tab/comma/space delimited)"
+        help = "Marker TSV: `feature<TAB>celltype` per line (tab/comma/space delimited)"
     )]
     pub markers: Box<str>,
 

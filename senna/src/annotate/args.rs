@@ -436,7 +436,7 @@ pub struct AnnotateProjectionArgs {
         help = "Run manifest, or run prefix, from a co-embedding run",
         long_help = "Run manifest (or the run's --out prefix) with a co-embedded gene space.\n\
                      That means `senna bge`, `fne`, `resolve-embedding-space`, or `gem`.\n\
-                     Reads `outputs.feature_embedding` + `outputs.cell_embedding`.\n\
+                     Reads `outputs.feature_coembedding` + `outputs.cell_embedding`.\n\
                      It falls back to `outputs.latent` for the cell side on plain bge/fne.\n\
                      \n\
                      On a gem run the feature table carries two rows per gene.\n\

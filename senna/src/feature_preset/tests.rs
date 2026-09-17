@@ -228,9 +228,9 @@ fn carried_fixture() -> CarriedRows {
 fn appending_writes_the_full_table_and_types_every_row() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("run").to_string_lossy().into_owned();
-    let path = write_run_table(&out, "feature_loading.parquet", "gene", &["A", "B"]);
+    let path = write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "B"]);
     carried_fixture()
-        .append_to(&out, "feature_loading.parquet")
+        .append_to(&out, "feature_embedding.parquet")
         .unwrap();
 
     let t = DMatrix::<f32>::from_parquet(&path).unwrap();
@@ -282,16 +282,16 @@ fn appending_keeps_the_run_s_own_types() {
 fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("run").to_string_lossy().into_owned();
-    let path = write_run_table(&out, "feature_loading.parquet", "gene", &["A", "GATA1"]);
+    let path = write_run_table(&out, "feature_embedding.parquet", "gene", &["A", "GATA1"]);
     let mut wide = carried_fixture();
     wide.names = vec![Box::from("X"), Box::from("Y")];
     wide.rows = DMatrix::<f32>::zeros(2, 4);
-    assert!(wide.append_to(&out, "feature_loading.parquet").is_err());
+    assert!(wide.append_to(&out, "feature_embedding.parquet").is_err());
     let t = DMatrix::<f32>::from_parquet(&path).unwrap();
     assert_eq!(t.mat.nrows(), 2, "left as written");
 
     carried_fixture()
-        .append_to(&out, "feature_loading.parquet")
+        .append_to(&out, "feature_embedding.parquet")
         .unwrap();
     let t = DMatrix::<f32>::from_parquet(&path).unwrap();
     let names: Vec<&str> = t.rows.iter().map(AsRef::as_ref).collect();
@@ -306,12 +306,12 @@ fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
     let out2 = dir.path().join("run2").to_string_lossy().into_owned();
     let path2 = write_run_table(
         &out2,
-        "feature_loading.parquet",
+        "feature_embedding.parquet",
         "gene",
         &["GATA1", "GO:0006915"],
     );
     carried_fixture()
-        .append_to(&out2, "feature_loading.parquet")
+        .append_to(&out2, "feature_embedding.parquet")
         .unwrap();
     assert_eq!(DMatrix::<f32>::from_parquet(&path2).unwrap().mat.nrows(), 2);
     assert!(auxiliary_data::feature_types::read_feature_types(&out2)

@@ -3,7 +3,7 @@
 //! Thin by design: the recipe lives in the shared crate; this module owns the
 //! command line, the same loader / cell QC / HVG plumbing as `bge`, and the
 //! bge-shaped artifacts (`cell_embedding`, `feature_embedding`,
-//! `feature_loading`, `h0..h{D-1}` columns, `senna.json`) so one comparison
+//! `feature_coembedding`, `h0..h{D-1}` columns, `senna.json`) so one comparison
 //! script reads every arm.
 
 mod args;

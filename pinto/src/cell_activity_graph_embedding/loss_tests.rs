@@ -1,4 +1,4 @@
-use super::loss::cage_nce_loss_per_gene_level;
+use super::loss::cage_nce_loss_per_feature_level;
 use candle_util::candle_core::Device;
 use candle_util::candle_nn::VarMap;
 use graph_embedding_util::loss::{NceObjective, UnitChainBatch};
@@ -6,7 +6,7 @@ use graph_embedding_util::model::{JointEmbedModel, ModelArgs, ModelInit};
 use nalgebra::DMatrix;
 
 const N_CELLS: usize = 32;
-const N_GENES: usize = 6;
+const N_FEATURES: usize = 6;
 const DIM: usize = 4;
 const B: usize = 5;
 const K: usize = 3;
@@ -21,7 +21,7 @@ fn model_with_e_feat(
 ) -> JointEmbedModel {
     JointEmbedModel::new_with_init(
         ModelArgs {
-            n_features: N_GENES,
+            n_features: N_FEATURES,
             n_cells: N_CELLS,
             embedding_dim: DIM,
             seed: 42,
@@ -29,10 +29,10 @@ fn model_with_e_feat(
         &ModelInit {
             e_feat,
             e_cell: None,
-            // Zero biases, so a dead gene embedding leaves the score at EXACTLY
-            // the bias term and `pair_magnitude_reports_a_dead_gene_embedding`
+            // Zero biases, so a dead feature embedding leaves the score at EXACTLY
+            // the bias term and `pair_magnitude_reports_a_dead_feature_embedding`
             // can key off the pair term alone.
-            b_feat: &[0.0_f32; N_GENES],
+            b_feat: &[0.0_f32; N_FEATURES],
             b_cell: &[0.0_f32; N_CELLS],
         },
         varmap,
@@ -45,11 +45,11 @@ fn model(varmap: &VarMap, dev: &Device) -> JointEmbedModel {
     model_with_e_feat(varmap, dev, None)
 }
 
-/// One deterministic batch per gene. Cells are picked by a fixed stride so the
+/// One deterministic batch per feature. Cells are picked by a fixed stride so the
 /// batches differ from each other without needing an RNG.
 fn batches() -> (Vec<UnitChainBatch>, Vec<u32>) {
     let mut out = Vec::new();
-    for g in 0..N_GENES {
+    for g in 0..N_FEATURES {
         let left: Vec<u32> = (0..B).map(|b| ((g * 7 + b * 3) % N_CELLS) as u32).collect();
         let right: Vec<u32> = (0..B)
             .map(|b| ((g * 7 + b * 3 + 1) % N_CELLS) as u32)
@@ -68,18 +68,18 @@ fn batches() -> (Vec<UnitChainBatch>, Vec<u32>) {
             n_negatives: K,
         });
     }
-    (out, (0..N_GENES as u32).collect())
+    (out, (0..N_FEATURES as u32).collect())
 }
 
 #[test]
-fn returns_one_loss_per_gene_and_level() {
+fn returns_one_loss_per_feature_and_level() {
     let dev = Device::Cpu;
     let varmap = VarMap::new();
     let m = model(&varmap, &dev);
     let (bs, ids) = batches();
 
-    let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
-    assert_eq!(out.per_gene_level.dims(), &[N_GENES, L]);
+    let out = cage_nce_loss_per_feature_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    assert_eq!(out.per_feature_level.dims(), &[N_FEATURES, L]);
     assert_eq!(
         out.mean_abs_pair.dims().len(),
         0,
@@ -87,20 +87,20 @@ fn returns_one_loss_per_gene_and_level() {
     );
 }
 
-/// A zeroed gene embedding annihilates the gene direction, leaving the ungated
+/// A zeroed feature embedding annihilates the feature direction, leaving the ungated
 /// cell biases to explain the objective. That is the degenerate optimum the
 /// squared-gate hazard used to lead to — measured under the old variational
 /// gate: at a sparse init the pair term underflowed to exactly 0 by epoch 4 —
 /// and `mean_abs_pair` is the diagnostic that must see it coming.
 #[test]
-fn pair_magnitude_reports_a_dead_gene_embedding() {
+fn pair_magnitude_reports_a_dead_feature_embedding() {
     let dev = Device::Cpu;
 
     let vm_live = VarMap::new();
     let live_m = model(&vm_live, &dev);
     let (bs, ids) = batches();
     let live =
-        cage_nce_loss_per_gene_level(&live_m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+        cage_nce_loss_per_feature_level(&live_m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let live_pair: f32 = live.mean_abs_pair.to_scalar().unwrap();
     assert!(
         live_pair > 0.0,
@@ -108,11 +108,11 @@ fn pair_magnitude_reports_a_dead_gene_embedding() {
     );
 
     let vm_dead = VarMap::new();
-    let zeros = DMatrix::<f32>::zeros(N_GENES, DIM);
+    let zeros = DMatrix::<f32>::zeros(N_FEATURES, DIM);
     let dead_m = model_with_e_feat(&vm_dead, &dev, Some(&zeros));
     let (bs2, ids2) = batches();
     let dead =
-        cage_nce_loss_per_gene_level(&dead_m, bs2, &ids2, NceObjective::Logistic, &dev).unwrap();
+        cage_nce_loss_per_feature_level(&dead_m, bs2, &ids2, NceObjective::Logistic, &dev).unwrap();
     let dead_pair: f32 = dead.mean_abs_pair.to_scalar().unwrap();
     assert_eq!(dead_pair, 0.0, "a zeroed e_feat must kill the pair term");
     assert!(live_pair > dead_pair);
@@ -122,16 +122,16 @@ fn pair_magnitude_reports_a_dead_gene_embedding() {
 ///
 /// This pins that `gathered_gate_weights` returns `None` on an ungated model and
 /// the gather stays plain — i.e. installing the gate is what turns selection on,
-/// and nothing else silently scales the gene rows. A stray factor would slip
+/// and nothing else silently scales the feature rows. A stray factor would slip
 /// past every other test in this file, because they only ever compare losses to
 /// each other.
 #[test]
-fn score_is_exactly_the_raw_gene_embedding() {
+fn score_is_exactly_the_raw_feature_embedding() {
     let dev = Device::Cpu;
     let varmap = VarMap::new();
-    // A gene embedding whose rows differ a lot, so a mask cannot coincidentally
+    // A feature embedding whose rows differ a lot, so a mask cannot coincidentally
     // reproduce the expected value.
-    let e_feat = DMatrix::<f32>::from_fn(N_GENES, DIM, |g, d| {
+    let e_feat = DMatrix::<f32>::from_fn(N_FEATURES, DIM, |g, d| {
         0.3 * (g as f32 + 1.0) - 0.17 * (d as f32)
     });
     let m = model_with_e_feat(&varmap, &dev, Some(&e_feat));
@@ -156,29 +156,29 @@ fn score_is_exactly_the_raw_gene_embedding() {
     }
     let expected = (acc / n as f64) as f32;
 
-    let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    let out = cage_nce_loss_per_feature_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
     let got: f32 = out.mean_abs_pair.to_scalar().unwrap();
     assert!(
         (got - expected).abs() <= 1e-5 * expected.abs().max(1e-6),
         "pair term is not the raw e_feat score: got {got}, expected {expected} \
-         — something is masking the gene rows"
+         — something is masking the feature rows"
     );
 }
 
-/// Gradient must reach the gene embedding.
+/// Gradient must reach the feature embedding.
 #[test]
-fn backward_reaches_the_gene_embedding() {
+fn backward_reaches_the_feature_embedding() {
     let dev = Device::Cpu;
     let varmap = VarMap::new();
     let m = model(&varmap, &dev);
     let (bs, ids) = batches();
 
-    let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
-    let grads = out.per_gene_level.sum_all().unwrap().backward().unwrap();
+    let out = cage_nce_loss_per_feature_level(&m, bs, &ids, NceObjective::Logistic, &dev).unwrap();
+    let grads = out.per_feature_level.sum_all().unwrap().backward().unwrap();
 
     let g = grads
         .get(&m.e_feat)
-        .expect("no gradient reached the gene embedding");
+        .expect("no gradient reached the feature embedding");
     let mag: f32 = g.abs().unwrap().sum_all().unwrap().to_scalar().unwrap();
     assert!(mag > 0.0, "gradient reached e_feat but is all zero");
 }
@@ -196,9 +196,9 @@ fn objective_selects_a_different_loss() {
 
     let mean_per_level = |obj| {
         let (bs, ids) = batches();
-        cage_nce_loss_per_gene_level(&m, bs, &ids, obj, &dev)
+        cage_nce_loss_per_feature_level(&m, bs, &ids, obj, &dev)
             .unwrap()
-            .per_gene_level
+            .per_feature_level
             .mean_all()
             .unwrap()
             .to_scalar::<f32>()
@@ -224,7 +224,7 @@ fn objective_selects_a_different_loss() {
 
 /// `fit.rs` weights the gate KL by the mass its data term carries, and that
 /// term is `per_level_gl` SUMMED. So the unit count must track the tensor's
-/// real shape on both axes — genes AND chain levels.
+/// real shape on both axes — features AND chain levels.
 ///
 /// The previous version of this test asserted `elem_count == n_ids * L` with
 /// `L` a test constant, which is true by construction and pins nothing. This
@@ -233,7 +233,7 @@ fn objective_selects_a_different_loss() {
 /// `--chain-levels` still moves the prior's share — a known, documented gap
 /// this test makes visible rather than hides).
 #[test]
-fn per_level_shape_tracks_genes_and_levels() {
+fn per_level_shape_tracks_features_and_levels() {
     let dev = Device::Cpu;
     let varmap = VarMap::new();
     let m = model(&varmap, &dev);
@@ -243,11 +243,12 @@ fn per_level_shape_tracks_genes_and_levels() {
         for cb in &mut bs {
             cb.per_level_neg.truncate(n_levels);
         }
-        let out = cage_nce_loss_per_gene_level(&m, bs, &ids, NceObjective::Softmax, &dev).unwrap();
+        let out =
+            cage_nce_loss_per_feature_level(&m, bs, &ids, NceObjective::Softmax, &dev).unwrap();
         assert_eq!(
-            out.per_gene_level.dims(),
+            out.per_feature_level.dims(),
             &[ids.len(), n_levels],
-            "per-level loss must be [genes, levels] so the KL weight can track it"
+            "per-level loss must be [features, levels] so the KL weight can track it"
         );
     }
 }

@@ -21,7 +21,7 @@ The binary lands at `target/release/pinto`.
 ### `lc` (link-community) — recommended
 
 Link community detection. Assigns each spatial edge to one of K communities
-via collapsed Gibbs sampling on compressed all-gene edge profiles, then
+via collapsed Gibbs sampling on compressed all-feature edge profiles, then
 derives per-cell soft membership.
 
 ```sh
@@ -31,9 +31,9 @@ pinto lc data.h5 -c tissue_positions.csv -o out
 # More communities:
 pinto lc data.h5 -c coords.csv -o out --n-communities 25
 
-# External gene-pair network (e.g. BioGRID):
+# External feature-pair network (e.g. BioGRID):
 pinto lc data.h5 -c coords.csv -o out \
-  --gene-network biogrid_pairs.tsv --n-outer-iter 3
+  --feature-network biogrid_pairs.tsv --n-outer-iter 3
 
 # Expression-only (no coordinates):
 pinto lc data.h5 -o out

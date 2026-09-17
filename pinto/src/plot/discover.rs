@@ -12,12 +12,12 @@
 //! 2. **`.pinto.json` fallback** — when the glob finds nothing, read
 //!    `{prefix}.pinto.json` and build a single `final` Level whose
 //!    explicit paths point at `outputs.{propensity, link_community,
-//!    gene_community}` (or the equivalent fields in `levels[]`). Kept
+//!    feature_community}` (or the equivalent fields in `levels[]`). Kept
 //!    for runs whose propensity-equivalent artifact is named something
 //!    the glob cannot see.
 //!
 //! `Level` carries explicit `PathBuf`s for the propensity / link-
-//! community / gene-community parquets so both paths populate the same
+//! community / feature-community parquets so both paths populate the same
 //! shape — downstream plot code doesn't branch on which discovery
 //! kind produced it.
 
@@ -40,9 +40,9 @@ pub struct Level {
     /// path that does not exist, makes plot skip mesh / edge overlays
     /// for that level rather than fail.
     pub link_community: Option<PathBuf>,
-    /// Optional path to the gene-community (or feature-dictionary)
+    /// Optional path to the feature-community (or feature-dictionary)
     /// parquet. `None` when the run didn't produce one.
-    pub gene_community: Option<PathBuf>,
+    pub feature_community: Option<PathBuf>,
 }
 
 /// User selector: `all` | `final` | `draft` | comma-list (`final,L0,draft`).
@@ -144,8 +144,8 @@ fn discover_via_glob(prefix: &str, selector: &LevelSelector) -> anyhow::Result<V
             link_community: Some(PathBuf::from(format!(
                 "{prefix}{infix}.link_community.parquet"
             ))),
-            gene_community: Some(PathBuf::from(format!(
-                "{prefix}{infix}.gene_community.parquet"
+            feature_community: Some(PathBuf::from(format!(
+                "{prefix}{infix}.feature_community.parquet"
             ))),
         });
     }
@@ -176,7 +176,7 @@ fn discover_via_pinto_json(
             sort_key: li.level_index as i32,
             propensity: PathBuf::from(&li.propensity),
             link_community: li.link_community.as_ref().map(PathBuf::from),
-            gene_community: li.gene_community.as_ref().map(PathBuf::from),
+            feature_community: li.feature_community.as_ref().map(PathBuf::from),
         });
     }
     out.sort_by_key(|l| l.sort_key);

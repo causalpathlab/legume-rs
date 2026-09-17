@@ -12,14 +12,18 @@ use graph_embedding_util::{LoraArgs, PresetMode};
 pub struct FeatureEmbeddingArgs {
     #[arg(
         long,
+        visible_alias = "freeze",
         value_name = "PREFIX",
         conflicts_with_all = ["init_feature_embedding", "lora_feature_embedding"],
         help = "Pin the gene embedding ρ to an earlier run's table; everything else trains",
         long_help = "Pin the per-gene embedding ρ to an earlier run's feature table,\n\
                      given by that run's output prefix.\n\
-                     It resolves `{prefix}.feature_loading.parquet`,\n\
-                     else `{prefix}.dictionary.parquet` or `{prefix}.feature_embedding.parquet`,\n\
-                     accepting only a signed table (a log-simplex dictionary is refused).\n\
+                     It resolves `{prefix}.feature_embedding.parquet`,\n\
+                     else `{prefix}.dictionary.parquet`, accepting only a signed table\n\
+                     (a log-simplex dictionary is refused); an older run's\n\
+                     `{prefix}.feature_loading.parquet` is read first when present.\n\
+                     One of those table paths, or the run's `.senna.json`, is accepted\n\
+                     in place of the prefix.\n\
                      A `senna fne` run qualifies: its table also holds terms, words and\n\
                      cell types, and only its gene rows are read.\n\
                      \n\
@@ -47,6 +51,7 @@ pub struct FeatureEmbeddingArgs {
 
     #[arg(
         long,
+        visible_alias = "init",
         value_name = "PREFIX",
         conflicts_with = "lora_feature_embedding",
         help = "Start the gene embedding ρ from an earlier run's table; it keeps training",
@@ -61,6 +66,7 @@ pub struct FeatureEmbeddingArgs {
 
     #[arg(
         long,
+        visible_alias = "lora",
         value_name = "PREFIX",
         help = "Anchor ρ to an earlier run's table and train a low-rank residual on top",
         long_help = "Anchor the per-gene embedding ρ to an earlier run's feature table and\n\

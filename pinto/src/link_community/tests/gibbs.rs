@@ -5,7 +5,7 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
 /// Create a planted partition: edges 0..n/2 belong to community 0,
-/// edges n/2..n belong to community 1, with distinct gene signatures.
+/// edges n/2..n belong to community 1, with distinct feature signatures.
 fn make_planted_profiles(n_edges: usize, m: usize) -> (LinkProfileStore, Vec<usize>) {
     let mut profiles = vec![0.0f32; n_edges * m];
     let mut true_labels = vec![0usize; n_edges];
@@ -14,7 +14,7 @@ fn make_planted_profiles(n_edges: usize, m: usize) -> (LinkProfileStore, Vec<usi
         let c = if e < n_edges / 2 { 0 } else { 1 };
         true_labels[e] = c;
         for g in 0..m {
-            // Strong signal in first half of genes for c=0, second half for c=1
+            // Strong signal in first half of features for c=0, second half for c=1
             let signal = if (g < m / 2) == (c == 0) { 10.0 } else { 1.0 };
             profiles[e * m + g] = signal;
         }
@@ -112,8 +112,8 @@ fn test_sample_categorical_log() {
 
 /// Test memoized EM Gibbs on a 2-component graph with planted partition.
 ///
-/// Component 0: nodes 0-4, edges among them → community 0 (high in genes 0..m/2)
-/// Component 1: nodes 5-9, edges among them → community 1 (high in genes m/2..m)
+/// Component 0: nodes 0-4, edges among them → community 0 (high in features 0..m/2)
+/// Component 1: nodes 5-9, edges among them → community 1 (high in features m/2..m)
 #[test]
 fn test_memoized_em_two_components() {
     let m = 10;
@@ -252,8 +252,8 @@ fn test_memoized_stats_consistency() {
     // Verify: sum of component stats == global stats
     for i in 0..k * m {
         assert!(
-            (gs0[i] + gs1[i] - global.gene_sum[i]).abs() < 1e-10,
-            "gene_sum mismatch at {}",
+            (gs0[i] + gs1[i] - global.feature_sum[i]).abs() < 1e-10,
+            "feature_sum mismatch at {}",
             i
         );
     }

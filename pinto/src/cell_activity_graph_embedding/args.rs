@@ -1,6 +1,6 @@
 //! CLI arguments for `pinto cage`.
 
-use crate::cell_activity_graph_embedding::gene_gating::ActivityNorm;
+use crate::cell_activity_graph_embedding::feature_gating::ActivityNorm;
 use auxiliary_data::feature_names::FeatureNameKind;
 use clap::{Parser, ValueEnum};
 use data_beans_alg::hvg::HvgCliArgs;
@@ -30,23 +30,23 @@ impl NceObjectiveArg {
     }
 }
 
-/// Row-name canonicalization strategy for matching the data's gene
+/// Row-name canonicalization strategy for matching the data's feature
 /// names against external resources (PPI networks, marker lists,
-/// pretrained gene embeddings). `Auto` sniffs the first data file's
+/// pretrained feature embeddings). `Auto` sniffs the first data file's
 /// row names and dispatches to [`FeatureNameKind::auto_detect`] —
 /// gene-symbol-style names (`ENSG..._SYMBOL`) get the `Gene` rule
 /// applied automatically.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
 #[clap(rename_all = "lowercase")]
-pub enum GeneNameMode {
+pub enum FeatureNameMode {
     /// Peek the first file's row names and pick `Exact` / `Gene` /
     /// `Locus` / `Mixed` via [`FeatureNameKind::auto_detect`].
     Auto,
     /// Strict string match — no canonicalization. The historical pinto
     /// default for `lc` / `svd`.
     Exact,
-    /// `Gene { delim: '_' }`: register every `_`-split component as an
-    /// alias of the full row name.
+    /// `Gene { delim: '_' }`: gene-symbol rows — register every `_`-split
+    /// component as an alias of the full row name.
     Gene,
     /// `Locus { merge_overlapping: true }`: normalize chrom-coord names
     /// and collapse overlapping intervals.
@@ -55,18 +55,18 @@ pub enum GeneNameMode {
     Mixed,
 }
 
-impl GeneNameMode {
+impl FeatureNameMode {
     /// Resolve to a concrete [`FeatureNameKind`]. `peek_names` is only
     /// consulted under `Auto`; other modes ignore it.
     pub fn resolve_kind(self, peek_names: &[Box<str>]) -> FeatureNameKind {
         match self {
-            GeneNameMode::Auto => FeatureNameKind::auto_detect(peek_names),
-            GeneNameMode::Exact => FeatureNameKind::Exact,
-            GeneNameMode::Gene => FeatureNameKind::Gene { delim: '_' },
-            GeneNameMode::Locus => FeatureNameKind::Locus {
+            FeatureNameMode::Auto => FeatureNameKind::auto_detect(peek_names),
+            FeatureNameMode::Exact => FeatureNameKind::Exact,
+            FeatureNameMode::Gene => FeatureNameKind::Gene { delim: '_' },
+            FeatureNameMode::Locus => FeatureNameKind::Locus {
                 merge_overlapping: true,
             },
-            GeneNameMode::Mixed => FeatureNameKind::Mixed,
+            FeatureNameMode::Mixed => FeatureNameKind::Mixed,
         }
     }
 }
@@ -84,17 +84,18 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        default_value_t = GeneNameMode::Auto,
+        default_value_t = FeatureNameMode::Auto,
         value_enum,
-        help = "Gene-name canonicalization for matching external resources",
+        help = "Feature-name canonicalization for matching external resources",
         long_help = "Row-name canonicalization strategy:\n\
                      auto  — peek row names and auto-detect (default)\n\
                      exact — strict string equality (pinto lc / svd default)\n\
-                     gene  — split on '_'; both 'ENSG..._TGFB1' and 'TGFB1' alias\n\
+                     gene  — gene symbols; split on '_' so 'ENSG..._TGFB1' and 'TGFB1' alias\n\
                      locus — normalize chrom-coord names; collapse overlaps mixed —\n\
                      per-row dispatch (RNA+ATAC paired axes)"
     )]
-    pub gene_name_mode: GeneNameMode,
+    #[arg(alias = "gene-name-mode")]
+    pub feature_name_mode: FeatureNameMode,
 
     #[arg(
         long,
@@ -119,7 +120,7 @@ pub struct CellActivityGraphEmbeddingArgs {
         value_name = "H|auto",
         help = "Cell embedding dimensionality (auto = a pinned dictionary's width, else 16)",
         long_help = "Cell embedding dimensionality. auto is the default.\n\
-                     With --gene-embedding under freeze, free or lora the rows are\n\
+                     With --feature-embedding under freeze, free or lora the rows are\n\
                      installed verbatim, so auto is the dictionary's width and a\n\
                      given width must agree with it.\n\
                      Otherwise auto is 16; the adapt mode maps the dictionary into\n\
@@ -130,26 +131,26 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 100,
-        help = "Training epochs over the gene axis (early-stops on --convergence-tol)",
-        long_help = "Passes over the gene axis.\n\
+        help = "Training epochs over the feature axis (early-stops on --convergence-tol)",
+        long_help = "Passes over the feature axis.\n\
                      \n\
                      The run early-stops once the loss flattens, per\n\
                      --convergence-tol over --convergence-window.\n\
                      A high value here is a ceiling, not a fixed cost.\n\
                      \n\
-                     Pair with --genes-per-epoch to cap per-epoch cost."
+                     Pair with --features-per-epoch to cap per-epoch cost."
     )]
     pub epochs: usize,
 
     #[arg(
         long,
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
-        help = "Genes per outer parallel sampling chunk",
-        long_help = "The outer loop samples this many genes in parallel via rayon.\n\
+        help = "Features per outer parallel sampling chunk",
+        long_help = "The outer loop samples this many features in parallel via rayon.\n\
                      Forward and backward then run serially. candle Var is not parallel-safe.\n\
                      \n\
                      This is ALSO the SGD minibatch, not just a parallel width.\n\
-                     An epoch takes trainable-genes / this many optimizer steps,\n\
+                     An epoch takes trainable-features / this many optimizer steps,\n\
                      each paying a forward, a backward, a gradient clip and an\n\
                      AdamW update over the whole feature table.\n\
                      So it sets both wall-clock and how many parameter updates\n\
@@ -157,7 +158,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      raising 64 to 2048 cut wall-clock several fold AND raised\n\
                      spatial coherence, at an unchanged sampling budget.\n\
                      \n\
-                     Below ~this many trainable genes an epoch is ONE step,\n\
+                     Below ~this many trainable features an epoch is ONE step,\n\
                      so a small panel may want a smaller value here\n\
                      or more --epochs.\n\
                      \n\
@@ -172,7 +173,8 @@ pub struct CellActivityGraphEmbeddingArgs {
                      trades some of that benefit for fitting at all.\n\
                      Passing a value disables the probe and always wins."
     )]
-    pub gene_batch_size: Option<usize>,
+    #[arg(alias = "gene-batch-size")]
+    pub feature_batch_size: Option<usize>,
 
     #[arg(
         long,
@@ -184,17 +186,17 @@ pub struct CellActivityGraphEmbeddingArgs {
                      with half reserved for the backward pass,\n\
                      fits this fraction of the device memory free at start.\n\
                      Fractions outside 0.05 to 0.95 are clamped to that range.\n\
-                     Ignored on CPU and when --gene-batch-size is set."
+                     Ignored on CPU and when --feature-batch-size is set."
     )]
     pub gpu_mem_fraction: f32,
 
     #[arg(
         long,
         default_value_t = 12,
-        help = "Positive super-edge draws per (gene, batch) sample",
-        long_help = "Every gene draws this many positive SUPER EDGES\n\
+        help = "Positive super-edge draws per (feature, batch) sample",
+        long_help = "Every feature draws this many positive SUPER EDGES\n\
                      per experimental batch each epoch, with replacement:\n\
-                     a batch's per-gene pool is tens of super edges,\n\
+                     a batch's per-feature pool is tens of super edges,\n\
                      so repeated draws are by design.\n\
                      Over-sampling does not merely cost time,\n\
                      it can DEGRADE the fit\n\
@@ -203,30 +205,30 @@ pub struct CellActivityGraphEmbeddingArgs {
                      Raise it only if the fit looks under-trained,\n\
                      and check the coherence rather than the loss.\n\
                      \n\
-                     Kept per-gene so the budget tracks the gene axis.\n\
+                     Kept per-feature so the budget tracks the feature axis.\n\
                      --positives-per-epoch overrides it with an absolute total."
     )]
-    pub per_gene_batch: usize,
+    pub per_feature_batch: usize,
 
     #[arg(
         long,
         value_name = "N",
-        help = "Total positive edges drawn per epoch, across all genes (unset = auto)",
+        help = "Total positive edges drawn per epoch, across all features (unset = auto)",
         long_help = "The epoch's total SUPER-EDGE sampling budget.\n\
                      \n\
-                     Divided evenly: each gene draws\n\
-                     N / (trainable genes x batches) positives per batch.\n\
-                     Unset keeps the historical --per-gene-batch instead.\n\
+                     Divided evenly: each feature draws\n\
+                     N / (trainable features x batches) positives per batch.\n\
+                     Unset keeps the historical --per-feature-batch instead.\n\
                      Each positive carries\n\
                      1 + --n-negatives x --chain-levels scores.\n\
                      \n\
                      This is the knob for how much data an epoch sees,\n\
                      and it is the one that moved the fit.\n\
-                     Pair it with --gene-batch-size: the budget sets work per\n\
+                     Pair it with --feature-batch-size: the budget sets work per\n\
                      step, that sets how many steps an epoch takes.\n\
                      \n\
-                     --genes-per-epoch is the coarse alternative:\n\
-                     it drops genes rather than sampling each one less.",
+                     --features-per-epoch is the coarse alternative:\n\
+                     it drops features rather than sampling each one less.",
         hide = true
     )]
     pub positives_per_epoch: Option<usize>,
@@ -254,7 +256,7 @@ pub struct CellActivityGraphEmbeddingArgs {
         long,
         default_value_t = ActivityNorm::Log1p,
         value_enum,
-        help = "Per-gene activity normalization",
+        help = "Per-feature activity normalization",
         hide = true,
     )]
     pub activity_norm: ActivityNorm,
@@ -262,24 +264,24 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Exponent on within-gene positive-edge weights a_g[u]·a_g[v]",
+        help = "Exponent on within-feature positive-edge weights a_g[u]·a_g[v]",
         long_help = "Stage-2 coverage exponent, one axis down from bge's alpha_pb.\n\
-                     Positive edges within a gene are drawn with probability ∝ (a_g[u]·a_g[v])^activity-alpha.\n\
+                     Positive edges within a feature are drawn with probability ∝ (a_g[u]·a_g[v])^activity-alpha.\n\
                      The default of 1.0 keeps the activity-proportional draw.\n\
-                     0.0 makes every active edge of a gene equally likely,\n\
-                     so no high-activity hub pair dominates that gene.",
+                     0.0 makes every active edge of a feature equally likely,\n\
+                     so no high-activity hub pair dominates that feature.",
         hide = true
     )]
     pub activity_alpha: f32,
 
     #[arg(
         long,
-        help = "Disable NB-Fisher per-gene precision weighting of the loss",
-        long_help = "Each gene's contribution to the loss is down-weighted.\n\
+        help = "Disable NB-Fisher per-feature precision weighting of the loss",
+        long_help = "Each feature's contribution to the loss is down-weighted.\n\
                      The weight is its NB Fisher-info w_g ∈ (0,1]. High-mean,\n\
-                     high-dispersion housekeeping genes go toward 0,\n\
-                     and informative low-mean genes go toward 1. This matches `pinto lc` and `senna bge`.\n\
-                     Set this flag to train every gene at equal weight.",
+                     high-dispersion housekeeping features go toward 0,\n\
+                     and informative low-mean features go toward 1. This matches `pinto lc` and `senna bge`.\n\
+                     Set this flag to train every feature at equal weight.",
         hide = true
     )]
     pub no_fisher_weights: bool,
@@ -287,36 +289,37 @@ pub struct CellActivityGraphEmbeddingArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Genes visited per epoch; 0 = the whole axis",
-        long_help = "Cost lever. cage walks the gene axis once per epoch.\n\
-                     Runtime is therefore linear in the gene count.\n\
+        help = "Features visited per epoch; 0 = the whole axis",
+        long_help = "Cost lever. cage walks the feature axis once per epoch.\n\
+                     Runtime is therefore linear in the feature count.\n\
                      This caps how many are VISITED per epoch.\n\
                      A fresh random subset is drawn each time.\n\
                      \n\
                      That is stochastic coverage, NOT feature selection.\n\
-                     Every gene stays on the trained axis. It keeps its sampled loading.\n\
+                     Every feature stays on the trained axis. It keeps its sampled loading.\n\
                      It appears in every output table.\n\
-                     A gene left out simply waits for a later epoch. Contrast --n-hvg,\n\
+                     A feature left out simply waits for a later epoch. Contrast --n-hvg,\n\
                      which weights the projection. That likewise drops nobody."
     )]
-    pub genes_per_epoch: usize,
+    #[arg(alias = "genes-per-epoch")]
+    pub features_per_epoch: usize,
 
     #[arg(
         long,
         default_value_t = 0.0625,
-        help = "L2 penalty λ on the shared cell and gene embeddings; 0 = off",
-        long_help = "L2 penalty λ on E_pb ∈ ℝ^{P×D} and E_gene ∈ ℝ^{G×D}.\n\
+        help = "L2 penalty λ on the shared cell and feature embeddings; 0 = off",
+        long_help = "L2 penalty λ on E_pb ∈ ℝ^{P×D} and E_feature ∈ ℝ^{G×D}.\n\
                      It adds λ · (mean_n ‖e_n‖² + mean_g ‖e_g‖²) to the loss:\n\
                      a sum over the D latent dims, averaged over rows.\n\
                      The row-mean keeps λ scale-invariant across N and G, and\n\
                      summing over D rather than averaging keeps it invariant to\n\
                      --embedding-dim too — see loss::embedding_ridge.\n\
                      The default 0.0625 is the shrinkage cage was tuned at\n\
-                     (~40% off the free gene-embedding norm); it is 1/16 only\n\
+                     (~40% off the free feature-embedding norm); it is 1/16 only\n\
                      because the penalty used to be divided by D and D defaulted\n\
                      to 16. It now means the same thing at every D.\n\
                      Useful range 0.01-0.25. Do NOT reach for 1.0: measured on\n\
-                     a 10.9k-cell 18k-gene sample it drives both embeddings to\n\
+                     a 10.9k-cell 18k-feature sample it drives both embeddings to\n\
                      zero. A dense every-row penalty competes with a SPARSE data\n\
                      gradient under Adam's per-parameter normalization, so it\n\
                      bites far harder than its size against the loss suggests.",
@@ -341,11 +344,11 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     /// HVG selection: senna-style shared CLI (`--n-hvg`,
     /// `--feature-list-file`). cage **weights the random projection** with it,
-    /// exactly as `senna bge` and `senna gem` do — non-selected genes get
+    /// exactly as `senna bge` and `senna gem` do — non-selected features get
     /// projection weight 0 and so sit out the basis the coarsening hierarchy is
     /// built from, but they stay on the trained axis. The selection shapes
-    /// *where the pseudobulks land*, not *which genes the model may use*.
-    /// `--n-hvg 0` disables. Use `--genes-per-epoch` for the cost lever a hard
+    /// *where the pseudobulks land*, not *which features the model may use*.
+    /// `--n-hvg 0` disables. Use `--features-per-epoch` for the cost lever a hard
     /// subset used to provide.
     #[command(flatten)]
     pub hvg: HvgCliArgs,
@@ -398,7 +401,7 @@ pub struct CellActivityGraphEmbeddingArgs {
                      the exact per-pair solve it is checked against carries it,\n\
                      and it is saved with the encoder,\n\
                      so `pinto predict` and `pinto impute` use the model's value.\n\
-                     The log-partition is summed over every gene,\n\
+                     The log-partition is summed over every feature,\n\
                      so this is a mild prior, not the only bound on the fit.\n\
                      The per-pair intercept is never penalized."
     )]
@@ -426,43 +429,45 @@ pub struct CellActivityGraphEmbeddingArgs {
 
     #[arg(
         long,
-        help = "Pre-trained gene x H embedding parquet to start the gene side from",
-        long_help = "Path to a pre-trained gene x H embedding parquet.\n\
-                     Row column 0 holds the gene name; value columns are the dimensions.\n\
-                     Feed a RAW dictionary: a topic model's feature_embedding.parquet,\n\
-                     or an embedding run's feature_loading.parquet.\n\
-                     Co-embedding outputs are not dictionaries and are rejected.\n\
-                     Genes are matched under --gene-name-mode.\n\
-                     A gene with no dictionary row is seeded from the matched gene\n\
+        help = "Pre-trained feature x H embedding parquet to start the feature side from",
+        long_help = "Path to a pre-trained feature x H embedding parquet.\n\
+                     Row column 0 holds the feature name; value columns are the dimensions.\n\
+                     Feed a RAW dictionary: a run's feature_embedding.parquet.\n\
+                     Co-embedding outputs (feature_coembedding.parquet) are not\n\
+                     dictionaries and are rejected.\n\
+                     Features are matched under --feature-name-mode.\n\
+                     A feature with no dictionary row is seeded from the matched feature\n\
                      with the most similar count profile and listed in\n\
-                     {out}.gene_embedding_init.parquet. Under freeze, free and lora such\n\
-                     rows train; under adapt a seeded gene follows its seed through\n\
-                     the shared map until --gene-adapter-residual gives it its own\n\
+                     {out}.feature_embedding_init.parquet. Under freeze, free and lora such\n\
+                     rows train; under adapt a seeded feature follows its seed through\n\
+                     the shared map until --feature-adapter-residual gives it its own\n\
                      correction."
     )]
-    pub gene_embedding: Option<Box<str>>,
+    #[arg(alias = "gene-embedding")]
+    pub feature_embedding: Option<Box<str>>,
 
     #[arg(
         long,
-        requires = "gene_embedding",
-        help = "Optional per-gene bias parquet ([D, 1]) paired with --gene-embedding;\n\
-                genes without a row get bias 0"
+        requires = "feature_embedding",
+        help = "Optional per-feature bias parquet ([D, 1]) paired with --feature-embedding;\n\
+                features without a row get bias 0"
     )]
-    pub gene_embedding_bias: Option<Box<str>>,
+    #[arg(alias = "gene-embedding-bias")]
+    pub feature_embedding_bias: Option<Box<str>>,
 
     #[arg(
         long,
         value_enum,
-        default_value_t = GeneEmbeddingMode::Adapt,
-        requires = "gene_embedding",
-        help = "What training may do to the pre-trained gene embedding",
-        long_help = "What training may do to the pre-trained gene embedding.\n\
+        default_value_t = FeatureEmbeddingMode::Adapt,
+        requires = "feature_embedding",
+        help = "What training may do to the pre-trained feature embedding",
+        long_help = "What training may do to the pre-trained feature embedding.\n\
                      \n\
                      adapt keeps the dictionary fixed and trains one\n\
-                     shared linear map on top of it, so every gene's gradient\n\
+                     shared linear map on top of it, so every feature's gradient\n\
                      updates the same few parameters.\n\
                      The dictionary width and --embedding-dim may differ.\n\
-                     Add --gene-adapter-residual for a per-gene correction\n\
+                     Add --feature-adapter-residual for a per-feature correction\n\
                      where the shared map is not enough.\n\
                      \n\
                      freeze keeps every dictionary-matched row fixed at its loaded value.\n\
@@ -476,88 +481,93 @@ pub struct CellActivityGraphEmbeddingArgs {
                      \n\
                      lora keeps every dictionary-matched row fixed, as freeze does,\n\
                      and trains a low-rank residual on top of those rows:\n\
-                     row_g = dictionary_g + u_g · V, with u_g per gene (--lora-rank numbers)\n\
-                     and V shared by every matched gene, at the LoRA+ rate\n\
+                     row_g = dictionary_g + u_g · V, with u_g per feature (--lora-rank numbers)\n\
+                     and V shared by every matched feature, at the LoRA+ rate\n\
                      (--lora-lr-ratio) and under --lora-ridge.\n\
                      Neighbor-seeded rows still train. Requires the widths to match.\n\
                      The written feature embedding carries the residual folded in."
     )]
-    pub gene_embedding_mode: GeneEmbeddingMode,
+    #[arg(alias = "gene-embedding-mode")]
+    pub feature_embedding_mode: FeatureEmbeddingMode,
 
     /// `--lora-rank`, `--lora-lr-ratio`, `--lora-ridge`; read under
-    /// `--gene-embedding-mode lora` only.
+    /// `--feature-embedding-mode lora` only.
     #[command(flatten)]
     pub lora: graph_embedding_util::LoraArgs,
 
     #[arg(
         long,
-        requires = "gene_embedding",
-        help = "adapt only: add a ridge-shrunk per-gene correction\n\
+        requires = "feature_embedding",
+        help = "adapt only: add a ridge-shrunk per-feature correction\n\
                 on top of the shared map"
     )]
-    pub gene_adapter_residual: bool,
+    #[arg(alias = "gene-adapter-residual")]
+    pub feature_adapter_residual: bool,
 
     #[arg(
         long,
         value_enum,
-        default_value_t = GeneInitMode::Membership,
-        requires = "gene_embedding",
-        help = "How a gene with no dictionary row starts",
-        long_help = "How a gene with no row in --gene-embedding starts.\n\
+        default_value_t = FeatureInitMode::Membership,
+        requires = "feature_embedding",
+        help = "How a feature with no dictionary row starts",
+        long_help = "How a feature with no row in --feature-embedding starts.\n\
                      \n\
                      membership places it through the dictionary's learned modules:\n\
                      its membership is the similarity-weighted mean of the closest\n\
-                     matched genes' memberships (by count profile), and its row is\n\
+                     matched features' memberships (by count profile), and its row is\n\
                      that membership times the module dictionary, with no residual.\n\
                      Needs {stem}.module_membership.parquet and\n\
                      {stem}.module_dictionary.parquet beside the dictionary; without\n\
                      them it falls back to neighbor and says so in\n\
-                     {out}.gene_embedding_init.parquet.\n\
+                     {out}.feature_embedding_init.parquet.\n\
                      \n\
-                     neighbor copies the row of the single closest matched gene."
+                     neighbor copies the row of the single closest matched feature."
     )]
-    pub gene_init_mode: GeneInitMode,
+    #[arg(alias = "gene-init-mode")]
+    pub feature_init_mode: FeatureInitMode,
 
     #[arg(
         long,
         default_value_t = graph_embedding_util::transfer::DEFAULT_INIT_NEIGHBOURS,
         value_name = "K",
-        requires = "gene_embedding",
-        help = "membership init: matched genes whose memberships are averaged"
+        requires = "feature_embedding",
+        help = "membership init: matched features whose memberships are averaged"
     )]
-    pub gene_init_neighbours: usize,
+    #[arg(alias = "gene-init-neighbours")]
+    pub feature_init_neighbours: usize,
 
     #[arg(
         long,
         default_value_t = graph_embedding_util::transfer::DEFAULT_SIMILARITY_FLOOR,
         value_name = "S",
-        requires = "gene_embedding",
-        help = "membership init: below this best profile similarity a gene takes the diffuse prior"
+        requires = "feature_embedding",
+        help = "membership init: below this best profile similarity a feature takes the diffuse prior"
     )]
-    pub gene_init_similarity_floor: f32,
+    #[arg(alias = "gene-init-similarity-floor")]
+    pub feature_init_similarity_floor: f32,
 
-    /// The `--gene-modules` flag group (see `graph_embedding_util::GeneModuleArgs`).
-    /// Cage has no gene-negative NCE, so the within-module negatives do not apply
-    /// here; the composition, the exact pseudobulk–module term, the gene dropout
+    /// The `--feature-modules` flag group (see `graph_embedding_util::GeneModuleArgs`).
+    /// Cage has no feature-negative NCE, so the within-module negatives do not apply
+    /// here; the composition, the exact pseudobulk–module term, the feature dropout
     /// and the warm start do. The residual takes `--embedding-l2` like every other
-    /// gene-side table in cage.
+    /// feature-side table in cage.
     #[command(flatten)]
     pub modules: graph_embedding_util::GeneModuleArgs,
 }
 
-/// How a gene with no dictionary row is initialized.
+/// How a feature with no dictionary row is initialized.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum GeneInitMode {
+pub enum FeatureInitMode {
     /// Through the dictionary's learned modules (falls back to `Neighbor`
     /// without module tables).
     Membership,
-    /// The closest matched gene's row.
+    /// The closest matched feature's row.
     Neighbor,
 }
 
-/// What training may do to a pre-trained gene embedding.
+/// What training may do to a pre-trained feature embedding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum GeneEmbeddingMode {
+pub enum FeatureEmbeddingMode {
     /// Fixed dictionary + one shared trainable map.
     Adapt,
     /// Dictionary-matched rows stay fixed; neighbor-seeded rows train.
@@ -573,37 +583,39 @@ pub enum GeneEmbeddingMode {
 pub const DEFAULT_EMBEDDING_DIM: usize = 16;
 
 impl CellActivityGraphEmbeddingArgs {
-    /// The rules between `--gene-embedding-mode` and the flags only one mode
+    /// The rules between `--feature-embedding-mode` and the flags only one mode
     /// reads, checked before any data is opened.
-    pub fn validate_gene_embedding(&self) -> anyhow::Result<()> {
+    pub fn validate_feature_embedding(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !(self.gene_adapter_residual && self.gene_embedding_mode != GeneEmbeddingMode::Adapt),
-            "--gene-adapter-residual is the adapter's per-gene correction and only \
-             --gene-embedding-mode adapt trains one; under another mode the flag \
+            !(self.feature_adapter_residual
+                && self.feature_embedding_mode != FeatureEmbeddingMode::Adapt),
+            "--feature-adapter-residual is the adapter's per-feature correction and only \
+             --feature-embedding-mode adapt trains one; under another mode the flag \
              would be read and ignored. Drop it, or use the adapt mode."
         );
         self.lora.refuse_unless_selected(
-            self.gene_embedding_mode == GeneEmbeddingMode::Lora,
-            "--gene-embedding-mode lora",
+            self.feature_embedding_mode == FeatureEmbeddingMode::Lora,
+            "--feature-embedding-mode lora",
         )
     }
 
     /// The embedding width this run trains at: the flag, else a pinned
-    /// dictionary's width (`dictionary_width`, when `--gene-embedding` is
+    /// dictionary's width (`dictionary_width`, when `--feature-embedding` is
     /// given), else the default. A pinned dictionary (every mode but adapt)
     /// installs its rows verbatim, so a flag that disagrees with it is
     /// refused; the adapter maps into its own width. The LoRA rank is checked
     /// against the resolved width here, the one place it is known.
     pub fn resolve_embedding_dim(&self, dictionary_width: Option<usize>) -> anyhow::Result<usize> {
-        self.validate_gene_embedding()?;
+        self.validate_feature_embedding()?;
         let pinned = dictionary_width.filter(|_| {
-            self.gene_embedding.is_some() && self.gene_embedding_mode != GeneEmbeddingMode::Adapt
+            self.feature_embedding.is_some()
+                && self.feature_embedding_mode != FeatureEmbeddingMode::Adapt
         });
         let dim = self
             .embedding_dim
             .resolve(pinned)?
             .unwrap_or(DEFAULT_EMBEDDING_DIM);
-        if self.gene_embedding_mode == GeneEmbeddingMode::Lora {
+        if self.feature_embedding_mode == FeatureEmbeddingMode::Lora {
             graph_embedding_util::PresetMode::Lora(self.lora.spec()).validate(dim)?;
         }
         Ok(dim)

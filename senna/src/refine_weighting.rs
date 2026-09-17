@@ -265,7 +265,7 @@ pub(crate) struct CollapseArgs {
         long,
         conflicts_with = "emit_pb_reference",
         help = "Do NOT carry this run's pseudobulks forward",
-        long_help = "By default a run writes {out}.pb_reference.zarr, one column per\n\
+        long_help = "By default a run writes {out}.pb_reference.zarr.zip, one column per\n\
                      pseudobulk holding its batch-adjusted per-cell rate, plus a\n\
                      sidecar with each column's cell count. `senna update` then\n\
                      absorbs a new sample by re-collapsing only the NEW cells\n\

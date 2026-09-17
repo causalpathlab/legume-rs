@@ -2,7 +2,7 @@
 //!
 //! `lc`, `dsvd`, and `cage` all share the same opening sequence:
 //! load → invariants → spatial-or-expression KNN → optional auto-batch →
-//! optional batch effects → optional NB Fisher gene weights.
+//! optional batch effects → optional NB Fisher feature weights.
 //! `preprocess_srt` extracts that once.
 //!
 //! `SrtCellPairs<'a>` borrows the `SparseIoVec` and `Mat`, so this bundle
@@ -16,7 +16,7 @@ use crate::util::cell_pairs::{
     connected_components, SrtCellPairsArgs,
 };
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use crate::util::input::{
     auto_batch_from_components, read_data_with_coordinates, read_data_without_coordinates,
     KnnExprScope, ResolvedKnn, SRTData, SrtInputArgs,
@@ -34,18 +34,18 @@ use matrix_util::knn_graph::{DistanceMerge, EdgeSource};
 
 pub struct SrtPreprocessConfig<'a> {
     pub common: &'a SrtInputArgs,
-    /// Compute per-gene NB Fisher-info weights. `lc` needs them; `svd`
+    /// Compute per-feature NB Fisher-info weights. `lc` needs them; `svd`
     /// and (v1) `cage` do not.
     pub fisher_weights: bool,
     /// Estimate per-batch effects. All current subcommands set this.
     pub batch_effects: bool,
-    /// Whether, and how strictly, to resolve the GENE unit axis from the row
+    /// Whether, and how strictly, to resolve the FEATURE unit axis from the row
     /// names and fold the running statistics onto it in the same pass.
-    pub gene_axis: GeneAxisMode,
+    pub feature_axis: FeatureAxisMode,
     /// Row-name canonicalization strategy. `None` falls back to
     /// `FeatureNameKind::Exact` (strict equality), matching the
     /// historical behaviour of `lc` / `svd`. `cage` passes
-    /// `FeatureNameKind::Gene` or an `auto_detect`'d kind so gene
+    /// `FeatureNameKind::Gene` or an `auto_detect`'d kind so feature
     /// symbols register as aliases of `ENSG..._SYMBOL` row names.
     pub feature_kind: Option<FeatureNameKind>,
     /// Compute the shared post-batch-correction cell projection and hand it
@@ -56,16 +56,16 @@ pub struct SrtPreprocessConfig<'a> {
 
 /// How a caller wants the feature axis resolved.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GeneAxisMode {
+pub enum FeatureAxisMode {
     /// Stay on the matrix rows. `svd` stacks its channels there and never
-    /// folds, so a gene axis would buy it nothing.
+    /// folds, so a feature axis would buy it nothing.
     Rows,
-    /// Resolve a gene axis, and FAIL on a feature axis that only partly parses.
-    /// For a consumer that pools a gene's tracks: a row whose track is unknown
+    /// Resolve a feature axis, and FAIL on a feature axis that only partly parses.
+    /// For a consumer that pools a feature's tracks: a row whose track is unknown
     /// has no correct pooled answer.
     Strict,
-    /// Resolve a gene axis, falling back to one unit per row when the axis is
-    /// mixed. For a consumer that only filters and reports per gene, where one
+    /// Resolve a feature axis, falling back to one unit per row when the axis is
+    /// mixed. For a consumer that only filters and reports per feature, where one
     /// unit per row is a defined answer and aborting would reject multimodal
     /// matrices that used to work.
     Lenient,
@@ -76,7 +76,7 @@ pub struct SrtPreprocessed {
     pub coordinates: Mat,
     pub coordinate_names: Vec<Box<str>>,
     pub batch_membership: Vec<Box<str>>,
-    /// Posterior batch-effect mean `[n_genes × n_batches]`. `None`
+    /// Posterior batch-effect mean `[n_features × n_batches]`. `None`
     /// when single-batch.
     pub batch_effects: Option<Mat>,
     pub graph: KnnGraph,
@@ -95,9 +95,9 @@ pub struct SrtPreprocessed {
     /// `cage` would have used, so they can reuse it instead of paying for a
     /// second full pass. `None` unless the config asked for one.
     pub cell_proj: Option<data_beans_alg::random_projection::RandColProjOut>,
-    /// The gene unit axis. `Some` iff the config asked for it. Identity (one
-    /// gene per row) unless the rows carry splice channels.
-    pub gene_axis: Option<GeneAxis>,
+    /// The feature unit axis. `Some` iff the config asked for it. Identity (one
+    /// feature per row) unless the rows carry splice channels.
+    pub feature_axis: Option<FeatureAxis>,
     /// Per-ROW NB Fisher-info weights. This is the right axis for the
     /// projection and for anything that reads the matrix directly.
     pub row_weights: Option<Vec<f32>>,
@@ -105,22 +105,22 @@ pub struct SrtPreprocessed {
     /// the per-row count total, which spares a caller that needs one a second
     /// full pass over the data.
     pub row_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
-    /// Per-GENE NB Fisher-info weights, `Some` iff both `fisher_weights` and
-    /// `gene_axis` were asked for.
+    /// Per-FEATURE NB Fisher-info weights, `Some` iff both `fisher_weights` and
+    /// `feature_axis` were asked for.
     ///
     /// These are NOT a fold of [`Self::row_weights`]. A Fisher weight is a
     /// function of a feature's abundance and mean, and that function is not
-    /// additive, so folding the weights would hand a gene a precision no
+    /// additive, so folding the weights would hand a feature a precision no
     /// measurement supports. The fold happens on the statistics instead, and it
     /// happens inside the streaming pass because `npos` and `s2` do not survive
     /// one applied afterwards.
-    pub gene_weights: Option<Vec<f32>>,
-    /// The gene-axis statistics [`Self::gene_weights`] came from. Carried out
-    /// because the dictionary merge needs per-gene DETECTION counts, which is
+    pub feature_weights: Option<Vec<f32>>,
+    /// The feature-axis statistics [`Self::feature_weights`] came from. Carried out
+    /// because the dictionary merge needs per-feature DETECTION counts, which is
     /// exactly the statistic a post-hoc fold gets wrong.
-    pub gene_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
+    pub feature_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
     pub n_cells: usize,
-    /// Matrix rows. Equal to the gene count only on a non-channelized axis.
+    /// Matrix rows. Equal to the feature count only on a non-channelized axis.
     pub n_rows: usize,
 }
 
@@ -155,7 +155,7 @@ pub fn topology_graph<'a>(
 
 /// Run the shared SRT preamble: load, build the cell-cell KNN graph,
 /// optionally auto-detect batches from disconnected components, estimate
-/// per-batch effects, and (optionally) compute NB Fisher gene weights.
+/// per-batch effects, and (optionally) compute NB Fisher feature weights.
 ///
 /// In expression mode (no `--coord`), the cell embedding used to build
 /// the graph is the random-projected count matrix with no batch
@@ -377,16 +377,16 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         (merged, Some(graph), Some(source))
     };
 
-    // What a ROW means, decided once, before anything keyed on a gene runs.
-    let gene_axis = match cfg.gene_axis {
-        GeneAxisMode::Rows => None,
-        GeneAxisMode::Strict => Some(GeneAxis::resolve(&data_vec.row_names()?)?),
-        GeneAxisMode::Lenient => Some(GeneAxis::resolve_or_identity(&data_vec.row_names()?)?),
+    // What a ROW means, decided once, before anything keyed on a feature runs.
+    let feature_axis = match cfg.feature_axis {
+        FeatureAxisMode::Rows => None,
+        FeatureAxisMode::Strict => Some(FeatureAxis::resolve(&data_vec.row_names()?)?),
+        FeatureAxisMode::Lenient => Some(FeatureAxis::resolve_or_identity(&data_vec.row_names()?)?),
     };
 
     // One streaming pass, up to four consumers. `compute_nb_fisher_weights`
     // builds these same statistics and returns only the weights, dropping
-    // `npos`, which is exactly the per-gene detection count the dictionary
+    // `npos`, which is exactly the per-feature detection count the dictionary
     // merge keys on. Taking the statistics here saves a second full read.
     //
     // On a channelized axis the pass folds as it goes rather than afterwards,
@@ -396,22 +396,22 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
     // trend respectively depend on.
     let mut row_weights = None;
     let mut row_stats = None;
-    let mut gene_weights = None;
-    let mut gene_stats = None;
+    let mut feature_weights = None;
+    let mut feature_stats = None;
     if cfg.fisher_weights {
         info!("Computing NB Fisher-info weights for inference...");
-        match gene_axis.as_ref() {
+        match feature_axis.as_ref() {
             Some(axis) => {
                 let (r_stats, g_stats) =
                     axis.running_stats(&data_vec, c.block_size, "NB-Fisher")?;
                 let rw = fisher_weights_from_stats(&r_stats, n_cells);
                 let gw = fisher_weights_from_stats(&g_stats, n_cells);
                 log_weights("Row weights w_r", &rw);
-                log_weights("Gene weights w_g", &gw);
+                log_weights("Feature weights w_g", &gw);
                 row_weights = Some(rw);
                 row_stats = Some(r_stats);
-                gene_weights = Some(gw);
-                gene_stats = Some(g_stats);
+                feature_weights = Some(gw);
+                feature_stats = Some(g_stats);
             }
             None => {
                 let stats = streaming_sparse_running_stats(&data_vec, c.block_size, "NB-Fisher")?;
@@ -434,11 +434,11 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
         spatial_graph,
         edge_source,
         cell_proj,
-        gene_axis,
+        feature_axis,
         row_weights,
         row_stats,
-        gene_weights,
-        gene_stats,
+        feature_weights,
+        feature_stats,
         n_cells,
         n_rows,
     })

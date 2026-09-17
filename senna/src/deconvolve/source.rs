@@ -3,7 +3,7 @@
 //! **`senna bge` (with or without `--skip-etm`) and `senna simba` are the
 //! supported sources.** What is taken from a run:
 //!
-//! - the gene axis and embedding width, from `feature_loading.parquet` — the
+//! - the gene axis and embedding width, from `feature_embedding.parquet` — the
 //!   per-gene loading ρ. Older runs kept ρ only under `--skip-etm`, where it
 //!   borrowed the `dictionary` slot, so that legacy layout is read as a
 //!   fallback. There the slot must be checked by CONTENT (a β has
@@ -104,12 +104,12 @@ impl EmbeddingSource {
     /// `bge` / `simba`: the gene axis and the embedding width, from the raw
     /// gene table (ρ, or SIMBA's gene node table).
     ///
-    /// Resolution is delegated to [`run_manifest::resolve_feature_loading_for`],
+    /// Resolution is delegated to [`run_manifest::resolve_feature_embedding_for`],
     /// the single place that knows where ρ can live and that verifies each
     /// candidate's scale. Duplicating that probe here is what let the same bug
     /// recur in three consumers.
     fn from_gene_table(m: &RunManifest, dir: &Path) -> Result<Self> {
-        let (rho_path, _) = run_manifest::resolve_feature_loading_for(m, dir)?;
+        let (rho_path, _) = run_manifest::resolve_feature_embedding_for(m, dir)?;
         let rho = load_mat(&rho_path, "per-gene loading ρ")?;
         ArtifactScale::ensure(&rho.mat, ArtifactScale::Signed, &rho_path)?;
         Self::assemble(rho, m.kind)

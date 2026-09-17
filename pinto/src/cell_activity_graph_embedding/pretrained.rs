@@ -1,17 +1,17 @@
-//! Pre-trained gene-embedding ingestion for `cage`.
+//! Pre-trained feature-embedding ingestion for `cage`.
 //!
-//! Aligns an external `gene x H` dictionary (a raw feature embedding written
-//! by another training run) to this run's gene axis. Matched genes take their
-//! dictionary row verbatim; a gene with no dictionary row is seeded from the
-//! matched gene whose count profile it resembles most, so it starts near a
+//! Aligns an external `feature x H` dictionary (a raw feature embedding written
+//! by another training run) to this run's feature axis. Matched features take their
+//! dictionary row verbatim; a feature with no dictionary row is seeded from the
+//! matched feature whose count profile it resembles most, so it starts near a
 //! plausible relative rather than at noise, and stays trainable.
 //!
 //! The heavy lifting — parquet read, per-side name canonicalization, bias
 //! pairing, target-order alignment — is
 //! [`auxiliary_data::frozen_features::load_frozen_feature_host`]. This module
 //! adds what `cage` needs on top: rejection of co-embed artifacts, expansion
-//! from the matched subset back to the full gene axis, profile-neighbor
-//! seeding, and an auditable per-gene record of where every row came from.
+//! from the matched subset back to the full feature axis, profile-neighbor
+//! seeding, and an auditable per-feature record of where every row came from.
 
 use crate::util::common::Mat;
 use auxiliary_data::feature_names::FeatureNameKind;
@@ -21,18 +21,18 @@ use candle_util::candle_core::{Tensor, Var};
 use log::{info, warn};
 use rayon::prelude::*;
 
-/// Where a gene's initial embedding row came from.
+/// Where a feature's initial embedding row came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitKind {
-    /// The dictionary had a row for this gene; taken verbatim.
+    /// The dictionary had a row for this feature; taken verbatim.
     Matched,
-    /// No dictionary row; seeded from the closest matched gene's row
-    /// (or from the matched-row mean when the gene's profile is all zero,
-    /// in which case `neighbor_gene` is `None`).
+    /// No dictionary row; seeded from the closest matched feature's row
+    /// (or from the matched-row mean when the feature's profile is all zero,
+    /// in which case `neighbor_feature` is `None`).
     Neighbor,
     /// No dictionary row; placed through the dictionary's learned modules as
-    /// `π̂ μ`, with `π̂` averaged over the closest matched genes' memberships
-    /// (`neighbor_gene` is the best of them; `None` when the diffuse prior was
+    /// `π̂ μ`, with `π̂` averaged over the closest matched features' memberships
+    /// (`neighbor_feature` is the best of them; `None` when the diffuse prior was
     /// used because no neighbour reached the similarity floor).
     Membership,
 }
@@ -47,30 +47,30 @@ impl InitKind {
     }
 }
 
-/// One row of the `{out}.gene_embedding_init.parquet` audit table.
+/// One row of the `{out}.feature_embedding_init.parquet` audit table.
 pub struct InitRecord {
-    pub gene: Box<str>,
+    pub feature: Box<str>,
     pub init: InitKind,
-    /// The matched gene an unmatched one was seeded from. `None` for matched
-    /// genes and for mean-seeded genes.
-    pub neighbor_gene: Option<Box<str>>,
-    /// Profile cosine to `neighbor_gene`; `NaN` where no neighbor was used.
+    /// The matched feature an unmatched one was seeded from. `None` for matched
+    /// features and for mean-seeded features.
+    pub neighbor_feature: Option<Box<str>>,
+    /// Profile cosine to `neighbor_feature`; `NaN` where no neighbor was used.
     pub cosine: f32,
 }
 
-/// The aligned, fully populated gene side, `[n_genes x h]`, rows in the run's
-/// gene order. `records` is parallel to the gene axis and is the single
+/// The aligned, fully populated feature side, `[n_features x h]`, rows in the run's
+/// feature order. `records` is parallel to the feature axis and is the single
 /// source of truth for which rows came from the dictionary.
-pub struct PretrainedGeneEmbedding {
-    pub e_gene: Mat,
-    pub b_gene: Vec<f32>,
+pub struct PretrainedFeatureEmbedding {
+    pub e_feat: Mat,
+    pub b_feat: Vec<f32>,
     pub records: Vec<InitRecord>,
 }
 
-impl PretrainedGeneEmbedding {
+impl PretrainedFeatureEmbedding {
     /// The dictionary's embedding width.
     pub fn h(&self) -> usize {
-        self.e_gene.ncols()
+        self.e_feat.ncols()
     }
 
     /// `1.0` where the row came from the dictionary, `0.0` where it was
@@ -89,7 +89,7 @@ impl PretrainedGeneEmbedding {
             .collect()
     }
 
-    /// The rows that came from the dictionary, as ids into the gene axis.
+    /// The rows that came from the dictionary, as ids into the feature axis.
     pub fn matched_ids(&self) -> Vec<u32> {
         self.records
             .iter()
@@ -106,24 +106,24 @@ impl PretrainedGeneEmbedding {
 }
 
 pub struct PretrainedArgs<'a> {
-    /// Path to the `gene x H` dictionary parquet; row column 0 is the gene name.
+    /// Path to the `feature x H` dictionary parquet; row column 0 is the feature name.
     pub dictionary_path: &'a str,
-    /// Optional `[D, 1]` per-gene bias parquet; zeros when absent.
+    /// Optional `[D, 1]` per-feature bias parquet; zeros when absent.
     pub bias_path: Option<&'a str>,
-    /// The run's gene axis, already final.
-    pub gene_names: &'a [Box<str>],
+    /// The run's feature axis, already final.
+    pub feature_names: &'a [Box<str>],
     /// Canonicalization applied to both sides before matching.
     pub name_kind: FeatureNameKind,
-    /// Produces `[n_genes x P]` per-gene count profiles (any pooling; only
-    /// row directions matter). Called at most once, and only when some gene
+    /// Produces `[n_features x P]` per-feature count profiles (any pooling; only
+    /// row directions matter). Called at most once, and only when some feature
     /// has no dictionary row — an all-matched dictionary never pays for it.
-    pub gene_profiles: &'a dyn Fn() -> anyhow::Result<Mat>,
-    /// Place unmatched genes through the dictionary's learned modules when
+    pub feature_profiles: &'a dyn Fn() -> anyhow::Result<Mat>,
+    /// Place unmatched features through the dictionary's learned modules when
     /// `{stem}.module_membership.parquet` and `{stem}.module_dictionary.parquet`
     /// sit beside it (`stem` = the dictionary path without its
-    /// `.feature_loading.parquet` / `.dictionary.parquet` / `.parquet` suffix):
+    /// `.feature_embedding.parquet` / `.dictionary.parquet` / `.parquet` suffix):
     /// `π̂` = similarity-weighted mean membership of the `k` closest matched
-    /// genes, row = `π̂ μ`. Falls back to the neighbour rule when the tables are
+    /// features, row = `π̂ μ`. Falls back to the neighbour rule when the tables are
     /// absent. `None` = the neighbour rule.
     pub membership_init: Option<graph_embedding_util::transfer::AlignKnobs>,
 }
@@ -138,15 +138,15 @@ pub fn dictionary_width(dictionary_path: &str) -> anyhow::Result<usize> {
 }
 
 /// Load, align, and fill. See the module doc for the contract; every path
-/// through this function leaves `e_gene` fully populated and `records`
-/// parallel to `gene_names`.
-pub fn load_pretrained_gene_embedding(
+/// through this function leaves `e_feat` fully populated and `records`
+/// parallel to `feature_names`.
+pub fn load_pretrained_feature_embedding(
     args: PretrainedArgs<'_>,
-) -> anyhow::Result<PretrainedGeneEmbedding> {
-    let n_genes = args.gene_names.len();
-    anyhow::ensure!(n_genes > 0, "empty gene axis");
+) -> anyhow::Result<PretrainedFeatureEmbedding> {
+    let n_features = args.feature_names.len();
+    anyhow::ensure!(n_features > 0, "empty feature axis");
 
-    // A row name in the channelized `{gene}/{modality}/...` grammar means a
+    // A row name in the channelized `{feature}/{modality}/...` grammar means a
     // channelized or co-embed artifact, which is not a dictionary. Catch it
     // by name — a names-only column read, not a full matrix decode — before
     // alignment would quietly match nothing. The grammar itself is
@@ -160,11 +160,10 @@ pub fn load_pretrained_gene_embedding(
         .collect();
     anyhow::ensure!(
         offending.is_empty(),
-        "{} does not look like a gene x H dictionary: row names carry the \
-         channelized row grammar (e.g. {}). Point --gene-embedding at a raw \
-         feature embedding (a topic model's feature_embedding.parquet or an \
-         embedding run's feature_loading.parquet), not at a co-embedding \
-         output.",
+        "{} does not look like a feature x H dictionary: row names carry the \
+         channelized row grammar (e.g. {}). Point --feature-embedding at a raw \
+         feature embedding (a run's feature_embedding.parquet), not at a \
+         co-embedding output (feature_coembedding.parquet).",
         args.dictionary_path,
         offending.join(", ")
     );
@@ -172,29 +171,32 @@ pub fn load_pretrained_gene_embedding(
     let host = load_frozen_feature_host(FrozenLoadArgs {
         dictionary_path: args.dictionary_path,
         bias_path: args.bias_path,
-        target_feature_names: args.gene_names,
+        target_feature_names: args.feature_names,
         name_kind: args.name_kind,
         source_name_map: None,
     })?;
     let h = host.h;
     let n_matched = host.keep_target_indices.len();
-    anyhow::ensure!(n_matched > 0, "no gene of this run matched the dictionary");
+    anyhow::ensure!(
+        n_matched > 0,
+        "no feature of this run matched the dictionary"
+    );
 
     // Expand the matched subset back onto the full axis.
-    let mut e_gene = Mat::zeros(n_genes, h);
-    let mut b_gene = vec![0.0f32; n_genes];
-    let mut matched = vec![false; n_genes];
+    let mut e_feat = Mat::zeros(n_features, h);
+    let mut b_feat = vec![0.0f32; n_features];
+    let mut matched = vec![false; n_features];
     for (k, &g) in host.keep_target_indices.iter().enumerate() {
-        e_gene.row_mut(g).copy_from(&host.e_feat.row(k));
-        b_gene[g] = host.b_feat[k];
+        e_feat.row_mut(g).copy_from(&host.e_feat.row(k));
+        b_feat[g] = host.b_feat[k];
         matched[g] = true;
     }
-    let matched_idx: Vec<usize> = (0..n_genes).filter(|&g| matched[g]).collect();
-    let unmatched_idx: Vec<usize> = (0..n_genes).filter(|&g| !matched[g]).collect();
+    let matched_idx: Vec<usize> = (0..n_features).filter(|&g| matched[g]).collect();
+    let unmatched_idx: Vec<usize> = (0..n_features).filter(|&g| !matched[g]).collect();
 
     // Membership initialization through the dictionary's modules, when asked
     // for and the tables exist. Returns early with the alignment's rows for the
-    // unmatched genes; otherwise the neighbour rule below runs.
+    // unmatched features; otherwise the neighbour rule below runs.
     if let (Some(knobs), false) = (args.membership_init, unmatched_idx.is_empty()) {
         let (pi_path, mu_path) =
             graph_embedding_util::transfer::module_table_paths(args.dictionary_path);
@@ -210,15 +212,15 @@ pub fn load_pretrained_gene_embedding(
                 None
             };
         if let Some((pi, mu)) = tables {
-            let prof = (args.gene_profiles)()?;
+            let prof = (args.feature_profiles)()?;
             anyhow::ensure!(
-                prof.nrows() == n_genes,
-                "gene_profiles rows ({}) != gene axis ({})",
+                prof.nrows() == n_features,
+                "feature_profiles rows ({}) != feature axis ({})",
                 prof.nrows(),
-                n_genes
+                n_features
             );
-            // Run gene → dictionary row, for the matched genes.
-            let mut new_to_train: Vec<Option<usize>> = vec![None; n_genes];
+            // Run feature → dictionary row, for the matched features.
+            let mut new_to_train: Vec<Option<usize>> = vec![None; n_features];
             for (&g, &src) in host
                 .keep_target_indices
                 .iter()
@@ -241,32 +243,32 @@ pub fn load_pretrained_gene_embedding(
             );
             let mut diffuse = 0usize;
             let records: Vec<InitRecord> = args
-                .gene_names
+                .feature_names
                 .iter()
                 .enumerate()
-                .map(|(g, gene)| {
+                .map(|(g, feature)| {
                     if matched[g] {
                         return InitRecord {
-                            gene: gene.clone(),
+                            feature: feature.clone(),
                             init: InitKind::Matched,
-                            neighbor_gene: None,
+                            neighbor_feature: None,
                             cosine: f32::NAN,
                         };
                     }
-                    let union = al.new_to_union[g].expect("an unmatched gene is initialized");
+                    let union = al.new_to_union[g].expect("an unmatched feature is initialized");
                     for c in 0..h {
-                        e_gene[(g, c)] = al.rows[(union, c)];
+                        e_feat[(g, c)] = al.rows[(union, c)];
                     }
                     let prov = al.provenance[union]
                         .as_ref()
-                        .expect("an initialized gene has provenance");
+                        .expect("an initialized feature has provenance");
                     if prov.diffuse {
                         diffuse += 1;
                     }
                     InitRecord {
-                        gene: gene.clone(),
+                        feature: feature.clone(),
                         init: InitKind::Membership,
-                        neighbor_gene: prov
+                        neighbor_feature: prov
                             .neighbours
                             .first()
                             .map(|&src| host.src_names[src].clone()),
@@ -279,7 +281,7 @@ pub fn load_pretrained_gene_embedding(
                 })
                 .collect();
             info!(
-                "Pre-trained gene embedding: {} matched, {} membership-initialized through {} \
+                "Pre-trained feature embedding: {} matched, {} membership-initialized through {} \
                  modules ({} on the diffuse prior), {} dictionary rows unused",
                 n_matched,
                 unmatched_idx.len(),
@@ -287,9 +289,9 @@ pub fn load_pretrained_gene_embedding(
                 diffuse,
                 dict_names.len().saturating_sub(n_matched)
             );
-            return Ok(PretrainedGeneEmbedding {
-                e_gene,
-                b_gene,
+            return Ok(PretrainedFeatureEmbedding {
+                e_feat,
+                b_feat,
                 records,
             });
         }
@@ -300,21 +302,21 @@ pub fn load_pretrained_gene_embedding(
         );
     }
 
-    // Closest matched gene by profile cosine, per unmatched gene. The
+    // Closest matched feature by profile cosine, per unmatched feature. The
     // profiles (a full pass over the data at the caller) are built only when
     // this branch is reached at all.
     let neighbor_of: Vec<Option<(usize, f32)>> = if unmatched_idx.is_empty() {
         Vec::new()
     } else {
-        let prof = (args.gene_profiles)()?;
+        let prof = (args.feature_profiles)()?;
         anyhow::ensure!(
-            prof.nrows() == n_genes,
-            "gene_profiles rows ({}) != gene axis ({})",
+            prof.nrows() == n_features,
+            "feature_profiles rows ({}) != feature axis ({})",
             prof.nrows(),
-            n_genes
+            n_features
         );
         let norm = |g: usize| -> f32 { prof.row(g).iter().map(|v| v * v).sum::<f32>().sqrt() };
-        // Matched norms once, not once per unmatched gene: recomputing them
+        // Matched norms once, not once per unmatched feature: recomputing them
         // inside the search doubles its arithmetic.
         let matched_norms: Vec<f32> = matched_idx.iter().map(|&m| norm(m)).collect();
         unmatched_idx
@@ -344,46 +346,46 @@ pub fn load_pretrained_gene_embedding(
             .collect()
     };
 
-    // Mean of the matched rows, the fallback seed for a gene with no usable
+    // Mean of the matched rows, the fallback seed for a feature with no usable
     // profile. `host.e_feat` is exactly the matched rows, so its column means
     // are the answer.
     let mean_row = host.e_feat.row_mean();
 
     // Fill the seeded rows and build every record where its case is decided,
-    // in one pass over the gene axis.
-    let mut neighbor_at = vec![None; n_genes];
+    // in one pass over the feature axis.
+    let mut neighbor_at = vec![None; n_features];
     for (&g, nb) in unmatched_idx.iter().zip(neighbor_of.iter()) {
         neighbor_at[g] = Some(*nb);
     }
     let mut mean_seeded = 0usize;
     let records: Vec<InitRecord> = args
-        .gene_names
+        .feature_names
         .iter()
         .enumerate()
-        .map(|(g, gene)| match neighbor_at[g] {
+        .map(|(g, feature)| match neighbor_at[g] {
             None => InitRecord {
-                gene: gene.clone(),
+                feature: feature.clone(),
                 init: InitKind::Matched,
-                neighbor_gene: None,
+                neighbor_feature: None,
                 cosine: f32::NAN,
             },
             Some(Some((m, cos))) => {
-                let src = e_gene.row(m).into_owned();
-                e_gene.row_mut(g).copy_from(&src);
+                let src = e_feat.row(m).into_owned();
+                e_feat.row_mut(g).copy_from(&src);
                 InitRecord {
-                    gene: gene.clone(),
+                    feature: feature.clone(),
                     init: InitKind::Neighbor,
-                    neighbor_gene: Some(args.gene_names[m].clone()),
+                    neighbor_feature: Some(args.feature_names[m].clone()),
                     cosine: cos,
                 }
             }
             Some(None) => {
-                e_gene.row_mut(g).copy_from(&mean_row);
+                e_feat.row_mut(g).copy_from(&mean_row);
                 mean_seeded += 1;
                 InitRecord {
-                    gene: gene.clone(),
+                    feature: feature.clone(),
                     init: InitKind::Neighbor,
-                    neighbor_gene: None,
+                    neighbor_feature: None,
                     cosine: f32::NAN,
                 }
             }
@@ -392,44 +394,44 @@ pub fn load_pretrained_gene_embedding(
 
     let unused = dict_names.len().saturating_sub(n_matched);
     info!(
-        "Pre-trained gene embedding: {} matched, {} neighbor-seeded ({} of those from the matched mean), {} dictionary rows unused",
+        "Pre-trained feature embedding: {} matched, {} neighbor-seeded ({} of those from the matched mean), {} dictionary rows unused",
         n_matched,
         unmatched_idx.len(),
         mean_seeded,
         unused
     );
-    if n_matched < n_genes / 2 {
+    if n_matched < n_features / 2 {
         warn!(
-            "fewer than half the genes matched the dictionary ({n_matched}/{n_genes}); \
-             check --gene-name-mode if this is unexpected"
+            "fewer than half the features matched the dictionary ({n_matched}/{n_features}); \
+             check --feature-name-mode if this is unexpected"
         );
     }
 
-    Ok(PretrainedGeneEmbedding {
-        e_gene,
-        b_gene,
+    Ok(PretrainedFeatureEmbedding {
+        e_feat,
+        b_feat,
         records,
     })
 }
 
-/// Write the audit table: one row per gene, in gene-axis order.
+/// Write the audit table: one row per feature, in feature-axis order.
 pub fn write_init_report(out_prefix: &str, records: &[InitRecord]) -> anyhow::Result<()> {
-    let genes: Vec<Box<str>> = records.iter().map(|r| r.gene.clone()).collect();
+    let features: Vec<Box<str>> = records.iter().map(|r| r.feature.clone()).collect();
     let init: Vec<Box<str>> = records.iter().map(|r| r.init.label().into()).collect();
     let neighbor: Vec<Box<str>> = records
         .iter()
-        .map(|r| r.neighbor_gene.clone().unwrap_or_else(|| "".into()))
+        .map(|r| r.neighbor_feature.clone().unwrap_or_else(|| "".into()))
         .collect();
     let cosine: Vec<f32> = records.iter().map(|r| r.cosine).collect();
 
     matrix_util::parquet::write_named_table(
-        &format!("{out_prefix}.gene_embedding_init.parquet"),
-        "gene",
-        &genes,
+        &format!("{out_prefix}.feature_embedding_init.parquet"),
+        "feature",
+        &features,
         &[
             ("init".into(), matrix_util::parquet::Column::Str(&init)),
             (
-                "neighbor_gene".into(),
+                "neighbor_feature".into(),
                 matrix_util::parquet::Column::Str(&neighbor),
             ),
             ("cosine".into(), matrix_util::parquet::Column::F32(&cosine)),
@@ -445,7 +447,7 @@ pub struct FrozenGene {
     fixed: Tensor,
     keep_mask: Tensor,
     var: Var,
-    /// The loaded per-gene bias and its Var, present only when a bias file
+    /// The loaded per-feature bias and its Var, present only when a bias file
     /// was given (then its values are part of the dictionary contract and
     /// must not drift while the rows they were fitted beside are pinned).
     bias: Option<(Tensor, Var)>,

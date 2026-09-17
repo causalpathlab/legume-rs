@@ -585,7 +585,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         pb_latent_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: None,
-        feature_loading_suffix: None,
+        feature_coembedding_suffix: None,
         carried: None,
         module_membership_suffix: None,
         module_dictionary_suffix: None,

@@ -17,10 +17,9 @@ use matrix_util::traits::IoOps;
 /// [`Default`] is the legacy senna convention (`latent` / `dictionary`), kept
 /// so pre-existing manifests still describe their files correctly. senna's
 /// embedding commands now use [`EmbeddingFileNames::SENNA_EMBEDDING`], which
-/// moves the cell table to `cell_embedding` and leaves `latent` to mean log θ.
-/// `senna gem` uses [`EmbeddingFileNames::EXPLICIT`], and its own downstream
-/// (`senna lineage` / `senna annotate-gem`) reads those names. The conventions do
-/// not mix: a reader expects one or the other.
+/// says what each table *is* (`cell_embedding` / `feature_embedding`) and
+/// leaves `latent` / `dictionary` to mean log θ / β. The conventions do not
+/// mix: a reader expects one or the other.
 #[derive(Clone, Copy, Debug)]
 pub struct EmbeddingFileNames {
     /// Stem for the cell × H table.
@@ -39,27 +38,19 @@ impl Default for EmbeddingFileNames {
 }
 
 impl EmbeddingFileNames {
-    /// The explicit spelling used by `senna gem`: say what the table *is* rather
-    /// than what role it plays in a topic model.
-    pub const EXPLICIT: Self = Self {
-        cell: "cell_embedding",
-        feature: "feature_embedding",
-    };
-
-    /// The convention used by senna's embedding commands (`bge`, `fne`).
+    /// The convention used by senna's embedding commands (`bge`, `gem`,
+    /// `simba`, `fne`): say what the table *is* rather than what role it
+    /// plays in a topic model.
     ///
     /// Cell side is `cell_embedding`, never `latent`: `latent` is reserved for
     /// log θ, so a run that also resolves topics can emit both without either
-    /// table's meaning depending on which flags were passed.
-    ///
-    /// The feature side deliberately stays `dictionary` rather than following
-    /// [`Self::EXPLICIT`] — in senna, `{out}.feature_embedding.parquet` is
-    /// owned by the SIMBA co-embed (features re-placed onto the cell manifold),
-    /// and writing the raw off-manifold ρ there would hand
-    /// `annotate-by-projection` an ill-posed nearest-centroid problem.
+    /// table's meaning depending on which flags were passed. Feature side is
+    /// the raw model-axis ρ; the SIMBA co-embed (features re-placed onto the
+    /// cell manifold) is a separate table, `feature_coembedding`, written by
+    /// [`write_feature_coembedding`].
     pub const SENNA_EMBEDDING: Self = Self {
         cell: "cell_embedding",
-        feature: "dictionary",
+        feature: "feature_embedding",
     };
 }
 
@@ -225,9 +216,9 @@ pub fn save_bias(
 /// SIMBA-style feature co-embedding, shared by `senna bge` and `senna rest`:
 /// re-embed every feature onto the cell manifold (feature = softmax-over-cells
 /// weighted average of the cell embeddings) via [`crate::feature_coembedding`]
-/// and write it as `{out}.feature_embedding.parquet`, *overriding* the raw
-/// learned feature embedding (the raw embedding is the disjoint off-manifold
-/// cloud — nothing downstream consumes it, so it is not written). `e_cell` is
+/// and write it as `{out}.feature_coembedding.parquet`, beside the raw
+/// learned feature embedding in `{out}.feature_embedding.parquet` (the two
+/// are not interchangeable: the co-embed is a lossy, one-way view). `e_cell` is
 /// the reference cell embedding (left unchanged, SIMBA's anchor) and `e_feat`
 /// the raw feature embedding (both `[*, H]` on the same device); `target_eff`
 /// is the eff-cells temperature target from [`crate::cell_clusters`].
@@ -240,11 +231,13 @@ pub fn write_feature_coembedding(
 ) -> anyhow::Result<()> {
     let (coembed, t) = crate::feature_coembedding(e_cell, e_feat, target_eff)?;
     save_embedding(
-        &format!("{out_prefix}.feature_embedding.parquet"),
+        &format!("{out_prefix}.feature_coembedding.parquet"),
         &coembed,
         feature_names,
         "feature",
     )?;
-    info!("Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_embedding.parquet");
+    info!(
+        "Feature co-embedding (SIMBA-style, T={t:.4}) → {out_prefix}.feature_coembedding.parquet"
+    );
     Ok(())
 }

@@ -32,7 +32,7 @@ pub struct PbFrame {
 /// Build the frame from the multilevel coarsening, the pair graph, and
 /// the per-cell batch membership. Returns the frame plus the
 /// fine-edge -> super-edge map (`None` = intra-PB), separately so the
-/// caller can drop the map once per-gene activity has been folded
+/// caller can drop the map once per-feature activity has been folded
 /// through it — it is `O(n_fine_edges)` and needed exactly once.
 ///
 /// Nesting is required: every finest PB must map to exactly one

@@ -19,14 +19,14 @@ fn metadata_roundtrip_lc() {
             coord_file: Some("a.tsv,b.tsv"),
             coord_columns: &coord_cols,
             n_cells: 1234,
-            n_genes: 18000,
+            n_features: 18000,
             n_edges: 55555,
             k: 12,
             graph: GraphParams::default(),
         },
         Some(DictMergeSummary {
             min_nnz: 1,
-            genes_scored: 10,
+            features_scored: 10,
         }),
         // A channelized `lc` run reports the structural fact of its feature
         // axis.
@@ -83,7 +83,7 @@ fn metadata_roundtrip_cage() {
             coord_file: Some("a.csv"),
             coord_columns: &coord_cols,
             n_cells: 1000,
-            n_genes: 20000,
+            n_features: 20000,
             n_edges: 5000,
             k: 16, // edge clusters
             graph: GraphParams::default(),
@@ -116,13 +116,13 @@ fn metadata_roundtrip_cage() {
     assert!(back.outputs.pb_bias.is_some());
     assert!(back.outputs.cell_pb.is_some());
     assert!(back.outputs.feature_embedding.is_some());
-    assert!(back.outputs.gene_bias.is_some());
+    assert!(back.outputs.feature_bias.is_some());
     assert!(back.outputs.scores.is_some());
-    // A channelized run reports GENES on `n_genes` and keeps the matrix's
-    // own row count in the splice block — reading `n_genes` as a row count
+    // A channelized run reports FEATURES on `n_features` and keeps the matrix's
+    // own row count in the splice block — reading `n_features` as a row count
     // is exactly the confusion the two-field split exists to prevent.
     let splice = back.splice.expect("splice block round-trips");
-    assert_eq!(back.n_genes, 20000);
+    assert_eq!(back.n_features, 20000);
     assert_eq!(splice.n_rows, 40000);
     assert_eq!(splice.n_delta_identified, 15000);
     assert_eq!(splice.delta_base, "spliced");
@@ -133,7 +133,7 @@ fn metadata_roundtrip_cage() {
     assert_eq!(levels[0].tag, "final");
     // The point of the pair projection: cage's level is the SAME shape lc and
     // dsvd publish — a real propensity (with entropy), a per-edge community
-    // table, and a gene x community dictionary.
+    // table, and a feature x community dictionary.
     assert!(levels[0].propensity.ends_with(".propensity.parquet"));
     assert!(levels[0]
         .link_community
@@ -141,10 +141,10 @@ fn metadata_roundtrip_cage() {
         .unwrap()
         .ends_with(".link_community.parquet"));
     assert!(levels[0]
-        .gene_community
+        .feature_community
         .as_deref()
         .unwrap()
-        .ends_with(".gene_community.parquet"));
+        .ends_with(".feature_community.parquet"));
     assert_eq!(levels[0].entropy_present, Some(true));
 }
 
@@ -160,7 +160,7 @@ fn metadata_roundtrip_cage_no_batch() {
             coord_file: None,
             coord_columns: &[],
             n_cells: 100,
-            n_genes: 200,
+            n_features: 200,
             n_edges: 300,
             k: 8,
             graph: GraphParams::default(),
@@ -194,7 +194,7 @@ fn metadata_roundtrip_lc_merge_no_collapse() {
             coord_file: None,
             coord_columns: &[],
             n_cells: 100,
-            n_genes: 200,
+            n_features: 200,
             n_edges: 300,
             k: 8,
             graph: GraphParams::default(),
@@ -230,7 +230,7 @@ fn roundtrip_graph(graph: GraphParams) -> (tempfile::TempDir, GraphParams) {
             coord_file: Some("a.tsv"),
             coord_columns: &coord_cols,
             n_cells: 1234,
-            n_genes: 18000,
+            n_features: 18000,
             n_edges: 55555,
             k: 12,
             graph,
@@ -300,7 +300,7 @@ fn an_older_graph_block_still_deserializes() {
         "timestamp": "0",
         "prefix": "run",
         "n_cells": 10,
-        "n_genes": 10,
+        "n_features": 10,
         "graph": {"knn_base": 5, "knn_expr": 0, "augmented": false},
         "outputs": {}
     }"#;

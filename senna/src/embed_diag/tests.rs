@@ -53,8 +53,8 @@ fn every_recorded_table_is_measured_in_report_order() {
     let genes = rank_one();
     let mut manifest = RunManifest::new(RunKind::Bge, &prefix);
     manifest.outputs.cell_embedding = Some(plant_table(&prefix, "cell_embedding.parquet", &cells));
-    manifest.outputs.feature_loading =
-        Some(plant_table(&prefix, "feature_loading.parquet", &genes));
+    manifest.outputs.feature_embedding =
+        Some(plant_table(&prefix, "feature_embedding.parquet", &genes));
     // No module dictionary recorded: it must simply be absent from the report.
     manifest
         .save(Path::new(&default_path(&prefix)))
@@ -62,7 +62,7 @@ fn every_recorded_table_is_measured_in_report_order() {
 
     let rows = collect_geometry(&prefix).expect("collect");
     let names: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
-    assert_eq!(names, ["cell_embedding", "feature_loading"]);
+    assert_eq!(names, ["cell_embedding", "feature_embedding"]);
 
     // f32 through parquet is lossless, so the readout must equal a direct
     // measurement of the same matrix exactly — not approximately.
@@ -89,7 +89,7 @@ fn the_manifest_path_and_the_prefix_resolve_to_the_same_report() {
     assert_eq!(by_prefix, by_path);
 }
 
-/// `bge --skip-etm` writes the SAME ρ to `feature_loading.parquet` and to
+/// A v1 `bge --skip-etm` wrote the SAME ρ to `feature_embedding.parquet` and to
 /// `dictionary.parquet`: two DISTINCT files, byte-identical content. It is one
 /// table and must be measured once — reported twice it reads as two independent
 /// findings that happen to agree. Planted the way the run writes it, so the
@@ -103,11 +103,11 @@ fn one_table_written_to_two_files_is_measured_once() {
     let mut manifest = RunManifest::new(RunKind::Bge, &prefix);
     manifest.outputs.cell_embedding =
         Some(plant_table(&prefix, "cell_embedding.parquet", &balanced()));
-    manifest.outputs.feature_loading =
-        Some(plant_table(&prefix, "feature_loading.parquet", &genes));
+    manifest.outputs.feature_embedding =
+        Some(plant_table(&prefix, "feature_embedding.parquet", &genes));
     manifest.outputs.dictionary = Some(plant_table(&prefix, "dictionary.parquet", &genes));
     assert_ne!(
-        manifest.outputs.feature_loading, manifest.outputs.dictionary,
+        manifest.outputs.feature_embedding, manifest.outputs.dictionary,
         "the fixture must plant two different paths, or it tests nothing"
     );
     manifest
@@ -119,11 +119,11 @@ fn one_table_written_to_two_files_is_measured_once() {
         .iter()
         .map(|(n, _)| *n)
         .collect();
-    assert_eq!(names, ["cell_embedding", "feature_loading"]);
+    assert_eq!(names, ["cell_embedding", "feature_embedding"]);
 }
 
 /// An SVD- or topic-shaped run names its tables `latent` / `dictionary` rather
-/// than bge's `cell_embedding` / `feature_loading`. Measuring those is the whole
+/// than bge's `cell_embedding` / `feature_embedding`. Measuring those is the whole
 /// point of the diagnostic: the comparison it exists for is across families.
 #[test]
 fn a_latent_and_dictionary_run_is_measured_too() {

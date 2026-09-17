@@ -6,7 +6,7 @@
 //! to their node ids with `map_ids`.
 //!
 //! The source is any run whose prefix resolves through
-//! [`crate::run_manifest::resolve_feature_loading`] — typically `senna fne`,
+//! [`crate::run_manifest::resolve_feature_embedding`] — typically `senna fne`,
 //! whose table also holds terms, words and cell types. Those rows are skipped
 //! by the run's `feature_types.parquet` when it exists; a source without one
 //! is taken to be all genes. Genes of this axis with no source row stay free.
@@ -62,7 +62,7 @@ pub(crate) fn load_preset_rows(
     rename_source: Option<SourceNameMap<'_>>,
 ) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
-    let (dictionary_path, _bias) = crate::run_manifest::resolve_feature_loading(prefix)
+    let (dictionary_path, _bias) = crate::run_manifest::resolve_feature_embedding(prefix)
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
 
     // Which source rows are genes: the types table, when the run wrote one.
@@ -161,7 +161,7 @@ pub(crate) mod test_support {
     /// The extra rows [`widen`] adds: a gene the data lacks and a term.
     pub(crate) const EXTRA: [(&str, &str); 2] = [("EXTRA1", "gene"), ("GO:9999999", "term")];
 
-    /// Write `{out}.feature_loading.parquet` = the ρ table at `src_rho_path`
+    /// Write `{out}.feature_embedding.parquet` = the ρ table at `src_rho_path`
     /// plus [`EXTRA`], with a types table over every row; returns the extra
     /// rows' values for the caller to look for in a run's output.
     pub(crate) fn widen(src_rho_path: &str, out: &str) -> DMatrix<f32> {
@@ -177,7 +177,7 @@ pub(crate) mod test_support {
             types.push(ty.into());
         }
         mat.to_parquet_with_names(
-            &format!("{out}.feature_loading.parquet"),
+            &format!("{out}.feature_embedding.parquet"),
             (Some(&names), Some("gene")),
             Some(&t.cols),
         )

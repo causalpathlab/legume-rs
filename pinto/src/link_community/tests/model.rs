@@ -4,7 +4,7 @@ fn make_synthetic_profiles(n_edges: usize, m: usize, k: usize) -> (LinkProfileSt
     let mut profiles = vec![0.0f32; n_edges * m];
     let mut labels = vec![0usize; n_edges];
 
-    // Create planted structure: edges in community c have higher values in gene c
+    // Create planted structure: edges in community c have higher values in feature c
     for e in 0..n_edges {
         let c = e % k;
         labels[e] = c;
@@ -84,7 +84,7 @@ fn test_recompute_matches() {
 fn test_delta_score_matches_hand_computed_dot_product() {
     // Fast DC-SBM scoring: log_probs[t] must equal
     //   Σ_g y_eg · (log_rate[t,g] - log_rate[current_c,g])
-    // where log_rate[k,g] = log_gene[k,g] + log_size_offset[k].
+    // where log_rate[k,g] = log_feature[k,g] + log_size_offset[k].
     let (store, labels) = make_synthetic_profiles(15, 4, 3);
     let stats = LinkCommunityStats::from_profiles(&store, 3, &labels);
     let mut log_probs = vec![0.0f64; 3];
@@ -106,8 +106,9 @@ fn test_delta_score_matches_hand_computed_dot_product() {
             for (&col, &y_f32) in cols.iter().zip(vals.iter()) {
                 let y = y_f32 as f64;
                 let g = col as usize;
-                expected +=
-                    y * (stats.log_gene[t * stats.m + g] - stats.log_gene[current_c * stats.m + g]);
+                expected += y
+                    * (stats.log_feature[t * stats.m + g]
+                        - stats.log_feature[current_c * stats.m + g]);
             }
             assert!(
                 (got - expected).abs() < 1e-10,
@@ -119,8 +120,8 @@ fn test_delta_score_matches_hand_computed_dot_product() {
 
 #[test]
 fn test_delta_move_keeps_caches_in_sync() {
-    // After any sequence of delta_moves, log_gene[k,g] must equal
-    // ln(gene_sum[k,g] + ε) and log_size_offset[k] must equal
+    // After any sequence of delta_moves, log_feature[k,g] must equal
+    // ln(feature_sum[k,g] + ε) and log_size_offset[k] must equal
     // -ln(size_sum[k] + M·ε).
     let (store, labels) = make_synthetic_profiles(30, 5, 3);
     let mut stats = LinkCommunityStats::from_profiles(&store, 3, &labels);
@@ -144,18 +145,18 @@ fn test_delta_move_keeps_caches_in_sync() {
         );
         for g in 0..stats.m {
             let idx = k * stats.m + g;
-            let lg_expected = (stats.gene_sum[idx] + LOG_EPS).ln();
+            let lg_expected = (stats.feature_sum[idx] + LOG_EPS).ln();
             assert!(
-                (stats.log_gene[idx] - lg_expected).abs() < 1e-12,
-                "log_gene[{k},{g}] drift"
+                (stats.log_feature[idx] - lg_expected).abs() < 1e-12,
+                "log_feature[{k},{g}] drift"
             );
         }
     }
 
     // Incremental caches must also agree with a fresh rebuild.
     let fresh = LinkCommunityStats::from_profiles(&store, 3, &stats.membership);
-    for i in 0..stats.log_gene.len() {
-        assert!((stats.log_gene[i] - fresh.log_gene[i]).abs() < 1e-12);
+    for i in 0..stats.log_feature.len() {
+        assert!((stats.log_feature[i] - fresh.log_feature[i]).abs() < 1e-12);
     }
     for k in 0..stats.k {
         assert!((stats.log_size_offset[k] - fresh.log_size_offset[k]).abs() < 1e-12);
@@ -172,7 +173,7 @@ fn test_size_factors() {
 
 #[test]
 fn test_classifier_recovers_planted() {
-    // Create planted profiles: K=3 communities with distinct gene signatures
+    // Create planted profiles: K=3 communities with distinct feature signatures
     let k = 3;
     let m = 6;
     let n_edges = 60;

@@ -68,7 +68,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     let effective = crate::hvg::resolve_multiome_with_hvg(false, args.data_files.len(), &args.hvg);
     let must_train =
         crate::hvg::load_must_train(effective.must_train_file, effective.selection_on())?;
-    let (hvg_rows, gene_names): (Vec<usize>, Vec<Box<str>>) = if effective.selection_on() {
+    let (hvg_rows, feature_names): (Vec<usize>, Vec<Box<str>>) = if effective.selection_on() {
         let sel = select_hvg_streaming(
             data,
             (effective.n_hvg > 0).then_some(effective.n_hvg),
@@ -96,7 +96,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     //////////////
     let (preset, carried) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
-        &gene_names,
+        &feature_names,
         &ge::FeatureNameKind::Gene { delim: '_' },
     )?;
     let dim = crate::feature_preset::resolve_dim(args.embedding_dim, preset.as_ref())?;
@@ -141,23 +141,23 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         &cell_names,
         "cell",
     )?;
-    // Row axis `gene`, as bge labels its raw gene table.
+    // The raw gene table ρ, as bge writes its own.
     ge::save_embedding(
-        &format!("{prefix}.feature_loading.parquet"),
+        &format!("{prefix}.feature_embedding.parquet"),
         &out.e_gene,
-        &gene_names,
-        "gene",
+        &feature_names,
+        "feature",
     )?;
     // SIMBA's `si.tl.embed`: genes onto the (kept) cells at a fixed T.
     let coembed = ge::feature_coembedding_fixed_t(&e_cell, &out.e_gene, cfg.coembed_t)?;
     ge::save_embedding(
-        &format!("{prefix}.feature_embedding.parquet"),
+        &format!("{prefix}.feature_coembedding.parquet"),
         &coembed,
-        &gene_names,
+        &feature_names,
         "feature",
     )?;
     info!(
-        "Feature co-embedding (SIMBA, T={}) → {prefix}.feature_embedding.parquet",
+        "Feature co-embedding (SIMBA, T={}) → {prefix}.feature_coembedding.parquet",
         cfg.coembed_t
     );
 
@@ -169,7 +169,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         .collect();
     metrics.to_tensor()?.to_parquet_with_names(
         &format!("{prefix}.feature_scores.parquet"),
-        (Some(&gene_names), Some("feature")),
+        (Some(&feature_names), Some("feature")),
         Some(&score_cols),
     )?;
 
@@ -220,7 +220,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         pb_reference_suffix: None,
         dictionary_empirical_suffix: None,
         feature_embedding_suffix: Some("feature_embedding.parquet"),
-        feature_loading_suffix: Some("feature_loading.parquet"),
+        feature_coembedding_suffix: Some("feature_coembedding.parquet"),
         carried: carried.as_ref(),
         module_membership_suffix: None,
         module_dictionary_suffix: None,
@@ -239,7 +239,7 @@ pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
         "simba: {} edges over {} cells × {} genes (per level {:?}); wd {}; final train loss {:.4}/edge → {prefix}.*",
         out.n_edges,
         n_cells,
-        gene_names.len(),
+        feature_names.len(),
         out.level_counts,
         out.wd,
         out.epochs.last().map_or(f64::NAN, |e| e.train_loss)

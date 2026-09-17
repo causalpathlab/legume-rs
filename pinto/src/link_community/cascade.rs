@@ -16,7 +16,7 @@ use crate::link_community::model::*;
 use crate::link_community::outputs::{write_level_outputs, ScoreEntry};
 use crate::link_community::profiles::*;
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 
 /// Per-cell module-pair state carried across cascade levels.
 ///
@@ -33,12 +33,12 @@ pub struct ModulePairContext {
 
 /// Which basis to use when building edge profiles.
 ///
-/// - `ModulePair` is the gene-network path: per-cell module expression plus
+/// - `ModulePair` is the feature-network path: per-cell module expression plus
 ///   a precomputed module-pair basis. Per-level pb-sample expression is
 ///   rebuilt from the fine-cell matrix (fast column-sum aggregation) and
 ///   fed to [`build_module_pair_profiles_for_edges`].
 /// - `Projection` is the no-network default: Gaussian random projection
-///   basis over genes, with edge profiles computed directly from the
+///   basis over features, with edge profiles computed directly from the
 ///   sparse expression matrix at each level.
 pub enum ProfileMode<'a> {
     ModulePair {
@@ -80,8 +80,8 @@ pub struct CascadeConfig {
 
 /// Run Gibbs + greedy at every pyramid level, emitting per-level outputs.
 ///
-/// `gene_weights` is the precomputed NB Fisher-info weight vector; when
-/// `Some` it is forwarded into per-level `compute_gene_community_stat` calls
+/// `feature_weights` is the precomputed NB Fisher-info weight vector; when
+/// `Some` it is forwarded into per-level `compute_feature_community_stat` calls
 /// to avoid re-fitting the dispersion trend at every cascade level.
 #[allow(clippy::too_many_arguments)]
 pub fn run_cascade(
@@ -93,8 +93,8 @@ pub fn run_cascade(
     cfg: &CascadeConfig,
     sampler: &mut LinkGibbsSampler,
     cell_names: &[Box<str>],
-    gene_weights: Option<&[f32]>,
-    gene_axis: &GeneAxis,
+    feature_weights: Option<&[f32]>,
+    feature_axis: &FeatureAxis,
     edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<CascadeResult> {
     anyhow::ensure!(
@@ -240,8 +240,8 @@ pub fn run_cascade(
                 k,
                 cell_names,
                 data_vec,
-                gene_weights,
-                gene_axis,
+                feature_weights,
+                feature_axis,
                 block_size,
                 edge_kind,
             )?;

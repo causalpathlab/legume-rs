@@ -242,9 +242,9 @@ fn status_round_trips_through_its_wire_spelling() {
 #[test]
 fn module_table_paths_strip_every_dictionary_slot() {
     for dict in [
-        "run.feature_loading.parquet",
-        "run.dictionary.parquet",
         "run.feature_embedding.parquet",
+        "run.dictionary.parquet",
+        "run.feature_loading.parquet",
         "run.parquet",
     ] {
         let (pi, mu) = module_table_paths(dict);

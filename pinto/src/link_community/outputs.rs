@@ -3,11 +3,11 @@
 
 use crate::link_community::dict_merge::BhcMerge;
 use crate::link_community::profiles::{
-    compute_node_membership, dominant_cluster_rows, fit_gene_community_param, shannon_entropy_rows,
-    write_gene_community_param,
+    compute_node_membership, dominant_cluster_rows, fit_feature_community_param,
+    shannon_entropy_rows, write_feature_community_param,
 };
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 
 /// Write link community assignments to parquet.
@@ -83,7 +83,7 @@ pub fn write_link_communities(
 ///
 /// Columns: `merge_id`, `left`, `right`, `score`, `n_leaves`. The `score`
 /// column carries the cosine similarity at which the two children were
-/// merged (higher = more redundant gene programs). Reuses the
+/// merged (higher = more redundant feature programs). Reuses the
 /// `BhcMerge` carrier type from `data_beans_alg::bhc` for the merge tree;
 /// only the score interpretation differs from the original BHC log-BF.
 pub fn write_dict_merges(file_path: &str, merges: &[BhcMerge]) -> anyhow::Result<()> {
@@ -234,7 +234,7 @@ pub fn link_community_histogram(membership: &[usize], k: usize, max_width: usize
 pub use crate::util::score_trace::{write_score_trace, ScoreEntry};
 
 /// Write `<prefix>.propensity.parquet` from cell-edge labels and return
-/// the propensity matrix (reused to compute gene-community stats).
+/// the propensity matrix (reused to compute feature-community stats).
 pub fn write_propensity_parquet(
     prefix: &str,
     edges: &[(usize, usize)],
@@ -287,8 +287,8 @@ pub fn write_propensity_matrix(
 }
 
 /// Write the full per-partition output triple (link community edges,
-/// cell propensity, gene×community stats) under a shared prefix. Returns the
-/// propensity matrix and the fitted gene-community posterior so callers can
+/// cell propensity, feature×community stats) under a shared prefix. Returns the
+/// propensity matrix and the fitted feature-community posterior so callers can
 /// reuse them (e.g. the dictionary-merge step needs the posterior to
 /// compute pairwise community cosine without re-reading the parquet).
 #[allow(clippy::too_many_arguments)]
@@ -300,8 +300,8 @@ pub fn write_partition_outputs(
     k: usize,
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
-    gene_weights: Option<&[f32]>,
-    axis: &GeneAxis,
+    feature_weights: Option<&[f32]>,
+    axis: &FeatureAxis,
     block_size: Option<usize>,
     edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<(Mat, GammaMatrix)> {
@@ -313,14 +313,19 @@ pub fn write_partition_outputs(
         edge_kind,
     )?;
     let propensity = write_propensity_parquet(prefix, edges, fine_labels, n_cells, k, cell_names)?;
-    let gene_community =
-        fit_gene_community_param(&propensity, data_vec, gene_weights, Some(axis), block_size)?;
-    write_gene_community_param(&gene_community, axis.gene_names(), prefix)?;
-    Ok((propensity, gene_community))
+    let feature_community = fit_feature_community_param(
+        &propensity,
+        data_vec,
+        feature_weights,
+        Some(axis),
+        block_size,
+    )?;
+    write_feature_community_param(&feature_community, axis.feature_names(), prefix)?;
+    Ok((propensity, feature_community))
 }
 
 /// Write one cascade level's outputs: `.L{l}.link_community.parquet`,
-/// `.L{l}.propensity.parquet`, `.L{l}.gene_community.parquet`. The fine-edge
+/// `.L{l}.propensity.parquet`, `.L{l}.feature_community.parquet`. The fine-edge
 /// labels here are the super-edge assignment broadcast through
 /// `transfer_labels`, so every per-level file is keyed on the same edge
 /// list as the final output.
@@ -334,8 +339,8 @@ pub fn write_level_outputs(
     k: usize,
     cell_names: &[Box<str>],
     data_vec: &SparseIoVec,
-    gene_weights: Option<&[f32]>,
-    axis: &GeneAxis,
+    feature_weights: Option<&[f32]>,
+    axis: &FeatureAxis,
     block_size: Option<usize>,
     edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<()> {
@@ -347,7 +352,7 @@ pub fn write_level_outputs(
         k,
         cell_names,
         data_vec,
-        gene_weights,
+        feature_weights,
         axis,
         block_size,
         edge_kind,

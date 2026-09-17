@@ -11,7 +11,7 @@
 //!
 //! 2. **Build pb-samples**: each (batch, group) intersection becomes
 //!    a pb-sample with a centroid (mean projection vector) and
-//!    aggregated gene sums. This is a small set — typically
+//!    aggregated feature sums. This is a small set — typically
 //!    O(n_batches * n_groups) entries.
 //!
 //! 3. **Cross-batch KNN matching** (`--batch-knn`): for each
@@ -23,13 +23,13 @@
 //! 4. **Counterfactual imputation**: the matched neighbors provide a
 //!    "what would this group look like in another batch?" estimate.
 //!    - `imputed_sum[g,s]` = weighted average of matched neighbors'
-//!      per-cell gene expression, scaled by cell count
+//!      per-cell feature expression, scaled by cell count
 //!    - `matched_bs[b,s]` = how much of that counterfactual came from
 //!      each source batch
 //!
-//! 5. **EM-style optimization**: one batch-free rate μ per (gene, group)
+//! 5. **EM-style optimization**: one batch-free rate μ per (feature, group)
 //!    with both the observed and the counterfactual side Poisson at that
-//!    rate, and a per-(gene, batch) fold δ identified by the counterfactual
+//!    rate, and a per-(feature, batch) fold δ identified by the counterfactual
 //!    side and pinned to geometric mean 1 over the frame batches. The
 //!    per-group readouts μ_resid (own fold) and γ (source fold) are derived
 //!    from μ afterwards.
@@ -62,7 +62,7 @@ pub struct EstimateBatchArgs {
     pub num_levels: usize,
 }
 
-/// Estimate per-gene batch effect multipliers (δ) via hierarchical
+/// Estimate per-feature batch effect multipliers (δ) via hierarchical
 /// pseudobulk collapsing with cross-batch KNN matching.
 ///
 /// Returns `None` if fewer than 2 batches are present.
@@ -107,7 +107,7 @@ pub fn estimate_batch(
 /// Estimate batch effects and write them to parquet.
 ///
 /// Skips estimation when fewer than 2 batches are present.
-/// Returns the posterior mean matrix `[n_genes × n_batches]` when
+/// Returns the posterior mean matrix `[n_features × n_batches]` when
 /// multi-batch, or `None` for single-batch.
 pub fn estimate_and_write_batch_effects(
     data_vec: &mut SparseIoVec,
@@ -129,10 +129,10 @@ pub fn estimate_and_write_batch_effects(
     if let Some(batch_db) = batch_effects.as_ref() {
         let outfile = out_prefix.to_string() + ".delta.parquet";
         let batch_names = data_vec.batch_names();
-        let gene_names = data_vec.row_names()?;
+        let feature_names = data_vec.row_names()?;
         batch_db.to_melted_parquet(
             &outfile,
-            (Some(&gene_names), Some("gene")),
+            (Some(&feature_names), Some("feature")),
             (batch_names.as_deref(), Some("batch")),
         )?;
     }

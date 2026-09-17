@@ -13,10 +13,10 @@ pub struct SrtInputArgs {
     #[arg(
         required = true,
         value_delimiter(','),
-        help = "Spatial gene expression data files (.zarr or .h5)",
-        long_help = "Spatial gene expression data files, comma separated.\n\
+        help = "Spatial feature expression data files (.zarr or .h5)",
+        long_help = "Spatial feature expression data files, comma separated.\n\
                      Accepted formats are .zarr and .h5.\n\
-                     Each file is a genes-by-cells sparse matrix.\n\
+                     Each file is a features-by-cells sparse matrix.\n\
                      Multiple files are concatenated column-wise, over cells.\n\
                      Each file is then its own batch unless --batch-files says otherwise."
     )]
@@ -30,7 +30,7 @@ pub struct SrtInputArgs {
         long_help = "Spatial coordinate files, one per data file, comma separated.\n\
                      Recommended for spatial transcriptomics data.\n\
                      Omit them to run in expression mode.\n\
-                     The KNN graph then comes from gene expression.\n\
+                     The KNN graph then comes from feature expression.\n\
                      \n\
                      Accepted formats: CSV, TSV, space-delimited text, .parquet,\n\
                      or .zarr/.zarr.zip (Xenium cells.zarr.zip).\n\
@@ -178,7 +178,7 @@ pub struct SrtInputArgs {
         default_value_t = 200,
         help = "Random projection dimension for cell embeddings",
         long_help = "Dimension of the random projection for cell embeddings.\n\
-                     Cells are projected from G gene dimensions down to this one.\n\
+                     Cells are projected from G feature dimensions down to this one.\n\
                      That projection feeds KNN construction and coarsening,\n\
                      and in `lc` it also sets the width of every edge profile.\n\
                      \n\
@@ -566,9 +566,9 @@ impl SrtInputArgs {
     /// `feature_kind` selects how row names get canonicalized for
     /// cross-file / cross-resource matching. `pinto cage` uses
     /// `FeatureNameKind::Gene { delim: '_' }` (or `auto_detect`'d) so
-    /// gene names like `ENSG00000105329_TGFB1` register both the full
+    /// feature names like `ENSG00000105329_TGFB1` register both the full
     /// name and the `TGFB1` suffix as aliases — required for matching
-    /// against external gene resources (PPI, marker sets, etc.). `lc`
+    /// against external feature resources (PPI, marker sets, etc.). `lc`
     /// and `svd` currently pass `FeatureNameKind::Exact` for strict
     /// equality.
     pub fn to_read_args_with_kind(&self, feature_kind: FeatureNameKind) -> SRTReadArgs {
@@ -593,7 +593,7 @@ pub struct SRTReadArgs {
     pub coord_column_names: Vec<Box<str>>,
     pub batch_files: Option<Vec<Box<str>>>,
     pub header_in_coord: Option<usize>,
-    /// Optional row-name canonicalizer for fuzzy cross-file gene/locus
+    /// Optional row-name canonicalizer for fuzzy cross-file feature/locus
     /// alignment. Default = `Exact` keeps the strict row-name equality
     /// check in [`read_data_with_coordinates`] (used by `pinto lc` and
     /// friends). When non-Exact, canonicalization runs through

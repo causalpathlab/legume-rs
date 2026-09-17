@@ -1,14 +1,14 @@
 //! What a matrix ROW means, resolved once from the row names.
 //!
-//! A plain matrix has one gene per row. A splice-channelized one (faba's
-//! `{gene}/count/{spliced,unspliced}`) has two rows per gene, and reading one
-//! as the other is silent rather than loud: `n_genes < n_rows` means a per-gene
+//! A plain matrix has one feature per row. A splice-channelized one (faba's
+//! `{feature}/count/{spliced,unspliced}`) has two rows per feature, and reading one
+//! as the other is silent rather than loud: `n_features < n_rows` means a per-feature
 //! index into a per-row vector never goes out of bounds, it just reads the
 //! wrong feature.
 //!
 //! Consumers split into two kinds, and the split is the whole point:
 //!
-//! - **Mean GENE.** `cage`'s training loop and pseudobulk selection, `lc`'s
+//! - **Mean FEATURE.** `cage`'s training loop and pseudobulk selection, `lc`'s
 //!   projection basis, count filter, dictionary and merge cutoff, and `lra`'s
 //!   ligand and receptor lookup. All of these fold through this type.
 //! - **Mean ROW.** Anything that reads the matrix directly and reports what it
@@ -17,13 +17,13 @@
 //!
 //! The NB-Fisher weights need BOTH, and they are the reason
 //! [`Self::broadcast_to_rows`] exists: the weight is a function of abundance
-//! and mean and is not additive, so it is evaluated once per gene on folded
-//! statistics and then spread back over that gene's rows. Folding the weights
-//! afterwards would hand a gene a precision no measurement supports.
+//! and mean and is not additive, so it is evaluated once per feature on folded
+//! statistics and then spread back over that feature's rows. Folding the weights
+//! afterwards would hand a feature a precision no measurement supports.
 //!
 //! Resolution is strict by default: a feature axis where only some rows carry
 //! splice channels is an error, because pooling a row whose track is unknown
-//! has no correct answer. [`GeneAxis::resolve_or_identity`] is the fallback for
+//! has no correct answer. [`FeatureAxis::resolve_or_identity`] is the fallback for
 //! a consumer that never pools.
 
 use crate::util::common::*;
@@ -34,21 +34,21 @@ use data_beans_alg::sparse_streaming::{
 };
 use matrix_util::sparse_stat::SparseRunningStatistics;
 
-/// The feature axis `cage` fits on: one entry per GENE, with a map back to the
+/// The feature axis `cage` fits on: one entry per FEATURE, with a map back to the
 /// matrix rows that carry it.
 #[derive(Debug)]
-pub struct GeneAxis {
-    row_to_gene: Vec<u32>,
+pub struct FeatureAxis {
+    row_to_feature: Vec<u32>,
     row_is_nascent: Vec<bool>,
-    gene_names: Vec<Box<str>>,
+    feature_names: Vec<Box<str>>,
     channelized: bool,
 }
 
-impl GeneAxis {
+impl FeatureAxis {
     /// Resolve the axis from the matrix's row names.
     ///
-    /// - no row is `{gene}/count/{spliced|unspliced}` ⇒ the identity axis.
-    /// - every row is ⇒ the pooled gene axis.
+    /// - no row is `{feature}/count/{spliced|unspliced}` ⇒ the identity axis.
+    /// - every row is ⇒ the pooled feature axis.
     /// - some rows are ⇒ error, naming up to three offenders.
     pub fn resolve(row_names: &[Box<str>]) -> anyhow::Result<Self> {
         let map = intern_count_rows(row_names, UnparsedRowPolicy::Reject);
@@ -66,9 +66,9 @@ impl GeneAxis {
                 .map(|&r| row_names[r].as_ref())
                 .collect();
             anyhow::bail!(
-                "the feature axis mixes gene-count rows with {} row(s) that are not \
-                 `{{gene}}/count/{{spliced|unspliced}}`, and pooling a row whose splice \
-                 track is unknown has no correct answer. Offenders: {}. A `{{gene}}/count/total` \
+                "the feature axis mixes feature-count rows with {} row(s) that are not \
+                 `{{feature}}/count/{{spliced|unspliced}}`, and pooling a row whose splice \
+                 track is unknown has no correct answer. Offenders: {}. A `{{feature}}/count/total` \
                  row is the usual cause — it is already spliced + unspliced, so it lives in \
                  its own matrix and must not be concatenated with the two tracks.",
                 map.unparsed.len(),
@@ -77,15 +77,15 @@ impl GeneAxis {
         }
 
         info!(
-            "Feature axis: {} rows carry splice channels over {} genes ({} nascent rows)",
+            "Feature axis: {} rows carry splice channels over {} features ({} nascent rows)",
             n_rows,
             map.n_genes(),
             map.n_nascent_rows()
         );
         Ok(Self {
-            row_to_gene: map.row_to_gene,
+            row_to_feature: map.row_to_gene,
             row_is_nascent: map.row_is_nascent,
-            gene_names: map.gene_names,
+            feature_names: map.gene_names,
             channelized: true,
         })
     }
@@ -93,11 +93,11 @@ impl GeneAxis {
     /// As [`Self::resolve`], but a mixed feature axis falls back to the
     /// identity rather than aborting.
     ///
-    /// The strict form is right for a consumer that POOLS a gene's tracks: a
+    /// The strict form is right for a consumer that POOLS a feature's tracks: a
     /// row whose track is unknown has no correct pooled answer, so failing is
     /// better than guessing. A consumer that only needs a unit axis for
     /// filtering and reporting has a defined fallback, one unit per row, which
-    /// is exactly what it did before a gene axis existed. Aborting there would
+    /// is exactly what it did before a feature axis existed. Aborting there would
     /// reject multimodal matrices that used to work.
     pub fn resolve_or_identity(row_names: &[Box<str>]) -> anyhow::Result<Self> {
         match Self::resolve(row_names) {
@@ -105,8 +105,8 @@ impl GeneAxis {
             Err(e) => {
                 log::warn!(
                     "{e}\nFalling back to one unit per row, so nothing is pooled and \
-                     every per-gene filter and report is per row instead. Split the \
-                     modalities into their own matrices to get a gene axis."
+                     every per-feature filter and report is per row instead. Split the \
+                     modalities into their own matrices to get a feature axis."
                 );
                 Ok(Self::identity(row_names))
             }
@@ -117,16 +117,16 @@ impl GeneAxis {
     /// fallback for an axis that only partly parses.
     fn identity(row_names: &[Box<str>]) -> Self {
         Self {
-            row_to_gene: (0..row_names.len() as u32).collect(),
+            row_to_feature: (0..row_names.len() as u32).collect(),
             row_is_nascent: vec![false; row_names.len()],
-            gene_names: row_names.to_vec(),
+            feature_names: row_names.to_vec(),
             channelized: false,
         }
     }
 
     /// One streaming pass, both axes.
     ///
-    /// Returns `(row_stats, gene_stats)`. On the identity axis a gene IS a row,
+    /// Returns `(row_stats, feature_stats)`. On the identity axis a feature IS a row,
     /// so the two views are the same numbers and the second is a clone rather
     /// than a second pass. On a channelized axis the fold happens INSIDE the
     /// pass, because `npos` and `s2` do not survive one applied afterwards: a
@@ -134,7 +134,7 @@ impl GeneAxis {
     /// lose its cross term.
     ///
     /// This lives here so the "is it channelized" fork is written once. Every
-    /// consumer that needs a per-gene NB precision needs exactly this pair.
+    /// consumer that needs a per-feature NB precision needs exactly this pair.
     pub fn running_stats(
         &self,
         data: &SparseIoVec,
@@ -146,8 +146,8 @@ impl GeneAxis {
                 data,
                 block_size,
                 label,
-                self.row_to_gene(),
-                self.n_genes(),
+                self.row_to_feature(),
+                self.n_features(),
             )
         } else {
             let stats = streaming_sparse_running_stats(data, block_size, label)?;
@@ -156,13 +156,13 @@ impl GeneAxis {
     }
 
     #[must_use]
-    pub fn n_genes(&self) -> usize {
-        self.gene_names.len()
+    pub fn n_features(&self) -> usize {
+        self.feature_names.len()
     }
 
     #[must_use]
     pub fn n_rows(&self) -> usize {
-        self.row_to_gene.len()
+        self.row_to_feature.len()
     }
 
     /// True when the input carries splice channels — i.e. when any fold below is
@@ -172,47 +172,47 @@ impl GeneAxis {
         self.channelized
     }
 
-    /// Gene keys in id order. These, not the row names, label every gene-side
+    /// Feature keys in id order. These, not the row names, label every feature-side
     /// output `cage` writes.
     #[must_use]
-    pub fn gene_names(&self) -> &[Box<str>] {
-        &self.gene_names
+    pub fn feature_names(&self) -> &[Box<str>] {
+        &self.feature_names
     }
 
-    /// Spread a per-GENE vector back over the matrix rows, so every row of a
-    /// gene carries its gene's value.
+    /// Spread a per-FEATURE vector back over the matrix rows, so every row of a
+    /// feature carries its feature's value.
     ///
-    /// This is how a quantity that is only correct per gene reaches a consumer
+    /// This is how a quantity that is only correct per feature reaches a consumer
     /// that indexes rows. The projection basis is the case in point: its rows
     /// are matrix rows, but a Fisher precision computed per row would hand a
-    /// gene's two splice tracks two different precisions, because the nascent
+    /// feature's two splice tracks two different precisions, because the nascent
     /// track is sparser and lands elsewhere on the dispersion trend. Computing
-    /// once per gene and spreading is exact; folding the weights afterwards
+    /// once per feature and spreading is exact; folding the weights afterwards
     /// would not be, since the weight is not additive.
     ///
     /// Returns the input unchanged on the identity axis.
     #[must_use]
-    pub fn broadcast_to_rows<T: Copy>(&self, per_gene: &[T]) -> Vec<T> {
+    pub fn broadcast_to_rows<T: Copy>(&self, per_feature: &[T]) -> Vec<T> {
         if !self.channelized {
-            return per_gene.to_vec();
+            return per_feature.to_vec();
         }
-        debug_assert_eq!(per_gene.len(), self.n_genes());
-        self.row_to_gene
+        debug_assert_eq!(per_feature.len(), self.n_features());
+        self.row_to_feature
             .iter()
-            .map(|&g| per_gene[g as usize])
+            .map(|&g| per_feature[g as usize])
             .collect()
     }
 
-    /// The row -> gene map itself, for callers that need to hand it to a
-    /// folding primitive rather than call `gene_of_row` per row.
+    /// The row -> feature map itself, for callers that need to hand it to a
+    /// folding primitive rather than call `feature_of_row` per row.
     #[must_use]
-    pub fn row_to_gene(&self) -> &[u32] {
-        &self.row_to_gene
+    pub fn row_to_feature(&self) -> &[u32] {
+        &self.row_to_feature
     }
 
     #[must_use]
-    pub fn gene_of_row(&self, row: usize) -> usize {
-        self.row_to_gene[row] as usize
+    pub fn feature_of_row(&self, row: usize) -> usize {
+        self.row_to_feature[row] as usize
     }
 
     #[must_use]
@@ -220,7 +220,7 @@ impl GeneAxis {
         self.row_is_nascent[row]
     }
 
-    /// The gene-axis fold of a `[n_rows × k]` matrix, or `None` when the axis is
+    /// The feature-axis fold of a `[n_rows × k]` matrix, or `None` when the axis is
     /// the identity and a fold would only be a copy — so `None` means "nothing to
     /// do", never failure. Borrows, for the caller that keeps the row axis too.
     #[must_use]
@@ -228,7 +228,7 @@ impl GeneAxis {
         self.channelized.then(|| self.fold_rows(m))
     }
 
-    /// Sum rows onto the gene axis, COLUMN-major.
+    /// Sum rows onto the feature axis, COLUMN-major.
     ///
     /// `Mat` is nalgebra, so a column is contiguous and the column loop has to be
     /// the outer one: with the row loop outside, `m[(r, c)]` strides by `nrows`
@@ -247,15 +247,15 @@ impl GeneAxis {
         // accumulator stay resident, which is what the column-major order buys;
         // the row-outer form this replaced strided by `nrows` and took a cache
         // miss per element on matrices the pyramid sizes in hundreds of MB.
-        build_columns_par(self.n_genes(), m.ncols(), |c, dst| {
+        build_columns_par(self.n_features(), m.ncols(), |c, dst| {
             let src = m.column(c);
             for (r, &v) in src.iter().enumerate() {
-                dst[self.gene_of_row(r)] += v;
+                dst[self.feature_of_row(r)] += v;
             }
         })
     }
 
-    /// Fold a per-ROW vector onto genes by summing a gene's rows.
+    /// Fold a per-ROW vector onto features by summing a feature's rows.
     ///
     /// Borrows rather than consuming: every caller needs the row-axis vector
     /// afterwards, and a by-value signature only forced them all to clone it.
@@ -264,23 +264,23 @@ impl GeneAxis {
         if !self.channelized {
             return per_row.to_vec();
         }
-        let mut out = vec![0.0f64; self.n_genes()];
+        let mut out = vec![0.0f64; self.n_features()];
         for (r, &v) in per_row.iter().enumerate() {
-            out[self.row_to_gene[r] as usize] += v;
+            out[self.row_to_feature[r] as usize] += v;
         }
         out
     }
 
-    /// Sum a sparse `(row, value)` profile onto the gene axis, ascending by gene
-    /// id. A gene's two channel rows merge into one entry, which is the whole
-    /// point: downstream this is one gene's evidence, not two genes' halves.
+    /// Sum a sparse `(row, value)` profile onto the feature axis, ascending by feature
+    /// id. A feature's two channel rows merge into one entry, which is the whole
+    /// point: downstream this is one feature's evidence, not two features' halves.
     #[must_use]
     pub fn pool_profile(&self, mut obs: Vec<(u32, f32)>) -> Vec<(u32, f32)> {
         if !self.channelized {
             return obs;
         }
         for entry in obs.iter_mut() {
-            entry.0 = self.row_to_gene[entry.0 as usize];
+            entry.0 = self.row_to_feature[entry.0 as usize];
         }
         obs.sort_unstable_by_key(|&(g, _)| g);
         let mut out: Vec<(u32, f32)> = Vec::with_capacity(obs.len());
@@ -293,28 +293,28 @@ impl GeneAxis {
         out
     }
 
-    /// Widen a per-row weight vector so a gene is never half-weighted: if any of
-    /// a gene's rows carries weight, all of them take that gene's maximum.
+    /// Widen a per-row weight vector so a feature is never half-weighted: if any of
+    /// a feature's rows carries weight, all of them take that feature's maximum.
     ///
     /// This is what `--n-hvg` needs. HVG selection ranks ROWS, so on a
-    /// channelized matrix it can pick a gene's spliced row and drop its
-    /// unspliced one — which would weight half a gene into the projection the
-    /// coarsening hierarchy is cut from. Returns the number of genes carrying
+    /// channelized matrix it can pick a feature's spliced row and drop its
+    /// unspliced one — which would weight half a feature into the projection the
+    /// coarsening hierarchy is cut from. Returns the number of features carrying
     /// weight, which is what the count in the log should say.
     pub fn promote_row_weights(&self, w: &mut [f32]) -> usize {
         debug_assert_eq!(w.len(), self.n_rows());
-        let mut per_gene = vec![0.0f32; self.n_genes()];
+        let mut per_feature = vec![0.0f32; self.n_features()];
         for (r, &x) in w.iter().enumerate() {
-            let g = self.gene_of_row(r);
-            per_gene[g] = per_gene[g].max(x);
+            let g = self.feature_of_row(r);
+            per_feature[g] = per_feature[g].max(x);
         }
         for (r, x) in w.iter_mut().enumerate() {
-            *x = per_gene[self.gene_of_row(r)];
+            *x = per_feature[self.feature_of_row(r)];
         }
-        per_gene.iter().filter(|&&x| x > 0.0).count()
+        per_feature.iter().filter(|&&x| x > 0.0).count()
     }
 
-    /// Which genes could ever pin a nascent-minus-mature contrast, from per-row
+    /// Which features could ever pin a nascent-minus-mature contrast, from per-row
     /// count totals.
     ///
     /// The rule: `δ` needs counts on BOTH tracks. With no spliced counts only
@@ -329,15 +329,15 @@ impl GeneAxis {
     pub fn delta_identified(&self, row_totals: &[f64]) -> Vec<bool> {
         debug_assert_eq!(row_totals.len(), self.n_rows());
         if !self.channelized {
-            return vec![false; self.n_genes()];
+            return vec![false; self.n_features()];
         }
-        let mut has_mature = vec![false; self.n_genes()];
-        let mut has_nascent = vec![false; self.n_genes()];
+        let mut has_mature = vec![false; self.n_features()];
+        let mut has_nascent = vec![false; self.n_features()];
         for (r, &v) in row_totals.iter().enumerate() {
             if v <= 0.0 {
                 continue;
             }
-            let g = self.gene_of_row(r);
+            let g = self.feature_of_row(r);
             if self.row_is_nascent(r) {
                 has_nascent[g] = true;
             } else {
@@ -372,16 +372,16 @@ impl GeneAxis {
             0.0
         };
         info!(
-            "Splice tracks: {}/{} genes carry counts on both tracks ({:.1}%); \
+            "Splice tracks: {}/{} features carry counts on both tracks ({:.1}%); \
              the nascent track is {:.1}% of the library",
             n_identified,
-            self.n_genes(),
-            100.0 * n_identified as f64 / self.n_genes().max(1) as f64,
+            self.n_features(),
+            100.0 * n_identified as f64 / self.n_features().max(1) as f64,
             100.0 * nascent_fraction
         );
         if n_identified == 0 {
             warn!(
-                "No gene carries counts on both splice tracks, so nothing in this input \
+                "No feature carries counts on both splice tracks, so nothing in this input \
                  pins a nascent-minus-mature contrast. The pooled fit below is still \
                  correct; a velocity read off it would not be."
             );
@@ -398,12 +398,12 @@ impl GeneAxis {
 /// on it, so it is recorded in the run manifest and not only logged.
 #[derive(Debug, Clone, Copy)]
 pub struct DeltaIdentifiability {
-    /// Genes with counts on BOTH tracks.
+    /// Features with counts on BOTH tracks.
     pub n_identified: usize,
     /// Nascent share of the total library.
     pub nascent_fraction: f64,
 }
 
 #[cfg(test)]
-#[path = "gene_axis/tests.rs"]
+#[path = "feature_axis/tests.rs"]
 mod tests;

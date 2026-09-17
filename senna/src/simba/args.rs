@@ -85,8 +85,8 @@ pub struct SimbaArgs {
         required = true,
         help = "Output prefix",
         long_help = "Output prefix. It produces {out}.cell_embedding.parquet (Z),\n\
-                     {out}.feature_loading.parquet (the raw gene table),\n\
-                     {out}.feature_embedding.parquet (the co-embedded genes),\n\
+                     {out}.feature_embedding.parquet (the raw gene table),\n\
+                     {out}.feature_coembedding.parquet (the co-embedded genes),\n\
                      {out}.feature_scores.parquet, {out}.simba_bins.parquet\n\
                      and {out}.senna.json."
     )]

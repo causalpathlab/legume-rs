@@ -127,6 +127,47 @@ fn manifest_without_track_encoder_slots_still_loads() {
     assert!(m.outputs.track_encoders.is_empty());
 }
 
+/// A v1 embedding manifest recorded the SIMBA co-embed as `feature_embedding`
+/// and ρ as `feature_loading`; loading lifts them onto the v2 slots so a
+/// reader sees ρ in `feature_embedding` and the co-embed in
+/// `feature_coembedding`. A v1 `fne` manifest already had ρ in
+/// `feature_embedding` and stays put.
+#[test]
+fn v1_feature_slots_are_lifted_on_load() {
+    let (_dir, path) = scratch();
+    std::fs::write(
+        &path,
+        r#"{"version":1,"kind":"bge","prefix":"old","data":{"input":["a.zarr"]},
+           "outputs":{"feature_embedding":"old.feature_embedding.parquet",
+                      "feature_loading":"old.feature_loading.parquet"}}"#,
+    )
+    .expect("write v1 bge manifest");
+    let (m, _) = RunManifest::load(&path).expect("load");
+    assert_eq!(
+        m.outputs.feature_embedding.as_deref(),
+        Some("old.feature_loading.parquet"),
+        "ρ moves to feature_embedding"
+    );
+    assert_eq!(
+        m.outputs.feature_coembedding.as_deref(),
+        Some("old.feature_embedding.parquet"),
+        "the co-embed moves to feature_coembedding"
+    );
+
+    std::fs::write(
+        &path,
+        r#"{"version":1,"kind":"fne","prefix":"old","data":{"input":["a.zarr"]},
+           "outputs":{"feature_embedding":"old.feature_embedding.parquet"}}"#,
+    )
+    .expect("write v1 fne manifest");
+    let (m, _) = RunManifest::load(&path).expect("load");
+    assert_eq!(
+        m.outputs.feature_embedding.as_deref(),
+        Some("old.feature_embedding.parquet")
+    );
+    assert!(m.outputs.feature_coembedding.is_none());
+}
+
 /// Manifests written before `train_args` existed must still load.
 #[test]
 fn manifest_without_train_args_still_loads() {

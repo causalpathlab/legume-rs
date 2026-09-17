@@ -65,9 +65,9 @@ fn a_multiome_parent_is_read_off_its_recorded_arguments() {
 fn a_substituted_lineage_is_recognised_by_its_carried_reference() {
     let plain: Vec<Box<str>> = vec!["a.zarr".into(), "b.zarr".into()];
     assert_eq!(carried_reference_among(&plain), None);
-    let substituted: Vec<Box<str>> = vec!["c.zarr".into(), "runs/r1.pb_reference.zarr".into()];
+    let substituted: Vec<Box<str>> = vec!["c.zarr".into(), "runs/r1.pb_reference.zarr.zip".into()];
     assert_eq!(
         carried_reference_among(&substituted),
-        Some("runs/r1.pb_reference.zarr")
+        Some("runs/r1.pb_reference.zarr.zip")
     );
 }

@@ -20,7 +20,7 @@ pub struct SrtLinkCommunityArgs {
                      \n\
                      Prefer over-shooting K to under-shooting it.\n\
                      The default of 50 leans on the cosine dictionary-merge pass.\n\
-                     That pass collapses redundant gene programs."
+                     That pass collapses redundant feature programs."
     )]
     pub n_communities: usize,
 
@@ -75,47 +75,50 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Min total count to include a gene in the projection basis",
-        long_help = "Genes under this total count are zeroed in the basis.\n\
+        help = "Min total count to include a feature in the projection basis",
+        long_help = "Features under this total count are zeroed in the basis.\n\
                      That removes them from every profile dimension.\n\
-                     Gene-pair mode ignores this flag. Pass 0 to include all genes."
+                     Feature-pair mode ignores this flag. Pass 0 to include all features."
     )]
-    pub min_gene_count: f32,
+    pub min_feature_count: f32,
 
     #[arg(
         long,
-        help = "External gene-gene network file (two-column TSV: gene1, gene2)",
-        long_help = "External gene-gene network, a two-column TSV of gene1, gene2. When given,\n\
-                     edge profiles come from gene-pair deltas.\n\
-                     They do not come from gene modules. Each edge e=(i,j) gets the profile:\n\
+        help = "External feature-feature network file (two-column TSV: feature1, feature2)",
+        long_help = "External feature-feature network, a two-column TSV of feature1, feature2. When given,\n\
+                     edge profiles come from feature-pair deltas.\n\
+                     They do not come from feature modules. Each edge e=(i,j) gets the profile:\n\
                      y_e[p] = sum of positive co-expression deltas for pair p."
     )]
-    pub gene_network: Option<Box<str>>,
+    #[arg(alias = "gene-network")]
+    pub feature_network: Option<Box<str>>,
 
     #[arg(
         long,
         default_value_t = false,
-        help = "Allow prefix matching for gene names in external network",
+        help = "Allow prefix matching for feature names in external network",
         hide = true
     )]
-    pub gene_network_allow_prefix: bool,
+    #[arg(alias = "gene-network-allow-prefix")]
+    pub feature_network_allow_prefix: bool,
 
     #[arg(
         long,
         default_value = "_",
-        help = "Delimiter for splitting compound gene names",
+        help = "Delimiter for splitting compound feature names",
         hide = true
     )]
-    pub gene_network_delimiter: Option<char>,
+    #[arg(alias = "gene-network-delimiter")]
+    pub feature_network_delimiter: Option<char>,
 
     #[arg(
         long,
         default_value_t = 3,
         help = "Shared-neighbor count to add an SNN edge (0 disables)",
-        long_help = "Augment the gene network with shared-neighbor edges.\n\
+        long_help = "Augment the feature network with shared-neighbor edges.\n\
                      A synthetic edge joins any unconnected pair (u, v).\n\
                      The pair must share at least N neighbours already.\n\
-                     This densifies incomplete networks. It applies only with --gene-network;\n\
+                     This densifies incomplete networks. It applies only with --feature-network;\n\
                      0 disables it.",
         hide = true
     )]
@@ -124,26 +127,28 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         default_value_t = 3,
-        help = "Minimum gene degree to keep before Leiden module resolution",
-        long_help = "k-core trim applied before Leiden runs on the gene graph.\n\
-                     Genes below this subgraph degree are dropped, iteratively.\n\
-                     A gene trimmed in any round contributes to no module,\n\
-                     and to no module-pair basis entry. This applies only with --gene-network.",
+        help = "Minimum feature degree to keep before Leiden module resolution",
+        long_help = "k-core trim applied before Leiden runs on the feature graph.\n\
+                     Features below this subgraph degree are dropped, iteratively.\n\
+                     A feature trimmed in any round contributes to no module,\n\
+                     and to no module-pair basis entry. This applies only with --feature-network.",
         hide = true
     )]
-    pub gene_trim_min_degree: usize,
+    #[arg(alias = "gene-trim-min-degree")]
+    pub feature_trim_min_degree: usize,
 
     #[arg(
         long,
         default_value_t = 1.0,
-        help = "Leiden modularity resolution for gene-module clustering",
-        long_help = "Modularity γ for Leiden on the gene graph.\n\
+        help = "Leiden modularity resolution for feature-module clustering",
+        long_help = "Modularity γ for Leiden on the feature graph.\n\
                      That graph is SNN-augmented and k-core-trimmed. Higher γ yields more,\n\
                      smaller modules. Lower γ yields fewer, larger ones.\n\
-                     This applies only with --gene-network.",
+                     This applies only with --feature-network.",
         hide = true
     )]
-    pub gene_modules_resolution: f64,
+    #[arg(alias = "gene-modules-resolution")]
+    pub feature_modules_resolution: f64,
 
     #[arg(
         long,
@@ -166,9 +171,9 @@ pub struct SrtLinkCommunityArgs {
         long_help = "Merges at or above this cosine collapse into one community.\n\
                      Merges below the cutoff stay separate.\n\
                      \n\
-                     Cosine runs on per-gene-centred log-rates of the gene-community posterior,\n\
-                     restricted to detected genes (see --merge-min-nnz).\n\
-                     Centring is per GENE only, so this is not a Pearson\n\
+                     Cosine runs on per-feature-centred log-rates of the feature-community posterior,\n\
+                     restricted to detected features (see --merge-min-nnz).\n\
+                     Centring is per FEATURE only, so this is not a Pearson\n\
                      correlation between communities, which would also centre\n\
                      each community.\n\
                      \n\
@@ -178,8 +183,8 @@ pub struct SrtLinkCommunityArgs {
                      Try 0.95 for a finer partition. Try 0.85 for an aggressive collapse.\n\
                      \n\
                      If the cut collapses far more than expected,\n\
-                     check the gene filter before raising this.\n\
-                     Undetected genes inflate every pairwise cosine.\n\
+                     check the feature filter before raising this.\n\
+                     Undetected features inflate every pairwise cosine.\n\
                      \n\
                      The cut lands in <out>.dict_merges.cut.parquet.\n\
                      Its columns are (community, consensus).\n\
@@ -191,22 +196,22 @@ pub struct SrtLinkCommunityArgs {
     #[arg(
         long,
         value_name = "N",
-        help = "Minimum cells a gene must appear in to score the dictionary merge (unset = auto)",
-        long_help = "Genes detected in fewer than N cells are dropped before the\n\
+        help = "Minimum cells a feature must appear in to score the dictionary merge (unset = auto)",
+        long_help = "Features detected in fewer than N cells are dropped before the\n\
                      merge cosine is computed.\n\
                      They are NOT dropped from any other output.\n\
                      \n\
                      Unset (the default) picks N by the same 2-means split\n\
                      data-beans uses for cell QC.\n\
-                     Pass 0 to score every gene, which is the pre-fix behaviour.\n\
+                     Pass 0 to score every feature, which is the pre-fix behaviour.\n\
                      \n\
                      WHY THIS EXISTS.\n\
-                     An undetected gene still gets a Poisson-Gamma posterior.\n\
+                     An undetected feature still gets a Poisson-Gamma posterior.\n\
                      Its log-rate is then set by each community's exposure\n\
                      rather than by data, so it swings across communities\n\
-                     harder than a well-measured gene's does.\n\
+                     harder than a well-measured feature's does.\n\
                      Cosine is dominated by the largest-magnitude rows,\n\
-                     so left in, those genes decide the merge\n\
+                     so left in, those features decide the merge\n\
                      and collapse the tree at any cut.\n\
                      \n\
                      Raising N past the community count is refused:\n\
@@ -224,7 +229,7 @@ pub struct SrtLinkCommunityArgs {
                      \n  \
                      <out>.L{l}.link_community.parquet\n  \
                      <out>.L{l}.propensity.parquet\n  \
-                     <out>.L{l}.gene_community.parquet\n\
+                     <out>.L{l}.feature_community.parquet\n\
                      They let you inspect the clustering at every resolution.\n\
                      \n\
                      Pass this flag to skip those writes.\n\

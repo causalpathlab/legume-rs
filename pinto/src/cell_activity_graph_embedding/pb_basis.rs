@@ -10,7 +10,7 @@
 //! cell->super-cell map) and collapsing counts against it is one call to
 //! [`coarsen_cell_expression_dense`]. Neither is reimplemented here. What
 //! coarsening does NOT produce is `e_pb_svd`: the super-cells expressed in the
-//! same `D` dims the gene loadings live in. It hands over labels and a
+//! same `D` dims the feature loadings live in. It hands over labels and a
 //! `proj_dim` RANDOM projection; neither is that.
 //!
 //! The finest level's basis is the WARM START of the trained PB table, and it
@@ -19,7 +19,7 @@
 //!
 //! # Why super-cells rather than single spots
 //!
-//! A single spot detects only a small fraction of the gene axis, so a zero is
+//! A single spot detects only a small fraction of the feature axis, so a zero is
 //! mostly non-detection. Super-cells aggregate tens of spots, so a zero means
 //! closer to absent.
 //!
@@ -30,7 +30,7 @@
 
 use crate::link_community::profiles::coarsen_cell_expression_dense;
 use crate::util::common::*;
-use crate::util::gene_axis::GeneAxis;
+use crate::util::feature_axis::FeatureAxis;
 
 /// One coarsening level's pseudobulk, projected into the shared basis.
 pub struct LevelPseudobulk {
@@ -39,7 +39,7 @@ pub struct LevelPseudobulk {
     /// Super-cell counts on the MATRIX ROW axis, `[n_rows × n_pb]`.
     ///
     /// The row axis is kept because the two splice tracks are only separable
-    /// here: a gene-pooled view is a projection of this and cannot be inverted.
+    /// here: a feature-pooled view is a projection of this and cannot be inverted.
     pub counts: Mat,
     /// This level's SUPER-EDGES: distinct `(min, max)` pairs of DIFFERENT
     /// super-cells, i.e. the coarsened cell-graph adjacency.
@@ -67,7 +67,7 @@ impl LevelPseudobulk {
 /// The collapsed levels, projected through ONE shared basis.
 pub struct Pseudobulks {
     pub levels: Vec<LevelPseudobulk>,
-    // The shared gene→community basis it was all projected through is NOT kept:
+    // The shared feature→community basis it was all projected through is NOT kept:
     // it is scaffolding for `e_pb_svd`.
 }
 
@@ -81,13 +81,13 @@ pub struct PseudobulkArgs<'a> {
     pub graph: &'a crate::util::knn_graph::KnnGraph,
     /// Latent dimensionality `D` — the number of communities.
     pub embedding_dim: usize,
-    /// How a matrix row maps onto the gene axis.
+    /// How a matrix row maps onto the feature axis.
     ///
     /// The collapsed counts stay on the ROW axis — that is the only place the
     /// two splice tracks are separable, and the delta block reads them apart —
-    /// so this is NOT used to fold them. It is used for the gene-axis views the
+    /// so this is NOT used to fold them. It is used for the feature-axis views the
     /// basis and `e_pb_svd` need, which are built per level and dropped.
-    pub gene_axis: &'a GeneAxis,
+    pub feature_axis: &'a FeatureAxis,
 }
 
 /// Collapse every level, fit one shared basis, project each level onto it.
@@ -112,7 +112,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     // silently produced wrong counts.
     //
     // Cost: was one full zarr decompression per level (4 passes on a real run), each
-    // materializing every block's `[n_genes x n_pb]` partial at once. Now one
+    // materializing every block's `[n_features x n_pb]` partial at once. Now one
     // pass plus `G x P_fine` adds per coarser level.
     //
     // Nesting is transitive and only COARSE levels are ever dropped by the
@@ -128,7 +128,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
     // now bounds its own accumulator structurally. See the rationale on
     // `coarsen_cell_expression_dense`.
     // The MATRIX ROW axis, deliberately: the two splice tracks are separable only
-    // here, and Stage 1's `delta` block reads them apart. The gene-pooled fold
+    // here, and Stage 1's `delta` block reads them apart. The feature-pooled fold
     // every other consumer wants is derived per level below.
     let mut finest_counts = Some(coarsen_cell_expression_dense(
         args.data,
@@ -215,42 +215,42 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         .last()
         .expect("non-empty after the ensure above")
         .1;
-    // The basis, and the `e_pb_svd` it produces, live on the GENE axis: `e_pb_svd` is the
-    // frozen side the gene-anchored blocks score against, so it has to be
-    // commensurate with a per-gene loading, not with a per-row one.
-    let finest_pooled = args.gene_axis.pool_rows_opt(finest_rows);
+    // The basis, and the `e_pb_svd` it produces, live on the FEATURE axis: `e_pb_svd` is the
+    // frozen side the feature-anchored blocks score against, so it has to be
+    // commensurate with a per-feature loading, not with a per-row one.
+    let finest_pooled = args.feature_axis.pool_rows_opt(finest_rows);
     let finest = finest_pooled.as_ref().unwrap_or(finest_rows);
     // Row-CENTRE before the SVD. Without it the leading direction is library
-    // size: every gene loads positively on it, it carries no community
-    // structure, and it crowds out a dimension. Centring each gene by its own
+    // size: every feature loads positively on it, it carries no community
+    // structure, and it crowds out a dimension. Centring each feature by its own
     // mean across pseudobulks makes cosine on the result equal Pearson on the
     // log-rates — the same reason `dict_merge.rs:47-53` centres before its
     // cosine merge. `scale_columns` alone does NOT fix this: measured, it
     // still leaves the first singular value several times the second.
-    // Gene means come from the FINEST level and are reused for every level's
+    // Feature means come from the FINEST level and are reused for every level's
     // projection. Centring each level by its OWN means would put each level in
     // a different affine frame while they share one basis and one pooled
     // pseudobulk index space.
     let finest_log = log1p_dense(finest);
-    let gene_means = row_means(&finest_log);
-    let training = row_center_with(&finest_log, &gene_means).scale_columns();
+    let feature_means = row_means(&finest_log);
+    let training = row_center_with(&finest_log, &feature_means).scale_columns();
     // Fit D+1 components and DROP the first. Measured, component 0 tracks log
     // library size almost perfectly — it is sequencing depth, not community
     // structure, and leaving it in would spend a full dimension on it.
     //
     // Row-centring alone does NOT fix this and is not meant to: it removes
-    // per-gene abundance, but depth is a COLUMN effect. It is still worth
+    // per-feature abundance, but depth is a COLUMN effect. It is still worth
     // keeping — it took σ₁/σ₂ from 6.2 to 4.0 and lifted the tail 78% — so both
     // corrections are applied.
     let (u_dk, s_k, _) = training.rsvd(dim + 1)?;
-    let basis_full = nystrom_basis(&u_dk, &s_k); // [n_genes × D+1]
+    let basis_full = nystrom_basis(&u_dk, &s_k); // [n_features × D+1]
     let basis = basis_full.columns(1, dim).into_owned(); // drop the depth axis
                                                          // The spectrum is the health check: a sharp drop to ~0 means the effective
                                                          // rank is below D and the trailing communities are noise directions that
                                                          // nothing can meaningfully load on.
     let sv: Vec<String> = s_k.iter().skip(1).map(|v| format!("{v:.3}")).collect();
     info!(
-        "pseudobulk basis: {} genes × {} dims, fit on the finest of {} levels; \
+        "pseudobulk basis: {} features × {} dims, fit on the finest of {} levels; \
          singular values (depth axis dropped) = [{}]",
         basis.nrows(),
         basis.ncols(),
@@ -271,7 +271,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
             .filter(|&&(i, j)| cell_labels[i] == cell_labels[j])
             .count();
         // Project under the SAME transform the basis was fit with: centre by
-        // the finest level's gene means, THEN standardize columns.
+        // the finest level's feature means, THEN standardize columns.
         //
         // Dropping `.scale_columns()` here is not cosmetic. The basis is the
         // Nyström map for standardized columns, so projecting unstandardized
@@ -280,16 +280,16 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
         // which the per-dim correlation diagnostic could not see because
         // scaling by a positive factor moves magnitudes, not signs.
         // `tr_mul` is `Aᵀ · B` without materializing `Aᵀ`. The explicit
-        // `.transpose()` it replaces allocated a full `[n_pb x n_genes]` copy
+        // `.transpose()` it replaces allocated a full `[n_pb x n_features]` copy
         // (205 MB at the finest level) and read it across rows of a
         // column-major matrix.
-        // The basis and `e_pb_svd` live on the GENE axis (see the basis fit above), so
+        // The basis and `e_pb_svd` live on the FEATURE axis (see the basis fit above), so
         // the fold happens here and is dropped: nothing downstream of `e_pb_svd` wants
         // pooled counts, and keeping a copy per level would double the pyramid.
-        let pooled_counts = args.gene_axis.pool_rows_opt(&counts);
+        let pooled_counts = args.feature_axis.pool_rows_opt(&counts);
         let e_pb_svd = row_center_with(
             &log1p_dense(pooled_counts.as_ref().unwrap_or(&counts)),
-            &gene_means,
+            &feature_means,
         )
         .scale_columns()
         .tr_mul(&basis);
@@ -392,7 +392,7 @@ fn row_center_with(m: &Mat, means: &nalgebra::DVector<f32>) -> Mat {
 }
 
 /// Elementwise `log1p`, out of place. The collapse emits raw counts; the basis
-/// is fit on the log scale so a handful of very high-count genes do not set the
+/// is fit on the log scale so a handful of very high-count features do not set the
 /// leading directions on their own.
 fn log1p_dense(m: &Mat) -> Mat {
     m.map(|v| v.max(0.0).ln_1p())

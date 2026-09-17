@@ -11,19 +11,19 @@
 //!   3. Estimate batch effects
 //!   4. Multi-level cell coarsening (produces the pyramid)
 //!   5. Profile context setup:
-//!        - Gene-network path: SNN-augment → k-core trim → Leiden modules →
+//!        - Feature-network path: SNN-augment → k-core trim → Leiden modules →
 //!          `ModulePairBasis` + per-cell module expression (`x_{c,m}`).
-//!        - Projection path: Gaussian random-projection basis over genes,
-//!          with optional low-count gene filtering.
+//!        - Projection path: Gaussian random-projection basis over features,
+//!          with optional low-count feature filtering.
 //!   6. Build full fine-resolution profiles (sparse CSR)
 //!   7. V-cycle: per-level super-edges → profiles → Gibbs + greedy with
 //!      coarse→fine label inheritance; per-level outputs are written inside
 //!   8. Single-pass component-EM + greedy on full profiles
-//!   9. Final outputs (propensity, gene_community, link_community, scores,
+//!   9. Final outputs (propensity, feature_community, link_community, scores,
 //!      cosine dictionary merge)
 
-use crate::gene_network::graph::*;
-use crate::gene_network::modules::{kcore_trim, leiden_gene_modules};
+use crate::feature_network::graph::*;
+use crate::feature_network::modules::{kcore_trim, leiden_feature_modules};
 use crate::link_community::cascade::{run_cascade, CascadeConfig, ModulePairContext, ProfileMode};
 use crate::link_community::dict_merge::{cosine_cut, cosine_merge};
 use crate::link_community::gibbs::{ComponentGibbsArgs, IncidenceConfig, LinkGibbsSampler};
@@ -38,7 +38,7 @@ use crate::util::cell_pairs::*;
 use crate::util::common::*;
 use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{
-    preprocess_srt, topology_graph, GeneAxisMode, SrtPreprocessConfig, SrtPreprocessed,
+    preprocess_srt, topology_graph, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use data_beans::qc::suggest_nnz_cutoff;
 use matrix_util::common_io::mkdir_parent;
@@ -58,7 +58,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     anyhow::ensure!(args.n_communities > 0, "n_communities must be > 0");
 
     ////////////////////////////////////////////////////
-    // 1-3. Load + KNN + batch effects + gene weights //
+    // 1-3. Load + KNN + batch effects + feature weights //
     ////////////////////////////////////////////////////
     let SrtPreprocessed {
         data_vec,
@@ -71,32 +71,32 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         spatial_graph,
         edge_source,
         cell_proj,
-        gene_axis,
+        feature_axis,
         row_weights: _,
         row_stats,
-        gene_weights,
-        gene_stats,
+        feature_weights,
+        feature_stats,
         n_cells,
         n_rows,
     } = preprocess_srt(SrtPreprocessConfig {
         common: c,
         fisher_weights: true,
         batch_effects: true,
-        // Everything `lc` filters, weights and reports is per GENE. On a
-        // channelized matrix a row is half a gene, and reading one as the other
+        // Everything `lc` filters, weights and reports is per FEATURE. On a
+        // channelized matrix a row is half a feature, and reading one as the other
         // is what let the merge filter pick its cutoff by splice track.
-        // Lenient, not strict: `lc` does not pool a gene's tracks into one
+        // Lenient, not strict: `lc` does not pool a feature's tracks into one
         // observation, so one unit per row is a defined fallback and a
         // multimodal matrix must not be rejected outright.
-        gene_axis: GeneAxisMode::Lenient,
+        feature_axis: FeatureAxisMode::Lenient,
         feature_kind: None,
         cell_projection: true,
     })?;
     let has_coords = c.has_coordinates();
-    let gene_axis = gene_axis.expect("a gene-axis mode other than Rows must yield Some");
-    let gene_weights = gene_weights.expect("fisher_weights=true must yield Some");
-    let gene_stats = gene_stats.expect("fisher_weights with a gene axis must yield Some");
-    let n_genes = gene_axis.n_genes();
+    let feature_axis = feature_axis.expect("a feature-axis mode other than Rows must yield Some");
+    let feature_weights = feature_weights.expect("fisher_weights=true must yield Some");
+    let feature_stats = feature_stats.expect("fisher_weights with a feature axis must yield Some");
+    let n_features = feature_axis.n_features();
     // Per-row totals, taken off the streaming pass rather than paid for again.
     let row_totals: Vec<f64> = row_stats
         .expect("fisher_weights=true must yield Some")
@@ -106,60 +106,64 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         .collect();
 
     /////////////////////////////////////////////
-    // 4-pre. Gene network setup (if provided) //
+    // 4-pre. Feature network setup (if provided) //
     /////////////////////////////////////////////
-    // Resolve gene modules on the SNN-augmented, k-core-trimmed graph before
+    // Resolve feature modules on the SNN-augmented, k-core-trimmed graph before
     // building the cell-cell KNN coarsening, so the module-pair basis is
     // ready to feed the V-cycle.
     let mut module_ctx: Option<ModulePairContext> = None;
-    if let Some(ref network_file) = args.gene_network {
-        // Resolve against GENE names, not row names. The name resolver aliases
-        // only on `--gene-network-delimiter` (default `_`) and never on `/`, so
-        // a channelized row like `GENE1/count/spliced` matches no network entry
+    if let Some(ref network_file) = args.feature_network {
+        // Resolve against FEATURE names, not row names. The name resolver aliases
+        // only on `--feature-network-delimiter` (default `_`) and never on `/`, so
+        // a channelized row like `FEATURE1/count/spliced` matches no network entry
         // and the `num_edges() > 0` check below fires, blaming the user's file
         // for what is a units mismatch on our side.
-        let gene_names = gene_axis.gene_names().to_vec();
-        info!("Loading external gene network from {}...", network_file);
-        let mut gene_graph = GenePairGraph::from_edge_list(
+        let feature_names = feature_axis.feature_names().to_vec();
+        info!("Loading external feature network from {}...", network_file);
+        let mut feature_graph = FeaturePairGraph::from_edge_list(
             network_file,
-            gene_names,
-            args.gene_network_allow_prefix,
-            args.gene_network_delimiter,
+            feature_names,
+            args.feature_network_allow_prefix,
+            args.feature_network_delimiter,
         )?;
         anyhow::ensure!(
-            gene_graph.num_edges() > 0,
-            "Gene network matched 0 gene pairs. Check that gene names in {} \
-             match the data gene names (use --gene-network-delimiter or \
-             --gene-network-allow-prefix for fuzzy matching).",
+            feature_graph.num_edges() > 0,
+            "Feature network matched 0 feature pairs. Check that feature names in {} \
+             match the data feature names (use --feature-network-delimiter or \
+             --feature-network-allow-prefix for fuzzy matching).",
             network_file
         );
 
-        gene_graph.augment_with_snn(args.snn_min_shared);
+        feature_graph.augment_with_snn(args.snn_min_shared);
 
-        let keep = kcore_trim(&gene_graph, args.gene_trim_min_degree);
-        let module_of_gene =
-            leiden_gene_modules(&gene_graph, &keep, args.gene_modules_resolution, c.seed);
-
-        gene_graph.to_parquet(
-            &(c.out.to_string() + ".gene_graph.parquet"),
-            ("gene1", "gene2"),
-        )?;
-
-        let basis = ModulePairBasis::build(&gene_graph, module_of_gene);
-        anyhow::ensure!(
-            basis.n_pairs > 0,
-            "Gene-network module-pair basis is empty (0 pairs). Try a lower \
-             --gene-trim-min-degree or --gene-modules-resolution, or disable \
-             --gene-network to use the projection basis."
+        let keep = kcore_trim(&feature_graph, args.feature_trim_min_degree);
+        let module_of_feature = leiden_feature_modules(
+            &feature_graph,
+            &keep,
+            args.feature_modules_resolution,
+            c.seed,
         );
 
-        info!("Computing per-cell module expression (NB Fisher gene-weighted)...");
-        // `build_module_expression` walks matrix rows, so the per-gene module
-        // assignment and the per-gene weights are both spread back over rows.
-        // A gene's two tracks therefore land in the same module, which is the
-        // only coherent answer: a module is a set of genes, not of tracks.
-        let module_of_row = gene_axis.broadcast_to_rows(&basis.module_of_gene);
-        let row_weights = gene_axis.broadcast_to_rows(&gene_weights);
+        feature_graph.to_parquet(
+            &(c.out.to_string() + ".feature_graph.parquet"),
+            ("feature1", "feature2"),
+        )?;
+
+        let basis = ModulePairBasis::build(&feature_graph, module_of_feature);
+        anyhow::ensure!(
+            basis.n_pairs > 0,
+            "Feature-network module-pair basis is empty (0 pairs). Try a lower \
+             --feature-trim-min-degree or --feature-modules-resolution, or disable \
+             --feature-network to use the projection basis."
+        );
+
+        info!("Computing per-cell module expression (NB Fisher feature-weighted)...");
+        // `build_module_expression` walks matrix rows, so the per-feature module
+        // assignment and the per-feature weights are both spread back over rows.
+        // A feature's two tracks therefore land in the same module, which is the
+        // only coherent answer: a module is a set of features, not of tracks.
+        let module_of_row = feature_axis.broadcast_to_rows(&basis.module_of_feature);
+        let row_weights = feature_axis.broadcast_to_rows(&feature_weights);
         let (module_expr, cell_totals) = build_module_expression(
             &data_vec,
             &module_of_row,
@@ -232,7 +236,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 },
                 data: &data_vec,
                 // Reads the matrix, so this is a row count.
-                num_genes: n_rows,
+                num_features: n_rows,
             }),
         },
     );
@@ -242,35 +246,39 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     ///////////////////////////////////////////////////
     let proj_basis: Option<Mat> = if module_ctx.is_none() {
         // Projection mode: Gaussian random-projection basis with optional
-        // low-count gene filtering, then NB Fisher-info gene weighting baked
+        // low-count feature filtering, then NB Fisher-info feature weighting baked
         // into the basis: basis'[g, m] = w_g · basis[g, m]. Equivalent to
         // projecting w·x instead of x — housekeeping / high-mean-high-
-        // dispersion genes get attenuated (w_g → 0), informative genes
+        // dispersion features get attenuated (w_g → 0), informative features
         // recover w_g ≈ 1.
         //
-        // Both the filter and the weights are decided per GENE and then spread
-        // back over that gene's rows. Deciding either per row would split a
-        // gene: the nascent track is sparser, so it lands elsewhere on the
+        // Both the filter and the weights are decided per FEATURE and then spread
+        // back over that feature's rows. Deciding either per row would split a
+        // feature: the nascent track is sparser, so it lands elsewhere on the
         // dispersion trend and can fall the other side of a count threshold,
-        // and the projection would then see one gene at two precisions.
+        // and the projection would then see one feature at two precisions.
         let mut basis = cell_proj.basis.clone();
-        if args.min_gene_count > 0.0 {
-            let gene_totals = gene_axis.pool_totals(&row_totals);
-            let per_row = gene_axis.broadcast_to_rows(&gene_totals);
-            // Rows kept is what the filter returns; genes kept is counted on
-            // the gene axis, since a gene keeps or loses all of its rows
+        if args.min_feature_count > 0.0 {
+            let feature_totals = feature_axis.pool_totals(&row_totals);
+            let per_row = feature_axis.broadcast_to_rows(&feature_totals);
+            // Rows kept is what the filter returns; features kept is counted on
+            // the feature axis, since a feature keeps or loses all of its rows
             // together.
-            let n_rows_kept = filter_basis_by_gene_count(&mut basis, &per_row, args.min_gene_count);
-            let n_genes_kept = gene_totals
+            let n_rows_kept =
+                filter_basis_by_feature_count(&mut basis, &per_row, args.min_feature_count);
+            let n_features_kept = feature_totals
                 .iter()
-                .filter(|&&t| t >= f64::from(args.min_gene_count))
+                .filter(|&&t| t >= f64::from(args.min_feature_count))
                 .count();
             info!(
-                "Kept {}/{} genes ({} of {} rows, min_count={:.0})",
-                n_genes_kept, n_genes, n_rows_kept, n_rows, args.min_gene_count
+                "Kept {}/{} features ({} of {} rows, min_count={:.0})",
+                n_features_kept, n_features, n_rows_kept, n_rows, args.min_feature_count
             );
         }
-        apply_gene_weights(&mut basis, &gene_axis.broadcast_to_rows(&gene_weights));
+        apply_feature_weights(
+            &mut basis,
+            &feature_axis.broadcast_to_rows(&feature_weights),
+        );
         Some(basis)
     } else {
         None
@@ -336,8 +344,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         &cascade_cfg,
         &mut sampler,
         &cell_names,
-        Some(&gene_weights),
-        &gene_axis,
+        Some(&feature_weights),
+        &feature_axis,
         edge_kind,
     )?;
 
@@ -461,10 +469,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     ////////////////////////////////////////
     let draft_prefix = format!("{}.draft", c.out);
     info!(
-        "Writing draft outputs (propensity, gene_community, link_community) → {}.*",
+        "Writing draft outputs (propensity, feature_community, link_community) → {}.*",
         draft_prefix
     );
-    let (_draft_propensity, draft_gene_community) = write_partition_outputs(
+    let (_draft_propensity, draft_feature_community) = write_partition_outputs(
         &draft_prefix,
         edges,
         &final_membership,
@@ -472,8 +480,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
         k,
         &cell_names,
         &data_vec,
-        Some(&gene_weights),
-        &gene_axis,
+        Some(&feature_weights),
+        &feature_axis,
         c.block_size,
         edge_kind,
     )?;
@@ -491,29 +499,29 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     {
         use matrix_param::traits::Inference;
 
-        // Score the merge on DETECTED genes only — see `cosine_merge`'s step 0
-        // for why undetected genes otherwise decide it. `gene_nnz` rides out of
+        // Score the merge on DETECTED features only — see `cosine_merge`'s step 0
+        // for why undetected features otherwise decide it. `feature_nnz` rides out of
         // the Fisher-weight pass rather than costing a second full read.
         //
-        // Per GENE, not per row, and on a channelized matrix that is the whole
+        // Per FEATURE, not per row, and on a channelized matrix that is the whole
         // ballgame. `suggest_nnz_cutoff` is an exact 2-means split on
         // `log1p(nnz)` that assumes the one bimodality it finds is
         // ambient-vs-real. Row-wise, a channelized matrix carries a STRONGER
         // second bimodality — the nascent track is detected far less often than
         // the mature one — so the split lands between the two tracks and
-        // `keep_genes` silently becomes "is this row spliced". On the gene axis
+        // `keep_features` silently becomes "is this row spliced". On the feature axis
         // that bimodality does not exist, so the question does not arise.
-        let gene_nnz = gene_stats.count_positives();
+        let feature_nnz = feature_stats.count_positives();
         let min_nnz = args
             .merge_min_nnz
-            .or_else(|| suggest_nnz_cutoff(&gene_nnz))
+            .or_else(|| suggest_nnz_cutoff(&feature_nnz))
             .unwrap_or(1);
-        let keep_genes: Vec<bool> = gene_nnz.iter().map(|&n| n as usize >= min_nnz).collect();
-        let n_keep = keep_genes.iter().filter(|&&b| b).count();
+        let keep_features: Vec<bool> = feature_nnz.iter().map(|&n| n as usize >= min_nnz).collect();
+        let n_keep = keep_features.iter().filter(|&&b| b).count();
         info!(
-            "Dictionary merge scores {} of {} genes (detected in ≥ {} cells{})",
+            "Dictionary merge scores {} of {} features (detected in ≥ {} cells{})",
             n_keep,
-            keep_genes.len(),
+            keep_features.len(),
             min_nnz,
             if args.merge_min_nnz.is_some() {
                 ", --merge-min-nnz"
@@ -521,18 +529,18 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 ", auto cutoff"
             }
         );
-        // Too few surviving genes is as bad as too many. The centred dictionary
+        // Too few surviving features is as bad as too many. The centred dictionary
         // is `n_keep x K`, so below `K` rows its columns are linearly dependent
         // and every pairwise cosine is forced toward +-1 — which collapses the
         // whole partition at any cut, silently, and is exactly the failure the
-        // gene filter exists to prevent. Skip the merge instead: `cosine_merge`
+        // feature filter exists to prevent. Skip the merge instead: `cosine_merge`
         // would return a degenerate tree, and the draft partition is a real
         // answer whereas a merge on rank-deficient input is not.
         if n_keep < k {
             warn!(
-                "only {} gene(s) are detected in >= {} cells, fewer than the {} communities; \
+                "only {} feature(s) are detected in >= {} cells, fewer than the {} communities; \
                  skipping the dictionary merge, so the draft outputs at {}.* are the final \
-                 result. Lower --merge-min-nnz to score more genes.",
+                 result. Lower --merge-min-nnz to score more features.",
                 n_keep, min_nnz, k, draft_prefix
             );
         } else {
@@ -540,7 +548,10 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 "Running cosine dictionary merge (average linkage) over K={} communities...",
                 k
             );
-            let merges = cosine_merge(draft_gene_community.posterior_log_mean(), Some(&keep_genes));
+            let merges = cosine_merge(
+                draft_feature_community.posterior_log_mean(),
+                Some(&keep_features),
+            );
             write_dict_merges(&(c.out.to_string() + ".dict_merges.parquet"), &merges)?;
 
             let labels = cosine_cut(&merges, k, args.merge_cut);
@@ -570,7 +581,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     })
                     .collect();
                 info!(
-                    "Writing final outputs (propensity, gene_community, link_community) → {}.*",
+                    "Writing final outputs (propensity, feature_community, link_community) → {}.*",
                     c.out
                 );
                 write_partition_outputs(
@@ -581,8 +592,8 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                     n_consensus,
                     &cell_names,
                     &data_vec,
-                    Some(&gene_weights),
-                    &gene_axis,
+                    Some(&feature_weights),
+                    &feature_axis,
                     c.block_size,
                     edge_kind,
                 )?;
@@ -597,7 +608,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             if merge_present_with_consensus {
                 merge_summary = Some(crate::util::metadata::DictMergeSummary {
                     min_nnz,
-                    genes_scored: n_keep,
+                    features_scored: n_keep,
                 });
             }
         }
@@ -616,7 +627,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 coord_file: coord_file_str.as_deref(),
                 coord_columns: &coordinate_names,
                 n_cells,
-                n_genes,
+                n_features,
                 n_edges: edges.len(),
                 k,
                 graph: (&knn).into(),
@@ -624,7 +635,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
             merge_summary,
             // What `lc` can report is the structural fact of the axis, not a
             // fitted contrast.
-            gene_axis
+            feature_axis
                 .report_delta_identifiability(&row_totals)
                 .map(|r| crate::util::metadata::SpliceTrackInfo {
                     n_rows,

@@ -201,7 +201,8 @@ fn print_logo() {
                   senna deconvolve --from bge.senna.json --annotation A --bulk bulk.parquet\n\
                   \n\
                   Artifact naming: a slot name fixes the axis, never the numeric scale.\n\
-                  `feature_loading` is the per-gene loading rho, and it is signed.\n\
+                  `feature_embedding` is the per-gene embedding rho, and it is signed;\n\
+                  `feature_coembedding` is rho re-placed onto the cell manifold.\n\
                   `dictionary` is a topic dictionary in LOG space, or SVD signed loadings.\n\
                   Reading one as the other yields NaN, so check `kind` before assuming.\n\
                   See senna/docs/deconvolve.md and the run_manifest module docs."
@@ -397,8 +398,8 @@ enum Commands {
                       so it is embarrassingly parallel.\n\
                       \n\
                       Writes {out}.senna.json,\n\
-                      plus {out}.{cell_embedding,dictionary,feature_embedding,\n  \
-                      feature_bias,cell_bias}.parquet.\n\
+                      plus {out}.{cell_embedding,feature_embedding,feature_coembedding,\n  \
+                      feature_bias,cell_bias}.parquet, and {out}.dictionary.parquet unless --skip-etm.\n\
                       The H-space cell embedding Z is always {out}.cell_embedding.parquet.\n\
                       \n\
                       Unless --skip-etm, an ETM is resolved too.\n\
@@ -435,8 +436,8 @@ enum Commands {
                       Pass the same --n-hvg to every arm of a comparison.\n\
                       \n\
                       Writes {out}.senna.json, {out}.cell_embedding.parquet (Z),\n\
-                      {out}.feature_loading.parquet (the raw gene table),\n\
-                      {out}.feature_embedding.parquet (genes co-embedded at a fixed T),\n\
+                      {out}.feature_embedding.parquet (the raw gene table),\n\
+                      {out}.feature_coembedding.parquet (genes co-embedded at a fixed T),\n\
                       {out}.feature_scores.parquet (SIMBA's max/std/gini/entropy)\n\
                       and {out}.simba_bins.parquet (the expression levels)."
     )]
@@ -523,9 +524,9 @@ enum Commands {
                       Writes the same output set `senna bge` does,\n\
                       plus {out}.feature_contrast.parquet (one row per gene and modality,\n\
                       columns h0..h{H-1}):\n\
-                      {out}.senna.json, {out}.{cell_embedding,dictionary,feature_embedding,\n\
-                      feature_loading,feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
-                      plus {out}.{latent,topic_embedding}.parquet from the resolved ETM.",
+                      {out}.senna.json, {out}.{cell_embedding,feature_embedding,feature_coembedding,\n\
+                      feature_bias,cell_bias,pb_embedding,pb_batch}.parquet,\n\
+                      plus {out}.{latent,dictionary,topic_embedding}.parquet from the resolved ETM.",
         after_long_help = "\
 	Example:\n\
   senna gem out/rep1_genes.zarr.zip -o out/gem\n\n\

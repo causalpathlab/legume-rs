@@ -4,7 +4,7 @@
 //! `[N_pairs × K_latent]` projection that has to become per-edge community
 //! labels. They therefore offer the same flags, with the same meanings and the
 //! same defaults, and resolve them through the same [`EdgeClustering`] enum
-//! that `compute_propensity_and_gene_community_stat` consumes.
+//! that `compute_propensity_and_feature_community_stat` consumes.
 
 use crate::link_community::profiles::EdgeClustering;
 use clap::{Args, ValueEnum};
