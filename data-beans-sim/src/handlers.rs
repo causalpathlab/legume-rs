@@ -256,9 +256,10 @@ pub struct RunSimulateArgs {
     pub backend: SparseIoBackend,
 
     #[arg(
-        long,
-        default_value_t = false,
-        help = "Produce a `.zarr.zip` archive instead of a `.zarr` directory"
+        long = "no-zip",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Write a plain `.zarr` directory instead of the default `.zarr.zip` archive"
     )]
     pub zip: bool,
 }
@@ -375,9 +376,10 @@ pub struct RunSimulateMultimodalArgs {
     pub backend: SparseIoBackend,
 
     #[arg(
-        long,
-        default_value_t = false,
-        help = "Produce a `.zarr.zip` archive instead of a `.zarr` directory"
+        long = "no-zip",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Write a plain `.zarr` directory instead of the default `.zarr.zip` archive"
     )]
     pub zip: bool,
 }
