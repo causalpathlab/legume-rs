@@ -41,7 +41,6 @@ pub struct SnpSite {
     pub gq: f32,
 }
 
-#[allow(dead_code)]
 impl SnpSite {
     pub fn ref_count(&self) -> usize {
         self.counts

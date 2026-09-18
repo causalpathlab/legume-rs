@@ -3,8 +3,7 @@
 //! Each one builds the standalone subcommand's args from [`super::args::PipelineArgs`]
 //! and calls the same entry point the user would — never a private copy of the work.
 
-use crate::editing::io::{write_discovery_outputs, ToParquet};
-use crate::editing::mask::{build_atoi_mask, filter_conversion_sites_by_mask, filter_m6a_by_mask};
+use crate::editing::io::ToParquet;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
@@ -22,15 +21,9 @@ use genomic_data::gff::{build_gene_map, read_gff_record_vec, GffRecordMap};
 use log::info;
 use rustc_hash::FxHashSet;
 
-pub(super) struct AtoiMaskData {
-    pub(super) mask: rustc_hash::FxHashSet<(Box<str>, i64)>,
-    pub(super) n_sites: usize,
-}
-
-// Step 0: SNP genotyping (discovery + optional known sites).
-// VAF filter ensures de novo variants only enter the mask if they have
-// germline-like allele fractions, preserving RNA editing sites.
-pub(super) fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box<str>, i64)>> {
+// Step 0: SNP genotyping (discovery + optional known sites). Writes the SNP
+// call set and per-cell BAF matrices; nothing downstream consumes it as a mask.
+pub(super) fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<()> {
     let known_snps = if let Some(ref path) = args.known_snps {
         info!("Loading known SNPs from: {}", path);
         let snps = load_known_snps_auto(path)?;
@@ -46,12 +39,6 @@ pub(super) fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box
         None
     } else {
         Some(args.umi_tag.clone())
-    };
-
-    let min_vaf = if args.snp_mask_min_vaf > 0.0 {
-        Some(args.snp_mask_min_vaf)
-    } else {
-        None
     };
 
     let params = SnpParams {
@@ -76,15 +63,13 @@ pub(super) fn run_snp_step(args: &PipelineArgs) -> anyhow::Result<FxHashSet<(Box
         zip: args.zip,
         output: args.output.clone(),
         // Per-cell, like `faba snp` standalone: `faba all` documents
-        // `{batch}_snp_{alt,depth}` in its output layout and promises control
-        // BAMs a per-cell SNP matrix, and it already hands the pipeline the
+        // `{batch}_baf` in its output layout and promises control BAMs a
+        // per-cell BAF matrix, and it already hands the pipeline the
         // `Some(&gff_map)` that pass 2 needs.
-        // Running bulk suppressed exactly the matrices the help advertised, and
-        // the SNP mask every later step consumes is built in pass 1 either way.
+        // Running bulk suppressed exactly the matrices the help advertised.
         bulk: false,
         umi_tag,
         use_base_quality: true,
-        min_vaf,
     };
 
     // Discover de novo + force-call known sites if provided
@@ -163,8 +148,7 @@ pub(super) fn run_gene_counting_step(args: &PipelineArgs) -> anyhow::Result<Opti
 pub(super) fn run_atoi_step(
     args: &PipelineArgs,
     gene_count_qc: &Option<GeneCountQc>,
-    snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
-) -> anyhow::Result<AtoiMaskData> {
+) -> anyhow::Result<usize> {
     // Load GFF and filter to expressed genes
     let (gff_map, spliced) = filtered_gff(args.gff_file.as_ref(), gene_count_qc)?;
 
@@ -180,7 +164,6 @@ pub(super) fn run_atoi_step(
         include_missing_barcode: false,
         min_coverage: args.atoi_min_coverage,
         min_conversion: args.atoi_min_conversion,
-        pvalue_cutoff: args.atoi_pvalue_cutoff,
         error_rate: args.edit_error_rate,
         overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
@@ -202,36 +185,16 @@ pub(super) fn run_atoi_step(
         },
         // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
         mut_bam_files: Vec::new(),
-        site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
         competent_cells: None,
     };
 
-    // Find ATOI sites (first pass): reference-anchored A→G / T→C calls, each
-    // tested against the beta-binomial sequencing-error null (no control sample).
+    // Find ATOI sites (first pass): reference-anchored A→G / T→C candidates,
+    // each carrying its beta-binomial p-value. Every putative site is written;
+    // `faba qc` thresholds them.
     info!("Discovering ATOI sites (reference-anchored)...");
-    let discovered = find_all_conversion_sites(&gff_map, &params, None)?;
-    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "atoi")?;
-    let atoi_sites = discovered.selected;
-
-    // Apply SNP mask if available
-    if let Some(ref mask) = snp_mask {
-        let n_before: usize = atoi_sites.iter().map(|e| e.value().len()).sum();
-        filter_conversion_sites_by_mask(&atoi_sites, mask, &gff_map);
-        let n_after: usize = atoi_sites.iter().map(|e| e.value().len()).sum();
-        info!(
-            "SNP masking: {} → {} ATOI sites ({} removed)",
-            n_before,
-            n_after,
-            n_before - n_after
-        );
-    }
-
-    // Count total sites
+    let atoi_sites = find_all_conversion_sites(&gff_map, &params, None)?;
     let n_sites: usize = atoi_sites.iter().map(|entry| entry.value().len()).sum();
-    info!("Found {} ATOI sites", n_sites);
-
-    // Build mask
-    let mask = build_atoi_mask(&atoi_sites, &gff_map);
+    info!("Found {} putative ATOI sites", n_sites);
 
     // Save site annotations
     let sites_output = format!("{}/atoi_sites.parquet", args.output);
@@ -261,35 +224,15 @@ pub(super) fn run_atoi_step(
         )?;
     }
 
-    Ok(AtoiMaskData { mask, n_sites })
+    Ok(n_sites)
 }
 
 // Step 3: APA analysis
 pub(super) fn run_apa_step(
     args: &PipelineArgs,
-    atoi_mask: &Option<AtoiMaskData>,
-    snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<()> {
     use crate::apa::run::{run_apa, ApaMethod, CountApaArgs};
-
-    // Save ATOI mask to file if available
-    let atoi_mask_file = if let Some(ref _mask_data) = atoi_mask {
-        let mask_path = format!("{}/atoi_sites.parquet", args.output);
-        info!("APA will use ATOI mask from: {}", mask_path);
-        Some(mask_path.into_boxed_str())
-    } else {
-        None
-    };
-
-    // SNP mask file path if SNP step was run
-    let snp_mask_file = if snp_mask.is_some() {
-        let mask_path = format!("{}/snp_sites.parquet", args.output);
-        info!("APA will use SNP mask from: {}", mask_path);
-        Some(mask_path.into_boxed_str())
-    } else {
-        None
-    };
 
     // APA is pure quantification (no contrast): produce it for WT + control.
     let all_bam_files = all_quant_bam_files(args);
@@ -336,8 +279,6 @@ pub(super) fn run_apa_step(
         apa_max_sites: args.apa_max_sites,
         apa_em_pdui: args.apa_em_pdui,
         drop_single_component: args.drop_single_component,
-        atoi_mask_file,
-        snp_mask_file,
         gene_barcode_tag: args.gene_barcode_tag.clone(),
         resolution_bp: 10,
         include_missing_barcode: false,
@@ -378,8 +319,6 @@ pub(super) fn run_apa_step(
 // Step 4: DART analysis
 pub(super) fn run_dart_step(
     args: &PipelineArgs,
-    atoi_mask: &Option<AtoiMaskData>,
-    snp_mask: &Option<FxHashSet<(Box<str>, i64)>>,
     gene_count_qc: &Option<GeneCountQc>,
 ) -> anyhow::Result<()> {
     // Load GFF and filter to expressed genes
@@ -411,10 +350,7 @@ pub(super) fn run_dart_step(
 
     // Build ConversionParams for m6A (DART)
     let mut params = ConversionParams {
-        mod_type: ModificationType::M6A {
-            check_r_site: true,
-            contrast: args.m6a_contrast.to_contrast(),
-        },
+        mod_type: ModificationType::M6A { check_r_site: true },
         genome_file: args.genome_file.clone(),
         wt_bam_files: signal_bam_files,
         gene_barcode_tag: args.gene_barcode_tag.clone(),
@@ -422,7 +358,6 @@ pub(super) fn run_dart_step(
         include_missing_barcode: false,
         min_coverage: args.m6a_min_coverage,
         min_conversion: args.m6a_min_conversion,
-        pvalue_cutoff: args.m6a_pvalue_cutoff,
         error_rate: args.edit_error_rate,
         overdispersion: args.edit_overdispersion,
         backend: args.backend.clone(),
@@ -443,7 +378,6 @@ pub(super) fn run_dart_step(
             Some(args.umi_tag.clone())
         },
         mut_bam_files: args.control_bam_files.clone(),
-        site_min_cells: crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
         competent_cells: None,
     };
 
@@ -463,44 +397,10 @@ pub(super) fn run_dart_step(
         "m6a",
     )?;
 
-    let discovered = find_all_conversion_sites(&gff_map, &params, None)?;
-
-    // Pre-mask audit (unselected sites, with reasons), shared with
-    // `faba dartseq` so both emit identical files.
-    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "m6a")?;
-    let m6a_sites = discovered.selected;
-
-    let n_sites_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
-    info!("Found {} m6A sites before masking", n_sites_before);
-
-    // Apply ATOI mask if available
-    if let Some(ref mask_data) = atoi_mask {
-        info!("Applying ATOI mask to m6A sites...");
-        filter_m6a_by_mask(&m6a_sites, &mask_data.mask, &gff_map);
-        let n_sites_after: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
-        info!(
-            "Retained {} m6A sites after ATOI masking (removed {})",
-            n_sites_after,
-            n_sites_before - n_sites_after
-        );
-    }
-
-    // Apply SNP mask only if explicitly requested. Off by default: the WT-vs-MUT
-    // contrast already rejects genomic variants (equal in both arms), so the SNP
-    // mask is redundant here and was over-aggressive.
-    if args.m6a_snp_mask {
-        if let Some(ref mask) = snp_mask {
-            let n_before: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
-            filter_m6a_by_mask(&m6a_sites, mask, &gff_map);
-            let n_after: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
-            info!(
-                "SNP masking: {} → {} m6A sites ({} removed)",
-                n_before,
-                n_after,
-                n_before - n_after
-            );
-        }
-    }
+    // Every putative site with its statistics; no test, no masks.
+    let m6a_sites = find_all_conversion_sites(&gff_map, &params, None)?;
+    let n_sites: usize = m6a_sites.iter().map(|e| e.value().len()).sum();
+    info!("Found {} putative m6A sites", n_sites);
 
     // Save site annotations
     let sites_output = format!("{}/m6a_sites.parquet", args.output);

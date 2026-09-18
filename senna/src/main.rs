@@ -529,13 +529,13 @@ enum Commands {
                       plus {out}.{latent,dictionary,topic_embedding}.parquet from the resolved ETM.",
         after_long_help = "\
 	Example:\n\
-  senna gem out/rep1_genes.zarr.zip -o out/gem\n\n\
+  senna gem out/rep1_count.zarr.zip -o out/gem\n\n\
   With a co-measured modality, one file per sample, matched by sample id:\n\n\
-  senna gem out/*_genes.zarr.zip --modality out/*_m6a.zarr.zip -o out/gem\n\n\
+  senna gem out/*_count.zarr.zip --modality out/*_m6a.zarr.zip -o out/gem\n\n\
   Multiple gene samples, pass them positionally so shell globs work.\n\
   Each sample becomes a batch via its barcodes' `@batch` tag.\n\n\
-  senna gem out/rep1_genes.zarr.zip out/rep2_genes.zarr.zip -o out/gem\n\
-  senna gem out/*_genes.zarr.zip -o out/gem")]
+  senna gem out/rep1_count.zarr.zip out/rep2_count.zarr.zip -o out/gem\n\
+  senna gem out/*_count.zarr.zip -o out/gem")]
     Gem(GemArgs),
 
     // ─────────── 2. Held-out inference ───────────
@@ -885,7 +885,7 @@ enum Commands {
             https://doi.org/10.1186/s12864-018-4772-0",
         after_long_help = "\
 	Example:\n\
-	senna gem out/rep1_genes.zarr.zip -o out/gem\n\
+	senna gem out/rep1_count.zarr.zip -o out/gem\n\
   senna lineage -f out/gem -o out/gem"
     )]
     Lineage(LineageArgs),

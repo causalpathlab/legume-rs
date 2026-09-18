@@ -22,7 +22,7 @@ pub struct ScanPwmArgs {
         short = 's',
         long = "sites",
         required = true,
-        help = "Site-level parquet file (from dartseq or apa output)"
+        help = "Site-level parquet file (from dartseq, atoi or apa output)"
     )]
     site_file: Box<str>,
 

@@ -1,4 +1,6 @@
-use crate::apa::fragment::{FragmentCluster, FragmentRecord};
+use crate::apa::fragment::FragmentCluster;
+#[cfg(test)]
+use crate::apa::fragment::FragmentRecord;
 
 /// Parameters for the SCAPE likelihood model.
 pub struct LikelihoodParams {
@@ -26,12 +28,12 @@ impl Default for LikelihoodParams {
     }
 }
 
+#[cfg(test)]
 /// SCAPE per-fragment likelihood `log p(x_n, l_n, r_n | θ_nk)`. Depends
 /// only on `(x, l, r, is_junction)` — `pa_site` is only used in site
 /// discovery, not in the per-fragment likelihood, so this signature is
 /// shared between `FragmentRecord` and `FragmentCluster` via
 /// [`log_lik_features_given_theta`].
-#[allow(dead_code)] // kept for tests / external callers; production path uses the cluster variant
 pub fn log_lik_fragment_given_theta(
     frag: &FragmentRecord,
     theta: f32,

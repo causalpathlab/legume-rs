@@ -1,6 +1,6 @@
 //! Cell calling (barcode QC), CellRanger-style: OrdMag knee ∪ EmptyDrops.
 //!
-//! `faba genes` (and the shared gene-count QC that feeds apa/atoi/m6a) counts
+//! `faba count` (and the shared gene-count QC that feeds apa/atoi/m6a) counts
 //! every observed cell barcode, so the raw output is a superset of real cells
 //! that includes empty/ambient droplets. This module separates real cells from
 //! ambient using two stages, run **independently per batch** (each BAM is a
@@ -91,7 +91,7 @@ impl Default for CellCallParams {
 }
 
 /// Shared CLI knobs for cell calling, flattened into each subcommand that does
-/// gene-count QC (`genes`, `apa`, `atoi`, `dartseq`, `all`).
+/// gene-count QC (`count`, `apa`, `atoi`, `dartseq`, `all`).
 #[derive(clap::Args, Debug, Clone, serde::Serialize)]
 pub struct CellQcArgs {
     /// Cell-calling method (barcode QC)

@@ -1,6 +1,5 @@
 use crate::common::*;
-use crate::editing::io::{write_discovery_outputs, ToParquet};
-use crate::editing::mask::filter_conversion_sites_by_mask;
+use crate::editing::io::ToParquet;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::*;
@@ -9,7 +8,6 @@ use crate::gene_count::splice::CountReadOpts;
 use crate::quant::{
     check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
-use crate::snp::io::load_snp_mask_from_parquet;
 
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::GffRecordMap;
@@ -47,8 +45,10 @@ pub struct AtoICountArgs {
         required = true,
         help = "Output directory",
         long_help = "Output directory for A-to-I detection results.\n\
-                     Creates atoi_sites.parquet with the detected sites,\n\
-                     and one sparse count matrix per input BAM, suffixed _atoi."
+                     Writes atoi_sites.parquet (every putative site with its statistics),\n\
+                     and per input BAM: {batch}_atoi (gene-level), {batch}_atoi_site (per-site),\n\
+                     {batch}_count and {batch}_cells.tsv.gz from the gene QC, genes_kept.tsv.gz,\n\
+                     and {batch}_atoi_mixture (+ atoi_components.parquet) with --mixture."
     )]
     pub output: Box<str>,
 
@@ -60,15 +60,19 @@ pub struct AtoICountArgs {
 
     #[arg(
         long,
-        default_value_t = 5,
-        help = "Minimum coverage for A-to-I site detection"
+        default_value_t = crate::editing::pipeline::DEFAULT_ATOI_MIN_COVERAGE,
+        help = "Minimum coverage (ref + alt reads) for an A-to-I site to be written",
+        long_help = "Minimum coverage (ref + alt reads) for an A-to-I site to be written.\n\
+                     A candidacy floor, shared with `faba all --atoi-min-coverage`.\n\
+                     A-to-I has no motif anchor, so this bounds the candidate set;\n\
+                     no p-value cutoff is applied here (see `faba qc --site-max-pv`)."
     )]
     pub min_coverage: usize,
 
     #[arg(
         long = "min-conversion",
-        default_value_t = 3,
-        help = "Minimum A-to-G conversions for A-to-I detection"
+        default_value_t = crate::editing::pipeline::DEFAULT_ATOI_MIN_CONVERSION,
+        help = "Minimum A-to-G (alt) reads for an A-to-I site to be written"
     )]
     pub min_conversion: usize,
 
@@ -101,21 +105,6 @@ pub struct AtoICountArgs {
     pub overdispersion: f64,
 
     #[arg(
-        short = 'q',
-        long = "pvalue",
-        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
-        help = "Marginal p-value cutoff for A-to-I site detection (no multiplicity correction)",
-        long_help = "Marginal p-value cutoff for A-to-I site detection. Applied per site,\n\
-                     above the coverage and conversion floors. A-to-I is single-sample,\n\
-                     so this cutoff is its entire test. There is no multiplicity correction.\n\
-                     BH needs independence or positive regression dependence.\n\
-                     Neighbouring sites share reads, so it has neither.\n\
-                     Expect about `cutoff x tested` false calls; the run log prints both.\n\
-                     `--pvalue 1.0` leaves the coverage floors as the only filter."
-    )]
-    pub pvalue_cutoff: f32,
-
-    #[arg(
         long,
         value_enum,
         default_value = "zarr",
@@ -135,18 +124,6 @@ pub struct AtoICountArgs {
 
     #[arg(long, default_value_t = false, help = "Include reads w/o barcode info")]
     pub include_missing_barcode: bool,
-
-    #[arg(
-        long = "site-min-cells",
-        default_value_t = crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
-        help = "Min cells per site for the per-site matrix feature QC (0 disables)",
-        long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
-                     a site is kept only if detected in at least this many cells,\n\
-                     and both of its channels (edited/unedited) are kept together.\n\
-                     The gene-level matrix is unaffected. 0 disables.\n\
-                     Sites are a distinct feature space not covered by the upstream gene expression QC (--gene-min-cells)."
-    )]
-    pub site_min_cells: usize,
 
     #[arg(
         long = "cell-membership",
@@ -177,15 +154,6 @@ pub struct AtoICountArgs {
     )]
     pub exact_barcode_match: bool,
 
-    #[arg(
-        long = "snp-mask",
-        help = "SNP mask parquet from `faba snp` to filter genetic variants",
-        long_help = "Path to snp_sites.parquet from `faba snp`.\n\
-                     A-to-I candidates at known SNP positions (het or hom-alt) are removed before quantification,\n\
-                     eliminating A/G SNPs that mimic editing."
-    )]
-    pub snp_mask_file: Option<Box<str>>,
-
     #[arg(long, value_enum, help = "Gene type filter")]
     gene_type: Option<GffGeneType>,
 
@@ -201,11 +169,11 @@ pub struct AtoICountArgs {
     // Mixture model options //
     ///////////////////////////
     #[arg(
-        long = "no-mixture",
+        long = "mixture",
         default_value_t = false,
-        help = "Disable 1D Gaussian mixture clustering of editing sites"
+        help = "Also fit the per-gene 1D Gaussian mixture of editing sites (slow EM; off by default)"
     )]
-    pub no_mixture: bool,
+    pub mixture: bool,
 
     #[arg(
         long = "mixture-min-sites",
@@ -217,7 +185,7 @@ pub struct AtoICountArgs {
     #[arg(
         long = "mixture-max-k",
         default_value_t = 5,
-        help = "Max components to test via BIC"
+        help = "Cap on components per gene (modes of the smoothed site density; not a BIC selection)"
     )]
     pub mixture_max_k: usize,
 
@@ -267,8 +235,8 @@ pub struct AtoICountArgs {
     ////////////////////////
     #[arg(
         long = "gene-min-cells",
-        default_value_t = 10,
-        help = "Min cells per gene for expression QC"
+        default_value_t = 1,
+        help = "Min cells per gene for expression QC; 1 = drop only empty rows (stricter floors: `faba qc`)"
     )]
     pub gene_min_cells: usize,
 
@@ -281,8 +249,8 @@ pub struct AtoICountArgs {
 
     #[arg(
         long = "cell-min-genes",
-        default_value_t = 10,
-        help = "Min genes per cell for expression QC"
+        default_value_t = 1,
+        help = "Min genes per cell for expression QC; 1 = drop only empty columns (stricter floors: `faba qc`)"
     )]
     pub cell_min_genes: usize,
 
@@ -299,14 +267,14 @@ pub struct AtoICountArgs {
     #[command(flatten)]
     pub mito_qc: crate::quant::MitoQcArgs,
 
-    /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
+    /// Reuse a per-batch cell set from `faba count` instead of recomputing QC
     #[arg(
         long = "valid-cells",
-        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse"
+        help = "Directory of `faba count` outputs ({batch}_cells.tsv.gz) to reuse"
     )]
     pub valid_cells_file: Option<Box<str>>,
 
-    /// Reuse the retained-gene set from `faba genes` (its pooled `genes_kept.tsv.gz`)
+    /// Reuse the retained-gene set from `faba count` (its pooled `genes_kept.tsv.gz`)
     #[arg(long = "valid-genes")]
     pub valid_genes_file: Option<Box<str>>,
 
@@ -335,7 +303,6 @@ impl From<&AtoICountArgs> for ConversionParams {
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            pvalue_cutoff: args.pvalue_cutoff,
             error_rate: args.error_rate,
             overdispersion: args.overdispersion,
             backend: args.backend.clone(),
@@ -358,7 +325,6 @@ impl From<&AtoICountArgs> for ConversionParams {
             },
             // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
             mut_bam_files: Vec::new(),
-            site_min_cells: args.site_min_cells,
             competent_cells: None,
         }
     }
@@ -404,7 +370,7 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Gene expression QC: reuse a passed cell/gene set from `faba genes`, or
+    // Gene expression QC: reuse a passed cell/gene set from `faba count`, or
     // recompute it (per-batch cell calling).
     let gene_qc = resolve_modality_gene_qc(
         &mut gff_map,
@@ -445,28 +411,11 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     // Load cell membership for filtering
     let membership = params.load_membership()?;
 
-    // FIRST PASS: discover A-to-I sites, then emit the audit (unselected sites,
-    // with the reason each missed) before keeping the calls.
-    let discovered = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
-    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "atoi")?;
-    let atoi_sites = discovered.selected;
+    // FIRST PASS: every putative A-to-I site, with its p-value. No cutoff is
+    // applied here; `faba qc` thresholds the parquet columns.
+    let atoi_sites = find_all_conversion_sites(&gff_map, &params, membership.as_ref())?;
     let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
-    info!("Found {} A-to-I editing sites", n_atoi);
-
-    // Apply SNP mask if provided
-    if let Some(ref mask_file) = args.snp_mask_file {
-        info!("Loading SNP mask from {}", mask_file);
-        let snp_mask = load_snp_mask_from_parquet(mask_file.as_ref())?;
-        let n_before: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
-        filter_conversion_sites_by_mask(&atoi_sites, &snp_mask, &gff_map);
-        let n_after: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
-        info!(
-            "SNP masking: {} → {} A-to-I sites ({} removed)",
-            n_before,
-            n_after,
-            n_before - n_after
-        );
-    }
+    info!("Found {} putative A-to-I editing sites", n_atoi);
 
     if atoi_sites.is_empty() {
         info!("no A-to-I sites found");
@@ -486,8 +435,8 @@ pub fn run_atoi(args: &AtoICountArgs) -> anyhow::Result<()> {
     let valid_cells = gene_qc.as_ref().map(|qc| &qc.cells_by_batch);
     process_all_bam_files_to_backend(&params, &atoi_sites, &gff_map, valid_cells)?;
 
-    // Mixture model: cluster editing sites per gene
-    if !args.no_mixture {
+    // Mixture model (opt-in): cluster editing sites per gene
+    if args.mixture {
         info!("Running 1D Gaussian mixture model on A-to-I sites...");
         let mix_params = MixtureParams {
             min_sites: args.mixture_min_sites,

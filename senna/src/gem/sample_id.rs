@@ -5,26 +5,22 @@
 //! each file's barcodes with `{COLUMN_SEP}{sample_id}` (COLUMN_SEP = `@`)
 //! under `ColumnAlignment::Union`, where the sample id is the file's basename
 //! with a suffix stripped so every file of one sample collapses to the same id
-//! (`rep1_wt_genes` → `rep1_wt`).
+//! (`rep1_wt_count` → `rep1_wt`).
 
-use matrix_util::common_io::basename;
+/// The suffix `faba count` gives its gene-count matrices (`{batch}_count`).
+pub const COUNT_SUFFIX: &str = "_count";
+/// The suffix `faba genes` gave them before the subcommand became `count`;
+/// still stripped so older outputs keep loading.
+pub const LEGACY_COUNT_SUFFIX: &str = "_genes";
 
-/// Strip the per-flag `strip` suffix from an already-computed basename.
-/// Empty (or non-matching) `strip` keeps the full basename, so two files of one
-/// sample merge only when their stripped basenames agree.
-pub fn strip_sample_id(base: &str, strip: &str) -> Box<str> {
-    if strip.is_empty() {
-        base.into()
-    } else {
-        base.strip_suffix(strip).unwrap_or(base).into()
-    }
-}
-
-/// Per-file sample id: the file's basename (sparse-data extension stripped)
-/// with the per-flag `strip` suffix removed. `rep1_wt_genes.zarr.zip` with
-/// `strip = "_genes"` → `rep1_wt`.
-pub fn file_sample_id(file: &str, strip: &str) -> anyhow::Result<Box<str>> {
-    Ok(strip_sample_id(basename(file)?.as_ref(), strip))
+/// Strip whichever of `suffixes` the basename ends with, first match wins;
+/// none matching keeps the full basename.
+pub fn strip_any_suffix(base: &str, suffixes: &[&str]) -> Box<str> {
+    suffixes
+        .iter()
+        .find_map(|s| base.strip_suffix(s))
+        .unwrap_or(base)
+        .into()
 }
 
 #[cfg(test)]

@@ -102,13 +102,6 @@ impl<'a> DnaBaseFreqMap<'a> {
         }
     }
 
-    /// Set the anchor location and base for m6A counting:
-    /// only count bases on reads that cover the anchor position with the expected base.
-    #[allow(dead_code)]
-    pub fn set_anchor_position(&mut self, loc: i64, base: Dna) {
-        self.anchor = Some((loc, base));
-    }
-
     /// Set position filter to only accumulate frequencies for specific positions.
     /// This dramatically reduces memory usage when processing many sites in a large gene.
     pub fn set_position_filter(&mut self, positions: FxHashSet<i64>) {

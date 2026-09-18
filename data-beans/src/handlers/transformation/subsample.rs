@@ -96,7 +96,7 @@ pub fn run_subsample(args: &SubsampleArgs) -> anyhow::Result<()> {
     // returns ascending indices, which is what lets the row renumbering stay
     // monotone and the columns keep their order without a per-column sort.
     let row_filter = (gene_idx.len() < nrow).then_some(gene_idx.as_slice());
-    let (_, _, nnz) = crate::handlers::transformation::stream_column_selection(
+    let (_, _, nnz) = crate::column_subset::stream_column_selection(
         &*data,
         &cell_idx,
         row_filter,

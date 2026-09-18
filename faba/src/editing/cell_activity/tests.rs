@@ -295,14 +295,8 @@ fn the_score_is_continuous_where_a_p_value_would_underflow() {
 #[test]
 fn channel_bases_follow_the_modality_and_strand() {
     use crate::editing::cell_activity::scan::channel_bases;
-    use crate::editing::sifter::{M6aContrast, ModificationType};
-    let m6a = ModificationType::M6A {
-        check_r_site: true,
-        contrast: M6aContrast {
-            min_control_coverage: 1,
-            min_log_odds: 1e-4,
-        },
-    };
+    use crate::editing::sifter::ModificationType;
+    let m6a = ModificationType::M6A { check_r_site: true };
     // m6A is a C->U deamination: C->T read forward, G->A read on the reverse strand.
     assert_eq!(channel_bases(&m6a, true), (Dna::C, Dna::T));
     assert_eq!(channel_bases(&m6a, false), (Dna::G, Dna::A));
@@ -513,14 +507,8 @@ fn mask_sets(
 #[test]
 fn the_dense_mask_reproduces_the_hashed_scan_exactly() {
     use crate::editing::cell_activity::scan::candidate_and_background;
-    use crate::editing::sifter::{M6aContrast, ModificationType};
-    let m6a = |check_r_site: bool| ModificationType::M6A {
-        check_r_site,
-        contrast: M6aContrast {
-            min_control_coverage: 1,
-            min_log_odds: 1e-4,
-        },
-    };
+    use crate::editing::sifter::ModificationType;
+    let m6a = |check_r_site: bool| ModificationType::M6A { check_r_site };
     let (_f, faidx) = scan_fasta(&scan_reference());
 
     for mod_type in [m6a(true), m6a(false), ModificationType::AtoI] {
@@ -552,14 +540,8 @@ fn the_dense_mask_agrees_on_references_nobody_designed() {
     // that hang off the contig so the fetch comes back short. Seeded, so any
     // failure reproduces exactly.
     use crate::editing::cell_activity::scan::candidate_and_background;
-    use crate::editing::sifter::{M6aContrast, ModificationType};
-    let m6a = |check_r_site: bool| ModificationType::M6A {
-        check_r_site,
-        contrast: M6aContrast {
-            min_control_coverage: 1,
-            min_log_odds: 1e-4,
-        },
-    };
+    use crate::editing::sifter::ModificationType;
+    let m6a = |check_r_site: bool| ModificationType::M6A { check_r_site };
     let mut state = 0x2545_f491_4f6c_dd1du64;
     let mut next = move || {
         state ^= state << 13;
@@ -602,14 +584,8 @@ fn the_single_fetch_leaves_candidate_positions_unchanged() {
     // run the same classifier a second time. The wrapper it now shares must
     // still answer exactly what the mask holds.
     use crate::editing::cell_activity::scan::{candidate_and_background, candidate_positions};
-    use crate::editing::sifter::{M6aContrast, ModificationType};
-    let mod_type = ModificationType::M6A {
-        check_r_site: true,
-        contrast: M6aContrast {
-            min_control_coverage: 1,
-            min_log_odds: 1e-4,
-        },
-    };
+    use crate::editing::sifter::ModificationType;
+    let mod_type = ModificationType::M6A { check_r_site: true };
     let (_f, faidx) = scan_fasta(&scan_reference());
     for forward in [true, false] {
         let wrapper: std::collections::BTreeSet<i64> =
@@ -633,14 +609,8 @@ fn background_skips_the_keep_out_zone_and_then_takes_every_fourth() {
     // run at 38..=49 starts at exactly 26 nt out, so all 12 are eligible, then
     // 52 and 62 follow. Every 4th eligible position survives the stride.
     use crate::editing::cell_activity::scan::candidate_and_background;
-    use crate::editing::sifter::{M6aContrast, ModificationType};
-    let mod_type = ModificationType::M6A {
-        check_r_site: true,
-        contrast: M6aContrast {
-            min_control_coverage: 1,
-            min_log_odds: 1e-4,
-        },
-    };
+    use crate::editing::sifter::ModificationType;
+    let mod_type = ModificationType::M6A { check_r_site: true };
     let (_f, faidx) = scan_fasta(&scan_reference());
     let pos = candidate_and_background(&faidx, "chr1", 0, 130, true, &mod_type);
     assert!(pos.has_motif());

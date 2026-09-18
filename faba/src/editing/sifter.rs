@@ -2,44 +2,16 @@ use crate::data::dna::Dna;
 use crate::data::dna::DnaBaseCount;
 use crate::data::dna_stat_map::HashMap;
 use crate::data::util_htslib::{fetch_reference_base, fetch_reference_bases};
-use crate::editing::{CallReason, ConversionSite};
+use crate::editing::ConversionSite;
 use faba::hypothesis_tests::{betabinom_pvalue_greater, contrast_pvalue};
 use rust_htslib::faidx;
-
-/// Statistical guards for the m6A WT-vs-MUT contrast.
-///
-/// m6A-only: A-to-I is single-sample and carries none of this, which is why the
-/// config hangs on the `M6A` arm below rather than living as flat sifter/param
-/// fields that A-to-I would have to fill with never-read placeholders.
-#[derive(Clone, Copy, Debug)]
-pub struct M6aContrast {
-    /// minimum MUT (control) coverage required to confirm WT-specificity. A site
-    /// with too little control coverage cannot be shown to be control-low, so it
-    /// is left uncalled rather than assumed real.
-    pub min_control_coverage: usize,
-    /// minimum log odds ratio `ln((a_w·u_m)/(u_w·a_m))` of the WT arm over the
-    /// control, on the raw counts.
-    ///
-    /// The odds ratio is the parameter the site's Fisher exact null is about, so
-    /// this guard and that test are on one scale — which the absolute
-    /// `p_WT − p_MUT` floor it replaced was not.
-    ///
-    /// [`faba::hypothesis_tests::log_odds_ratio`] is the single home for that
-    /// argument, the measurements behind it, and why no continuity correction may
-    /// be applied on this path. Do not restate them here: they are measured
-    /// numbers, and copies drift.
-    pub min_log_odds: f32,
-}
 
 /// Controls which scanning logic to use
 #[derive(Clone, Debug)]
 pub enum ModificationType {
     /// DART-seq m6A: RAC/GTY pattern, triplet validation, and a WT-vs-MUT
-    /// `contrast` against the pooled control.
-    M6A {
-        check_r_site: bool,
-        contrast: M6aContrast,
-    },
+    /// contrast p-value against the pooled control.
+    M6A { check_r_site: bool },
     /// A-to-I editing: single-position A->G / T->C
     AtoI,
 }
@@ -99,8 +71,7 @@ pub struct ConversionSifter<'a> {
     pub error_rate: f64,
     /// Overdispersion ρ of the single-sample (A-to-I) beta-binomial null.
     pub overdispersion: f64,
-    /// Scan mode. The m6A contrast guards live on the `M6A` arm ([`M6aContrast`]);
-    /// A-to-I carries none.
+    /// Scan mode.
     pub mod_type: ModificationType,
     pub candidate_sites: Vec<ConversionSite>,
 }
@@ -152,16 +123,16 @@ impl<'a> ConversionSifter<'a> {
         ))
     }
 
-    /// Score a *putative* m6A site at a motif C. A site is putative on the WT
-    /// sequencing evidence alone — the RAC/GTY motif (validated by the caller)
-    /// plus observed WT C→U at or above the coverage / minimum-conversion floors.
-    /// It is materialized here with its raw WT-vs-MUT contrast p-value and a copy
-    /// of the control counts; the control-coverage, odds-ratio (`min_log_odds`)
-    /// and p-value checks are the *test*, applied downstream in
-    /// [`crate::editing::pipeline::find_all_conversion_sites`], where a failing
-    /// site is recorded with its reason rather than dropped.
-    /// Returns `(p-value, cloned MUT counts)`, or `None` when the WT
-    /// evidence does not clear the coverage / minimum-conversion floors.
+    /// Score a *putative* m6A site at a motif C. A site is putative on the
+    /// sequencing evidence alone: the RAC/GTY motif (validated by the caller),
+    /// at least `min_conversion` converted signal reads, and total coverage
+    /// (signal + control) of at least `min_coverage`. It is materialized with
+    /// its raw WT-vs-MUT contrast p-value and a copy of the control counts.
+    /// Nothing here is a call: the p-value, the odds ratio and the control
+    /// depth are written to the sites parquet and thresholded, if at all, by
+    /// `faba qc`.
+    /// Returns `(p-value, cloned MUT counts)`, or `None` when the site does
+    /// not clear the coverage / minimum-conversion floors.
     fn m6a_contrast(
         &self,
         wt: &DnaBaseCount,
@@ -171,16 +142,13 @@ impl<'a> ConversionSifter<'a> {
     ) -> Option<(f32, DnaBaseCount)> {
         let a_w = wt.get(Some(&alt_base)) as u64; // WT converted (edited)
         let u_w = wt.get(Some(&ref_base)) as u64; // WT unconverted
-        let n_w = a_w + u_w;
-        if (n_w as usize) < self.min_coverage || (a_w as usize) < self.min_conversion {
-            return None;
-        }
-
-        // Control counts (may be zero / thin — that is the test's concern, not
-        // candidacy). A missing control ⇒ zero counts ⇒ the site is still
-        // putative but will fail the downstream control-coverage check.
+                                                  // Control counts (may be zero / thin; a missing control ⇒ zero counts).
         let a_m = mut_conv.map_or(0, |m| m.get(Some(&alt_base))) as u64; // MUT converted
         let u_m = mut_conv.map_or(0, |m| m.get(Some(&ref_base))) as u64; // MUT unconverted
+        let n_total = a_w + u_w + a_m + u_m;
+        if (n_total as usize) < self.min_coverage || (a_w as usize) < self.min_conversion {
+            return None;
+        }
 
         let pv = contrast_pvalue(a_w, u_w, a_m, u_m);
         Some((pv, mut_conv.cloned().unwrap_or_default()))
@@ -279,7 +247,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_conv.clone(),
                     mut_freq,
                     pv,
-                    reason: CallReason::default(),
                 });
             }
         }
@@ -321,7 +288,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_conv.clone(),
                     mut_freq,
                     pv,
-                    reason: CallReason::default(),
                 });
             }
         }
@@ -354,7 +320,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_freq.clone(),
                     mut_freq: DnaBaseCount::default(),
                     pv,
-                    reason: CallReason::default(),
                 });
             }
         }
@@ -387,7 +352,6 @@ impl<'a> ConversionSifter<'a> {
                     wt_freq: wt_freq.clone(),
                     mut_freq: DnaBaseCount::default(),
                     pv,
-                    reason: CallReason::default(),
                 });
             }
         }

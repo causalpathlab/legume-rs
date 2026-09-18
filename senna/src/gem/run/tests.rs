@@ -290,7 +290,7 @@ fn spliced_only_run_writes_an_empty_but_present_contrast_pair() {
     let dir = tempfile::tempdir().expect("tempdir");
     let genes = synth(
         dir.path(),
-        "S1_genes",
+        "S1_count",
         &["GENE1/count/spliced", "GENE2/count/spliced"],
         &CELLS,
     );
@@ -433,7 +433,7 @@ fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let genes = synth(
         dir.path(),
-        "S1_genes",
+        "S1_count",
         &[
             "GENE1/count/spliced",
             "GENE1/count/unspliced",

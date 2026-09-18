@@ -181,7 +181,7 @@ pub fn contrast_pvalue(a_w: u64, u_w: u64, a_m: u64, u_m: u64) -> f32 {
 /// converts 0 of 3 reads. Raw, that is `+inf`; corrected, it is −3.148, i.e. a
 /// claim that the control converts 23× MORE, on the strength of three reads.
 /// Both agree the site is unproven (Fisher p = 0.982), but only the raw value
-/// lets it be recorded as `Pvalue` ("no evidence") rather than `OddsRatio`
+/// lets `faba qc` drop it as `pvalue` ("no evidence") rather than `log_odds`
 /// ("no effect"). Use [`log_odds_ratio_woolf`] when a finite, writable estimate
 /// is wanted; never for a decision.
 ///

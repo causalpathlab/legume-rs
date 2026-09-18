@@ -45,31 +45,24 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
 
     let n_steps = 5;
 
-    // Step 0: SNP genotyping (de novo discovery + optional known sites).
-    // VAF filtering prevents masking true RNA editing sites from de novo variants.
-    let snp_mask = if !args.skip_snp {
+    // Step 0: SNP genotyping (de novo discovery + optional known sites). Its
+    // outputs stand alone; no later step consumes them as a mask.
+    if !args.skip_snp {
         info!("Step 0/{}: SNP genotyping", n_steps);
         match run_snp_step(args) {
-            Ok(mask) => {
-                info!("SNP complete: {} variant positions in mask", mask.len());
-                Some(mask)
-            }
-            Err(e) => {
-                log::warn!("SNP step failed: {}. Continuing without SNP mask.", e);
-                None
-            }
+            Ok(()) => info!("SNP complete"),
+            Err(e) => log::warn!("SNP step failed: {}. Continuing.", e),
         }
     } else {
         info!("Step 0/{}: SKIPPED (--skip-snp)", n_steps);
-        None
-    };
+    }
 
-    // Step 1: Gene Expression Filtering
-    let gene_count_qc = if !args.skip_genes {
-        info!("Step 1/{}: Gene expression filtering", n_steps);
+    // Step 1: gene counting and cell calling
+    let gene_count_qc = if !args.skip_count {
+        info!("Step 1/{}: gene counting and cell calling", n_steps);
         run_gene_counting_step(args)?
     } else {
-        info!("Step 1/{}: SKIPPED (--skip-genes)", n_steps);
+        info!("Step 1/{}: SKIPPED (--skip-count)", n_steps);
         None
     };
 
@@ -88,32 +81,20 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     }
 
     // Step 3: ATOI Detection
-    let atoi_mask = if !args.skip_atoi {
+    if !args.skip_atoi {
         info!("Step 3/{}: ATOI detection", n_steps);
-        match run_atoi_step(args, &gene_count_qc, &snp_mask) {
-            Ok(mask_data) => {
-                info!(
-                    "ATOI complete: {} sites, {} mask positions",
-                    mask_data.n_sites,
-                    mask_data.mask.len()
-                );
-                Some(mask_data)
-            }
-            Err(e) => {
-                log::warn!("ATOI step failed: {}. Continuing without mask.", e);
-                None
-            }
+        match run_atoi_step(args, &gene_count_qc) {
+            Ok(n_sites) => info!("ATOI complete: {} putative sites", n_sites),
+            Err(e) => log::warn!("ATOI step failed: {}. Continuing.", e),
         }
     } else {
         info!("Step 3/{}: SKIPPED (--skip-atoi)", n_steps);
-        None
-    };
+    }
 
     // Step 4: m6A (DART) detection — WT-vs-MUT contrast at motif Cs (signal arm =
     // positional BAMs minus --control-bam, tested against the pooled control).
-    // m6A discovery uses only the SNP + ATOI masks (NOT APA), so it runs BEFORE
-    // the heavy APA EM — the fast modalities all finish first. Requires a
-    // control; skipped (not failed) when none is supplied.
+    // It runs BEFORE the heavy APA EM so the fast modalities all finish first.
+    // Requires a control; skipped (not failed) when none is supplied.
     if args.control_bam_files.is_empty() {
         info!(
             "Step 4/{}: SKIPPED (m6A needs --control-bam for the WT-vs-MUT contrast)",
@@ -121,7 +102,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
         );
     } else {
         info!("Step 4/{}: m6A detection", n_steps);
-        match run_dart_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
+        match run_dart_step(args, &gene_count_qc) {
             Ok(_) => info!("m6A complete"),
             Err(e) => log::warn!("m6A step failed: {}", e),
         }
@@ -131,7 +112,7 @@ pub fn run_pipeline(args: &PipelineArgs) -> anyhow::Result<()> {
     // fast modalities (genes / depth / ATOI / m6A) that downstream work needs first.
     if !args.skip_apa {
         info!("Step 5/{}: APA analysis", n_steps);
-        match run_apa_step(args, &atoi_mask, &snp_mask, &gene_count_qc) {
+        match run_apa_step(args, &gene_count_qc) {
             Ok(_) => info!("APA complete"),
             Err(e) => log::warn!("APA step failed: {}", e),
         }
