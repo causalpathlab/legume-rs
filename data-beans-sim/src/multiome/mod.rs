@@ -242,9 +242,10 @@ pub struct MultiomeArgs {
     pub backend: SparseIoBackend,
 
     #[arg(
-        long,
-        default_value_t = false,
-        help = "Write `.zarr.zip` archive instead of `.zarr` directory"
+        long = "no-zip",
+        default_value_t = true,
+        action = clap::ArgAction::SetFalse,
+        help = "Write a plain `.zarr` directory instead of the default `.zarr.zip` archive"
     )]
     pub zip: bool,
 
