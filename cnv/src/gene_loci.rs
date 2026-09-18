@@ -159,8 +159,22 @@ mod tests {
 
     fn index() -> GeneLocusIndex {
         let records = vec![
-            rec("ENSG1", "TP53", "chr17", 7_661_779, 7_687_538, Strand::Backward),
-            rec("ENSG2", "MYC", "chr8", 127_735_434, 127_742_951, Strand::Forward),
+            rec(
+                "ENSG1",
+                "TP53",
+                "chr17",
+                7_661_779,
+                7_687_538,
+                Strand::Backward,
+            ),
+            rec(
+                "ENSG2",
+                "MYC",
+                "chr8",
+                127_735_434,
+                127_742_951,
+                Strand::Forward,
+            ),
         ];
         let map = GffRecordMap::from_map(
             genomic_data::gff::build_gene_map(&records, Some(&FeatureType::Gene)).unwrap(),
@@ -176,26 +190,42 @@ mod tests {
         assert_eq!(idx.resolve("ENSG1.12").unwrap().symbol.as_ref(), "TP53");
         assert_eq!(idx.resolve("ENSG1_TP53").unwrap().symbol.as_ref(), "TP53");
         assert_eq!(
-            idx.resolve("ENSGX_MYC/count/spliced").unwrap().gene_id.as_ref(),
+            idx.resolve("ENSGX_MYC/count/spliced")
+                .unwrap()
+                .gene_id
+                .as_ref(),
             "ENSG2"
         );
         // Canonical matcher: case-insensitive, and an ENSG row whose symbol
         // moved between HGNC releases still lands on the same locus.
         assert_eq!(idx.resolve("tp53").unwrap().gene_id.as_ref(), "ENSG1");
-        assert_eq!(idx.resolve("ENSG1.12_TP53").unwrap().symbol.as_ref(), "TP53");
+        assert_eq!(
+            idx.resolve("ENSG1.12_TP53").unwrap().symbol.as_ref(),
+            "TP53"
+        );
         assert!(idx.resolve("NOPE").is_none());
     }
 
     #[test]
     fn hgnc_alias_resolves_through_canonical_matcher() {
-        let records = vec![rec("ENSG9", "H4C3", "chr6", 26_104_000, 26_104_900, Strand::Forward)];
+        let records = vec![rec(
+            "ENSG9",
+            "H4C3",
+            "chr6",
+            26_104_000,
+            26_104_900,
+            Strand::Forward,
+        )];
         let map = GffRecordMap::from_map(
             genomic_data::gff::build_gene_map(&records, Some(&FeatureType::Gene)).unwrap(),
         );
         let idx = GeneLocusIndex::from_record_map(&map);
         // Old HGNC name in the matrix, new one in the GFF.
         assert_eq!(idx.resolve("HIST1H4C").unwrap().gene_id.as_ref(), "ENSG9");
-        assert_eq!(idx.resolve("ENSGZ_HIST1H4C").unwrap().gene_id.as_ref(), "ENSG9");
+        assert_eq!(
+            idx.resolve("ENSGZ_HIST1H4C").unwrap().gene_id.as_ref(),
+            "ENSG9"
+        );
     }
 
     #[test]
