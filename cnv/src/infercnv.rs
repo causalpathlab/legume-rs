@@ -70,10 +70,7 @@ pub fn infercnv_signal(
 ///
 /// `ref_cols` empty ⇒ mean over all columns. Non-finite entries are ignored
 /// in the mean; a gene with no finite reference values yields 0.
-pub fn subtract_reference(
-    expr: &DMatrix<f32>,
-    ref_cols: &[usize],
-) -> anyhow::Result<DMatrix<f32>> {
+pub fn subtract_reference(expr: &DMatrix<f32>, ref_cols: &[usize]) -> anyhow::Result<DMatrix<f32>> {
     let g = expr.nrows();
     let n = expr.ncols();
     if ref_cols.iter().any(|&j| j >= n) {

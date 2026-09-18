@@ -42,8 +42,5 @@ fn a_fit_recorded_before_the_opt_out_existed_still_carries() {
 #[test]
 fn cnv_clones_flag_parses() {
     let cli = Cli::try_parse_from(["senna", "--cnv-clones", "x.clones.tsv.gz"]).unwrap();
-    assert_eq!(
-        cli.collapse.cnv_clones.as_deref(),
-        Some("x.clones.tsv.gz")
-    );
+    assert_eq!(cli.collapse.cnv_clones.as_deref(), Some("x.clones.tsv.gz"));
 }

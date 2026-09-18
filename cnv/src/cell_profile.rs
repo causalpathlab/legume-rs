@@ -26,6 +26,7 @@ use crate::gene_loci::GeneLocus;
 use crate::genome_order::{GenePosition, GenomeOrder};
 use crate::infercnv::{smooth_ordered, InferCnvConfig};
 
+use data_beans::sparse_data_visitors::styled_progress_bar;
 use data_beans::sparse_io::{create_sparse_streaming_empty, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans::zarr_io::{finalize_output, prepare_output};
@@ -131,6 +132,7 @@ pub fn reference_stats(
         0,
         Some(cfg.block_size.max(1)),
     );
+    let bar = styled_progress_bar(blocks.len() as u64, "reference blocks");
     for (lb, ub) in blocks {
         let csc = data.read_columns_csc(ref_cols[lb..ub].iter().copied())?;
         let depths = column_depths(&csc);
@@ -158,7 +160,9 @@ pub fn reference_stats(
             );
         raw_sum.iter_mut().zip(&r).for_each(|(a, b)| *a += b);
         log_sum.iter_mut().zip(&l).for_each(|(a, b)| *a += b);
+        bar.inc(1);
     }
+    bar.finish_and_clear();
     Ok(ReferenceStats {
         n_cells: ref_cols.len(),
         raw_sum,
@@ -399,9 +403,7 @@ pub fn profile_block(
                     return;
                 }
                 let m = buf.len() / 2;
-                let med = *buf
-                    .select_nth_unstable_by(m, |a, b| a.total_cmp(b))
-                    .1;
+                let med = *buf.select_nth_unstable_by(m, |a, b| a.total_cmp(b)).1;
                 for v in col.iter_mut() {
                     *v -= med;
                 }
@@ -479,7 +481,6 @@ pub fn run_cell_profiles(
             0,
             Some(cfg.block_size.max(1)),
         );
-        let n_blocks = blocks.len();
         let max_block = blocks.iter().map(|(lb, ub)| ub - lb).max().unwrap_or(0);
         // Dense output: every block tiles the same row indices and the same
         // column pointers. Build once at the largest block size; slice per
@@ -490,8 +491,9 @@ pub fn run_cell_profiles(
         let colptr_full: Vec<u64> = (0..max_block as u64).map(|j| j * n_rows as u64).collect();
         let inv_n_rows = 1.0 / (n_rows.max(1) as f32);
 
+        let bar = styled_progress_bar(blocks.len() as u64, "query blocks");
         let mut nnz_offset = 0u64;
-        for (b, (lb, ub)) in blocks.into_iter().enumerate() {
+        for (lb, ub) in blocks {
             let cols = &query_cols[lb..ub];
             let csc = data.read_columns_csc(cols.iter().copied())?;
             let (block, depths) = profile_block(&csc, &feats, cfg);
@@ -515,13 +517,15 @@ pub fn run_cell_profiles(
                 block.as_slice(),
             )?;
             nnz_offset += (n_rows * n_block) as u64;
-            log::info!("block {}/{}: cells {}..{}", b + 1, n_blocks, lb, ub);
+            bar.inc(1);
         }
+        bar.finish_and_clear();
 
         out.finalize_streaming_csc()?;
-        out.build_csr_from_csc_streaming()?;
+        // CSC-only: canna never reads `/by_row` (rebuild CSR if a row-wise API needs it).
         out.register_row_names_vec(&feats.row_names);
-        let query_names: Vec<Box<str>> = query_cols.iter().map(|&c| cell_names[c].clone()).collect();
+        let query_names: Vec<Box<str>> =
+            query_cols.iter().map(|&c| cell_names[c].clone()).collect();
         out.register_column_names_vec(&query_names);
     }
     let backend_path = finalize_output(&working_file, &effective_out)?.to_string();
@@ -626,7 +630,10 @@ mod tests {
         let st = ReferenceStats {
             n_cells: 1,
             raw_sum: counts.to_vec(),
-            log_sum: counts.iter().map(|&x| log_norm(x, depth, cfg.scale)).collect(),
+            log_sum: counts
+                .iter()
+                .map(|&x| log_norm(x, depth, cfg.scale))
+                .collect(),
         };
         let f = GenomeFeatures::build(&loci, &st, &cfg).unwrap();
         let dense = DMatrix::from_column_slice(3, 1, &counts);

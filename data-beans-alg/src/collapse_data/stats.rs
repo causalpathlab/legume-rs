@@ -255,10 +255,10 @@ fn optimize_block(
         let n_bs = &stat.n_bs;
         let w_bs = &stat.matched_bs;
         let own_plus_src = n_bs + w_bs; // [b × s] — full mass for update_mu
-        // δ's observed side: optionally drop unmatched (no counterfactual)
-        // samples so private-clone mass cannot pull the batch fold.
-        // `n_bs_d` is the matched-own mass that also votes in `pin_delta_scale`
-        // (same basis as unstratified `frame_weights()` — own mass only).
+                                        // δ's observed side: optionally drop unmatched (no counterfactual)
+                                        // samples so private-clone mass cannot pull the batch fold.
+                                        // `n_bs_d` is the matched-own mass that also votes in `pin_delta_scale`
+                                        // (same basis as unstratified `frame_weights()` — own mass only).
         let (obs_db_for_delta, own_plus_src_for_delta, n_bs_d) =
             if stat.exclude_unmatched_from_delta {
                 let mut obs = stat.observed_sum_db.clone();
@@ -286,7 +286,11 @@ fn optimize_block(
                 let own_plus = &n_bs_d + w_bs;
                 (obs, own_plus, n_bs_d)
             } else {
-                (stat.observed_sum_db.clone(), own_plus_src.clone(), n_bs.clone())
+                (
+                    stat.observed_sum_db.clone(),
+                    own_plus_src.clone(),
+                    n_bs.clone(),
+                )
             };
         let obs_plus_imp = &stat.observed_sum_ds + &stat.imputed_sum_ds;
         // Fraction of each (gene, sample)'s mass whose source measures the gene;
@@ -356,8 +360,7 @@ fn optimize_block(
             imp_share.zip_apply(&stat.imputed_sum_ds, |z, x| {
                 *z = if *z > 0.0 { x / *z } else { 0.0 };
             });
-            let mut num_db =
-                &obs_db_for_delta + (&imp_share * &w_bs_t).component_mul(&delta_gb);
+            let mut num_db = &obs_db_for_delta + (&imp_share * &w_bs_t).component_mul(&delta_gb);
             let mu_frac_ref: &DMatrix<f32> = match obs_frac.as_ref() {
                 Some(f) => {
                     mu_frac.copy_from(mu_ds);

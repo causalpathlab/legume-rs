@@ -3,9 +3,7 @@
 //! only on matched (typically stratum-0) mass.
 use data_beans::sparse_io::create_sparse_from_triplets;
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::collapse_data::{
-    collapse_columns_multilevel_with_strata, MultilevelParams,
-};
+use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_strata, MultilevelParams};
 use data_beans_alg::random_projection::RandProjOps;
 use matrix_param::traits::Inference;
 use rustc_hash::FxHashSet;
@@ -30,7 +28,14 @@ fn clone_profile(i: usize) -> Vec<f32> {
         .collect()
 }
 
-fn cohort(tag: &str) -> (SparseIoVec, Vec<&'static str>, Vec<usize>, tempfile::TempDir) {
+fn cohort(
+    tag: &str,
+) -> (
+    SparseIoVec,
+    Vec<&'static str>,
+    Vec<usize>,
+    tempfile::TempDir,
+) {
     // 40 diploid A, 40 clone A, 40 diploid B (1.5× platform).
     let mut cols: Vec<Vec<f32>> = Vec::new();
     let mut batches: Vec<&'static str> = Vec::new();
@@ -100,10 +105,7 @@ fn params() -> MultilevelParams {
     }
 }
 
-fn pb_sets(
-    c2g: &[usize],
-    stratum: &[usize],
-) -> (FxHashSet<usize>, FxHashSet<usize>) {
+fn pb_sets(c2g: &[usize], stratum: &[usize]) -> (FxHashSet<usize>, FxHashSet<usize>) {
     let mut bucket = FxHashSet::default();
     let mut clone = FxHashSet::default();
     for (c, &s) in stratum.iter().enumerate() {
@@ -117,11 +119,7 @@ fn pb_sets(
 }
 
 /// Mean of `mat[(g, p)]` over genes in `genes` and pb-samples in `pbs`.
-fn gene_mean(
-    mat: &nalgebra::DMatrix<f32>,
-    pbs: &FxHashSet<usize>,
-    genes: &[usize],
-) -> f32 {
+fn gene_mean(mat: &nalgebra::DMatrix<f32>, pbs: &FxHashSet<usize>, genes: &[usize]) -> f32 {
     if pbs.is_empty() {
         return 0.0;
     }
@@ -143,14 +141,8 @@ fn private_clone_cells_never_share_a_pb_sample_with_the_bucket() {
         .project_columns_with_batch_correction(4, None, Some(&batches))
         .expect("proj")
         .proj;
-    let out = collapse_columns_multilevel_with_strata(
-        &mut v,
-        &proj,
-        &batches,
-        &params(),
-        &stratum,
-    )
-    .expect("collapse");
+    let out = collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &params(), &stratum)
+        .expect("collapse");
     let c2g = &out.cell_to_pb_per_level[0];
     let mut bucket: FxHashSet<usize> = FxHashSet::default();
     let mut clone: FxHashSet<usize> = FxHashSet::default();
@@ -175,14 +167,8 @@ fn mixable_bucket_still_estimates_delta_across_donors() {
         .project_columns_with_batch_correction(4, None, Some(&batches))
         .expect("proj")
         .proj;
-    let out = collapse_columns_multilevel_with_strata(
-        &mut v,
-        &proj,
-        &batches,
-        &params(),
-        &stratum,
-    )
-    .expect("collapse");
+    let out = collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &params(), &stratum)
+        .expect("collapse");
     let delta = out.levels[0]
         .delta
         .as_ref()
@@ -208,14 +194,8 @@ fn private_program_in_mu_adjusted_residual_is_batch_fold() {
         .project_columns_with_batch_correction(4, None, Some(&batches))
         .expect("proj")
         .proj;
-    let out = collapse_columns_multilevel_with_strata(
-        &mut v,
-        &proj,
-        &batches,
-        &params(),
-        &stratum,
-    )
-    .expect("collapse");
+    let out = collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &params(), &stratum)
+        .expect("collapse");
     let (bucket_pb, clone_pb) = pb_sets(&out.cell_to_pb_per_level[0], &stratum);
     assert!(!clone_pb.is_empty());
 
@@ -246,8 +226,12 @@ fn private_program_in_mu_adjusted_residual_is_batch_fold() {
         .expect("batch A");
     let ratio = |g: usize| delta[(g, 0)].max(1e-6) / delta[(g, 1)].max(1e-6);
     let house_log = (0..6).map(ratio).fold(0.0f32, |a, r| a + r.ln().abs()) / 6.0;
-    let novel_log =
-        (NOVEL.iter().copied().map(ratio).fold(0.0f32, |a, r| a + r.ln().abs())) / 2.0;
+    let novel_log = (NOVEL
+        .iter()
+        .copied()
+        .map(ratio)
+        .fold(0.0f32, |a, r| a + r.ln().abs()))
+        / 2.0;
     assert!(
         novel_log < house_log + 1.0,
         "private genes absorbed as δ: novel={novel_log} house={house_log}"
@@ -311,16 +295,8 @@ fn without_strata_private_program_leaks_into_delta_and_residual() {
         &pure_clone
     };
 
-    let mu_adj = out.levels[0]
-        .mu_adjusted
-        .as_ref()
-        .unwrap()
-        .posterior_mean();
-    let resid = out.levels[0]
-        .mu_residual
-        .as_ref()
-        .unwrap()
-        .posterior_mean();
+    let mu_adj = out.levels[0].mu_adjusted.as_ref().unwrap().posterior_mean();
+    let resid = out.levels[0].mu_residual.as_ref().unwrap().posterior_mean();
     let delta = out.levels[0].delta.as_ref().unwrap().posterior_mean();
 
     let adj_nh = novel_over_house(mu_adj, pbs);
@@ -340,8 +316,12 @@ fn without_strata_private_program_leaks_into_delta_and_residual() {
     // genes pick up a different A/B fold (program leaked into δ).
     let ratio = |g: usize| delta[(g, 0)].max(1e-6) / delta[(g, 1)].max(1e-6);
     let house_r = (0..6).map(ratio).fold(0.0f32, |a, r| a + r.ln()) / 6.0;
-    let novel_r =
-        (NOVEL.iter().copied().map(ratio).fold(0.0f32, |a, r| a + r.ln())) / 2.0;
+    let novel_r = (NOVEL
+        .iter()
+        .copied()
+        .map(ratio)
+        .fold(0.0f32, |a, r| a + r.ln()))
+        / 2.0;
     assert!(
         (house_r - novel_r).abs() > 0.3,
         "expected δ A/B to disagree on novel vs housekeeping without strata: \
@@ -359,10 +339,9 @@ fn a_single_stratum_matches_unstratified_hierarchy() {
         .proj;
     let all_zero = vec![0usize; n];
     let p = params();
-    let out_strata = collapse_columns_multilevel_with_strata(
-        &mut v, &proj, &batches, &p, &all_zero,
-    )
-    .expect("strata");
+    let out_strata =
+        collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &p, &all_zero)
+            .expect("strata");
     let out_none = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
         &mut v, &proj, &batches, &p,
     )
@@ -389,10 +368,8 @@ fn strata_none_path_still_produces_delta() {
     )
     .expect("collapse");
     let all_zero = vec![0usize; n];
-    let out_zero = collapse_columns_multilevel_with_strata(
-        &mut v, &proj, &batches, &p, &all_zero,
-    )
-    .expect("all-zero strata");
+    let out_zero = collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &p, &all_zero)
+        .expect("all-zero strata");
     let map = assert_partitions_equal_up_to_relabel(
         &out_none.cell_to_pb_per_level[0],
         &out_zero.cell_to_pb_per_level[0],
@@ -463,8 +440,16 @@ fn assert_collapsed_means_agree(
         }
     };
     check("mu_observed", Some(&a.mu_observed), Some(&b.mu_observed));
-    check("mu_adjusted", a.mu_adjusted.as_ref(), b.mu_adjusted.as_ref());
-    check("mu_residual", a.mu_residual.as_ref(), b.mu_residual.as_ref());
+    check(
+        "mu_adjusted",
+        a.mu_adjusted.as_ref(),
+        b.mu_adjusted.as_ref(),
+    );
+    check(
+        "mu_residual",
+        a.mu_residual.as_ref(),
+        b.mu_residual.as_ref(),
+    );
     // δ is [genes × batches] — no group axis; compare directly.
     match (a.delta.as_ref(), b.delta.as_ref()) {
         (None, None) => {}
@@ -486,4 +471,3 @@ fn assert_collapsed_means_agree(
         _ => panic!("delta: one side missing"),
     }
 }
-
