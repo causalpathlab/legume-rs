@@ -48,9 +48,9 @@ mod pb_tree;
 pub use pb_tree::{BelowEdge, ContrastGene, PbTree, PbTreeParams, RootRecord, SplitRecord};
 mod refine;
 use refine::{
-    compute_fine_to_coarse_mapping, compute_level_sort_dims, fine_to_coarse_from_refined,
-    pad_numeric_labels, refine_and_collect_single_layer, refine_and_collect_stack,
-    split_anchored_finest_groups, RefineCollectCtx,
+    compute_level_sort_dims, fine_to_coarse_from_refined, pad_numeric_labels,
+    refine_and_collect_single_layer, refine_and_collect_stack, split_anchored_finest_groups,
+    RefineCollectCtx,
 };
 mod stats;
 use stats::{
@@ -76,9 +76,10 @@ pub struct MultilevelParams {
     pub num_levels: usize,
     pub sort_dim: usize,
     pub num_opt_iter: usize,
-    /// Opt-in BBKNN + Poisson DC-SBM refinement on top of the hash
-    /// partition. `None` preserves legacy behavior.
-    pub refine: Option<crate::refine_multilevel::RefineParams>,
+    /// BBKNN + Poisson DC-SBM refinement on top of the hash partition.
+    /// Zero sweeps (`num_gibbs == 0 && num_greedy == 0`) keep the hash
+    /// partition as is.
+    pub refine: crate::refine_multilevel::RefineParams,
     /// Which posterior planes the *output* `CollapsedOut` should carry.
     /// `MeanOnly` skips the sd / log_mean / log_sd allocations entirely —
     /// a big memory win for consumers that only read `posterior_mean()`
@@ -139,7 +140,7 @@ impl MultilevelParams {
             num_levels: DEFAULT_NUM_LEVELS,
             sort_dim: proj_dim.min(12),
             num_opt_iter: DEFAULT_OPT_ITER,
-            refine: Some(crate::refine_multilevel::RefineParams::default()),
+            refine: crate::refine_multilevel::RefineParams::default(),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
@@ -728,11 +729,7 @@ pub trait MultilevelCollapsingOps {
 /// Same as `SparseIoVec::collapse_columns_multilevel_vec`, but also returns
 /// the per-level cell → pb mapping needed for hierarchical / nested
 /// chain sampling in downstream consumers (currently
-/// `graph-embedding-util`). Requires `MultilevelParams.refine` to be
-/// `Some(..)` — the legacy non-refinement path doesn't currently
-/// surface the per-level partition structure. Rather than silently
-/// returning an empty hierarchy, we error so callers can't be misled
-/// into walking an empty tree.
+/// `graph-embedding-util`).
 pub fn collapse_columns_multilevel_with_hierarchy<T>(
     data_vec: &mut SparseIoVec,
     proj_kn: &DMatrix<f32>,
@@ -767,13 +764,7 @@ where
         .ok_or_else(|| anyhow::anyhow!("columns not assigned"))?
         .clone();
 
-    let refine_params = params.refine.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "collapse_columns_multilevel_with_hierarchy requires \
-             MultilevelParams.refine = Some(..); the legacy non-refinement path \
-             doesn't surface per-level cell→pb mappings"
-        )
-    })?;
+    let refine_params = &params.refine;
 
     let anchor_batches =
         resolve_named_batches(data_vec, "anchor", params.anchor_batches.as_deref())?;
@@ -1123,7 +1114,6 @@ impl MultilevelCollapsingOps for SparseIoVec {
             tree: pb_tree,
             strata_bits,
         } = finest_codes(self, proj_kn, &level_dims, params)?;
-        let finest_dim = level_dims[0];
 
         // Partition at finest level
         self.assign_groups(&fine_codes, None);
@@ -1132,149 +1122,39 @@ impl MultilevelCollapsingOps for SparseIoVec {
             .take_grouped_columns()
             .ok_or(anyhow::anyhow!("columns not assigned"))?
             .clone();
-        let num_groups = group_to_cols.len();
 
         ////////////////////////////////////////////////////////////////////
         // Opt-in refinement path: BBKNN + Poisson DC-SBM over pb-samples //
         ////////////////////////////////////////////////////////////////////
 
-        if let Some(refine_params) = params.refine.as_ref() {
-            let anchor_batches =
-                resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
-            let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
-            ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
-            let summary_batches = anchor_batches.clone();
-            let anchor_batches =
-                greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
-            let ctx = RefineCollectCtx {
-                fine_codes: &fine_codes,
-                group_to_cols_finest: &group_to_cols,
-                level_dims: &level_dims,
-                num_features,
-                num_batches,
-                knn,
-                opt_iter,
-                refine_params,
-                output_calibration: params.output_calibration,
-                anchor_batches: anchor_batches.as_deref(),
-                summary_batches: summary_batches.as_deref(),
-                bulk_batches: bulk_batches.as_deref(),
-                observe_panels: params.observe_panels,
-                keep_finest_stats: params.keep_finest_stats,
-                pb_tree: pb_tree.as_ref(),
-                cell_to_stratum: params.strata.as_deref(),
-                exclude_unmatched_from_delta: params.strata.is_some(),
-                strata_bits,
-            };
-            return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
-        }
-
-        // Collect statistics at finest level
-        let mut fine_stat = CollapsedStat::new(num_features, num_groups, num_batches);
-        fine_stat.exclude_unmatched_from_delta = params.strata.is_some();
-
-        info!(
-            "Level 1/{}: sort_dim={}, {} groups (finest)",
-            level_dims.len(),
-            finest_dim,
-            num_groups
-        );
-        self.collect_basic_stat(&mut fine_stat)?;
-
-        // Batch correction: pb-sample matching across batches
-        if num_batches >= 2 {
-            self.collect_batch_stat(&mut fine_stat)?;
-
-            info!("Building pb-samples ...");
-            let anchor_batches =
-                resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
-            let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
-            ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
-            let summary_batches = anchor_batches.clone();
-            let anchor_batches =
-                greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
-            let pb_samples = build_pb_samples(
-                self,
-                proj_kn,
-                num_features,
-                summary_batches.as_deref().unwrap_or(&[]),
-                bulk_batches.as_deref().unwrap_or(&[]),
-                params.strata.as_deref(),
-            )?;
-            info!(
-                "Built {} pb-samples, matching with knn={} ...",
-                pb_samples.layout.cell_counts.len(),
-                knn
-            );
-            let batch_knn = self
-                .batch_knn_lookup()
-                .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
-            collect_matched_stat_coarse(
-                &pb_samples.layout,
-                &pb_samples.gene_sums,
-                &pb_samples.layout.pb_sample_to_group,
-                batch_knn.as_slice(),
-                knn,
-                anchor_batches.as_deref(),
-                &mut fine_stat,
-            )?;
-        }
-        if params.observe_panels {
-            attach_observability(&mut fine_stat, self)?;
-        }
-
-        // Optimize finest level
-        let result = optimize(
-            &fine_stat,
-            (1.0, 1.0),
+        let refine_params = &params.refine;
+        let anchor_batches =
+            resolve_named_batches(self, "anchor", params.anchor_batches.as_deref())?;
+        let bulk_batches = resolve_named_batches(self, "bulk", params.bulk_batches.as_deref())?;
+        ensure_disjoint_roles(anchor_batches.as_deref(), bulk_batches.as_deref())?;
+        let summary_batches = anchor_batches.clone();
+        let anchor_batches = greedy_anchor_for_bulk(self, anchor_batches, bulk_batches.as_deref());
+        let ctx = RefineCollectCtx {
+            fine_codes: &fine_codes,
+            group_to_cols_finest: &group_to_cols,
+            level_dims: &level_dims,
+            num_features,
+            num_batches,
+            knn,
             opt_iter,
-            &format!("Fit L1/{}", level_dims.len()),
-            CalibrateTarget::All,
-            false,
-        )?;
-        let mut results = vec![result];
-
-        // Agglomeratively merge for coarser levels
-        let mut prev_stat = fine_stat;
-        let mut prev_group_to_cols = group_to_cols.clone();
-
-        for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
-            let level_opt_iter = (opt_iter / 2).max(10);
-
-            let (fine_to_coarse, num_coarse) =
-                compute_fine_to_coarse_mapping(&prev_group_to_cols, &fine_codes, level_sort_dim);
-
-            info!(
-                "Level {}/{}: sort_dim={}, {} groups (merged from {})",
-                level + 1,
-                level_dims.len(),
-                level_sort_dim,
-                num_coarse,
-                prev_stat.num_samples(),
-            );
-
-            let coarse_stat = merge_stat(&prev_stat, &fine_to_coarse, num_coarse);
-
-            let coarse_result = optimize(
-                &coarse_stat,
-                (1.0, 1.0),
-                level_opt_iter,
-                &format!("Fit L{}/{}", level + 1, level_dims.len()),
-                CalibrateTarget::All,
-                false,
-            )?;
-            results.push(coarse_result);
-
-            let mut coarse_group_to_cols = vec![vec![]; num_coarse];
-            for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
-                coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);
-            }
-
-            prev_stat = coarse_stat;
-            prev_group_to_cols = coarse_group_to_cols;
-        }
-
-        Ok(results)
+            refine_params,
+            output_calibration: params.output_calibration,
+            anchor_batches: anchor_batches.as_deref(),
+            summary_batches: summary_batches.as_deref(),
+            bulk_batches: bulk_batches.as_deref(),
+            observe_panels: params.observe_panels,
+            keep_finest_stats: params.keep_finest_stats,
+            pb_tree: pb_tree.as_ref(),
+            cell_to_stratum: params.strata.as_deref(),
+            exclude_unmatched_from_delta: params.strata.is_some(),
+            strata_bits,
+        };
+        refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels)
     }
 }
 
@@ -1326,292 +1206,52 @@ impl MultilevelCollapsingOps for SparseIoStack {
             }
         }
 
-        // Build col_to_batch from the first layer (shared across all layers)
         let ncols = proj_kn.ncols();
-        let col_to_batch: Vec<usize> = self.stack[0].get_batch_membership(0..ncols);
-
-        // Opt-in refinement path for the stack.
-        if let Some(refine_params) = params.refine.as_ref() {
-            let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-            let finest_dim = level_dims[0];
-            let kk = proj_kn.nrows().min(finest_dim).min(ncols);
-            let codes = binary_sort_columns(proj_kn, kk)?;
-            let (fine_codes, level_dims, strata_bits) = match params.strata.as_deref() {
-                Some(strata) => {
-                    let (c, d, s) = apply_strata_to_codes(&codes, &level_dims, strata)?;
-                    (c, d, s)
-                }
-                None => (codes, level_dims, 0),
-            };
-            for layer in self.stack.iter_mut() {
-                layer.assign_groups(&fine_codes, None);
-            }
-            let group_to_cols = self.stack[0]
-                .take_grouped_columns()
-                .ok_or(anyhow::anyhow!("columns not assigned"))?
-                .clone();
-            let num_features = self.stack[0].num_rows();
-            anyhow::ensure!(
-                params.anchor_batches.is_none() && params.bulk_batches.is_none(),
-                "anchor_batches / bulk_batches are not supported on the stack path — nothing \
-                 produces a carried reference or bulk input for stacked modalities"
-            );
-            let ctx = RefineCollectCtx {
-                fine_codes: &fine_codes,
-                group_to_cols_finest: &group_to_cols,
-                level_dims: &level_dims,
-                num_features,
-                num_batches,
-                knn,
-                opt_iter,
-                refine_params,
-                output_calibration: params.output_calibration,
-                anchor_batches: None,
-                summary_batches: None,
-                bulk_batches: None,
-                observe_panels: false,
-                keep_finest_stats: false,
-                pb_tree: None,
-                cell_to_stratum: params.strata.as_deref(),
-                exclude_unmatched_from_delta: params.strata.is_some(),
-                strata_bits,
-            };
-            return refine_and_collect_stack(self, proj_kn, &ctx);
-        }
-
-        if num_batches < 2 {
-            // No batch effects — multi-level collapsing without batch correction
-            let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-
-            info!(
-                "Multi-level stack collapsing (no batch): {} levels, sort_dims={:?}",
-                level_dims.len(),
-                level_dims,
-            );
-
-            // Partition at finest level
-            let finest_dim = level_dims[0];
-            let kk = proj_kn.nrows().min(finest_dim).min(ncols);
-            let fine_codes = binary_sort_columns(proj_kn, kk)?;
-
-            for layer in self.stack.iter_mut() {
-                layer.assign_groups(&fine_codes, None);
-            }
-
-            let group_to_cols = self.stack[0]
-                .take_grouped_columns()
-                .ok_or(anyhow::anyhow!("columns not assigned"))?;
-
-            // Finest level stats
-            let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
-            let mut layer_results = Vec::with_capacity(num_layers);
-            for (d, layer) in self.stack.iter().enumerate() {
-                let num_features = layer.num_rows();
-                let num_groups = group_to_cols.len();
-                let mut stat = CollapsedStat::new(num_features, num_groups, 0);
-                layer.collect_basic_stat(&mut stat)?;
-                layer_results.push(optimize(
-                    &stat,
-                    (1.0, 1.0),
-                    opt_iter,
-                    &format!("Fit L1/{} layer {}/{}", level_dims.len(), d + 1, num_layers),
-                    CalibrateTarget::All,
-                    false,
-                )?);
-                fine_stats.push(stat);
-            }
-
-            let mut results = vec![layer_results];
-
-            // Agglomeratively merge for coarser levels
-            let mut prev_stats = fine_stats;
-            let mut prev_group_to_cols = group_to_cols.clone();
-
-            for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
-                let level_opt_iter = (opt_iter / 2).max(10);
-                let (fine_to_coarse, num_coarse) = compute_fine_to_coarse_mapping(
-                    &prev_group_to_cols,
-                    &fine_codes,
-                    level_sort_dim,
-                );
-
-                let mut layer_results = Vec::with_capacity(num_layers);
-                let mut coarse_stats = Vec::with_capacity(num_layers);
-                for (d, prev_stat) in prev_stats.iter().enumerate() {
-                    let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, num_coarse);
-                    layer_results.push(optimize(
-                        &coarse_stat,
-                        (1.0, 1.0),
-                        level_opt_iter,
-                        &format!(
-                            "Fit L{}/{} layer {}/{}",
-                            level + 1,
-                            level_dims.len(),
-                            d + 1,
-                            num_layers
-                        ),
-                        CalibrateTarget::All,
-                        false,
-                    )?);
-                    coarse_stats.push(coarse_stat);
-                }
-                results.push(layer_results);
-
-                let mut coarse_group_to_cols = vec![vec![]; num_coarse];
-                for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
-                    coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);
-                }
-                prev_stats = coarse_stats;
-                prev_group_to_cols = coarse_group_to_cols;
-            }
-
-            return Ok(results);
-        }
-
-        // Level dims: [finest, ..., coarsest]
+        let refine_params = &params.refine;
         let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-
-        info!(
-            "Multi-level stack collapsing (fine→coarse): {} levels, sort_dims={:?}, {} batches, {} layers",
-            level_dims.len(), level_dims, num_batches, num_layers
-        );
-
-        // Compute binary codes at finest resolution once
         let finest_dim = level_dims[0];
         let kk = proj_kn.nrows().min(finest_dim).min(ncols);
-        let fine_codes = binary_sort_columns(proj_kn, kk)?;
-
-        // Partition all layers at finest level using binary codes
+        let codes = binary_sort_columns(proj_kn, kk)?;
+        let (fine_codes, level_dims, strata_bits) = match params.strata.as_deref() {
+            Some(strata) => {
+                let (c, d, s) = apply_strata_to_codes(&codes, &level_dims, strata)?;
+                (c, d, s)
+            }
+            None => (codes, level_dims, 0),
+        };
         for layer in self.stack.iter_mut() {
             layer.assign_groups(&fine_codes, None);
         }
-
-        // Get group_to_cols from first layer (all layers share the same grouping)
         let group_to_cols = self.stack[0]
             .take_grouped_columns()
-            .ok_or(anyhow::anyhow!("columns not assigned"))?;
-        let num_groups = group_to_cols.len();
-
-        // Build shared pb-sample layout ONCE at finest level
-        info!(
-            "Level 1/{}: sort_dim={}, {} groups (finest — full computation)",
-            level_dims.len(),
-            finest_dim,
-            num_groups
+            .ok_or(anyhow::anyhow!("columns not assigned"))?
+            .clone();
+        let num_features = self.stack[0].num_rows();
+        anyhow::ensure!(
+            params.anchor_batches.is_none() && params.bulk_batches.is_none(),
+            "anchor_batches / bulk_batches are not supported on the stack path — nothing \
+             produces a carried reference or bulk input for stacked modalities"
         );
-        let layout = build_pb_sample_layout(
-            group_to_cols,
-            &col_to_batch,
-            proj_kn,
-            None,
-            &[],
-            &[],
-            params.strata.as_deref(),
-        )?;
-        let num_pb = layout.cell_counts.len();
-        info!("Built {} pb-samples, matching with knn={} ...", num_pb, knn);
-
-        // Collect per-layer stats at finest level (reads all cells ONCE)
-        let mut fine_stats: Vec<CollapsedStat> = Vec::with_capacity(num_layers);
-        let mut layer_results = Vec::with_capacity(num_layers);
-
-        for (d, layer) in self.stack.iter().enumerate() {
-            let num_features = layer.num_rows();
-            let mut stat = CollapsedStat::new(num_features, num_groups, num_batches);
-
-            info!("Layer {}/{}: collecting stats ...", d + 1, num_layers);
-            layer.collect_basic_stat(&mut stat)?;
-            layer.collect_batch_stat(&mut stat)?;
-
-            // Collect layer-specific gene sums
-            let gene_sums =
-                collect_pb_sample_gene_sums(layer, group_to_cols, &layout.cell_to_pbsamp, num_pb)?;
-
-            // Match across batches using shared layout + layer gene sums
-            let batch_knn = layer
-                .batch_knn_lookup()
-                .ok_or_else(|| anyhow::anyhow!("batch_knn_lookup not built"))?;
-            collect_matched_stat_coarse(
-                &layout,
-                &gene_sums,
-                &layout.pb_sample_to_group,
-                batch_knn.as_slice(),
-                knn,
-                // Stack path: anchoring rejected upstream, always pooled.
-                None,
-                &mut stat,
-            )?;
-
-            // Optimize finest-level parameters
-            layer_results.push(optimize(
-                &stat,
-                (1.0, 1.0),
-                opt_iter,
-                &format!("Fit L1/{} layer {}/{}", level_dims.len(), d + 1, num_layers),
-                CalibrateTarget::All,
-                false,
-            )?);
-            fine_stats.push(stat);
-        }
-
-        let mut results = vec![layer_results];
-
-        // Agglomeratively merge for coarser levels
-        let mut prev_stats = fine_stats;
-        let mut prev_group_to_cols = group_to_cols.clone();
-
-        for (level, &level_sort_dim) in level_dims.iter().enumerate().skip(1) {
-            let level_opt_iter = (opt_iter / 2).max(10);
-
-            // Compute merge mapping (shared across layers)
-            let (fine_to_coarse, num_coarse) =
-                compute_fine_to_coarse_mapping(&prev_group_to_cols, &fine_codes, level_sort_dim);
-
-            info!(
-                "Level {}/{}: sort_dim={}, {} groups (merged from {})",
-                level + 1,
-                level_dims.len(),
-                level_sort_dim,
-                num_coarse,
-                prev_stats[0].num_samples(),
-            );
-
-            // Merge and optimize each layer
-            let mut layer_results = Vec::with_capacity(num_layers);
-            let mut coarse_stats = Vec::with_capacity(num_layers);
-
-            for (d, prev_stat) in prev_stats.iter().enumerate() {
-                let coarse_stat = merge_stat(prev_stat, &fine_to_coarse, num_coarse);
-
-                layer_results.push(optimize(
-                    &coarse_stat,
-                    (1.0, 1.0),
-                    level_opt_iter,
-                    &format!(
-                        "Fit L{}/{} layer {}/{}",
-                        level + 1,
-                        level_dims.len(),
-                        d + 1,
-                        num_layers
-                    ),
-                    CalibrateTarget::All,
-                    false,
-                )?);
-                coarse_stats.push(coarse_stat);
-            }
-
-            results.push(layer_results);
-
-            // Build coarse group_to_cols for next iteration
-            let mut coarse_group_to_cols = vec![vec![]; num_coarse];
-            for (fine_g, &coarse_g) in fine_to_coarse.iter().enumerate() {
-                coarse_group_to_cols[coarse_g].extend_from_slice(&prev_group_to_cols[fine_g]);
-            }
-
-            prev_stats = coarse_stats;
-            prev_group_to_cols = coarse_group_to_cols;
-        }
-
-        Ok(results)
+        let ctx = RefineCollectCtx {
+            fine_codes: &fine_codes,
+            group_to_cols_finest: &group_to_cols,
+            level_dims: &level_dims,
+            num_features,
+            num_batches,
+            knn,
+            opt_iter,
+            refine_params,
+            output_calibration: params.output_calibration,
+            anchor_batches: None,
+            summary_batches: None,
+            bulk_batches: None,
+            observe_panels: false,
+            keep_finest_stats: false,
+            pb_tree: None,
+            cell_to_stratum: params.strata.as_deref(),
+            exclude_unmatched_from_delta: params.strata.is_some(),
+            strata_bits,
+        };
+        refine_and_collect_stack(self, proj_kn, &ctx)
     }
 }

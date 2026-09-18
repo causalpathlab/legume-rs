@@ -121,11 +121,11 @@ fn run_pooled() -> (
         num_opt_iter: 30,
         // No refinement sweeps: the hashed partition stands, so the batch
         // indicator above keeps every pseudobulk batch-pure.
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams {
+        refine: data_beans_alg::refine_multilevel::RefineParams {
             num_gibbs: 0,
             num_greedy: 0,
             ..Default::default()
-        }),
+        },
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: None,
         bulk_batches: None,

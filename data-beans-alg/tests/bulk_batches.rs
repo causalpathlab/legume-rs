@@ -140,7 +140,7 @@ fn bulk_composition_does_not_leak_into_delta() {
         num_levels: 1,
         sort_dim: 3,
         num_opt_iter: 30,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: data_beans_alg::refine_multilevel::RefineParams::default(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: None,
         bulk_batches: Some(vec!["blk".into()]),

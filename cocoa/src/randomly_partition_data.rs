@@ -158,7 +158,7 @@ impl RandPartitionOps for SparseIoVec {
             num_levels: refine.num_levels.max(1),
             sort_dim: refine.sort_dim,
             num_opt_iter: refine.num_opt_iter,
-            refine: Some(refine.refine_params.clone()),
+            refine: refine.refine_params.clone(),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,

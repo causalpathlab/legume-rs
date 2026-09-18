@@ -161,7 +161,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         num_levels: args.collapse.num_levels,
         sort_dim: args.collapse.sort_dim,
         num_opt_iter: args.collapse.iter_opt,
-        refine: Some(args.collapse.pb_refine.to_params()),
+        refine: args.collapse.pb_refine.to_params(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         // See `topic::common::load_and_collapse` — greedy correction
         // against the carried reference when one is loaded.
@@ -176,10 +176,6 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         strata: None,
     };
     let mut multilevel = if let Some(path) = args.collapse.cnv_clones.as_deref() {
-        anyhow::ensure!(
-            ml_params.refine.is_some(),
-            "--cnv-clones requires PB refinement"
-        );
         let cell_to_stratum = load_cnv_cell_strata(path, &data_vec)?;
         data_beans_alg::collapse_data::collapse_columns_multilevel_with_strata(
             &mut data_vec,

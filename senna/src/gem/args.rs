@@ -149,14 +149,6 @@ pub(crate) struct GemArgs {
     )]
     pub(crate) num_topics: Option<usize>,
 
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable BBKNN + DC-Poisson refinement of the multi-level pseudobulk partition.\n\
-                Default: enabled."
-    )]
-    pub(crate) no_refine: bool,
-
     #[arg(short = 'i', long, default_value_t = 1000, help = "Training epochs")]
     pub(crate) epochs: usize,
 
