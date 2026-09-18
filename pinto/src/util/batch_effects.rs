@@ -60,6 +60,26 @@ pub struct EstimateBatchArgs {
     /// not individual cells, so this stays small.
     pub batch_knn: usize,
     pub num_levels: usize,
+    /// Per-cell CNV stratum from `canna clones` (`0` = mixable). Maps to
+    /// [`MultilevelParams::strata`].
+    pub strata: Option<Vec<usize>>,
+}
+
+/// Read a `canna clones` table and align strata to `data_vec` column order.
+pub fn load_cnv_cell_strata(
+    clones_path: &str,
+    data_vec: &SparseIoVec,
+) -> anyhow::Result<Vec<usize>> {
+    let table = cnv::clone_call::read_clone_table(clones_path)?;
+    let names = data_vec.column_names()?;
+    let cell_to_stratum = cnv::clone_call::align_strata_to_cells(&table, &names)?;
+    let n_kept = cell_to_stratum.iter().filter(|&&s| s > 0).count();
+    info!(
+        "CNV strata from {clones_path}: {} / {} cells in donor-private clones",
+        n_kept,
+        cell_to_stratum.len()
+    );
+    Ok(cell_to_stratum)
 }
 
 /// Estimate per-feature batch effect multipliers (δ) via hierarchical
@@ -97,6 +117,7 @@ pub fn estimate_batch(
             knn_pb_samples: args.batch_knn,
             sort_dim: args.sort_dim,
             num_levels: args.num_levels,
+            strata: args.strata.clone(),
             ..MultilevelParams::new(cell_proj_kn.nrows())
         },
     )?;

@@ -51,8 +51,8 @@ pub(crate) struct EmbedKnobs<'a> {
     /// `false`).
     pub emit_pb_reference: bool,
     /// BBKNN + DC-Poisson refinement params, already resolved by the
-    /// caller; `None` disables it (bge: `--no-refine`; gem always refines).
-    pub refine: Option<ge::RefineParams>,
+    /// caller from the shared `--pb-refine-*` flags.
+    pub refine: ge::RefineParams,
 
     pub qc: &'a QcArgs,
     pub phase1_cells_per_pb: usize,
@@ -180,6 +180,13 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             },
             None => None,
         };
+        let strata = match knobs.collapse.cnv_clones.as_deref() {
+            Some(path) => Some(crate::topic::common::load_cnv_cell_strata(
+                path,
+                unified.count_backend(),
+            )?),
+            None => None,
+        };
         Ok(ge::FitConfig {
             embedding_dim: knobs.embedding_dim,
             // Greedy batch correction against the carried reference, exactly
@@ -217,6 +224,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             offset_rank: plan.offset_rank,
             preset_features,
             preset_offsets,
+            strata,
         })
     };
 
@@ -648,9 +656,7 @@ impl super::BgeArgs {
             collapse: &self.collapse,
             bulk_batches: self.collapse.mixture_batch.as_deref(),
             emit_pb_reference: self.collapse.emits_pb_reference(),
-            // `--no-refine` is gbe-specific (the other subcommands always refine);
-            // otherwise the shared `--pb-refine-*` flags drive RefineParams.
-            refine: (!self.no_refine).then(|| self.collapse.pb_refine.to_params()),
+            refine: self.collapse.pb_refine.to_params(),
             qc: &self.qc,
             phase1_cells_per_pb: self.phase1_cells_per_pb,
             modules_per_unit: self.modules_per_unit,
@@ -685,7 +691,7 @@ impl crate::gem::args::GemArgs {
             // `--emit-pb-reference` now parse on gem's shared `collapse`.
             bulk_batches: None,
             emit_pb_reference: false,
-            refine: (!self.no_refine).then(|| self.collapse.pb_refine.to_params()),
+            refine: self.collapse.pb_refine.to_params(),
             qc: &self.qc,
             phase1_cells_per_pb: self.phase1_cells_per_pb,
             modules_per_unit: self.modules_per_unit,

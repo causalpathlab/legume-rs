@@ -241,6 +241,14 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         data_stack.num_types()
     );
 
+    let strata = match args.collapse.cnv_clones.as_deref() {
+        Some(path) => Some(crate::topic::common::load_cnv_cell_strata(
+            path,
+            &data_stack.stack[0],
+        )?),
+        None => None,
+    };
+
     let mut collapsed_levels: Vec<Vec<CollapsedOut>> = data_stack.collapse_columns_multilevel_vec(
         &proj_kn,
         batch_stack[0].as_ref(),
@@ -249,13 +257,14 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             num_levels: args.collapse.num_levels,
             sort_dim: args.collapse.sort_dim,
             num_opt_iter: args.collapse.iter_opt,
-            refine: Some(args.collapse.pb_refine.to_params()),
+            refine: args.collapse.pb_refine.to_params(),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: true,
             keep_finest_stats: false,
             pb_tree: args.collapse.pb_tree_params(),
+            strata,
         },
     )?;
     // Reverse so training goes coarse→fine: coarsest (fewest samples)

@@ -212,6 +212,23 @@ pub struct SrtInputArgs {
     pub batch_knn: usize,
 
     #[arg(
+        long = "cnv-clones",
+        help = "CNV clone table from `canna clones`; batch δ cannot mix across strata",
+        long_help = "Path to `{out}.clones.tsv.gz` written by `canna clones`.\n\
+                     Each cell's stratum is a hard parent cut on the multilevel\n\
+                     collapse used for batch-effect estimation (cage / lc / dsvd):\n\
+                     finest codes are crossed with the stratum, BBKNN matches only\n\
+                     within stratum, and unmatched (clone-only) mass is excluded\n\
+                     from the δ update / pin vote while the δ learned on mixable\n\
+                     cells is still applied to clones. Missing cells default to\n\
+                     stratum 0. A batch with no matched mass gets δ ≈ 1 (warned).\n\
+                     \n\
+                     Does not gate spatial graph coarsening — only the MultilevelParams\n\
+                     δ path shared by cage / lc / dsvd."
+    )]
+    pub cnv_clones: Option<Box<str>>,
+
+    #[arg(
         long,
         short = 'd',
         default_value_t = 1024,
