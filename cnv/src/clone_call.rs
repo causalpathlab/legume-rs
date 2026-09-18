@@ -1,11 +1,14 @@
 //! Donor-private CNV clone calling from inferCNV profiles.
 //!
 //! Cells are sketched to one mean per chromosome, clustered in that space,
-//! then each cluster is scored for donor enclosure and spatial structure.
-//! A **2-component Gaussian mixture** (BIC: K=1 vs K=2) on those scores
-//! decides which clusters are putative clones; the rest dump into stratum
-//! `0` — the mixable bucket (Controls + CNV-flat / WT-like cells from AML
-//! donors). Optional purity / spatial floors only tighten the mixture call.
+//! then each cluster is scored for donor enclosure and **segmental** (genomic)
+//! structure — elevated chromosome-sketch L1 vs a size-matched null, not tissue
+//! spatial coordinates. A **2-component Gaussian mixture** (BIC: K=1 vs K=2) on
+//! those scores decides which clusters are putative clones; the rest dump into
+//! stratum `0` — the mixable bucket (Controls + CNV-flat / WT-like cells from
+//! AML donors). Optional purity / segmental-z floors only tighten the mixture
+//! call. Lean permissive on `k_max` / `min_cells`: a false clone is
+//! under-integration; a missed clone lets batch δ eat private CN.
 
 use crate::kmeans_init::cluster_stats_kmeans;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -29,9 +32,10 @@ pub struct CloneCallConfig {
     pub min_purity: Option<f32>,
     /// Clusters smaller than this cannot be clones (chance purity).
     pub min_cells: usize,
-    /// Optional spatial-z floor on top of the mixture (None = mixture only).
+    /// Optional segmental-CN z floor on top of the mixture (None = mixture only).
+    /// Genomic roughness of the chromosome sketch, not tissue spatial z.
     pub spatial_z: Option<f32>,
-    /// Random subsets drawn for the spatial null.
+    /// Random subsets drawn for the segmental-CN null.
     pub n_perm: usize,
     pub seed: u64,
     pub kmeans_iter: usize,
@@ -317,8 +321,8 @@ pub fn score_cluster(
 /// BIC-select a 1- vs 2-component Gaussian mixture on `clone_score` and
 /// return which eligible clusters belong to the high (clone) component.
 ///
-/// K=1 wins ⇒ nothing is a clone. Optional purity / spatial floors can only
-/// reject mixture positives, never invent them.
+/// K=1 wins ⇒ nothing is a clone. Optional purity / segmental-z floors can
+/// only reject mixture positives, never invent them.
 pub fn select_clones_by_mixture(
     scores: &[ClusterScore],
     cfg: &CloneCallConfig,

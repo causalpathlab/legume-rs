@@ -26,6 +26,7 @@ cargo install --path senna      # Stochastic data Embedding with Nearest Neighbo
 cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
 cargo install --path cocoa      # COunterfactual COnfounder Adjustment
 cargo install --path faba       # Feature extraction from Alignment for Base-pair Annotation
+cargo install --path cnv        # Copy-number profiles and clone strata from scRNA (inferCNV-style)
 ```
 
 ### Backend selection

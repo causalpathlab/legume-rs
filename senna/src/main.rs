@@ -200,6 +200,10 @@ fn print_logo() {
                   \n  \
                   senna deconvolve --from bge.senna.json --annotation A --bulk bulk.parquet\n\
                   \n\
+                  CNV-aware collapse: `cnv clones` writes `{out}.clones.tsv.gz`;\n\
+                  pass `--cnv-clones` on topic / masked-* / vae / svd / bge / gem /\n\
+                  joint-* so donor-private CN stays out of batch δ.\n\
+                  \n\
                   Artifact naming: a slot name fixes the axis, never the numeric scale.\n\
                   `feature_embedding` is the per-gene embedding rho, and it is signed;\n\
                   `feature_coembedding` is rho re-placed onto the cell manifold.\n\
@@ -229,6 +233,8 @@ enum Commands {
                       \n\
                       Decoders are multinom, nb and nbmixture (the default).\n\
                       Combine them with a comma-separated --decoder.\n\
+                      Optional `--cnv-clones` (from `cnv clones`) keeps donor-private\n\
+                      CNV out of batch δ during the collapse.\n\
                       \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
                       {out}.model.json, {out}.senna.json (run manifest)."
@@ -340,6 +346,9 @@ enum Commands {
                       \x20 2. randomized SVD\n\
                       \x20 3. per-cell Nyström projection\n\
                       \n\
+                      Optional `--cnv-clones` (from `cnv clones`) keeps donor-private\n\
+                      CNV out of batch δ during the collapse.\n\
+                      \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.senna.json."
     )]
     Svd(SvdArgs),
@@ -356,6 +365,9 @@ enum Commands {
                       (modality m = softmax(z @ (W_base + Σ δ_1..m));\n              \
                       requires shared features across modalities).\n\
                       \n\
+                      Optional `--cnv-clones` (from `cnv clones`) stratifies the shared-column\n\
+                      collapse so donor-private CNV stays out of batch δ.\n\
+                      \n\
                       Writes {out}.latent.parquet, {out}.senna.json."
     )]
     JointTopic(JointTopicArgs),
@@ -366,6 +378,9 @@ enum Commands {
                       Data files form a row-major (modality × batch) table.\n\
                       -m sets the modality-row count.\n\
                       Cells must be shared; features may differ.\n\
+                      \n\
+                      Optional `--cnv-clones` (from `cnv clones`) stratifies the shared-column\n\
+                      collapse so donor-private CNV stays out of batch δ.\n\
                       \n\
                       Writes {out}.latent.parquet, {out}.senna.json."
     )]
@@ -389,6 +404,9 @@ enum Commands {
                       No negatives are sampled.\n\
                       Units are the pseudobulks at every collapse level plus a per-pseudobulk\n\
                       cell subsample (--phase1-cells-per-pb).\n\
+                      \n\
+                      Optional `--cnv-clones` (from `cnv clones`) keeps donor-private CNV\n\
+                      out of batch δ during the multilevel collapse that builds those PBs.\n\
                       \n\
                       Training runs in two phases.\n\
                       The module structure is internal to phase 1;\n\
@@ -520,6 +538,9 @@ enum Commands {
                       and every other track adds a ridge-shrunk offset to it (--offset-l2).\n\
                       Rows match across files by exact name;\n\
                       cells match by barcode within a sample (--genes-sample-strip).\n\
+                      \n\
+                      Optional `--cnv-clones` (from `cnv clones`) keeps donor-private CNV\n\
+                      out of batch δ during the shared bge collapse path.\n\
                       \n\
                       Writes the same output set `senna bge` does,\n\
                       plus {out}.feature_contrast.parquet (one row per gene and modality,\n\

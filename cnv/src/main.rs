@@ -16,11 +16,12 @@ use std::sync::Arc;
     version,
     about = "cnv — copy-number variation from single-cell expression",
     long_about = "Reads `data-beans` backends (.zarr.zip / .zarr / .h5) and writes\n\
-                  copy-number profiles.\n\
+                  copy-number profiles and clone strata for `--cnv-clones` consumers.\n\
                   \n\
                   Subcommands:\n  \
                   \x20 infercnv — per-cell inferCNV log-ratio profiles on a genomic-interval axis\n  \
-                  \x20 clones   — donor-private CNV strata from those profiles"
+                  \x20 clones   — donor-private CNV strata (`{out}.clones.tsv.gz`) for\n               \
+                  senna / pinto `--cnv-clones`"
 )]
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Increase output verbosity")]
@@ -67,15 +68,22 @@ enum Commands {
         about = "Donor-private CNV clone strata from inferCNV profiles",
         long_about = "Cluster cells on a per-chromosome mean of the inferCNV log-ratio,\n\
                       then keep a cluster as a putative clone only if it is both\n\
-                      donor-enclosing and spatially structured. Shared or flat\n\
-                      clusters dump into stratum 0 (the mixable bucket).\n\
+                      donor-enclosing and genomically structured (elevated segmental\n\
+                      CN vs a size-matched null). Shared or flat clusters dump into\n\
+                      stratum 0 (the mixable bucket).\n\
+                      \n\
+                      Gate tuning: a false clone is under-integration (cheap); a missed\n\
+                      clone lets batch δ eat a private program (the motivating failure).\n\
+                      Prefer a permissive `--k-max` / `--min-cells` and let the mixture\n\
+                      dump weak clusters to 0.\n\
                       \n\
                       Reads an existing CNV backend (`--from`), or runs `infercnv`\n\
                       first on `--ref` / QUERY and then calls clones.\n\
                       \n\
                       Writes `{out}.clones.tsv.gz` (cell, donor, cluster, stratum, …).\n\
-                      Pass that file to senna `--cnv-clones` so collapse cannot mix\n\
-                      across clone boundaries."
+                      Pass that file as `--cnv-clones` to senna (topic / masked-* /\n\
+                      vae / svd / bge / gem / joint-*) or pinto (cage / lc / dsvd)\n\
+                      so collapse cannot mix across clone boundaries."
     )]
     Clones(CloneArgs),
 }
@@ -211,21 +219,39 @@ struct CloneArgs {
     #[arg(long)]
     preload: bool,
 
-    #[arg(long, default_value_t = 8, help = "k-means K on the chromosome sketch")]
+    #[arg(
+        long,
+        default_value_t = 8,
+        help = "k-means K on the chromosome sketch (overclustering is fine; lean permissive)",
+        long_help = "k-means K on the per-chromosome sketch. Overclustering is fine:\n\
+                     weak clusters dump to stratum 0. A false clone is under-integration\n\
+                     (cheap); a missed clone lets δ absorb private CN — lean permissive."
+    )]
     k_max: usize,
     #[arg(
         long,
         help = "Optional purity floor on top of the clone-score mixture (omit = mixture only)"
     )]
     min_purity: Option<f32>,
-    #[arg(long, default_value_t = 50, help = "Minimum cells to keep a cluster as a clone")]
-    min_cells: usize,
     #[arg(
         long,
-        help = "Optional spatial-z floor on top of the mixture (omit = mixture only)"
+        default_value_t = 50,
+        help = "Minimum cells to keep a cluster as a clone (lean permissive)",
+        long_help = "Clusters smaller than this cannot be clones. Lean permissive:\n\
+                     a missed small clone is worse than a false one that fails to mix."
+    )]
+    min_cells: usize,
+    #[arg(
+        long = "segmental-z",
+        visible_alias = "spatial-z",
+        help = "Optional segmental-CN z floor on top of the mixture (omit = mixture only)",
+        long_help = "Optional floor on the segmental (genomic) z-score of a cluster's\n\
+                     chromosome-sketch L1 vs a size-matched null. This is genomic\n\
+                     roughness, not tissue spatial coordinates (unlike pinto's spatial z).\n\
+                     `--spatial-z` is a deprecated alias."
     )]
     spatial_z: Option<f32>,
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 32, help = "Null permutations for the segmental-CN z-score")]
     n_perm: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
