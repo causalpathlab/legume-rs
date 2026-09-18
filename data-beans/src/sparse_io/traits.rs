@@ -1143,9 +1143,10 @@ pub trait SparseIo: Sync + Send {
             return Ok(());
         }
 
-        info!("transpose pass 1: counting row nnz");
-        let mut row_counts = vec![0u64; nrow];
         const COL_BLOCK: usize = 1024;
+        let n_col_blocks = ncol.div_ceil(COL_BLOCK);
+        let bar1 = styled_progress_bar(n_col_blocks as u64, "transpose count");
+        let mut row_counts = vec![0u64; nrow];
         let mut col_lo = 0usize;
         while col_lo < ncol {
             let col_hi = (col_lo + COL_BLOCK).min(ncol);
@@ -1155,7 +1156,9 @@ pub trait SparseIo: Sync + Send {
                 row_counts[*row_i as usize] += 1;
             }
             col_lo = col_hi;
+            bar1.inc(1);
         }
+        bar1.finish_and_clear();
 
         let mut rowptr = vec![0u64; nrow + 1];
         let mut acc = 0u64;
@@ -1179,13 +1182,9 @@ pub trait SparseIo: Sync + Send {
         let band_rows = (TRANSPOSE_BAND_BYTES / (12 * avg_density.max(1)))
             .max(1)
             .min(nrow);
+        let n_bands = nrow.div_ceil(band_rows);
 
-        info!(
-            "transpose pass 2: scatter (band of {} rows, {} bands)",
-            band_rows,
-            nrow.div_ceil(band_rows)
-        );
-
+        let bar2 = styled_progress_bar(n_bands as u64, "transpose scatter");
         let mut band_lo = 0usize;
         while band_lo < nrow {
             let band_hi = (band_lo + band_rows).min(nrow);
@@ -1195,6 +1194,7 @@ pub trait SparseIo: Sync + Send {
 
             if band_nnz == 0 {
                 band_lo = band_hi;
+                bar2.inc(1);
                 continue;
             }
 
@@ -1230,7 +1230,9 @@ pub trait SparseIo: Sync + Send {
             self.cs_write_f32(CsKey::CsrData, band_nnz_start, &out_values)?;
 
             band_lo = band_hi;
+            bar2.inc(1);
         }
+        bar2.finish_and_clear();
 
         self.read_row_indptr()?;
         Ok(())

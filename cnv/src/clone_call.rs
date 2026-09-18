@@ -1,18 +1,21 @@
 //! Donor-private CNV clone calling from inferCNV profiles.
 //!
-//! Cells are sketched to one mean per chromosome, clustered in that space,
+//! Cells are sketched to genomic means (per chromosome by default, or
+//! `--bin-size` tiles — same knob as inferCNV), clustered in that space,
 //! then each cluster is scored for donor enclosure and **segmental** (genomic)
 //! structure — elevated chromosome-sketch L1 vs a size-matched null, not tissue
-//! spatial coordinates. A **2-component Gaussian mixture** (BIC: K=1 vs K=2) on
-//! those scores decides which clusters are putative clones; the rest dump into
-//! stratum `0` — the mixable bucket (Controls + CNV-flat / WT-like cells from
-//! AML donors). Optional purity / segmental-z floors only tighten the mixture
-//! call. Lean permissive on `k_max` / `min_cells`: a false clone is
-//! under-integration; a missed clone lets batch δ eat private CN.
+//! spatial coordinates. A **Gaussian mixture** on those scores (BIC over
+//! `K = 1..=n_eligible`, where eligible clusters pass `min_cells`) decides
+//! which are putative clones; the rest dump into stratum `0` — the mixable
+//! bucket (Controls + CNV-flat / WT-like cells from AML donors). Optional
+//! purity / segmental-z floors only tighten the mixture call. Lean permissive
+//! on `k_max` / `min_cells`: a false clone is under-integration; a missed
+//! clone lets batch δ eat private CN.
 
-use crate::kmeans_init::cluster_stats_kmeans;
+use crate::kmeans_init::select_kmeans_k;
+use data_beans::sparse_data_visitors::styled_progress_bar;
 use data_beans::sparse_io_vector::SparseIoVec;
-use genomic_data::coordinates::parse_peak_coordinates;
+use genomic_data::coordinates::{parse_peak_coordinates, PeakCoord};
 use matrix_util::clustering::{Kmeans, KmeansArgs};
 use matrix_util::common_io::{read_lines, write_lines};
 use nalgebra::DMatrix;
@@ -25,7 +28,12 @@ use rustc_hash::FxHashMap;
 /// Knobs for [`call_clones`].
 #[derive(Debug, Clone)]
 pub struct CloneCallConfig {
-    /// k-means K on the chromosome sketch (overclustering is fine; failures
+    /// Same as [`crate::cell_profile::CellProfileConfig::bin_size`]: `0` =
+    /// classic inferCNV (gene / interval rows → one sketch dim per chromosome);
+    /// `> 0` = average into fixed genomic tiles of this many bp (prefer
+    /// `1_000_000` with inferCNV's large-cohort guidance).
+    pub bin_size: i64,
+    /// k-means K on the genomic sketch (overclustering is fine; failures
     /// dump to stratum 0).
     pub k_max: usize,
     /// Optional purity floor on top of the mixture (None = mixture only).
@@ -44,6 +52,7 @@ pub struct CloneCallConfig {
 impl Default for CloneCallConfig {
     fn default() -> Self {
         Self {
+            bin_size: 0,
             k_max: 8,
             min_purity: None,
             min_cells: 50,
@@ -143,54 +152,72 @@ pub fn chromosome_sketch(
     (sketch, names)
 }
 
-/// Chromosome sketch from a CSC block whose rows are genomic intervals.
-pub fn chromosome_sketch_csc(
+/// Mean within each sketch bin for a CSC block (rows = genomic intervals).
+pub fn sketch_csc(
     csc: &CscMatrix<f32>,
-    chr_index: &[Option<usize>],
-    n_chr: usize,
-    inv_genes: &[f32],
+    row_bin: &[Option<usize>],
+    n_bins: usize,
+    inv_bins: &[f32],
 ) -> DMatrix<f32> {
     let n = csc.ncols();
-    matrix_util::dmatrix_util::build_columns_par(n_chr, n, |j, col| {
+    matrix_util::dmatrix_util::build_columns_par(n_bins, n, |j, col| {
         col.fill(0.0);
         let column = csc.col(j);
         for (&r, &v) in column.row_indices().iter().zip(column.values()) {
-            if let Some(i) = chr_index.get(r).copied().flatten() {
+            if let Some(i) = row_bin.get(r).copied().flatten() {
                 col[i] += v;
             }
         }
-        for (v, w) in col.iter_mut().zip(inv_genes) {
+        for (v, w) in col.iter_mut().zip(inv_bins) {
             *v *= w;
         }
     })
 }
 
-fn compact_chromosomes(chr_of_row: &[impl AsRef<str>]) -> (Vec<Option<usize>>, Vec<Box<str>>, Vec<f32>) {
-    let mut chr_index: FxHashMap<Box<str>, usize> = FxHashMap::default();
+/// Map each genomic-interval row onto a sketch bin: whole chromosome when
+/// `bin_size ≤ 0`, else the `bin_size`-bp tile containing the interval midpoint.
+fn compact_sketch_bins(
+    coords: &[Option<PeakCoord>],
+    bin_size: i64,
+) -> (Vec<Option<usize>>, Vec<Box<str>>, Vec<f32>) {
+    // Key: (chr, tile_start); tile_start = -1 means the whole chromosome.
+    let mut index: FxHashMap<(Box<str>, i64), usize> = FxHashMap::default();
     let mut names: Vec<Box<str>> = Vec::new();
-    let mut row_chr = Vec::with_capacity(chr_of_row.len());
+    let mut row_bin = Vec::with_capacity(coords.len());
     let mut counts: Vec<f32> = Vec::new();
-    for name in chr_of_row {
-        let raw = name.as_ref();
-        if raw.is_empty() || raw.eq_ignore_ascii_case("NA") {
-            row_chr.push(None);
+    for c in coords {
+        let Some(coord) = c.as_ref() else {
+            row_bin.push(None);
+            continue;
+        };
+        if coord.chr.is_empty() || coord.chr.eq_ignore_ascii_case("NA") {
+            row_bin.push(None);
             continue;
         }
-        let key: Box<str> = raw.into();
-        let idx = *chr_index.entry(key.clone()).or_insert_with(|| {
+        let tile = if bin_size <= 0 {
+            -1
+        } else {
+            let mid = (coord.start + coord.end) / 2;
+            mid.max(0).div_euclid(bin_size) * bin_size
+        };
+        let idx = *index.entry((coord.chr.clone(), tile)).or_insert_with(|| {
             let i = names.len();
-            names.push(key);
+            names.push(if tile < 0 {
+                coord.chr.clone()
+            } else {
+                format!("{}:{}-{}", coord.chr, tile, tile + bin_size).into()
+            });
             counts.push(0.0);
             i
         });
         counts[idx] += 1.0;
-        row_chr.push(Some(idx));
+        row_bin.push(Some(idx));
     }
     let inv: Vec<f32> = counts
         .iter()
         .map(|&k| if k > 0.0 { 1.0 / k } else { 0.0 })
         .collect();
-    (row_chr, names, inv)
+    (row_bin, names, inv)
 }
 
 fn ln_choose(n: usize, k: usize) -> f64 {
@@ -302,11 +329,7 @@ pub fn score_cluster(
     let z = (obs - mu) / sd;
     // Enclosure × structure. Enrichment down-weights chance purity in a
     // donor-imbalanced cohort; softplus(z) keeps flat clusters near zero.
-    let spatial_pos = if z > 20.0 {
-        z
-    } else {
-        (1.0 + z.exp()).ln()
-    };
+    let spatial_pos = if z > 20.0 { z } else { (1.0 + z.exp()).ln() };
     let clone_score = purity * enrich.max(0.0) * spatial_pos;
     ClusterScore {
         n_cells: n,
@@ -318,11 +341,13 @@ pub fn score_cluster(
     }
 }
 
-/// BIC-select a 1- vs 2-component Gaussian mixture on `clone_score` and
-/// return which eligible clusters belong to the high (clone) component.
+/// BIC-select a Gaussian mixture on `clone_score` over `K = 1..=n_eligible`
+/// (eligible = clusters with ≥ `min_cells`) and return which belong to a
+/// non-background component.
 ///
-/// K=1 wins ⇒ nothing is a clone. Optional purity / segmental-z floors can
-/// only reject mixture positives, never invent them.
+/// K=1 wins ⇒ nothing is a clone. For K≥2 the lowest-mean component is the
+/// mixable background; clusters whose score is nearest another component are
+/// kept (optional purity / segmental-z floors can only reject, never invent).
 pub fn select_clones_by_mixture(
     scores: &[ClusterScore],
     cfg: &CloneCallConfig,
@@ -338,30 +363,42 @@ pub fn select_clones_by_mixture(
         return (keep, None);
     }
     let values: Vec<f32> = eligible.iter().map(|&i| scores[i].clone_score).collect();
-    let (means1, vars1, weights1, ll1) = cluster_stats_kmeans(&values, 1);
-    let (means2, vars2, weights2, ll2) = cluster_stats_kmeans(&values, 2);
-    let n = values.len() as f32;
-    // K=1: mean+var (2 params); K=2: 2 means + 2 vars + 1 free weight (5).
-    let bic1 = -2.0 * ll1 + 2.0 * n.max(1.0).ln();
-    let bic2 = -2.0 * ll2 + 5.0 * n.max(1.0).ln();
+    let k_range: Vec<usize> = (1..=eligible.len()).collect();
+    let (k, means, _vars, _weights) = select_kmeans_k(&values, &k_range);
+    let lo = means.iter().copied().fold(f32::INFINITY, f32::min);
+    let hi = means.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     log::info!(
-        "clone-score mixture: BIC1={bic1:.1} BIC2={bic2:.1} (Δ={:.1}); means K2={:.3}/{:.3}",
-        bic1 - bic2,
-        means2.first().copied().unwrap_or(0.0),
-        means2.get(1).copied().unwrap_or(0.0)
+        "clone-score mixture: BIC-selected K={k} of 1..{}; means=[{}]",
+        eligible.len(),
+        means
+            .iter()
+            .map(|m| format!("{m:.3}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
-    if bic2 >= bic1 - 1e-6 {
-        // One component preferred — no separable clone class.
-        let _ = (means1, vars1, weights1);
+    if k <= 1 {
         return (keep, None);
     }
-    let _ = (vars2, weights2);
-    let high = if means2[0] >= means2[1] { 0 } else { 1 };
-    let low = 1 - high;
-    let cutoff_mid = 0.5 * (means2[high] + means2[low]);
+    let low_idx = means
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
     for &i in &eligible {
         let s = &scores[i];
-        let mut ok = s.clone_score >= cutoff_mid && s.clone_score > means2[low];
+        let nearest = means
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (*a - s.clone_score)
+                    .abs()
+                    .partial_cmp(&(*b - s.clone_score).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(j, _)| j)
+            .unwrap_or(low_idx);
+        let mut ok = nearest != low_idx;
         if let Some(p) = cfg.min_purity {
             ok &= s.purity >= p;
         }
@@ -370,7 +407,7 @@ pub fn select_clones_by_mixture(
         }
         keep[i] = ok;
     }
-    (keep, Some((means2[low], means2[high])))
+    (keep, Some((lo, hi)))
 }
 
 /// Cluster cells on a chromosome sketch and map failures to stratum 0.
@@ -423,7 +460,7 @@ pub fn call_clones_from_sketch(
     }
     let (cluster_keep, mix) = select_clones_by_mixture(&scores, cfg);
     if let Some((lo, hi)) = mix {
-        log::info!("clone-score cutoff between mixture means {lo:.3} and {hi:.3}");
+        log::info!("clone-score mixture background..clone means {lo:.3} .. {hi:.3}");
     } else {
         log::info!("clone-score mixture prefers a single component → no clones");
     }
@@ -474,21 +511,13 @@ pub fn call_clones_from_sketch(
         .collect()
 }
 
-/// Stream a CNV backend (rows = `chr:start-end`) into a chromosome sketch
-/// and call clones.
+/// Stream a CNV backend (rows = `chr:start-end`) into a genomic sketch and
+/// call clones.
 pub fn call_clones(data: &SparseIoVec, cfg: &CloneCallConfig) -> anyhow::Result<Vec<CloneRow>> {
     anyhow::ensure!(data.num_columns() > 0, "no cells to call clones on");
     let row_names = data.row_names()?;
     let coords = parse_peak_coordinates(&row_names);
-    let chr_of_row: Vec<Box<str>> = coords
-        .iter()
-        .map(|c| {
-            c.as_ref()
-                .map(|p| p.chr.clone())
-                .unwrap_or_else(|| "NA".into())
-        })
-        .collect();
-    let (row_chr, names, inv) = compact_chromosomes(&chr_of_row);
+    let (row_bin, names, inv) = compact_sketch_bins(&coords, cfg.bin_size);
     anyhow::ensure!(
         !names.is_empty(),
         "CNV backend rows are not genomic intervals (`chr:start-end`)"
@@ -497,17 +526,19 @@ pub fn call_clones(data: &SparseIoVec, cfg: &CloneCallConfig) -> anyhow::Result<
     let c = names.len();
     let mut sketch = DMatrix::<f32>::zeros(c, n);
     let blocks = matrix_util::utils::generate_minibatch_intervals(n, 0, Some(512));
+    let bar = styled_progress_bar(blocks.len() as u64, "clone sketch blocks");
     for (lb, ub) in blocks {
         let csc = data.read_columns_csc(lb..ub)?;
-        let block = chromosome_sketch_csc(&csc, &row_chr, c, &inv);
-        sketch
-            .columns_mut(lb, ub - lb)
-            .copy_from(&block);
+        let block = sketch_csc(&csc, &row_bin, c, &inv);
+        sketch.columns_mut(lb, ub - lb).copy_from(&block);
+        bar.inc(1);
     }
+    bar.finish_and_clear();
     log::info!(
-        "chromosome sketch: {} chromosomes × {} cells",
+        "clone sketch: {} bins × {} cells (bin_size={})",
         c,
-        n
+        n,
+        cfg.bin_size
     );
     let cell_names = data.column_names()?;
     Ok(call_clones_from_sketch(&sketch, &cell_names, cfg))
@@ -592,6 +623,42 @@ mod tests {
     use rand::RngExt;
 
     #[test]
+    fn sketch_buckets_match_infercnv_bin_size() {
+        let coords = [
+            Some(PeakCoord {
+                chr: "chr1".into(),
+                start: 100,
+                end: 200,
+            }),
+            Some(PeakCoord {
+                chr: "chr1".into(),
+                start: 1_500_000,
+                end: 1_500_100,
+            }),
+            Some(PeakCoord {
+                chr: "chr2".into(),
+                start: 10,
+                end: 20,
+            }),
+            None,
+        ];
+        let (row_chr, names_chr, _) = compact_sketch_bins(&coords, 0);
+        assert_eq!(names_chr, vec!["chr1".into(), "chr2".into()]);
+        assert_eq!(row_chr, vec![Some(0), Some(0), Some(1), None]);
+
+        let (row_mb, names_mb, _) = compact_sketch_bins(&coords, 1_000_000);
+        assert_eq!(
+            names_mb,
+            vec![
+                "chr1:0-1000000".into(),
+                "chr1:1000000-2000000".into(),
+                "chr2:0-1000000".into(),
+            ]
+        );
+        assert_eq!(row_mb, vec![Some(0), Some(1), Some(2), None]);
+    }
+
+    #[test]
     fn donor_of_uses_at_suffix() {
         assert_eq!(donor_of("AAACCTG@AML001"), "AML001");
         assert_eq!(donor_of("plain"), "plain");
@@ -643,6 +710,7 @@ mod tests {
                 n_perm: 24,
                 seed: 3,
                 kmeans_iter: 50,
+                ..Default::default()
             },
         );
         let n_clone = rows.iter().filter(|r| r.stratum > 0).count();
@@ -686,6 +754,7 @@ mod tests {
                 n_perm: 16,
                 seed: 1,
                 kmeans_iter: 50,
+                ..Default::default()
             },
         );
         assert!(

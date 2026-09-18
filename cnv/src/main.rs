@@ -68,16 +68,17 @@ enum Commands {
     Infercnv(InferCnvArgs),
     #[command(
         about = "Donor-private CNV clone strata from inferCNV profiles",
-        long_about = "Cluster cells on a per-chromosome mean of the inferCNV log-ratio,\n\
-                      then keep a cluster as a putative clone only if it is both\n\
-                      donor-enclosing and genomically structured (elevated segmental\n\
-                      CN vs a size-matched null). Shared or flat clusters dump into\n\
-                      stratum 0 (the mixable bucket).\n\
+        long_about = "Cluster cells on a genomic sketch of the inferCNV log-ratio\n\
+                      (`--bin-size 0` = per-chromosome means, the inferCNV default;\n\
+                      `>0` = fixed bp tiles), then keep a cluster as a putative clone\n\
+                      only if it is both donor-enclosing and genomically structured\n\
+                      (elevated segmental CN vs a size-matched null). Shared or flat\n\
+                      clusters dump into stratum 0 (the mixable bucket).\n\
                       \n\
                       Gate tuning: a false clone is under-integration (cheap); a missed\n\
                       clone lets batch δ eat a private program (the motivating failure).\n\
                       Prefer a permissive `--k-max` / `--min-cells` and let the mixture\n\
-                      dump weak clusters to 0.\n\
+                      (BIC over K=1..=n_eligible clusters) dump weak clusters to 0.\n\
                       \n\
                       Reads an existing CNV backend (`--from`), or runs `infercnv`\n\
                       first on `--ref` / QUERY and then calls clones.\n\
@@ -110,16 +111,32 @@ struct InferCnvArgs {
     #[arg(long, help = "GFF/GTF with `gene` features (gene_id, gene_name)")]
     gff: Box<str>,
 
-    #[arg(short, long, help = "Output prefix; writes {out}.zarr.zip, {out}.features.tsv.gz, {out}.cells.tsv.gz")]
+    #[arg(
+        short,
+        long,
+        help = "Output prefix; writes {out}.zarr.zip, {out}.features.tsv.gz, {out}.cells.tsv.gz"
+    )]
     out: Box<str>,
 
-    #[arg(long, default_value_t = 101, help = "Smoothing window in genes (odd; ≤1 disables)")]
+    #[arg(
+        long,
+        default_value_t = 101,
+        help = "Smoothing window in genes (odd; ≤1 disables)"
+    )]
     window: usize,
 
-    #[arg(long, default_value_t = 3.0, help = "Clip per-gene log-ratio at ±clip before smoothing (≤0 disables)")]
+    #[arg(
+        long,
+        default_value_t = 3.0,
+        help = "Clip per-gene log-ratio at ±clip before smoothing (≤0 disables)"
+    )]
     clip: f32,
 
-    #[arg(long, default_value_t = 1e4, help = "Depth-normalisation target: ln(1 + scale·x/depth)")]
+    #[arg(
+        long,
+        default_value_t = 1e4,
+        help = "Depth-normalisation target: ln(1 + scale·x/depth)"
+    )]
     scale: f32,
 
     #[arg(
@@ -185,7 +202,11 @@ struct CloneArgs {
     )]
     from: Option<Box<str>>,
 
-    #[arg(short, long, help = "Output prefix; writes {out}.clones.tsv.gz (and inferCNV artifacts when not `--from`)")]
+    #[arg(
+        short,
+        long,
+        help = "Output prefix; writes {out}.clones.tsv.gz (and inferCNV artifacts when not `--from`)"
+    )]
     out: Box<str>,
 
     #[arg(long, default_value_t = 101)]
@@ -199,12 +220,13 @@ struct CloneArgs {
     #[arg(
         long,
         default_value_t = 0,
-        help = "Average smoothed genes into fixed genomic tiles of this many bp (0 = one row per gene)",
-        long_help = "Average smoothed genes into fixed genomic tiles of this many bp.\n\
-                     Default 0 keeps classic inferCNV gene-level rows.\n\
-                     For large cohorts, prefer `--bin-size 1000000` (1 Mb):\n\
-                     after a 101-gene window the signal is already ~Mb-scale,\n\
-                     and autosomes compress to ~3k rows instead of ~15–20k genes."
+        help = "Genomic tile size in bp for inferCNV rows and the clone sketch (0 = inferCNV default)",
+        long_help = "Same `--bin-size` as `canna infercnv` (default 0 = classic inferCNV).\n\
+                     When running inferCNV first: average smoothed genes into fixed genomic\n\
+                     tiles of this many bp (0 = one row per gene). Prefer `1000000` (1 Mb)\n\
+                     on large cohorts.\n\
+                     For the clone sketch (also with `--from`): `0` = one dim per chromosome;\n\
+                     `>0` = one dim per tile of the interval midpoint."
     )]
     bin_size: i64,
     #[arg(long, default_value_t = 1000)]
@@ -224,9 +246,9 @@ struct CloneArgs {
     #[arg(
         long,
         default_value_t = 8,
-        help = "k-means K on the chromosome sketch (overclustering is fine; lean permissive)",
-        long_help = "k-means K on the per-chromosome sketch. Overclustering is fine:\n\
-                     weak clusters dump to stratum 0. A false clone is under-integration\n\
+        help = "k-means K on the genomic sketch (overclustering is fine; lean permissive)",
+        long_help = "k-means K on the genomic sketch (`--bin-size` dims). Overclustering is\n\
+                     fine: weak clusters dump to stratum 0. A false clone is under-integration\n\
                      (cheap); a missed clone lets δ absorb private CN — lean permissive."
     )]
     k_max: usize,
@@ -253,7 +275,11 @@ struct CloneArgs {
                      `--spatial-z` is a deprecated alias."
     )]
     spatial_z: Option<f32>,
-    #[arg(long, default_value_t = 32, help = "Null permutations for the segmental-CN z-score")]
+    #[arg(
+        long,
+        default_value_t = 32,
+        help = "Null permutations for the segmental-CN z-score"
+    )]
     n_perm: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
@@ -321,14 +347,7 @@ fn run_infercnv(args: &InferCnvArgs) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
-    let default_filter = if cli.verbose {
-        "info"
-    } else {
-        matrix_util::common_io::QUIET_LOG_FILTER
-    };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
-        .init();
+    auxiliary_data::logging::init_logger(cli.verbose);
 
     if let Some(n) = cli.n_threads {
         anyhow::ensure!(n >= 1, "--n-threads must be >= 1");
@@ -348,7 +367,10 @@ fn run_clones(args: &CloneArgs) -> anyhow::Result<()> {
     let backend_path = if let Some(from) = args.from.as_ref() {
         from.to_string()
     } else {
-        anyhow::ensure!(!args.query.is_empty(), "QUERY backends required unless --from");
+        anyhow::ensure!(
+            !args.query.is_empty(),
+            "QUERY backends required unless --from"
+        );
         let gff = args
             .gff
             .as_ref()
@@ -376,6 +398,7 @@ fn run_clones(args: &CloneArgs) -> anyhow::Result<()> {
     let mut data = SparseIoVec::new();
     data.push(Arc::from(opened), None)?;
     let cfg = CloneCallConfig {
+        bin_size: args.bin_size,
         k_max: args.k_max,
         min_purity: args.min_purity,
         min_cells: args.min_cells,
