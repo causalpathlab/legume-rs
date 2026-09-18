@@ -288,8 +288,8 @@ pub(crate) struct CollapseArgs {
 
     #[arg(
         long,
-        help = "CNV clone table from `cnv clones`; collapse cannot mix across strata",
-        long_help = "Path to `{out}.clones.tsv.gz` written by `cnv clones`.\n\
+        help = "CNV clone table from `canna clones`; collapse cannot mix across strata",
+        long_help = "Path to `{out}.clones.tsv.gz` written by `canna clones`.\n\
                      Each cell's `stratum` is a hard parent cut on one multilevel\n\
                      collapse: finest codes are crossed with the stratum, BBKNN\n\
                      matches only within the same stratum, and unmatched (clone-only)\n\

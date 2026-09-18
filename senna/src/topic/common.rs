@@ -761,7 +761,7 @@ pub struct LoadCollapseArgs<'a> {
     /// equal `partition.len()` or `load_and_collapse` bails. When
     /// `Some`, the loader auto-sets `want_hierarchy = true`.
     pub prebuilt_partition: Option<crate::run_manifest::InheritedPartition>,
-    /// Optional `{out}.clones.tsv.gz` from `cnv clones`. When set,
+    /// Optional `{out}.clones.tsv.gz` from `canna clones`. When set,
     /// collapse routes through
     /// [`collapse_columns_multilevel_with_strata`] (sets
     /// `MultilevelParams.strata`: same-stratum BBKNN + unmatched-δ guard).
