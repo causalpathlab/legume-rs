@@ -1021,14 +1021,19 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cnv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
+ "auxiliary-data",
+ "clap",
+ "data-beans",
+ "genomic-data",
  "log",
  "matrix-util",
  "mcmc-util",
  "nalgebra 0.34.2",
+ "nalgebra-sparse",
  "rand 0.10.2",
  "rand_distr 0.6.0",
  "rayon",
@@ -1561,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans-alg"
-version = "0.4.6"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "approx",
@@ -2820,7 +2825,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "graph-embedding-util"
-version = "0.7.4"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "auxiliary-data",
@@ -4804,6 +4809,7 @@ dependencies = [
  "auxiliary-data",
  "candle-util",
  "clap",
+ "cnv",
  "colored",
  "dashmap",
  "data-beans",
@@ -5633,7 +5639,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "senna"
-version = "0.16.10"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "approx",

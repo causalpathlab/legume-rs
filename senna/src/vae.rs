@@ -271,7 +271,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         must_train_file: args.hvg.must_train_features.as_deref(),
-        refine: Some(args.collapse.pb_refine.to_params()),
+        refine: args.collapse.pb_refine.to_params(),
         pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),
@@ -286,6 +286,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         feature_kind: args.feature_name_kind.clone().into(),
         want_hierarchy: true,
         prebuilt_partition,
+        cnv_clones: args.collapse.cnv_clones.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

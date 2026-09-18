@@ -31,6 +31,9 @@ pub struct PbSampleLayout {
     /// excluded from cross-batch matching in BOTH directions (see
     /// [`bbknn_match_one_pbsamp`]).
     pub bulk_batches: Vec<usize>,
+    /// Per-pb-sample CNV stratum when collapse is stratified. Same-stratum
+    /// BBKNN filter reads this; `None` disables the filter.
+    pub pb_sample_to_stratum: Option<Vec<usize>>,
 }
 
 impl PbSampleLayout {
@@ -98,6 +101,7 @@ pub(super) fn build_pb_sample_layout(
     col_weight: Option<&[f32]>,
     anchor_batches: &[usize],
     bulk_batches: &[usize],
+    cell_to_stratum: Option<&[usize]>,
 ) -> anyhow::Result<PbSampleLayout> {
     let proj_dim = proj_kn.nrows();
 
@@ -206,6 +210,29 @@ pub(super) fn build_pb_sample_layout(
         }
     }
 
+    let pb_sample_to_stratum = if let Some(strata) = cell_to_stratum {
+        anyhow::ensure!(
+            strata.len() == ncols,
+            "cell_to_stratum has {} entries, layout has {} columns",
+            strata.len(),
+            ncols
+        );
+        let mut out = vec![0usize; num_pb];
+        let mut seen = vec![false; num_pb];
+        for (c, &pbsamp) in cell_to_pbsamp.iter().enumerate() {
+            if pbsamp == usize::MAX {
+                continue;
+            }
+            if !seen[pbsamp] {
+                out[pbsamp] = strata[c];
+                seen[pbsamp] = true;
+            }
+        }
+        Some(out)
+    } else {
+        None
+    };
+
     Ok(PbSampleLayout {
         centroids,
         cell_counts,
@@ -215,6 +242,7 @@ pub(super) fn build_pb_sample_layout(
         cell_to_pbsamp,
         singleton_col,
         bulk_batches: bulk_batches.to_vec(),
+        pb_sample_to_stratum,
     })
 }
 
@@ -277,6 +305,7 @@ pub(super) fn build_pb_samples(
     num_genes: usize,
     anchor_batches: &[usize],
     bulk_batches: &[usize],
+    cell_to_stratum: Option<&[usize]>,
 ) -> anyhow::Result<PbSampleCollection> {
     let group_to_cols = data_vec
         .take_grouped_columns()
@@ -297,6 +326,7 @@ pub(super) fn build_pb_samples(
         weights.as_deref(),
         anchor_batches,
         bulk_batches,
+        cell_to_stratum,
     )?;
     let num_pb = layout.cell_counts.len();
     let gene_sums =
@@ -326,6 +356,8 @@ pub(crate) fn knn_distinct_pbsamples_in_batch(
     knn: usize,
     cell_to_pbsamp: &[usize],
     own_pbsamp: usize,
+    pb_sample_to_stratum: Option<&[usize]>,
+    own_stratum: Option<usize>,
 ) -> anyhow::Result<Vec<(usize, f32)>> {
     let n = bknn.num_points();
     if n == 0 || knn == 0 {
@@ -343,6 +375,11 @@ pub(crate) fn knn_distinct_pbsamples_in_batch(
             let other_pbsamp = cell_to_pbsamp[c];
             if other_pbsamp == usize::MAX || other_pbsamp == own_pbsamp {
                 continue;
+            }
+            if let (Some(st), Some(own_s)) = (pb_sample_to_stratum, own_stratum) {
+                if st[other_pbsamp] != own_s {
+                    continue;
+                }
             }
             best.entry(other_pbsamp)
                 .and_modify(|old| {
@@ -385,6 +422,8 @@ pub(crate) fn bbknn_match_one_pbsamp(
     // every anchor set).
     let pbsamp_batch = layout.pb_sample_to_batch[pbsamp];
     let centroid: Vec<f32> = layout.centroids.column(pbsamp).iter().copied().collect();
+    let pb_stratum = layout.pb_sample_to_stratum.as_deref();
+    let own_stratum = pb_stratum.map(|s| s[pbsamp]);
     let mut all_hits: Vec<(usize, f32)> = Vec::new();
     match anchor_batches {
         // Pooled matching: every non-own, non-bulk batch contributes
@@ -402,6 +441,8 @@ pub(crate) fn bbknn_match_one_pbsamp(
                     knn,
                     &layout.cell_to_pbsamp,
                     pbsamp,
+                    pb_stratum,
+                    own_stratum,
                 )?;
                 all_hits.extend(per_batch);
             }
@@ -422,6 +463,8 @@ pub(crate) fn bbknn_match_one_pbsamp(
                     knn,
                     &layout.cell_to_pbsamp,
                     usize::MAX, // self-match allowed
+                    pb_stratum,
+                    own_stratum,
                 )?;
                 all_hits.extend(per_batch);
             }

@@ -913,11 +913,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             data_beans::sparse_io_vector::ColumnAlignment::Disjoint
         },
         feature_kind: args.feature_name_kind.clone().into(),
-        refine: Some(args.collapse.pb_refine.to_params()),
+        refine: args.collapse.pb_refine.to_params(),
         pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: true,
         prebuilt_partition,
+        cnv_clones: args.collapse.cnv_clones.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

@@ -125,13 +125,14 @@ fn run(tag: &str, anchored: bool) -> data_beans_alg::collapse_data::CollapsedOut
         num_levels: 1,
         sort_dim: 3,
         num_opt_iter: 30,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: data_beans_alg::refine_multilevel::RefineParams::default(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: anchored.then(|| vec!["__ref__".into()]),
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
         pb_tree: None,
+        strata: None,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -201,13 +202,14 @@ fn an_unknown_anchor_batch_is_refused() {
         num_levels: 1,
         sort_dim: 3,
         num_opt_iter: 10,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: data_beans_alg::refine_multilevel::RefineParams::default(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["no_such_batch".into()]),
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
         pb_tree: None,
+        strata: None,
     };
     let err = match collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params) {
         Ok(_) => panic!("an unknown anchor batch must be refused"),
@@ -298,13 +300,14 @@ fn novel_biology_survives_into_the_adjusted_target() {
         num_levels: 1,
         sort_dim: 3,
         num_opt_iter: 30,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: data_beans_alg::refine_multilevel::RefineParams::default(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["__ref__".into()]),
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: false,
         pb_tree: None,
+        strata: None,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -365,13 +368,14 @@ fn anchored_columns_keep_singleton_finest_groups() {
         num_levels: 1,
         sort_dim: 3,
         num_opt_iter: 30,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: data_beans_alg::refine_multilevel::RefineParams::default(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: Some(vec!["__ref__".into()]),
         bulk_batches: None,
         observe_panels: true,
         keep_finest_stats: true,
         pb_tree: None,
+        strata: None,
     };
     let out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");

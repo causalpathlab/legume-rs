@@ -10,7 +10,9 @@
 //! `SrtCellPairs::with_graph`, passing the data, coordinates, graph and edge
 //! source it finds here.
 
-use crate::util::batch_effects::{estimate_and_write_batch_effects, EstimateBatchArgs};
+use crate::util::batch_effects::{
+    estimate_and_write_batch_effects, load_cnv_cell_strata, EstimateBatchArgs,
+};
 use crate::util::cell_pairs::{
     build_expression_graph, build_expression_knn, build_expression_knn_within, build_spatial_graph,
     connected_components, SrtCellPairsArgs,
@@ -282,6 +284,10 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
 
     let batch_effects = if cfg.batch_effects {
         let batch_sort_dim = c.proj_dim.min(10);
+        let strata = match c.cnv_clones.as_deref() {
+            Some(path) => Some(load_cnv_cell_strata(path, &data_vec)?),
+            None => None,
+        };
         estimate_and_write_batch_effects(
             &mut data_vec,
             &batch_membership,
@@ -291,6 +297,7 @@ pub fn preprocess_srt(cfg: SrtPreprocessConfig<'_>) -> anyhow::Result<SrtPreproc
                 block_size: c.block_size,
                 batch_knn: c.batch_knn,
                 num_levels: c.num_levels,
+                strata,
             },
             &c.out,
         )?

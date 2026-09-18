@@ -123,13 +123,14 @@ fn run(tag: &str, observe_panels: bool) -> (CollapsedOut, Vec<Box<str>>) {
         // mixes both batches — the composition the drag assertions need.
         sort_dim: 1,
         num_opt_iter: 30,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+        refine: data_beans_alg::refine_multilevel::RefineParams::default(),
         output_calibration: matrix_param::traits::CalibrateTarget::All,
         anchor_batches: None,
         bulk_batches: None,
         observe_panels,
         keep_finest_stats: false,
         pb_tree: None,
+        strata: None,
     };
     let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");
@@ -264,13 +265,14 @@ fn identical_panels_are_a_bitwise_no_op() {
             num_levels: 1,
             sort_dim: 2,
             num_opt_iter: 20,
-            refine: Some(data_beans_alg::refine_multilevel::RefineParams::default()),
+            refine: data_beans_alg::refine_multilevel::RefineParams::default(),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: observe,
             keep_finest_stats: false,
             pb_tree: None,
+            strata: None,
         };
         let mut out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
             .expect("collapse");

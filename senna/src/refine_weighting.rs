@@ -286,6 +286,26 @@ pub(crate) struct CollapseArgs {
     )]
     pub(crate) no_emit_pb_reference: bool,
 
+    #[arg(
+        long,
+        help = "CNV clone table from `canna clones`; collapse cannot mix across strata",
+        long_help = "Path to `{out}.clones.tsv.gz` written by `canna clones`.\n\
+                     Each cell's `stratum` is a hard parent cut on one multilevel\n\
+                     collapse: finest codes are crossed with the stratum, BBKNN\n\
+                     matches only within the same stratum, and unmatched (clone-only)\n\
+                     mass is excluded from the batch-δ update / pin vote while the\n\
+                     δ learned on mixable cells is still applied to clones — so\n\
+                     private CN stays in μ / mu_adjusted, not in δ or the residual.\n\
+                     Stratum 0 is the mixable bucket; missing cells default to 0.\n\
+                     \n\
+                     Honoured by topic, masked-topic, masked-sbp, masked-vae, vae,\n\
+                     svd, bge, gem, joint-topic, and joint-svd. Requires PB\n\
+                     refinement. Incompatible with an inherited `--from` cell→pb\n\
+                     partition. On a stratified run `{out}.pb_tree.json` leaves may\n\
+                     not equal the finest groups (tree is grown then crossed)."
+    )]
+    pub(crate) cnv_clones: Option<Box<str>>,
+
     #[command(flatten)]
     pub(crate) pb_refine: PbRefineArgs,
 }
@@ -391,6 +411,7 @@ impl CollapseArgs {
     /// Accepting an explicit request there and silently doing nothing is the
     /// worst option: the user believes the reference exists and only finds out
     /// a round later. The default is not a request, so it is not an error.
+    ///
     pub(crate) fn reject_pb_reference(
         &self,
         kind: crate::run_manifest::RunKind,
