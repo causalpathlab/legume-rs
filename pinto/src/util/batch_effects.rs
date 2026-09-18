@@ -60,12 +60,12 @@ pub struct EstimateBatchArgs {
     /// not individual cells, so this stays small.
     pub batch_knn: usize,
     pub num_levels: usize,
-    /// Per-cell CNV stratum from `cnv clones` (`0` = mixable). Maps to
+    /// Per-cell CNV stratum from `canna clones` (`0` = mixable). Maps to
     /// [`MultilevelParams::strata`].
     pub strata: Option<Vec<usize>>,
 }
 
-/// Read a `cnv clones` table and align strata to `data_vec` column order.
+/// Read a `canna clones` table and align strata to `data_vec` column order.
 pub fn load_cnv_cell_strata(
     clones_path: &str,
     data_vec: &SparseIoVec,

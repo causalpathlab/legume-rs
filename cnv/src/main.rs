@@ -1,4 +1,5 @@
-//! `cnv` — copy-number profiles from single-cell expression backends.
+//! `canna` — copy-number profiles from single-cell expression backends
+//! (crate/lib: `cnv`).
 
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
@@ -13,8 +14,9 @@ use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
+    name = "canna",
     version,
-    about = "cnv — copy-number variation from single-cell expression",
+    about = "canna — copy-number variation from single-cell expression",
     long_about = "Reads `data-beans` backends (.zarr.zip / .zarr / .h5) and writes\n\
                   copy-number profiles and clone strata for `--cnv-clones` consumers.\n\
                   \n\
@@ -59,7 +61,7 @@ enum Commands {
                       by every cell becomes invisible.\n\
                       \n\
                       Example:\n  \
-                      cnv infercnv --gff gencode.v46.gtf.gz \\\n    \
+                      canna infercnv --gff gencode.v46.gtf.gz \\\n    \
                       --ref Control1.zarr.zip Control2.zarr.zip \\\n    \
                       --out aml001.cnv AML001.zarr.zip"
     )]
