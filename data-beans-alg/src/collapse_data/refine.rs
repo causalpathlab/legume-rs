@@ -65,19 +65,25 @@ pub(super) fn fine_to_coarse_from_refined(
 /// hash codes by bit-masking each level's sort dim and compacting labels to
 /// `0..k_level`. Each pb-sample's finest hash code is read from any of its
 /// member cells (all cells in a pb-sample share the same finest group).
+///
+/// `strata_bits` are low bits crossed into `fine_codes` for CNV purity;
+/// they are included in the mask width but do not inflate `level_dims`
+/// (expression budget stays `2^d`).
 pub(super) fn initial_per_level_from_hash(
     fine_codes: &[usize],
     pb_sample_to_cells: &[Vec<usize>],
     level_dims: &[usize],
+    strata_bits: usize,
 ) -> Vec<Vec<usize>> {
     let num_pb = pb_sample_to_cells.len();
     level_dims
         .iter()
         .map(|&d| {
-            let mask = if d >= usize::BITS as usize {
+            let width = d.saturating_add(strata_bits);
+            let mask = if width >= usize::BITS as usize {
                 usize::MAX
             } else {
-                (1_usize << d).wrapping_sub(1)
+                (1_usize << width).wrapping_sub(1)
             };
             let codes: Vec<usize> = (0..num_pb)
                 .map(|pbsamp| fine_codes[pb_sample_to_cells[pbsamp][0]] & mask)
@@ -94,10 +100,14 @@ pub(super) fn initial_per_level_from_hash(
 /// by `2^child_dim` while staying hash-meaningful (cells agreeing on the finer
 /// SVD dims group together), instead of an arbitrary positional index. The
 /// coarsest level has no parent, so its entry is empty (unused).
+///
+/// `strata_bits` shift the parent cut so low stratum bits are skipped when
+/// reading expression extras; the extra-bit width stays `child − parent`.
 pub(super) fn build_reproject_offsets(
     fine_codes: &[usize],
     pb_sample_to_cells: &[Vec<usize>],
     level_dims: &[usize],
+    strata_bits: usize,
 ) -> Vec<Vec<usize>> {
     let raw: Vec<usize> = pb_sample_to_cells
         .iter()
@@ -106,8 +116,8 @@ pub(super) fn build_reproject_offsets(
     (0..level_dims.len())
         .map(|level| {
             if level + 1 < level_dims.len() {
-                let parent_dim = level_dims[level + 1];
-                let nbits = level_dims[level].saturating_sub(parent_dim);
+                let parent_dim = level_dims[level + 1].saturating_add(strata_bits);
+                let nbits = level_dims[level].saturating_sub(level_dims[level + 1]);
                 let mask = if nbits >= usize::BITS as usize {
                     usize::MAX
                 } else {
@@ -251,6 +261,14 @@ pub(super) struct RefineCollectCtx<'a> {
     pub(super) keep_finest_stats: bool,
     /// Tree behind `fine_codes`, when the finest partition was grown.
     pub(super) pb_tree: Option<&'a PbTree>,
+    /// Per-cell CNV stratum when collapse is stratified (`None` = no filter).
+    pub(super) cell_to_stratum: Option<&'a [usize]>,
+    /// Exclude unmatched sample mass from the δ update (set when strata
+    /// are present so private-clone observed mass cannot pull δ).
+    pub(super) exclude_unmatched_from_delta: bool,
+    /// Low bits of `fine_codes` reserved for stratum (0 when unstratified).
+    /// Hash/reproject masks include these; `level_dims` do not.
+    pub(super) strata_bits: usize,
 }
 
 /// Refinement integration path for `SparseIoVec`.
@@ -284,6 +302,9 @@ pub(super) fn refine_and_collect_single_layer(
         observe_panels: _,
         keep_finest_stats: _,
         pb_tree: _,
+        cell_to_stratum: _,
+        exclude_unmatched_from_delta: _,
+        strata_bits,
     } = *ctx;
     info!(
         "Multi-level refinement path (BBKNN + DC-SBM): {} levels",
@@ -297,6 +318,7 @@ pub(super) fn refine_and_collect_single_layer(
         num_features,
         ctx.summary_batches.unwrap_or(&[]),
         ctx.bulk_batches.unwrap_or(&[]),
+        ctx.cell_to_stratum,
     )?;
     let num_pb = pb_samples.layout.cell_counts.len();
     let ncells_dbg = proj_kn.ncols();
@@ -320,7 +342,7 @@ pub(super) fn refine_and_collect_single_layer(
     let pb_sample_to_cells = build_pb_sample_to_cells(&pb_samples.layout);
 
     let initial_per_level =
-        initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims);
+        initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims, strata_bits);
     let empty: [ColumnDict<usize>; 0] = [];
     let batch_knn: &[ColumnDict<usize>] = if num_batches >= 2 {
         data_vec
@@ -330,7 +352,8 @@ pub(super) fn refine_and_collect_single_layer(
     } else {
         &empty
     };
-    let reproject_offsets = build_reproject_offsets(fine_codes, &pb_sample_to_cells, level_dims);
+    let reproject_offsets =
+        build_reproject_offsets(fine_codes, &pb_sample_to_cells, level_dims, strata_bits);
     let inputs = crate::refine_multilevel::RefineInputs {
         layout: &pb_samples.layout,
         gene_sums: &pb_samples.gene_sums,
@@ -403,6 +426,7 @@ pub(super) fn refine_and_collect_single_layer(
     debug_assert_eq!(data_vec.num_groups(), k_finest);
 
     let mut fine_stat = CollapsedStat::new(num_features, k_finest, num_batches);
+    fine_stat.exclude_unmatched_from_delta = ctx.exclude_unmatched_from_delta;
     info!("Collecting basic stats over {} groups ...", k_finest);
     data_vec.collect_basic_stat(&mut fine_stat)?;
     if num_batches >= 2 {
@@ -547,6 +571,9 @@ pub(super) fn refine_and_collect_stack(
         observe_panels: _,
         keep_finest_stats: _,
         pb_tree: _,
+        cell_to_stratum,
+        exclude_unmatched_from_delta,
+        strata_bits,
     } = *ctx;
     let num_layers = stack.num_types();
     info!(
@@ -560,8 +587,15 @@ pub(super) fn refine_and_collect_stack(
 
     // Build shared pb-sample layout from layer[0]'s row count and the shared
     // projection. The layout only uses `proj_kn` + grouping, no raw reads.
-    let layout =
-        build_pb_sample_layout(group_to_cols_finest, &col_to_batch, proj_kn, None, &[], &[])?;
+    let layout = build_pb_sample_layout(
+        group_to_cols_finest,
+        &col_to_batch,
+        proj_kn,
+        None,
+        &[],
+        &[],
+        cell_to_stratum,
+    )?;
     let num_pb = layout.cell_counts.len();
 
     // Gene sums for layer[0] drive the refinement (first-layer-owns).
@@ -576,7 +610,7 @@ pub(super) fn refine_and_collect_stack(
     let pb_sample_to_cells = build_pb_sample_to_cells(&layout);
 
     let initial_per_level =
-        initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims);
+        initial_per_level_from_hash(fine_codes, &pb_sample_to_cells, level_dims, strata_bits);
     let empty: [ColumnDict<usize>; 0] = [];
     let batch_knn: &[ColumnDict<usize>] = if num_batches >= 2 {
         stack.stack[0]
@@ -586,7 +620,8 @@ pub(super) fn refine_and_collect_stack(
     } else {
         &empty
     };
-    let reproject_offsets = build_reproject_offsets(fine_codes, &pb_sample_to_cells, level_dims);
+    let reproject_offsets =
+        build_reproject_offsets(fine_codes, &pb_sample_to_cells, level_dims, strata_bits);
     let inputs = crate::refine_multilevel::RefineInputs {
         layout: &layout,
         gene_sums: &gene_sums_owner,
@@ -640,6 +675,7 @@ pub(super) fn refine_and_collect_stack(
     for (d, layer) in stack.stack.iter().enumerate() {
         let num_features = layer.num_rows();
         let mut stat = CollapsedStat::new(num_features, k_finest, num_batches);
+        stat.exclude_unmatched_from_delta = exclude_unmatched_from_delta;
         info!(
             "Layer {}/{}: collecting basic stats over {} groups ...",
             d + 1,

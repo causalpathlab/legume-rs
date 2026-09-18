@@ -761,6 +761,32 @@ pub struct LoadCollapseArgs<'a> {
     /// equal `partition.len()` or `load_and_collapse` bails. When
     /// `Some`, the loader auto-sets `want_hierarchy = true`.
     pub prebuilt_partition: Option<crate::run_manifest::InheritedPartition>,
+    /// Optional `{out}.clones.tsv.gz` from `cnv clones`. When set,
+    /// collapse routes through
+    /// [`collapse_columns_multilevel_with_strata`] (sets
+    /// `MultilevelParams.strata`: same-stratum BBKNN + unmatched-δ guard).
+    /// Incompatible with `prebuilt_partition`.
+    pub cnv_clones: Option<&'a str>,
+}
+
+/// Read `{out}.clones.tsv.gz` and align to `data_vec` column names.
+///
+/// Shared by [`load_and_collapse`] and `senna svd` so the clone-table load
+/// is not reimplemented per command.
+pub fn load_cnv_cell_strata(
+    clones_path: &str,
+    data_vec: &SparseIoVec,
+) -> anyhow::Result<Vec<usize>> {
+    let table = cnv::clone_call::read_clone_table(clones_path)?;
+    let names = data_vec.column_names()?;
+    let cell_to_stratum = cnv::clone_call::align_strata_to_cells(&table, &names)?;
+    let n_kept = cell_to_stratum.iter().filter(|&&s| s > 0).count();
+    info!(
+        "CNV strata from {clones_path}: {} / {} cells in donor-private clones",
+        n_kept,
+        cell_to_stratum.len()
+    );
+    Ok(cell_to_stratum)
 }
 
 /// Load sparse data, project, multi-level collapse, and write delta output.
@@ -814,6 +840,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         observe_panels: args.observe_panels,
         keep_finest_stats: false,
         pb_tree: args.pb_tree.clone(),
+        strata: None,
     };
 
     // Both `collapse_columns_multilevel_vec` and the with-hierarchy /
@@ -828,7 +855,32 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         Vec<CollapsedOut>,
         Option<Vec<Vec<usize>>>,
         Option<data_beans_alg::collapse_data::PbTree>,
-    ) = if let Some((partition_src, cell_names_src)) = args.prebuilt_partition.clone() {
+    ) = if args.cnv_clones.is_some() && args.prebuilt_partition.is_some() {
+        anyhow::bail!(
+            "--cnv-clones cannot be combined with an inherited `--from` cell→pb partition: \
+             strata are a parent cut on a fresh collapse, not a skipped-refine partition"
+        );
+    } else if let Some(clones_path) = args.cnv_clones {
+        anyhow::ensure!(
+            ml_params.refine.is_some(),
+            "--cnv-clones requires PB refinement (do not pass --pb-refine-gibbs 0 with the \
+             refinement opt-out that clears RefineParams)"
+        );
+        let cell_to_stratum = load_cnv_cell_strata(clones_path, &data_vec)?;
+        let MultilevelCollapseOut {
+            levels,
+            mut cell_to_pb_per_level,
+            pb_tree,
+        } = collapse_columns_multilevel_with_strata(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            &ml_params,
+            &cell_to_stratum,
+        )?;
+        cell_to_pb_per_level.reverse();
+        (levels, Some(cell_to_pb_per_level), pb_tree)
+    } else if let Some((partition_src, cell_names_src)) = args.prebuilt_partition.clone() {
         let data_cell_names = data_vec.column_names()?;
         // Align by cell name (handles row-order differences /
         // bails on cell-set mismatch). The aligned partition is

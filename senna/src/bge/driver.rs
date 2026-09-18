@@ -180,6 +180,19 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             },
             None => None,
         };
+        let strata = match knobs.collapse.cnv_clones.as_deref() {
+            Some(path) => {
+                anyhow::ensure!(
+                    knobs.refine.is_some(),
+                    "--cnv-clones requires PB refinement"
+                );
+                Some(crate::topic::common::load_cnv_cell_strata(
+                    path,
+                    unified.count_backend(),
+                )?)
+            }
+            None => None,
+        };
         Ok(ge::FitConfig {
             embedding_dim: knobs.embedding_dim,
             // Greedy batch correction against the carried reference, exactly
@@ -217,6 +230,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             offset_rank: plan.offset_rank,
             preset_features,
             preset_offsets,
+            strata,
         })
     };
 

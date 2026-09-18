@@ -1,6 +1,6 @@
 use crate::embed_common::*;
 use crate::hvg::HvgCliArgs;
-use crate::topic::common::{load_and_project, LoadProjectArgs, ProjectedData};
+use crate::topic::common::{load_and_project, load_cnv_cell_strata, LoadProjectArgs, ProjectedData};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
@@ -154,29 +154,46 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // data-beans-alg hands levels back finest-FIRST, and svd consumes only
     // the finest: take element 0 of each and drop the coarser tail now — a
     // retained level is up to six `[D, S]` planes of dead weight.
-    let mut multilevel = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
-        &mut data_vec,
-        &proj_kn,
-        &batch_membership,
-        &MultilevelParams {
-            knn_pb_samples: args.collapse.knn_cells,
-            num_levels: args.collapse.num_levels,
-            sort_dim: args.collapse.sort_dim,
-            num_opt_iter: args.collapse.iter_opt,
-            refine: Some(args.collapse.pb_refine.to_params()),
-            output_calibration: matrix_param::traits::CalibrateTarget::All,
-            // See `topic::common::load_and_collapse` — greedy correction
-            // against the carried reference when one is loaded.
-            anchor_batches: args
-                .pb_reference
-                .is_some()
-                .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
-            bulk_batches: args.collapse.mixture_batch.clone(),
-            observe_panels: true,
-            keep_finest_stats: false,
-            pb_tree: args.collapse.pb_tree_params(),
-        },
-    )?;
+    let ml_params = MultilevelParams {
+        knn_pb_samples: args.collapse.knn_cells,
+        num_levels: args.collapse.num_levels,
+        sort_dim: args.collapse.sort_dim,
+        num_opt_iter: args.collapse.iter_opt,
+        refine: Some(args.collapse.pb_refine.to_params()),
+        output_calibration: matrix_param::traits::CalibrateTarget::All,
+        // See `topic::common::load_and_collapse` — greedy correction
+        // against the carried reference when one is loaded.
+        anchor_batches: args
+            .pb_reference
+            .is_some()
+            .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+        bulk_batches: args.collapse.mixture_batch.clone(),
+        observe_panels: true,
+        keep_finest_stats: false,
+        pb_tree: args.collapse.pb_tree_params(),
+        strata: None,
+    };
+    let mut multilevel = if let Some(path) = args.collapse.cnv_clones.as_deref() {
+        anyhow::ensure!(
+            ml_params.refine.is_some(),
+            "--cnv-clones requires PB refinement"
+        );
+        let cell_to_stratum = load_cnv_cell_strata(path, &data_vec)?;
+        data_beans_alg::collapse_data::collapse_columns_multilevel_with_strata(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            &ml_params,
+            &cell_to_stratum,
+        )?
+    } else {
+        data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
+            &mut data_vec,
+            &proj_kn,
+            &batch_membership,
+            &ml_params,
+        )?
+    };
     anyhow::ensure!(!multilevel.levels.is_empty(), "collapse returned no levels");
     let collapse_out = multilevel.levels.swap_remove(0);
     let finest_membership = multilevel.cell_to_pb_per_level.swap_remove(0);

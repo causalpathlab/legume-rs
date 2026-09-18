@@ -6,23 +6,35 @@ description = "Copy number variation detection from single-cell expression data"
 repository.workspace = true
 homepage.workspace = true
 edition.workspace = true
-version = "0.1.0"
+version = "0.2.0"
 
 [lib]
 name = "cnv"
 path = "src/lib.rs"
 
+[[bin]]
+name = "cnv"
+path = "src/main.rs"
+
 [features]
 default = []
-cuda = ["matrix-util/cuda", "mcmc-util/cuda"]
-metal = ["matrix-util/metal", "mcmc-util/metal"]
+cuda = ["matrix-util/cuda", "mcmc-util/cuda", "data-beans/cuda"]
+metal = ["matrix-util/metal", "mcmc-util/metal", "data-beans/metal"]
+hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
-nalgebra = { workspace = true }
+auxiliary-data = { workspace = true }
+data-beans = { workspace = true }
+genomic-data = { workspace = true }
 matrix-util = { workspace = true }
 mcmc-util = { workspace = true }
-log = { workspace = true }
+
 anyhow = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+nalgebra-sparse = { workspace = true }
 rayon = { workspace = true }
 rustc-hash = { workspace = true }
 rand = { workspace = true }
