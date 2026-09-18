@@ -360,12 +360,17 @@ pub fn profile_block(
     csc: &CscMatrix<f32>,
     feats: &GenomeFeatures,
     cfg: &CellProfileConfig,
-) -> (DMatrix<f32>, Vec<f32>) {
+) -> anyhow::Result<(DMatrix<f32>, Vec<f32>)> {
     let n = csc.ncols();
     let g_ord = feats.n_ordered();
     let depths = column_depths(csc);
     let ord_of_row = &feats.ord_of_data_row;
-    debug_assert_eq!(ord_of_row.len(), csc.nrows());
+    anyhow::ensure!(
+        ord_of_row.len() == csc.nrows(),
+        "profile_block: block has {} rows but the genome features were built over {}",
+        csc.nrows(),
+        ord_of_row.len()
+    );
 
     let clip = cfg.clip;
     let log_ratio = build_columns_par(g_ord, n, |j, col| {
@@ -412,7 +417,7 @@ pub fn profile_block(
 
     let n_rows = feats.n_rows();
     if n_rows == g_ord {
-        return (smoothed, depths);
+        return Ok((smoothed, depths));
     }
     let inv_genes_per_row: Vec<f32> = feats
         .genes_per_row
@@ -429,7 +434,7 @@ pub fn profile_block(
             .zip(&inv_genes_per_row)
             .for_each(|(v, w)| *v *= w);
     });
-    (binned, depths)
+    Ok((binned, depths))
 }
 
 /// Where the outputs went.
@@ -496,7 +501,7 @@ pub fn run_cell_profiles(
         for (lb, ub) in blocks {
             let cols = &query_cols[lb..ub];
             let csc = data.read_columns_csc(cols.iter().copied())?;
-            let (block, depths) = profile_block(&csc, &feats, cfg);
+            let (block, depths) = profile_block(&csc, &feats, cfg)?;
             let n_block = ub - lb;
 
             let burden: Vec<f32> = block
@@ -638,7 +643,7 @@ mod tests {
         let f = GenomeFeatures::build(&loci, &st, &cfg).unwrap();
         let dense = DMatrix::from_column_slice(3, 1, &counts);
         let csc = CscMatrix::from(&dense);
-        let (prof, depths) = profile_block(&csc, &f, &cfg);
+        let (prof, depths) = profile_block(&csc, &f, &cfg).expect("profile");
         assert_eq!(depths, vec![depth]);
         for v in prof.iter() {
             assert!(v.abs() < 1e-6, "{v}");
