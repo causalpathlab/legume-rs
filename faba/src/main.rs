@@ -47,42 +47,31 @@ fn print_logo() {
 Feature naming convention:\n\
   All sparse matrix row names follow: {gene_key}/{modality}/{detail}\n\
   where gene_key = {gene_id}_{symbol} (e.g. ENSG00001234_BRCA2)\n\n\
-  count:   gene_key/count/spliced, gene_key/count/unspliced\n\
-  dartseq: gene_key/m6a/{channel} (gene), gene_key/m6a/{chr}:{pos}/{channel}\n\
-           (site), gene_key/m6a/{component}/{channel} (mixture)\n\
-  atoi:    gene_key/atoi/{channel} (gene), gene_key/atoi/{chr}:{pos}/{channel}\n\
-           (site), gene_key/atoi/{component}/{channel} (mixture)\n\
-  apa:     gene_key/apa/{proximal|distal} (gene),\n\
-           gene_key/apa/{component} (mixture)\n\
-  baf:     {chr}:{pos}/baf/{alt|depth}\n\n\
-  The channel is always the LAST field, so a 4-field row carries a subunit\n\
-  (site or mixture component) and a 3-field row is unit-level.\n\
-  The apa mixture is the exception: it names a unit with no channel,\n\
-  because its contrast lives ACROSS a gene's components rather than within a row.\n\n\
-  baf is keyed on the LOCUS, not on a gene:\n\
-  a variant is a coordinate and belongs to no gene,\n\
-  and keying it by gene named the same variant twice wherever two genes overlapped.\n\
-  Its two channels also NEST rather than partition (alt ≤ depth),\n\
-  so BAF is alt/depth — do not sum a locus's channels to recover coverage.\n\n\
-  Split on '/' to extract (unit, modality, detail) for cross-modal joins.\n\n\
+  \n\
+  * count:   {gene_key}/count/spliced, {gene_key}/count/unspliced\n\
+  * dartseq: {gene_key}/m6a/{channel} (gene), {gene_key}/m6a/{chr}:{pos}/{channel}\n\
+  * (site),  {gene_key}/m6a/{component}/{channel} (mixture)\n\
+  * atoi:    {gene_key}/atoi/{channel} (gene), {gene_key}/atoi/{chr}:{pos}/{channel}\n\
+  * (site),  {gene_key}/atoi/{component}/{channel} (mixture)\n\
+  * apa:     {gene_key}/apa/{proximal|distal} (gene),\n\
+  * (mixture){gene_key}/apa/{component}\n\
+  * baf:     {chr}:{pos}/baf/{alt|depth}\n\
+  \n\
+  \n\
 Output layout (every matrix is per-replicate — one per input BAM):\n\
-  per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n\
-                gene_key/m6a/{methylated|unmethylated}, gene_key/atoi/{edited|unedited}),\n\
-                plus {batch}_{m6a,atoi}_site (per-site) and _mixture,\n\
-                {batch}_count\n\
-  baf:          {batch}_baf — per-cell alt and depth reads at each called locus\n\
-                (`faba snp` writes it; the CALL SET is snp_sites.parquet/.vcf.gz)\n\
-  depth:        {batch}_depth — binned per-cell read depth (--depth-resolution-kb)\n\
-  apa:          {batch}_apa (proximal/distal counts, default; `apa --no-pdui` / `all --no-apa-pdui` skip),\n\
-                {batch}_apa_mixture (--mixture)\n\
-  Mixture components are FIT on the pooled replicates (shared across batches)\n\
-  but COUNTED per batch, so per-batch mixture matrices share one row vocabulary\n\
+  per-modality: {batch}_m6a, {batch}_atoi, ...\n\
+  depth:        {batch}_depth —> binned per-cell read depth (--depth-resolution-kb)\n\
+  apa:          {batch}_apa (proximal/distal counts)\n\
+  \n\
+  Mixture components are FIT ON the POOLED shared across batches\n\
+  but COUNTED PER BATCH, so per-batch matrices share one row vocabulary\n\
   and stack directly.\n\
+  \n\
   The shared definitions are the only single files:\n\
   *_sites.parquet, *_components.parquet.\n\
-  --drop-single-component prunes genes with a lone component (no relative signal)\n\
-  from the mixture matrices and component sidecars.\n\n\
+  \n\
 Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
+
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Enable verbose logging")]
     verbose: bool,
@@ -100,11 +89,8 @@ enum Commands {
             the RAC (forward) / GTY (reverse) motif,\n\
             at least --min-conversion converted signal reads,\n\
             and total coverage (signal + control) of at least --min-coverage.\n\
-            That is the only decision made here. Every putative site is written with\n\
-            its one-sided Fisher exact p-value on the WT-vs-MUT 2x2, its log odds ratio,\n\
-            and its signal / control counts, then quantified per cell.\n\
-            No p-value, odds-ratio or cells-per-site cutoff is applied:\n\
-            `faba qc` thresholds those columns, and `faba qc-report` shows what each keeps.\n\
+            `faba qc` thresholds variants, and `faba qc-report` shows what each keeps.\n\
+	    \n\
             The unit is always the site.\n\
             A genomic C/T variant converts equally in both arms, so a control is REQUIRED.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
@@ -116,7 +102,8 @@ enum Commands {
             - {batch}_m6a_mixture (+ m6a_components.parquet), with --mixture:\n\
               per-replicate mixture counts — components fit on pooled replicates,\n\
               counted per batch (shared row schema)\n\n\
-            Reference:\n  \
+	      \n\
+            Reference:\n\
             Meyer, \"DART-seq: an antibody-free method for global m6A detection\",\n\
             Nature Methods, 16(12):1275-1280, 2019.\n\
             https://doi.org/10.1038/s41592-019-0570-0",
@@ -249,8 +236,8 @@ Example:\n  \
 	faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2\n\
 	faba pileup out/rep*_wt_m6a.zarr.zip -q BRCA2 -s out/m6a_sites.parquet\n\
 	# Miami figure: epi sites / gene model / read depth, faceted by cell type\n\
-	faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2 \\\n\
-	--gtf gencode.gtf --bam sample.bam --cell-membership cells.tsv \\\n\
+	faba pileup out/rep1_wt_m6a.zarr.zip -q BRCA2 \n\
+	--gtf gencode.gtf --bam sample.bam --cell-membership cells.tsv \n\
     --top-modality m6A --out brca2_miami --svg --png"
     )]
     Pileup(PileupArgs),
@@ -285,7 +272,7 @@ Example:\n  \
 	Example:\n\
 	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv --print\n\
 	# write the table MetaPlotR's visualize_metagenes.R reads:\n\
-	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv \\\n\
+	faba metagene -s out/m6a_sites.parquet -g genes.gff -o metagene.tsv \n\
 	--dist-measures m6a.dist.measures.txt"
     )]
     Metagene(MetageneArgs),
