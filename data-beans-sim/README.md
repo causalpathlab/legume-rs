@@ -206,9 +206,10 @@ with known topic memberships.
 
 ## Output backends
 
-`--backend zarr` (default), `--backend h5`, or `--backend zarr --zip` for
-a `.zarr.zip` single-file archive. Companion `.parquet` / `.tsv.gz`
-files are independent of the backend choice.
+`--backend zarr` (default) writes a `.zarr.zip` single-file archive;
+pass `--no-zip` for a plain `.zarr` directory, or `--backend h5` for
+HDF5. Companion `.parquet` / `.tsv.gz` files are independent of the
+backend choice.
 
 `--save-mtx` additionally emits a Matrix Market `.mtx.gz` triplet file
 plus `.rows.gz` / `.cols.gz` name files. Useful for cross-checking
