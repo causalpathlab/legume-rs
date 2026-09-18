@@ -281,7 +281,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             num_levels: args.num_levels.max(1),
             sort_dim: args.sort_dim,
             num_opt_iter: DEFAULT_OPT_ITER,
-            refine: Some(RefineParams::default()),
+            refine: RefineParams::default(),
             output_calibration: matrix_param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,

@@ -712,9 +712,8 @@ pub struct LoadCollapseArgs<'a> {
     pub feature_list_file: Option<&'a str>,
     /// Optional force-include list — see [`LoadProjectArgs::must_train_file`].
     pub must_train_file: Option<&'a str>,
-    /// Opt-in BBKNN + Poisson DC-SBM refinement of the multilevel
-    /// partition. `None` keeps the legacy hash-only behavior.
-    pub refine: Option<data_beans_alg::refine_multilevel::RefineParams>,
+    /// BBKNN + Poisson DC-SBM refinement of the multilevel partition.
+    pub refine: data_beans_alg::refine_multilevel::RefineParams,
     /// Grow the finest partition as a tree — see `MultilevelParams::pb_tree`.
     pub pb_tree: Option<data_beans_alg::collapse_data::PbTreeParams>,
     /// Treat all cells as a single batch — no per-batch δ estimation.
@@ -746,9 +745,8 @@ pub struct LoadCollapseArgs<'a> {
     pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
     /// Retain the per-level cell → pb membership hierarchy. When `true`,
     /// `load_and_collapse` routes through
-    /// [`collapse_columns_multilevel_with_hierarchy`] (which requires
-    /// `refine = Some(..)`) and populates `PreparedData.cell_to_pb_per_level`.
-    /// Default `false` keeps the legacy `masked-topic` behavior.
+    /// [`collapse_columns_multilevel_with_hierarchy`] and populates
+    /// `PreparedData.cell_to_pb_per_level`.
     pub want_hierarchy: bool,
     /// Optional pre-built `cell_to_pb_per_level` membership (finest-
     /// last) paired with the source's `cell_names`, inherited from a
@@ -861,11 +859,6 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
              strata are a parent cut on a fresh collapse, not a skipped-refine partition"
         );
     } else if let Some(clones_path) = args.cnv_clones {
-        anyhow::ensure!(
-            ml_params.refine.is_some(),
-            "--cnv-clones requires PB refinement (do not pass --pb-refine-gibbs 0 with the \
-             refinement opt-out that clears RefineParams)"
-        );
         let cell_to_stratum = load_cnv_cell_strata(clones_path, &data_vec)?;
         let MultilevelCollapseOut {
             levels,

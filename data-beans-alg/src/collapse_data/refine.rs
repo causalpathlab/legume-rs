@@ -11,9 +11,8 @@
 //!   stacked observations sharing the first-layer grouping decision).
 //!
 //! Also houses the level-descent helpers (`compute_level_sort_dims`,
-//! `compute_fine_to_coarse_mapping`, `fine_to_coarse_from_refined`)
-//! and the trivial-identity fallback (`refine_or_identity`) used by
-//! the single-batch path.
+//! `fine_to_coarse_from_refined`) and the trivial-identity fallback
+//! (`refine_or_identity`) used by the single-batch path.
 
 use super::stats::DEFAULT_COARSEST_SORT_DIM;
 use super::*;
@@ -794,41 +793,6 @@ pub(super) fn compute_level_sort_dims(finest_sort_dim: usize, num_levels: usize)
         }
     }
     dims
-}
-
-/// Compute the mapping from fine group indices to coarse group indices.
-///
-/// Each fine group's binary code is masked to `coarse_dim` bits to
-/// produce its coarse code. Unique coarse codes are assigned
-/// consecutive indices.
-pub(super) fn compute_fine_to_coarse_mapping(
-    group_to_cols: &[Vec<usize>],
-    fine_codes: &[usize],
-    coarse_dim: usize,
-) -> (Vec<usize>, usize) {
-    let coarse_mask = (1_usize << coarse_dim) - 1;
-
-    // For each fine group, look up binary code from any member column
-    let coarse_codes: Vec<usize> = group_to_cols
-        .iter()
-        .map(|cols| fine_codes[cols[0]] & coarse_mask)
-        .collect();
-
-    // Unique coarse codes → consecutive indices
-    let mut unique_coarse: Vec<usize> = coarse_codes.to_vec();
-    unique_coarse.sort_unstable();
-    unique_coarse.dedup();
-    let num_coarse = unique_coarse.len();
-
-    let coarse_to_idx: HashMap<usize, usize> = unique_coarse
-        .into_iter()
-        .enumerate()
-        .map(|(i, c)| (c, i))
-        .collect();
-
-    let fine_to_coarse: Vec<usize> = coarse_codes.iter().map(|c| coarse_to_idx[c]).collect();
-
-    (fine_to_coarse, num_coarse)
 }
 
 #[cfg(test)]

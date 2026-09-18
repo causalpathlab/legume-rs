@@ -109,7 +109,7 @@ fn a_record_missing_offset_l2_replays_with_the_clap_default() {
 /// Every flag `gem/args.rs` declares directly (excludes the flattened shared
 /// groups `hvg` / `collapse` / `qc` / `modules`, whose help text belongs to
 /// their own source files and is governed there, not here).
-const GEM_OWN_ARG_IDS: [&str; 22] = [
+const GEM_OWN_ARG_IDS: [&str; 21] = [
     "genes",
     "modality_files",
     "batch_files",
@@ -119,7 +119,6 @@ const GEM_OWN_ARG_IDS: [&str; 22] = [
     "modules_per_unit",
     "skip_etm",
     "num_topics",
-    "no_refine",
     "epochs",
     "batch_size",
     "learning_rate",
