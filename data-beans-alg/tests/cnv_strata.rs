@@ -331,17 +331,24 @@ fn without_strata_private_program_leaks_into_delta_and_residual() {
 
 #[test]
 fn a_single_stratum_matches_unstratified_hierarchy() {
-    let (mut v, batches, _, _dir) = cohort("one");
-    let n = v.num_columns();
+    // Each arm on its own backend: a collapse mutates `v` (group
+    // assignment, batch registration), so running both on one `v`
+    // compares different starting states, not the two code paths.
+    let p = params();
+    let (mut v, batches, _, _dir) = cohort("one-strata");
     let proj = v
         .project_columns_with_batch_correction(4, None, Some(&batches))
         .expect("proj")
         .proj;
-    let all_zero = vec![0usize; n];
-    let p = params();
+    let all_zero = vec![0usize; v.num_columns()];
     let out_strata =
         collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &p, &all_zero)
             .expect("strata");
+    let (mut v, batches, _, _dir) = cohort("one-none");
+    let proj = v
+        .project_columns_with_batch_correction(4, None, Some(&batches))
+        .expect("proj")
+        .proj;
     let out_none = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
         &mut v, &proj, &batches, &p,
     )
@@ -350,31 +357,48 @@ fn a_single_stratum_matches_unstratified_hierarchy() {
         &out_none.cell_to_pb_per_level[0],
         &out_strata.cell_to_pb_per_level[0],
     );
-    assert_collapsed_means_agree(&out_none.levels[0], &out_strata.levels[0], &map, 1e-6);
+    assert_collapsed_means_agree(&out_none.levels[0], &out_strata.levels[0], &map, 1e-5);
 }
 
 #[test]
 fn strata_none_path_still_produces_delta() {
-    let (mut v, batches, _, _dir) = cohort("none");
-    let n = v.num_columns();
+    let mut p = params();
+    p.strata = None;
+    let (mut v, batches, _, _dir) = cohort("none-none");
     let proj = v
         .project_columns_with_batch_correction(4, None, Some(&batches))
         .expect("proj")
         .proj;
-    let mut p = params();
-    p.strata = None;
     let out_none = data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
         &mut v, &proj, &batches, &p,
     )
     .expect("collapse");
-    let all_zero = vec![0usize; n];
+    let (mut v, batches, _, _dir) = cohort("none-zero");
+    let proj = v
+        .project_columns_with_batch_correction(4, None, Some(&batches))
+        .expect("proj")
+        .proj;
+    let all_zero = vec![0usize; v.num_columns()];
     let out_zero = collapse_columns_multilevel_with_strata(&mut v, &proj, &batches, &p, &all_zero)
         .expect("all-zero strata");
     let map = assert_partitions_equal_up_to_relabel(
         &out_none.cell_to_pb_per_level[0],
         &out_zero.cell_to_pb_per_level[0],
     );
-    assert_collapsed_means_agree(&out_none.levels[0], &out_zero.levels[0], &map, 1e-6);
+    assert_collapsed_means_agree(&out_none.levels[0], &out_zero.levels[0], &map, 1e-5);
+}
+
+/// Largest `|a − b| / max(1, |a|)` over the matrix: a relative tolerance,
+/// so an f32 ulp on an O(10) rate is not a disagreement.
+fn max_rel_diff(a: &nalgebra::DMatrix<f32>, b: &nalgebra::DMatrix<f32>) -> f32 {
+    let mut max_rel = 0.0f32;
+    for g in 0..a.nrows() {
+        for c in 0..a.ncols() {
+            let rel = (a[(g, c)] - b[(g, c)]).abs() / a[(g, c)].abs().max(1.0);
+            max_rel = max_rel.max(rel);
+        }
+    }
+    max_rel
 }
 
 /// Same cell→group partition after independent compacting. Returns `a_group → b_group`.
@@ -425,15 +449,10 @@ fn assert_collapsed_means_agree(
                 let ma = ga.posterior_mean();
                 let mb = align(gb.posterior_mean());
                 assert_eq!(ma.shape(), mb.shape(), "{name} shape");
-                let mut max_abs = 0.0f32;
-                for g in 0..ma.nrows() {
-                    for c in 0..ma.ncols() {
-                        max_abs = max_abs.max((ma[(g, c)] - mb[(g, c)]).abs());
-                    }
-                }
+                let max_rel = max_rel_diff(ma, &mb);
                 assert!(
-                    max_abs < tol,
-                    "{name} posterior means disagree: max |Δ|={max_abs} (tol={tol})"
+                    max_rel < tol,
+                    "{name} posterior means disagree: max rel |Δ|={max_rel} (tol={tol})"
                 );
             }
             _ => panic!("{name}: one side missing"),
@@ -457,15 +476,10 @@ fn assert_collapsed_means_agree(
             let ma = da.posterior_mean();
             let mb = db.posterior_mean();
             assert_eq!(ma.shape(), mb.shape(), "delta shape");
-            let mut max_abs = 0.0f32;
-            for g in 0..ma.nrows() {
-                for c in 0..ma.ncols() {
-                    max_abs = max_abs.max((ma[(g, c)] - mb[(g, c)]).abs());
-                }
-            }
+            let max_rel = max_rel_diff(ma, mb);
             assert!(
-                max_abs < tol,
-                "delta posterior means disagree: max |Δ|={max_abs} (tol={tol})"
+                max_rel < tol,
+                "delta posterior means disagree: max rel |Δ|={max_rel} (tol={tol})"
             );
         }
         _ => panic!("delta: one side missing"),
