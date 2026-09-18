@@ -290,12 +290,19 @@ pub(crate) struct CollapseArgs {
         long,
         help = "CNV clone table from `cnv clones`; collapse cannot mix across strata",
         long_help = "Path to `{out}.clones.tsv.gz` written by `cnv clones`.\n\
-                     Each cell's `stratum` is a hard parent cut: expression\n\
-                     collapse runs independently inside each stratum so a\n\
-                     donor-private CNV clone cannot share a pseudobulk with the\n\
-                     mixable (stratum 0) bucket, and batch δ is estimated only\n\
-                     on mixable cells. Missing cells default to stratum 0.\n\
-                     Incompatible with inheriting a `--from` cell→pb partition."
+                     Each cell's `stratum` is a hard parent cut on one multilevel\n\
+                     collapse: finest codes are crossed with the stratum, BBKNN\n\
+                     matches only within the same stratum, and unmatched (clone-only)\n\
+                     mass is excluded from the batch-δ update / pin vote while the\n\
+                     δ learned on mixable cells is still applied to clones — so\n\
+                     private CN stays in μ / mu_adjusted, not in δ or the residual.\n\
+                     Stratum 0 is the mixable bucket; missing cells default to 0.\n\
+                     \n\
+                     Honoured by topic, masked-topic, masked-sbp, masked-vae, vae,\n\
+                     svd, bge, gem, joint-topic, and joint-svd. Requires PB\n\
+                     refinement. Incompatible with an inherited `--from` cell→pb\n\
+                     partition. On a stratified run `{out}.pb_tree.json` leaves may\n\
+                     not equal the finest groups (tree is grown then crossed)."
     )]
     pub(crate) cnv_clones: Option<Box<str>>,
 
