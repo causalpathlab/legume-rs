@@ -201,6 +201,18 @@ fn apply_strata_to_codes(
     Ok((stratified, level_dims.to_vec(), s_bits))
 }
 
+/// Finest cell codes plus what the per-level grouping needs to read them.
+struct FinestCodes {
+    /// Per-cell finest code (stratum bits in the low `strata_bits`).
+    codes: Vec<usize>,
+    /// Per-level expression widths, finest-first — un-bumped by strata.
+    widths: Vec<usize>,
+    /// The tree behind the finest partition, when one was grown.
+    tree: Option<PbTree>,
+    /// Width of the stratum field crossed into `codes` (`0` = no strata).
+    strata_bits: usize,
+}
+
 /// Finest codes and their level widths (finest-first). Without residual
 /// bits: the marginal sketch signs masked by `level_dims`. With them: the
 /// marginal top nodes (optionally re-sorted by `reassign_cells`) are the
@@ -218,7 +230,7 @@ fn finest_codes(
     proj_kn: &DMatrix<f32>,
     level_dims: &[usize],
     params: &MultilevelParams,
-) -> anyhow::Result<(Vec<usize>, Vec<usize>, Option<PbTree>, usize)> {
+) -> anyhow::Result<FinestCodes> {
     let finest_dim = level_dims[0];
     let nn = proj_kn.ncols();
     let kk = proj_kn.nrows().min(finest_dim).min(nn);
@@ -281,9 +293,14 @@ fn maybe_stratify_codes(
     widths: Vec<usize>,
     tree: Option<PbTree>,
     params: &MultilevelParams,
-) -> anyhow::Result<(Vec<usize>, Vec<usize>, Option<PbTree>, usize)> {
+) -> anyhow::Result<FinestCodes> {
     let Some(strata) = params.strata.as_deref() else {
-        return Ok((codes, widths, tree, 0));
+        return Ok(FinestCodes {
+            codes,
+            widths,
+            tree,
+            strata_bits: 0,
+        });
     };
     anyhow::ensure!(
         strata.len() == codes.len(),
@@ -304,7 +321,12 @@ fn maybe_stratify_codes(
         n_occ,
         s_bits
     );
-    Ok((codes, widths, tree, s_bits))
+    Ok(FinestCodes {
+        codes,
+        widths,
+        tree,
+        strata_bits: s_bits,
+    })
 }
 
 /// Resolve [`MultilevelParams::anchor_batches`] / `bulk_batches` names to
@@ -732,8 +754,12 @@ where
     }
 
     let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-    let (fine_codes, level_dims, pb_tree, strata_bits) =
-        finest_codes(data_vec, proj_kn, &level_dims, params)?;
+    let FinestCodes {
+        codes: fine_codes,
+        widths: level_dims,
+        tree: pb_tree,
+        strata_bits,
+    } = finest_codes(data_vec, proj_kn, &level_dims, params)?;
     data_vec.assign_groups(&fine_codes, None);
 
     let group_to_cols = data_vec
@@ -1091,8 +1117,12 @@ impl MultilevelCollapsingOps for SparseIoVec {
         );
 
         // Compute binary codes at finest resolution once
-        let (fine_codes, level_dims, pb_tree, strata_bits) =
-            finest_codes(self, proj_kn, &level_dims, params)?;
+        let FinestCodes {
+            codes: fine_codes,
+            widths: level_dims,
+            tree: pb_tree,
+            strata_bits,
+        } = finest_codes(self, proj_kn, &level_dims, params)?;
         let finest_dim = level_dims[0];
 
         // Partition at finest level
