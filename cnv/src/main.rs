@@ -351,10 +351,12 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(n) = cli.n_threads {
         anyhow::ensure!(n >= 1, "--n-threads must be >= 1");
-        rayon::ThreadPoolBuilder::new()
+        if let Err(e) = rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .build_global()
-            .ok();
+        {
+            warn!("--n-threads {n} ignored: the rayon global pool already exists ({e})");
+        }
     }
 
     match &cli.command {
