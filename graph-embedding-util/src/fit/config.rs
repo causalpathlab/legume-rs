@@ -284,6 +284,9 @@ pub struct FitConfig {
     /// Given offsets on non-base tracks, by gene (see [`crate::PresetOffsets`]);
     /// empty for none. Requires `preset_features` under a pinning mode.
     pub preset_offsets: Vec<crate::PresetOffsets>,
+    /// Per-cell CNV stratum (`0` = mixable). Maps to
+    /// [`MultilevelParams::strata`]. `None` is the pre-strata collapse path.
+    pub strata: Option<Vec<usize>>,
 }
 
 /// The one rule on [`FitConfig::offset_rank`]: `1..=h`, `h` being the

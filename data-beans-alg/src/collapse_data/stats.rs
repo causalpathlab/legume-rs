@@ -254,7 +254,40 @@ fn optimize_block(
         //////////////////////////////////////////////////////////////////
         let n_bs = &stat.n_bs;
         let w_bs = &stat.matched_bs;
-        let own_plus_src = n_bs + w_bs; // [b × s]
+        let own_plus_src = n_bs + w_bs; // [b × s] — full mass for update_mu
+        // δ's observed side: optionally drop unmatched (no counterfactual)
+        // samples so private-clone mass cannot pull the batch fold.
+        // `n_bs_d` is the matched-own mass that also votes in `pin_delta_scale`
+        // (same basis as unstratified `frame_weights()` — own mass only).
+        let (obs_db_for_delta, own_plus_src_for_delta, n_bs_d) =
+            if stat.exclude_unmatched_from_delta {
+                let mut obs = stat.observed_sum_db.clone();
+                let mut n_bs_d = n_bs.clone();
+                for s in 0..num_samples {
+                    if w_bs.column(s).sum() > 0.0 {
+                        continue;
+                    }
+                    let size = stat.size_s[s];
+                    if size <= 0.0 {
+                        continue;
+                    }
+                    for b in 0..num_batches {
+                        let n = n_bs[(b, s)];
+                        if n <= 0.0 {
+                            continue;
+                        }
+                        let frac = n / size;
+                        for g in 0..num_genes {
+                            obs[(g, b)] -= stat.observed_sum_ds[(g, s)] * frac;
+                        }
+                        n_bs_d[(b, s)] = 0.0;
+                    }
+                }
+                let own_plus = &n_bs_d + w_bs;
+                (obs, own_plus, n_bs_d)
+            } else {
+                (stat.observed_sum_db.clone(), own_plus_src.clone(), n_bs.clone())
+            };
         let obs_plus_imp = &stat.observed_sum_ds + &stat.imputed_sum_ds;
         // Fraction of each (gene, sample)'s mass whose source measures the gene;
         // `None` = fully observed.
@@ -268,8 +301,22 @@ fn optimize_block(
                 }
             })
         });
-        let frame_w = stat.frame_weights();
-        let own_plus_src_t = own_plus_src.transpose(); // [s × b]
+        let frame_w = if stat.exclude_unmatched_from_delta && stat.anchor_batches.is_empty() {
+            // Own matched mass only — do not add counterfactual source mass
+            // (that would double-count vs unstratified `frame_weights()`).
+            DVector::from_fn(num_batches, |b, _| n_bs_d.row(b).sum())
+        } else {
+            stat.frame_weights()
+        };
+        for b in 0..num_batches {
+            if frame_w[b] <= 0.0 {
+                warn!(
+                    "batch {b} has no matched mass for δ (frame weight 0); \
+                     δ_·{b} stays on prior ≈ 1 (e.g. blast-only / clone-only donor)"
+                );
+            }
+        }
+        let own_plus_src_delta_t = own_plus_src_for_delta.transpose();
         let w_bs_t = w_bs.transpose();
 
         let mut mu_adj_param = GammaMatrix::new((num_genes, num_samples), a0, b0);
@@ -310,7 +357,7 @@ fn optimize_block(
                 *z = if *z > 0.0 { x / *z } else { 0.0 };
             });
             let mut num_db =
-                &stat.observed_sum_db + (&imp_share * &w_bs_t).component_mul(&delta_gb);
+                &obs_db_for_delta + (&imp_share * &w_bs_t).component_mul(&delta_gb);
             let mu_frac_ref: &DMatrix<f32> = match obs_frac.as_ref() {
                 Some(f) => {
                     mu_frac.copy_from(mu_ds);
@@ -319,7 +366,7 @@ fn optimize_block(
                 }
                 None => mu_ds,
             };
-            let mut den_db = mu_frac_ref * &own_plus_src_t; // [g × b]
+            let mut den_db = mu_frac_ref * &own_plus_src_delta_t; // [g × b]
             if let Some(mask) = stat.obs_mask_db.as_ref() {
                 // Zeroing a (gene, batch) entry means "this batch carries no δ
                 // evidence for this gene"; masking BOTH sides lands the
@@ -627,6 +674,11 @@ pub struct CollapsedStat {
     /// there sends δ to its prior (≈ 1, "no adjustment") instead of to an
     /// extreme driven by structurally-absent counts. `None` = all observed.
     pub obs_mask_db: Option<nalgebra::DMatrix<f32>>,
+    /// When true (CNV strata present), samples with no counterfactual mass
+    /// (`matched_bs` column sum 0) are excluded from the δ numerator and
+    /// denominator so private-clone observed mass cannot pull δ. `update_mu`
+    /// still uses the full masses. Default false — bit-identical to before.
+    pub exclude_unmatched_from_delta: bool,
 }
 
 impl CollapsedStat {
@@ -641,6 +693,7 @@ impl CollapsedStat {
             anchor_batches: Vec::new(),
             size_ds: None,
             obs_mask_db: None,
+            exclude_unmatched_from_delta: false,
         }
     }
 
@@ -711,6 +764,7 @@ impl CollapsedStat {
         out.obs_mask_db = self.obs_mask_db.clone();
         out.observed_sum_db.copy_from(&self.observed_sum_db);
         out.anchor_batches = self.anchor_batches.clone();
+        out.exclude_unmatched_from_delta = self.exclude_unmatched_from_delta;
         out
     }
 
@@ -735,6 +789,7 @@ impl CollapsedStat {
                 .obs_mask_db
                 .as_ref()
                 .map(|m| m.rows(r0, nrows).into_owned()),
+            exclude_unmatched_from_delta: self.exclude_unmatched_from_delta,
         }
     }
 }
@@ -906,6 +961,7 @@ pub(super) fn merge_stat(
     }
     coarse.obs_mask_db = fine_stat.obs_mask_db.clone();
     coarse.anchor_batches = fine_stat.anchor_batches.clone();
+    coarse.exclude_unmatched_from_delta = fine_stat.exclude_unmatched_from_delta;
 
     coarse.observed_sum_db.copy_from(&fine_stat.observed_sum_db);
     coarse

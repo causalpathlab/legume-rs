@@ -132,6 +132,14 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         data_stack.num_types()
     );
 
+    let strata = match args.collapse.cnv_clones.as_deref() {
+        Some(path) => Some(crate::topic::common::load_cnv_cell_strata(
+            path,
+            &data_stack.stack[0],
+        )?),
+        None => None,
+    };
+
     let collapsed_data_vec: Vec<CollapsedOut> = data_stack.collapse_columns_multilevel(
         &proj_kn,
         batch_stack[0].as_ref(),
@@ -147,6 +155,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             observe_panels: true,
             keep_finest_stats: false,
             pb_tree: args.collapse.pb_tree_params(),
+            strata,
         },
     )?;
 

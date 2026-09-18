@@ -1,0 +1,717 @@
+//! Donor-private CNV clone calling from inferCNV profiles.
+//!
+//! Cells are sketched to one mean per chromosome, clustered in that space,
+//! then each cluster is scored for donor enclosure and spatial structure.
+//! A **2-component Gaussian mixture** (BIC: K=1 vs K=2) on those scores
+//! decides which clusters are putative clones; the rest dump into stratum
+//! `0` — the mixable bucket (Controls + CNV-flat / WT-like cells from AML
+//! donors). Optional purity / spatial floors only tighten the mixture call.
+
+use crate::kmeans_init::cluster_stats_kmeans;
+use data_beans::sparse_io_vector::SparseIoVec;
+use genomic_data::coordinates::parse_peak_coordinates;
+use matrix_util::clustering::{Kmeans, KmeansArgs};
+use matrix_util::common_io::{read_lines, write_lines};
+use nalgebra::DMatrix;
+use nalgebra_sparse::CscMatrix;
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{RngExt, SeedableRng};
+use rustc_hash::FxHashMap;
+
+/// Knobs for [`call_clones`].
+#[derive(Debug, Clone)]
+pub struct CloneCallConfig {
+    /// k-means K on the chromosome sketch (overclustering is fine; failures
+    /// dump to stratum 0).
+    pub k_max: usize,
+    /// Optional purity floor on top of the mixture (None = mixture only).
+    pub min_purity: Option<f32>,
+    /// Clusters smaller than this cannot be clones (chance purity).
+    pub min_cells: usize,
+    /// Optional spatial-z floor on top of the mixture (None = mixture only).
+    pub spatial_z: Option<f32>,
+    /// Random subsets drawn for the spatial null.
+    pub n_perm: usize,
+    pub seed: u64,
+    pub kmeans_iter: usize,
+}
+
+impl Default for CloneCallConfig {
+    fn default() -> Self {
+        Self {
+            k_max: 8,
+            min_purity: None,
+            min_cells: 50,
+            spatial_z: None,
+            n_perm: 32,
+            seed: 1,
+            kmeans_iter: 200,
+        }
+    }
+}
+
+/// Per-cluster diagnostics before the mixture gate.
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterScore {
+    pub n_cells: usize,
+    pub purity: f32,
+    /// −log10(hypergeometric enrichment p) of the majority donor.
+    pub enrich: f32,
+    pub spatial_score: f32,
+    pub spatial_z: f32,
+    /// Scalar the mixture sees: donor enclosure × spatial structure.
+    pub clone_score: f32,
+}
+
+/// One cell's clone-call row.
+#[derive(Debug, Clone)]
+pub struct CloneRow {
+    pub cell: Box<str>,
+    pub donor: Box<str>,
+    pub cluster: usize,
+    pub stratum: usize,
+    pub purity: f32,
+    pub spatial_score: f32,
+    pub spatial_z: f32,
+}
+
+/// Donor tag: suffix after the last `@` (data-beans disjoint `@basename`),
+/// otherwise the whole name.
+#[must_use]
+pub fn donor_of(cell: &str) -> &str {
+    cell.rsplit_once('@').map(|(_, d)| d).unwrap_or(cell)
+}
+
+/// Per-cell mean of the profile within each chromosome, genome order of first
+/// appearance. Rows with empty/`NA` chromosome names are dropped.
+///
+/// Returns `(sketch [C × N], chromosome names)`.
+pub fn chromosome_sketch(
+    profiles: &DMatrix<f32>,
+    chr_of_row: &[impl AsRef<str>],
+) -> (DMatrix<f32>, Vec<Box<str>>) {
+    assert_eq!(profiles.nrows(), chr_of_row.len());
+    let mut chr_index: FxHashMap<Box<str>, usize> = FxHashMap::default();
+    let mut names: Vec<Box<str>> = Vec::new();
+    let mut row_chr: Vec<Option<usize>> = Vec::with_capacity(chr_of_row.len());
+    for name in chr_of_row {
+        let raw = name.as_ref();
+        if raw.is_empty() || raw.eq_ignore_ascii_case("NA") {
+            row_chr.push(None);
+            continue;
+        }
+        let key: Box<str> = raw.into();
+        let idx = *chr_index.entry(key.clone()).or_insert_with(|| {
+            let i = names.len();
+            names.push(key);
+            i
+        });
+        row_chr.push(Some(idx));
+    }
+    let c = names.len();
+    let n = profiles.ncols();
+    if c == 0 || n == 0 {
+        return (DMatrix::zeros(c, n), names);
+    }
+    let mut counts = vec![0f32; c];
+    for &idx in &row_chr {
+        if let Some(i) = idx {
+            counts[i] += 1.0;
+        }
+    }
+    let inv: Vec<f32> = counts
+        .iter()
+        .map(|&k| if k > 0.0 { 1.0 / k } else { 0.0 })
+        .collect();
+    let sketch = matrix_util::dmatrix_util::build_columns_par(c, n, |j, col| {
+        col.fill(0.0);
+        let src = profiles.column(j);
+        for (r, &idx) in row_chr.iter().enumerate() {
+            if let Some(i) = idx {
+                col[i] += src[r];
+            }
+        }
+        for (v, w) in col.iter_mut().zip(&inv) {
+            *v *= w;
+        }
+    });
+    (sketch, names)
+}
+
+/// Chromosome sketch from a CSC block whose rows are genomic intervals.
+pub fn chromosome_sketch_csc(
+    csc: &CscMatrix<f32>,
+    chr_index: &[Option<usize>],
+    n_chr: usize,
+    inv_genes: &[f32],
+) -> DMatrix<f32> {
+    let n = csc.ncols();
+    matrix_util::dmatrix_util::build_columns_par(n_chr, n, |j, col| {
+        col.fill(0.0);
+        let column = csc.col(j);
+        for (&r, &v) in column.row_indices().iter().zip(column.values()) {
+            if let Some(i) = chr_index.get(r).copied().flatten() {
+                col[i] += v;
+            }
+        }
+        for (v, w) in col.iter_mut().zip(inv_genes) {
+            *v *= w;
+        }
+    })
+}
+
+fn compact_chromosomes(chr_of_row: &[impl AsRef<str>]) -> (Vec<Option<usize>>, Vec<Box<str>>, Vec<f32>) {
+    let mut chr_index: FxHashMap<Box<str>, usize> = FxHashMap::default();
+    let mut names: Vec<Box<str>> = Vec::new();
+    let mut row_chr = Vec::with_capacity(chr_of_row.len());
+    let mut counts: Vec<f32> = Vec::new();
+    for name in chr_of_row {
+        let raw = name.as_ref();
+        if raw.is_empty() || raw.eq_ignore_ascii_case("NA") {
+            row_chr.push(None);
+            continue;
+        }
+        let key: Box<str> = raw.into();
+        let idx = *chr_index.entry(key.clone()).or_insert_with(|| {
+            let i = names.len();
+            names.push(key);
+            counts.push(0.0);
+            i
+        });
+        counts[idx] += 1.0;
+        row_chr.push(Some(idx));
+    }
+    let inv: Vec<f32> = counts
+        .iter()
+        .map(|&k| if k > 0.0 { 1.0 / k } else { 0.0 })
+        .collect();
+    (row_chr, names, inv)
+}
+
+fn ln_choose(n: usize, k: usize) -> f64 {
+    if k > n {
+        return f64::NEG_INFINITY;
+    }
+    let k = k.min(n - k);
+    (0..k)
+        .map(|i| ((n - k + 1 + i) as f64).ln() - ((i + 1) as f64).ln())
+        .sum()
+}
+
+fn hypergeom_sf(k: usize, draws: usize, k_pop: usize, n_pop: usize) -> f64 {
+    let k_max = draws.min(k_pop);
+    if k > k_max {
+        return 0.0;
+    }
+    if draws > n_pop || k_pop > n_pop {
+        return 0.0;
+    }
+    if k == 0 {
+        return 1.0;
+    }
+    let n_other = n_pop - k_pop;
+    if draws > n_other && k < draws - n_other {
+        return 1.0;
+    }
+    let mut log_p = ln_choose(k_pop, k) + ln_choose(n_other, draws - k) - ln_choose(n_pop, draws);
+    let mut acc = log_p.exp();
+    for x in k..k_max {
+        let num = (k_pop - x) as f64 * (draws - x) as f64;
+        let den = (x + 1) as f64 * (n_pop - k_pop - draws + x + 1) as f64;
+        if den <= 0.0 {
+            break;
+        }
+        log_p += num.ln() - den.ln();
+        let p = log_p.exp();
+        if !p.is_finite() {
+            break;
+        }
+        acc += p;
+        if acc >= 1.0 {
+            return 1.0;
+        }
+    }
+    acc.clamp(0.0, 1.0)
+}
+
+fn mean_l1(sketch: &DMatrix<f32>, members: &[usize]) -> f32 {
+    let c = sketch.nrows();
+    if members.is_empty() || c == 0 {
+        return 0.0;
+    }
+    let inv = 1.0 / (members.len() as f32);
+    let mut acc = vec![0f32; c];
+    for &j in members {
+        for i in 0..c {
+            acc[i] += sketch[(i, j)];
+        }
+    }
+    acc.iter().map(|v| (v * inv).abs()).sum::<f32>() / (c as f32)
+}
+
+/// Score one k-means cluster (no keep/drop decision).
+pub fn score_cluster(
+    members: &[usize],
+    sketch: &DMatrix<f32>,
+    donor_of_cell: &[usize],
+    n_per_donor: &[usize],
+    cfg: &CloneCallConfig,
+    rng: &mut impl RngExt,
+) -> ClusterScore {
+    let n = members.len();
+    if n == 0 {
+        return ClusterScore {
+            n_cells: 0,
+            purity: 0.0,
+            enrich: 0.0,
+            spatial_score: 0.0,
+            spatial_z: 0.0,
+            clone_score: 0.0,
+        };
+    }
+    let mut counts = vec![0usize; n_per_donor.len()];
+    for &j in members {
+        counts[donor_of_cell[j]] += 1;
+    }
+    let (maj_d, maj_n) = counts
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by_key(|(_, c)| *c)
+        .unwrap_or((0, 0));
+    let purity = maj_n as f32 / n as f32;
+    let p_enrich = hypergeom_sf(maj_n, n, n_per_donor[maj_d], donor_of_cell.len()).max(1e-300);
+    let enrich = (-p_enrich.ln() / std::f64::consts::LN_10) as f32;
+
+    let obs = mean_l1(sketch, members);
+    let n_cells_total = sketch.ncols();
+    let mut pool: Vec<usize> = (0..n_cells_total).collect();
+    let mut nulls = Vec::with_capacity(cfg.n_perm);
+    for _ in 0..cfg.n_perm {
+        pool.shuffle(rng);
+        nulls.push(mean_l1(sketch, &pool[..n.min(n_cells_total)]));
+    }
+    let mu = nulls.iter().sum::<f32>() / (nulls.len().max(1) as f32);
+    let var = nulls.iter().map(|x| (x - mu).powi(2)).sum::<f32>() / (nulls.len().max(1) as f32);
+    let sd = var.sqrt().max(1e-6);
+    let z = (obs - mu) / sd;
+    // Enclosure × structure. Enrichment down-weights chance purity in a
+    // donor-imbalanced cohort; softplus(z) keeps flat clusters near zero.
+    let spatial_pos = if z > 20.0 {
+        z
+    } else {
+        (1.0 + z.exp()).ln()
+    };
+    let clone_score = purity * enrich.max(0.0) * spatial_pos;
+    ClusterScore {
+        n_cells: n,
+        purity,
+        enrich,
+        spatial_score: obs,
+        spatial_z: z,
+        clone_score,
+    }
+}
+
+/// BIC-select a 1- vs 2-component Gaussian mixture on `clone_score` and
+/// return which eligible clusters belong to the high (clone) component.
+///
+/// K=1 wins ⇒ nothing is a clone. Optional purity / spatial floors can only
+/// reject mixture positives, never invent them.
+pub fn select_clones_by_mixture(
+    scores: &[ClusterScore],
+    cfg: &CloneCallConfig,
+) -> (Vec<bool>, Option<(f32, f32)>) {
+    let mut keep = vec![false; scores.len()];
+    let eligible: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.n_cells >= cfg.min_cells)
+        .map(|(i, _)| i)
+        .collect();
+    if eligible.len() < 2 {
+        return (keep, None);
+    }
+    let values: Vec<f32> = eligible.iter().map(|&i| scores[i].clone_score).collect();
+    let (means1, vars1, weights1, ll1) = cluster_stats_kmeans(&values, 1);
+    let (means2, vars2, weights2, ll2) = cluster_stats_kmeans(&values, 2);
+    let n = values.len() as f32;
+    // K=1: mean+var (2 params); K=2: 2 means + 2 vars + 1 free weight (5).
+    let bic1 = -2.0 * ll1 + 2.0 * n.max(1.0).ln();
+    let bic2 = -2.0 * ll2 + 5.0 * n.max(1.0).ln();
+    log::info!(
+        "clone-score mixture: BIC1={bic1:.1} BIC2={bic2:.1} (Δ={:.1}); means K2={:.3}/{:.3}",
+        bic1 - bic2,
+        means2.first().copied().unwrap_or(0.0),
+        means2.get(1).copied().unwrap_or(0.0)
+    );
+    if bic2 >= bic1 - 1e-6 {
+        // One component preferred — no separable clone class.
+        let _ = (means1, vars1, weights1);
+        return (keep, None);
+    }
+    let _ = (vars2, weights2);
+    let high = if means2[0] >= means2[1] { 0 } else { 1 };
+    let low = 1 - high;
+    let cutoff_mid = 0.5 * (means2[high] + means2[low]);
+    for &i in &eligible {
+        let s = &scores[i];
+        let mut ok = s.clone_score >= cutoff_mid && s.clone_score > means2[low];
+        if let Some(p) = cfg.min_purity {
+            ok &= s.purity >= p;
+        }
+        if let Some(z) = cfg.spatial_z {
+            ok &= s.spatial_z >= z;
+        }
+        keep[i] = ok;
+    }
+    (keep, Some((means2[low], means2[high])))
+}
+
+/// Cluster cells on a chromosome sketch and map failures to stratum 0.
+pub fn call_clones_from_sketch(
+    sketch: &DMatrix<f32>,
+    cell_names: &[Box<str>],
+    cfg: &CloneCallConfig,
+) -> Vec<CloneRow> {
+    let n = sketch.ncols();
+    assert_eq!(n, cell_names.len());
+    let donors: Vec<Box<str>> = cell_names.iter().map(|c| donor_of(c).into()).collect();
+    let mut donor_id: FxHashMap<Box<str>, usize> = FxHashMap::default();
+    let mut donor_of_cell = Vec::with_capacity(n);
+    let mut n_per_donor: Vec<usize> = Vec::new();
+    for d in &donors {
+        let id = *donor_id.entry(d.clone()).or_insert_with(|| {
+            n_per_donor.push(0);
+            n_per_donor.len() - 1
+        });
+        n_per_donor[id] += 1;
+        donor_of_cell.push(id);
+    }
+
+    let k = cfg.k_max.max(1).min(n.max(1));
+    let labels = if k <= 1 || sketch.nrows() == 0 {
+        vec![0usize; n]
+    } else {
+        sketch.kmeans_columns(KmeansArgs {
+            num_clusters: k,
+            max_iter: cfg.kmeans_iter,
+        })
+    };
+
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); k];
+    for (j, &lab) in labels.iter().enumerate() {
+        members[lab.min(k - 1)].push(j);
+    }
+
+    let mut rng = SmallRng::seed_from_u64(cfg.seed);
+    let mut scores = Vec::with_capacity(k);
+    for mem in &members {
+        scores.push(score_cluster(
+            mem,
+            sketch,
+            &donor_of_cell,
+            &n_per_donor,
+            cfg,
+            &mut rng,
+        ));
+    }
+    let (cluster_keep, mix) = select_clones_by_mixture(&scores, cfg);
+    if let Some((lo, hi)) = mix {
+        log::info!("clone-score cutoff between mixture means {lo:.3} and {hi:.3}");
+    } else {
+        log::info!("clone-score mixture prefers a single component → no clones");
+    }
+
+    for (lab, s) in scores.iter().enumerate() {
+        if s.n_cells == 0 {
+            continue;
+        }
+        log::info!(
+            "CNV cluster {lab}: n={}, purity={:.3}, enrich={:.1}, spatial={:.4} z={:.2}, score={:.3} → {}",
+            s.n_cells,
+            s.purity,
+            s.enrich,
+            s.spatial_score,
+            s.spatial_z,
+            s.clone_score,
+            if cluster_keep[lab] { "clone" } else { "bucket 0" }
+        );
+    }
+
+    // Stable remap of kept clusters → 1..K by descending size.
+    let mut kept: Vec<usize> = cluster_keep
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| **k)
+        .map(|(i, _)| i)
+        .collect();
+    kept.sort_by_key(|&i| std::cmp::Reverse(members[i].len()));
+    let mut remap = vec![0usize; k];
+    for (new_id, &old) in kept.iter().enumerate() {
+        remap[old] = new_id + 1;
+    }
+
+    (0..n)
+        .map(|j| {
+            let lab = labels[j].min(k - 1);
+            let s = &scores[lab];
+            CloneRow {
+                cell: cell_names[j].clone(),
+                donor: donors[j].clone(),
+                cluster: lab,
+                stratum: remap[lab],
+                purity: s.purity,
+                spatial_score: s.spatial_score,
+                spatial_z: s.spatial_z,
+            }
+        })
+        .collect()
+}
+
+/// Stream a CNV backend (rows = `chr:start-end`) into a chromosome sketch
+/// and call clones.
+pub fn call_clones(data: &SparseIoVec, cfg: &CloneCallConfig) -> anyhow::Result<Vec<CloneRow>> {
+    anyhow::ensure!(data.num_columns() > 0, "no cells to call clones on");
+    let row_names = data.row_names()?;
+    let coords = parse_peak_coordinates(&row_names);
+    let chr_of_row: Vec<Box<str>> = coords
+        .iter()
+        .map(|c| {
+            c.as_ref()
+                .map(|p| p.chr.clone())
+                .unwrap_or_else(|| "NA".into())
+        })
+        .collect();
+    let (row_chr, names, inv) = compact_chromosomes(&chr_of_row);
+    anyhow::ensure!(
+        !names.is_empty(),
+        "CNV backend rows are not genomic intervals (`chr:start-end`)"
+    );
+    let n = data.num_columns();
+    let c = names.len();
+    let mut sketch = DMatrix::<f32>::zeros(c, n);
+    let blocks = matrix_util::utils::generate_minibatch_intervals(n, 0, Some(512));
+    for (lb, ub) in blocks {
+        let csc = data.read_columns_csc(lb..ub)?;
+        let block = chromosome_sketch_csc(&csc, &row_chr, c, &inv);
+        sketch
+            .columns_mut(lb, ub - lb)
+            .copy_from(&block);
+    }
+    log::info!(
+        "chromosome sketch: {} chromosomes × {} cells",
+        c,
+        n
+    );
+    let cell_names = data.column_names()?;
+    Ok(call_clones_from_sketch(&sketch, &cell_names, cfg))
+}
+
+pub fn write_clone_table(rows: &[CloneRow], path: &str) -> anyhow::Result<()> {
+    let mut lines: Vec<Box<str>> =
+        vec!["cell\tdonor\tcluster\tstratum\tpurity\tspatial_score\tspatial_z".into()];
+    lines.extend(rows.iter().map(|r| {
+        format!(
+            "{}\t{}\t{}\t{}\t{:.4}\t{:.6}\t{:.3}",
+            r.cell, r.donor, r.cluster, r.stratum, r.purity, r.spatial_score, r.spatial_z
+        )
+        .into_boxed_str()
+    }));
+    write_lines(&lines, path)
+}
+
+pub fn read_clone_table(path: &str) -> anyhow::Result<Vec<CloneRow>> {
+    let lines = read_lines(path)?;
+    let mut rows = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 && line.starts_with("cell\t") {
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        anyhow::ensure!(
+            cols.len() >= 4,
+            "{}:{}: expected cell, donor, cluster, stratum",
+            path,
+            i + 1
+        );
+        rows.push(CloneRow {
+            cell: cols[0].into(),
+            donor: cols[1].into(),
+            cluster: cols[2].parse()?,
+            stratum: cols[3].parse()?,
+            purity: cols.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            spatial_score: cols.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            spatial_z: cols.get(6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        });
+    }
+    Ok(rows)
+}
+
+/// Map a clone table onto `cell_names` (collapse column order). Missing
+/// cells become stratum 0.
+pub fn align_strata_to_cells(
+    rows: &[CloneRow],
+    cell_names: &[Box<str>],
+) -> anyhow::Result<Vec<usize>> {
+    let mut by_cell: FxHashMap<&str, usize> = FxHashMap::default();
+    for r in rows {
+        by_cell.insert(r.cell.as_ref(), r.stratum);
+    }
+    let mut missing = 0usize;
+    let out: Vec<usize> = cell_names
+        .iter()
+        .map(|c| {
+            by_cell.get(c.as_ref()).copied().unwrap_or_else(|| {
+                missing += 1;
+                0
+            })
+        })
+        .collect();
+    if missing > 0 {
+        log::warn!(
+            "{} / {} cells missing from the clone table; treating as stratum 0",
+            missing,
+            cell_names.len()
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::RngExt;
+
+    #[test]
+    fn donor_of_uses_at_suffix() {
+        assert_eq!(donor_of("AAACCTG@AML001"), "AML001");
+        assert_eq!(donor_of("plain"), "plain");
+        assert_eq!(donor_of("a@b@c"), "c");
+    }
+
+    #[test]
+    fn chromosome_sketch_means_per_chr() {
+        // 4 rows: chr1, chr1, chr2, chr2. One cell: values 1,3,10,30 → chr1=2, chr2=20.
+        let m = DMatrix::from_column_slice(4, 1, &[1.0, 3.0, 10.0, 30.0]);
+        let (s, names) = chromosome_sketch(&m, &["chr1", "chr1", "chr2", "chr2"]);
+        assert_eq!(names, vec!["chr1".into(), "chr2".into()]);
+        assert!((s[(0, 0)] - 2.0).abs() < 1e-6);
+        assert!((s[(1, 0)] - 20.0).abs() < 1e-6);
+    }
+
+    fn synthetic_sketch(n_flat: usize, n_clone: usize) -> (DMatrix<f32>, Vec<Box<str>>) {
+        // 3 chromosomes. Flat cells ~ N(0, 0.02); clone cells chr0 = -1.
+        let n = n_flat + n_clone;
+        let mut rng = SmallRng::seed_from_u64(7);
+        let mut data = Vec::with_capacity(3 * n);
+        let mut names = Vec::with_capacity(n);
+        for i in 0..n_flat {
+            for _ in 0..3 {
+                data.push(0.02 * (rng.random::<f32>() - 0.5));
+            }
+            names.push(format!("c{i}@Ctl").into_boxed_str());
+        }
+        for i in 0..n_clone {
+            data.push(-1.0 + 0.02 * (rng.random::<f32>() - 0.5));
+            data.push(0.02 * (rng.random::<f32>() - 0.5));
+            data.push(0.02 * (rng.random::<f32>() - 0.5));
+            names.push(format!("t{i}@AML").into_boxed_str());
+        }
+        (DMatrix::from_vec(3, n, data), names)
+    }
+
+    #[test]
+    fn donor_private_structured_cluster_becomes_a_clone() {
+        let (sketch, names) = synthetic_sketch(80, 80);
+        let rows = call_clones_from_sketch(
+            &sketch,
+            &names,
+            &CloneCallConfig {
+                k_max: 2,
+                min_cells: 20,
+                min_purity: None,
+                spatial_z: None,
+                n_perm: 24,
+                seed: 3,
+                kmeans_iter: 50,
+            },
+        );
+        let n_clone = rows.iter().filter(|r| r.stratum > 0).count();
+        let aml_cloned = rows
+            .iter()
+            .filter(|r| r.donor.as_ref() == "AML" && r.stratum > 0)
+            .count();
+        let ctl_cloned = rows
+            .iter()
+            .filter(|r| r.donor.as_ref() == "Ctl" && r.stratum > 0)
+            .count();
+        assert!(n_clone >= 50, "expected a clone, got {n_clone} cells");
+        assert!(aml_cloned >= 50, "AML cells should form the clone");
+        assert!(
+            ctl_cloned < 10,
+            "Control cells should stay in bucket 0, got {ctl_cloned}"
+        );
+    }
+
+    #[test]
+    fn shared_shift_across_donors_dumps_to_bucket_zero() {
+        // Same chr0 = -1 in BOTH donors → not donor-enclosing.
+        let n = 80;
+        let mut data = Vec::new();
+        let mut names = Vec::new();
+        for d in ["A", "B"] {
+            for i in 0..n {
+                data.extend_from_slice(&[-1.0f32, 0.0, 0.0]);
+                names.push(format!("c{i}@{d}").into_boxed_str());
+            }
+        }
+        let sketch = DMatrix::from_vec(3, 2 * n, data);
+        let rows = call_clones_from_sketch(
+            &sketch,
+            &names,
+            &CloneCallConfig {
+                k_max: 2,
+                min_cells: 20,
+                min_purity: None,
+                spatial_z: None,
+                n_perm: 16,
+                seed: 1,
+                kmeans_iter: 50,
+            },
+        );
+        assert!(
+            rows.iter().all(|r| r.stratum == 0),
+            "shared pattern must dump to stratum 0"
+        );
+    }
+
+    #[test]
+    fn align_missing_cells_default_to_zero() {
+        let rows = vec![CloneRow {
+            cell: "a".into(),
+            donor: "d".into(),
+            cluster: 0,
+            stratum: 2,
+            purity: 1.0,
+            spatial_score: 1.0,
+            spatial_z: 3.0,
+        }];
+        let names: Vec<Box<str>> = ["a", "b"].map(Into::into).to_vec();
+        let s = align_strata_to_cells(&rows, &names).unwrap();
+        assert_eq!(s, vec![2, 0]);
+    }
+
+    #[test]
+    fn hypergeom_sf_known_values() {
+        // P(X >= 5) for Hypergeometric(N=10, K=5, n=5) = P(X=5) = 1/C(10,5)*C(5,5)*C(5,0)
+        let p = hypergeom_sf(5, 5, 5, 10);
+        let want = (ln_choose(5, 5) + ln_choose(5, 0) - ln_choose(10, 5)).exp();
+        assert!((p - want).abs() < 1e-9, "{p} vs {want}");
+        assert!((hypergeom_sf(0, 5, 5, 10) - 1.0).abs() < 1e-12);
+    }
+}

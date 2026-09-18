@@ -918,6 +918,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         ignore_batch: args.collapse.ignore_batch,
         want_hierarchy: true,
         prebuilt_partition,
+        cnv_clones: args.collapse.cnv_clones.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

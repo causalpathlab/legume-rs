@@ -32,8 +32,16 @@ fn adaptive_recovers_knn_distinct_pbsamples() {
     let bknn = ColumnDict::<usize>::from_dmatrix(mat, names);
 
     let query = vec![0.0f32];
-    let hits = knn_distinct_pbsamples_in_batch(&bknn, &query, knn, &cell_to_pbsamp, usize::MAX - 1)
-        .unwrap();
+    let hits = knn_distinct_pbsamples_in_batch(
+        &bknn,
+        &query,
+        knn,
+        &cell_to_pbsamp,
+        usize::MAX - 1,
+        None,
+        None,
+    )
+    .unwrap();
 
     let distinct: HashSet<usize> = hits.iter().map(|&(p, _)| p).collect();
     assert_eq!(
@@ -68,8 +76,16 @@ fn adaptive_returns_all_when_fewer_than_knn() {
     let mat = DMatrix::<f32>::from_row_slice(1, n, &feats);
     let bknn = ColumnDict::<usize>::from_dmatrix(mat, names);
     let query = vec![0.0f32];
-    let hits = knn_distinct_pbsamples_in_batch(&bknn, &query, knn, &cell_to_pbsamp, usize::MAX - 1)
-        .unwrap();
+    let hits = knn_distinct_pbsamples_in_batch(
+        &bknn,
+        &query,
+        knn,
+        &cell_to_pbsamp,
+        usize::MAX - 1,
+        None,
+        None,
+    )
+    .unwrap();
     let distinct: HashSet<usize> = hits.iter().map(|&(p, _)| p).collect();
     assert_eq!(distinct.len(), 3);
 }

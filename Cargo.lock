@@ -1021,14 +1021,20 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cnv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "approx",
+ "auxiliary-data",
+ "clap",
+ "data-beans",
+ "env_logger",
+ "genomic-data",
  "log",
  "matrix-util",
  "mcmc-util",
  "nalgebra 0.34.2",
+ "nalgebra-sparse",
  "rand 0.10.2",
  "rand_distr 0.6.0",
  "rayon",
@@ -4804,6 +4810,7 @@ dependencies = [
  "auxiliary-data",
  "candle-util",
  "clap",
+ "cnv",
  "colored",
  "dashmap",
  "data-beans",
