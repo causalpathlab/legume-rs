@@ -276,7 +276,6 @@ fn per_site_keeps_distinct_single_base_sites_apart() {
         "m6a",
         "methylated",
         "unmethylated",
-        0,
     );
 
     // Two sites × two channels = four rows, each carrying the `chr:pos` subunit.
@@ -329,35 +328,4 @@ fn gene_level_pools_sites_that_per_site_keeps_separate() {
         .map(|(_, _, v)| *v)
         .sum();
     assert_eq!(meth_val, 5.0);
-}
-
-#[test]
-fn per_site_min_cells_drops_rare_sites_unit_aware() {
-    // Site chr1:100 is seen in 3 cells; chr1:250 in only 1. With min_cells=2,
-    // the rare site is dropped entirely — BOTH channels, never half.
-    let stats = vec![
-        stat("AAA", "chr1", 100, 3, 1),
-        stat("BBB", "chr1", 100, 2, 0),
-        stat("CCC", "chr1", 100, 1, 4),
-        stat("AAA", "chr1", 250, 9, 9), // lone cell at the rare site
-    ];
-    let out = summarize_stats_per_site(
-        &stats,
-        |b| format!("{}", b.gene).into(),
-        "m6a",
-        "methylated",
-        "unmethylated",
-        2,
-    );
-
-    let mut rows = out.rows.clone();
-    rows.sort();
-    // Only the 3-cell site survives, with both its channels intact.
-    assert_eq!(
-        rows.as_slice(),
-        [
-            "G1/m6a/chr1:100/methylated".into(),
-            "G1/m6a/chr1:100/unmethylated".into(),
-        ]
-    );
 }

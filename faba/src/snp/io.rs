@@ -4,7 +4,7 @@ use arrow::record_batch::RecordBatch;
 use log::info;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -22,20 +22,9 @@ pub struct KnownSnps {
     pub by_chr: FxHashMap<Box<str>, FxHashMap<i64, SnpAlleles>>,
 }
 
-#[allow(dead_code)]
 impl KnownSnps {
     pub fn num_sites(&self) -> usize {
         self.by_chr.values().map(|m| m.len()).sum()
-    }
-
-    /// Get the set of positions on a given chromosome
-    pub fn positions_for_chr(&self, chr: &str) -> Option<FxHashSet<i64>> {
-        self.by_chr.get(chr).map(|m| m.keys().copied().collect())
-    }
-
-    /// Look up alleles at a (chr, pos) without allocating
-    pub fn get(&self, chr: &str, pos: i64) -> Option<&SnpAlleles> {
-        self.by_chr.get(chr)?.get(&pos)
     }
 
     /// Get all unique chromosomes
@@ -105,44 +94,6 @@ pub fn load_known_snps(vcf_path: &str) -> Result<KnownSnps> {
     info!("loaded {} known biallelic SNPs from {}", n_sites, vcf_path);
 
     Ok(KnownSnps { by_chr })
-}
-
-/// Build a SNP mask from called sites (het or hom-alt above GQ threshold).
-///
-/// When `min_vaf` is Some, only sites with germline-like allele fractions
-/// enter the mask: het sites need VAF in [min_vaf, 1-min_vaf], hom-alt
-/// sites need VAF >= 1-min_vaf. This prevents masking true RNA editing
-/// sites (low/variable VAF) discovered de novo from RNA-seq data.
-pub fn build_snp_mask(
-    sites: &[SnpSite],
-    min_gq: f32,
-    min_vaf: Option<f32>,
-) -> FxHashSet<(Box<str>, i64)> {
-    sites
-        .iter()
-        .filter(|s| {
-            if s.gq < min_gq {
-                return false;
-            }
-            let depth = s.depth();
-            if depth == 0 {
-                return false;
-            }
-            let vaf = s.alt_count() as f32 / depth as f32;
-            match s.genotype {
-                crate::snp::SnpGenotype::Het => match min_vaf {
-                    Some(v) => vaf >= v && vaf <= (1.0 - v),
-                    None => true,
-                },
-                crate::snp::SnpGenotype::HomAlt => match min_vaf {
-                    Some(v) => vaf >= (1.0 - v),
-                    None => true,
-                },
-                _ => false,
-            }
-        })
-        .map(|s| (s.chr.clone(), s.pos))
-        .collect()
 }
 
 /// Write SNP sites to a Parquet file.
@@ -438,53 +389,4 @@ pub fn load_contigs_from_fai(genome_file: &str) -> Result<Vec<(Box<str>, u64)>> 
         }
     }
     Ok(contigs)
-}
-
-/// Load a SNP mask from a parquet file (output of `faba snp`).
-/// Returns (chr, pos) set for het/hom-alt sites.
-pub fn load_snp_mask_from_parquet<P: AsRef<Path>>(path: P) -> Result<FxHashSet<(Box<str>, i64)>> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-    let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut mask = FxHashSet::default();
-
-    for batch in reader {
-        let batch = batch?;
-
-        let chr_col = batch
-            .column_by_name("chr")
-            .ok_or_else(|| anyhow::anyhow!("missing 'chr' column in SNP parquet"))?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("'chr' column is not a string array"))?;
-
-        let pos_col = batch
-            .column_by_name("pos")
-            .ok_or_else(|| anyhow::anyhow!("missing 'pos' column in SNP parquet"))?
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| anyhow::anyhow!("'pos' column is not an Int64 array"))?;
-
-        let gt_col = batch
-            .column_by_name("genotype")
-            .ok_or_else(|| anyhow::anyhow!("missing 'genotype' column in SNP parquet"))?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("'genotype' column is not a string array"))?;
-
-        for i in 0..batch.num_rows() {
-            let gt = gt_col.value(i);
-            // Only include het and hom-alt in the mask
-            if gt == "0/1" || gt == "1/1" {
-                let chr: Box<str> = chr_col.value(i).into();
-                let pos = pos_col.value(i);
-                mask.insert((chr, pos));
-            }
-        }
-    }
-
-    Ok(mask)
 }

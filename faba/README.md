@@ -133,10 +133,13 @@ faba <COMMAND> [OPTIONS]
 | `dartseq` (`dart`, `m6a`) | Call DART-seq m6A sites by a WT-vs-MUT control contrast on C-to-T conversions |
 | `atoi` (`a2i`, `editing`) | Detect and quantify A-to-I RNA editing sites |
 | `apa` (`polya`)           | Quantify alternative polyadenylation sites per cell |
-| `genes` (`count-genes`)   | Count reads per gene (single-cell or bulk RNA-seq) |
+| `count` (`genes`)         | Count reads per gene and call cells (single-cell or bulk RNA-seq) |
 | `depth` (`rd`)            | Compute read depth over genomic intervals |
 | `snp` (`genotype`)        | Discover and genotype SNP variants from BAM pileup |
-| `all` (`pipeline`)        | Run the full profiling pipeline: SNP → genes → ATOI → APA → m6A |
+| `all` (`pipeline`)        | Run the full profiling pipeline: SNP → count → ATOI → m6A → APA |
+| **QC — choose and apply thresholds after profiling** ||
+| `qc-report`               | Sweep every `qc` threshold and show kept sites / genes / cells, plus a -log10(p) histogram |
+| `qc`                      | Filter a faba output directory into a new fileset: cells, features and editing sites |
 | **Inspection & reference** ||
 | `pwm`                     | Build a position weight matrix around genomic sites |
 | `pileup` (`inspect`)      | ASCII pileup, or a faceted Miami plot, for one gene |
@@ -169,21 +172,25 @@ the code is how people end up debugging things that were never built).
 ### Examples
 
 ```sh
-# Gene counts from a single-cell BAM
-faba genes sample.bam -g genes.gff -o out/
+# Gene counts and cell calling from a single-cell BAM
+faba count sample.bam -g genes.gff -o out/
 
-# A-to-I editing sites (the mask is reusable by other subcommands)
+# A-to-I editing sites (every putative site is written; `faba qc` decides)
 faba atoi sample.bam -g genes.gff -f genome.fa -o out/
 
 # DART-seq m6A: signal (WT APOBEC1-YTH) vs catalytically-dead control (YTHmut).
 # A control is REQUIRED — m6A can't be told apart from genomic C/T variation
 # without it (--mut / --control / --background are accepted aliases).
-faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/ \
-    --atoi-mask out/atoi_sites.parquet
+faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/
 
 # Everything in one pass (the m6A step runs only when --control-bam is given,
 # otherwise it is skipped; the other steps need no control)
 faba all sample.bam -g genes.gff -f genome.fa -o out/ --control-bam ctrl.bam
+
+# The producers apply no p-value / effect-size / reproducibility cutoff.
+# See what each threshold keeps, then cut into a NEW directory:
+faba qc-report out/ -o out/qc
+faba qc out/ -o out_qc/ --site-max-pv 0.05 --site-min-cells 10 --auto-cutoff
 ```
 
 ## License

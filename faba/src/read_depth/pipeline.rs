@@ -14,7 +14,7 @@ pub type ValidCellsByBam = FxHashMap<Box<str>, FxHashSet<CellBarcode>>;
 
 pub fn run_read_depth_pipeline(args: &ReadDepthArgs) -> anyhow::Result<()> {
     // `faba depth` calls no cells of its own, so the only standalone source of a
-    // keep-set is `faba genes` output the user points at.
+    // keep-set is `faba count` output the user points at.
     let from_flag = match args.valid_cells_file.as_deref() {
         Some(dir) => Some(crate::quant::load_valid_cells_dir(dir, &args.bam_files)?),
         None => None,

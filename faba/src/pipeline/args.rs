@@ -5,7 +5,6 @@
 //! hand-run subcommand cannot drift apart.
 
 use crate::common::*;
-use crate::editing::pipeline::M6aContrastArgs;
 
 /// Serialize a field by its `Debug` form — for foreign enums that carry no `Serialize`.
 pub(super) fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(
@@ -16,32 +15,6 @@ pub(super) fn ser_debug<T: std::fmt::Debug, S: serde::Serializer>(
 }
 
 #[derive(Args, Debug, serde::Serialize)]
-#[command(
-    about = "Run unified RNA-seq pipeline: SNP → genes → ATOI → m6A → APA",
-    long_about = "Orchestrates the complete RNA-seq analysis pipeline:\n\
-                  \n\
-                  0. SNP genotyping (de novo discovery + optional known sites)\n\
-                  1. Gene expression filtering (identify expressed genes)\n\
-                  2. ATOI detection (A-to-I editing, masked by SNP)\n\
-                  3. m6A detection (DART C→T, WT-vs-MUT contrast; skipped without --control-bam)\n\
-                  4. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
-                  \n\
-                  APA runs last because the SCAPE EM is the heavy step and nothing else waits on it.\n\
-                  \n\
-                  ATOI is reference-anchored,\n\
-                  and tested per site against a beta-binomial sequencing-error null,\n\
-                  via --edit-error-rate/--edit-overdispersion, no control sample.\n\
-                  m6A instead requires a catalytically-dead control (--control-bam):\n\
-                  each motif C is tested for higher conversion in the positional BAMs than the pooled control,\n\
-                  so a genomic C/T variant is rejected;\n\
-                  the step is skipped when no control is given.\n\
-                  The SNP mask is off by default for m6A:\n\
-                  the contrast already rejects variants. Opt back in with --m6a-snp-mask.\n\
-                  Step 0 discovers variants de novo,\n\
-                  and optionally force-calls at known sites (--known-snps, VCF/BCF/Parquet).\n\
-                  De novo variants are VAF-filtered (--snp-mask-min-vaf) so RNA editing sites are preserved in the mask.\n\
-                  UMI deduplication is applied to all pileup steps (disable with --no-umi-dedup)."
-)]
 pub struct PipelineArgs {
     // Required inputs
     #[arg(
@@ -138,10 +111,12 @@ pub struct PipelineArgs {
     ///////////////////////////////
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Minimum cells per gene; 0 = off",
-        long_help = "Minimum cells per gene, for gene filtering. 0 turns it off,\n\
-                     matching Cell Ranger, which keeps every gene and feature."
+        default_value_t = 1,
+        help = "Minimum cells per gene; 1 = drop only empty rows",
+        long_help = "Minimum cells per gene, for gene filtering.\n\
+                     The default of 1 drops only genes with no counts at all;\n\
+                     an opinionated floor belongs to `faba qc --row-nnz-cutoff`.\n\
+                     Matches the standalone subcommands."
     )]
     pub gene_min_cells: usize,
 
@@ -156,15 +131,15 @@ pub struct PipelineArgs {
 
     #[arg(
         long,
-        default_value_t = 0,
-        help = "Minimum detected genes (nnz) per cell; 0 = off",
+        default_value_t = 1,
+        help = "Minimum detected genes (nnz) per cell; 1 = drop only empty columns",
         long_help = "Minimum detected genes, as nnz, per cell.\n\
                      Cells below it are dropped from gene counts,\n\
                      and from every downstream modality.\n\
                      \n\
-                     0 is the default and turns it off.\n\
-                     Cell calling is then pure Cell Ranger EmptyDrops/OrdMag,\n\
-                     with no extra min-genes floor."
+                     The default of 1 drops only cells with no counts at all,\n\
+                     so cell calling is pure Cell Ranger EmptyDrops/OrdMag;\n\
+                     an opinionated floor belongs to `faba qc`."
     )]
     pub cell_min_genes: usize,
 
@@ -225,32 +200,24 @@ pub struct PipelineArgs {
     /////////////////////
     // ATOI parameters //
     /////////////////////
+    // Shared with `faba atoi` by const, so the same BAM cannot produce a
+    // different A-to-I site list depending on which command ran it.
     #[arg(
         long,
-        default_value_t = 5,
-        help = "Minimum coverage for ATOI detection (matches `faba atoi`)"
+        default_value_t = crate::editing::pipeline::DEFAULT_ATOI_MIN_COVERAGE,
+        help = "Minimum coverage (ref + alt) for an ATOI site to be written (matches `faba atoi`)"
     )]
     pub atoi_min_coverage: usize,
 
-    // "matches `faba atoi`" is now true. It was not: the pipeline called an
-    // A-to-I site at 2 conversions while the standalone wanted 3, so the same
-    // BAM produced a different site list depending on which command ran it.
     #[arg(
         long,
-        default_value_t = 3,
-        help = "Minimum A-to-G conversions for ATOI (matches `faba atoi`)"
+        default_value_t = crate::editing::pipeline::DEFAULT_ATOI_MIN_CONVERSION,
+        help = "Minimum A-to-G (alt) reads for an ATOI site to be written (matches `faba atoi`)"
     )]
     pub atoi_min_conversion: usize,
 
-    #[arg(
-        long = "atoi-pvalue",
-        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
-        help = "Marginal p-value cutoff for ATOI detection (no multiplicity correction)"
-    )]
-    pub atoi_pvalue_cutoff: f32,
-
     ///////////////////////////////////////////////////////
-    // Editing statistical null (shared by ATOI and m6A) //
+    // Editing statistical null (ATOI only; m6A is a contrast) //
     ///////////////////////////////////////////////////////
     #[arg(
         long = "edit-error-rate",
@@ -314,35 +281,19 @@ pub struct PipelineArgs {
     #[arg(
         long,
         default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_COVERAGE,
-        help = "Minimum coverage for m6A detection (matches `faba dartseq`)"
+        help = "Minimum total reads (signal + control) for an m6A site to be written (matches `faba dartseq`)"
     )]
     pub m6a_min_coverage: usize,
 
     #[arg(
         long,
         default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_CONVERSION,
-        help = "Minimum C-to-T conversions for m6A (matches `faba dartseq`)"
+        help = "Minimum converted (C->T) signal reads for an m6A site to be written (matches `faba dartseq`)"
     )]
     pub m6a_min_conversion: usize,
 
-    #[arg(
-        long = "m6a-pvalue",
-        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
-        help = "Marginal p-value cutoff for m6A detection (no multiplicity correction)"
-    )]
-    pub m6a_pvalue_cutoff: f32,
-
-    #[command(flatten)]
-    pub m6a_contrast: M6aContrastArgs,
-
     #[command(flatten)]
     pub cell_scan: crate::editing::cell_activity::CellScanArgs,
-
-    /// Apply the SNP mask to m6A calls. Off by default: with the WT-vs-MUT
-    /// contrast a genomic variant is rejected automatically, so the mask is
-    /// redundant (and was over-aggressive).
-    #[arg(long = "m6a-snp-mask", default_value_t = false)]
-    pub m6a_snp_mask: bool,
 
     ////////////////////////////////////////////////////////
     // Mixture model weighting (shared by m6A and A-to-I) //
@@ -389,7 +340,7 @@ pub struct PipelineArgs {
                      They come from an EM fit, which is slow.\n\
                      \n\
                      This is off by default.\n\
-                     Only the gene-level `{gene}/{modality}/{channel}` counts are produced then.\n\
+                     Only the gene-level and per-site matrices are produced then.\n\
                      \n\
                      For m6A / A-to-I this SKIPS the 1-D Gaussian mixture EM entirely when off.\n\
                      For APA the SCAPE poly-A fit always runs (PDUI needs it to identify proximal vs distal),\n\
@@ -402,13 +353,12 @@ pub struct PipelineArgs {
     ////////////////////
     #[arg(
         long = "known-snps",
-        help = "Known SNP sites VCF/BCF/Parquet for SNP masking",
+        help = "Known SNP sites VCF/BCF/Parquet to force-call",
         long_help = "Path to known SNP sites. Accepts:\n\
                      - VCF/BCF (.vcf, .vcf.gz, .bcf): standard variant calls\n\
                      - Parquet (.parquet): output from a previous `faba snp` run\n\
                      When provided,\n\
-                     force-calls genotypes at these positions in addition to de novo discovery,\n\
-                     and builds a mask for ATOI/APA/DART filtering."
+                     force-calls genotypes at these positions in addition to de novo discovery."
     )]
     pub known_snps: Option<Box<str>>,
 
@@ -418,7 +368,7 @@ pub struct PipelineArgs {
     #[arg(
         long,
         default_value_t = 20.0,
-        help = "Minimum genotype quality for SNP mask"
+        help = "Minimum genotype quality (Phred) to emit a call"
     )]
     pub snp_min_gq: f32,
 
@@ -443,18 +393,6 @@ pub struct PipelineArgs {
     )]
     pub snp_min_alt_freq: f64,
 
-    #[arg(
-        long,
-        default_value_t = 0.35,
-        help = "Minimum VAF for SNP mask (filters RNA editing from de novo variants)",
-        long_help = "Minimum variant allele fraction for a de novo discovered variant to enter the SNP mask.\n\
-                     A het site needs VAF in the range [min_vaf, 1-min_vaf];\n\
-                     a hom-alt site needs VAF >= 1-min_vaf.\n\
-                     Sites with lower VAF are likely RNA editing (A-to-I or m6A) rather than germline SNPs.\n\
-                     Set to 0 to disable VAF filtering (mask all called variants)."
-    )]
-    pub snp_mask_min_vaf: f32,
-
     //////////////////////////////////////////////
     // UMI deduplication (applies to all steps) //
     //////////////////////////////////////////////
@@ -478,8 +416,13 @@ pub struct PipelineArgs {
     #[arg(long, default_value_t = false, help = "Skip SNP genotyping step")]
     pub skip_snp: bool,
 
-    #[arg(long, default_value_t = false, help = "Skip gene counting step")]
-    pub skip_genes: bool,
+    #[arg(
+        long = "skip-count",
+        alias = "skip-genes",
+        default_value_t = false,
+        help = "Skip the gene counting / cell calling step"
+    )]
+    pub skip_count: bool,
 
     #[arg(long, default_value_t = false, help = "Skip ATOI detection step")]
     pub skip_atoi: bool,

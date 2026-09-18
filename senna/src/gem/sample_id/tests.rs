@@ -2,18 +2,12 @@
 
 use super::*;
 
+/// Gene files carry `_count` now and `_genes` from before the rename; both
+/// resolve to the same sample id, so old and new outputs load alike.
 #[test]
-fn strip_sample_id_handles_empty_and_match() {
-    assert_eq!(&*strip_sample_id("rep1_wt_genes", "_genes"), "rep1_wt");
-    assert_eq!(&*strip_sample_id("rep1_wt_genes", ""), "rep1_wt_genes");
-    // Non-matching strip keeps the full basename.
-    assert_eq!(&*strip_sample_id("rep1_wt_genes", "_m6a"), "rep1_wt_genes");
-}
-
-#[test]
-fn file_sample_id_strips_the_basename() {
-    assert_eq!(
-        &*file_sample_id("out/s1_genes.zarr.zip", "_genes").unwrap(),
-        "s1"
-    );
+fn gene_file_default_strips_count_then_legacy_genes() {
+    let both = [COUNT_SUFFIX, LEGACY_COUNT_SUFFIX];
+    assert_eq!(&*strip_any_suffix("rep1_wt_count", &both), "rep1_wt");
+    assert_eq!(&*strip_any_suffix("rep1_wt_genes", &both), "rep1_wt");
+    assert_eq!(&*strip_any_suffix("rep1_wt", &both), "rep1_wt");
 }

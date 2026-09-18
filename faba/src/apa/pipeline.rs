@@ -43,55 +43,6 @@ pub fn run_simple(args: &CountApaArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Apply A-to-I mask if provided
-    if let Some(ref mask_file) = args.atoi_mask_file {
-        use crate::editing::io::load_atoi_mask_from_parquet;
-        use crate::editing::mask::filter_polya_by_mask;
-
-        info!("Loading A-to-I mask from {}", mask_file);
-        let atoi_mask = load_atoi_mask_from_parquet(mask_file.as_ref())?;
-        info!("Loaded A-to-I mask with {} positions", atoi_mask.len());
-
-        let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        filter_polya_by_mask(&gene_sites, &atoi_mask, &gff_map);
-        let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        info!(
-            "A-to-I masking: {} → {} poly-A sites ({} removed)",
-            n_before,
-            n_after,
-            n_before - n_after
-        );
-
-        if gene_sites.is_empty() {
-            info!("no poly-A sites remaining after A-to-I masking");
-            return Ok(());
-        }
-    }
-
-    // Apply SNP mask if provided
-    if let Some(ref mask_file) = args.snp_mask_file {
-        use crate::editing::mask::filter_polya_by_mask;
-        use crate::snp::io::load_snp_mask_from_parquet;
-
-        info!("Loading SNP mask from {}", mask_file);
-        let snp_mask = load_snp_mask_from_parquet(mask_file.as_ref())?;
-
-        let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        filter_polya_by_mask(&gene_sites, &snp_mask, &gff_map);
-        let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        info!(
-            "SNP masking: {} → {} poly-A sites ({} removed)",
-            n_before,
-            n_after,
-            n_before - n_after
-        );
-
-        if gene_sites.is_empty() {
-            info!("no poly-A sites remaining after SNP masking");
-            return Ok(());
-        }
-    }
-
     let ndata: usize = gene_sites.iter().map(|x| x.value().len()).sum();
     info!("Found {} poly-A sites", ndata);
 
@@ -390,12 +341,6 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
     // downstream, so the per-UTR schedule order does not change results.
     utrs.sort_by_key(|u| std::cmp::Reverse(u.utr_length));
 
-    // ATOI + SNP position masks, pooled once into one (chr, genomic_pos) set. The
-    // mixture path drops candidate poly-A sites coinciding with an edit/variant;
-    // run_simple did this but run_mixture historically skipped it, so the pipeline
-    // computed both masks and silently ignored them.
-    let site_mask = load_polya_site_mask(args)?;
-
     let pre_sites = if let Some(ref pre_path) = args.pre_sites {
         info!("loading pre-identified sites from {}", pre_path);
         let sites = load_pre_sites(pre_path)?;
@@ -425,7 +370,6 @@ pub fn run_mixture(args: &CountApaArgs) -> anyhow::Result<()> {
                 utr,
                 &args.bam_files,
                 pre_sites.as_ref(),
-                site_mask.as_ref(),
                 &extract_ns,
                 &bic_ns,
                 &discover_ns,
@@ -642,34 +586,6 @@ fn load_pre_sites(path: &str) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, 
     Ok(sites)
 }
 
-/// ATOI/SNP position masks pooled by chromosome: `chr -> {genomic_pos}`. Keying
-/// by chr lets `process_utr` do one borrowed lookup per UTR and an i64-only
-/// membership test per candidate (no per-candidate chr-string clone or hash).
-type PolyaSiteMask = rustc_hash::FxHashMap<Box<str>, rustc_hash::FxHashSet<i64>>;
-
-/// Load and pool the ATOI + SNP position masks referenced by `CountApaArgs`.
-/// Returns `None` when neither is set. The mixture path checks discovered
-/// candidate poly-A sites against this union and drops any that coincide with an
-/// A-to-I edit or SNP — parity with run_simple.
-fn load_polya_site_mask(args: &CountApaArgs) -> anyhow::Result<Option<PolyaSiteMask>> {
-    let mut mask: PolyaSiteMask = rustc_hash::FxHashMap::default();
-    if let Some(ref f) = args.atoi_mask_file {
-        let m = crate::editing::io::load_atoi_mask_from_parquet(f.as_ref())?;
-        info!("APA: loaded {} ATOI mask positions from {}", m.len(), f);
-        for (chr, pos) in m {
-            mask.entry(chr).or_default().insert(pos);
-        }
-    }
-    if let Some(ref f) = args.snp_mask_file {
-        let m = crate::snp::io::load_snp_mask_from_parquet(f.as_ref())?;
-        info!("APA: loaded {} SNP mask positions from {}", m.len(), f);
-        for (chr, pos) in m {
-            mask.entry(chr).or_default().insert(pos);
-        }
-    }
-    Ok(if mask.is_empty() { None } else { Some(mask) })
-}
-
 /// Fast 2-site PDUI path: treat a UTR as effectively single-site (no PDUI) unless
 /// the runner-up cluster carries at least this fraction of the dominant cluster's
 /// reads. Both sites already pass the min-coverage discovery gate, so this is a
@@ -684,7 +600,6 @@ fn process_utr(
     utr: &UtrRegion,
     bam_files: &[Box<str>],
     pre_sites: Option<&rustc_hash::FxHashMap<Box<str>, Vec<f32>>>,
-    site_mask: Option<&PolyaSiteMask>,
     extract_ns: &std::sync::atomic::AtomicU64,
     bic_ns: &std::sync::atomic::AtomicU64,
     discover_ns: &std::sync::atomic::AtomicU64,
@@ -760,12 +675,6 @@ fn process_utr(
             args.merge_distance,
             args.min_coverage,
         );
-        // Drop clusters coinciding with an A-to-I edit / SNP (parity with the EM path).
-        // `alpha_to_genomic` answers 0-based, which is the frame the mask is
-        // keyed in, so the two sides compare directly.
-        if let Some(masked) = site_mask.and_then(|m| m.get(&*utr.chr)) {
-            clusters.retain(|&(alpha, _)| !masked.contains(&utr.alpha_to_genomic(alpha as f64)));
-        }
         discover_ns.fetch_add(
             t_discover.elapsed().as_nanos() as u64,
             std::sync::atomic::Ordering::Relaxed,
@@ -810,30 +719,6 @@ fn process_utr(
         }
     };
 
-    // Drop candidate sites that coincide with an A-to-I edit or SNP. Candidate
-    // positions are UTR-relative alpha; map each through the exons, then test
-    // (chr, pos) membership. `alpha_to_genomic` and the mask are both 0-based —
-    // the frame `run_simple` compares in, since its positions come straight off
-    // `reference_start()`/`reference_end()`.
-    let candidate_sites: Vec<f32> = match site_mask.and_then(|m| m.get(&*utr.chr)) {
-        Some(masked_pos) => {
-            let before = candidate_sites.len();
-            let kept: Vec<f32> = candidate_sites
-                .into_iter()
-                .filter(|&alpha| !masked_pos.contains(&utr.alpha_to_genomic(alpha as f64)))
-                .collect();
-            if kept.len() != before {
-                log::debug!(
-                    "UTR {}: masked candidate sites {} -> {}",
-                    utr.name,
-                    before,
-                    kept.len()
-                );
-            }
-            kept
-        }
-        None => candidate_sites,
-    };
     discover_ns.fetch_add(
         t_discover.elapsed().as_nanos() as u64,
         std::sync::atomic::Ordering::Relaxed,

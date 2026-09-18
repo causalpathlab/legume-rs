@@ -4,7 +4,7 @@ How `faba` turns alignment files into per-cell feature matrices: m6A methylation
 alternative polyadenylation, gene counts, read depth, and SNP genotypes.
 
 Every default given here is the shipped default, and every claim was read off the code rather
-than off the help text (where the two disagreed, §9 says so). References are collected in §10.
+than off the help text (where the two disagreed, §10 says so). References are collected in §11.
 
 ---
 
@@ -13,7 +13,7 @@ than off the help text (where the two disagreed, §9 says so). References are co
 **Reading the BAM.** Reads are dropped if the duplicate flag is set. The pileup-based modalities
 (m6A, A-to-I, SNP) additionally require `MAPQ ≥ --min-mapping-quality` (20), drop secondary and
 supplementary alignments, drop paired reads that are not properly paired, and require each
-individual base to have `Phred ≥ --min-base-quality` (20). **`faba genes` and `faba depth` do
+individual base to have `Phred ≥ --min-base-quality` (20). **`faba count` and `faba depth` do
 not apply those filters** — they take every non-duplicate read with a gene tag. That asymmetry is
 deliberate (counting wants sensitivity, variant calling wants specificity) but it is worth stating
 in a write-up rather than leaving for a reader to discover.
@@ -22,7 +22,13 @@ in a write-up rather than leaving for a reader to discover.
 to one observation per cell per gene, in the manner of UMI-tools [7]. `--no-umi-dedup` turns this
 off. This is *separate from*, and on top of, the duplicate-flag filter.
 
-**Which cells are real.** Every modality inherits one cell set, called by `faba genes` (§5).
+**Which cells are real.** Every modality inherits one cell set, called by `faba count` (§5).
+
+**Nothing is thresholded by the producers.** Every subcommand in §2–§6 writes every called cell,
+every gene with a count, and every putative site with its statistics. The only floors are the
+candidacy floors that keep an all-zero row from existing. p-values, odds ratios, edit ratios,
+cells-per-site and nnz cutoffs are `faba qc` flags (§8), applied to stored columns, and
+`faba qc-report` shows what each one keeps before it is applied.
 
 **Output.** Sparse matrices in Zarr (default, zipped) or HDF5, with feature rows keyed
 `{gene}/{modality}/{channel}` — e.g. `{gene}/m6a/methylated`. Site-level rows carry the position:
@@ -40,11 +46,9 @@ defects below were found on, and it still governs everything else.
 every record of a feature type for a gene into a single `min(start)..max(stop)` interval. That is
 not the feature; it is the *reach* of the feature. It has since been deleted — nothing called it
 once the metagene moved to per-transcript models (§1.2) — but the measurement is why, and the same
-mistake is available to anyone who reaches for `min`/`max` over a gene's records. On GENCODE v48
-basic: the union CDS "span" covers a
-median **83.5%** of the whole gene, introns included, and overlaps the union UTR in **95.9%** of
-genes. The union 3′UTR span runs a mean **6.35×** its real spliced length (median 1.00×, p90
-12.4×) and overlaps the CDS span in **46.1%** of genes.
+mistake is available to anyone who reaches for `min`/`max` over a gene's records: the union CDS
+span covers most of the gene, introns included, overlaps the union UTR span in most genes, and the
+union 3′UTR span runs far longer than its spliced length.
 
 Under a gene-level model, features had to be tested in the order 5′UTR → CDS → 3′UTR, so an
 oversized CDS span *claimed* 3′UTR sites. Because those sites sit at the far end of the span, they
@@ -52,12 +56,6 @@ binned to the **last CDS bin**. That was the origin of a terminal-bin spike that
 and was not. (The metagene has since moved to per-transcript regions, which are disjoint, so it
 needs no priority order at all — §1.2. The measurement stands as how the defect was found, and the
 ordering problem is still live for anything that classifies a position against merged features.)
-
-| track | last bin / mean of the rest, union spans | with merged features |
-|---|---|---|
-| 5′UTR | 7.66× | **1.31×** |
-| CDS | 13.77× | 9.10× |
-| 3′UTR | 1.94× | **0.64×** |
 
 The tell that it was never library 3′ bias: the spike was **worst in CDS**, whereas 3′ coverage
 pileup, adapter read-through, internal priming and 3′-end base quality all predict a spike in the
@@ -71,34 +69,28 @@ mirrored on the reverse strand, so `bin = rel * nbins / spliced_len`. That corre
 both models: the metagene now takes it along one transcript's regions, everything else along the
 gene's merged ones.
 
-**Verification.** After the fix, an independent transcript-level classification in Python puts
-382 of rep1's 4,033 called sites in real CDS exons and 3,493 in real UTRs; the gene-level model
-reported 373 and 3,509, and the 9-site gap is accounted for exactly by isoform convention (12 sites
-are CDS in one isoform and 5′UTR in another, where that model tested 5′UTR first, less 3 sites
-inside an overlapping gene's CDS). What survives is the expected biology: CDS climbs monotonically
-into the stop codon
-and the 3′UTR is strongly front-loaded just past it, matching a stop-codon distance histogram in
-which **85%** of sites lie 3′ of the stop and **43.9%** fall 100–500 nt beyond it.
+**Verification.** After the fix, an independent transcript-level classification agrees with the
+gene-level model up to isoform convention (a site that is CDS in one isoform and 5′UTR in another,
+where that model tested 5′UTR first, or a site inside an overlapping gene's CDS). What survives is
+the expected biology: CDS climbs into the stop codon and the 3′UTR is front-loaded just past it.
 
 **The same defect reached APA.** `apa` built its 3′UTR regions from the same union model, which
 matters more there than anywhere else: APA's whole estimand is *position within the 3′UTR*, so a
-region running through introns and CDS corrupts the estimate rather than just the plot. Of 17,653
-regions admitted at `--min-utr-length 200`, **6,599 (37.4%)** had a span overlapping the gene's own
-CDS. 3′UTRs are now merged annotated exons, `--min-utr-length` gates on the **spliced** length, and
+region running through introns and CDS corrupts the estimate rather than just the plot, and a
+large share of admitted regions had a span overlapping the gene's own CDS. 3′UTRs are now merged
+annotated exons, `--min-utr-length` gates on the **spliced** length, and
 a read is charged only its exonic bases — so a read lying in an intron of the 3′UTR contributes
 nothing, and one spanning an intron is credited its spliced length, not its genomic length.
 
-**Cross-isoform CDS/3′UTR overlap is real, and is kept.** After the fix, 4,958 of 17,502 regions
-(28.3%) still have a 3′UTR exon overlapping some CDS record. **This is biology, not a residual
-artifact, and it must not be "corrected" away.** Of 65,270 transcripts in GENCODE v48 basic,
-**zero** have a `UTR` record overlapping a `CDS` record *of the same transcript* — the annotation
-is internally consistent within a transcript. The overlap exists only *across* isoforms, which is
-exactly what alternative last exons and alternative stop usage produce: the same genomic base is
-genuinely coding in one isoform and 3′UTR in another. `ENSG00000186891` (TNFRSF18) is typical —
-one transcript's 3′UTR is 1,203,508–1,203,846 while another's CDS is 1,203,594–1,203,960, and both
-records are true.
+**Cross-isoform CDS/3′UTR overlap is real, and is kept.** After the fix, a share of regions still
+have a 3′UTR exon overlapping some CDS record. **This is biology, not a residual artifact, and it
+must not be "corrected" away.** No transcript in the annotation has a `UTR` record overlapping a
+`CDS` record *of the same transcript* — the annotation is internally consistent within a
+transcript. The overlap exists only *across* isoforms, which is exactly what alternative last exons
+and alternative stop usage produce: the same genomic base is genuinely coding in one isoform and
+3′UTR in another, and both records are true.
 
-So 28.3% is a **statement about the transcriptome**, not a quality metric to minimise. A
+So that share is a **statement about the transcriptome**, not a quality metric to minimise. A
 gene-level merged model reports that base as 3′UTR because for some isoform it is one, and reads
 there are informative about 3′-end usage — which is what APA estimates. The model is therefore
 **gene-level, merged across isoforms** — stated plainly rather than implying a per-transcript
@@ -116,21 +108,15 @@ Nothing else moved. APA still measures 3′-end usage on the merged model, `rel_
 offset along merged exons, and the methylation mixture still shares that axis. Their estimands are
 about *any-isoform* exonic evidence, where merging is the right answer rather than the wrong one.
 
-**The cost is measured and it is not small.** On gencode v46 with 59,703 m6A calls, electing one
-transcript leaves **11.84%** of sites unassigned against **6.16%** under the merged model, and the
-5′UTR track collapses from **3,500 to 433** sites. CDS and 3′UTR are robust — CDS 13,958 → 13,849
-(−0.8%), 3′UTR 38,570 → 41,223 (+6.9%).
+**The cost is not small.** Electing one transcript leaves more sites unassigned than the merged
+model does, and the 5′UTR track collapses: almost all of the merged model's 5′UTR sites lie in
+regions that are 5′UTR only in non-canonical isoforms (alternative first exons and TSS). CDS and
+3′UTR are robust. **Neither 5′UTR count should carry weight**, and a swing of that size on a small
+track is the reason to state which model produced a figure.
 
-This was predicted. An earlier MANE-Select experiment on 4,033 rep1 sites cost 6.6% of them against
-1.3% unassigned, moved CDS 373 → 341 and 3′UTR 3,381 → 3,420, and collapsed the 5′UTR **128 → 6**.
-Almost all of the merged model's 5′UTR sites lie in regions that are 5′UTR only in non-canonical
-isoforms (alternative first exons and TSS). **Neither 5′UTR count should carry weight**, and that
-20× swing on a small track is the reason to state which model produced a figure.
-
-The effect on the profile is not subtle. Under the merged model the 3′UTR's terminal bin was the
-tallest thing in the plot at **2.08×** the mid-UTR trough while the stop-codon bin barely registered
-at **1.38×**; per transcript those become **0.82×** and **5.27×**. The two models support opposite
-readings of the same sites.
+The effect on the profile is not subtle: under the merged model the 3′UTR's terminal bin dominates
+the plot while the stop-codon bin barely registers; per transcript it is the other way round. The
+two models support opposite readings of the same sites.
 
 **Deviations from MetaPlotR**, all deliberate, all documented where they are implemented
 (`genomic-data/src/transcript.rs`, `faba/src/site_analysis/metagene.rs`):
@@ -141,13 +127,11 @@ readings of the same sites.
    order. Neither matches what either document says it does; we implement the stated intent, and
    break ties on `transcript_id` because `read_gff_record_vec` collects through `par_bridge` and
    record order is not reproducible. Running their script on our own `--dist-measures` output shows
-   the gap directly: their dedup yields scale factors 0.1532/1.7373 where our election gives
-   0.1511/1.6764.
+   the gap directly in the scale factors.
 2. *Site-weighted medians.* Bin widths come from median region sizes over the **assigned sites**,
-   not the transcript set — `visualize_metagenes.R` computes them from `dist`, one row per site. On
-   our calls the two readings differ by 59% in the 3′UTR (**1.6764** site-weighted against
-   **1.0554** transcript-weighted). The transcript-weighted reading would draw the 3′UTR at 63% of
-   its correct width and still look entirely plausible.
+   not the transcript set — `visualize_metagenes.R` computes them from `dist`, one row per site. The
+   two readings differ materially in the 3′UTR, and the transcript-weighted one would draw it too
+   narrow while still looking entirely plausible.
 3. *`--include-non-coding`* has no MetaPlotR counterpart. That track sits on its own [0,1] axis and
    its density is normalised within itself.
 
@@ -156,19 +140,18 @@ along the gene's **merged exons** — introns consume none of it. It was an offs
 start in genomic space, which for a typical human gene says more about intron content than about
 where in the mRNA a site sits. The column is **nullable**, and is null for an intronic site: such a
 site has no transcript coordinate, and substituting the nearest exon edge would put a value there
-that no reader could distinguish from a real one. About 4% of called sites are intronic.
+that no reader could distinguish from a real one.
 
 The exon model is the same shape used above — gene-level, merged across isoforms, so a base exonic
 in *any* isoform is exonic here.
 
 The **methylation mixture** uses the same coordinate. Its position covariate and the `gene_length`
 that normalises it must sit on one axis, and both were genomic: consistently wrong together, so the
-fit was valid but the axis was mostly intron. Measured on rep1, moving both to spliced shrinks the
-covariate's range by a median **7.6×** (gene length 24,012 → 3,161 nt), and fitted components then
-sit at a median **66% along the mature transcript** — 3′-biased, matching the stop-codon enrichment
-in §7. Under the old axis that fraction was not interpretable. Sites with no transcript position are
-dropped from the fit rather than nudged onto the nearest exon (901 of 126,924 observations, 0.71%),
-and the count is logged.
+fit was valid but the axis was mostly intron. Moving both to spliced shrinks the covariate's range
+by the gene's intron content, and fitted components then sit toward the 3′ end of the mature
+transcript, matching the stop-codon enrichment in §7. Under the old axis that fraction was not
+interpretable. Sites with no transcript position are dropped from the fit rather than nudged onto
+the nearest exon, and the count is logged.
 
 ---
 
@@ -192,24 +175,21 @@ The 2×2 table (signal/control × converted/unconverted) is tested one-sided by 
 observed)`.
 
 There used to be a second branch — an overdispersed beta-binomial likelihood-ratio test, taken once
-every cell reached 5 reads and total coverage reached 100. Both tests were individually correct; the
-*dispatch* was not. Two different nulls met at a count threshold, so the p-value jumped
-discontinuously across it: measured, one extra converted read in the control moved it 7.6e6-fold
-(3.7e-9 → 2.8e-2), and doubling coverage at a fixed effect made a site *less* significant (5.6e-4 →
-5.3e-2). A statistic that is not monotone in its own evidence cannot rank sites. The exact branch was
-kept because it was already the majority: on rep1, 94.6% of called sites took Fisher, since DART
-control background is 0.1–1% and the control converted count is 0–2 at 88% of sites. The cost, stated
-plainly: overdispersion (fitted at 0.022–0.045) is now unmodelled rather than applied to the 5.4% of
-sites that reached the LRT.
+every cell of the 2×2 was deep enough. Both tests were individually correct; the *dispatch* was
+not. Two different nulls met at a count threshold, so the p-value jumped discontinuously across
+it: one extra converted read in the control, or doubling the coverage at a fixed effect, could
+move a site across orders of magnitude. A statistic that is not monotone in its own evidence
+cannot rank sites. The exact branch was kept because a catalytically-dead control converts next
+to nothing at most sites, so the exact test was already the common path. The cost, stated
+plainly: overdispersion is now unmodelled rather than applied to the deep minority.
 
 **Null-cell QC (de-dilution).** Before discovery, a fast pre-pass tallies each cell's
 conversions at reference motif positions and drops the cells that edit no more than the
 catalytically-dead control does. These are not bad cells — droplet calling, gene
 complexity and mitochondrial fraction all pass them — the reporter simply did not work
 in them, and every existing QC stage is expression-based and therefore blind to that.
-Leaving them in contributes coverage without signal: measured on DART data, **90.9% of
-the cells covering MYC convert nothing while carrying 74.5% of its coverage**, which is
-enough to bury the gene entirely.
+Leaving them in contributes coverage without signal, which is enough to bury a focally
+methylated gene entirely when most of the cells covering it never convert.
 
 This is QC, not a hypothesis test, so it has no significance level. The cut is placed
 where the *discarded* population stops being distinguishable from the control —
@@ -222,9 +202,8 @@ pool; the logged `dropped/control` reports the cost. Alternatively
 editing more than 98% of depth-matched control cells"). Both are quantile/ratio rules on
 an empirical reference — **not** tests: no p-values and no multiplicity anywhere in cell
 QC. Every run logs its operating point in *both* units (`dropped/control 1.00; cut sits
-at control p95`), because the correspondence is data-dependent: tolerance 1.2 mapped to
-p95 on one panel and p98 on another, so read the reported percentile rather than
-assuming a fixed equivalence.
+at control p95`), because the correspondence is data-dependent and differs between
+panels, so read the reported percentile rather than assuming a fixed equivalence.
 
 Under `-v`, a side-by-side **logit-scale** histogram of the per-cell conversion rate
 (signal vs control) is printed. Logit because the rates are ~1e-4 to 1e-2 and a linear
@@ -236,7 +215,7 @@ in the comparison, which is why the control library is required rather than opti
 It is **off by default and scoped to m6A alone**: faba's rule is that every modality
 inherits one cell set, so restricting the m6A matrices makes their columns a subset of
 the gene/apa/atoi matrices and cross-modality joins will drop cells. Left off, the
-matrices carry every QC-passing cell — measured whole-genome, ~60% of those are null
+matrices carry every QC-passing cell — a large share of those are null
 cells, so a per-cell methylation rate read straight off the default matrix runs low.
 The per-cell audit carries a `kept` column, so the same filtering can be done
 downstream instead. The control matrices are never restricted either way.
@@ -248,30 +227,33 @@ just a diluted one. The scan no-ops on its own when there is no control arm to
 calibrate against (A-to-I, or m6A run without `--control-bam`). A per-cell audit goes
 to `{output}_m6a_cell_qc.tsv.gz`, with `scored` separating "assessed and rejected" from
 "too little coverage to assess". `faba dartseq` and `faba all` share the same knobs, so
-the two paths cannot drift. Measured end to end on chr19 + MYC: 131 → 235 selected
-sites, and MYC is called only once the null cells are dropped.
+the two paths cannot drift.
 
-**Putative sites vs the test.** A site is a *putative candidate* on the sequencing pattern alone:
-the RAC/GTY motif plus observed WT C→U at/above the signal floors — signal coverage ≥
-`--min-coverage` (3) and signal conversions ≥ `--min-conversion` (1). Those floors are deliberately
-low: discovery is meant to be promiscuous, because a thin site costs almost nothing in the backend
-and is easy to drop downstream, while a site never discovered cannot be recovered without a rerun.
-Everything else is the *test* that decides selected vs unselected, applied after discovery: control
-coverage ≥ `--edit-control-min-coverage` (1) and a log odds ratio ≥ `--m6a-min-log-odds` (1e-4),
-then the p-value cutoff. A putative site that misses any of these is *recorded* (not dropped) in
-`m6a_sites_unselected.parquet` with a `reason` (`low_control` / `odds_ratio` / `pvalue`), so every
-candidate is accounted for.
+**Putative sites, and no test.** A site is a *putative candidate* on the sequencing pattern alone:
+the RAC/GTY motif, at least `--min-conversion` (1) converted signal read, and total coverage (signal
++ control) ≥ `--min-coverage` (1). That is the whole producer-side decision. Every putative site is
+written to `m6a_sites.parquet` with its statistics — `pv`, `log_odds`, `log_odds_se`, `coverage`,
+`converted`, `control_coverage`, `control_converted` and the raw base counts — quantified into the
+`_site` matrix, and pooled into the gene-level matrix. There is no p-value cutoff, no odds-ratio
+guard, no control-coverage floor and no mask here: those are `faba qc` flags (`--site-max-pv`,
+`--site-min-log-odds`, `--site-min-coverage`, `--site-min-cells`, …; §8) applied to stored columns,
+so a different cut is a rerun of `qc`, never of a BAM scan. The floors default to 1 because the only
+site they exclude is one with no converted read at all, i.e. an empty row.
 
-The guard uses the **raw** cross-product `ln((a_w·u_m)/(u_w·a_m))`, with no continuity correction, so
-a control that never converts reads `+∞` and passes. That is the common case, not an edge case — the
-control converts nothing at all at 57% of sites (measured on chr19+MYC) and 0–2 reads at 80–88%. Correcting the guard would invert its meaning: with
+What follows is the reasoning behind the `qc` knobs. It was written when the guard and the cutoff
+lived in the producer; the argument is the same, only the flag that carries it moved.
+
+`--site-min-log-odds` uses the **raw** cross-product `ln((a_w·u_m)/(u_w·a_m))`, with no continuity correction, so
+a control that never converts reads `+∞` and passes. That is the common case, not an edge case: a
+catalytically-dead control converts nothing, or next to nothing, at most sites. Correcting the guard
+would invert its meaning: with
 `a_m = 0` a Haldane-corrected guard passes only when the WT odds exceed `0.5/(n_MUT + 0.5)`, an
 implied **minimum WT rate** of 12.5% at `n_MUT = 3` and 25% at `n_MUT = 1` — which is precisely the
 pathology the odds ratio was brought in to remove. Worked case: `(a_w, u_w, a_m, u_m) = (30, 4970,
 0, 3)` is a 0.6% WT site whose control converts 0 of 3 reads. Raw, that is `+∞`; corrected, −3.148,
 i.e. a claim that the control converts 23× *more*, off three reads. Both agree the site is unproven
-(Fisher p = 0.982) — but only the raw guard lets it be recorded as `pvalue` ("no evidence") instead
-of `odds_ratio` ("no effect").
+(Fisher p = 0.982) — but only the raw guard lets it be dropped as `pvalue` ("no evidence") instead
+of `log_odds` ("no effect").
 
 The default `1e-4` is not tuned; it means "direction only". On integer counts the smallest odds ratio
 above 1 a table can express is `1 + 1/(u_w·a_m)`, which exceeds 1e-4 for every table with `u_w·a_m`
@@ -286,17 +268,14 @@ removed because it measured the wrong thing in three separate ways.
 It was on the wrong *scale*. The Fisher exact test's null is `OR = 1`, which is multiplicative; a
 difference is additive. Guard and test were not measuring the same quantity.
 
-It barely consulted the *control*. DART background runs 0.1–0.3%, so `p_WT − p_MUT ≈ p_WT`. Measured
-on real data, delta correlated with the WT conversion rate at **ρ = 0.983** but with the log odds
-ratio at only **ρ = 0.172** — a flag documented as an effect-size guard behaving as a minimum-WT-rate
-filter. It rejected 36,830 candidates whose median odds ratio was **4.83**, with median WT coverage
-744 (three times the 254 of the sites it *kept*) and median control background 0.0008 (four times
-cleaner than the kept sites). In MYC the site with the **smallest** delta (0.0121) had the **largest**
-odds ratio (8.05) — the guard ranked the gene's best site last.
+It barely consulted the *control*. DART background is small next to any real signal rate, so
+`p_WT − p_MUT ≈ p_WT`: a flag documented as an effect-size guard behaves as a minimum-WT-rate
+filter, tracking the WT conversion rate rather than the odds ratio. It rejects deep, clean sites
+with large odds ratios and can rank a gene's strongest site, by odds ratio, last.
 
 And it was denominated in a unit the method itself rescales. Null-cell QC leaves `a_w` alone and
-shrinks `u_w`, so it multiplies the WT *odds* by `1/f` — and `f` differs per gene (74.5% of MYC's
-coverage is null-cell, see above). One fixed additive threshold therefore meant something different
+shrinks `u_w`, so it multiplies the WT *odds* by `1/f` — and `f` differs per gene (see above). One
+fixed additive threshold therefore meant something different
 at every gene. A log-odds threshold absorbs that rescaling as a constant shift.
 
 **Do not read an effect size off a low-abundance site.** This is the sharpest form of the argument.
@@ -314,60 +293,32 @@ how "do not trust this effect size" becomes a number instead of a warning. On th
 above it reads 1.71 either way, but the Wald lower bounds separate them at 2.50 and −0.20.
 
 Two caveats, stated so they do not arrive as bug reports. With `a_m = 0` the corrected control cell
-is 0.5, so the SE is floored near `√2 ≈ 1.41` regardless of depth: at the 57% of sites with no control conversion it flags
+is 0.5, so the SE is floored near `√2 ≈ 1.41` regardless of depth: at sites with no control conversion it flags
 uncertainty without *ranking* it, and ranking there is `pv`'s job. And because the reported estimate
 is corrected while the guard is not, the two can disagree in sign at a nearly-empty control — by
 design, as the worked case above shows. `log_odds − 1.96·log_odds_se` is a Wald lower bound if one
 is wanted; it is deliberately neither a column nor a filter, because to a normal approximation it is
 the same one-sided test `pv` already reports exactly.
 
-**Measured on chr19 + MYC (faba 0.12.5).** Of 3,503 putative sites, 980 selected, 2,459 rejected on
-the p-value, **61 (1.7%) on the odds ratio**, and 3 on control coverage. The odds-ratio rejection
-rate is what the retired 1.25× fold gate predicted (it passed 94–99% of sites), which is the check
-that the new guard is doing the job it claims and no more.
-
-Re-running at the pre-0.12.5 floors isolates the guard from the floors, and the split is sharp:
-
-| | putative | tested | selected | expected false |
-|---|---|---|---|---|
-| floors 5 / 2 / 3 | 1,606 | 1,579 | 978 | 79 (8.1% of calls) |
-| floors 3 / 1 / 1 | 3,503 | 3,439 | 980 | 172 (17.5% of calls) |
-
-So **the call set is the guard's doing, not the floors'.** At the old floors, the retired delta rule
-would have cut 994 of the 1,606 putative sites, and **542 of those are now selected** — the call set
-goes from 436 to 978, a 2.24× increase attributable entirely to the change of statistic. The
-remaining 425 land on `pvalue`. An earlier draft of this section predicted the opposite split
-(mostly relabelling, few new calls); the measurement contradicted it, and the delta guard really was
-suppressing a majority of the calls it touched.
-
-**The loosened candidacy floors, by contrast, are not obviously worth it.** They doubled the
-candidate pool and the tested count to buy **two** extra calls, while doubling the expected
-false-call burden from 79 to 172 — because the cutoff is marginal, every additional test costs 0.05
-expected false calls whether or not it yields one. `--min-coverage 5 --min-conversion 2` restores
-the cleaner call set at the price of the thin tail. Storage was never the constraint; multiplicity is.
-
 There is no separate control-fold gate, because the odds-ratio guard *is* one. A Bullseye-style
-`p_WT / p_MUT ≥ 1.25` guard was measured on three DART replicates and found inert: 94–99% of putative
-sites passed it and removing it changed the selected-site count by exactly zero. The current guard is
-the same family — on odds rather than rates, with the threshold at ~1.0 rather than 1.25 — kept for
-agreement with the test's null rather than as a filter. That measurement is also this rule's
-falsifiable prediction: `odds_ratio` rejections should be a small minority of putative sites, and if
-they are common something is wrong.
+`p_WT / p_MUT ≥ 1.25` guard is the same family — on rates rather than odds, with the threshold at
+1.25 rather than ~1.0 — and `faba qc --site-min-fold` exposes it, beside `--site-min-edit-ratio` and
+`--site-min-converted`, so a Bullseye-style call set can be reproduced from the same producer
+output. `faba qc-report` shows what any of them keeps on the data at hand.
 
 **The two arms are not symmetric, and resampling cannot fix it.** The WT arm is de-diluted (restricted
 to editing-competent cells) while the control is not, so the arms rest on different cell counts. That
 asymmetry is real but it is not a *variance* problem, and matching sample sizes would not help.
 
 The Woolf SE is dominated by the smallest cell, and at a typical site that cell is `a_m` — the
-control's *converted* count, 0–2 at 80–88% of sites — not either library's depth. In a representative
-2×2 (`n_WT` 744, `n_MUT` 1201) only **4%** of the variance comes from the WT arm; `u_m = 1200`
-contributes `1/1200 ≈ 0`. Subsampling the control down to WT depth therefore discards the term that
-was already free, moving the SE from 0.83 to 0.96 and the bound from 2.46 to 2.25.
+control's *converted* count, a few reads at most — not either library's depth: the deep unconverted
+control cell contributes `1/u_m ≈ 0`. Subsampling the control down to WT depth therefore discards
+the term that was already free and only widens the SE.
 
 It would also add variance without removing bias. Simple random subsampling is unbiased for a
 proportion, so the resampled control rate has the same expectation; it only inflates the variance by
 `n_MUT/n_WT`, levelling the more precise arm down to the less precise one. Worse here specifically:
-with `a_m ∈ {0,1,2}` at most sites, subsampling turns `a_m = 1` into `a_m = 0` most of the time,
+with only a handful of control conversions at most sites, subsampling turns one into none most of the time,
 converting a measured background into a structural zero. And the closed form is what such a bootstrap
 converges to anyway — the bootstrap variance of a proportion is `p(1−p)/n`, whose delta-method logit
 SE is `1/a + 1/u`, and summing the arms gives Woolf exactly.
@@ -384,7 +335,7 @@ one background rate, conditioning on competence within it is vacuous, and compar
 all-MUT is a legitimate contrast — "the rate among editing cells" against "the one rate there is".
 That premise is what a catalytically-dead control *is*, and it is also why control cells must never
 be competence-filtered: selecting them on apparent activity would select on background. A second,
-weaker assumption backs it: competence is scored over ~28,000 motif positions, so any single site
+weaker assumption backs it: competence is scored over every motif position, so any single site
 contributes ~1/n of its own selection evidence — negligible at a typical site, largest at exactly the
 strong sites that drove the ranking.
 
@@ -392,23 +343,21 @@ Both are testable rather than merely asserted. The cell scan already fits a beta
 the control arm, so running the competence call *on* the control and looking for a competent tail
 tests the first directly. If the control is homogeneous, there is nothing to correct.
 
-**Multiple testing: there is none.** Each putative motif C is tested on its own and kept when its
-marginal p-value clears `-q/--pvalue` (**0.05**). No Benjamini–Hochberg and no q-values:
-`m6a_sites.parquet` carries a single `pv` column and nothing beside it.
+**Multiple testing: there is none.** Each putative motif C carries its own marginal p-value, and
+`faba qc --site-max-pv` (**0.05**) keeps it or not on that value alone. No Benjamini–Hochberg and
+no q-values: `m6a_sites.parquet` carries a single `pv` column and nothing beside it.
 
 A marginal cutoff is **not** scale-free the way an FDR threshold is. "q ≤ 0.05" means the same thing
 at 300 tests and at 300,000; "p ≤ 0.05" admits `0.05 × m` null sites, so its meaning moves with `m`
-and the flag alone cannot tell you what you bought. Every run therefore logs that expected false-call
-count beside the tally — `~640 false calls expected under the null (0.05 x 12800 tested)` — where `m`
-counts the sites that actually reached the cutoff, i.e. selected plus `pvalue`-rejected, not the ones
-the coverage/odds-ratio guards had already stopped.
+and the flag alone cannot tell you what you bought. `faba qc-report` therefore prints, for every
+cutoff on the grid, what it keeps (§8); calibrating the cutoff is the user's call.
 
 This is deliberate. BH [4] controls the FDR under independence or *positive regression dependence*,
 and neighbouring candidate C's have neither: they are covered by the **same reads**, so their 2×2s
 share cells and depth, and a read converted at one site is evidence *against* its unconverted
 neighbour — the dependence is not even reliably positive. Under arbitrary dependence the valid
-procedure is Benjamini–Yekutieli, which divides α by `Σ 1/i ≈ ln m`: a **10.6× penalty** at the
-~28,000 putative sites of one library, i.e. calling almost nothing. Between "BY and call nothing" and
+procedure is Benjamini–Yekutieli, which divides α by `Σ 1/i ≈ ln m`: an order-of-magnitude penalty
+at the tens of thousands of putative sites of one library, i.e. calling almost nothing. Between "BY and call nothing" and
 "stop claiming FDR control", claiming BH's guarantee while its assumption fails was the one
 indefensible option. Two further measurements point the same way: BH was running on p-values that are
 not uniform under H₀ (a site only exists once it clears `--min-conversion`, so the null tail is
@@ -417,8 +366,7 @@ the subset is filtered by `--m6a-min-log-odds`, which is monotone in a monotone 
 Fisher statistic itself rather than merely correlated with it as the old delta guard was, so the
 conditioning deflates every q by roughly #eligible/#putative and is even harder to defend. This
 matches the field: Bullseye and scDART call sites by thresholds plus control fold and replicate
-reproducibility, not by a genome-wide FDR. `--pvalue 1.0` disables the cutoff entirely, leaving the
-coverage + odds-ratio gates as the field-standard filter.
+reproducibility, not by a genome-wide FDR. `--site-max-pv 1` disables the cutoff entirely.
 
 **The unit is the site, never the gene.** A gene-level mode used to pool every putative C in a gene
 into one 2×2 and test that. It is gone. faba's whole m6A method rests on **de-dilution** — cells that
@@ -428,18 +376,18 @@ failure one level up: it averages a focal methylation site against the gene's no
 positions, with no corresponding de-dilution step. The decisive objection is that a gene-level verdict
 cannot say **which** C carries the mark, and that holds under any guard.
 
-Under the retired delta guard the dilution surfaced as false negatives. Measured on MYC: 12 putative
-sites, of which three are strong (per-site signal-vs-control deltas of 3.6%, 2.9%, 3.4%; p = 1.3e-4,
-2.5e-4, 3.8e-17). Pooled across all 12 the delta was **0.0150**, under that rule's 0.02 floor — so
-the gene was rejected at the effect guard and all 12 sites inherited that verdict, while per site all
-three are called. That number is **historical**: it describes a guard that no longer exists. Under
+Under the retired delta guard the dilution surfaced as false negatives: a gene with a few strong
+sites among many quiet ones pooled to a delta under the floor, so the gene was rejected at the effect
+guard and every site inherited that verdict, while per site the strong ones are called. Under
 the odds-ratio guard a pooled 2×2 of that shape clears the floor comfortably, so pooling now fails in
 the opposite direction, by false **attribution** — one verdict inherited by every C in the gene, most
 of which carry nothing. The direction of the error moved; the argument for the site as the unit did
 not. Gene pooling is dilution-honest by construction and dilution-*blind* in practice, precisely on
-the focally methylated genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet` and their `_unselected`
-companions are no longer produced, and the `gene_pv` and `qvalue` columns are gone from the site
-parquets — `qvalue` had become a byte-for-byte copy of `pv`, which is a lying name, not a schema.
+the focally methylated genes the assay exists to find. `m6a_genes.parquet` / `atoi_genes.parquet`
+are no longer produced, nor is `m6a_sites_unselected.parquet`: there is one site table per
+modality, and `faba qc` writes what it drops to `m6a_sites_dropped.parquet` with a `reason`. The
+`gene_pv` and `qvalue` columns are gone from the site parquets — `qvalue` had become a byte-for-byte
+copy of `pv`, which is a lying name, not a schema.
 
 **Discovery is pooled, never stratified.** Discovery scans each gene's pooled WT marginal over
 every cell that passed QC. A putative site needs only the motif and observed C→U, and the pooled
@@ -483,11 +431,15 @@ noise: `k ~ BetaBinomial(n, α, β)` with mean `ε = --error-rate` (0.01) and in
 `ρ = --overdispersion` (0.1). The p-value is the upper tail `P(K ≥ k)`. With ρ = 0 this degenerates
 to a plain binomial. This is the single-condition test used by SAILOR [5] and JACUSA2 [6].
 
-Gates before testing: `n ≥ --min-coverage` (**5**) and `k ≥ --min-conversion` (**3** — note this
-differs from dartseq's 2). Then the same marginal cutoff as §2, keeping `p ≤ --pvalue` (0.05)
-per site — no multiplicity correction, and no gene-level pooling, for the reasons given there. The
-argument is if anything stronger here: A-to-I has no control arm and no de-dilution pre-pass, so a
-pooled gene test would average edited positions against unedited ones with nothing to undo it.
+Candidacy floors: `n ≥ --min-coverage` (**5**) and `k ≥ --min-conversion` (**3**), the same in
+`faba atoi` and `faba all`. They are higher than m6A's 1 / 1 because A-to-I has no motif anchor: at
+1 / 1 every reference A with a single mismatching read would be a site. No p-value cutoff is applied
+here either — every putative site is written with its `pv`, and `faba qc --site-max-pv` decides, as a
+marginal cutoff with no multiplicity correction and no gene-level pooling, for the reasons given in
+§2. The argument is if anything stronger here: A-to-I has no control arm and no de-dilution
+pre-pass, so a pooled gene test would average edited positions against unedited ones with nothing
+to undo it. No SNP mask is applied: a germline A/G variant is a site with an edit ratio near 0.5 or
+1, which `--site-max-edit-ratio` can drop, and the SNP call set is there to join against.
 
 Quantification is as in §2, with channels `edited` / `unedited`.
 
@@ -537,11 +489,13 @@ counted rather than differenced.
 
 ---
 
-## 5. `genes` — gene counts, and cell calling
+## 5. `count` — gene counts, and cell calling
 
 Counts reads per gene, splice-aware by default. A read is called **unspliced** if any aligned
 block falls outside every annotated exon; otherwise **spliced** (the alevin-fry "S+A" convention
-[9]). Three matrices per batch: total, spliced, unspliced. These are what `senna gem` consumes.
+[9]). One matrix per batch, `{batch}_count`, with both tracks as rows
+(`{gene}/count/{spliced|unspliced}`; sum a gene's two rows for its total). These are what
+`senna gem` consumes.
 
 **This command *does* call cells.** The default `--cell-filter` is `empty-drops`, and the cell set
 it produces is inherited by every other modality. It is the union of two rules:
@@ -564,7 +518,8 @@ excluded from the matrix unless `--keep-mito`.
 
 Cell calling looks at spliced counts and at all biotypes; the *quantified* gene set is then
 narrowed by `--gene-type` and mitochondrial exclusion. Genes are kept if seen in
-`≥ --row-nnz-cutoff` (10) cells; cells if they carry `≥ --column-nnz-cutoff` (10) genes.
+`≥ --row-nnz-cutoff` (1) cells; cells if they carry `≥ --column-nnz-cutoff` (1) genes — i.e. only
+empty rows and columns are dropped. An opinionated floor belongs to `faba qc` (§8).
 
 ---
 
@@ -604,9 +559,10 @@ Two properties of that matrix are worth stating, since both differ from every ot
   and sum to coverage (methylated + unmethylated, spliced + unspliced). Here `alt ≤ depth`, so BAF
   is `alt / depth` and summing the two channels is meaningless.
 
-**One asymmetry to know about.** The SNP *mask* used to protect RNA-editing sites from being
-thrown away as variants applies a VAF filter (`--snp-mask-min-vaf`, 0.35) **only inside
-`faba all`**. Standalone `faba snp` builds its mask without it.
+**The call set is an output, not a mask.** No other modality consumes it: the editing and APA
+steps used to drop sites at called variants, and that was removed, for speed and because the
+m6A contrast already rejects a germline variant on its own (equal conversion in both arms, §2).
+Join `snp_sites.parquet` against a site table downstream if a variant overlap matters.
 
 ---
 
@@ -645,38 +601,87 @@ None of these fit a model or produce a p-value.
 
 ---
 
-## 8. `all` — the full pipeline
+## 8. `qc` and `qc-report` — the one place faba thresholds anything
+
+`faba qc` reads a faba output directory and writes a **new** fileset to `-o`, never in place. The
+producers are inclusive by design (§1), so this is where every opinionated decision lives, and
+`faba qc-report` puts the data behind the decision.
+
+**Order of operations, per batch.**
+
+1. **Cells** are decided once, on `{batch}_count`: a non-zero floor (`-c/--column-nnz-cutoff`, or
+   the BIC-guarded 2-means suggestion under `--auto-cutoff`, as `data-beans squeeze`), then the
+   data-beans MAD-outlier cell QC on detected genes and total counts (`--qc-mads` 5,
+   `--qc-min-cell-nnz` 2; `--no-cell-qc` skips it). The same keep set is applied to every matrix
+   of the batch, so the modalities stay column-aligned. The kept barcodes go to
+   `{batch}_cells.tsv.gz` and the per-cell verdicts to `{batch}_cell_qc_report.tsv`.
+2. **Sites** are decided on the parquet columns, in this order: `--site-min-coverage` (3, on
+   signal + control reads), `--site-min-converted` (1), `--site-min-edit-ratio` /
+   `--site-max-edit-ratio` (0 / 1, on `converted / coverage`), then for m6A `--site-min-fold` (1,
+   signal rate over control rate; a clean control passes) and `--site-min-log-odds` (1e-4, the
+   raw cross-product, §2), then `--site-max-pv` (0.05), then `--site-min-cells` (10): the number
+   of kept cells carrying a converted read at the site, read off the `_site` matrices and pooled
+   over batches. The kept rows are written under the same name; the dropped rows go to
+   `{modality}_sites_dropped.parquet` with a `reason` column naming the first check that failed.
+3. **`_site` matrices** keep both channels of every kept site, over the kept cells.
+4. **Gene-level `{batch}_m6a` / `{batch}_atoi` are re-pooled** from the filtered site matrix
+   (`{gene}/{modality}/{chr}:{pos}/{channel}` rows summed to `{gene}/{modality}/{channel}`), so
+   gene level cannot disagree with the site cut. The producer's pooled matrix, which sums every
+   putative site, is replaced.
+5. **Every other matrix** (`_count`, `_apa`, `_*_mixture`, `_baf`, `_depth`) takes the cell keep
+   set and `-r/--row-nnz-cutoff` (0 = drop only empty rows; `--auto-cutoff` suggests one).
+6. Everything else is copied through, and `qc_summary.tsv` lists every written matrix with its
+   shape before and after.
+
+**`qc-report`.** Sweeps each `qc` criterion over a grid, one at a time with the others off, and
+writes `{prefix}.qc_report.parquet` (`modality, criterion, unit, threshold, n_kept, n_genes`) plus
+an ASCII chart on stderr — one panel per (modality, criterion), a row per threshold, `*` bars
+scaled to the panel's largest count, in the style of `faba metagene`. The grids are dense at the
+permissive end, because that is where the trade-off is decided. Editing modalities print a
+−log10(p) histogram of every putative site first (rows with criterion `neglog10_pv_hist`, one per
+bin), then sweep `max_pv`, `min_log_odds`, `min_fold`, `min_coverage`, `min_converted`,
+`min_edit_ratio` and `min_cells`; `count` and `apa` sweep `min_cells` and `min_counts` per gene
+unit, and `count` also `min_genes_per_cell`. No error rate is estimated: how a marginal p-value or
+any other column should be calibrated is left to the user, with the table as the evidence.
+
+---
+
+## 9. `all` — the full pipeline
 
 The steps run in this order, and each one's output constrains the next:
 
 ```
-SNP  →  genes  →  [depth]  →  ATOI  →  m6A  →  APA
+SNP  →  count  →  [depth]  →  ATOI  →  m6A  →  APA
 ```
 
-- **SNP** runs first, in bulk mode, and produces the variant mask. It is not fatal if it fails.
-- **genes** calls cells and picks the expressed gene set. **Every downstream modality inherits
+Modalities do not mask one another, and no step applies a p-value or effect-size cutoff; the
+pipeline's output is the inclusive fileset `faba qc` (§8) cuts.
+
+- **SNP** runs first, in per-cell mode, and writes the call set and BAF matrices. Nothing downstream
+  reads it. It is not fatal if it fails.
+- **count** calls cells and picks the expressed gene set. **Every downstream modality inherits
   both** — this is what makes the modalities directly comparable, since they share a cell axis.
 - **depth** (`--depth-resolution-kb`, opt-in) writes `{batch}_depth`, binned per-cell read depth.
-  It is independent of every other step: it reads no mask, produces none, and nothing downstream
-  consumes it, so it can fail without costing anything that follows. It sits directly after gene
+  It is independent of every other step and nothing downstream consumes it, so it can fail
+  without costing anything that follows. It sits directly after gene
   counting for one reason only — that is where the called-cell axis exists, and sharing it keeps
   the depth matrix's columns identical to every other modality's.
-- **ATOI** runs masked by the SNP mask, and produces the editing mask. Discovery is in bulk, over
-  the cells step 1 called — as it is for m6A, so the two cannot disagree about which cells were
-  compared. There is no cell grouping step; `--cluster-resolution` and the Leiden grouping behind
-  it were removed, for the reasons in §2.
-- **m6A** runs masked by the editing mask (a C→T at an edited site is not methylation). It is
-  **skipped, not failed**, if no `--control-bam` is given. The SNP mask is *not* applied by
-  default, because the WT-vs-MUT contrast already rejects germline variants.
+- **ATOI** writes every putative site (§3). Discovery is in bulk, over the cells step 1 called —
+  as it is for m6A, so the two cannot disagree about which cells were compared. There is no cell
+  grouping step; `--cluster-resolution` and the Leiden grouping behind it were removed, for the
+  reasons in §2.
+- **m6A** writes every putative site (§2). It is **skipped, not failed**, if no `--control-bam` is
+  given.
 - **APA** runs last, because the SCAPE EM is the expensive step.
 
-The pipeline deliberately relaxes the per-modality count floors (`--gene-min-cells`,
-`--cell-min-genes` default to 0 here, versus 10 standalone) so that the cell and gene axes are set
-once, by the gene-counting step, and not silently re-filtered by each modality afterwards.
+The per-modality floors are the same in `all` and standalone: `--gene-min-cells` 1 and
+`--cell-min-genes` 1 drop only empty rows and columns, so the cell and gene axes are set once, by
+the count step, and every modality carries them unchanged to `faba qc`. `--site-min-cells` (1) and
+the editing floors are likewise shared by const with the standalone commands.
 
 ---
 
-## 9. Where the code and its own help text disagree
+## 10. Where the code and its own help text disagree
 
 Found by reading both. These are documentation bugs, not method bugs, but they will mislead anyone
 writing this up from `--help` alone. The rest of what this section used to list has since been
@@ -684,11 +689,11 @@ fixed in the help text itself, so only the live discrepancy is kept here:
 
 | flag / text | says | actually |
 |---|---|---|
-| `--mixture-max-k` (m6A, A-to-I) | "max components to test **via BIC**" | m6A/A-to-I call components from smoothed-density **modes**, then truncate to `max_k` (`editing/mixture.rs`), so it is a plain cap and never a selection criterion. BIC genuinely selects `K` **in APA only**. The same stale claim is repeated by `--no-mixture`'s help and by `fit_gene_mixture`'s own rustdoc |
+| `--mixture-max-k` (m6A, A-to-I) | "max components to test **via BIC**" | m6A/A-to-I call components from smoothed-density **modes**, then truncate to `max_k` (`editing/mixture.rs`), so it is a plain cap and never a selection criterion. BIC genuinely selects `K` **in APA only**. The CLI help now says so; `fit_gene_mixture`'s own rustdoc still makes the stale claim |
 
 ---
 
-## 10. References
+## 11. References
 
 1. Meyer KD. *DART-seq: an antibody-free method for global m⁶A detection.* Nat Methods 16,
    1275–1280 (2019).

@@ -9,12 +9,14 @@ mod gene_count;
 mod m6a;
 mod mixture;
 mod pipeline;
+mod qc;
 mod quant;
 mod read_depth;
 mod site_analysis;
 mod snp;
 
 use crate::common::*;
+use crate::qc::{run_qc, run_qc_report, QcArgs, QcReportArgs};
 use apa::run::*;
 use atoi::run::*;
 use docs::*;
@@ -45,7 +47,7 @@ fn print_logo() {
 Feature naming convention:\n\
   All sparse matrix row names follow: {gene_key}/{modality}/{detail}\n\
   where gene_key = {gene_id}_{symbol} (e.g. ENSG00001234_BRCA2)\n\n\
-  genes:   gene_key/count/spliced, gene_key/count/unspliced\n\
+  count:   gene_key/count/spliced, gene_key/count/unspliced\n\
   dartseq: gene_key/m6a/{channel} (gene), gene_key/m6a/{chr}:{pos}/{channel}\n\
            (site), gene_key/m6a/{component}/{channel} (mixture)\n\
   atoi:    gene_key/atoi/{channel} (gene), gene_key/atoi/{chr}:{pos}/{channel}\n\
@@ -65,13 +67,13 @@ Feature naming convention:\n\
   Split on '/' to extract (unit, modality, detail) for cross-modal joins.\n\n\
 Output layout (every matrix is per-replicate — one per input BAM):\n\
   per-modality: {batch}_m6a, {batch}_atoi (gene two-channel:\n\
-                {gene}/{mod}/{pos} = converted, /{neg} = unconverted),\n\
+                gene_key/m6a/{methylated|unmethylated}, gene_key/atoi/{edited|unedited}),\n\
                 plus {batch}_{m6a,atoi}_site (per-site) and _mixture,\n\
-                {batch}_genes\n\
+                {batch}_count\n\
   baf:          {batch}_baf — per-cell alt and depth reads at each called locus\n\
                 (`faba snp` writes it; the CALL SET is snp_sites.parquet/.vcf.gz)\n\
   depth:        {batch}_depth — binned per-cell read depth (--depth-resolution-kb)\n\
-  apa:          {batch}_apa (proximal/distal counts, default; --no-pdui skips),\n\
+  apa:          {batch}_apa (proximal/distal counts, default; `apa --no-pdui` / `all --no-apa-pdui` skip),\n\
                 {batch}_apa_mixture (--mixture)\n\
   Mixture components are FIT on the pooled replicates (shared across batches)\n\
   but COUNTED per batch, so per-batch mixture matrices share one row vocabulary\n\
@@ -96,25 +98,24 @@ enum Commands {
         long_about = "Quantify DART-seq m6A sites from C-to-T conversions\n\n\
             A site is a PUTATIVE candidate on the sequencing pattern alone:\n\
             the RAC (forward) / GTY (reverse) motif,\n\
-            plus observed WT C->U (G->A) at/above the coverage floors.\n\
-            The WT-vs-MUT test then decides it:\n\
-            control coverage, the odds ratio (--m6a-min-log-odds),\n\
-            and a marginal p-value cutoff (--pvalue) on the one-sided Fisher exact test of the site's 2x2.\n\
+            at least --min-conversion converted signal reads,\n\
+            and total coverage (signal + control) of at least --min-coverage.\n\
+            That is the only decision made here. Every putative site is written with\n\
+            its one-sided Fisher exact p-value on the WT-vs-MUT 2x2, its log odds ratio,\n\
+            and its signal / control counts, then quantified per cell.\n\
+            No p-value, odds-ratio or cells-per-site cutoff is applied:\n\
+            `faba qc` thresholds those columns, and `faba qc-report` shows what each keeps.\n\
             The unit is always the site.\n\
-            A genomic C/T variant converts equally in both arms, so a control is REQUIRED.\n\
-            Every putative site is then recorded selected or unselected, with the reason it missed.\n\
-            Then quantifies per-cell methylation.\n\n\
+            A genomic C/T variant converts equally in both arms, so a control is REQUIRED.\n\n\
             Outputs (one per input BAM, {batch}-prefixed):\n\
-            - m6a_sites.parquet: selected site annotations (single)\n\
-            - m6a_sites_unselected.parquet: every putative site that missed the\n\
-              cut, with a `reason` column (low_control / odds_ratio / pvalue)\n\
+            - m6a_sites.parquet: every putative site with its statistics (single)\n\
             - {batch}_m6a: gene-level two-channel matrix\n\
-              (methylated + unmethylated counts per gene)\n\
+              (methylated + unmethylated counts per gene, pooled over every putative site)\n\
             - {batch}_m6a_site: per-site two-channel matrix,\n\
-              keyed on the single-base {chr}:{pos} site (min --site-min-cells)\n\
-            - {batch}_m6a_mixture (+ m6a_components.parquet):\n\
+              keyed on the single-base {chr}:{pos} site\n\
+            - {batch}_m6a_mixture (+ m6a_components.parquet), with --mixture:\n\
               per-replicate mixture counts — components fit on pooled replicates,\n\
-              counted per batch (shared row schema); --no-mixture skips it\n\n\
+              counted per batch (shared row schema)\n\n\
             Reference:\n  \
             Meyer, \"DART-seq: an antibody-free method for global m6A detection\",\n\
             Nature Methods, 16(12):1275-1280, 2019.\n\
@@ -122,10 +123,9 @@ enum Commands {
         after_long_help = "\
 Example:\n  \
   faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/\n\
-  faba dartseq s1.bam,s2.bam --control-bam c1.bam,c2.bam \n\
-    -g genes.gff -f genome.fa -o out/ --detect-atoi --min-coverage 20\n\
-    faba dartseq wt.bam --control-bam ctrl.bam -g genes.gff -f genome.fa -o out/ \n\
-    --atoi-mask out/atoi_sites.parquet")]
+  faba dartseq s1.bam,s2.bam --control-bam c1.bam,c2.bam\n\
+    -g genes.gff -f genome.fa -o out/ --mixture\n\
+  faba qc-report out/ -o out/qc && faba qc out/ -o out_qc/")]
     DartSeq(DartSeqCountArgs),
 
     #[command(name = "apa", aliases = ["polya"],
@@ -151,7 +151,7 @@ Example:\n  \
 	faba apa sample.bam -g genes.gff -o out/\n\
 	faba apa sample.bam -g genes.gff -o out/ --method simple\n\
 	faba apa sample.bam --utr-bed utrs.bed -o out/ --mixture\n\
-  faba apa sample.bam -g genes.gff -o out/ --atoi-mask out/atoi_sites.parquet")]
+  faba apa sample.bam -g genes.gff -o out/ --gene-type protein_coding")]
     Apa(CountApaArgs),
 
     #[command(name = "atoi", aliases = ["a2i", "editing"],
@@ -159,42 +159,41 @@ Example:\n  \
         long_about = "Detect A-to-I (adenosine-to-inosine) RNA editing sites\n\
                       \n\
                       Discovers editing sites from A->G (forward) or T->C (reverse) conversions in BAM files.\n\
-                      A putative site is a reference A/T with observed editing at/above the coverage floors.\n\
-                      A marginal p-value cutoff (--pvalue) on the beta-binomial test then selects it,\n\
-                      per site. Then quantifies per-cell editing at the selected sites.\n\
+                      A putative site is a reference A/T with observed editing at/above the\n\
+                      candidacy floors (--min-coverage, --min-conversion). Every putative site is\n\
+                      written with its beta-binomial p-value against the sequencing-error null and\n\
+                      quantified per cell; no p-value cutoff is applied here (see `faba qc`).\n\
                       \n\
                       Outputs (one per input BAM, {batch}-prefixed):\n\
-                      - atoi_sites.parquet: selected site annotations (single);\n\
-                      usable as --atoi-mask input for `faba dartseq` or `faba apa`\n\
-                      - atoi_sites_unselected.parquet: putative sites that missed the cut (reason column)\n\
+                      - atoi_sites.parquet: every putative site with its statistics (single)\n\
                       - {batch}_atoi: gene-level two-channel matrix\n\
-                      (edited + unedited counts per gene)\n\
+                      (edited + unedited counts per gene, pooled over every putative site)\n\
                       - {batch}_atoi_site: per-site two-channel matrix,\n\
-                      keyed on the single-base {chr}:{pos} site (min --site-min-cells)\n\
-                      - {batch}_atoi_mixture (+ atoi_components.parquet):\n\
-                      per-replicate mixture counts (unless --no-mixture)",
+                      keyed on the single-base {chr}:{pos} site\n\
+                      - {batch}_atoi_mixture (+ atoi_components.parquet), with --mixture:\n\
+                      per-replicate mixture counts",
         after_long_help = "\
 	Example:\n\
 	faba atoi sample.bam -g genes.gff -f genome.fa -o out/\n\
   faba atoi s1.bam,s2.bam -g genes.gff -f genome.fa -o out/ --min-coverage 10")]
     AtoI(AtoICountArgs),
 
-    #[command(name = "genes", aliases = ["count-genes"],
+    #[command(name = "count", aliases = ["genes", "count-genes"],
         about = "Count reads per gene for single-cell or bulk RNA-seq",
         long_about = "Count reads per gene for single-cell or bulk RNA-seq\n\
                       \n\
                       Produces ONE sparse (features x cells) count matrix per input BAM,\n\
-                      `{batch}_genes`, from GFF gene annotations.\n\
+                      `{batch}_count`, from GFF gene annotations.\n\
                       Supports 10x-style cell barcodes.\n\
                       Rows are `{gene_key}/count/{spliced|unspliced}`:\n\
                       both tracks share the one feature axis,\n\
                       so sum a gene's two rows to recover its total count.",
         after_long_help = "\
 	Example:\n\
-	faba genes sample.bam -g genes.gff -o out/\n\
-  faba genes s1.bam,s2.bam -g genes.gff -o out/ --gene-type protein_coding"
+	faba count sample.bam -g genes.gff -o out/\n\
+  faba count s1.bam,s2.bam -g genes.gff -o out/ --gene-type protein_coding"
     )]
-    Genes(GeneCountArgs),
+    Count(GeneCountArgs),
 
     #[command(name = "depth", aliases = ["read-depth", "rd"],
         about = "Compute read depth over genomic intervals",
@@ -213,7 +212,7 @@ Example:\n  \
         about = "Build position weight matrix around genomic sites",
         long_about = "Build position weight matrix around genomic sites\n\
                       \n\
-                      Reads site-level parquet files from dartseq or apa output,\n\
+                      Reads site-level parquet files from dartseq, atoi or apa output,\n\
                       collects base frequencies in a +/- window around each site,\n\
                       and outputs a position weight matrix as TSV.",
         after_long_help = "\
@@ -322,9 +321,8 @@ Example:\n  \
                       \n\
                       Uses a binomial genotype likelihood model (cellSNP-lite; Huang & Huang, Bioinformatics 2021).\n\
                       \n\
-                      The SNP mask output can be used with --snp-mask in `faba atoi`,\n\
-                      `faba dartseq`,\n\
-                      and `faba apa` to filter genetic variants that masquerade as base modifications.",
+                      The call set is an output in its own right; no other faba step consumes it as a mask.\n\
+                      Join snp_sites.parquet against a site table downstream if a variant overlap matters.",
         after_long_help = "\
 	Example:\n\
 	# De novo discovery\n\
@@ -353,6 +351,40 @@ Example:\n  \
     Snp(SnpArgs),
 
     #[command(
+        name = "qc",
+        about = "Filter a faba output directory into a new fileset: cells, features and editing sites",
+        long_about = "Filter a faba output directory into a NEW fileset (never in place).\n\
+                      \n\
+                      The producers are inclusive: they write every called cell, every gene with a count,\n\
+                      and every putative editing site with its statistics, and apply no p-value,\n\
+                      effect-size or reproducibility cutoff. This is where those cuts live.\n\
+                      \n\
+                      Cells are decided once per batch on `{batch}_count` (nnz floor + MAD outlier QC)\n\
+                      and the same keep set is applied to every matrix of the batch.\n\
+                      Editing sites are decided on the parquet columns (pv, log_odds, coverage, ...)\n\
+                      plus the kept cells per site read off the `_site` matrices; dropped sites go to\n\
+                      `{modality}_sites_dropped.parquet` with a `reason`. Gene-level `{batch}_m6a` /\n\
+                      `{batch}_atoi` are re-pooled from the filtered site matrix, so they agree with the cut.\n\
+                      Run `faba qc-report` first to see what each threshold keeps.",
+        after_long_help = "\
+	Example:\n\
+	faba qc-report out/ -o out/qc\n\
+	faba qc out/ -o out_qc/ --site-max-pv 0.05 --site-min-cells 10 --auto-cutoff"
+    )]
+    Qc(QcArgs),
+
+    #[command(
+        name = "qc-report",
+        about = "Sweep every `faba qc` threshold and report what survives",
+        long_about = "Sweep every `faba qc` threshold over a grid, one criterion at a time with the\n\
+                      others off, and report the kept sites / genes / cells at each value, after a\n\
+                      -log10(p) histogram of every putative site per editing modality.\n\
+                      Writes {prefix}.qc_report.parquet and draws each panel as ASCII bars on stderr.\n\
+                      No error rate is estimated; calibrating a cutoff is left to you."
+    )]
+    QcReport(QcReportArgs),
+
+    #[command(
         name = "docs",
         about = "Print the method write-ups compiled into this binary",
         long_about = "Print the method write-ups compiled into this binary.\n\
@@ -364,24 +396,22 @@ Example:\n  \
     #[command(
         name = "all",
         aliases = ["pipeline", "full", "magic"],
-        about = "Run all RNA-seq analyses: SNP → genes → ATOI → m6A → APA",
+        about = "Run all RNA-seq analyses: SNP → count → ATOI → m6A → APA",
         long_about = "Run all RNA-seq analyses in a unified pipeline\n\
                       \n\
                       Orchestrates the complete analysis workflow:\n\
                       0. SNP genotyping (de novo + optional --known-snps; skip --skip-snp)\n\
                       1. Gene expression filtering (identify expressed genes)\n\
                       2. Per-cell read depth (only with --depth-resolution-kb)\n\
-                      3. ATOI detection (A-to-I editing sites, masked by SNP)\n\
+                      3. ATOI detection (every putative A-to-I site, with its p-value)\n\
                       4. m6A detection (DART C→T, WT-vs-MUT contrast; skipped w/o --control-bam)\n\
-                      5. APA quantification (alternative polyadenylation, masked by SNP+ATOI)\n\
+                      5. APA quantification (alternative polyadenylation)\n\
                       \n\
-                      Read depth is independent of every other step: it consumes no mask,\n\
-                      produces none, and nothing downstream reads it.\n\
+                      Read depth is independent of every other step: nothing downstream reads it.\n\
                       It runs straight after gene counting only to share that step's called-cell axis,\n\
                       so its columns match every other matrix.\n\
                       \n\
-                      APA runs LAST because the SCAPE EM is the heavy step and nothing else waits on it;\n\
-                      m6A discovery needs only the SNP + ATOI masks,\n\
+                      APA runs LAST because the SCAPE EM is the heavy step and nothing else waits on it,\n\
                       so the fast modalities finish first.\n\
                       \n\
                       Discovery runs in bulk, over all cells that passed step 1 at once,\n\
@@ -396,8 +426,9 @@ Example:\n  \
                       The WT-vs-MUT split is only for that contrast:\n\
                       control BAMs are otherwise quantified like the positional samples,\n\
                       so every modality is produced for them too.\n\
-                      Gene filter applies after step 1;\n\
-                      the SNP mask feeds steps 2-4 (m6A only with --m6a-snp-mask) and the ATOI mask feeds steps 3-4.",
+                      The gene and cell sets from step 1 apply to every later step.\n\
+                      No step masks another and no step applies a p-value or effect-size cutoff:\n\
+                      run `faba qc-report` and `faba qc` on the output directory for that.",
         after_long_help = "\
 	Example:\n\
 	faba all sample.bam -g genes.gff -f genome.fa -o out/\n\
@@ -429,12 +460,14 @@ fn main() -> anyhow::Result<()> {
         Commands::DartSeq(ref args) => run_m6a(args)?,
         Commands::Apa(mut args) => run_apa(&mut args)?,
         Commands::AtoI(ref args) => run_atoi(args)?,
-        Commands::Genes(ref args) => run_gene_count(args)?,
+        Commands::Count(ref args) => run_gene_count(args)?,
         Commands::Depth(ref args) => run_read_depth(args)?,
         Commands::Pwm(ref args) => run_scan_pwm(args)?,
         Commands::Pileup(ref args) => run_pileup(args)?,
         Commands::Metagene(ref args) => run_metagene(args)?,
         Commands::Snp(ref args) => run_snp(args)?,
+        Commands::Qc(ref args) => run_qc(args)?,
+        Commands::QcReport(ref args) => run_qc_report(args)?,
         Commands::Docs(ref args) => run_docs(args)?,
         Commands::All(ref args) => run_pipeline(args)?,
     }

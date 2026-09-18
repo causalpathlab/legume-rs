@@ -42,15 +42,7 @@ pub struct FixedEmResult {
     pub n_iter: usize,
 }
 
-impl FixedEmResult {
-    /// Posterior γ_{n,·} for observation `n`.
-    #[allow(dead_code)] // public helper; the in-crate caller unpacks `gamma` directly.
-    #[inline]
-    pub fn gamma_row(&self, n: usize) -> &[f32] {
-        let start = n * self.n_components;
-        &self.gamma[start..start + self.n_components]
-    }
-}
+impl FixedEmResult {}
 
 /// Result of full Gaussian mixture EM.
 pub struct GmmResult {
@@ -60,12 +52,6 @@ pub struct GmmResult {
     pub mus: Vec<f32>,
     /// Learned component standard deviations
     pub sigmas: Vec<f32>,
-    /// Posterior assignment probabilities gamma[n][k]
-    #[allow(dead_code)] // set by the GMM path; bandwidth-first caller leaves it empty
-    pub gamma: Vec<Vec<f32>>,
-    /// BIC
-    #[allow(dead_code)] // no BIC model selection on the editing path
-    pub bic: f32,
 }
 
 /// Numerically stable log-sum-exp: log(exp(a) + exp(b))
@@ -88,6 +74,7 @@ pub fn log_sum_exp(a: f32, b: f32) -> f32 {
 /// ACTB, …) start dwarfing all the rest combined.
 const E_STEP_PARALLEL_THRESHOLD: usize = 4096;
 
+#[cfg(test)]
 /// Fixed-parameter EM: given precomputed per-observation component log-likelihoods,
 /// estimate only the mixing weights.
 ///
@@ -102,7 +89,6 @@ const E_STEP_PARALLEL_THRESHOLD: usize = 4096;
 /// * `n_components` - row stride of `component_log_liks`
 /// * `n_free_params` - number of free parameters for BIC computation
 /// * `params` - EM parameters
-#[allow(dead_code)] // unweighted convenience wrapper; in-crate caller goes through `fixed_em_weighted`
 pub fn fixed_em(
     component_log_liks: &[f32],
     n_components: usize,
@@ -315,6 +301,7 @@ fn e_step_one(gamma_row: &mut [f32], cll_row: &[f32], log_weights: &[f32]) -> f3
     log_norm
 }
 
+#[cfg(test)]
 /// Log PDF of a Gaussian distribution
 fn gaussian_log_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
     if sigma <= 0.0 {
@@ -324,10 +311,10 @@ fn gaussian_log_pdf(x: f32, mu: f32, sigma: f32) -> f32 {
     -0.5 * z * z - sigma.ln() - 0.5 * std::f32::consts::TAU.ln()
 }
 
+#[cfg(test)]
 /// Full 1D Gaussian mixture EM with a uniform noise component (unit weights).
 ///
 /// Convenience wrapper around `weighted_gaussian_mixture_em` with all weights = 1.
-#[allow(dead_code)]
 pub fn gaussian_mixture_em(
     observations: &[f32],
     initial_mus: &[f32],
@@ -346,6 +333,7 @@ pub fn gaussian_mixture_em(
     )
 }
 
+#[cfg(test)]
 /// Weighted 1D Gaussian mixture EM with a uniform noise component.
 ///
 /// Convenience wrapper around `weighted_gaussian_mixture_em_with_n` that uses
@@ -369,6 +357,7 @@ pub fn weighted_gaussian_mixture_em(
     )
 }
 
+#[cfg(test)]
 /// Weighted 1D Gaussian mixture EM with explicit BIC sample size.
 ///
 /// Same as `weighted_gaussian_mixture_em` except `n_for_bic` is the value used
@@ -399,8 +388,6 @@ pub fn weighted_gaussian_mixture_em_with_n(
             weights: vec![],
             mus: vec![],
             sigmas: vec![],
-            gamma: vec![],
-            bic: 0.0,
         };
     }
 
@@ -474,15 +461,10 @@ pub fn weighted_gaussian_mixture_em_with_n(
 
         let ll_change = (total_ll - prev_ll).abs();
         if iter > 1 && (ll_change < params.tol || iter >= params.max_iter) {
-            let n_params = 3 * k;
-            let bic = -2.0 * total_ll + n_params as f32 * n_for_bic.ln();
-
             return GmmResult {
                 weights,
                 mus,
                 sigmas,
-                gamma,
-                bic,
             };
         }
 

@@ -84,11 +84,11 @@ pub struct ReadDepthArgs {
     )]
     pub(crate) zip: bool,
 
-    /// Restrict the output to a per-batch cell set from `faba genes`
+    /// Restrict the output to a per-batch cell set from `faba count`
     #[arg(
         long = "valid-cells",
-        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse",
-        long_help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse.\n\
+        help = "Directory of `faba count` outputs ({batch}_cells.tsv.gz) to reuse",
+        long_help = "Directory of `faba count` outputs ({batch}_cells.tsv.gz) to reuse.\n\
                      Without it every observed barcode gets a column,\n\
                      ambient droplets included.\n\
                      Reads with no cell barcode tag are dropped whenever this is given."

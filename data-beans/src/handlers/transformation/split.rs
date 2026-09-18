@@ -419,7 +419,7 @@ fn write_half(
     let (effective_output, backend_out, file_out) =
         prepare_output(output, args.backend.clone(), args.zip)?;
     info!("Streaming {} columns to {output}", selected_columns.len());
-    let (n_rows, n_cols, nnz) = crate::handlers::transformation::stream_column_selection(
+    let (n_rows, n_cols, nnz) = crate::column_subset::stream_column_selection(
         data,
         selected_columns,
         None,

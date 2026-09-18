@@ -33,13 +33,7 @@ fn make_m6a_sifter<'a>(faidx: &'a faidx::Reader) -> ConversionSifter<'a> {
         min_conversion: 5,
         error_rate: 0.01,
         overdispersion: 0.1,
-        mod_type: ModificationType::M6A {
-            check_r_site: true,
-            contrast: M6aContrast {
-                min_control_coverage: 10,
-                min_log_odds: 1e-4,
-            },
-        },
+        mod_type: ModificationType::M6A { check_r_site: true },
         candidate_sites: Vec::new(),
     }
 }
@@ -174,9 +168,9 @@ fn test_sweep_respects_min_coverage() {
     let mut sifter = make_m6a_sifter(&reader);
     sifter.min_coverage = 10;
 
-    // n_ref + n_alt = 5 < 10
+    // The floor is on TOTAL coverage: signal 5 + control 4 = 9 < 10.
     let wt = build_freq_map(&[(10, Dna::C, 1), (10, Dna::T, 4)]);
-    let mutc = build_freq_map(&[(10, Dna::C, 50), (10, Dna::T, 0)]);
+    let mutc = build_freq_map(&[(10, Dna::C, 4), (10, Dna::T, 0)]);
 
     let positions: Vec<i64> = (0..=10).collect();
     sifter.forward_sweep(&positions, &wt, Some(&mutc));
@@ -203,9 +197,9 @@ fn test_sweep_respects_min_conversion() {
 
 #[test]
 fn test_thin_or_absent_control_is_still_putative() {
-    // Control depth no longer gates candidacy — that is the downstream
-    // control-coverage test. A strong WT motif is putative whether the control is
-    // thin or absent; the p-value and the recorded reason handle it later.
+    // Control depth does not gate candidacy on its own. A strong WT motif is
+    // putative whether the control is thin or absent; `faba qc` can threshold
+    // `control_coverage` later from the parquet.
     let seq = "NNNNNNNNGAC";
     let (_f, reader) = create_test_fasta(seq);
     let mut sifter = make_m6a_sifter(&reader);
@@ -415,10 +409,6 @@ fn discovery_and_the_cell_scan_both_implement_the_motif_rule() {
         let mut sifter = make_m6a_sifter(&faidx);
         sifter.mod_type = ModificationType::M6A {
             check_r_site: check_r,
-            contrast: M6aContrast {
-                min_control_coverage: 10,
-                min_log_odds: 1e-4,
-            },
         };
         let bases = fetch_reference_bases(&faidx, "chr1", 0, n - 1)
             .unwrap()

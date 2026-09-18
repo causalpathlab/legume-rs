@@ -5,7 +5,7 @@ use crate::data::dna_stat_map::DnaBaseFreqMap;
 use crate::data::util_htslib::{fetch_reference_base, load_fasta_index};
 use crate::snp::genotyper::{find_top_alt_allele, genotype_site, GenotypeParams, SiteInput};
 use crate::snp::io::{
-    build_snp_mask, load_contigs_from_fai, write_snp_sites_parquet, write_snp_sites_vcf, KnownSnps,
+    load_contigs_from_fai, write_snp_sites_parquet, write_snp_sites_vcf, KnownSnps,
 };
 use crate::snp::{SnpGenotype, SnpSite};
 
@@ -35,9 +35,6 @@ pub struct SnpParams {
     pub umi_tag: Option<Box<str>>,
     /// Use per-base quality model (Li 2011) instead of constant error rate.
     pub use_base_quality: bool,
-    /// Minimum VAF for a site to enter the SNP mask. Sites with lower VAF
-    /// (likely RNA editing, not germline SNPs) are excluded. None = no filter.
-    pub min_vaf: Option<f32>,
 }
 
 impl SnpParams {
@@ -682,7 +679,7 @@ pub fn run_snp_pipeline(
     gff_map: Option<&GffRecordMap>,
     params: &SnpParams,
     discover: bool,
-) -> anyhow::Result<FxHashSet<(Box<str>, i64)>> {
+) -> anyhow::Result<()> {
     let mut all_sites = Vec::new();
     let gene_sites = DashMap::<GeneId, Vec<SnpSite>>::default();
 
@@ -764,10 +761,6 @@ pub fn run_snp_pipeline(
         Err(e) => log::warn!("Cannot load .fai for VCF contigs: {}", e),
     }
 
-    // Build mask
-    let snp_mask = build_snp_mask(&all_sites, params.genotype_params.min_gq, params.min_vaf);
-    info!("SNP mask: {} variant positions", snp_mask.len());
-
     // Pass 2: Per-cell allele counts (single-cell mode only)
     if !params.bulk {
         if let Some(gff) = gff_map {
@@ -821,7 +814,7 @@ pub fn run_snp_pipeline(
         }
     }
 
-    Ok(snp_mask)
+    Ok(())
 }
 
 #[cfg(test)]

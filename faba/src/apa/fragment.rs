@@ -24,7 +24,6 @@ pub struct FragmentCluster {
     /// in case downstream code needs it; the SCAPE per-fragment
     /// likelihood doesn't depend on it (only site discovery does, and
     /// that runs on the un-clustered fragments).
-    #[allow(dead_code)]
     pub pa_site: Option<f32>,
     /// Number of original fragments collapsed into this cluster (the EM
     /// multiplicity weight for the representative).

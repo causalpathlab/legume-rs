@@ -52,26 +52,8 @@ pub fn find_modes(y: &[f32]) -> Vec<usize> {
     modes
 }
 
-/// Find local valleys (minima) in a smoothed signal.
-/// Returns indices where y[i] < y[i-1] and y[i] < y[i+1].
-#[allow(dead_code)]
-pub fn find_valleys(y: &[f32]) -> Vec<usize> {
-    if y.len() < 3 {
-        return Vec::new();
-    }
-
-    let mut valleys = Vec::new();
-    for i in 1..y.len() - 1 {
-        if y[i] < y[i - 1] && y[i] < y[i + 1] {
-            valleys.push(i);
-        }
-    }
-    valleys
-}
-
 /// Compute a coverage histogram from fragment positions.
 /// Returns (positions, counts) at the given resolution.
-#[allow(dead_code)]
 pub fn coverage_histogram(
     positions: &[f32],
     utr_length: f32,

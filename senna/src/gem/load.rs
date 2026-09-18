@@ -5,7 +5,7 @@
 //! is read once, cheaply (row/column NAMES only, via [`ge::read_file_axes`])
 //! to classify it as a gene file (`count` rows only) or a modality file
 //! (exactly one non-`count` modality) and to derive its sample id — the
-//! matching key that lets `senna gem a_genes.zarr.zip --modality
+//! matching key that lets `senna gem a_count.zarr.zip --modality
 //! a_m6a.zarr.zip` merge `a`'s two files under one set of barcodes, while
 //! keeping `a` and `b` apart.
 //!
@@ -21,7 +21,7 @@ use graph_embedding_util as ge;
 use log::info;
 use matrix_util::common_io::basename;
 
-use crate::gem::sample_id::file_sample_id;
+use crate::gem::sample_id::{strip_any_suffix, COUNT_SUFFIX, LEGACY_COUNT_SUFFIX};
 use crate::gem::tracks::{assign_tracks, TrackPlan};
 
 /// One resolved gem input: every file to load, and its matched sample id.
@@ -43,7 +43,8 @@ pub(crate) struct GemInputs {
 /// equal some gene file's sample id, so it merges onto the right sample
 /// under `Union` column alignment; a mismatch errors, listing both sets.
 ///
-/// Sample id per file: `strip` when non-empty, else `_genes` for a gene file
+/// Sample id per file: `strip` when non-empty, else `_count` (or the legacy
+/// `_genes`) for a gene file
 /// / `_{modality}` for a modality file, stripped from the file's basename
 /// ([`strip_sample_id`]). A basename that does not end with that suffix
 /// keeps its full name and is warned — see [`sample_id_for`].
@@ -55,7 +56,7 @@ pub(crate) fn resolve_inputs(
     anyhow::ensure!(
         !genes.is_empty(),
         "no gene matrices given: pass them positionally \
-         (`senna gem out/*_genes.zarr.zip -o out/gem`)"
+         (`senna gem out/*_count.zarr.zip -o out/gem`)"
     );
 
     let all_files: Vec<Box<str>> = genes.iter().chain(modality_files.iter()).cloned().collect();
@@ -85,7 +86,7 @@ pub(crate) fn resolve_inputs(
                 if mods.len() == 1 { "y" } else { "ies" },
                 mods
             );
-            let sid = sample_id_for(&ax.file, strip, "_genes")?;
+            let sid = sample_id_for(&ax.file, strip, &[COUNT_SUFFIX, LEGACY_COUNT_SUFFIX])?;
             gene_sample_ids.insert(sid.clone());
             files.push(ax.file.clone());
             sample_ids.push(sid);
@@ -97,7 +98,7 @@ pub(crate) fn resolve_inputs(
                 mods
             );
             let default_suffix = format!("_{}", non_count[0]);
-            let sid = sample_id_for(&ax.file, strip, &default_suffix)?;
+            let sid = sample_id_for(&ax.file, strip, &[&default_suffix])?;
             modality_entries.push((ax.file.clone(), sid.clone()));
             files.push(ax.file.clone());
             sample_ids.push(sid);
@@ -129,21 +130,21 @@ fn distinct_modalities(rows: &[Box<str>]) -> BTreeSet<Box<str>> {
         .collect()
 }
 
-/// A file's sample id: its basename with `strip` (when non-empty) or
-/// `default_suffix` removed. A basename that does not end with that suffix
-/// keeps its full name — and is warned, since it means this file did not
+/// A file's sample id: its basename with `strip` (when non-empty) or the first
+/// matching of `default_suffixes` removed. A basename that ends with none of
+/// them keeps its full name — and is warned, since it means this file did not
 /// match the naming convention every OTHER file of its kind is assumed to.
-fn sample_id_for(file: &str, strip: &str, default_suffix: &str) -> anyhow::Result<Box<str>> {
-    let effective = if strip.is_empty() {
-        default_suffix
-    } else {
-        strip
-    };
-    let sid = file_sample_id(file, effective)?;
+fn sample_id_for(file: &str, strip: &str, default_suffixes: &[&str]) -> anyhow::Result<Box<str>> {
     let base = basename(file)?;
+    let suffixes: &[&str] = if strip.is_empty() {
+        default_suffixes
+    } else {
+        std::slice::from_ref(&strip)
+    };
+    let sid = strip_any_suffix(base.as_ref(), suffixes);
     if sid.as_ref() == base.as_ref() {
         log::warn!(
-            "{file}: basename {base:?} does not end with {effective:?}; using the full \
+            "{file}: basename {base:?} does not end with {suffixes:?}; using the full \
              basename as its sample id"
         );
     }

@@ -1,19 +1,17 @@
 use crate::common::*;
 use crate::data::cell_membership::CellMembership;
 use crate::editing::bed_output::process_all_bam_files_to_bed;
-use crate::editing::io::{load_atoi_mask_from_parquet, write_discovery_outputs, ToParquet};
-use crate::editing::mask::{build_atoi_mask, filter_m6a_by_mask};
+use crate::editing::io::ToParquet;
 use crate::editing::mixture::MixtureParams;
 use crate::editing::mixture_pipeline::run_mixture_model;
 use crate::editing::pipeline::{
-    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams, M6aContrastArgs,
+    find_all_conversion_sites, process_all_bam_files_to_backend, ConversionParams,
 };
 use crate::editing::sifter::ModificationType;
 use crate::gene_count::splice::CountReadOpts;
 use crate::quant::{
     check_all_bam_indices, resolve_modality_gene_qc, resolve_umi_tag, GeneMatrixSink, GeneQcRequest,
 };
-use crate::snp::io::load_snp_mask_from_parquet;
 
 use genomic_data::gff::GeneType as GffGeneType;
 use genomic_data::gff::GffRecordMap;
@@ -50,9 +48,6 @@ pub struct DartSeqCountArgs {
     )]
     pub control_bam_files: Vec<Box<str>>,
 
-    #[command(flatten)]
-    pub m6a_contrast: M6aContrastArgs,
-
     #[arg(
         short = 'g',
         long = "gff",
@@ -82,50 +77,29 @@ pub struct DartSeqCountArgs {
     #[arg(
         long,
         default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_COVERAGE,
-        help = "Minimum number of total reads per site",
-        long_help = "Minimum number of total reads required per site for inclusion.\n\
+        help = "Minimum total reads (signal + control) per site",
+        long_help = "Minimum total reads (signal + control) at a site for it to be written.\n\
                      \n\
-                     A candidacy floor, not a call:\n\
-                     it decides which sites are worth testing at all,\n\
-                     and the p-value decides which are real. Set low on purpose,\n\
-                     because discovery is meant to be promiscuous —\n\
-                     a thin site costs almost nothing in the backend and is easy to drop downstream,\n\
-                     while a site never discovered cannot be recovered without a rerun.\n\
+                     This is the ONLY floor the producer applies, and it defaults to 1.\n\
+                     Together with --min-conversion 1 it excludes exactly the sites\n\
+                     with no converted read at all, i.e. empty rows.\n\
+                     Every other decision (p-value, odds ratio, control depth,\n\
+                     edit ratio, cells per site) is a column in m6a_sites.parquet\n\
+                     and a flag on `faba qc`, so it can be revisited without a rerun.\n\
                      \n\
-                     KNOWN COST, measured on chr19+MYC. Lowering this to 3 and\n\
-                     --min-conversion to 1 took the candidate pool from 1,606 to\n\
-                     3,503 and the tested count from 1,579 to 3,439,\n\
-                     but changed the call set by TWO sites (978 -> 980).\n\
-                     Because the cutoff is marginal with no multiplicity correction,\n\
-                     every extra test adds\n\
-                     0.05 expected false calls: 79 -> 172, i.e. 8.1% -> 17.5% of the\n\
-                     calls. Pass --min-coverage 5 --min-conversion 2 to buy that back,\n\
-                     if a cleaner call set matters more than coverage of the thin tail.\n\
-                     \n\
-                     Null-cell QC removes cells that never edit before discovery runs.\n\
-                     That roughly halves the coverage a site is judged on.\n\
-                     The floor is set for the de-diluted depth, not the raw depth."
+                     Null-cell QC removes cells that never edit before discovery runs,\n\
+                     so the signal-arm depth here is the de-diluted depth."
     )]
     pub min_coverage: usize,
 
     #[arg(
         long = "min-conversion",
         default_value_t = crate::editing::pipeline::DEFAULT_M6A_MIN_CONVERSION,
-        help = "Minimum converted (C->T) reads per site",
-        long_help = "Minimum converted (C->T) reads required per site.\n\
-                     \n\
-                     Also a candidacy floor.\n\
-                     At the default of 1 a single converted read makes a site testable,\n\
-                     which is the promiscuous end of the range: it raises the candidate count,\n\
-                     and with it the run time, the size of m6a_sites_unselected.parquet,\n\
-                     and the expected false-call count —\n\
-                     see --min-coverage for the measurement,\n\
-                     which found the pair of loosened floors bought two extra calls for twice the false-call burden.\n\
-                     \n\
-                     Note this truncates the null:\n\
-                     a site only exists once it clears this floor,\n\
-                     so the p-values are not uniform under H0.\n\
-                     That is one of the reasons faba reports a marginal cutoff rather than claiming FDR control."
+        help = "Minimum converted (C->T) signal reads per site",
+        long_help = "Minimum converted (C->T) signal reads at a site for it to be written.\n\
+                     At the default of 1 a single converted read makes a site.\n\
+                     Raise it only to bound the candidate set; thresholding evidence\n\
+                     is `faba qc`'s job (--site-min-converted, --site-max-pv, ...)."
     )]
     pub min_conversion: usize,
 
@@ -142,37 +116,6 @@ pub struct DartSeqCountArgs {
         help = "Minimum mapping quality (MAPQ) to include a read"
     )]
     pub min_mapping_quality: u8,
-
-    #[arg(
-        long = "error-rate",
-        default_value_t = 0.01,
-        help = "Sequencing-error rate ε for the beta-binomial editing null"
-    )]
-    pub error_rate: f64,
-
-    #[arg(
-        long = "overdispersion",
-        default_value_t = 0.1,
-        help = "Beta-binomial overdispersion ρ for the editing null (0 ⇒ binomial)"
-    )]
-    pub overdispersion: f64,
-
-    #[arg(
-        short = 'q',
-        long = "pvalue",
-        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
-        help = "Marginal p-value cutoff for site detection; 1.0 disables it",
-        long_help = "Marginal p-value cutoff for m6A site detection. Applied per site,\n\
-                     to whatever clears the coverage and odds-ratio guards.\n\
-                     There is no multiplicity correction.\n\
-                     BH needs independence or positive regression dependence.\n\
-                     Neighbouring sites share reads, so it has neither.\n\
-                     Expect about `cutoff x tested` false calls; the run log prints both.\n\
-                     `--pvalue 1.0` leaves the coverage and odds-ratio gates as the filter.\n\
-                     Governs the m6A calls only.\n\
-                     The A-to-I mask pass (--detect-atoi) has its own `--atoi-pvalue`."
-    )]
-    pub pvalue_cutoff: f32,
 
     #[arg(
         long,
@@ -192,21 +135,6 @@ pub struct DartSeqCountArgs {
                      Choose the right number in HPC environments."
     )]
     max_threads: usize,
-
-    #[arg(
-        long = "site-min-cells",
-        default_value_t = crate::editing::pipeline::DEFAULT_SITE_MIN_CELLS,
-        help = "Min cells per site for the per-site matrix feature QC (0 disables)",
-        long_help = "Unit-aware feature QC for the per-site (`_site`) output matrix:\n\
-                     a site is kept only if detected in at least this many cells,\n\
-                     and both of its channels (methylated/unmethylated) are kept together.\n\
-                     This is the single-cell reproducibility control —\n\
-                     the scDART-seq criterion of a site seen in >= 10 cells —\n\
-                     standing in for bulk replicate concordance.\n\
-                     The gene-level matrix is unaffected. 0 disables.\n\
-                     Sites are a distinct feature space not covered by the upstream gene expression QC (--gene-min-cells)."
-    )]
-    pub site_min_cells: usize,
 
     #[arg(
         long,
@@ -317,87 +245,34 @@ pub struct DartSeqCountArgs {
     )]
     pub no_check_r_site: bool,
 
-    //////////////////////////////
-    // A-to-I editing detection //
-    //////////////////////////////
-    #[arg(
-        long = "detect-atoi",
-        default_value_t = false,
-        help = "Detect A-to-I editing sites and mask them from m6A calling",
-        long_help = "Detect A-to-I (adenosine-to-inosine) RNA editing sites via A→G conversions.\n\
-                     Detected sites are written to a separate parquet file,\n\
-                     then used as a mask to exclude false-positive m6A candidates,\n\
-                     those whose RAC/GTY triplet overlaps an A-to-I site.\n\
-                     This mask pass has its own --atoi-pvalue cutoff, not the m6A --pvalue."
-    )]
-    pub detect_atoi: bool,
-
-    #[arg(
-        long = "atoi-min-coverage",
-        default_value_t = 10,
-        help = "Minimum coverage for A-to-I site detection"
-    )]
-    pub atoi_min_coverage: usize,
-
-    #[arg(
-        long = "atoi-min-conversion",
-        default_value_t = 5,
-        help = "Minimum A-to-G conversions for A-to-I detection"
-    )]
-    pub atoi_min_conversion: usize,
-
-    #[arg(
-        long = "atoi-pvalue",
-        default_value_t = crate::editing::pipeline::DEFAULT_PVALUE_CUTOFF,
-        help = "Marginal p-value cutoff for the A-to-I confounder-mask pass",
-        long_help = "Marginal p-value cutoff for the A-to-I mask pass (--detect-atoi).\n\
-                     Kept separate from the m6A --pvalue so the confounder mask can be tuned independently of the m6A calls."
-    )]
-    pub atoi_pvalue_cutoff: f32,
-
-    #[arg(
-        long = "atoi-mask",
-        help = "Pre-computed A-to-I mask parquet (from `faba atoi` or `--detect-atoi`)",
-        long_help = "Path to a pre-computed A-to-I sites parquet file. When provided,\n\
-                     skips A-to-I discovery and loads the mask directly from this file to filter m6A candidates.\n\
-                     Implies --detect-atoi behavior for masking."
-    )]
-    pub atoi_mask_file: Option<Box<str>>,
-
-    #[arg(
-        long = "snp-mask",
-        help = "SNP mask parquet from `faba snp` to filter genetic variants",
-        long_help = "Path to snp_sites.parquet from `faba snp`.\n\
-                     m6A candidates at known SNP positions (het or hom-alt) are removed.\n\
-                     Applied after A-to-I masking (if any)."
-    )]
-    pub snp_mask_file: Option<Box<str>>,
-
     ///////////////////////////
     // Mixture model options //
     ///////////////////////////
     #[arg(
-        long = "no-mixture",
+        long = "mixture",
         default_value_t = false,
-        help = "Disable 1D Gaussian mixture clustering of modification sites",
-        long_help = "Disable 1D Gaussian mixture clustering of modification sites. By default,\n\
-                     faba fits a mixture of Gaussians + uniform noise to the discovered site positions per gene,\n\
-                     selecting K by BIC.\n\
-                     This outputs a sparse (cells x mixture_components) count matrix and a m6a_components.parquet file."
+        help = "Also fit the per-gene 1D Gaussian mixture of site positions (slow EM)",
+        long_help = "Also fit a 1D Gaussian mixture (+ uniform noise) to each gene's putative site positions,\n\
+                     with components called as modes of the bandwidth-smoothed site pileup
+\
+                     (--mixture-bandwidth, capped by --mixture-max-k), and write a sparse (cells x components) matrix\n\
+                     plus m6a_components.parquet. Off by default, matching `faba all`.\n\
+                     The fit runs over EVERY putative site, posterior-weighted by evidence,\n\
+                     since the producer applies no p-value cutoff."
     )]
-    pub no_mixture: bool,
+    pub mixture: bool,
 
     #[arg(
         long = "mixture-min-sites",
         default_value_t = 3,
-        help = "Min distinct positions per gene to attempt mixture (default: 3)"
+        help = "Min distinct positions per gene to attempt mixture"
     )]
     pub mixture_min_sites: usize,
 
     #[arg(
         long = "mixture-max-k",
         default_value_t = 5,
-        help = "Max components to test via BIC (default: 5)"
+        help = "Cap on components per gene (modes of the smoothed site density; not a BIC selection)"
     )]
     pub mixture_max_k: usize,
 
@@ -451,10 +326,12 @@ pub struct DartSeqCountArgs {
     ////////////////////////
     #[arg(
         long = "gene-min-cells",
-        default_value_t = 10,
-        help = "Min cells per gene for expression QC",
+        default_value_t = 1,
+        help = "Min cells per gene for expression QC; 1 = drop only empty rows",
         long_help = "Minimum number of cells with non-zero expression for a gene to pass QC.\n\
-                     Genes below this threshold are excluded before site discovery."
+                     Genes below this threshold are excluded before site discovery.\n\
+                     The default of 1 drops only genes with no counts at all;\n\
+                     an opinionated floor belongs to `faba qc --row-nnz-cutoff`."
     )]
     pub gene_min_cells: usize,
 
@@ -470,10 +347,12 @@ pub struct DartSeqCountArgs {
 
     #[arg(
         long = "cell-min-genes",
-        default_value_t = 10,
-        help = "Min genes per cell for expression QC",
+        default_value_t = 1,
+        help = "Min genes per cell for expression QC; 1 = drop only empty columns",
         long_help = "Minimum number of genes with non-zero expression for a cell to pass QC.\n\
-                     Cells below this threshold are excluded from quantification."
+                     Cells below this threshold are excluded from quantification.\n\
+                     The default of 1 drops only cells with no counts at all;\n\
+                     an opinionated floor belongs to `faba qc`."
     )]
     pub cell_min_genes: usize,
 
@@ -492,17 +371,17 @@ pub struct DartSeqCountArgs {
     #[command(flatten)]
     pub mito_qc: crate::quant::MitoQcArgs,
 
-    /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
+    /// Reuse a per-batch cell set from `faba count` instead of recomputing QC
     #[arg(
         long = "valid-cells",
-        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse"
+        help = "Directory of `faba count` outputs ({batch}_cells.tsv.gz) to reuse"
     )]
     pub valid_cells_file: Option<Box<str>>,
 
     #[command(flatten)]
     pub cell_scan: crate::editing::cell_activity::CellScanArgs,
 
-    /// Reuse the retained-gene set from `faba genes` (its pooled `genes_kept.tsv.gz`)
+    /// Reuse the retained-gene set from `faba count` (its pooled `genes_kept.tsv.gz`)
     #[arg(long = "valid-genes")]
     pub valid_genes_file: Option<Box<str>>,
 
@@ -532,9 +411,8 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             include_missing_barcode: args.include_missing_barcode,
             min_coverage: args.min_coverage,
             min_conversion: args.min_conversion,
-            pvalue_cutoff: args.pvalue_cutoff,
-            error_rate: args.error_rate,
-            overdispersion: args.overdispersion,
+            error_rate: crate::editing::pipeline::DEFAULT_EDIT_ERROR_RATE,
+            overdispersion: crate::editing::pipeline::DEFAULT_EDIT_OVERDISPERSION,
             backend: args.backend.clone(),
             zip: args.zip,
             output: args.output.clone(),
@@ -544,7 +422,6 @@ impl From<&DartSeqCountArgs> for ConversionParams {
             exact_barcode_match: args.exact_barcode_match,
             mod_type: ModificationType::M6A {
                 check_r_site: !args.no_check_r_site,
-                contrast: args.m6a_contrast.to_contrast(),
             },
             min_base_quality: args.min_base_quality,
             min_mapping_quality: args.min_mapping_quality,
@@ -557,49 +434,6 @@ impl From<&DartSeqCountArgs> for ConversionParams {
                 Some(args.umi_tag.clone())
             },
             mut_bam_files: args.control_bam_files.clone(),
-            site_min_cells: args.site_min_cells,
-            competent_cells: None,
-        }
-    }
-}
-
-impl DartSeqCountArgs {
-    /// Create A-to-I ConversionParams from DartSeqCountArgs (single-sample).
-    fn atoi_params(&self) -> ConversionParams {
-        ConversionParams {
-            genome_file: self.genome_file.clone(),
-            wt_bam_files: self.wt_bam_files.clone(),
-            gene_barcode_tag: self.gene_barcode_tag.clone(),
-            cell_barcode_tag: self.cell_barcode_tag.clone(),
-            include_missing_barcode: self.include_missing_barcode,
-            min_coverage: self.atoi_min_coverage,
-            min_conversion: self.atoi_min_conversion,
-            // A-to-I mask pass has its own cutoff (`--atoi-pvalue`), separate
-            // from the m6A `--pvalue`.
-            pvalue_cutoff: self.atoi_pvalue_cutoff,
-            error_rate: self.error_rate,
-            overdispersion: self.overdispersion,
-            backend: self.backend.clone(),
-            zip: self.zip,
-            output: self.output.clone(),
-            cell_membership_file: self.cell_membership_file.clone(),
-            membership_barcode_col: self.membership_barcode_col,
-            membership_celltype_col: self.membership_celltype_col,
-            exact_barcode_match: self.exact_barcode_match,
-            mod_type: ModificationType::AtoI,
-            min_base_quality: self.min_base_quality,
-            min_mapping_quality: self.min_mapping_quality,
-            mixture_weight_mode: self.mixture_weight,
-            mixture_prior_alpha: self.mixture_prior_alpha,
-            mixture_prior_beta: self.mixture_prior_beta,
-            umi_tag: if self.no_umi_dedup {
-                None
-            } else {
-                Some(self.umi_tag.clone())
-            },
-            // A-to-I is single-sample (ADAR is active in the YTHmut too); no control.
-            mut_bam_files: Vec::new(),
-            site_min_cells: self.site_min_cells,
             competent_cells: None,
         }
     }
@@ -680,7 +514,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Gene expression QC: reuse a passed cell/gene set from `faba genes`, or
+    // Gene expression QC: reuse a passed cell/gene set from `faba count`, or
     // recompute it (per-batch cell calling).
     // Cell-calling QC must cover EVERY quantified BAM — signal (wt) AND control
     // (mut) — so control cells are filtered by their own per-library knee in the
@@ -756,42 +590,6 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // FIRST PASS: Find edit sites //
     /////////////////////////////////
 
-    // Detect A-to-I editing sites first (if requested), or load pre-computed mask
-    let atoi_params = args.atoi_params();
-    let atoi_mask = if let Some(ref mask_file) = args.atoi_mask_file {
-        // Load pre-computed A-to-I mask from parquet
-        info!("Loading A-to-I mask from {}", mask_file);
-        let mask = load_atoi_mask_from_parquet(mask_file.as_ref())?;
-        info!("Loaded A-to-I mask with {} positions", mask.len());
-        Some((None, mask))
-    } else if args.detect_atoi {
-        // The A-to-I masking pass sees the same cell set as m6A discovery, so the
-        // two modalities cannot disagree about which cells were compared. Only the
-        // selected A-to-I calls feed the mask; rejected candidates are not written
-        // here (the mask is a confounder filter, not a result).
-        let atoi_sites =
-            find_all_conversion_sites(&gff_map, &atoi_params, membership.as_ref())?.selected;
-        let n_atoi: usize = atoi_sites.iter().map(|x| x.value().len()).sum();
-        info!("Found {} A-to-I editing sites", n_atoi);
-
-        if !atoi_sites.is_empty() {
-            ToParquet::to_parquet(
-                &atoi_sites,
-                &gff_map,
-                &spliced,
-                format!("{}/atoi_sites.parquet", args.output),
-            )?;
-        }
-
-        let mask = build_atoi_mask(&atoi_sites, &gff_map);
-        info!("Built A-to-I mask with {} positions", mask.len());
-
-        // Store atoi_sites for second-pass quantification
-        Some((Some(atoi_sites), mask))
-    } else {
-        None
-    };
-
     let mut m6a_params = ConversionParams::from(args);
     // Discovery contrasts signal vs control: override the wt arm to exclude
     // controls. `quant_bam_files` still unions the controls back in, so the
@@ -801,7 +599,6 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     // Null-cell QC, BEFORE discovery. Cells that edit no more than the control
     // does are dropped from the SIGNAL arm only, so every site's WT counts are
     // de-diluted as they are first computed and nothing downstream changes.
-    // Measured on chr19 + MYC: MYC is called only with this on.
     m6a_params.competent_cells = crate::editing::cell_activity::call_and_report(
         &gff_map,
         &m6a_params,
@@ -815,42 +612,10 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         "m6a",
     )?;
 
-    let discovered = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
-
-    // Pre-mask audit: the unselected sites, with reasons. Emitted before masking
-    // and the empty-selected early return, so it always accompanies the calls.
-    write_discovery_outputs(&discovered, &gff_map, &spliced, &args.output, "m6a")?;
-    let gene_sites = discovered.selected;
-
-    // Apply A-to-I mask to filter m6A candidates
-    if let Some((_, ref mask)) = atoi_mask {
-        if !mask.is_empty() {
-            let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-            filter_m6a_by_mask(&gene_sites, mask, &gff_map);
-            let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-            info!(
-                "A-to-I masking: {} → {} m6A sites ({} removed)",
-                n_before,
-                n_after,
-                n_before - n_after
-            );
-        }
-    }
-
-    // Apply SNP mask if provided (after A-to-I masking)
-    if let Some(ref mask_file) = args.snp_mask_file {
-        info!("Loading SNP mask from {}", mask_file);
-        let snp_mask = load_snp_mask_from_parquet(mask_file.as_ref())?;
-        let n_before: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        filter_m6a_by_mask(&gene_sites, &snp_mask, &gff_map);
-        let n_after: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-        info!(
-            "SNP masking: {} → {} m6A sites ({} removed)",
-            n_before,
-            n_after,
-            n_before - n_after
-        );
-    }
+    // Every putative site, with its statistics. Nothing is tested here: the
+    // p-value, odds ratio, control depth and edit ratio are columns, and
+    // `faba qc` is where they become thresholds.
+    let gene_sites = find_all_conversion_sites(&gff_map, &m6a_params, membership.as_ref())?;
 
     if gene_sites.is_empty() {
         info!("no sites found");
@@ -858,7 +623,7 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
     }
 
     let ndata: usize = gene_sites.iter().map(|x| x.value().len()).sum();
-    info!("Found {} m6A sites", ndata);
+    info!("Found {} putative m6A sites", ndata);
 
     gene_sites.to_parquet(
         &gff_map,
@@ -887,17 +652,8 @@ pub fn run_m6a(args: &DartSeqCountArgs) -> anyhow::Result<()> {
         process_all_bam_files_to_backend(&m6a_params, &gene_sites, &gff_map, valid_cells)?;
     }
 
-    // A-to-I second pass: quantify editing sites into sparse matrices
-    if let Some((Some(ref atoi_sites), _)) = atoi_mask {
-        if !atoi_sites.is_empty() {
-            info!("Second pass: A-to-I count matrix");
-            let valid_cells = gene_qc.as_ref().map(|qc| &qc.cells_by_batch);
-            process_all_bam_files_to_backend(&atoi_params, atoi_sites, &gff_map, valid_cells)?;
-        }
-    }
-
-    // Mixture model: cluster modification sites per gene
-    if !args.no_mixture {
+    // Mixture model (opt-in): cluster modification sites per gene
+    if args.mixture {
         info!("Running 1D Gaussian mixture model on m6A sites...");
         let mix_params = MixtureParams {
             min_sites: args.mixture_min_sites,

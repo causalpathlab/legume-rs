@@ -3,18 +3,11 @@ use genomic_data::sam::{CellBarcode, Strand};
 use rustc_hash::FxHashMap as HashMap;
 
 /// Result of PDUI computation for one gene/UTR
-#[allow(dead_code)]
 pub struct PduiResult {
-    /// Gene/UTR name
-    pub gene_name: Box<str>,
     /// Per-cell `(proximal_count, distal_count)` — the channel counts the
     /// co-embedding consumes (`{gene}/apa/{proximal,distal}`); PDUI =
     /// `distal / (proximal + distal)` is derived where needed.
     pub cell_counts: Vec<(CellBarcode, usize, usize)>,
-    /// Proximal site annotation
-    pub proximal: ApaSiteAnnotation,
-    /// Distal site annotation
-    pub distal: ApaSiteAnnotation,
 }
 
 /// Compute PDUI for a single gene given its cell-site counts and site annotations.
@@ -78,12 +71,7 @@ pub fn compute_pdui(
         }
     }
 
-    Some(PduiResult {
-        gene_name: annotations[0].gene_name.clone(),
-        cell_counts,
-        proximal,
-        distal,
-    })
+    Some(PduiResult { cell_counts })
 }
 
 #[cfg(test)]

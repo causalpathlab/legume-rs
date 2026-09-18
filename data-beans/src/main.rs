@@ -1,3 +1,4 @@
+mod column_subset;
 mod handlers;
 mod hdf5_io;
 mod interactive;

@@ -124,7 +124,7 @@ fn unmapped_records_are_never_counted_as_spliced() {
 #[test]
 fn paired_reads_without_a_proper_pair_flag_are_still_counted() {
     // Unlike `bam_io::passes_alignment_filters`, gene counting must not require
-    // `is_proper_pair` — `faba genes` quantifies bulk libraries too.
+    // `is_proper_pair` — `faba count` quantifies bulk libraries too.
     let mut rec = read(100, 255);
     rec.set_paired();
     let mut counter = SpliceAwareReadCounter::new(opts(20), &EXONS);
