@@ -368,7 +368,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         max_features: args.hvg.n_hvg,
         feature_list_file: args.hvg.feature_list_file.as_deref(),
         must_train_file: args.hvg.must_train_features.as_deref(),
-        refine: Some(args.collapse.pb_refine.to_params()),
+        refine: args.collapse.pb_refine.to_params(),
         pb_tree: args.collapse.pb_tree_params(),
         ignore_batch: args.collapse.ignore_batch,
         qc: args.qc.to_config(),

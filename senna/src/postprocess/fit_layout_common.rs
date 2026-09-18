@@ -1065,10 +1065,10 @@ fn preprocess_layout_data_recompute(
         max_features: 5000,
         feature_list_file: None,
         must_train_file: None,
-        refine: Some(data_beans_alg::refine_multilevel::RefineParams {
+        refine: data_beans_alg::refine_multilevel::RefineParams {
             feature_weighting: args.refine_weighting.into(),
             ..data_beans_alg::refine_multilevel::RefineParams::default()
-        }),
+        },
         // Layout only needs a marginal grid; the training tree is read from
         // the manifest, never recomputed here.
         pb_tree: None,

@@ -12,8 +12,7 @@ use super::*;
 /// Collapse with a hard CNV stratum partition on cells.
 ///
 /// `cell_to_stratum[c]` is the clone id of global column `c` (`0` = mixable
-/// residual). Requires `MultilevelParams.refine = Some(..)` — the same
-/// contract as [`collapse_columns_multilevel_with_hierarchy`].
+/// residual).
 pub fn collapse_columns_multilevel_with_strata<T>(
     data_vec: &mut SparseIoVec,
     proj_kn: &DMatrix<f32>,
@@ -43,12 +42,6 @@ where
         batch_membership.len(),
         n
     );
-    anyhow::ensure!(
-        params.refine.is_some(),
-        "collapse_columns_multilevel_with_strata requires \
-         MultilevelParams.refine = Some(..)"
-    );
-
     let local = params.with_strata(cell_to_stratum.to_vec());
     collapse_columns_multilevel_with_hierarchy(data_vec, proj_kn, batch_membership, &local)
 }
