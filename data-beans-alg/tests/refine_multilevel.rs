@@ -129,6 +129,7 @@ fn make_toy_layout_and_profiles(
         cell_to_pbsamp: cell_to_pbsamp_vec,
         singleton_col,
         bulk_batches: Vec::new(),
+        pb_sample_to_stratum: None,
     };
     ToyFixture {
         layout,

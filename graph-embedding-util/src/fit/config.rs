@@ -232,11 +232,9 @@ pub struct FitConfig {
     /// corrected RP (every gene weight = 1).
     pub hvg_weights: Option<Vec<f32>>,
     /// BBKNN + DC-Poisson refinement on the multi-level pseudobulk
-    /// partition. `Some(RefineParams::default())` enables it (parity
-    /// with senna topic / svd / postprocess); `None` falls back to the
-    /// raw hash partition. Setting `num_gibbs == 0 && num_greedy == 0`
-    /// inside `Some(..)` is equivalent to disabling.
-    pub refine: Option<RefineParams>,
+    /// partition (parity with senna topic / svd / postprocess).
+    /// `num_gibbs == 0 && num_greedy == 0` keeps the raw hash partition.
+    pub refine: RefineParams,
     /// `AdamW` decoupled weight decay applied uniformly to every parameter
     /// (the shared `E_feat`, `b_feat`, and every per-axis head). Post-
     /// step shrinkage; doesn't enter the backward graph. `0.0` disables.
@@ -284,6 +282,9 @@ pub struct FitConfig {
     /// Given offsets on non-base tracks, by gene (see [`crate::PresetOffsets`]);
     /// empty for none. Requires `preset_features` under a pinning mode.
     pub preset_offsets: Vec<crate::PresetOffsets>,
+    /// Per-cell CNV stratum (`0` = mixable). Maps to
+    /// [`MultilevelParams::strata`]. `None` is the pre-strata collapse path.
+    pub strata: Option<Vec<usize>>,
 }
 
 /// The one rule on [`FitConfig::offset_rank`]: `1..=h`, `h` being the

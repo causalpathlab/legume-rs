@@ -121,6 +121,8 @@ enum Commands {
                       \x20 1. Load data X [G x N] and coordinates [N x D]\n\
                       \x20    (if no coordinates, use expression embeddings)\n\
                       \x20 2. Estimate batch effects delta [G x B]\n\
+                      \x20    (optional `--cnv-clones` from `canna clones` so private CN\n\
+                      \x20     stays out of δ; does not gate spatial coarsening)\n\
                       \x20 3. Build KNN graph -> E cell pairs\n\
                       \x20    (spatial KNN from coordinates, or expression KNN\n\
                       \x20     from random-projected feature expression)\n\
@@ -248,7 +250,9 @@ enum Commands {
                       \x20   --feature-modules-resolution.\n\n\
                       ALGORITHM:\n\n\
                       \x20 1. Build spatial KNN graph (or expression KNN if no coords)\n\
-                      \x20 2. Batch effect estimation (multi-sample only)\n\
+                      \x20 2. Batch effect estimation (multi-sample only;\n\
+                      \x20    optional `--cnv-clones` from `canna clones` so private CN\n\
+                      \x20    stays out of δ — does not gate spatial coarsening)\n\
                       \x20 3. Multi-level graph coarsening\n\
                       \x20 4. Resolve feature modules (projection or SNN + k-core + Leiden)\n\
                       \x20 5. Build sparse edge profiles (projection or module-pair residual)\n\
@@ -373,7 +377,8 @@ enum Commands {
                       \x20 {out}.feature_community.parquet  feature × K Poisson-Gamma rates\n\
                       \x20 {out}.scores.parquet          per-epoch loss trace\n\
                       \x20 {out}.fisher_weights.parquet  per-ROW NB precisions w_r\n\
-                      \x20 {out}.delta.parquet           batch effects (multi-batch only)\n\
+                      \x20 {out}.delta.parquet           batch effects (multi-batch only;\n\
+                      \x20                                optional `--cnv-clones` on the δ path)\n\
                       \x20 {out}.pinto.json           manifest"
     )]
     Cage(CellActivityGraphEmbeddingArgs),

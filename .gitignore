@@ -50,8 +50,9 @@ temp*
 *.fna
 *.fai
 
-# claude
+# claude and cursor
 .claude
+.cursor
 
 # faba run/smoke-test output dirs (not source)
 faba/sim_out/

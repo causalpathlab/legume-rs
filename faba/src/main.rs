@@ -71,7 +71,6 @@ Output layout (every matrix is per-replicate — one per input BAM):\n\
   *_sites.parquet, *_components.parquet.\n\
   \n\
 Use `faba <COMMAND> --help` for detailed options on each subcommand.")]
-
 struct Cli {
     #[arg(short = 'v', long, global = true, help = "Enable verbose logging")]
     verbose: bool,
