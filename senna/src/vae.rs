@@ -286,6 +286,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         feature_kind: args.feature_name_kind.clone().into(),
         want_hierarchy: true,
         prebuilt_partition,
+        cnv_clones: args.collapse.cnv_clones.as_deref(),
     })?;
 
     let finest_collapsed: &CollapsedOut = collapsed_levels.last().unwrap();

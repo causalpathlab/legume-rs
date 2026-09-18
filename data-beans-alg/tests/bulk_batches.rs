@@ -147,6 +147,7 @@ fn bulk_composition_does_not_leak_into_delta() {
         observe_panels: true,
         keep_finest_stats: true,
         pb_tree: None,
+        strata: None,
     };
     let out = collapse_columns_multilevel_with_hierarchy(&mut v, &proj, &batches, &params)
         .expect("collapse");

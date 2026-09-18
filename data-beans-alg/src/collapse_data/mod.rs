@@ -58,6 +58,8 @@ use stats::{
     collect_matched_stat_visitor, merge_stat, optimize, KnnParams, DEFAULT_NUM_LEVELS,
 };
 pub use stats::{resample_and_optimize, CollapsedOut, CollapsedStat};
+mod strata;
+pub use strata::collapse_columns_multilevel_with_strata;
 
 pub struct MultilevelCollapseOut {
     pub levels: Vec<CollapsedOut>,
@@ -68,6 +70,7 @@ pub struct MultilevelCollapseOut {
 }
 
 /// Configuration for multi-level collapsing.
+#[derive(Clone)]
 pub struct MultilevelParams {
     pub knn_pb_samples: usize,
     pub num_levels: usize,
@@ -122,6 +125,11 @@ pub struct MultilevelParams {
     /// one leaf target per level. `None` keeps the marginal hash, bit-identical
     /// to before this field existed.
     pub pb_tree: Option<PbTreeParams>,
+    /// Per-cell CNV stratum (`0` = mixable residual). Crossed into finest
+    /// codes so no pb-group mixes strata; BBKNN matches only within stratum;
+    /// unmatched clone mass is excluded from the δ update so private CN
+    /// stays in `mu_adjusted`. `None` is bit-identical to the pre-strata path.
+    pub strata: Option<Vec<usize>>,
 }
 
 impl MultilevelParams {
@@ -138,8 +146,59 @@ impl MultilevelParams {
             observe_panels: true,
             keep_finest_stats: false,
             pb_tree: None,
+            strata: None,
         }
     }
+
+    /// Copy with [`Self::strata`] set (used by the thin `with_strata` wrapper).
+    #[must_use]
+    pub fn with_strata(&self, strata: Vec<usize>) -> Self {
+        let mut p = self.clone();
+        p.strata = Some(strata);
+        p
+    }
+}
+
+/// Bits needed to encode stratum labels in the low bits of a hash code.
+/// A single occupied stratum needs no bits (identity with the unstratified
+/// path); otherwise `ceil(log2(max_label + 1))`.
+fn stratum_bits(strata: &[usize]) -> usize {
+    let mut occupied: Vec<usize> = strata.to_vec();
+    occupied.sort_unstable();
+    occupied.dedup();
+    if occupied.len() <= 1 {
+        return 0;
+    }
+    let max = *occupied.last().unwrap_or(&0);
+    let n = max + 1;
+    (usize::BITS as usize - n.saturating_sub(1).leading_zeros() as usize).max(1)
+}
+
+/// Cross finest hash/tree codes with per-cell strata so no group mixes
+/// strata. Stratum occupies the **low** bits. Level widths are **not**
+/// bumped — expression budget (`1 << d` tree targets, refine bounds) stays
+/// unchanged; hash/reproject masks add `s_bits` separately.
+fn apply_strata_to_codes(
+    codes: &[usize],
+    level_dims: &[usize],
+    strata: &[usize],
+) -> anyhow::Result<(Vec<usize>, Vec<usize>, usize)> {
+    anyhow::ensure!(
+        codes.len() == strata.len(),
+        "strata has {} entries, codes have {}",
+        strata.len(),
+        codes.len()
+    );
+    let s_bits = stratum_bits(strata);
+    if s_bits == 0 {
+        return Ok((codes.to_vec(), level_dims.to_vec(), 0));
+    }
+    let stratified: Vec<usize> = codes
+        .iter()
+        .zip(strata.iter())
+        .map(|(&c, &s)| (c << s_bits) | s)
+        .collect();
+    Ok((stratified, level_dims.to_vec(), s_bits))
 }
 
 /// Finest codes and their level widths (finest-first). Without residual
@@ -149,62 +208,103 @@ impl MultilevelParams {
 /// `level_dims`, and the nested levels are packed into prefix codes whose
 /// widths replace `level_dims`. Batch membership must already be
 /// registered on `data_vec`.
+///
+/// When [`MultilevelParams::strata`] is set, stratum bits are crossed into
+/// the codes after the tree/hash is grown (so leaf budgets stay expression-
+/// only). Returned widths are the un-bumped expression dims; `strata_bits`
+/// is carried separately for hash/reproject masks.
 fn finest_codes(
     data_vec: &SparseIoVec,
     proj_kn: &DMatrix<f32>,
     level_dims: &[usize],
     params: &MultilevelParams,
-) -> anyhow::Result<(Vec<usize>, Vec<usize>, Option<PbTree>)> {
+) -> anyhow::Result<(Vec<usize>, Vec<usize>, Option<PbTree>, usize)> {
     let finest_dim = level_dims[0];
     let nn = proj_kn.ncols();
     let kk = proj_kn.nrows().min(finest_dim).min(nn);
     let codes = binary_sort_columns(proj_kn, kk)?;
-    let Some(rb) = params.pb_tree.as_ref() else {
-        return Ok((codes, level_dims.to_vec(), None));
-    };
-    let coarse_bits = if level_dims.len() >= 2 {
-        *level_dims.last().expect("non-empty level dims")
-    } else {
-        stats::DEFAULT_COARSEST_SORT_DIM.min(kk)
-    };
-    let low_mask = (1usize << coarse_bits) - 1;
-    let n = data_vec.num_columns();
-    // Summary columns (carried reference, bulk) are not tree members; they
-    // become singleton pb-samples downstream regardless of their code.
-    let active: Vec<bool> = if data_vec.has_column_multiplicity() {
-        (0..n)
-            .map(|c| (data_vec.column_multiplicity(c) - 1.0).abs() <= f32::EPSILON)
-            .collect()
-    } else {
-        vec![true; n]
-    };
-    let low: Vec<usize> = codes.iter().map(|&c| c & low_mask).collect();
-    let (mut node, _) = crate::dc_poisson::compact_labels(&low);
-    let reassigned_cells = match rb.reassign_cells.as_ref() {
-        Some(cr) => {
-            let col_to_batch = data_vec.get_batch_membership(0..n);
-            let csc = data_vec.read_columns_csc(0..n)?;
-            reassign_cells::reassign_cells_to_nodes(
-                &csc,
-                &col_to_batch,
-                data_vec.num_batches().max(1),
-                &active,
-                &mut node,
-                cr,
-            )
+    let (codes, widths, tree) = match params.pb_tree.as_ref() {
+        None => (codes, level_dims.to_vec(), None),
+        Some(rb) => {
+            let coarse_bits = if level_dims.len() >= 2 {
+                *level_dims.last().expect("non-empty level dims")
+            } else {
+                stats::DEFAULT_COARSEST_SORT_DIM.min(kk)
+            };
+            let low_mask = (1usize << coarse_bits) - 1;
+            let n = data_vec.num_columns();
+            // Summary columns (carried reference, bulk) are not tree members; they
+            // become singleton pb-samples downstream regardless of their code.
+            let active: Vec<bool> = if data_vec.has_column_multiplicity() {
+                (0..n)
+                    .map(|c| (data_vec.column_multiplicity(c) - 1.0).abs() <= f32::EPSILON)
+                    .collect()
+            } else {
+                vec![true; n]
+            };
+            let low: Vec<usize> = codes.iter().map(|&c| c & low_mask).collect();
+            let (mut node, _) = crate::dc_poisson::compact_labels(&low);
+            let reassigned_cells = match rb.reassign_cells.as_ref() {
+                Some(cr) => {
+                    let col_to_batch = data_vec.get_batch_membership(0..n);
+                    let csc = data_vec.read_columns_csc(0..n)?;
+                    reassign_cells::reassign_cells_to_nodes(
+                        &csc,
+                        &col_to_batch,
+                        data_vec.num_batches().max(1),
+                        &active,
+                        &mut node,
+                        cr,
+                    )
+                }
+                None => 0,
+            };
+            for (c, nd) in node.iter_mut().enumerate() {
+                if !active[c] {
+                    *nd = usize::MAX;
+                }
+            }
+            // Leaf targets per level, coarse to fine — expression budget only.
+            let targets: Vec<usize> = level_dims.iter().rev().map(|&d| 1usize << d).collect();
+            let (codes, widths, mut tree) =
+                pb_tree::build_tree(data_vec, &node, &codes, &targets, rb)?;
+            tree.reassigned_cells = reassigned_cells;
+            (codes, widths, Some(tree))
         }
-        None => 0,
     };
-    for (c, nd) in node.iter_mut().enumerate() {
-        if !active[c] {
-            *nd = usize::MAX;
-        }
-    }
-    // Leaf targets per level, coarse to fine.
-    let targets: Vec<usize> = level_dims.iter().rev().map(|&d| 1usize << d).collect();
-    let (codes, widths, mut tree) = pb_tree::build_tree(data_vec, &node, &codes, &targets, rb)?;
-    tree.reassigned_cells = reassigned_cells;
-    Ok((codes, widths, Some(tree)))
+    maybe_stratify_codes(codes, widths, tree, params)
+}
+
+/// Apply [`MultilevelParams::strata`] to finest codes, or pass through.
+fn maybe_stratify_codes(
+    codes: Vec<usize>,
+    widths: Vec<usize>,
+    tree: Option<PbTree>,
+    params: &MultilevelParams,
+) -> anyhow::Result<(Vec<usize>, Vec<usize>, Option<PbTree>, usize)> {
+    let Some(strata) = params.strata.as_deref() else {
+        return Ok((codes, widths, tree, 0));
+    };
+    anyhow::ensure!(
+        strata.len() == codes.len(),
+        "MultilevelParams.strata has {} entries, codes have {}",
+        strata.len(),
+        codes.len()
+    );
+    let (codes, widths, s_bits) = apply_strata_to_codes(&codes, &widths, strata)?;
+    let n_occ = {
+        let mut u = strata.to_vec();
+        u.sort_unstable();
+        u.dedup();
+        u.len()
+    };
+    info!(
+        "CNV strata: crossed finest codes with {} cell strata ({} occupied, {} stratum bits)",
+        strata.len(),
+        n_occ,
+        s_bits
+    );
+    Ok((codes, widths, tree, s_bits))
 }
 
 /// Resolve [`MultilevelParams::anchor_batches`] / `bulk_batches` names to
@@ -632,7 +732,8 @@ where
     }
 
     let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
-    let (fine_codes, level_dims, pb_tree) = finest_codes(data_vec, proj_kn, &level_dims, params)?;
+    let (fine_codes, level_dims, pb_tree, strata_bits) =
+        finest_codes(data_vec, proj_kn, &level_dims, params)?;
     data_vec.assign_groups(&fine_codes, None);
 
     let group_to_cols = data_vec
@@ -675,6 +776,9 @@ where
         observe_panels: params.observe_panels,
         keep_finest_stats: params.keep_finest_stats,
         pb_tree: pb_tree.as_ref(),
+        cell_to_stratum: params.strata.as_deref(),
+        exclude_unmatched_from_delta: params.strata.is_some(),
+        strata_bits,
     };
     refine_and_collect_single_layer(data_vec, proj_kn, &ctx)
 }
@@ -754,6 +858,7 @@ where
         num_features,
         summary_batches.as_deref().unwrap_or(&[]),
         bulk_batches.as_deref().unwrap_or(&[]),
+        params.strata.as_deref(),
     )?;
     let num_pb = pb_samples.layout.cell_counts.len();
     let ncols = proj_kn.ncols();
@@ -811,6 +916,7 @@ where
     debug_assert_eq!(data_vec.num_groups(), k_finest);
 
     let mut fine_stat = CollapsedStat::new(num_features, k_finest, num_batches);
+    fine_stat.exclude_unmatched_from_delta = params.strata.is_some();
     info!("Collecting basic stats over {} groups ...", k_finest);
     data_vec.collect_basic_stat(&mut fine_stat)?;
     if num_batches >= 2 {
@@ -985,7 +1091,8 @@ impl MultilevelCollapsingOps for SparseIoVec {
         );
 
         // Compute binary codes at finest resolution once
-        let (fine_codes, level_dims, pb_tree) = finest_codes(self, proj_kn, &level_dims, params)?;
+        let (fine_codes, level_dims, pb_tree, strata_bits) =
+            finest_codes(self, proj_kn, &level_dims, params)?;
         let finest_dim = level_dims[0];
 
         // Partition at finest level
@@ -1025,12 +1132,16 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 observe_panels: params.observe_panels,
                 keep_finest_stats: params.keep_finest_stats,
                 pb_tree: pb_tree.as_ref(),
+                cell_to_stratum: params.strata.as_deref(),
+                exclude_unmatched_from_delta: params.strata.is_some(),
+                strata_bits,
             };
             return refine_and_collect_single_layer(self, proj_kn, &ctx).map(|out| out.levels);
         }
 
         // Collect statistics at finest level
         let mut fine_stat = CollapsedStat::new(num_features, num_groups, num_batches);
+        fine_stat.exclude_unmatched_from_delta = params.strata.is_some();
 
         info!(
             "Level 1/{}: sort_dim={}, {} groups (finest)",
@@ -1058,6 +1169,7 @@ impl MultilevelCollapsingOps for SparseIoVec {
                 num_features,
                 summary_batches.as_deref().unwrap_or(&[]),
                 bulk_batches.as_deref().unwrap_or(&[]),
+                params.strata.as_deref(),
             )?;
             info!(
                 "Built {} pb-samples, matching with knn={} ...",
@@ -1193,7 +1305,14 @@ impl MultilevelCollapsingOps for SparseIoStack {
             let level_dims = compute_level_sort_dims(sort_dim, params.num_levels);
             let finest_dim = level_dims[0];
             let kk = proj_kn.nrows().min(finest_dim).min(ncols);
-            let fine_codes = binary_sort_columns(proj_kn, kk)?;
+            let codes = binary_sort_columns(proj_kn, kk)?;
+            let (fine_codes, level_dims, strata_bits) = match params.strata.as_deref() {
+                Some(strata) => {
+                    let (c, d, s) = apply_strata_to_codes(&codes, &level_dims, strata)?;
+                    (c, d, s)
+                }
+                None => (codes, level_dims, 0),
+            };
             for layer in self.stack.iter_mut() {
                 layer.assign_groups(&fine_codes, None);
             }
@@ -1223,6 +1342,9 @@ impl MultilevelCollapsingOps for SparseIoStack {
                 observe_panels: false,
                 keep_finest_stats: false,
                 pb_tree: None,
+                cell_to_stratum: params.strata.as_deref(),
+                exclude_unmatched_from_delta: params.strata.is_some(),
+                strata_bits,
             };
             return refine_and_collect_stack(self, proj_kn, &ctx);
         }
@@ -1347,7 +1469,15 @@ impl MultilevelCollapsingOps for SparseIoStack {
             finest_dim,
             num_groups
         );
-        let layout = build_pb_sample_layout(group_to_cols, &col_to_batch, proj_kn, None, &[], &[])?;
+        let layout = build_pb_sample_layout(
+            group_to_cols,
+            &col_to_batch,
+            proj_kn,
+            None,
+            &[],
+            &[],
+            params.strata.as_deref(),
+        )?;
         let num_pb = layout.cell_counts.len();
         info!("Built {} pb-samples, matching with knn={} ...", num_pb, knn);
 

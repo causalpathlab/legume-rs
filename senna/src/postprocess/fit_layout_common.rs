@@ -1082,6 +1082,7 @@ fn preprocess_layout_data_recompute(
         feature_kind: None,
         want_hierarchy: prebuilt_partition.is_some(),
         prebuilt_partition,
+        cnv_clones: None,
     })?;
     winsorize_rows_inplace(&mut proj_kn, args.trim_cell_mads);
 
