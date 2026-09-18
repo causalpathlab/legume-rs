@@ -60,9 +60,11 @@ pub struct GeneCountArgs {
     #[arg(
         short,
         long,
-        default_value_t = 10,
-        help = "Minimum non-zeros per row (gene)",
-        long_help = "Genes with fewer than this many non-zero cells are removed from the output matrix."
+        default_value_t = 1,
+        help = "Minimum non-zeros per row (gene); 1 = drop only empty rows",
+        long_help = "Genes with fewer than this many non-zero cells are removed from the output matrix.\n\
+                     The default of 1 drops only genes with no counts at all;\n\
+                     an opinionated floor belongs to `faba qc --row-nnz-cutoff`."
     )]
     pub(crate) row_nnz_cutoff: usize,
 
@@ -70,9 +72,11 @@ pub struct GeneCountArgs {
     #[arg(
         short,
         long,
-        default_value_t = 10,
-        help = "Minimum non-zeros per column (cell)",
-        long_help = "Cells with fewer than this many non-zero genes are removed from the output matrix."
+        default_value_t = 1,
+        help = "Minimum non-zeros per column (cell); 1 = drop only empty columns",
+        long_help = "Cells with fewer than this many non-zero genes are removed from the output matrix.\n\
+                     The default of 1 drops only cells with no counts at all;\n\
+                     an opinionated floor belongs to `faba qc --column-nnz-cutoff`."
     )]
     pub(crate) column_nnz_cutoff: usize,
 
@@ -158,7 +162,7 @@ impl GeneCountArgs {
     }
 
     /// The admission policy this run hands the shared counting loop, so
-    /// `faba genes` and the gene QC pass behind each modality cannot diverge on
+    /// `faba count` and the gene QC pass behind each modality cannot diverge on
     /// tags or on which reads they trust.
     pub(crate) fn count_read_opts(&self) -> CountReadOpts<'_> {
         CountReadOpts {
@@ -170,7 +174,7 @@ impl GeneCountArgs {
     }
 }
 
-/// Count genes into one `{batch}_genes` matrix per BAM, spliced and unspliced
+/// Count genes into one `{batch}_count` matrix per BAM, spliced and unspliced
 /// rows in the same feature axis.
 ///
 /// This is [`crate::quant::run_gene_count_qc`] with the standalone command's

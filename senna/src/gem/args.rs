@@ -24,7 +24,7 @@ pub(crate) struct GemArgs {
         required = true,
         help = "Gene-count matrices (zarr/h5), comma- or space-separated",
         long_help = "Gene-count matrices to embed. Pass them all, in any order;\n\
-                     space-separated so shell globs work (`senna gem out/*_genes.zarr.zip`),\n\
+                     space-separated so shell globs work (`senna gem out/*_count.zarr.zip`),\n\
                      commas also accepted.\n\
                      \x20\n\
                      Rows must follow `{gene}/count/{spliced|unspliced}`. The gene key is the first field,\n\
@@ -62,7 +62,7 @@ pub(crate) struct GemArgs {
         default_value = "",
         help = "Suffix stripped from every input basename to form its sample id.",
         long_help = "Suffix stripped from every input basename to form its sample id.\n\
-                     Empty (the default) strips _genes from gene files and\n\
+                     Empty (the default) strips _count (or the older _genes) from gene files and\n\
                      _{modality} from modality files.\n\
                      Files of one sample must land on the same id."
     )]

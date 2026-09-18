@@ -2,7 +2,6 @@ pub mod bandwidth;
 pub mod bed_output;
 pub mod cell_activity;
 pub mod io;
-pub mod mask;
 pub mod mixture;
 pub mod mixture_pipeline;
 pub mod pipeline;
@@ -10,61 +9,6 @@ pub mod sifter;
 
 use crate::data::dna::DnaBaseCount;
 use genomic_data::sam::Strand;
-
-/// Why a putative site did or did not survive the test. A putative site is
-/// defined by the sequencing pattern alone (RAC/GTY motif + observed WT C→U with
-/// enough coverage); the odds-ratio and p-value checks are applied afterward,
-/// and a failing site is *recorded* with the reason it missed rather than
-/// dropped, so `*_unselected.parquet` explains every call. `Selected` is also
-/// the value carried through discovery, before the test.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CallReason {
-    /// Passed every test (or not yet decided, during discovery).
-    #[default]
-    Selected,
-    /// Too little control (MUT) coverage to confirm WT-specificity.
-    LowControl,
-    /// Log odds ratio `ln((a_w·u_m)/(u_w·a_m))` below `--m6a-min-log-odds`.
-    ///
-    /// The default floor is near zero, so in practice this means the WT arm did
-    /// not out-convert the control at all. A genomic C/T variant converts equally
-    /// in both arms, so its odds ratio is exactly 1 and it lands here at any
-    /// depth — the one job this guard has. Replaced `Delta`, an absolute
-    /// `p_WT − p_MUT` floor; see [`faba::hypothesis_tests::log_odds_ratio`] for
-    /// why that was the wrong scale.
-    OddsRatio,
-    /// Missed the p-value cutoff.
-    ///
-    /// m6A reaches this only after clearing the control-coverage and
-    /// odds-ratio guards. A-to-I is single-sample and has no guards above the
-    /// coverage floors, so for it the p-value is the whole test.
-    ///
-    /// faba does NO multiplicity correction. BH needs independence or positive
-    /// regression dependence, and neighbouring sites are covered by the same
-    /// reads -- a read converted at one is evidence against its unconverted
-    /// neighbour, so the dependence is not even reliably positive. Under
-    /// arbitrary dependence the valid procedure is Benjamini-Yekutieli, whose
-    /// ~ln(m) penalty is 10.6x at 28k sites. Claiming a guarantee whose
-    /// assumption fails is worse than claiming none.
-    Pvalue,
-}
-
-impl CallReason {
-    /// Lower-case token written to the `reason` parquet column.
-    pub fn label(&self) -> &'static str {
-        match self {
-            CallReason::Selected => "selected",
-            CallReason::LowControl => "low_control",
-            CallReason::OddsRatio => "odds_ratio",
-            CallReason::Pvalue => "pvalue",
-        }
-    }
-
-    /// Whether this reason denotes a kept call.
-    pub fn is_selected(&self) -> bool {
-        matches!(self, CallReason::Selected)
-    }
-}
 
 /// Unified site type for base conversion events (m6A and A-to-I)
 #[derive(Clone, Debug)]
@@ -78,10 +22,9 @@ pub enum ConversionSite {
         /// position. The m6A call is `WT conversion > MUT conversion`, so this
         /// is always populated for m6A sites.
         mut_freq: DnaBaseCount,
-        /// Per-site WT-vs-MUT contrast p-value — the statistic the call is made on.
+        /// Per-site WT-vs-MUT contrast p-value. Reported, never thresholded
+        /// here: `faba qc` is where a p-value cutoff lives.
         pv: f32,
-        /// Test outcome (set by the test pass; `Selected` until then).
-        reason: CallReason,
     },
     /// A-to-I RNA editing site: A->G on forward strand, T->C on reverse
     AtoI {
@@ -92,8 +35,6 @@ pub enum ConversionSite {
         /// Kept as an empty default for a uniform `ConversionSite` shape.
         mut_freq: DnaBaseCount,
         pv: f32,
-        /// Test outcome (set by the test pass; `Selected` until then).
-        reason: CallReason,
     },
 }
 
@@ -167,6 +108,36 @@ impl ConversionSite {
         })
     }
 
+    /// `(converted, unconverted)` signal-arm reads at the site, strand-resolved
+    /// on the transcript: m6A reads C→T forward / G→A reverse, A-to-I reads
+    /// A→G forward / T→C reverse. Same table as [`Self::contrast_counts`] for
+    /// m6A; this one also answers for A-to-I, so the parquet's `coverage` /
+    /// `converted` columns come from one place for both modalities.
+    pub fn signal_counts(&self, strand: Strand) -> (u64, u64) {
+        let f = self.wt_freq();
+        match (self, strand) {
+            (ConversionSite::M6A { .. }, Strand::Forward) => {
+                (f.count_t() as u64, f.count_c() as u64)
+            }
+            (ConversionSite::M6A { .. }, Strand::Backward) => {
+                (f.count_a() as u64, f.count_g() as u64)
+            }
+            (ConversionSite::AtoI { .. }, Strand::Forward) => {
+                (f.count_g() as u64, f.count_a() as u64)
+            }
+            (ConversionSite::AtoI { .. }, Strand::Backward) => {
+                (f.count_c() as u64, f.count_t() as u64)
+            }
+        }
+    }
+
+    /// `(converted, unconverted)` control-arm reads at the site; `(0, 0)` for
+    /// A-to-I, which has no control arm.
+    pub fn control_counts(&self, strand: Strand) -> (u64, u64) {
+        self.contrast_counts(strand)
+            .map_or((0, 0), |(_, _, a_m, u_m)| (a_m, u_m))
+    }
+
     /// MUT (control) base frequencies at the conversion position. Populated for
     /// m6A; an empty default for A-to-I (single-sample).
     pub fn mut_freq(&self) -> &DnaBaseCount {
@@ -182,22 +153,6 @@ impl ConversionSite {
         match self {
             ConversionSite::M6A { pv, .. } => *pv,
             ConversionSite::AtoI { pv, .. } => *pv,
-        }
-    }
-
-    /// Test outcome (`Selected` unless the test pass recorded a rejection).
-    pub fn reason(&self) -> CallReason {
-        match self {
-            ConversionSite::M6A { reason, .. } => *reason,
-            ConversionSite::AtoI { reason, .. } => *reason,
-        }
-    }
-
-    /// Set the test outcome (called by the test pass).
-    pub fn set_reason(&mut self, r: CallReason) {
-        match self {
-            ConversionSite::M6A { reason, .. } => *reason = r,
-            ConversionSite::AtoI { reason, .. } => *reason = r,
         }
     }
 

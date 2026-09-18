@@ -31,7 +31,7 @@ pub(crate) const CELLS: [&str; 6] = ["C1", "C2", "C3", "C4", "C5", "C6"];
 pub(crate) fn genes_file(dir: &std::path::Path) -> Box<str> {
     synth(
         dir,
-        "S1_genes",
+        "S1_count",
         &[
             "GENE1/count/spliced",
             "GENE1/count/unspliced",

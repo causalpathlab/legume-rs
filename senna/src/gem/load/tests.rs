@@ -27,7 +27,7 @@ fn resolve_inputs_matches_by_default_suffix() {
     let dir = tempfile::tempdir().expect("tempdir");
     let genes = synth(
         dir.path(),
-        "s1_genes",
+        "s1_count",
         &["GENE1/count/spliced"],
         &["C1", "C2"],
     );
@@ -53,7 +53,7 @@ fn resolve_inputs_honours_an_explicit_strip() {
     std::fs::create_dir_all(&genes_dir).unwrap();
     std::fs::create_dir_all(&mods_dir).unwrap();
     // Same basename in different directories; an explicit strip applies
-    // uniformly to every file (not the type-specific `_genes` / `_{modality}`
+    // uniformly to every file (not the type-specific `_count` / `_{modality}`
     // default), so both resolve to the same sample id.
     let genes = synth(
         &genes_dir,
@@ -76,7 +76,7 @@ fn resolve_inputs_honours_an_explicit_strip() {
 #[test]
 fn a_sample_id_mismatch_names_both_id_sets() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let genes = synth(dir.path(), "s1_genes", &["GENE1/count/spliced"], &["C1"]);
+    let genes = synth(dir.path(), "s1_count", &["GENE1/count/spliced"], &["C1"]);
     let m6a = synth(
         dir.path(),
         "s2_m6a",
@@ -96,7 +96,7 @@ fn a_gene_file_with_an_m6a_row_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let genes = synth(
         dir.path(),
-        "s1_genes",
+        "s1_count",
         &["GENE1/count/spliced", "GENE1/m6a/methylated"],
         &["C1"],
     );
@@ -112,7 +112,7 @@ fn end_to_end_union_axis_and_track_plan() {
     let cells = ["C1", "C2", "C3", "C4", "C5", "C6"];
     let genes = synth(
         dir.path(),
-        "S1_genes",
+        "S1_count",
         &[
             "GENE1/count/spliced",
             "GENE1/count/unspliced",
@@ -165,7 +165,7 @@ fn sample_tagging_still_applies_with_explicit_batch_files() {
     let cells = ["C1", "C2", "C3", "C4", "C5", "C6"];
     let genes = synth(
         dir.path(),
-        "S1_genes",
+        "S1_count",
         &[
             "GENE1/count/spliced",
             "GENE1/count/unspliced",

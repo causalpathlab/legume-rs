@@ -5,9 +5,8 @@ use crate::data::dna::Dna;
 use crate::data::dna_stat_map::*;
 use crate::data::util_htslib::*;
 use crate::editing::sifter::*;
-use crate::editing::{CallReason, ConversionSite};
+use crate::editing::ConversionSite;
 use crate::quant::*;
-use faba::hypothesis_tests::log_odds_ratio;
 
 use dashmap::DashMap as HashMap;
 use dashmap::DashSet as HashSet;
@@ -41,12 +40,11 @@ pub struct ConversionParams {
     pub gene_barcode_tag: Box<str>,
     pub cell_barcode_tag: Box<str>,
     pub include_missing_barcode: bool,
+    /// Candidacy floor on total coverage at a site (signal + control for m6A,
+    /// ref + alt for A-to-I). The producer applies no other threshold: every
+    /// site that clears this and `min_conversion` is written and quantified.
     pub min_coverage: usize,
     pub min_conversion: usize,
-    /// Marginal p-value cutoff for site detection.
-    /// Not a q-value: faba applies no multiplicity correction (see
-    /// [`crate::editing::CallReason::Pvalue`]).
-    pub pvalue_cutoff: f32,
     /// Sequencing-error rate ε for the beta-binomial editing null.
     pub error_rate: f64,
     /// Overdispersion ρ for the beta-binomial editing null (0 ⇒ binomial).
@@ -73,14 +71,7 @@ pub struct ConversionParams {
     pub umi_tag: Option<Box<str>>,
     /// MUT (catalytically-dead YTHmut) control BAMs for the m6A WT-vs-MUT
     /// contrast. Pooled into one background. Empty for A-to-I (single-sample).
-    /// The contrast guards (control coverage / effect size) live on the
-    /// [`ModificationType::M6A`] arm's [`M6aContrast`], not here.
     pub mut_bam_files: Vec<Box<str>>,
-    /// Unit-aware feature QC for the per-site `_site` matrix: keep a site only
-    /// if detected in ≥ this many cells (both channels kept together). `0`/`1`
-    /// disables. The gene-level matrix is unaffected (its gene axis is already
-    /// filtered upstream by `gene_min_cells`). See [`crate::quant::summarize_stats_per_site`].
-    pub site_min_cells: usize,
     /// Editing-competent cells from [`crate::editing::cell_activity`], restricting
     /// the **signal arm only**, keyed by signal BAM path.
     ///
@@ -99,103 +90,40 @@ pub struct ConversionParams {
     pub competent_cells: Option<Arc<crate::editing::cell_activity::CompetentCells>>,
 }
 
-/// Default for `--site-min-cells`: keep sites seen in ≥10 cells, matching
-/// faba's `gene_min_cells` convention. Cell Ranger does not filter features on
-/// its output matrices (only barcodes), so there is no upstream rule to mirror.
-pub const DEFAULT_SITE_MIN_CELLS: usize = 10;
-
-/// Default for every editing `--pvalue` / `--atoi-pvalue` / `--m6a-pvalue`.
-/// Defined once because it is a MARGINAL cutoff, not an FDR target: its meaning
-/// depends on how many sites were tested, so the m6A and A-to-I arms and the
-/// chained pipeline must not be able to drift to different values silently.
-pub const DEFAULT_PVALUE_CUTOFF: f32 = 0.05;
+/// Defaults for the single-sample (A-to-I) beta-binomial sequencing-error
+/// null: error rate ε and overdispersion ρ. m6A does not use them (its test is
+/// the WT-vs-MUT contrast), so `faba dartseq` exposes no flag for them.
+pub const DEFAULT_EDIT_ERROR_RATE: f64 = 0.01;
+/// See [`DEFAULT_EDIT_ERROR_RATE`].
+pub const DEFAULT_EDIT_OVERDISPERSION: f64 = 0.1;
 
 /// Defaults for the m6A candidacy floors, shared by `faba dartseq`'s
 /// `--min-coverage` / `--min-conversion` and `faba all`'s `--m6a-min-coverage` /
 /// `--m6a-min-conversion`.
 ///
-/// Defined once because the two MUST agree: they drifted before — the pipeline
-/// ran at half of each, so `faba all` called m6A sites a hand-run `faba dartseq`
-/// rejected, which is the one thing that module exists to prevent. A shared
-/// const makes that a compile-time fact instead of a comment asking the next
-/// editor to remember. `faba atoi` carries the same scar tissue.
+/// Defined once because the two MUST agree: they drifted before, and `faba all`
+/// called m6A sites a hand-run `faba dartseq` rejected. A shared const makes
+/// agreement a compile-time fact.
 ///
-/// Both are candidacy floors, not calls: they decide what is worth testing, and
-/// the odds-ratio guard plus the p-value decide what is real. See the long_help
-/// on `faba dartseq --min-coverage` for the measured cost of setting them low.
-pub const DEFAULT_M6A_MIN_COVERAGE: usize = 3;
+/// The producer is inclusive by design. `min_coverage` is on TOTAL coverage
+/// (signal + control) and `min_conversion` on converted signal reads; at 1 / 1
+/// the only site excluded is one with no converted read at all, i.e. an empty
+/// row. Every other decision (p-value, odds ratio, control depth, cells per
+/// site) is a column in the sites parquet and a flag on `faba qc`, so it can be
+/// revisited without rescanning BAMs.
+pub const DEFAULT_M6A_MIN_COVERAGE: usize = 1;
 /// See [`DEFAULT_M6A_MIN_COVERAGE`].
 pub const DEFAULT_M6A_MIN_CONVERSION: usize = 1;
 
-/// Shared clap args for the m6A WT-vs-MUT contrast guards: the control-coverage
-/// floor and the odds-ratio floor.
-/// `#[command(flatten)]`-ed into both `faba dartseq` and `faba all`, so the two
-/// knobs are defined once.
-/// The control BAM list itself is declared separately by each subcommand (its
-/// required-ness and positional split differ).
-#[derive(Args, Debug, Clone, serde::Serialize)]
-pub struct M6aContrastArgs {
-    /// m6A: minimum MUT (control) coverage to attempt a site.
-    ///
-    /// Soft floor only, and at the default of 1 it asks merely that some control
-    /// was observed. The test already handles the rest: a site with no control
-    /// coverage gives a degenerate 2x2 whose one-sided Fisher p is exactly 1, so
-    /// it is rejected on evidence regardless. Keeping the floor low therefore
-    /// moves those rejections from `low_control` to `pvalue` in the audit, which
-    /// is the more honest of the two labels — "we have no measurement here"
-    /// rather than "we measured no effect".
-    ///
-    /// Raise it if you would rather not see zero-control sites tested at all.
-    /// Foreground depth is governed separately by --min-coverage.
-    #[arg(long = "edit-control-min-coverage", default_value_t = 1)]
-    pub control_min_coverage: usize,
-
-    /// m6A: minimum log odds ratio (WT vs MUT) required to call a site.
-    ///
-    /// The odds ratio is the parameter the site's Fisher exact null is about,
-    /// so this guard and that test measure one quantity on one scale.
-    /// The default says only "the WT arm must out-convert the control", nothing
-    /// more, because weighing the evidence is the p-value cutoff's job.
-    /// Discovery is meant to be promiscuous: a near-empty site costs almost
-    /// nothing in the backend and is easy to drop downstream, while a site never
-    /// discovered cannot be recovered without a rerun.
-    ///
-    /// The default is not tuned. On integer counts the smallest odds ratio above
-    /// 1 that a table can even express is 1 + 1/(u_w·a_m), which exceeds 1e-4
-    /// for every table with u_w·a_m below 10^4 — essentially all of them, since
-    /// the control converts 0-2 reads at 80-88% of sites. So 1e-4 falls in the gap
-    /// between "exactly 1" and the next expressible value, and anything from
-    /// about 1e-6 to 1e-4 behaves identically.
-    ///
-    /// This replaces --m6a-min-delta, which measured the wrong thing here.
-    /// DART control background runs 0.1-0.3%, so p_WT − p_MUT is very nearly
-    /// p_WT: measured, delta tracked the WT rate at rho = 0.983 but the log odds
-    /// ratio at only rho = 0.172, making a flag documented as an effect-size
-    /// guard behave as a minimum-WT-rate filter. It rejected 36,830 candidates
-    /// whose median odds ratio was 4.83, with three times the WT coverage and a
-    /// four times cleaner control than the sites it kept, and in MYC the site
-    /// with the smallest delta had the largest odds ratio.
-    ///
-    /// Do not threshold a rate DIFFERENCE at low abundance. A delta is bounded
-    /// by the larger arm's rate and quantized by depth, so 1 converted read of 5
-    /// scores 0.2 while 1 of 744 scores 0.001 — it reports depth, not effect.
-    /// Null-cell QC also rescales the WT denominator by a per-gene factor, so an
-    /// absolute threshold means something different at every gene, while a ratio
-    /// commutes with that rescaling. The site parquet's log_odds_se column says
-    /// how far to trust each estimate; it is large wherever any cell is small.
-    #[arg(long = "m6a-min-log-odds", default_value_t = 1e-4)]
-    pub m6a_min_log_odds: f32,
-}
-
-impl M6aContrastArgs {
-    /// Build the sifter-side [`M6aContrast`] from these CLI args.
-    pub fn to_contrast(&self) -> M6aContrast {
-        M6aContrast {
-            min_control_coverage: self.control_min_coverage,
-            min_log_odds: self.m6a_min_log_odds,
-        }
-    }
-}
+/// Defaults for the A-to-I candidacy floors, shared by `faba atoi` and
+/// `faba all --atoi-*`. A-to-I has no motif anchor, so at 1 / 1 every reference
+/// A with a single mismatching read would be a site; these floors bound the
+/// candidate set. `faba dartseq --detect-atoi` used to carry its own copy at
+/// 10 / 5, so the same BAM produced a different A-to-I site list depending on
+/// which command ran it.
+pub const DEFAULT_ATOI_MIN_COVERAGE: usize = 5;
+/// See [`DEFAULT_ATOI_MIN_COVERAGE`].
+pub const DEFAULT_ATOI_MIN_CONVERSION: usize = 3;
 
 impl ConversionParams {
     /// If a UMI tag is configured, enable UMI dedup on the given freq map.
@@ -304,36 +232,17 @@ impl ConversionParams {
 // FIRST PASS: Site discovery //
 ////////////////////////////////
 
-/// Outcome of site discovery plus the per-site test.
+/// Find all putative conversion sites across the genome, keyed by gene and
+/// sorted (genes by id, sites by position) so every writer downstream is
+/// reproducible without sorting again.
 ///
-/// Every motif that clears the sifter's coverage / effect-size guards enters as
-/// a candidate carrying a raw p-value; the test pass then splits the candidates
-/// on that p-value. `selected` are the calls (p ≤ cutoff) — the sites quantified
-/// in the second pass. `rejected` are the candidates that fell short (p > cutoff
-/// or a failed guard); they keep their p-values and reason, so the two maps
-/// together are a complete audit of what the test decided. `rejected` is
-/// *not* every motif in the genome — a motif the sifter never scored (failed
-/// coverage / effect-size / motif guards) is never materialized as a site.
-/// Callers may write `rejected` to a `*_unselected.parquet` beside the calls.
-///
-/// The unit is always the site. Pooling a gene's putative sites into one test
-/// was removed because a gene-level verdict cannot say WHICH C carries the
-/// mark: it averages a focal modification against the gene's non-modified
-/// positions with no de-dilution step, which is the same dilution the null-cell
-/// QC exists to undo, one level up.
-///
-/// Only the direction of the error moved when the guard did. Under the retired
-/// delta floor pooling produced false negatives (measured on MYC, in git
-/// history); under the odds-ratio guard the pooled 2×2 clears the floor, so it
-/// now produces false ATTRIBUTION — one verdict inherited by every C in the gene,
-/// most of which carry nothing. `site_level_attributes_the_call_to_the_c_that_carries_it`
-/// pins both halves.
-pub struct DiscoveredSites {
-    pub selected: HashMap<GeneId, Vec<ConversionSite>>,
-    pub rejected: HashMap<GeneId, Vec<ConversionSite>>,
-}
-
-/// Find all conversion sites across the genome.
+/// Discovery is the whole producer-side decision. A site is materialized when
+/// it clears the sifter's coverage / minimum-conversion floors and nothing
+/// else: its p-value, odds ratio and control depth are carried on the site and
+/// written to the sites parquet, and every site is quantified in the second
+/// pass. Thresholding them is `faba qc`'s job. The unit is always the site;
+/// pooling a gene's putative sites into one test was removed because a
+/// gene-level verdict cannot say WHICH C carries the mark.
 ///
 /// For m6A with cell_membership: uses per-cell-type discovery.
 /// For m6A without membership or for AtoI: uses bulk statistics.
@@ -341,7 +250,7 @@ pub fn find_all_conversion_sites(
     gff_map: &GffRecordMap,
     params: &ConversionParams,
     cell_membership: Option<&CellMembership>,
-) -> anyhow::Result<DiscoveredSites> {
+) -> anyhow::Result<HashMap<GeneId, Vec<ConversionSite>>> {
     let njobs = gff_map.len();
     info!(
         "Searching {} conversion sites over {} blocks",
@@ -381,192 +290,33 @@ pub fn find_all_conversion_sites(
     let gene_sites = Arc::try_unwrap(arc_gene_sites)
         .map_err(|_| anyhow::anyhow!("failed to release gene_sites"))?;
 
-    // The test step. Discovery materialized every *putative* site (RAC/GTY motif
-    // + observed WT C→U at/above the coverage floors, or a reference A/T with
-    // observed editing for A-to-I); here the effect-size and p-value checks decide
-    // selected vs unselected and record the reason for each rejection, so
-    // `*_unselected.parquet` explains every call. m6A applies the control-coverage
-    // / odds-ratio guards then the p-value cutoff; A-to-I is single-sample, so its
-    // test is the beta-binomial p-value alone.
-    //
-    // Always per site. The gene-level alternative — pool a gene's putative sites
-    // into one 2x2 — was removed: see [`DiscoveredSites`] for the MYC measurement
-    // that shows the pooled test is dilution-blind exactly where the method is
-    // strongest.
-    let cutoff = params.pvalue_cutoff;
-    let label = params.mod_type.label();
-    let contrast = match &params.mod_type {
-        ModificationType::M6A { contrast, .. } => Some(*contrast),
-        ModificationType::AtoI => None,
-    };
-    let discovered = partition_by_site(gene_sites, gff_map, cutoff, contrast);
-
-    let n_sel: usize = discovered.selected.iter().map(|e| e.value().len()).sum();
-    let n_rej: usize = discovered.rejected.iter().map(|e| e.value().len()).sum();
-
-    // Report the expected false-call count, because the cutoff alone cannot.
-    // A q-value threshold is scale-free in the number of tests -- "q <= 0.05"
-    // means the same thing at 300 sites and at 300k, and BH supplied that
-    // reading for free. A MARGINAL p-value cutoff does not: it admits
-    // `cutoff x m` null sites, so its meaning moves with m and the user cannot
-    // recover m from the flag. So log m and the product outright.
-    //
-    // m is the number of sites that reached the cutoff -- `Selected` plus the
-    // `Pvalue` rejections. Guard rejections (LowControl / OddsRatio) were never
-    // tested and must not inflate the count.
-    let n_tested = n_sel
-        + discovered
-            .rejected
-            .iter()
-            .map(|e| {
-                e.value()
-                    .iter()
-                    .filter(|s| s.reason() == CallReason::Pvalue)
-                    .count()
-            })
-            .sum::<usize>();
+    let sites = sort_sites(gene_sites);
+    let n_sites: usize = sites.iter().map(|e| e.value().len()).sum();
     info!(
-        "{} test: {} selected / {} unselected of {} putative sites (p <= {}); \
-         ~{:.0} false calls expected under the null ({} x {} tested)",
-        label,
-        n_sel,
-        n_rej,
-        n_sel + n_rej,
-        cutoff,
-        cutoff as f64 * n_tested as f64,
-        cutoff,
-        n_tested,
+        "{}: {} putative sites over {} genes (no producer-side test; \
+         threshold pv / log_odds / coverage with `faba qc`)",
+        params.mod_type.label(),
+        n_sites,
+        sites.len(),
     );
-    Ok(discovered)
+    Ok(sites)
 }
 
-/// The m6A odds-ratio test on one site's 2×2.
-/// Returns the rejection reason under the control-coverage / odds-ratio guards,
-/// or `None` when the 2×2 clears them and is eligible for the p-value cutoff.
-///
-/// The guard is the RAW cross-product ratio
-/// ([`faba::hypothesis_tests::log_odds_ratio`]), with no continuity correction,
-/// so a clean control (`a_m = 0`, which holds at most DART sites -- 57%
-/// measured on chr19+MYC) reads
-/// `+inf` and passes — the promiscuous behaviour discovery wants. A genomic C/T
-/// variant converts equally in both arms, so its odds ratio is exactly 1 and its
-/// log exactly `0.0`: rejected at any positive floor, at any depth. That is the
-/// one job this guard has. The `.max(1)` denominators of the rate-difference
-/// rule it replaced are gone with it — every degenerate table now takes an
-/// explicit branch rather than relying on a floored division to dodge `NaN`.
-///
-/// Deliberately NOT the guard: the Wald lower bound `log_or - z·se`. To a normal
-/// approximation that is the same one-sided test the Fisher p-value below
-/// already runs exactly, and it is least reliable precisely where the control
-/// arm is empty. This guard's question is direction; the site's evidence is
-/// `pv`'s question. `log_odds − 1.96·log_odds_se` is one subtraction from two
-/// shipped parquet columns for anyone who wants it post hoc.
-///
-/// This IS a fold guard, replacing the 1.25× rate-fold gate that was measured
-/// inert (94–99% of putative sites passed it, and it changed the call count by
-/// exactly zero) — same family, on odds rather than rates, with the threshold at
-/// ~1.0 rather than 1.25, and kept for agreement with the test's null rather
-/// than as a filter. That measurement is also this rule's falsifiable
-/// prediction: `odds_ratio` rejections should be a small minority of putative
-/// sites. If they are common, something is wrong here.
-fn m6a_effect_reason(
-    a_w: u64,
-    u_w: u64,
-    a_m: u64,
-    u_m: u64,
-    c: &M6aContrast,
-) -> Option<CallReason> {
-    if ((a_m + u_m) as usize) < c.min_control_coverage {
-        return Some(CallReason::LowControl);
-    }
-    if log_odds_ratio(a_w, u_w, a_m, u_m) < c.min_log_odds as f64 {
-        return Some(CallReason::OddsRatio);
-    }
-    None
-}
-
-/// The test. Each putative site takes the m6A effect guards first — a
-/// `LowControl` / `OddsRatio` rejection keeps its own reason, so the audit says
-/// which guard fired — and whatever survives them takes the p-value cutoff,
-/// becoming `Selected` at or below it and a `Pvalue` rejection above.
-/// Every site keeps its reason, so the two maps together account for all putative
-/// sites. A-to-I passes `contrast: None`: it is single-sample, with no control
-/// arm to guard against, so the p-value alone decides.
-///
-/// One in-place pass, because the verdict is local to the site. It was two —
-/// collect every eligible index, then revisit — only because BH is a GLOBAL
-/// procedure: no site's verdict was knowable until every eligible p-value had
-/// been gathered and ranked.
-fn partition_by_site(
+/// Fix the order once, here, not at each writer. `gene_sites` is a DashMap, so
+/// its iteration order is whatever the parallel scan's sharding produced, and
+/// the site parquet would inherit it. Ordering the discovery result makes every
+/// consumer reproducible instead of asking each writer to remember to sort.
+fn sort_sites(
     gene_sites: HashMap<GeneId, Vec<ConversionSite>>,
-    gff_map: &GffRecordMap,
-    cutoff: f32,
-    contrast: Option<M6aContrast>,
-) -> DiscoveredSites {
+) -> HashMap<GeneId, Vec<ConversionSite>> {
     let mut genes: Vec<(GeneId, Vec<ConversionSite>)> = gene_sites.into_iter().collect();
-    // Fix the order HERE, not at each writer. `gene_sites` is a DashMap, so its
-    // iteration order is whatever the parallel scan's sharding produced, and the
-    // site parquet inherits it. Ordering the discovery result once makes every
-    // consumer reproducible instead of asking each writer to remember to sort.
     genes.sort_by(|a, b| a.0.cmp(&b.0));
-    for (_, sites) in genes.iter_mut() {
-        sites.sort_by_key(|s| s.primary_pos());
-    }
-
-    // The cutoff is a plain marginal p-value. NOT Benjamini-Hochberg.
-    //
-    // BH controls FDR under independence or positive regression dependence, and
-    // sites have neither. Neighbouring candidate C's are covered by the SAME
-    // reads, so their 2x2s share cells and depth; worse, a read converted at one
-    // site is evidence against the unconverted neighbour, so the dependence is
-    // not even reliably positive. Under arbitrary dependence the valid procedure
-    // is Benjamini-Yekutieli, which divides alpha by sum(1/i) ~ ln m -- a 10.6x
-    // penalty at the ~28k putative sites of one library. So the real options were
-    // "BY and call almost nothing" or "stop claiming FDR control"; claiming BH's
-    // guarantee while its assumption fails was the one indefensible choice.
-    //
-    // Two measurements said the same thing from the other end: BH here ran on
-    // p-values that are not uniform under H0 (a site only exists once it clears
-    // `--min-conversion`, so the null tail is truncated away), and it ran on the
-    // post-guard subset, which is filtered by `--m6a-min-log-odds` -- and that
-    // filter is now monotone in a monotone transform of the Fisher statistic
-    // ITSELF, not merely correlated with it as the old delta guard was, so the
-    // conditioning is even harder to defend -- deflating every q by roughly
-    // #eligible/#putative.
-    //
-    // Pooling a gene's sites into one 2x2 was the other way to absorb that
-    // within-gene dependence, and it is gone too: it dilutes a focal
-    // modification against the gene's non-modified positions, with no
-    // de-dilution step to undo it (see [`DiscoveredSites`]).
-    let selected = HashMap::<GeneId, Vec<ConversionSite>>::default();
-    let rejected = HashMap::<GeneId, Vec<ConversionSite>>::default();
+    let out = HashMap::<GeneId, Vec<ConversionSite>>::default();
     for (gid, mut sites) in genes {
-        let strand = gff_map
-            .get(&gid)
-            .map(|r| r.strand)
-            .unwrap_or(Strand::Forward);
-        for site in sites.iter_mut() {
-            let guard = contrast
-                .as_ref()
-                .zip(site.contrast_counts(strand))
-                .and_then(|(c, (a_w, u_w, a_m, u_m))| m6a_effect_reason(a_w, u_w, a_m, u_m, c));
-            site.set_reason(guard.unwrap_or(if site.pv() <= cutoff {
-                CallReason::Selected
-            } else {
-                CallReason::Pvalue
-            }));
-        }
-        let (sel, rej): (Vec<_>, Vec<_>) =
-            sites.into_iter().partition(|s| s.reason().is_selected());
-        if !rej.is_empty() {
-            rejected.insert(gid.clone(), rej);
-        }
-        if !sel.is_empty() {
-            selected.insert(gid, sel);
-        }
+        sites.sort_by_key(|s| s.primary_pos());
+        out.insert(gid, sites);
     }
-
-    DiscoveredSites { selected, rejected }
+    out
 }
 
 /// Per-gene site discovery: reads WT and MUT BAM files, creates
@@ -1164,16 +914,9 @@ fn process_bam_to_backend(
     write_resolution_backend(ctx, batch_name, modality, gene_triplets, gene_out)?;
 
     // Per-site: same channels keyed on the single-base `{chr}:{pos}` subunit, in
-    // `{batch}_{modality}_site`: `{gene}/{modality}/{chr}:{pos}/{pos,neg}`. A
-    // unit-aware `site_min_cells` filter drops sites seen in too few cells.
-    let site_triplets = summarize_stats_per_site(
-        &stats,
-        ctx.gene_key,
-        modality,
-        pos_channel,
-        neg_channel,
-        ctx.params.site_min_cells,
-    );
+    // `{batch}_{modality}_site`: `{gene}/{modality}/{chr}:{pos}/{pos,neg}`.
+    let site_triplets =
+        summarize_stats_per_site(&stats, ctx.gene_key, modality, pos_channel, neg_channel);
     write_resolution_backend(
         ctx,
         batch_name,
@@ -1189,8 +932,9 @@ fn process_bam_to_backend(
 /// record its rows + deferred finalize into `out`. Finalize is deferred because
 /// rows are later reordered to the shared cross-batch union (see
 /// [`reorder_all_matrices`]). No post-write nnz squeeze: the gene axis is QC'd
-/// upstream (`gene_min_cells`), the site axis by `site_min_cells`, and cells are
-/// frozen by the shared cell call — so a squeeze here would only be redundant.
+/// upstream (`gene_min_cells`), every putative site is kept by design, and
+/// cells are frozen by the shared cell call — `faba qc` is where a squeeze
+/// belongs.
 fn write_resolution_backend(
     ctx: &BamProcessContext<'_, impl Fn(&BedWithGene) -> Box<str> + Send + Sync>,
     batch_name: &str,

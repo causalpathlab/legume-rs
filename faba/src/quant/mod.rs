@@ -182,22 +182,14 @@ where
 /// site into its gene; here distinct sites stay separate rows. Zero counts are
 /// skipped to keep the matrix sparse.
 ///
-/// `min_cells` applies a **unit-aware** feature QC: a site is kept only if it is
-/// detected in at least `min_cells` cells, and when kept BOTH of its channel
-/// rows are emitted together (never de-paired — mirrors the way Cell Ranger
-/// keeps all of a gene's features together rather than filtering channels
-/// independently). `0` or `1` disables the filter. The gene axis is already
-/// filtered upstream by `gene_min_cells` (see [`passing_genes_from_stats`]); the
-/// per-site axis is new feature space that nothing else QCs. Note `stats` only
-/// carries cells with a converted read at the site, so this counts
-/// signal-bearing cells.
+/// Every site with a converted read in any cell is kept: the reproducibility
+/// rule ("seen in ≥ N cells") lives in `faba qc --site-min-cells`.
 pub fn summarize_stats_per_site<F>(
     stats: &[(CellBarcode, BedWithGene, ConversionData)],
     gene_key_func: F,
     modality: &str,
     pos_channel: &str,
     neg_channel: &str,
-    min_cells: usize,
 ) -> TripletsRowsCols
 where
     F: Fn(&BedWithGene) -> Box<str> + Send + Sync,
@@ -212,33 +204,11 @@ where
         combined.entry(key).or_default().add_assign(dat);
     });
 
-    // Drain into a Vec so we can count cells per site, then filter sequentially.
     let entries: Vec<_> = combined.into_iter().collect();
 
-    // Unit-aware min-cells: cells detected per (gene, site). Borrow keys from
-    // `entries` to avoid clones; only built when the filter is active.
-    let cells_per_site: rustc_hash::FxHashMap<(&str, &str), usize> = if min_cells > 1 {
-        let mut m: rustc_hash::FxHashMap<(&str, &str), usize> = rustc_hash::FxHashMap::default();
-        for ((_, gene, site), _) in &entries {
-            *m.entry((gene.as_ref(), site.as_ref())).or_insert(0) += 1;
-        }
-        m
-    } else {
-        rustc_hash::FxHashMap::default()
-    };
-    let keep = |gene: &str, site: &str| -> bool {
-        min_cells <= 1
-            || cells_per_site
-                .get(&(gene, site))
-                .is_some_and(|&n| n >= min_cells)
-    };
-
-    // Two channel rows per kept (cell, gene, site); drop zeros (sparse).
+    // Two channel rows per (cell, gene, site); drop zeros (sparse).
     let mut triplets: Vec<(CellBarcode, Box<str>, f32)> = Vec::with_capacity(entries.len() * 2);
     for ((cb, gene, site), dat) in &entries {
-        if !keep(gene, site) {
-            continue;
-        }
         push_channel_row(
             &mut triplets,
             cb,
@@ -454,7 +424,7 @@ pub fn accumulate_gene_stats(
 /// this with a different [`GeneQcRequest`]. They used to be two near-identical
 /// copies of this loop, and the mito cell filter was added to one and forgotten in
 /// the other — the copies *were* the defect, so there is now only one.
-/// (`faba genes` keeps its own writers: it emits a different set of matrices.)
+/// (`faba count` keeps its own writers: it emits a different set of matrices.)
 pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<GeneCountQc> {
     info!("=== Gene expression QC ===");
 
@@ -576,7 +546,7 @@ pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<
 
             let out = BackendOutputPath::new(
                 req.output_dir,
-                &format!("{}_genes", batch_name),
+                &format!("{}_count", batch_name),
                 sink.backend,
                 sink.zip,
             );
@@ -602,7 +572,7 @@ pub fn run_gene_count_qc(gff_file: &str, req: &GeneQcRequest) -> anyhow::Result<
     }
 
     // Threshold the pooled gene stats once → the shared vocabulary for
-    // --valid-genes reuse and downstream modality masking. Same gate as the
+    // --valid-genes reuse and downstream modality reuse. Same gate as the
     // per-batch matrices, so the frozen set ATOI/APA/m6A inherit carries the
     // biotype subset and the mito exclusion.
     let passing_genes =
@@ -677,7 +647,7 @@ pub struct GeneQcRequest<'a> {
 }
 
 /// Resolve a modality's gene-expression QC: reuse a passed per-batch cell set
-/// (`--valid-cells` + optional `--valid-genes`) written by `faba genes`, or
+/// (`--valid-cells` + optional `--valid-genes`) written by `faba count`, or
 /// recompute it in memory (per-batch cell calling). Returns `None` when QC is
 /// skipped. **Convention:** an empty `gene_ids` means "no gene-level filter"
 /// (e.g. `--valid-cells` without `--valid-genes`) — callers must treat it as
@@ -766,7 +736,7 @@ pub fn write_qc_genes(dir: &str, gene_ids: &rustc_hash::FxHashSet<GeneId>) -> an
 pub const MITO_CHR_DEFAULT: &str = "chrM,chrMT,MT,M";
 
 /// Shared CLI knobs for mitochondrial QC, flattened into every subcommand that
-/// does gene-count QC (`genes`, `apa`, `atoi`, `dartseq`, `all`) so the policy
+/// does gene-count QC (`count`, `apa`, `atoi`, `dartseq`, `all`) so the policy
 /// is spelled the same way everywhere. Mirrors [`crate::cell_qc::CellQcArgs`];
 /// resolve to the clap-free [`MitoQcParams`] with [`MitoQcArgs::params`].
 #[derive(clap::Args, Debug, Clone, serde::Serialize)]
@@ -1137,7 +1107,7 @@ pub struct QcArtifacts<'a> {
 /// two QC artifacts.
 ///
 /// **This is the single place a batch's passing cell set is decided.** Every path
-/// that calls cells routes through it — the `faba all` loop, both `faba genes`
+/// that calls cells routes through it — the `faba all` loop, both `faba count`
 /// writers, and [`run_gene_count_qc`] (the shared QC behind `dartseq` / `atoi` /
 /// `apa`) — so the cell sets cannot drift apart.
 ///
@@ -1192,7 +1162,7 @@ pub fn qc_one_batch(
     })
 }
 
-/// Load a per-batch valid-cell set written by `faba genes` (one
+/// Load a per-batch valid-cell set written by `faba count` (one
 /// `{batch}_cells.tsv.gz` per batch, one barcode per line) from `dir`. Missing
 /// per-batch files are warned and skipped (that batch goes unfiltered).
 pub fn load_valid_cells_dir(
@@ -1229,7 +1199,7 @@ pub fn load_valid_cells_dir(
     Ok(out)
 }
 
-/// Load a retained-gene set written by `faba genes` (`{batch}_genes_kept.tsv.gz`,
+/// Load a retained-gene set written by `faba count` (`genes_kept.tsv.gz`,
 /// one gene id per line). Genes are shared across batches, so a single file is read.
 pub fn load_valid_genes(path: &str) -> anyhow::Result<rustc_hash::FxHashSet<GeneId>> {
     let genes: rustc_hash::FxHashSet<GeneId> = read_lines(path)?

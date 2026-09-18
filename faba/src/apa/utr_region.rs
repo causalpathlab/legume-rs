@@ -85,6 +85,7 @@ impl UtrRegion {
         }
     }
 
+    #[cfg(test)]
     /// 1-based position of `genomic_pos` along the spliced 3'UTR, read 5'->3'.
     /// `None` when the position sits in an intron or outside the exons.
     ///
@@ -96,7 +97,6 @@ impl UtrRegion {
     /// hot path calls this. It stays because it is the direction
     /// `genomic_from_spliced` inverts: the round-trip test is what pins the two
     /// together, and a mapping with only one side written down drifts.
-    #[allow(dead_code)]
     pub fn spliced_offset(&self, genomic_pos: i64) -> Option<i64> {
         let mut before = 0i64;
         for &(exon_start, exon_stop) in self.exons.iter() {

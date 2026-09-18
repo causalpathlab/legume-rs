@@ -43,22 +43,29 @@ pub trait ToParquet {
 /// - conversion_pos: nullable Int64 (Some for M6A, None/null for AtoI)
 /// - rel_pos: strand-aware position along the gene's merged EXONS (0-based),
 ///   i.e. a transcript coordinate. Null for an intronic site, which has none.
-/// - pv: per-site contrast p-value — the statistic the call is made on
+/// - pv: per-site p-value (Fisher exact WT-vs-MUT for m6A, beta-binomial
+///   against the sequencing-error null for A-to-I). Reported for every
+///   putative site; the producer applies no cutoff. `faba qc --site-max-pv`
+///   thresholds it, as a MARGINAL p-value: faba does no multiplicity
+///   correction, because neighbouring sites share reads and are not even
+///   positively dependent (see the `qc` module for the full argument).
 /// - log_odds: Haldane-corrected log odds ratio (WT vs MUT), null for A-to-I.
-///   A shrunken ESTIMATE, not the guard's value: the guard uses the raw
-///   cross-product, which is `+inf` when the control never converts, and its
-///   verdict is in `reason`. Read `log_odds_se` before reading this.
+///   A shrunken ESTIMATE: the raw cross-product is `+inf` when the control
+///   never converts. Read `log_odds_se` before reading this.
 /// - log_odds_se: Woolf standard error on the same corrected cells, null for
 ///   A-to-I. Dominated by the SMALLEST cell rather than by either library's
 ///   depth, so it is large exactly where the site is thin — this is the
 ///   machine-readable form of "do not read an effect size off a low-abundance
 ///   site", which a rate difference could never express. Caveat: with zero
-///   control conversions (57% of sites on chr19+MYC) it is floored near 1.41 by the
+///   control conversions it is floored near 1.41 by the
 ///   pseudo-count regardless of depth, so it flags those sites without ranking
 ///   them; rank by `pv`. `log_odds − 1.96·log_odds_se` is a Wald lower bound if
 ///   one is wanted — deliberately neither a column nor a filter, because it
 ///   approximates the exact one-sided test `pv` already reports.
-/// - reason: test outcome — `selected` / `low_control` / `odds_ratio` / `pvalue`
+/// - coverage, converted: signal-arm reads at the site (total, converted),
+///   strand-resolved via [`ConversionSite::signal_counts`]
+/// - control_coverage, control_converted: the same for the control arm; both
+///   0 for A-to-I, which has none
 /// - wt_a, wt_t, wt_g, wt_c: base counts at the site
 impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
     fn to_parquet<P: AsRef<Path>>(
@@ -80,7 +87,10 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         // Nullable: A-to-I is single-sample, so it has no 2×2 and no odds ratio.
         let mut log_odds_builder = Float32Builder::new();
         let mut log_odds_se_builder = Float32Builder::new();
-        let mut reason_vec: Vec<String> = Vec::new();
+        let mut coverage_vec: Vec<u64> = Vec::new();
+        let mut converted_vec: Vec<u64> = Vec::new();
+        let mut control_coverage_vec: Vec<u64> = Vec::new();
+        let mut control_converted_vec: Vec<u64> = Vec::new();
         let mut wt_a_vec: Vec<u64> = Vec::new();
         let mut wt_t_vec: Vec<u64> = Vec::new();
         let mut wt_g_vec: Vec<u64> = Vec::new();
@@ -92,9 +102,9 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let mut mut_g_vec: Vec<u64> = Vec::new();
         let mut mut_c_vec: Vec<u64> = Vec::new();
 
-        // Row order is fixed upstream, where discovery partitions its results
-        // (see `partition_by_site`), so every writer that reads a
-        // `DiscoveredSites` is reproducible -- not just this one.
+        // Sites within a gene are position-sorted upstream (see
+        // `find_all_conversion_sites`); genes are ordered here, because a
+        // DashMap has no order of its own.
         let mut ordered: Vec<_> = self.iter().collect();
         ordered.sort_unstable_by(|a, b| a.key().cmp(b.key()));
 
@@ -173,7 +183,14 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 log_odds_builder.append_option(log_odds.map(|v| v as f32));
                 log_odds_se_builder.append_option(se.map(|v| v as f32));
 
-                reason_vec.push(site.reason().label().to_string());
+                // Same strand table as the odds ratio above, so `coverage` and
+                // `log_odds` cannot disagree on which base is "converted".
+                let (a_w, u_w) = site.signal_counts(strand_obj);
+                let (a_m, u_m) = site.control_counts(strand_obj);
+                coverage_vec.push(a_w + u_w);
+                converted_vec.push(a_w);
+                control_coverage_vec.push(a_m + u_m);
+                control_converted_vec.push(a_m);
 
                 wt_a_vec.push(site.wt_freq().count_a() as u64);
                 wt_t_vec.push(site.wt_freq().count_t() as u64);
@@ -200,7 +217,11 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         let pv_array = Arc::new(Float32Array::from(pv_vec)) as ArrayRef;
         let log_odds_array = Arc::new(log_odds_builder.finish()) as ArrayRef;
         let log_odds_se_array = Arc::new(log_odds_se_builder.finish()) as ArrayRef;
-        let reason_array = Arc::new(StringArray::from(reason_vec)) as ArrayRef;
+        let coverage_array = Arc::new(UInt64Array::from(coverage_vec)) as ArrayRef;
+        let converted_array = Arc::new(UInt64Array::from(converted_vec)) as ArrayRef;
+        let control_coverage_array = Arc::new(UInt64Array::from(control_coverage_vec)) as ArrayRef;
+        let control_converted_array =
+            Arc::new(UInt64Array::from(control_converted_vec)) as ArrayRef;
 
         let wt_a_array = Arc::new(UInt64Array::from(wt_a_vec)) as ArrayRef;
         let wt_t_array = Arc::new(UInt64Array::from(wt_t_vec)) as ArrayRef;
@@ -229,7 +250,18 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
             arrow::datatypes::Field::new("pv", arrow::datatypes::DataType::Float32, false),
             arrow::datatypes::Field::new("log_odds", arrow::datatypes::DataType::Float32, true),
             arrow::datatypes::Field::new("log_odds_se", arrow::datatypes::DataType::Float32, true),
-            arrow::datatypes::Field::new("reason", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("coverage", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("converted", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new(
+                "control_coverage",
+                arrow::datatypes::DataType::UInt64,
+                false,
+            ),
+            arrow::datatypes::Field::new(
+                "control_converted",
+                arrow::datatypes::DataType::UInt64,
+                false,
+            ),
             arrow::datatypes::Field::new("wt_a", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_t", arrow::datatypes::DataType::UInt64, false),
             arrow::datatypes::Field::new("wt_g", arrow::datatypes::DataType::UInt64, false),
@@ -241,7 +273,7 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
         ]);
 
         let batch = RecordBatch::try_new(
-            Arc::new(schema.clone()),
+            Arc::new(schema),
             vec![
                 chr_array,
                 gene_array,
@@ -255,7 +287,10 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
                 pv_array,
                 log_odds_array,
                 log_odds_se_array,
-                reason_array,
+                coverage_array,
+                converted_array,
+                control_coverage_array,
+                control_converted_array,
                 wt_a_array,
                 wt_t_array,
                 wt_g_array,
@@ -267,87 +302,16 @@ impl ToParquet for DashMap<GeneId, Vec<ConversionSite>> {
             ],
         )?;
 
-        let file = File::create(path)?;
-        let props = WriterProperties::builder().build();
-        let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))?;
-
-        writer.write(&batch)?;
-        writer.close()?;
-
-        Ok(())
+        write_record_batch(&batch, path)
     }
 }
 
-/// Emit the discovery audit output for one modality, shared by `faba dartseq`
-/// and `faba all` so both write identical files. `prefix` is the modality file
-/// stem (e.g. `"m6a"`). Writes `{prefix}_sites_unselected.parquet`: every
-/// putative site that missed the cut, with its `reason`. The *selected* sites
-/// are written by the caller after masking; this is the pre-mask audit of the
-/// test itself.
-pub fn write_discovery_outputs(
-    discovered: &crate::editing::pipeline::DiscoveredSites,
-    gff_map: &GffRecordMap,
-    spliced: &SplicedGenes,
-    output_dir: &str,
-    prefix: &str,
-) -> Result<()> {
-    let n_unselected: usize = discovered.rejected.iter().map(|e| e.value().len()).sum();
-    discovered.rejected.to_parquet(
-        gff_map,
-        spliced,
-        format!("{output_dir}/{prefix}_sites_unselected.parquet"),
-    )?;
-    log::info!("wrote {n_unselected} unselected {prefix} sites (with reasons)");
+/// Write one Arrow record batch as a parquet file.
+pub fn write_record_batch<P: AsRef<Path>>(batch: &RecordBatch, path: P) -> Result<()> {
+    let file = File::create(path)?;
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
+    writer.write(batch)?;
+    writer.close()?;
     Ok(())
-}
-
-/// Load an A-to-I mask from a parquet file (output of `faba atoi`, `faba dartseq --detect-atoi`,
-/// or the unified `faba editing` pipeline).
-///
-/// Returns a set of (chr, position) tuples for masking known A-to-I sites.
-/// Tries "primary_pos" column first (new unified format), falls back to "editing_pos"
-/// (legacy atoi format) for backward compatibility.
-pub fn load_atoi_mask_from_parquet<P: AsRef<Path>>(
-    path: P,
-) -> Result<rustc_hash::FxHashSet<(Box<str>, i64)>> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
-    let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-    let reader = builder.build()?;
-
-    let mut mask = rustc_hash::FxHashSet::default();
-
-    for batch in reader {
-        let batch = batch?;
-
-        let chr_col = batch
-            .column_by_name("chr")
-            .ok_or_else(|| anyhow::anyhow!("missing 'chr' column in A-to-I parquet"))?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow::anyhow!("'chr' column is not a string array"))?;
-
-        // Try "primary_pos" first (unified format), fall back to "editing_pos" (legacy)
-        let pos_col = batch
-            .column_by_name("primary_pos")
-            .or_else(|| batch.column_by_name("editing_pos"))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing position column in A-to-I parquet \
-                     (expected 'primary_pos' or 'editing_pos')"
-                )
-            })?
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| anyhow::anyhow!("position column is not an Int64 array"))?;
-
-        for i in 0..batch.num_rows() {
-            let chr: Box<str> = chr_col.value(i).into();
-            let pos = pos_col.value(i);
-            mask.insert((chr, pos));
-        }
-    }
-
-    Ok(mask)
 }

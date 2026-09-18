@@ -87,7 +87,8 @@ pub struct WeightedObservation {
     pub count: f32,
 }
 
-/// Run per-gene GMM model selection over K=1..max_k, pick best by BIC.
+/// Fit the per-gene mixture: components are modes of the bandwidth-smoothed
+/// site pileup, capped at `max_k` (no BIC selection).
 ///
 /// * `observations` - weighted observations (unique per cell+position)
 /// * `gene_length` - length of the gene for uniform noise component
@@ -217,8 +218,6 @@ pub fn fit_gene_mixture(
         weights: fe.weights,
         mus: centers,
         sigmas: vec![bandwidth; k],
-        gamma: Vec::new(), // per-obs γ already consumed into cell_component_counts
-        bic: fe.bic,
     };
 
     Some(GeneMixtureResult {

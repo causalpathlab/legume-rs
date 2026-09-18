@@ -111,7 +111,7 @@ fn motif_hits(
 /// — which is exactly why the scan can precede discovery.
 // Kept for tests / callers that want candidates without the background channel;
 // the scan itself goes through `candidate_and_background`.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn candidate_positions(
     faidx: &rust_htslib::faidx::Reader,
     chr: &str,

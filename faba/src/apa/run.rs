@@ -21,13 +21,6 @@ pub enum ApaMethod {
 }
 
 #[derive(Args, Debug)]
-#[command(after_long_help = "CITATION:\n  \
-        The mixture model is based on the SCAPE framework:\n  \
-        Zhou et al., \"SCAPE: a mixture model revealing single-cell\n  \
-        polyadenylation diversity and cellular dynamics during cell\n  \
-        differentiation and reprogramming\",\n  \
-        Nucleic Acids Research, 50(11):e66, 2022.\n  \
-        https://doi.org/10.1093/nar/gkac167")]
 pub struct CountApaArgs {
     /// Input BAM file(s), comma-separated
     #[arg(
@@ -134,8 +127,9 @@ pub struct CountApaArgs {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Minimum non-zeros per row (site)",
-        long_help = "Sites with fewer than this many non-zero cells are removed from the output matrix."
+        help = "Minimum non-zeros per row",
+        long_help = "Rows with fewer than this many non-zero cells are removed from the output matrix\n\
+                     (poly(A) sites in simple mode; gene channels / components in mixture mode)."
     )]
     pub(crate) row_nnz_cutoff: usize,
 
@@ -156,7 +150,8 @@ pub struct CountApaArgs {
         help = "Output directory",
         long_help = "Directory for output files. In simple mode,\n\
                      one sparse matrix per input BAM is created. In mixture mode,\n\
-                     a single sparse matrix and a site annotation parquet are created for all inputs."
+                     apa_components.parquet is shared and {batch}_apa (plus {batch}_apa_mixture\n\
+                     with --mixture) is written per input BAM."
     )]
     pub(crate) output: Box<str>,
 
@@ -194,26 +189,6 @@ pub struct CountApaArgs {
                      \"mixture\": EM mixture model based on SCAPE."
     )]
     pub(crate) method: ApaMethod,
-
-    /////////////////////////////////////////////////////
-    // A-to-I mask (shared between simple and mixture) //
-    /////////////////////////////////////////////////////
-    /// Pre-computed A-to-I mask parquet file
-    #[arg(
-        long = "atoi-mask",
-        help = "A-to-I mask parquet (from `faba atoi` or `faba dartseq --detect-atoi`)",
-        long_help = "Path to a pre-computed A-to-I sites parquet file. When provided,\n\
-                     poly(A) sites that overlap A-to-I editing positions are removed before quantification."
-    )]
-    pub(crate) atoi_mask_file: Option<Box<str>>,
-
-    #[arg(
-        long = "snp-mask",
-        help = "SNP mask parquet from `faba snp` to filter genetic variants",
-        long_help = "Path to snp_sites.parquet from `faba snp`.\n\
-                     Poly(A) sites at known SNP positions (het or hom-alt) are removed."
-    )]
-    pub(crate) snp_mask_file: Option<Box<str>>,
 
     //////////////////////
     // Simple-mode args //
@@ -507,8 +482,8 @@ pub struct CountApaArgs {
     ////////////////////////
     #[arg(
         long = "gene-min-cells",
-        default_value_t = 10,
-        help = "Min cells per gene for expression QC"
+        default_value_t = 1,
+        help = "Min cells per gene for expression QC; 1 = drop only empty rows (stricter floors: `faba qc`)"
     )]
     pub(crate) gene_min_cells: usize,
 
@@ -521,8 +496,8 @@ pub struct CountApaArgs {
 
     #[arg(
         long = "cell-min-genes",
-        default_value_t = 10,
-        help = "Min detected genes (nnz) per cell for expression QC"
+        default_value_t = 1,
+        help = "Min detected genes (nnz) per cell for expression QC; 1 = drop only empty columns (stricter floors: `faba qc`)"
     )]
     pub(crate) cell_min_genes: usize,
 
@@ -548,14 +523,14 @@ pub struct CountApaArgs {
     #[command(flatten)]
     pub(crate) mito_qc: crate::quant::MitoQcArgs,
 
-    /// Reuse a per-batch cell set from `faba genes` instead of recomputing QC
+    /// Reuse a per-batch cell set from `faba count` instead of recomputing QC
     #[arg(
         long = "valid-cells",
-        help = "Directory of `faba genes` outputs ({batch}_cells.tsv.gz) to reuse"
+        help = "Directory of `faba count` outputs ({batch}_cells.tsv.gz) to reuse"
     )]
     pub(crate) valid_cells_file: Option<Box<str>>,
 
-    /// Reuse the retained-gene set from `faba genes` (its pooled `genes_kept.tsv.gz`)
+    /// Reuse the retained-gene set from `faba count` (its pooled `genes_kept.tsv.gz`)
     #[arg(long = "valid-genes")]
     pub(crate) valid_genes_file: Option<Box<str>>,
 }
@@ -625,7 +600,7 @@ pub fn run_apa(args: &mut CountApaArgs) -> anyhow::Result<()> {
         check_bam_index(bam_file, None)?;
     }
 
-    // Gene expression QC: reuse a passed cell/gene set from `faba genes`, or
+    // Gene expression QC: reuse a passed cell/gene set from `faba count`, or
     // recompute it (per-batch cell calling). Only mixture mode consumes these
     // fields; running QC for simple mode would pay the scan cost and discard it.
     // `valid_cell_barcodes` is pre-populated in `faba all` pipeline mode, which

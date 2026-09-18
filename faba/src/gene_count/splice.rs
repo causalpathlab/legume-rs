@@ -26,7 +26,7 @@ pub fn format_gene_key(rec: &GffRecord) -> Box<str> {
 /// BAM tags and the read-admission threshold for gene counting.
 ///
 /// Grouped rather than passed as loose arguments so every counting entry point
-/// takes the same admission policy by construction: `faba genes` and the gene QC
+/// takes the same admission policy by construction: `faba count` and the gene QC
 /// pass behind each modality build one of these and cannot drift apart in which
 /// tag they read or which alignments they trust.
 #[derive(Clone, Copy)]
@@ -43,7 +43,7 @@ pub struct CountReadOpts<'a> {
 /// Deliberately narrower than [`bam_io::passes_alignment_filters`], which the
 /// pileup modalities use: that predicate also requires `is_proper_pair()` for
 /// paired records, which would drop legitimate reads from paired-end bulk input,
-/// and `faba genes` quantifies bulk as well as single-cell libraries. The
+/// and `faba count` quantifies bulk as well as single-cell libraries. The
 /// duplicate flag is already screened by the `for_each_record_in_gene*`
 /// iterators, so it is not repeated here.
 ///

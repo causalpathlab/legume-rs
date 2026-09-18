@@ -115,15 +115,14 @@ pub struct SnpArgs {
     pub gene_barcode_tag: Box<str>,
 
     /// Bulk mode: only produce genotype calls, no per-cell matrices.
-    /// Use for bulk WGS/RNA-seq or when only the SNP mask is needed.
+    /// Use for bulk WGS/RNA-seq or when only the call set is needed.
     #[arg(
         long,
         default_value_t = false,
         help = "Bulk mode (genotype calls only, no per-cell output)",
         long_help = "When set, only snp_sites.parquet is produced.\n\
                      No per-cell allele count or depth matrices are written.\n\
-                     Use for bulk WGS/RNA-seq,\n\
-                     or when you only need the SNP mask for --snp-mask in faba atoi/dartseq/apa."
+                     Use for bulk WGS/RNA-seq, or when only the call set is needed."
     )]
     pub bulk: bool,
 
@@ -266,14 +265,14 @@ pub struct SnpArgs {
     ///////////////////
     // Quality model //
     ///////////////////
-    /// Use per-base quality scores for genotype likelihoods (Li 2011 model).
+    /// Per-base quality scores for genotype likelihoods (Li 2011 model) are
+    /// on by default; this flag turns them off.
     #[arg(
-        long = "use-base-quality",
-        default_value_t = true,
-        help = "Use per-base quality in genotype model",
-        long_help = "When enabled,\n\
-                     genotype likelihoods use per-read Phred quality scores (Li 2011 model) instead of a constant error rate.\n\
-                     More accurate but slightly slower."
+        long = "no-base-quality",
+        action = clap::ArgAction::SetFalse,
+        help = "Use a constant error rate instead of per-base quality in the genotype model",
+        long_help = "By default genotype likelihoods use per-read Phred quality scores (Li 2011 model).\n\
+                     This flag switches to a constant error rate instead: slightly faster, less accurate."
     )]
     pub use_base_quality: bool,
 
@@ -414,11 +413,10 @@ pub fn run_snp(args: &SnpArgs) -> anyhow::Result<()> {
         bulk: args.bulk,
         umi_tag,
         use_base_quality: args.use_base_quality,
-        min_vaf: None, // standalone genotyping — no VAF filter on mask
     };
 
-    let snp_mask = run_snp_pipeline(known_snps.as_ref(), gff_map.as_ref(), &params, discover)?;
-    info!("done: {} variant positions in SNP mask", snp_mask.len());
+    run_snp_pipeline(known_snps.as_ref(), gff_map.as_ref(), &params, discover)?;
+    info!("done");
 
     Ok(())
 }
