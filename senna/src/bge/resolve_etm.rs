@@ -3,7 +3,7 @@
 //! and write a topic-model-shaped output layout (`latent` = log θ,
 //! `dictionary` = β). Called from the shared [`crate::bge::driver`].
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use graph_embedding_util as ge;
 
 //////////////////////////////////////////////////////////////////////

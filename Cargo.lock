@@ -3766,6 +3766,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lupin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "gene-text",
+ "graph-embedding-util",
+ "log",
+ "matrix-util",
+ "senna",
+ "serde_json",
+]
+
+[[package]]
 name = "lz4-sys"
 version = "1.11.1+lz4-1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

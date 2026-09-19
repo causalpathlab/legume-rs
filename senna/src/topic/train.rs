@@ -5,7 +5,7 @@
 //! builds per-level data from `CollapsedOut` + `FeatureCoarsening`, and
 //! wires senna's anchor-prior penalty into the trainer's `loss_hook`.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::cmd::TopicArgs;
 
 use candle_core::{Device, Tensor};

@@ -33,7 +33,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     validate_args(args)?;
 
-    let batch_files = crate::senna_input::effective_batch_files(
+    let batch_files = senna::senna_input::effective_batch_files(
         args.collapse.ignore_batch,
         args.batch_files.as_deref(),
     );
@@ -54,7 +54,7 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
 
     let data_files = inputs.files.clone();
     fit_embed_family(EmbedPlan {
-        kind: crate::run_manifest::RunKind::Gem,
+        kind: senna::run_manifest::RunKind::Gem,
         knobs: args.knobs(embedding_dim),
         unified,
         data_files,
@@ -68,14 +68,14 @@ pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
         carried: preset.carried,
         pb_reference: None,
         init_from: None,
-        train_args: crate::run_manifest::record_train_args(args)?,
+        train_args: senna::run_manifest::record_train_args(args)?,
         after_fit: Some(&|a| write_contrast(a, &plan)),
     })
 }
 
 fn validate_args(args: &GemArgs) -> anyhow::Result<()> {
     args.collapse
-        .reject_pb_reference(crate::run_manifest::RunKind::Gem)?;
+        .reject_pb_reference(senna::run_manifest::RunKind::Gem)?;
     Ok(())
 }
 

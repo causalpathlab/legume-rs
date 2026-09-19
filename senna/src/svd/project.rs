@@ -13,13 +13,13 @@
 //! why both consumers do, and why `impute` re-projects its reference rather
 //! than reading the stored latent.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::eval::{
     build_gene_remap_with, ensure_gene_coverage, hide_features, QueryNameOpts,
 };
 
 /// The training-time normalization scale, replayed from the manifest's
-/// recorded fit arguments through the typed [`crate::run_manifest::RunManifest::train_args_as`]
+/// recorded fit arguments through the typed [`senna::run_manifest::RunManifest::train_args_as`]
 /// reader. Runs predating the manifest (or the `train_args` record) take the
 /// fit's long-standing default.
 ///
@@ -31,7 +31,7 @@ use crate::topic::eval::{
 /// otherwise need.
 pub(crate) fn column_sum_norm(model: &str) -> f32 {
     const DEFAULT: f32 = 1e4;
-    let Ok((manifest, _)) = crate::run_manifest::load_for(model) else {
+    let Ok((manifest, _)) = senna::run_manifest::load_for(model) else {
         info!("no manifest for {model}; using the default normalization scale");
         return DEFAULT;
     };

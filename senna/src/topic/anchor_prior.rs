@@ -12,7 +12,7 @@
 //! don't register that Var (e.g. vMF).
 
 use crate::anchor_common::{gram_schmidt_anchors, softmax_col_into, zscore_columns};
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_nn::VarMap;

@@ -168,6 +168,11 @@ fn no_signal_yields_no_calls() {
         calls.iter().all(|&t| t == UNASSIGNED),
         "called {calls:?} on labels with no cluster structure"
     );
+    let best = cluster_best(&ora, 4, 2);
+    assert!(
+        best.iter().all(|&t| t < 2),
+        "best match must still name a term index: {best:?}"
+    );
 }
 
 /// The null pool is `n_perm × n_comm`, so a partition that is already fine buys its own

@@ -5,7 +5,7 @@
 //! rather than only at the end. The trace covers warmup as well as the retained
 //! draws — burn-in is the part worth looking at.
 
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use anyhow::{Context, Result};
 use matrix_util::common_io::open_buf_writer;
 use std::io::Write;

@@ -57,7 +57,7 @@ pub fn masked_head_from_model_type(model_type: &str) -> Option<LatentHead> {
     }
 }
 
-pub use crate::embed_common::latent_to_theta;
+pub use senna::embed_common::latent_to_theta;
 
 /// Resolve which family of run lives at `prefix`, for commands that dispatch on
 /// it. `probe` is the caller; `update` deliberately is not — it needs the whole
@@ -76,10 +76,10 @@ pub use crate::embed_common::latent_to_theta;
 /// resolved through a manifest.
 ///
 /// Callers decide what they *support*; this only says what the run *is*.
-pub fn resolve_run_kind(prefix: &str) -> anyhow::Result<crate::run_manifest::RunKind> {
-    use crate::run_manifest::{RunKind, RunManifest};
+pub fn resolve_run_kind(prefix: &str) -> anyhow::Result<senna::run_manifest::RunKind> {
+    use senna::run_manifest::{RunKind, RunManifest};
 
-    let manifest = std::path::PathBuf::from(crate::run_manifest::default_path(prefix));
+    let manifest = std::path::PathBuf::from(senna::run_manifest::default_path(prefix));
     if manifest.is_file() {
         let (m, _) = RunManifest::load(&manifest)?;
         return Ok(m.kind);

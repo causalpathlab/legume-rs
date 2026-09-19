@@ -1,5 +1,5 @@
-use crate::embed_common::*;
-use crate::senna_input::{
+use senna::embed_common::*;
+use senna::senna_input::{
     read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
 };
 use data_beans::sparse_data_visitors::VisitColumnsOps;
@@ -94,7 +94,7 @@ pub struct JointSvdArgs {
 pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     args.collapse
-        .reject_pb_reference(crate::run_manifest::RunKind::JointSvd)?;
+        .reject_pb_reference(senna::run_manifest::RunKind::JointSvd)?;
 
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
@@ -113,7 +113,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     if args.collapse.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
         for batch in &mut batch_stack {
-            crate::senna_input::collapse_to_single_batch(batch);
+            senna::senna_input::collapse_to_single_batch(batch);
         }
     }
 
@@ -202,13 +202,13 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
     let cell_names = data_stack.column_names()?;
     let gene_names = data_stack.row_names()?;
 
-    crate::output_helpers::save_latent(
+    senna::output_helpers::save_latent(
         &args.out,
         &nystrom_out.latent_nk,
         &cell_names,
         output_keep_idx.as_deref(),
     )?;
-    crate::output_helpers::save_dictionary(&args.out, &nystrom_out.dictionary_dk, &gene_names)?;
+    senna::output_helpers::save_dictionary(&args.out, &nystrom_out.dictionary_dk, &gene_names)?;
 
     // Modality-0 only — joint multi-modality annotation is a follow-up.
     {
@@ -218,7 +218,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         };
         let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
         let gene_names_0: Vec<Box<str>> = data_stack.stack[0].row_names()?;
-        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
+        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
     }
 
     crate::postprocess::viz_prep::write_cell_proj(
@@ -238,9 +238,9 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: None,
-        kind: crate::run_manifest::RunKind::JointSvd,
+        kind: senna::run_manifest::RunKind::JointSvd,
         prefix: &args.out,
         data_input: &input,
         data_multiome: None,

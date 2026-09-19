@@ -13,8 +13,8 @@
 //! happens in `build_remap`, as for every other input. The model's genes are
 //! consulted here only to decide which axis of the table is the gene axis.
 
-use crate::embed_common::{oriented, read_labeled_mat, resolve_orientation, BulkTableOpts};
-use crate::run_manifest::RunKind;
+use senna::embed_common::{oriented, read_labeled_mat, resolve_orientation, BulkTableOpts};
+use senna::run_manifest::RunKind;
 use data_beans::sparse_io::{create_sparse_from_dmatrix, remove_backend_path};
 use log::{info, warn};
 use std::path::{Path, PathBuf};

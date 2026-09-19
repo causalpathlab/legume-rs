@@ -14,7 +14,7 @@
 //! ambient mixture, empirical dictionary, feature coarsening) does not apply to a
 //! continuous-factor model and is intentionally omitted.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
@@ -25,7 +25,7 @@ use candle_util::decoder::GaussianNbDecoder;
 use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct VaeArgs {
     #[arg(
         value_delimiter = ',',
@@ -80,7 +80,7 @@ pub struct VaeArgs {
     /// neither a CLI flag nor part of the recorded configuration.
     #[arg(skip)]
     #[serde(skip)]
-    pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
+    pub(crate) pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
     #[arg(
         long,
@@ -222,7 +222,7 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     let inherited = args
         .from
         .as_deref()
-        .map(crate::run_manifest::inherit_from)
+        .map(senna::run_manifest::inherit_from)
         .transpose()?;
     if let Some(inh) = inherited.as_ref() {
         info!(
@@ -235,18 +235,18 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
             inh.source_kind
         );
     }
-    crate::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "vae")?;
-    let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
+    senna::run_manifest::InheritedFromManifest::ensure_replayable(inherited.as_ref(), "vae")?;
+    let data_files = senna::run_manifest::InheritedFromManifest::resolve_data(
         inherited.as_ref(),
         &args.data_files,
     )?;
-    let batch_files = crate::run_manifest::InheritedFromManifest::resolve_batch(
+    let batch_files = senna::run_manifest::InheritedFromManifest::resolve_batch(
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
     let prebuilt_partition = inherited
         .as_ref()
-        .map(super::run_manifest::InheritedFromManifest::load_cell_to_pb)
+        .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
         .transpose()?
         .flatten();
 
@@ -525,9 +525,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
     let z_nk = evaluate_latent_by_encoder(&data_vec, &cpu_encoder, finest_collapsed, &eval_config)?;
 
     let cell_names = data_vec.column_names()?;
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
+    senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
-    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+    let pb_reference_suffix = senna::pb_reference::emit_if_requested(
         args.collapse.emits_pb_reference(),
         &args.out,
         finest_collapsed,
@@ -570,9 +570,9 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         .as_deref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        train_args: Some(crate::run_manifest::record_train_args(args)?),
-        kind: crate::run_manifest::RunKind::Vae,
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
+        train_args: Some(senna::run_manifest::record_train_args(args)?),
+        kind: senna::run_manifest::RunKind::Vae,
         prefix: &args.out,
         data_input: &input,
         data_multiome: None,

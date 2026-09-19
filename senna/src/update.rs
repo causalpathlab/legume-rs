@@ -2,7 +2,7 @@
 //! training, rather than refitting the cohort from scratch.
 //!
 //! **This is a dispatcher, not a trainer.** It reconstructs the parent's own
-//! fit call — recorded in its manifest as [`crate::run_manifest::TrainArgsRecord`]
+//! fit call — recorded in its manifest as [`senna::run_manifest::TrainArgsRecord`]
 //! — points it at `recorded ∪ new` data, turns on warm start, and hands the
 //! whole thing to the unchanged family entry point. No new estimator, no second
 //! training path to keep in sync with the first.
@@ -17,7 +17,7 @@
 //!
 //! What that costs is time: re-reading every previously absorbed cell makes a
 //! chain of S samples O(S²) in cell reads. So by default a round substitutes the
-//! parent's carried pseudobulks for its cells ([`crate::pb_reference`]) and
+//! parent's carried pseudobulks for its cells ([`senna::pb_reference`]) and
 //! costs the new data only; the exact re-collapse remains the baseline it is
 //! checked against (`--no-pb-reference`), and the fallback when the
 //! substitution is impossible — see [`select_reference`].
@@ -27,8 +27,8 @@
 //! `align_cell_to_pb_to_cells` bails on any cell absent from the source — which
 //! every new cell is. `from` is forced to `None`.
 
-use crate::embed_common::*;
-use crate::run_manifest::{RunKind, RunManifest};
+use senna::embed_common::*;
+use senna::run_manifest::{RunKind, RunManifest};
 use std::path::{Path, PathBuf};
 
 /// The four things `update` changes about a recorded fit.
@@ -56,7 +56,7 @@ pub(crate) struct Rebase {
     pub growth: crate::topic::warm_start::Growth,
     /// The parent's carried pseudobulks when they are standing in for its
     /// cells; `None` means this round re-collapses.
-    pub reference: Option<crate::pb_reference::ReferenceInput>,
+    pub reference: Option<senna::pb_reference::ReferenceInput>,
 }
 
 /// A fit whose recorded arguments can be re-pointed at a larger cohort.
@@ -203,7 +203,7 @@ fn recorded_paths(recorded: &[String], dir: &Path) -> Vec<Box<str>> {
             if Path::new(s).exists() {
                 return s.as_str().into();
             }
-            let rel = crate::run_manifest::resolve(dir, s);
+            let rel = senna::run_manifest::resolve(dir, s);
             if rel.exists() {
                 return rel.to_string_lossy().into_owned().into();
             }
@@ -288,8 +288,8 @@ fn select_reference(
     args: &UpdateArgs,
     manifest: &RunManifest,
     recorded: &[Box<str>],
-) -> anyhow::Result<Option<crate::pb_reference::ReferenceInput>> {
-    let chosen: Result<Option<crate::pb_reference::ReferenceInput>, String> =
+) -> anyhow::Result<Option<senna::pb_reference::ReferenceInput>> {
+    let chosen: Result<Option<senna::pb_reference::ReferenceInput>, String> =
         if args.no_pb_reference {
             Err("--no-pb-reference was passed".into())
         } else if manifest.kind == RunKind::Simba {
@@ -315,7 +315,7 @@ fn select_reference(
             // A sidecar whose backend has gone missing, or that fails to
             // parse, is "nothing to substitute": a moved run directory used to
             // update fine and must keep doing so.
-            match crate::pb_reference::prepare(&args.model, &args.out) {
+            match senna::pb_reference::prepare(&args.model, &args.out) {
                 Ok(Some(r)) => Ok(Some(r)),
                 Ok(None) => Err(format!(
                     "{} carries no pseudobulks (trained with --no-emit-pb-reference, or before \
@@ -375,7 +375,7 @@ fn multiome_in_args(args: &serde_json::Value) -> bool {
 fn carried_reference_among(recorded: &[Box<str>]) -> Option<&str> {
     // Either the `.zarr.zip` archive or the unzipped `.zarr` directory an
     // older binary wrote; the archive suffix extends the directory one.
-    let suffix = format!(".{}", crate::pb_reference::BACKEND_SUFFIX);
+    let suffix = format!(".{}", senna::pb_reference::BACKEND_SUFFIX);
     let legacy = suffix.trim_end_matches(".zip");
     recorded
         .iter()
@@ -398,7 +398,7 @@ pub fn run_update(args: &UpdateArgs) -> anyhow::Result<()> {
     // cannot help here anyway: without a manifest there is no recorded fit to
     // replay, so a manifest-less prefix has to fail — with this message rather
     // than a bare io error one line later.
-    let manifest_path = PathBuf::from(crate::run_manifest::default_path(&args.model));
+    let manifest_path = PathBuf::from(senna::run_manifest::default_path(&args.model));
     let (manifest, dir) = RunManifest::load(&manifest_path).map_err(|e| {
         anyhow::anyhow!(
             "{e}\n`senna update` replays the parent's recorded fit, which lives in its run \

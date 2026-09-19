@@ -4,7 +4,7 @@
 use super::args::FneArgs;
 use super::graph::TypedGraphBuilder;
 use super::output::{write_outputs, write_text_export};
-use crate::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
+use senna::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
 use auxiliary_data::ontology::Ontology;
 use graph_embedding_util::fne::{train, FneConfig};

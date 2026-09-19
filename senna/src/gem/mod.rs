@@ -37,10 +37,8 @@ pub(crate) mod hvg;
 /// gene files by sample id, loads them into one `UnifiedData`, and assigns
 /// the [`tracks::TrackPlan`].
 pub(crate) mod load;
-/// Loading gem's co-embedded **feature** embedding (`{out}.feature_coembedding.parquet`)
-/// for the marker-space nearest-centroid call in `senna annotate-by-projection` / `senna lineage`:
-/// the metric-compatible table, not β. See the module docs for why β/θ can't be used.
-pub mod marker_embedding;
+/// Loading of gem's co-embedded feature table for annotate / lineage lives in
+/// [`crate::marker_embedding`] (not β).
 /// `--{freeze,init,lora}-feature-embedding` read onto the row grammar: base
 /// rows, per-track offsets, carried rows.
 pub(crate) mod preset;

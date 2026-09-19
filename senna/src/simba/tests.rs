@@ -2,8 +2,8 @@
 //! artifacts and a manifest that downstream commands can open.
 
 use super::{fit_simba, SimbaArgs};
-use crate::embed_common::Mat;
-use crate::run_manifest::{CellSpace, RunKind, RunManifest};
+use senna::embed_common::Mat;
+use senna::run_manifest::{CellSpace, RunKind, RunManifest};
 use clap::Parser;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use matrix_util::traits::IoOps;

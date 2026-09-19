@@ -8,7 +8,7 @@
 //! (the `masked_topic` command, `train_cell_embedded`) on stable import paths.
 
 use super::common::sample_collapsed_data_dp;
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 use candle_core::Tensor;
 use candle_util::encoder::IndexedEmbeddingEncoder;

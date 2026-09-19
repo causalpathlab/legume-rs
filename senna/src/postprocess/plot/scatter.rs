@@ -12,14 +12,14 @@
 //! into a `ResolvedInputs`, buckets cells by group, dispatches per-group
 //! rasterization via rayon, emits SVG, then renders PNG + PDF.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::postprocess::plot::hull::{
     convex_hull, hull_centroid, median_xy, trim_outliers_by_median, Pt,
 };
 use crate::postprocess::plot::palette::{self, Palette};
 use crate::postprocess::plot::rasterize::{rasterize_group_png, DataBounds, Extent, PointShape};
 use crate::postprocess::plot::svg_emit::{emit_svg, SvgOpts, TopicLayer};
-use crate::run_manifest::{self, RunManifest};
+use senna::run_manifest::{self, RunManifest};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::fs;
@@ -969,8 +969,8 @@ fn argmax_topics(path: &str, n_cells_expected: usize) -> anyhow::Result<Vec<i64>
     }
     // `T{c}` carries an ID; `h{c}` is an embedding axis, numbered by position;
     // anything else is refused rather than argmaxed as if it were a composition.
-    let topic_ids = crate::embed_common::try_parse_axis_ids(&cols, "T")
-        .or_else(|| crate::embed_common::try_parse_axis_ids(&cols, "h"))
+    let topic_ids = senna::embed_common::try_parse_axis_ids(&cols, "T")
+        .or_else(|| senna::embed_common::try_parse_axis_ids(&cols, "h"))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "topics parquet at {path} has columns that are neither topic IDs (`T{{c}}`) \
@@ -1018,13 +1018,13 @@ fn resolve_cluster_ids_for_plot(
     if let Some(path) = resolved.clusters.as_deref() {
         info!("Loading clusters from {path}");
         let (labels_usize, n_clusters) =
-            crate::annotate::inputs::load_cluster_labels(path, cell_names)?;
+            senna::annotate::inputs::load_cluster_labels(path, cell_names)?;
         info!("Loaded {n_clusters} clusters from manifest.cluster.clusters");
         return Ok(usize_to_signed(&labels_usize));
     }
 
     // Path 2: leiden on the manifest's latent. Defaults mirror annotate.
-    let leiden_args = crate::annotate::inputs::LeidenArgs {
+    let leiden_args = senna::annotate::inputs::LeidenArgs {
         knn: 15,
         resolution: 1.0,
         num_clusters: None,
@@ -1041,7 +1041,7 @@ fn resolve_cluster_ids_for_plot(
         "No 'cluster' column in cell_coords and manifest.cluster.clusters is unset; \
          running internal Leiden on the manifest latent"
     );
-    let (labels_usize, n_clusters) = crate::annotate::inputs::compute_clusters_from_latent(
+    let (labels_usize, n_clusters) = senna::annotate::inputs::compute_clusters_from_latent(
         manifest,
         &resolve,
         cell_names,
