@@ -1,4 +1,5 @@
-//! `canna` — copy-number profiles from single-cell expression backends
+//! `mung` (Malignancy Unmixing on Normalized Genomes) — copy-number
+//! profiles from single-cell expression backends
 //! (crate/lib: `cnv`).
 
 use anyhow::Context;
@@ -15,9 +16,9 @@ use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "canna",
+    name = "mung",
     version,
-    about = "canna — copy-number variation from single-cell expression",
+    about = "mung — Malignancy Unmixing on Normalized Genomes",
     long_about = "Reads `data-beans` backends (.zarr.zip / .zarr / .h5) and writes\n\
                   copy-number profiles and clone strata for `--cnv-clones` consumers.\n\
                   \n\
@@ -62,7 +63,7 @@ enum Commands {
                       by every cell becomes invisible.\n\
                       \n\
                       Example:\n  \
-                      canna infercnv --gff gencode.v46.gtf.gz \\\n    \
+                      mung infercnv --gff gencode.v46.gtf.gz \\\n    \
                       --ref Control1.zarr.zip Control2.zarr.zip \\\n    \
                       --out aml001.cnv AML001.zarr.zip"
     )]
@@ -229,7 +230,7 @@ struct CloneArgs {
         long,
         default_value_t = 0,
         help = "Genomic tile size in bp for inferCNV rows and the clone sketch (0 = inferCNV default)",
-        long_help = "Same `--bin-size` as `canna infercnv` (default 0 = classic inferCNV).\n\
+        long_help = "Same `--bin-size` as `mung infercnv` (default 0 = classic inferCNV).\n\
                      When running inferCNV first: average smoothed genes into fixed genomic\n\
                      tiles of this many bp (0 = one row per gene). Prefer `1000000` (1 Mb)\n\
                      on large cohorts for the CNV backend itself.\n\

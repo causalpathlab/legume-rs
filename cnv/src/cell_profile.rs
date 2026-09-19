@@ -539,7 +539,7 @@ pub fn run_cell_profiles(
         bar.finish_and_clear();
 
         out.finalize_streaming_csc()?;
-        // CSC-only: canna never reads `/by_row` (rebuild CSR if a row-wise API needs it).
+        // CSC-only: mung never reads `/by_row` (rebuild CSR if a row-wise API needs it).
         out.register_row_names_vec(&feats.row_names);
         let query_names: Vec<Box<str>> =
             query_cols.iter().map(|&c| cell_names[c].clone()).collect();
