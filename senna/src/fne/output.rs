@@ -77,6 +77,11 @@ pub(crate) fn write_outputs(
         .map(|r| Box::from(out.node_types.name(r.rhs_type as usize)))
         .collect();
     let weight: Vec<f32> = out.relations.iter().map(|r| r.weight).collect();
+    let polarity: Vec<Box<str>> = out
+        .relations
+        .iter()
+        .map(|r| Box::from(r.polarity.as_str()))
+        .collect();
     let as_i32 = |f: fn(&ge::fne::RelationStats) -> usize| -> Vec<i32> {
         out.per_relation.iter().map(|s| f(s) as i32).collect()
     };
@@ -101,6 +106,7 @@ pub(crate) fn write_outputs(
         &[
             (Box::from("lhs_type"), Column::Str(&lhs)),
             (Box::from("rhs_type"), Column::Str(&rhs)),
+            (Box::from("polarity"), Column::Str(&polarity)),
             (Box::from("weight"), Column::F32(&weight)),
             (Box::from("n_edges"), Column::I32(&n_edges)),
             (Box::from("n_train"), Column::I32(&n_train)),

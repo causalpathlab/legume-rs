@@ -50,14 +50,20 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
     assert_eq!(a.train.wd_interval, 50);
     assert_eq!(a.train.eval_fraction, 0.05);
     assert!(a.networks.is_empty());
+    assert!(a.named_pairs.is_empty());
+    assert!(a.relation_polarity.is_empty());
     assert!(a.edges.is_empty());
     let b: FneArgs = parse_args(&[
         "fne",
         "ppi.tsv,string.tsv",
+        "--named-pairs",
+        "mixed.tsv",
         "--edges",
         "a.tsv,b.tsv",
         "--relation-weight",
         "gene:word=0.5,gene:gene/ppi=2",
+        "--relation-polarity",
+        "gene:gene/genetic_sl=enemy",
         "--ppi-max-degree",
         "50",
         "--ppi-snn-k",
@@ -71,8 +77,10 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
         "x",
     ]);
     assert_eq!(b.networks.len(), 2);
+    assert_eq!(b.named_pairs.len(), 1);
     assert_eq!(b.edges.len(), 2);
     assert_eq!(b.relation_weight.len(), 2);
+    assert_eq!(b.relation_polarity.len(), 1);
     assert_eq!(b.train.learning_rate, 0.05);
     assert_eq!((b.ppi_max_degree, b.ppi_snn_k, b.no_ppi_ppr), (50, 2, true));
     assert_eq!(b.ppi_ppr_restart, 0.15);
@@ -149,6 +157,29 @@ fn a_pair_file_becomes_one_undirected_gene_relation_with_weights_and_canonical_n
         .collect();
     pairs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     assert_eq!(pairs, vec![(0, 1, 2.0), (0, 2, 1.0)]);
+}
+
+#[test]
+fn named_pairs_split_into_relations_and_polarity_overrides_take_full_ids() {
+    use graph_embedding_util::fne::RelationPolarity;
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "mixed.tsv",
+        "TP53\tMDM2\tphysical\t2.0\nA\tB\tgenetic_sl\nA\tC\tgenetic_sl\t0.5\n",
+    );
+    let mut b = TypedGraphBuilder::new(gene_kind());
+    b.add_named_pair_file(&p).unwrap();
+    b.set_relation_polarity("gene:gene/genetic_sl=enemy")
+        .unwrap();
+    assert!(b.set_relation_polarity("gene:gene/nope=enemy").is_err());
+    assert!(b.set_relation_polarity("gene:gene/physical=maybe").is_err());
+    let g = b.finish().unwrap();
+    let names: Vec<&str> = g.relations.iter().map(|r| r.name.as_ref()).collect();
+    assert_eq!(names, vec!["gene:gene/physical", "gene:gene/genetic_sl"]);
+    assert_eq!(g.relations.get(0).polarity, RelationPolarity::Friend);
+    assert_eq!(g.relations.get(1).polarity, RelationPolarity::Enemy);
+    assert_eq!(g.edges.counts_per_relation(2), vec![1, 2]);
 }
 
 /// Two triangles A,B,C and D,E,F joined by C–D, a pendant G on A, and a
@@ -376,7 +407,7 @@ fn fne_writes_typed_artifacts_and_a_manifest_and_places_genes_with_their_own_typ
 
     let rels = read_parquet_string_columns_by_name(
         &format!("{out}.relations.parquet"),
-        &["relation", "lhs_type", "rhs_type"],
+        &["relation", "lhs_type", "rhs_type", "polarity"],
     )
     .unwrap();
     assert_eq!(
@@ -389,6 +420,7 @@ fn fne_writes_typed_artifacts_and_a_manifest_and_places_genes_with_their_own_typ
             Box::from("gene:term")
         ]
     );
+    assert!(rels[3].iter().all(|p| p.as_ref() == "friend"));
     assert_eq!(rels[2][3].as_ref(), "cell_type");
     let rel_num = Mat::from_parquet(&format!("{out}.relations.parquet")).unwrap();
     let col = |c: &str| rel_num.cols.iter().position(|x| x.as_ref() == c).unwrap();
