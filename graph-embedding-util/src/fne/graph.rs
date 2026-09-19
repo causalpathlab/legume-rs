@@ -113,6 +113,42 @@ impl NodeTypeTable {
     }
 }
 
+/// Whether linked endpoints should attract (high Dot) or repel (low Dot).
+/// Names are geometric only — callers choose polarity; FNE does not map
+/// biological labels (e.g. genetic interaction sign) onto these variants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RelationPolarity {
+    /// Softmax-NCE on Dot: the observed pair should rank above negatives.
+    #[default]
+    Friend,
+    /// Softmax-NCE on −Dot: the observed pair should rank below negatives.
+    Enemy,
+}
+
+impl RelationPolarity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Friend => "friend",
+            Self::Enemy => "enemy",
+        }
+    }
+
+    /// Enemy scores −Dot into softmax-NCE; friend leaves Dot unchanged.
+    #[must_use]
+    pub fn flips_dot(self) -> bool {
+        matches!(self, Self::Enemy)
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "friend" => Ok(Self::Friend),
+            "enemy" => Ok(Self::Enemy),
+            other => anyhow::bail!("unknown polarity `{other}` (expected friend or enemy)"),
+        }
+    }
+}
+
 /// One relation of the graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Relation {
@@ -126,6 +162,8 @@ pub struct Relation {
     /// for loaders and reports only: the loss corrupts both sides of every
     /// relation regardless, so reverse edges are never inserted.
     pub undirected: bool,
+    /// Friend = attract (Dot NCE); Enemy = repel (anti-Dot NCE).
+    pub polarity: RelationPolarity,
 }
 
 #[derive(Clone, Debug)]
