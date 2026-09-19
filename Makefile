@@ -1,12 +1,12 @@
-BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli gene-text canna
+BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli gene-text mung
 
 # Packages whose crate directory / Cargo package name differs from the
-# installed binary name. `canna` is the CLI; the crate stays `cnv`.
+# installed binary name. `mung` is the CLI; the crate stays `cnv`.
 #
 # The mapping has to happen in the shell, not with a make function: the loops
 # below iterate over `$$bin` inside a recipe, so make would only ever see the
 # literal text `$$bin` and never match it.
-crate_pkg_case = case $$bin in canna) pkg=cnv;; *) pkg=$$bin;; esac
+crate_pkg_case = case $$bin in mung) pkg=cnv;; *) pkg=$$bin;; esac
 
 # Binaries with no `cuda` / `metal` feature to pass. `faba` reads BAM files and
 # writes sparse matrices; nothing on that path touches a GPU, and the

@@ -257,11 +257,7 @@ impl<'a> CellPairs<'a> {
         for (name, col) in extra {
             // Name the offending column; parquet's own row-count check fires
             // later and cannot say which one is short.
-            let len = match col {
-                Column::Str(d) => d.len(),
-                Column::F32(d) => d.len(),
-                Column::I32(d) => d.len(),
-            };
+            let len = col.len();
             if len != num_pairs {
                 return Err(anyhow::anyhow!(
                     "column `{}` carries {} values for {} pairs",
@@ -276,6 +272,7 @@ impl<'a> CellPairs<'a> {
                     Column::Str(d) => Column::Str(d),
                     Column::F32(d) => Column::F32(d),
                     Column::I32(d) => Column::I32(d),
+                    Column::I64(d) => Column::I64(d),
                 },
             ));
         }

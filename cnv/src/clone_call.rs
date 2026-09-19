@@ -1,29 +1,39 @@
 //! Donor-private CNV clone calling from inferCNV profiles.
 //!
-//! Cells are sketched to genomic means (per chromosome by default, or
-//! `--bin-size` tiles — same knob as inferCNV), clustered in that space,
-//! then each cluster is scored for donor enclosure and **segmental** (genomic)
-//! structure — elevated chromosome-sketch L1 vs a size-matched null, not tissue
-//! spatial coordinates. A **Gaussian mixture** on those scores (BIC over
-//! `K = 1..=n_eligible`, where eligible clusters pass `min_cells`) decides
-//! which are putative clones; the rest dump into stratum `0` — the mixable
-//! bucket (Controls + CNV-flat / WT-like cells from AML donors). Optional
-//! purity / segmental-z floors only tighten the mixture call. Lean permissive
-//! on `k_max` / `min_cells`: a false clone is under-integration; a missed
-//! clone lets batch δ eat private CN.
+//! Default engine: [`CloneEngine::Bayes`] — two-stage posterior malignancy +
+//! peaky donor-mix components ([`crate::clone_bayes`]). Legacy mixture path
+//! (`--engine mixture`) sketches cells, k-means clusters, scores donor
+//! enclosure × segmental structure, then BIC-gates clusters.
+//!
+//! Stratum `0` is the mixable bucket. A false clone hard-partitions collapse
+//! and under-integrates batch δ — costly; prefer the Bayes gate without
+//! `--ref`.
 
+use crate::clone_bayes::{
+    bayes_config_from_clone_call, call_clones_bayes, load_burden_from_cells_table,
+};
 use crate::kmeans_init::select_kmeans_k;
 use data_beans::sparse_data_visitors::styled_progress_bar;
 use data_beans::sparse_io_vector::SparseIoVec;
 use genomic_data::coordinates::{parse_peak_coordinates, PeakCoord};
 use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::common_io::{read_lines, write_lines};
+use matrix_util::parquet::{read_table_columns, write_named_table, Column};
 use nalgebra::DMatrix;
 use nalgebra_sparse::CscMatrix;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
 use rustc_hash::FxHashMap;
+
+/// Clone-calling engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum CloneEngine {
+    /// Two-stage Bayesian malignancy + peaky donor-mix gate (default).
+    #[default]
+    Bayes,
+    /// Legacy cluster-score Gaussian mixture.
+    Mixture,
+}
 
 /// Knobs for [`call_clones`].
 #[derive(Debug, Clone)]
@@ -33,20 +43,27 @@ pub struct CloneCallConfig {
     /// `> 0` = average into fixed genomic tiles of this many bp (prefer
     /// `1_000_000` with inferCNV's large-cohort guidance).
     pub bin_size: i64,
-    /// k-means K on the genomic sketch (overclustering is fine; failures
-    /// dump to stratum 0).
+    /// Finite K_max (Bayes components / mixture k-means K).
     pub k_max: usize,
-    /// Optional purity floor on top of the mixture (None = mixture only).
+    /// Which gate: Bayes (default) or legacy mixture.
+    pub engine: CloneEngine,
+    /// Donor-mix purity floor. Bayes default ~0.8; mixture `None` = mixture only.
     pub min_purity: Option<f32>,
-    /// Clusters smaller than this cannot be clones (chance purity).
+    /// Clusters / components smaller than this cannot be clones.
     pub min_cells: usize,
     /// Optional segmental-CN z floor on top of the mixture (None = mixture only).
     /// Genomic roughness of the chromosome sketch, not tissue spatial z.
     pub spatial_z: Option<f32>,
-    /// Random subsets drawn for the segmental-CN null.
+    /// Random subsets drawn for the segmental-CN null (mixture only).
     pub n_perm: usize,
     pub seed: u64,
     pub kmeans_iter: usize,
+    /// Bayes Gibbs sweeps after burn-in (posterior samples).
+    pub n_sweeps: usize,
+    /// Bayes burn-in sweeps discarded before posterior averages.
+    pub n_burnin: usize,
+    /// Stratum 0 if `p_malig <` this (Bayes).
+    pub p_malig_threshold: f32,
 }
 
 impl Default for CloneCallConfig {
@@ -54,12 +71,16 @@ impl Default for CloneCallConfig {
         Self {
             bin_size: 0,
             k_max: 8,
+            engine: CloneEngine::Bayes,
             min_purity: None,
             min_cells: 50,
             spatial_z: None,
             n_perm: 32,
             seed: 1,
             kmeans_iter: 200,
+            n_sweeps: 100,
+            n_burnin: 40,
+            p_malig_threshold: 0.5,
         }
     }
 }
@@ -87,6 +108,10 @@ pub struct CloneRow {
     pub purity: f32,
     pub spatial_score: f32,
     pub spatial_z: f32,
+    /// Mean |CNV| burden (from `{prefix}.cells.parquet` or recomputed).
+    pub burden: f32,
+    /// Posterior malignancy `E[m_i]` (Bayes); 0/1 proxy on mixture path.
+    pub p_malig: f32,
 }
 
 /// Donor tag: suffix after the last `@` (data-beans disjoint `@basename`),
@@ -506,15 +531,34 @@ pub fn call_clones_from_sketch(
                 purity: s.purity,
                 spatial_score: s.spatial_score,
                 spatial_z: s.spatial_z,
+                burden: 0.0,
+                p_malig: if remap[lab] > 0 { 1.0 } else { 0.0 },
             }
         })
         .collect()
 }
 
 /// Stream a CNV backend (rows = `chr:start-end`) into a genomic sketch and
-/// call clones.
+/// call clones. Resolves per-cell burden from the `{prefix}.cells.parquet`
+/// hints, else mean |col| fused into the sketch pass.
 pub fn call_clones(data: &SparseIoVec, cfg: &CloneCallConfig) -> anyhow::Result<Vec<CloneRow>> {
+    call_clones_with_burden(data, cfg, None, &[])
+}
+
+/// Like [`call_clones`], with optional precomputed burden and
+/// `{prefix}.cells.parquet` paths to try (first hit wins) before the fused
+/// mean |col|.
+pub fn call_clones_with_burden(
+    data: &SparseIoVec,
+    cfg: &CloneCallConfig,
+    burden: Option<&[f32]>,
+    cells_table_hints: &[&str],
+) -> anyhow::Result<Vec<CloneRow>> {
     anyhow::ensure!(data.num_columns() > 0, "no cells to call clones on");
+    anyhow::ensure!(
+        cfg.engine != CloneEngine::Bayes || cfg.n_sweeps > 0,
+        "--n-sweeps must be >= 1 for the Bayes engine (no posterior samples otherwise)"
+    );
     let row_names = data.row_names()?;
     let coords = parse_peak_coordinates(&row_names);
     let (row_bin, names, inv) = compact_sketch_bins(&coords, cfg.bin_size);
@@ -523,14 +567,22 @@ pub fn call_clones(data: &SparseIoVec, cfg: &CloneCallConfig) -> anyhow::Result<
         "CNV backend rows are not genomic intervals (`chr:start-end`)"
     );
     let n = data.num_columns();
+    let n_rows = data.num_rows().max(1);
+    let inv_rows = 1.0 / n_rows as f32;
     let c = names.len();
     let mut sketch = DMatrix::<f32>::zeros(c, n);
+    // Fuse mean |CNV| while sketching so we never re-read the backend for burden.
+    let mut fused_burden = vec![0f32; n];
     let blocks = matrix_util::utils::generate_minibatch_intervals(n, 0, Some(512));
     let bar = styled_progress_bar(blocks.len() as u64, "clone sketch blocks");
     for (lb, ub) in blocks {
         let csc = data.read_columns_csc(lb..ub)?;
         let block = sketch_csc(&csc, &row_bin, c, &inv);
         sketch.columns_mut(lb, ub - lb).copy_from(&block);
+        for (offset, dest) in fused_burden[lb..ub].iter_mut().enumerate() {
+            let s: f32 = csc.col(offset).values().iter().map(|v| v.abs()).sum();
+            *dest = s * inv_rows;
+        }
         bar.inc(1);
     }
     bar.finish_and_clear();
@@ -541,49 +593,113 @@ pub fn call_clones(data: &SparseIoVec, cfg: &CloneCallConfig) -> anyhow::Result<
         cfg.bin_size
     );
     let cell_names = data.column_names()?;
-    Ok(call_clones_from_sketch(&sketch, &cell_names, cfg))
-}
 
-pub fn write_clone_table(rows: &[CloneRow], path: &str) -> anyhow::Result<()> {
-    let mut lines: Vec<Box<str>> =
-        vec!["cell\tdonor\tcluster\tstratum\tpurity\tspatial_score\tspatial_z".into()];
-    lines.extend(rows.iter().map(|r| {
-        format!(
-            "{}\t{}\t{}\t{}\t{:.4}\t{:.6}\t{:.3}",
-            r.cell, r.donor, r.cluster, r.stratum, r.purity, r.spatial_score, r.spatial_z
-        )
-        .into_boxed_str()
-    }));
-    write_lines(&lines, path)
-}
+    let burden_owned = if let Some(b) = burden {
+        anyhow::ensure!(b.len() == n, "burden length {} != n_cells {}", b.len(), n);
+        None
+    } else {
+        let mut loaded = None;
+        let mut tried: Vec<&str> = Vec::new();
+        for path in cells_table_hints {
+            if path.is_empty() || tried.contains(path) {
+                continue;
+            }
+            tried.push(path);
+            if let Some(b) = load_burden_from_cells_table(path, &cell_names, &fused_burden)? {
+                log::info!("loaded burden from {path}");
+                loaded = Some(b);
+                break;
+            }
+        }
+        if loaded.is_none() {
+            log::info!("using mean |CNV| fused from the sketch pass");
+        }
+        Some(loaded.unwrap_or(fused_burden))
+    };
+    let burden_slice: &[f32] = burden.unwrap_or_else(|| burden_owned.as_deref().unwrap());
 
-pub fn read_clone_table(path: &str) -> anyhow::Result<Vec<CloneRow>> {
-    let lines = read_lines(path)?;
-    let mut rows = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i == 0 && line.starts_with("cell\t") {
-            continue;
+    match cfg.engine {
+        CloneEngine::Bayes => {
+            let bcfg = bayes_config_from_clone_call(cfg);
+            Ok(call_clones_bayes(&sketch, &cell_names, burden_slice, &bcfg))
         }
-        if line.is_empty() {
-            continue;
+        CloneEngine::Mixture => {
+            let mut rows = call_clones_from_sketch(&sketch, &cell_names, cfg);
+            for (r, &b) in rows.iter_mut().zip(burden_slice) {
+                r.burden = b;
+            }
+            Ok(rows)
         }
-        let cols: Vec<&str> = line.split('\t').collect();
-        anyhow::ensure!(
-            cols.len() >= 4,
-            "{}:{}: expected cell, donor, cluster, stratum",
-            path,
-            i + 1
-        );
-        rows.push(CloneRow {
-            cell: cols[0].into(),
-            donor: cols[1].into(),
-            cluster: cols[2].parse()?,
-            stratum: cols[3].parse()?,
-            purity: cols.get(4).and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            spatial_score: cols.get(5).and_then(|s| s.parse().ok()).unwrap_or(0.0),
-            spatial_z: cols.get(6).and_then(|s| s.parse().ok()).unwrap_or(0.0),
-        });
     }
+}
+
+/// Write `{out}.clones.parquet`: one row per cell with `cell`, `donor`,
+/// `cluster`, `stratum`, `purity`, `spatial_score`, `spatial_z`, `burden`,
+/// `p_malig`.
+pub fn write_clone_table(rows: &[CloneRow], path: &str) -> anyhow::Result<()> {
+    let cell: Vec<Box<str>> = rows.iter().map(|r| r.cell.clone()).collect();
+    let donor: Vec<Box<str>> = rows.iter().map(|r| r.donor.clone()).collect();
+    let cluster: Vec<i32> = rows.iter().map(|r| r.cluster as i32).collect();
+    let stratum: Vec<i32> = rows.iter().map(|r| r.stratum as i32).collect();
+    let purity: Vec<f32> = rows.iter().map(|r| r.purity).collect();
+    let spatial_score: Vec<f32> = rows.iter().map(|r| r.spatial_score).collect();
+    let spatial_z: Vec<f32> = rows.iter().map(|r| r.spatial_z).collect();
+    let burden: Vec<f32> = rows.iter().map(|r| r.burden).collect();
+    let p_malig: Vec<f32> = rows.iter().map(|r| r.p_malig).collect();
+    write_named_table(
+        path,
+        "cell",
+        &cell,
+        &[
+            ("donor".into(), Column::Str(&donor)),
+            ("cluster".into(), Column::I32(&cluster)),
+            ("stratum".into(), Column::I32(&stratum)),
+            ("purity".into(), Column::F32(&purity)),
+            ("spatial_score".into(), Column::F32(&spatial_score)),
+            ("spatial_z".into(), Column::F32(&spatial_z)),
+            ("burden".into(), Column::F32(&burden)),
+            ("p_malig".into(), Column::F32(&p_malig)),
+        ],
+    )
+}
+
+/// Read a table written by [`write_clone_table`].
+pub fn read_clone_table(path: &str) -> anyhow::Result<Vec<CloneRow>> {
+    let (strs, nums) = read_table_columns(
+        path,
+        &["cell", "donor"],
+        &[
+            "cluster",
+            "stratum",
+            "purity",
+            "spatial_score",
+            "spatial_z",
+            "burden",
+            "p_malig",
+        ],
+    )?;
+    let n = strs[0].len();
+    let rows = (0..n)
+        .map(|i| {
+            let cluster = nums[0][i];
+            let stratum = nums[1][i];
+            anyhow::ensure!(
+                cluster >= 0.0 && stratum >= 0.0,
+                "{path}: row {i}: negative cluster/stratum"
+            );
+            Ok(CloneRow {
+                cell: strs[0][i].clone(),
+                donor: strs[1][i].clone(),
+                cluster: cluster as usize,
+                stratum: stratum as usize,
+                purity: nums[2][i] as f32,
+                spatial_score: nums[3][i] as f32,
+                spatial_z: nums[4][i] as f32,
+                burden: nums[5][i] as f32,
+                p_malig: nums[6][i] as f32,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -703,6 +819,7 @@ mod tests {
             &sketch,
             &names,
             &CloneCallConfig {
+                engine: CloneEngine::Mixture,
                 k_max: 2,
                 min_cells: 20,
                 min_purity: None,
@@ -747,6 +864,7 @@ mod tests {
             &sketch,
             &names,
             &CloneCallConfig {
+                engine: CloneEngine::Mixture,
                 k_max: 2,
                 min_cells: 20,
                 min_purity: None,
@@ -773,10 +891,38 @@ mod tests {
             purity: 1.0,
             spatial_score: 1.0,
             spatial_z: 3.0,
+            burden: 0.1,
+            p_malig: 0.9,
         }];
         let names: Vec<Box<str>> = ["a", "b"].map(Into::into).to_vec();
         let s = align_strata_to_cells(&rows, &names).unwrap();
         assert_eq!(s, vec![2, 0]);
+    }
+
+    #[test]
+    fn clone_table_roundtrip_keeps_burden_and_p_malig() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("cnv_clone_roundtrip.parquet");
+        let path = path.to_str().unwrap();
+        let rows = vec![CloneRow {
+            cell: "a@D".into(),
+            donor: "D".into(),
+            cluster: 1,
+            stratum: 1,
+            purity: 0.91,
+            spatial_score: 0.12,
+            spatial_z: 2.5,
+            burden: 0.234567,
+            p_malig: 0.8765,
+        }];
+        write_clone_table(&rows, path).unwrap();
+        let got = read_clone_table(path).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].cell.as_ref(), "a@D");
+        assert_eq!(got[0].stratum, 1);
+        assert!((got[0].burden - 0.234567).abs() < 1e-6);
+        assert!((got[0].p_malig - 0.8765).abs() < 1e-4);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
