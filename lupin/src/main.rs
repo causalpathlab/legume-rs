@@ -99,8 +99,12 @@ enum Commands {
         name = "describe",
         about = "Short citation-checked sentence from annotate / lineage_annot evidence",
         long_about = "Builds structured evidence from `{from}.annot.parquet` (or argmax / lineage_annot).\n\
-                      Optionally blends keyword incidence from a `word-graph` prefix.\n\
-                      Writes `{out}.describe.json` and `{out}.describe.txt`.\n\
+                      Optionally fishes per-cluster keywords from a `word-graph` prefix\n\
+                      (`feature_word.edges` over each cluster's markers;\n\
+                      `--feature-embedding` adds nearest-neighbour genes first).\n\
+                      When `{from}.cluster_term_q.parquet` is present,\n\
+                      a second FDR-significant contender is named if one exists.\n\
+                      Writes `{out}.describe.json` and `{out}.describe.md`.\n\
                       \n\
                       The composer never invents labels: sentences are citation-checked.\n\
                       Default composer is a citation-checked template (candle decoder TBD)."
