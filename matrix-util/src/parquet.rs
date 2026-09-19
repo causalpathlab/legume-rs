@@ -143,6 +143,50 @@ pub fn read_parquet_string_columns_by_name(
     Ok(out)
 }
 
+/// String columns and numeric columns of a table, each in request order.
+pub type TableColumns = (Vec<Vec<Box<str>>>, Vec<Vec<f64>>);
+
+/// Read a tidy mixed-type table (as written by [`write_named_table`] /
+/// [`write_table`]): the named string columns and the named numeric columns,
+/// each returned in request order. A missing column of either kind is an
+/// error; a string column requested as numeric (or vice versa) is too.
+pub fn read_table_columns(
+    file_path: &str,
+    string_cols: &[&str],
+    numeric_cols: &[&str],
+) -> anyhow::Result<TableColumns> {
+    let strings = if string_cols.is_empty() {
+        Vec::new()
+    } else {
+        read_parquet_string_columns_by_name(file_path, string_cols)?
+    };
+    if numeric_cols.is_empty() {
+        return Ok((strings, Vec::new()));
+    }
+    let wanted: Vec<Box<str>> = numeric_cols.iter().map(|&c| c.into()).collect();
+    let reader = ParquetReader::new(file_path, None, None, Some(&wanted))?;
+    let ncols = reader.column_names.len();
+    let nrows = if ncols == 0 {
+        0
+    } else {
+        reader.row_major_data.len() / ncols
+    };
+    let numbers = numeric_cols
+        .iter()
+        .map(|&c| {
+            let j = reader
+                .column_names
+                .iter()
+                .position(|n| n.as_ref() == c)
+                .ok_or_else(|| anyhow::anyhow!("numeric column '{c}' not found in {file_path}"))?;
+            Ok((0..nrows)
+                .map(|i| reader.row_major_data[i * ncols + j])
+                .collect())
+        })
+        .collect::<anyhow::Result<Vec<Vec<f64>>>>()?;
+    Ok((strings, numbers))
+}
+
 pub struct ParquetReader {
     pub row_major_data: Vec<f64>,
     pub row_names: Vec<Box<str>>,
@@ -274,9 +318,8 @@ impl ParquetReader {
                         let x = match tt {
                             parquet::basic::Type::DOUBLE => row.get_double(j)?,
                             parquet::basic::Type::FLOAT => row.get_float(j)? as f64,
-                            parquet::basic::Type::INT32 | parquet::basic::Type::INT64 => {
-                                row.get_int(j)? as f64
-                            }
+                            parquet::basic::Type::INT32 => row.get_int(j)? as f64,
+                            parquet::basic::Type::INT64 => row.get_long(j)? as f64,
                             _ => {
                                 unimplemented!("we just support integer and float/double for now")
                             }
@@ -457,6 +500,7 @@ pub enum Column<'a> {
     Str(&'a [Box<str>]),
     F32(&'a [f32]),
     I32(&'a [i32]),
+    I64(&'a [i64]),
 }
 
 /// Write a tidy mixed-type table to parquet: a leading string key column
@@ -476,6 +520,7 @@ pub fn write_named_table(
             Column::Str(_) => ParquetType::BYTE_ARRAY,
             Column::F32(_) => ParquetType::FLOAT,
             Column::I32(_) => ParquetType::INT32,
+            Column::I64(_) => ParquetType::INT64,
         })
         .collect();
 
@@ -495,6 +540,7 @@ pub fn write_named_table(
             Column::Str(d) => parquet_add_string_column(&mut rg, d)?,
             Column::F32(d) => parquet_add_numeric_column(&mut rg, d)?,
             Column::I32(d) => parquet_add_numeric_column(&mut rg, d)?,
+            Column::I64(d) => parquet_add_numeric_column(&mut rg, d)?,
         }
     }
     rg.close()?;
@@ -531,6 +577,7 @@ pub fn write_table(file_path: &str, columns: &[(Box<str>, Column)]) -> anyhow::R
             Column::Str(d) => parquet_add_string_column(&mut rg, d)?,
             Column::F32(d) => parquet_add_numeric_column(&mut rg, d)?,
             Column::I32(d) => parquet_add_numeric_column(&mut rg, d)?,
+            Column::I64(d) => parquet_add_numeric_column(&mut rg, d)?,
         }
     }
     rg.close()?;
@@ -539,12 +586,18 @@ pub fn write_table(file_path: &str, columns: &[(Box<str>, Column)]) -> anyhow::R
 }
 
 impl Column<'_> {
-    fn len(&self) -> usize {
+    /// Number of rows this column carries.
+    pub fn len(&self) -> usize {
         match self {
             Column::Str(d) => d.len(),
             Column::F32(d) => d.len(),
             Column::I32(d) => d.len(),
+            Column::I64(d) => d.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn parquet_type(&self) -> ParquetType {
@@ -552,6 +605,7 @@ impl Column<'_> {
             Column::Str(_) => ParquetType::BYTE_ARRAY,
             Column::F32(_) => ParquetType::FLOAT,
             Column::I32(_) => ParquetType::INT32,
+            Column::I64(_) => ParquetType::INT64,
         }
     }
 }
