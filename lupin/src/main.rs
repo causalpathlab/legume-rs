@@ -6,13 +6,12 @@ mod describe;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gene_text::cli::{run_knn_graph, run_qc, KnnGraphCmd, QcCmd};
-use senna::assoc::run::{run_assoc, AssocArgs};
-use senna::lineage::args::LineageArgs;
-// `lineage` itself takes resolved paths; these adapters turn `-f run.senna.json`
-// into those and record the artifacts they produce.
+use lineage::assoc::run::{run_assoc, AssocArgs};
+use lineage::lineage::args::LineageArgs;
+use lineage::lineage_plot::{run_lineage_plot, LineagePlotArgs};
+use lineage::pseudotime::PseudotimeArgs;
+// Resolved paths and manifest mutation stay in senna adapters.
 use senna::lineage_manifest::{run_lineage_from_manifest, run_pseudotime_from_manifest};
-use senna::lineage_plot::{run_lineage_plot, LineagePlotArgs};
-use senna::pseudotime::PseudotimeArgs;
 
 use annotate::{run_annotate, AnnotateCliArgs};
 use describe::{run_describe, DescribeArgs};

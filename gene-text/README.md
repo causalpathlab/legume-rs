@@ -8,8 +8,8 @@ contextual similarity times TF-IDF. The edges feed `senna fne --edges`; the
 pooled vectors are a text prior for the gene side.
 
 ```
-gene-text qc --uniprot-tsv human.tsv --obo go-basic.obo -o run          # inspect the word cuts (optional)
-gene-text knn-graph --uniprot-tsv human.tsv --obo go-basic.obo -o run   # encode, write the text graph (alias: knn)
+lupin text-qc --uniprot-tsv human.tsv --obo go-basic.obo -o run          # inspect the word cuts (optional)
+lupin word-graph --uniprot-tsv human.tsv --obo go-basic.obo -o run       # encode, write the text graph
 senna fne biogrid.tsv --edges run.feature_word.edges.tsv,run.knn_graph.edges.tsv --relation-weight gene:word=0.5 -o graph
 ```
 
@@ -43,7 +43,7 @@ then both tails of the document-frequency distribution are cut by quantile
 (`--min-df`, `--max-df-frac`). The run prints the df histogram and the words
 on each side of every cut; `{out}.vocab.tsv` lists every candidate with its
 verdict and can be edited and handed back through `knn-graph --vocab-file`.
-`knn-graph` runs the same step itself; `qc` only lets you look first.
+`lupin word-graph` runs the same step itself; `lupin text-qc` only lets you look first.
 
 ## Outputs
 
