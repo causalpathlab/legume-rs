@@ -29,8 +29,6 @@ pub struct LatentContract {
     /// topic-family run stamps one; `senna gem` writes a Euclidean
     /// `cell_embedding` instead.
     pub latent_is_log_simplex: bool,
-    /// Whether the producer is a `senna gem` run, which carries no velocity.
-    pub is_gem: bool,
     /// How the producing run names itself, quoted in diagnostics; `None` when
     /// nothing was readable.
     pub kind: Option<Box<str>>,
@@ -45,10 +43,15 @@ impl LatentContract {
     pub fn unknown(source: impl Into<Box<str>>) -> Self {
         Self {
             latent_is_log_simplex: false,
-            is_gem: false,
             kind: None,
             source: source.into(),
         }
+    }
+
+    /// Whether the producer is a `senna gem` run (no velocity).
+    #[must_use]
+    pub fn is_gem(&self) -> bool {
+        self.kind.as_deref() == Some("gem")
     }
 }
 
@@ -145,8 +148,9 @@ pub(super) fn apply_geometry(theta: &DMatrix<f32>, geometry: LatentGeometry) -> 
         LatentGeometry::Euclidean => theta.clone(),
         LatentGeometry::Cosine => l2_normalize_rows(theta),
         LatentGeometry::Hellinger => theta.map(|v| v.max(0.0).sqrt()),
-        // Resolved by `resolve_geometry` before this point.
-        LatentGeometry::Auto => theta.clone(),
+        LatentGeometry::Auto => {
+            unreachable!("resolve_geometry must run before apply_geometry")
+        }
     }
 }
 

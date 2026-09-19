@@ -92,7 +92,7 @@ pub fn run_lineage(args: &LineageArgs, inputs: &LineageInputs) -> Result<()> {
     let n = theta_native.nrows();
     anyhow::ensure!(n >= 2, "need ≥ 2 cells, got {n}");
 
-    if velocity.is_none() && inputs.contract.is_gem {
+    if velocity.is_none() && inputs.contract.is_gem() {
         info!(
             "gem runs carry no velocity; edges are geometry-only, root with \
              --root-node/--root-cell/--root-type"
@@ -107,11 +107,15 @@ pub fn run_lineage(args: &LineageArgs, inputs: &LineageInputs) -> Result<()> {
 
     // `--markers` scores against the co-embedded gene vectors, which are H-space — so it
     // reads cell_embedding even when the trajectory was fitted on the K-space simplex.
-    let raw_theta: Option<DMatrix<f32>> = args
-        .markers
-        .is_some()
-        .then(|| load_marker_theta(prefix, &cell_names))
-        .transpose()?;
+    // When θ itself already came from cell_embedding, reuse it instead of a second parquet read.
+    let raw_theta: Option<DMatrix<f32>> = if args.markers.is_some() {
+        Some(match theta_from {
+            ThetaFrom::CellEmbedding => theta_native.clone(),
+            _ => load_marker_theta(prefix, &cell_names)?,
+        })
+    } else {
+        None
+    };
 
     let k = choose_k(n, args.n_centroids);
     anyhow::ensure!(k >= 2, "need ≥ 2 centroids, got {k}");

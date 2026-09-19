@@ -16,9 +16,9 @@ use lineage::lineage::run::{run_lineage, LineageInputs};
 use lineage::lineage::LatentContract;
 use lineage::pseudotime::{run_pseudotime, PseudotimeArgs, PseudotimeInputs, PseudotimeOutputs};
 
-use crate::marker_embedding::load_marker_feature_embedding;
+use crate::marker_embedding::load_marker_feature_embedding_from;
 use crate::run_manifest::{
-    default_path, derive_out_prefix, load_for, rel_to_manifest, resolve, RunKind, RunManifest,
+    default_path, derive_out_prefix, load_for, rel_to_manifest, resolve, RunManifest,
 };
 
 /// What `{prefix}`'s manifest says about its per-cell tables, in the form the
@@ -30,11 +30,14 @@ pub fn latent_contract(prefix: &str) -> LatentContract {
     let Ok((manifest, _)) = load_for(prefix) else {
         return LatentContract::unknown(source);
     };
+    contract_from_manifest(&manifest, source)
+}
+
+fn contract_from_manifest(manifest: &RunManifest, source: impl Into<Box<str>>) -> LatentContract {
     LatentContract {
         latent_is_log_simplex: manifest.kind.latent_is_log_simplex(),
-        is_gem: manifest.kind == RunKind::Gem,
         kind: Some(manifest.kind.to_string().into_boxed_str()),
-        source: source.into_boxed_str(),
+        source: source.into(),
     }
 }
 
@@ -42,16 +45,29 @@ pub fn latent_contract(prefix: &str) -> LatentContract {
 /// then run the fit.
 pub fn run_lineage_from_manifest(args: &LineageArgs) -> Result<()> {
     let prefix = args.from.as_ref();
+    let source = default_path(&derive_out_prefix(prefix));
+    let (contract, feature_embedding) = match load_for(prefix) {
+        Ok((manifest, dir)) => {
+            let contract = contract_from_manifest(&manifest, source);
+            let feature_embedding = args
+                .markers
+                .is_some()
+                .then(|| load_marker_feature_embedding_from(&manifest, &dir, prefix))
+                .transpose()?;
+            (contract, feature_embedding)
+        }
+        Err(_) => {
+            anyhow::ensure!(
+                args.markers.is_none(),
+                "--markers needs a readable run.senna.json under {prefix} to locate \
+                 feature_coembedding"
+            );
+            (LatentContract::unknown(source), None)
+        }
+    };
     let inputs = LineageInputs {
-        contract: latent_contract(prefix),
-        // `--markers` scores against the co-embedded gene vectors, and finding
-        // them means reading `outputs.feature_coembedding` — manifest work,
-        // so it happens here rather than inside the fit.
-        feature_embedding: args
-            .markers
-            .is_some()
-            .then(|| load_marker_feature_embedding(prefix))
-            .transpose()?,
+        contract,
+        feature_embedding,
     };
     run_lineage(args, &inputs)
 }
