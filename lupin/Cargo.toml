@@ -25,6 +25,8 @@ clap = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 gene-text = { path = "../gene-text" }
+annotate = { path = "../annotate" }
+lineage = { path = "../lineage" }
 senna = { path = "../senna" }
 graph-embedding-util = { workspace = true }
 matrix-util = { workspace = true }

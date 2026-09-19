@@ -28,7 +28,6 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "m
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
-env_logger = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
 nalgebra = { workspace = true }
