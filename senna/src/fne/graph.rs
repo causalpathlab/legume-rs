@@ -13,7 +13,9 @@ use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::gene_sets::{read_membership_pairs, GeneSets};
 use auxiliary_data::ontology::{Ontology, Rel};
 use genomic_data::coordinates::{parse_region, tile_windows};
-use graph_embedding_util::fne::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
+use graph_embedding_util::fne::{
+    NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList,
+};
 use log::{info, warn};
 use matrix_util::common_io::{file_stem, read_lines_of_words_delim};
 use matrix_util::membership::detect_delimiter;
@@ -57,6 +59,15 @@ impl PpiOpts {
     }
 }
 
+/// How a gene–gene edge file names its relations and where the weight sits.
+#[derive(Clone, Copy)]
+enum GenePairMode {
+    /// One relation for the whole file; optional weight in column 2.
+    Stem { rel: usize },
+    /// Relation token in column 2; optional weight in column 3.
+    Named,
+}
+
 /// Forward-push tolerance of the PageRank approximation: residual mass per
 /// unit degree below which a node is not pushed. Small enough that the
 /// top-k of a gene with hundreds of partners is resolved.
@@ -76,6 +87,7 @@ struct RelSpec {
     rhs_type: usize,
     undirected: bool,
     weight: f32,
+    polarity: RelationPolarity,
     /// Passes over the relation's edges per epoch.
     repeat: usize,
     /// `(lhs local, rhs local) → edge weight`; a repeated pair keeps the
@@ -165,6 +177,7 @@ impl TypedGraphBuilder {
             rhs_type,
             undirected: lhs == rhs,
             weight: 1.0,
+            polarity: RelationPolarity::Friend,
             repeat: 1,
             edges: FxHashMap::default(),
             n_self_loops: 0,
@@ -211,16 +224,7 @@ impl TypedGraphBuilder {
         let stem = file_stem(path);
         let rel_name = format!("{GENE_TYPE}:{GENE_TYPE}/{stem}");
         let r = self.relation(&rel_name, GENE_TYPE, GENE_TYPE);
-        let read = read_lines_of_words_delim(path, detect_delimiter(path), -1)?;
-        let mut n_rows = 0usize;
-        for line in &read.lines {
-            if line.len() < 2 || line[0].starts_with('#') {
-                continue;
-            }
-            let weight = parse_weight(line.get(2).map(AsRef::as_ref), path)?;
-            self.link(r, GENE_TYPE, &line[0], GENE_TYPE, &line[1], weight);
-            n_rows += 1;
-        }
+        let (n_rows, _) = self.ingest_gene_pairs(path, GenePairMode::Stem { rel: r })?;
         let rel = &self.relations[r];
         info!(
             "fne: {path}: {n_rows} pair rows → relation `{}` with {} unique edges ({} self-loops, {} repeats dropped)",
@@ -233,6 +237,80 @@ impl TypedGraphBuilder {
             self.refine_pair_relation(r, &stem, opts);
         }
         Ok(())
+    }
+
+    /// Mixed gene–gene file: `gene1 gene2 relation [weight]`. Each distinct
+    /// relation token becomes `gene:gene/<relation>`; no PPI QC / SNN / PPR.
+    pub(crate) fn add_named_pair_file(&mut self, path: &str) -> anyhow::Result<()> {
+        let (n_rows, touched) = self.ingest_gene_pairs(path, GenePairMode::Named)?;
+        anyhow::ensure!(
+            n_rows > 0,
+            "{path}: no named-pair rows (need `gene gene relation [weight]`)"
+        );
+        let names: Vec<String> = touched
+            .iter()
+            .map(|&r| {
+                format!(
+                    "`{}`:{}",
+                    self.relations[r].name,
+                    self.relations[r].edges.len()
+                )
+            })
+            .collect();
+        info!(
+            "fne: {path}: {n_rows} named-pair rows → {} relation(s) ({})",
+            touched.len(),
+            names.join(", ")
+        );
+        Ok(())
+    }
+
+    /// Shared gene–gene TSV ingest: columns 0/1 are endpoints; weight and
+    /// relation naming follow [`GenePairMode`].
+    fn ingest_gene_pairs(
+        &mut self,
+        path: &str,
+        mode: GenePairMode,
+    ) -> anyhow::Result<(usize, Vec<usize>)> {
+        let (min_cols, weight_col) = match mode {
+            GenePairMode::Stem { .. } => (2, 2),
+            GenePairMode::Named => (3, 3),
+        };
+        let read = read_lines_of_words_delim(path, detect_delimiter(path), -1)?;
+        let mut n_rows = 0usize;
+        let mut tok_to_r: FxHashMap<Box<str>, usize> = FxHashMap::default();
+        let mut touched: Vec<usize> = Vec::new();
+        for line in &read.lines {
+            if line.len() < min_cols || line[0].starts_with('#') {
+                continue;
+            }
+            let r = match mode {
+                GenePairMode::Stem { rel } => rel,
+                GenePairMode::Named => {
+                    let rel_tok = line[2].trim();
+                    anyhow::ensure!(
+                        !rel_tok.is_empty(),
+                        "{path}: empty relation name on a named-pair row"
+                    );
+                    match tok_to_r.get(rel_tok) {
+                        Some(&r) => r,
+                        None => {
+                            let name = format!("{GENE_TYPE}:{GENE_TYPE}/{rel_tok}");
+                            let r = self.relation(&name, GENE_TYPE, GENE_TYPE);
+                            tok_to_r.insert(rel_tok.into(), r);
+                            r
+                        }
+                    }
+                }
+            };
+            let weight = parse_weight(line.get(weight_col).map(AsRef::as_ref), path)?;
+            self.link(r, GENE_TYPE, &line[0], GENE_TYPE, &line[1], weight);
+            if !touched.contains(&r) {
+                touched.push(r);
+            }
+            n_rows += 1;
+        }
+        Ok((n_rows, touched))
     }
 
     /// The QC pipeline of `matrix_util::pair_graph` on one pair relation
@@ -538,12 +616,32 @@ impl TypedGraphBuilder {
         Ok(())
     }
 
+    /// Resolve `name=value` against the relation roster; shared by weight /
+    /// repeat / polarity overrides.
+    fn relation_override<'a>(
+        &self,
+        flag: &str,
+        spec: &'a str,
+        expected: &str,
+    ) -> anyhow::Result<(&'a str, usize)> {
+        let (name, value) = spec
+            .rsplit_once('=')
+            .ok_or_else(|| anyhow::anyhow!("{flag} `{spec}`: expected `{expected}`"))?;
+        let known: Vec<&str> = self.relations.iter().map(|r| r.name.as_ref()).collect();
+        let r = *self.rel_index.get(name.trim()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{flag} `{spec}`: no relation named `{}`; the run has {}",
+                name.trim(),
+                known.join(", ")
+            )
+        })?;
+        Ok((value, r))
+    }
+
     /// `name=weight` overrides; an unknown relation name is an error so a
     /// typo cannot silently leave a relation at 1.
     pub(crate) fn set_relation_weight(&mut self, spec: &str) -> anyhow::Result<()> {
-        let (name, w) = spec
-            .rsplit_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--relation-weight `{spec}`: expected `name=weight`"))?;
+        let (w, r) = self.relation_override("--relation-weight", spec, "name=weight")?;
         let w: f32 = w
             .trim()
             .parse()
@@ -552,37 +650,29 @@ impl TypedGraphBuilder {
             w.is_finite() && w >= 0.0,
             "--relation-weight `{spec}`: weight must be a non-negative number"
         );
-        let known: Vec<&str> = self.relations.iter().map(|r| r.name.as_ref()).collect();
-        let r = *self.rel_index.get(name.trim()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "--relation-weight `{spec}`: no relation named `{}`; the run has {}",
-                name.trim(),
-                known.join(", ")
-            )
-        })?;
         self.relations[r].weight = w;
         Ok(())
     }
 
     /// `name=k` passes per epoch; an unknown relation name is an error.
     pub(crate) fn set_relation_repeat(&mut self, spec: &str) -> anyhow::Result<()> {
-        let (name, k) = spec
-            .rsplit_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--relation-repeat `{spec}`: expected `name=k`"))?;
+        let (k, r) = self.relation_override("--relation-repeat", spec, "name=k")?;
         let k: usize = k
             .trim()
             .parse()
             .map_err(|e| anyhow::anyhow!("--relation-repeat `{spec}`: {e}"))?;
         anyhow::ensure!(k >= 1, "--relation-repeat `{spec}`: k must be at least 1");
-        let known: Vec<&str> = self.relations.iter().map(|r| r.name.as_ref()).collect();
-        let r = *self.rel_index.get(name.trim()).ok_or_else(|| {
-            anyhow::anyhow!(
-                "--relation-repeat `{spec}`: no relation named `{}`; the run has {}",
-                name.trim(),
-                known.join(", ")
-            )
-        })?;
         self.relations[r].repeat = k;
+        Ok(())
+    }
+
+    /// `name=friend|enemy` with the full relation id (as logged).
+    pub(crate) fn set_relation_polarity(&mut self, spec: &str) -> anyhow::Result<()> {
+        let (pol, r) =
+            self.relation_override("--relation-polarity", spec, "name=friend|enemy")?;
+        let polarity = RelationPolarity::parse(pol)
+            .map_err(|e| anyhow::anyhow!("--relation-polarity `{spec}`: {e}"))?;
+        self.relations[r].polarity = polarity;
         Ok(())
     }
 
@@ -639,6 +729,7 @@ impl TypedGraphBuilder {
                 rhs_type: rt as u16,
                 weight: spec.weight,
                 undirected: spec.undirected,
+                polarity: spec.polarity,
             });
             // Sorted so the edge order is a function of the files, not of
             // the hash map.
@@ -657,6 +748,15 @@ impl TypedGraphBuilder {
         let relations = RelationTable::new(relations, &types)?;
         for (t, n) in &type_specs {
             info!("fne: node type `{t}`: {n} nodes");
+        }
+        for r in relations.iter() {
+            info!(
+                "fne: relation `{}`: polarity={} weight={} undirected={}",
+                r.name,
+                r.polarity.as_str(),
+                r.weight,
+                r.undirected
+            );
         }
         Ok(TypedGraph {
             types,

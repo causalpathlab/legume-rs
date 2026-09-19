@@ -49,6 +49,7 @@ fn batch(n_real: usize, c: usize, u: usize, w: &[f32], n_lhs: usize, n_rhs: usiz
         u,
         n_real,
         rel: 0,
+        polarity: crate::fne::RelationPolarity::Friend,
         lhs: vec![0; p],
         rhs: vec![0; p],
         row_w: vec![0.0; p],
@@ -173,6 +174,42 @@ fn the_masked_batch_negative_block_never_scores_a_positive_against_itself_or_a_p
         dot(&lhs[2], &rhs[(b.uni_rhs[1] - 6) as usize]),
         1e-5
     ));
+    // Enemy polarity must negate raw Dots *before* the mask, so pad/diag
+    // slots stay ≪ 0 (MASK_NEG must not become +1e9).
+    let mut enemy = b;
+    enemy.polarity = crate::fne::RelationPolarity::Enemy;
+    let se = model.score_blocks(&enemy, &dev).unwrap();
+    let rb_e = se.rhs_bat.to_vec3::<f32>().unwrap();
+    let lb_e = se.lhs_bat.to_vec3::<f32>().unwrap();
+    let pos_e = se.pos.to_vec2::<f32>().unwrap();
+    for i in 0..c {
+        assert!(
+            approx(f64::from(pos_e[0][i]), -f64::from(pos[0][i]), 1e-5),
+            "enemy pos flips sign"
+        );
+        for j in 0..c {
+            let masked = i == j || j == 3;
+            if masked {
+                assert!(
+                    f64::from(rb_e[0][i][j]) < -1e8,
+                    "enemy rhs [{i},{j}] must stay masked"
+                );
+                assert!(
+                    f64::from(lb_e[0][i][j]) < -1e8,
+                    "enemy lhs [{i},{j}] must stay masked"
+                );
+            } else {
+                assert!(
+                    approx(f64::from(rb_e[0][i][j]), -f64::from(rb[0][i][j]), 1e-5),
+                    "enemy rhs [{i},{j}] flips Dot"
+                );
+                assert!(
+                    approx(f64::from(lb_e[0][i][j]), -f64::from(lb[0][i][j]), 1e-5),
+                    "enemy lhs [{i},{j}] flips Dot"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -290,6 +327,7 @@ fn planted_graph() -> (TypedEdgeList, NodeTypeTable, RelationTable) {
                 rhs_type: 0,
                 weight: 1.0,
                 undirected: true,
+                polarity: crate::fne::RelationPolarity::Friend,
             },
             Relation {
                 name: "marker".into(),
@@ -297,6 +335,7 @@ fn planted_graph() -> (TypedEdgeList, NodeTypeTable, RelationTable) {
                 rhs_type: 1,
                 weight: 1.0,
                 undirected: false,
+                polarity: crate::fne::RelationPolarity::Friend,
             },
             Relation {
                 name: "go".into(),
@@ -304,6 +343,7 @@ fn planted_graph() -> (TypedEdgeList, NodeTypeTable, RelationTable) {
                 rhs_type: 2,
                 weight: 1.0,
                 undirected: false,
+                polarity: crate::fne::RelationPolarity::Friend,
             },
         ],
         &t,
@@ -373,6 +413,94 @@ fn training_a_three_type_graph_places_each_gene_group_with_its_own_type_and_term
     let first = out.epochs.first().unwrap().train_loss;
     let last = out.epochs.last().unwrap().train_loss;
     assert!(last < first, "loss falls over training: {first} → {last}");
+}
+
+#[test]
+fn enemy_polarity_pushes_linked_gene_dots_below_cross_pairs() {
+    // Friend edges within two cliques, enemy edges between them: after
+    // training, mean Dot within a clique should exceed mean Dot across.
+    let t = NodeTypeTable::new(&[("gene", 8)]).unwrap();
+    let rels = RelationTable::new(
+        vec![
+            Relation {
+                name: "ppi".into(),
+                lhs_type: 0,
+                rhs_type: 0,
+                weight: 1.0,
+                undirected: true,
+                polarity: crate::fne::RelationPolarity::Friend,
+            },
+            Relation {
+                name: "gi".into(),
+                lhs_type: 0,
+                rhs_type: 0,
+                weight: 1.0,
+                undirected: true,
+                polarity: crate::fne::RelationPolarity::Enemy,
+            },
+        ],
+        &t,
+    )
+    .unwrap();
+    let mut e = TypedEdgeList::default();
+    for g in 0..2u32 {
+        let lo = g * 4;
+        for i in lo..lo + 4 {
+            for j in (i + 1)..lo + 4 {
+                e.lhs.push(i);
+                e.rhs.push(j);
+                e.rel.push(0);
+            }
+        }
+    }
+    for i in 0..4u32 {
+        for j in 4..8u32 {
+            e.lhs.push(i);
+            e.rhs.push(j);
+            e.rel.push(1);
+        }
+    }
+    let cfg = FneConfig {
+        dim: 8,
+        epochs: 100,
+        batch_size: 16,
+        num_batch_negs: 4,
+        num_uniform_negs: 4,
+        wd: Some(0.0),
+        eval_fraction: 0.0,
+        seed: 2,
+        ..FneConfig::default()
+    };
+    let out = train(e, t, rels, &cfg).unwrap();
+    let emb = out.embedding.to_vec2::<f32>().unwrap();
+    let dot = |a: usize, b: usize| -> f32 {
+        emb[a].iter().zip(&emb[b]).map(|(x, y)| x * y).sum()
+    };
+    let mut within = 0.0f32;
+    let mut n_within = 0usize;
+    for g in 0..2 {
+        let lo = g * 4;
+        for i in lo..lo + 4 {
+            for j in (i + 1)..lo + 4 {
+                within += dot(i, j);
+                n_within += 1;
+            }
+        }
+    }
+    let mut across = 0.0f32;
+    let mut n_across = 0usize;
+    for i in 0..4 {
+        for j in 4..8 {
+            across += dot(i, j);
+            n_across += 1;
+        }
+    }
+    let within = within / n_within as f32;
+    let across = across / n_across as f32;
+    assert!(
+        within > across,
+        "friend within / enemy across: within={within} across={across}"
+    );
 }
 
 #[test]
