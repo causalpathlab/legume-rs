@@ -135,8 +135,9 @@ fn load_from_annot_parquet(path: &str) -> Result<Vec<ClusterEvidence>> {
         numeric_cols.push("best_significant");
     }
 
-    let (strings, nums) = matrix_util::parquet::read_table_columns(path, &string_cols, &numeric_cols)
-        .with_context(|| format!("read {path}"))?;
+    let (strings, nums) =
+        matrix_util::parquet::read_table_columns(path, &string_cols, &numeric_cols)
+            .with_context(|| format!("read {path}"))?;
 
     let coarse = &strings[0];
     let best = if strings.len() > 1 {
@@ -213,12 +214,7 @@ fn load_incidence_words(prefix: Option<&str>) -> Result<Vec<String>> {
     }
     // n_docs is only used for df_frac display in Vocabulary; 1 is fine for incidence listing.
     let vocab = Vocabulary::read_tsv(&path, 1)?;
-    Ok(vocab
-        .kept
-        .iter()
-        .take(32)
-        .map(|w| w.to_string())
-        .collect())
+    Ok(vocab.kept.iter().take(32).map(|w| w.to_string()).collect())
 }
 
 fn allowed_entities(clusters: &[ClusterEvidence]) -> BTreeSet<String> {
@@ -302,9 +298,10 @@ fn citation_check(draft: &str, allowed: &BTreeSet<String>, c: &ClusterEvidence) 
             continue;
         }
         if lower.contains(&ent.to_lowercase())
-            && !cluster_allowed
-                .iter()
-                .any(|a| a.to_lowercase().contains(&ent.to_lowercase()) || ent.to_lowercase().contains(&a.to_lowercase()))
+            && !cluster_allowed.iter().any(|a| {
+                a.to_lowercase().contains(&ent.to_lowercase())
+                    || ent.to_lowercase().contains(&a.to_lowercase())
+            })
         {
             // Only fail if this entity appears as a whole word-ish claim and isn't a substring
             // of an allowed label (e.g. "T" inside "Tcell").
