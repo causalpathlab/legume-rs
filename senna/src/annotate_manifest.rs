@@ -21,7 +21,7 @@ use crate::cluster_aggregation::{
     accumulate_gene_sum, accumulate_gene_sum_pair, weighted_mean_profile,
 };
 use crate::embed_common::Mat;
-use crate::marker_embedding::load_marker_feature_embedding;
+use crate::marker_embedding::load_marker_feature_embedding_from;
 use crate::marker_support::build_annotation_matrix;
 use crate::run_manifest::{self, CellSpace, RunManifest};
 use crate::senna_input::{
@@ -72,10 +72,11 @@ pub fn annotate_by_projection(args: &AnnotateProjectionArgs) -> Result<()> {
     // Feature side: genes on the cell manifold (required for projection). Reads
     // `outputs.feature_coembedding` off the manifest and, for a `gem` run, keeps
     // only the spliced rows re-keyed by gene — see `crate::gem::marker_embedding`.
-    let feat = load_marker_feature_embedding(&args.from).with_context(|| {
-        "projection needs a co-embedded gene space (a `senna gem` / `bge` / `fne` / \
+    let feat = load_marker_feature_embedding_from(&manifest, &manifest_dir, &args.from)
+        .with_context(|| {
+            "projection needs a co-embedded gene space (a `senna gem` / `bge` / `fne` / \
          `resolve-embedding-space` run). For topic/svd runs use `senna annotate-by-enrichment`."
-    })?;
+        })?;
     // Cell side: prefer the explicit cell_embedding; fall back to latent for
     // manifests written before Z moved there unconditionally.
     let cell_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
@@ -148,18 +149,13 @@ fn record_annotation(
     let rel = |abs: &str| run_manifest::rel_to_manifest(manifest_dir, abs);
     manifest.annotate.argmax = out.argmax.as_deref().map(&rel);
     manifest.annotate.markers = Some(markers.to_string());
-    if let Some(a) = out.annotation.as_deref() {
-        manifest.annotate.annotation = Some(rel(a));
-    }
-    if let Some(q) = out.cluster_celltype_q.as_deref() {
-        manifest.annotate.cluster_celltype_q = Some(rel(q));
-    }
-    if let Some(e) = out.cluster_celltype_es.as_deref() {
-        manifest.annotate.cluster_celltype_es = Some(rel(e));
-    }
-    if let Some(x) = out.cluster_expression.as_deref() {
-        manifest.annotate.cluster_expression = Some(rel(x));
-    }
+    // Always assign (including None) so a projection re-run clears enrichment
+    // paths left by an earlier annotate-by-enrichment, matching the ontology
+    // clear semantics below.
+    manifest.annotate.annotation = out.annotation.as_deref().map(&rel);
+    manifest.annotate.cluster_celltype_q = out.cluster_celltype_q.as_deref().map(&rel);
+    manifest.annotate.cluster_celltype_es = out.cluster_celltype_es.as_deref().map(&rel);
+    manifest.annotate.cluster_expression = out.cluster_expression.as_deref().map(&rel);
     // Overwrite (not conditionally set) so a re-run without ontology clears any
     // stale pointers from a previous standalone `annotate-ontology`.
     manifest.annotate.ontology_assignment = out.ontology_assignment.as_deref().map(&rel);

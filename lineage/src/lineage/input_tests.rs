@@ -6,7 +6,6 @@ use super::*;
 fn simplex(kind: &str) -> LatentContract {
     LatentContract {
         latent_is_log_simplex: true,
-        is_gem: false,
         kind: Some(kind.into()),
         source: "scratch.senna.json".into(),
     }
@@ -16,7 +15,6 @@ fn simplex(kind: &str) -> LatentContract {
 fn gem() -> LatentContract {
     LatentContract {
         latent_is_log_simplex: false,
-        is_gem: true,
         kind: Some("gem".into()),
         source: "scratch.senna.json".into(),
     }
