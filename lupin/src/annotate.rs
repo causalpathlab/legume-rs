@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use annotate::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use graph_embedding_util::type_annotation::{
@@ -10,10 +11,7 @@ use graph_embedding_util::type_annotation::{
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::IoOps;
-use senna::annotate::{
-    annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
-    AnnotateOntologyArgs, AnnotateProjectionArgs,
-};
+use senna::annotate::{annotate_by_enrichment, annotate_by_projection, annotate_ontology};
 use senna::run_manifest::{self, RunKind};
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, ValueEnum)]

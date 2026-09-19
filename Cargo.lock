@@ -2629,7 +2629,6 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "clap",
- "env_logger",
  "hf-hub",
  "log",
  "matrix-util",
@@ -3810,11 +3809,13 @@ dependencies = [
 name = "lupin"
 version = "0.1.0"
 dependencies = [
+ "annotate",
  "anyhow",
  "clap",
  "env_logger",
  "gene-text",
  "graph-embedding-util",
+ "lineage",
  "log",
  "matrix-util",
  "senna",
