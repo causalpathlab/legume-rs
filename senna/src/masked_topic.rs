@@ -1,4 +1,4 @@
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
@@ -70,7 +70,7 @@ impl MaskedLikelihoodArg {
 }
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct MaskedTopicArgs {
     #[arg(
         value_delimiter = ',',
@@ -174,7 +174,7 @@ pub struct MaskedTopicArgs {
     /// neither a CLI flag nor part of the recorded configuration.
     #[arg(skip)]
     #[serde(skip)]
-    pb_reference: Option<crate::pb_reference::ReferenceInput>,
+    pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
     #[arg(
         long,
@@ -714,10 +714,10 @@ pub fn fit_masked_vae_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
 
 /// The manifest kind for a masked run. `masked-vae` gets its own kind because
 /// its latent is a Gaussian `z`, not `log θ` — see [`RunKind::latent_is_log_simplex`].
-pub(crate) fn masked_run_kind(head: LatentHead) -> crate::run_manifest::RunKind {
+pub(crate) fn masked_run_kind(head: LatentHead) -> senna::run_manifest::RunKind {
     match head {
-        LatentHead::Gaussian => crate::run_manifest::RunKind::MaskedVae,
-        LatentHead::Softmax | LatentHead::StickBreaking => crate::run_manifest::RunKind::Itopic,
+        LatentHead::Gaussian => senna::run_manifest::RunKind::MaskedVae,
+        LatentHead::Softmax | LatentHead::StickBreaking => senna::run_manifest::RunKind::Itopic,
     }
 }
 
@@ -746,7 +746,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     let inherited = args
         .from
         .as_deref()
-        .map(crate::run_manifest::inherit_from)
+        .map(senna::run_manifest::inherit_from)
         .transpose()?;
     if let Some(inh) = inherited.as_ref() {
         info!(
@@ -754,15 +754,15 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             inh.source_kind
         );
     }
-    crate::run_manifest::InheritedFromManifest::ensure_replayable(
+    senna::run_manifest::InheritedFromManifest::ensure_replayable(
         inherited.as_ref(),
         "masked-topic",
     )?;
-    let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
+    let data_files = senna::run_manifest::InheritedFromManifest::resolve_data(
         inherited.as_ref(),
         &args.data_files,
     )?;
-    let batch_files = crate::run_manifest::InheritedFromManifest::resolve_batch(
+    let batch_files = senna::run_manifest::InheritedFromManifest::resolve_batch(
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
@@ -846,7 +846,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     let prebuilt_partition = inherited
         .as_ref()
-        .map(super::run_manifest::InheritedFromManifest::load_cell_to_pb)
+        .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
         .transpose()?
         .flatten();
 
@@ -1035,7 +1035,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // through safetensors); for freeze mode the optimizer excludes it
     // via `trainable_vars` (see `train_masked.rs`), for init mode it
     // keeps updating.
-    let mut carried: Option<crate::carried_rows::CarriedRows> = None;
+    let mut carried: Option<senna::carried_rows::CarriedRows> = None;
     if let Some(spec) = pretrained_spec.as_ref() {
         anyhow::ensure!(
             args.init_from.is_none(),
@@ -1043,7 +1043,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
              (warm-start would overwrite the pre-trained ρ from a different checkpoint)"
         );
         let host = spec.materialize(&gene_names)?;
-        carried = crate::carried_rows::CarriedRows::from_unmatched(
+        carried = senna::carried_rows::CarriedRows::from_unmatched(
             pinned_rho,
             preset_flag,
             &host,
@@ -1381,7 +1381,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     let cell_names = data_vec.column_names()?;
 
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
+    senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
     // PB aggregates + the empirical dictionary, exactly as `senna topic` writes them.
     //
@@ -1404,7 +1404,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
     // of silently falling back here.
     {
         let pb_gene_gp: Mat = finest_collapsed.mu_observed.posterior_mean().clone();
-        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names)?;
+        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names)?;
 
         if let Some(c2p) = cell_to_pb_per_level.as_ref().and_then(|l| l.last()) {
             let n_pb = pb_gene_gp.ncols();
@@ -1534,7 +1534,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         false
     };
 
-    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+    let pb_reference_suffix = senna::pb_reference::emit_if_requested(
         args.collapse.emits_pb_reference(),
         &args.out,
         finest_collapsed,
@@ -1553,8 +1553,8 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        train_args: Some(crate::run_manifest::record_train_args(args)?),
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
+        train_args: Some(senna::run_manifest::record_train_args(args)?),
         kind: masked_run_kind(head),
         prefix: &args.out,
         data_input: &input,

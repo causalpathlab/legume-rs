@@ -17,6 +17,7 @@ members = [
     "graph-embedding-util",
     "hsblock",
     "leiden",
+    "lupin",
     "matrix-param",
     "matrix-util",
     "mcmc-util",

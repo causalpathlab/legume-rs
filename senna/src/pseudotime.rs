@@ -23,7 +23,7 @@ use std::path::PathBuf;
 /// How the pseudotime origin is specified. Cells/nodes are resolved against
 /// the principal graph after it is fit, so any variant is valid here.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum RootSpec<'a> {
+pub enum RootSpec<'a> {
     /// Look up `cell_name` in the latent's row names, then snap to the
     /// closest principal-graph node.
     Cell(&'a str),
@@ -37,7 +37,7 @@ pub(crate) enum RootSpec<'a> {
 /// Output of [`compute_pseudotime`]: everything needed both to write
 /// parquet artifacts and to drive downstream consumers (orient-by-root,
 /// tree layout, …) in-memory.
-pub(crate) struct PseudotimeArtifacts {
+pub struct PseudotimeArtifacts {
     pub graph: PrincipalGraph,
     pub projections: Vec<CellProjection>,
     pub root: usize,
@@ -47,7 +47,7 @@ pub(crate) struct PseudotimeArtifacts {
 /// Pure core: fit the principal graph on `latent`, project cells, resolve
 /// the root, and compute per-cell pseudotime. No I/O. Shared by
 /// `run_pseudotime` and by `senna layout phate --orient-by-root`.
-pub(crate) fn compute_pseudotime(
+pub fn compute_pseudotime(
     latent: &Mat,
     cell_names: &[Box<str>],
     pg_args: &PrincipalGraphArgs,

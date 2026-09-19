@@ -17,10 +17,10 @@
 use super::args::ArchetypeConfig;
 use super::reference::Reference;
 use super::source::EmbeddingSource;
-use crate::cluster::leiden_clustering;
-use crate::cluster_aggregation::accumulate_gene_sum_multi;
-use crate::embed_common::Mat;
-use crate::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
+use senna::cluster::leiden_clustering;
+use senna::cluster_aggregation::accumulate_gene_sum_multi;
+use senna::embed_common::Mat;
+use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
 use anyhow::{Context, Result};
 use log::{info, warn};
 use matrix_util::dmatrix_io::DMatrix;
@@ -45,7 +45,7 @@ struct CellRow {
 /// pooling over partitions costs one pass over the counts rather than one per
 /// partition — the column reads are the raw matrix off disk and dominate.
 struct ArchetypeInputs {
-    stack: crate::senna_input::SparseStackWithBatch,
+    stack: senna::senna_input::SparseStackWithBatch,
     annotation: MatWithNames<Mat>,
     /// Cells shared by counts, embedding and annotation, after `--archetype-cells`.
     rows: Vec<CellRow>,
@@ -444,7 +444,7 @@ impl GeneMap {
 /// Built once: canonicalizing tens of thousands of names per partition would
 /// repeat the same work for every granularity.
 fn map_panel_genes(sc_genes: &[Box<str>], genes: &[Box<str>]) -> Result<GeneMap> {
-    let name_kind = crate::embed_common::reconcile_name_kind(genes, &[sc_genes]);
+    let name_kind = senna::embed_common::reconcile_name_kind(genes, &[sc_genes]);
     // Many-to-one collapses keep every source row: these are counts, so the
     // contributions sum. The bulk loader does the same, and taking only the
     // first row here would scale those genes differently on the two sides.

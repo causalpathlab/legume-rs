@@ -22,8 +22,8 @@
 //!     └── heatmap.pdf               # if n_genes > 100
 //! ```
 
-use crate::embed_common::*;
-use crate::run_manifest::{self, RunManifest};
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunManifest};
 use auxiliary_data::feature_names::FeatureNameKind;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;

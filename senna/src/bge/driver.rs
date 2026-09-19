@@ -24,9 +24,9 @@
 //! gem's surface too — so `GemArgs::knobs` still hardcodes them off, exactly
 //! as before this task.
 
-use crate::embed_common::*;
-use crate::pb_reference::ReferenceInput;
-use crate::run_manifest::RunKind;
+use senna::embed_common::*;
+use senna::pb_reference::ReferenceInput;
+use senna::run_manifest::RunKind;
 use graph_embedding_util as ge;
 
 /// Every driver flag both commands drive the fit with, borrowed from
@@ -95,7 +95,7 @@ pub(crate) struct EmbedPlan<'a> {
     /// The data files this run was loaded from (manifest `data.input`).
     pub data_files: Vec<Box<str>>,
     /// The resolved multiome layout, when this load had one (bge only).
-    pub multiome: Option<crate::multiome_layout::RunMultiome>,
+    pub multiome: Option<senna::multiome_layout::RunMultiome>,
     /// Full-axis (current feature-axis-indexed) HVG projection weights.
     pub hvg_weights: Option<Vec<f32>>,
     /// Row structure of the feature axis, from [`crate::gem::tracks::assign_tracks`]:
@@ -116,10 +116,10 @@ pub(crate) struct EmbedPlan<'a> {
     pub preset_offsets: Vec<ge::PresetOffsets>,
     /// The given table's rows that matched no feature, appended to the
     /// written ρ so the output is the full table.
-    pub carried: Option<crate::carried_rows::CarriedRows>,
+    pub carried: Option<senna::carried_rows::CarriedRows>,
     pub pb_reference: Option<&'a ReferenceInput>,
     pub init_from: Option<&'a str>,
-    pub train_args: crate::run_manifest::TrainArgsRecord,
+    pub train_args: senna::run_manifest::TrainArgsRecord,
     /// Called after the module tables are written and before the manifest.
     /// `senna gem` hooks its `{out}.feature_contrast.parquet` writer in
     /// here; bge always passes `None`.
@@ -194,7 +194,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
             anchor_batches: plan
                 .pb_reference
                 .is_some()
-                .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+                .then(|| vec![senna::pb_reference::REFERENCE_BATCH.into()]),
             bulk_batches: knobs.bulk_batches.map(<[Box<str>]>::to_vec),
             emit_finest_collapse: knobs.emit_pb_reference,
             num_levels: knobs.collapse.num_levels,
@@ -235,7 +235,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // Carried pseudobulks out, same contract as every other family: the
     // finest collapse level's evidence rates + per-column cell counts.
     let pb_reference_suffix = match out.finest_collapse.as_ref() {
-        Some((finest, membership)) => crate::pb_reference::emit_if_requested(
+        Some((finest, membership)) => senna::pb_reference::emit_if_requested(
             knobs.emit_pb_reference,
             knobs.out,
             finest,
@@ -286,7 +286,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     } else {
         None
     };
-    let qc_keep_idx = crate::pb_reference::exclude_carried(
+    let qc_keep_idx = senna::pb_reference::exclude_carried(
         plan.pb_reference,
         plan.unified.n_cells(),
         qc_keep_idx,
@@ -458,7 +458,7 @@ pub(crate) fn fit_embed_family(mut plan: EmbedPlan<'_>) -> anyhow::Result<()> {
     // branch above; an interrupted run wrote no contrast tables, so the
     // manifest must not claim it did.
     let contrast_written = plan.after_fit.is_some() && !interrupted;
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: Some(plan.train_args),
         kind: plan.kind,
         prefix: knobs.out,

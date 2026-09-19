@@ -28,7 +28,7 @@ use super::result::{
     residual_stat, split_rhat_ess, Convergence, DeconvResult, ExpressionTensor,
     MIN_DRAWS_FOR_DIAGNOSTICS,
 };
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use log::info;
 use matrix_util::running_quantile::RunningQuantiles;
 use rand::rngs::SmallRng;

@@ -14,8 +14,8 @@
 //!   `{out}.bhc.merges.parquet` — merge tree (`merge_id`, left, right, `log_bf`, `n_cells`)
 //!   `{out}.bhc.cut.parquet`    — consensus id per original cluster (−1 = empty)
 
-use crate::cluster_aggregation::accumulate_gene_sum;
-use crate::embed_common::*;
+use senna::cluster_aggregation::accumulate_gene_sum;
+use senna::embed_common::*;
 use data_beans_alg::bhc::{bhc_cut, bhc_merge, BhcInput, BhcMerge};
 
 /// Runtime configuration for cluster BHC.

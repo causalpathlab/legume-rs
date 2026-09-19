@@ -52,7 +52,7 @@ pub(crate) const WEIGHTING_HELP: &str =
 /// `--pb-refine-{gibbs,greedy,weighting,seed}` and call [`PbRefineArgs::to_params`]
 /// to build the `RefineParams` passed into `MultilevelParams::refine`.
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub(crate) struct PbRefineArgs {
     #[arg(
         id = "pb_refine_gibbs",
@@ -130,7 +130,7 @@ pub(crate) enum PbTreeArg {
 }
 
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub(crate) struct CollapseArgs {
     #[arg(
         long,
@@ -375,7 +375,7 @@ pub(crate) fn fit_fisher_weights(
                  the count scale it is defined for."
             )
         })?;
-        return crate::pb_reference::fisher_weights_for_weighted_cohort(
+        return senna::pb_reference::fisher_weights_for_weighted_cohort(
             collapsed,
             cell_to_pb,
             data_vec.column_multiplicities(),
@@ -414,7 +414,7 @@ impl CollapseArgs {
     ///
     pub(crate) fn reject_pb_reference(
         &self,
-        kind: crate::run_manifest::RunKind,
+        kind: senna::run_manifest::RunKind,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.mixture_batch.is_none(),
@@ -439,7 +439,7 @@ impl CollapseArgs {
 /// `--amort-refine-steps = 0` disables refinement; in that case
 /// [`AmortRefineArgs::to_config`] returns `None`.
 #[derive(Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub(crate) struct AmortRefineArgs {
     #[arg(
         long = "amort-refine-steps",

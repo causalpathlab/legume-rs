@@ -7,12 +7,12 @@ use super::fit_layout_common::{
     PbLayoutPrep, PhateCliArgs, ResolvedViz,
 };
 use super::viz_prep::apply_svd_preprocessing;
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::geometry::orient::rotate_root_to_bottom;
 use crate::geometry::phate::phate_layout_2d;
-use crate::principal_graph::PrincipalGraphArgs;
-use crate::pseudotime::{compute_pseudotime, PseudotimeArtifacts, RootSpec};
-use crate::run_manifest::resolve;
+use senna::principal_graph::PrincipalGraphArgs;
+use senna::pseudotime::{compute_pseudotime, PseudotimeArtifacts, RootSpec};
+use senna::run_manifest::resolve;
 
 #[derive(Args, Debug)]
 pub struct LayoutPhateArgs {

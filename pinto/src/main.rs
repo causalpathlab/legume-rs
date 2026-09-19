@@ -13,7 +13,7 @@ mod util;
 #[cfg(test)]
 mod test_support;
 
-use annotate::{run_annotate, AnnotateArgs};
+use annotate::AnnotateArgs;
 use cell_activity_graph_embedding::{
     fit_cell_activity_graph_embedding, CellActivityGraphEmbeddingArgs,
 };
@@ -849,8 +849,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Cage(args) => {
             fit_cell_activity_graph_embedding(args)?;
         }
-        Commands::Annotate(args) => {
-            run_annotate(args)?;
+        Commands::Annotate(_args) => {
+            eprintln!(
+                "The `pinto annotate` command moved to `lupin annotate`.\n\
+                 Run `lupin annotate --help` for usage."
+            );
+            std::process::exit(1);
         }
         Commands::Predict(args) => {
             // The return value serves `pinto impute`; the CLI path only wants

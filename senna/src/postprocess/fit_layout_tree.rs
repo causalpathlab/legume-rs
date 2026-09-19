@@ -7,9 +7,9 @@
 //! `{out}.tree_layout.{cell_coords,nodes_2d}.parquet` and updates
 //! `manifest.pseudotime.tree_{cell_coords,nodes_2d}`.
 
-use crate::embed_common::*;
-use crate::principal_graph::{project_cells_to_graph, PrincipalGraph};
-use crate::run_manifest::{rel_to_manifest, resolve, RunManifest};
+use senna::embed_common::*;
+use senna::principal_graph::{project_cells_to_graph, PrincipalGraph};
+use senna::run_manifest::{rel_to_manifest, resolve, RunManifest};
 use crate::tree_layout::{place_cells_on_tree, reingold_tilford_layout};
 use std::path::PathBuf;
 

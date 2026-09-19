@@ -21,7 +21,7 @@
 
 use super::args::AnnotateProjectionArgs;
 use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
-use crate::gem::marker_embedding::load_marker_feature_embedding;
+use crate::marker_embedding::load_marker_feature_embedding;
 use crate::run_manifest;
 use anyhow::{Context, Result};
 use graph_embedding_util::type_annotation::{

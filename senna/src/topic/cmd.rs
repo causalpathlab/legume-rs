@@ -1,4 +1,4 @@
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
@@ -35,7 +35,7 @@ impl DecoderType {
 }
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct TopicArgs {
     #[arg(
         value_delimiter = ',',
@@ -132,7 +132,7 @@ pub struct TopicArgs {
     /// neither a CLI flag nor part of the recorded configuration.
     #[arg(skip)]
     #[serde(skip)]
-    pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
+    pub(crate) pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
     #[arg(
         long,
@@ -320,7 +320,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
     let inherited = args
         .from
         .as_deref()
-        .map(crate::run_manifest::inherit_from)
+        .map(senna::run_manifest::inherit_from)
         .transpose()?;
     if let Some(inh) = inherited.as_ref() {
         info!(
@@ -333,17 +333,17 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
             inh.source_kind
         );
     }
-    let data_files = crate::run_manifest::InheritedFromManifest::resolve_data(
+    let data_files = senna::run_manifest::InheritedFromManifest::resolve_data(
         inherited.as_ref(),
         &args.data_files,
     )?;
-    let batch_files = crate::run_manifest::InheritedFromManifest::resolve_batch(
+    let batch_files = senna::run_manifest::InheritedFromManifest::resolve_batch(
         inherited.as_ref(),
         args.batch_files.as_deref(),
     );
     let prebuilt_partition = inherited
         .as_ref()
-        .map(super::super::run_manifest::InheritedFromManifest::load_cell_to_pb)
+        .map(senna::run_manifest::InheritedFromManifest::load_cell_to_pb)
         .transpose()?
         .flatten();
 
@@ -589,7 +589,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
 
     let cell_names = data_vec.column_names()?;
 
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
+    senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx.as_deref())?;
 
     // CNV detection using topic proportions as cell-type membership
     let gene_names = data_vec.row_names()?;
@@ -643,7 +643,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         false
     };
 
-    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+    let pb_reference_suffix = senna::pb_reference::emit_if_requested(
         args.collapse.emits_pb_reference(),
         &args.out,
         finest_collapsed,
@@ -661,7 +661,7 @@ pub fn fit_topic_model(args: &TopicArgs) -> anyhow::Result<()> {
         has_cell_to_pb,
         has_pb_tree,
         pb_reference_suffix,
-        crate::run_manifest::record_train_args(args)?,
+        senna::run_manifest::record_train_args(args)?,
     )?;
 
     info!("Done");
@@ -678,7 +678,7 @@ fn write_topic_manifest(
     has_cell_to_pb: bool,
     has_pb_tree: bool,
     pb_reference_suffix: Option<&'static str>,
-    train_args: crate::run_manifest::TrainArgsRecord,
+    train_args: senna::run_manifest::TrainArgsRecord,
 ) -> anyhow::Result<()> {
     let input: Vec<String> = data_files
         .iter()
@@ -687,9 +687,9 @@ fn write_topic_manifest(
     let batch: Vec<String> = batch_files
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: Some(train_args),
-        kind: crate::run_manifest::RunKind::Topic,
+        kind: senna::run_manifest::RunKind::Topic,
         prefix,
         data_input: &input,
         data_multiome: None,
@@ -945,7 +945,7 @@ where
         )?;
 
         let pb_gene_gp: Mat = ctx.finest_collapsed.mu_observed.posterior_mean().clone();
-        crate::output_helpers::save_pb_gene(ctx.args.out.as_ref(), &pb_gene_gp, ctx.gene_names)?;
+        senna::output_helpers::save_pb_gene(ctx.args.out.as_ref(), &pb_gene_gp, ctx.gene_names)?;
 
         // Empirical NB-Fisher-weighted gene × topic dictionary at full gene
         // resolution. Avoids the lossy expand-from-coarse approximation in
@@ -961,7 +961,7 @@ where
             ctx.data_vec,
             ctx.args.block_size,
         )?;
-        crate::output_helpers::save_fisher_weights(
+        senna::output_helpers::save_fisher_weights(
             ctx.args.out.as_ref(),
             &fisher_w,
             ctx.gene_names,

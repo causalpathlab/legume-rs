@@ -20,8 +20,8 @@
 //!
 //! Topic-family runs are rejected up front; see [`EmbeddingSource::load`].
 
-use crate::embed_common::Mat;
-use crate::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
+use senna::embed_common::Mat;
+use senna::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use anyhow::{Context, Result};
 use log::info;
 use matrix_util::dmatrix_io::DMatrix;

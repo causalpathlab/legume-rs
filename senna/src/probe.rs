@@ -40,7 +40,7 @@
 //!   multi-scale analysis across samples* (scPoli). Nat. Methods 20:1683.
 
 use crate::counterfactual::{counterfactual, CellBank, CfArgs, Z_99};
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::predict::MaskedScored;
 use crate::topic::masked_artifact::MaskedModel;
 use log::info;
@@ -251,7 +251,7 @@ struct Verdict<'a> {
 }
 
 pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
-    use crate::run_manifest::RunKind;
+    use senna::run_manifest::RunKind;
     use crate::topic::model_metadata::resolve_run_kind;
 
     mkdir_parent(&args.out)?;
@@ -283,7 +283,7 @@ pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
 /// which a few hundred query cells cannot identify. Chain
 /// `bge --skip-etm` → `masked-topic --freeze-feature-embedding` → `probe --counterfactual`
 /// when the counterfactual is what you want.
-fn probe_bge(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyhow::Result<()> {
+fn probe_bge(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
     use crate::bge::score::BgeEmbedding;
 
     anyhow::ensure!(
@@ -398,9 +398,9 @@ fn cal_and_query<S: Scored>(
     Ok((cal_fit, per_cell_fit(llik, total), data_vec.column_names()?))
 }
 
-fn probe_fit_only(args: &ProbeArgs, kind: crate::run_manifest::RunKind) -> anyhow::Result<()> {
+fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
-    use crate::run_manifest::RunKind;
+    use senna::run_manifest::RunKind;
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::TopicModelMetadata;
     use crate::topic::predict_common::LatentMode;

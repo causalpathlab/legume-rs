@@ -1,8 +1,8 @@
 //! The `senna simba` driver: load, cell QC, HVG subset, train, write.
 
 use super::SimbaArgs;
-use crate::embed_common::*;
-use crate::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
+use senna::embed_common::*;
+use senna::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 use candle_util::candle_core::{Device, Tensor};
 use data_beans_alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;

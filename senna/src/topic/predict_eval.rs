@@ -25,7 +25,7 @@
 //! comparable. `--eval-features` pins one gene set for every method, whatever
 //! each happens to carry, which is what makes an ablation series readable.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::logging::new_progress_bar;
 use matrix_util::agreement::{
     agreement_from_rate, pearson_log1p, rate_to_counts, spearman, CellAgreement,

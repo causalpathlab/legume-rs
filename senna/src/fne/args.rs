@@ -2,11 +2,11 @@
 //! (the settings SIMBA's `pbg_train` uses) at the workspace's embedding
 //! dimension, so a bare invocation is the published recipe.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use auxiliary_data::feature_names::FeatureNameKindArg;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct FneArgs {
     // ── Gene–gene edges ──────────────────────────────────────────────
     #[arg(
