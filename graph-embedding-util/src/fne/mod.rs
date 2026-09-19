@@ -16,7 +16,9 @@ pub mod train;
 
 pub use candle_util::masking::MASK_NEG;
 pub use candle_util::optim::{RowAdagrad, ADAGRAD_EPS};
-pub use graph::{auto_wd, NodeTypeTable, Relation, RelationTable, TypedEdgeList};
+pub use graph::{
+    auto_wd, NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList,
+};
 pub use train::{train, FneOutput, RelationStats};
 
 pub use crate::preset_mode::{LoraSpec, PresetMode, PresetRows};

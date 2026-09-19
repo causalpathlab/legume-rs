@@ -16,6 +16,7 @@ fn relations(t: &NodeTypeTable) -> RelationTable {
                 rhs_type: 0,
                 weight: 1.0,
                 undirected: true,
+                polarity: crate::fne::RelationPolarity::Friend,
             },
             Relation {
                 name: "go".into(),
@@ -23,6 +24,7 @@ fn relations(t: &NodeTypeTable) -> RelationTable {
                 rhs_type: 1,
                 weight: 2.0,
                 undirected: false,
+                polarity: crate::fne::RelationPolarity::Friend,
             },
             Relation {
                 name: "marker".into(),
@@ -30,6 +32,7 @@ fn relations(t: &NodeTypeTable) -> RelationTable {
                 rhs_type: 2,
                 weight: 3.0,
                 undirected: false,
+                polarity: crate::fne::RelationPolarity::Friend,
             },
         ],
         t,

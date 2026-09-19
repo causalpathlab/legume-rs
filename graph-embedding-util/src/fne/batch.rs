@@ -10,7 +10,7 @@
 //! relation's own lhs / rhs node-type ranges, and a row's weight is the
 //! relation weight times the edge's own weight.
 
-use super::graph::{NodeTypeTable, RelationTable, TypedEdgeList};
+use super::graph::{NodeTypeTable, RelationPolarity, RelationTable, TypedEdgeList};
 use rand::{Rng, RngExt};
 use std::ops::Range;
 
@@ -26,6 +26,8 @@ pub(crate) struct PaddedBatch {
     pub n_real: usize,
     /// The relation every row belongs to.
     pub rel: usize,
+    /// Friend vs enemy scoring for this relation (constant on the batch).
+    pub polarity: RelationPolarity,
     /// `[k·c]` lhs global ids (0 on pad rows).
     pub lhs: Vec<u32>,
     /// `[k·c]` rhs global ids (0 on pad rows).
@@ -133,6 +135,7 @@ impl EpochBatcher {
             u,
             n_real,
             rel: r,
+            polarity: relation.polarity,
             lhs,
             rhs,
             row_w,
