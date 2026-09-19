@@ -5,7 +5,7 @@ use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::{Args, Parser, Subcommand};
 use cnv::cell_profile::{run_cell_profiles, CellProfileConfig};
-use cnv::clone_bayes::{cells_tsv_beside, DEFAULT_MIN_PURITY};
+use cnv::clone_bayes::{cells_table_beside, DEFAULT_MIN_PURITY};
 use cnv::clone_call::{call_clones_with_burden, write_clone_table, CloneCallConfig, CloneEngine};
 use cnv::gene_loci::GeneLocusIndex;
 use data_beans::convert::try_open_or_convert;
@@ -23,7 +23,7 @@ use std::sync::Arc;
                   \n\
                   Subcommands:\n  \
                   \x20 infercnv — per-cell inferCNV log-ratio profiles on a genomic-interval axis\n  \
-                  \x20 clones   — donor-private CNV strata (`{out}.clones.tsv.gz`) for\n               \
+                  \x20 clones   — donor-private CNV strata (`{out}.clones.parquet`) for\n               \
                   senna / pinto `--cnv-clones`"
 )]
 struct Cli {
@@ -54,8 +54,8 @@ enum Commands {
                       Output is a new data-beans backend `{out}.zarr.zip` whose rows are\n\
                       genomic intervals (`chr:start-end`; one gene each, or `--bin-size`\n\
                       tiles — prefer `1000000` / 1 Mb on large cohorts) and whose columns\n\
-                      are the query cells. `{out}.features.tsv.gz`\n\
-                      maps each row back to its genes; `{out}.cells.tsv.gz` has per-cell\n\
+                      are the query cells. `{out}.features.parquet`\n\
+                      maps each row back to its genes; `{out}.cells.parquet` has per-cell\n\
                       depth and mean |log-ratio| (CNV burden).\n\
                       \n\
                       With no `--ref`, the query cohort mean is the baseline: any CNV shared\n\
@@ -90,9 +90,9 @@ enum Commands {
                       \n\
                       Reads an existing CNV backend (`--from`), or runs `infercnv`\n\
                       first on `--ref` / QUERY and then calls clones. Burden comes\n\
-                      from `{prefix}.cells.tsv.gz` when present, else mean |CNV|.\n\
+                      from `{prefix}.cells.parquet` when present, else mean |CNV|.\n\
                       \n\
-                      Writes `{out}.clones.tsv.gz` (cell, donor, cluster, stratum,\n\
+                      Writes `{out}.clones.parquet` (cell, donor, cluster, stratum,\n\
                       …, burden, p_malig). Pass that file as `--cnv-clones` to\n\
                       senna / pinto so collapse cannot mix across clone boundaries."
     )]
@@ -122,7 +122,7 @@ struct InferCnvArgs {
     #[arg(
         short,
         long,
-        help = "Output prefix; writes {out}.zarr.zip, {out}.features.tsv.gz, {out}.cells.tsv.gz"
+        help = "Output prefix; writes {out}.zarr.zip, {out}.features.parquet, {out}.cells.parquet"
     )]
     out: Box<str>,
 
@@ -213,7 +213,7 @@ struct CloneArgs {
     #[arg(
         short,
         long,
-        help = "Output prefix; writes {out}.clones.tsv.gz (and inferCNV artifacts when not `--from`)"
+        help = "Output prefix; writes {out}.clones.parquet (and inferCNV artifacts when not `--from`)"
     )]
     out: Box<str>,
 
@@ -445,12 +445,13 @@ fn run_clones(args: &CloneArgs) -> anyhow::Result<()> {
         p_malig_threshold: args.p_malig_threshold,
         ..Default::default()
     };
-    let out_cells = format!("{}.cells.tsv.gz", args.out);
-    let beside = cells_tsv_beside(&backend_path);
-    let rows = call_clones_with_burden(&data, &cfg, None, &[out_cells.as_str(), beside.as_str()])?;
+    // Only the backend's own sibling table: a `{out}.cells.parquet` left by
+    // an earlier run on a different dataset must not feed `--from`.
+    let beside = cells_table_beside(&backend_path);
+    let rows = call_clones_with_burden(&data, &cfg, None, &[beside.as_str()])?;
     let n_clone = rows.iter().filter(|r| r.stratum > 0).count();
     let n_strata = rows.iter().map(|r| r.stratum).max().unwrap_or(0);
-    let path = format!("{}.clones.tsv.gz", args.out);
+    let path = format!("{}.clones.parquet", args.out);
     write_clone_table(&rows, &path)?;
     info!(
         "wrote {path} ({} cells, {n_clone} in {} donor-private clone(s); engine={:?})",

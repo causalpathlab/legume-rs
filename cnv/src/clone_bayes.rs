@@ -7,7 +7,7 @@
 
 use crate::clone_call::{donor_of, CloneCallConfig, CloneRow};
 use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::common_io::read_lines;
+use matrix_util::parquet::read_table_columns;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -91,63 +91,56 @@ pub fn bayes_config_from_clone_call(cfg: &CloneCallConfig) -> BayesCloneConfig {
     }
 }
 
-/// Sibling `{prefix}.cells.tsv.gz` for a CNV backend path.
+/// Sibling `{prefix}.cells.parquet` for a CNV backend path.
 #[must_use]
-pub fn cells_tsv_beside(backend_path: &str) -> String {
+pub fn cells_table_beside(backend_path: &str) -> String {
     for suffix in [".zarr.zip", ".zarr", ".h5"] {
         if let Some(prefix) = backend_path.strip_suffix(suffix) {
-            return format!("{prefix}.cells.tsv.gz");
+            return format!("{prefix}.cells.parquet");
         }
     }
-    format!("{backend_path}.cells.tsv.gz")
+    format!("{backend_path}.cells.parquet")
 }
 
-/// Back-compat alias used by older call sites / tests.
-#[must_use]
-pub fn cells_tsv_candidates(backend_path: &str) -> Vec<String> {
-    vec![cells_tsv_beside(backend_path)]
-}
-
-/// Load `cnv_burden` from a cells TSV. Returns `Ok(None)` if the file is missing.
-pub fn load_burden_from_cells_tsv(
+/// Load `cnv_burden` from a `{prefix}.cells.parquet` table (`cell`, `depth`,
+/// `cnv_burden`), aligned to `cell_names`. Returns `Ok(None)` if the file is
+/// missing. A cell absent from the table takes its `fallback` burden (the
+/// fused mean |CNV| from the sketch pass) rather than a zero, which would
+/// otherwise become a `ln(1e-8)` outlier in the log-burden mixture.
+pub fn load_burden_from_cells_table(
     path: &str,
     cell_names: &[Box<str>],
+    fallback: &[f32],
 ) -> anyhow::Result<Option<Vec<f32>>> {
     if !Path::new(path).exists() {
         return Ok(None);
     }
-    let lines = read_lines(path)?;
-    let mut by_cell: FxHashMap<Box<str>, f32> = FxHashMap::default();
-    for (i, line) in lines.iter().enumerate() {
-        if i == 0 && line.starts_with("cell\t") {
-            continue;
-        }
-        if line.is_empty() {
-            continue;
-        }
-        let cols: Vec<&str> = line.split('\t').collect();
-        anyhow::ensure!(
-            cols.len() >= 3,
-            "{}:{}: expected cell, depth, cnv_burden",
-            path,
-            i + 1
-        );
-        by_cell.insert(cols[0].into(), cols[2].parse()?);
-    }
+    anyhow::ensure!(
+        fallback.len() == cell_names.len(),
+        "fallback burden length {} != n_cells {}",
+        fallback.len(),
+        cell_names.len()
+    );
+    let (strs, nums) = read_table_columns(path, &["cell"], &["cnv_burden"])?;
+    let by_cell: FxHashMap<&str, f32> = strs[0]
+        .iter()
+        .zip(&nums[0])
+        .map(|(c, &b)| (c.as_ref(), b as f32))
+        .collect();
     let mut out = Vec::with_capacity(cell_names.len());
     let mut missing = 0usize;
-    for c in cell_names {
-        match by_cell.get(c) {
+    for (c, &fb) in cell_names.iter().zip(fallback) {
+        match by_cell.get(c.as_ref()) {
             Some(&b) => out.push(b),
             None => {
                 missing += 1;
-                out.push(0.0);
+                out.push(fb);
             }
         }
     }
     if missing > 0 {
         log::warn!(
-            "{} / {} cells missing from {}; filled burden=0",
+            "{} / {} cells missing from {}; using fused mean |CNV| for those",
             missing,
             cell_names.len(),
             path
@@ -183,6 +176,12 @@ pub fn call_clones_bayes(
         donor_of_cell.push(id);
     }
     let n_donors = n_donors.max(1);
+    if n_donors == 1 && n > 0 {
+        log::warn!(
+            "single donor: majority-donor purity is trivially 1, so the purity gate \
+             cannot reject a high-burden tail; treat clone calls with caution"
+        );
+    }
     let k_max = cfg.k_max.max(1).min(n.max(1));
 
     if n == 0 || c == 0 {
@@ -503,6 +502,10 @@ fn update_globals(
     let prior_nu1 = log_b_mean + 0.25;
     nu[0] = (sum_lb[0] + prior_n * prior_nu0) / (n_lb[0] + prior_n);
     nu[1] = (sum_lb[1] + prior_n * prior_nu1) / (n_lb[1] + prior_n);
+    // Identifiability: component 1 is "higher burden" by definition, so the
+    // order is enforced every sweep. On data with no burden gap this still
+    // labels the high-burden tail malignant; the purity / min_cells gate is
+    // what stops that tail becoming a clone, and it is vacuous with one donor.
     if nu[1] < nu[0] + 0.05 {
         let mid = 0.5 * (nu[0] + nu[1]);
         nu[0] = mid - 0.08;
@@ -579,13 +582,15 @@ fn sample_assignments(
                     let diff = sketch[(r, i)] - mu[(r, k)];
                     sse += diff * diff;
                 }
+                // Every component carries its donor term; φ_0 is uniform, so
+                // dropping it here would bias all cells toward bg by ln(D).
+                score += log_phi[k][d];
                 if k == 0 {
                     score += inv_c * (log_norm_bg - inv_2var_bg * sse);
                     score += log_normal_lpdf(lb, nu[0], tau[0]);
                 } else {
                     score += inv_c * (log_norm_cl - inv_2var_cl * sse);
                     score += log_normal_lpdf(lb, nu[1], tau[1]);
-                    score += log_phi[k][d];
                 }
                 lp[k] = score;
             }
@@ -769,10 +774,10 @@ mod tests {
     }
 
     #[test]
-    fn cells_tsv_beside_strips_zarr_zip() {
+    fn cells_table_beside_strips_zarr_zip() {
         assert_eq!(
-            cells_tsv_beside("/tmp/foo.zarr.zip"),
-            "/tmp/foo.cells.tsv.gz"
+            cells_table_beside("/tmp/foo.zarr.zip"),
+            "/tmp/foo.cells.parquet"
         );
     }
 }
