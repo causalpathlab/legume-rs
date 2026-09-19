@@ -668,8 +668,7 @@ impl TypedGraphBuilder {
 
     /// `name=friend|enemy` with the full relation id (as logged).
     pub(crate) fn set_relation_polarity(&mut self, spec: &str) -> anyhow::Result<()> {
-        let (pol, r) =
-            self.relation_override("--relation-polarity", spec, "name=friend|enemy")?;
+        let (pol, r) = self.relation_override("--relation-polarity", spec, "name=friend|enemy")?;
         let polarity = RelationPolarity::parse(pol)
             .map_err(|e| anyhow::anyhow!("--relation-polarity `{spec}`: {e}"))?;
         self.relations[r].polarity = polarity;
