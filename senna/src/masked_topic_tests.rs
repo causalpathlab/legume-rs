@@ -27,7 +27,7 @@ fn adj_method_is_listed_in_help() {
 /// The masked objective is the regularizer; `masked-vae` no longer weighs a KL.
 mod no_kl {
     use super::{Cli, MaskedTopicArgs};
-    use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
 
     #[test]
@@ -64,7 +64,7 @@ mod no_kl {
 /// and populated a context window have nothing left to do.
 mod window_free {
     use super::{Cli, MaskedTopicArgs};
-    use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
 
     fn parse(extra: &[&str]) -> MaskedTopicArgs {
@@ -145,7 +145,7 @@ mod window_free {
 /// module stays (for re-wiring later), but nothing reaches it from a command.
 mod query_unwired {
     use super::{Cli, MaskedTopicArgs};
-    use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
 
     /// None of the four flags is a flag any more. Silently accepting one would
@@ -278,7 +278,7 @@ mod mask_fraction_bounds {
 ////////////////////////////////////////////////////////////////
 
 use super::fit_masked_topic_model;
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use candle_util::candle_core;
 use clap::Parser;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};

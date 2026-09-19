@@ -25,8 +25,8 @@ mod tests;
 
 pub use args::DeconvolveArgs;
 
-use crate::embed_common::{read_bulk_data_aligned, Mat};
-use crate::run_manifest;
+use senna::embed_common::{read_bulk_data_aligned, Mat};
+use senna::run_manifest;
 use anyhow::Result;
 use gibbs::PosteriorAccum;
 use log::info;

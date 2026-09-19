@@ -4,10 +4,10 @@
 //! same everywhere. The embedding dimension stays with each command, whose
 //! published default differs.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct PbgTrainArgs {
     #[arg(
         long,

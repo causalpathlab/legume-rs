@@ -4,7 +4,7 @@
 //! against `C` *cell types*, with `R ≫ C` and the mapping given by the soft
 //! annotation readout. Everything here is already at `C`.
 
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use mcmc_util::engine::{ess, split_rhat};
 
 /// Posterior-predictive fit of one bulk sample at the posterior-mean reference.

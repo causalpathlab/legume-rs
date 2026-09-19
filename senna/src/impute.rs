@@ -25,9 +25,9 @@
 //! payoff (residual full-rank covariance β can't carry), not a
 //! deterministic β·θ readout.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::predict::{predict_model, PredictArgs};
-use crate::run_manifest::{self, RunKind};
+use senna::run_manifest::{self, RunKind};
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::Args;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -136,7 +136,7 @@ pub struct ImputeArgs {
 
     #[arg(
         long,
-        default_value_t = crate::embed_common::ComputeDevice::Cpu,
+        default_value_t = senna::embed_common::ComputeDevice::Cpu,
         value_enum,
         help = "Compute device for the inner predict",
         long_help = "Compute device for the inner predict.\n\
@@ -145,7 +145,7 @@ pub struct ImputeArgs {
                      the per-cell SGD of training; the encoder families infer\n\
                      with one forward pass."
     )]
-    pub device: crate::embed_common::ComputeDevice,
+    pub device: senna::embed_common::ComputeDevice,
 
     #[arg(long, default_value_t = 0, help = "Device ordinal (for cuda/metal)")]
     pub device_no: usize,
@@ -233,7 +233,7 @@ struct ReferenceSpec {
     /// The multiome layout the reference run trained under, when its manifest
     /// recorded one. `None` for `--reference-data` given by hand: those files
     /// are the caller's, not the run's, so there is nothing to replay.
-    multiome: Option<crate::multiome_layout::RunMultiome>,
+    multiome: Option<senna::multiome_layout::RunMultiome>,
 }
 
 /// Resolve the reference from `--reference` / the model's own manifest,
@@ -367,7 +367,7 @@ pub fn impute_model(args: &ImputeArgs) -> anyhow::Result<()> {
             "Opening reference data ({} file(s))",
             reference.data_files.len()
         );
-        let reload = crate::multiome_layout::recorded_layout(
+        let reload = senna::multiome_layout::recorded_layout(
             reference.multiome.as_ref(),
             reference.data_files.len(),
         )?;
@@ -452,7 +452,7 @@ fn predict_matching_latents(
         eval_features: None,
         data_files: args.data_files.clone(),
         bulk: Vec::new(),
-        bulk_table: crate::embed_common::BulkTableArgs::default(),
+        bulk_table: senna::embed_common::BulkTableArgs::default(),
         model: args.model.clone(),
         out: predict_prefix.clone(),
         batch_files: args.batch_files.clone(),
@@ -535,7 +535,7 @@ fn svd_matching_latents(
     );
 
     info!("Loading new data for the dictionary projection");
-    let new_loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let new_loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: args.data_files.clone(),
             batch_files: args.batch_files.clone(),

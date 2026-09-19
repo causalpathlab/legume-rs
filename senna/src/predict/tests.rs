@@ -256,7 +256,7 @@ fn bulk_alone_parses_with_no_data_files() {
     assert_eq!(a.bulk, vec![Box::from("counts.parquet")]);
     assert_eq!(
         a.bulk_table.bulk_orientation,
-        crate::embed_common::OrientationArg::Auto
+        senna::embed_common::OrientationArg::Auto
     );
 }
 
@@ -303,7 +303,7 @@ fn bulk_orientation_is_a_value_enum() {
     .expect("parses");
     assert_eq!(
         a.bulk_table.bulk_orientation.forced(),
-        Some(crate::embed_common::Orientation::SamplesByGenes)
+        Some(senna::embed_common::Orientation::SamplesByGenes)
     );
 }
 
@@ -312,7 +312,7 @@ fn bulk_header_defaults_to_auto_and_parses_yes_no() {
     let a = parse(&["--model", "m", "-o", "p", "--bulk", "c.tsv"]).expect("parses");
     assert_eq!(
         a.bulk_table.bulk_header,
-        crate::embed_common::HeaderArg::Auto
+        senna::embed_common::HeaderArg::Auto
     );
     let a = parse(&[
         "--model",
@@ -327,7 +327,7 @@ fn bulk_header_defaults_to_auto_and_parses_yes_no() {
     .expect("parses");
     assert_eq!(
         a.bulk_table.bulk_header,
-        crate::embed_common::HeaderArg::Yes
+        senna::embed_common::HeaderArg::Yes
     );
     let a = parse(&[
         "--model",
@@ -340,7 +340,7 @@ fn bulk_header_defaults_to_auto_and_parses_yes_no() {
         "no",
     ])
     .expect("parses");
-    assert_eq!(a.bulk_table.bulk_header, crate::embed_common::HeaderArg::No);
+    assert_eq!(a.bulk_table.bulk_header, senna::embed_common::HeaderArg::No);
 }
 
 //////////////////////////////////////////////////////////////////
@@ -613,7 +613,7 @@ mod gem_predict {
     }
 
     /// A second query file must be refused, not silently scored against
-    /// disjoint cells: `crate::multiome_layout::query_load` does not apply
+    /// disjoint cells: `senna::multiome_layout::query_load` does not apply
     /// gem's per-file `@sample` tagging, so two files fall back to
     /// `ColumnAlignment::Disjoint` (see
     /// `predict_reproduces_the_runs_own_cell_embedding`'s doc comment for the

@@ -2,7 +2,7 @@
 //! transforms that operate on it (thresholding, local scaling, diagonal
 //! regularization).
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use rayon::prelude::*;
 
 /// f32 dot product on two equal-length slices. `zip().map().sum()` is the

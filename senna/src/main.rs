@@ -38,19 +38,13 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod anchor_common;
-mod annotate;
-mod assoc;
 mod bge;
-mod carried_rows;
-mod cluster;
-mod cluster_aggregation;
 mod cluster_bhc;
 mod clustering;
 mod cnv_pseudobulk;
 mod counterfactual;
 mod deconvolve;
 mod docs;
-mod embed_common;
 mod embed_diag;
 mod empirical_dict;
 mod eval_topic;
@@ -62,25 +56,15 @@ mod geometry;
 mod hvg;
 mod impute;
 mod joint_topic;
-mod lineage;
-mod lineage_plot;
 mod logging;
-mod marker_support;
 mod masked_topic;
-mod multiome_layout;
-mod output_helpers;
-mod pb_reference;
 mod pbg_train_args;
 mod postprocess;
 mod predict;
 mod predict_tmle;
-mod principal_graph;
 mod probe;
-mod pseudotime;
 mod refine_weighting;
 mod resolve_embedding_space;
-mod run_manifest;
-mod senna_input;
 mod simba;
 mod svd;
 mod topic;
@@ -88,16 +72,13 @@ mod tree_layout;
 mod update;
 mod vae;
 
-use annotate::{
-    annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
-    AnnotateOntologyArgs, AnnotateProjectionArgs,
-};
-use assoc::run::{run_assoc, AssocArgs};
+use senna::annotate::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
+use senna::assoc::run::AssocArgs;
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
-use embed_common::*;
+use senna::embed_common::*;
 use embed_diag::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
@@ -105,14 +86,13 @@ use gem::args::GemArgs;
 use gem::run::run_gem_embedding;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
-use lineage::args::LineageArgs;
-use lineage::run::run_lineage;
-use lineage_plot::{run_lineage_plot, LineagePlotArgs};
+use senna::lineage::args::LineageArgs;
+use senna::lineage_plot::LineagePlotArgs;
 use masked_topic::*;
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
 use probe::{run_probe, ProbeArgs};
-use pseudotime::{run_pseudotime, PseudotimeArgs};
+use senna::pseudotime::PseudotimeArgs;
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
@@ -123,6 +103,14 @@ use vae::*;
 use colored::Colorize;
 
 const LOGO: &str = include_str!("../logo.txt");
+
+fn migrated_to_lupin(senna_cmd: &str, lupin_cmd: &str) -> ! {
+    eprintln!(
+        "The `senna {senna_cmd}` command moved to `lupin {lupin_cmd}`.\n\
+         Run `lupin {lupin_cmd} --help` for usage."
+    );
+    std::process::exit(1);
+}
 
 fn colorize_logo_line(line: &str) -> String {
     line.replace('@', &"@".bright_yellow().to_string())
@@ -1177,14 +1165,12 @@ fn main() -> anyhow::Result<()> {
             fit_joint_topic_model(args)?;
         }
 
-        Commands::Annotate(args) => {
-            annotate_by_enrichment(args)?;
+        Commands::Annotate(_args) => migrated_to_lupin("annotate-by-enrichment", "annotate --method enrichment"),
+        Commands::AnnotateOntology(_args) => {
+            migrated_to_lupin("annotate-ontology", "annotate")
         }
-        Commands::AnnotateOntology(args) => {
-            annotate_ontology(args)?;
-        }
-        Commands::AnnotateByProjection(args) => {
-            annotate_by_projection(args)?;
+        Commands::AnnotateByProjection(_args) => {
+            migrated_to_lupin("annotate-by-projection", "annotate --method projection")
         }
         Commands::Deconvolve(args) => {
             deconvolve::run(args)?;
@@ -1212,9 +1198,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Docs(args) => run_docs(args)?,
         Commands::Gem(args) => run_gem_embedding(args)?,
-        Commands::Lineage(args) => run_lineage(args)?,
-        Commands::LineagePlot(args) => run_lineage_plot(args)?,
-        Commands::Assoc(args) => run_assoc(args)?,
+        Commands::Lineage(_args) => migrated_to_lupin("lineage", "lineage"),
+        Commands::LineagePlot(_args) => migrated_to_lupin("lineage-plot", "lineage-plot"),
+        Commands::Assoc(_args) => migrated_to_lupin("dyn-assoc", "dyn-assoc"),
         Commands::Layout { cmd } => match cmd {
             LayoutCmd::Tsne(args) => {
                 fit_layout_tsne(args)?;
@@ -1232,9 +1218,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Clustering(args) => {
             run_clustering(args)?;
         }
-        Commands::Pseudotime(args) => {
-            run_pseudotime(args)?;
-        }
+        Commands::Pseudotime(_args) => migrated_to_lupin("pseudotime", "pseudotime"),
         Commands::Plot(args) => {
             fit_plot(args)?;
         }

@@ -42,7 +42,7 @@ pub struct FrozenFeatureSpec {
 
 impl FrozenFeatureSpec {
     /// Locate the frozen feature side for `{prefix}` via the shared resolver
-    /// [`crate::run_manifest::resolve_feature_embedding`].
+    /// [`senna::run_manifest::resolve_feature_embedding`].
     ///
     /// This used to probe filenames directly and accept
     /// `{prefix}.dictionary.parquet` as the feature embedding — but on a DEFAULT
@@ -52,7 +52,7 @@ impl FrozenFeatureSpec {
     /// before accepting it, and knows the canonical `feature_embedding` slot.
     pub fn resolve_from_prefix(prefix: &str, name_kind: FeatureNameKind) -> anyhow::Result<Self> {
         let (dictionary_path, bias_path) =
-            crate::run_manifest::resolve_feature_embedding(prefix)
+            senna::run_manifest::resolve_feature_embedding(prefix)
                 .map_err(|e| anyhow::anyhow!("--freeze-feature-embedding {prefix}: {e}"))?;
         match &bias_path {
             Some(b) => log::info!("Frozen feature side: {dictionary_path} + {b}"),

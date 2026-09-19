@@ -46,7 +46,7 @@ pub(super) struct AnnotateTrajArgs<'a> {
 pub(super) fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
     // The co-embedded feature vectors, not β — see `crate::gem::marker_embedding` for why a
     // Euclidean nearest-centroid call against β is not a well-posed question.
-    let beta = crate::gem::marker_embedding::load_marker_feature_embedding(a.prefix)?;
+    let beta = crate::marker_embedding::load_marker_feature_embedding(a.prefix)?;
     let cfg = TermOraConfig {
         n_perm: a.num_perm,
         // `--seed` drives the whole fit; it should drive the annotation's randomness too. It was

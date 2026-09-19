@@ -14,7 +14,7 @@
 //! (multinomial / NB working submodel) applied to the held-out distribution;
 //! iterating to a fixed point gives full TMLE for δ.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::common::expand_delta_for_block;
 use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};

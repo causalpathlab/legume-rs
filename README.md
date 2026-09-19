@@ -24,6 +24,7 @@ Alternatively, you can install individual binaries:
 cargo install --path data-beans # Data Backend for Extraction And Neighbourhood Search
 cargo install --path senna      # Stochastic data Embedding with Nearest Neighbourhood Adjustment
 cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
+cargo install --path lupin      # Lexicon-Using Projection for Identity Naming (text, annotate, lineage, describe)
 cargo install --path cocoa      # COunterfactual COnfounder Adjustment
 cargo install --path faba       # Feature extraction from Alignment for Base-pair Annotation
 cargo install --path cnv        # mung — Malignancy Unmixing on Normalized Genomes (inferCNV-style clone strata)

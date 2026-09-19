@@ -2,11 +2,11 @@
 //! PyTorch-BigGraph settings its `pbg_train` uses), so a bare invocation is
 //! the published recipe.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct SimbaArgs {
     #[arg(
         value_delimiter = ',',

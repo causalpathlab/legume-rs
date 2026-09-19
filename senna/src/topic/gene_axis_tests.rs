@@ -3,7 +3,7 @@
 //! group-mean restart of an unseen gene's ρ row.
 
 use super::fill_rows_by_coarsening;
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use crate::topic::eval::GeneRemap;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 

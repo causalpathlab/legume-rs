@@ -1,5 +1,5 @@
 use super::common::{expand_delta_for_block, process_blocks};
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_util::topic_refinement::*;
@@ -106,7 +106,7 @@ pub(crate) struct QueryNameOpts {
     /// every caller got before `--feature-name-kind` reached the loader at all:
     /// the flag used to drive only `kind` below, so `exact` on an exact-trained
     /// model still scored a canonicalized query. A multiome query layout may
-    /// refuse an explicit kind (see `crate::multiome_layout`).
+    /// refuse an explicit kind (see `senna::multiome_layout`).
     pub loader_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
     /// The rule applied to each query row name before it is matched to the
     /// model's axis.
@@ -141,7 +141,7 @@ pub(crate) struct QueryNameOpts {
 /// canonical rule must not widen a hit onto a second row that merely shares a
 /// suffix (`gene_0` vs `other_0`). Only when nothing matches exactly is the
 /// naming rule reconciled between the two sides
-/// ([`crate::embed_common::reconcile_name_kind`]) and both keyed canonically.
+/// ([`senna::embed_common::reconcile_name_kind`]) and both keyed canonically.
 pub(crate) struct ReconciledNames {
     /// The rule BOTH sides are keyed under. `Exact` when the list already
     /// spells names the way the axis does — `Exact::canonicalize` is the
@@ -168,7 +168,7 @@ impl ReconciledNames {
         // Nothing matches as spelled, so bridge the two axes. The list is
         // materialised only here, on the path that needs it.
         let listed: Vec<Box<str>> = names.into_iter().map(Box::from).collect();
-        let kind = crate::embed_common::reconcile_name_kind(axis, &[&listed]);
+        let kind = senna::embed_common::reconcile_name_kind(axis, &[&listed]);
         log::info!(
             "gene list: no name matches the axis as spelled; matching under the {kind:?} rule"
         );
@@ -273,7 +273,7 @@ pub(crate) fn build_gene_remap_with(
     new_data_genes: &[Box<str>],
     opts: &QueryNameOpts,
 ) -> GeneRemap {
-    use crate::marker_support::flexible_gene_match;
+    use senna::marker_support::flexible_gene_match;
 
     // Lowercased exact-match index — fast path for matching name sets.
     let train_pos: rustc_hash::FxHashMap<String, usize> = training_genes

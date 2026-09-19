@@ -102,7 +102,7 @@
 //! slice of the reference playing the query role — which is how the fit score is already
 //! calibrated. Until that lands, this module reports magnitudes and no verdict.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::{csc_to_indexed, PerGeneContext};
 use candle_core::{DType, Device, Tensor};

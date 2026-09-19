@@ -7,7 +7,7 @@
 //! - `predictive_llik_*`: wrap decoder forwards to return just the per-cell
 //!   log-likelihood tensor.
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::topic::eval::GeneRemap;
 use candle_core::{Device, Result as CandleResult, Tensor, Var};
 use candle_nn::ops;

@@ -1,5 +1,5 @@
 use super::{contrast_rows, write_contrast_table};
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use crate::gem::tracks::assign_tracks;
 use matrix_util::parquet::read_parquet_string_columns_by_name;
 use matrix_util::traits::IoOps;

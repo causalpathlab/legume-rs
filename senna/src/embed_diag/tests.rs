@@ -2,7 +2,7 @@
 //! same parquet writer senna's runs use, so the read path is the real one.
 
 use super::*;
-use crate::run_manifest::{default_path, RunKind, RunManifest};
+use senna::run_manifest::{default_path, RunKind, RunManifest};
 use graph_embedding_util::embedding_col_names;
 use std::path::Path;
 
@@ -158,7 +158,7 @@ fn a_manifest_with_nothing_measurable_is_an_error_naming_the_tables() {
 
     let err = collect_geometry(&prefix).expect_err("nothing to measure");
     let msg = err.to_string();
-    for t in crate::run_manifest::GEOMETRY_TABLE_SLOTS {
+    for t in senna::run_manifest::GEOMETRY_TABLE_SLOTS {
         assert!(msg.contains(t), "error must name `{t}`: {msg}");
     }
 }

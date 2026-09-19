@@ -1,6 +1,6 @@
 //! CLI arguments for `senna deconvolve`.
 
-use crate::embed_common::BulkTableArgs;
+use senna::embed_common::BulkTableArgs;
 use clap::Args;
 
 #[derive(Args, Debug)]

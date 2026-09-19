@@ -6,7 +6,7 @@
 //! to their node ids with `map_ids`.
 //!
 //! The source is any run whose prefix resolves through
-//! [`crate::run_manifest::resolve_feature_embedding`] — typically `senna fne`,
+//! [`senna::run_manifest::resolve_feature_embedding`] — typically `senna fne`,
 //! whose table also holds terms, words and cell types. Those rows are skipped
 //! by the run's `feature_types.parquet` when it exists; a source without one
 //! is taken to be all genes. Genes of this axis with no source row stay free.
@@ -24,7 +24,7 @@ use graph_embedding_util::PresetMode;
 use log::info;
 use rustc_hash::FxHashSet;
 
-pub(crate) use crate::carried_rows::CarriedRows;
+pub(crate) use senna::carried_rows::CarriedRows;
 
 /// The preset of a command's `--{freeze,init,lora}-feature-embedding`, when
 /// one was given: the rows to pin or start from, and the rows to carry.
@@ -62,7 +62,7 @@ pub(crate) fn load_preset_rows(
     rename_source: Option<SourceNameMap<'_>>,
 ) -> anyhow::Result<(ge::PresetRows, Option<CarriedRows>)> {
     let flag = crate::feature_embedding_args::flag_name(mode);
-    let (dictionary_path, _bias) = crate::run_manifest::resolve_feature_embedding(prefix)
+    let (dictionary_path, _bias) = senna::run_manifest::resolve_feature_embedding(prefix)
         .map_err(|e| anyhow::anyhow!("{flag} {prefix}: {e}"))?;
 
     // Which source rows are genes: the types table, when the run wrote one.

@@ -23,7 +23,7 @@
 //! writes it; nothing here special-cases it.
 
 use crate::bge::driver::FitArtifacts;
-use crate::embed_common::*;
+use senna::embed_common::*;
 use crate::gem::tracks::{contrast_channels, TrackPlan};
 use graph_embedding_util as ge;
 use matrix_util::parquet::{write_named_table, Column};

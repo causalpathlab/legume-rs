@@ -4,8 +4,8 @@
 
 use super::graph::{NodeText, PpiOpts, TypedGraphBuilder};
 use super::{fit_fne, FneArgs};
-use crate::embed_common::Mat;
-use crate::run_manifest::{RunKind, RunManifest};
+use senna::embed_common::Mat;
+use senna::run_manifest::{RunKind, RunManifest};
 use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
 use auxiliary_data::ontology::Ontology;

@@ -1,7 +1,7 @@
 //! Output writers for `senna deconvolve`.
 
 use super::result::DeconvResult;
-use crate::embed_common::{axis_id_names, Mat};
+use senna::embed_common::{axis_id_names, Mat};
 use anyhow::{Context, Result};
 use log::info;
 use matrix_util::common_io::write_lines;

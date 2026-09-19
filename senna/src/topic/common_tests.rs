@@ -1,7 +1,7 @@
 //! Inheriting a source run's coarsening ladder under `--init-from`.
 
 use super::inherit_level_coarsenings;
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use crate::topic::eval::GeneRemap;
 use crate::topic::model_metadata::save_coarsening_levels;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;

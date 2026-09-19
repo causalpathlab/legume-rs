@@ -207,7 +207,7 @@ pub(super) fn cluster_term_ora(
 /// Each cluster's FDR-gated call: its top over-represented term, kept only if significant.
 /// [`UNASSIGNED`] when nothing survives `fdr_alpha`.
 pub(super) fn cluster_calls(ora: &OraResult, n_comm: usize, c: usize, alpha: f32) -> Vec<usize> {
-    let top = argmax_rows(&ora.stat, n_comm, c);
+    let top = cluster_best(ora, n_comm, c);
     (0..n_comm)
         .map(|k| {
             let best = top[k];
@@ -218,6 +218,12 @@ pub(super) fn cluster_calls(ora: &OraResult, n_comm: usize, c: usize, alpha: f32
             }
         })
         .collect()
+}
+
+/// Always the top term by ORA statistic (argmin q / argmax stat), whether or not it clears FDR.
+/// Used for `best_label` / `best_q` when the significant call abstains.
+pub(super) fn cluster_best(ora: &OraResult, n_comm: usize, c: usize) -> Vec<usize> {
+    argmax_rows(&ora.stat, n_comm, c)
 }
 
 /// `[n_comm × c]` row-major contingency counts over the **assigned cells only**: `comms` and

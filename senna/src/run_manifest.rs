@@ -1155,12 +1155,12 @@ pub fn resolve(manifest_dir: &Path, rel: &str) -> PathBuf {
 }
 
 /// Derive an output prefix from a `--from` manifest path when `--out` was
-/// omitted: strip `.senna.json` (preferred) or any trailing `.json`, leaving
-/// the same basename the training run used. Single source for the several
-/// subcommands that default `--out` to their `--from`.
+/// omitted: strip `.senna.json` / `.pinto.json` (preferred) or any trailing
+/// `.json`, leaving the same basename the training run used.
 #[must_use]
 pub fn derive_out_prefix(from: &str) -> String {
     from.strip_suffix(".senna.json")
+        .or_else(|| from.strip_suffix(".pinto.json"))
         .or_else(|| from.strip_suffix(".json"))
         .unwrap_or(from)
         .to_string()

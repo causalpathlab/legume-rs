@@ -13,7 +13,7 @@ use super::fit_layout_common::{
     write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep,
     ResolvedViz,
 };
-use crate::embed_common::*;
+use senna::embed_common::*;
 use matrix_util::pca::{init_2d_from_scores, pc_scores, random_init_2d};
 use matrix_util::umap::Umap;
 use rayon::prelude::*;
@@ -79,7 +79,7 @@ impl Default for LayoutUmapArgs {
 /// [`crate::postprocess::run_default_phate_layout`] in scope and
 /// behavior; differs only in the layout algorithm.
 pub fn run_default_umap_layout(manifest_path: &str, preload: bool) -> anyhow::Result<()> {
-    use crate::run_manifest::RunManifest;
+    use senna::run_manifest::RunManifest;
     use std::path::Path;
 
     let mut args = LayoutUmapArgs::default();

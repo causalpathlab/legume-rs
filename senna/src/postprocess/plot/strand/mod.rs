@@ -25,8 +25,8 @@
 mod place;
 mod render;
 
-use crate::embed_common::*;
-use crate::run_manifest::{self, RunManifest};
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunManifest};
 use place::{bin_group, place_genes, robust_max, sum_grids, BinGrid};
 use rayon::prelude::*;
 use render::render_one;

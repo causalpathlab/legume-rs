@@ -12,7 +12,7 @@
 //! postprocessing sides without dragging candle / data-beans into each other's
 //! graph.
 
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 use crate::logging::new_progress_bar;
 use nalgebra::DVector;
 use rayon::prelude::*;

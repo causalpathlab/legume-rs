@@ -21,7 +21,7 @@ use matrix_util::clustering::{Kmeans, KmeansArgs};
 
 use matrix_util::traits::IoOps;
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 /////////////////////////
 // Public entry points //
