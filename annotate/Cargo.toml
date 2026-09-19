@@ -9,8 +9,24 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Cell-type annotation (projection, enrichment, ontology)"
 
+[features]
+default = []
+cuda = ["graph-embedding-util/cuda", "matrix-util/cuda"]
+metal = ["graph-embedding-util/metal", "matrix-util/metal"]
+
 [dependencies]
+auxiliary-data = { workspace = true }
+data-beans = { workspace = true }
+enrichment = { workspace = true }
+graph-embedding-util = { workspace = true }
+matrix-util = { workspace = true }
+
 anyhow = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
-# fill real deps when modules land (matrix-util, plot-utils, ndarray, …)
+nalgebra = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

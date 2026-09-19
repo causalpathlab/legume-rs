@@ -1,11 +1,11 @@
-//! `senna annotate-by-projection` — firm marker-set annotation by projection
-//! onto a co-embedded feature space.
+//! `annotate-by-projection` — firm marker-set annotation by projection onto a
+//! co-embedded feature space.
 //!
-//! A thin senna front-end over the shared firm term-ORA core
+//! A thin front-end over the shared firm term-ORA core
 //! ([`graph_embedding_util::type_annotation::annotate_embeddings_ora`]): it
-//! reads `outputs.feature_coembedding` (genes on the cell manifold) + the cell
-//! embedding (`outputs.cell_embedding`, else `outputs.latent`) from the run
-//! manifest and hands them to the firm routine — Euclidean nearest-centroid
+//! takes the co-embedded gene vectors (genes on the cell manifold) + the cell
+//! embedding — both loaded by the caller, since finding them is manifest work —
+//! and hands them to the firm routine: Euclidean nearest-centroid
 //! assignment → distance-outlier QC → Leiden clustering → cluster × term
 //! hypergeometric over-representation (permutation-calibrated) → optional TreeBH
 //! ontology calling.
@@ -19,55 +19,44 @@
 //! argmax.tsv}`) and the TreeBH ontology core with the other passes, so their
 //! outputs are directly comparable.
 
-use super::args::AnnotateProjectionArgs;
-use super::finalize::{clean_outputs, finalize_annotation, AnnotationArtifacts};
-use crate::marker_embedding::load_marker_feature_embedding;
-use crate::run_manifest;
-use anyhow::{Context, Result};
+use crate::args::AnnotateProjectionArgs;
+use crate::mat_io::{Mat, MatWithNames};
+use crate::outputs::{clean_outputs, AnnotationOutputs};
+use anyhow::Result;
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
     TERM_ORA_OUTPUT_SUFFIXES,
 };
 use log::info;
 use matrix_util::common_io::mkdir_parent;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
 use std::path::Path;
 
-pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
+/// The two embeddings the projection pass scores against each other. Finding
+/// them means reading `outputs.feature_coembedding` / `outputs.cell_embedding`,
+/// so the caller loads them — see `senna::annotate_manifest`.
+pub struct ProjectionInputs<'a> {
+    /// Genes on the cell manifold (the co-embedded feature space).
+    pub feature_embedding: &'a MatWithNames<Mat>,
+    /// Cells in the same space.
+    pub cell_embedding: &'a MatWithNames<Mat>,
+}
+
+pub fn run(
+    args: &AnnotateProjectionArgs,
+    default_out: &str,
+    inputs: &ProjectionInputs<'_>,
+) -> Result<AnnotationOutputs> {
     let out: String = match args.out.as_deref() {
         Some(o) => o.to_string(),
-        None => run_manifest::derive_out_prefix(&args.from),
+        None => default_out.to_string(),
     };
     mkdir_parent(&out)?;
     if !args.no_clean {
         clean_outputs(&out, TERM_ORA_OUTPUT_SUFFIXES);
     }
 
-    let (mut manifest, dir) = run_manifest::load_for(&args.from)?;
-    info!("Loaded manifest ({}): kind={}", args.from, manifest.kind);
-    let resolve = |rel: &str| -> String {
-        run_manifest::resolve(&dir, rel)
-            .to_string_lossy()
-            .into_owned()
-    };
-
-    // Feature side: genes on the cell manifold (required for projection). Reads
-    // `outputs.feature_coembedding` off the manifest and, for a `gem` run, keeps
-    // only the spliced rows re-keyed by gene — see `crate::gem::marker_embedding`.
-    let feat = load_marker_feature_embedding(&args.from).with_context(|| {
-        "projection needs a co-embedded gene space (a `senna gem` / `bge` / `fne` / \
-         `resolve-embedding-space` run). For topic/svd runs use `senna annotate-by-enrichment`."
-    })?;
-    // Cell side: prefer the explicit cell_embedding; fall back to latent for
-    // manifests written before Z moved there unconditionally.
-    let cell_rel = manifest.outputs.geometry_latent().ok_or_else(|| {
-        anyhow::anyhow!("manifest has neither `outputs.cell_embedding` nor `outputs.latent`")
-    })?;
-
-    let cell_path = resolve(cell_rel);
-    let cell = DMatrix::<f32>::from_parquet(&cell_path)
-        .with_context(|| format!("reading cell embedding {cell_path}"))?;
+    let feat = inputs.feature_embedding;
+    let cell = inputs.cell_embedding;
     info!(
         "projection inputs: features [{} × {}], cells [{} × {}]",
         feat.mat.nrows(),
@@ -121,32 +110,21 @@ pub fn run(args: &AnnotateProjectionArgs) -> Result<()> {
         &cfg,
     )?;
 
-    ///////////////////////////////////////////////
-    // wire into the manifest (shared finalizer) //
-    ///////////////////////////////////////////////
-    let annot = format!("{out}.annot.parquet");
-    let argmax = format!("{out}.argmax.tsv");
+    ///////////////////////////////////////
+    // what the caller records in a manifest //
+    ///////////////////////////////////////
     let onto_assign = format!("{out}.ontology_assignment.tsv");
     let onto_mass = format!("{out}.ontology_node_mass.parquet");
     let has_onto = Path::new(&onto_assign).exists();
-    finalize_annotation(
-        &mut manifest,
-        Path::new(args.from.as_ref()),
-        &dir,
-        &AnnotationArtifacts {
-            argmax_abs: &argmax,
-            markers: &args.markers,
-            annotation_abs: Some(&annot),
-            // Projection emits cluster × term (not cluster × celltype enrichment);
-            // those manifest fields stay None for this pass.
-            cluster_celltype_q_abs: None,
-            cluster_celltype_es_abs: None,
-            cluster_expression_abs: None,
-            ontology_assignment_abs: has_onto.then_some(onto_assign.as_str()),
-            ontology_node_mass_abs: has_onto.then_some(onto_mass.as_str()),
-        },
-    )?;
 
-    info!("senna annotate-by-projection complete → {out}.*");
-    Ok(())
+    info!("annotate-by-projection complete → {out}.*");
+    Ok(AnnotationOutputs {
+        argmax: Some(format!("{out}.argmax.tsv")),
+        annotation: Some(format!("{out}.annot.parquet")),
+        // Projection emits cluster × term (not cluster × celltype enrichment);
+        // those manifest fields stay None for this pass.
+        ontology_assignment: has_onto.then_some(onto_assign),
+        ontology_node_mass: has_onto.then_some(onto_mass),
+        ..AnnotationOutputs::default()
+    })
 }

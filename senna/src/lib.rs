@@ -13,7 +13,7 @@
     clippy::struct_field_names
 )]
 
-pub mod annotate;
+pub mod annotate_manifest;
 pub mod carried_rows;
 pub mod cluster;
 pub mod cluster_aggregation;
@@ -36,3 +36,18 @@ pub use ::lineage::assoc;
 pub use ::lineage::lineage;
 pub use ::lineage::lineage_plot;
 pub use ::lineage::pseudotime;
+
+/// The `senna::annotate::…` paths callers had before the implementation moved
+/// into the `annotate` crate: argument types and the cluster reader come from
+/// there, the run entrypoints from [`annotate_manifest`].
+pub mod annotate {
+    pub use crate::annotate_manifest::{
+        annotate_by_enrichment, annotate_by_projection, annotate_ontology,
+    };
+    pub use ::annotate::args::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
+
+    pub mod inputs {
+        pub use crate::annotate_manifest::{compute_clusters_from_latent, LeidenArgs};
+        pub use ::annotate::inputs::load_cluster_labels;
+    }
+}
