@@ -8,8 +8,8 @@ use super::fit_layout_common::{
     LayoutPrep,
 };
 use super::viz_prep::apply_svd_preprocessing;
-use senna::embed_common::*;
 use crate::geometry::tsne::{similarity_to_distance, TSne};
+use senna::embed_common::*;
 
 #[derive(Args, Debug)]
 pub struct LayoutTsneArgs {

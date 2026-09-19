@@ -10,19 +10,19 @@
 //! actual 2D layout algorithm.
 
 use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
-use senna::embed_common::*;
 use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
-use senna::run_manifest::{self, load_cell_to_pb_raw, rel_to_manifest, RunManifest};
-use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
 };
 use data_beans_alg::random_projection::binary_sort_columns;
 use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
+use senna::embed_common::*;
+use senna::run_manifest::{self, load_cell_to_pb_raw, rel_to_manifest, RunManifest};
+use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use std::path::{Path, PathBuf};
 
 /// How to pick landmarks for the latent-driven layout path.

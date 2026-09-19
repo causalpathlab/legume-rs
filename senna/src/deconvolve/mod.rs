@@ -25,14 +25,14 @@ mod tests;
 
 pub use args::DeconvolveArgs;
 
-use senna::embed_common::{read_bulk_data_aligned, Mat};
-use senna::run_manifest;
 use anyhow::Result;
 use gibbs::PosteriorAccum;
 use log::info;
 use matrix_util::common_io::mkdir_parent;
 use monitor::Monitor;
 use reference::Reference;
+use senna::embed_common::{read_bulk_data_aligned, Mat};
+use senna::run_manifest;
 use source::EmbeddingSource;
 
 /// Seed stride between independent streams — an odd, well-mixed constant so the

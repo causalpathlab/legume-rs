@@ -4,14 +4,14 @@
 
 use super::graph::{NodeText, PpiOpts, TypedGraphBuilder};
 use super::{fit_fne, FneArgs};
-use senna::embed_common::Mat;
-use senna::run_manifest::{RunKind, RunManifest};
 use auxiliary_data::feature_names::FeatureNameKind;
 use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
 use auxiliary_data::ontology::Ontology;
 use clap::Parser;
 use matrix_util::parquet::read_parquet_string_columns_by_name;
 use matrix_util::traits::IoOps;
+use senna::embed_common::Mat;
+use senna::run_manifest::{RunKind, RunManifest};
 use std::path::Path;
 
 #[derive(Parser)]

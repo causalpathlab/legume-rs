@@ -27,8 +27,8 @@ fn adj_method_is_listed_in_help() {
 /// The masked objective is the regularizer; `masked-vae` no longer weighs a KL.
 mod no_kl {
     use super::{Cli, MaskedTopicArgs};
-    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
     #[test]
     fn kl_weight_is_not_a_flag_any_more() {
@@ -64,8 +64,8 @@ mod no_kl {
 /// and populated a context window have nothing left to do.
 mod window_free {
     use super::{Cli, MaskedTopicArgs};
-    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
     fn parse(extra: &[&str]) -> MaskedTopicArgs {
         let mut argv = vec!["senna-masked-vae", "d.zarr", "-o", "out"];
@@ -145,8 +145,8 @@ mod window_free {
 /// module stays (for re-wiring later), but nothing reaches it from a command.
 mod query_unwired {
     use super::{Cli, MaskedTopicArgs};
-    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
     use clap::Parser;
+    use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
     /// None of the four flags is a flag any more. Silently accepting one would
     /// let a user believe they had turned a head on.
@@ -278,11 +278,11 @@ mod mask_fraction_bounds {
 ////////////////////////////////////////////////////////////////
 
 use super::fit_masked_topic_model;
-use senna::embed_common::Mat;
 use candle_util::candle_core;
 use clap::Parser;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use matrix_util::traits::IoOps;
+use senna::embed_common::Mat;
 use std::path::Path;
 
 fn parse_masked(argv: &[&str]) -> MaskedTopicArgs {

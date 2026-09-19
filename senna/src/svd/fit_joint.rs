@@ -1,9 +1,9 @@
+use data_beans::sparse_data_visitors::VisitColumnsOps;
+use matrix_util::dmatrix_util::concatenate_vertical;
 use senna::embed_common::*;
 use senna::senna_input::{
     read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
 };
-use data_beans::sparse_data_visitors::VisitColumnsOps;
-use matrix_util::dmatrix_util::concatenate_vertical;
 
 #[derive(Args, Debug)]
 pub struct JointSvdArgs {

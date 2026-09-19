@@ -12,10 +12,10 @@
 //! postprocessing sides without dragging candle / data-beans into each other's
 //! graph.
 
-use senna::embed_common::Mat;
 use crate::logging::new_progress_bar;
 use nalgebra::DVector;
 use rayon::prelude::*;
+use senna::embed_common::Mat;
 
 /// Write `softmax(col)` from a source column view into a destination column
 /// view of the same length. Used per anchor when building anchor simplex

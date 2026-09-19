@@ -2,8 +2,8 @@
 //! or an embedding (axes numbered by position), and refuses anything else.
 
 use super::argmax_topics;
-use senna::embed_common::Mat;
 use matrix_util::traits::IoOps;
+use senna::embed_common::Mat;
 
 fn write(dir: &std::path::Path, name: &str, cols: &[&str]) -> String {
     let m = Mat::from_row_slice(3, 3, &[0.1, 0.9, 0.0, 0.7, 0.2, 0.1, 0.0, 0.0, 1.0]);

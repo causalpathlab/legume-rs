@@ -1,10 +1,10 @@
 //! Inheriting a source run's coarsening ladder under `--init-from`.
 
 use super::inherit_level_coarsenings;
-use senna::embed_common::Mat;
 use crate::topic::eval::GeneRemap;
 use crate::topic::model_metadata::save_coarsening_levels;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use senna::embed_common::Mat;
 
 fn coarsening(fine_to_coarse: &[usize], num_coarse: usize) -> FeatureCoarsening {
     FeatureCoarsening::from_fine_to_coarse(fine_to_coarse.to_vec(), num_coarse).unwrap()

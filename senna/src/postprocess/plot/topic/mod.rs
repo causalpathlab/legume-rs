@@ -22,14 +22,14 @@
 //!     └── heatmap.pdf               # if n_genes > 100
 //! ```
 
-use senna::embed_common::*;
-use senna::run_manifest::{self, RunManifest};
 use auxiliary_data::feature_names::FeatureNameKind;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use plot_utils::palette::{self, Palette, Rgb};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunManifest};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};

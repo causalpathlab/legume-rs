@@ -1,4 +1,3 @@
-use senna::embed_common::*;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
@@ -7,6 +6,7 @@ use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedCon
 use crate::topic::train_masked::{
     train_masked, write_feature_embedding, write_masked_dictionary, IndexedTrainConfig,
 };
+use senna::embed_common::*;
 
 use candle_util::decoder::masked_etm::{log_background_from_mean, pin_background};
 use candle_util::decoder::EmbeddedNbTopicDecoder;

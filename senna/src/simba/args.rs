@@ -2,8 +2,8 @@
 //! PyTorch-BigGraph settings its `pbg_train` uses), so a bare invocation is
 //! the published recipe.
 
-use senna::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]

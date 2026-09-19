@@ -1,9 +1,9 @@
-use senna::embed_common::*;
 use crate::hvg::HvgCliArgs;
 use crate::topic::common::{
     load_and_project, load_cnv_cell_strata, LoadProjectArgs, ProjectedData,
 };
 use data_beans::sparse_data_visitors::VisitColumnsOps;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
