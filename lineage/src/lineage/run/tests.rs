@@ -194,7 +194,16 @@ fn end_to_end_run_writes_forest_outputs() {
         "--seed",
         "1",
     ]);
-    run_lineage(&w.a).unwrap();
+    // No manifest is written for this fixture, which is what a caller with
+    // nothing to resolve hands in.
+    run_lineage(
+        &w.a,
+        &LineageInputs {
+            contract: LatentContract::unknown(format!("{prefix}.senna.json")),
+            feature_embedding: None,
+        },
+    )
+    .unwrap();
 
     // The forest outputs exist and describe a ≥2-tree split with finite pseudotime.
     let trees = DMatrix::<f32>::from_parquet(&format!("{prefix}.trees.parquet")).unwrap();

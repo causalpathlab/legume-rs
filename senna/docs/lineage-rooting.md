@@ -36,7 +36,7 @@ trying to infer it from a shaky embedding.
 
 ## Current state (what exists today)
 
-- Root priority in `resolve_root_hint` (`senna/src/lineage/root.rs`):
+- Root priority in `resolve_root_hint` (`lineage/src/lineage/root.rs`):
   `--root-node > --root-cell > --root-type > velocity-flux root > node 0`.
 - `--root-type <TYPE>`: single marker-grounded type, matched to the
   highest-confidence node of that type via the marker ORA (`--markers`).
@@ -46,7 +46,7 @@ trying to infer it from a shaky embedding.
   unreliable in exactly the regime we care about.
 - Marker/node scoring infrastructure already present:
   `graph_embedding_util::type_annotation` (the `term_ora` scoring path) and
-  the `--markers` path in `senna/src/lineage/traj_annotation.rs`
+  the `--markers` path in `lineage/src/lineage/traj_annotation.rs`
   (`compute_node_calls`, consumed by `root_type_node`).
 
 ## Ideas to elicit expert knowledge (cheap to rich)
@@ -126,11 +126,11 @@ now-removed underfit flag with something actionable and root-specific.
 
 ## Related
 
-- `senna/src/lineage/root.rs`: `resolve_root_hint`, `root_type_node`.
-- `senna/src/lineage/traj_annotation.rs`: `compute_node_calls`.
+- `lineage/src/lineage/root.rs`: `resolve_root_hint`, `root_type_node`.
+- `lineage/src/lineage/traj_annotation.rs`: `compute_node_calls`.
 - `graph-embedding-util/src/type_annotation/`: the marker ORA node scoring
   to reuse for signature rooting.
 - `docs/annotation-ontology-plan.md`: the reference-free CL-DAG annotation
   plan (shares the marker/ontology machinery).
-- `senna/src/assoc/`: the downstream that inherits the rooting choice; see
+- `lineage/src/assoc/`: the downstream that inherits the rooting choice; see
   the root-invariance decomposition (detection vs direction).

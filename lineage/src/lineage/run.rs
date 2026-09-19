@@ -29,6 +29,7 @@ use matrix_util::principal_curve::PrincipalCurveArgs;
 use matrix_util::principal_graph::{
     kmeans_centroids_seeded, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
 };
+use matrix_util::traits::MatWithNames;
 use std::collections::HashMap;
 
 use super::args::*;
@@ -44,7 +45,20 @@ use crate::lineage::orient::{
     EdgeDirection, EdgeDirectionConfig,
 };
 
-pub fn run_lineage(args: &LineageArgs) -> Result<()> {
+/// The manifest-derived inputs `run_lineage` cannot read for itself.
+///
+/// Everything here needs a run manifest, which lives in `senna` — so the
+/// caller resolves it and hands the results in. `senna::lineage_manifest`
+/// builds this from a prefix.
+pub struct LineageInputs {
+    /// What the producing run says about its per-cell tables.
+    pub contract: LatentContract,
+    /// Co-embedded gene vectors for the `--markers` node calls. Required
+    /// exactly when [`LineageArgs::markers`] is set.
+    pub feature_embedding: Option<MatWithNames<DMatrix<f32>>>,
+}
+
+pub fn run_lineage(args: &LineageArgs, inputs: &LineageInputs) -> Result<()> {
     let prefix = args.from.as_ref();
     let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
@@ -67,7 +81,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
              geometry for a cell embedding. Use --latent-geometry to choose explicitly."
         );
     }
-    let theta_from = resolve_theta_from(args.theta_from, prefix)?;
+    let theta_from = resolve_theta_from(args.theta_from, &inputs.contract)?;
     let geometry = resolve_geometry(args.latent_geometry, theta_from);
     let loaded = load_theta(prefix, theta_from, args.no_orient_velocity)?;
     let LoadedTheta {
@@ -78,11 +92,7 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     let n = theta_native.nrows();
     anyhow::ensure!(n >= 2, "need ≥ 2 cells, got {n}");
 
-    if velocity.is_none()
-        && crate::run_manifest::load_for(prefix)
-            .ok()
-            .is_some_and(|(m, _)| m.kind == crate::run_manifest::RunKind::Gem)
-    {
+    if velocity.is_none() && inputs.contract.is_gem {
         info!(
             "gem runs carry no velocity; edges are geometry-only, root with \
              --root-node/--root-cell/--root-type"
@@ -179,7 +189,9 @@ pub fn run_lineage(args: &LineageArgs) -> Result<()> {
     // model `annotate-by-enrichment` is the right statistic instead.
     let node_calls = match (args.markers.as_deref(), raw_theta.as_ref()) {
         (Some(markers), Some(raw)) => Some(compute_node_calls(&AnnotateTrajArgs {
-            prefix,
+            feature_embedding: inputs.feature_embedding.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("--markers needs a gene embedding, but none was supplied")
+            })?,
             out: &out,
             markers,
             raw_theta: raw,

@@ -9,8 +9,29 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Lineage inference, pseudotime, dyn-assoc, and lineage plots"
 
+[features]
+default = []
+cuda = ["graph-embedding-util/cuda", "matrix-util/cuda", "mcmc-util/cuda"]
+metal = ["graph-embedding-util/metal", "matrix-util/metal", "mcmc-util/metal"]
+
 [dependencies]
+auxiliary-data = { workspace = true }
+data-beans = { workspace = true }
+enrichment = { workspace = true }
+graph-embedding-util = { workspace = true }
+matrix-util = { workspace = true }
+mcmc-util = { workspace = true }
+plot-utils = { workspace = true }
+
 anyhow = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
-# fill real deps when modules land (matrix-util, plot-utils, ndarray, …)
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+statrs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

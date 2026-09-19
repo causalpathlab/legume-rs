@@ -8,9 +8,11 @@ use clap::{Parser, Subcommand};
 use gene_text::cli::{run_knn_graph, run_qc, KnnGraphCmd, QcCmd};
 use senna::assoc::run::{run_assoc, AssocArgs};
 use senna::lineage::args::LineageArgs;
-use senna::lineage::run::run_lineage;
+// `lineage` itself takes resolved paths; these adapters turn `-f run.senna.json`
+// into those and record the artifacts they produce.
+use senna::lineage_manifest::{run_lineage_from_manifest, run_pseudotime_from_manifest};
 use senna::lineage_plot::{run_lineage_plot, LineagePlotArgs};
-use senna::pseudotime::{run_pseudotime, PseudotimeArgs};
+use senna::pseudotime::PseudotimeArgs;
 
 use annotate::{run_annotate, AnnotateCliArgs};
 use describe::{run_describe, DescribeArgs};
@@ -122,10 +124,10 @@ fn main() -> Result<()> {
         Commands::TextQc(c) => run_qc(&c),
         Commands::WordGraph(c) => run_knn_graph(&c),
         Commands::Annotate(c) => run_annotate(&c),
-        Commands::Lineage(c) => run_lineage(&c),
+        Commands::Lineage(c) => run_lineage_from_manifest(&c),
         Commands::LineagePlot(c) => run_lineage_plot(&c),
         Commands::DynAssoc(c) => run_assoc(&c),
-        Commands::Pseudotime(c) => run_pseudotime(&c),
+        Commands::Pseudotime(c) => run_pseudotime_from_manifest(&c),
         Commands::Describe(c) => run_describe(&c),
     }
 }
