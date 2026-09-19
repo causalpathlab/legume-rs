@@ -80,6 +80,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "annotate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "auxiliary-data",
+ "clap",
+ "data-beans",
+ "enrichment",
+ "graph-embedding-util",
+ "log",
+ "matrix-util",
+ "nalgebra 0.34.2",
+ "rayon",
+ "rustc-hash",
+ "tempfile",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2611,7 +2629,6 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "clap",
- "env_logger",
  "hf-hub",
  "log",
  "matrix-util",
@@ -3715,6 +3732,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "lineage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "auxiliary-data",
+ "clap",
+ "data-beans",
+ "enrichment",
+ "graph-embedding-util",
+ "log",
+ "matrix-util",
+ "mcmc-util",
+ "nalgebra 0.34.2",
+ "plot-utils",
+ "rand 0.10.2",
+ "rand_distr 0.6.0",
+ "rayon",
+ "rustc-hash",
+ "statrs",
+ "tempfile",
+]
+
+[[package]]
 name = "linear-map"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3763,6 +3803,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "lupin"
+version = "0.1.0"
+dependencies = [
+ "annotate",
+ "anyhow",
+ "clap",
+ "env_logger",
+ "gene-text",
+ "graph-embedding-util",
+ "lineage",
+ "log",
+ "matrix-util",
+ "senna",
+ "serde_json",
 ]
 
 [[package]]
@@ -5641,6 +5698,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 name = "senna"
 version = "0.17.0"
 dependencies = [
+ "annotate",
  "anyhow",
  "approx",
  "auxiliary-data",
@@ -5662,6 +5720,7 @@ dependencies = [
  "indicatif 0.18.6",
  "indicatif-log-bridge",
  "leiden",
+ "lineage",
  "log",
  "matrix-param",
  "matrix-util",

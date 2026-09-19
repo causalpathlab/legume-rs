@@ -15,8 +15,8 @@ use super::*;
 use crate::gem::args::GemArgs;
 use crate::gem::run::run_gem_embedding;
 use crate::gem::test_fixtures::{genes_file, m6a_file};
-use crate::run_manifest::{RunManifest, TrackEncoderSlot};
 use clap::Parser;
+use senna::run_manifest::{RunManifest, TrackEncoderSlot};
 
 #[derive(Parser)]
 struct Cli {

@@ -4,10 +4,10 @@
 //! downstream can tell which door the data came in through.
 
 use super::{materialize, BulkBackends};
-use crate::embed_common::{BulkTableOpts, HeaderArg, Mat, Orientation};
 use data_beans::sparse_io::{create_sparse_from_triplets, open_sparse_matrix, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
 use matrix_util::traits::IoOps;
+use senna::embed_common::{BulkTableOpts, HeaderArg, Mat, Orientation};
 use std::sync::Arc;
 
 fn labels(v: &[&str]) -> Vec<Box<str>> {

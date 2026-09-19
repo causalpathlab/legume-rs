@@ -66,7 +66,7 @@ use centroids::{
 };
 use clustering::{cell_knn_graph, cluster_cells, cluster_sizes};
 use log::{info, warn};
-use ora::{capped_n_perm, cluster_calls, cluster_term_ora, ln_factorials, Want};
+use ora::{capped_n_perm, cluster_best, cluster_calls, cluster_term_ora, ln_factorials, Want};
 use output::{
     log_cluster_calls, report_bootstrap, report_consensus, report_panel_null, run_ontology,
     write_annot_parquet, write_bootstrap_outputs, write_calibration, write_cluster_term_matrices,
@@ -605,6 +605,7 @@ fn annotate_inner(
     // 6. cluster calls → per-cell firm labels //
     /////////////////////////////////////////////
     let cluster_label = cluster_calls(&ora, n_comm, c, cfg.fdr_alpha);
+    let best_by_cluster = cluster_best(&ora, n_comm, c);
     ////////////////////////////////////////////////////////////////////////////
     // 6b. the shipped label: one partition's word, or the consensus of many  //
     ////////////////////////////////////////////////////////////////////////////
@@ -688,6 +689,7 @@ fn annotate_inner(
         &type_names,
         &ora,
         &cluster_label,
+        &best_by_cluster,
         boot.as_ref(),
         consensus,
         sup_null.as_ref(),

@@ -38,19 +38,13 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod anchor_common;
-mod annotate;
-mod assoc;
 mod bge;
-mod carried_rows;
-mod cluster;
-mod cluster_aggregation;
 mod cluster_bhc;
 mod clustering;
 mod cnv_pseudobulk;
 mod counterfactual;
 mod deconvolve;
 mod docs;
-mod embed_common;
 mod embed_diag;
 mod empirical_dict;
 mod eval_topic;
@@ -62,25 +56,15 @@ mod geometry;
 mod hvg;
 mod impute;
 mod joint_topic;
-mod lineage;
-mod lineage_plot;
 mod logging;
-mod marker_support;
 mod masked_topic;
-mod multiome_layout;
-mod output_helpers;
-mod pb_reference;
 mod pbg_train_args;
 mod postprocess;
 mod predict;
 mod predict_tmle;
-mod principal_graph;
 mod probe;
-mod pseudotime;
 mod refine_weighting;
 mod resolve_embedding_space;
-mod run_manifest;
-mod senna_input;
 mod simba;
 mod svd;
 mod topic;
@@ -88,16 +72,10 @@ mod tree_layout;
 mod update;
 mod vae;
 
-use annotate::{
-    annotate_by_enrichment, annotate_by_projection, annotate_ontology, AnnotateArgs,
-    AnnotateOntologyArgs, AnnotateProjectionArgs,
-};
-use assoc::run::{run_assoc, AssocArgs};
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
-use embed_common::*;
 use embed_diag::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
@@ -105,15 +83,17 @@ use gem::args::GemArgs;
 use gem::run::run_gem_embedding;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
-use lineage::args::LineageArgs;
-use lineage::run::run_lineage;
-use lineage_plot::{run_lineage_plot, LineagePlotArgs};
 use masked_topic::*;
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
 use probe::{run_probe, ProbeArgs};
-use pseudotime::{run_pseudotime, PseudotimeArgs};
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
+use senna::annotate::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
+use senna::assoc::run::AssocArgs;
+use senna::embed_common::*;
+use senna::lineage::args::LineageArgs;
+use senna::lineage_plot::LineagePlotArgs;
+use senna::pseudotime::PseudotimeArgs;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
 use topic::cmd::*;
@@ -123,6 +103,14 @@ use vae::*;
 use colored::Colorize;
 
 const LOGO: &str = include_str!("../logo.txt");
+
+fn migrated_to_lupin(senna_cmd: &str, lupin_cmd: &str) -> ! {
+    eprintln!(
+        "The `senna {senna_cmd}` command moved to `lupin {lupin_cmd}`.\n\
+         Run `lupin {lupin_cmd} --help` for usage."
+    );
+    std::process::exit(1);
+}
 
 fn colorize_logo_line(line: &str) -> String {
     line.replace('@', &"@".bright_yellow().to_string())
@@ -744,22 +732,7 @@ enum Commands {
         name = "annotate-by-enrichment",
         visible_aliases = ["annotate-by-topic", "ann-by-topic", "ann-by-enrich", "annot-by-enrich"],
         about = "Annotate cells via cluster-level marker enrichment.",
-        long_about = "Pipeline:\n  \
-                      1. (re)cluster on the manifest's latent, Leiden when no\n  \
-                      \x20  clusters exist yet.\n  \
-                      2. NB-Fisher-adjusted per-cluster mean expression,\n  \
-                      \x20  streamed from raw counts.\n  \
-                      3. weighted-KS marker enrichment, with cross-cluster simplex\n  \
-                      \x20  normalization to suppress housekeeping genes.\n  \
-                      4. softmax-normalized per-cluster Q matrix.\n  \
-                      5. cluster-broadcast per-cell labels.\n\
-                      \n\
-                      Usage:\n\
-                      senna annotate-by-enrichment -f run.senna.json -m markers.tsv -o out\n\
-                      \n\
-                      Updates `manifest.annotate.{argmax,annotation,...}`.\n\
-                      Later `senna plot` runs then colour by predicted cell type.\n\
-                      Writes {out}.argmax.tsv, {out}.annotation.parquet and {out}.cluster_*.parquet."
+        long_about = "Moved to `lupin annotate --method enrichment`. Run `lupin annotate --help`."
     )]
     Annotate(AnnotateArgs),
 
@@ -767,22 +740,7 @@ enum Commands {
         name = "annotate-ontology",
         visible_aliases = ["ann-ontology", "annot-ontology"],
         about = "Hierarchical multi-resolution cell-type calling on the Cell Ontology (TreeBH).",
-        long_about = "Post-processes an `annotate-by-enrichment` run.\n\
-                      Each cluster is placed on the Cell Ontology is_a tree,\n\
-                      at the deepest resolution the data supports. Sibling ties abstain.\n\
-                      Clusters that no marker explains are flagged. The method is TreeBH,\n\
-                      after Bogomolov, Peterson, Benjamini & Sabatti, Biometrika 2021.\n\
-                      \n\
-                      Scores are Φ(−z) on the permutation z,\n\
-                      or the restandardized ES when that is unavailable,\n\
-                      Simes-combined up the tree.\n\
-                      Writes {out}.ontology_assignment.tsv and {out}.ontology_node_mass.parquet.\n\
-                      `annotate-by-enrichment --obo --label-cl` does the same inline,\n\
-                      with no re-run needed.\n\
-                      \n\
-                      Usage:\n\
-                      senna annotate-ontology -f run.senna.json \\\n\
-                      \x20 --label-cl label_cl.tsv --obo cl-basic.obo"
+        long_about = "Moved to `lupin annotate` (ontology follow-up flags). Run `lupin annotate --help`."
     )]
     AnnotateOntology(AnnotateOntologyArgs),
 
@@ -790,28 +748,7 @@ enum Commands {
         name = "annotate-by-projection",
         visible_aliases = ["ann-by-proj", "annot-by-proj"],
         about = "Annotate cells via firm marker over-representation on the co-embedding.",
-        long_about = "Embedding-grounded alternative to `annotate-by-enrichment`.\n\
-                      It suits runs with a co-embedded gene space:\n\
-                      bge, fne or resolve-embedding-space.\n\
-                      \n\
-                      Pipeline:\n  \
-                      1. build each type's IDF-weighted marker centroid.\n  \
-                      2. assign each cell to its Euclidean nearest centroid.\n  \
-                      3. drop distance outliers in QC.\n  \
-                      4. Leiden-cluster the cells.\n  \
-                      5. test cluster × term hypergeometric over-representation,\n  \
-                      \x20  permutation-calibrated.\n  \
-                      6. broadcast the per-cluster call to cells.\n\
-                      \n\
-                      --obo and --label-cl add an optional TreeBH ontology.\n\
-                      Raw counts are never re-read.\n\
-                      That makes this complementary to enrichment.\n\
-                      Enrichment is raw-count-grounded instead.\n\
-                      \n\
-                      Usage:\n\
-                      senna annotate-by-projection -f run.senna.json -m markers.tsv -o out\n\
-                      Writes {out}.{argmax.tsv,membership.tsv,annot.parquet,cluster_term_*.parquet,\n\
-                      null_calibration.tsv}; updates `manifest.annotate.*`."
+        long_about = "Moved to `lupin annotate --method projection`. Run `lupin annotate --help`."
     )]
     AnnotateByProjection(AnnotateProjectionArgs),
 
@@ -843,16 +780,7 @@ enum Commands {
 
     #[command(
         about = "Pseudotime via Monocle-3-style principal graph (SimplePPT) on the latent.",
-        long_about = "Port of Mao et al. 2015 SimplePPT applied to `manifest.outputs.latent`.\n\
-                      \n\
-                      (1) k-means init K centroids, (2) iterate:\n\
-                      soft-assign cells → MST over centroids → solve\n    \
-                      (D_R + γL) Y = R^T Z for centroid coords,\n\
-                      (3) project each cell onto its nearest tree edge,\n\
-                      (4) Dijkstra geodesic from a chosen root → pseudotime.\n\
-                      \n\
-                      Outputs {out}.pseudotime.parquet.\n\
-                      It also writes {out}.principal_graph.{nodes,edges}.parquet."
+        long_about = "Moved to `lupin pseudotime`. Run `lupin pseudotime --help`."
     )]
     Pseudotime(PseudotimeArgs),
 
@@ -860,54 +788,7 @@ enum Commands {
         name = "lineage",
         aliases = ["trajectory", "traj"],
         about = "Geometry-first lineage and principal curves over a `senna gem` run",
-        long_about = "Infer a lineage over the embeddings from `senna gem`.\n\n\
-            Reads θ by prefix (`-f/--from`), picked by `--theta-from`:\n\
-            on an EMBEDDING run, cell_embedding.parquet (H space);\n\
-            on a TOPIC run, latent.parquet alone (the K-space simplex, geometry-only).\n\
-            No senna command currently writes {from}.velocity.parquet.\n\
-            When that table is present its δ orients each candidate edge;\n\
-            when it is absent every edge falls back to the geometric MST direction.\n\
-            The topic default is deliberate:\n\
-            `cell_embedding = θ·α` confines every cell to the convex hull of α's K rows,\n\
-            so a diffuse softmax θ compresses the population toward that hull's centroid —\n\
-            blobby for reasons no layout can undo.\n\
-            `--latent-geometry` sets the metric (Hellinger on a simplex, else cosine).\n\
-            Fits K k-means centroids on θ and an MST over them,\n\
-            then TESTS the velocity direction of every candidate edge\n\
-            (bootstrap CI + sign-flip permutation; an edge that cannot clear\n\
-            --edge-alpha abstains rather than being handed a direction).\n\
-            Maximum-weight branching turns those calls into a rooted FOREST —\n\
-            contradictions cut, weak parents rewired —\n\
-            so a dataset with disconnected structure yields several trees, not one forced tree.\n\
-            Slingshot-style smooth principal curves are then fit per tree\n\
-            → per-cell pseudotime + branch.\n\
-            Cells on a tree too small to carry a curve get NaN pseudotime\n\
-            (reported, and skipped by `senna dyn-assoc`).\n\
-            `--no-edge-direction` keeps the geometric MST instead;\n\
-            `--no-orient-velocity` ignores velocity entirely.\n\n\
-            Root selection (priority order):\n\
-            --root-node, --root-cell, --root-type (marker-grounded, needs --markers),\n\
-            else the velocity-flux source.\n\n\
-            The low-coverage modalities are NOT embedded here;\n\
-            this produces the lineage ordering that a separate confounder-adjusted test runs against.\n\n\
-            Outputs (all `{out}`-prefixed parquet):\n\
-            nodes, node_velocity,\n\
-            edges (every candidate edge with its velocity_flux, CI, q and call),\n\
-            trees (the selected branching), lineages, pseudotime,\n\
-            cell_lineage_weights, lineage_pseudotime, curves;\n\
-            with --markers also lineage_annot.* + trajectory_annotation;\n\
-            with --layout phate (default) or umap also {cells,nodes,curves}_2d,\n\
-            plus velocity_grid_2d (the gridded δ arrow field, when the run has δ).\n\
-            The layout embeds θ alone by default, so position means identity,\n\
-            and the arrow field carries the direction.\n\n\
-            Reference:\n  \
-            Street et al., \"Slingshot: cell lineage and pseudotime inference for single-cell transcriptomics\",\n\
-            BMC Genomics, 19:477, 2018.\n\
-            https://doi.org/10.1186/s12864-018-4772-0",
-        after_long_help = "\
-	Example:\n\
-	senna gem out/rep1_count.zarr.zip -o out/gem\n\
-  senna lineage -f out/gem -o out/gem"
+        long_about = "Moved to `lupin lineage`. Run `lupin lineage --help`."
     )]
     Lineage(LineageArgs),
 
@@ -915,54 +796,7 @@ enum Commands {
         name = "dyn-assoc",
         aliases = ["assoc", "temporal-assoc", "trend"],
         about = "Bayesian between-branch modality contrast along a `senna lineage`",
-        long_about = "Test whether a modality (m6a/apa/atoi) diverges between lineage branches.\n\n\
-            Downstream of `senna lineage` (like `annotate` is to `gem`).\n\
-            Cells are pooled into pseudotime BINS,\n\
-            and each branch L is tested against the rest with a binomial GLM:\n\
-            logit(p_{b,g}) = α_b + β·1[g=L],\n\
-            where b indexes the bin.\n\
-            The per-bin baseline α_b conditions out pseudotime,\n\
-            a matched null, à la tradeSeq patternTest / cocoa,\n\
-            so β is the branch's pseudotime-adjusted log-odds excess.\n\
-            Coverage (edited + unedited) is the binomial denominator,\n\
-            so detection bias is conditioned out;\n\
-            a shrinkage prior N(0, τ²) on β damps noisy calls,\n\
-            stable across seeds, with no permutation machinery.\n\
-            Reports the posterior mean effect, 90% credible interval,\n\
-            and lfsr = min(P(β>0), P(β<0));\n\
-            the within-branch trend GAM (--trend-method) runs alongside.\n\n\
-            Each level writes three tables —\n\
-            {out}.branch_contrast / _profile / _trend.parquet.\n\n\
-            If the lineage was annotated (`senna lineage --markers`, which leaves a\n\
-            {from}.lineage_annot.membership.tsv — or point `--celltype-annot` at any\n\
-            `cell<TAB>cell_type` TSV), the same two tests are also reported per CELL TYPE —\n\
-            cells sharing an annotated type are pooled across lineages\n\
-            ({out}.celltype_contrast / _profile / _trend.parquet).\n\
-            The between-cell-type contrast is the clean deliverable;\n\
-            the within-cell-type trend is secondary\n\
-            (pooling divergent lineages onto one pseudotime axis weakens the trend reading).\n\
-            Skip with --no-celltype.\n\n\
-            Not double-dipping:\n\
-            branches come from gem θ, plus a velocity-oriented δ when a table for it is\n\
-            present, which never see the modality.\n\n\
-            Output is tidy:\n\
-            `site | gene | subunit | branch` (branch level) or\n\
-            `site | gene | subunit | cell_type` (cell-type level —\n\
-            no branch column, because a cell-type aggregate pools cells across branches),\n\
-            then the values.\n\
-            The Bayesian tables also carry `ess` and `mcse_lfsr`:\n\
-            lfsr is a Monte-Carlo tail probability,\n\
-            so a site near --fdr-alpha can cross it with the seed,\n\
-            and mcse_lfsr is that error per site.\n\
-            When |lfsr - alpha| is not comfortably above mcse_lfsr,\n\
-            raise --posterior-samples rather than reading anything into the effect.\n\n\
-            Reference:\n  \
-            Van den Berge et al., \"Trajectory-based differential expression analysis for single-cell sequencing data\",\n\
-            Nat Commun 11:1201, 2020.",
-        after_long_help = "\
-	Example:\n\
-	senna lineage -f out/gem -o out/lin --markers markers.tsv\n\
-  senna dyn-assoc -f out/lin -s out/rep1_wt_m6a_site.zarr.zip --modality m6a -o out/m6a_assoc"
+        long_about = "Moved to `lupin dyn-assoc`. Run `lupin dyn-assoc --help`."
     )]
     Assoc(AssocArgs),
 
@@ -1046,43 +880,7 @@ enum Commands {
         name = "lineage-plot",
         aliases = ["plot-lineage", "trajectory-plot"],
         about = "Publication-style figure (PDF/PNG/SVG) of a `senna lineage` trajectory over its 2D embedding",
-        long_about = "Render the outputs of `senna lineage --markers` into one annotated figure,\n\
-                      with the default --layout phate: cells laid out on the PHATE embedding,\n\
-                      coloured by coarse cell type (default) or pseudotime,\n\
-                      with a trajectory backbone, velocity arrows and MST nodes overlaid.\n\
-                      \n\
-                      Reads by prefix (`-f/--from`): {from}.cells_2d.parquet (PHATE coords),\n\
-                      {from}.lineage_annot.annot.parquet (per-cell coarse_label),\n\
-                      {from}.curves_2d.parquet (principal curves),\n\
-                      {from}.nodes_2d.parquet (MST nodes),\n\
-                      {from}.trajectory_annotation.parquet (node role/cell_type),\n\
-                      and {from}.pseudotime.parquet (for --color-by pseudotime).\n\
-                      \n\
-                      The cells are drawn as transparent raster layers per cell type,\n\
-                      from a qualitative palette, with a legend — confident calls solid,\n\
-                      mixed ones faded —\n\
-                      or one continuous blue->red pseudotime layer (with a colourbar).\n\
-                      \n\
-                      The backbone is `--trajectory auto` by default:\n\
-                      the Slingshot principal curves when the run has few lineages,\n\
-                      otherwise the MST drawn ONCE, with stroke weight by traversal count.\n\
-                      The curves all share the trunk,\n\
-                      so past ~24 lineages they overplot into an opaque mat.\n\
-                      Force it with `tree`, `curves` or `none`.\n\
-                      Direction is ALWAYS shown as velocity arrows read off `velocity_flux`,\n\
-                      independent of that choice, and only on edges whose velocity earned one.\n\
-                      Nodes are dark overlays; the root is marked with a red star,\n\
-                      and `--label-nodes` (default `per-type`) labels one node per called cell type,\n\
-                      on its most-differentiated node.\n\
-                      Uses the shared plot-utils rasterize -> SVG -> render pipeline;\n\
-                      writes {out}.plot.pdf by default (--png / --svg add those formats, --no-pdf skips the PDF).\n\
-                      The scatter is a raster layer,\n\
-                      so the PDF is a hybrid (vector text over raster points at --dpi; raise --dpi to 300-600 for print).",
-        after_long_help = "\
-	Example:\n\
-	senna lineage -f out/gem -o out/lin --markers markers.tsv\n\
-	senna lineage-plot -f out/lin\n\
-  senna lineage-plot -f out/lin -o out/lin_pt --color-by pseudotime"
+        long_about = "Moved to `lupin lineage-plot`. Run `lupin lineage-plot --help`."
     )]
     LineagePlot(LineagePlotArgs),
 
@@ -1177,14 +975,12 @@ fn main() -> anyhow::Result<()> {
             fit_joint_topic_model(args)?;
         }
 
-        Commands::Annotate(args) => {
-            annotate_by_enrichment(args)?;
+        Commands::Annotate(_args) => {
+            migrated_to_lupin("annotate-by-enrichment", "annotate --method enrichment")
         }
-        Commands::AnnotateOntology(args) => {
-            annotate_ontology(args)?;
-        }
-        Commands::AnnotateByProjection(args) => {
-            annotate_by_projection(args)?;
+        Commands::AnnotateOntology(_args) => migrated_to_lupin("annotate-ontology", "annotate"),
+        Commands::AnnotateByProjection(_args) => {
+            migrated_to_lupin("annotate-by-projection", "annotate --method projection")
         }
         Commands::Deconvolve(args) => {
             deconvolve::run(args)?;
@@ -1212,9 +1008,9 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Docs(args) => run_docs(args)?,
         Commands::Gem(args) => run_gem_embedding(args)?,
-        Commands::Lineage(args) => run_lineage(args)?,
-        Commands::LineagePlot(args) => run_lineage_plot(args)?,
-        Commands::Assoc(args) => run_assoc(args)?,
+        Commands::Lineage(_args) => migrated_to_lupin("lineage", "lineage"),
+        Commands::LineagePlot(_args) => migrated_to_lupin("lineage-plot", "lineage-plot"),
+        Commands::Assoc(_args) => migrated_to_lupin("dyn-assoc", "dyn-assoc"),
         Commands::Layout { cmd } => match cmd {
             LayoutCmd::Tsne(args) => {
                 fit_layout_tsne(args)?;
@@ -1232,9 +1028,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Clustering(args) => {
             run_clustering(args)?;
         }
-        Commands::Pseudotime(args) => {
-            run_pseudotime(args)?;
-        }
+        Commands::Pseudotime(_args) => migrated_to_lupin("pseudotime", "pseudotime"),
         Commands::Plot(args) => {
             fit_plot(args)?;
         }

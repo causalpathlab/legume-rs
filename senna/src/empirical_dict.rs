@@ -19,9 +19,9 @@
 //! used during DC-Poisson refinement, kept consistent across pinto / senna /
 //! chickpea reporting). This is the dictionary `senna annotate-by-enrichment` consumes.
 
-use crate::embed_common::Mat;
 pub use data_beans_alg::gene_weighting::{apply_gene_weights, compute_nb_fisher_weights};
 use matrix_util::traits::MatOps;
+use senna::embed_common::Mat;
 
 /// Build the empirical β: scale `pb_gene · pb_theta` rows by per-gene NB
 /// Fisher weights, then column-normalize so each topic column is a

@@ -4,7 +4,7 @@
 //! pseudotime-aware canonical frame (PHATE coordinates are only defined
 //! up to rotation/reflection, so this is principled, not a hack).
 
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 /// Rotate `pb_coords` (`n_pb` × 2) so that the centroid of the bottom-`q`
 /// PBs by `pb_pt` sits below the centroid of the top-`q` PBs along the

@@ -1,5 +1,5 @@
 use super::common::{expand_delta_for_block, process_blocks_at};
-use crate::embed_common::*;
+use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_util::data::csc_columns_to_indexed_samples;
