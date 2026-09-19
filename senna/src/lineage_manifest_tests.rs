@@ -5,7 +5,7 @@
 //! `lineage::lineage::input`.
 
 use super::*;
-use crate::run_manifest::write_kind_only;
+use crate::run_manifest::{write_kind_only, RunKind};
 
 /// A unique scratch prefix per test, so the manifests written here cannot collide.
 fn scratch(tag: &str) -> String {
@@ -24,7 +24,7 @@ fn a_topic_run_promises_a_log_simplex_latent() {
     write_kind_only(&p, RunKind::Topic).unwrap();
     let c = latent_contract(&p);
     assert!(c.latent_is_log_simplex);
-    assert!(!c.is_gem);
+    assert!(!c.is_gem());
     assert_eq!(c.kind.as_deref(), Some("topic"));
 }
 
@@ -37,7 +37,7 @@ fn a_gem_run_promises_a_euclidean_co_embedding_and_no_velocity() {
         !c.latent_is_log_simplex,
         "gem writes no latent.parquet at all"
     );
-    assert!(c.is_gem, "the caller uses this to explain the missing δ");
+    assert!(c.is_gem(), "the caller uses this to explain the missing δ");
 }
 
 #[test]

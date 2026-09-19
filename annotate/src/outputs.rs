@@ -51,12 +51,12 @@ pub fn clean_outputs(prefix: &str, suffixes: &[&str]) {
 }
 
 /// Absolute paths of the artifacts an annotation pass produced. Which fields
-/// are filled is method-specific: `annotate-by-projection` emits cluster × term
-/// rather than cluster × celltype enrichment, and the GO/GMT gene-set mode
-/// emits a signature instead of per-cell labels.
+/// are filled is method-specific: projection emits cluster × term rather than
+/// cluster × celltype enrichment, and GO/GMT gene-set mode emits a signature
+/// instead of per-cell labels.
 ///
-/// A `None` is meaningful to the manifest adapter for the ontology fields: it
-/// CLEARS any stale pointer left by an earlier run.
+/// A `None` is meaningful to the manifest adapter: it CLEARS any stale pointer
+/// left by an earlier run of a different annotate method.
 #[derive(Default)]
 pub struct AnnotationOutputs {
     pub argmax: Option<String>,
