@@ -1,7 +1,7 @@
 # `legume-rs`: Library for Exploring Genomics Using Machine learning Essentials
 
 - This is a command line based tool runs on Unix-like environments.
-- Fine-mapping / QTL tooling formerly shipped as `fagioli` now lives in
+- **fqtl** (functions for QTL analysis), formerly `fagioli`, now lives in
   [`causalpathlab/fqtl-rs`](https://github.com/causalpathlab/fqtl-rs) (`fqtl` binary).
 
 ## Installation
