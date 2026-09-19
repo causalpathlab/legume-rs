@@ -13,7 +13,6 @@
 //!     `log(1/K)`; optimize purely against the frozen decoder. Useful when
 //!     the test feature set is too divergent for the encoder.
 
-use crate::embed_common::*;
 use crate::masked_topic::FeatureNameKindArg;
 use crate::topic::eval::{build_gene_remap_with, GeneRemap, QueryNameOpts};
 use crate::topic::model_metadata::{
@@ -25,6 +24,7 @@ use crate::topic::predict_common::{
 use crate::topic::predict_eval::{
     evaluate_predictions, mean_finite, resolve_eval_genes, EvalArgs, EvalOutcome, Reconstruction,
 };
+use senna::embed_common::*;
 
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
@@ -495,7 +495,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
         k if k.has_frozen_gene_table() => return predict_bge(args, kind),
         // svd writes no checkpoint either; its query side is the Nyström
         // projection onto the frozen dictionary.
-        crate::run_manifest::RunKind::Svd => return predict_svd(args),
+        senna::run_manifest::RunKind::Svd => return predict_svd(args),
         _ => {}
     }
 
@@ -562,7 +562,7 @@ pub fn predict_model(args: &PredictArgs) -> anyhow::Result<()> {
 /// see [`crate::bge::score::BgeEmbedding::score`] for the measurement. `--eval-mask-fraction`
 /// on the training run, or `senna probe`, answer "has the model seen this biology" better
 /// than a per-cell fit with H free parameters can.
-fn predict_bge(args: &PredictArgs, kind: crate::run_manifest::RunKind) -> anyhow::Result<()> {
+fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
     anyhow::ensure!(
         !args.decoder_only && args.refine_steps == 0,
         "--decoder-only / --refine-steps are for the topic families; {} is a `senna {kind}` \
@@ -575,17 +575,17 @@ fn predict_bge(args: &PredictArgs, kind: crate::run_manifest::RunKind) -> anyhow
     // resolves a gem run's gene axis just fine (see `bulk::model_gene_axis`),
     // which is why the refusal has to live here rather than there.
     anyhow::ensure!(
-        kind != crate::run_manifest::RunKind::Gem || args.bulk.is_empty(),
+        kind != senna::run_manifest::RunKind::Gem || args.bulk.is_empty(),
         "a bulk table names genes, a gem axis names {{gene}}/{{modality}}/{{channel}} rows; \
          predict --bulk is not available on a gem run"
     );
     // The query loader matches files by position, not by gem's per-file
-    // `@sample` tagging (see `crate::multiome_layout::query_load`), so a
+    // `@sample` tagging (see `senna::multiome_layout::query_load`), so a
     // second query file lands on disjoint cells instead of being joined by
     // sample onto the same axis. Refuse rather than silently score wrong
     // cells.
     anyhow::ensure!(
-        kind != crate::run_manifest::RunKind::Gem || args.data_files.len() <= 1,
+        kind != senna::run_manifest::RunKind::Gem || args.data_files.len() <= 1,
         "the query loader does not yet join a gene file with modality files for a gem \
          query; pass one file"
     );
@@ -692,7 +692,7 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
 
     // Resolved once: building these reads `--ablate-features` from disk.
     let qopts = args.query_name_opts()?;
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: args.data_files.to_vec(),
             preload: args.preload_data,
@@ -824,7 +824,7 @@ fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
     }
 
     let cell_names = data_vec.column_names()?;
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
+    senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, None)?;
 
     let n_eval = eval_genes.len() as f32;
     let mut pred = Mat::zeros(per_cell.len(), 5);
@@ -1082,7 +1082,7 @@ pub(crate) fn score_dense_backend(a: DenseScoreArgs<'_>) -> anyhow::Result<Dense
             Err(_) => None,
         };
 
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: a.data_files.to_vec(),
             batch_files: a.batch_files.map(<[_]>::to_vec),
@@ -1624,7 +1624,7 @@ pub(crate) fn score_masked_backend(a: MaskedScoreArgs<'_>) -> anyhow::Result<Mas
         training_genes.len()
     );
 
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: a.data_files.to_vec(),
             batch_files: a.batch_files.map(<[_]>::to_vec),
@@ -1979,7 +1979,7 @@ fn vae_training_minibatch(model: &str, requested: usize) -> usize {
     /// `VaeArgs::minibatch_size.unwrap_or(100)` — the fit's own default when
     /// the flag was left unset.
     const VAE_TRAIN_DEFAULT: usize = 100;
-    let Ok((manifest, _)) = crate::run_manifest::load_for(model) else {
+    let Ok((manifest, _)) = senna::run_manifest::load_for(model) else {
         return requested;
     };
     if manifest.train_args.is_none() {
@@ -2028,7 +2028,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
         training_genes.len()
     );
 
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: a.data_files.to_vec(),
             batch_files: a.batch_files.map(<[_]>::to_vec),
@@ -2403,7 +2403,7 @@ fn training_marginal(
     // genes from the floor that the model is being scored on.
     let mut opts = args.query_name_opts()?;
     opts.hide = None;
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload: args.preload_data,

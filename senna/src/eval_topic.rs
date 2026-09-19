@@ -1,8 +1,8 @@
-use crate::embed_common::*;
 use crate::topic::eval::{
     build_gene_remap, evaluate_latent_with_gene_remap, EvaluateLatentConfig, GeneRemap,
 };
 use crate::topic::model_metadata::{load_coarsening, load_dictionary, TopicModelMetadata};
+use senna::embed_common::*;
 
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
@@ -123,7 +123,7 @@ pub fn eval_topic_model(args: &EvalTopicArgs) -> anyhow::Result<()> {
         None
     };
 
-    let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+    let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
         ReadSharedRowsArgs {
             data_files: args.data_files.clone(),
             batch_files: args.batch_files.clone(),

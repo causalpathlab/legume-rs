@@ -19,21 +19,25 @@ path = "src/main.rs"
 [features]
 default = []
 cuda = [
+    "annotate/cuda",
     "candle-util/cuda",
     "cnv/cuda",
     "data-beans/cuda",
     "data-beans-alg/cuda",
     "graph-embedding-util/cuda",
+    "lineage/cuda",
     "matrix-util/cuda",
     "matrix-param/cuda",
     "mcmc-util/cuda",
 ]
 metal = [
+    "annotate/metal",
     "candle-util/metal",
     "cnv/metal",
     "data-beans/metal",
     "data-beans-alg/metal",
     "graph-embedding-util/metal",
+    "lineage/metal",
     "matrix-util/metal",
     "matrix-param/metal",
     "mcmc-util/metal",
@@ -42,6 +46,7 @@ hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
 mimalloc = "0.1"
+annotate = { path = "../annotate" }
 auxiliary-data = { workspace = true }
 cnv = { workspace = true }
 data-beans = { workspace = true }
@@ -49,6 +54,7 @@ data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
 genomic-data = { workspace = true }
 graph-embedding-util = { workspace = true }
+lineage = { path = "../lineage" }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 mcmc-util = { workspace = true }

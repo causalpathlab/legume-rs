@@ -1,4 +1,4 @@
-BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli gene-text mung
+BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli gene-text lupin mung
 
 # Packages whose crate directory / Cargo package name differs from the
 # installed binary name. `mung` is the CLI; the crate stays `cnv`.

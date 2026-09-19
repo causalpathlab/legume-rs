@@ -77,7 +77,7 @@ pub fn select_spliced_rows(
 }
 
 /// Load the marker-matching gene table for a run: `outputs.feature_coembedding`
-/// off `{prefix}`'s run manifest — genes on the cell manifold, which is what a
+/// off the run's manifest — genes on the cell manifold, which is what a
 /// Euclidean nearest-centroid call against the cells needs. A run that never
 /// co-embeds (`fne`, the masked family) has only `outputs.feature_embedding`,
 /// its ρ, which shares the cells' space by construction and is used as is. A
@@ -86,8 +86,14 @@ pub fn select_spliced_rows(
 /// would be ill-posed. For a [`RunKind::Gem`] run only, [`select_spliced_rows`]
 /// is applied; every other kind's table is already gene-keyed and is
 /// returned as read.
-pub(crate) fn load_marker_feature_embedding(prefix: &str) -> Result<MatWithNames<DMatrix<f32>>> {
-    let (manifest, dir) = run_manifest::load_for(prefix)?;
+///
+/// `prefix` is only used in error messages. Callers that already hold a loaded
+/// manifest should pass it in (avoids a second `load_for`).
+pub(crate) fn load_marker_feature_embedding_from(
+    manifest: &crate::run_manifest::RunManifest,
+    dir: &std::path::Path,
+    prefix: &str,
+) -> Result<MatWithNames<DMatrix<f32>>> {
     let coembeds = matches!(
         manifest.kind,
         RunKind::Bge | RunKind::Gem | RunKind::Simba | RunKind::ResolveEmbeddingSpace
@@ -110,7 +116,7 @@ pub(crate) fn load_marker_feature_embedding(prefix: &str) -> Result<MatWithNames
              `fne` / `resolve-embedding-space` run)"
         ),
     };
-    let path = run_manifest::resolve(&dir, rel)
+    let path = run_manifest::resolve(dir, rel)
         .to_string_lossy()
         .into_owned();
     let feat = DMatrix::<f32>::from_parquet(&path)

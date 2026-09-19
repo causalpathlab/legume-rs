@@ -5,7 +5,7 @@
 
 use super::VaeArgs;
 use crate::masked_topic::FeatureNameKindArg;
-use crate::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
+use senna::run_manifest::{RunKind, RunManifest, TrainArgsRecord};
 
 #[derive(clap::Parser)]
 struct Cli {

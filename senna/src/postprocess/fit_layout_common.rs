@@ -10,19 +10,19 @@
 //! actual 2D layout algorithm.
 
 use super::viz_prep::{aggregate_features_by_group, select_pb_coverage};
-use crate::embed_common::*;
 use crate::geometry::cell_layout::project_cells_nystrom;
 use crate::geometry::similarity::{
     compute_cosine_similarity, local_scale_similarity, regularize_similarity, threshold_similarity,
 };
-use crate::run_manifest::{self, load_cell_to_pb_raw, rel_to_manifest, RunManifest};
-use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
 };
 use data_beans_alg::random_projection::binary_sort_columns;
 use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
+use senna::embed_common::*;
+use senna::run_manifest::{self, load_cell_to_pb_raw, rel_to_manifest, RunManifest};
+use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 use std::path::{Path, PathBuf};
 
 /// How to pick landmarks for the latent-driven layout path.
@@ -389,7 +389,7 @@ pub(crate) struct ResolvedViz {
     pub cell_to_pb_path: Option<String>,
     /// The multiome layout the run trained under, replayed from its manifest.
     /// Default (a plain load) for every single-modality run.
-    pub reload: crate::multiome_layout::ReloadLayout,
+    pub reload: senna::multiome_layout::ReloadLayout,
 }
 
 pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<ResolvedViz> {
@@ -468,7 +468,7 @@ pub(crate) fn resolve_inputs(args: &LayoutCommonArgs) -> anyhow::Result<Resolved
     // Replay the run's multiome layout, so the reload glues cells by barcode
     // and namespaces features exactly as training did. Positional against
     // `data.input`, hence the file-count check inside.
-    let reload = crate::multiome_layout::recorded_layout(
+    let reload = senna::multiome_layout::recorded_layout(
         manifest.as_ref().and_then(|m| m.data.multiome.as_ref()),
         data_files.len(),
     )?;
@@ -564,7 +564,7 @@ pub(crate) fn preprocess_layout_data(
     // table to lay out is the H-space Z in `cell_embedding`, while `latent`
     // holds log θ. Reading `latent` here would feed log-simplex coordinates to
     // the kind-based transform below, which treats bge/fne as raw Euclidean.
-    let latent_path: Option<(String, crate::run_manifest::RunKind)> = resolved
+    let latent_path: Option<(String, senna::run_manifest::RunKind)> = resolved
         .manifest
         .as_ref()
         .and_then(|m| m.outputs.geometry_latent().map(|p| (p.to_string(), m.kind)))
@@ -663,7 +663,7 @@ fn preprocess_layout_data_from_latent(
     args: &LayoutCommonArgs,
     resolved: &ResolvedViz,
     latent_path: &str,
-    kind: crate::run_manifest::RunKind,
+    kind: senna::run_manifest::RunKind,
     allow_direct_cells: bool,
 ) -> anyhow::Result<LayoutPrep> {
     let SparseDataWithBatch {
@@ -697,7 +697,7 @@ fn preprocess_layout_data_from_latent(
         } else {
             format!("Hellinger-θ, τ={tau:.3}")
         }
-    } else if kind.cell_space() == crate::run_manifest::CellSpace::Embedding {
+    } else if kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
         // BGE / FNE embed cells in a Euclidean space where magnitude carries
         // signal — run the layout on the RAW embedding so the DistL2 kNN
         // respects it. (Unit-sphere/cosine normalization collapsed magnitude
@@ -724,7 +724,7 @@ fn preprocess_layout_data_from_latent(
     // entirely and let the layout subcommand work cell-level directly.
     // Topic / SVD latents are noisier and still benefit from the PB
     // summarization, so they fall through to the landmark path below.
-    if allow_direct_cells && kind.cell_space() == crate::run_manifest::CellSpace::Embedding {
+    if allow_direct_cells && kind.cell_space() == senna::run_manifest::CellSpace::Embedding {
         info!("Graph-trained latent → DirectCells mode: skipping PB landmark sampling");
         return Ok(LayoutPrep::DirectCells(DirectLayoutPrep {
             data_vec,
@@ -1029,7 +1029,7 @@ fn preprocess_layout_data_recompute(
     // the recompute skips the BBKNN + DC-SBM refinement step. Loading
     // here (not inside load_and_collapse) keeps the partition's source
     // path local to layout's resolved-viz state.
-    let prebuilt_partition: Option<crate::run_manifest::InheritedPartition> = resolved
+    let prebuilt_partition: Option<senna::run_manifest::InheritedPartition> = resolved
         .cell_to_pb_path
         .as_deref()
         .map(load_cell_to_pb_raw)

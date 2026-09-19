@@ -2,9 +2,9 @@
 //! expansion of a module-level dictionary back to genes.
 
 use super::{coarsening_map_for, expand_log_dict_with_shares};
-use crate::embed_common::Mat;
 use candle_util::candle_core::Device;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use senna::embed_common::Mat;
 
 fn coarsening() -> FeatureCoarsening {
     FeatureCoarsening {

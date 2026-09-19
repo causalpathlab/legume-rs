@@ -12,8 +12,8 @@
 //! 5. score the initialized genes on their OWN column ([`score_initialized`]):
 //!    a prior's score is never mixed into the comparable per-gene score.
 
-use crate::embed_common::Mat;
 use nalgebra::DMatrix;
+use senna::embed_common::Mat;
 
 /// Accumulate per-gene count profiles over pseudobulks defined by a cell
 /// clustering into `profiles` (`[n_genes × n_clusters]`):

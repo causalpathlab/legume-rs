@@ -1,7 +1,7 @@
 use super::common::{compute_level_epochs, process_blocks};
-use crate::embed_common::*;
 use crate::joint_topic::JointTopicArgs;
 use crate::logging::new_progress_bar;
+use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
@@ -124,7 +124,7 @@ pub(crate) fn write_latent_states<Enc: JointEncoderModuleT + Send + Sync>(
     )?;
     let cell_names = data_stack.column_names()?;
     // Reuse the shared latent writer (handles the near-empty output mask).
-    crate::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx)?;
+    senna::output_helpers::save_latent(&args.out, &z_nk, &cell_names, output_keep_idx)?;
     Ok(())
 }
 

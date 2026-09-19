@@ -5,7 +5,7 @@ use super::gibbs::{finalize, run_chain, ComponentTable, PosteriorAccum};
 use super::monitor::Monitor;
 use super::reference::Reference;
 use super::result::split_rhat_ess;
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 
 fn cfg_tau(tau: f32) -> SamplerConfig {
     SamplerConfig {

@@ -13,12 +13,12 @@
 //!   contrast row).
 
 use super::{run_gem_embedding, validate_offset_rank};
-use crate::embed_common::*;
 use crate::gem::args::GemArgs;
 use crate::gem::test_fixtures::{boxes, genes_file, m6a_file, synth, CELLS};
-use crate::run_manifest::{self, RunKind};
 use clap::Parser;
 use matrix_util::parquet::read_parquet_string_columns_by_name;
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunKind};
 
 #[derive(Parser)]
 struct Cli {

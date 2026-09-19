@@ -7,12 +7,12 @@
 //! pipeline in `topic/cmd.rs` doesn't have to fan out per-decoder
 //! `match` arms when serializing trained models.
 
-use crate::embed_common::*;
 use candle_util::decoder::NbMixtureTopicDecoder;
 use candle_util::decoder::{MultinomTopicDecoder, NbTopicDecoder};
 use candle_util::traits::*;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use matrix_util::traits::IoOps;
+use senna::embed_common::*;
 
 /// Decoder-specific post-training output (dictionary writing, extra parameters).
 pub(crate) trait DecoderExtras {

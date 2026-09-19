@@ -9,6 +9,10 @@ homepage.workspace = true
 rust-version.workspace = true
 description = "Text side of the feature graph: a small Hugging Face encoder over gene, term and pathway descriptions, a document-frequency vocabulary, and gene–word edges for `senna fne`"
 
+[lib]
+name = "gene_text"
+path = "src/lib.rs"
+
 [[bin]]
 name = "gene-text"
 path = "src/main.rs"
@@ -24,7 +28,6 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "m
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
-env_logger = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
 nalgebra = { workspace = true }

@@ -6,7 +6,7 @@
 //! Components are empirical profiles from collapsed annotated cells, fixed
 //! across sweeps, with a readout given by the annotation posterior.
 
-use crate::embed_common::Mat;
+use senna::embed_common::Mat;
 
 pub struct Reference {
     /// Gene-major rates `mu_gm[g*n_comp + m] = μ_{g,m}`, so the inner per-component

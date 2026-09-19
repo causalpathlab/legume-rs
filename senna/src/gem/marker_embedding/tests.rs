@@ -1,9 +1,22 @@
-//! [`load_marker_feature_embedding`] against a manifest planted on disk.
+//! [`load_marker_feature_embedding_from`] against a manifest planted on disk.
 
 use super::*;
-use crate::run_manifest::{default_path, RunKind, RunManifest};
+use crate::run_manifest::{default_path, load_for, RunKind, RunManifest};
 use matrix_util::traits::IoOps;
 use std::path::Path;
+
+fn load_for_prefix(prefix: &str) -> MatWithNames<DMatrix<f32>> {
+    let (manifest, dir) = load_for(prefix).expect("load manifest");
+    load_marker_feature_embedding_from(&manifest, &dir, prefix).expect("load feature embedding")
+}
+
+fn load_err(prefix: &str) -> String {
+    let (manifest, dir) = load_for(prefix).expect("load manifest");
+    load_marker_feature_embedding_from(&manifest, &dir, prefix)
+        .err()
+        .expect("expected error")
+        .to_string()
+}
 
 /// Plant `{prefix}.feature_coembedding.parquet` with the given row names and
 /// return its basename, the way a manifest records it.
@@ -42,7 +55,7 @@ fn gem_kind_keeps_only_the_spliced_row_per_gene() {
     let basename = plant_feature_coembedding(&prefix, &rows);
     write_manifest(&prefix, RunKind::Gem, basename);
 
-    let feat = load_marker_feature_embedding(&prefix).expect("load");
+    let feat = load_for_prefix(&prefix);
     assert_eq!(feat.rows.as_slice(), [Box::<str>::from("GENE1")].as_slice());
     assert_eq!(feat.mat.nrows(), 1);
     assert_eq!(feat.mat.ncols(), 2);
@@ -62,7 +75,7 @@ fn non_gem_kind_passes_the_table_through_untouched() {
     let basename = plant_feature_coembedding(&prefix, &rows);
     write_manifest(&prefix, RunKind::Bge, basename);
 
-    let feat = load_marker_feature_embedding(&prefix).expect("load");
+    let feat = load_for_prefix(&prefix);
     let expect_rows: Vec<Box<str>> = rows.iter().map(|&s| s.into()).collect();
     assert_eq!(feat.rows, expect_rows);
     assert_eq!(feat.mat.nrows(), 3);
@@ -91,15 +104,12 @@ fn a_coembedding_kind_without_its_coembed_is_refused_and_fne_uses_rho() {
     let mut m = RunManifest::new(RunKind::Bge, &prefix);
     m.outputs.feature_embedding = Some(basename.clone());
     m.save(Path::new(&default_path(&prefix))).expect("save");
-    let err = load_marker_feature_embedding(&prefix)
-        .err()
-        .expect("an interrupted bge run must be refused")
-        .to_string();
+    let err = load_err(&prefix);
     assert!(err.contains("feature_coembedding"), "{err}");
 
     let mut m = RunManifest::new(RunKind::Fne, &prefix);
     m.outputs.feature_embedding = Some(basename);
     m.save(Path::new(&default_path(&prefix))).expect("save");
-    let feat = load_marker_feature_embedding(&prefix).expect("fne matches on ρ");
+    let feat = load_for_prefix(&prefix);
     assert_eq!(feat.rows, rows);
 }

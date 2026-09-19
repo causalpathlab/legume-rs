@@ -1,8 +1,8 @@
-use crate::embed_common::*;
-pub use crate::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
 use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
-use crate::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
+use senna::embed_common::*;
+pub use senna::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
+use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 
 use candle_core::{Device, Tensor};
 use indicatif::ParallelProgressIterator;
@@ -526,7 +526,7 @@ pub struct LoadProjectArgs<'a> {
     /// observations), and `output_keep_idx` is narrowed so they never reach
     /// a per-cell artifact. One hook here instead of three per family —
     /// the keep-mask half fails *silently* when a family forgets it.
-    pub pb_reference: Option<&'a crate::pb_reference::ReferenceInput>,
+    pub pb_reference: Option<&'a senna::pb_reference::ReferenceInput>,
     /// Row-alignment strategy when multiple `data_files` are passed.
     /// Default Union — keep every row from any backend (single-
     /// modality cohorts unchanged because all backends share the same
@@ -599,7 +599,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
     })?;
     if args.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch");
-        crate::senna_input::collapse_to_single_batch(&mut batch_membership);
+        senna::senna_input::collapse_to_single_batch(&mut batch_membership);
     }
 
     // Optional row-subset (e.g. restrict to features covered by a feature
@@ -626,7 +626,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
     // see a carried pseudobulk as the many cells it stands for.
     let output_keep_idx = if let Some(r) = args.pb_reference {
         let col_names = data_vec.column_names()?;
-        let w = crate::pb_reference::weights_for(&r.cell_counts, &col_names)?;
+        let w = senna::pb_reference::weights_for(&r.cell_counts, &col_names)?;
         data_vec.register_column_multiplicity(&w)?;
         let carried: f32 = w.iter().filter(|&&x| x > 1.0).sum();
         info!(
@@ -637,7 +637,7 @@ pub fn load_and_project(args: &LoadProjectArgs) -> anyhow::Result<ProjectedData>
         );
         // Carried pseudobulks train the model but are not cells; hold them
         // out of every per-cell artifact.
-        crate::pb_reference::exclude_carried(
+        senna::pb_reference::exclude_carried(
             args.pb_reference,
             data_vec.num_columns(),
             output_keep_idx,
@@ -727,7 +727,7 @@ pub struct LoadCollapseArgs<'a> {
     /// Optional row-subset hook — see [`LoadProjectArgs::feature_mask_fn`].
     pub feature_mask_fn: Option<&'a FeatureMaskFn>,
     /// A parent run's carried pseudobulks — see [`LoadProjectArgs::pb_reference`].
-    pub pb_reference: Option<&'a crate::pb_reference::ReferenceInput>,
+    pub pb_reference: Option<&'a senna::pb_reference::ReferenceInput>,
     /// Panel observability — see `MultilevelParams::observe_panels`. On for
     /// every family except masked-topic under `--multiome`, whose row union
     /// is intentional modality stacking rather than differing panels.
@@ -758,7 +758,7 @@ pub struct LoadCollapseArgs<'a> {
     /// counts + re-fits per-PB Gamma posteriors). `num_levels` must
     /// equal `partition.len()` or `load_and_collapse` bails. When
     /// `Some`, the loader auto-sets `want_hierarchy = true`.
-    pub prebuilt_partition: Option<crate::run_manifest::InheritedPartition>,
+    pub prebuilt_partition: Option<senna::run_manifest::InheritedPartition>,
     /// Optional `{out}.clones.parquet` from `mung clones`. When set,
     /// collapse routes through
     /// [`collapse_columns_multilevel_with_strata`] (sets
@@ -833,7 +833,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         anchor_batches: args
             .pb_reference
             .is_some()
-            .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            .then(|| vec![senna::pb_reference::REFERENCE_BATCH.into()]),
         bulk_batches: args.mixture_batches.clone(),
         observe_panels: args.observe_panels,
         keep_finest_stats: false,
@@ -880,7 +880,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         // returned finest-last; data-beans-alg expects finest-
         // first, so reverse before the call.
         let aligned_finest_last =
-            crate::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
+            senna::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(
                 partition_src,
                 &cell_names_src,
                 &data_cell_names,

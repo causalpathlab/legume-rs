@@ -39,7 +39,6 @@
 //! reads) beside the raw ρ in `{out}.feature_embedding.parquet`. Cells are
 //! the reference and are unchanged, and training is untouched.
 
-use crate::embed_common::*;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::Device;
 use graph_embedding_util as ge;
@@ -48,6 +47,7 @@ use graph_embedding_util::fit::resolve_embedding::{
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use rustc_hash::FxHashMap;
+use senna::embed_common::*;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -253,7 +253,7 @@ fn inherit_paths(cli: Option<&[Box<str>]>, manifest_rel: &[String], dir: &Path) 
         None => manifest_rel
             .iter()
             .map(|p| {
-                crate::run_manifest::resolve(dir, p)
+                senna::run_manifest::resolve(dir, p)
                     .to_string_lossy()
                     .into_owned()
                     .into_boxed_str()
@@ -265,14 +265,14 @@ fn inherit_paths(cli: Option<&[Box<str>]>, manifest_rel: &[String], dir: &Path) 
 pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     let out = match args.out.as_deref() {
         Some(o) => o.to_string(),
-        None => crate::run_manifest::derive_out_prefix(&args.from),
+        None => senna::run_manifest::derive_out_prefix(&args.from),
     };
     mkdir_parent(&out)?;
 
     ///////////////////////////////////////////////////
     // Frozen topic side: θ + the source count files //
     ///////////////////////////////////////////////////
-    let (manifest, dir) = crate::run_manifest::RunManifest::load(Path::new(args.from.as_ref()))?;
+    let (manifest, dir) = senna::run_manifest::RunManifest::load(Path::new(args.from.as_ref()))?;
     // `latent_is_log_simplex`, not `is_topic_family`: this command `exp()`s the
     // stored latent as θ just below, so it needs a log-θ latent specifically.
     // `masked-vae` is topic-family but stores a raw Gaussian z (softmax, not
@@ -288,7 +288,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
         .latent
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("--from manifest has no outputs.latent (θ)"))?;
-    let theta_path = crate::run_manifest::resolve(&dir, theta_rel)
+    let theta_path = senna::run_manifest::resolve(&dir, theta_rel)
         .to_string_lossy()
         .into_owned();
     let theta_mat = Mat::from_parquet(&theta_path)?;
@@ -320,7 +320,7 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
     // The counts ρ trains against are the source run's own files, so replay
     // the multiome layout they were trained under.
     let reload =
-        crate::multiome_layout::recorded_layout(manifest.data.multiome.as_ref(), data_files.len())?;
+        senna::multiome_layout::recorded_layout(manifest.data.multiome.as_ref(), data_files.len())?;
     let loaded = read_data_on_shared_rows(reload.apply(ReadSharedRowsArgs {
         data_files,
         batch_files,
@@ -444,9 +444,9 @@ pub fn resolve_embedding_space(args: &RestArgs) -> anyhow::Result<()> {
 
     write_outputs(&trained, &feature_names, &kept_names, &out)?;
 
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: None,
-        kind: crate::run_manifest::RunKind::ResolveEmbeddingSpace,
+        kind: senna::run_manifest::RunKind::ResolveEmbeddingSpace,
         prefix: &out,
         data_input: &input_for_manifest,
         data_multiome: None,

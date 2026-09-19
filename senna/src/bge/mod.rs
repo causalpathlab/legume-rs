@@ -18,9 +18,9 @@
 //! use, and its six flags dominated bge's surface. `senna topic` /
 //! `masked-topic` keep their own, unrelated feature-network restriction.
 
-use crate::embed_common::*;
 use data_beans_alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;
+use senna::embed_common::*;
 
 pub(crate) mod args;
 pub(crate) mod driver;
@@ -109,7 +109,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         data_beans::sparse_io_vector::ColumnAlignment::Disjoint
     };
 
-    let batch_files = crate::senna_input::effective_batch_files(
+    let batch_files = senna::senna_input::effective_batch_files(
         args.collapse.ignore_batch,
         args.batch_files.as_deref(),
     );
@@ -138,7 +138,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
     if let Some(r) = args.pb_reference.as_ref() {
         let v = unified.count_backend_mut();
         let names = v.column_names()?;
-        let w = crate::pb_reference::weights_for(&r.cell_counts, &names)?;
+        let w = senna::pb_reference::weights_for(&r.cell_counts, &names)?;
         v.register_column_multiplicity(&w)?;
         info!(
             "Column multiplicity: {} carried pseudobulks stand for {} cells",
@@ -178,7 +178,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
 
     let run_multiome = multiome_plan
         .as_ref()
-        .map(crate::multiome_layout::RunMultiome::from_plan);
+        .map(senna::multiome_layout::RunMultiome::from_plan);
 
     let (preset_features, carried) = crate::feature_preset::resolve_preset(
         args.feature_embedding.resolve()?,
@@ -189,7 +189,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         crate::feature_preset::resolve_dim(args.embedding_dim, preset_features.as_ref())?;
 
     driver::fit_embed_family(driver::EmbedPlan {
-        kind: crate::run_manifest::RunKind::Bge,
+        kind: senna::run_manifest::RunKind::Bge,
         knobs: args.knobs(embedding_dim),
         unified,
         data_files,
@@ -203,7 +203,7 @@ pub fn fit_bge(args: &BgeArgs) -> anyhow::Result<()> {
         carried,
         pb_reference: args.pb_reference.as_ref(),
         init_from: args.init_from.as_deref(),
-        train_args: crate::run_manifest::record_train_args(args)?,
+        train_args: senna::run_manifest::record_train_args(args)?,
         after_fit: None,
     })
 }

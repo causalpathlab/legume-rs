@@ -1,12 +1,12 @@
-use crate::embed_common::*;
 use crate::hvg::HvgCliArgs;
 use crate::topic::common::{
     load_and_project, load_cnv_cell_strata, LoadProjectArgs, ProjectedData,
 };
 use data_beans::sparse_data_visitors::VisitColumnsOps;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct SvdArgs {
     #[arg(
         required = true,
@@ -53,7 +53,7 @@ pub struct SvdArgs {
     /// neither a CLI flag nor part of the recorded configuration.
     #[arg(skip)]
     #[serde(skip)]
-    pb_reference: Option<crate::pb_reference::ReferenceInput>,
+    pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
     /// The parent run this one continues, set by `senna update` — svd has no
     /// weights to warm-start, so unlike the other families this is not a CLI
@@ -168,7 +168,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         anchor_batches: args
             .pb_reference
             .is_some()
-            .then(|| vec![crate::pb_reference::REFERENCE_BATCH.into()]),
+            .then(|| vec![senna::pb_reference::REFERENCE_BATCH.into()]),
         bulk_batches: args.collapse.mixture_batch.clone(),
         observe_panels: true,
         keep_finest_stats: false,
@@ -269,13 +269,13 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // SVD reuses the topic models' `T{c}` convention so `senna plot
     // --colour-by topic` reads the latent.parquet identically regardless
     // of upstream (`senna topic` or `senna svd`).
-    crate::output_helpers::save_latent(
+    senna::output_helpers::save_latent(
         &args.out,
         &nystrom_out.latent_nk,
         &cell_names,
         output_keep_idx.as_deref(),
     )?;
-    crate::output_helpers::save_dictionary(
+    senna::output_helpers::save_dictionary(
         &args.out,
         &nystrom_out.dictionary_dk,
         &output_gene_names,
@@ -283,7 +283,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     {
         let pb_gene_gp: Mat = x_dn.posterior_mean().clone();
-        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
+        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &output_gene_names)?;
     }
 
     // Captured before CNV consumes `data_vec`; the emit itself runs after, so
@@ -325,7 +325,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         output_keep_idx.as_deref(),
     )?;
 
-    let pb_reference_suffix = crate::pb_reference::emit_if_requested(
+    let pb_reference_suffix = senna::pb_reference::emit_if_requested(
         args.collapse.emits_pb_reference(),
         &args.out,
         &collapse_out,
@@ -346,9 +346,9 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
-        train_args: Some(crate::run_manifest::record_train_args(args)?),
-        kind: crate::run_manifest::RunKind::Svd,
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
+        train_args: Some(senna::run_manifest::record_train_args(args)?),
+        kind: senna::run_manifest::RunKind::Svd,
         prefix: &args.out,
         data_input: &input,
         data_multiome: None,

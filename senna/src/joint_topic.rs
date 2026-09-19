@@ -1,9 +1,9 @@
-use crate::embed_common::*;
-use crate::senna_input::{
-    read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
-};
 use crate::topic::common::{create_device, setup_stop_handler};
 use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
+use senna::embed_common::*;
+use senna::senna_input::{
+    read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
+};
 
 use candle_util::decoder::DeltaTopicDecoder;
 use candle_util::decoder::JointTopicDecoder;
@@ -183,7 +183,7 @@ pub struct JointTopicArgs {
 pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     args.collapse
-        .reject_pb_reference(crate::run_manifest::RunKind::JointTopic)?;
+        .reject_pb_reference(senna::run_manifest::RunKind::JointTopic)?;
 
     // 1. Read the data with batch membership
     let SparseStackWithBatch {
@@ -202,7 +202,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     if args.collapse.ignore_batch {
         info!("--ignore-batch: collapsing all cells to a single batch (per modality)");
         for batch in &mut batch_stack {
-            crate::senna_input::collapse_to_single_batch(batch);
+            senna::senna_input::collapse_to_single_batch(batch);
         }
     }
 
@@ -474,7 +474,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
     {
         let pb_gene_gp: Mat = collapsed_data_vec[0].mu_observed.posterior_mean().clone();
         let gene_names_0: Vec<Box<str>> = data_stack.stack[0].row_names()?;
-        crate::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
+        senna::output_helpers::save_pb_gene(&args.out, &pb_gene_gp, &gene_names_0)?;
     }
 
     let input: Vec<String> = args
@@ -487,9 +487,9 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|v| v.iter().map(std::string::ToString::to_string).collect())
         .unwrap_or_default();
-    crate::run_manifest::write_run_manifest(&crate::run_manifest::RunDescription {
+    senna::run_manifest::write_run_manifest(&senna::run_manifest::RunDescription {
         train_args: None,
-        kind: crate::run_manifest::RunKind::JointTopic,
+        kind: senna::run_manifest::RunKind::JointTopic,
         prefix: &args.out,
         data_input: &input,
         data_multiome: None,

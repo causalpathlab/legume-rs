@@ -1,0 +1,37 @@
+[package]
+name = "lineage"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Lineage inference, pseudotime, dyn-assoc, and lineage plots"
+
+[features]
+default = []
+cuda = ["graph-embedding-util/cuda", "matrix-util/cuda", "mcmc-util/cuda"]
+metal = ["graph-embedding-util/metal", "matrix-util/metal", "mcmc-util/metal"]
+
+[dependencies]
+auxiliary-data = { workspace = true }
+data-beans = { workspace = true }
+enrichment = { workspace = true }
+graph-embedding-util = { workspace = true }
+matrix-util = { workspace = true }
+mcmc-util = { workspace = true }
+plot-utils = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+log = { workspace = true }
+nalgebra = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+statrs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

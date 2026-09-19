@@ -11,12 +11,16 @@ use matrix_util::branching::Branching;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::principal_graph::kmeans_centroids_seeded;
+use matrix_util::traits::MatWithNames;
 
 use super::write::*;
 
 /// Inputs for [`annotate_trajectory`] — bundled to keep the fan-in a struct.
 pub(super) struct AnnotateTrajArgs<'a> {
-    pub(super) prefix: &'a str,
+    /// The co-embedded gene vectors `[G × H]` the node calls score against.
+    /// Loading these needs the producing run's manifest, so the caller hands
+    /// them in already loaded — see `senna::lineage_manifest`.
+    pub(super) feature_embedding: &'a MatWithNames<DMatrix<f32>>,
     pub(super) out: &'a str,
     pub(super) markers: &'a str,
     /// Raw θ `[N × H]` — the same latent space `senna annotate-by-projection` scores in.
@@ -44,9 +48,9 @@ pub(super) struct AnnotateTrajArgs<'a> {
 /// `--root-type` can pick the root from these calls; the caller writes
 /// `{out}.trajectory_annotation.parquet` afterwards via [`write_trajectory_annotation`].
 pub(super) fn compute_node_calls(a: &AnnotateTrajArgs) -> Result<CommunityCalls> {
-    // The co-embedded feature vectors, not β — see `crate::gem::marker_embedding` for why a
+    // The co-embedded feature vectors, not β — see `senna::marker_embedding` for why a
     // Euclidean nearest-centroid call against β is not a well-posed question.
-    let beta = crate::gem::marker_embedding::load_marker_feature_embedding(a.prefix)?;
+    let beta = a.feature_embedding;
     let cfg = TermOraConfig {
         n_perm: a.num_perm,
         // `--seed` drives the whole fit; it should drive the annotation's randomness too. It was

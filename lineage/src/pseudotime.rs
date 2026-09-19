@@ -4,17 +4,19 @@
 //!   1. Read a cell × K latent matrix (typically `senna topic`'s
 //!      `.latent.parquet`).
 //!   2. Fit a `SimplePPT` principal tree over the cells in latent space
-//!      ([`principal_graph::fit_principal_graph`]).
+//!      ([`matrix_util::principal_graph::fit_principal_graph`]).
 //!   3. Project each cell to its nearest point on the tree and compute
 //!      geodesic distance from a user-chosen root.
 
-use crate::embed_common::*;
-use crate::principal_graph::{
+use crate::mat_io::{axis_id_names, read_mat, Mat, MatWithNames};
+use clap::Args;
+use log::info;
+use matrix_util::common_io::mkdir_parent;
+use matrix_util::principal_graph::{
     closest_node_to_row, fit_principal_graph, project_cells_to_graph, pseudotime_from_root,
     CellProjection, PrincipalGraph, PrincipalGraphArgs,
 };
-use crate::run_manifest::{rel_to_manifest, resolve, RunManifest};
-use std::path::PathBuf;
+use matrix_util::traits::IoOps;
 
 //////////////////////////
 // Pure pseudotime core //
@@ -23,7 +25,7 @@ use std::path::PathBuf;
 /// How the pseudotime origin is specified. Cells/nodes are resolved against
 /// the principal graph after it is fit, so any variant is valid here.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum RootSpec<'a> {
+pub enum RootSpec<'a> {
     /// Look up `cell_name` in the latent's row names, then snap to the
     /// closest principal-graph node.
     Cell(&'a str),
@@ -37,7 +39,7 @@ pub(crate) enum RootSpec<'a> {
 /// Output of [`compute_pseudotime`]: everything needed both to write
 /// parquet artifacts and to drive downstream consumers (orient-by-root,
 /// tree layout, …) in-memory.
-pub(crate) struct PseudotimeArtifacts {
+pub struct PseudotimeArtifacts {
     pub graph: PrincipalGraph,
     pub projections: Vec<CellProjection>,
     pub root: usize,
@@ -47,7 +49,7 @@ pub(crate) struct PseudotimeArtifacts {
 /// Pure core: fit the principal graph on `latent`, project cells, resolve
 /// the root, and compute per-cell pseudotime. No I/O. Shared by
 /// `run_pseudotime` and by `senna layout phate --orient-by-root`.
-pub(crate) fn compute_pseudotime(
+pub fn compute_pseudotime(
     latent: &Mat,
     cell_names: &[Box<str>],
     pg_args: &PrincipalGraphArgs,
@@ -196,18 +198,58 @@ pub struct PseudotimeArgs {
     out: Box<str>,
 }
 
-pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
+impl PseudotimeArgs {
+    /// `--latent`, when the caller named the matrix directly.
+    #[must_use]
+    pub fn latent(&self) -> Option<&str> {
+        self.latent.as_deref()
+    }
+
+    /// `--from`, the run manifest the caller should resolve inputs against.
+    /// Resolving it is `senna`'s job — see `senna::lineage_manifest`.
+    #[must_use]
+    pub fn manifest(&self) -> Option<&str> {
+        self.from.as_deref()
+    }
+}
+
+/// Paths a caller has already resolved for [`run_pseudotime`].
+///
+/// This crate never reads a run manifest, so resolving `--from` is the
+/// caller's job: `senna::lineage_manifest` does it for the CLI, and a
+/// caller working off explicit paths fills this directly.
+pub struct PseudotimeInputs {
+    /// Cell × K latent matrix (parquet or delimited text).
+    pub latent: String,
+    /// The run's 2D cell layout, when it has one. Present ⇒ the K centroids
+    /// are also projected into layout space.
+    pub cell_coords: Option<String>,
+}
+
+/// Artifact paths [`run_pseudotime`] wrote, plus the root it resolved — what
+/// a manifest-updating caller needs to record the run.
+pub struct PseudotimeOutputs {
+    pub pseudotime: String,
+    pub nodes_latent: String,
+    pub nodes_2d: Option<String>,
+    pub edges: String,
+    pub root: usize,
+}
+
+pub fn run_pseudotime(
+    args: &PseudotimeArgs,
+    inputs: &PseudotimeInputs,
+) -> anyhow::Result<PseudotimeOutputs> {
     mkdir_parent(&args.out)?;
 
-    let manifest_ctx = load_manifest_ctx(args)?;
-    let latent_path = resolve_latent_path(args, manifest_ctx.as_ref())?;
+    let latent_path = inputs.latent.as_str();
     info!("Reading latent matrix from {latent_path}");
 
     let MatWithNames {
         rows: cell_names,
         cols: feat_names,
         mat: latent,
-    } = read_mat(&latent_path)?;
+    } = read_mat(latent_path)?;
 
     info!(
         "Loaded latent: {} cells × {} dims",
@@ -278,108 +320,48 @@ pub fn run_pseudotime(args: &PseudotimeArgs) -> anyhow::Result<()> {
     write_graph_nodes(&graph.nodes, &feat_names, &nodes_latent_path)?;
     write_graph_edges(&graph.edges, &graph.edge_weights, &edges_path)?;
 
-    let nodes_2d_path = match manifest_ctx.as_ref() {
-        Some(ctx) => project_centroids_to_2d(ctx, &latent, &graph, &cell_names, &args.out)?,
-        None => None,
-    };
-
-    if let Some(ctx) = manifest_ctx {
-        update_manifest(
-            ctx,
-            PseudotimeManifestUpdate {
-                pseudotime: &pseudotime_path,
-                nodes_latent: &nodes_latent_path,
-                nodes_2d: nodes_2d_path.as_deref(),
-                edges: &edges_path,
-                root,
-            },
-        )?;
-    }
+    let nodes_2d_path = inputs
+        .cell_coords
+        .as_deref()
+        .map(|cell_coords| {
+            project_centroids_to_2d(cell_coords, &latent, &graph, &cell_names, &args.out)
+        })
+        .transpose()?;
 
     info!(
         "Run `senna layout tree --from <manifest>` to produce the Reingold-Tilford \
          tree layout from this pseudotime run."
     );
 
-    Ok(())
-}
-
-/// Bundle of artifact paths handed to [`update_manifest`]. All paths are
-/// the same strings already passed to the writer fns above; the struct
-/// just keeps the call site readable.
-struct PseudotimeManifestUpdate<'a> {
-    pseudotime: &'a str,
-    nodes_latent: &'a str,
-    nodes_2d: Option<&'a str>,
-    edges: &'a str,
-    root: usize,
+    Ok(PseudotimeOutputs {
+        pseudotime: pseudotime_path,
+        nodes_latent: nodes_latent_path,
+        nodes_2d: nodes_2d_path,
+        edges: edges_path,
+        root,
+    })
 }
 
 fn default_k(n_cells: usize) -> usize {
     (n_cells / 10).clamp(5, 200)
 }
 
-/// Loaded manifest plus its on-disk path and resolved directory. Held
-/// across the whole pseudotime run so we can both read existing entries
-/// (e.g. `outputs.latent`, `layout.cell_coords`) and write new ones back.
-struct ManifestCtx {
-    manifest: RunManifest,
-    path: PathBuf,
-    dir: PathBuf,
-}
-
-fn load_manifest_ctx(args: &PseudotimeArgs) -> anyhow::Result<Option<ManifestCtx>> {
-    let Some(from) = args.from.as_deref() else {
-        return Ok(None);
-    };
-    let path = PathBuf::from(from);
-    let (manifest, dir) = RunManifest::load(&path)?;
-    Ok(Some(ManifestCtx {
-        manifest,
-        path,
-        dir,
-    }))
-}
-
-fn resolve_latent_path(args: &PseudotimeArgs, ctx: Option<&ManifestCtx>) -> anyhow::Result<String> {
-    if let Some(p) = args.latent.as_deref() {
-        return Ok(p.to_string());
-    }
-    let ctx = ctx.ok_or_else(|| anyhow::anyhow!("either --latent or --from is required"))?;
-    let rel = ctx.manifest.outputs.geometry_latent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "manifest {} has no outputs.cell_embedding or outputs.latent",
-            ctx.path.display()
-        )
-    })?;
-    Ok(resolve(&ctx.dir, rel).to_string_lossy().into_owned())
-}
-
-/// Project the K centroids into 2D using the run's cell layout when
-/// available. The 2D position of each centroid is the mean of the 2D
-/// coordinates of cells whose nearest centroid (in latent space) is that
-/// node — the simplest faithful map from latent → layout space without
-/// needing R or running a second embedding.
+/// Project the K centroids into 2D using the run's cell layout. The 2D
+/// position of each centroid is the mean of the 2D coordinates of cells whose
+/// nearest centroid (in latent space) is that node — the simplest faithful map
+/// from latent → layout space without needing R or running a second embedding.
 fn project_centroids_to_2d(
-    ctx: &ManifestCtx,
+    cell_coords_path: &str,
     latent: &Mat,
-    graph: &crate::principal_graph::PrincipalGraph,
+    graph: &PrincipalGraph,
     cell_names: &[Box<str>],
     out: &str,
-) -> anyhow::Result<Option<String>> {
-    let Some(rel) = ctx.manifest.layout.cell_coords.as_deref() else {
-        info!(
-            "manifest has no layout.cell_coords; skipping 2D centroid projection \
-             (run `senna layout phate --from ...` first to enable plot overlay)"
-        );
-        return Ok(None);
-    };
-    let cell_coords_path = resolve(&ctx.dir, rel).to_string_lossy().into_owned();
+) -> anyhow::Result<String> {
     let MatWithNames {
         rows: layout_cells,
         cols: layout_cols,
         mat: layout,
-    } = read_mat(&cell_coords_path)?;
+    } = read_mat(cell_coords_path)?;
 
     anyhow::ensure!(
         layout.nrows() == latent.nrows(),
@@ -404,7 +386,7 @@ fn project_centroids_to_2d(
     let mut acc = Mat::zeros(k, 2);
     let mut counts = vec![0usize; k];
     for i in 0..latent.nrows() {
-        let node = crate::principal_graph::closest_node_to_row(latent, i, graph);
+        let node = closest_node_to_row(latent, i, graph);
         acc[(node, 0)] += layout[(i, xy_cols.0)];
         acc[(node, 1)] += layout[(i, xy_cols.1)];
         counts[node] += 1;
@@ -426,33 +408,13 @@ fn project_centroids_to_2d(
     let col_names: Vec<Box<str>> = vec!["x".into(), "y".into()];
     acc.to_parquet_with_names(&path, (Some(&row_names), Some("node")), Some(&col_names))?;
     info!("Wrote {path}");
-    Ok(Some(path))
+    Ok(path)
 }
 
 fn pick_xy_columns(cols: &[Box<str>]) -> (usize, usize) {
     let x = cols.iter().position(|c| c.as_ref() == "x").unwrap_or(0);
     let y = cols.iter().position(|c| c.as_ref() == "y").unwrap_or(1);
     (x, y)
-}
-
-fn update_manifest(
-    mut ctx: ManifestCtx,
-    update: PseudotimeManifestUpdate<'_>,
-) -> anyhow::Result<()> {
-    let rel = |p: &str| rel_to_manifest(&ctx.dir, p);
-    ctx.manifest.pseudotime.pseudotime = Some(rel(update.pseudotime));
-    ctx.manifest.pseudotime.nodes_latent = Some(rel(update.nodes_latent));
-    ctx.manifest.pseudotime.nodes_2d = update.nodes_2d.map(rel);
-    ctx.manifest.pseudotime.edges = Some(rel(update.edges));
-    ctx.manifest.pseudotime.root_node = Some(update.root);
-    // Tree layout is now produced by `senna layout tree`; clear any stale
-    // paths from a previous run so downstream readers don't pick up a
-    // tree that no longer matches this pseudotime fit.
-    ctx.manifest.pseudotime.tree_cell_coords = None;
-    ctx.manifest.pseudotime.tree_nodes_2d = None;
-    ctx.manifest.save(&ctx.path)?;
-    info!("Updated manifest {}", ctx.path.display());
-    Ok(())
 }
 
 fn write_pseudotime(pseudotime: &[f32], cell_names: &[Box<str>], path: &str) -> anyhow::Result<()> {

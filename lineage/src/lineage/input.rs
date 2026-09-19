@@ -15,7 +15,45 @@ use matrix_util::traits::IoOps;
 
 use super::args::*;
 use super::layout::l2_normalize_rows;
-use crate::run_manifest::RunKind;
+
+/// What the producing run says about its own per-cell tables — everything the
+/// θ resolver needs from a run manifest.
+///
+/// This crate never reads a manifest (that would cycle once `senna` re-exports
+/// it), so the caller stamps this instead: `senna::lineage_manifest` fills it
+/// from `senna::run_manifest`, and a caller with nothing to go on passes
+/// [`LatentContract::unknown`].
+#[derive(Clone, Debug)]
+pub struct LatentContract {
+    /// Whether `{prefix}.latent.parquet` holds log θ on the simplex. Only a
+    /// topic-family run stamps one; `senna gem` writes a Euclidean
+    /// `cell_embedding` instead.
+    pub latent_is_log_simplex: bool,
+    /// How the producing run names itself, quoted in diagnostics; `None` when
+    /// nothing was readable.
+    pub kind: Option<Box<str>>,
+    /// Where the claim was read from, quoted in diagnostics.
+    pub source: Box<str>,
+}
+
+impl LatentContract {
+    /// Nothing is known about the run — no readable manifest. `source` still
+    /// names where one was looked for, so the fallback warning can say.
+    #[must_use]
+    pub fn unknown(source: impl Into<Box<str>>) -> Self {
+        Self {
+            latent_is_log_simplex: false,
+            kind: None,
+            source: source.into(),
+        }
+    }
+
+    /// Whether the producer is a `senna gem` run (no velocity).
+    #[must_use]
+    pub fn is_gem(&self) -> bool {
+        self.kind.as_deref() == Some("gem")
+    }
+}
 
 /// θ and δ as they came off disk, plus what they are.
 ///
@@ -30,49 +68,50 @@ pub(super) struct LoadedTheta {
     pub velocity: Option<DMatrix<f32>>,
 }
 
-/// Resolve `--theta-from auto` against the run manifest.
+/// Resolve `--theta-from auto` against what the producing run promised.
 ///
 /// `latent` requires a run whose `latent.parquet` is on the probability simplex
 /// — a topic-family run, not `senna gem`. `gem` writes no latent at all: its
 /// per-cell table is a Euclidean embedding, and `exp()`-ing it would produce a
 /// plausible wrong θ rather than an error.
 ///
-/// Which kinds stamp a log-simplex latent is a property of the manifest's
-/// `kind`, not of this resolver — see [`RunKind::latent_is_log_simplex`].
-pub(super) fn resolve_theta_from(requested: ThetaFrom, prefix: &str) -> Result<ThetaFrom> {
-    // A missing manifest is not fatal for `auto` — it just means the geometry
-    // has to be assumed rather than read — so this stays an Option.
-    let kind = crate::run_manifest::load_for(prefix)
-        .ok()
-        .map(|(m, _)| m.kind);
-    let is_log_theta = kind.is_some_and(RunKind::latent_is_log_simplex);
-    let manifest =
-        crate::run_manifest::default_path(&crate::run_manifest::derive_out_prefix(prefix));
+/// Which kinds stamp a log-simplex latent is a property of the run, not of this
+/// resolver, and reading it is the caller's job — see [`LatentContract`].
+pub(super) fn resolve_theta_from(
+    requested: ThetaFrom,
+    contract: &LatentContract,
+) -> Result<ThetaFrom> {
+    let LatentContract {
+        latent_is_log_simplex: is_log_theta,
+        kind,
+        source,
+        ..
+    } = contract;
 
     match requested {
         ThetaFrom::CellEmbedding => Ok(ThetaFrom::CellEmbedding),
         ThetaFrom::Latent => {
             anyhow::ensure!(
-                is_log_theta,
-                "--theta-from latent needs a run whose latent is on the simplex; {manifest} \
+                *is_log_theta,
+                "--theta-from latent needs a run whose latent is on the simplex; {source} \
                  reports {}. Only a topic-family run stamps a log-simplex latent; \
                  `senna gem` writes a Euclidean cell_embedding.",
-                kind.map_or_else(|| "no manifest".to_string(), |k| k.to_string())
+                kind.as_deref().unwrap_or("no manifest")
             );
             Ok(ThetaFrom::Latent)
         }
         ThetaFrom::Auto => {
-            if is_log_theta {
+            if *is_log_theta {
                 info!(
-                    "--theta-from auto → latent: {manifest} is a {} run, so the fit reads the \
+                    "--theta-from auto → latent: {source} is a {} run, so the fit reads the \
                      SIMPLEX directly rather than the θ·α co-embedding",
-                    kind.expect("is_log_theta implies a kind")
+                    kind.as_deref().expect("is_log_theta implies a kind")
                 );
                 Ok(ThetaFrom::Latent)
             } else {
                 if kind.is_none() {
                     warn!(
-                        "no readable manifest at {manifest}, so --theta-from auto falls back to \
+                        "no readable manifest at {source}, so --theta-from auto falls back to \
                          cell_embedding. Pass --theta-from explicitly if that is not what this \
                          prefix holds."
                     );
@@ -109,8 +148,9 @@ pub(super) fn apply_geometry(theta: &DMatrix<f32>, geometry: LatentGeometry) -> 
         LatentGeometry::Euclidean => theta.clone(),
         LatentGeometry::Cosine => l2_normalize_rows(theta),
         LatentGeometry::Hellinger => theta.map(|v| v.max(0.0).sqrt()),
-        // Resolved by `resolve_geometry` before this point.
-        LatentGeometry::Auto => theta.clone(),
+        LatentGeometry::Auto => {
+            unreachable!("resolve_geometry must run before apply_geometry")
+        }
     }
 }
 
