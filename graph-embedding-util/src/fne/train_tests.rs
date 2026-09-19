@@ -473,9 +473,7 @@ fn enemy_polarity_pushes_linked_gene_dots_below_cross_pairs() {
     };
     let out = train(e, t, rels, &cfg).unwrap();
     let emb = out.embedding.to_vec2::<f32>().unwrap();
-    let dot = |a: usize, b: usize| -> f32 {
-        emb[a].iter().zip(&emb[b]).map(|(x, y)| x * y).sum()
-    };
+    let dot = |a: usize, b: usize| -> f32 { emb[a].iter().zip(&emb[b]).map(|(x, y)| x * y).sum() };
     let mut within = 0.0f32;
     let mut n_within = 0usize;
     for g in 0..2 {
