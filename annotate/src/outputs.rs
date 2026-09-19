@@ -3,7 +3,7 @@
 //! `annotate-by-enrichment`) so their I/O contract stays in lock-step.
 //!
 //! Wiring these paths into `manifest.annotate.*` is the caller's job — see
-//! `senna::annotate_manifest::finalize_annotation`.
+//! `senna::annotate_manifest::{record_annotation, record_gene_set_signature}`.
 
 use std::path::Path;
 
