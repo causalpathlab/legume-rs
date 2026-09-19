@@ -10,7 +10,7 @@ use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
 use nalgebra::DMatrix;
 
 use crate::bge::{fit_bge, BgeArgs};
-use crate::run_manifest::{self, RunKind};
+use senna::run_manifest::{self, RunKind};
 
 const N_GENES: usize = 12;
 const N_CELLS: usize = 40;

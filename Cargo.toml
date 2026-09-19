@@ -2,6 +2,7 @@
 
 members = [
     "auxiliary-data",
+    "annotate",
     "candle-util",
     "chickpea",
     "cnv",
@@ -17,6 +18,8 @@ members = [
     "graph-embedding-util",
     "hsblock",
     "leiden",
+    "lineage",
+    "lupin",
     "matrix-param",
     "matrix-util",
     "mcmc-util",

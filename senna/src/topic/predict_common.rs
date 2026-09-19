@@ -7,11 +7,11 @@
 //! - `predictive_llik_*`: wrap decoder forwards to return just the per-cell
 //!   log-likelihood tensor.
 
-use crate::embed_common::*;
 use crate::topic::eval::GeneRemap;
 use candle_core::{Device, Result as CandleResult, Tensor, Var};
 use candle_nn::ops;
 use candle_util::traits::DecoderModuleT;
+use senna::embed_common::*;
 
 /// Lower / upper bounds on per-(gene, batch) δ. Stops a single noisy batch
 /// from blowing up the encoder's null input when one batch has near-zero

@@ -44,12 +44,7 @@ pub use data_beans_alg::random_projection::*;
 /// writer in this crate (and pinto's `C{c}` analogue). A reader can
 /// recover the integer ID from the column name alone, surviving column
 /// reordering, schema audits, and partial subsetting.
-#[must_use]
-pub fn axis_id_names(prefix: &str, k: usize) -> Vec<Box<str>> {
-    (0..k)
-        .map(|i| format!("{prefix}{i}").into_boxed_str())
-        .collect()
-}
+pub use matrix_util::dense_mat_io::axis_id_names;
 
 /// Inverse of [`axis_id_names`]. Accepts the explicit `{prefix}{c}` form
 /// and the legacy bare-integer fallback (matrix-util's default column
@@ -243,12 +238,7 @@ impl TrainScores {
 }
 
 /// Read a matrix from parquet or delimited text file
-pub fn read_mat(file_path: &str) -> anyhow::Result<MatWithNames<Mat>> {
-    Ok(match file_ext(file_path)?.as_ref() {
-        "parquet" => Mat::from_parquet(file_path)?,
-        _ => Mat::read_data(file_path, &['\t', ','], None, Some(0), None, None)?,
-    })
-}
+pub use matrix_util::dense_mat_io::read_mat;
 
 /// Delimiters a dense bulk table may use.
 pub const BULK_DELIMS: [char; 2] = ['\t', ','];
@@ -737,14 +727,7 @@ pub fn latent_sharpness(theta_nk: &Mat) -> (f32, f32) {
 /// equals cosine distance on the input. A ~zero row is left unchanged —
 /// normalizing it would blow it up to an arbitrary unit direction (and the
 /// retrieval core reads an all-zero row as "no evidence").
-pub fn l2_normalize_rows_inplace(m: &mut Mat) {
-    for mut row in m.row_iter_mut() {
-        let norm = row.norm();
-        if norm > 1e-9 {
-            row /= norm;
-        }
-    }
-}
+pub use matrix_util::dense_mat_io::l2_normalize_rows_inplace;
 
 /// In-place numerically-stable per-row softmax on a host matrix (`[N, K]` →
 /// each row `softmax`ed over K): subtract the row max, `exp`, then divide by

@@ -29,6 +29,7 @@ pub(super) fn write_annot_parquet(
     type_names: &[Box<str>],
     ora: &OraResult,
     cluster_label: &[usize],
+    cluster_best: &[usize],
     boot: Option<&BootstrapResult>,
     consensus: Option<&CoarseConsensus>,
     sup_null: Option<&crate::type_annotation::support_null::SupportNull>,
@@ -53,6 +54,25 @@ pub(super) fn write_annot_parquet(
     let coarse_p: Vec<f32> = (0..n).map(|i| stat_of(&ora.p_perm, i)).collect();
     let coarse_q: Vec<f32> = (0..n).map(|i| stat_of(&ora.q, i)).collect();
 
+    // Best match regardless of FDR: always report the top term so abstaining clusters still
+    // carry a closest panel type (flagged via `best_significant`).
+    let best_label: Vec<Box<str>> = (0..n)
+        .map(|i| {
+            let t = cluster_best[community[i]];
+            label_of(t, type_names)
+        })
+        .collect();
+    let best_q: Vec<f32> = (0..n)
+        .map(|i| {
+            let k = community[i];
+            let t = cluster_best[k];
+            ora.q[k * c + t]
+        })
+        .collect();
+    let best_significant: Vec<i32> = (0..n)
+        .map(|i| (cluster_label[community[i]] != UNASSIGNED) as i32)
+        .collect();
+
     let annot_path = format!("{out_prefix}.annot.parquet");
     let mut cols = vec![
         (Box::from("community"), Column::I32(&comm_i32)),
@@ -61,6 +81,12 @@ pub(super) fn write_annot_parquet(
         (Box::from("fine_label"), Column::Str(&fine_label)),
         (Box::from("fine_distance"), Column::F32(dist)),
         (Box::from("is_outlier"), Column::I32(&is_outlier)),
+        (Box::from("best_label"), Column::Str(&best_label)),
+        (Box::from("best_q"), Column::F32(&best_q)),
+        (
+            Box::from("best_significant"),
+            Column::I32(&best_significant),
+        ),
     ];
     // **`coarse_p`/`coarse_q` are only honest without the bootstrap**, and are withheld with it.
     //

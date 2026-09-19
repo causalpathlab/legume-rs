@@ -2,8 +2,8 @@
 //! transforms that operate on it (thresholding, local scaling, diagonal
 //! regularization).
 
-use crate::embed_common::*;
 use rayon::prelude::*;
+use senna::embed_common::*;
 
 /// f32 dot product on two equal-length slices. `zip().map().sum()` is the
 /// form LLVM consistently lowers to SSE/AVX f32 SIMD reductions.

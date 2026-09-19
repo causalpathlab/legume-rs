@@ -17,7 +17,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 
-use crate::principal_graph::{node_geodesic_from, CellProjection, PrincipalGraph};
+use senna::principal_graph::{node_geodesic_from, CellProjection, PrincipalGraph};
 
 /// Per-node 2D position produced by [`reingold_tilford_layout`]. The y
 /// coordinate is the geodesic distance from the root along tree edges,
@@ -175,7 +175,7 @@ pub fn place_cells_on_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::principal_graph::{fit_principal_graph, project_cells_to_graph, PrincipalGraphArgs};
+    use senna::principal_graph::{fit_principal_graph, project_cells_to_graph, PrincipalGraphArgs};
 
     fn synthetic_branched(n_per_branch: usize) -> DMatrix<f32> {
         // Three branches in 3-D meeting at the origin.

@@ -6,12 +6,12 @@
 //! of it first. Nothing here computes; the translation to
 //! `graph_embedding_util::FitConfig` stays with the driver that performs it.
 
-use crate::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default = "crate::embed_common::clap_defaults")]
+#[serde(default = "senna::embed_common::clap_defaults")]
 pub struct BgeArgs {
     #[arg(
         value_delimiter = ',',
@@ -50,7 +50,7 @@ pub struct BgeArgs {
     /// neither a CLI flag nor part of the recorded configuration.
     #[arg(skip)]
     #[serde(skip)]
-    pub(crate) pb_reference: Option<crate::pb_reference::ReferenceInput>,
+    pub(crate) pb_reference: Option<senna::pb_reference::ReferenceInput>,
 
     /// The parent run this one continues, set by `senna update`. Under `senna
     /// update` the parent's module partition (its membership, argmax per gene,

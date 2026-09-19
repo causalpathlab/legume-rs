@@ -3,9 +3,9 @@
 //! - Raw-gene-space log1p-CPM construction for PB landmarks.
 //! - SVD preprocessing for dimensionality reduction.
 
-use crate::embed_common::*;
 use matrix_util::traits::RandomizedAlgs;
 use rayon::prelude::*;
+use senna::embed_common::*;
 
 /// Accumulate the mean feature vector for each PB group.
 ///
@@ -113,7 +113,7 @@ pub(crate) fn write_cell_proj(
         .map(|i| format!("p{i}").into_boxed_str())
         .collect();
     let n_emitted = if let Some((mat, names)) =
-        crate::output_helpers::cell_subset(&proj_nk, cell_names, keep_idx)
+        senna::output_helpers::cell_subset(&proj_nk, cell_names, keep_idx)
     {
         let n = mat.nrows();
         mat.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
@@ -170,7 +170,7 @@ pub(crate) fn write_cell_to_pb(
         .collect();
     let path = format!("{prefix}.cell_to_pb.parquet");
     let n_emitted =
-        if let Some((m, names)) = crate::output_helpers::cell_subset(&mat, cell_names, keep_idx) {
+        if let Some((m, names)) = senna::output_helpers::cell_subset(&mat, cell_names, keep_idx) {
             let n = m.nrows();
             m.to_parquet_with_names(&path, (Some(&names), Some("cell")), Some(&col_names))?;
             n

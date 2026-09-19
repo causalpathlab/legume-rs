@@ -9,7 +9,7 @@
 //! declaration at the crate root.
 //!
 //! **ρ lives in more than one place, and only one resolver knows the rules.**
-//! [`crate::run_manifest::resolve_feature_embedding_for`] exists because three consumers each
+//! [`senna::run_manifest::resolve_feature_embedding_for`] exists because three consumers each
 //! probed for ρ independently and each broke differently. Go through it. Note it returns
 //! `(ρ_path, bias_path)` and `deconvolve` discards the second — a probe needs both, since
 //! `(ρ, b_feat)` is exactly the frozen side that [`FrozenProjector`] and
@@ -19,9 +19,7 @@
 //! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
 //! itself as working with or without the flag.
 
-use crate::embed_common::Mat;
 use crate::logging::new_progress_bar;
-use crate::run_manifest::{self, ArtifactScale, RunManifest};
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
@@ -36,6 +34,8 @@ use log::info;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
+use senna::embed_common::Mat;
+use senna::run_manifest::{self, ArtifactScale, RunManifest};
 use std::path::Path;
 
 /// An opened `senna bge` (or `senna simba`) model: the frozen feature side, and the
@@ -69,7 +69,7 @@ pub struct BgeEmbedding {
     pub tracks: Option<crate::gem::tracks::TrackPlan>,
     /// `(track id, resolved path)` for every count track BEYOND track 0 whose
     /// encoder the manifest recorded, the id resolved by matching
-    /// [`crate::run_manifest::TrackEncoderSlot::track`]'s name against
+    /// [`senna::run_manifest::TrackEncoderSlot::track`]'s name against
     /// [`Self::tracks`]. Empty for bge / simba, and for a gem run with a
     /// single count track.
     pub track_encoders: Vec<(u32, String)>,
@@ -316,7 +316,7 @@ impl BgeEmbedding {
             ModuleTables,
         };
 
-        let loaded = read_data_on_shared_rows(crate::multiome_layout::query_load(
+        let loaded = read_data_on_shared_rows(senna::multiome_layout::query_load(
             ReadSharedRowsArgs {
                 data_files: files.to_vec(),
                 preload,

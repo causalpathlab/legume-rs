@@ -7,11 +7,11 @@
 //! manifest so an A/B is one command per arm and the same arithmetic for every
 //! arm. It measures; it decides nothing.
 
-use crate::run_manifest;
 use clap::Args;
 use matrix_util::embedding_geometry::{embedding_geometry, EmbeddingGeometry};
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
+use senna::run_manifest;
 
 #[derive(Args, Debug)]
 pub struct EmbedDiagArgs {

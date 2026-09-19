@@ -1,17 +1,11 @@
-//! Cluster-based annotation: re-aggregates raw counts per cluster (NB-Fisher
-//! adjusted), then runs marker-set enrichment on the cluster expression matrix.
+//! Cluster-based annotation: marker-set enrichment on the per-cluster
+//! expression matrix (NB-Fisher adjusted, re-aggregated from raw counts by the
+//! caller — see `senna::annotate_manifest`).
 
-use super::args::AnnotateArgs;
-use super::finalize::{
-    clean_outputs, finalize_annotation, AnnotationArtifacts, ENRICHMENT_OUTPUT_SUFFIXES,
-};
-use super::inputs::{load_from_manifest, LeidenArgs};
-use crate::cluster_aggregation::{
-    accumulate_gene_sum, accumulate_gene_sum_pair, weighted_mean_profile,
-};
-use crate::embed_common::{axis_id_names, Mat};
-use crate::run_manifest;
-use data_beans_alg::gene_weighting::{compute_nb_fisher_weights, load_fisher_weights};
+use crate::args::AnnotateArgs;
+use crate::inputs::EnrichmentInputs;
+use crate::mat_io::{axis_id_names, Mat};
+use crate::outputs::{clean_outputs, AnnotationOutputs, ENRICHMENT_OUTPUT_SUFFIXES};
 use enrichment::consensus::{Abstain, UNASSIGNED};
 use enrichment::marker_bootstrap::{ClusterBootstrap, EnrichmentBootstrapConfig};
 use enrichment::{annotate, AnnotateConfig, AnnotateOutputs, GroupInputs, SpecificityMode};
@@ -19,12 +13,24 @@ use log::info;
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::traits::IoOps;
 use rayon::prelude::*;
-use std::path::Path;
 
-pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
+/// What the argument surface decides before any data is read: where the outputs
+/// go, and which of the two gene-set pipelines runs. [`plan`] settles both, so
+/// the caller can aggregate the right axes for [`run`].
+pub struct EnrichmentPlan {
+    pub out: Box<str>,
+    /// `--gaf`/`--gmt`: descriptive GO/GMT module-score signature rather than
+    /// curated marker annotation. Needs only the per-cluster gene sums.
+    pub ontology_mode: bool,
+}
+
+/// Validate the gene-set source flags, settle the output prefix, and erase a
+/// previous run's artifacts. `default_out` is what `{out}` becomes when
+/// `--out` is absent; deriving it from a manifest is the caller's job.
+pub fn plan(args: &AnnotateArgs, default_out: &str) -> anyhow::Result<EnrichmentPlan> {
     let out: Box<str> = match args.out.as_deref() {
         Some(o) => Box::from(o),
-        None => crate::run_manifest::derive_out_prefix(&args.from).into_boxed_str(),
+        None => Box::from(default_out),
     };
     mkdir_parent(&out)?;
     // Exactly one gene-set source. --markers → curated cell-type annotation
@@ -62,103 +68,23 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     if !args.no_clean {
         clean_outputs(&out, ENRICHMENT_OUTPUT_SUFFIXES);
     }
+    Ok(EnrichmentPlan { out, ontology_mode })
+}
 
-    let leiden_args = LeidenArgs {
-        knn: args.knn,
-        resolution: args.resolution,
-        num_clusters: args.num_clusters,
-        min_cluster_size: args.min_cluster_size,
-        seed: args.cluster_seed,
-    };
-    let (loaded, mut manifest, manifest_dir) = load_from_manifest(
-        &args.from,
-        args.clusters.as_deref(),
-        &args.markers,
-        args.preload_data,
-        &leiden_args,
-    )?;
-
-    anyhow::ensure!(
-        loaded.n_clusters >= 2,
-        "annotate needs ≥ 2 clusters, found {}",
-        loaded.n_clusters
-    );
-
-    ////////////////////////////////
-    // NB-Fisher per-gene weights //
-    ////////////////////////////////
-    // Try the cached parquet from training first; fall back to recomputing.
-    let fisher_prefix = run_manifest::resolve(&manifest_dir, &manifest.prefix)
-        .to_string_lossy()
-        .into_owned();
-    let nb_fisher: Vec<f32> = match load_fisher_weights(&fisher_prefix)? {
-        Some((cached_genes, cached_w)) if cached_genes == loaded.gene_names => {
-            info!(
-                "Loaded {} NB-Fisher weights from {fisher_prefix}.fisher_weights.parquet",
-                cached_w.len()
-            );
-            cached_w
-        }
-        Some((cached_genes, _)) => {
-            info!(
-                "Cached fisher_weights gene names ({}) don't match data ({}); recomputing",
-                cached_genes.len(),
-                loaded.gene_names.len()
-            );
-            compute_nb_fisher_weights(loaded.data_vec(), Some(args.block_size))?
-        }
-        None => compute_nb_fisher_weights(loaded.data_vec(), Some(args.block_size))?,
-    };
-    let (w_min, w_max, w_sum) = nb_fisher.par_iter().map(|&w| (w, w, w)).reduce(
-        || (f32::INFINITY, 0.0f32, 0.0f32),
-        |(lo, hi, s), (a, b, c)| (lo.min(a), hi.max(b), s + c),
-    );
-    info!(
-        "NB-Fisher weights: min={:.4}, max={:.4}, mean={:.4}",
-        w_min,
-        w_max,
-        w_sum / nb_fisher.len() as f32
-    );
-
-    ///////////////////////////
-    // Per-cluster gene sums //
-    ///////////////////////////
-    // The marker path additionally needs a per-batch axis (its sample-
-    // permutation null), accumulated in the same fused sweep. The GO/GMT
-    // ontology path scores the per-cluster profile directly, so it needs only
-    // the cluster sums.
-    let g = loaded.gene_names.len();
-    let n_clusters = loaded.n_clusters;
-    let n_batches = loaded.n_batches;
-    let batch_labels_usize: Vec<usize> = loaded.batch_labels.iter().map(|&b| b as usize).collect();
-    let (gene_sum_kg, gene_sum_b_opt): (Vec<f64>, Option<Vec<f64>>) = if ontology_mode {
-        (
-            accumulate_gene_sum(
-                loaded.data_vec(),
-                &loaded.cluster_labels,
-                n_clusters,
-                g,
-                args.block_size,
-            )?,
-            None,
-        )
-    } else {
-        let (kg, b) = accumulate_gene_sum_pair(
-            loaded.data_vec(),
-            &loaded.cluster_labels,
-            n_clusters,
-            &batch_labels_usize,
-            n_batches,
-            g,
-            args.block_size,
-        )?;
-        (kg, Some(b))
-    };
-
-    // μ[g, c] = w_NBF[g] · (Σ counts[g, n ∈ c]) / size_sum[c]; Simplex
-    // specificity downstream supplies the cross-cluster housekeeping
-    // suppression.
-    let profile_gk = weighted_mean_profile(&gene_sum_kg, n_clusters, g, &nb_fisher);
+/// Score the aggregated cluster expression against the marker panel (or, in
+/// GO/GMT mode, against the gene sets) and write the artifacts under
+/// `plan.out`. Returns their paths; recording them in a run manifest is the
+/// caller's job.
+pub fn run(
+    args: &AnnotateArgs,
+    plan: &EnrichmentPlan,
+    inputs: &EnrichmentInputs,
+) -> anyhow::Result<AnnotationOutputs> {
+    let out = plan.out.as_ref();
+    let g = inputs.gene_names.len();
+    let n_clusters = inputs.n_clusters;
+    let n_batches = inputs.n_batches;
+    let profile_gk = &inputs.profile_gk;
     let cluster_names = axis_id_names("K", n_clusters);
     info!("Cluster expression: {g} genes × {n_clusters} clusters");
     let profile_max = profile_gk.iter().fold(0f32, |m, &v| m.max(v));
@@ -175,33 +101,23 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     ///////////////////////////////////
     // Descriptive module-score signature on the cluster profile (no cell-level
     // labels, no permutation, no tree). Diverges from the marker path entirely.
-    if ontology_mode {
-        return run_ontology_gene_sets(
-            args,
-            &out,
-            &profile_gk,
-            &loaded.gene_names,
-            &cluster_names,
-            &mut manifest,
-            &manifest_dir,
-        );
+    if plan.ontology_mode {
+        return run_ontology_gene_sets(args, out, profile_gk, &inputs.gene_names, &cluster_names);
     }
 
-    // marker path: the second axis was per-batch.
-    let gene_sum_pg = gene_sum_b_opt.expect("marker path accumulates the per-batch axis");
-
     // pb_membership[batch, cluster] = (# cells in batch with cluster id) / batch_size.
+    let batch_labels_usize: Vec<usize> = inputs.batch_labels.iter().map(|&b| b as usize).collect();
     let pb_membership_pk = build_pb_membership(
         &batch_labels_usize,
-        &loaded.cluster_labels,
+        &inputs.cluster_labels,
         n_batches,
         n_clusters,
     );
 
     // One-hot cell membership (N × nClusters).
-    let n_cells = loaded.cell_names.len();
+    let n_cells = inputs.cell_names.len();
     let mut cell_membership_nk = Mat::zeros(n_cells, n_clusters);
-    for (n, &c) in loaded.cluster_labels.iter().enumerate() {
+    for (n, &c) in inputs.cluster_labels.iter().enumerate() {
         if c < n_clusters {
             cell_membership_nk[(n, c)] = 1.0;
         }
@@ -212,21 +128,24 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     // Markers that light up broadly (GZMB across NK + CD8 effector) get
     // attenuated; cluster-exclusive markers (NCAM1 in NK only) keep full
     // weight. This complements the IDF that already runs on the marker TSV.
-    let mut markers_gc = loaded.markers_gc.clone();
+    let mut markers_gc = inputs.markers_gc.clone();
     if !args.no_empirical_specificity {
-        apply_empirical_specificity_weights(&mut markers_gc, &profile_gk);
+        apply_empirical_specificity_weights(&mut markers_gc, profile_gk);
     }
 
-    // Per-batch β̃ profile — only the marker (sample-permutation) path needs it,
-    // so it's built after the GO/GMT early-return above.
-    let pb_gene_gp = weighted_mean_profile(&gene_sum_pg, n_batches, g, &nb_fisher);
+    // The per-batch β̃ profile backs the sample-permutation null, so only the
+    // marker path — past the GO/GMT early return above — asks for it.
+    let pb_gene_gp = inputs
+        .pb_gene_gp
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("marker annotation needs the per-batch gene profile"))?;
     let group = GroupInputs {
         profile_gk: profile_gk.clone(),
         pb_gene_gp,
         pb_membership_pk,
         cell_membership_nk,
-        gene_names: loaded.gene_names.clone(),
-        cell_names: loaded.cell_names.clone(),
+        gene_names: inputs.gene_names.clone(),
+        cell_names: inputs.cell_names.clone(),
     };
 
     let config = AnnotateConfig {
@@ -266,7 +185,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         "Running cluster × marker enrichment: {} clusters × {} celltypes, \
          row-rand B={}, sample-perm B={}",
         n_clusters,
-        loaded.celltype_names.len(),
+        inputs.celltype_names.len(),
         args.num_draws,
         args.num_perm,
     );
@@ -281,7 +200,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         cell_annotation_nc,
         argmax_labels,
         bootstrap,
-    } = annotate(&group, &markers_gc, &loaded.celltype_names, &config)?;
+    } = annotate(&group, &markers_gc, &inputs.celltype_names, &config)?;
 
     /////////////
     // Outputs //
@@ -289,7 +208,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let cell_expr_path = format!("{out}.cluster_expression.parquet");
     profile_gk.to_parquet_with_names(
         &cell_expr_path,
-        (Some(&loaded.gene_names), Some("gene")),
+        (Some(&inputs.gene_names), Some("gene")),
         Some(&cluster_names),
     )?;
     info!("wrote {cell_expr_path}");
@@ -297,8 +216,8 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let annotation_path = format!("{out}.annotation.parquet");
     cell_annotation_nc.to_parquet_with_names(
         &annotation_path,
-        (Some(&loaded.cell_names), Some("cell")),
-        Some(&loaded.celltype_names),
+        (Some(&inputs.cell_names), Some("cell")),
+        Some(&inputs.celltype_names),
     )?;
     info!("wrote {annotation_path}");
 
@@ -315,14 +234,14 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
             .map(|l| Box::from(l.label.as_ref()))
             .collect();
         let probs: Vec<f32> = argmax_labels.iter().map(|l| l.confidence).collect();
-        graph_embedding_util::type_annotation::write_label_tsvs(&out, &cells, &labels, &probs)?;
+        graph_embedding_util::type_annotation::write_label_tsvs(out, &cells, &labels, &probs)?;
     }
 
     let q_path = format!("{out}.cluster_celltype_q.parquet");
     q_kc.to_parquet_with_names(
         &q_path,
         (Some(&cluster_names), Some("cluster")),
-        Some(&loaded.celltype_names),
+        Some(&inputs.celltype_names),
     )?;
     info!("wrote {q_path}");
 
@@ -330,7 +249,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     es_kc.to_parquet_with_names(
         &es_path,
         (Some(&cluster_names), Some("cluster")),
-        Some(&loaded.celltype_names),
+        Some(&inputs.celltype_names),
     )?;
     info!("wrote {es_path}");
 
@@ -338,7 +257,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     es_restandardized_kc.to_parquet_with_names(
         &es_std_path,
         (Some(&cluster_names), Some("cluster")),
-        Some(&loaded.celltype_names),
+        Some(&inputs.celltype_names),
     )?;
 
     // Correlation-preserving sample-permutation z (when num_perm > 0): the
@@ -348,7 +267,7 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         pz.to_parquet_with_names(
             &perm_z_path,
             (Some(&cluster_names), Some("cluster")),
-            Some(&loaded.celltype_names),
+            Some(&inputs.celltype_names),
         )?;
     }
 
@@ -356,14 +275,14 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     pvalue_kc.to_parquet_with_names(
         &p_path,
         (Some(&cluster_names), Some("cluster")),
-        Some(&loaded.celltype_names),
+        Some(&inputs.celltype_names),
     )?;
 
     let q_val_path = format!("{out}.cluster_celltype_q_values.parquet");
     qvalue_kc.to_parquet_with_names(
         &q_val_path,
         (Some(&cluster_names), Some("cluster")),
-        Some(&loaded.celltype_names),
+        Some(&inputs.celltype_names),
     )?;
 
     // The bootstrap's own artifacts. The K x C matrices above are NOT withheld under the
@@ -372,10 +291,10 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     // now carries `cluster_label_support` instead of a softmaxed test statistic, and
     // `cell_annotation_nc` is the consensus distribution. Both were swapped inside `annotate`.
     if let Some(boot) = &bootstrap {
-        write_bootstrap_outputs(&out, boot, &cluster_names, &loaded.celltype_names)?;
+        write_bootstrap_outputs(out, boot, &cluster_names, &inputs.celltype_names)?;
     }
 
-    display_annotation_histogram(&cell_annotation_nc, &loaded.celltype_names);
+    display_annotation_histogram(&cell_annotation_nc, &inputs.celltype_names);
 
     // Optional inline ontology annotation (TreeBH) — reuses the freshly computed
     // restandardized-ES z-matrix in memory, no parquet round-trip. NON-FATAL: a
@@ -384,18 +303,18 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
     let mut ontology_assign: Option<String> = None;
     let mut ontology_mass: Option<String> = None;
     if let (Some(obo), Some(label_cl)) = (args.obo.as_deref(), args.label_cl.as_deref()) {
-        match super::ontology::annotate_ontology_with_obo(
-            &out,
+        match crate::ontology::annotate_ontology_with_obo(
+            out,
             label_cl,
             obo,
             args.ontology_fdr_q,
             args.ontology_by,
             // Prefer the correlation-preserving permutation z; fall back to the
             // row-randomization restandardized ES when no sample permutations ran.
-            super::ontology::OntologyScore::Z(perm_z_kc.as_ref().unwrap_or(&es_restandardized_kc)),
+            crate::ontology::OntologyScore::Z(perm_z_kc.as_ref().unwrap_or(&es_restandardized_kc)),
             Some(&q_kc),
             &cluster_names,
-            &loaded.celltype_names,
+            &inputs.celltype_names,
         ) {
             Ok((a, m)) => {
                 ontology_assign = Some(a);
@@ -407,24 +326,17 @@ pub fn run(args: &AnnotateArgs) -> anyhow::Result<()> {
         }
     }
 
-    finalize_annotation(
-        &mut manifest,
-        Path::new(args.from.as_ref()),
-        &manifest_dir,
-        &AnnotationArtifacts {
-            argmax_abs: &argmax_path,
-            markers: &args.markers,
-            annotation_abs: Some(&annotation_path),
-            cluster_celltype_q_abs: Some(&q_path),
-            cluster_celltype_es_abs: Some(&es_path),
-            cluster_expression_abs: Some(&cell_expr_path),
-            ontology_assignment_abs: ontology_assign.as_deref(),
-            ontology_node_mass_abs: ontology_mass.as_deref(),
-        },
-    )?;
-
-    info!("senna annotate-by-enrichment complete");
-    Ok(())
+    info!("annotate-by-enrichment complete");
+    Ok(AnnotationOutputs {
+        argmax: Some(argmax_path),
+        annotation: Some(annotation_path),
+        cluster_celltype_q: Some(q_path),
+        cluster_celltype_es: Some(es_path),
+        cluster_expression: Some(cell_expr_path),
+        ontology_assignment: ontology_assign,
+        ontology_node_mass: ontology_mass,
+        ..AnnotationOutputs::default()
+    })
 }
 
 /// GO/GMT ontology gene-set mode: read gene-sets → reconcile to the run's gene
@@ -437,16 +349,14 @@ fn run_ontology_gene_sets(
     profile_gk: &Mat,
     gene_names: &[Box<str>],
     cluster_names: &[Box<str>],
-    manifest: &mut crate::run_manifest::RunManifest,
-    manifest_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AnnotationOutputs> {
     use enrichment::ontology_module_score;
 
     let obo = args
         .obo
         .as_deref()
         .expect("ontology mode validated to require --obo");
-    let gs = super::go_signature::load_go_gene_sets(
+    let gs = crate::go_signature::load_go_gene_sets(
         obo,
         args.gaf.as_deref(),
         args.gmt.as_deref(),
@@ -476,7 +386,7 @@ fn run_ontology_gene_sets(
     info!("wrote {cell_expr_path}");
 
     let sig_path = format!("{out}.ontology_signature.tsv");
-    super::go_signature::write_go_signature(
+    crate::go_signature::write_go_signature(
         &sig_path,
         &gs.onto,
         &ms.effect_kt,
@@ -493,16 +403,13 @@ fn run_ontology_gene_sets(
     )?;
     info!("wrote {effect_path}");
 
-    manifest.annotate.cluster_expression =
-        Some(run_manifest::rel_to_manifest(manifest_dir, &cell_expr_path));
-    manifest.annotate.ontology_signature =
-        Some(run_manifest::rel_to_manifest(manifest_dir, &sig_path));
-    manifest.annotate.ontology_term_effect =
-        Some(run_manifest::rel_to_manifest(manifest_dir, &effect_path));
-    manifest.save(Path::new(args.from.as_ref()))?;
-
-    info!("senna annotate-by-enrichment (ontology gene-set mode) complete");
-    Ok(())
+    info!("annotate-by-enrichment (ontology gene-set mode) complete");
+    Ok(AnnotationOutputs {
+        cluster_expression: Some(cell_expr_path),
+        ontology_signature: Some(sig_path),
+        ontology_term_effect: Some(effect_path),
+        ..AnnotationOutputs::default()
+    })
 }
 
 /// Multiply each gene's marker entries by an empirical specificity score

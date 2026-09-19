@@ -4,6 +4,7 @@ pub mod branching;
 pub mod clap_defaults;
 pub mod clustering;
 pub mod common_io;
+pub mod dense_mat_io;
 pub mod dmatrix_io;
 pub mod dmatrix_rsvd;
 pub mod dmatrix_util;
