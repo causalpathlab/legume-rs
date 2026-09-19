@@ -11,6 +11,7 @@ fn rel(name: &str, l: u16, r: u16, w: f32, undirected: bool) -> Relation {
         rhs_type: r,
         weight: w,
         undirected,
+        polarity: RelationPolarity::Friend,
     }
 }
 

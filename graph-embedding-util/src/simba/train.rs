@@ -40,6 +40,7 @@ pub fn train(edges: EdgeList, cfg: &SimbaConfig) -> anyhow::Result<TrainOutput> 
                 rhs_type: 1,
                 weight,
                 undirected: false,
+                polarity: fne::RelationPolarity::Friend,
             })
             .collect(),
         &types,
