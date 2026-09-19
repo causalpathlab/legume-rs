@@ -13,7 +13,7 @@ name = "cnv"
 path = "src/lib.rs"
 
 [[bin]]
-name = "canna"
+name = "mung"
 path = "src/main.rs"
 
 [features]
