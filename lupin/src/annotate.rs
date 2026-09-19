@@ -41,10 +41,16 @@ pub struct AnnotateCliArgs {
     )]
     pub from: Option<Box<str>>,
 
-    #[arg(long, help = "Feature × D embedding parquet (pinto / explicit projection path)")]
+    #[arg(
+        long,
+        help = "Feature × D embedding parquet (pinto / explicit projection path)"
+    )]
     pub feature_embedding: Option<Box<str>>,
 
-    #[arg(long, help = "Cell × D embedding parquet (pinto / explicit projection path)")]
+    #[arg(
+        long,
+        help = "Cell × D embedding parquet (pinto / explicit projection path)"
+    )]
     pub cell_embedding: Option<Box<str>>,
 
     #[arg(
@@ -161,9 +167,8 @@ fn resolve_method(args: &AnnotateCliArgs) -> Result<AnnotateMethod> {
         AnnotateMethod::Auto => {
             // Senna manifests first: their feature_embedding.parquet is ρ, not the
             // marker co-embed — never treat those filenames as a pinto ORA input.
-            if senna_manifest_prefers_projection(args)? {
-                Ok(AnnotateMethod::Projection)
-            } else if resolve_embedding_paths(args)?.is_some() {
+            if senna_manifest_prefers_projection(args)? || resolve_embedding_paths(args)?.is_some()
+            {
                 Ok(AnnotateMethod::Projection)
             } else {
                 Ok(AnnotateMethod::Enrichment)
@@ -182,7 +187,7 @@ fn resolve_embedding_paths(args: &AnnotateCliArgs) -> Result<Option<(String, Str
         let prefix = args
             .out
             .as_deref()
-            .or(args.from.as_deref().map(|f| f.as_ref()))
+            .or(args.from.as_deref())
             .map(run_manifest::derive_out_prefix)
             .unwrap_or_else(|| "annot".into());
         return Ok(Some((feat.to_string(), cell.to_string(), prefix)));
@@ -264,11 +269,7 @@ fn run_embedding_ora(
     let cell = DMatrix::<f32>::from_parquet(cell_path)
         .with_context(|| format!("reading cell embedding {cell_path}"))?;
 
-    let out = args
-        .out
-        .as_deref()
-        .unwrap_or(prefix)
-        .to_string();
+    let out = args.out.as_deref().unwrap_or(prefix).to_string();
     mkdir_parent(&out)?;
 
     let cfg = TermOraConfig {
