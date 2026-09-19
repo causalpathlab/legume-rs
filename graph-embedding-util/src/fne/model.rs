@@ -156,13 +156,21 @@ impl FneModel {
         let floats = Tensor::from_slice(&floats, floats.len(), dev)?;
         let l = self.rows(&ids.narrow(0, 0, p)?)?.reshape((k, c, d))?;
         let r = self.rows(&ids.narrow(0, p, p)?)?.reshape((k, c, d))?;
-        let pos = (&l * &r)?.sum(2)?; // [k, c]
-                                      // `(1 − valid) · MASK_NEG` on pad columns, plus the cached diagonal.
+        // Polarity flips raw Dots before the pad/diag mask: MASK_NEG must
+        // stay large-negative under enemy (−Dot) scoring.
+        let flip = |t: Tensor| -> Result<Tensor> {
+            if b.polarity.flips_dot() {
+                t.neg()
+            } else {
+                Ok(t)
+            }
+        };
+        let pos = flip((&l * &r)?.sum(2)?)?; // [k, c]
         let pad = additive_pad_mask(&floats.narrow(0, 0, p)?.reshape((k, 1, c))?)?;
         let row_w = floats.narrow(0, p, p)?;
         let mask = (self.diag_neg.broadcast_as((k, c, c))? + pad.broadcast_as((k, c, c))?)?;
-        let rhs_bat = (l.matmul(&r.t()?)? + &mask)?;
-        let lhs_bat = (r.matmul(&l.t()?)? + &mask)?;
+        let rhs_bat = (flip(l.matmul(&r.t()?)?)? + &mask)?;
+        let lhs_bat = (flip(r.matmul(&l.t()?)?)? + &mask)?;
         let (rhs_uni, lhs_uni) = if u > 0 {
             let ul = self
                 .rows(&ids.narrow(0, 2 * p, k * u)?)?
@@ -170,7 +178,10 @@ impl FneModel {
             let ur = self
                 .rows(&ids.narrow(0, 2 * p + k * u, k * u)?)?
                 .reshape((k, u, d))?;
-            (Some(l.matmul(&ur.t()?)?), Some(r.matmul(&ul.t()?)?))
+            (
+                Some(flip(l.matmul(&ur.t()?)?)?),
+                Some(flip(r.matmul(&ul.t()?)?)?),
+            )
         } else {
             (None, None)
         };
@@ -186,6 +197,7 @@ impl FneModel {
 
     /// PBG's batch loss: weighted sum over positives of the lhs- and
     /// rhs-corrupted softmax losses. Weight decay is added by the caller.
+    /// Enemy relations enter as −Dot (see [`Self::score_blocks`]).
     pub(crate) fn batch_loss(&self, b: &PaddedBatch, dev: &Device) -> Result<Tensor> {
         let s = self.score_blocks(b, dev)?;
         let p = b.k * b.c;

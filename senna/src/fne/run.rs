@@ -16,6 +16,7 @@ use matrix_util::common_io::mkdir_parent;
 pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;
     let any_input = !args.networks.is_empty()
+        || !args.named_pairs.is_empty()
         || !args.edges.is_empty()
         || !args.membership.is_empty()
         || args.gaf.is_some()
@@ -23,7 +24,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
         || !args.region_gene.is_empty();
     anyhow::ensure!(
         any_input,
-        "fne: no input files; pass gene-gene pair files, --edges, --membership, --gaf, --gmt or --region-gene"
+        "fne: no input files; pass gene-gene pair files, --named-pairs, --edges, --membership, --gaf, --gmt or --region-gene"
     );
     anyhow::ensure!(
         args.gaf.is_none() || args.obo.is_some(),
@@ -46,6 +47,9 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     );
     for path in &args.networks {
         builder.add_pair_file(path, &ppi)?;
+    }
+    for path in &args.named_pairs {
+        builder.add_named_pair_file(path)?;
     }
     for path in &args.edges {
         builder.add_typed_file(path)?;
@@ -94,6 +98,9 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     }
     for spec in &args.relation_repeat {
         builder.set_relation_repeat(spec)?;
+    }
+    for spec in &args.relation_polarity {
+        builder.set_relation_polarity(spec)?;
     }
     let mut graph = builder.finish()?;
     if let Some(path) = &args.export_text {
@@ -158,6 +165,7 @@ pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {
     let input: Vec<String> = args
         .networks
         .iter()
+        .chain(args.named_pairs.iter())
         .chain(args.edges.iter())
         .chain(args.membership.iter())
         .chain(args.gaf.iter())
