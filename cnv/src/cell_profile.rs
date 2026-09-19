@@ -30,9 +30,9 @@ use data_beans::sparse_data_visitors::styled_progress_bar;
 use data_beans::sparse_io::{create_sparse_streaming_empty, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans::zarr_io::{finalize_output, prepare_output};
-use genomic_data::coordinates::PeakCoord;
-use matrix_util::common_io::write_lines;
+use genomic_data::coordinates::{parse_peak_coordinates, PeakCoord};
 use matrix_util::dmatrix_util::build_columns_par;
+use matrix_util::parquet::{write_named_table, Column};
 use nalgebra::DMatrix;
 use nalgebra_sparse::CscMatrix;
 use rayon::prelude::*;
@@ -318,8 +318,9 @@ impl GenomeFeatures {
         })
     }
 
-    /// Lines for `{out}.features.tsv.gz`.
-    pub fn feature_table(&self) -> Vec<Box<str>> {
+    /// Write `{out}.features.parquet`: one row per genomic interval with its
+    /// coordinates and the comma-joined gene keys it covers.
+    pub fn write_feature_table(&self, path: &str) -> anyhow::Result<()> {
         let mut genes_by_row: Vec<Vec<&str>> = vec![Vec::new(); self.n_rows()];
         let mut keys: Vec<Box<str>> = Vec::with_capacity(self.n_ordered());
         for &k in &self.order.ordered_indices {
@@ -328,29 +329,38 @@ impl GenomeFeatures {
         for (o, &r) in self.row_of_ordered.iter().enumerate() {
             genes_by_row[r].push(&keys[o]);
         }
-        let mut lines: Vec<Box<str>> = vec!["feature\tchr\tstart\tend\tn_genes\tgenes".into()];
-        for (r, name) in self.row_names.iter().enumerate() {
-            let coord =
-                genomic_data::coordinates::parse_peak_coordinates(std::slice::from_ref(name))
-                    .pop()
-                    .flatten();
-            let (chr, s, e) = coord
-                .map(|c| (c.chr.to_string(), c.start, c.end))
-                .unwrap_or_else(|| (String::new(), 0, 0));
-            lines.push(
-                format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}",
-                    name,
-                    chr,
-                    s,
-                    e,
-                    self.genes_per_row[r],
-                    genes_by_row[r].join(",")
-                )
-                .into(),
-            );
+        let coords = parse_peak_coordinates(&self.row_names);
+        let mut chr: Vec<Box<str>> = Vec::with_capacity(self.n_rows());
+        let mut start: Vec<i64> = Vec::with_capacity(self.n_rows());
+        let mut end: Vec<i64> = Vec::with_capacity(self.n_rows());
+        for c in &coords {
+            match c {
+                Some(c) => {
+                    chr.push(c.chr.clone());
+                    start.push(c.start);
+                    end.push(c.end);
+                }
+                None => {
+                    chr.push("".into());
+                    start.push(0);
+                    end.push(0);
+                }
+            }
         }
-        lines
+        let n_genes: Vec<i32> = self.genes_per_row.iter().map(|&g| g as i32).collect();
+        let genes: Vec<Box<str>> = genes_by_row.iter().map(|g| g.join(",").into()).collect();
+        write_named_table(
+            path,
+            "feature",
+            &self.row_names,
+            &[
+                ("chr".into(), Column::Str(&chr)),
+                ("start".into(), Column::I64(&start)),
+                ("end".into(), Column::I64(&end)),
+                ("n_genes".into(), Column::I32(&n_genes)),
+                ("genes".into(), Column::Str(&genes)),
+            ],
+        )
     }
 }
 
@@ -448,7 +458,7 @@ pub struct CellProfileOutputs {
 
 /// Stream per-cell CNV profiles for `query_cols` into `{out}.zarr.zip`
 /// (rows = genomic intervals, columns = query cells), with
-/// `{out}.features.tsv.gz` and `{out}.cells.tsv.gz` alongside.
+/// `{out}.features.parquet` and `{out}.cells.parquet` alongside.
 pub fn run_cell_profiles(
     data: &SparseIoVec,
     ref_cols: &[usize],
@@ -475,7 +485,9 @@ pub fn run_cell_profiles(
 
     let (effective_out, backend, working_file) =
         prepare_output(out_prefix, SparseIoBackend::Zarr, true)?;
-    let mut cells_tsv: Vec<Box<str>> = vec!["cell\tdepth\tcnv_burden".into()];
+    let mut cell_ids: Vec<Box<str>> = Vec::with_capacity(n_cells);
+    let mut cell_depth: Vec<f32> = Vec::with_capacity(n_cells);
+    let mut cell_burden: Vec<f32> = Vec::with_capacity(n_cells);
 
     {
         let mut out = create_sparse_streaming_empty(Some(&working_file), Some(&backend))?;
@@ -509,9 +521,9 @@ pub fn run_cell_profiles(
                 .par_chunks(n_rows.max(1))
                 .map(|col| col.iter().map(|v| v.abs()).sum::<f32>() * inv_n_rows)
                 .collect();
-            cells_tsv.extend(cols.iter().enumerate().map(|(j, &c)| {
-                format!("{}\t{}\t{:.6}", cell_names[c], depths[j], burden[j]).into_boxed_str()
-            }));
+            cell_ids.extend(cols.iter().map(|&c| cell_names[c].clone()));
+            cell_depth.extend_from_slice(&depths[..n_block]);
+            cell_burden.extend_from_slice(&burden[..n_block]);
 
             // nalgebra is column-major: the slice is already CSC value order.
             out.append_csc_slab(
@@ -527,7 +539,7 @@ pub fn run_cell_profiles(
         bar.finish_and_clear();
 
         out.finalize_streaming_csc()?;
-        // CSC-only: canna never reads `/by_row` (rebuild CSR if a row-wise API needs it).
+        // CSC-only: mung never reads `/by_row` (rebuild CSR if a row-wise API needs it).
         out.register_row_names_vec(&feats.row_names);
         let query_names: Vec<Box<str>> =
             query_cols.iter().map(|&c| cell_names[c].clone()).collect();
@@ -535,10 +547,18 @@ pub fn run_cell_profiles(
     }
     let backend_path = finalize_output(&working_file, &effective_out)?.to_string();
 
-    let features_path = format!("{}.features.tsv.gz", out_prefix);
-    write_lines(&feats.feature_table(), &features_path)?;
-    let cells_path = format!("{}.cells.tsv.gz", out_prefix);
-    write_lines(&cells_tsv, &cells_path)?;
+    let features_path = format!("{}.features.parquet", out_prefix);
+    feats.write_feature_table(&features_path)?;
+    let cells_path = format!("{}.cells.parquet", out_prefix);
+    write_named_table(
+        &cells_path,
+        "cell",
+        &cell_ids,
+        &[
+            ("depth".into(), Column::F32(&cell_depth)),
+            ("cnv_burden".into(), Column::F32(&cell_burden)),
+        ],
+    )?;
 
     log::info!(
         "wrote {} ({} intervals × {} cells), {}, {}",
@@ -603,8 +623,22 @@ mod tests {
             vec!["chr1:0-1000", "chr1:1000-2000", "chr2:0-1000"]
         );
         assert_eq!(f.genes_per_row, vec![1, 2, 1]);
-        let table = f.feature_table();
-        assert!(table[2].ends_with("\t2\tc_c,b_b"), "{}", table[2]);
+        let path = std::env::temp_dir().join("cnv_features_bin_by_tss_tile.parquet");
+        let path = path.to_str().unwrap();
+        f.write_feature_table(path).unwrap();
+        let (strs, nums) = matrix_util::parquet::read_table_columns(
+            path,
+            &["feature", "chr", "genes"],
+            &["start", "end", "n_genes"],
+        )
+        .unwrap();
+        assert_eq!(strs[0][1].as_ref(), "chr1:1000-2000");
+        assert_eq!(strs[1][1].as_ref(), "chr1");
+        assert_eq!(strs[2][1].as_ref(), "c_c,b_b");
+        assert_eq!(nums[0][1], 1000.0);
+        assert_eq!(nums[1][1], 2000.0);
+        assert_eq!(nums[2], vec![1.0, 2.0, 1.0]);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

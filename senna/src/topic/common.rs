@@ -759,7 +759,7 @@ pub struct LoadCollapseArgs<'a> {
     /// equal `partition.len()` or `load_and_collapse` bails. When
     /// `Some`, the loader auto-sets `want_hierarchy = true`.
     pub prebuilt_partition: Option<crate::run_manifest::InheritedPartition>,
-    /// Optional `{out}.clones.tsv.gz` from `canna clones`. When set,
+    /// Optional `{out}.clones.parquet` from `mung clones`. When set,
     /// collapse routes through
     /// [`collapse_columns_multilevel_with_strata`] (sets
     /// `MultilevelParams.strata`: same-stratum BBKNN + unmatched-δ guard).
@@ -767,7 +767,7 @@ pub struct LoadCollapseArgs<'a> {
     pub cnv_clones: Option<&'a str>,
 }
 
-/// Read `{out}.clones.tsv.gz` and align to `data_vec` column names.
+/// Read `{out}.clones.parquet` and align to `data_vec` column names.
 ///
 /// Shared by [`load_and_collapse`] and `senna svd` so the clone-table load
 /// is not reimplemented per command.

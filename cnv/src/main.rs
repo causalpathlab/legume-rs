@@ -1,11 +1,13 @@
-//! `canna` — copy-number profiles from single-cell expression backends
+//! `mung` (Malignancy Unmixing on Normalized Genomes) — copy-number
+//! profiles from single-cell expression backends
 //! (crate/lib: `cnv`).
 
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::{Args, Parser, Subcommand};
 use cnv::cell_profile::{run_cell_profiles, CellProfileConfig};
-use cnv::clone_call::{call_clones, write_clone_table, CloneCallConfig};
+use cnv::clone_bayes::{cells_table_beside, DEFAULT_MIN_PURITY};
+use cnv::clone_call::{call_clones_with_burden, write_clone_table, CloneCallConfig, CloneEngine};
 use cnv::gene_loci::GeneLocusIndex;
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
@@ -14,15 +16,15 @@ use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "canna",
+    name = "mung",
     version,
-    about = "canna — copy-number variation from single-cell expression",
+    about = "mung — Malignancy Unmixing on Normalized Genomes",
     long_about = "Reads `data-beans` backends (.zarr.zip / .zarr / .h5) and writes\n\
                   copy-number profiles and clone strata for `--cnv-clones` consumers.\n\
                   \n\
                   Subcommands:\n  \
                   \x20 infercnv — per-cell inferCNV log-ratio profiles on a genomic-interval axis\n  \
-                  \x20 clones   — donor-private CNV strata (`{out}.clones.tsv.gz`) for\n               \
+                  \x20 clones   — donor-private CNV strata (`{out}.clones.parquet`) for\n               \
                   senna / pinto `--cnv-clones`"
 )]
 struct Cli {
@@ -53,40 +55,47 @@ enum Commands {
                       Output is a new data-beans backend `{out}.zarr.zip` whose rows are\n\
                       genomic intervals (`chr:start-end`; one gene each, or `--bin-size`\n\
                       tiles — prefer `1000000` / 1 Mb on large cohorts) and whose columns\n\
-                      are the query cells. `{out}.features.tsv.gz`\n\
-                      maps each row back to its genes; `{out}.cells.tsv.gz` has per-cell\n\
+                      are the query cells. `{out}.features.parquet`\n\
+                      maps each row back to its genes; `{out}.cells.parquet` has per-cell\n\
                       depth and mean |log-ratio| (CNV burden).\n\
                       \n\
                       With no `--ref`, the query cohort mean is the baseline: any CNV shared\n\
                       by every cell becomes invisible.\n\
                       \n\
                       Example:\n  \
-                      canna infercnv --gff gencode.v46.gtf.gz \\\n    \
+                      mung infercnv --gff gencode.v46.gtf.gz \\\n    \
                       --ref Control1.zarr.zip Control2.zarr.zip \\\n    \
                       --out aml001.cnv AML001.zarr.zip"
     )]
     Infercnv(InferCnvArgs),
     #[command(
         about = "Donor-private CNV clone strata from inferCNV profiles",
-        long_about = "Cluster cells on a genomic sketch of the inferCNV log-ratio\n\
-                      (`--bin-size 0` = per-chromosome means, the inferCNV default;\n\
-                      `>0` = fixed bp tiles), then keep a cluster as a putative clone\n\
-                      only if it is both donor-enclosing and genomically structured\n\
-                      (elevated segmental CN vs a size-matched null). Shared or flat\n\
-                      clusters dump into stratum 0 (the mixable bucket).\n\
+        long_about = "Gate cells on a genomic sketch + CNV burden into stratum 0\n\
+                      (mixable) vs donor-private clones for `--cnv-clones`.\n\
                       \n\
-                      Gate tuning: a false clone is under-integration (cheap); a missed\n\
-                      clone lets batch δ eat a private program (the motivating failure).\n\
-                      Prefer a permissive `--k-max` / `--min-cells` and let the mixture\n\
-                      (BIC over K=1..=n_eligible clusters) dump weak clusters to 0.\n\
+                      Default `--engine bayes`: a cell is a clone member only if\n\
+                      posterior malignancy is high and it sits in a peaky donor-mix\n\
+                      component. False clones hard-partition collapse and under-\n\
+                      integrate batch δ — costly; the Bayes gate is the primary\n\
+                      bar and works without `--ref`. Legacy `--engine mixture`\n\
+                      keeps the cluster-score BIC path.\n\
+                      \n\
+                      Generative model (bayes): each cell is mixable (m=0) or\n\
+                      malignant (m=1); burden is low/high LogNormal given m;\n\
+                      sketch ~ N(μ0,σ²) if mixable, else N(μ_z,σ²) for clone z\n\
+                      with peaky donor mix φ_z. Report p_malig = E[m], then MAP z.\n\
+                      \n\
+                      Sketch: `--bin-size` defaults to `0` (chromosome means — fast\n\
+                      for Bayes). Override with Mb tiles (e.g. `1000000`) if you want;\n\
+                      that still applies to inferCNV when run first.\n\
                       \n\
                       Reads an existing CNV backend (`--from`), or runs `infercnv`\n\
-                      first on `--ref` / QUERY and then calls clones.\n\
+                      first on `--ref` / QUERY and then calls clones. Burden comes\n\
+                      from `{prefix}.cells.parquet` when present, else mean |CNV|.\n\
                       \n\
-                      Writes `{out}.clones.tsv.gz` (cell, donor, cluster, stratum, …).\n\
-                      Pass that file as `--cnv-clones` to senna (topic / masked-* /\n\
-                      vae / svd / bge / gem / joint-*) or pinto (cage / lc / dsvd)\n\
-                      so collapse cannot mix across clone boundaries."
+                      Writes `{out}.clones.parquet` (cell, donor, cluster, stratum,\n\
+                      …, burden, p_malig). Pass that file as `--cnv-clones` to\n\
+                      senna / pinto so collapse cannot mix across clone boundaries."
     )]
     Clones(CloneArgs),
 }
@@ -114,7 +123,7 @@ struct InferCnvArgs {
     #[arg(
         short,
         long,
-        help = "Output prefix; writes {out}.zarr.zip, {out}.features.tsv.gz, {out}.cells.tsv.gz"
+        help = "Output prefix; writes {out}.zarr.zip, {out}.features.parquet, {out}.cells.parquet"
     )]
     out: Box<str>,
 
@@ -205,7 +214,7 @@ struct CloneArgs {
     #[arg(
         short,
         long,
-        help = "Output prefix; writes {out}.clones.tsv.gz (and inferCNV artifacts when not `--from`)"
+        help = "Output prefix; writes {out}.clones.parquet (and inferCNV artifacts when not `--from`)"
     )]
     out: Box<str>,
 
@@ -221,11 +230,12 @@ struct CloneArgs {
         long,
         default_value_t = 0,
         help = "Genomic tile size in bp for inferCNV rows and the clone sketch (0 = inferCNV default)",
-        long_help = "Same `--bin-size` as `canna infercnv` (default 0 = classic inferCNV).\n\
+        long_help = "Same `--bin-size` as `mung infercnv` (default 0 = classic inferCNV).\n\
                      When running inferCNV first: average smoothed genes into fixed genomic\n\
                      tiles of this many bp (0 = one row per gene). Prefer `1000000` (1 Mb)\n\
-                     on large cohorts.\n\
-                     For the clone sketch (also with `--from`): `0` = one dim per chromosome;\n\
+                     on large cohorts for the CNV backend itself.\n\
+                     For the clone sketch (also with `--from`): default `0` = one dim per\n\
+                     chromosome (recommended for Bayes — Gibbs scales with C).\n\
                      `>0` = one dim per tile of the interval midpoint."
     )]
     bin_size: i64,
@@ -245,42 +255,60 @@ struct CloneArgs {
 
     #[arg(
         long,
+        value_enum,
+        default_value_t = CloneEngine::Bayes,
+        help = "Clone gate: bayes (default) or legacy mixture",
+        long_help = "bayes (default): m ~ Bern; b|m LogNormal; sketch|m,z Gaussian;\n\
+                     clone z has peaky donor mix φ. mixture: legacy cluster-score\n\
+                     BIC gate. False clones under-integrate batch δ — prefer bayes."
+    )]
+    engine: CloneEngine,
+
+    #[arg(
+        long,
         default_value_t = 8,
-        help = "k-means K on the genomic sketch (overclustering is fine; lean permissive)",
-        long_help = "k-means K on the genomic sketch (`--bin-size` dims). Overclustering is\n\
-                     fine: weak clusters dump to stratum 0. A false clone is under-integration\n\
-                     (cheap); a missed clone lets δ absorb private CN — lean permissive."
+        help = "Finite K_max (Bayes components / mixture k-means K)",
+        long_help = "Finite K_max on the genomic sketch (`--bin-size` dims).\n\
+                     Bayes: empty components OK. Mixture: overclustering dumps\n\
+                     weak clusters to stratum 0. False clones under-integrate δ."
     )]
     k_max: usize,
     #[arg(
         long,
-        help = "Optional purity floor on top of the clone-score mixture (omit = mixture only)"
+        help = "Donor-mix purity floor (Bayes default 0.8; mixture omit = mixture only)"
     )]
     min_purity: Option<f32>,
     #[arg(
         long,
         default_value_t = 50,
-        help = "Minimum cells to keep a cluster as a clone (lean permissive)",
-        long_help = "Clusters smaller than this cannot be clones. Lean permissive:\n\
-                     a missed small clone is worse than a false one that fails to mix."
+        help = "Minimum cells to keep a clone component / cluster"
     )]
     min_cells: usize,
     #[arg(
         long = "segmental-z",
         visible_alias = "spatial-z",
-        help = "Optional segmental-CN z floor on top of the mixture (omit = mixture only)",
+        help = "Optional segmental-CN z floor (mixture engine only)",
         long_help = "Optional floor on the segmental (genomic) z-score of a cluster's\n\
-                     chromosome-sketch L1 vs a size-matched null. This is genomic\n\
-                     roughness, not tissue spatial coordinates (unlike pinto's spatial z).\n\
+                     chromosome-sketch L1 vs a size-matched null. Mixture only.\n\
                      `--spatial-z` is a deprecated alias."
     )]
     spatial_z: Option<f32>,
     #[arg(
         long,
         default_value_t = 32,
-        help = "Null permutations for the segmental-CN z-score"
+        help = "Null permutations for segmental-CN z (mixture only)"
     )]
     n_perm: usize,
+    #[arg(long, default_value_t = 100, help = "Bayes Gibbs sweeps after burn-in")]
+    n_sweeps: usize,
+    #[arg(long, default_value_t = 40, help = "Bayes Gibbs burn-in sweeps")]
+    n_burnin: usize,
+    #[arg(
+        long,
+        default_value_t = 0.5,
+        help = "Stratum 0 if posterior malignancy is below this (Bayes)"
+    )]
+    p_malig_threshold: f32,
     #[arg(long, default_value_t = 1)]
     seed: u64,
 }
@@ -399,25 +427,38 @@ fn run_clones(args: &CloneArgs) -> anyhow::Result<()> {
     let opened = try_open_or_convert(&backend_path)?;
     let mut data = SparseIoVec::new();
     data.push(Arc::from(opened), None)?;
+
+    let min_purity = args.min_purity.or(match args.engine {
+        CloneEngine::Bayes => Some(DEFAULT_MIN_PURITY),
+        CloneEngine::Mixture => None,
+    });
     let cfg = CloneCallConfig {
         bin_size: args.bin_size,
         k_max: args.k_max,
-        min_purity: args.min_purity,
+        engine: args.engine,
+        min_purity,
         min_cells: args.min_cells,
         spatial_z: args.spatial_z,
         n_perm: args.n_perm,
         seed: args.seed,
+        n_sweeps: args.n_sweeps,
+        n_burnin: args.n_burnin,
+        p_malig_threshold: args.p_malig_threshold,
         ..Default::default()
     };
-    let rows = call_clones(&data, &cfg)?;
+    // Only the backend's own sibling table: a `{out}.cells.parquet` left by
+    // an earlier run on a different dataset must not feed `--from`.
+    let beside = cells_table_beside(&backend_path);
+    let rows = call_clones_with_burden(&data, &cfg, None, &[beside.as_str()])?;
     let n_clone = rows.iter().filter(|r| r.stratum > 0).count();
     let n_strata = rows.iter().map(|r| r.stratum).max().unwrap_or(0);
-    let path = format!("{}.clones.tsv.gz", args.out);
+    let path = format!("{}.clones.parquet", args.out);
     write_clone_table(&rows, &path)?;
     info!(
-        "wrote {path} ({} cells, {n_clone} in {} donor-private clone(s))",
+        "wrote {path} ({} cells, {n_clone} in {} donor-private clone(s); engine={:?})",
         rows.len(),
-        n_strata
+        n_strata,
+        args.engine
     );
     Ok(())
 }

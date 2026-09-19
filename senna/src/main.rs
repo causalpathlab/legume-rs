@@ -200,7 +200,7 @@ fn print_logo() {
                   \n  \
                   senna deconvolve --from bge.senna.json --annotation A --bulk bulk.parquet\n\
                   \n\
-                  CNV-aware collapse: `canna clones` writes `{out}.clones.tsv.gz`;\n\
+                  CNV-aware collapse: `mung clones` writes `{out}.clones.parquet`;\n\
                   pass `--cnv-clones` on topic / masked-* / vae / svd / bge / gem /\n\
                   joint-* so donor-private CN stays out of batch δ.\n\
                   \n\
@@ -233,7 +233,7 @@ enum Commands {
                       \n\
                       Decoders are multinom, nb and nbmixture (the default).\n\
                       Combine them with a comma-separated --decoder.\n\
-                      Optional `--cnv-clones` (from `canna clones`) keeps donor-private\n\
+                      Optional `--cnv-clones` (from `mung clones`) keeps donor-private\n\
                       CNV out of batch δ during the collapse.\n\
                       \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.safetensors,\n\
@@ -346,7 +346,7 @@ enum Commands {
                       \x20 2. randomized SVD\n\
                       \x20 3. per-cell Nyström projection\n\
                       \n\
-                      Optional `--cnv-clones` (from `canna clones`) keeps donor-private\n\
+                      Optional `--cnv-clones` (from `mung clones`) keeps donor-private\n\
                       CNV out of batch δ during the collapse.\n\
                       \n\
                       Writes {out}.{latent,dictionary}.parquet, {out}.senna.json."
@@ -365,7 +365,7 @@ enum Commands {
                       (modality m = softmax(z @ (W_base + Σ δ_1..m));\n              \
                       requires shared features across modalities).\n\
                       \n\
-                      Optional `--cnv-clones` (from `canna clones`) stratifies the shared-column\n\
+                      Optional `--cnv-clones` (from `mung clones`) stratifies the shared-column\n\
                       collapse so donor-private CNV stays out of batch δ.\n\
                       \n\
                       Writes {out}.latent.parquet, {out}.senna.json."
@@ -379,7 +379,7 @@ enum Commands {
                       -m sets the modality-row count.\n\
                       Cells must be shared; features may differ.\n\
                       \n\
-                      Optional `--cnv-clones` (from `canna clones`) stratifies the shared-column\n\
+                      Optional `--cnv-clones` (from `mung clones`) stratifies the shared-column\n\
                       collapse so donor-private CNV stays out of batch δ.\n\
                       \n\
                       Writes {out}.latent.parquet, {out}.senna.json."
@@ -405,7 +405,7 @@ enum Commands {
                       Units are the pseudobulks at every collapse level plus a per-pseudobulk\n\
                       cell subsample (--phase1-cells-per-pb).\n\
                       \n\
-                      Optional `--cnv-clones` (from `canna clones`) keeps donor-private CNV\n\
+                      Optional `--cnv-clones` (from `mung clones`) keeps donor-private CNV\n\
                       out of batch δ during the multilevel collapse that builds those PBs.\n\
                       \n\
                       Training runs in two phases.\n\
@@ -539,7 +539,7 @@ enum Commands {
                       Rows match across files by exact name;\n\
                       cells match by barcode within a sample (--genes-sample-strip).\n\
                       \n\
-                      Optional `--cnv-clones` (from `canna clones`) keeps donor-private CNV\n\
+                      Optional `--cnv-clones` (from `mung clones`) keeps donor-private CNV\n\
                       out of batch δ during the shared bge collapse path.\n\
                       \n\
                       Writes the same output set `senna bge` does,\n\
