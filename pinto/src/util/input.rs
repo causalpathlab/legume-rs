@@ -214,7 +214,7 @@ pub struct SrtInputArgs {
     #[arg(
         long = "cnv-clones",
         help = "CNV clone table from `canna clones`; batch δ cannot mix across strata",
-        long_help = "Path to `{out}.clones.tsv.gz` written by `canna clones`.\n\
+        long_help = "Path to `{out}.clones.parquet` written by `canna clones`.\n\
                      Each cell's stratum is a hard parent cut on the multilevel\n\
                      collapse used for batch-effect estimation (cage / lc / dsvd):\n\
                      finest codes are crossed with the stratum, BBKNN matches only\n\

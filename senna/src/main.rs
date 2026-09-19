@@ -200,7 +200,7 @@ fn print_logo() {
                   \n  \
                   senna deconvolve --from bge.senna.json --annotation A --bulk bulk.parquet\n\
                   \n\
-                  CNV-aware collapse: `canna clones` writes `{out}.clones.tsv.gz`;\n\
+                  CNV-aware collapse: `canna clones` writes `{out}.clones.parquet`;\n\
                   pass `--cnv-clones` on topic / masked-* / vae / svd / bge / gem /\n\
                   joint-* so donor-private CN stays out of batch δ.\n\
                   \n\
