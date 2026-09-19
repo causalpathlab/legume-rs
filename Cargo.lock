@@ -80,6 +80,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "annotate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "log",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3712,6 +3721,15 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "lineage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "log",
 ]
 
 [[package]]
