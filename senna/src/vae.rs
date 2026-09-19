@@ -14,12 +14,12 @@
 //! ambient mixture, empirical dictionary, feature coarsening) does not apply to a
 //! continuous-factor model and is intentionally omitted.
 
-use senna::embed_common::*;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
 };
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
+use senna::embed_common::*;
 
 use candle_util::decoder::GaussianNbDecoder;
 use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};

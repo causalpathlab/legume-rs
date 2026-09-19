@@ -7,9 +7,9 @@ use super::fit_layout_common::{
     PbLayoutPrep, PhateCliArgs, ResolvedViz,
 };
 use super::viz_prep::apply_svd_preprocessing;
-use senna::embed_common::*;
 use crate::geometry::orient::rotate_root_to_bottom;
 use crate::geometry::phate::phate_layout_2d;
+use senna::embed_common::*;
 use senna::principal_graph::PrincipalGraphArgs;
 use senna::pseudotime::{compute_pseudotime, PseudotimeArtifacts, RootSpec};
 use senna::run_manifest::resolve;

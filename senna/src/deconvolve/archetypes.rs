@@ -17,15 +17,15 @@
 use super::args::ArchetypeConfig;
 use super::reference::Reference;
 use super::source::EmbeddingSource;
-use senna::cluster::leiden_clustering;
-use senna::cluster_aggregation::accumulate_gene_sum_multi;
-use senna::embed_common::Mat;
-use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
 use anyhow::{Context, Result};
 use log::{info, warn};
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::{IoOps, MatWithNames};
 use rustc_hash::{FxHashMap, FxHashSet};
+use senna::cluster::leiden_clustering;
+use senna::cluster_aggregation::accumulate_gene_sum_multi;
+use senna::embed_common::Mat;
+use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};
 
 /// Neighbours used by the Leiden kNN graph over the cell embedding.
 const LEIDEN_KNN: usize = 30;

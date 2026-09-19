@@ -24,10 +24,10 @@
 //! gem's surface too — so `GemArgs::knobs` still hardcodes them off, exactly
 //! as before this task.
 
+use graph_embedding_util as ge;
 use senna::embed_common::*;
 use senna::pb_reference::ReferenceInput;
 use senna::run_manifest::RunKind;
-use graph_embedding_util as ge;
 
 /// Every driver flag both commands drive the fit with, borrowed from
 /// whichever command's own `*Args` built this. Constructed by

@@ -83,7 +83,10 @@ pub(super) fn write_annot_parquet(
         (Box::from("is_outlier"), Column::I32(&is_outlier)),
         (Box::from("best_label"), Column::Str(&best_label)),
         (Box::from("best_q"), Column::F32(&best_q)),
-        (Box::from("best_significant"), Column::I32(&best_significant)),
+        (
+            Box::from("best_significant"),
+            Column::I32(&best_significant),
+        ),
     ];
     // **`coarse_p`/`coarse_q` are only honest without the bootstrap**, and are withheld with it.
     //

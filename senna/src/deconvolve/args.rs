@@ -1,7 +1,7 @@
 //! CLI arguments for `senna deconvolve`.
 
-use senna::embed_common::BulkTableArgs;
 use clap::Args;
+use senna::embed_common::BulkTableArgs;
 
 #[derive(Args, Debug)]
 pub struct DeconvolveArgs {

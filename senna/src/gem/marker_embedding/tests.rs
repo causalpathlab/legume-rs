@@ -1,7 +1,7 @@
 //! [`load_marker_feature_embedding`] against a manifest planted on disk.
 
 use super::*;
-use senna::run_manifest::{default_path, RunKind, RunManifest};
+use crate::run_manifest::{default_path, RunKind, RunManifest};
 use matrix_util::traits::IoOps;
 use std::path::Path;
 

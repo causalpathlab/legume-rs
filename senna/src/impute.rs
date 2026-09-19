@@ -25,15 +25,15 @@
 //! payoff (residual full-rank covariance β can't carry), not a
 //! deterministic β·θ readout.
 
-use senna::embed_common::*;
 use crate::predict::{predict_model, PredictArgs};
-use senna::run_manifest::{self, RunKind};
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::Args;
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans_alg::retrieval_impute::{retrieval_impute, RetrievalImputeConfig};
 use log::info;
 use matrix_util::traits::IoOps;
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunKind};
 
 #[derive(Args, Debug)]
 pub struct ImputeArgs {

@@ -1,8 +1,8 @@
-use senna::embed_common::*;
 use crate::topic::eval::{
     build_gene_remap, evaluate_latent_with_gene_remap, EvaluateLatentConfig, GeneRemap,
 };
 use crate::topic::model_metadata::{load_coarsening, load_dictionary, TopicModelMetadata};
+use senna::embed_common::*;
 
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;

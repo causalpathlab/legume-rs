@@ -2,11 +2,11 @@
 //! artifacts and a manifest that downstream commands can open.
 
 use super::{fit_simba, SimbaArgs};
-use senna::embed_common::Mat;
-use senna::run_manifest::{CellSpace, RunKind, RunManifest};
 use clap::Parser;
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use matrix_util::traits::IoOps;
+use senna::embed_common::Mat;
+use senna::run_manifest::{CellSpace, RunKind, RunManifest};
 use std::path::Path;
 
 /// Parse any `#[derive(Args)]` struct from a bare argv, as the CLI would.

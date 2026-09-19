@@ -25,12 +25,12 @@
 mod place;
 mod render;
 
-use senna::embed_common::*;
-use senna::run_manifest::{self, RunManifest};
 use place::{bin_group, place_genes, robust_max, sum_grids, BinGrid};
 use rayon::prelude::*;
 use render::render_one;
 use rustc_hash::FxHashMap;
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunManifest};
 use std::path::Path;
 
 /////////

@@ -13,10 +13,10 @@
 //! why both consumers do, and why `impute` re-projects its reference rather
 //! than reading the stored latent.
 
-use senna::embed_common::*;
 use crate::topic::eval::{
     build_gene_remap_with, ensure_gene_coverage, hide_features, QueryNameOpts,
 };
+use senna::embed_common::*;
 
 /// The training-time normalization scale, replayed from the manifest's
 /// recorded fit arguments through the typed [`senna::run_manifest::RunManifest::train_args_as`]

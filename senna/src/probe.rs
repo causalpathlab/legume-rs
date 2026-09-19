@@ -40,10 +40,10 @@
 //!   multi-scale analysis across samples* (scPoli). Nat. Methods 20:1683.
 
 use crate::counterfactual::{counterfactual, CellBank, CfArgs, Z_99};
-use senna::embed_common::*;
 use crate::predict::MaskedScored;
 use crate::topic::masked_artifact::MaskedModel;
 use log::info;
+use senna::embed_common::*;
 use std::f64::consts::SQRT_2;
 
 #[derive(Args, Debug)]
@@ -251,8 +251,8 @@ struct Verdict<'a> {
 }
 
 pub fn run_probe(args: &ProbeArgs) -> anyhow::Result<()> {
-    use senna::run_manifest::RunKind;
     use crate::topic::model_metadata::resolve_run_kind;
+    use senna::run_manifest::RunKind;
 
     mkdir_parent(&args.out)?;
     // `resolve_run_kind` says what the run *is*; the match below is probe's own
@@ -400,11 +400,11 @@ fn cal_and_query<S: Scored>(
 
 fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyhow::Result<()> {
     use crate::predict::{score_dense_backend, score_vae_backend, DenseScoreArgs, VaeScoreArgs};
-    use senna::run_manifest::RunKind;
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::TopicModelMetadata;
     use crate::topic::predict_common::LatentMode;
     use candle_util::topic_refinement::TopicRefinementConfig;
+    use senna::run_manifest::RunKind;
 
     let metadata = TopicModelMetadata::load(&args.model)?;
     anyhow::ensure!(

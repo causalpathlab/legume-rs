@@ -21,10 +21,10 @@
 //!   module reachable (see `candle_util::grow`). The families with no per-gene
 //!   embedding at all take only the gather.
 
-use senna::embed_common::Mat;
 use crate::topic::eval::{GeneRemap, QueryNameOpts};
 use auxiliary_data::feature_names::FeatureNameKindArg;
 use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use senna::embed_common::Mat;
 
 /// Name of the per-gene embedding ρ in a masked checkpoint.
 /// The encoder's `VarBuilder` prefix; its feature table and LoRA factors

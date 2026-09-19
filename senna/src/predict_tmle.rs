@@ -14,7 +14,6 @@
 //! (multinomial / NB working submodel) applied to the held-out distribution;
 //! iterating to a fixed point gives full TMLE for δ.
 
-use senna::embed_common::*;
 use crate::topic::common::expand_delta_for_block;
 use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
@@ -22,6 +21,7 @@ use crate::topic::model_metadata::latent_to_theta;
 use crate::topic::predict_common::{nb_fisher_weight, solve_delta_from_sums, DeltaSums};
 use candle_util::encoder::IndexedEmbeddingEncoder;
 use candle_util::vae::masked_topic::LatentHead;
+use senna::embed_common::*;
 
 use crate::logging::new_progress_bar;
 use candle_core::{Device, Tensor};

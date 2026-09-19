@@ -25,12 +25,12 @@
 //! comparable. `--eval-features` pins one gene set for every method, whatever
 //! each happens to carry, which is what makes an ablation series readable.
 
-use senna::embed_common::*;
 use crate::logging::new_progress_bar;
 use matrix_util::agreement::{
     agreement_from_rate, pearson_log1p, rate_to_counts, spearman, CellAgreement,
 };
 use rayon::prelude::*;
+use senna::embed_common::*;
 
 /// Streaming accumulator: fed one cell at a time, over the evaluation genes.
 ///

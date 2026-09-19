@@ -19,9 +19,7 @@
 //! carried raw signed ρ; it now does on both paths, which is why `deconvolve` documents
 //! itself as working with or without the flag.
 
-use senna::embed_common::Mat;
 use crate::logging::new_progress_bar;
-use senna::run_manifest::{self, ArtifactScale, RunManifest};
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
@@ -36,6 +34,8 @@ use log::info;
 use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
+use senna::embed_common::Mat;
+use senna::run_manifest::{self, ArtifactScale, RunManifest};
 use std::path::Path;
 
 /// An opened `senna bge` (or `senna simba`) model: the frozen feature side, and the

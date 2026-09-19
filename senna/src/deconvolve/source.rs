@@ -20,12 +20,12 @@
 //!
 //! Topic-family runs are rejected up front; see [`EmbeddingSource::load`].
 
-use senna::embed_common::Mat;
-use senna::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use anyhow::{Context, Result};
 use log::info;
 use matrix_util::dmatrix_io::DMatrix;
 use matrix_util::traits::{IoOps, MatWithNames};
+use senna::embed_common::Mat;
+use senna::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use std::path::Path;
 
 /// Everything the deconvolution needs from the upstream embedding run.

@@ -1,8 +1,8 @@
 use super::{contrast_rows, write_contrast_table};
-use senna::embed_common::Mat;
 use crate::gem::tracks::assign_tracks;
 use matrix_util::parquet::read_parquet_string_columns_by_name;
 use matrix_util::traits::IoOps;
+use senna::embed_common::Mat;
 
 fn names(rows: &[&str]) -> Vec<Box<str>> {
     rows.iter().map(|&s| s.into()).collect()

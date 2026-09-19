@@ -13,10 +13,10 @@ use super::fit_layout_common::{
     write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep,
     ResolvedViz,
 };
-use senna::embed_common::*;
 use matrix_util::pca::{init_2d_from_scores, pc_scores, random_init_2d};
 use matrix_util::umap::Umap;
 use rayon::prelude::*;
+use senna::embed_common::*;
 
 #[derive(Args, Debug)]
 pub struct LayoutUmapArgs {

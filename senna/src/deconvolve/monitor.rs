@@ -5,9 +5,9 @@
 //! rather than only at the end. The trace covers warmup as well as the retained
 //! draws — burn-in is the part worth looking at.
 
-use senna::embed_common::Mat;
 use anyhow::{Context, Result};
 use matrix_util::common_io::open_buf_writer;
+use senna::embed_common::Mat;
 use std::io::Write;
 
 /// How the trace and checkpoints are emitted.

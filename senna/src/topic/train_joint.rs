@@ -1,7 +1,7 @@
 use super::common::{compute_level_epochs, process_blocks};
-use senna::embed_common::*;
 use crate::joint_topic::JointTopicArgs;
 use crate::logging::new_progress_bar;
+use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;

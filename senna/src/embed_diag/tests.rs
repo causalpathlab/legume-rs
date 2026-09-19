@@ -2,8 +2,8 @@
 //! same parquet writer senna's runs use, so the read path is the real one.
 
 use super::*;
-use senna::run_manifest::{default_path, RunKind, RunManifest};
 use graph_embedding_util::embedding_col_names;
+use senna::run_manifest::{default_path, RunKind, RunManifest};
 use std::path::Path;
 
 /// Write `m` as `{prefix}.{suffix}` the way `save_embedding` does, and return

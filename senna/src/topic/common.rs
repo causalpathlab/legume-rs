@@ -1,7 +1,7 @@
-use senna::embed_common::*;
-pub use senna::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
 use crate::hvg::{load_must_train, select_hvg_streaming, HvgSelection};
 use crate::logging::new_progress_bar;
+use senna::embed_common::*;
+pub use senna::embed_common::{preferred_posterior_log_mean, preferred_posterior_mean};
 use senna::senna_input::{read_data_on_shared_rows, ReadSharedRowsArgs, SparseDataWithBatch};
 
 use candle_core::{Device, Tensor};

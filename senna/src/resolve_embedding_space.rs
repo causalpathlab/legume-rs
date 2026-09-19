@@ -39,7 +39,6 @@
 //! reads) beside the raw ρ in `{out}.feature_embedding.parquet`. Cells are
 //! the reference and are unchanged, and training is untouched.
 
-use senna::embed_common::*;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::Device;
 use graph_embedding_util as ge;
@@ -48,6 +47,7 @@ use graph_embedding_util::fit::resolve_embedding::{
 };
 use graph_embedding_util::stop::setup_stop_handler;
 use rustc_hash::FxHashMap;
+use senna::embed_common::*;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
