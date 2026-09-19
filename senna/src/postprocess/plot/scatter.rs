@@ -12,16 +12,16 @@
 //! into a `ResolvedInputs`, buckets cells by group, dispatches per-group
 //! rasterization via rayon, emits SVG, then renders PNG + PDF.
 
-use senna::embed_common::*;
 use crate::postprocess::plot::hull::{
     convex_hull, hull_centroid, median_xy, trim_outliers_by_median, Pt,
 };
 use crate::postprocess::plot::palette::{self, Palette};
 use crate::postprocess::plot::rasterize::{rasterize_group_png, DataBounds, Extent, PointShape};
 use crate::postprocess::plot::svg_emit::{emit_svg, SvgOpts, TopicLayer};
-use senna::run_manifest::{self, RunManifest};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use senna::embed_common::*;
+use senna::run_manifest::{self, RunManifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -13,7 +13,6 @@
 //!     `log(1/K)`; optimize purely against the frozen decoder. Useful when
 //!     the test feature set is too divergent for the encoder.
 
-use senna::embed_common::*;
 use crate::masked_topic::FeatureNameKindArg;
 use crate::topic::eval::{build_gene_remap_with, GeneRemap, QueryNameOpts};
 use crate::topic::model_metadata::{
@@ -25,6 +24,7 @@ use crate::topic::predict_common::{
 use crate::topic::predict_eval::{
     evaluate_predictions, mean_finite, resolve_eval_genes, EvalArgs, EvalOutcome, Reconstruction,
 };
+use senna::embed_common::*;
 
 use crate::logging::new_progress_bar;
 use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};

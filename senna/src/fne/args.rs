@@ -2,8 +2,8 @@
 //! (the settings SIMBA's `pbg_train` uses) at the workspace's embedding
 //! dimension, so a bare invocation is the published recipe.
 
-use senna::embed_common::*;
 use auxiliary_data::feature_names::FeatureNameKindArg;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]

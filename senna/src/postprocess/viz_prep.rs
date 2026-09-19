@@ -3,9 +3,9 @@
 //! - Raw-gene-space log1p-CPM construction for PB landmarks.
 //! - SVD preprocessing for dimensionality reduction.
 
-use senna::embed_common::*;
 use matrix_util::traits::RandomizedAlgs;
 use rayon::prelude::*;
+use senna::embed_common::*;
 
 /// Accumulate the mean feature vector for each PB group.
 ///

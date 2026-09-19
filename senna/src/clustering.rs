@@ -2,10 +2,10 @@
 //!
 //! Cluster cells based on latent representations (topic proportions, SVD embeddings)
 
+use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use senna::cluster::{
     hsblock_clustering, kmeans_clustering, leiden_clustering, ClusterMethod, ClusterResult,
 };
-use crate::cluster_bhc::{run_cluster_bhc, ClusterBhcConfig};
 use senna::embed_common::*;
 use senna::run_manifest::RunManifest;
 use senna::senna_input::{read_data_on_shared_columns, ReadSharedColumnsArgs};

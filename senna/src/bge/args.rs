@@ -6,9 +6,9 @@
 //! of it first. Nothing here computes; the translation to
 //! `graph_embedding_util::FitConfig` stays with the driver that performs it.
 
-use senna::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]

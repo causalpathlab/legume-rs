@@ -1,10 +1,10 @@
-use senna::embed_common::*;
 use crate::topic::common::{
     create_device, load_and_collapse, move_varmap_to_cpu, setup_stop_handler, LoadCollapseArgs,
     PreparedData,
 };
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use crate::topic::train::{train_mixed, TrainConfig};
+use senna::embed_common::*;
 
 use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
 use candle_util::decoder::*;

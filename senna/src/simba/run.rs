@@ -1,8 +1,6 @@
 //! The `senna simba` driver: load, cell QC, HVG subset, train, write.
 
 use super::SimbaArgs;
-use senna::embed_common::*;
-use senna::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 use candle_util::candle_core::{Device, Tensor};
 use data_beans_alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;
@@ -11,6 +9,8 @@ use graph_embedding_util::simba::{
 };
 use log::info;
 use matrix_util::common_io::mkdir_parent;
+use senna::embed_common::*;
+use senna::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 
 pub fn fit_simba(args: &SimbaArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;

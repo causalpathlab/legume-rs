@@ -11,9 +11,9 @@
 //! `BgeArgs`, `GemArgs` does not implement `Updatable`; `senna update` does
 //! not (yet) continue a gem run.
 
-use senna::embed_common::*;
 use data_beans_alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
+use senna::embed_common::*;
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]

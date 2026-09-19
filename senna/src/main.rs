@@ -72,13 +72,10 @@ mod tree_layout;
 mod update;
 mod vae;
 
-use senna::annotate::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
-use senna::assoc::run::AssocArgs;
 use bge::{fit_bge, BgeArgs};
 use clustering::*;
 use deconvolve::DeconvolveArgs;
 use docs::{run_docs, DocsArgs};
-use senna::embed_common::*;
 use embed_diag::*;
 use eval_topic::*;
 use fne::{fit_fne, FneArgs};
@@ -86,14 +83,17 @@ use gem::args::GemArgs;
 use gem::run::run_gem_embedding;
 use impute::{impute_model, ImputeArgs};
 use joint_topic::*;
-use senna::lineage::args::LineageArgs;
-use senna::lineage_plot::LineagePlotArgs;
 use masked_topic::*;
 use postprocess::*;
 use predict::{predict_model, PredictArgs};
 use probe::{run_probe, ProbeArgs};
-use senna::pseudotime::PseudotimeArgs;
 use resolve_embedding_space::{resolve_embedding_space, RestArgs};
+use senna::annotate::{AnnotateArgs, AnnotateOntologyArgs, AnnotateProjectionArgs};
+use senna::assoc::run::AssocArgs;
+use senna::embed_common::*;
+use senna::lineage::args::LineageArgs;
+use senna::lineage_plot::LineagePlotArgs;
+use senna::pseudotime::PseudotimeArgs;
 use simba::{fit_simba, SimbaArgs};
 use svd::*;
 use topic::cmd::*;
@@ -1165,10 +1165,10 @@ fn main() -> anyhow::Result<()> {
             fit_joint_topic_model(args)?;
         }
 
-        Commands::Annotate(_args) => migrated_to_lupin("annotate-by-enrichment", "annotate --method enrichment"),
-        Commands::AnnotateOntology(_args) => {
-            migrated_to_lupin("annotate-ontology", "annotate")
+        Commands::Annotate(_args) => {
+            migrated_to_lupin("annotate-by-enrichment", "annotate --method enrichment")
         }
+        Commands::AnnotateOntology(_args) => migrated_to_lupin("annotate-ontology", "annotate"),
         Commands::AnnotateByProjection(_args) => {
             migrated_to_lupin("annotate-by-projection", "annotate --method projection")
         }

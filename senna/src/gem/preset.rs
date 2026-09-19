@@ -13,13 +13,13 @@
 //! The rows that match nothing are carried through as for every engine
 //! ([`senna::carried_rows::CarriedRows`]), a gene under its lifted name.
 
-use senna::carried_rows::CarriedRows;
 use crate::gem::tracks::TrackPlan;
 use auxiliary_data::feature_rows::{feature_row, parse_feature_row, COUNT, SPLICED};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::{info, warn};
 use rustc_hash::FxHashMap;
+use senna::carried_rows::CarriedRows;
 use std::collections::BTreeMap;
 
 /// What a given table resolves to on a gem axis.

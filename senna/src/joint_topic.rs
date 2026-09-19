@@ -1,9 +1,9 @@
+use crate::topic::common::{create_device, setup_stop_handler};
+use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 use senna::embed_common::*;
 use senna::senna_input::{
     read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
 };
-use crate::topic::common::{create_device, setup_stop_handler};
-use crate::topic::train_joint::{train_and_save, ProgressiveTrainConfig, SaveContext};
 
 use candle_util::decoder::DeltaTopicDecoder;
 use candle_util::decoder::JointTopicDecoder;
