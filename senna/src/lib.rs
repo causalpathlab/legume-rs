@@ -14,13 +14,11 @@
 )]
 
 pub mod annotate;
-pub mod assoc;
 pub mod carried_rows;
 pub mod cluster;
 pub mod cluster_aggregation;
 pub mod embed_common;
-pub mod lineage;
-pub mod lineage_plot;
+pub mod lineage_manifest;
 #[path = "gem/marker_embedding.rs"]
 pub mod marker_embedding;
 pub mod marker_support;
@@ -28,6 +26,13 @@ pub mod multiome_layout;
 pub mod output_helpers;
 pub mod pb_reference;
 pub mod principal_graph;
-pub mod pseudotime;
 pub mod run_manifest;
 pub mod senna_input;
+
+// The lineage family lives in the `lineage` crate now. These re-exports keep
+// the historical `senna::lineage` / `senna::pseudotime` / … paths resolving.
+// `::` because `lineage::lineage` shadows the crate name in this scope.
+pub use ::lineage::assoc;
+pub use ::lineage::lineage;
+pub use ::lineage::lineage_plot;
+pub use ::lineage::pseudotime;

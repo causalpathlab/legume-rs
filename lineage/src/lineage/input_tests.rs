@@ -1,44 +1,49 @@
 //! Which table θ comes from, and the metric it lands in.
 
 use super::*;
-use crate::run_manifest::{write_kind_only, RunKind};
 
-/// A unique scratch prefix per test, so the manifests written here cannot collide.
-fn scratch(tag: &str) -> String {
-    std::env::temp_dir()
-        .join(format!("senna_lin_input_{}_{tag}", std::process::id()))
-        .to_string_lossy()
-        .into_owned()
+/// A run that stamped a log-simplex latent, as a topic-family one does.
+fn simplex(kind: &str) -> LatentContract {
+    LatentContract {
+        latent_is_log_simplex: true,
+        is_gem: false,
+        kind: Some(kind.into()),
+        source: "scratch.senna.json".into(),
+    }
 }
 
-/// Stamp `{prefix}.senna.json` the way a producer would.
-fn write_manifest(prefix: &str, kind: RunKind) {
-    write_kind_only(prefix, kind).unwrap();
+/// A `senna gem` run: a Euclidean co-embedding, no latent at all.
+fn gem() -> LatentContract {
+    LatentContract {
+        latent_is_log_simplex: false,
+        is_gem: true,
+        kind: Some("gem".into()),
+        source: "scratch.senna.json".into(),
+    }
 }
 
-/// `auto` reads the simplex exactly when the producing run has one.
+/// `auto` reads the simplex exactly when the producing run has one. Which
+/// kinds have one is `senna::lineage_manifest`'s call, tested there.
 #[test]
 fn auto_reads_the_simplex_only_for_a_run_that_has_one() {
-    // a topic-family run: latent.parquet is log θ.
-    let p = scratch("topic");
-    write_manifest(&p, RunKind::Topic);
     assert_eq!(
-        resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
+        resolve_theta_from(ThetaFrom::Auto, &simplex("topic")).unwrap(),
         ThetaFrom::Latent
     );
 
     // gem writes no latent.parquet at all — its per-cell table is Euclidean.
-    let p = scratch("gem");
-    write_manifest(&p, RunKind::Gem);
     assert_eq!(
-        resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
+        resolve_theta_from(ThetaFrom::Auto, &gem()).unwrap(),
         ThetaFrom::CellEmbedding
     );
 
     // No manifest → nothing says, so keep the historical behaviour.
-    let p = scratch("no_manifest");
     assert_eq!(
-        resolve_theta_from(ThetaFrom::Auto, &p).unwrap(),
+        resolve_theta_from(
+            ThetaFrom::Auto,
+            &LatentContract::unknown("scratch.senna.json")
+        )
+        .unwrap(),
         ThetaFrom::CellEmbedding
     );
 }
@@ -47,31 +52,28 @@ fn auto_reads_the_simplex_only_for_a_run_that_has_one() {
 fn explicit_latent_refuses_a_run_that_cannot_supply_it() {
     // A gem run has no latent.parquet: fail loudly rather than read a file that
     // does not exist, or one that means something else.
-    let p = scratch("explicit_gem");
-    write_manifest(&p, RunKind::Gem);
-    assert!(resolve_theta_from(ThetaFrom::Latent, &p).is_err());
+    assert!(resolve_theta_from(ThetaFrom::Latent, &gem()).is_err());
 
     // Nothing to go on is also a refusal: `--theta-from latent` is an assertion
     // about the file, and an unverifiable assertion is not a licence to guess.
-    let p = scratch("explicit_no_manifest");
-    assert!(resolve_theta_from(ThetaFrom::Latent, &p).is_err());
+    assert!(resolve_theta_from(
+        ThetaFrom::Latent,
+        &LatentContract::unknown("scratch.senna.json")
+    )
+    .is_err());
 
-    let p = scratch("explicit_ok");
-    write_manifest(&p, RunKind::Topic);
     assert_eq!(
-        resolve_theta_from(ThetaFrom::Latent, &p).unwrap(),
+        resolve_theta_from(ThetaFrom::Latent, &simplex("topic")).unwrap(),
         ThetaFrom::Latent
     );
 }
 
 #[test]
-fn cell_embedding_is_honoured_without_consulting_the_manifest() {
+fn cell_embedding_is_honoured_without_consulting_the_contract() {
     // Even on a topic run, an explicit request stands: it is the escape
     // hatch for comparing the co-embedding against the simplex.
-    let p = scratch("forced_embedding");
-    write_manifest(&p, RunKind::Topic);
     assert_eq!(
-        resolve_theta_from(ThetaFrom::CellEmbedding, &p).unwrap(),
+        resolve_theta_from(ThetaFrom::CellEmbedding, &simplex("topic")).unwrap(),
         ThetaFrom::CellEmbedding
     );
 }

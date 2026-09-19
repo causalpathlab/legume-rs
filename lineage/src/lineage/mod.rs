@@ -26,3 +26,7 @@ mod write;
 pub mod branch;
 pub mod forest;
 pub mod orient;
+
+/// What the producing run promised about its per-cell tables. Read from a run
+/// manifest by the caller — this crate never opens one.
+pub use input::LatentContract;
