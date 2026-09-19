@@ -1,0 +1,16 @@
+[package]
+name = "annotate"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Cell-type annotation (projection, enrichment, ontology)"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+log = { workspace = true }
+# fill real deps when modules land (matrix-util, plot-utils, ndarray, …)
