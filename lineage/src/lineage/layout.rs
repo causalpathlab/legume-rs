@@ -255,7 +255,7 @@ pub(super) fn project_onto_cells(
 /// PHATE layout.
 pub(super) fn l2_normalize_rows(m: &DMatrix<f32>) -> DMatrix<f32> {
     let mut out = m.clone();
-    crate::embed_common::l2_normalize_rows_inplace(&mut out);
+    crate::mat_io::l2_normalize_rows_inplace(&mut out);
     out
 }
 

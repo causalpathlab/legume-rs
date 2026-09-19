@@ -24,6 +24,7 @@ cuda = [
     "data-beans/cuda",
     "data-beans-alg/cuda",
     "graph-embedding-util/cuda",
+    "lineage/cuda",
     "matrix-util/cuda",
     "matrix-param/cuda",
     "mcmc-util/cuda",
@@ -34,6 +35,7 @@ metal = [
     "data-beans/metal",
     "data-beans-alg/metal",
     "graph-embedding-util/metal",
+    "lineage/metal",
     "matrix-util/metal",
     "matrix-param/metal",
     "mcmc-util/metal",
@@ -49,6 +51,7 @@ data-beans-alg = { workspace = true }
 candle-util = { workspace = true }
 genomic-data = { workspace = true }
 graph-embedding-util = { workspace = true }
+lineage = { path = "../lineage" }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 mcmc-util = { workspace = true }
