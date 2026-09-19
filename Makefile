@@ -2,7 +2,11 @@ BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim fagioli ge
 
 # Packages whose crate directory / Cargo package name differs from the
 # installed binary name. `canna` is the CLI; the crate stays `cnv`.
-crate_path = $(if $(filter canna,$(1)),cnv,$(1))
+#
+# The mapping has to happen in the shell, not with a make function: the loops
+# below iterate over `$$bin` inside a recipe, so make would only ever see the
+# literal text `$$bin` and never match it.
+crate_pkg_case = case $$bin in canna) pkg=cnv;; *) pkg=$$bin;; esac
 
 # Binaries with no `cuda` / `metal` feature to pass. `faba` reads BAM files and
 # writes sparse matrices; nothing on that path touches a GPU, and the
@@ -308,26 +312,26 @@ install-metal:
 # backend is appended to INSTALL_STATUS_FILE for the summary.
 $(addprefix install-,$(BINARIES)):
 	@bin=$(@:install-%=%); \
-	path=$(call crate_path,$$bin); \
+	$(crate_pkg_case); \
 	if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
 	    echo "Installing $$bin (no GPU backend; CPU-only by design)..."; \
-	    cargo install --locked --path $$path $(CARGO_FEATURES_CPU_FALLBACK); \
+	    cargo install --locked --path $$pkg $(CARGO_FEATURES_CPU_FALLBACK); \
 	    echo "$$bin n/a" >> $(INSTALL_STATUS_FILE); \
 	elif [ -n "$(CARGO_FEATURES)" ]; then \
 	    echo "Installing $$bin (backend: $(BACKEND))..."; \
-	    if cargo install --locked --path $$path $(CARGO_FEATURES); then \
+	    if cargo install --locked --path $$pkg $(CARGO_FEATURES); then \
 	        echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS_FILE); \
 	    else \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
 	        $(CUDA_CAP_HINT) \
 	        echo ""; \
-	        cargo install --locked --path $$path $(CARGO_FEATURES_CPU_FALLBACK); \
+	        cargo install --locked --path $$pkg $(CARGO_FEATURES_CPU_FALLBACK); \
 	        echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	    fi; \
 	else \
 	    echo "Installing $$bin (backend: cpu)..."; \
-	    cargo install --locked --path $$path $(CARGO_FEATURES_CPU_FALLBACK); \
+	    cargo install --locked --path $$pkg $(CARGO_FEATURES_CPU_FALLBACK); \
 	    echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	fi
 
@@ -335,8 +339,10 @@ uninstall: $(addprefix uninstall-,$(BINARIES))
 	@echo "All binaries uninstalled successfully"
 
 $(addprefix uninstall-,$(BINARIES)):
-	@echo "Uninstalling $(@:uninstall-%=%)..."
-	cargo uninstall $(@:uninstall-%=%)
+	@bin=$(@:uninstall-%=%); \
+	$(crate_pkg_case); \
+	echo "Uninstalling $$bin..."; \
+	cargo uninstall $$pkg
 
 # Mirror the install per-binary fallback: a single GPU-build failure does
 # NOT abort the whole loop. Each binary that can't be built with the
@@ -345,7 +351,7 @@ build:
 ifeq ($(BACKEND),cpu)
 ifeq ($(HDF5),on)
 	@for bin in $(BINARIES); do \
-	    case $$bin in canna) pkg=cnv;; *) pkg=$$bin;; esac; \
+	    $(crate_pkg_case); \
 	    cargo build --release -p $$pkg --features hdf5 || exit $$?; \
 	done
 else
@@ -356,7 +362,7 @@ ifeq ($(BACKEND),cuda)
 	@echo "CUDA compute capability: $(or $(CUDA_COMPUTE_CAP),none) ($(CUDA_CAP_SOURCE))"
 endif
 	@for bin in $(BINARIES); do \
-	    case $$bin in canna) pkg=cnv;; *) pkg=$$bin;; esac; \
+	    $(crate_pkg_case); \
 	    if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
 	        echo "Building $$bin (no GPU backend; CPU-only by design)..."; \
 	        cargo build --release -p $$pkg $(CARGO_FEATURES_CPU_FALLBACK) || exit $$?; \
