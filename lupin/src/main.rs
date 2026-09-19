@@ -34,9 +34,10 @@ enum Commands {
         name = "text-qc",
         about = "Inspect the word vocabulary and its frequency cuts, without encoding",
         long_about = "The vocabulary step of `word-graph` on its own,\n\
-                      so the cuts can be inspected before paying for the model pass:\n\
-                      tokenise every description, drop stopwords and filler,\n\
-                      cut both tails of the document-frequency distribution by quantile.\n\
+                      so the cuts can be inspected before paying for the model pass.\n\
+                      \n\
+                      Tokenise every description, drop stopwords and filler,\n\
+                      then cut both tails of the document-frequency distribution by quantile.\n\
                       Prints the df histogram, the cuts and the words on each side of them,\n\
                       and writes {out}.vocab.tsv.\n\
                       Tune the stopword list and the quantiles here,\n\
@@ -50,10 +51,11 @@ enum Commands {
         about = "Encode the descriptions and write the text graph: feature–word and feature–feature edges",
         long_about = "Runs the vocabulary step,\n\
                       then a BERT-family encoder from the Hugging Face Hub over every description,\n\
-                      and writes the text graph:\n\
-                      {out}.feature_word.edges.tsv, each feature to the words of its text\n\
-                      (weight = contextual cosine × TF-IDF),\n\
-                      and {out}.knn_graph.edges.tsv, the nearest features by text similarity.\n\
+                      and writes the text graph.\n\
+                      \n\
+                      {out}.feature_word.edges.tsv maps each feature to the words of its text\n\
+                      (weight = contextual cosine × TF-IDF).\n\
+                      {out}.knn_graph.edges.tsv lists the nearest features by text similarity.\n\
                       Both are typed edge files for `senna fne --edges`.\n\
                       Also writes {out}.text_embedding.parquet (pooled, centred),\n\
                       {out}.vocab.tsv and {out}.feature_text.tsv."
@@ -63,9 +65,11 @@ enum Commands {
         name = "annotate",
         about = "Cell-type annotation by enrichment, embedding projection, or auto-dispatch",
         long_about = "Unified annotation entry point.\n\
+                      \n\
                       `--method enrichment` runs the senna topic/svd enrichment pipeline.\n\
-                      `--method projection` runs senna co-embed projection or pinto-style ORA\n\
-                      when `--feature-embedding` / `--cell-embedding` (or pinto parquets) are present.\n\
+                      `--method projection` runs senna co-embed projection.\n\
+                      With `--feature-embedding` / `--cell-embedding` (or pinto parquets),\n\
+                      it runs pinto-style ORA instead.\n\
                       `--method auto` (default) picks projection when embeddings resolve, else enrichment.\n\
                       Ontology-only follow-up: `--from` + `--obo` + `--label-cl` without markers."
     )]
@@ -94,9 +98,10 @@ enum Commands {
     #[command(
         name = "describe",
         about = "Short citation-checked sentence from annotate / lineage_annot evidence",
-        long_about = "Builds structured evidence from `{from}.annot.parquet` (or argmax / lineage_annot),\n\
-                      optionally blends keyword incidence from a `word-graph` prefix,\n\
-                      and writes `{out}.describe.json` + `{out}.describe.txt`.\n\
+        long_about = "Builds structured evidence from `{from}.annot.parquet` (or argmax / lineage_annot).\n\
+                      Optionally blends keyword incidence from a `word-graph` prefix.\n\
+                      Writes `{out}.describe.json` and `{out}.describe.txt`.\n\
+                      \n\
                       The composer never invents labels: sentences are citation-checked.\n\
                       Default composer is a citation-checked template (candle decoder TBD)."
     )]
