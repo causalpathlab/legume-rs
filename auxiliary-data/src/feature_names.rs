@@ -365,7 +365,7 @@ fn strip_feature_type_suffix(name: &str, delim: char) -> &str {
 ///
 /// The rule and the flag that selects it belong together: every crate that
 /// aligns feature names across files exposes the same `--feature-name-kind`
-/// vocabulary, so `senna`, `fagioli` and anything after them agree on what
+/// vocabulary, so `senna` and anything after it agree on what
 /// `gene` or `locus` means without each inventing a local rule.
 #[derive(clap::ValueEnum, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
