@@ -159,9 +159,11 @@ fn resolve_method(args: &AnnotateCliArgs) -> Result<AnnotateMethod> {
     match args.method {
         AnnotateMethod::Enrichment | AnnotateMethod::Projection => Ok(args.method),
         AnnotateMethod::Auto => {
-            if resolve_embedding_paths(args)?.is_some() {
+            // Senna manifests first: their feature_embedding.parquet is ρ, not the
+            // marker co-embed — never treat those filenames as a pinto ORA input.
+            if senna_manifest_prefers_projection(args)? {
                 Ok(AnnotateMethod::Projection)
-            } else if senna_manifest_prefers_projection(args)? {
+            } else if resolve_embedding_paths(args)?.is_some() {
                 Ok(AnnotateMethod::Projection)
             } else {
                 Ok(AnnotateMethod::Enrichment)
@@ -226,10 +228,21 @@ fn run_enrichment(args: &AnnotateCliArgs) -> Result<()> {
 }
 
 fn run_projection(args: &AnnotateCliArgs) -> Result<()> {
-    // Explicit / pinto-style embedding pair always wins over a senna manifest.
-    if let Some((feat, cell, prefix)) = resolve_embedding_paths(args)? {
+    let explicit = args.feature_embedding.is_some() && args.cell_embedding.is_some();
+    let senna_from = args
+        .from
+        .as_deref()
+        .is_some_and(|f| run_manifest::load_for(f).is_ok());
+
+    // Explicit embedding pair → pinto-style ORA. Senna manifests with only `--from`
+    // must go through annotate_by_projection (co-embed), even though they also write
+    // feature_embedding.parquet + cell_embedding.parquet (ρ and Z).
+    if explicit || (!senna_from && resolve_embedding_paths(args)?.is_some()) {
+        let (feat, cell, prefix) = resolve_embedding_paths(args)?
+            .context("provide --feature-embedding/--cell-embedding or a pinto --from prefix")?;
         return run_embedding_ora(args, &feat, &cell, &prefix);
     }
+
     let from = args
         .from
         .clone()
@@ -286,7 +299,7 @@ fn run_embedding_ora(
             cell_names: &cell.rows,
         },
         &args.markers,
-        &format!("{out}.annot"),
+        &out,
         !args.no_idf,
         &cfg,
     )
