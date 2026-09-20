@@ -10,9 +10,9 @@ mod group;
 pub use group::*;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod group_tests;
+#[cfg(test)]
+mod tests;
 
 pub struct CocoaStat {
     y1_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample
