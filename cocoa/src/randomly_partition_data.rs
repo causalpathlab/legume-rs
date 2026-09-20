@@ -32,15 +32,6 @@ impl RefineSettings {
 }
 
 pub trait RandPartitionOps {
-    fn assign_pseudobulk_individuals<T>(
-        &mut self,
-        proj_dim: usize,
-        block_size: usize,
-        cell_to_indv: &[T],
-    ) -> anyhow::Result<()>
-    where
-        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString;
-
     /// Multilevel DC-Poisson-refined pseudobulk assignment. No exposure
     /// strata: pseudobulks may mix exposures, so τ sees the full
     /// between-individual spread.
@@ -109,24 +100,6 @@ where
 }
 
 impl RandPartitionOps for SparseIoVec {
-    fn assign_pseudobulk_individuals<T>(
-        &mut self,
-        proj_dim: usize,
-        block_size: usize,
-        cell_to_indv: &[T],
-    ) -> anyhow::Result<()>
-    where
-        T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
-    {
-        let centred = self.project_columns_with_batch_correction(
-            proj_dim,
-            Some(block_size),
-            Some(cell_to_indv),
-        )?;
-        let raw = self.project_columns(proj_dim, Some(block_size))?;
-        apply_projections(self, &centred.proj, &raw.proj, cell_to_indv)
-    }
-
     fn assign_pseudobulk_individuals_refined<T>(
         &mut self,
         proj_dim: usize,
