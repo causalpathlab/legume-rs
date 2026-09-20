@@ -1,4 +1,3 @@
-mod cnv_call;
 mod collapse_cocoa_data;
 mod common;
 mod input;
@@ -59,11 +58,15 @@ enum Commands {
                       Adjustment is by cross-condition and cross-exposure matching,\n\
                       after Park & Kellis, 2021.\n\
                       \n\
-                      By default, topic proportions are residualized.\n\
-                      That removes the exposure-driven shift before analysis.\n\
-                      It breaks collider bias.\n\
-                      The bias arises when cell type A is a common effect of exposure X and cell-level confounder U,\n\
-                      so X → A ← U. Use --no-residualize-topics to disable it.\n\
+                      Pipeline (default):\n  \
+                      (1) residualize soft topic weights vs exposure (collider; soft -r needed),\n  \
+                      (2) multilevel refine of the pseudobulk partition (no exposure strata),\n  \
+                      (3) CoCoA matching across exposure on raw counts,\n  \
+                      (4) group model: tau = average exposure effect (gene x group),\n  \
+                      \x20   delta = individual effect without exposure (random effect).\n\
+                      Writes {out}.effect, .delta, .contrast and, with\n\
+                      --n-permutations, .perm (label-permutation z, p).\n\
+                      Use --no-residualize-topics / --no-refine to disable (1) / (2).\n\
                       \n\
                       References:\n  \
                       Park & Kellis (2021) Genome Biol — CoCoA-diff framework\n  \

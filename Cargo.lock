@@ -1060,19 +1060,17 @@ dependencies = [
 
 [[package]]
 name = "cocoa"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "approx",
  "auxiliary-data",
  "clap",
- "cnv",
  "data-beans",
  "data-beans-alg",
  "data-beans-sim",
  "env_logger",
  "flate2",
- "genomic-data",
  "indicatif 0.18.6",
  "log",
  "matrix-param",
@@ -1550,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "data-beans"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "approx",

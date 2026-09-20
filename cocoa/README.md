@@ -106,9 +106,64 @@ Conditioning on cell type A opens the path X → A ← U → Y:
 - Since U → Y, this creates a non-causal path X ↔ U → Y,
   inflating the apparent effect of X on Y even for non-causal genes.
 
-CoCoA addresses this by matching cells across exposure groups using KNN,
-constructing counterfactual controls (y0) for each treated cell (y1).
-The topic-weighted matching (`z_matched(k)`) ensures matches are within
-the same cell type, but residual bias remains when composition shifts
-alter the within-type cell-state distribution.
+## `diff` pipeline
 
+Default order of operations in `cocoa diff`:
+
+1. **Collider residualization** of topic weights (default on; `--no-residualize-topics` to skip).
+   Per topic, the exposure-group mean of individual-level log proportions is compared with the grand mean,
+   and every cell's proportion is multiplied by `exp(-(group_mean - grand_mean))`.
+   This is a multiplicative rescale, so a zero stays zero: hard one-hot assignments (`-t`) are
+   unchanged after row renormalization, and the tool warns. Use soft proportions (`-r`) for
+   residualization to change matching weights.
+2. **Multilevel pseudobulk refine** (default; `--no-refine` restores the hash-only partition).
+   Cells are hash-partitioned then DC-Poisson refined via senna's `collapse_columns_multilevel_vec`.
+   Exposure is not used as multilevel strata, so pseudobulks may mix exposures. HNSW for CoCoA
+   matching is built on the batch-centred projection. `--covariate-file` and
+   `--adjustment-data-files` bypass refine.
+3. **Optional pseudobulk δ export.** When refine runs, the finest-level batch fold (gene × individual)
+   is written to `{out}.pb_delta.parquet` for QA, in the same melted layout senna uses for its
+   `.delta.parquet`. It is not fed into τ.
+4. **CoCoA matching.** Cross-exposure KNN matching builds y0 for each y1 cell on raw counts and
+   accumulates the sufficient statistics per topic. NB-Fisher gene weights, if enabled, are applied
+   afterwards.
+5. **Group model** (per topic):
+
+   ```text
+   y1(g,i,p) ~ Poisson( τ(g, x(i)) · δ(g,i) · μ(g,p) · n(i,p) )
+   y0(g,p)   ~ Poisson( γ(g,p) · μ(g,p) · n(p) )
+   δ(g,i)    ~ Gamma(φ_g, φ_g)
+   ```
+
+   τ is the average exposure effect, gene × exposure group. δ is the individual effect with the
+   exposure effect removed: a random effect with mean 1 inside every group and between-individual
+   dispersion 1/φ_g. μ is the shared cell-state rate and γ the matched residual, as in CoCoA.
+   φ_g is fit by maximizing each gene's negative-binomial marginal over individuals and shrunk toward
+   the median across genes. δ is integrated over, never divided out, so the uncertainty of τ counts
+   individuals rather than cells.
+
+| Estimand | Shape | File |
+|----------|-------|------|
+| τ, average exposure effect | gene × exposure group, per topic | `*.effect.parquet` |
+| δ, individual effect without exposure | gene × individual, per topic | `*.delta.parquet` |
+| `contrast` = log τ(group 1) − log τ(group 0), `dispersion` = φ | gene | `*.contrast.parquet` |
+| permutation `contrast`, `z_score`, `pvalue` (with `--n-permutations`) | gene | `*.perm.parquet` |
+
+Inference is by permutation only. `--n-permutations` shuffles exposure labels over individuals and
+refits the whole group model each time, so every label-dependent quantity, including δ and φ, is
+recomputed under the null; the reported z compares the observed contrast with the mean and standard
+deviation of the permuted contrasts. A closed-form standard error from the negative-binomial Fisher
+information was tried and dropped: with a handful of individuals per arm and heavy between-individual
+heterogeneity it understated the null spread by about half, whereas the permutation matched it.
+
+### Why δ is a random effect and not a divisor
+
+With one library per donor, batch is the individual, and an individual-level fold cannot be told
+apart from that donor's response to exposure by the data alone. The group model separates them by
+definition: τ carries the group mean, δ carries the within-group deviation, and the within-group
+mean-1 constraint on δ is what identifies the split. Dividing counts by a within-exposure δ before
+fitting τ would leave the average effect unchanged and delete the between-individual spread that its
+standard error is built from. An earlier version of this branch did exactly that with δ held fixed
+across permutations; on a null simulation it called most genes significant. A δ that is a genuine
+technical nuisance (a lane or site spanning both exposures) belongs in the denominator as an offset,
+and needs a batch variable that is not the individual.
