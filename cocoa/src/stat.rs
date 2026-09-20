@@ -6,8 +6,13 @@ use matrix_param::traits::*;
 use rayon::prelude::*;
 use special::Error;
 
+mod group;
+pub use group::*;
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod group_tests;
 
 pub struct CocoaStat {
     y1_sum_dp_vec: Vec<Mat>, // cell type topic x gene x pseudobulk sample
@@ -19,12 +24,6 @@ pub struct CocoaStat {
     n_opt_iter: usize,       // iterative optimization
     a0: f32,                 // hyper parameters
     b0: f32,                 // hyper parameters
-}
-
-pub struct CocoaGammaOut {
-    pub shared: GammaMatrix,
-    pub residual: GammaMatrix,
-    pub exposure: GammaMatrix,
 }
 
 pub struct CocoaStatArgs {
@@ -104,132 +103,6 @@ impl CocoaStat {
     pub fn indv_size_stat(&self, k: usize) -> &Mat {
         &self.size_ip_vec[k]
     }
-
-    pub fn estimate_parameters(&self) -> anyhow::Result<Vec<CocoaGammaOut>> {
-        let ret: Result<Vec<_>, _> = (0..self.n_topics)
-            .into_par_iter()
-            .map(|k| self.optimize_each_topic(k))
-            .collect();
-        let ret = ret?;
-        info!("finished optimization for {} topics", self.n_topics);
-        Ok(ret)
-    }
-
-    pub fn optimize_each_topic(&self, k: usize) -> anyhow::Result<CocoaGammaOut> {
-        let y1_dp = self.y1_stat(k);
-        let y0_dp = self.y0_stat(k);
-        let y10_dp = y1_dp + y0_dp;
-        let y1_di = self.indv_y1_stat(k);
-
-        let size_p = self.size_stat(k);
-        let size_ip = self.indv_size_stat(k);
-
-        let n_genes = y1_dp.nrows();
-        let n_pb = y1_dp.ncols();
-        let n_indv = y1_di.ncols();
-
-        let mut mu_param_dp = GammaMatrix::new((n_genes, n_pb), self.a0, self.b0);
-        let mut gamma_param_dp = GammaMatrix::new((n_genes, n_pb), self.a0, self.b0);
-        let mut tau_param_di = GammaMatrix::new((n_genes, n_indv), self.a0, self.b0);
-
-        let mut denom_dp = Mat::zeros(n_genes, n_pb);
-        let mut denom_di = Mat::zeros(n_genes, n_indv);
-
-        for _opt_iter in 0..self.n_opt_iter {
-            // shared component μ(d,p)
-            //
-            // y1(d,p) + y0(d,p)
-            // -----------------------------------------
-            // sum_i τ(d,i) * n(i,p) + γ(d,p) * n(s)
-
-            let gamma_dp = gamma_param_dp.posterior_mean();
-            let tau_di = tau_param_di.posterior_mean();
-
-            // γ(d,p) * n(p): scale each column p by size_p[p]
-            denom_dp.copy_from(gamma_dp);
-            for p in 0..n_pb {
-                denom_dp.column_mut(p).scale_mut(size_p[p]);
-            }
-            denom_dp += tau_di * size_ip;
-
-            mu_param_dp.update_stat(&y10_dp, &denom_dp);
-            mu_param_dp.calibrate_with(CalibrateTarget::MeanOnly);
-
-            // matched component γ(d,p)
-            //
-            // y0(d,p)
-            // -----------------------------------
-            // μ(d,p) * n(s)
-
-            let mu_dp = mu_param_dp.posterior_mean();
-
-            // μ(d,p) * n(p): scale each column p by size_p[p]
-            denom_dp.copy_from(mu_dp);
-            for p in 0..n_pb {
-                denom_dp.column_mut(p).scale_mut(size_p[p]);
-            }
-
-            gamma_param_dp.update_stat(y0_dp, &denom_dp);
-            gamma_param_dp.calibrate_with(CalibrateTarget::MeanOnly);
-
-            // individual-specific effect τ(d,i)
-            //
-            // y1(d,i)
-            // ---------------------
-            // sum_s μ(d,p) * n(i,p)
-
-            denom_di.copy_from(&(mu_dp * size_ip.transpose()));
-            tau_param_di.update_stat(y1_di, &denom_di);
-            tau_param_di.calibrate_with(CalibrateTarget::MeanOnly);
-        }
-
-        // Final full calibration for downstream use (log_mean needed
-        // for exposure contrast, all quantities needed for I/O export)
-        mu_param_dp.calibrate();
-        gamma_param_dp.calibrate();
-        tau_param_di.calibrate();
-
-        Ok(CocoaGammaOut {
-            shared: mu_param_dp,
-            residual: gamma_param_dp,
-            exposure: tau_param_di,
-        })
-    }
-}
-
-/// Compute per-gene signed log exposure contrast:
-///   mean(log τ_{exp1}) - mean(log τ_{exp0})
-/// averaged across topics. Returns Vec<f32> of length n_genes.
-pub fn compute_exposure_contrast(
-    parameters: &[CocoaGammaOut],
-    exposure_assignment: &[usize],
-) -> Vec<f32> {
-    let n_topics = parameters.len();
-    let n_genes = parameters[0].exposure.posterior_log_mean().nrows();
-    let n_indv = parameters[0].exposure.posterior_log_mean().ncols();
-
-    let exp0_indvs: Vec<usize> = (0..n_indv)
-        .filter(|&i| exposure_assignment[i] == 0)
-        .collect();
-    let exp1_indvs: Vec<usize> = (0..n_indv)
-        .filter(|&i| exposure_assignment[i] == 1)
-        .collect();
-
-    let n0 = exp0_indvs.len() as f32;
-    let n1 = exp1_indvs.len() as f32;
-
-    let mut contrast = vec![0f32; n_genes];
-
-    for param in parameters {
-        let tau_log = param.exposure.posterior_log_mean();
-        for g in 0..n_genes {
-            let mean0: f32 = exp0_indvs.iter().map(|&i| tau_log[(g, i)]).sum::<f32>() / n0;
-            let mean1: f32 = exp1_indvs.iter().map(|&i| tau_log[(g, i)]).sum::<f32>() / n1;
-            contrast[g] += (mean1 - mean0) / n_topics as f32;
-        }
-    }
-
-    contrast
 }
 
 /// Compute two-sided p-value from z-score using normal CDF.
@@ -412,4 +285,17 @@ pub fn remove_exposure_effect_from_topic_proportions(
     }
 
     max_shift_per_topic
+}
+
+/// True when every non-empty row is a hard one-hot assignment.
+///
+/// All-zero rows (e.g. NA cells) are skipped so they do not suppress the
+/// hard-assignment warning; a matrix with no assigned row is not one-hot.
+pub fn topics_look_one_hot(z: &Mat) -> bool {
+    let mut n_pos = z
+        .row_iter()
+        .map(|r| r.iter().filter(|&&v| v > 1e-6).count())
+        .filter(|&n| n > 0)
+        .peekable();
+    n_pos.peek().is_some() && n_pos.all(|n| n == 1)
 }

@@ -5,6 +5,9 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Inputs for the matched accumulate pass. No batch δ enters here: scaling
+/// counts by 1/δ would cancel the between-individual spread the permutation
+/// null is built from (see README, "Why δ is a random effect").
 pub struct CocoaCollapseIn<'a> {
     pub n_genes: usize,
     pub n_topics: usize,
@@ -46,6 +49,13 @@ impl CocoaCollapseOps for SparseIoVec {
         assert_eq!(n_topics, cocoa_input.cell_topic_nk.ncols());
 
         let n_samples = pb_samples.len();
+        info!(
+            "{} pseudobulk groups over {} cells ({:.1} cells per group, {} individuals)",
+            n_samples,
+            n_cells,
+            n_cells as f32 / n_samples.max(1) as f32,
+            n_indv
+        );
 
         let mut cocoa_stat = CocoaStat::new(
             CocoaStatArgs {
