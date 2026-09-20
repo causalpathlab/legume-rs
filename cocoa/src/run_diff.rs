@@ -5,7 +5,6 @@ use crate::randomly_partition_data::*;
 use crate::stat::*;
 
 use clap::Parser;
-use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
 use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::io::*;
 use matrix_param::traits::Inference;
@@ -16,6 +15,9 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Parser, Debug, Clone)]
 pub struct DiffArgs {
@@ -173,53 +175,6 @@ pub struct DiffArgs {
 
     #[arg(
         long,
-        default_value_t = false,
-        help = "Disable residual collider adjustment of topic proportions",
-        long_help = "By default, the exposure-driven shift is removed.\n\
-                     It is removed from the topic logits, before analysis.\n\
-                     That breaks collider bias, X -> A <- U.\n\
-                     \n\
-                     Use this flag to disable the adjustment.\n\
-                     That suits a cell type known not to be a collider,\n\
-                     and comparison experiments.\n\
-                     \n\
-                     Reference: adapted from residual collider stratification,\n\
-                     Hartwig et al. (2023) Eur J Epidemiol."
-    )]
-    no_residualize_topics: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Disable NB-Fisher housekeeping gene adjustment",
-        long_help = "By default, y1/y0 sufficient statistics are row-scaled.\n\
-                     The row scale is the NB-Fisher weight, applied after accumulation:\n\
-                     \x20 w_g = 1 / (1 + π_g · s̄ · φ(μ_g))\n\
-                     \n\
-                     So the τ, μ and γ posteriors contract toward the prior.\n\
-                     That happens for housekeeping genes, which run high-mean and high-dispersion.\n\
-                     This matches pinto's adjustment."
-    )]
-    no_adjust_housekeeping: bool,
-
-    #[arg(
-        long,
-        default_value_t = false,
-        help = "Skip multilevel refine; use raw hash pseudobulk partition",
-        long_help = "By default, pseudobulk assignment uses senna's multilevel path.\n\
-                     That is collapse_columns_multilevel_vec with BBKNN + DC-Poisson.\n\
-                     HNSW for CoCoA matching is built on the batch-centred projection.\n\
-                     \n\
-                     Use this flag to restore the older hash-only partition,\n\
-                     with HNSW on the raw (uncentred) projection.\n\
-                     \n\
-                     Applies only on the default pseudobulk path,\n\
-                     so with neither --covariate-file nor --adjustment-data-files."
-    )]
-    no_refine: bool,
-
-    #[arg(
-        long,
         default_value_t = 2,
         help = "Number of coarsening levels for multilevel refinement"
     )]
@@ -302,13 +257,13 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     // Residual collider adjustment: remove the exposure-driven shift from
     // topic proportions to break collider bias (X -> A <- U).
     //
-    // By default ON. Use --no-residualize-topics to disable.
-    // Runs BEFORE topic-conditioned CoCoA matching.
+    // Always on; a no-op on hard one-hot topics. Runs BEFORE topic-conditioned
+    // CoCoA matching.
     //
     // Reference: adapted from residual collider stratification,
     //   Hartwig et al. (2023) Eur J Epidemiol
     //   "Avoiding collider bias in MR when performing stratified analyses"
-    if !args.no_residualize_topics && data.cell_topic.ncols() > 1 {
+    if data.cell_topic.ncols() > 1 {
         if topics_look_one_hot(&data.cell_topic) {
             warn!(
                 "Topic matrix looks one-hot (hard assignments); \
@@ -364,16 +319,9 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             args.block_size,
             &data.cell_to_indv,
         )?;
-    } else if args.no_refine {
-        info!("Pseudobulk assignment via hash partition (--no-refine)");
-        data.sparse_data.assign_pseudobulk_individuals(
-            args.proj_dim,
-            args.block_size,
-            &data.cell_to_indv,
-        )?;
     } else {
         info!(
-            "Multilevel refine (default): num_levels={}, knn_pb_samples={}",
+            "Multilevel refine: num_levels={}, knn_pb_samples={}",
             args.refine_num_levels, args.refine_knn_pb_samples
         );
         let mut refine_settings =
@@ -437,22 +385,6 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         )?;
     }
 
-    let gene_weights: Option<Vec<f32>> = if args.no_adjust_housekeeping {
-        None
-    } else {
-        info!("Computing NB-Fisher housekeeping weights (--no-adjust-housekeeping to disable)");
-        let w = compute_nb_fisher_weights(&data.sparse_data, Some(args.block_size))?;
-        let wmin = w.iter().cloned().fold(f32::INFINITY, f32::min);
-        let wmax = w.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        info!(
-            "NB-Fisher weights: {} genes, min={:.4}, max={:.4}",
-            w.len(),
-            wmin,
-            wmax
-        );
-        Some(w)
-    };
-
     let cocoa_input = CocoaCollapseIn {
         n_genes,
         n_topics,
@@ -461,7 +393,6 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         hyper_param: Some((args.a0, args.b0)),
         cell_topic_nk: data.cell_topic,
         exposure_assignment: &exposure_assignment,
-        gene_weights: gene_weights.as_deref(),
     };
 
     info!("Collecting statistics...");
@@ -550,7 +481,6 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         let num_opt_iter = args.num_opt_iter;
         let cell_topic = &cocoa_input.cell_topic_nk;
         let n_perm = args.n_permutations;
-        let perm_gene_weights = gene_weights.as_deref();
 
         let perm_contrasts: Vec<Vec<f32>> = permuted_exposures
             .into_par_iter()
@@ -563,7 +493,6 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
                     n_topics,
                     num_opt_iter,
                     hyper_param,
-                    perm_gene_weights,
                 )?;
                 let perm_params = perm_stat.estimate_group_parameters(&perm_exposure, n_groups)?;
                 let contrast = compute_group_contrast(&perm_params, 1, 0);
