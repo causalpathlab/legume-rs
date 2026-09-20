@@ -66,7 +66,6 @@ enum Commands {
                       \x20   delta = individual effect without exposure (random effect).\n\
                       Writes {out}.effect, .delta, .contrast and, with\n\
                       --n-permutations, .perm (label-permutation z, p).\n\
-                      Use --no-residualize-topics / --no-refine to disable (1) / (2).\n\
                       \n\
                       References:\n  \
                       Park & Kellis (2021) Genome Biol — CoCoA-diff framework\n  \
