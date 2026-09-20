@@ -39,6 +39,15 @@ pub fn open_sparse_matrix(
     }
 }
 
+/// Open a sparse matrix, choosing the backend from the file name
+/// (`.h5`, `.zarr`, or `.zarr.zip`) via [`crate::hdf5_io::resolve_backend_file`].
+pub fn open_sparse_matrix_by_path(
+    file_path: &str,
+) -> anyhow::Result<Box<dyn SparseIo<IndexIter = Vec<usize>>>> {
+    let (backend, backend_file) = crate::hdf5_io::resolve_backend_file(file_path, None)?;
+    open_sparse_matrix(&backend_file, &backend)
+}
+
 /// Create a sparse backend from a borrowed triplet slice.
 ///
 /// Clones the slice internally — prefer [`create_sparse_from_triplets_owned`]
