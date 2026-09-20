@@ -71,7 +71,9 @@ fn simulate(n_genes: usize, beta: &[f32], seed: u64) -> GroupSim {
                 y1_dp[(d, p)] += y;
                 y1_di[(d, i)] += y;
             }
-            y0_dp[(d, p)] = Poisson::new(gamma * mu * size_p[p]).unwrap().sample(&mut rng);
+            y0_dp[(d, p)] = Poisson::new(gamma * mu * size_p[p])
+                .unwrap()
+                .sample(&mut rng);
         }
     }
 
@@ -100,15 +102,29 @@ fn simulate(n_genes: usize, beta: &[f32], seed: u64) -> GroupSim {
 #[test]
 fn group_effect_recovers_planted_log_fold() {
     let n_genes = 200;
-    let beta: Vec<f32> = (0..n_genes).map(|d| if d % 2 == 0 { 0.7 } else { 0.0 }).collect();
+    let beta: Vec<f32> = (0..n_genes)
+        .map(|d| if d % 2 == 0 { 0.7 } else { 0.0 })
+        .collect();
     let sim = simulate(n_genes, &beta, 1);
-    let params = sim.stat.estimate_group_parameters(&sim.indv_to_group, 2).unwrap();
+    let params = sim
+        .stat
+        .estimate_group_parameters(&sim.indv_to_group, 2)
+        .unwrap();
     let contrast = compute_group_contrast(&params, 1, 0);
 
-    let planted: Vec<f32> = (0..n_genes).filter(|d| d % 2 == 0).map(|d| contrast[d]).collect();
-    let null: Vec<f32> = (0..n_genes).filter(|d| d % 2 == 1).map(|d| contrast[d]).collect();
+    let planted: Vec<f32> = (0..n_genes)
+        .filter(|d| d % 2 == 0)
+        .map(|d| contrast[d])
+        .collect();
+    let null: Vec<f32> = (0..n_genes)
+        .filter(|d| d % 2 == 1)
+        .map(|d| contrast[d])
+        .collect();
     let (m1, m0) = (mean(&planted), mean(&null));
-    assert!((m1 - 0.7).abs() < 0.1, "planted mean contrast {m1}, want 0.7");
+    assert!(
+        (m1 - 0.7).abs() < 0.1,
+        "planted mean contrast {m1}, want 0.7"
+    );
     assert!(m0.abs() < 0.1, "null mean contrast {m0}, want 0");
 }
 
@@ -117,7 +133,10 @@ fn individual_delta_averages_to_one_within_each_group() {
     let n_genes = 100;
     let beta = vec![0.7f32; n_genes];
     let sim = simulate(n_genes, &beta, 2);
-    let params = sim.stat.estimate_group_parameters(&sim.indv_to_group, 2).unwrap();
+    let params = sim
+        .stat
+        .estimate_group_parameters(&sim.indv_to_group, 2)
+        .unwrap();
     let delta = params[0].indv_delta.posterior_mean();
     // Groups are contiguous blocks of N_PER_GROUP individuals by construction.
     for x in 0..2 {
@@ -131,7 +150,10 @@ fn dispersion_recovers_between_individual_spread() {
     let n_genes = 150;
     let beta = vec![0.0f32; n_genes];
     let sim = simulate(n_genes, &beta, 3);
-    let params = sim.stat.estimate_group_parameters(&sim.indv_to_group, 2).unwrap();
+    let params = sim
+        .stat
+        .estimate_group_parameters(&sim.indv_to_group, 2)
+        .unwrap();
     let med = median(params[0].dispersion.as_slice());
     assert!(
         med > PHI_TRUE / 2.5 && med < PHI_TRUE * 2.5,
@@ -144,7 +166,10 @@ fn group_contrast_is_antisymmetric_in_group_labels() {
     let n_genes = 20;
     let beta = vec![0.5f32; n_genes];
     let sim = simulate(n_genes, &beta, 6);
-    let params = sim.stat.estimate_group_parameters(&sim.indv_to_group, 2).unwrap();
+    let params = sim
+        .stat
+        .estimate_group_parameters(&sim.indv_to_group, 2)
+        .unwrap();
     let a = compute_group_contrast(&params, 1, 0);
     let b = compute_group_contrast(&params, 0, 1);
     for d in 0..n_genes {
@@ -155,7 +180,9 @@ fn group_contrast_is_antisymmetric_in_group_labels() {
 #[test]
 fn gene_blocks_do_not_change_the_contrast() {
     let n_genes = 150;
-    let beta: Vec<f32> = (0..n_genes).map(|d| if d % 3 == 0 { 0.6 } else { 0.0 }).collect();
+    let beta: Vec<f32> = (0..n_genes)
+        .map(|d| if d % 3 == 0 { 0.6 } else { 0.0 })
+        .collect();
     let sim = simulate(n_genes, &beta, 7);
     let whole = sim
         .stat

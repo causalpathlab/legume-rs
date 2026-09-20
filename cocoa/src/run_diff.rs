@@ -6,13 +6,13 @@ use crate::stat::*;
 
 use clap::Parser;
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::io::*;
+use matrix_param::traits::Inference;
 use matrix_util::common_io::mkdir_parent;
 use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::traits::{IoOps, MatOps};
 use rand::seq::SliceRandom;
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::Inference;
 use rand::SeedableRng;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
@@ -485,9 +485,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     info!("Writing down the estimates...");
 
     let dispersion: Vec<f32> = (0..n_genes)
-        .map(|g| {
-            parameters.iter().map(|p| p.dispersion[g]).sum::<f32>() / parameters.len() as f32
-        })
+        .map(|g| parameters.iter().map(|p| p.dispersion[g]).sum::<f32>() / parameters.len() as f32)
         .collect();
 
     let (tau, delta): (Vec<_>, Vec<_>) = parameters
@@ -522,7 +520,10 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
                 ("dispersion".into(), Column::F32(&dispersion)),
             ],
         )?;
-        info!("Wrote {} vs {} contrast to {}", group_names[1], group_names[0], file);
+        info!(
+            "Wrote {} vs {} contrast to {}",
+            group_names[1], group_names[0], file
+        );
     }
 
     // Permutation testing
@@ -599,7 +600,11 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         // Assemble [n_genes × n_cols] numeric matrix and write as parquet,
         // matching the format used elsewhere in cocoa (effect.parquet).
         let col_names: Vec<Box<str>> = vec!["contrast".into(), "z_score".into(), "pvalue".into()];
-        let columns = [DVec::from(contrast_col), DVec::from(z_col), DVec::from(p_col)];
+        let columns = [
+            DVec::from(contrast_col),
+            DVec::from(z_col),
+            DVec::from(p_col),
+        ];
         let perm_mat = Mat::from_columns(&columns);
         let perm_file = format!("{}.perm.parquet", args.output);
         perm_mat.to_parquet_with_names(

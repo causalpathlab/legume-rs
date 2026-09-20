@@ -111,7 +111,10 @@ impl CocoaStat {
             let blocks: Vec<CocoaGroupOut> = fits.by_ref().take(n_blocks).collect();
             out.push(concat_blocks(blocks));
         }
-        info!("finished group-model optimization for {} topics", self.n_topics);
+        info!(
+            "finished group-model optimization for {} topics",
+            self.n_topics
+        );
         Ok(out)
     }
 
@@ -136,7 +139,9 @@ impl CocoaStat {
         let n_indv = y1_di.ncols();
 
         // Indicator (individual x group) for group sums; loop-invariant.
-        let g_ig = Mat::from_fn(n_indv, n_groups, |i, x| (indv_to_group[i] == x) as u8 as f32);
+        let g_ig = Mat::from_fn(n_indv, n_groups, |i, x| {
+            (indv_to_group[i] == x) as u8 as f32
+        });
         let num_dx = &y1_di * &g_ig;
         let size_ip_t = size_ip.transpose();
 
@@ -171,7 +176,9 @@ impl CocoaStat {
 
         for iter in 0..self.n_opt_iter {
             // mu(d,p): (y1 + y0) / ( sum_i tau(d,x(i)) delta(d,i) n(i,p) + gamma(d,p) n(p) )
-            let tau_delta_di = tau_dx.select_columns(indv_to_group).component_mul(&delta_di);
+            let tau_delta_di = tau_dx
+                .select_columns(indv_to_group)
+                .component_mul(&delta_di);
             scale_by_size(&mut denom_dp, gamma_param.posterior_mean());
             denom_dp.gemm(1.0, &tau_delta_di, size_ip, 1.0);
             mu_param.update_stat(&y10_dp, &denom_dp);
