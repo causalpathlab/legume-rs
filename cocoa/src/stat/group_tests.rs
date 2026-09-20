@@ -204,3 +204,76 @@ fn gene_blocks_do_not_change_the_contrast() {
     assert!(worst < 0.05, "block fit differs from whole fit by {worst}");
     assert_eq!(blocked[0].dispersion.len(), n_genes);
 }
+
+/// Golden values captured from the fit before the row-prior refactor; the
+/// refactor must be bit-identical on tau, delta, and phi.
+#[test]
+fn group_fit_matches_pre_refactor_golden() {
+    let beta = vec![0.5f32, 0.0, 0.5, 0.0];
+    let sim = simulate(4, &beta, 11);
+    let params = sim
+        .stat
+        .estimate_group_parameters_blocked(&sim.indv_to_group, 2, 2)
+        .unwrap();
+    let tau = params[0].exposure.posterior_mean();
+    let delta = params[0].indv_delta.posterior_mean();
+    let phi = &params[0].dispersion;
+    let got: Vec<f32> = vec![
+        tau[(0, 0)],
+        tau[(0, 1)],
+        tau[(3, 1)],
+        delta[(0, 0)],
+        delta[(1, 5)],
+        delta[(2, 9)],
+        delta[(3, 15)],
+        phi[0],
+        phi[3],
+    ];
+    let want: [f32; 9] = [
+        0.36396444, 0.6596475, 0.36043492, 0.8567653, 0.85177416, 1.0529978, 0.95140713,
+        11.6951685, 7.6683264,
+    ];
+    for (g, w) in got.iter().zip(want.iter()) {
+        assert!(
+            (g - w).abs() <= 1e-6 * w.abs().max(1.0),
+            "golden mismatch: got {g}, want {w}"
+        );
+    }
+}
+
+/// The delta update through the row prior is the hand-folded update it
+/// replaced: adding phi_d to both statistics of a zero-prior Gamma matrix.
+#[test]
+fn delta_step_with_row_prior_equals_hand_folded_prior() {
+    let sim = simulate(5, &[0.0; 5], 3);
+    let y1_di = sim.stat.indv_y1_stat(0).clone();
+    let lambda_di = y1_di.map(|y| 0.9 * y + 1.0);
+    let phi = DVec::from_column_slice(&[0.5, 2.0, 8.0, 30.0, 300.0]);
+    let (n_genes, n_indv) = y1_di.shape();
+
+    let mut folded = GammaMatrix::new((n_genes, n_indv), 0.0, 0.0);
+    let mut num = y1_di.clone();
+    let mut den = lambda_di.clone();
+    for d in 0..n_genes {
+        num.row_mut(d).add_scalar_mut(phi[d]);
+        den.row_mut(d).add_scalar_mut(phi[d]);
+    }
+    folded.update_stat(&num, &den);
+    folded.calibrate();
+
+    let mut row = GammaMatrix::with_row_prior((n_genes, n_indv), &phi, &phi);
+    row.update_stat(&y1_di, &lambda_di);
+    row.calibrate();
+
+    let planes = [
+        (folded.posterior_mean(), row.posterior_mean()),
+        (folded.posterior_sd(), row.posterior_sd()),
+        (folded.posterior_log_mean(), row.posterior_log_mean()),
+        (folded.posterior_log_sd(), row.posterior_log_sd()),
+    ];
+    for (f, r) in planes {
+        for (x, y) in f.iter().zip(r.iter()) {
+            assert!((x - y).abs() < 1e-5, "{x} != {y}");
+        }
+    }
+}
