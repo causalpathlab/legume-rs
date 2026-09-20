@@ -152,16 +152,16 @@ Default order of operations in `cocoa diff`:
      cannot chase per-gene noise, and the individual effects δ are shrunk with a strength that
      tracks expression level.
 
-   The fit runs in two passes over gene blocks: φ free in the first pass (yielding the evidence),
-   the global trend, then a warm-started second pass with φ fixed at the trend. The
-   permutation test repeats both passes under every relabeling, so the prior is re-estimated under
-   the null.
+   The fit runs in two passes over gene blocks: a common starting φ in the first pass, one profile
+   per gene at that fixed point, the global trend, then a warm-started second pass with φ fixed at
+   the trend. The permutation test repeats both passes under every relabeling, so the trend is
+   re-estimated under the null.
 
 | Estimand | Shape | File |
 |----------|-------|------|
 | τ, average exposure effect | gene × exposure group, per topic | `*.effect.parquet` |
 | δ, individual effect without exposure | gene × individual, per topic | `*.delta.parquet` |
-| `contrast` = log τ(group 1) − log τ(group 0), `dispersion` = φ from the trend | gene | `*.contrast.parquet` |
+| `contrast` = log τ(group 1) − log τ(group 0), `dispersion` = φ from the trend, `log_mean` = log mean count per cell | gene | `*.contrast.parquet` |
 | permutation `contrast`, `z_score`, `pvalue` (with `--n-permutations`) | gene | `*.perm.parquet` |
 
 Inference is by permutation only. `--n-permutations` shuffles exposure labels over individuals and
@@ -182,6 +182,23 @@ standard error is built from. An earlier version of this branch did exactly that
 across permutations; on a null simulation it called most genes significant. A δ that is a genuine
 technical nuisance (a lane or site spanning both exposures) belongs in the denominator as an offset,
 and needs a batch variable that is not the individual.
+
+### What the estimator adjusts for, and what it assumes
+
+Within a pseudobulk, exposed and control individuals' cells share one cell-state rate μ, so the
+exposure contrast is a within-stratum comparison at matched cell state with δ absorbing each
+individual's deviation: stratification on cell state. That adjusts for cell-level confounding that
+acts through state, and the topic residualization handles the composition shift exposure itself
+induces. The matched counterfactual y0 currently enters only through the free per-pseudobulk γ, so
+it does not constrain μ; the adjustment is carried by the shared strata.
+
+Individual-level confounders that act on expression directly are invisible to cell-state matching:
+the projection is centred per individual before partitioning, and matched cells from other
+individuals carry no information about them. The identifying assumption is therefore that
+individual-level confounding enters through cell state, or is supplied through `--covariate-file`
+or `--adjustment-data-files`. The permutation test stays exact under the sharp null regardless;
+what unadjusted confounding does is bias the contrast and inflate rejections on confounded genes,
+which shows up as observed contrasts wider than the permuted ones.
 
 ## Simulation harness
 

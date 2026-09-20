@@ -10,8 +10,6 @@ mod group;
 pub use group::*;
 
 #[cfg(test)]
-mod group_tests;
-#[cfg(test)]
 mod tests;
 
 pub struct CocoaStat {
