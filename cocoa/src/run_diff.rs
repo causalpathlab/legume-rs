@@ -1,4 +1,3 @@
-use crate::cnv_call::{self, CnvArgs};
 use crate::collapse_cocoa_data::*;
 use crate::common::*;
 use crate::input::*;
@@ -7,8 +6,11 @@ use crate::stat::*;
 
 use clap::Parser;
 use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
+use matrix_param::dmatrix_gamma::GammaMatrix;
 use matrix_param::io::*;
+use matrix_param::traits::Inference;
 use matrix_util::common_io::mkdir_parent;
+use matrix_util::parquet::{write_named_table, Column};
 use matrix_util::traits::{IoOps, MatOps};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -203,19 +205,18 @@ pub struct DiffArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Refine cell → pseudobulk membership via senna's multilevel DC-Poisson pass",
-        long_help = "Route pseudobulk assignment through senna's multilevel path.\n\
-                     That is collapse_columns_multilevel_vec,\n\
-                     with BBKNN and DC-Poisson refinement.\n\
+        help = "Skip multilevel refine; use raw hash pseudobulk partition",
+        long_help = "By default, pseudobulk assignment uses senna's multilevel path.\n\
+                     That is collapse_columns_multilevel_vec with BBKNN + DC-Poisson.\n\
+                     HNSW for CoCoA matching is built on the batch-centred projection.\n\
                      \n\
-                     Cells are reassigned across sibling pseudobulks.\n\
-                     The criterion is Poisson likelihood, under NB-Fisher gene weighting.\n\
-                     Each pseudobulk therefore becomes more internally coherent.\n\
+                     Use this flag to restore the older hash-only partition,\n\
+                     with HNSW on the raw (uncentred) projection.\n\
                      \n\
-                     This applies only on the default pseudobulk path,\n\
+                     Applies only on the default pseudobulk path,\n\
                      so with neither --covariate-file nor --adjustment-data-files."
     )]
-    refine: bool,
+    no_refine: bool,
 
     #[arg(
         long,
@@ -230,9 +231,6 @@ pub struct DiffArgs {
         help = "BBKNN fan-out for multilevel refinement"
     )]
     refine_knn_pb_samples: usize,
-
-    #[command(flatten)]
-    cnv: CnvArgs,
 }
 
 /////////////////////////////////////
@@ -262,6 +260,11 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
         .take()
         .ok_or(anyhow::anyhow!("Missing exposure information"))?;
     let n_exposure = exposure_id.len();
+    anyhow::ensure!(
+        n_exposure >= 2,
+        "need at least two exposure groups, found {}",
+        n_exposure
+    );
 
     // Map individual names to numeric indices (filter unmatched "NA" cells)
     let unique_indv_names: Vec<Box<str>> = data
@@ -300,11 +303,19 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     // topic proportions to break collider bias (X -> A <- U).
     //
     // By default ON. Use --no-residualize-topics to disable.
+    // Runs BEFORE topic-conditioned CoCoA matching.
     //
     // Reference: adapted from residual collider stratification,
     //   Hartwig et al. (2023) Eur J Epidemiol
     //   "Avoiding collider bias in MR when performing stratified analyses"
     if !args.no_residualize_topics && data.cell_topic.ncols() > 1 {
+        if topics_look_one_hot(&data.cell_topic) {
+            warn!(
+                "Topic matrix looks one-hot (hard assignments); \
+                 residual collider adjustment is a no-op after row-normalization. \
+                 Use soft proportions (-r) for residualization to affect matching weights."
+            );
+        }
         info!("Residualizing topic proportions to remove exposure-driven collider bias");
         let shifts = remove_exposure_effect_from_topic_proportions(
             &mut data.cell_topic,
@@ -322,6 +333,10 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     }
 
     info!("Assign cells to pseudobulk samples to calibrate the null distribution");
+
+    // Optional diagnostic δ from multilevel collapse (not fed into τ: when
+    // batch = individual, δ and τ are the same estimand and 1/δ breaks the perm null).
+    let mut pb_delta: Option<GammaMatrix> = None;
 
     if let Some(ref cov_file) = args.covariate_file {
         info!("Loading known covariates from: {}", cov_file);
@@ -349,27 +364,30 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             args.block_size,
             &data.cell_to_indv,
         )?;
-    } else if args.refine {
+    } else if args.no_refine {
+        info!("Pseudobulk assignment via hash partition (--no-refine)");
+        data.sparse_data.assign_pseudobulk_individuals(
+            args.proj_dim,
+            args.block_size,
+            &data.cell_to_indv,
+        )?;
+    } else {
         info!(
-            "Refining pseudobulk assignment via multilevel DC-Poisson (num_levels={}, knn_pb_samples={})",
+            "Multilevel refine (default): num_levels={}, knn_pb_samples={}",
             args.refine_num_levels, args.refine_knn_pb_samples
         );
         let mut refine_settings =
             crate::randomly_partition_data::RefineSettings::with_proj_dim(args.proj_dim);
         refine_settings.num_levels = args.refine_num_levels;
         refine_settings.knn_pb_samples = args.refine_knn_pb_samples;
-        data.sparse_data.assign_pseudobulk_individuals_refined(
+        // No exposure strata: PBs may mix exposures; δ (if written) is pooled QA only.
+        let collapsed = data.sparse_data.assign_pseudobulk_individuals_refined(
             args.proj_dim,
             args.block_size,
             &data.cell_to_indv,
             &refine_settings,
         )?;
-    } else {
-        data.sparse_data.assign_pseudobulk_individuals(
-            args.proj_dim,
-            args.block_size,
-            &data.cell_to_indv,
-        )?;
+        pb_delta = collapsed.delta;
     }
 
     let indv_names = data.sparse_data.batch_names().unwrap();
@@ -403,6 +421,22 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     let n_topics = data.cell_topic.ncols();
     let gene_names = data.sparse_data.row_names()?;
 
+    if let Some(d) = pb_delta.take() {
+        let outfile = format!("{}.pb_delta.parquet", args.output);
+        info!(
+            "Writing multilevel δ for QA only ({} genes × {} batches) to {} \
+             (not used in τ; batch=individual makes δ the same estimand as τ)",
+            d.nrows(),
+            d.ncols(),
+            outfile
+        );
+        d.to_melted_parquet(
+            &outfile,
+            (Some(&gene_names), Some("gene")),
+            (Some(&indv_names), Some("batch")),
+        )?;
+    }
+
     let gene_weights: Option<Vec<f32>> = if args.no_adjust_housekeeping {
         None
     } else {
@@ -433,48 +467,68 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
     info!("Collecting statistics...");
     let cocoa_stat = data.sparse_data.collect_cocoa_stat(&cocoa_input)?;
 
-    info!("Optimizing parameters...");
-    let parameters = cocoa_stat.estimate_parameters()?;
+    // Group model: τ(gene × exposure group) is the average exposure effect,
+    // δ(gene × individual) the individual effect with exposure removed.
+    // Individuals without an exposure label form the extra group `n_exposure`.
+    let n_groups = n_exposure + 1;
+    let mut group_names: Vec<Box<str>> = vec!["unassigned".into(); n_groups];
+    for (name, &idx) in exposure_id.iter() {
+        group_names[idx] = name.clone();
+    }
 
-    // CNV calling on the cocoa-residual (indv × topic) signal
-    let cnv_run = cnv_call::run_cnv_calling(
-        &args.cnv,
-        &parameters,
-        &indv_names,
-        &topic_names,
-        &gene_names,
-        &args.output,
-    )?;
+    info!("Optimizing parameters (group model)...");
+    let parameters = cocoa_stat.estimate_group_parameters(&exposure_assignment, n_groups)?;
 
-    // Compute real contrast before consuming parameters
-    let real_contrast = if args.n_permutations > 0 {
-        Some(compute_exposure_contrast(&parameters, &exposure_assignment))
-    } else {
-        None
-    };
+    // Group 1 vs group 0 contrast; its null comes from the permutations below.
+    let group_contrast = compute_group_contrast(&parameters, 1, 0);
 
     info!("Writing down the estimates...");
 
-    let mut tau = Vec::with_capacity(parameters.len());
-    let mut shared = Vec::with_capacity(parameters.len());
-    let mut residual = Vec::with_capacity(parameters.len());
+    let dispersion: Vec<f32> = (0..n_genes)
+        .map(|g| parameters.iter().map(|p| p.dispersion[g]).sum::<f32>() / parameters.len() as f32)
+        .collect();
 
-    for param in parameters.into_iter() {
-        tau.push(param.exposure);
-        shared.push(param.shared);
-        residual.push(param.residual);
-    }
+    let (tau, delta): (Vec<_>, Vec<_>) = parameters
+        .into_iter()
+        .map(|p| (p.exposure, p.indv_delta))
+        .unzip();
 
     to_parquet(
         &tau,
         (Some(&gene_names), Some("gene")),
-        (Some(&indv_exposure_names), Some("individual_exposure")),
+        (Some(&group_names), Some("exposure")),
         Some(&topic_names),
         &format!("{}.effect.parquet", args.output),
     )?;
 
+    to_parquet(
+        &delta,
+        (Some(&gene_names), Some("gene")),
+        (Some(&indv_exposure_names), Some("individual_exposure")),
+        Some(&topic_names),
+        &format!("{}.delta.parquet", args.output),
+    )?;
+
+    {
+        let file = format!("{}.contrast.parquet", args.output);
+        write_named_table(
+            &file,
+            "gene",
+            &gene_names,
+            &[
+                ("contrast".into(), Column::F32(&group_contrast)),
+                ("dispersion".into(), Column::F32(&dispersion)),
+            ],
+        )?;
+        info!(
+            "Wrote {} vs {} contrast to {}",
+            group_names[1], group_names[0], file
+        );
+    }
+
     // Permutation testing
-    if let Some(real_contrast) = real_contrast {
+    if args.n_permutations > 0 {
+        let real_contrast = &group_contrast;
         info!(
             "Building match cache for {} permutations...",
             args.n_permutations
@@ -511,8 +565,8 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
                     hyper_param,
                     perm_gene_weights,
                 )?;
-                let perm_params = perm_stat.estimate_parameters()?;
-                let contrast = compute_exposure_contrast(&perm_params, &perm_exposure);
+                let perm_params = perm_stat.estimate_group_parameters(&perm_exposure, n_groups)?;
+                let contrast = compute_group_contrast(&perm_params, 1, 0);
                 info!("Permutation {}/{}", p + 1, n_perm);
                 Ok(contrast)
             })
@@ -543,36 +597,14 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             p_col[g] = z_to_pvalue(z);
         }
 
-        // Optional CNV concordance columns
-        let concordance = cnv_run.as_ref().map(|(cnv_result, signal)| {
-            cnv_call::compute_deg_concordance(signal, cnv_result, n_genes)
-        });
-
         // Assemble [n_genes × n_cols] numeric matrix and write as parquet,
         // matching the format used elsewhere in cocoa (effect.parquet).
-        let mut col_names: Vec<Box<str>> = vec![
-            "contrast".to_string().into(),
-            "z_score".to_string().into(),
-            "pvalue".to_string().into(),
-        ];
-        let mut columns: Vec<DVec> = vec![
+        let col_names: Vec<Box<str>> = vec!["contrast".into(), "z_score".into(), "pvalue".into()];
+        let columns = [
             DVec::from(contrast_col),
             DVec::from(z_col),
             DVec::from(p_col),
         ];
-        if let Some(c) = concordance.as_ref() {
-            col_names.extend(
-                ["cnv_concordance_r", "cnv_concordance_p", "cnv_state"]
-                    .iter()
-                    .map(|s| (*s).to_string().into()),
-            );
-            columns.push(DVec::from(c.r.clone()));
-            columns.push(DVec::from(c.p.clone()));
-            columns.push(DVec::from_iterator(
-                n_genes,
-                c.state.iter().map(|&x| x as f32),
-            ));
-        }
         let perm_mat = Mat::from_columns(&columns);
         let perm_file = format!("{}.perm.parquet", args.output);
         perm_mat.to_parquet_with_names(
