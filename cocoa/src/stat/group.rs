@@ -148,11 +148,11 @@ impl CocoaStat {
         let mut mu_param = GammaMatrix::new((n_genes, n_pb), self.a0, self.b0);
         let mut gamma_param = GammaMatrix::new((n_genes, n_pb), self.a0, self.b0);
         let mut tau_param = GammaMatrix::new((n_genes, n_groups), self.a0, self.b0);
-        // delta's prior Gamma(phi_d, phi_d) is per gene, so it is added to the
-        // statistics by hand below instead of through the scalar (a0, b0).
-        let mut delta_param = GammaMatrix::new((n_genes, n_indv), 0.0, 0.0);
 
         let mut phi = DVec::from_element(n_genes, PHI_INIT);
+        // delta's prior is Gamma(phi_d, phi_d) per gene; re-set whenever phi is
+        // re-estimated (takes effect at the next update).
+        let mut delta_param = GammaMatrix::with_row_prior((n_genes, n_indv), &phi, &phi);
         let mut phi_fits = 0usize;
         let mut tau_dx = Mat::from_element(n_genes, n_groups, 1.0);
         let mut delta_di = Mat::from_element(n_genes, n_indv, 1.0);
@@ -161,8 +161,6 @@ impl CocoaStat {
         let mut denom_dp = Mat::zeros(n_genes, n_pb);
         let mut m_di = Mat::zeros(n_genes, n_indv);
         let mut lambda_di = Mat::zeros(n_genes, n_indv);
-        let mut num_di = Mat::zeros(n_genes, n_indv);
-        let mut den_di = Mat::zeros(n_genes, n_indv);
         let mut prev_tau = tau_dx.clone();
         let mut prev_delta = delta_di.clone();
 
@@ -202,13 +200,7 @@ impl CocoaStat {
             // delta(d,i) ~ Gamma(phi_d, phi_d): (y1 + phi) / (tau m + phi)
             lambda_di.copy_from(&tau_dx.select_columns(indv_to_group));
             lambda_di.component_mul_assign(&m_di);
-            num_di.copy_from(&y1_di);
-            den_di.copy_from(&lambda_di);
-            for d in 0..n_genes {
-                num_di.row_mut(d).add_scalar_mut(phi[d]);
-                den_di.row_mut(d).add_scalar_mut(phi[d]);
-            }
-            delta_param.update_stat(&num_di, &den_di);
+            delta_param.update_stat(&y1_di, &lambda_di);
             delta_param.calibrate_with(CalibrateTarget::MeanOnly);
             delta_di.copy_from(delta_param.posterior_mean());
 
@@ -218,6 +210,7 @@ impl CocoaStat {
                     < CONVERGENCE_TOL;
             if sweeps % PHI_UPDATE_EVERY == 0 || converged || sweeps == self.n_opt_iter {
                 phi = estimate_dispersion(&y1_di, &lambda_di, &phi, phi_fits == 0);
+                delta_param.set_row_prior(&phi, &phi);
                 phi_fits += 1;
             }
             if converged {
@@ -260,9 +253,16 @@ fn concat_blocks(mut blocks: Vec<CocoaGroupOut>) -> CocoaGroupOut {
         .into_iter()
         .map(|b| (b.exposure, b.indv_delta))
         .unzip();
+    let indv_delta = GammaMatrix::vconcat(indv_delta, true);
+    debug_assert!(
+        indv_delta
+            .row_prior()
+            .is_some_and(|(a, _)| a == &dispersion),
+        "stacked delta prior must equal the stacked dispersion"
+    );
     CocoaGroupOut {
         exposure: GammaMatrix::vconcat(exposure, true),
-        indv_delta: GammaMatrix::vconcat(indv_delta, true),
+        indv_delta,
         dispersion,
     }
 }
