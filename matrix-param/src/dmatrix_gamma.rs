@@ -4,7 +4,7 @@ extern crate special;
 
 use crate::io::*;
 use crate::traits::*;
-use nalgebra::DMatrix;
+use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -16,6 +16,9 @@ pub struct GammaMatrix {
     //////////////////////
     a0: f32,
     b0: f32,
+    /// Per-row prior `(a0, b0)`, overriding the scalar pair when set.
+    /// Lengths equal `num_rows`. See [`Self::with_row_prior`].
+    row_prior: Option<(DVector<f32>, DVector<f32>)>,
     ///////////////////////////
     // sufficient statistics //
     ///////////////////////////
@@ -44,6 +47,7 @@ impl TwoStatParam for GammaMatrix {
             num_columns: dims.1,
             a0: a,
             b0: b,
+            row_prior: None,
             a_stat: DMatrix::from_element(dims.0, dims.1, a),
             b_stat: DMatrix::from_element(dims.0, dims.1, b),
             // `estimated_mean` is eager: the coordinate descent reads
@@ -70,16 +74,42 @@ impl TwoStatParam for GammaMatrix {
         self.add_stat(update_a, update_b);
     }
     fn reset_stat(&mut self) {
-        self.a_stat.fill(self.a0);
-        self.b_stat.fill(self.b0);
+        match &self.row_prior {
+            None => {
+                self.a_stat.fill(self.a0);
+                self.b_stat.fill(self.b0);
+            }
+            Some((a0, b0)) => {
+                // Column-wise copies are contiguous in column-major storage and
+                // are a no-op on a released (0 x 0) plane.
+                for mut col in self.a_stat.column_iter_mut() {
+                    col.copy_from(a0);
+                }
+                for mut col in self.b_stat.column_iter_mut() {
+                    col.copy_from(b0);
+                }
+            }
+        }
     }
     fn update_stat_col(&mut self, update_a: &Self::Mat, update_b: &Self::Mat, k: usize) {
-        self.a_stat
-            .column_mut(k)
-            .copy_from(&update_a.map(|x| x + self.a0));
-        self.b_stat
-            .column_mut(k)
-            .copy_from(&update_b.map(|x| x + self.b0));
+        match &self.row_prior {
+            None => {
+                self.a_stat
+                    .column_mut(k)
+                    .copy_from(&update_a.map(|x| x + self.a0));
+                self.b_stat
+                    .column_mut(k)
+                    .copy_from(&update_b.map(|x| x + self.b0));
+            }
+            Some((a0, b0)) => {
+                let mut a = self.a_stat.column_mut(k);
+                a.copy_from(update_a);
+                a += a0;
+                let mut b = self.b_stat.column_mut(k);
+                b.copy_from(update_b);
+                b += b0;
+            }
+        }
     }
 
     // fn nrows(&self) -> usize {
@@ -266,7 +296,7 @@ impl GammaMatrix {
     /// its writer checked this.
     #[must_use]
     pub fn has_data_support(&self, row: usize, col: usize) -> bool {
-        self.a_stat[(row, col)] > self.a0
+        self.a_stat[(row, col)] > self.a0_at(row)
     }
 
     /// The unregularized rate at `(row, col)`: `(a_stat − a0) / (b_stat − b0)`
@@ -282,8 +312,8 @@ impl GammaMatrix {
     /// value.
     #[must_use]
     pub fn evidence_mean(&self, row: usize, col: usize) -> f32 {
-        let a = self.a_stat[(row, col)] - self.a0;
-        let b = self.b_stat[(row, col)] - self.b0;
+        let a = self.a_stat[(row, col)] - self.a0_at(row);
+        let b = self.b_stat[(row, col)] - self.b0_at(row);
         if a > 0.0 && b > 0.0 {
             a / b
         } else {
@@ -291,9 +321,46 @@ impl GammaMatrix {
         }
     }
 
+    /// Prior shape for `row`: its row prior when set, else the scalar `a0`.
+    #[inline]
+    fn a0_at(&self, row: usize) -> f32 {
+        self.row_prior.as_ref().map_or(self.a0, |(a, _)| a[row])
+    }
+
+    /// Prior rate for `row`: its row prior when set, else the scalar `b0`.
+    #[inline]
+    fn b0_at(&self, row: usize) -> f32 {
+        self.row_prior.as_ref().map_or(self.b0, |(_, b)| b[row])
+    }
+
+    /// A matrix whose row `d` has prior `Gamma(a0[d], b0[d])`. The statistics
+    /// start at the prior, as with [`TwoStatParam::new`].
+    pub fn with_row_prior(dims: (usize, usize), a0: &DVector<f32>, b0: &DVector<f32>) -> Self {
+        let mut out = Self::new(dims, 0.0, 0.0);
+        out.set_row_prior(a0, b0);
+        out.reset_stat();
+        out
+    }
+
+    /// Replace the per-row prior. Accumulated statistics are left as they
+    /// are; the new prior applies at the next `reset_stat` / `update_stat`.
+    pub fn set_row_prior(&mut self, a0: &DVector<f32>, b0: &DVector<f32>) {
+        assert_eq!(a0.len(), self.num_rows, "row prior a0 length != rows");
+        assert_eq!(b0.len(), self.num_rows, "row prior b0 length != rows");
+        self.row_prior = Some((a0.clone(), b0.clone()));
+    }
+
+    /// The per-row prior, if one is set.
+    #[must_use]
+    pub fn row_prior(&self) -> Option<(&DVector<f32>, &DVector<f32>)> {
+        self.row_prior.as_ref().map(|(a, b)| (a, b))
+    }
+
     /// Row-stack per-feature-block parameters (from a gene-blocked fit)
     /// into one `[Σrowsᵢ × K]` parameter. All blocks must share the column
-    /// count and hyper-params. Calibrated planes present in the first block
+    /// count and either share the scalar hyper-params or all carry a row
+    /// prior, in which case the row priors are concatenated. Calibrated
+    /// planes present in the first block
     /// are stacked; lazily-empty planes stay empty. `stack_stats` controls
     /// whether `a_stat`/`b_stat` are carried through — pass `false` when the
     /// output only needs posterior estimates, so the heavy sufficient-stat
@@ -304,6 +371,33 @@ impl GammaMatrix {
         let a0 = blocks[0].a0;
         let b0 = blocks[0].b0;
         let nrows: usize = blocks.iter().map(|b| b.num_rows).sum();
+        let row_prior = if blocks[0].row_prior.is_some() {
+            assert!(
+                blocks.iter().all(|b| b.row_prior.is_some()),
+                "vconcat: blocks mix scalar and row priors"
+            );
+            let a = DVector::from_iterator(
+                nrows,
+                blocks
+                    .iter()
+                    .flat_map(|b| b.row_prior.as_ref().expect("checked").0.iter().copied()),
+            );
+            let b = DVector::from_iterator(
+                nrows,
+                blocks
+                    .iter()
+                    .flat_map(|b| b.row_prior.as_ref().expect("checked").1.iter().copied()),
+            );
+            Some((a, b))
+        } else {
+            assert!(
+                blocks
+                    .iter()
+                    .all(|b| b.row_prior.is_none() && b.a0 == a0 && b.b0 == b0),
+                "vconcat: blocks must share hyper-params"
+            );
+            None
+        };
         let a_stat = stack_field(&blocks, nrows, ncols, stack_stats, |g| &g.a_stat);
         let b_stat = stack_field(&blocks, nrows, ncols, stack_stats, |g| &g.b_stat);
         let estimated_mean = stack_field(&blocks, nrows, ncols, true, |g| &g.estimated_mean);
@@ -316,6 +410,7 @@ impl GammaMatrix {
             num_columns: ncols,
             a0,
             b0,
+            row_prior,
             a_stat,
             b_stat,
             estimated_mean,
