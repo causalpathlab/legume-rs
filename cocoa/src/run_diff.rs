@@ -415,9 +415,13 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
 
     info!("Writing down the estimates...");
 
-    let dispersion: Vec<f32> = (0..n_genes)
-        .map(|g| parameters.iter().map(|p| p.dispersion[g]).sum::<f32>() / parameters.len() as f32)
-        .collect();
+    let over_topics = |f: &dyn Fn(&CocoaGroupOut, usize) -> f32| -> Vec<f32> {
+        (0..n_genes)
+            .map(|g| parameters.iter().map(|p| f(p, g)).sum::<f32>() / parameters.len() as f32)
+            .collect()
+    };
+    let dispersion = over_topics(&|p, g| p.dispersion[g]);
+    let log_mean = over_topics(&|p, g| p.log_mean[g]);
 
     let (tau, delta): (Vec<_>, Vec<_>) = parameters
         .into_iter()
@@ -449,6 +453,7 @@ pub fn run_cocoa_diff(args: DiffArgs) -> anyhow::Result<()> {
             &[
                 ("contrast".into(), Column::F32(&group_contrast)),
                 ("dispersion".into(), Column::F32(&dispersion)),
+                ("log_mean".into(), Column::F32(&log_mean)),
             ],
         )?;
         info!(

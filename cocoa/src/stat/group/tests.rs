@@ -31,8 +31,14 @@ struct GroupSim {
     indv_to_group: Vec<usize>,
     /// Planted between-individual dispersion per gene.
     phi_true: Vec<f32>,
-    /// Planted log baseline rate per gene (before the per-pseudobulk factor).
-    log_base_true: Vec<f32>,
+}
+
+/// Largest |a[i] - b[i]|.
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0f32, f32::max)
 }
 
 /// How the planted dispersion varies across genes.
@@ -106,7 +112,6 @@ fn simulate_with(n_genes: usize, beta: &[f32], seed: u64, spec: SimSpec) -> Grou
     let mut y0_dp = Mat::zeros(n_genes, N_PB);
     let mut y1_di = Mat::zeros(n_genes, n_indv);
     let mut phi_true = Vec::with_capacity(n_genes);
-    let mut log_base_true = Vec::with_capacity(n_genes);
 
     for d in 0..n_genes {
         let tau_x = [1.0f32, beta[d].exp()];
@@ -135,7 +140,6 @@ fn simulate_with(n_genes: usize, beta: &[f32], seed: u64, spec: SimSpec) -> Grou
                 .sample(&mut rng);
         }
         phi_true.push(phi);
-        log_base_true.push(log_base);
     }
 
     let mut stat = CocoaStat::new(
@@ -158,7 +162,6 @@ fn simulate_with(n_genes: usize, beta: &[f32], seed: u64, spec: SimSpec) -> Grou
         stat,
         indv_to_group,
         phi_true,
-        log_base_true,
     }
 }
 
@@ -257,16 +260,11 @@ fn gene_blocks_do_not_change_the_contrast() {
         .unwrap();
     let a = compute_group_contrast(&whole, 1, 0);
     let b = compute_group_contrast(&blocked, 1, 0);
-    let worst = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0f32, f32::max);
-    // Blocks only change the dispersion shrinkage center; the contrast must
-    // agree to well inside the between-individual noise.
-    assert!(worst < 0.05, "block fit differs from whole fit by {worst}");
+    // Every update is row-separable and the trend is global, so block size
+    // only leaves floating-point noise.
+    let worst = max_abs_diff(&a, &b);
+    assert!(worst < 1e-3, "block fit differs from whole fit by {worst}");
     assert_eq!(blocked[0].dispersion.len(), n_genes);
-    // The prior is global, so block size may only leave trajectory noise in phi.
     let worst_phi = whole[0]
         .dispersion
         .iter()
@@ -274,7 +272,7 @@ fn gene_blocks_do_not_change_the_contrast() {
         .map(|(w, b)| (w - b).abs() / w)
         .fold(0f32, f32::max);
     assert!(
-        worst_phi < 0.3,
+        worst_phi < 1e-3,
         "block phi differs from whole phi by {worst_phi} relative"
     );
 }
@@ -345,21 +343,19 @@ fn cox_reid_profile_is_less_biased_than_unadjusted() {
             }
         }
     }
-    let log_mean = DVec::from_element(n_genes, 0.0);
-    let prev = DVec::from_element(n_genes, PHI_INIT);
-    let ml = profile_dispersion(&y, &lambda, &group, 2, &log_mean, &prev, true, false);
-    let cr = profile_dispersion(&y, &lambda, &group, 2, &log_mean, &prev, true, true);
-    let med = |f: &DispersionFit| {
-        let v: Vec<f32> = f
-            .log_phi_hat
+    let layout = ActiveLayout::new(&vec![true; n_indv], &group, 2);
+    let ml = profile_dispersion(&y, &lambda, &layout, false);
+    let cr = profile_dispersion(&y, &lambda, &layout, true);
+    let med = |e: &[GeneEvidence]| {
+        let v: Vec<f32> = e
             .iter()
+            .map(|g| g.log_phi_hat)
             .filter(|x| x.is_finite())
             .map(|x| x.exp())
             .collect();
         median(&v)
     };
     let (m_ml, m_cr) = (med(&ml), med(&cr));
-    eprintln!("cox-reid: ML median {m_ml:.3}, CR median {m_cr:.3}, truth {phi}");
     assert!(
         (m_cr - phi).abs() < (m_ml - phi).abs(),
         "CR median {m_cr} not closer to {phi} than ML median {m_ml}"
@@ -394,15 +390,13 @@ fn dispersion_trend_recovers_planted_slope() {
         "slope {} vs planted 0.4",
         prior.b
     );
-    let fit = params[0].dispersion_fit.as_ref().expect("evidence");
+    // The trend at each gene's mean tracks the planted phi up to the planted
+    // scatter (sd 0.3) plus the profile noise.
     let mean_abs_err = (0..n_genes)
-        .map(|d| {
-            let want = 8f32.ln() + 0.4 * sim.log_base_true[d];
-            (prior.log_phi_trend(fit.log_mean[d]) - want).abs()
-        })
+        .map(|d| (prior.log_phi_trend(params[0].log_mean[d]) - sim.phi_true[d].ln()).abs())
         .sum::<f32>()
         / n_genes as f32;
-    assert!(mean_abs_err < 0.25, "trend mean abs error {mean_abs_err}");
+    assert!(mean_abs_err < 0.5, "trend mean abs error {mean_abs_err}");
 }
 
 /// With the dispersion prior in place, the contrast matches an oracle fit run
@@ -430,17 +424,15 @@ fn eb_dispersion_leaves_contrast_near_oracle() {
     let phi_true = DVec::from_column_slice(&sim.phi_true);
     let oracle = sim
         .stat
-        .estimate_group_parameters_with_dispersion(&sim.indv_to_group, 2, GENE_BLOCK, &[phi_true])
+        .fit_with_dispersion(&sim.indv_to_group, 2, GENE_BLOCK, vec![phi_true])
         .unwrap();
     let a = compute_group_contrast(&eb, 1, 0);
     let b = compute_group_contrast(&oracle, 1, 0);
-    let worst = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0f32, f32::max);
-    eprintln!("oracle gap: {worst:.4}");
-    assert!(worst < 0.05, "EB contrast differs from oracle by {worst}");
+    let worst = max_abs_diff(&a, &b);
+    assert!(
+        worst < 0.05,
+        "trend-phi contrast differs from oracle by {worst}"
+    );
     let planted = mean(
         &(0..n_genes)
             .filter(|d| d % 3 == 0)
@@ -484,15 +476,11 @@ fn global_phi_moves_the_contrast_little() {
     let global = DVec::from_element(n_genes, median(&sim.phi_true));
     let one_phi = sim
         .stat
-        .estimate_group_parameters_with_dispersion(&sim.indv_to_group, 2, GENE_BLOCK, &[global])
+        .fit_with_dispersion(&sim.indv_to_group, 2, GENE_BLOCK, vec![global])
         .unwrap();
     let a = compute_group_contrast(&eb, 1, 0);
     let b = compute_group_contrast(&one_phi, 1, 0);
-    let worst = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0f32, f32::max);
+    let worst = max_abs_diff(&a, &b);
     let r = {
         let (ma, mb) = (mean(&a), mean(&b));
         let num: f32 = a
@@ -504,19 +492,8 @@ fn global_phi_moves_the_contrast_little() {
         let db: f32 = b.iter().map(|y| (y - mb).powi(2)).sum::<f32>().sqrt();
         num / (da * db)
     };
-    // Per-gene delta, by contrast, is shrunk with the wrong strength under one phi.
-    let d_eb = eb[0].indv_delta.posterior_log_mean();
-    let d_one = one_phi[0].indv_delta.posterior_log_mean();
-    let delta_gap = d_eb
-        .iter()
-        .zip(d_one.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0f32, f32::max);
-    eprintln!(
-        "global phi vs gene-wise: contrast max|diff| {worst:.4}, cor {r:.4}; max |log delta diff| {delta_gap:.3}"
-    );
     assert!(worst < 0.1, "contrast moved by {worst} under a global phi");
-    assert!(r > 0.99);
+    assert!(r > 0.99, "contrast correlation {r} under a global phi");
 }
 
 /// Trend-only dispersion: every gene's phi is the trend evaluated at its own
@@ -539,13 +516,66 @@ fn dispersion_equals_trend_at_each_gene() {
         .estimate_group_parameters(&sim.indv_to_group, 2)
         .unwrap();
     let prior = params[0].dispersion_prior.expect("fitted prior");
-    let fit = params[0].dispersion_fit.as_ref().expect("evidence");
     for d in 0..n_genes {
-        let want = prior.log_phi_trend(fit.log_mean[d]).exp();
+        let want = prior.log_phi_trend(params[0].log_mean[d]).exp();
         let got = params[0].dispersion[d];
         assert!(
             (got - want).abs() < 1e-4 * want,
             "gene {d}: phi {got} != trend {want}"
         );
     }
+}
+
+/// The same comparison at low counts, where delta's prior dominates the data
+/// and phi sets the weights in tau's denominator: this is the regime where a
+/// wrong phi could move the calls.
+#[test]
+fn global_phi_moves_the_contrast_little_at_low_counts() {
+    let spec = SimSpec {
+        base_log_mean: 0.02f32.ln(),
+        base_log_sd: 1.0,
+        phi: PhiSpec::Trend {
+            a: 8f32.ln(),
+            b: 0.4,
+            sd: 0.8,
+        },
+    };
+    let n_genes = 300;
+    let beta: Vec<f32> = (0..n_genes)
+        .map(|d| if d % 3 == 0 { 0.6 } else { 0.0 })
+        .collect();
+    let sim = simulate_with(n_genes, &beta, 29, spec);
+    let trend = sim
+        .stat
+        .estimate_group_parameters(&sim.indv_to_group, 2)
+        .unwrap();
+    let global = DVec::from_element(n_genes, median(&sim.phi_true));
+    let one_phi = sim
+        .stat
+        .fit_with_dispersion(&sim.indv_to_group, 2, GENE_BLOCK, vec![global])
+        .unwrap();
+    let phi_true = DVec::from_column_slice(&sim.phi_true);
+    let oracle = sim
+        .stat
+        .fit_with_dispersion(&sim.indv_to_group, 2, GENE_BLOCK, vec![phi_true])
+        .unwrap();
+    let a = compute_group_contrast(&trend, 1, 0);
+    let b = compute_group_contrast(&one_phi, 1, 0);
+    let c = compute_group_contrast(&oracle, 1, 0);
+    let counts_per_indv = sim.stat.indv_y1_stat(0).sum() / (n_genes * 2 * N_PER_GROUP) as f32;
+    let planted = mean(
+        &(0..n_genes)
+            .filter(|d| d % 3 == 0)
+            .map(|d| a[d])
+            .collect::<Vec<_>>(),
+    );
+    // Measured: about 0.14 at this depth (0.02 at 600 counts). A wrong phi
+    // does move sparse genes' estimates; this guards against it getting worse.
+    let vs_oracle = max_abs_diff(&a, &c);
+    assert!(
+        vs_oracle < 0.25,
+        "at {counts_per_indv:.1} counts per gene per individual: trend vs oracle {vs_oracle:.3}, \
+         trend vs global {:.3}, planted mean {planted:.3}",
+        max_abs_diff(&a, &b)
+    );
 }
