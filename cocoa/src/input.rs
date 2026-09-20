@@ -192,10 +192,12 @@ fn process_exposure_assignments(
         .map(|w| (w[0].clone(), w[1].clone()))
         .collect();
 
+    // Sorted so group indices (and the sign of the group 1 vs 0 contrast)
+    // do not depend on hash order.
     let exposure_id: HashMap<Box<str>, usize> = indv_to_exposure
         .values()
         .cloned()
-        .collect::<HashSet<_>>()
+        .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .enumerate()
         .map(|(id, val)| (val, id))
@@ -256,26 +258,12 @@ fn read_individual_assignments(
     Ok(result)
 }
 
-/// Determines the appropriate sparse matrix backend from file extension
-fn get_backend_from_extension(file_path: &str) -> anyhow::Result<SparseIoBackend> {
-    match file_ext(file_path)?.to_string().as_str() {
-        "h5" => Ok(SparseIoBackend::HDF5),
-        "zarr" => Ok(SparseIoBackend::Zarr),
-        ext => Err(anyhow::anyhow!(
-            "Unsupported file extension '{}' for data file: {}. Expected 'h5' or 'zarr'",
-            ext,
-            file_path
-        )),
-    }
-}
-
 /// Load sparse SC data for confounder adjustment only (no annotations).
 pub fn read_adjustment_data(data_files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
     let mut sparse_data = SparseIoVec::new();
     for this_data_file in data_files {
         info!("Importing adjustment data: {}", this_data_file);
-        let backend = get_backend_from_extension(this_data_file)?;
-        let mut this_data = open_sparse_matrix(this_data_file, &backend)?;
+        let mut this_data = open_sparse_matrix_by_path(this_data_file)?;
         if preload {
             this_data.preload_columns()?;
         }
@@ -343,8 +331,7 @@ pub fn read_input_data(args: InputDataArgs) -> anyhow::Result<InputData> {
 
         info!("Importing: {}, {:?}", this_data_file, this_indv_file);
 
-        let backend = get_backend_from_extension(this_data_file)?;
-        let mut this_data = open_sparse_matrix(this_data_file, &backend)?;
+        let mut this_data = open_sparse_matrix_by_path(this_data_file)?;
 
         if args.preload_data {
             this_data.preload_columns()?;

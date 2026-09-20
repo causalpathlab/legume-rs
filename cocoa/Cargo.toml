@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Counterfactual Confounder Adjustment for Differential Analysis"
 
-version = "0.2.4"
+version = "0.2.5"
 
 [[bin]]
 name = "cocoa"
@@ -14,14 +14,12 @@ path = "src/main.rs"
 [features]
 default = []
 cuda = [
-    "cnv/cuda",
     "data-beans/cuda",
     "data-beans-alg/cuda",
     "matrix-util/cuda",
     "matrix-param/cuda",
 ]
 metal = [
-    "cnv/metal",
     "data-beans/metal",
     "data-beans-alg/metal",
     "matrix-util/metal",
@@ -31,11 +29,9 @@ hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
 auxiliary-data = { workspace = true }
-cnv = { workspace = true }
 data-beans = { workspace = true }
 data-beans-alg = { workspace = true }
 data-beans-sim = { workspace = true }
-genomic-data = { workspace = true }
 matrix-util = { workspace = true }
 matrix-param = { workspace = true }
 
