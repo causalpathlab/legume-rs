@@ -40,13 +40,13 @@ fn print_logo() {
     long_about = "chickpea — peak-to-gene cis-regulatory linkage\n\
                   \n\
                   Links ATAC peaks to RNA genes from paired single-cell RNA + ATAC.\n\
-                  The intended path trains peak/gene embeddings with graph-embedding-util,\n\
-                  embeds cells, clusters, and refines peak→gene within each cluster,\n\
-                  writing E2G-like parquet:\n\
+                  Pseudobulk via data-beans multilevel collapse (optional batch adjustment).\n\
+                  Train peak/gene embeddings with graph-embedding-util,\n\
+                  embed pb samples, cluster, refine peak→gene within each cluster,\n\
+                  write E2G-like parquet:\n\
                   peaks.parquet (id, chromosome, start, end, class),\n\
                   clusters.parquet (id, name),\n\
-                  peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).\n\
-                  That association path is not fully wired yet — see chickpea/todo.md.",
+                  peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).",
     term_width = 80
 )]
 struct Cli {
@@ -65,17 +65,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Peak→gene linkage via graph-embedding-util (not wired yet)
+    /// Peak→gene linkage via graph-embedding-util
     #[command(
         long_about = "Link ATAC peaks to RNA genes.\n\
                       \n\
-                      Planned pipeline: rough ABC / co-occurrence map,\n\
-                      train peak/gene embeddings with graph-embedding-util (pb-level),\n\
-                      embed cells → cluster → refine peak→gene within each cluster,\n\
-                      write E2G-like parquet (peaks, clusters, peak_gene).\n\
+                      1. Load paired RNA+ATAC; optional RNA-driven cell QC.\n\
+                      2. data-beans multilevel pb collapse (+ refine; optional --use-adjusted).\n\
+                      3. Rough cis co-occurrence map; train peak/gene embeds with ge-util FNE.\n\
+                      4. Embed pb samples → Leiden clusters → within-cluster refine.\n\
+                      5. Write E2G-like parquet (peaks, clusters, peak_gene/chr*).\n\
                       \n\
-                      The old rSVD / SuSiE / knockoff / TMLE path has been removed.\n\
-                      This subcommand currently exits until the ge-util path is wired.\n\
                       See chickpea/todo.md.",
         after_long_help = ENV_HELP,
         aliases = ["p2g", "peak2gene"]
