@@ -1,7 +1,7 @@
 //! Bridge from the concrete Cell Ontology loader to the generic TreeBH core.
 //!
 //! The calling/tree/TreeBH math is generic and lives in `enrichment`
-//! ([`enrichment::annotate_ontology_core`]) with **no** `auxiliary-data`
+//! ([`enrichment::annotate_ontology_core`]) with **no** `data_beans::aux`
 //! dependency — ontology access is injected as closures. This module is the one
 //! place that binds that core to the concrete `data_beans::aux::ontology::Ontology`
 //! OBO loader: load the OBO + the curated `label→CL` map, build the closures,

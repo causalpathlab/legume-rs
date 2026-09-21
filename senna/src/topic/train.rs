@@ -29,7 +29,7 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_penalty: f32,
 }
 
-/// Build the candle-util-side `TrainConfig` from the senna-side bundle.
+/// Build the legume_numeric::candle-side `TrainConfig` from the senna-side bundle.
 /// The anchor-prior hook is included only when priors are attached and
 /// λ > 0; otherwise the hook is `None` and the trainer takes the bare
 /// ELBO path.
@@ -72,7 +72,7 @@ where
         .collect();
 
     // Anchor-prior loss hook: senna injects the CE penalty per level
-    // through the candle-util `loss_hook` slot.
+    // through the legume_numeric::candle `loss_hook` slot.
     let priors = config.anchor_prior_per_level;
     let lambda = config.anchor_penalty;
     let parameters = config.parameters;

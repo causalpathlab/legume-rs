@@ -153,7 +153,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // `--emit-pb-reference` needs it, to know how many cells each carried
     // column stands for. Same work, one more return value.
     //
-    // data-beans-alg hands levels back finest-FIRST, and svd consumes only
+    // data_beans::alg hands levels back finest-FIRST, and svd consumes only
     // the finest: take element 0 of each and drop the coarser tail now — a
     // retained level is up to six `[D, S]` planes of dead weight.
     let ml_params = MultilevelParams {

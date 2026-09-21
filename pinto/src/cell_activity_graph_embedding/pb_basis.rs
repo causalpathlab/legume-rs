@@ -105,7 +105,7 @@ pub fn build_pseudobulks(args: PseudobulkArgs<'_>) -> anyhow::Result<Pseudobulks
 
     // Read the sparse matrix ONCE, at the finest level, then PROPAGATE upward:
     // a coarser level's counts are the column-sums of the finer level's, driven
-    // by the parent map. This is `data-beans-alg`'s multi-level pattern
+    // by the parent map. This is `data_beans::alg`'s multi-level pattern
     // (`feature_coarsening_multilevel`), and it is only valid because
     // `graph_coarsen_multilevel` now guarantees levels nest — before that fix a
     // coarse super-cell was not a union of fine ones and this would have
@@ -382,7 +382,7 @@ fn row_means(m: &Mat) -> nalgebra::DVector<f32> {
 ///
 /// Taking the means as an argument is the whole point: every level must land in
 /// the same affine frame, so they come from the finest level rather than from
-/// each level's own data. `matrix_util`'s `centre_columns` centres by each
+/// each level's own data. `legume_numeric::matrix`'s `centre_columns` centres by each
 /// column's OWN mean, which is a different operation.
 fn row_center_with(m: &Mat, means: &nalgebra::DVector<f32>) -> Mat {
     debug_assert_eq!(means.len(), m.nrows());

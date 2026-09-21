@@ -88,7 +88,7 @@ pub struct PileupArgs {
         value_delimiter = ',',
         help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs",
         long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs,\n\
-                     case-insensitive. Uses the auxiliary-data relaxed gene-name scheme;\n\
+                     case-insensitive. Uses the shared relaxed gene-name scheme;\n\
                      all matched genes are aggregated into one pileup."
     )]
     genes: Vec<Box<str>>,
@@ -312,7 +312,7 @@ fn parse_row_name_full(name: &str) -> Option<(&str, &str, &str, i64)> {
     }
 }
 
-/// Relaxed gene matching, consistent with the auxiliary-data
+/// Relaxed gene matching, consistent with the data_beans::aux
 /// `FeatureNameKind::Gene` canonicalization used for cross-file row
 /// alignment. A row matches when its `gene_part` shares any `_`-split
 /// component with the query, or agrees on the canonical gene symbol

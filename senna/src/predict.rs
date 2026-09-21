@@ -247,7 +247,7 @@ pub struct PredictArgs {
                      The reference is μ ∝ δ?·Σ_k θ_k·exp(β_dk). Regression is by DIVISION.\n\
                      The leftover is written as a NEW sparse backend, gene × cell.\n\
                      \n\
-                     It reuses matrix-util's `adjust_by_division_inplace`. Per cell,\n\
+                     It reuses the shared `adjust_by_division_inplace`. Per cell,\n\
                      x_d /= μ_d·λ. λ = Σ_d x / Σ_d μ is the self-normalizing column scale.\n\
                      So the residual is a per-cell relative fold-change.\n\
                      `senna svd` uses the same division semantics for batches.\n\
@@ -2555,7 +2555,7 @@ fn write_outputs(
 }
 
 /// Regress the reference reconstruction `μ` out of the held-out counts **by
-/// division**, reusing matrix-util's `adjust_by_division_inplace`, and write
+/// division**, reusing legume_numeric::matrix's `adjust_by_division_inplace`, and write
 /// the leftover ("residual expression") to a NEW sparse backend.
 ///
 /// Blocks of cells run in parallel (rayon, like [`run_predict_blocks`]). Per

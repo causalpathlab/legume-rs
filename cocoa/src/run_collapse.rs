@@ -166,7 +166,7 @@ pub fn run_collapse(args: CollapseArgs) -> anyhow::Result<()> {
         Some(w)
     };
 
-    // Delegate to data-beans-alg's collapse_pseudobulk_weighted
+    // Delegate to data_beans::alg's collapse_pseudobulk_weighted
     let collapsed = collapse_pseudobulk_weighted(
         data.sparse_data,
         &annotations,
