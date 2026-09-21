@@ -162,7 +162,7 @@ pub struct PeakToGeneArgs {
         short,
         required = true,
         help = "Output prefix: E2G tables under `{out}/`,\n\
-                embeddings as `{out}.feature_embedding.parquet` etc. (senna-style)"
+                `{out}.peak_embedding.parquet` and `{out}.gene_embedding.parquet`"
     )]
     out: Box<str>,
 }

@@ -2,7 +2,7 @@
 //!
 //! Thin wrapper: typed region+gene graph from [`crate::p2g::abc_map`] edges →
 //! `graph_embedding_util::fne::train`. No local NCE/PBG loop.
-//! Embedding artifacts mirror senna FNE/SIMBA parquet layout.
+//! Writes `{out}.peak_embedding.parquet` and `{out}.gene_embedding.parquet`.
 
 use crate::common::*;
 use crate::p2g::abc_map::PeakGeneEdge;
@@ -10,9 +10,7 @@ use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::fne::{
     train, FneConfig, NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList,
 };
-use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
-use nalgebra::DMatrix;
 
 /// Peak and gene row embeddings after FNE training (CPU `[n, dim]` f32).
 #[derive(Clone, Debug)]
@@ -108,74 +106,72 @@ pub fn train_peak_gene_embeds(
     })
 }
 
-/// Write senna-style embedding parquets under `prefix`:
-/// - `{prefix}.feature_embedding.parquet` — peaks then genes, row axis `feature`
-/// - `{prefix}.feature_types.parquet` — `region` / `gene` per row
-/// - `{prefix}.cell_embedding.parquet` — pb-sample embeds, row axis `cell`
-pub fn write_embedding_parquets(
-    prefix: &str,
-    embeds: &PeakGeneEmbeds,
-    cell_emb: &DMatrix<f32>,
-) -> anyhow::Result<()> {
+/// Write peak and gene embedding parquets under `prefix` (senna layout):
+/// - `{prefix}.peak_embedding.parquet` — region nodes, row axis `peak`
+/// - `{prefix}.gene_embedding.parquet` — gene nodes, row axis `gene`
+///
+/// Cell / pb-sample embeddings are deferred (written later when needed).
+pub fn write_embedding_parquets(prefix: &str, embeds: &PeakGeneEmbeds) -> anyhow::Result<()> {
     anyhow::ensure!(embeds.dim > 0, "empty embedding dim");
     anyhow::ensure!(
-        cell_emb.ncols() == embeds.dim,
-        "cell embedding width {} != feature dim {}",
-        cell_emb.ncols(),
-        embeds.dim
+        embeds.peak.len() == embeds.peak_names.len(),
+        "peak rows vs names mismatch"
+    );
+    anyhow::ensure!(
+        embeds.gene.len() == embeds.gene_names.len(),
+        "gene rows vs names mismatch"
     );
 
     let cols = embedding_col_names(embeds.dim);
-    let n_feat = embeds.peak.len() + embeds.gene.len();
-    let mut feat = Mat::zeros(n_feat, embeds.dim);
-    let mut names: Vec<Box<str>> = Vec::with_capacity(n_feat);
-    let mut types: Vec<Box<str>> = Vec::with_capacity(n_feat);
-
-    for (i, row) in embeds.peak.iter().enumerate() {
-        anyhow::ensure!(row.len() == embeds.dim, "ragged peak embedding");
-        for d in 0..embeds.dim {
-            feat[(i, d)] = row[d];
-        }
-        names.push(embeds.peak_names[i].clone());
-        types.push("region".into());
-    }
-    let off = embeds.peak.len();
-    for (i, row) in embeds.gene.iter().enumerate() {
-        anyhow::ensure!(row.len() == embeds.dim, "ragged gene embedding");
-        for d in 0..embeds.dim {
-            feat[(off + i, d)] = row[d];
-        }
-        names.push(embeds.gene_names[i].clone());
-        types.push("gene".into());
-    }
-
-    let feat_path = format!("{prefix}.feature_embedding.parquet");
-    feat.to_parquet_with_names(&feat_path, (Some(&names), Some("feature")), Some(&cols))?;
-
-    write_named_table(
-        &format!("{prefix}.feature_types.parquet"),
-        "feature",
-        &names,
-        &[(Box::from("type"), Column::Str(&types))],
+    let peak_path = format!("{prefix}.peak_embedding.parquet");
+    rows_to_parquet(
+        &peak_path,
+        &embeds.peak,
+        &embeds.peak_names,
+        "peak",
+        embeds.dim,
+        &cols,
+    )?;
+    let gene_path = format!("{prefix}.gene_embedding.parquet");
+    rows_to_parquet(
+        &gene_path,
+        &embeds.gene,
+        &embeds.gene_names,
+        "gene",
+        embeds.dim,
+        &cols,
     )?;
 
-    let n_cells = cell_emb.nrows();
-    let mut cell = Mat::zeros(n_cells, embeds.dim);
-    let cell_names: Vec<Box<str>> = (0..n_cells)
-        .map(|i| format!("pb_{i}").into_boxed_str())
-        .collect();
-    for i in 0..n_cells {
-        for d in 0..embeds.dim {
-            cell[(i, d)] = cell_emb[(i, d)];
+    info!(
+        "Wrote embeddings: {peak_path} ({} peaks × {}), {gene_path} ({} genes × {})",
+        embeds.peak.len(),
+        embeds.dim,
+        embeds.gene.len(),
+        embeds.dim
+    );
+    Ok(())
+}
+
+fn rows_to_parquet(
+    path: &str,
+    rows: &[Vec<f32>],
+    names: &[Box<str>],
+    row_axis: &str,
+    dim: usize,
+    cols: &[Box<str>],
+) -> anyhow::Result<()> {
+    let mut mat = Mat::zeros(rows.len(), dim);
+    for (i, row) in rows.iter().enumerate() {
+        anyhow::ensure!(
+            row.len() == dim,
+            "ragged {row_axis} embedding at row {i}: len {} != {dim}",
+            row.len()
+        );
+        for d in 0..dim {
+            mat[(i, d)] = row[d];
         }
     }
-    let cell_path = format!("{prefix}.cell_embedding.parquet");
-    cell.to_parquet_with_names(&cell_path, (Some(&cell_names), Some("cell")), Some(&cols))?;
-
-    info!(
-        "Wrote embeddings: {feat_path} ({} features × {}), {cell_path} ({} cells × {})",
-        n_feat, embeds.dim, n_cells, embeds.dim
-    );
+    mat.to_parquet_with_names(path, (Some(names), Some(row_axis)), Some(cols))?;
     Ok(())
 }
 

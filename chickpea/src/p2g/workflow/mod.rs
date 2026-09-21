@@ -79,7 +79,7 @@ pub fn run_from_pseudobulk(
 
     info!("Embedding pb samples from gene embeddings...");
     let sample_mat = embed_pb_samples(rna_pb, &embeds.gene)?;
-    write_embedding_parquets(out_dir, &embeds, &sample_mat)?;
+    write_embedding_parquets(out_dir, &embeds)?;
     info!(
         "Clustering {} pb samples (min_cluster_samples={})...",
         sample_mat.nrows(),
