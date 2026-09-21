@@ -76,7 +76,9 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     );
     anyhow::bail!(
         "peak-to-gene via graph-embedding-util is not wired yet \
-         (rSVD / SuSiE / knockoff / TMLE path removed); see chickpea/todo.md \
+         (rSVD / SuSiE / knockoff / TMLE removed). Stages: abc_map → embed_ge → \
+         cluster/refine → parquet_out. See chickpea/todo.md and \
+         docs/superpowers/plans/2026-09-21-chickpea-ge-util-p2g.md \
          (out prefix would be {})",
         args.out
     );
