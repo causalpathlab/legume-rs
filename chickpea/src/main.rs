@@ -42,13 +42,11 @@ fn print_logo() {
                   Links ATAC peaks to RNA genes from paired single-cell RNA + ATAC.\n\
                   The intended path trains peak/gene embeddings with graph-embedding-util,\n\
                   embeds cells, clusters, and refines peak→gene within each cluster,\n\
-                  writing E2G-like parquet (peaks / clusters / peak_gene).\n\
-                  That association path is not wired yet — see chickpea/todo.md.\n\
-                  \n\
-                  Working ATAC fixture:\n\
-                  ~/work/writing/paper-chickpea/data/10k_pbmc_ATACv2-qc.zarr.zip\n\
-                  E2G schema example:\n\
-                  ~/work/writing/paper-chickpea/data/e2g/",
+                  writing E2G-like parquet:\n\
+                  peaks.parquet (id, chromosome, start, end, class),\n\
+                  clusters.parquet (id, name),\n\
+                  peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).\n\
+                  That association path is not fully wired yet — see chickpea/todo.md.",
     term_width = 80
 )]
 struct Cli {

@@ -4,11 +4,15 @@
 
 **Goal:** Wire chickpea `peak-to-gene` to train peak/gene embeddings with `graph-embedding-util`, refine links within cell clusters, and write E2G-like parquet.
 
-**Architecture:** Chickpea owns data loading, rough ABC/co-occurrence edges, cell clustering, within-cluster refine, and parquet I/O. All embedding training goes through `graph-embedding-util` (prefer FNE / simba-style typed graphs with `region` + `gene` node types — do not reimplement NCE/PBG). Interim CLI stub on branch `ypp/chickpea-ditch-rsvd-knockoff` is replaced incrementally.
+**Architecture:** Chickpea owns data loading, rough ABC/co-occurrence edges, cell clustering, within-cluster refine, and parquet I/O. All embedding training goes through `graph-embedding-util` (prefer FNE / simba-style typed graphs with `region` + `gene` node types — do not reimplement NCE/PBG). Interim CLI stub is replaced incrementally.
 
 **Tech Stack:** Rust, `graph-embedding-util`, `data-beans`, `genomic-data`, parquet (Arrow), clap.
 
-**Spec:** [`chickpea/todo.md`](../../../chickpea/todo.md) (practical algorithm + E2G working example under `~/work/writing/paper-chickpea/data/e2g/`; ATAC fixture `10k_pbmc_ATACv2-qc.zarr.zip`).
+**Spec:** [`chickpea/todo.md`](../../../chickpea/todo.md) — practical algorithm + E2G-like output schema:
+
+- `peaks.parquet`: id, chromosome, start, end, class
+- `clusters.parquet`: id, name
+- `peak_gene/chr*.parquet`: id, score, target_gene_id, target_gene_name, target_gene_tss, enhancer_gene_distance, model, chromosome, enhancer_id, cell_type_id
 
 ## Global Constraints
 
@@ -88,17 +92,18 @@
 **Files:**
 - Implement: `parquet_out.rs`
 - Modify: `run.rs`, `main.rs` help
-- Reference schemas: `~/work/writing/paper-chickpea/data/e2g/`
+- Reference schemas: E2G-like columns listed in the Spec header above
 
 - [ ] Write `peaks.parquet`, `clusters.parquet`, `peak_gene/chr*.parquet`
 - [ ] `run_peak_to_gene` runs full pipeline end-to-end on sim or tiny fixture
 - [ ] Clippy + test
 - [ ] Commit: `feat(chickpea): E2G-like parquet peak-to-gene output`
 
-### Task 6: Dry-run notes on 10k PBMC ATAC QC
+### Task 6: Wire `run` end-to-end
 
-- [ ] Document in `todo.md` or README how to point at `10k_pbmc_ATACv2-qc.zarr.zip` (ATAC-only / gene-activity path may still be partial)
-- [ ] Commit only if docs change
+- [ ] `run_peak_to_gene` orchestrates abc_map → embed_ge → cluster/refine → parquet_out
+- [ ] Clippy + test
+- [ ] Commit: `feat(chickpea): wire peak-to-gene orchestration`
 
 ---
 

@@ -31,6 +31,7 @@ data-beans = { workspace = true, features = ["aux", "alg"] }
 legume-numeric = { workspace = true, features = ["matrix", "param", "candle", "mcmc"] }
 graph-embedding-util = { workspace = true }
 genomic-data = { workspace = true }
+parquet = { workspace = true }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

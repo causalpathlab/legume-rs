@@ -5,7 +5,7 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
 
 ## TODO
 
-* [x] download ABC data available in Jesse Engreitz (Stanford) lab. i like their schema... and .parquet file... let's use them `~/work/writing/paper-chickpea/data/e2g/`
+* [x] download ABC / E2G reference data (Engreitz lab schema + parquet)
 
 * [x] study ABC model.. what is the generative model? it's just activity co-occurrence
 
@@ -13,11 +13,10 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
     1. learn rough ABC map — pb co-occurrence between peaks and genes (multiome: both modalities; ATAC-only: mimic gene activity from ATAC)
     2. train peak + gene embeddings with **`graph-embedding-util`** (simba / bge-style; prefer pb-level; do not reimplement in chickpea)
     3. embed cells in that space → group into clusters (min-cell gate; prefer joint RNA+ATAC or RNA-led clusters) → **refine peak→gene within each cluster** (pb-per-cluster)
-    4. emit **E2G-like parquet** whenever possible — working example `~/work/writing/paper-chickpea/data/e2g/`:
-       - `peaks.parquet` ← `enhancers.parquet`
-       - `clusters.parquet` ← `cell_types.parquet`
-       - `peak_gene/chr*.parquet` ← `enhancer_gene_predictions/` (gene id/name/tss denormalized on link rows; `cluster_id` plays E2G `cell_type_id`)
-    - working ATAC input: `~/work/writing/paper-chickpea/data/10k_pbmc_ATACv2-qc.zarr.zip` (prefer over raw zarr/h5)
+    4. emit **E2G-like parquet**:
+       - `peaks.parquet`: id, chromosome, start, end, class  (← enhancers)
+       - `clusters.parquet`: id, name  (← cell_types)
+       - `peak_gene/chr*.parquet`: id, score, target_gene_id, target_gene_name, target_gene_tss, enhancer_gene_distance, model, chromosome, enhancer_id, cell_type_id (= cluster)  (← enhancer_gene_predictions)
 
 * [ ] open question: how should we model multi-resolution Y (gene RNA/ATAC) ~ X (ATAC peaks, 1kb / 10kb / 100kb)?
 

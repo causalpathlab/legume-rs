@@ -881,6 +881,7 @@ dependencies = [
  "ndarray",
  "ndarray-rand",
  "num_cpus",
+ "parquet",
  "rand 0.10.2",
  "rand_distr 0.6.0",
  "rayon",
