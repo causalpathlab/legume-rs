@@ -10,8 +10,6 @@ mod group;
 pub use group::*;
 
 #[cfg(test)]
-mod group_tests;
-#[cfg(test)]
 mod tests;
 
 pub struct CocoaStat {
@@ -58,10 +56,6 @@ impl CocoaStat {
             a0: a0.unwrap_or(1.),
             b0: b0.unwrap_or(1.),
         }
-    }
-
-    pub fn num_topics(&self) -> usize {
-        self.n_topics
     }
 
     pub fn y1_stat_mut(&mut self, k: usize) -> &mut Mat {

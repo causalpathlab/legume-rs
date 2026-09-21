@@ -11,7 +11,7 @@ use legume_numeric::matrix::mtx_io;
 use legume_numeric::matrix::traits::{IoOps, MatOps, SampleOps};
 use log::info;
 use rand::SeedableRng;
-use rand_distr::{weighted::WeightedIndex, Distribution, Poisson, Uniform};
+use rand_distr::{weighted::WeightedIndex, Distribution, Gamma, Normal, Poisson, Uniform};
 
 use rayon::prelude::*;
 
@@ -34,6 +34,12 @@ struct GlmSimulator {
     effect_size: f32,
     rseed: u64,
     depth_gamma_hyperparam: (f32, f32),
+    /// SD of the per-gene log baseline rate (0 = every gene at the same level).
+    gene_mean_sd: f32,
+    /// `(a, b, s0)`: log phi_g = a + b log m_g + N(0, s0^2), with the
+    /// individual effect delta_gi ~ Gamma(phi_g, phi_g). `None` keeps the
+    /// Gaussian residual.
+    indv_dispersion: Option<(f32, f32, f32)>,
 }
 
 struct GlmOut {
@@ -41,12 +47,32 @@ struct GlmOut {
     sample_to_exposure: Vec<(usize, usize)>,
     confounder_nk: Mat,
     causal_m: Vec<(usize, usize)>,
+    /// Per gene `(m_g, phi_g)`: baseline mean rate per cell and the planted
+    /// between-individual dispersion; `None` without a dispersion trend.
+    dispersion_m: Option<Vec<(f32, f32)>>,
+}
+
+/// One simulated gene: its log rate over individuals and, with a planted
+/// dispersion trend, its baseline mean rate and phi.
+struct GeneDraw {
+    gene: usize,
+    log_rate: Mat,
+    planted: Option<(f32, f32)>,
 }
 
 struct TripletsOut {
     mtx_shape: (usize, usize, usize),
     triplets: Vec<(u64, u64, f32)>,
     samples: Vec<usize>,
+}
+
+/// `N(0, sd)` draw, or exactly zero when `sd` is zero.
+fn normal_or_zero(rng: &mut rand::rngs::StdRng, sd: f32) -> f32 {
+    if sd > 0.0 {
+        Normal::new(0.0, sd).expect("positive sd").sample(rng)
+    } else {
+        0.0
+    }
 }
 
 impl GlmSimulator {
@@ -104,13 +130,17 @@ impl GlmSimulator {
             .collect();
 
         // 3.b. Generate individual-level data with confounding effects
-        let mut data: Vec<(usize, Mat)> = (0..self.n_genes)
+        let mut data: Vec<GeneDraw> = (0..self.n_genes)
             .into_par_iter()
             .map(|g| {
+                // Every draw for this gene comes from one seeded stream, so
+                // the gene loop is reproducible whatever its thread order.
+                let gene_seed = legume_numeric::matrix::rand_util::mix_seed(self.rseed, g as u64);
+                let mut grng = rand::rngs::StdRng::seed_from_u64(gene_seed);
+                let log_base = normal_or_zero(&mut grng, self.gene_mean_sd);
                 // residual, irreducible errors
-                let eps_n = Mat::rnorm(1, self.n_indv);
                 // gene-specific confounding effects
-                let conf_k = Mat::rnorm(1, self.n_covar);
+                let conf_k = Mat::rnorm_seeded(1, self.n_covar, gene_seed.wrapping_add(1));
                 let mut covar_n = conf_k * &confounder_nk.transpose();
                 let mu_covar = covar_n.mean();
                 let sig_covar = covar_n.variance().sqrt().max(MIN_VARIANCE);
@@ -118,25 +148,58 @@ impl GlmSimulator {
                     .iter_mut()
                     .for_each(|x| *x = (*x - mu_covar) / sig_covar);
 
-                if causal_genes.contains_key(&g) {
-                    let (_cat, assign) = causal_genes.get(&g).expect("should have assignment");
-
-                    let ret = assign * self.pve_gene.max(0.).sqrt()
-                        + covar_n * self.pve_covar.sqrt()
-                        + eps_n * (1. - self.pve_gene - self.pve_covar).max(0.).sqrt();
-                    (g, ret)
+                // Fixed part: exposure effect (causal genes) and confounding.
+                let (fixed_n, pve_fixed) = if let Some((_cat, assign)) = causal_genes.get(&g) {
+                    (
+                        assign * self.pve_gene.max(0.).sqrt() + covar_n * self.pve_covar.sqrt(),
+                        self.pve_gene + self.pve_covar,
+                    )
                 } else {
-                    let ret = covar_n * self.pve_covar.sqrt()
-                        + eps_n * (1. - self.pve_covar).max(0.).sqrt();
-                    (g, ret)
+                    (covar_n * self.pve_covar.sqrt(), self.pve_covar)
+                };
+
+                match self.indv_dispersion {
+                    Some((a, b, s0)) => {
+                        // Baseline mean rate per cell before the random effect
+                        // (delta has mean 1) and before depth.
+                        let m_g = fixed_n.iter().map(|u| (log_base + u).exp()).sum::<f32>()
+                            / self.n_indv as f32;
+                        let phi = (a + b * m_g.ln() + normal_or_zero(&mut grng, s0))
+                            .exp()
+                            .clamp(1e-2, 1e4);
+                        let delta = Gamma::new(phi, 1.0 / phi).expect("valid gamma");
+                        let log_rate = fixed_n.map(|u| {
+                            let d: f32 = delta.sample(&mut grng);
+                            log_base + u + d.ln()
+                        });
+                        GeneDraw {
+                            gene: g,
+                            log_rate,
+                            planted: Some((m_g, phi)),
+                        }
+                    }
+                    None => {
+                        // residual, irreducible errors
+                        let eps_n = Mat::rnorm_seeded(1, self.n_indv, gene_seed.wrapping_add(2));
+                        let log_rate = (fixed_n + eps_n * (1. - pve_fixed).max(0.).sqrt())
+                            .add_scalar(log_base);
+                        GeneDraw {
+                            gene: g,
+                            log_rate,
+                            planted: None,
+                        }
+                    }
                 }
             })
             .collect();
 
-        data.sort_by_key(|&(g, _)| g);
+        data.sort_by_key(|d| d.gene);
+        let dispersion_m = self
+            .indv_dispersion
+            .map(|_| data.iter().map(|d| d.planted.expect("planted")).collect());
         let data_mn = data
             .into_iter()
-            .map(|(_, x)| x.row(0).into_owned())
+            .map(|d| d.log_rate.row(0).into_owned())
             .collect::<Vec<_>>();
 
         Ok(GlmOut {
@@ -144,6 +207,7 @@ impl GlmSimulator {
             sample_to_exposure,
             confounder_nk,
             causal_m: causal_genes.into_iter().map(|(g, (c, _))| (g, c)).collect(),
+            dispersion_m,
         })
     }
 
@@ -313,10 +377,39 @@ pub struct SimOneTypeArgs {
         long,
         value_delimiter = ',',
         default_value = "1.0,1.0",
-        value_name = "SHAPE,RATE",
-        help = "Gamma(shape, rate) hyperparameters for the per-cell depth factor ρ_j"
+        value_name = "SHAPE,SCALE",
+        help = "Gamma(shape, scale) hyperparameters for the per-cell depth factor ρ_j"
     )]
     gamma_hyperparam: Vec<f32>,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_name = "SD",
+        help = "SD of the per-gene log baseline rate.\n\
+                0 keeps every gene at the same baseline."
+    )]
+    gene_mean_sd: f32,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "A,B",
+        help = "Dispersion-vs-mean trend for the individual effect:\n\
+                log phi_g = A + B * log m_g,\n\
+                with delta_gi ~ Gamma(phi_g, phi_g) replacing the Gaussian residual.\n\
+                Writes {out}.dispersion.tsv.gz with the planted m_g and phi_g."
+    )]
+    indv_dispersion_trend: Option<Vec<f32>>,
+
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_name = "S0",
+        requires = "indv_dispersion_trend",
+        help = "Scatter of log phi_g around the trend, N(0, S0^2)"
+    )]
+    indv_dispersion_sd: f32,
 
     #[arg(long, default_value_t = 42, help = "Random seed")]
     rseed: u64,
@@ -370,6 +463,22 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
         ));
     }
 
+    let indv_dispersion = match args.indv_dispersion_trend.as_deref() {
+        None => None,
+        Some([a, b]) => {
+            anyhow::ensure!(
+                args.indv_dispersion_sd >= 0.0,
+                "`indv-dispersion-sd` must be non-negative"
+            );
+            Some((*a, *b, args.indv_dispersion_sd))
+        }
+        Some(_) => anyhow::bail!("need exactly two values for `indv-dispersion-trend`"),
+    };
+    anyhow::ensure!(
+        args.gene_mean_sd >= 0.0,
+        "`gene-mean-sd` must be non-negative"
+    );
+
     mkdir_parent(&args.output)?;
 
     let depth_gamma_hyperparam = (args.gamma_hyperparam[0], args.gamma_hyperparam[1]);
@@ -389,6 +498,8 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
         effect_size: args.effect_size,
         rseed: args.rseed,
         depth_gamma_hyperparam,
+        gene_mean_sd: args.gene_mean_sd,
+        indv_dispersion,
     };
 
     info!("Simulating underlying individual-level data...");
@@ -436,6 +547,20 @@ pub fn run_sim_one_type_data(args: SimOneTypeArgs) -> anyhow::Result<()> {
     )?;
     glm.confounder_nk.to_tsv(&conf_file)?;
     glm.data_mn.to_tsv(&data_file)?;
+    if let (Some(disp), Some((a, b, s0))) = (glm.dispersion_m.as_ref(), indv_dispersion) {
+        let disp_file = mtx_file.replace(".mtx.gz", ".dispersion.tsv.gz");
+        let mut lines = vec!["gene\tmean\tphi".to_string()];
+        lines.extend(
+            disp.iter()
+                .enumerate()
+                .map(|(g, (m, phi))| format!("{}\t{}\t{}", g, m, phi)),
+        );
+        write_types(&lines, &disp_file)?;
+        info!(
+            "Planted dispersion trend: log phi = {} + {} log mean, scatter sd {}",
+            a, b, s0
+        );
+    }
 
     info!("registering triplets ...");
     let mtx_shape = sim_out.mtx_shape;
