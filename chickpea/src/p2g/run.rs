@@ -161,8 +161,9 @@ pub struct PeakToGeneArgs {
         long,
         short,
         required = true,
-        help = "Output prefix: E2G tables under `{out}/`,\n\
-                `{out}.peak_embedding.parquet` and `{out}.gene_embedding.parquet`"
+        help = "Output prefix: E2G tables under `{out}/`;\n\
+                `{out}.peak_embedding.parquet`, `.gene_embedding.parquet`,\n\
+                `.cell_embedding.parquet`"
     )]
     out: Box<str>,
 }
