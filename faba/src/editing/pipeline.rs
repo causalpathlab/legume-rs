@@ -890,14 +890,14 @@ fn process_bam_to_backend(
 
     let (modality, pos_channel, neg_channel) = match ctx.params.mod_type {
         ModificationType::M6A { .. } => (
-            auxiliary_data::feature_rows::M6A,
-            auxiliary_data::feature_rows::METHYLATED,
-            auxiliary_data::feature_rows::UNMETHYLATED,
+            data_beans::aux::feature_rows::M6A,
+            data_beans::aux::feature_rows::METHYLATED,
+            data_beans::aux::feature_rows::UNMETHYLATED,
         ),
         ModificationType::AtoI => (
-            auxiliary_data::feature_rows::ATOI,
-            auxiliary_data::feature_rows::EDITED,
-            auxiliary_data::feature_rows::UNEDITED,
+            data_beans::aux::feature_rows::ATOI,
+            data_beans::aux::feature_rows::EDITED,
+            data_beans::aux::feature_rows::UNEDITED,
         ),
     };
 

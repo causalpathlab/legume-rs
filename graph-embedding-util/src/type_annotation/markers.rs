@@ -137,10 +137,10 @@ pub fn parse_and_match_markers(
 }
 
 /// Coverage below which a panel is reported as degraded rather than merely noted. Shared with
-/// `auxiliary-data`'s gene-set reconciliation, which asks the same question of GAF/GMT term
+/// `data_beans::aux`'s gene-set reconciliation, which asks the same question of GAF/GMT term
 /// sets — a marker panel is just another term→genes map, and a thin overlap means the same
 /// thing in both.
-use auxiliary_data::gene_sets::COVERAGE_WARN_FRAC as WARN_COVERAGE;
+use data_beans::aux::gene_sets::COVERAGE_WARN_FRAC as WARN_COVERAGE;
 
 /// How many under-covered types to name before truncating the warning.
 const MAX_LISTED: usize = 10;
@@ -234,7 +234,7 @@ fn report_panel_coverage(
 /// membership reader (header and `#` rows skipped), mapping spaces in
 /// cell-type names → `_`.
 pub(super) fn read_marker_tsv(path: &str) -> Result<Vec<(Box<str>, Box<str>)>> {
-    let out: Vec<(Box<str>, Box<str>)> = auxiliary_data::gene_sets::read_membership_pairs(path)
+    let out: Vec<(Box<str>, Box<str>)> = data_beans::aux::gene_sets::read_membership_pairs(path)
         .with_context(|| format!("reading markers {path}"))?
         .into_iter()
         .map(|(gene, ct)| (gene, Box::from(ct.replace(' ', "_"))))

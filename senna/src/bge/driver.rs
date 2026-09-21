@@ -600,8 +600,8 @@ fn write_pb_embeddings(
     levels: &[ge::fit::PbLevelEmbedding],
     batch_names: &[Box<str>],
 ) -> anyhow::Result<()> {
-    use matrix_util::dmatrix_util::concatenate_vertical;
-    use matrix_util::parquet::{write_named_table, Column};
+    use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
+    use legume_numeric::matrix::parquet::{write_named_table, Column};
     if levels.is_empty() {
         return Ok(());
     }

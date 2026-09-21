@@ -1,5 +1,5 @@
 use genomic_data::sam::CellBarcode;
-use matrix_util::membership::Membership;
+use legume_numeric::matrix::membership::Membership;
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -7,7 +7,7 @@ use std::sync::Mutex;
 /// Cell membership data structure for filtering BAM records by cell barcode
 /// Supports exact and prefix matching with caching for performance
 pub struct CellMembership {
-    /// Core membership from matrix-util
+    /// Core membership from legume_numeric::matrix
     inner: Membership,
 
     /// Cache for matched BAM barcodes (thread-safe for parallel processing)

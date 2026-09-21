@@ -2,10 +2,10 @@ use crate::util::common::*;
 use crate::util::input::read_expr_data;
 use clap::Parser;
 use dmatrix_gamma::GammaMatrix;
-use matrix_param::dmatrix_gamma;
-use matrix_param::io::ParamIo;
-use matrix_param::traits::TwoStatParam;
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::param::dmatrix_gamma;
+use legume_numeric::param::io::ParamIo;
+use legume_numeric::param::traits::TwoStatParam;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtPropensityArgs {
@@ -110,7 +110,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
     // physically adjacent downstream (lr-activity's spatial filter, plot's
     // mesh) through the missing-column fallback.
     let edge_kind: Option<Vec<i32>> =
-        if matrix_util::parquet::peek_parquet_field_names(&args.coord_pair_file)?
+        if legume_numeric::matrix::parquet::peek_parquet_field_names(&args.coord_pair_file)?
             .iter()
             .any(|c| c.as_ref() == "edge_kind")
         {
@@ -280,7 +280,7 @@ pub fn fit_srt_propensity(args: &SrtPropensityArgs) -> anyhow::Result<()> {
         let features = data_vec.row_names()?;
         let data_vertices = data_vec.column_names()?;
 
-        let jobs = matrix_util::utils::generate_minibatch_intervals(
+        let jobs = legume_numeric::matrix::utils::generate_minibatch_intervals(
             data_vec.num_columns(),
             data_vec.num_rows(),
             args.block_size,

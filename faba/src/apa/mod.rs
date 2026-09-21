@@ -12,7 +12,7 @@ pub mod utr_region;
 /////////////////////
 // poly-A site ids //
 /////////////////////
-// A poly-A `site_id` is a channel-less unit row (`auxiliary_data::feature_rows::unit_row`):
+// A poly-A `site_id` is a channel-less unit row (`data_beans::aux::feature_rows::unit_row`):
 // `{gene}/apa/{component}` for the EM mixture, `{gene}/apa/{chr}:{start}` for the
 // simple pileup. It is both a `{batch}_apa_mixture` row name and the `site_id`
 // column of `apa_components.parquet`, so the two join on it — and several callers
@@ -25,7 +25,7 @@ pub(crate) const SITE_INFIX: &str = "/apa/";
 
 /// Format a poly-A `site_id` for `gene`, keyed by a component index or `chr:pos`.
 pub(crate) fn site_id(gene: &str, subunit: &str) -> Box<str> {
-    auxiliary_data::feature_rows::unit_row(gene, auxiliary_data::feature_rows::APA, subunit)
+    data_beans::aux::feature_rows::unit_row(gene, data_beans::aux::feature_rows::APA, subunit)
 }
 
 /// Recover the gene from a poly-A `site_id`, or the whole id when it has no infix.

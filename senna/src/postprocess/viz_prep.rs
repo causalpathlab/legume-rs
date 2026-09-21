@@ -3,7 +3,7 @@
 //! - Raw-gene-space log1p-CPM construction for PB landmarks.
 //! - SVD preprocessing for dimensionality reduction.
 
-use matrix_util::traits::RandomizedAlgs;
+use legume_numeric::matrix::traits::RandomizedAlgs;
 use rayon::prelude::*;
 use senna::embed_common::*;
 
@@ -260,11 +260,11 @@ fn split_id(root: usize, depth: usize, path: usize) -> String {
 /// interpretation.
 pub(crate) fn write_pb_tree(
     prefix: &str,
-    tree: &data_beans_alg::collapse_data::PbTree,
+    tree: &data_beans::alg::collapse_data::PbTree,
     gene_names: &[Box<str>],
 ) -> anyhow::Result<String> {
     let name = |g: usize| gene_names.get(g).map_or("", |n| n.as_ref());
-    let gene_view = |cg: &data_beans_alg::collapse_data::ContrastGene| PbTreeGeneView {
+    let gene_view = |cg: &data_beans::alg::collapse_data::ContrastGene| PbTreeGeneView {
         gene: name(cg.gene),
         loading: cg.loading,
         lfc: cg.lfc,

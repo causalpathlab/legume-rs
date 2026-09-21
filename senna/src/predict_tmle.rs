@@ -19,17 +19,17 @@ use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::{evaluate_latent_masked, EvaluateLatentMaskedConfig};
 use crate::topic::model_metadata::latent_to_theta;
 use crate::topic::predict_common::{nb_fisher_weight, solve_delta_from_sums, DeltaSums};
-use candle_util::encoder::IndexedEmbeddingEncoder;
-use candle_util::vae::masked_topic::LatentHead;
+use legume_numeric::candle::encoder::IndexedEmbeddingEncoder;
+use legume_numeric::candle::vae::masked_topic::LatentHead;
 use senna::embed_common::*;
 
 use crate::logging::new_progress_bar;
 use candle_core::{Device, Tensor};
-use candle_util::encoder::LogSoftmaxEncoder;
-use candle_util::traits::EncoderModuleT;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use indicatif::ParallelProgressIterator;
+use legume_numeric::candle::encoder::LogSoftmaxEncoder;
+use legume_numeric::candle::traits::EncoderModuleT;
 use log::info;
 use rayon::prelude::*;
 

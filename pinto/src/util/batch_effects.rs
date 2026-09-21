@@ -45,11 +45,11 @@
 //! adjustments.
 
 use crate::util::common::*;
-use data_beans_alg::collapse_data::*;
-use data_beans_alg::random_projection::*;
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::io::ParamIo;
-use matrix_param::traits::Inference;
+use data_beans::alg::collapse_data::*;
+use data_beans::alg::random_projection::*;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::io::ParamIo;
+use legume_numeric::param::traits::Inference;
 
 pub struct EstimateBatchArgs {
     pub proj_dim: usize,

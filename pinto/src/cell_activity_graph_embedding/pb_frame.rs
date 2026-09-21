@@ -9,8 +9,8 @@
 //! cell id again.
 
 use crate::util::graph_coarsen::{fold_edges_to_super, MultiLevelCoarsenResult};
+use legume_numeric::matrix::knn_graph::KnnGraph;
 use log::{info, warn};
-use matrix_util::knn_graph::KnnGraph;
 
 #[derive(Debug)]
 pub struct PbFrame {

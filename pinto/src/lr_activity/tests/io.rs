@@ -4,7 +4,7 @@
 //! vanish, so the reader must load either, stringifying numerics.
 
 use crate::lr_activity::io::{attach_batch_from_coord_pairs, EdgeRecord};
-use matrix_util::parquet::{write_named_table, Column};
+use legume_numeric::matrix::parquet::{write_named_table, Column};
 
 fn records(n: usize) -> Vec<EdgeRecord> {
     (0..n)

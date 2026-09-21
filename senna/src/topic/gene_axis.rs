@@ -13,17 +13,17 @@
 //!   unknown gene joining the inherited coarse group whose known members its
 //!   pseudobulk profile most resembles (see `inherit_level_coarsenings`);
 //! - the checkpoint's gene-keyed tensors are gathered onto the new order by
-//!   `candle_util::grow`, which starts an unseen gene at the checkpoint's mean;
+//!   `legume_numeric::candle::grow`, which starts an unseen gene at the checkpoint's mean;
 //! - a free per-gene ρ knows more than that, so [`refine_rho_by_coarsening`]
 //!   moves an unseen gene's row from the global mean to the mean of its coarse
 //!   group's known members. A feature side composed from learned modules takes
 //!   neither: its membership starts flat, the one start that leaves every
-//!   module reachable (see `candle_util::grow`). The families with no per-gene
+//!   module reachable (see `legume_numeric::candle::grow`). The families with no per-gene
 //!   embedding at all take only the gather.
 
 use crate::topic::eval::{GeneRemap, QueryNameOpts};
-use auxiliary_data::feature_names::FeatureNameKindArg;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
+use data_beans::aux::feature_names::FeatureNameKindArg;
 use senna::embed_common::Mat;
 
 /// Name of the per-gene embedding ρ in a masked checkpoint.
@@ -79,11 +79,11 @@ pub(crate) fn remap_for_init_from(
 /// ρ row at the mean of its coarse group's known members instead of the global
 /// mean it was given, so it enters the fit inside that group's neighbourhood.
 pub(crate) fn refine_rho_by_coarsening(
-    parameters: &candle_util::candle_nn::VarMap,
+    parameters: &legume_numeric::candle::candle_nn::VarMap,
     remap: &GeneRemap,
     coarsening: &FeatureCoarsening,
 ) -> anyhow::Result<()> {
-    use matrix_util::traits::ConvertMatOps;
+    use legume_numeric::matrix::traits::ConvertMatOps;
     let var = parameters
         .data()
         .lock()
@@ -100,11 +100,16 @@ pub(crate) fn refine_rho_by_coarsening(
         })?;
     let mut rho = Mat::from_tensor(
         &var.as_tensor()
-            .to_device(&candle_util::candle_core::Device::Cpu)?,
+            .to_device(&legume_numeric::candle::candle_core::Device::Cpu)?,
     )?;
     let known: Vec<bool> = remap.new_to_train.iter().map(Option::is_some).collect();
     fill_rows_by_coarsening(&mut rho, &known, coarsening)?;
-    candle_util::frozen_features::overwrite_var_2d(parameters, RHO_TENSOR, &rho, var.device())?;
+    legume_numeric::candle::frozen_features::overwrite_var_2d(
+        parameters,
+        RHO_TENSOR,
+        &rho,
+        var.device(),
+    )?;
     Ok(())
 }
 

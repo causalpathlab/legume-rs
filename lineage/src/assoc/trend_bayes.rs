@@ -4,7 +4,7 @@
 //! get a Gaussian smoothing prior — vague on the intercept, `N(0, τ²)` on the
 //! standardized spline terms — which is the Bayesian form of a penalized spline (the
 //! posterior mode is exactly a ridge-penalized GAM). ESS samples the posterior with no
-//! tuning (mcmc-util). The association summary is the posterior of the net log-odds
+//! tuning (legume_numeric::mcmc). The association summary is the posterior of the net log-odds
 //! change along the branch: its mean and 90% credible interval, plus an
 //! `lfsr = min(P(effect > 0), P(effect < 0))` — the local false sign rate, small when
 //! the branch's editing rate moves in a consistent direction.
@@ -18,7 +18,7 @@ use rand::rngs::SmallRng;
 use rand_distr::{Distribution, StandardNormal};
 use rayon::prelude::*;
 
-use mcmc_util::engine::EssSampler;
+use legume_numeric::mcmc::engine::EssSampler;
 
 use super::bayes_common::{
     derive_seed, softplus, summarize_posterior, BayesResult, Posterior, INTERCEPT_SD,

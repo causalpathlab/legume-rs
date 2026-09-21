@@ -14,15 +14,15 @@
 //! - **Generic** `feature <TAB> type <TAB> name <TAB> text` with that header.
 
 use anyhow::{Context, Result};
-use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts, GeneSets};
-use auxiliary_data::ontology::Ontology;
+use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::aux::gene_sets::{read_gaf, read_gmt, GafOpts, GeneSets};
+use data_beans::aux::ontology::Ontology;
+use legume_numeric::matrix::common_io::{file_stem, open_buf_reader};
 use log::{info, warn};
-use matrix_util::common_io::{file_stem, open_buf_reader};
 use rustc_hash::FxHashMap;
 use std::io::BufRead;
 
-pub use auxiliary_data::feature_types::{GENE_TYPE, TERM_TYPE};
+pub use data_beans::aux::feature_types::{GENE_TYPE, TERM_TYPE};
 
 /// One feature's text.
 #[derive(Clone, Debug, PartialEq, Eq)]

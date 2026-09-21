@@ -7,9 +7,9 @@
 //! id and root→node order confidence.
 
 use anyhow::Result;
-use matrix_util::branching::Branching;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::principal_curve::{
+use legume_numeric::matrix::branching::Branching;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::principal_curve::{
     fit_principal_curves, LineageCurve, PrincipalCurveArgs, PrincipalCurves,
 };
 use std::collections::{HashMap, HashSet};

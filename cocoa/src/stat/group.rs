@@ -27,7 +27,7 @@
 //! warm-started from pass 1 with phi fixed at the trend.
 
 use super::*;
-use matrix_util::utils::median;
+use legume_numeric::matrix::utils::median;
 use special::Gamma as SpecialGamma;
 
 #[cfg(test)]

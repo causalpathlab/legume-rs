@@ -39,7 +39,7 @@ pub fn clean_outputs(prefix: &str, suffixes: &[&str]) {
     for s in suffixes {
         let path = format!("{prefix}{s}");
         if Path::new(&path).exists() {
-            match matrix_util::common_io::remove_file(&path) {
+            match legume_numeric::matrix::common_io::remove_file(&path) {
                 Ok(()) => removed += 1,
                 Err(e) => log::warn!("--clean: could not remove {path}: {e}"),
             }

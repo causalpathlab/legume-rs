@@ -84,7 +84,7 @@ pub struct MarkerBootstrapConfig {
     /// Re-derive the cell clustering inside every resample, so the **pipeline's own
     /// stochasticity** is absorbed into the support alongside the marker panel's.
     ///
-    /// The kNN graph is deterministic now (matrix-util's seeded instant-distance backend), so the
+    /// The kNN graph is deterministic now (legume_numeric::matrix's seeded instant-distance backend), so the
     /// pipeline reproduces run-to-run. What reclustering absorbs is the clustering's *within-run*
     /// arbitrariness: Leiden picks among near-equal modularity optima, so re-partitioning under a
     /// fresh seed each replicate moves the cells that only ever sat on a partition boundary. A

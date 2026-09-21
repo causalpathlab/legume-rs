@@ -5,12 +5,12 @@ use crate::randomly_partition_data::*;
 use crate::stat::*;
 
 use clap::Parser;
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::io::*;
-use matrix_param::traits::Inference;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::traits::{IoOps, MatOps};
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::traits::{IoOps, MatOps};
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::io::*;
+use legume_numeric::param::traits::Inference;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rayon::prelude::*;

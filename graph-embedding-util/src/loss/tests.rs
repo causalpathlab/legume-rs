@@ -192,7 +192,7 @@ fn cell_cell_sampler_filters_pb_mismatched_edges() {
 /// to the table (the reformulation is a memory fix, not a model change).
 #[test]
 fn embedding_ridge_matches_elementwise_form() {
-    use candle_util::candle_core::{DType, Device, Var};
+    use legume_numeric::candle::candle_core::{DType, Device, Var};
     let dev = Device::Cpu;
     let var = Var::rand(-1.0f32, 1.0, (7, 5), &dev).unwrap();
     let x = var.as_tensor();

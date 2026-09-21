@@ -2,8 +2,8 @@ use super::common::{expand_delta_for_block, process_blocks};
 use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
-use candle_util::topic_refinement::*;
-use candle_util::traits::*;
+use legume_numeric::candle::topic_refinement::*;
+use legume_numeric::candle::traits::*;
 
 /// Configuration for latent evaluation by encoder
 pub(crate) struct EvaluateLatentConfig<'a, Dec> {
@@ -107,10 +107,10 @@ pub(crate) struct QueryNameOpts {
     /// the flag used to drive only `kind` below, so `exact` on an exact-trained
     /// model still scored a canonicalized query. A multiome query layout may
     /// refuse an explicit kind (see `senna::multiome_layout`).
-    pub loader_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
+    pub loader_kind: Option<data_beans::aux::feature_names::FeatureNameKind>,
     /// The rule applied to each query row name before it is matched to the
     /// model's axis.
-    pub kind: auxiliary_data::feature_names::FeatureNameKind,
+    pub kind: data_beans::aux::feature_names::FeatureNameKind,
     pub suffix_delim: Option<char>,
     pub keep_suffix: Option<Box<str>>,
     /// Fraction of the model's genes the query must cover. `0` — the derived
@@ -146,7 +146,7 @@ pub(crate) struct ReconciledNames {
     /// The rule BOTH sides are keyed under. `Exact` when the list already
     /// spells names the way the axis does — `Exact::canonicalize` is the
     /// identity, so one keying rule covers both cases.
-    kind: auxiliary_data::feature_names::FeatureNameKind,
+    kind: data_beans::aux::feature_names::FeatureNameKind,
     keys: rustc_hash::FxHashSet<String>,
 }
 
@@ -156,7 +156,7 @@ impl ReconciledNames {
     where
         I: IntoIterator<Item = &'a str> + Clone,
     {
-        use auxiliary_data::feature_names::FeatureNameKind;
+        use data_beans::aux::feature_names::FeatureNameKind;
         let keys: rustc_hash::FxHashSet<String> =
             names.clone().into_iter().map(str::to_lowercase).collect();
         if axis.iter().any(|a| keys.contains(&a.to_lowercase())) {
@@ -511,7 +511,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use auxiliary_data::feature_names::FeatureNameKind;
+    use data_beans::aux::feature_names::FeatureNameKind;
 
     fn names(xs: &[&str]) -> Vec<Box<str>> {
         xs.iter().map(|s| (*s).into()).collect()

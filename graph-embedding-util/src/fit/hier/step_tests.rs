@@ -5,8 +5,8 @@ use crate::fit::hier::params::{HostOffset, PresetGenes, PresetMode, PresetOffset
 use crate::fit::hier::partition::{Partition, TrackSupport, UnitModules};
 use crate::fit::hier::units::UnitTable;
 use crate::LoraSpec;
-use candle_util::candle_core::Device;
-use candle_util::convert::to_host;
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::convert::to_host;
 
 fn t(cell: u32, feature: u32, count: f32) -> Triplet {
     Triplet {

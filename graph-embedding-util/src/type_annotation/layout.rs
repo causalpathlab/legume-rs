@@ -3,13 +3,13 @@
 
 use super::{AnnotateProjConfig, AnnotateProjOutputs, FEAT_PROJ_ALPHA};
 use anyhow::{Context, Result};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::knn_graph::{self, KnnGraph};
+use legume_numeric::matrix::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::pca::pc_layout_init;
+use legume_numeric::matrix::umap::Umap;
 use log::info;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::knn_graph::{self, KnnGraph};
-use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::pca::pc_layout_init;
-use matrix_util::umap::Umap;
 use rayon::prelude::*;
 
 ////////////////////////////////
@@ -18,7 +18,7 @@ use rayon::prelude::*;
 
 /// Leiden community detection over a prebuilt kNN graph (modularity
 /// objective), returning compacted labels. Mirrors the tail of
-/// `matrix_util::clustering::leiden_clustering` but consumes a graph we
+/// `legume_numeric::matrix::clustering::leiden_clustering` but consumes a graph we
 /// already built rather than rebuilding it.
 pub(super) fn leiden_from_graph(
     graph: &KnnGraph,
@@ -36,7 +36,7 @@ pub(super) fn leiden_from_graph(
 /// UMAP SGD layout off the fuzzy-weighted cell kNN graph, started from the
 /// leading principal components of `cell_u` (`[N×H]` row-major, unit-norm)
 /// rather than from a random scatter. Returns `[N×2]` row-major coords. Uses
-/// the shared `matrix_util::umap` kernel (same as `senna gem-plot`).
+/// the shared `legume_numeric::matrix::umap` kernel (same as `senna gem-plot`).
 ///
 /// Only the *init* moves to PC space here; the graph stays the caller's,
 /// because it is the same one Leiden coarsening and fine-score smoothing

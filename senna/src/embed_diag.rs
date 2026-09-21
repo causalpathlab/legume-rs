@@ -8,8 +8,8 @@
 //! arm. It measures; it decides nothing.
 
 use clap::Args;
-use matrix_util::embedding_geometry::{embedding_geometry, EmbeddingGeometry};
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::embedding_geometry::{embedding_geometry, EmbeddingGeometry};
+use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 use senna::run_manifest;
 

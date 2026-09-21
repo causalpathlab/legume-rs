@@ -17,7 +17,7 @@ use crate::geometry::similarity::{
 use crate::topic::common::{
     load_and_collapse, preferred_posterior_log_mean, LoadCollapseArgs, PreparedData,
 };
-use data_beans_alg::random_projection::binary_sort_columns;
+use data_beans::alg::random_projection::binary_sort_columns;
 use rand::{rngs::SmallRng, SeedableRng};
 use rayon::prelude::*;
 use senna::embed_common::*;
@@ -791,7 +791,7 @@ fn preprocess_layout_data_from_latent(
 
     let landmark_cols: Vec<nalgebra::DVectorView<f32>> =
         landmark_cells.iter().map(|&c| feat_kn.column(c)).collect();
-    let landmark_dict = matrix_util::knn_match::ColumnDict::from_dvector_views(
+    let landmark_dict = legume_numeric::matrix::knn_match::ColumnDict::from_dvector_views(
         landmark_cols,
         (0..n_pb_full).collect(),
     );
@@ -854,9 +854,9 @@ fn preprocess_layout_data_from_latent(
     let n_pb = pb_centroids_kp.ncols();
     let knn = args.knn.clamp(1, n_pb.saturating_sub(1).max(1));
     info!("Building fuzzy kNN graph on PB centroids: n_pb={n_pb}, knn={knn}");
-    let graph = matrix_util::knn_graph::KnnGraph::from_columns(
+    let graph = legume_numeric::matrix::knn_graph::KnnGraph::from_columns(
         &pb_centroids_kp,
-        matrix_util::knn_graph::KnnGraphArgs {
+        legume_numeric::matrix::knn_graph::KnnGraphArgs {
             knn,
             block_size: args.block_size.unwrap_or(1000),
             reciprocal: false,
@@ -1065,9 +1065,9 @@ fn preprocess_layout_data_recompute(
         max_features: 5000,
         feature_list_file: None,
         must_train_file: None,
-        refine: data_beans_alg::refine_multilevel::RefineParams {
+        refine: data_beans::alg::refine_multilevel::RefineParams {
             feature_weighting: args.refine_weighting.into(),
-            ..data_beans_alg::refine_multilevel::RefineParams::default()
+            ..data_beans::alg::refine_multilevel::RefineParams::default()
         },
         // Layout only needs a marginal grid; the training tree is read from
         // the manifest, never recomputed here.

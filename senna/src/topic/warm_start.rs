@@ -8,12 +8,12 @@
 //!
 //! A different gene list is accepted only when the caller hands over a
 //! [`GeneAxisGrowth`]: the checkpoint's gene-keyed tensors are then gathered
-//! onto this run's order by name (`candle_util::grow`). Without one the axes
+//! onto this run's order by name (`legume_numeric::candle::grow`). Without one the axes
 //! must match exactly.
 
 use crate::topic::model_metadata::TopicModelMetadata;
-use candle_util::candle_nn::VarMap;
-pub use candle_util::grow::Growth;
+use legume_numeric::candle::candle_nn::VarMap;
+pub use legume_numeric::candle::grow::Growth;
 
 /// This run's gene axis is not the source run's: how the two align, and the
 /// coarse group an unseen gene was placed in.
@@ -26,7 +26,7 @@ pub struct GeneAxisGrowth<'a> {
     /// has no coarsening to take a mean over. Ignored, present or not, when the
     /// feature side is composed from learned modules: there `n_gene_modules`
     /// decides, and a gained gene's membership starts flat by its own rule.
-    pub coarsening: Option<&'a data_beans_alg::feature_coarsening::FeatureCoarsening>,
+    pub coarsening: Option<&'a data_beans::alg::feature_coarsening::FeatureCoarsening>,
 }
 
 /// Architecture invariants the saved checkpoint must match.
@@ -77,7 +77,7 @@ pub(crate) fn check_feature_side(
 /// an `[M, H]` dictionary. Continuing across that switch asks the loader for
 /// tensors the checkpoint does not contain; continuing between two counts asks
 /// for a membership of a different width, which cannot be reached by appending
-/// (`candle_util::feature_embedding`). Both are refused by the flag that caused
+/// (`legume_numeric::candle::feature_embedding`). Both are refused by the flag that caused
 /// them, rather than further down by a missing variable name.
 fn check_gene_modules(saved: usize, current: usize) -> anyhow::Result<()> {
     if saved == current {
@@ -228,7 +228,7 @@ pub fn warm_start_load(
     let safetensors_path = format!("{prefix}.safetensors");
     log::info!("Warm-starting from {safetensors_path}");
 
-    let dims = candle_util::grow::GrowthDims {
+    let dims = legume_numeric::candle::grow::GrowthDims {
         k_old: metadata.n_topics,
         k_new: expected.n_topics,
         h_old: metadata.embedding_dim.unwrap_or(0),
@@ -236,7 +236,7 @@ pub fn warm_start_load(
         gene_axis: expected
             .gene_axis
             .as_ref()
-            .map(|g| candle_util::grow::AxisRemap {
+            .map(|g| legume_numeric::candle::grow::AxisRemap {
                 new_to_old: &g.remap.new_to_train,
                 n_old: g.remap.d_train,
             }),
@@ -248,7 +248,7 @@ pub fn warm_start_load(
             g.remap.n_mapped,
             g.remap.d_train,
         );
-        candle_util::grow::load_grown(parameters, &safetensors_path, &dims)?;
+        legume_numeric::candle::grow::load_grown(parameters, &safetensors_path, &dims)?;
         // Which feature side this is, is known here and nowhere below: a free
         // table gets its unseen rows refined, a composed one already has the
         // flat membership `grow` gave it, which composes the dictionary's
@@ -285,7 +285,7 @@ pub fn warm_start_load(
         dims.h_old,
         dims.h_new,
     );
-    candle_util::grow::load_grown(parameters, &safetensors_path, &dims)
+    legume_numeric::candle::grow::load_grown(parameters, &safetensors_path, &dims)
 }
 
 #[cfg(test)]

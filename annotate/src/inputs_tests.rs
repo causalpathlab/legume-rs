@@ -2,7 +2,7 @@
 
 use super::load_cluster_labels;
 use crate::mat_io::Mat;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 
 fn write_clusters(dir: &std::path::Path, name: &str, cells: &[&str], labels: &[f32]) -> String {
     let mut m = Mat::zeros(cells.len(), 1);

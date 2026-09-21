@@ -23,7 +23,7 @@
 use super::{block_sgd, densify_mapped, null_intercept, CellEncoder, FoldedRow};
 use crate::fit::config::TrackSpec;
 use crate::fit::projection::FrozenProjection;
-use candle_util::candle_core::Tensor;
+use legume_numeric::candle::candle_core::Tensor;
 use rayon::prelude::*;
 use std::borrow::Cow;
 
@@ -191,7 +191,7 @@ impl CellEncoders {
         h: usize,
         tracks: &TrackSpec,
         paths: &[(u32, String)],
-        dev: &candle_util::candle_core::Device,
+        dev: &legume_numeric::candle::candle_core::Device,
     ) -> anyhow::Result<Self> {
         let mut ordered: Vec<(u32, &str)> = paths.iter().map(|(t, p)| (*t, p.as_str())).collect();
         ordered.sort_by_key(|&(t, _)| t);

@@ -1,5 +1,5 @@
 use super::*;
-use candle_util::convert::to_host;
+use legume_numeric::candle::convert::to_host;
 
 fn as_vec(v: &Var) -> Vec<f32> {
     to_host(v.as_tensor()).unwrap()

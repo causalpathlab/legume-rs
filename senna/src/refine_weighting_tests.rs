@@ -1,6 +1,6 @@
 use super::*;
 use clap::Parser;
-use data_beans_alg::collapse_data::BelowEdge;
+use data_beans::alg::collapse_data::BelowEdge;
 
 #[derive(Parser)]
 struct Cli {

@@ -421,7 +421,7 @@ pub fn fisher_weights_for_weighted_cohort(
 ) -> anyhow::Result<Vec<f32>> {
     let mu_ds = collapsed.mu_observed.posterior_mean();
     let size_s = cell_counts_from(cell_to_pb_finest, mu_ds.ncols(), column_weight)?;
-    data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk(mu_ds, &size_s, coarsening)
+    data_beans::alg::gene_weighting::fisher_weights_from_pseudobulk(mu_ds, &size_s, coarsening)
 }
 
 /// Keep-mask over the loaded columns that excludes the carried pseudobulks,
@@ -513,7 +513,7 @@ pub fn prepare(parent: &str, out: &str) -> anyhow::Result<Option<ReferenceInput>
 
     // The loader takes batch labels as a file, one line per column.
     let batch_file = format!("{out}.pb_reference_batch.txt");
-    matrix_util::common_io::write_types(
+    legume_numeric::matrix::common_io::write_types(
         &vec![meta.batch_label.clone(); meta.cell_counts.len()],
         &batch_file,
     )?;

@@ -74,7 +74,7 @@ pub(crate) fn score_initialized(
     null_comp: &[f32],
 ) -> Vec<InitScore> {
     use rayon::prelude::*;
-    let floor = f64::from(matrix_util::agreement::PROB_FLOOR);
+    let floor = f64::from(legume_numeric::matrix::agreement::PROB_FLOOR);
     let log_null: Vec<f64> = null_comp
         .iter()
         .map(|&q| f64::from(q).max(floor).ln())
@@ -131,8 +131,8 @@ pub(crate) fn write_init_outputs(
     emit_rates: bool,
 ) -> anyhow::Result<()> {
     use graph_embedding_util::transfer::{log_rates, write_alignment_table, GeneStatus};
+    use legume_numeric::matrix::traits::IoOps;
     use log::info;
-    use matrix_util::traits::IoOps;
 
     let Some(init) = fit.init.as_ref() else {
         return Ok(());

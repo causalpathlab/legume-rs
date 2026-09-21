@@ -71,8 +71,8 @@
 #[cfg(test)]
 mod tests;
 
+use legume_numeric::matrix::dmatrix_io::DMatrix;
 use log::{info, warn};
-use matrix_util::dmatrix_io::DMatrix;
 use rayon::prelude::*;
 
 /// How close to the hub a gene must be, as a fraction of the cell cloud's own radius, before it is

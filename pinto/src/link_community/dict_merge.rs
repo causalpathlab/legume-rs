@@ -10,7 +10,7 @@
 //! similarity of per-feature-centred log-rates.
 //!
 //! The output `Vec<BhcMerge>` reuses the merge-tree node type from
-//! `data_beans_alg::bhc` purely as a binary-merge-tree carrier. The
+//! `data_beans::alg::bhc` purely as a binary-merge-tree carrier. The
 //! cut function is the same union-find walk BHC uses; under the
 //! cosine alias, `log_bf` carries cosine similarity and `cutoff` is a
 //! user-chosen similarity threshold rather than a Bayes-factor break
@@ -22,8 +22,8 @@
 //! which is equivalent to the average pairwise similarity between leaves.
 
 use crate::util::common::Mat;
-pub use data_beans_alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
-use matrix_util::traits::MatOps;
+pub use data_beans::alg::bhc::{bhc_cut as cosine_cut, BhcMerge};
+use legume_numeric::matrix::traits::MatOps;
 
 /// Build an agglomerative average-linkage merge tree over the K columns of
 /// `post_log_mean` (feature × community posterior log-mean) using cosine
@@ -31,7 +31,7 @@ use matrix_util::traits::MatOps;
 ///
 /// Returns `K - 1` merges in increasing-id order. Each merge records the
 /// cosine similarity at which the two children were joined in `log_bf`.
-/// The resulting tree can be cut with `data_beans_alg::bhc::bhc_cut`
+/// The resulting tree can be cut with `data_beans::alg::bhc::bhc_cut`
 /// using a cosine-similarity threshold (e.g. 0.9 = collapse columns whose
 /// merge happened at cosine ≥ 0.9).
 ///

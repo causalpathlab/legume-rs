@@ -1,8 +1,8 @@
 use crate::common::*;
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::CalibrateTarget;
-use matrix_param::traits::Inference;
-use matrix_param::traits::*;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::traits::CalibrateTarget;
+use legume_numeric::param::traits::Inference;
+use legume_numeric::param::traits::*;
 use rayon::prelude::*;
 use special::Error;
 

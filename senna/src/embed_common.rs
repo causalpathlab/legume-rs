@@ -18,36 +18,36 @@ pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_stack::*;
 pub use data_beans::sparse_io_vector::*;
 
-pub use candle_util::{candle_core, candle_nn};
+pub use legume_numeric::candle::{candle_core, candle_nn};
 
 pub use clap::{Args, Parser, Subcommand, ValueEnum};
 
-pub use matrix_param::io::ParamIo;
-pub use matrix_param::traits::{Inference, TwoStatParam};
-pub use matrix_util::common_io::{mkdir_parent, remove_file};
-pub use matrix_util::dmatrix_rsvd::nystrom_basis;
-pub use matrix_util::traits::*;
+pub use legume_numeric::matrix::common_io::{mkdir_parent, remove_file};
+pub use legume_numeric::matrix::dmatrix_rsvd::nystrom_basis;
+pub use legume_numeric::matrix::traits::*;
+pub use legume_numeric::param::io::ParamIo;
+pub use legume_numeric::param::traits::{Inference, TwoStatParam};
 
-pub use matrix_util::common_io::file_ext;
-pub use matrix_util::dmatrix_util::concatenate_horizontal;
+pub use legume_numeric::matrix::common_io::file_ext;
+pub use legume_numeric::matrix::dmatrix_util::concatenate_horizontal;
 
-pub use data_beans_alg::collapse_data::*;
-pub use data_beans_alg::feature_coarsening::*;
-pub use data_beans_alg::feature_coarsening_multilevel::{
+pub use data_beans::alg::collapse_data::*;
+pub use data_beans::alg::feature_coarsening::*;
+pub use data_beans::alg::feature_coarsening_multilevel::{
     compute_multilevel_feature_coarsening, refine_multilevel_feature_coarsening, FeatureKnnContext,
     MultilevelRefineParams,
 };
-pub use data_beans_alg::random_projection::*;
+pub use data_beans::alg::random_projection::*;
 
 /// Build `{prefix}0..{prefix}{k-1}` axis-id column names — the explicit
 /// "this column is topic/cluster N" convention used by every K-dim
 /// writer in this crate (and pinto's `C{c}` analogue). A reader can
 /// recover the integer ID from the column name alone, surviving column
 /// reordering, schema audits, and partial subsetting.
-pub use matrix_util::dense_mat_io::axis_id_names;
+pub use legume_numeric::matrix::dense_mat_io::axis_id_names;
 
 /// Inverse of [`axis_id_names`]. Accepts the explicit `{prefix}{c}` form
-/// and the legacy bare-integer fallback (matrix-util's default column
+/// and the legacy bare-integer fallback (legume_numeric::matrix's default column
 /// names) so older parquets still load.
 #[must_use]
 pub fn parse_axis_id(name: &str, prefix: &str) -> Option<i64> {
@@ -76,9 +76,9 @@ pub fn axis_ids_or_positions(cols: &[Box<str>], prefix: &str) -> Vec<i64> {
 }
 
 /// Clap-declared defaults for an `Args` struct — see
-/// [`matrix_util::clap_defaults`]. Re-exported because senna's arg structs name
+/// [`legume_numeric::matrix::clap_defaults`]. Re-exported because senna's arg structs name
 /// it by path in `#[serde(default = "...")]`.
-pub use matrix_util::clap_defaults::clap_defaults;
+pub use legume_numeric::matrix::clap_defaults::clap_defaults;
 
 /// Posterior-mean PB matrix `[D, n_pb]`, preferring the batch-adjusted
 /// estimate when available. Anchor selection and ambient-profile
@@ -87,7 +87,7 @@ pub use matrix_util::clap_defaults::clap_defaults;
 pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
     collapsed.mu_adjusted.as_ref().map_or_else(
         || collapsed.mu_observed.posterior_mean(),
-        matrix_param::traits::Inference::posterior_mean,
+        legume_numeric::param::traits::Inference::posterior_mean,
     )
 }
 
@@ -96,7 +96,7 @@ pub fn preferred_posterior_mean(collapsed: &CollapsedOut) -> &Mat {
 pub fn preferred_posterior_log_mean(collapsed: &CollapsedOut) -> &Mat {
     collapsed.mu_adjusted.as_ref().map_or_else(
         || collapsed.mu_observed.posterior_log_mean(),
-        matrix_param::traits::Inference::posterior_log_mean,
+        legume_numeric::param::traits::Inference::posterior_log_mean,
     )
 }
 
@@ -238,7 +238,7 @@ impl TrainScores {
 }
 
 /// Read a matrix from parquet or delimited text file
-pub use matrix_util::dense_mat_io::read_mat;
+pub use legume_numeric::matrix::dense_mat_io::read_mat;
 
 /// Delimiters a dense bulk table may use.
 pub const BULK_DELIMS: [char; 2] = ['\t', ','];
@@ -321,16 +321,18 @@ impl BulkTableArgs {
 /// it sits. A table with no string column has no names to align on and is
 /// refused rather than read with a data column stringified as names.
 pub fn read_labeled_mat(file_path: &str, header: HeaderArg) -> anyhow::Result<MatWithNames<Mat>> {
-    use matrix_util::common_io::{detect_header_row_numeric, first_line_fields};
+    use legume_numeric::matrix::common_io::{detect_header_row_numeric, first_line_fields};
     Ok(match file_ext(file_path)?.as_ref() {
         "parquet" => {
-            let idx = matrix_util::parquet::first_string_column(file_path)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{file_path}: no string column to take row names from (every column is \
+            let idx = legume_numeric::matrix::parquet::first_string_column(file_path)?.ok_or_else(
+                || {
+                    anyhow::anyhow!(
+                        "{file_path}: no string column to take row names from (every column is \
                      numeric), so there is no name column to align genes on. Write the \
                      table with its gene names as a column."
-                )
-            })?;
+                    )
+                },
+            )?;
             if idx != 0 {
                 info!("{file_path}: row names come from column {idx}, the first string column");
             }
@@ -399,8 +401,8 @@ pub struct BulkDataOut {
 pub fn reconcile_name_kind(
     reference: &[Box<str>],
     others: &[&[Box<str>]],
-) -> auxiliary_data::feature_names::FeatureNameKind {
-    use auxiliary_data::feature_names::FeatureNameKind;
+) -> data_beans::aux::feature_names::FeatureNameKind {
+    use data_beans::aux::feature_names::FeatureNameKind;
     // The same per-axis fold the loader applies across input files.
     let kinds: Vec<FeatureNameKind> = std::iter::once(reference)
         .chain(others.iter().copied())
@@ -535,7 +537,7 @@ pub fn oriented(m: MatWithNames<Mat>, o: Orientation) -> MatWithNames<Mat> {
 /// Read bulk data files and align rows to the given gene list.
 ///
 /// Names are reconciled through the shared canonicalizer
-/// ([`auxiliary_data::feature_names::FeatureNameKind`]) rather than by string
+/// ([`data_beans::aux::feature_names::FeatureNameKind`]) rather than by string
 /// equality, so a bulk file naming genes `ENSG00000105329_TGFB1` aligns to a
 /// reference naming them `TGFB1` (and vice versa) with no pre-editing.
 ///
@@ -654,7 +656,7 @@ pub fn read_bulk_data_aligned(
 }
 
 // `clip_grads_and_step` lived here as a hand-rolled copy of the global-L2 clip.
-// It has been removed in favour of the single `candle_util::vae::clip_grads_and_step`,
+// It has been removed in favour of the single `legume_numeric::candle::vae::clip_grads_and_step`,
 // which additionally skips the step when the gradient norm is non-finite
 // (this copy laundered one `Inf` gradient into all-`NaN` parameters via
 // `Inf * 0`). `senna joint-topic` — its only caller — now imports that one.
@@ -665,15 +667,18 @@ pub fn read_bulk_data_aligned(
 /// The simplex heads store `log θ`, so this is `exp`. The Gaussian
 /// (`masked-vae`) head stores a raw unconstrained `z` and reaches the decoder
 /// through `log_softmax(z)` (see
-/// `candle_util::vae::masked_topic::decoder_log_theta`), so its proportions are
+/// `legume_numeric::candle::vae::masked_topic::decoder_log_theta`), so its proportions are
 /// `softmax(z)`. Plain `exp(z)` — what the θ consumers used to do for every
 /// head alike — is not a proportion at all: unnormalized, and unbounded above.
 ///
 /// Anything needing θ from a masked latent goes through here. The raw latent is
 /// what gets written to disk and is *not* interchangeable with this.
 #[must_use]
-pub fn latent_to_theta(z_nk: &Mat, head: candle_util::vae::masked_topic::LatentHead) -> Mat {
-    use candle_util::vae::masked_topic::LatentHead;
+pub fn latent_to_theta(
+    z_nk: &Mat,
+    head: legume_numeric::candle::vae::masked_topic::LatentHead,
+) -> Mat {
+    use legume_numeric::candle::vae::masked_topic::LatentHead;
     match head {
         LatentHead::Softmax | LatentHead::StickBreaking => z_nk.map(f32::exp),
         LatentHead::Gaussian => {
@@ -727,7 +732,7 @@ pub fn latent_sharpness(theta_nk: &Mat) -> (f32, f32) {
 /// equals cosine distance on the input. A ~zero row is left unchanged —
 /// normalizing it would blow it up to an arbitrary unit direction (and the
 /// retrieval core reads an all-zero row as "no evidence").
-pub use matrix_util::dense_mat_io::l2_normalize_rows_inplace;
+pub use legume_numeric::matrix::dense_mat_io::l2_normalize_rows_inplace;
 
 /// In-place numerically-stable per-row softmax on a host matrix (`[N, K]` →
 /// each row `softmax`ed over K): subtract the row max, `exp`, then divide by
