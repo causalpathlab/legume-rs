@@ -119,7 +119,7 @@ fn bge_writes_its_documented_output_set_and_manifest_kind() {
 #[test]
 fn bge_carries_the_unmatched_rows_of_a_pinned_table_through() {
     use crate::feature_preset::test_support::{assert_carried, widen};
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let dir = tempfile::tempdir().expect("tempdir");
     let data = synthetic_backend(dir.path());
     let first = dir.path().join("first").to_string_lossy().into_owned();

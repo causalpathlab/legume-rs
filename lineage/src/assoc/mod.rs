@@ -34,7 +34,7 @@ mod tests;
 
 use clap::ValueEnum;
 
-use auxiliary_data::feature_rows::{DISTAL, EDITED, METHYLATED, PROXIMAL, UNEDITED, UNMETHYLATED};
+use data_beans::aux::feature_rows::{DISTAL, EDITED, METHYLATED, PROXIMAL, UNEDITED, UNMETHYLATED};
 
 /// Modality whose per-site rate is contrasted between branches.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]

@@ -41,9 +41,9 @@ pub mod simba;
 pub mod transfer;
 pub mod type_annotation;
 
-pub use auxiliary_data::feature_names::FeatureNameKind;
 pub use data::{load_unified_data, validate_multiome_groups, LoadUnifiedArgs, UnifiedData};
-pub use data_beans_alg::refine_multilevel::RefineParams;
+pub use data_beans::alg::refine_multilevel::RefineParams;
+pub use data_beans::aux::feature_names::FeatureNameKind;
 pub use embedding_dim::EmbeddingDim;
 pub use eval::{
     embedding_col_names, save_embedding, save_outputs, save_outputs_named,
@@ -62,10 +62,10 @@ pub use multiome_plan::{
 pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_fixed_t};
 pub use preset_mode::{LoraArgs, LoraSpec, PresetMode, PresetOffsets, PresetRows};
 
-/// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
+/// Graceful-stop on Ctrl+C. Lives in `legume_numeric::matrix` so the annotation crates *below* this one
 /// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same
 /// interrupt-safe replicate combinators — a process must have exactly one SIGINT handler, and
 /// `ctrlc::set_handler` panics on a second registration. Re-exported here so `crate::stop::…` and
 /// `graph_embedding_util::stop::…` keep resolving for the callers that already use them.
-pub use matrix_util::stop;
-pub use matrix_util::stop::{setup_stop_handler, stop_flag};
+pub use legume_numeric::matrix::stop;
+pub use legume_numeric::matrix::stop::{setup_stop_handler, stop_flag};

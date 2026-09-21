@@ -21,8 +21,8 @@ use crate::topic::eval::QueryNameOpts;
 use crate::topic::model_metadata::{
     load_feature_mean, load_shortlist_weights, masked_head_from_model_type, TopicModelMetadata,
 };
-use candle_util::candle_core::Device;
-use candle_util::vae::masked_topic::LatentHead;
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::vae::masked_topic::LatentHead;
 
 /// Every file a masked model must have for *all* of its consumers to work.
 ///
@@ -200,7 +200,7 @@ mod tests {
             std::fs::write(format!("{prefix}.{suffix}"), b"").unwrap();
         }
         if with_shortlist {
-            use matrix_util::traits::IoOps;
+            use legume_numeric::matrix::traits::IoOps;
             let cols: Vec<Box<str>> = vec!["weight".into()];
             nalgebra::DMatrix::<f32>::from_column_slice(4, 1, &[1.0, 1.0, 1.0, 1.0])
                 .to_parquet_with_names(

@@ -11,16 +11,20 @@ description = "Lineage inference, pseudotime, dyn-assoc, and lineage plots"
 
 [features]
 default = []
-cuda = ["graph-embedding-util/cuda", "matrix-util/cuda", "mcmc-util/cuda"]
-metal = ["graph-embedding-util/metal", "matrix-util/metal", "mcmc-util/metal"]
+cuda = [
+    "graph-embedding-util/cuda",
+    "legume-numeric/cuda",
+]
+metal = [
+    "graph-embedding-util/metal",
+    "legume-numeric/metal",
+]
 
 [dependencies]
-auxiliary-data = { workspace = true }
-data-beans = { workspace = true }
+data-beans = { workspace = true, features = ["aux"] }
 enrichment = { workspace = true }
 graph-embedding-util = { workspace = true }
-matrix-util = { workspace = true }
-mcmc-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix", "param", "candle", "mcmc"] }
 plot-utils = { workspace = true }
 
 anyhow = { workspace = true }

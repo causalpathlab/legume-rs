@@ -6,7 +6,7 @@
 //! keeps gene level coherent with the site cut by construction.
 
 use crate::common::*;
-use auxiliary_data::feature_rows::{feature_row, parse_feature_row};
+use data_beans::aux::feature_rows::{feature_row, parse_feature_row};
 use rustc_hash::FxHashMap;
 
 use super::matrix::{OutSpec, Written};
@@ -52,7 +52,9 @@ pub fn repool_gene_level(
     let mut pooled_nnz = vec![0usize; n_pooled];
     let mut scratch = vec![0f32; n_pooled];
     let mut touched: Vec<u32> = Vec::new();
-    for (lb, ub) in matrix_util::utils::generate_minibatch_intervals(cols.len(), 0, Some(8192)) {
+    for (lb, ub) in
+        legume_numeric::matrix::utils::generate_minibatch_intervals(cols.len(), 0, Some(8192))
+    {
         let (_, _, block) = data.read_triplets_by_columns(cols[lb..ub].to_vec())?;
         let mut per_col: Vec<Vec<(u32, f32)>> = vec![Vec::new(); ub - lb];
         for (r, c_local, x) in block {

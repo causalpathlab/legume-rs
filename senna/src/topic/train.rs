@@ -1,6 +1,6 @@
 //! Senna-side glue for the dense VAE topic trainer.
 //!
-//! The training hot loop lives in [`candle_util::vae::topic`]. This
+//! The training hot loop lives in [`legume_numeric::candle::vae::topic`]. This
 //! module keeps senna's `TrainConfig` shape (keyed on `&TopicArgs`),
 //! builds per-level data from `CollapsedOut` + `FeatureCoarsening`, and
 //! wires senna's anchor-prior penalty into the trainer's `loss_hook`.
@@ -9,8 +9,8 @@ use crate::topic::cmd::TopicArgs;
 use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
-use candle_util::decoder::DynDecoderModuleT;
-use candle_util::traits::*;
+use legume_numeric::candle::decoder::DynDecoderModuleT;
+use legume_numeric::candle::traits::*;
 use std::sync::atomic::AtomicBool;
 
 use super::anchor_prior::anchor_penalty_at_level;
@@ -29,15 +29,15 @@ pub(crate) struct TrainConfig<'a> {
     pub anchor_penalty: f32,
 }
 
-/// Build the candle-util-side `TrainConfig` from the senna-side bundle.
+/// Build the legume_numeric::candle-side `TrainConfig` from the senna-side bundle.
 /// The anchor-prior hook is included only when priors are attached and
 /// λ > 0; otherwise the hook is `None` and the trainer takes the bare
 /// ELBO path.
 fn make_candle_config<'a>(
     config: &'a TrainConfig<'a>,
-    hook: Option<&'a candle_util::vae::LevelLossHook<'a>>,
-) -> candle_util::vae::topic::TrainConfig<'a> {
-    candle_util::vae::topic::TrainConfig {
+    hook: Option<&'a legume_numeric::candle::vae::LevelLossHook<'a>>,
+) -> legume_numeric::candle::vae::topic::TrainConfig<'a> {
+    legume_numeric::candle::vae::topic::TrainConfig {
         parameters: config.parameters,
         dev: config.dev,
         epochs: config.args.epochs,
@@ -66,23 +66,28 @@ where
 {
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
     let level_data = build_level_data(collapsed_levels, level_coarsenings, enc_coarsening)?;
-    let level_refs: Vec<candle_util::vae::topic::LevelData> = level_data
+    let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
         .collect();
 
     // Anchor-prior loss hook: senna injects the CE penalty per level
-    // through the candle-util `loss_hook` slot.
+    // through the legume_numeric::candle `loss_hook` slot.
     let priors = config.anchor_prior_per_level;
     let lambda = config.anchor_penalty;
     let parameters = config.parameters;
     let hook_owned = move |loss: Tensor, level: usize| {
         anchor_penalty_at_level(loss, parameters, priors, lambda, level)
     };
-    let hook_ref: &candle_util::vae::LevelLossHook = &hook_owned;
+    let hook_ref: &legume_numeric::candle::vae::LevelLossHook = &hook_owned;
     let candle_cfg = make_candle_config(config, Some(hook_ref));
 
-    let scores = candle_util::vae::topic::train_mixed(&level_refs, encoder, decoders, &candle_cfg)?;
+    let scores = legume_numeric::candle::vae::topic::train_mixed(
+        &level_refs,
+        encoder,
+        decoders,
+        &candle_cfg,
+    )?;
     Ok(TrainScores {
         llik: scores.llik,
         kl: scores.kl,
@@ -100,7 +105,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
 ) -> anyhow::Result<TrainScores> {
     let enc_coarsening = level_coarsenings.last().and_then(|c| c.as_ref());
     let level_data = build_level_data(collapsed_levels, level_coarsenings, enc_coarsening)?;
-    let level_refs: Vec<candle_util::vae::topic::LevelData> = level_data
+    let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
         .collect();
@@ -110,7 +115,7 @@ pub(crate) fn train_mixed_multi_decoder<Enc: EncoderModuleT>(
     // `anchor_penalty: 0.0` here). Keep that behaviour explicitly.
     let candle_cfg = make_candle_config(config, None);
 
-    let scores = candle_util::vae::topic::train_mixed_multi_decoder(
+    let scores = legume_numeric::candle::vae::topic::train_mixed_multi_decoder(
         &level_refs,
         encoder,
         decoders_per_level,

@@ -14,10 +14,10 @@
 //! score reads a cell's own row of `e_cell` directly, with no coarse→fine
 //! pooling.
 
-use candle_util::candle_core::{Device, Result, Tensor};
-use candle_util::candle_nn::VarMap;
-use candle_util::fast_index::gather_rows;
-use candle_util::lora::PinnedLora;
+use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::candle_nn::VarMap;
+use legume_numeric::candle::fast_index::gather_rows;
+use legume_numeric::candle::lora::PinnedLora;
 
 mod modules;
 mod score;
@@ -348,7 +348,7 @@ impl JointEmbedModel {
     /// Put a rank-`rank` LoRA residual on the free `e_feat` of this model, on
     /// the rows `anchored` (ids into the feature axis): the factors are
     /// registered in `varmap` beside the table under the shared LoRA names
-    /// ([`candle_util::lora::factor_names`] of [`E_FEAT_VAR_NAME`]), `u`
+    /// ([`legume_numeric::candle::lora::factor_names`] of [`E_FEAT_VAR_NAME`]), `u`
     /// drawn on the anchored rows from `seed`, `v` at zero. The caller pins
     /// the anchored rows of `e_feat` itself and gives `v` its LoRA+ group.
     /// Refused on a model whose feature side is already composed.
@@ -361,13 +361,13 @@ impl JointEmbedModel {
         seed: u64,
     ) -> Result<Self> {
         if self.composed().is_some() {
-            candle_util::candle_core::bail!(
+            legume_numeric::candle::candle_core::bail!(
                 "with_lora: the feature side is already a composed parameterization"
             );
         }
         let n_features = self.e_feat.dims()[0];
         let lora = PinnedLora::new(n_features, self.embedding_dim, rank, anchored, seed, dev)?;
-        let (u_name, v_name) = candle_util::lora::factor_names(E_FEAT_VAR_NAME);
+        let (u_name, v_name) = legume_numeric::candle::lora::factor_names(E_FEAT_VAR_NAME);
         {
             let mut tbl = varmap.data().lock().unwrap();
             tbl.insert(u_name, lora.u.clone());
@@ -390,14 +390,14 @@ impl JointEmbedModel {
         let n_features = args.rho.nrows();
         let h_src = args.rho.ncols();
         if args.b_feat.len() != n_features {
-            candle_util::candle_core::bail!(
+            legume_numeric::candle::candle_core::bail!(
                 "new_adapted: b_feat has {} entries but rho has {} rows",
                 args.b_feat.len(),
                 n_features
             );
         }
         if args.b_cell.len() != args.n_cells {
-            candle_util::candle_core::bail!(
+            legume_numeric::candle::candle_core::bail!(
                 "new_adapted: b_cell has {} entries but n_cells is {}",
                 args.b_cell.len(),
                 args.n_cells
@@ -407,8 +407,8 @@ impl JointEmbedModel {
         // Constant upload: same `[rows, cols]` layout as `register_var_from_mat`,
         // but deliberately NOT a Var. `to_tensor` returns a transposed view,
         // so make it contiguous for the per-batch index_select/matmul path.
-        let rho = matrix_util::traits::ConvertMatOps::to_tensor(args.rho, dev)
-            .map_err(|e| candle_util::candle_core::Error::Msg(e.to_string()))?
+        let rho = legume_numeric::matrix::traits::ConvertMatOps::to_tensor(args.rho, dev)
+            .map_err(|e| legume_numeric::candle::candle_core::Error::Msg(e.to_string()))?
             .contiguous()?;
 
         let w = register_randn_seeded(

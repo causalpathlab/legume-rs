@@ -2,7 +2,7 @@
 //!
 //! Postprocess after `senna cluster`: aggregates raw counts per cluster to form
 //! the per-gene sufficient stats `T_{k,g} = Σ_{n ∈ k} y_{n,g}`, cluster size
-//! `S_k = |{n : label_n = k}|`, then defers to `data_beans_alg::bhc` for the
+//! `S_k = |{n : label_n = k}|`, then defers to `data_beans::alg::bhc` for the
 //! Dirichlet-Multinomial Bayes-factor merge tree + consensus cut.
 //!
 //! This is the exact recipe pinto uses for link communities, just over cell
@@ -14,7 +14,7 @@
 //!   `{out}.bhc.merges.parquet` — merge tree (`merge_id`, left, right, `log_bf`, `n_cells`)
 //!   `{out}.bhc.cut.parquet`    — consensus id per original cluster (−1 = empty)
 
-use data_beans_alg::bhc::{bhc_cut, bhc_merge, BhcInput, BhcMerge};
+use data_beans::alg::bhc::{bhc_cut, bhc_merge, BhcInput, BhcMerge};
 use senna::cluster_aggregation::accumulate_gene_sum;
 use senna::embed_common::*;
 

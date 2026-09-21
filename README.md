@@ -3,6 +3,10 @@
 - This is a command line based tool runs on Unix-like environments.
 - **fqtl** (functions for QTL analysis), formerly `fagioli`, now lives in
   [`causalpathlab/fqtl-rs`](https://github.com/causalpathlab/fqtl-rs) (`fqtl` binary).
+- Shared libraries are published separately:
+  [`legume-numeric`](https://crates.io/crates/legume-numeric),
+  [`data-beans`](https://crates.io/crates/data-beans),
+  [`hsblock-rs`](https://crates.io/crates/hsblock-rs).
 
 ## Installation
 
@@ -23,7 +27,8 @@ libhdf5 — see [HDF5 support](#hdf5-support) below.
 Alternatively, you can install individual binaries:
 
 ```sh
-cargo install --path data-beans # Data Backend for Extraction And Neighbourhood Search
+cargo install data-beans             # Data Backend for Extraction And Neighbourhood Search
+cargo install data-beans --features sim  # data-beans-sim binary
 cargo install --path senna      # Stochastic data Embedding with Nearest Neighbourhood Adjustment
 cargo install --path pinto      # Proximity-based Interaction Network for Tissue Organization
 cargo install --path lupin      # Lexicon-Using Projection for Identity Naming (text, annotate, lineage, describe)

@@ -1,8 +1,8 @@
 //! Tests of the learned-module parameterization.
 
 use super::*;
-use candle_util::candle_core::{Device, Var};
-use candle_util::nn::sparsemax;
+use legume_numeric::candle::candle_core::{Device, Var};
+use legume_numeric::candle::nn::sparsemax;
 
 fn dev() -> Device {
     Device::Cpu
@@ -139,8 +139,15 @@ fn materialize_composes_and_is_idempotent() {
 fn ridge_lands_on_the_residual() {
     let (m, vm) = build(Some(&[0, 1, 2, 0, 1, 2]), 0.8);
     let r = var(&vm, MODULE_RESIDUAL_VAR_NAME);
-    r.set(&Tensor::ones((6, 4), candle_util::candle_core::DType::F32, &dev()).unwrap())
-        .unwrap();
+    r.set(
+        &Tensor::ones(
+            (6, 4),
+            legume_numeric::candle::candle_core::DType::F32,
+            &dev(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let pen = m
         .feature_ridge(0.5)
         .unwrap()

@@ -4,12 +4,12 @@
 
 use super::graph::{NodeText, PpiOpts, TypedGraphBuilder};
 use super::{fit_fne, FneArgs};
-use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
-use auxiliary_data::ontology::Ontology;
 use clap::Parser;
-use matrix_util::parquet::read_parquet_string_columns_by_name;
-use matrix_util::traits::IoOps;
+use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::aux::gene_sets::{read_gaf, read_gmt, GafOpts};
+use data_beans::aux::ontology::Ontology;
+use legume_numeric::matrix::parquet::read_parquet_string_columns_by_name;
+use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::Mat;
 use senna::run_manifest::{RunKind, RunManifest};
 use std::path::Path;
@@ -109,7 +109,7 @@ fn clap_defaults_are_the_published_recipe_at_the_workspace_dimension() {
 
 #[test]
 fn the_relation_stem_drops_known_extensions_but_keeps_dots_inside_the_name() {
-    use matrix_util::common_io::file_stem;
+    use legume_numeric::matrix::common_io::file_stem;
     assert_eq!(file_stem("/x/y/biogrid.tsv"), "biogrid");
     assert_eq!(
         file_stem("BIOGRID-Homo_sapiens-5.0.256.unique_pairs.protein_coding.tsv.gz"),
@@ -814,7 +814,7 @@ fn fne_pins_gene_rows_to_an_earlier_runs_feature_embedding() {
     let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
     let e2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
     assert_eq!(e2.mat.ncols(), 6, "H taken from the table");
-    let row = |e: &matrix_util::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
+    let row = |e: &legume_numeric::matrix::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
         let i = e.rows.iter().position(|r| r.as_ref() == name).unwrap();
         e.mat.row(i).iter().copied().collect()
     };
@@ -893,7 +893,7 @@ fn fne_anchors_gene_rows_with_a_low_rank_residual() {
     let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
     let e2 = Mat::from_parquet(&format!("{second}.feature_embedding.parquet")).unwrap();
     assert_eq!(e2.mat.ncols(), 6, "H taken from the table");
-    let row = |e: &matrix_util::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
+    let row = |e: &legume_numeric::matrix::traits::MatWithNames<Mat>, name: &str| -> Vec<f32> {
         let i = e.rows.iter().position(|r| r.as_ref() == name).unwrap();
         e.mat.row(i).iter().copied().collect()
     };
@@ -970,7 +970,7 @@ fn fne_carries_the_unmatched_rows_of_a_pinned_table_through() {
         let e1 = Mat::from_parquet(&format!("{first}.feature_embedding.parquet")).unwrap();
         let rho = format!("{out}.feature_embedding.parquet");
         assert_carried(&out, &rho, e1.rows.len(), &extra);
-        let types = auxiliary_data::feature_types::read_feature_types(&out)
+        let types = data_beans::aux::feature_types::read_feature_types(&out)
             .unwrap()
             .unwrap();
         let ct0 = types.iter().find(|(n, _)| n.as_ref() == "CT0").unwrap();

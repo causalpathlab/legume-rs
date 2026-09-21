@@ -20,8 +20,8 @@
 //! current caller, so the objective is written once for it.
 
 use crate::model::FeatModules;
-use candle_util::candle_core::{Device, Result, Tensor};
-use candle_util::candle_nn::ops::log_softmax;
+use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::candle_nn::ops::log_softmax;
 use log::info;
 use rand::{Rng, RngExt};
 use rayon::prelude::*;

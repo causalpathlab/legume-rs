@@ -4,8 +4,8 @@ use crate::site_analysis::miami::depth::read_depth_binned;
 use crate::site_analysis::miami::genemodel::{load_gene_models, models_extent};
 use crate::site_analysis::miami::render::{render_miami, FigOpts, PanelData};
 use arrow::array::{Float32Array, Int64Array, StringArray, UInt64Array};
-use auxiliary_data::feature_names::FeatureNameKind;
 use clap::Args;
+use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::open_sparse_matrix;
 use genomic_data::bed::Bed;
@@ -88,7 +88,7 @@ pub struct PileupArgs {
         value_delimiter = ',',
         help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs",
         long_help = "Genes to pile up: comma-separated symbols (`MYCBP,GNA15`) or Ensembl IDs,\n\
-                     case-insensitive. Uses the auxiliary-data relaxed gene-name scheme;\n\
+                     case-insensitive. Uses the shared relaxed gene-name scheme;\n\
                      all matched genes are aggregated into one pileup."
     )]
     genes: Vec<Box<str>>,
@@ -312,7 +312,7 @@ fn parse_row_name_full(name: &str) -> Option<(&str, &str, &str, i64)> {
     }
 }
 
-/// Relaxed gene matching, consistent with the auxiliary-data
+/// Relaxed gene matching, consistent with the data_beans::aux
 /// `FeatureNameKind::Gene` canonicalization used for cross-file row
 /// alignment. A row matches when its `gene_part` shares any `_`-split
 /// component with the query, or agrees on the canonical gene symbol
@@ -976,7 +976,7 @@ fn print_vertical_histogram(pileup: &BinnedPileup, height: usize) {
 }
 
 fn write_pileup_tsv(tracks: &[&BinnedPileup], output: &str) -> anyhow::Result<()> {
-    let mut writer = matrix_util::common_io::open_buf_writer(output)?;
+    let mut writer = legume_numeric::matrix::common_io::open_buf_writer(output)?;
 
     for pileup in tracks {
         writeln!(

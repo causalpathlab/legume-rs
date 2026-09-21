@@ -1,16 +1,16 @@
 //! Bridge from the concrete Cell Ontology loader to the generic TreeBH core.
 //!
 //! The calling/tree/TreeBH math is generic and lives in `enrichment`
-//! ([`enrichment::annotate_ontology_core`]) with **no** `auxiliary-data`
+//! ([`enrichment::annotate_ontology_core`]) with **no** `data_beans::aux`
 //! dependency — ontology access is injected as closures. This module is the one
-//! place that binds that core to the concrete `auxiliary_data::ontology::Ontology`
+//! place that binds that core to the concrete `data_beans::aux::ontology::Ontology`
 //! OBO loader: load the OBO + the curated `label→CL` map, build the closures,
 //! and run the core. Shared by the term-ORA projection path here and by
 //! `senna annotate-ontology` / `-by-enrichment` (which delegate to it), so the
 //! OBO glue is written once.
 
 use anyhow::Result;
-use auxiliary_data::ontology::Ontology;
+use data_beans::aux::ontology::Ontology;
 use enrichment::{
     annotate_ontology_core, parse_label_map, Mat, OntologyAccess, OntologyParams, OntologyScore,
 };

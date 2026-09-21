@@ -6,8 +6,8 @@
 //! peaky components.
 
 use crate::clone_call::{donor_of, CloneCallConfig, CloneRow};
-use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::parquet::read_table_columns;
+use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::parquet::read_table_columns;
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};

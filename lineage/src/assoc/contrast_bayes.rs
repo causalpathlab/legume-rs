@@ -22,7 +22,7 @@ use rand::rngs::SmallRng;
 use rand_distr::{Distribution, StandardNormal};
 use rayon::prelude::*;
 
-use mcmc_util::engine::EssSampler;
+use legume_numeric::mcmc::engine::EssSampler;
 
 use super::bayes_common::{derive_seed, softplus, summarize_posterior, BayesResult, INTERCEPT_SD};
 use super::contrast::bin_pseudotime;

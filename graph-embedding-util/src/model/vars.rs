@@ -5,10 +5,10 @@
 //! them can borrow the model. Kept together as the layer between a host-side
 //! init and a device Var.
 
-use candle_util::candle_core::{Device, Result, Tensor};
-use candle_util::candle_nn::VarMap;
-use matrix_util::rand_util::name_seed;
-use matrix_util::traits::SampleOps;
+use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::candle_nn::VarMap;
+use legume_numeric::matrix::rand_util::name_seed;
+use legume_numeric::matrix::traits::SampleOps;
 
 use super::INIT_STDEV;
 
@@ -37,7 +37,7 @@ pub(super) fn register_randn_seeded(
         .affine(INIT_STDEV as f64, 0.0)?
         .to_device(dev)?
         .contiguous()?;
-    let var = candle_util::candle_core::Var::from_tensor(&t)?;
+    let var = legume_numeric::candle::candle_core::Var::from_tensor(&t)?;
     varmap
         .data()
         .lock()
@@ -54,7 +54,7 @@ pub(super) fn register_var_from_slice(
     name: &str,
     values: &[f32],
 ) -> Result<Tensor> {
-    let var = candle_util::candle_core::Var::from_slice(values, values.len(), dev)?;
+    let var = legume_numeric::candle::candle_core::Var::from_slice(values, values.len(), dev)?;
     {
         let mut data = varmap.data().lock().unwrap();
         data.insert(name.to_string(), var.clone());
@@ -80,7 +80,7 @@ pub(super) fn register_var_from_mat(
             row_major.push(mat[(i, j)]);
         }
     }
-    let var = candle_util::candle_core::Var::from_tensor(&Tensor::from_vec(
+    let var = legume_numeric::candle::candle_core::Var::from_tensor(&Tensor::from_vec(
         row_major,
         (rows, cols),
         dev,

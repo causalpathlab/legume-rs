@@ -42,12 +42,12 @@ use crate::util::metadata::{create_cage_metadata, RunInputs};
 use crate::util::srt_pipeline::{
     preprocess_srt, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
-use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use clap::Args;
+use data_beans::aux::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
 use graph_embedding_util::embedding_col_names;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 use std::path::Path;
 
@@ -400,8 +400,12 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
                 .ok_or_else(|| anyhow::anyhow!("predict: no cell projection to cluster on"))?;
             let cells_by_dim = proj.proj.transpose(); // [n_cells × k]
             let n_pb = graph_embedding_util::transfer::pseudobulk_count(n_cells);
-            let (_, labels) =
-                matrix_util::principal_graph::kmeans_centroids_seeded(&cells_by_dim, n_pb, 20, 0);
+            let (_, labels) = legume_numeric::matrix::principal_graph::kmeans_centroids_seeded(
+                &cells_by_dim,
+                n_pb,
+                20,
+                0,
+            );
             let row_profiles = crate::link_community::profiles::coarsen_cell_expression_dense(
                 &data_vec, &labels, n_pb,
             )?;
@@ -472,7 +476,7 @@ pub fn predict_cage(args: &PredictArgs) -> anyhow::Result<(Mat, Vec<Box<str>>)> 
         // meant a two-column panel scored senna on the right features and matched
         // nothing here.
         Some(path) => Some(
-            matrix_util::common_io::read_name_list(path)
+            legume_numeric::matrix::common_io::read_name_list(path)
                 .map_err(|e| anyhow::anyhow!("reading --eval-features {path}: {e}"))?,
         ),
         None => None,
@@ -726,7 +730,7 @@ fn write_predictive(out: &str, scores: &[PairScore]) -> anyhow::Result<()> {
 fn training_feature_totals(
     files: &[Box<str>],
     common: &crate::util::input::SrtInputArgs,
-    feature_kind: &auxiliary_data::feature_names::FeatureNameKind,
+    feature_kind: &data_beans::aux::feature_names::FeatureNameKind,
     target_features: &[Box<str>],
 ) -> anyhow::Result<Vec<f64>> {
     // The query's row names were canonicalized on the way in, by the same

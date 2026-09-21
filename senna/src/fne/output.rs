@@ -4,8 +4,8 @@
 use super::graph::TypedGraph;
 use graph_embedding_util as ge;
 use graph_embedding_util::fne::FneOutput;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
 use log::info;
-use matrix_util::parquet::{write_named_table, Column};
 use std::io::Write;
 
 /// `feature <TAB> type <TAB> name <TAB> text`, one row per node carrying
@@ -58,7 +58,7 @@ pub(crate) fn write_outputs(
     )?;
 
     // feature_types.parquet — the node type of every row, same order.
-    auxiliary_data::feature_types::write_feature_types(
+    data_beans::aux::feature_types::write_feature_types(
         prefix,
         &graph.node_names,
         &graph.node_types,

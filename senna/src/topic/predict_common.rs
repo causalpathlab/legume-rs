@@ -10,7 +10,7 @@
 use crate::topic::eval::GeneRemap;
 use candle_core::{Device, Result as CandleResult, Tensor, Var};
 use candle_nn::ops;
-use candle_util::traits::DecoderModuleT;
+use legume_numeric::candle::traits::DecoderModuleT;
 use senna::embed_common::*;
 
 /// Lower / upper bounds on per-(gene, batch) δ. Stops a single noisy batch
@@ -199,8 +199,8 @@ pub fn estimate_delta(
     let ntot = data_vec.num_columns();
     let mut pb_new = Mat::zeros(d_new, n_batches);
 
-    let block_size =
-        block_size.unwrap_or_else(|| matrix_util::utils::default_block_size(data_vec.num_rows()));
+    let block_size = block_size
+        .unwrap_or_else(|| legume_numeric::matrix::utils::default_block_size(data_vec.num_rows()));
     for lb in (0..ntot).step_by(block_size) {
         let ub = (lb + block_size).min(ntot);
         let csc = data_vec.read_columns_csc(lb..ub)?;

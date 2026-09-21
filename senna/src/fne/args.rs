@@ -2,7 +2,7 @@
 //! (the settings SIMBA's `pbg_train` uses) at the workspace's embedding
 //! dimension, so a bare invocation is the published recipe.
 
-use auxiliary_data::feature_names::FeatureNameKindArg;
+use data_beans::aux::feature_names::FeatureNameKindArg;
 use senna::embed_common::*;
 
 #[derive(Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -396,7 +396,7 @@ pub struct FneArgs {
 }
 
 impl FneArgs {
-    pub(crate) fn name_kind(&self) -> auxiliary_data::feature_names::FeatureNameKind {
+    pub(crate) fn name_kind(&self) -> data_beans::aux::feature_names::FeatureNameKind {
         self.feature_name_kind.resolve_or_gene()
     }
 }

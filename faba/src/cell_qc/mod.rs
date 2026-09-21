@@ -478,7 +478,7 @@ fn empty_drops_extend(
         })
         .collect();
 
-    let qvals = matrix_util::hypothesis::benjamini_hochberg(&pvals);
+    let qvals = legume_numeric::matrix::hypothesis::benjamini_hochberg(&pvals);
     let mut added = 0usize;
     for (k, &ci) in candidates.iter().enumerate() {
         if (qvals[k] as f64) < p.ed_fdr && set.insert(counts.cells[ci].barcode.clone()) {

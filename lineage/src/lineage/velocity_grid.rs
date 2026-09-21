@@ -3,8 +3,8 @@
 use anyhow::Result;
 use log::info;
 
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 use std::collections::HashMap;
 
 /// Running sums for one lattice bin of the velocity grid: the member cells' layout
@@ -44,7 +44,7 @@ pub(super) fn velocity_grid_arrows(
     delta: &DMatrix<f32>,
     knn: usize,
 ) -> Vec<(f32, f32, f32, f32)> {
-    use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+    use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
     const GRID: usize = 30;
     const MIN_PER_CELL: usize = 5;
     let (n, h) = (theta.nrows(), theta.ncols());

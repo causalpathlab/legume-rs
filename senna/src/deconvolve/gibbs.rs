@@ -28,8 +28,8 @@ use super::result::{
     residual_stat, split_rhat_ess, Convergence, DeconvResult, ExpressionTensor,
     MIN_DRAWS_FOR_DIAGNOSTICS,
 };
+use legume_numeric::matrix::running_quantile::RunningQuantiles;
 use log::info;
-use matrix_util::running_quantile::RunningQuantiles;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use rand_distr::{Binomial, Distribution, Gamma};

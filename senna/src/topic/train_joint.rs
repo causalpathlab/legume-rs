@@ -5,14 +5,14 @@ use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_nn::AdamW;
-use candle_util::data::*;
-use candle_util::encoder::LogSoftmaxJointEncoder;
-use candle_util::loss::topic_likelihood;
-use candle_util::traits::*;
+use legume_numeric::candle::data::*;
+use legume_numeric::candle::encoder::LogSoftmaxJointEncoder;
+use legume_numeric::candle::loss::topic_likelihood;
+use legume_numeric::candle::traits::*;
 // The canonical clip: skips the optimizer step on a non-finite gradient norm
 // (the former `embed_common` copy laundered `Inf` into `NaN` params).
-use candle_util::vae::clip_grads_and_step;
-use matrix_util::dmatrix_util::concatenate_vertical;
+use legume_numeric::candle::vae::clip_grads_and_step;
+use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) struct SaveContext<'a> {
@@ -347,7 +347,7 @@ where
                 .map(|(x, fc)| -> anyhow::Result<Option<Mat>> {
                     Ok(x.mu_adjusted
                         .as_ref()
-                        .map(matrix_param::traits::Inference::posterior_sample)
+                        .map(legume_numeric::param::traits::Inference::posterior_sample)
                         .transpose()?
                         .map(|y| {
                             let mat = y.sum_to_one_columns().scale(config.args.column_sum_norm);

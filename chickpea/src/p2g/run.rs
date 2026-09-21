@@ -7,8 +7,8 @@ use crate::p2g::input::{load_gene_coords_tsv, load_paired_data};
 use crate::p2g::knockoff::{knockoff_threshold, knockoff_w, KnockoffParams};
 use crate::p2g::output::{write_bed, LinkRecord};
 use crate::p2g::tmle::{centered_log1p, cis_link_stats_tmle, LocoConfounders, ModalityBlock};
-use data_beans_alg::collapse_data::MultilevelParams;
-use data_beans_alg::refine_multilevel::RefineParams;
+use data_beans::alg::collapse_data::MultilevelParams;
+use data_beans::alg::refine_multilevel::RefineParams;
 use genomic_data::coordinates::{find_cis_peaks, load_gene_tss, parse_peak_coordinates};
 use rayon::prelude::*;
 
@@ -206,7 +206,7 @@ pub struct PeakToGeneArgs {
     out: Box<str>,
 }
 
-/// CLI surface for [`matrix_util::knockoff::KnockoffS`].
+/// CLI surface for [`legume_numeric::matrix::knockoff::KnockoffS`].
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum KoSMethod {
     Equi,
@@ -214,7 +214,7 @@ enum KoSMethod {
     Me,
 }
 
-impl From<KoSMethod> for matrix_util::knockoff::KnockoffS {
+impl From<KoSMethod> for legume_numeric::matrix::knockoff::KnockoffS {
     fn from(m: KoSMethod) -> Self {
         match m {
             KoSMethod::Equi => Self::Equicorrelated,
@@ -282,7 +282,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             sort_dim: args.sort_dim,
             num_opt_iter: DEFAULT_OPT_ITER,
             refine: RefineParams::default(),
-            output_calibration: matrix_param::traits::CalibrateTarget::All,
+            output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: true,
@@ -514,7 +514,7 @@ pub fn run_peak_to_gene(args: &PeakToGeneArgs) -> anyhow::Result<()> {
 
 /// Pick `mu_adjusted` (batch-corrected) when requested and available, else
 /// `mu_observed`. Returns the [features, samples] posterior-mean intensities.
-fn pick_pseudobulk(co: &data_beans_alg::collapse_data::CollapsedOut, use_adjusted: bool) -> &Mat {
+fn pick_pseudobulk(co: &data_beans::alg::collapse_data::CollapsedOut, use_adjusted: bool) -> &Mat {
     if use_adjusted {
         if let Some(adj) = co.mu_adjusted.as_ref() {
             return adj.posterior_mean();

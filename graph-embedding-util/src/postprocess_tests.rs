@@ -5,7 +5,7 @@
 //! and invisible to every other test in the crate.
 
 use super::*;
-use candle_util::candle_core::{DType, Device};
+use legume_numeric::candle::candle_core::{DType, Device};
 
 const N: usize = 256;
 const H: usize = 8;
@@ -139,7 +139,7 @@ fn the_eff_target_is_clamped_above_and_below() {
 
 #[test]
 fn fixed_t_coembedding_uses_raw_scores_and_matches_a_hand_computed_softmax_average() {
-    use candle_util::candle_core::{Device, Tensor};
+    use legume_numeric::candle::candle_core::{Device, Tensor};
     let dev = Device::Cpu;
     let cells: Vec<Vec<f64>> = vec![
         vec![1.0, 0.0],

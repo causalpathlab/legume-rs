@@ -23,7 +23,7 @@ const DEFAULT_UNITS_PER_STEP: usize = 64;
 const DEFAULT_INIT_MASS: f32 = 0.9;
 
 #[derive(clap::Args, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default = "matrix_util::clap_defaults::clap_defaults")]
+#[serde(default = "legume_numeric::matrix::clap_defaults::clap_defaults")]
 pub struct FeatureModuleArgs {
     #[arg(
         long = "feature-modules",

@@ -18,7 +18,7 @@
 //! use, and its six flags dominated bge's surface. `senna topic` /
 //! `masked-topic` keep their own, unrelated feature-network restriction.
 
-use data_beans_alg::hvg::select_hvg_streaming;
+use data_beans::alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;
 use senna::embed_common::*;
 

@@ -1,7 +1,7 @@
 //! Spatial layer over [`CellPairs`].
 //!
 //! The general "cell-cell graph + the counts behind it" structure lives in
-//! [`data_beans_alg::cell_pairs`] so senna / faba can share it. Everything
+//! [`data_beans::alg::cell_pairs`] so senna / faba can share it. Everything
 //! here is what pinto adds on top: per-cell coordinates, the pair table that
 //! carries them, and the two ways pinto has of getting a graph in the first
 //! place (tissue positions, or a layout synthesized from expression).
@@ -9,9 +9,9 @@
 use crate::util::common::*;
 use crate::util::knn_graph::{KnnGraph, KnnGraphArgs};
 use dashmap::DashMap;
-use data_beans_alg::cell_pairs::CellPairs;
-use matrix_util::parquet::Column;
-use matrix_util::traits::RandomizedAlgs;
+use data_beans::alg::cell_pairs::CellPairs;
+use legume_numeric::matrix::parquet::Column;
+use legume_numeric::matrix::traits::RandomizedAlgs;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 /// `edge_kind` for a physically adjacent pair.
@@ -24,8 +24,8 @@ pub const EDGE_KIND_EXPRESSION: i32 = 1;
 /// [`EdgeSource::Both`] is deliberately spatial: such a pair is physically
 /// adjacent as well as expression-similar, and a consumer filtering on
 /// spatial is asking about adjacency.
-pub fn edge_kind_code(source: matrix_util::knn_graph::EdgeSource) -> i32 {
-    use matrix_util::knn_graph::EdgeSource::*;
+pub fn edge_kind_code(source: legume_numeric::matrix::knn_graph::EdgeSource) -> i32 {
+    use legume_numeric::matrix::knn_graph::EdgeSource::*;
     match source {
         Primary | Both => EDGE_KIND_SPATIAL,
         Secondary => EDGE_KIND_EXPRESSION,
@@ -68,7 +68,7 @@ impl<'a> SrtCellPairs<'a> {
         data: &'a SparseIoVec,
         coordinates: &'a Mat,
         graph: &'a KnnGraph,
-        edge_source: Option<&[matrix_util::knn_graph::EdgeSource]>,
+        edge_source: Option<&[legume_numeric::matrix::knn_graph::EdgeSource]>,
         batch_labels: Option<&'a [Box<str>]>,
     ) -> SrtCellPairs<'a> {
         let mut inner = CellPairs::from_graph(data, graph);
@@ -330,7 +330,8 @@ pub fn build_expression_knn_within(
     // The one implementation of this invariant lives with the type: the COO to
     // CSC conversion SUMS entries sharing a coordinate, so an edge pushed twice
     // silently doubles its weight.
-    let adjacency = matrix_util::knn_graph::symmetric_adjacency(n_cells, &edges, &distances);
+    let adjacency =
+        legume_numeric::matrix::knn_graph::symmetric_adjacency(n_cells, &edges, &distances);
     Ok(KnnGraph {
         adjacency,
         edges,

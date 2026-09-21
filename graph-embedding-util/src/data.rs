@@ -5,8 +5,8 @@
 //! downstream samplers can restrict negatives to within-batch.
 
 use crate::progress::new_progress_bar;
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use auxiliary_data::feature_names::FeatureNameKind;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::sparse_io_vector::{ColumnAlignment, SparseIoVec};
 use indicatif::ParallelProgressIterator;
 use log::info;
@@ -226,7 +226,7 @@ impl UnifiedData {
     /// `feature_names`, and composes `feature_to_backend_row` so the
     /// new compact index `i` still maps to the right row in `backend`.
     ///
-    /// Used to apply HVG selection (`data_beans_alg::hvg::select_hvg_streaming`)
+    /// Used to apply HVG selection (`data_beans::alg::hvg::select_hvg_streaming`)
     /// at the gbe layer without reaching back into `SparseIoVec`.
     pub fn subset_features(&mut self, selected_indices: &[usize]) {
         if selected_indices.len() == self.n_features() {
@@ -532,7 +532,7 @@ pub struct LoadUnifiedArgs {
 /// stacking — different feature schemas per file with shared cells —
 /// is out of scope for this loader.
 pub fn load_unified_data(args: LoadUnifiedArgs) -> anyhow::Result<UnifiedData> {
-    use matrix_util::common_io::read_lines;
+    use legume_numeric::matrix::common_io::read_lines;
     let LoadUnifiedArgs {
         data_files,
         batch_files,

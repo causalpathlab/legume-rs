@@ -7,11 +7,11 @@ use graph_embedding_util::type_annotation::{
     annotate_with_communities, CommunityCalls, InputEmbeddings, MarkerBootstrapConfig, Regroup,
     TermOraConfig,
 };
-use matrix_util::branching::Branching;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::principal_graph::kmeans_centroids_seeded;
-use matrix_util::traits::MatWithNames;
+use legume_numeric::matrix::branching::Branching;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::principal_graph::kmeans_centroids_seeded;
+use legume_numeric::matrix::traits::MatWithNames;
 
 use super::write::*;
 

@@ -8,16 +8,16 @@
 //!
 //! The heavy lifting — parquet read, per-side name canonicalization, bias
 //! pairing, target-order alignment — is
-//! [`auxiliary_data::frozen_features::load_frozen_feature_host`]. This module
+//! [`data_beans::aux::frozen_features::load_frozen_feature_host`]. This module
 //! adds what `cage` needs on top: rejection of co-embed artifacts, expansion
 //! from the matched subset back to the full feature axis, profile-neighbor
 //! seeding, and an auditable per-feature record of where every row came from.
 
 use crate::util::common::Mat;
-use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::feature_rows::parse_feature_row;
-use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
-use candle_util::candle_core::{Tensor, Var};
+use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::aux::feature_rows::parse_feature_row;
+use data_beans::aux::frozen_features::{load_frozen_feature_host, FrozenLoadArgs};
+use legume_numeric::candle::candle_core::{Tensor, Var};
 use log::{info, warn};
 use rayon::prelude::*;
 
@@ -132,7 +132,7 @@ pub struct PretrainedArgs<'a> {
 /// columns. What `--embedding-dim` takes when a pinned dictionary is given
 /// and no width is, before any data is opened.
 pub fn dictionary_width(dictionary_path: &str) -> anyhow::Result<usize> {
-    let h = matrix_util::parquet::parquet_numeric_column_count(dictionary_path)?;
+    let h = legume_numeric::matrix::parquet::parquet_numeric_column_count(dictionary_path)?;
     anyhow::ensure!(h > 0, "{dictionary_path} has no value columns");
     Ok(h)
 }
@@ -150,8 +150,9 @@ pub fn load_pretrained_feature_embedding(
     // channelized or co-embed artifact, which is not a dictionary. Catch it
     // by name — a names-only column read, not a full matrix decode — before
     // alignment would quietly match nothing. The grammar itself is
-    // single-sourced in `auxiliary_data::feature_rows`.
-    let dict_names = matrix_util::parquet::read_parquet_string_column(args.dictionary_path, 0)?;
+    // single-sourced in `data_beans::aux::feature_rows`.
+    let dict_names =
+        legume_numeric::matrix::parquet::read_parquet_string_column(args.dictionary_path, 0)?;
     let offending: Vec<&str> = dict_names
         .iter()
         .filter(|r| parse_feature_row(r).is_some())
@@ -424,17 +425,23 @@ pub fn write_init_report(out_prefix: &str, records: &[InitRecord]) -> anyhow::Re
         .collect();
     let cosine: Vec<f32> = records.iter().map(|r| r.cosine).collect();
 
-    matrix_util::parquet::write_named_table(
+    legume_numeric::matrix::parquet::write_named_table(
         &format!("{out_prefix}.feature_embedding_init.parquet"),
         "feature",
         &features,
         &[
-            ("init".into(), matrix_util::parquet::Column::Str(&init)),
+            (
+                "init".into(),
+                legume_numeric::matrix::parquet::Column::Str(&init),
+            ),
             (
                 "neighbor_feature".into(),
-                matrix_util::parquet::Column::Str(&neighbor),
+                legume_numeric::matrix::parquet::Column::Str(&neighbor),
             ),
-            ("cosine".into(), matrix_util::parquet::Column::F32(&cosine)),
+            (
+                "cosine".into(),
+                legume_numeric::matrix::parquet::Column::F32(&cosine),
+            ),
         ],
     )
 }
@@ -464,14 +471,18 @@ impl FrozenGene {
     }
 
     /// Put the frozen rows back after an optimizer step. See
-    /// [`candle_util::frozen_features::restore_frozen_rows`] for why a
+    /// [`legume_numeric::candle::frozen_features::restore_frozen_rows`] for why a
     /// post-step restore rather than a gradient mask.
     pub fn restore(&self) -> anyhow::Result<()> {
-        candle_util::frozen_features::restore_frozen_rows(&self.var, &self.fixed, &self.keep_mask)?;
+        legume_numeric::candle::frozen_features::restore_frozen_rows(
+            &self.var,
+            &self.fixed,
+            &self.keep_mask,
+        )?;
         if let Some((fixed_b, var_b)) = &self.bias {
             // b_feat is 1-D; the [n, 1] row mask squeezes to broadcast over it.
             let mask_1d = self.keep_mask.squeeze(1)?;
-            candle_util::frozen_features::restore_frozen_rows(var_b, fixed_b, &mask_1d)?;
+            legume_numeric::candle::frozen_features::restore_frozen_rows(var_b, fixed_b, &mask_1d)?;
         }
         Ok(())
     }

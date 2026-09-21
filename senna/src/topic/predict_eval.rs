@@ -26,7 +26,7 @@
 //! each happens to carry, which is what makes an ablation series readable.
 
 use crate::logging::new_progress_bar;
-use matrix_util::agreement::{
+use legume_numeric::matrix::agreement::{
     agreement_from_rate, pearson_log1p, rate_to_counts, spearman, CellAgreement,
 };
 use rayon::prelude::*;
@@ -128,7 +128,7 @@ pub(crate) fn resolve_eval_genes(
     let Some(path) = path else {
         return Ok((0..gene_names.len()).collect());
     };
-    let wanted = matrix_util::common_io::read_name_list(path)
+    let wanted = legume_numeric::matrix::common_io::read_name_list(path)
         .map_err(|e| anyhow::anyhow!("reading {flag} {path}: {e}"))?;
     // Case-insensitive, and bridged across spellings when the file and the
     // model do not share one (`ReconciledNames`): the file is the same across
@@ -422,7 +422,9 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
         per_gene_store
             .genes()
             .iter()
-            .map(|&g| f64::from((at(g) / z).max(matrix_util::agreement::PROB_FLOOR)).ln())
+            .map(|&g| {
+                f64::from((at(g) / z).max(legume_numeric::matrix::agreement::PROB_FLOOR)).ln()
+            })
             .collect()
     };
     let log_null = log_table(&null_comp);
@@ -469,7 +471,8 @@ pub(crate) fn evaluate_predictions(a: EvalArgs<'_>) -> anyhow::Result<EvalOutcom
                     }
                     count += x;
                     model += x * f64::from(
-                        (recon_dn[(g, j)] / recon_z).max(matrix_util::agreement::PROB_FLOOR),
+                        (recon_dn[(g, j)] / recon_z)
+                            .max(legume_numeric::matrix::agreement::PROB_FLOOR),
                     )
                     .ln();
                     null += x * log_null[slot];

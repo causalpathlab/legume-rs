@@ -16,7 +16,7 @@ use super::{run_gem_embedding, validate_offset_rank};
 use crate::gem::args::GemArgs;
 use crate::gem::test_fixtures::{boxes, genes_file, m6a_file, synth, CELLS};
 use clap::Parser;
-use matrix_util::parquet::read_parquet_string_columns_by_name;
+use legume_numeric::matrix::parquet::read_parquet_string_columns_by_name;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunKind};
 
@@ -411,7 +411,7 @@ fn tiny_fit(genes: &str, m6a: Option<&str>, out: &str, extra: &[&str]) -> GemArg
     Cli::try_parse_from(argv).expect("GemArgs parses").args
 }
 
-fn row_of(t: &matrix_util::traits::MatWithNames<Mat>, name: &str) -> Vec<f32> {
+fn row_of(t: &legume_numeric::matrix::traits::MatWithNames<Mat>, name: &str) -> Vec<f32> {
     let i = t
         .rows
         .iter()
@@ -429,7 +429,7 @@ fn row_of(t: &matrix_util::traits::MatWithNames<Mat>, name: &str) -> Vec<f32> {
 /// per module scores one-entry softmaxes and can move nothing).
 #[test]
 fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let dir = tempfile::tempdir().expect("tempdir");
     let genes = synth(
         dir.path(),
@@ -495,7 +495,7 @@ fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
         "carried under its lifted name"
     );
     assert_eq!(loading.rows.len(), 8 + 1);
-    let types = auxiliary_data::feature_types::read_feature_types(&out)
+    let types = data_beans::aux::feature_types::read_feature_types(&out)
         .unwrap()
         .expect("a type for every row");
     assert_eq!(types.len(), 9);
@@ -509,7 +509,7 @@ fn a_bare_gene_table_pins_the_spliced_rows_and_is_carried_in_the_row_grammar() {
 #[test]
 fn an_earlier_gem_table_pins_its_track_rows_and_lora_moves_them() {
     use crate::feature_preset::test_support::{widen, EXTRA};
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let dir = tempfile::tempdir().expect("tempdir");
     let genes = genes_file(dir.path());
     let m6a = m6a_file(dir.path());
@@ -560,7 +560,7 @@ fn an_earlier_gem_table_pins_its_track_rows_and_lora_moves_them() {
         extra.row(1).iter().copied().collect::<Vec<_>>(),
         "a term keeps its name"
     );
-    let types = auxiliary_data::feature_types::read_feature_types(&second)
+    let types = data_beans::aux::feature_types::read_feature_types(&second)
         .unwrap()
         .expect("types");
     assert!(types

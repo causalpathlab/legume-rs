@@ -17,5 +17,5 @@
 /// unconverted neighbour, so the dependence is not even reliably positive and
 /// Benjamini-Hochberg's assumption fails. Editing selects on a marginal p-value
 /// and claims no FDR guarantee. Callers whose units genuinely are independent
-/// use [`matrix_util::hypothesis::benjamini_hochberg`].
+/// use [`legume_numeric::matrix::hypothesis::benjamini_hochberg`].
 pub mod hypothesis_tests;

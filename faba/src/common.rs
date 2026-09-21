@@ -1,12 +1,12 @@
-pub use auxiliary_data::logging::new_progress_bar;
 pub use clap::{Args, Parser, Subcommand};
+pub use data_beans::aux::logging::new_progress_bar;
 pub use data_beans::qc::*;
 pub use data_beans::sparse_io::*;
 pub use genomic_data::gff::*;
 pub use genomic_data::sam::*;
 pub use indicatif::ParallelProgressIterator;
+pub use legume_numeric::matrix::common_io::*;
 pub use log::info;
-pub use matrix_util::common_io::*;
 pub use rayon::prelude::*;
 
 use rustc_hash::{FxHashMap, FxHashSet};

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::run_manifest::{default_path, load_for, RunKind, RunManifest};
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 use std::path::Path;
 
 fn load_for_prefix(prefix: &str) -> MatWithNames<DMatrix<f32>> {

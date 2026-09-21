@@ -1,5 +1,5 @@
 //! Cell-level layout: Nyström projection of individual cells onto the PB
-//! layout. The Nyström projector now lives in `matrix_util::layout` (shared
+//! layout. The Nyström projector now lives in `legume_numeric::matrix::layout` (shared
 //! with `senna annotate-by-projection`); re-exported here to keep the
 //! `crate::geometry::cell_layout::project_cells_nystrom` path stable.
 //!
@@ -7,4 +7,4 @@
 //! `LocalRefineArgs`, `local_tsne_step`) were unused dead code and were
 //! removed when the projector was lifted.
 
-pub(crate) use matrix_util::layout::project_cells_nystrom;
+pub(crate) use legume_numeric::matrix::layout::project_cells_nystrom;

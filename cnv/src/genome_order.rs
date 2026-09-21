@@ -91,7 +91,7 @@ impl GenomeOrder {
         &self,
         mat: &nalgebra::DMatrix<f32>,
     ) -> anyhow::Result<nalgebra::DMatrix<f32>> {
-        matrix_util::dmatrix_util::subset_rows(mat, self.ordered_indices.iter().copied())
+        legume_numeric::matrix::dmatrix_util::subset_rows(mat, self.ordered_indices.iter().copied())
     }
 }
 
@@ -117,7 +117,7 @@ pub fn build_genome_order(chromosomes: &[Box<str>], positions: &[u64]) -> Genome
 /// Read gene positions from a TSV file with header `gene\tchromosome\tposition\t...`.
 /// Extra columns (e.g. `state`) are ignored. Path may be plain or gzipped.
 pub fn read_gene_positions_from_tsv(path: &str) -> anyhow::Result<Vec<GenePosition>> {
-    let reader = matrix_util::common_io::open_buf_reader(path)?;
+    let reader = legume_numeric::matrix::common_io::open_buf_reader(path)?;
     let mut positions = Vec::new();
     for (i, line) in reader.lines().enumerate() {
         let line = line?;

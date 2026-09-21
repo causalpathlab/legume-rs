@@ -11,8 +11,8 @@
 //! count (so λ does not move with gene/cell count) and DEPENDENCE on the row
 //! norm rather than the per-element mean (so λ does not move with `-d`).
 
-use candle_util::candle_core::{DType, Device, Tensor};
 use graph_embedding_util::loss::embedding_ridge;
+use legume_numeric::candle::candle_core::{DType, Device, Tensor};
 
 fn cpu() -> Device {
     Device::Cpu
@@ -88,7 +88,7 @@ fn gradient_is_independent_of_latent_dim() -> anyhow::Result<()> {
     let dev = cpu();
     let rows = 50usize;
     for &h in &[8usize, 64] {
-        let table = candle_util::candle_core::Var::from_tensor(
+        let table = legume_numeric::candle::candle_core::Var::from_tensor(
             &(Tensor::ones((rows, h), DType::F32, &dev)? * 0.5)?,
         )?;
         let ridge = embedding_ridge(table.as_tensor(), 1.0)?;

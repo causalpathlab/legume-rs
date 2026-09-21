@@ -8,8 +8,8 @@ use super::CellBatchFold;
 use crate::fit::config::TrackSpec;
 use crate::loss::PerBatchStratifiedCellSampler;
 use crate::model::JointEmbedModel;
-use candle_util::candle_core::Device;
-use candle_util::candle_nn::VarMap;
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::candle_nn::VarMap;
 use log::info;
 
 /// What phase 2 hands back to [`crate::fit::fit`].
@@ -90,7 +90,7 @@ pub(crate) fn project_cells_phase2(
     tracks: &TrackSpec,
 ) -> anyhow::Result<Phase2Result> {
     use anyhow::Context;
-    use candle_util::candle_core::Tensor;
+    use legume_numeric::candle::candle_core::Tensor;
 
     let h = model.embedding_dim;
 

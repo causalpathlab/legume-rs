@@ -1,7 +1,7 @@
 use super::*;
-use auxiliary_data::feature_types::write_feature_types;
+use data_beans::aux::feature_types::write_feature_types;
 use graph_embedding_util::{LoraSpec, PresetMode};
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 
 /// A `senna fne`-shaped run: genes, one term and one word share the embedding
@@ -244,10 +244,10 @@ fn appending_writes_the_full_table_and_types_every_row() {
         t.mat.row(3).iter().copied().collect::<Vec<f32>>(),
         vec![-1.0, -2.0, -3.0]
     );
-    let fields = matrix_util::parquet::peek_parquet_field_names(&path).unwrap();
+    let fields = legume_numeric::matrix::parquet::peek_parquet_field_names(&path).unwrap();
     assert_eq!(fields[0].as_ref(), "gene", "the row axis is kept");
     assert_eq!(&t.cols[..], &["h0".into(), "h1".into(), "h2".into()]);
-    let types = auxiliary_data::feature_types::read_feature_types(&out)
+    let types = data_beans::aux::feature_types::read_feature_types(&out)
         .unwrap()
         .unwrap();
     let types: Vec<&str> = types.iter().map(|(_, t)| t.as_ref()).collect();
@@ -269,7 +269,7 @@ fn appending_keeps_the_run_s_own_types() {
     carried_fixture()
         .append_to(&out, "feature_embedding.parquet")
         .unwrap();
-    let types = auxiliary_data::feature_types::read_feature_types(&out)
+    let types = data_beans::aux::feature_types::read_feature_types(&out)
         .unwrap()
         .unwrap();
     let types: Vec<&str> = types.iter().map(|(_, t)| t.as_ref()).collect();
@@ -314,7 +314,7 @@ fn appending_skips_a_superseded_name_and_refuses_a_width_mismatch() {
         .append_to(&out2, "feature_embedding.parquet")
         .unwrap();
     assert_eq!(DMatrix::<f32>::from_parquet(&path2).unwrap().mat.nrows(), 2);
-    assert!(auxiliary_data::feature_types::read_feature_types(&out2)
+    assert!(data_beans::aux::feature_types::read_feature_types(&out2)
         .unwrap()
         .is_none());
 }

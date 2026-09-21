@@ -19,8 +19,8 @@
 //!   are then renamed by which trained row block the features actually land
 //!   in ([`reconcile_modalities`]).
 
-use auxiliary_data::data_loading::ReadSharedRowsArgs;
-use auxiliary_data::feature_names::FeatureNameKind;
+use data_beans::aux::data_loading::ReadSharedRowsArgs;
+use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::sparse_io_vector::ColumnAlignment;
 use graph_embedding_util as ge;
 use rustc_hash::{FxHashMap, FxHashSet};

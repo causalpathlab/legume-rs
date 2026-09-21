@@ -173,8 +173,8 @@ fn a_starved_feature_is_charged_the_shared_floor() {
     let s = dict.score(&[(0u32, 10.0f32)], &[-100.0, 100.0], &dict.eval_axis(None));
     let per_count = f64::from(s.llik) / f64::from(s.total);
     assert!(
-        (per_count - matrix_util::agreement::LOG_PROB_FLOOR).abs() < 1e-3,
+        (per_count - legume_numeric::matrix::agreement::LOG_PROB_FLOOR).abs() < 1e-3,
         "starved-feature charge {per_count} nats/count; the shared floor is {}",
-        matrix_util::agreement::LOG_PROB_FLOOR
+        legume_numeric::matrix::agreement::LOG_PROB_FLOOR
     );
 }

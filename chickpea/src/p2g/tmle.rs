@@ -22,7 +22,7 @@
 
 use crate::common::*;
 use genomic_data::coordinates::chr_stripped;
-use matrix_util::dmatrix_util::concatenate_vertical;
+use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
 use nalgebra::DVector;
 use std::collections::HashMap;
 

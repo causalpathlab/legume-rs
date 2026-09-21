@@ -22,7 +22,7 @@
 //! type; it reaches the ontology only through three closures
 //! (`ancestors_or_self` / `name_of` / `contains`), so this crate needs no OBO
 //! parser dependency — the caller loads the ontology (e.g.
-//! `auxiliary_data::ontology::Ontology`) and injects the closures.
+//! `data_beans::aux::ontology::Ontology`) and injects the closures.
 //!
 //! Writes `{out}.ontology_assignment.tsv` and (for soft viz colouring)
 //! `{out}.ontology_node_mass.parquet` (Σ of descendant-leaf Q per node).
@@ -30,8 +30,8 @@
 use crate::treebh;
 use crate::Mat;
 use anyhow::{anyhow, Result};
+use legume_numeric::matrix::traits::IoOps;
 use log::{info, warn};
-use matrix_util::traits::IoOps;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs::File;
 use std::io::Write;

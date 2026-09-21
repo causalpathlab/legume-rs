@@ -29,9 +29,9 @@ use crate::senna_input::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap as HashMap;
 use std::path::{Path, PathBuf};
@@ -369,7 +369,7 @@ fn nb_fisher_weights(
     data_vec: &data_beans::sparse_io_vector::SparseIoVec,
     gene_names: &[Box<str>],
 ) -> Result<Vec<f32>> {
-    use data_beans_alg::gene_weighting::{compute_nb_fisher_weights, load_fisher_weights};
+    use data_beans::alg::gene_weighting::{compute_nb_fisher_weights, load_fisher_weights};
 
     let fisher_prefix = resolve(manifest_dir, &manifest.prefix);
     let nb_fisher: Vec<f32> = match load_fisher_weights(&fisher_prefix)? {

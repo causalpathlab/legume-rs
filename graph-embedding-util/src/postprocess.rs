@@ -33,8 +33,8 @@
 //! shared per-cell depth offset that would drag every gene toward deep cells.
 //! See [`coembed_block`].
 
-use candle_util::candle_core::{Result, Tensor};
-use candle_util::candle_nn::ops::softmax;
+use legume_numeric::candle::candle_core::{Result, Tensor};
+use legume_numeric::candle::candle_nn::ops::softmax;
 use log::info;
 
 /// Feature-axis block size for the streaming pass (peak memory `N×FEAT_BLOCK`).
@@ -102,10 +102,10 @@ pub fn cell_clusters(
     e_cell: &Tensor,
     target_clusters: Option<usize>,
 ) -> anyhow::Result<(Vec<usize>, f64)> {
-    use matrix_util::traits::ConvertMatOps;
+    use legume_numeric::matrix::traits::ConvertMatOps;
     let n = e_cell.dim(0)?;
     let dm = nalgebra::DMatrix::<f32>::from_tensor(e_cell)?;
-    let labels = matrix_util::clustering::leiden_clustering(
+    let labels = legume_numeric::matrix::clustering::leiden_clustering(
         &dm,
         LEIDEN_KNN,
         LEIDEN_RES,
@@ -136,7 +136,7 @@ pub fn target_eff_from_labels(labels: &[usize], n_clusters: usize) -> f64 {
         }
     }
     let upper = (n as f64 / 2.0).clamp(MIN_TARGET_EFF, MAX_TARGET_EFF);
-    f64::from(matrix_util::utils::median(&sizes)).clamp(MIN_TARGET_EFF, upper)
+    f64::from(legume_numeric::matrix::utils::median(&sizes)).clamp(MIN_TARGET_EFF, upper)
 }
 
 /// Re-embed every feature onto the cell manifold (SIMBA-style). The attention is

@@ -6,10 +6,10 @@ use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use crate::topic::train::{train_mixed, TrainConfig};
 use senna::embed_common::*;
 
-use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
-use candle_util::decoder::*;
-use candle_util::encoder::*;
-use candle_util::traits::*;
+use legume_numeric::candle::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
+use legume_numeric::candle::decoder::*;
+use legume_numeric::candle::encoder::*;
+use legume_numeric::candle::traits::*;
 use log::warn;
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -238,7 +238,7 @@ pub struct TopicArgs {
 
     #[command(flatten)]
     #[serde(flatten)]
-    pub(crate) coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
+    pub(crate) coarsening: data_beans::alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -729,7 +729,7 @@ use crate::topic::decoder_output::{write_dictionary_tensor, DecoderExtras};
 /// Trait for optional per-run hyperparameter configuration from CLI args.
 /// Default is no-op; specific decoders override to set their own knobs.
 /// Per-feature Fisher weights flow through `DecoderModuleT::attach_feature_weights`
-/// (declared in `candle-util`) rather than this trait, so callers outside
+/// (declared in `legume_numeric::candle`) rather than this trait, so callers outside
 /// senna (e.g. `predict`) can attach weights without importing this.
 trait ConfigureDecoder {
     fn configure(&mut self, _args: &TopicArgs) {}
@@ -1048,7 +1048,7 @@ where
     {
         let finest_idx = ctx.feature_stats.fisher_per_level.len().saturating_sub(1);
         let finest_w = &ctx.feature_stats.fisher_per_level[finest_idx];
-        data_beans_alg::gene_weighting::save_fisher_weights_coarse(&ctx.args.out, finest_w)?;
+        data_beans::alg::gene_weighting::save_fisher_weights_coarse(&ctx.args.out, finest_w)?;
     }
 
     let mut metadata = TopicModelMetadata {
@@ -1159,7 +1159,7 @@ fn run_multi_decoder_pipeline<Enc: EncoderModuleT + Send + Sync>(
     encoder: &mut Enc,
 ) -> anyhow::Result<(TrainScores, Mat)> {
     use crate::topic::train::train_mixed_multi_decoder;
-    use candle_util::decoder::{create_dyn_decoder, DynDecoderModuleT};
+    use legume_numeric::candle::decoder::{create_dyn_decoder, DynDecoderModuleT};
 
     let decoder_weights =
         compute_decoder_weights(&ctx.args.decoder, ctx.args.decoder_weights.as_ref());

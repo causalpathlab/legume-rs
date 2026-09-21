@@ -2,11 +2,17 @@ BINARIES := senna pinto cocoa faba chickpea data-beans data-beans-sim gene-text 
 
 # Packages whose crate directory / Cargo package name differs from the
 # installed binary name. `mung` is the CLI; the crate stays `cnv`.
+# `data-beans-sim` is a binary of the `data-beans` package (feature `sim`).
 #
 # The mapping has to happen in the shell, not with a make function: the loops
 # below iterate over `$$bin` inside a recipe, so make would only ever see the
 # literal text `$$bin` and never match it.
-crate_pkg_case = case $$bin in mung) pkg=cnv;; *) pkg=$$bin;; esac
+crate_pkg_case = case $$bin in \
+	mung) pkg=cnv; extra_feat=; from_crates=;; \
+	data-beans) pkg=data-beans; extra_feat=; from_crates=1;; \
+	data-beans-sim) pkg=data-beans; extra_feat=sim; from_crates=1;; \
+	*) pkg=$$bin; extra_feat=; from_crates=;; \
+	esac
 
 # Binaries with no `cuda` / `metal` feature to pass. `faba` reads BAM files and
 # writes sparse matrices; nothing on that path touches a GPU, and the
@@ -313,25 +319,32 @@ install-metal:
 $(addprefix install-,$(BINARIES)):
 	@bin=$(@:install-%=%); \
 	$(crate_pkg_case); \
+	feats="$(CARGO_FEATURES)"; \
+	feats_cpu="$(CARGO_FEATURES_CPU_FALLBACK)"; \
+	if [ -n "$$extra_feat" ]; then \
+	    if [ -n "$$feats" ]; then feats="$$feats,$$extra_feat"; else feats="--features $$extra_feat"; fi; \
+	    if [ -n "$$feats_cpu" ]; then feats_cpu="$$feats_cpu,$$extra_feat"; else feats_cpu="--features $$extra_feat"; fi; \
+	fi; \
+	if [ -n "$$from_crates" ]; then install_cmd="cargo install --locked --force $$pkg"; else install_cmd="cargo install --locked --path $$pkg"; fi; \
 	if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
 	    echo "Installing $$bin (no GPU backend; CPU-only by design)..."; \
-	    cargo install --locked --path $$pkg $(CARGO_FEATURES_CPU_FALLBACK); \
+	    $$install_cmd $$feats_cpu; \
 	    echo "$$bin n/a" >> $(INSTALL_STATUS_FILE); \
-	elif [ -n "$(CARGO_FEATURES)" ]; then \
+	elif [ -n "$$feats" ]; then \
 	    echo "Installing $$bin (backend: $(BACKEND))..."; \
-	    if cargo install --locked --path $$pkg $(CARGO_FEATURES); then \
+	    if $$install_cmd $$feats; then \
 	        echo "$$bin $(BACKEND)" >> $(INSTALL_STATUS_FILE); \
 	    else \
 	        echo ""; \
 	        echo "  $(BACKEND) build of $$bin failed; retrying with CPU"; \
 	        $(CUDA_CAP_HINT) \
 	        echo ""; \
-	        cargo install --locked --path $$pkg $(CARGO_FEATURES_CPU_FALLBACK); \
+	        $$install_cmd $$feats_cpu; \
 	        echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	    fi; \
 	else \
 	    echo "Installing $$bin (backend: cpu)..."; \
-	    cargo install --locked --path $$pkg $(CARGO_FEATURES_CPU_FALLBACK); \
+	    $$install_cmd $$feats_cpu; \
 	    echo "$$bin cpu" >> $(INSTALL_STATUS_FILE); \
 	fi
 
@@ -352,6 +365,7 @@ ifeq ($(BACKEND),cpu)
 ifeq ($(HDF5),on)
 	@for bin in $(BINARIES); do \
 	    $(crate_pkg_case); \
+	    if [ -n "$$from_crates" ]; then echo "Skipping $$bin (crates.io package)"; continue; fi; \
 	    cargo build --release -p $$pkg --features hdf5 || exit $$?; \
 	done
 else
@@ -363,6 +377,7 @@ ifeq ($(BACKEND),cuda)
 endif
 	@for bin in $(BINARIES); do \
 	    $(crate_pkg_case); \
+	    if [ -n "$$from_crates" ]; then echo "Skipping $$bin (crates.io package)"; continue; fi; \
 	    if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
 	        echo "Building $$bin (no GPU backend; CPU-only by design)..."; \
 	        cargo build --release -p $$pkg $(CARGO_FEATURES_CPU_FALLBACK) || exit $$?; \

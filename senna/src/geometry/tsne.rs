@@ -4,7 +4,7 @@
     clippy::unused_self
 )]
 
-use candle_util::candle_core::*;
+use legume_numeric::candle::candle_core::*;
 
 /// t-SNE with an Rtsne-aligned update rule: per-parameter adaptive gains
 /// (Jacobs 1988), momentum switching, strong early exaggeration, and init

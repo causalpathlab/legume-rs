@@ -2,7 +2,7 @@
 //! or an embedding (axes numbered by position), and refuses anything else.
 
 use super::argmax_topics;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::Mat;
 
 fn write(dir: &std::path::Path, name: &str, cols: &[&str]) -> String {

@@ -29,5 +29,5 @@ annotate = { path = "../annotate" }
 lineage = { path = "../lineage" }
 senna = { path = "../senna" }
 graph-embedding-util = { workspace = true }
-matrix-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix"] }
 serde_json = { workspace = true }

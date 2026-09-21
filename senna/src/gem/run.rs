@@ -27,7 +27,7 @@ use crate::gem::args::GemArgs;
 use crate::gem::contrast::write_contrast;
 use crate::gem::hvg::gem_hvg_row_weights;
 use crate::gem::load::{load_gem_data, resolve_inputs};
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::matrix::common_io::mkdir_parent;
 
 pub fn run_gem_embedding(args: &GemArgs) -> anyhow::Result<()> {
     mkdir_parent(&args.out)?;

@@ -4,13 +4,13 @@ use crate::topic::eval::{
 use crate::topic::model_metadata::{load_coarsening, load_dictionary, TopicModelMetadata};
 use senna::embed_common::*;
 
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
-use candle_util::decoder::*;
-use candle_util::encoder::*;
-use candle_util::topic_refinement::TopicRefinementConfig;
-use candle_util::traits::*;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
+use legume_numeric::candle::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
+use legume_numeric::candle::decoder::*;
+use legume_numeric::candle::encoder::*;
+use legume_numeric::candle::topic_refinement::TopicRefinementConfig;
+use legume_numeric::candle::traits::*;
 use log::info;
 
 type Mat = nalgebra::DMatrix<f32>;
@@ -306,7 +306,7 @@ where
     // Same Fisher weight reattachment as `predict_dense_with_decoder` —
     // ensures refinement-time likelihood matches training.
     if let Some((_, coarse_w)) =
-        data_beans_alg::gene_weighting::load_fisher_weights_coarse(model_prefix)?
+        data_beans::alg::gene_weighting::load_fisher_weights_coarse(model_prefix)?
     {
         if let Some(finest) = decoders.last_mut() {
             finest.attach_feature_weights(&coarse_w, cpu_dev)?;

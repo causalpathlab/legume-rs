@@ -31,8 +31,8 @@ use data_beans::sparse_io::{create_sparse_streaming_empty, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
 use data_beans::zarr_io::{finalize_output, prepare_output};
 use genomic_data::coordinates::{parse_peak_coordinates, PeakCoord};
-use matrix_util::dmatrix_util::build_columns_par;
-use matrix_util::parquet::{write_named_table, Column};
+use legume_numeric::matrix::dmatrix_util::build_columns_par;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
 use nalgebra::DMatrix;
 use nalgebra_sparse::CscMatrix;
 use rayon::prelude::*;
@@ -127,7 +127,7 @@ pub fn reference_stats(
     let mut raw_sum = vec![0f32; g];
     let mut log_sum = vec![0f32; g];
 
-    let blocks = matrix_util::utils::generate_minibatch_intervals(
+    let blocks = legume_numeric::matrix::utils::generate_minibatch_intervals(
         ref_cols.len(),
         0,
         Some(cfg.block_size.max(1)),
@@ -493,7 +493,7 @@ pub fn run_cell_profiles(
         let mut out = create_sparse_streaming_empty(Some(&working_file), Some(&backend))?;
         out.begin_streaming_csc((n_rows, n_cells, nnz))?;
 
-        let blocks = matrix_util::utils::generate_minibatch_intervals(
+        let blocks = legume_numeric::matrix::utils::generate_minibatch_intervals(
             n_cells,
             0,
             Some(cfg.block_size.max(1)),
@@ -626,7 +626,7 @@ mod tests {
         let path = std::env::temp_dir().join("cnv_features_bin_by_tss_tile.parquet");
         let path = path.to_str().unwrap();
         f.write_feature_table(path).unwrap();
-        let (strs, nums) = matrix_util::parquet::read_table_columns(
+        let (strs, nums) = legume_numeric::matrix::parquet::read_table_columns(
             path,
             &["feature", "chr", "genes"],
             &["start", "end", "n_genes"],

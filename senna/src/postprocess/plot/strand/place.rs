@@ -5,7 +5,7 @@
 //! Crick(reverse) bin sums — the signal the renderer mirrors.
 
 use super::PlotStrandArgs;
-use auxiliary_data::feature_names::FeatureNameKind;
+use data_beans::aux::feature_names::FeatureNameKind;
 use genomic_data::coordinates::{chr_stripped, load_gene_loci_map, GeneLoc};
 use genomic_data::sam::Strand;
 use rustc_hash::FxHashMap;

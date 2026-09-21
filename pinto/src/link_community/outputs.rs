@@ -8,7 +8,7 @@ use crate::link_community::profiles::{
 };
 use crate::util::common::*;
 use crate::util::feature_axis::FeatureAxis;
-use matrix_param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
 
 /// Write link community assignments to parquet.
 ///
@@ -22,7 +22,7 @@ pub fn write_link_communities(
     cell_names: &[Box<str>],
     edge_kind: Option<&[i32]>,
 ) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
+    use legume_numeric::matrix::parquet::*;
     use parquet::basic::Type as ParquetType;
 
     let n_edges = edges.len();
@@ -84,10 +84,10 @@ pub fn write_link_communities(
 /// Columns: `merge_id`, `left`, `right`, `score`, `n_leaves`. The `score`
 /// column carries the cosine similarity at which the two children were
 /// merged (higher = more redundant feature programs). Reuses the
-/// `BhcMerge` carrier type from `data_beans_alg::bhc` for the merge tree;
+/// `BhcMerge` carrier type from `data_beans::alg::bhc` for the merge tree;
 /// only the score interpretation differs from the original BHC log-BF.
 pub fn write_dict_merges(file_path: &str, merges: &[BhcMerge]) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
+    use legume_numeric::matrix::parquet::*;
     use parquet::basic::Type as ParquetType;
 
     let n_rows = merges.len();
@@ -139,7 +139,7 @@ pub fn write_dict_merges(file_path: &str, merges: &[BhcMerge]) -> anyhow::Result
 
 /// Write the consensus cut from `bhc_cut` to parquet (fine_id → super_id).
 pub fn write_dict_cut(file_path: &str, labels: &[i32]) -> anyhow::Result<()> {
-    use matrix_util::parquet::*;
+    use legume_numeric::matrix::parquet::*;
     use parquet::basic::Type as ParquetType;
 
     let n_rows = labels.len();

@@ -8,9 +8,9 @@ use crate::feature_network::graph::FeaturePairGraph;
 use crate::link_community::model::LinkProfileStore;
 use crate::util::common::*;
 use crate::util::feature_axis::FeatureAxis;
-use data_beans_alg::cell_pairs::collapse_pairs;
-use matrix_param::io::ParamIo;
-use matrix_util::utils::generate_minibatch_intervals;
+use data_beans::alg::cell_pairs::collapse_pairs;
+use legume_numeric::matrix::utils::generate_minibatch_intervals;
+use legume_numeric::param::io::ParamIo;
 use nalgebra_sparse::csc::CscMatrix;
 use rayon::prelude::*;
 
@@ -498,9 +498,9 @@ pub fn fit_feature_community_param(
     feature_weights: Option<&[f32]>,
     axis: Option<&FeatureAxis>,
     block_size: Option<usize>,
-) -> anyhow::Result<matrix_param::dmatrix_gamma::GammaMatrix> {
-    use matrix_param::dmatrix_gamma::GammaMatrix;
-    use matrix_param::traits::TwoStatParam;
+) -> anyhow::Result<legume_numeric::param::dmatrix_gamma::GammaMatrix> {
+    use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+    use legume_numeric::param::traits::TwoStatParam;
 
     let n_rows = data_vec.num_rows();
     // Folding after the accumulation is exact, not an approximation: the
@@ -577,11 +577,11 @@ pub fn fit_feature_community_param(
 /// Write a fitted feature-community posterior to `<out_prefix>.feature_community.parquet`
 /// in melted (feature, community, mean, sd, log_mean, log_sd) form.
 pub fn write_feature_community_param(
-    param: &matrix_param::dmatrix_gamma::GammaMatrix,
+    param: &legume_numeric::param::dmatrix_gamma::GammaMatrix,
     feature_names: &[Box<str>],
     out_prefix: &str,
 ) -> anyhow::Result<()> {
-    use matrix_param::traits::Inference;
+    use legume_numeric::param::traits::Inference;
     let k = param.posterior_mean().ncols();
     let community_names: Vec<Box<str>> = (0..k).map(|i| format!("C{i}").into_boxed_str()).collect();
     param.to_melted_parquet(
@@ -643,13 +643,13 @@ impl EdgeClustering {
                 info!("Spherical k-means clustering edges (k={k}, seed={seed})...");
                 // Cosine, because the pair latent is a direction (it was
                 // L2-normalized before it got here).
-                matrix_util::kmeans::kmeans_rows_seeded(
+                legume_numeric::matrix::kmeans::kmeans_rows_seeded(
                     pair_latent_nk,
-                    &matrix_util::kmeans::KmeansRowsOpts {
+                    &legume_numeric::matrix::kmeans::KmeansRowsOpts {
                         k,
                         max_iter,
                         seed,
-                        metric: matrix_util::kmeans::KmeansMetric::Cosine,
+                        metric: legume_numeric::matrix::kmeans::KmeansMetric::Cosine,
                         min_changed_frac: KMEANS_MIN_CHANGED_FRAC,
                         init_sample: 0,
                     },
@@ -667,7 +667,7 @@ impl EdgeClustering {
                 );
                 // Cosine, because the pair latent is a direction (it was
                 // L2-normalized before it got here).
-                matrix_util::clustering::leiden_clustering(
+                legume_numeric::matrix::clustering::leiden_clustering(
                     pair_latent_nk,
                     knn,
                     resolution,

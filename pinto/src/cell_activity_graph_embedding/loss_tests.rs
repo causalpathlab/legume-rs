@@ -1,8 +1,8 @@
 use super::loss::cage_nce_loss_per_feature_level;
-use candle_util::candle_core::Device;
-use candle_util::candle_nn::VarMap;
 use graph_embedding_util::loss::{NceObjective, UnitChainBatch};
 use graph_embedding_util::model::{JointEmbedModel, ModelArgs, ModelInit};
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::candle_nn::VarMap;
 use nalgebra::DMatrix;
 
 const N_CELLS: usize = 32;
@@ -259,8 +259,8 @@ fn per_level_shape_tracks_features_and_levels() {
 /// candle and would keep passing if `score_negatives` dropped a bias term.
 #[test]
 fn score_negatives_matches_the_broadcast_formulation() {
-    use candle_util::candle_core::{DType, Tensor};
     use graph_embedding_util::model::JointEmbedModel;
+    use legume_numeric::candle::candle_core::{DType, Tensor};
 
     let dev = Device::Cpu;
     let (rows, k, d) = (512usize, 8usize, 16usize);

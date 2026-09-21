@@ -6,10 +6,10 @@ use std::ops::Div;
 
 use clap::Parser;
 use indicatif::ParallelProgressIterator;
+use legume_numeric::matrix::common_io::{mkdir_parent, write_lines, write_types};
+use legume_numeric::matrix::mtx_io;
+use legume_numeric::matrix::traits::{IoOps, MatOps, SampleOps};
 use log::info;
-use matrix_util::common_io::{mkdir_parent, write_lines, write_types};
-use matrix_util::mtx_io;
-use matrix_util::traits::{IoOps, MatOps, SampleOps};
 use rand::SeedableRng;
 use rand_distr::{weighted::WeightedIndex, Distribution, Gamma, Normal, Poisson, Uniform};
 
@@ -135,7 +135,7 @@ impl GlmSimulator {
             .map(|g| {
                 // Every draw for this gene comes from one seeded stream, so
                 // the gene loop is reproducible whatever its thread order.
-                let gene_seed = matrix_util::rand_util::mix_seed(self.rseed, g as u64);
+                let gene_seed = legume_numeric::matrix::rand_util::mix_seed(self.rseed, g as u64);
                 let mut grng = rand::rngs::StdRng::seed_from_u64(gene_seed);
                 let log_base = normal_or_zero(&mut grng, self.gene_mean_sd);
                 // residual, irreducible errors

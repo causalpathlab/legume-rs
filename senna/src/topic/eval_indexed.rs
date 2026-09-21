@@ -2,13 +2,13 @@ use super::common::{expand_delta_for_block, process_blocks_at};
 use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
-use candle_util::data::csc_columns_to_indexed_samples;
-use candle_util::decoder::coarsening_map::CoarseningMap;
-use candle_util::decoder::masked_etm::ModuleTarget;
-use candle_util::decoder::EmbeddedNbTopicDecoder;
-use candle_util::fast_index::scatter_add_cols;
-use candle_util::traits::*;
-use candle_util::vae::masked_topic::{
+use legume_numeric::candle::data::csc_columns_to_indexed_samples;
+use legume_numeric::candle::decoder::coarsening_map::CoarseningMap;
+use legume_numeric::candle::decoder::masked_etm::ModuleTarget;
+use legume_numeric::candle::decoder::EmbeddedNbTopicDecoder;
+use legume_numeric::candle::fast_index::scatter_add_cols;
+use legume_numeric::candle::traits::*;
+use legume_numeric::candle::vae::masked_topic::{
     decoder_log_theta, dense_module_targets, masked_encode, masked_encode_dense,
     DenseModuleTargets, LatentHead, MaskedDenseInput, MaskedEncoderInput, MaskedLikelihood,
 };
@@ -282,7 +282,7 @@ pub(crate) struct EvaluateLatentMaskedConfig<'a> {
 /// training-time pooling (pads excluded) — and uses no decoder.
 pub(crate) fn evaluate_latent_masked(
     data_vec: &SparseIoVec,
-    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    encoder: &legume_numeric::candle::encoder::IndexedEmbeddingEncoder,
     config: &EvaluateLatentMaskedConfig,
     delta: Option<&Tensor>,
     gene_remap: Option<&[Option<usize>]>,
@@ -323,7 +323,7 @@ pub(crate) fn evaluate_latent_masked(
 pub(crate) fn evaluate_latent_masked_rows(
     x_dp: &Mat,
     null_pd: Option<&Mat>,
-    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    encoder: &legume_numeric::candle::encoder::IndexedEmbeddingEncoder,
     config: &EvaluateLatentMaskedConfig,
 ) -> anyhow::Result<Mat> {
     if let Some(n) = null_pd {
@@ -350,7 +350,7 @@ pub(crate) fn evaluate_latent_masked_rows(
 /// optional `[n, D]` null; everything after that is identical for every source.
 fn evaluate_latent_masked_blocks<R>(
     ntot: usize,
-    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    encoder: &legume_numeric::candle::encoder::IndexedEmbeddingEncoder,
     config: &EvaluateLatentMaskedConfig,
     gene_remap: Option<&[Option<usize>]>,
     read: R,
@@ -552,7 +552,7 @@ pub(crate) struct HoldoutEvalConfig<'a> {
 /// its log-partition) are fixed, so they are computed once.
 pub(crate) fn evaluate_holdout_imputation(
     data_vec: &SparseIoVec,
-    encoder: &candle_util::encoder::IndexedEmbeddingEncoder,
+    encoder: &legume_numeric::candle::encoder::IndexedEmbeddingEncoder,
     decoder: &EmbeddedNbTopicDecoder,
     config: &HoldoutEvalConfig,
     delta: Option<&Tensor>,

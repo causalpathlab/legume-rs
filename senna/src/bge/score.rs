@@ -22,16 +22,16 @@
 use crate::logging::new_progress_bar;
 use crate::topic::eval::{build_gene_remap_with, QueryNameOpts};
 use anyhow::Context;
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use candle_util::candle_core::Device;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::{
     CellEncoder, CellEncoders, FrozenProjection, FrozenProjectionArgs, FrozenProjector, TrackSpec,
     PROJECTION_RIDGE_SGD,
 };
 use graph_embedding_util::loss::{multinomial_ll, FrozenSide, NodeTerm};
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 use senna::embed_common::Mat;
@@ -433,7 +433,7 @@ impl BgeEmbedding {
             // Pseudobulks for the profiles: a clustering of the pass-1 latents, so a
             // profile is a gene's expression across the cell states this model sees.
             let n_clusters = pseudobulk_count(n_cells);
-            let (_, labels) = matrix_util::principal_graph::kmeans_centroids_seeded(
+            let (_, labels) = legume_numeric::matrix::principal_graph::kmeans_centroids_seeded(
                 &pass.latent,
                 n_clusters,
                 20,

@@ -38,7 +38,7 @@ fn fully_internal_feature_folds_to_empty() {
 
 use crate::cell_activity_graph_embedding::pb_frame::build_pb_frame;
 use crate::util::graph_coarsen::MultiLevelCoarsenResult;
-use matrix_util::knn_graph::KnnGraph;
+use legume_numeric::matrix::knn_graph::KnnGraph;
 
 /// 6 cells, nested 2-level coarsening, 5 fine edges of which 2 are
 /// intra-PB. The frame must emit exactly the 3 PB-PB super edges, map

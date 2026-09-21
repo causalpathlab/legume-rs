@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::stat::*;
-use matrix_util::utils::partition_by_membership;
+use legume_numeric::matrix::utils::partition_by_membership;
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::{Arc, Mutex};

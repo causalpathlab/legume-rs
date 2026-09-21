@@ -34,7 +34,7 @@ pub(super) fn resolve_etm_topics(
     cell_keep_idx: Option<&[usize]>,
     labels: &[usize],
 ) -> anyhow::Result<()> {
-    use matrix_util::archetypal::topic_dictionary;
+    use legume_numeric::matrix::archetypal::topic_dictionary;
 
     let cpu = candle_core::Device::Cpu;
     let z_full = Mat::from_tensor(&model.e_cell.to_device(&cpu)?)?; // [N, H]
