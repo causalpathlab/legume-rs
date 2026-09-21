@@ -1,6 +1,6 @@
 use crate::test_support::make_test_graph;
 use crate::util::graph_dc_poisson_refine::{ConnectivityGuard, GraphProposer};
-use data_beans_alg::dc_poisson::{CandidateProposer, MoveGuard};
+use data_beans::alg::dc_poisson::{CandidateProposer, MoveGuard};
 
 #[test]
 fn test_graph_proposer_intersects_siblings_with_graph_neighbors() {

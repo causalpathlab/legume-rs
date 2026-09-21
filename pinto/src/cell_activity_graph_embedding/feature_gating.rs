@@ -16,7 +16,7 @@
 use crate::util::common::*;
 use crate::util::feature_axis::FeatureAxis;
 use clap::ValueEnum;
-use matrix_util::utils::generate_minibatch_intervals;
+use legume_numeric::matrix::utils::generate_minibatch_intervals;
 use nalgebra_sparse::{CooMatrix, CsrMatrix};
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]

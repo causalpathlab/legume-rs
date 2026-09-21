@@ -15,28 +15,18 @@ path = "src/lib.rs"
 [features]
 default = []
 cuda = [
-    "candle-util/cuda",
+    "legume-numeric/cuda",
     "data-beans/cuda",
-    "data-beans-alg/cuda",
-    "matrix-util/cuda",
-    "matrix-param/cuda",
 ]
 metal = [
-    "candle-util/metal",
+    "legume-numeric/metal",
     "data-beans/metal",
-    "data-beans-alg/metal",
-    "matrix-util/metal",
-    "matrix-param/metal",
 ]
 
 [dependencies]
-auxiliary-data = { workspace = true }
-data-beans = { workspace = true }
-data-beans-alg = { workspace = true }
-candle-util = { workspace = true }
+data-beans = { workspace = true, features = ["aux", "alg"] }
+legume-numeric = { workspace = true, features = ["matrix", "param", "candle", "mcmc"] }
 enrichment = { workspace = true }
-matrix-param = { workspace = true }
-matrix-util = { workspace = true }
 
 anyhow = { workspace = true }
 # `fit::module_args` exports the shared `--gene-modules` flag group, so every
@@ -58,7 +48,5 @@ serde = { workspace = true }
 # Local-only, for the #[ignore] real-data harnesses (not committed).
 [dev-dependencies]
 serde_json = { workspace = true }
-candle-util = { workspace = true }
-data-beans = { workspace = true }
-matrix-util = { workspace = true }
+data-beans = { workspace = true, features = ["aux", "alg"] }
 nalgebra = { workspace = true }

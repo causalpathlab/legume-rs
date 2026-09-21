@@ -1,27 +1,17 @@
 [workspace]
 
 members = [
-    "auxiliary-data",
     "annotate",
-    "candle-util",
     "chickpea",
     "cnv",
     "cocoa",
-    "data-beans",
-    "data-beans-alg",
-    "data-beans-sim",
     "enrichment",
     "faba",
     "gene-text",
     "genomic-data",
     "graph-embedding-util",
-    "hsblock",
-    "leiden",
     "lineage",
     "lupin",
-    "matrix-param",
-    "matrix-util",
-    "mcmc-util",
     "pinto",
     "plot-utils",
     "senna",
@@ -79,7 +69,7 @@ ndarray = { version = "0.17", features = ["rayon", "serde", "approx", "blas"] }
 ndarray-rand = "0.16"
 num-traits = "0.2.19"
 special = "0.13"
-statrs = "0.18"
+statrs = { version = "0.18", default-features = false }
 
 # Data structures / hashing
 dashmap = { version = "6.1.0", features = ["rayon"] }
@@ -125,40 +115,13 @@ usvg = "0.47"
 # Portable explicit SIMD
 wide = "0.7"
 
-# Internal crates
-auxiliary-data = { path = "auxiliary-data" }
-candle-util = { path = "candle-util" }
+# Published foundation / product crates (also developed in their own repos)
 cnv = { path = "cnv" }
-data-beans = { path = "data-beans" }
-data-beans-alg = { path = "data-beans-alg" }
-data-beans-sim = { path = "data-beans-sim" }
+data-beans = { version = "0.6.6" }
 enrichment = { path = "enrichment" }
 faba = { path = "faba" }
 genomic-data = { path = "genomic-data" }
 graph-embedding-util = { path = "graph-embedding-util" }
-hsblock = { path = "hsblock" }
-leiden = { path = "leiden" }
-matrix-param = { path = "matrix-param" }
-matrix-util = { path = "matrix-util" }
-mcmc-util = { path = "mcmc-util" }
+hsblock = { version = "0.1.1", package = "hsblock-rs" }
+legume-numeric = { version = "0.8.10" }
 plot-utils = { path = "plot-utils" }
-
-# candle-core with its CPU elementwise maps, strided copies and reductions
-# threaded over rayon; the crates.io build walks them on one core. One commit
-# on tag 0.10.1, the version candle-nn locks, pinned by hash (branch
-# `cpu-parallel-elementwise-0.10.1` on the fork). Measured in
-# candle-util/examples/cpu_elementwise_bench.rs.
-[patch.crates-io]
-candle-core = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
-# `candle-nn` is unmodified upstream at this rev -- its `src/` diffs clean
-# against the published crate -- and comes from the fork for one reason: it
-# carries an optional `candle-metal-kernels` of its own. Reached from two
-# different sources, those resolve to two distinct crates and a `metal` build
-# stops type-checking (`&Buffer` from one copy is a different type from
-# `&Buffer` in the other). Metal is the Makefile's default backend on macOS,
-# so that build has to keep working. Patching `candle-metal-kernels` directly
-# fixes the same collision, but it is a patch on an *optional* dependency:
-# absent from the graph on every build that leaves Metal off, which is what
-# cargo reports as "patch was not used in the crate graph". `candle-kernels`
-# (CUDA) needs no entry: nothing outside `candle-core` depends on it.
-candle-nn = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }

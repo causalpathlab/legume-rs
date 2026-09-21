@@ -951,11 +951,11 @@ fn log_rate_histogram(signal: &ActivityTally, control: &ControlCells, opts: &Nul
 /// on the first genome-wide run, warning "none matched" for genes that were
 /// certainly present.
 ///
-/// Field-anchored via [`auxiliary_data::feature_rows::parse_feature_row`], the
+/// Field-anchored via [`data_beans::aux::feature_rows::parse_feature_row`], the
 /// single source of truth for row layout: a bare `contains(symbol)` would let
 /// `METTL3` match `METTL3L` and `RBM15` match `RBM15B`.
 fn feature_is_gene(feature: &str, symbol: &str) -> bool {
-    auxiliary_data::feature_rows::parse_feature_row(feature)
+    data_beans::aux::feature_rows::parse_feature_row(feature)
         .is_some_and(|r| r.gene == symbol || r.gene.rsplit('_').next() == Some(symbol))
 }
 
@@ -978,7 +978,7 @@ fn log_family_expression(
     scanned: &ActivityTally,
     selected: &FxHashSet<CellBarcode>,
 ) -> anyhow::Result<()> {
-    use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+    use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
     use data_beans::qc::collect_column_stat_across_vec;
     use data_beans::sparse_io_vector::ColumnAlignment;
     if symbols.is_empty() {
@@ -1055,8 +1055,8 @@ fn log_family_expression(
         return Ok(());
     }
     let (mk, md) = (
-        matrix_util::utils::median(&kept),
-        matrix_util::utils::median(&dropped),
+        legume_numeric::matrix::utils::median(&kept),
+        legume_numeric::matrix::utils::median(&dropped),
     );
     info!(
         "{label} ({} genes, {} rows): per-10k median {:.1} in competent cells vs {:.1} in \

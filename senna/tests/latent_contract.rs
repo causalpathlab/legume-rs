@@ -5,7 +5,7 @@
 //! `kind: "itopic"`, so downstream applied the log-θ reading to masked-vae and
 //! produced unnormalized "proportions".
 
-use candle_util::vae::masked_topic::LatentHead;
+use legume_numeric::candle::vae::masked_topic::LatentHead;
 use senna::embed_common::{latent_to_theta, softmax_rows_inplace, Mat};
 use senna::run_manifest::{CellSpace, RunKind};
 

@@ -16,9 +16,9 @@ use crate::mat_io::Mat;
 use crate::outputs::AnnotationOutputs;
 use anyhow::{anyhow, Context, Result};
 use graph_embedding_util::type_annotation::annotate_ontology_from_obo;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::traits::IoOps;
 use std::path::Path;
 
 // Re-export the score enum so sibling modules (e.g. `by_enrichment`) name it

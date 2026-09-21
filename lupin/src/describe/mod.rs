@@ -12,8 +12,8 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use gene_text::vocab::Vocabulary;
+use legume_numeric::matrix::parquet::peek_parquet_field_names;
 use log::info;
-use matrix_util::parquet::peek_parquet_field_names;
 use serde_json::json;
 
 #[derive(Args, Debug)]
@@ -87,7 +87,7 @@ impl ClusterEvidence {
 
 pub fn run_describe(args: &DescribeArgs) -> Result<()> {
     let out = args.out.as_deref().unwrap_or(args.from.as_ref());
-    matrix_util::common_io::mkdir_parent(out)?;
+    legume_numeric::matrix::common_io::mkdir_parent(out)?;
 
     let mut enriched = load_evidence(args.from.as_ref())?;
     attach_second_best(&mut enriched, args.from.as_ref(), args.fdr_alpha)?;
@@ -197,7 +197,7 @@ fn load_from_annot_parquet(path: &str) -> Result<Vec<ClusterEvidence>> {
     }
 
     let (strings, nums) =
-        matrix_util::parquet::read_table_columns(path, &string_cols, &numeric_cols)
+        legume_numeric::matrix::parquet::read_table_columns(path, &string_cols, &numeric_cols)
             .with_context(|| format!("read {path}"))?;
 
     let coarse = &strings[0];
@@ -319,7 +319,7 @@ fn load_markers_from_support_parquet(path: &str) -> Result<BTreeMap<String, Vec<
         numeric_cols.push("idf_weight");
     }
     let (strings, nums) =
-        matrix_util::parquet::read_table_columns(path, &string_cols, &numeric_cols)
+        legume_numeric::matrix::parquet::read_table_columns(path, &string_cols, &numeric_cols)
             .with_context(|| format!("read {path}"))?;
     let genes = &strings[0];
     let types = &strings[1];
@@ -354,7 +354,7 @@ fn load_markers_from_embedding_parquet(path: &str) -> Result<BTreeMap<String, Ve
         vec![]
     };
     let (strings, nums) =
-        matrix_util::parquet::read_table_columns(path, &string_cols, &numeric_cols)
+        legume_numeric::matrix::parquet::read_table_columns(path, &string_cols, &numeric_cols)
             .with_context(|| format!("read {path}"))?;
     let genes = &strings[0];
     let types = &strings[1];
@@ -445,8 +445,8 @@ fn attach_second_best(clusters: &mut [ClusterEvidence], from: &str, fdr_alpha: f
         info!("describe: no {path}; skipping significant runner-up");
         return Ok(());
     }
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::dmatrix_io::DMatrix;
+    use legume_numeric::matrix::traits::IoOps;
     let loaded = DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))
         .with_context(|| format!("read {path}"))?;
     let row_of: BTreeMap<&str, usize> = loaded
@@ -594,8 +594,8 @@ fn attach_embedding_neighbours(
     if k == 0 {
         return Ok(());
     }
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::dmatrix_io::DMatrix;
+    use legume_numeric::matrix::traits::IoOps;
     let loaded = DMatrix::<f32>::from_parquet_with_row_names(emb_path, Some(0))
         .with_context(|| format!("read {emb_path}"))?;
     let (n, h) = (loaded.mat.nrows(), loaded.mat.ncols());

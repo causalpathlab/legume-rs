@@ -1,14 +1,14 @@
 //! The `senna simba` driver: load, cell QC, HVG subset, train, write.
 
 use super::SimbaArgs;
-use candle_util::candle_core::{Device, Tensor};
-use data_beans_alg::hvg::select_hvg_streaming;
+use data_beans::alg::hvg::select_hvg_streaming;
 use graph_embedding_util as ge;
 use graph_embedding_util::simba::{
     compare_entities, run_simba, EntityMetrics, SimbaConfig, METRICS_T, N_TOP_CELLS,
 };
+use legume_numeric::candle::candle_core::{Device, Tensor};
+use legume_numeric::matrix::common_io::mkdir_parent;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
 use senna::embed_common::*;
 use senna::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 

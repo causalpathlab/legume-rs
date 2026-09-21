@@ -38,7 +38,7 @@ fn test_connected_components_isolates() {
 /// the mesh view and from the directional activity test.
 #[test]
 fn a_pair_in_both_graphs_reads_as_spatial() {
-    use matrix_util::knn_graph::EdgeSource;
+    use legume_numeric::matrix::knn_graph::EdgeSource;
     assert_eq!(edge_kind_code(EdgeSource::Primary), EDGE_KIND_SPATIAL);
     assert_eq!(edge_kind_code(EdgeSource::Both), EDGE_KIND_SPATIAL);
     assert_eq!(edge_kind_code(EdgeSource::Secondary), EDGE_KIND_EXPRESSION);
@@ -54,8 +54,8 @@ mod coord_pairs_table {
     use crate::util::cell_pairs::*;
     use crate::util::common::*;
     use data_beans::sparse_io_vector::SparseIoVec;
-    use matrix_util::knn_graph::EdgeSource;
-    use matrix_util::parquet::peek_parquet_field_names;
+    use legume_numeric::matrix::knn_graph::EdgeSource;
+    use legume_numeric::matrix::parquet::peek_parquet_field_names;
     use ndarray::Array2;
     use std::sync::Arc;
 
@@ -187,7 +187,7 @@ mod coord_pairs_table {
         assert!(fields.iter().any(|f| f.as_ref() == "distance_rank"));
         assert!(fields.iter().any(|f| f.as_ref() == "distance"));
 
-        use matrix_util::parquet::ParquetReader;
+        use legume_numeric::matrix::parquet::ParquetReader;
         let read = ParquetReader::new(&path, Some(0), None, None)?;
         let di = read
             .column_names

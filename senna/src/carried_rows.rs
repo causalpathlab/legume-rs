@@ -3,15 +3,15 @@
 //! `feature_preset` in the binary): built once by the preset loader, appended
 //! by [`crate::run_manifest::write_run_manifest`] for every engine.
 
-use auxiliary_data::feature_types::{
+use data_beans::aux::feature_types::{
     feature_types_path, read_feature_types, write_feature_types, FeatureType, GENE_TYPE,
 };
-use auxiliary_data::frozen_features::FrozenFeatureHost;
+use data_beans::aux::frozen_features::FrozenFeatureHost;
 use graph_embedding_util as ge;
+use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
+use legume_numeric::matrix::parquet::peek_parquet_field_names;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::dmatrix_util::concatenate_vertical;
-use matrix_util::parquet::peek_parquet_field_names;
-use matrix_util::traits::IoOps;
 use nalgebra::DMatrix;
 use rustc_hash::{FxHashMap, FxHashSet};
 

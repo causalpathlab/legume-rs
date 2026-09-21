@@ -40,8 +40,8 @@ pub use graph::{EdgeList, RelationTable};
 pub use metrics::{compare_entities, EntityMetrics};
 pub use train::{train, TrainOutput};
 
-use candle_util::candle_core::{Device, Tensor};
 use data_beans::sparse_io_vector::SparseIoVec;
+use legume_numeric::candle::candle_core::{Device, Tensor};
 
 /// `si.pp.normalize(method='lib_size')` scale factor.
 pub const SCALE_FACTOR: f64 = 1e4;

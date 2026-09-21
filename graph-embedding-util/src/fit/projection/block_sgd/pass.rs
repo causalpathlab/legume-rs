@@ -16,7 +16,7 @@ use super::solve::solve_block;
 use super::{
     Phase2Input, BETA1, BETA2, GATE_FOLD_EPS, GROUP_BLOCKS, LR_FLOOR_FRAC, TARGET_DELTA_S,
 };
-use candle_util::candle_core::{DType, Device, Tensor};
+use legume_numeric::candle::candle_core::{DType, Device, Tensor};
 use log::info;
 
 ////////////////////////////////////

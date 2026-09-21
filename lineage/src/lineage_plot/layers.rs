@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use log::{info, warn};
 use std::collections::HashMap;
 
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 
 use plot_utils::palette::{self, Rgb};
 use plot_utils::rasterize::{

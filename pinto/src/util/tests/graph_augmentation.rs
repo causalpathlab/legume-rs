@@ -12,7 +12,7 @@
 use crate::util::common::Mat;
 use crate::util::input::auto_batch_from_components;
 use crate::util::srt_pipeline::topology_graph;
-use matrix_util::knn_graph::{DistanceMerge, KnnGraph, KnnGraphArgs};
+use legume_numeric::matrix::knn_graph::{DistanceMerge, KnnGraph, KnnGraphArgs};
 use nalgebra::DMatrix;
 
 /// The same eight points `two_sections` places, as a coordinate matrix.

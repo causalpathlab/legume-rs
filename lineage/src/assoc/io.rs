@@ -6,13 +6,13 @@ use rustc_hash::FxHashMap;
 
 use data_beans::hdf5_io::resolve_backend_file;
 use data_beans::sparse_io::{open_sparse_matrix, COLUMN_SEP};
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 
 use super::Modality;
-use auxiliary_data::feature_rows::parse_feature_row;
-use matrix_util::common_io::basename;
-use matrix_util::membership::Membership;
+use data_beans::aux::feature_rows::parse_feature_row;
+use legume_numeric::matrix::common_io::basename;
+use legume_numeric::matrix::membership::Membership;
 
 /// Per-cell lineage: a common pseudotime axis + primary branch, in cell order.
 pub struct Lineage {

@@ -1,8 +1,8 @@
-//! HVG selection has moved to `data_beans_alg::hvg`. This module
+//! HVG selection has moved to `data_beans::alg::hvg`. This module
 //! re-exports the public surface so existing `crate::hvg::*` call sites
 //! in senna keep compiling unchanged.
 
-pub use data_beans_alg::hvg::{load_must_train, select_hvg_streaming, HvgCliArgs, HvgSelection};
+pub use data_beans::alg::hvg::{load_must_train, select_hvg_streaming, HvgCliArgs, HvgSelection};
 
 /// The `--multiome` flag and HVG settings a run will actually use, after the
 /// warn-and-zero rules in [`resolve_multiome_with_hvg`] have been applied.

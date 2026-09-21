@@ -16,9 +16,9 @@ use senna::embed_common::*;
 
 use candle_core::{Device, Tensor};
 use candle_nn::VarMap;
-use data_beans_alg::collapse_data::CollapsedOut;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
-use matrix_util::traits::ConvertMatOps;
+use data_beans::alg::collapse_data::CollapsedOut;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
+use legume_numeric::matrix::traits::ConvertMatOps;
 
 /// Suffix on the per-level `VarMap` path where softmax-based decoders store
 /// their `[K, D]` pre-softmax logits.

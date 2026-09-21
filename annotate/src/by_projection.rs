@@ -27,8 +27,8 @@ use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, Abstain, InputEmbeddings, MarkerBootstrapConfig, TermOraConfig,
     TERM_ORA_OUTPUT_SUFFIXES,
 };
+use legume_numeric::matrix::common_io::mkdir_parent;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
 use std::path::Path;
 
 /// The two embeddings the projection pass scores against each other. Finding

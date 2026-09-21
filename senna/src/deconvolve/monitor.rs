@@ -6,7 +6,7 @@
 //! draws — burn-in is the part worth looking at.
 
 use anyhow::{Context, Result};
-use matrix_util::common_io::open_buf_writer;
+use legume_numeric::matrix::common_io::open_buf_writer;
 use senna::embed_common::Mat;
 use std::io::Write;
 

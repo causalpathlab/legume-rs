@@ -9,7 +9,7 @@
 use crate::common::*;
 use data_beans::column_subset::stream_column_selection;
 use data_beans::hdf5_io::resolve_backend_file;
-use matrix_util::traits::RunningStatOps;
+use legume_numeric::matrix::traits::RunningStatOps;
 
 pub type Backend = Box<dyn SparseIo<IndexIter = Vec<usize>>>;
 
@@ -47,7 +47,9 @@ pub fn row_nnz_over_columns(
 ) -> anyhow::Result<Vec<usize>> {
     let nrow = data.num_rows().unwrap_or(0);
     let mut nnz = vec![0usize; nrow];
-    for (lb, ub) in matrix_util::utils::generate_minibatch_intervals(cols.len(), 0, Some(8192)) {
+    for (lb, ub) in
+        legume_numeric::matrix::utils::generate_minibatch_intervals(cols.len(), 0, Some(8192))
+    {
         let (_, _, triplets) = data.read_triplets_by_columns(cols[lb..ub].to_vec())?;
         for (r, _, x) in triplets {
             if x > 0.0 {

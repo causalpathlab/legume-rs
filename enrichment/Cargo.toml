@@ -21,4 +21,4 @@ indicatif = { workspace = true }
 special = { workspace = true }
 statrs = { workspace = true }
 
-matrix-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix"] }

@@ -34,7 +34,7 @@ use crate::q_matrix::build_q_matrix;
 use crate::specificity::{compute_specificity, SpecificityMode};
 use crate::Mat;
 use indicatif::{ParallelProgressIterator, ProgressStyle};
-use matrix_util::hypothesis::benjamini_hochberg;
+use legume_numeric::matrix::hypothesis::benjamini_hochberg;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rayon::prelude::*;

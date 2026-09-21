@@ -11,7 +11,7 @@
 use super::config::FitConfig;
 use crate::data::UnifiedData;
 use crate::model::{JointEmbedModel, ModelArgs, ModelInit, ShareFeaturesArgs};
-use candle_util::candle_nn::VarMap;
+use legume_numeric::candle::candle_nn::VarMap;
 
 /// The primary (per-cell) head and one head per pseudobulk level, coarsest → finest.
 pub(super) struct Heads {

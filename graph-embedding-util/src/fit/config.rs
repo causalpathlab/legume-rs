@@ -1,7 +1,7 @@
 use crate::model::JointEmbedModel;
-use candle_util::candle_core::Device;
-use candle_util::candle_nn::VarMap;
-use data_beans_alg::refine_multilevel::RefineParams;
+use data_beans::alg::refine_multilevel::RefineParams;
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::candle_nn::VarMap;
 
 /// Stratification exponent for cell-axis positive sampling: outer pick
 /// is `q(c) ∝ degree(c)^alpha_cell` within each batch. `0.5` gives
@@ -219,7 +219,7 @@ pub struct FitConfig {
     pub seed: u64,
     pub device: Device,
     /// Streaming block size for column-block I/O. `None` falls back to
-    /// `matrix_util::utils::default_block_size(n_features)` which
+    /// `legume_numeric::matrix::utils::default_block_size(n_features)` which
     /// clamps to 100 for large feature counts — that's tiny on
     /// rotational disks. Pass `Some(1024)` or higher when you have
     /// the RAM, especially without `--preload-data`.
@@ -365,7 +365,7 @@ pub struct FitOutput {
     /// The finest collapse level and its cell → pb membership, present iff
     /// [`FitConfig::emit_finest_collapse`] was set. The membership indexes
     /// the global cell ids of the `UnifiedData` the fit ran on.
-    pub finest_collapse: Option<(data_beans_alg::collapse_data::CollapsedOut, Vec<usize>)>,
+    pub finest_collapse: Option<(data_beans::alg::collapse_data::CollapsedOut, Vec<usize>)>,
     pub varmap: VarMap,
     /// Un-normalized baseline MAP per-cell projection norm from phase 2 (`0`
     /// for cells with no observed features / when phase 2 was skipped). The

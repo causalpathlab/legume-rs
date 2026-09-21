@@ -8,12 +8,12 @@ use crate::encoder::{Encoder, ModelSpec, Pooling};
 use crate::sources::Corpus;
 use crate::vocab::{tokenize, DfQcOpts, Occurrence, TokenizeOpts, Vocabulary};
 use anyhow::Result;
-use auxiliary_data::feature_names::FeatureNameKindArg;
 use candle_core::{Device, Tensor};
 use clap::{Args, ValueEnum};
+use data_beans::aux::feature_names::FeatureNameKindArg;
+use legume_numeric::matrix::progress::new_progress_bar;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::progress::new_progress_bar;
-use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 use std::io::Write;
 
@@ -265,7 +265,7 @@ fn prepare(
     vocab_file: Option<&str>,
     out: &str,
 ) -> Result<Prepared> {
-    matrix_util::common_io::mkdir_parent(out)?;
+    legume_numeric::matrix::common_io::mkdir_parent(out)?;
     let corpus = sources.corpus()?;
     let opts = qc.tokenize_opts()?;
     let (sentences, occurrences): (Vec<String>, Vec<Vec<Occurrence>>) = corpus
@@ -399,7 +399,7 @@ fn write_text_embedding(
         Some(&cols),
     )?;
     let types: Vec<Box<str>> = corpus.docs().iter().map(|d| d.ty.clone()).collect();
-    auxiliary_data::feature_types::write_feature_types(out, &names, &types)
+    data_beans::aux::feature_types::write_feature_types(out, &names, &types)
 }
 
 /// `{out}.feature_word.edges.tsv`: each feature to the words of its text,

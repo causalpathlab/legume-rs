@@ -1,6 +1,6 @@
 //! Choosing K and placing the k-means centroids the graph is built over.
 
-use matrix_util::dmatrix_io::DMatrix;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
 
 use super::args::*;
 use super::layout::*;

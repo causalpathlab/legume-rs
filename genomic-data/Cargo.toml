@@ -15,7 +15,7 @@ log = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
 nalgebra = { workspace = true }
-matrix-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

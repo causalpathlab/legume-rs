@@ -95,8 +95,8 @@
 
 use crate::util::common::*;
 use crate::util::feature_axis::FeatureAxis;
-use candle_util::candle_core::Device;
-use matrix_util::utils::{generate_minibatch_intervals, quantiles};
+use legume_numeric::candle::candle_core::Device;
+use legume_numeric::matrix::utils::{generate_minibatch_intervals, quantiles};
 
 /// Clamp on the linear predictor before `exp`. f32 overflows at 88; the same
 /// bound geu puts on every Poisson fit in the workspace.

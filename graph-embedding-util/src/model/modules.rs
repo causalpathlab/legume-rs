@@ -27,9 +27,9 @@
 //! [`super::JointEmbedModel::materialize_e_feat`] refreshes the snapshot after
 //! training so phase 2 and every output reader see a fixed dictionary.
 
-use candle_util::candle_core::{Device, Result, Tensor};
-use candle_util::candle_nn::VarMap;
-use candle_util::nn::sparsemax;
+use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::candle_nn::VarMap;
+use legume_numeric::candle::nn::sparsemax;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -189,16 +189,18 @@ impl JointEmbedModel {
     pub fn new_with_modules(args: ModuleInit, varmap: &VarMap, dev: &Device) -> Result<Self> {
         let (d, m, h) = (args.n_features, args.n_modules, args.embedding_dim);
         if m < 2 {
-            candle_util::candle_core::bail!("new_with_modules: need at least 2 modules, got {m}");
+            legume_numeric::candle::candle_core::bail!(
+                "new_with_modules: need at least 2 modules, got {m}"
+            );
         }
         if args.b_feat.len() != d {
-            candle_util::candle_core::bail!(
+            legume_numeric::candle::candle_core::bail!(
                 "new_with_modules: b_feat has {} entries but n_features is {d}",
                 args.b_feat.len()
             );
         }
         if args.b_cell.len() != args.n_cells {
-            candle_util::candle_core::bail!(
+            legume_numeric::candle::candle_core::bail!(
                 "new_with_modules: b_cell has {} entries but n_cells is {}",
                 args.b_cell.len(),
                 args.n_cells
@@ -209,7 +211,7 @@ impl JointEmbedModel {
         match args.warm {
             ModuleWarmStart::Labels { labels, own_mass } => {
                 if labels.len() != d {
-                    candle_util::candle_core::bail!(
+                    legume_numeric::candle::candle_core::bail!(
                         "new_with_modules: {} warm-start labels for {d} features",
                         labels.len()
                     );
@@ -217,7 +219,7 @@ impl JointEmbedModel {
                 let kappa = module_logit_for_own_mass(own_mass, m);
                 for (g, &lab) in labels.iter().enumerate() {
                     if lab as usize >= m {
-                        candle_util::candle_core::bail!(
+                        legume_numeric::candle::candle_core::bail!(
                             "new_with_modules: warm-start label {lab} for feature {g} is not \
                              below the module count {m}"
                         );
@@ -227,7 +229,7 @@ impl JointEmbedModel {
             }
             ModuleWarmStart::Explicit { logits, mu } => {
                 if logits.nrows() != d || logits.ncols() != m {
-                    candle_util::candle_core::bail!(
+                    legume_numeric::candle::candle_core::bail!(
                         "new_with_modules: warm-start logits are {}×{} but the model is {d}×{m}",
                         logits.nrows(),
                         logits.ncols()
@@ -235,7 +237,7 @@ impl JointEmbedModel {
                 }
                 if let Some(parent) = mu {
                     if parent.nrows() != m || parent.ncols() != h {
-                        candle_util::candle_core::bail!(
+                        legume_numeric::candle::candle_core::bail!(
                             "new_with_modules: warm-start μ is {}×{} but the model needs {m}×{h}",
                             parent.nrows(),
                             parent.ncols()

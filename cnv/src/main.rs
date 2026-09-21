@@ -3,12 +3,12 @@
 //! (crate/lib: `cnv`).
 
 use anyhow::Context;
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::{Args, Parser, Subcommand};
 use cnv::cell_profile::{run_cell_profiles, CellProfileConfig};
 use cnv::clone_bayes::{cells_table_beside, DEFAULT_MIN_PURITY};
 use cnv::clone_call::{call_clones_with_burden, write_clone_table, CloneCallConfig, CloneEngine};
 use cnv::gene_loci::GeneLocusIndex;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::convert::try_open_or_convert;
 use data_beans::sparse_io_vector::SparseIoVec;
 use log::{info, warn};
@@ -375,7 +375,7 @@ fn run_infercnv(args: &InferCnvArgs) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    auxiliary_data::logging::init_logger(cli.verbose);
+    data_beans::aux::logging::init_logger(cli.verbose);
 
     if let Some(n) = cli.n_threads {
         anyhow::ensure!(n >= 1, "--n-threads must be >= 1");

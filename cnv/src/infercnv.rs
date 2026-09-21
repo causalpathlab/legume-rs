@@ -11,7 +11,7 @@
 //! 4. Optional symmetric clipping and per-column centering.
 //!
 //! Columns are independent and filled in parallel via
-//! [`matrix_util::dmatrix_util::build_columns_par`].
+//! [`legume_numeric::matrix::dmatrix_util::build_columns_par`].
 //!
 //! This is the expression-side counterpart of [`crate::per_sample`]: feed the
 //! returned matrix into [`crate::per_sample::call_per_sample_cnv`] (with
@@ -24,7 +24,7 @@
 //!   (windowed smoothing, reference subtraction, dynamic range clipping).
 
 use crate::genome_order::GenomeOrder;
-use matrix_util::dmatrix_util::build_columns_par;
+use legume_numeric::matrix::dmatrix_util::build_columns_par;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 

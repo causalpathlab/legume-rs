@@ -109,8 +109,8 @@ pub(super) fn write_type_coembeddings(
     h: usize,
     res: &AnnotateProjOutputs,
 ) -> Result<(DMatrix<f32>, DMatrix<f32>)> {
-    use candle_util::candle_core::{Device, Tensor};
-    use matrix_util::traits::ConvertMatOps;
+    use legume_numeric::candle::candle_core::{Device, Tensor};
+    use legume_numeric::matrix::traits::ConvertMatOps;
     let cpu = Device::Cpu;
     let cell_t = cell_emb.to_tensor(&cpu)?; // [N, H]
                                             // Eff-cells temperature target = median size of the coarse communities we
@@ -184,12 +184,12 @@ pub(super) fn write_annotation_outputs(
     // BH q-values across the N per-cell calls of each layer (FDR over the
     // selected-label p-values); NaN-filled when the null was skipped.
     let coarse_q = if res.coarse_p.is_some() {
-        matrix_util::hypothesis::benjamini_hochberg(&coarse_p)
+        legume_numeric::matrix::hypothesis::benjamini_hochberg(&coarse_p)
     } else {
         vec![nan; n]
     };
     let fine_q = if res.fine_p.is_some() {
-        matrix_util::hypothesis::benjamini_hochberg(&fine_p)
+        legume_numeric::matrix::hypothesis::benjamini_hochberg(&fine_p)
     } else {
         vec![nan; n]
     };

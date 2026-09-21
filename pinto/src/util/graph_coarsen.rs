@@ -1,8 +1,8 @@
 use crate::util::common::*;
 use crate::util::graph_refine::refine_labels;
 use crate::util::knn_graph::KnnGraph;
-use data_beans_alg::cell_pairs::collapse_pairs;
-use data_beans_alg::union_find::UnionFind;
+use data_beans::alg::cell_pairs::collapse_pairs;
+use data_beans::alg::union_find::UnionFind;
 use nalgebra_sparse::{CooMatrix, CscMatrix};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -558,7 +558,7 @@ pub struct SeedingParams<'a> {
 /// runtime check needed: `CoarsenConfig::dc_poisson: Option<DcPoissonConfig>`
 /// makes the joint nature explicit in the type.
 pub struct DcPoissonConfig<'a> {
-    pub params: data_beans_alg::dc_poisson::RefineParams,
+    pub params: data_beans::alg::dc_poisson::RefineParams,
     pub data: &'a SparseIoVec,
     pub num_features: usize,
 }
