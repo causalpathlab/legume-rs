@@ -434,7 +434,7 @@ fn pooled_chains_report_between_chain_diagnostics() {
 
 #[test]
 fn diagnostics_guard_and_wiring() {
-    // The estimators themselves are mcmc-util's and tested there; what is ours
+    // The estimators themselves are legume_numeric::mcmc's and tested there; what is ours
     // is the short-chain guard and that a drifting chain reaches them.
     assert!(
         split_rhat_ess(&[0.1, 0.2, 0.3]).is_none(),

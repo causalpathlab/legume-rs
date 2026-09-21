@@ -1,7 +1,7 @@
 //! Senna-side glue for the masked-topic trainer.
 //!
 //! The training hot loop lives in [`legume_numeric::candle::vae::masked_topic`].
-//! This module owns senna-specific bits the candle-util trainer does not
+//! This module owns senna-specific bits the legume_numeric::candle trainer does not
 //! see: per-level data assembly from [`CollapsedOut`], bulk-vs-SC delta
 //! estimation, bulk evaluation, and the dictionary / feature-embedding
 //! writers. The `pub(crate) use` re-exports keep existing call sites

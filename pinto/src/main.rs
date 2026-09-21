@@ -568,7 +568,7 @@ enum Commands {
                       \x20 1. Cells are collapsed into pseudobulk samples =\n\
                       \x20    (batch × propensity-bin), where the propensity bin is the\n\
                       \x20    sign-LSH binary code of an SVD'd random projection of feature\n\
-                      \x20    expression (data-beans-alg::binary_sort_columns).\n\
+                      \x20    expression (`binary_sort_columns`).\n\
                       \x20 2. Each cell carries soft membership over the link communities:\n\
                       \x20    the fraction of its within-community edge instances in each.\n\
                       \x20 3. Per (community, sample) we accumulate membership-weighted\n\

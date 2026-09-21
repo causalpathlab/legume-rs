@@ -214,7 +214,7 @@ pub fn leiden_clustering_with_metric(
     seed: Option<u64>,
     metric: LatentMetric,
 ) -> anyhow::Result<ClusterResult> {
-    // Core kNN-graph + Leiden lives in matrix-util now (shared with the
+    // Core kNN-graph + Leiden lives in legume_numeric::matrix now (shared with the
     // graph-embedding-util annotation coarsener); this is a thin wrapper
     // that maps the metric and packages a ClusterResult.
     let cosine = matches!(metric, LatentMetric::Cosine);

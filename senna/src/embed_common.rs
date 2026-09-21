@@ -47,7 +47,7 @@ pub use data_beans::alg::random_projection::*;
 pub use legume_numeric::matrix::dense_mat_io::axis_id_names;
 
 /// Inverse of [`axis_id_names`]. Accepts the explicit `{prefix}{c}` form
-/// and the legacy bare-integer fallback (matrix-util's default column
+/// and the legacy bare-integer fallback (legume_numeric::matrix's default column
 /// names) so older parquets still load.
 #[must_use]
 pub fn parse_axis_id(name: &str, prefix: &str) -> Option<i64> {

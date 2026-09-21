@@ -1,7 +1,7 @@
 //! Velocity-oriented lineage inference over a `senna gem` embedding, driven by
 //! [`crate::lineage::run::run_lineage`].
 //!
-//! The generic numeric primitives live in `matrix-util`: seeded k-means centroids
+//! The generic numeric primitives live in `legume_numeric::matrix`: seeded k-means centroids
 //! ([`legume_numeric::matrix::principal_graph::kmeans_centroids_seeded`]), the K×K distance matrix
 //! ([`legume_numeric::matrix::principal_graph::pairwise_sqdist_rows_to_rows`]) + MST
 //! ([`legume_numeric::matrix::principal_graph::mst_from_sqdist`]), and the Slingshot curves

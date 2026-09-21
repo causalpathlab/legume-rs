@@ -1,6 +1,6 @@
 //! Parquet readers for the pinto-plot pipeline.
 //!
-//! All readers here are thin wrappers over `matrix-util` primitives so
+//! All readers here are thin wrappers over `legume_numeric::matrix` primitives so
 //! we share one code path with senna / the rest of pinto. The only
 //! pinto-specific piece is [`read_cells_from_coord_pairs`], which
 //! dedupes `coord_pairs.parquet` into a per-cell table `(name, x, y,

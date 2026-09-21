@@ -729,7 +729,7 @@ use crate::topic::decoder_output::{write_dictionary_tensor, DecoderExtras};
 /// Trait for optional per-run hyperparameter configuration from CLI args.
 /// Default is no-op; specific decoders override to set their own knobs.
 /// Per-feature Fisher weights flow through `DecoderModuleT::attach_feature_weights`
-/// (declared in `candle-util`) rather than this trait, so callers outside
+/// (declared in `legume_numeric::candle`) rather than this trait, so callers outside
 /// senna (e.g. `predict`) can attach weights without importing this.
 trait ConfigureDecoder {
     fn configure(&mut self, _args: &TopicArgs) {}

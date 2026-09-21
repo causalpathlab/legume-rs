@@ -58,7 +58,7 @@ pub use modules::{
     module_softmax_loss, module_step_loss, MembershipDiagnostics, ModulePools, MODULE_SMALL_FLOOR,
 };
 
-/// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;
+/// The one canonical numerically-stable `log σ(x)` lives in `legume_numeric::candle`;
 /// re-exported here so `feat` (bipartite NCE), `chain` (cell-cell chain NCE),
 /// and [`logistic_nce`] all share a single implementation.
 pub(super) use legume_numeric::candle::loss::log_sigmoid;

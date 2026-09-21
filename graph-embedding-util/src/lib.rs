@@ -62,7 +62,7 @@ pub use multiome_plan::{
 pub use postprocess::{cell_clusters, feature_coembedding, feature_coembedding_fixed_t};
 pub use preset_mode::{LoraArgs, LoraSpec, PresetMode, PresetOffsets, PresetRows};
 
-/// Graceful-stop on Ctrl+C. Lives in `matrix-util` so the annotation crates *below* this one
+/// Graceful-stop on Ctrl+C. Lives in `legume_numeric::matrix` so the annotation crates *below* this one
 /// (`enrichment`, which owns the raw-count marker bootstrap) can share the same flag and the same
 /// interrupt-safe replicate combinators — a process must have exactly one SIGINT handler, and
 /// `ctrlc::set_handler` panics on a second registration. Re-exported here so `crate::stop::…` and

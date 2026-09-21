@@ -7,7 +7,7 @@ use std::sync::Mutex;
 /// Cell membership data structure for filtering BAM records by cell barcode
 /// Supports exact and prefix matching with caching for performance
 pub struct CellMembership {
-    /// Core membership from matrix-util
+    /// Core membership from legume_numeric::matrix
     inner: Membership,
 
     /// Cache for matched BAM barcodes (thread-safe for parallel processing)

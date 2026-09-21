@@ -69,7 +69,7 @@ ndarray = { version = "0.17", features = ["rayon", "serde", "approx", "blas"] }
 ndarray-rand = "0.16"
 num-traits = "0.2.19"
 special = "0.13"
-statrs = "0.18"
+statrs = { version = "0.18", default-features = false }
 
 # Data structures / hashing
 dashmap = { version = "6.1.0", features = ["rayon"] }
@@ -117,7 +117,7 @@ wide = "0.7"
 
 # Published foundation / product crates (also developed in their own repos)
 cnv = { path = "cnv" }
-data-beans = { version = "0.6.5" }
+data-beans = { version = "0.6.6" }
 enrichment = { path = "enrichment" }
 faba = { path = "faba" }
 genomic-data = { path = "genomic-data" }

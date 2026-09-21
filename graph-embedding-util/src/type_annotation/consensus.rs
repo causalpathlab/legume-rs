@@ -33,7 +33,7 @@
 //! # Cross-run reproducibility (now solved)
 //!
 //! `community` **is** reproducible between runs now. All `B` partitions within one run are Leiden
-//! re-seeds of **one kNN graph**, and that graph is deterministic (matrix-util's seeded
+//! re-seeds of **one kNN graph**, and that graph is deterministic (legume_numeric::matrix's seeded
 //! instant-distance backend), so a second run rebuilds the identical graph and re-derives the
 //! identical partition. Under the old un-seedable `hnsw_rs` backend this was false — the graph
 //! differed by ~9% of edges between builds (edge Jaccard 0.91), and three runs agreed on
