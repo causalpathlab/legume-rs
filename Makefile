@@ -325,7 +325,7 @@ $(addprefix install-,$(BINARIES)):
 	    if [ -n "$$feats" ]; then feats="$$feats,$$extra_feat"; else feats="--features $$extra_feat"; fi; \
 	    if [ -n "$$feats_cpu" ]; then feats_cpu="$$feats_cpu,$$extra_feat"; else feats_cpu="--features $$extra_feat"; fi; \
 	fi; \
-	if [ -n "$$from_crates" ]; then install_cmd="cargo install --locked $$pkg"; else install_cmd="cargo install --locked --path $$pkg"; fi; \
+	if [ -n "$$from_crates" ]; then install_cmd="cargo install --locked --force $$pkg"; else install_cmd="cargo install --locked --path $$pkg"; fi; \
 	if echo " $(CPU_ONLY_BINARIES) " | grep -q " $$bin "; then \
 	    echo "Installing $$bin (no GPU backend; CPU-only by design)..."; \
 	    $$install_cmd $$feats_cpu; \
