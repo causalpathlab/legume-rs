@@ -35,7 +35,7 @@ pub(crate) mod metrics;
 pub(crate) mod train;
 
 pub use crate::fne::{auto_wd, EpochStats, RowAdagrad, ADAGRAD_EPS, INIT_STDEV, MASK_NEG};
-pub use discretize::Discretization;
+pub use discretize::{log_norm, Discretization};
 pub use graph::{EdgeList, RelationTable};
 pub use metrics::{compare_entities, EntityMetrics};
 pub use train::{train, TrainOutput};

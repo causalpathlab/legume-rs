@@ -16,12 +16,12 @@ use crate::p2g::input::{
     load_paired_data, GeneUniverse,
 };
 use crate::p2g::link_map::{LinkParams, LinkScore};
+use crate::p2g::pb_levels::{parent_maps, PbLevels};
 use crate::p2g::workflow::{run_from_pseudobulk, PbMultiome, WorkflowParams};
 use data_beans::alg::collapse_data::MultilevelParams;
 use data_beans::alg::refine_multilevel::RefineParams;
 use genomic_data::coordinates::{load_gene_tss, parse_peak_coordinates, GeneTss};
 use graph_embedding_util::fne::FneConfig;
-use legume_numeric::candle::candle_core::Device;
 use log::info;
 
 #[derive(Args, Debug)]
@@ -167,11 +167,20 @@ pub struct PeakToGeneArgs {
 
     #[arg(
         long,
-        default_value_t = 1,
-        help = "Hierarchical refinement levels;\n\
-                refined finest level is used (1 = single level)"
+        default_value_t = 3,
+        help = "Pseudobulk tree levels.\n\
+                Links are scored on the finest level;\n\
+                every level joins the embedding as sample nodes"
     )]
     num_levels: usize,
+
+    #[arg(
+        long,
+        default_value_t = 5,
+        help = "Expression levels per modality\n\
+                in the pb-sample × feature relations of the embedding"
+    )]
+    context_bins: usize,
 
     /* Embedding / cluster */
     #[arg(
@@ -186,6 +195,17 @@ pub struct PeakToGeneArgs {
 
     #[arg(long, default_value_t = 42, help = "RNG seed for FNE")]
     seed: u64,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = ComputeDevice::Cpu,
+        help = "Compute device for the FNE training"
+    )]
+    device: ComputeDevice,
+
+    #[arg(long, default_value_t = 0, help = "Device ordinal for cuda / metal")]
+    device_no: usize,
 
     #[arg(
         long,
@@ -207,7 +227,8 @@ pub struct PeakToGeneArgs {
         required = true,
         help = "Output prefix: E2G tables under `{out}/`;\n\
                 `{out}.peak_embedding.parquet`, `.gene_embedding.parquet`,\n\
-                `.cell_embedding.parquet`"
+                `.cell_embedding.parquet` (finest pseudobulks);\n\
+                `.pb_tree_embedding.parquet` with more than one level"
     )]
     out: Box<str>,
 }
@@ -253,25 +274,19 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     let gene_names = paired.data_stack.stack[0].row_names()?;
     let peak_names = paired.data_stack.stack[1].row_names()?;
 
-    let (rna_pb, atac_pb) = collapse_finest_pb(&mut paired, args)?;
+    let levels = collapse_pb_levels(&mut paired, args)?;
     info!(
-        "Pseudobulk: RNA {}x{}, ATAC {}x{}{}",
-        rna_pb.nrows(),
-        rna_pb.ncols(),
-        atac_pb.nrows(),
-        atac_pb.ncols(),
+        "Pseudobulk: {} genes × {} peaks{}; levels {:?}",
+        gene_names.len(),
+        peak_names.len(),
         if args.use_adjusted {
             " (batch-adjusted)"
         } else {
             ""
-        }
+        },
+        levels.n_pb_per_level()
     );
-    if rna_pb.ncols() < 50 && args.link_score == LinkScore::Pearson {
-        info!(
-            "warning: only {} pseudobulk samples; correlations may be unstable",
-            rna_pb.ncols()
-        );
-    }
+    warn_few_samples(levels.n_pb(0), args);
 
     let peak_coords = parse_peak_coordinates(&peak_names);
     let gene_tss = load_gene_tss_aligned(args, &gene_names)?;
@@ -279,8 +294,8 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     finish_workflow(
         args,
         PbMultiome {
-            rna_pb: &rna_pb,
-            atac_pb: &atac_pb,
+            levels: &levels,
+            gene_activity: None,
             gene_tss: &gene_tss,
             peak_coords: &peak_coords,
             gene_names: &gene_names,
@@ -307,23 +322,19 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     }
 
     let peak_names = paired.data_stack.stack[0].row_names()?;
-    let (_, atac_pb) = collapse_finest_pb_single(&mut paired, args)?;
+    let levels = collapse_pb_levels(&mut paired, args)?;
+    let atac_pb = &levels.atac[0];
     info!(
-        "Pseudobulk (ATAC-only): ATAC {}x{}{}",
-        atac_pb.nrows(),
-        atac_pb.ncols(),
+        "Pseudobulk (ATAC-only): {} peaks{}; levels {:?}",
+        peak_names.len(),
         if args.use_adjusted {
             " (batch-adjusted)"
         } else {
             ""
-        }
+        },
+        levels.n_pb_per_level()
     );
-    if atac_pb.ncols() < 50 && args.link_score == LinkScore::Pearson {
-        info!(
-            "warning: only {} pseudobulk samples; correlations may be unstable",
-            atac_pb.ncols()
-        );
-    }
+    warn_few_samples(levels.n_pb(0), args);
 
     let peak_coords = parse_peak_coordinates(&peak_names);
     let (gene_names_all, gene_locs_all) = load_gene_universe(args)?;
@@ -333,7 +344,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
         decay: args.gene_activity_decay,
         ..GeneActivityParams::default()
     };
-    let activity = gene_activity_from_atac_pb(&atac_pb, &peak_coords, &gene_locs_all, &ga_params)?;
+    let activity = gene_activity_from_atac_pb(atac_pb, &peak_coords, &gene_locs_all, &ga_params)?;
 
     // Every gene with a locus is linked; a gene whose surrogate row is all
     // zero simply yields no edges (Pearson has no variance, ABC reads ATAC).
@@ -373,14 +384,20 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     finish_workflow(
         args,
         PbMultiome {
-            rna_pb: &rna_pb,
-            atac_pb: &atac_pb,
+            levels: &levels,
+            gene_activity: Some(&rna_pb),
             gene_tss: &gene_tss,
             peak_coords: &peak_coords,
             gene_names: &gene_names,
             peak_names: &peak_names,
         },
     )
+}
+
+fn warn_few_samples(n_pb: usize, args: &PeakToGeneArgs) {
+    if n_pb < 50 && args.link_score == LinkScore::Pearson {
+        info!("warning: only {n_pb} pseudobulk samples; correlations may be unstable");
+    }
 }
 
 fn finish_workflow(args: &PeakToGeneArgs, pb: PbMultiome<'_>) -> anyhow::Result<()> {
@@ -399,9 +416,10 @@ fn finish_workflow(args: &PeakToGeneArgs, pb: PbMultiome<'_>) -> anyhow::Result<
             dim: args.embedding_dim,
             epochs: args.epochs,
             seed: args.seed,
-            device: Device::Cpu,
+            device: args.device.to_device(args.device_no)?,
             ..FneConfig::default()
         },
+        context_bins: args.context_bins,
         min_cluster_samples: args.min_cluster_samples,
         target_clusters: args.num_clusters,
     };
@@ -433,42 +451,17 @@ fn load_gene_universe(args: &PeakToGeneArgs) -> anyhow::Result<GeneUniverse> {
     }
 }
 
-fn collapse_finest_pb(
+/// Collapse every layer of the stack into the pseudobulk levels. Layer 0
+/// (RNA, or ATAC when that is all there is) drives the partition and returns
+/// the per-level cell membership; the other layer is collapsed onto that same
+/// partition, so the finest matrices match what a stack collapse would give.
+fn collapse_pb_levels(
     paired: &mut crate::p2g::input::PairedDataWithBatch,
     args: &PeakToGeneArgs,
-) -> anyhow::Result<(Mat, Mat)> {
-    let levels = collapse_levels(paired, args)?;
-    let finest = levels
-        .iter()
-        .max_by_key(|lvl| pick_pseudobulk(&lvl[0], args.use_adjusted).ncols())
-        .expect("levels is non-empty");
-    anyhow::ensure!(
-        finest.len() >= 2,
-        "expected RNA+ATAC collapsed layers, got {}",
-        finest.len()
-    );
-    let rna_pb = pick_pseudobulk(&finest[0], args.use_adjusted).clone();
-    let atac_pb = pick_pseudobulk(&finest[1], args.use_adjusted).clone();
-    Ok((rna_pb, atac_pb))
-}
-
-fn collapse_finest_pb_single(
-    paired: &mut crate::p2g::input::PairedDataWithBatch,
-    args: &PeakToGeneArgs,
-) -> anyhow::Result<((), Mat)> {
-    let levels = collapse_levels(paired, args)?;
-    let finest = levels
-        .iter()
-        .max_by_key(|lvl| pick_pseudobulk(&lvl[0], args.use_adjusted).ncols())
-        .expect("levels is non-empty");
-    let atac_pb = pick_pseudobulk(&finest[0], args.use_adjusted).clone();
-    Ok(((), atac_pb))
-}
-
-fn collapse_levels(
-    paired: &mut crate::p2g::input::PairedDataWithBatch,
-    args: &PeakToGeneArgs,
-) -> anyhow::Result<Vec<Vec<data_beans::alg::collapse_data::CollapsedOut>>> {
+) -> anyhow::Result<PbLevels> {
+    use data_beans::alg::collapse_data::{
+        collapse_columns_multilevel_with_hierarchy, collapse_columns_multilevel_with_partition,
+    };
     let block_size: Option<usize> = None;
     info!(
         "Random projection (dim={}, {} cells)...",
@@ -480,29 +473,76 @@ fn collapse_levels(
         block_size,
         Some(&paired.batch_membership),
     )?;
+    let params = MultilevelParams {
+        knn_pb_samples: DEFAULT_KNN,
+        num_levels: args.num_levels.max(1),
+        sort_dim: args.sort_dim,
+        num_opt_iter: DEFAULT_OPT_ITER,
+        refine: RefineParams::default(),
+        // `All` keeps the Gamma sufficient statistics, which
+        // `supported_means` reads; `MeanOnly` would drop them.
+        output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
+        anchor_batches: None,
+        bulk_batches: None,
+        observe_panels: true,
+        keep_finest_stats: false,
+        pb_tree: None,
+        strata: None,
+    };
 
-    let levels = paired.data_stack.collapse_columns_multilevel_vec(
+    let driver = collapse_columns_multilevel_with_hierarchy(
+        &mut paired.data_stack.stack[0],
         &proj.proj,
         &paired.batch_membership,
-        &MultilevelParams {
-            knn_pb_samples: DEFAULT_KNN,
-            num_levels: args.num_levels.max(1),
-            sort_dim: args.sort_dim,
-            num_opt_iter: DEFAULT_OPT_ITER,
-            refine: RefineParams::default(),
-            output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
-            anchor_batches: None,
-            bulk_batches: None,
-            observe_panels: true,
-            keep_finest_stats: false,
-            pb_tree: None,
-            strata: None,
-        },
+        &params,
     )?;
-    if levels.is_empty() {
-        anyhow::bail!("collapse produced no levels");
+    anyhow::ensure!(!driver.levels.is_empty(), "collapse produced no levels");
+    let driver_pb = supported_means(&driver.levels, args.use_adjusted);
+    let parent = parent_maps(
+        &driver.cell_to_pb_per_level,
+        &driver_pb.iter().map(Mat::ncols).collect::<Vec<_>>(),
+    )?;
+
+    if paired.data_stack.num_types() == 1 {
+        return Ok(PbLevels {
+            rna: None,
+            atac: driver_pb,
+            parent,
+        });
     }
-    Ok(levels)
+    let follower = collapse_columns_multilevel_with_partition(
+        &mut paired.data_stack.stack[1],
+        &proj.proj,
+        &paired.batch_membership,
+        &params,
+        &driver.cell_to_pb_per_level,
+    )?;
+    Ok(PbLevels {
+        rna: Some(driver_pb),
+        atac: supported_means(&follower.levels, args.use_adjusted),
+        parent,
+    })
+}
+
+/// Posterior means per level, zeroed where the pb holds no data for the
+/// entry (the Gamma prior's floor is regularization, not signal).
+fn supported_means(
+    levels: &[data_beans::alg::collapse_data::CollapsedOut],
+    use_adjusted: bool,
+) -> Vec<Mat> {
+    levels
+        .iter()
+        .map(|co| {
+            let mean = pick_pseudobulk(co, use_adjusted);
+            Mat::from_fn(mean.nrows(), mean.ncols(), |r, c| {
+                if co.mu_observed.has_data_support(r, c) {
+                    mean[(r, c)]
+                } else {
+                    0.0
+                }
+            })
+        })
+        .collect()
 }
 
 /// Pick `mu_adjusted` when requested and available, else `mu_observed`.

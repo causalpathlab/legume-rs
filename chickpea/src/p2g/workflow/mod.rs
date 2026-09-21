@@ -1,32 +1,37 @@
 //! End-to-end peak-to-gene workflow on pb matrices.
 //!
-//! link_map → ge-util FNE → pb-sample embeds → cluster → within-cluster refine → E2G parquet.
+//! link_map → joint FNE over links + the pb levels → cluster the finest pb
+//! rows → within-cluster refine → E2G parquet.
 
 use crate::common::*;
 use crate::p2g::cluster::cluster_cells;
 use crate::p2g::embed_ge::{train_peak_gene_embeds, write_embedding_parquets};
 use crate::p2g::link_map::{link_peaks_to_genes, LinkParams};
 use crate::p2g::parquet_out::{peaks_from_coords, write_e2g_tables, ClusterRow};
+use crate::p2g::pb_levels::PbLevels;
 use crate::p2g::refine::refine_within_clusters;
 use genomic_data::coordinates::{GeneTss, PeakCoord};
 use graph_embedding_util::fne::FneConfig;
 use log::info;
-use nalgebra::DMatrix;
 
 /// Knobs for [`run_from_pseudobulk`].
 #[derive(Clone, Debug)]
 pub struct WorkflowParams {
     pub abc: LinkParams,
     pub fne: FneConfig,
+    /// SIMBA expression levels per modality in the pb × feature relations.
+    pub context_bins: usize,
     /// Min pb samples (or cells) to keep a cluster.
     pub min_cluster_samples: usize,
     pub target_clusters: Option<usize>,
 }
 
-/// Paired RNA/ATAC pb matrices plus feature metadata for the workflow.
+/// The pb levels (links are scored on level 0) and feature metadata. In an
+/// ATAC-only run `levels.rna` is `None` and `gene_activity` is the RNA
+/// surrogate the links are scored against.
 pub struct PbMultiome<'a> {
-    pub rna_pb: &'a Mat,
-    pub atac_pb: &'a Mat,
+    pub levels: &'a PbLevels,
+    pub gene_activity: Option<&'a Mat>,
     pub gene_tss: &'a [Option<GeneTss>],
     pub peak_coords: &'a [Option<PeakCoord>],
     pub gene_names: &'a [Box<str>],
@@ -40,13 +45,20 @@ pub fn run_from_pseudobulk(
     params: &WorkflowParams,
 ) -> anyhow::Result<()> {
     let PbMultiome {
-        rna_pb,
-        atac_pb,
+        levels,
+        gene_activity,
         gene_tss,
         peak_coords,
         gene_names,
         peak_names,
     } = data;
+    anyhow::ensure!(levels.n_levels() > 0, "no pb level");
+    let atac_pb: &Mat = &levels.atac[0];
+    let rna_pb: &Mat = match (gene_activity, &levels.rna) {
+        (Some(activity), _) => activity,
+        (None, Some(rna)) => &rna[0],
+        (None, None) => anyhow::bail!("neither RNA nor a gene activity surrogate"),
+    };
 
     anyhow::ensure!(
         rna_pb.nrows() == gene_names.len() && rna_pb.nrows() == gene_tss.len(),
@@ -67,17 +79,24 @@ pub fn run_from_pseudobulk(
     info!("Link map: {} edges", edges.len());
 
     info!(
-        "Training peak/gene embeddings via graph-embedding-util FNE (dim={}, epochs={})...",
-        params.fne.dim, params.fne.epochs
+        "Training peak/gene/pb embeddings jointly via graph-embedding-util FNE \
+         (dim={}, epochs={}, {} pb levels, {} bins)...",
+        params.fne.dim,
+        params.fne.epochs,
+        levels.n_levels(),
+        params.context_bins
     );
-    let embeds = train_peak_gene_embeds(&edges, peak_names, gene_names, &params.fne)?;
+    let embeds = train_peak_gene_embeds(
+        &edges,
+        levels,
+        peak_names,
+        gene_names,
+        params.context_bins,
+        &params.fne,
+    )?;
 
-    info!("Embedding pb samples from gene embeddings...");
-    let sample_mat = embed_pb_samples(rna_pb, &embeds.gene)?;
-    let cell_names: Vec<Box<str>> = (0..sample_mat.nrows())
-        .map(|i| format!("pb_{i}").into_boxed_str())
-        .collect();
-    write_embedding_parquets(out_dir, &embeds, &sample_mat, &cell_names)?;
+    write_embedding_parquets(out_dir, &embeds)?;
+    let sample_mat = embeds.finest_unit_rows();
     info!(
         "Clustering {} pb samples (min_cluster_samples={})...",
         sample_mat.nrows(),
@@ -125,47 +144,4 @@ pub fn run_from_pseudobulk(
         gene_names,
     )?;
     Ok(())
-}
-
-/// Pb-sample embedding: `Σ_g log1p(RNA_{g,s}) · e_gene[g]`, L2-normalized.
-pub(crate) fn embed_pb_samples(
-    rna_pb: &Mat,
-    gene_emb: &[Vec<f32>],
-) -> anyhow::Result<DMatrix<f32>> {
-    let n_genes = rna_pb.nrows();
-    let n_samples = rna_pb.ncols();
-    anyhow::ensure!(
-        gene_emb.len() == n_genes,
-        "gene embedding rows != RNA genes"
-    );
-    let dim = gene_emb.first().map_or(0, |r| r.len());
-    anyhow::ensure!(dim > 0, "empty gene embedding");
-    anyhow::ensure!(
-        gene_emb.iter().all(|r| r.len() == dim),
-        "ragged gene embedding"
-    );
-
-    let mut out = DMatrix::<f32>::zeros(n_samples, dim);
-    for s in 0..n_samples {
-        for g in 0..n_genes {
-            let w = rna_pb[(g, s)].ln_1p();
-            if w == 0.0 {
-                continue;
-            }
-            for d in 0..dim {
-                out[(s, d)] += w * gene_emb[g][d];
-            }
-        }
-        let mut norm = 0.0f32;
-        for d in 0..dim {
-            norm += out[(s, d)] * out[(s, d)];
-        }
-        let norm = norm.sqrt();
-        if norm > 1e-8 {
-            for d in 0..dim {
-                out[(s, d)] /= norm;
-            }
-        }
-    }
-    Ok(out)
 }

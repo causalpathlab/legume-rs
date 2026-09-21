@@ -11,10 +11,10 @@
 //! centroids, `O(k · n²)` on `n ≤ 100` points), which is what sklearn's seeded
 //! local search finds on this small 1-D problem — with no RNG to carry.
 
-use super::SCALE_FACTOR;
+use super::{HIST_BINS, SCALE_FACTOR};
 
 /// `ln1p(SCALE_FACTOR · x / lib_size)`: `si.pp.normalize` + `si.pp.log_transform`.
-pub(crate) fn log_norm(x: f32, lib_size: f64) -> f32 {
+pub fn log_norm(x: f32, lib_size: f64) -> f32 {
     (SCALE_FACTOR * f64::from(x) / lib_size).ln_1p() as f32
 }
 
@@ -171,6 +171,31 @@ impl Discretization {
             centers,
             bin_edges,
         })
+    }
+
+    /// Fit over a value stream: its range, a [`HIST_BINS`]-bin histogram and
+    /// the k-means levels in one call. A stream whose values are all one
+    /// number (a toy or a constant profile) gets one level.
+    pub fn fit_values(
+        values: impl Iterator<Item = f32> + Clone,
+        n_bins: usize,
+    ) -> anyhow::Result<Self> {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for v in values.clone() {
+            lo = lo.min(f64::from(v));
+            hi = hi.max(f64::from(v));
+        }
+        anyhow::ensure!(lo.is_finite(), "discretize: no value to fit");
+        let (lo, hi) = if hi - lo < 1e-6 {
+            (lo - 0.5, hi + 0.5)
+        } else {
+            (lo, hi)
+        };
+        let mut hist = Histogram::new(lo, hi, HIST_BINS)?;
+        for v in values {
+            hist.add(f64::from(v));
+        }
+        Self::fit(&hist, n_bins)
     }
 
     /// `np.digitize(v, bin_edges)`: the number of edges `≤ v`, clamped to

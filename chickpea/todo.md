@@ -14,7 +14,10 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
        or `abc` (Engreitz activity × contact with the 1 Mb pseudocount, ATAC only);
        `--top-k-per-gene` cuts each gene's ranked list (ATAC-only: ArchR gene activity is
        the RNA stand-in; circular under pearson, projection-only under abc)
-    2. train peak + gene embeddings with **`graph-embedding-util`** (simba / bge-style; prefer pb-level; do not reimplement in chickpea)
+    2. train peak + gene + pseudobulk embeddings jointly with **`graph-embedding-util`** FNE:
+       the link relation plus SIMBA-binned pb × feature relations for every level of the
+       pb tree (`--num-levels`, `--context-bins`) and the tree's parent edges; this is what
+       brings cellular context into the peak/gene geometry (2026-09-21)
     3. embed cells in that space → group into clusters (min-cell gate; prefer joint RNA+ATAC or RNA-led clusters) → **refine peak→gene within each cluster** (pb-per-cluster)
     4. emit **E2G-like parquet**:
        - `peaks.parquet`: id, chromosome, start, end, class  (← enhancers)
