@@ -4,15 +4,18 @@
 //! (optional batch-adjusted rates) → ge-util workflow → E2G-like parquet.
 //!
 //! ATAC-only: omit `--rna-files`; gene activity is an ArchR-style
-//! distance-weighted sum of cis peaks (gene body + exponential decay).
+//! distance-weighted sum of cis peaks (gene body + exponential decay). Under
+//! `--link-score pearson` it is the RNA stand-in of the link too (and so
+//! correlates peaks with a sum of themselves); under `abc` the link reads
+//! only ATAC and the surrogate feeds the pb-sample projection alone.
 
 use crate::common::*;
-use crate::p2g::abc_map::AbcMapParams;
 use crate::p2g::gene_activity::{gene_activity_from_atac_pb, GeneActivityParams};
 use crate::p2g::input::{
     load_all_gene_coords_tsv, load_all_gene_loci_from_gff, load_atac_data, load_gene_coords_tsv,
     load_paired_data, GeneUniverse,
 };
+use crate::p2g::link_map::{LinkParams, LinkScore};
 use crate::p2g::workflow::{run_from_pseudobulk, PbMultiome, WorkflowParams};
 use data_beans::alg::collapse_data::MultilevelParams;
 use data_beans::alg::refine_multilevel::RefineParams;
@@ -53,14 +56,54 @@ pub struct PeakToGeneArgs {
     #[command(flatten)]
     qc: data_beans::qc_lib::QcArgs,
 
-    /* Cis */
+    /* Link score */
+    #[arg(
+        long,
+        default_value_t = LinkScore::Pearson,
+        value_enum,
+        help = "Peak-gene link statistic.\n\
+                pearson: correlation of log1p pseudobulk profiles.\n\
+                abc: Engreitz activity x contact, normalized over the window (ATAC only)"
+    )]
+    link_score: LinkScore,
+
     #[arg(
         long,
         default_value_t = 500_000,
         help = "Cis-window in bp around each gene TSS (peak midpoint distance).\n\
-                Used for ABC / refine; gene activity uses --gene-activity-window"
+                Used for the link and the refine; gene activity uses --gene-activity-window"
     )]
     cis_window: i64,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Keep only the K best-scoring peaks per gene, globally and per cluster.\n\
+                0 keeps every peak above --min-weight"
+    )]
+    top_k_per_gene: usize,
+
+    #[arg(
+        long,
+        default_value_t = 0.87,
+        help = "abc: power-law contact exponent, C(d) = d^(-gamma)"
+    )]
+    contact_decay_gamma: f32,
+
+    #[arg(
+        long,
+        default_value_t = 5_000,
+        help = "abc: distances below this many bp count as this distance"
+    )]
+    contact_min_distance: i64,
+
+    #[arg(
+        long,
+        default_value_t = 1_000_000,
+        help = "abc: the contact at this distance is added to every contact\n\
+                (ABC's Hi-C pseudocount)"
+    )]
+    contact_pseudocount_distance: i64,
 
     #[arg(
         long,
@@ -95,7 +138,8 @@ pub struct PeakToGeneArgs {
     #[arg(
         long,
         default_value_t = 0.0,
-        help = "Drop ABC / refine edges with Pearson weight ≤ this floor"
+        help = "Drop link / refine edges with score at or below this floor\n\
+                (a correlation for pearson, a window share for abc)"
     )]
     min_weight: f32,
 
@@ -222,7 +266,7 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             ""
         }
     );
-    if rna_pb.ncols() < 50 {
+    if rna_pb.ncols() < 50 && args.link_score == LinkScore::Pearson {
         info!(
             "warning: only {} pseudobulk samples; correlations may be unstable",
             rna_pb.ncols()
@@ -274,7 +318,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             ""
         }
     );
-    if atac_pb.ncols() < 50 {
+    if atac_pb.ncols() < 50 && args.link_score == LinkScore::Pearson {
         info!(
             "warning: only {} pseudobulk samples; correlations may be unstable",
             atac_pb.ncols()
@@ -291,18 +335,22 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     };
     let activity = gene_activity_from_atac_pb(&atac_pb, &peak_coords, &gene_locs_all, &ga_params)?;
 
-    // Drop genes with no cis accessibility signal (keeps ABC / FNE tractable).
-    let keep: Vec<usize> = (0..activity.nrows())
+    // Every gene with a locus is linked; a gene whose surrogate row is all
+    // zero simply yields no edges (Pearson has no variance, ABC reads ATAC).
+    let n_active = (0..activity.nrows())
         .filter(|&g| (0..activity.ncols()).any(|j| activity[(g, j)] > 0.0))
+        .count();
+    let keep: Vec<usize> = (0..activity.nrows())
+        .filter(|&g| gene_locs_all[g].is_some())
         .collect();
     anyhow::ensure!(
         !keep.is_empty(),
-        "ATAC-only gene activity is all-zero; check gene-activity window and gene/peak coordinates"
+        "ATAC-only: no gene with coordinates to link"
     );
     info!(
-        "Gene activity (ArchR-style): kept {} / {} genes with cis ATAC signal",
-        keep.len(),
-        gene_names_all.len()
+        "Gene activity (ArchR-style): {n_active} / {} genes with cis ATAC signal; linking {} genes",
+        gene_names_all.len(),
+        keep.len()
     );
 
     let gene_names: Vec<Box<str>> = keep.iter().map(|&i| gene_names_all[i].clone()).collect();
@@ -337,10 +385,15 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
 
 fn finish_workflow(args: &PeakToGeneArgs, pb: PbMultiome<'_>) -> anyhow::Result<()> {
     let params = WorkflowParams {
-        abc: AbcMapParams {
+        abc: LinkParams {
+            score: args.link_score,
             cis_window: args.cis_window,
             max_cis: args.max_cis,
             min_weight: args.min_weight,
+            top_k_per_gene: args.top_k_per_gene,
+            contact_gamma: args.contact_decay_gamma,
+            contact_min_distance: args.contact_min_distance,
+            contact_pseudocount_distance: args.contact_pseudocount_distance,
         },
         fne: FneConfig {
             dim: args.embedding_dim,

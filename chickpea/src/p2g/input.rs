@@ -9,7 +9,7 @@ use genomic_data::coordinates::{GeneLoc, GeneTss};
 /// Gene names aligned with optional body/TSS annotations (ATAC-only universe).
 pub type GeneUniverse = (Vec<Box<str>>, Vec<Option<GeneLoc>>);
 
-pub(crate) struct PairedDataWithBatch {
+pub struct PairedDataWithBatch {
     pub data_stack: SparseIoStack,
     pub batch_membership: Vec<Box<str>>,
 }

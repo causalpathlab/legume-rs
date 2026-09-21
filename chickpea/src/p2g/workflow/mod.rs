@@ -1,11 +1,11 @@
 //! End-to-end peak-to-gene workflow on pb matrices.
 //!
-//! abc_map → ge-util FNE → pb-sample embeds → cluster → within-cluster refine → E2G parquet.
+//! link_map → ge-util FNE → pb-sample embeds → cluster → within-cluster refine → E2G parquet.
 
 use crate::common::*;
-use crate::p2g::abc_map::{rough_abc_map, AbcMapParams};
 use crate::p2g::cluster::cluster_cells;
 use crate::p2g::embed_ge::{train_peak_gene_embeds, write_embedding_parquets};
+use crate::p2g::link_map::{link_peaks_to_genes, LinkParams};
 use crate::p2g::parquet_out::{peaks_from_coords, write_e2g_tables, ClusterRow};
 use crate::p2g::refine::refine_within_clusters;
 use genomic_data::coordinates::{GeneTss, PeakCoord};
@@ -13,15 +13,10 @@ use graph_embedding_util::fne::FneConfig;
 use log::info;
 use nalgebra::DMatrix;
 
-#[cfg(test)]
-mod e2e_tests;
-#[cfg(test)]
-mod umap_tests;
-
 /// Knobs for [`run_from_pseudobulk`].
 #[derive(Clone, Debug)]
 pub struct WorkflowParams {
-    pub abc: AbcMapParams,
+    pub abc: LinkParams,
     pub fne: FneConfig,
     /// Min pb samples (or cells) to keep a cluster.
     pub min_cluster_samples: usize,
@@ -66,10 +61,10 @@ pub fn run_from_pseudobulk(
         "RNA/ATAC sample count mismatch"
     );
 
-    info!("Building rough ABC / co-occurrence map...");
-    let edges = rough_abc_map(rna_pb, atac_pb, gene_tss, peak_coords, &params.abc)?;
+    info!("Scoring peak–gene links ({:?})...", params.abc.score);
+    let edges = link_peaks_to_genes(rna_pb, atac_pb, gene_tss, peak_coords, &params.abc)?;
     anyhow::ensure!(!edges.is_empty(), "no cis peak–gene edges above min_weight");
-    info!("ABC map: {} edges", edges.len());
+    info!("Link map: {} edges", edges.len());
 
     info!(
         "Training peak/gene embeddings via graph-embedding-util FNE (dim={}, epochs={})...",

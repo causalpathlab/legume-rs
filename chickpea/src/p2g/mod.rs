@@ -2,22 +2,20 @@
 //!
 //! Workflow (see `chickpea/todo.md`):
 //! 1. data-beans multilevel pb collapse (+ optional batch adjustment)
-//! 2. rough ABC / pb co-occurrence map ([`abc_map`])
+//! 2. score peak–gene links on the pb profiles, Pearson or ABC ([`link_map`])
 //! 3. train peak/gene embeds with `graph-embedding-util` ([`embed_ge`])
-//! 4. embed pb samples → cluster → refine within cluster ([`cluster`], [`refine`])
+//! 4. embed pb samples → cluster → recompute links within cluster ([`cluster`], [`refine`])
 //! 5. write E2G-like parquet ([`parquet_out`])
-//!
-//! The old rSVD / SuSiE / GhostKnockoff / LOCO-TMLE path has been removed.
 
 pub mod run;
 
-mod abc_map;
-mod cluster;
-mod embed_ge;
-mod gene_activity;
-mod input;
-mod parquet_out;
-mod refine;
-mod workflow;
+pub mod cluster;
+pub mod embed_ge;
+pub mod gene_activity;
+pub mod input;
+pub mod link_map;
+pub mod parquet_out;
+pub mod refine;
+pub mod workflow;
 
 pub use run::{run_peak_to_gene, PeakToGeneArgs};

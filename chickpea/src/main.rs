@@ -1,7 +1,5 @@
-mod common;
-mod p2g;
-
-use crate::common::*;
+use chickpea::common::*;
+use chickpea::p2g;
 use colored::Colorize;
 
 const LOGO: &str = include_str!("../logo.txt");
@@ -41,7 +39,8 @@ fn print_logo() {
                   \n\
                   Links ATAC peaks to RNA genes from paired single-cell RNA + ATAC.\n\
                   Pseudobulk via data-beans multilevel collapse (optional batch adjustment).\n\
-                  Train peak/gene embeddings with graph-embedding-util,\n\
+                  Score cis links by log1p Pearson or Engreitz ABC,\n\
+                  train peak/gene embeddings with graph-embedding-util,\n\
                   embed pb samples, cluster, refine peak→gene within each cluster,\n\
                   write E2G-like parquet:\n\
                   peaks.parquet (id, chromosome, start, end, class),\n\
@@ -73,7 +72,8 @@ enum Commands {
                       \n\
                       1. Load paired RNA+ATAC; optional RNA-driven cell QC.\n\
                       2. data-beans multilevel pb collapse (+ refine; optional --use-adjusted).\n\
-                      3. Rough cis co-occurrence map; train peak/gene embeds with ge-util FNE.\n\
+                      3. Score cis peak-gene links (--link-score pearson | abc);\n\
+                         train peak/gene embeds with ge-util FNE.\n\
                       4. Embed pb samples → Leiden clusters → within-cluster refine.\n\
                       5. Write `{out}.peak_embedding.parquet`, `{out}.gene_embedding.parquet`,\n\
                          `{out}.cell_embedding.parquet`, and E2G-like tables\n\

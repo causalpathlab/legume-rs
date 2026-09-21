@@ -1,6 +1,11 @@
 //! End-to-end workflow smoke test on synthetic pb matrices.
 
-use super::*;
+mod common;
+
+use chickpea::common::Mat;
+use chickpea::p2g::link_map::LinkParams;
+use chickpea::p2g::workflow::*;
+use common::{peak, tss};
 use graph_embedding_util::fne::FneConfig;
 use legume_numeric::candle::candle_core::Device;
 use std::path::Path;
@@ -27,57 +32,29 @@ fn e2e_writes_e2g_parquet_from_synthetic_pb() {
         "chr1:200000-200500".into(),
         "chr1:150000-150500".into(),
     ];
-    let gene_tss = vec![
-        Some(GeneTss {
-            chr: "1".into(),
-            tss: 100_000,
-        }),
-        Some(GeneTss {
-            chr: "1".into(),
-            tss: 200_000,
-        }),
-    ];
-    let peak_coords = vec![
-        Some(PeakCoord {
-            chr: "1".into(),
-            start: 100_000,
-            end: 100_500,
-        }),
-        Some(PeakCoord {
-            chr: "1".into(),
-            start: 200_000,
-            end: 200_500,
-        }),
-        Some(PeakCoord {
-            chr: "1".into(),
-            start: 150_000,
-            end: 150_500,
-        }),
-    ];
+    let gene_tss = vec![tss(100_000), tss(200_000)];
+    let peak_coords = vec![peak(100_000), peak(200_000), peak(150_000)];
 
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().to_string_lossy().into_owned();
     let params = WorkflowParams {
-        abc: AbcMapParams {
+        abc: LinkParams {
             cis_window: 500_000,
             max_cis: 50,
             min_weight: 0.1,
+            ..LinkParams::default()
         },
         fne: FneConfig {
             dim: 8,
             epochs: 2,
-            lr: 0.1,
             batch_size: 8,
             num_batch_negs: 2,
             num_uniform_negs: 2,
             wd: Some(0.0),
-            wd_interval: 50,
             eval_fraction: 0.0,
-            eval_min_per_relation: 1,
-            relation_repeats: Vec::new(),
-            preset: None,
             seed: 3,
             device: Device::Cpu,
+            ..FneConfig::default()
         },
         min_cluster_samples: 5,
         target_clusters: Some(2),
