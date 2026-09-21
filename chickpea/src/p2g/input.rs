@@ -1,5 +1,9 @@
 //! Input loading for peak-to-gene: paired RNA + ATAC matrices and gene TSS
 //! coordinates.
+//!
+//! Kept as scaffolding for the graph-embedding-util pipeline; not yet called
+//! from [`super::run`].
+#![allow(dead_code)]
 
 use crate::common::*;
 use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};

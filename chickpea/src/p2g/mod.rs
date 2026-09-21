@@ -1,18 +1,13 @@
-//! peak-to-gene subcommand: summary-statistics fine-mapping of cis peak→gene
-//! links. Entry point: [`run::run_peak_to_gene`].
+//! peak-to-gene subcommand.
 //!
-//! Pipeline: pseudobulk the matched RNA + ATAC cells, embed peaks (and the
-//! projected genes) in a shared ATAC latent space, score each cis peak–gene
-//! pair by a log-linear regression z in that space, then fine-map per gene
-//! with SuSiE-RSS using the peak–peak correlation (LD) structure.
+//! The old rSVD embedding + SuSiE-RSS + GhostKnockoff / TMLE path has been
+//! removed. The intended pipeline trains peak/gene embeddings with
+//! `graph-embedding-util`, embeds cells, clusters, and refines peak→gene within
+//! each cluster, writing E2G-like parquet. That association path is not wired
+//! yet — see `todo.md`.
 
 pub mod run;
 
-mod embed;
-mod finemap;
 mod input;
-mod knockoff;
-mod output;
-mod tmle;
 
 pub use run::{run_peak_to_gene, PeakToGeneArgs};
