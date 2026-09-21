@@ -8,9 +8,9 @@
 //! - `{out}.cell_bias.parquet` (per-cell bias `b_cell`, the depth sink).
 
 use crate::model::JointEmbedModel;
-use candle_util::candle_core::Tensor;
+use legume_numeric::candle::candle_core::Tensor;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::traits::IoOps;
 
 /// File stems for the two embedding tables.
 ///

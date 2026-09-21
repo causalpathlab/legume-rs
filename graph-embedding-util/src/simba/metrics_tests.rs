@@ -1,5 +1,5 @@
 use super::*;
-use candle_util::candle_core::{Device, Tensor};
+use legume_numeric::candle::candle_core::{Device, Tensor};
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol

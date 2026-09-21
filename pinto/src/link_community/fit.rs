@@ -41,7 +41,7 @@ use crate::util::srt_pipeline::{
     preprocess_srt, topology_graph, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 use data_beans::qc::suggest_nnz_cutoff;
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::matrix::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -225,13 +225,13 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
                 gamma: args.modularity_gamma,
             }),
             dc_poisson: Some(DcPoissonConfig {
-                params: data_beans_alg::dc_poisson::RefineParams {
+                params: data_beans::alg::dc_poisson::RefineParams {
                     num_gibbs: 10,
                     num_greedy: 5,
-                    feature_weighting: data_beans_alg::dc_poisson::FeatureWeighting::FisherInfoNb,
+                    feature_weighting: data_beans::alg::dc_poisson::FeatureWeighting::FisherInfoNb,
                     seed: c.seed,
                     gibbs_stagnation: 0.005,
-                    profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,
+                    profile_source: data_beans::alg::dc_poisson::ProfileSource::Raw,
                     ..Default::default()
                 },
                 data: &data_vec,
@@ -497,7 +497,7 @@ pub fn fit_srt_link_community(args: &SrtLinkCommunityArgs) -> anyhow::Result<()>
     // not reproducible from its outputs without it.
 
     {
-        use matrix_param::traits::Inference;
+        use legume_numeric::param::traits::Inference;
 
         // Score the merge on DETECTED features only — see `cosine_merge`'s step 0
         // for why undetected features otherwise decide it. `feature_nnz` rides out of

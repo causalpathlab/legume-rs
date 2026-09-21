@@ -39,8 +39,8 @@
 //! reads) beside the raw ρ in `{out}.feature_embedding.parquet`. Cells are
 //! the reference and are unchanged, and training is untouched.
 
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::Device;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use graph_embedding_util as ge;
 use graph_embedding_util::fit::resolve_embedding::{
     train_rest, RestConfig, RestTrainInputs, TrainedRest,

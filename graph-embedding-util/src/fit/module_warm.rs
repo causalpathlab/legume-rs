@@ -9,10 +9,10 @@
 //! nothing extra.
 
 use super::config::{ParentModulesOwned, TrackSpec};
+use legume_numeric::matrix::principal_graph::kmeans_centroids_seeded;
+use legume_numeric::matrix::rand_util::name_seed;
+use legume_numeric::matrix::traits::SampleOps;
 use log::info;
-use matrix_util::principal_graph::kmeans_centroids_seeded;
-use matrix_util::rand_util::name_seed;
-use matrix_util::traits::SampleOps;
 use nalgebra::DMatrix;
 
 /// Widest profile k-means runs on directly; a pseudobulk axis longer than this is

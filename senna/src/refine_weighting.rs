@@ -11,15 +11,15 @@
 //! Two distinct things share the word "refinement", so the CLI keeps them on
 //! separate prefixes:
 //!
-//! - `--pb-refine-*` flags drive [`data_beans_alg::refine_multilevel::RefineParams`]
+//! - `--pb-refine-*` flags drive [`data_beans::alg::refine_multilevel::RefineParams`]
 //!   used during hierarchical pseudobulk collapsing.
 //! - `--amort-refine-*` flags drive
-//!   [`candle_util::topic_refinement::TopicRefinementConfig`] used at
+//!   [`legume_numeric::candle::topic_refinement::TopicRefinementConfig`] used at
 //!   inference to fine-tune per-cell topic logits against the frozen decoder.
 
 use clap::{Args, ValueEnum};
-use data_beans_alg::dc_poisson::FeatureWeighting;
-use data_beans_alg::refine_multilevel::RefineParams;
+use data_beans::alg::dc_poisson::FeatureWeighting;
+use data_beans::alg::refine_multilevel::RefineParams;
 
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, serde::Serialize, serde::Deserialize,
@@ -313,8 +313,8 @@ pub(crate) struct CollapseArgs {
 impl CollapseArgs {
     /// Tree parameters for the multilevel collapse, `None` under
     /// `--pb-tree marginal`.
-    pub(crate) fn pb_tree_params(&self) -> Option<data_beans_alg::collapse_data::PbTreeParams> {
-        use data_beans_alg::collapse_data::{PbTreeParams, ReassignCellsParams};
+    pub(crate) fn pb_tree_params(&self) -> Option<data_beans::alg::collapse_data::PbTreeParams> {
+        use data_beans::alg::collapse_data::{PbTreeParams, ReassignCellsParams};
         match self.pb_tree {
             PbTreeArg::Marginal => None,
             PbTreeArg::Refined => Some(PbTreeParams {
@@ -361,9 +361,9 @@ impl CollapseArgs {
 /// because the A/B above says model quality is insensitive to this trend at a
 /// far larger perturbation than a constant factor.
 pub(crate) fn fit_fisher_weights(
-    collapsed: &data_beans_alg::collapse_data::CollapsedOut,
+    collapsed: &data_beans::alg::collapse_data::CollapsedOut,
     cell_to_pb: Option<&[usize]>,
-    coarsening: Option<&data_beans_alg::feature_coarsening::FeatureCoarsening>,
+    coarsening: Option<&data_beans::alg::feature_coarsening::FeatureCoarsening>,
     data_vec: &data_beans::sparse_io_vector::SparseIoVec,
     block_size: Option<usize>,
 ) -> anyhow::Result<Vec<f32>> {
@@ -383,10 +383,10 @@ pub(crate) fn fit_fisher_weights(
         );
     }
     match coarsening {
-        Some(fc) => data_beans_alg::gene_weighting::compute_nb_fisher_weights_coarsened(
+        Some(fc) => data_beans::alg::gene_weighting::compute_nb_fisher_weights_coarsened(
             data_vec, fc, block_size,
         ),
-        None => data_beans_alg::gene_weighting::compute_nb_fisher_weights(data_vec, block_size),
+        None => data_beans::alg::gene_weighting::compute_nb_fisher_weights(data_vec, block_size),
     }
 }
 
@@ -468,15 +468,19 @@ pub(crate) struct AmortRefineArgs {
 impl AmortRefineArgs {
     /// Build the candle-side config from these CLI args. Returns `None` when
     /// `--amort-refine-steps = 0` (refinement disabled).
-    pub(crate) fn to_config(&self) -> Option<candle_util::topic_refinement::TopicRefinementConfig> {
+    pub(crate) fn to_config(
+        &self,
+    ) -> Option<legume_numeric::candle::topic_refinement::TopicRefinementConfig> {
         if self.steps == 0 {
             None
         } else {
-            Some(candle_util::topic_refinement::TopicRefinementConfig {
-                num_steps: self.steps,
-                learning_rate: self.lr,
-                regularization: self.reg,
-            })
+            Some(
+                legume_numeric::candle::topic_refinement::TopicRefinementConfig {
+                    num_steps: self.steps,
+                    learning_rate: self.lr,
+                    regularization: self.reg,
+                },
+            )
         }
     }
 }

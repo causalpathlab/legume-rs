@@ -52,7 +52,7 @@ pub(crate) fn build_annotation_matrix(
 ) -> anyhow::Result<AnnotInfo> {
     // The shared membership reader: every gene→label file in the workspace
     // is read the same way (header and `#` rows skipped, labels verbatim).
-    let marker_pairs = auxiliary_data::gene_sets::read_membership_pairs(marker_gene_path)?;
+    let marker_pairs = data_beans::aux::gene_sets::read_membership_pairs(marker_gene_path)?;
 
     if marker_pairs.is_empty() {
         return Err(anyhow::anyhow!("empty/invalid marker gene information"));

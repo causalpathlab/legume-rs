@@ -1,7 +1,7 @@
 //! Graph-constrained DC-Poisson refinement for pinto's coarsened partitions.
 //!
 //! Pinto-specific front-end over the shared Poisson scoring core in
-//! [`data_beans_alg::dc_poisson`]. Supplies:
+//! [`data_beans::alg::dc_poisson`]. Supplies:
 //! - [`GraphProposer`] — candidates from spatial-KNN neighbors ∩ siblings.
 //! - [`ConnectivityGuard`] — rejects moves that would disconnect the
 //!   source cluster's induced subgraph on the entity axis.
@@ -13,11 +13,11 @@
 
 use crate::util::common::*;
 use crate::util::knn_graph::KnnGraph;
-use data_beans_alg::dc_poisson::{
+use data_beans::alg::dc_poisson::{
     compact_labels, intersect_with_siblings_fallback, refine_with_proposer_guarded,
     CandidateProposer, FeatureWeighting, MoveGuard, Profiles, RefineParams,
 };
-use matrix_util::utils::generate_minibatch_intervals;
+use legume_numeric::matrix::utils::generate_minibatch_intervals;
 use rand::rngs::SmallRng;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -402,7 +402,7 @@ pub fn refine_level_dc_poisson(
         &proposer,
         &ctx.guard,
         rng,
-        &data_beans_alg::dc_poisson::RefineContext {
+        &data_beans::alg::dc_poisson::RefineContext {
             profiles: &ctx.profiles,
             k,
             params,

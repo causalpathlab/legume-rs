@@ -3,7 +3,7 @@
 //!
 //! The FDR adjustment these once sat beside is not an editing statistic and is
 //! now shared workspace-wide; its tests live with it in
-//! `matrix_util::hypothesis`.
+//! `legume_numeric::matrix::hypothesis`.
 
 use faba::hypothesis_tests::betabinom_pvalue_greater;
 use statrs::distribution::{Binomial, DiscreteCDF};

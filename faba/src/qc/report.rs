@@ -14,7 +14,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, Float64Array, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use auxiliary_data::feature_rows::{parse_feature_row, APA, COUNT};
+use data_beans::aux::feature_rows::{parse_feature_row, APA, COUNT};
 use rustc_hash::FxHashMap;
 
 use crate::common::*;

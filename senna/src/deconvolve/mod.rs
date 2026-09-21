@@ -27,8 +27,8 @@ pub use args::DeconvolveArgs;
 
 use anyhow::Result;
 use gibbs::PosteriorAccum;
+use legume_numeric::matrix::common_io::mkdir_parent;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
 use monitor::Monitor;
 use reference::Reference;
 use senna::embed_common::{read_bulk_data_aligned, Mat};

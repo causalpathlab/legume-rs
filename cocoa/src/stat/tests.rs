@@ -2,7 +2,7 @@
 //! Recovery tests for the group model live in `group_tests.rs`.
 
 use super::*;
-use matrix_util::traits::MatOps;
+use legume_numeric::matrix::traits::MatOps;
 
 #[test]
 fn z_to_pvalue_matches_the_two_sided_normal_tail() {

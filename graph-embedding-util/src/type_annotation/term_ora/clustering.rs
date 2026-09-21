@@ -6,8 +6,8 @@
 
 use super::TermOraConfig;
 use anyhow::Result;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
 
 /// Cells per cluster.
 pub(super) fn cluster_sizes(community: &[usize], n_comm: usize) -> Vec<usize> {

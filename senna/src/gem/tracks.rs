@@ -6,7 +6,7 @@
 //! modality's two channel rows (`{gene}/m6a/{methylated,unmethylated}`,
 //! `{gene}/atoi/{edited,unedited}`, `{gene}/apa/{proximal,distal}`). Every
 //! row is `{gene}/{modality}/{channel}`, split by
-//! [`auxiliary_data::feature_rows::parse_feature_row`] — the modality and
+//! [`data_beans::aux::feature_rows::parse_feature_row`] — the modality and
 //! channel are read from the row itself, never from a file name or load
 //! order.
 //!
@@ -25,7 +25,7 @@
 
 use std::collections::BTreeSet;
 
-use auxiliary_data::feature_rows::{
+use data_beans::aux::feature_rows::{
     parse_feature_row, APA, ATOI, COUNT, DISTAL, EDITED, M6A, METHYLATED, PROXIMAL, SPLICED,
     UNEDITED, UNMETHYLATED, UNSPLICED,
 };
@@ -72,7 +72,7 @@ pub(crate) fn assign_tracks(feature_names: &[Box<str>]) -> anyhow::Result<TrackP
     let mut bad_subunit: Vec<usize> = Vec::new();
     let mut bad_modality: Vec<usize> = Vec::new();
     let mut bad_count_channel: Vec<usize> = Vec::new();
-    let mut parsed: Vec<Option<auxiliary_data::feature_rows::FeatureRow<'_>>> =
+    let mut parsed: Vec<Option<data_beans::aux::feature_rows::FeatureRow<'_>>> =
         Vec::with_capacity(feature_names.len());
 
     for (r, name) in feature_names.iter().enumerate() {
@@ -247,7 +247,7 @@ pub(crate) fn encoder_suffix_for(track: u32, name: &str) -> String {
 /// The two channels a modality contrasts, `(numerator, denominator)`, for
 /// `{out}.feature_contrast.parquet`. `None` for a modality this axis does not
 /// recognize. Fixed by the row grammar's own channel vocabulary
-/// (`auxiliary_data::feature_rows`), never guessed from what is on the axis.
+/// (`data_beans::aux::feature_rows`), never guessed from what is on the axis.
 pub(crate) fn contrast_channels(modality: &str) -> Option<(&'static str, &'static str)> {
     match modality {
         COUNT => Some((UNSPLICED, SPLICED)),

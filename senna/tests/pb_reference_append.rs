@@ -9,8 +9,8 @@
 //! anchor δ every round — a frame that quietly drifts, compounding with each
 //! generation, which is the failure append-only exists to prevent.
 
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::TwoStatParam;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::traits::TwoStatParam;
 use nalgebra::DMatrix;
 use senna::pb_reference::{self, PbReferenceMeta, REFERENCE_BATCH};
 
@@ -20,7 +20,7 @@ const D: usize = 3;
 /// one carried column (weight 10). Observed and adjusted evidence are given
 /// deliberately different values so the emitted backend betrays which plane
 /// each group was read from.
-fn finest() -> data_beans_alg::collapse_data::CollapsedOut {
+fn finest() -> data_beans::alg::collapse_data::CollapsedOut {
     let observed_rate = DMatrix::from_row_slice(
         D,
         2,
@@ -46,7 +46,7 @@ fn finest() -> data_beans_alg::collapse_data::CollapsedOut {
     mu_observed.update_stat(&observed_rate.component_mul(&denom), &denom);
     let mut mu_adjusted = GammaMatrix::new((D, 2), 1.0, 1.0);
     mu_adjusted.update_stat(&adjusted_rate.component_mul(&denom), &denom);
-    data_beans_alg::collapse_data::CollapsedOut {
+    data_beans::alg::collapse_data::CollapsedOut {
         mu_observed,
         mu_adjusted: Some(mu_adjusted),
         mu_residual: None,

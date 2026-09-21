@@ -14,13 +14,13 @@ pub mod graph;
 pub(crate) mod model;
 pub mod train;
 
-pub use candle_util::masking::MASK_NEG;
-pub use candle_util::optim::{RowAdagrad, ADAGRAD_EPS};
 pub use graph::{auto_wd, NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList};
+pub use legume_numeric::candle::masking::MASK_NEG;
+pub use legume_numeric::candle::optim::{RowAdagrad, ADAGRAD_EPS};
 pub use train::{train, FneOutput, RelationStats};
 
 pub use crate::preset_mode::{LoraSpec, PresetMode, PresetRows};
-use candle_util::candle_core::Device;
+use legume_numeric::candle::candle_core::Device;
 
 /// PBG `init_scale`: each coordinate starts at `N(0, 1e-3)`.
 pub const INIT_STDEV: f64 = 1e-3;

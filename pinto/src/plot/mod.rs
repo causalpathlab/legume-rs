@@ -33,7 +33,7 @@ pub use args::SrtPlotArgs;
 
 use crate::util::common::*;
 use crate::util::input::read_expr_data;
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::matrix::common_io::mkdir_parent;
 use rayon::prelude::*;
 use serde_json::json;
 use std::path::PathBuf;

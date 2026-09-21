@@ -498,7 +498,7 @@ pub fn read_module_tables(
     dict_names: &[Box<str>],
     h: usize,
 ) -> anyhow::Result<(DMatrix<f32>, DMatrix<f32>)> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let pi = <DMatrix<f32> as IoOps>::from_parquet(pi_path)?;
     let mu = <DMatrix<f32> as IoOps>::from_parquet(mu_path)?;
     anyhow::ensure!(
@@ -526,7 +526,7 @@ pub fn write_alignment_table(
     train_names: &[Box<str>],
     al: &GeneAlignment,
 ) -> anyhow::Result<()> {
-    use matrix_util::parquet::{write_named_table, Column};
+    use legume_numeric::matrix::parquet::{write_named_table, Column};
     let status: Vec<Box<str>> = al.status.iter().map(|s| Box::from(s.as_str())).collect();
     let similarity: Vec<f32> = al
         .provenance

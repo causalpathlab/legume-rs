@@ -2,8 +2,6 @@
 //! real loss functions rather than described: which Var each term reaches, and
 //! the analytic gradient of the exact term.
 
-use candle_util::candle_core::{DType, Device, Tensor, Var};
-use candle_util::candle_nn::VarMap;
 use graph_embedding_util::loss::{
     module_balance_prior, module_softmax_loss, nce_loss_identity, EdgeBatch, NceObjective,
 };
@@ -11,6 +9,8 @@ use graph_embedding_util::model::{
     JointEmbedModel, ModuleInit, ModuleWarmStart, MODULE_BIAS_VAR_NAME, MODULE_LOGITS_VAR_NAME,
     MODULE_MU_VAR_NAME, MODULE_RESIDUAL_VAR_NAME,
 };
+use legume_numeric::candle::candle_core::{DType, Device, Tensor, Var};
+use legume_numeric::candle::candle_nn::VarMap;
 
 const D: usize = 8;
 const M: usize = 3;
@@ -48,7 +48,10 @@ fn var(vm: &VarMap, name: &str) -> Var {
     vm.data().lock().unwrap().get(name).unwrap().clone()
 }
 
-fn grad_norm(grads: &candle_util::candle_core::backprop::GradStore, v: &Var) -> Option<f32> {
+fn grad_norm(
+    grads: &legume_numeric::candle::candle_core::backprop::GradStore,
+    v: &Var,
+) -> Option<f32> {
     grads.get(v.as_tensor()).map(|g| {
         g.sqr()
             .unwrap()
@@ -186,7 +189,7 @@ fn exact_term_reaches_mu_bias_cells_with_q_minus_p_and_nothing_else() {
         .unwrap()
         .broadcast_add(&modules.b_module)
         .unwrap();
-    let q = candle_util::candle_nn::ops::softmax(&s, 1).unwrap();
+    let q = legume_numeric::candle::candle_nn::ops::softmax(&s, 1).unwrap();
     let p = x_cm.broadcast_div(&x_cm.sum_keepdim(1).unwrap()).unwrap();
     let want: Vec<f32> = (q - p).unwrap().mean(0).unwrap().to_vec1().unwrap();
     let got: Vec<f32> = grads

@@ -1,11 +1,11 @@
 use crate::common::*;
 
-use data_beans_alg::collapse_data::{
+use data_beans::alg::collapse_data::{
     CollapsedOut, CollapsingOps, MultilevelCollapsingOps, MultilevelParams, DEFAULT_KNN,
     DEFAULT_OPT_ITER,
 };
-use data_beans_alg::random_projection::RandProjOps;
-use data_beans_alg::refine_multilevel::RefineParams;
+use data_beans::alg::random_projection::RandProjOps;
+use data_beans::alg::refine_multilevel::RefineParams;
 use rustc_hash::FxHashMap as HashMap;
 
 /// Multilevel refinement settings for pseudobulk assignment.
@@ -149,7 +149,7 @@ impl RandPartitionOps for SparseIoVec {
             sort_dim: refine.sort_dim,
             num_opt_iter: refine.num_opt_iter,
             refine: refine.refine_params.clone(),
-            output_calibration: matrix_param::traits::CalibrateTarget::All,
+            output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: true,

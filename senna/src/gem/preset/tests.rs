@@ -1,7 +1,7 @@
 use super::{resolve_gem_preset, row_name_of};
 use crate::gem::tracks::assign_tracks;
 use graph_embedding_util::PresetMode;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 
 fn names(rows: &[&str]) -> Vec<Box<str>> {

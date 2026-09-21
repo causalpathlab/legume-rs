@@ -12,7 +12,7 @@
 //! (Candès et al. 2018, JRSS-B); knockoff+ FDR (Barber & Candès 2015, AoS).
 
 use crate::common::*;
-use matrix_util::knockoff::{knockoff_s, KnockoffS};
+use legume_numeric::matrix::knockoff::{knockoff_s, KnockoffS};
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;

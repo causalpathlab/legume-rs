@@ -4,9 +4,9 @@
 //! compile, it writes a table whose headers do not describe its contents.
 
 use super::*;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::parquet::{peek_parquet_field_names, read_parquet_string_column};
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::parquet::{peek_parquet_field_names, read_parquet_string_column};
+use legume_numeric::matrix::traits::IoOps;
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("senna_assoc_schema_{tag}"));

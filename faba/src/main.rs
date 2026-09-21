@@ -431,7 +431,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    auxiliary_data::logging::init_logger(cli.verbose);
+    data_beans::aux::logging::init_logger(cli.verbose);
 
     // Install the Ctrl+C handler up front, so one keypress means one thing for the whole run.
     //
@@ -440,7 +440,7 @@ fn main() -> anyhow::Result<()> {
     // it: a hard kill before the handler existed, a graceful stop while a loop was polling, and —
     // worst — a silent no-op afterwards, where the flag was set, nothing was watching it, and the
     // process simply appeared to ignore you until you pressed it a second time.
-    let _stop = matrix_util::stop::stop_flag();
+    let _stop = legume_numeric::matrix::stop::stop_flag();
 
     match cli.commands {
         Commands::DartSeq(ref args) => run_m6a(args)?,

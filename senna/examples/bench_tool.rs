@@ -17,8 +17,8 @@
 // iterator rewrites read worse than the maths they implement.
 #![allow(clippy::needless_range_loop)]
 
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 use std::collections::HashMap;
 
 fn main() -> anyhow::Result<()> {
@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
 /// row names in column 0) so ground truth can be supplied either way.
 fn load_named(
     path: &str,
-) -> anyhow::Result<matrix_util::traits::MatWithNames<nalgebra::DMatrix<f32>>> {
+) -> anyhow::Result<legume_numeric::matrix::traits::MatWithNames<nalgebra::DMatrix<f32>>> {
     if path.ends_with(".parquet") {
         DMatrix::<f32>::from_parquet(path)
     } else {

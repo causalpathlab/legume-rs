@@ -353,7 +353,7 @@ fn bulk_header_defaults_to_auto_and_parses_yes_no() {
 /// pairing (loader auto, remap exact-then-flexible); a value now drives both.
 mod feature_name_kind_reaches_the_loader {
     use super::parse;
-    use auxiliary_data::feature_names::FeatureNameKind;
+    use data_beans::aux::feature_names::FeatureNameKind;
 
     const BASE: &[&str] = &["q.zarr", "--model", "m", "-o", "out"];
 
@@ -399,7 +399,7 @@ mod gem_predict {
     use crate::gem::run::run_gem_embedding;
     use crate::gem::test_fixtures::{genes_file, m6a_file, synth, CELLS};
     use clap::Parser;
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
 
     #[derive(Parser)]
     struct GemCli {
@@ -470,8 +470,8 @@ mod gem_predict {
     /// position) — `predict`'s own row order need not match the training
     /// run's `cell_embedding.parquet` order.
     fn mean_paired_cosine_by_name(
-        a: &matrix_util::traits::MatWithNames<super::Mat>,
-        b: &matrix_util::traits::MatWithNames<super::Mat>,
+        a: &legume_numeric::matrix::traits::MatWithNames<super::Mat>,
+        b: &legume_numeric::matrix::traits::MatWithNames<super::Mat>,
     ) -> f32 {
         use std::collections::HashMap;
         let idx: HashMap<&str, usize> = a

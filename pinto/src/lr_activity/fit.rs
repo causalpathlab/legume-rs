@@ -16,7 +16,7 @@
 //!
 //! Per-(community, sample) gene rates are estimated as `Gamma(num + a0,
 //! denom + b0)` posteriors with a `Gamma(1, 1)` prior, calibrated via
-//! `matrix_param::dmatrix_gamma::GammaMatrix`. The variational log mean
+//! `legume_numeric::param::dmatrix_gamma::GammaMatrix`. The variational log mean
 //! `E[log λ] = ψ(a) − log(b)` (rather than `log1p(num/denom)`) is the
 //! input to the test: a sample with `num = 0` and small `denom` lands
 //! well above one with `num = 0` and large `denom`, breaking the
@@ -56,14 +56,14 @@ use crate::lr_activity::outputs::{
 };
 use crate::util::common::*;
 use crate::util::feature_axis::FeatureAxis;
+use data_beans::alg::gene_weighting::fisher_weights_from_stats;
+use data_beans::alg::random_projection::{binary_sort_columns, RandProjOps};
 use data_beans::convert::try_open_or_convert;
-use data_beans_alg::gene_weighting::fisher_weights_from_stats;
-use data_beans_alg::random_projection::{binary_sort_columns, RandProjOps};
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::{CalibrateTarget, Inference, TwoStatParam};
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::membership::GeneIndexResolver;
-use matrix_util::rand_util::mix_seed;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::membership::GeneIndexResolver;
+use legume_numeric::matrix::rand_util::mix_seed;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::traits::{CalibrateTarget, Inference, TwoStatParam};
 use nalgebra::DMatrix;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -649,7 +649,7 @@ fn load_expr_data(c: &SrtLrActivityArgs) -> anyhow::Result<SparseIoVec> {
             data.preload_columns()?;
         }
         let data_name = attach_data_name
-            .then(|| matrix_util::common_io::basename(data_file))
+            .then(|| legume_numeric::matrix::common_io::basename(data_file))
             .transpose()?;
         data_vec.push(Arc::from(data), data_name)?;
     }

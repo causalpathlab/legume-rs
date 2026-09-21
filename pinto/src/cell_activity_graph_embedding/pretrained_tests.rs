@@ -9,8 +9,8 @@
 
 use super::pretrained::{load_pretrained_feature_embedding, InitKind, PretrainedArgs};
 use crate::util::common::Mat;
-use auxiliary_data::feature_names::FeatureNameKind;
-use matrix_util::traits::IoOps;
+use data_beans::aux::feature_names::FeatureNameKind;
+use legume_numeric::matrix::traits::IoOps;
 
 /// Write a small dictionary parquet: rows named by `features`, `h` columns of
 /// values `base + row * 10 + col`, so every row is unique and recognizable.
@@ -236,8 +236,8 @@ fn zero_matched_features_is_a_hard_error() -> anyhow::Result<()> {
 /// leave the trainable rows where the step left them.
 #[test]
 fn restore_puts_frozen_rows_back_and_leaves_trainable_rows_alone() -> anyhow::Result<()> {
-    use candle_util::candle_core::{Device, Tensor, Var};
-    use candle_util::frozen_features::restore_frozen_rows;
+    use legume_numeric::candle::candle_core::{Device, Tensor, Var};
+    use legume_numeric::candle::frozen_features::restore_frozen_rows;
 
     let dev = Device::Cpu;
     let init = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (3, 2), &dev)?;

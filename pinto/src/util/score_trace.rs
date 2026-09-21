@@ -7,7 +7,7 @@
 //! `mutual_information = H(p_global) − mean_H(p_k|community)` for `lc`;
 //! `cage` reuses the same record shape with per-epoch loss in `score`.
 
-use matrix_util::parquet::*;
+use legume_numeric::matrix::parquet::*;
 use parquet::basic::Type as ParquetType;
 
 #[derive(Clone, Copy, Debug)]

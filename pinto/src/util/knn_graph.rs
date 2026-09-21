@@ -1,1 +1,1 @@
-pub use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
+pub use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};

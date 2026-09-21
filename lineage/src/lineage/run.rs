@@ -5,31 +5,31 @@
 //! `velocity` on an embedding run, `latent` alone (geometry-only) on a topic
 //! one (see [`super::input`]) — fits
 //! **K k-means centroids** on θ and an **MST**
-//! over them ([`matrix_util::principal_graph::mst_from_sqdist`]), tests the velocity
+//! over them ([`legume_numeric::matrix::principal_graph::mst_from_sqdist`]), tests the velocity
 //! **direction** of every candidate edge ([`crate::lineage::orient`]), and turns that
-//! into a **rooted forest** by maximum-weight branching ([`matrix_util::branching`]):
+//! into a **rooted forest** by maximum-weight branching ([`legume_numeric::matrix::branching`]):
 //! contradictions are cut, weak parents rewired, and each tree rooted at its velocity
-//! source. **Slingshot-style principal curves** ([`matrix_util::principal_curve`]) are
+//! source. **Slingshot-style principal curves** ([`legume_numeric::matrix::principal_curve`]) are
 //! then fit per tree ([`crate::lineage::forest`]). Outputs per-cell pseudotime + branch
 //! + tree + order confidence, the candidate-edge graph, the trees, and the curves.
 //!
 //! NOTE: centroid placement uses a **seeded** k-means
-//! (`matrix_util::…::kmeans_centroids_seeded`, kmeans++ from `--seed`), so the whole
+//! (`legume_numeric::matrix::…::kmeans_centroids_seeded`, kmeans++ from `--seed`), so the whole
 //! fit — centroids, MST, edge directions, forest, curves — is reproducible for a seed.
 
 use anyhow::Result;
 use log::{info, warn};
 
 use graph_embedding_util::type_annotation::{Abstain, MarkerBootstrapConfig};
-use matrix_util::branching::max_branching;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::layout::PhateArgs;
-use matrix_util::principal_curve::PrincipalCurveArgs;
-use matrix_util::principal_graph::{
+use legume_numeric::matrix::branching::max_branching;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::layout::PhateArgs;
+use legume_numeric::matrix::principal_curve::PrincipalCurveArgs;
+use legume_numeric::matrix::principal_graph::{
     kmeans_centroids_seeded, mst_from_sqdist, pairwise_sqdist_rows_to_rows,
 };
-use matrix_util::traits::MatWithNames;
+use legume_numeric::matrix::traits::MatWithNames;
 use std::collections::HashMap;
 
 use super::args::*;

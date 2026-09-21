@@ -8,9 +8,9 @@ use clap::{Args, ValueEnum};
 use graph_embedding_util::type_annotation::{
     annotate_embeddings_ora, InputEmbeddings, TermOraConfig,
 };
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 use senna::annotate::{annotate_by_enrichment, annotate_by_projection, annotate_ontology};
 use senna::run_manifest::{self, RunKind};
 

@@ -1077,7 +1077,7 @@ fn write_cluster_assignments_parquet(
     cell_names: &[Box<str>],
     labels: &[usize],
 ) -> anyhow::Result<()> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let mut data = Mat::zeros(cell_names.len(), 1);
     for (i, &c) in labels.iter().enumerate() {
         data[(i, 0)] = if c == usize::MAX { f32::NAN } else { c as f32 };

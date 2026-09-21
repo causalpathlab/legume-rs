@@ -22,8 +22,8 @@ default = []
 # No HDF5 reader here; accepted as a no-op so one install line, with the
 # workspace's usual feature set, serves every binary.
 hdf5 = []
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "matrix-util/cuda"]
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "matrix-util/metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "legume-numeric/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "legume-numeric/metal"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -35,14 +35,14 @@ rustc-hash = { workspace = true }
 serde_json = { workspace = true }
 candle-core = { version = "0.10" }
 candle-nn = { version = "0.10" }
-candle-transformers = { git = "https://github.com/causalpathlab/candle", rev = "7d19a1d3a1b96b8409baad88700f96e80ec9da25" }
+candle-transformers = { version = "0.10" }
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 hf-hub = "0.4"
 stop-words = "0.10"
 rust-stemmers = "1.2"
 unicode-segmentation = "1.13"
-matrix-util = { workspace = true }
-auxiliary-data = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix"] }
+data-beans = { workspace = true, features = ["aux"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

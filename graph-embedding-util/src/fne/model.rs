@@ -20,12 +20,12 @@ use super::batch::PaddedBatch;
 use super::graph::NodeTypeTable;
 use super::{INIT_STDEV, MASK_NEG};
 use crate::loss::softmax_nce;
-use candle_util::candle_core::{DType, Device, Result, Tensor, Var};
-use candle_util::fast_index::gather_rows;
-use candle_util::lora::PinnedLora;
-use candle_util::masking::additive_pad_mask;
-use matrix_util::rand_util::name_seed;
-use matrix_util::traits::SampleOps;
+use legume_numeric::candle::candle_core::{DType, Device, Result, Tensor, Var};
+use legume_numeric::candle::fast_index::gather_rows;
+use legume_numeric::candle::lora::PinnedLora;
+use legume_numeric::candle::masking::additive_pad_mask;
+use legume_numeric::matrix::rand_util::name_seed;
+use legume_numeric::matrix::traits::SampleOps;
 
 /// The score blocks of one batch, before the loss.
 pub(crate) struct ScoreBlocks {

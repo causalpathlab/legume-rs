@@ -2,7 +2,7 @@
 //! ([`super::contrast_bayes`] and [`super::trend_bayes`]).
 //!
 //! Both fit a binomial GLM `logit(p_i) = ηᵢ(β)` with vague intercept + Gaussian shrinkage
-//! prior on the effect coefficients, via [`mcmc_util::engine::EssSampler`], and summarize the
+//! prior on the effect coefficients, via [`legume_numeric::mcmc::engine::EssSampler`], and summarize the
 //! posterior of a **linear contrast** of `β` (start→end for the trend, branch indicator for
 //! the contrast) as a mean + 90% credible interval + local false sign rate. The scaffolding
 //! is orthogonal to the specific design matrix, so it lives here to prevent drift between
@@ -70,8 +70,11 @@ pub(super) fn summarize_posterior(mut effects: Vec<f32>) -> Option<Posterior> {
     // (the headline "how many independent draws is this worth"); the lfsr's error is governed
     // by the effective size of the SIGN INDICATOR chain — the sequence the proportion is
     // actually a mean of — which mixes differently from the effect itself.
-    let ess = mcmc_util::engine::ess(&effects);
-    let mcse_lfsr = mcmc_util::engine::mcse_proportion(lfsr, mcmc_util::engine::ess(&signs));
+    let ess = legume_numeric::mcmc::engine::ess(&effects);
+    let mcse_lfsr = legume_numeric::mcmc::engine::mcse_proportion(
+        lfsr,
+        legume_numeric::mcmc::engine::ess(&signs),
+    );
 
     // `total_cmp`, not `partial_cmp().unwrap()`: a diverged chain must not panic the run.
     let cmp = |a: &f32, b: &f32| a.total_cmp(b);

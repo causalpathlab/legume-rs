@@ -5,7 +5,7 @@ use data_beans::sparse_io::SparseIo;
 use data_beans::sparse_io::SparseIoBackend;
 use data_beans::sparse_util::*;
 use log::info;
-use matrix_util::common_io::remove_file;
+use legume_numeric::matrix::common_io::remove_file;
 
 pub struct MultiomeBackends {
     pub rna: Box<dyn SparseIo<IndexIter = Vec<usize>>>,

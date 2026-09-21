@@ -1,9 +1,9 @@
 //! CLI arguments for `pinto cage`.
 
 use crate::cell_activity_graph_embedding::feature_gating::ActivityNorm;
-use auxiliary_data::feature_names::FeatureNameKind;
 use clap::{Parser, ValueEnum};
-use data_beans_alg::hvg::HvgCliArgs;
+use data_beans::alg::hvg::HvgCliArgs;
+use data_beans::aux::feature_names::FeatureNameKind;
 
 use crate::util::device::ComputeDevice;
 
