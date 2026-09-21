@@ -16,9 +16,9 @@
 //! the contrast is by exposure-label permutation in `run_diff`, not tested here.
 
 use super::*;
-use legume_numeric::param::traits::Inference;
 use legume_numeric::matrix::hypothesis::mean;
 use legume_numeric::matrix::utils::median;
+use legume_numeric::param::traits::Inference;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Gamma, Normal, Poisson, Uniform};
 
