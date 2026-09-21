@@ -13,8 +13,8 @@ use super::fit_layout_common::{
     write_viz_outputs_pb, DirectLayoutPrep, LayoutCommonArgs, LayoutPrep, PbLayoutPrep,
     ResolvedViz,
 };
-use matrix_util::pca::{init_2d_from_scores, pc_scores, random_init_2d};
-use matrix_util::umap::Umap;
+use legume_numeric::matrix::pca::{init_2d_from_scores, pc_scores, random_init_2d};
+use legume_numeric::matrix::umap::Umap;
 use rayon::prelude::*;
 use senna::embed_common::*;
 
@@ -245,9 +245,9 @@ fn build_cell_cell_fuzzy_edges(
 ) -> anyhow::Result<Vec<(usize, usize, f32)>> {
     let n = feat_kn.ncols();
     info!("Cell-cell fuzzy kNN (n={n}, knn={knn}) ...");
-    let graph = matrix_util::knn_graph::KnnGraph::from_columns(
+    let graph = legume_numeric::matrix::knn_graph::KnnGraph::from_columns(
         feat_kn,
-        matrix_util::knn_graph::KnnGraphArgs {
+        legume_numeric::matrix::knn_graph::KnnGraphArgs {
             knn,
             block_size,
             reciprocal: false,

@@ -7,7 +7,7 @@
 use crate::link_community::outputs::write_propensity_parquet;
 use crate::link_community::profiles::dominant_cluster_rows;
 use crate::util::common::*;
-use matrix_util::traits::MatWithNames;
+use legume_numeric::matrix::traits::MatWithNames;
 
 /// Argmax per row; ties go to the lowest index (matching
 /// `CommunityStrata`), and a row with no mass maps to 0.

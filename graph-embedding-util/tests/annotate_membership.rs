@@ -5,7 +5,7 @@
 use graph_embedding_util::type_annotation::{
     annotate_embeddings, AnnotateProjConfig, InputEmbeddings,
 };
-use matrix_util::dmatrix_io::DMatrix;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
 use std::fs;
 
 fn names(v: &[&str]) -> Vec<Box<str>> {

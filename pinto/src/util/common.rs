@@ -5,27 +5,27 @@ pub use data_beans::sparse_io::*;
 pub use data_beans::sparse_io_vector::*;
 
 pub use indicatif::ParallelProgressIterator;
+pub use legume_numeric::matrix::common_io::{basename, file_ext, read_lines};
+pub use legume_numeric::matrix::dmatrix_util::*;
+pub use legume_numeric::matrix::traits::*;
 pub use log::{info, warn};
-pub use matrix_util::common_io::{basename, file_ext, read_lines};
-pub use matrix_util::dmatrix_util::*;
-pub use matrix_util::traits::*;
 pub use rayon::prelude::*;
 
 pub use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub use std::sync::{Arc, Mutex};
 
-// Logging and progress bars come from `auxiliary_data::logging`, which draws
-// through the workspace-wide `matrix_util::progress::MULTI_PROGRESS`. A second
+// Logging and progress bars come from `data_beans::aux::logging`, which draws
+// through the workspace-wide `legume_numeric::matrix::progress::MULTI_PROGRESS`. A second
 // `MultiProgress` here would leave its bars unbridged from the log output — see
-// the `matrix_util::progress` module docs. Bar labels are set with
+// the `legume_numeric::matrix::progress` module docs. Bar labels are set with
 // `new_progress_bar(n).with_message(..)`; the template belongs to the helper.
-pub use auxiliary_data::logging::{init_logger, new_progress_bar};
+pub use data_beans::aux::logging::{init_logger, new_progress_bar};
 
 // NB Fisher-info feature weighting helpers moved to
-// `data_beans_alg::gene_weighting` so senna / chickpea / pinto share one
+// `data_beans::alg::gene_weighting` so senna / chickpea / pinto share one
 // implementation. Re-exported here for backwards compatibility within pinto.
-pub use data_beans_alg::gene_weighting::{
+pub use data_beans::alg::gene_weighting::{
     apply_gene_weights as apply_feature_weights, compute_nb_fisher_weights,
 };
 

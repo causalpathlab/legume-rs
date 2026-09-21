@@ -107,7 +107,7 @@ use super::CellBatchFold;
 use crate::cell_projection::SCORE_CLAMP;
 use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
-use candle_util::candle_core::Device;
+use legume_numeric::candle::candle_core::Device;
 use log::info;
 
 mod edges;

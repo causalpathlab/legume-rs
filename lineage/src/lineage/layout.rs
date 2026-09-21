@@ -3,11 +3,11 @@
 use anyhow::Result;
 use log::info;
 
-use matrix_util::branching::Branching;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
-use matrix_util::principal_curve::PrincipalCurves;
-use matrix_util::principal_graph::kmeans_centroids_seeded;
+use legume_numeric::matrix::branching::Branching;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::layout::{phate_layout_2d, project_cells_nystrom, PhateArgs};
+use legume_numeric::matrix::principal_curve::PrincipalCurves;
+use legume_numeric::matrix::principal_graph::kmeans_centroids_seeded;
 use std::collections::HashMap;
 
 use super::args::*;
@@ -19,14 +19,14 @@ use crate::lineage::orient::{undirected, EdgeCall, EdgeDirection};
 /// t-UMAP 2D layout on a **cosine** kNN graph (an alternative to PHATE). Cells, MST
 /// nodes, and principal-curve points are stacked into ONE matrix, L2-normalized
 /// (cosine geometry), fed through a single fuzzy-kNN graph, and embedded jointly by
-/// `matrix_util::umap` — so all three share the 2D space (t-UMAP has no PHATE-style
+/// `legume_numeric::matrix::umap` — so all three share the 2D space (t-UMAP has no PHATE-style
 /// Nyström out-of-sample). The cell rows use the `space` representation (θ, θ+δ, or
 /// [θ|δ]); the backbone (nodes/curves) stays on θ (δ is a small increment, so the
 /// joint embedding stays coherent). Emits `{out}.{cells,nodes,curves}_2d.parquet`,
 /// plus `{out}.velocity_grid_2d.parquet` (scVelo-style gridded arrows) when δ exists.
 ///
 /// `pcs` is the principal-component budget for the graph and the SGD init (see
-/// [`matrix_util::pca`]); `0` keeps both on the raw latent with a random init.
+/// [`legume_numeric::matrix::pca`]); `0` keeps both on the raw latent with a random init.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_umap_layout(
     theta: &DMatrix<f32>,
@@ -41,9 +41,9 @@ pub(super) fn emit_umap_layout(
     seed: u64,
     out: &str,
 ) -> Result<()> {
-    use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
-    use matrix_util::pca::{pc_layout_init, random_init_2d};
-    use matrix_util::umap::Umap;
+    use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
+    use legume_numeric::matrix::pca::{pc_layout_init, random_init_2d};
+    use legume_numeric::matrix::umap::Umap;
 
     let (n, h) = (theta.nrows(), theta.ncols());
     let vel = native.velocity.filter(|_| space != LayoutSpace::Identity);

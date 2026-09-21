@@ -1,7 +1,7 @@
 use super::gem_hvg_row_weights;
 use crate::gem::tracks::assign_tracks;
+use data_beans::alg::hvg::HvgCliArgs;
 use data_beans::sparse_io::{create_sparse_from_dmatrix, SparseIoBackend};
-use data_beans_alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
 use nalgebra::DMatrix;
 

@@ -17,7 +17,7 @@ use super::*;
 use crate::cell_projection::SCORE_CLAMP;
 use crate::fit::batch_fold::BatchGeneFold;
 use crate::fit::{TrackInfo, TrackSpec};
-use candle_util::candle_core::Device;
+use legume_numeric::candle::candle_core::Device;
 
 fn cos(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();

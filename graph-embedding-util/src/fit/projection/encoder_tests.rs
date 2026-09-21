@@ -3,7 +3,7 @@
 //! planted target on held-out pseudobulks.
 
 use super::*;
-use candle_util::candle_core::Device;
+use legume_numeric::candle::candle_core::Device;
 
 fn aggregate_rows(rows: &[FoldedRow], members: &[usize], d: usize) -> Vec<f32> {
     let mut out = vec![0f32; d];

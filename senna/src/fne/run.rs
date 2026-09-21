@@ -4,13 +4,13 @@
 use super::args::FneArgs;
 use super::graph::TypedGraphBuilder;
 use super::output::{write_outputs, write_text_export};
-use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
-use auxiliary_data::ontology::Ontology;
+use data_beans::aux::gene_sets::{read_gaf, read_gmt, GafOpts};
+use data_beans::aux::ontology::Ontology;
 use graph_embedding_util::fne::{train, FneConfig};
 use graph_embedding_util::stop::setup_stop_handler;
+use legume_numeric::matrix::common_io::file_stem;
+use legume_numeric::matrix::common_io::mkdir_parent;
 use log::info;
-use matrix_util::common_io::file_stem;
-use matrix_util::common_io::mkdir_parent;
 use senna::run_manifest::{record_train_args, write_run_manifest, RunDescription, RunKind};
 
 pub fn fit_fne(args: &FneArgs) -> anyhow::Result<()> {

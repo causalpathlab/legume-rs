@@ -14,7 +14,7 @@
 //!     any gene × group matrix passed with `--activity`.
 //!   - gene coordinates + strand from a GTF/GFF (`--gtf`), matched to the
 //!     activity row names with the same alias-tolerant rule the topic
-//!     models use (`auxiliary_data::feature_names`).
+//!     models use (`data_beans::aux::feature_names`).
 //!
 //! Output: one figure per cell type (chromosomes stacked vertically),
 //! plus an optional consensus figure. We hand-build the SVG and render
@@ -475,7 +475,7 @@ fn load_activity(path: &str) -> anyhow::Result<Activity> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("strand_{}_{}", std::process::id(), name))

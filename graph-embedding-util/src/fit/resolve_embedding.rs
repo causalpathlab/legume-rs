@@ -45,11 +45,11 @@
 //! [`crate::fit`]. `senna resolve-embedding-space` is the current caller,
 //! reading them off disk.
 
-use candle_util::batched_dot::batched_matvec;
-use candle_util::candle_core::{DType, Device, Tensor};
-use candle_util::candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use legume_numeric::candle::batched_dot::batched_matvec;
+use legume_numeric::candle::candle_core::{DType, Device, Tensor};
+use legume_numeric::candle::candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use legume_numeric::matrix::traits::ConvertMatOps;
 use log::info;
-use matrix_util::traits::ConvertMatOps;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -299,7 +299,7 @@ fn step(
     // Negatives reuse z_b: score_neg[i,j] = z_b[i] · ρ_{neg[i,j]} + b_{neg[i,j]}.
     let rho_neg = rho.index_select(&gn_t, 0)?.reshape((b, k, h))?; // [B, K, H]
     let b_neg = b_gene.index_select(&gn_t, 0)?.reshape((b, k))?; // [B, K]
-                                                                 // Gemm — see `candle_util::batched_dot`. Same shape and semantics as
+                                                                 // Gemm — see `legume_numeric::candle::batched_dot`. Same shape and semantics as
                                                                  // `JointEmbedModel::score_negatives`, which calls the same helper.
     let neg_dot = batched_matvec(&rho_neg, &z_b)?; // [B, K]
     let neg_score = (neg_dot + b_neg)?; // [B, K]

@@ -16,10 +16,10 @@
 
 use std::collections::BTreeSet;
 
-use auxiliary_data::feature_rows::{parse_feature_row, COUNT};
+use data_beans::aux::feature_rows::{parse_feature_row, COUNT};
 use graph_embedding_util as ge;
+use legume_numeric::matrix::common_io::basename;
 use log::info;
-use matrix_util::common_io::basename;
 
 use crate::gem::sample_id::{strip_any_suffix, COUNT_SUFFIX, LEGACY_COUNT_SUFFIX};
 use crate::gem::tracks::{assign_tracks, TrackPlan};

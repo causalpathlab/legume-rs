@@ -1,6 +1,6 @@
 use super::*;
-use candle_util::candle_core::{DType, Var};
-use candle_util::nn::sparsemax;
+use legume_numeric::candle::candle_core::{DType, Var};
+use legume_numeric::candle::nn::sparsemax;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -259,7 +259,7 @@ fn diagnostics_read_collapse() {
 /// keep some support.
 #[test]
 fn entropy_stays_above_floor_on_random_counts() {
-    use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW};
+    use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
     let d = dev();
     let (nf, m, h, u) = (40usize, 4usize, 3usize, 8usize);
     let mut rng = StdRng::seed_from_u64(7);

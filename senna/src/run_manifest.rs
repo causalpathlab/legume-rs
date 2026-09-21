@@ -58,7 +58,7 @@
 //! bug. It is read defensively (by content, not by which sibling slots are
 //! populated) and is on the way out; write the unambiguous slot.
 
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};

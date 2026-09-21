@@ -1,6 +1,6 @@
 use crate::common::*;
 use crate::data::bam_io;
-use auxiliary_data::feature_rows;
+use data_beans::aux::feature_rows;
 use rust_htslib::bam::{self, ext::BamRecordExtensions};
 
 use rustc_hash::FxHashMap as HashMap;

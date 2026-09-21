@@ -1,7 +1,7 @@
 //! Parquet writer for `pinto lr-activity` results.
 
 use crate::util::common::{HashMap, HashSet};
-use matrix_util::parquet::*;
+use legume_numeric::matrix::parquet::*;
 use parquet::basic::Type as ParquetType;
 
 pub struct LrActivityRow {

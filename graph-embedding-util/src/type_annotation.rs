@@ -16,7 +16,7 @@
 //! many nested types (e.g. CD8 Naive/Effector/Memory) over-types: the
 //! signatures collapse onto a common cone and every per-cell score is flat.
 //! We fix this **from the cells, not the markers**: cluster the cells in the
-//! embedding space ([`matrix_util::clustering::leiden_clustering`], cosine
+//! embedding space ([`legume_numeric::matrix::clustering::leiden_clustering`], cosine
 //! kNN + Leiden, community count automatic), then merge fine types that peak
 //! on the same community into one coarse group, named by the lexical
 //! commonality of its members. The coarse layer is what the cells can
@@ -47,12 +47,12 @@
 
 use anyhow::{Context, Result};
 use data_beans::utilities::name_matching::{idf_weight, GeneIndex};
+use legume_numeric::matrix::common_io::write_lines;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::common_io::write_lines;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::traits::IoOps;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rayon::prelude::*;
@@ -539,7 +539,7 @@ pub fn annotate_by_projection(
     // the BH q-values), keyed on significance (primary) + optional margin.
 
     // Communities: Leiden over the shared graph (modularity objective),
-    // matching `matrix_util::clustering::leiden_clustering`'s tail.
+    // matching `legume_numeric::matrix::clustering::leiden_clustering`'s tail.
     let (community, n_comm) = match (do_coarsen, cell_graph.as_ref()) {
         (true, Some(graph)) => {
             let labels = leiden_from_graph(graph, n_cells, cfg.resolution, cfg.seed);

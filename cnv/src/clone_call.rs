@@ -16,8 +16,8 @@ use crate::kmeans_init::select_kmeans_k;
 use data_beans::sparse_data_visitors::styled_progress_bar;
 use data_beans::sparse_io_vector::SparseIoVec;
 use genomic_data::coordinates::{parse_peak_coordinates, PeakCoord};
-use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::parquet::{read_table_columns, write_named_table, Column};
+use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::parquet::{read_table_columns, write_named_table, Column};
 use nalgebra::DMatrix;
 use nalgebra_sparse::CscMatrix;
 use rand::rngs::SmallRng;
@@ -162,7 +162,7 @@ pub fn chromosome_sketch(
         .iter()
         .map(|&k| if k > 0.0 { 1.0 / k } else { 0.0 })
         .collect();
-    let sketch = matrix_util::dmatrix_util::build_columns_par(c, n, |j, col| {
+    let sketch = legume_numeric::matrix::dmatrix_util::build_columns_par(c, n, |j, col| {
         col.fill(0.0);
         let src = profiles.column(j);
         for (r, &idx) in row_chr.iter().enumerate() {
@@ -185,7 +185,7 @@ pub fn sketch_csc(
     inv_bins: &[f32],
 ) -> DMatrix<f32> {
     let n = csc.ncols();
-    matrix_util::dmatrix_util::build_columns_par(n_bins, n, |j, col| {
+    legume_numeric::matrix::dmatrix_util::build_columns_par(n_bins, n, |j, col| {
         col.fill(0.0);
         let column = csc.col(j);
         for (&r, &v) in column.row_indices().iter().zip(column.values()) {
@@ -573,7 +573,7 @@ pub fn call_clones_with_burden(
     let mut sketch = DMatrix::<f32>::zeros(c, n);
     // Fuse mean |CNV| while sketching so we never re-read the backend for burden.
     let mut fused_burden = vec![0f32; n];
-    let blocks = matrix_util::utils::generate_minibatch_intervals(n, 0, Some(512));
+    let blocks = legume_numeric::matrix::utils::generate_minibatch_intervals(n, 0, Some(512));
     let bar = styled_progress_bar(blocks.len() as u64, "clone sketch blocks");
     for (lb, ub) in blocks {
         let csc = data.read_columns_csc(lb..ub)?;

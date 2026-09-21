@@ -28,15 +28,15 @@ pub enum ComputeDevice {
     Metal,
 }
 
-pub use matrix_param::traits::TwoStatParam;
-pub use matrix_util::common_io::{mkdir_parent, remove_file};
-pub use matrix_util::traits::*;
+pub use legume_numeric::matrix::common_io::{mkdir_parent, remove_file};
+pub use legume_numeric::matrix::traits::*;
+pub use legume_numeric::param::traits::TwoStatParam;
 
-pub use data_beans_alg::collapse_data::MultilevelCollapsingOps;
-pub use data_beans_alg::feature_coarsening::*;
-pub use data_beans_alg::random_projection::*;
+pub use data_beans::alg::collapse_data::MultilevelCollapsingOps;
+pub use data_beans::alg::feature_coarsening::*;
+pub use data_beans::alg::random_projection::*;
 
-pub use matrix_param::io::ParamIo;
-pub use matrix_param::traits::Inference;
+pub use legume_numeric::param::io::ParamIo;
+pub use legume_numeric::param::traits::Inference;
 
-pub use candle_util::{candle_core, candle_nn};
+pub use legume_numeric::candle::{candle_core, candle_nn};

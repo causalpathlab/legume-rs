@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use auxiliary_data::feature_rows::{APA, ATOI, BAF, COUNT, M6A};
+use data_beans::aux::feature_rows::{APA, ATOI, BAF, COUNT, M6A};
 use data_beans::sparse_io::SparseIoBackend;
 use rustc_hash::FxHashMap;
 

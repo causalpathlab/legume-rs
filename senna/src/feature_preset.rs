@@ -17,8 +17,8 @@
 //! `feature_types.parquet` naming every row's type, so a run on a narrow
 //! feature axis (a panel) still hands on the full table it was given.
 
-use auxiliary_data::feature_types::{read_feature_types, FeatureType, GENE_TYPE};
-use auxiliary_data::frozen_features::{load_frozen_feature_host, FrozenLoadArgs, SourceNameMap};
+use data_beans::aux::feature_types::{read_feature_types, FeatureType, GENE_TYPE};
+use data_beans::aux::frozen_features::{load_frozen_feature_host, FrozenLoadArgs, SourceNameMap};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::info;
@@ -155,7 +155,7 @@ mod tests;
 /// For the engines' end-to-end tests: a source run wider than the data.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     use nalgebra::DMatrix;
 
     /// The extra rows [`widen`] adds: a gene the data lacks and a term.
@@ -169,7 +169,9 @@ pub(crate) mod test_support {
         let (n, h) = (t.mat.nrows(), t.mat.ncols());
         let extra =
             DMatrix::<f32>::from_fn(EXTRA.len(), h, |i, k| (i + 1) as f32 * 0.25 + k as f32);
-        let mat = matrix_util::dmatrix_util::concatenate_vertical(&[t.mat, extra.clone()]).unwrap();
+        let mat =
+            legume_numeric::matrix::dmatrix_util::concatenate_vertical(&[t.mat, extra.clone()])
+                .unwrap();
         let mut names = t.rows.clone();
         let mut types: Vec<Box<str>> = vec!["gene".into(); n];
         for (name, ty) in EXTRA {
@@ -182,7 +184,7 @@ pub(crate) mod test_support {
             Some(&t.cols),
         )
         .unwrap();
-        auxiliary_data::feature_types::write_feature_types(out, &names, &types).unwrap();
+        data_beans::aux::feature_types::write_feature_types(out, &names, &types).unwrap();
         extra
     }
 
@@ -199,7 +201,7 @@ pub(crate) mod test_support {
                 "{name} is carried unchanged"
             );
         }
-        let types = auxiliary_data::feature_types::read_feature_types(out)
+        let types = data_beans::aux::feature_types::read_feature_types(out)
             .unwrap()
             .expect("a types table over every row");
         assert_eq!(types.len(), own_rows + EXTRA.len());

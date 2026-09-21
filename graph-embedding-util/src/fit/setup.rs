@@ -8,11 +8,13 @@
 
 use super::config::{FitConfig, TrackSpec};
 use crate::data::UnifiedData;
+use data_beans::alg::collapse_data::{
+    collapse_columns_multilevel_with_hierarchy, MultilevelParams,
+};
+use data_beans::alg::random_projection::RandProjOps;
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::collapse_data::{collapse_columns_multilevel_with_hierarchy, MultilevelParams};
-use data_beans_alg::random_projection::RandProjOps;
+use legume_numeric::param::traits::Inference;
 use log::info;
-use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
 /// The collapse, ordered **coarsest → finest**, paired with the per-level pseudobulk
@@ -24,7 +26,7 @@ use nalgebra::DMatrix;
 /// functions past a defensible parameter count. They are one object; passing them as
 /// one keeps the seams below it honest.
 pub(super) struct Pseudobulks {
-    pub collapsed_levels: Vec<data_beans_alg::collapse_data::CollapsedOut>,
+    pub collapsed_levels: Vec<data_beans::alg::collapse_data::CollapsedOut>,
     /// `cell_to_pb_per_level[l][c]` is cell `c`'s pseudobulk at level `l`.
     pub cell_to_pb_per_level: Vec<Vec<usize>>,
     /// One `UnifiedData` per level, on the unified feature axis.
@@ -68,7 +70,7 @@ pub(super) fn build_pseudobulks(
             // Only `posterior_mean()` is ever read off this, so skip the sd / log_mean /
             // log_sd planes — that is the bulk of the coarsen-stage memory at high
             // pb-sample counts.
-            output_calibration: matrix_param::traits::CalibrateTarget::MeanOnly,
+            output_calibration: legume_numeric::param::traits::CalibrateTarget::MeanOnly,
             anchor_batches: config.anchor_batches.clone(),
             bulk_batches: config.bulk_batches.clone(),
             observe_panels: true,
@@ -125,7 +127,7 @@ fn project(
     config: &FitConfig,
     batch_labels: &[Box<str>],
     tracks: &TrackSpec,
-) -> anyhow::Result<data_beans_alg::random_projection::RandColProjOut> {
+) -> anyhow::Result<data_beans::alg::random_projection::RandColProjOut> {
     info!(
         "Batch-corrected projection (proj_dim={}, {} batches)...",
         config.proj_dim,
@@ -233,7 +235,7 @@ fn project_backend<T>(
     batch_arg: Option<&[T]>,
     row_weights: Option<&[f32]>,
     seed: u64,
-) -> anyhow::Result<data_beans_alg::random_projection::RandColProjOut>
+) -> anyhow::Result<data_beans::alg::random_projection::RandColProjOut>
 where
     T: Sync + Send + std::hash::Hash + Eq + Clone + ToString,
 {

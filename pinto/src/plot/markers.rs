@@ -127,7 +127,7 @@ pub fn fetch_feature_rows_aligned(
         // marker overlays read 0/N for every feature.
         let row_names = backend.row_names()?;
         let mut row_ix: HashMap<Box<str>, usize> = HashMap::default();
-        let kind = auxiliary_data::feature_names::FeatureNameKind::auto_detect(&row_names);
+        let kind = data_beans::aux::feature_names::FeatureNameKind::auto_detect(&row_names);
         for (i, n) in row_names.iter().enumerate() {
             row_ix.entry(n.clone()).or_insert(i);
             if !kind.is_exact() {
@@ -149,7 +149,7 @@ pub fn fetch_feature_rows_aligned(
             // that selected the marker pools both tracks; this panel does not,
             // and that difference is intended rather than an artifact of which
             // row happened to come first.
-            if let Some((feature, is_nascent)) = auxiliary_data::feature_rows::split_count_row(n) {
+            if let Some((feature, is_nascent)) = data_beans::aux::feature_rows::split_count_row(n) {
                 if !is_nascent {
                     row_ix.entry(feature.into()).or_insert(i);
                 }

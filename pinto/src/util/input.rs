@@ -1,8 +1,8 @@
 use crate::util::cell_pairs::connected_components;
 use crate::util::common::*;
 use crate::util::knn_graph::KnnGraph;
-use auxiliary_data::feature_names::FeatureNameKind;
 use clap::Parser;
+use data_beans::aux::feature_names::FeatureNameKind;
 use data_beans::convert::try_open_or_convert;
 
 /// Shared CLI arguments for spatial data input across all pinto subcommands.
@@ -1111,7 +1111,7 @@ pub fn read_one_coord_file(
                     let header_row = header_in_coord
                         .or_else(|| detect_header_row(coord_file, &['\t', ',', ' '], names))
                         .or_else(|| {
-                            matrix_util::common_io::detect_header_row_numeric(
+                            legume_numeric::matrix::common_io::detect_header_row_numeric(
                                 coord_file,
                                 &['\t', ',', ' '],
                             )
@@ -1150,7 +1150,7 @@ pub fn read_one_coord_file(
         let mut hint = String::new();
         if !is_zarr {
             if let Ok(first) =
-                matrix_util::common_io::first_line_fields(coord_file, &['\t', ',', ' '])
+                legume_numeric::matrix::common_io::first_line_fields(coord_file, &['\t', ',', ' '])
             {
                 hint = format!(" The file's first line reads {first:?}.");
             }

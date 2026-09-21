@@ -1,7 +1,7 @@
 //! Tests for the latent-sharpness summary.
 
 use super::{latent_sharpness, Mat};
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 
 #[test]
 fn a_flat_latent_has_k_effective_topics() {
@@ -225,7 +225,7 @@ fn a_forced_orientation_wins_over_the_evidence() {
 #[test]
 fn oriented_transposes_a_samples_by_genes_table_once() {
     let (genes, samples, mat) = bulk_fixture();
-    let t = matrix_util::traits::MatWithNames {
+    let t = legume_numeric::matrix::traits::MatWithNames {
         rows: samples.clone(),
         cols: genes.clone(),
         mat: mat.transpose(),
@@ -340,7 +340,7 @@ fn forcing_no_header_on_a_headered_file_is_an_error_not_a_panic() {
 /// The parquet name column is found by type, not by position.
 #[test]
 fn a_parquet_whose_name_column_is_not_first_still_reads_genes() {
-    use matrix_util::parquet::{write_table, Column};
+    use legume_numeric::matrix::parquet::{write_table, Column};
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("t.parquet");
     let p = path.to_str().unwrap();
@@ -364,7 +364,7 @@ fn a_parquet_whose_name_column_is_not_first_still_reads_genes() {
 /// do not stringify the first sample's counts into "gene names".
 #[test]
 fn a_parquet_with_no_string_column_is_refused() {
-    use matrix_util::parquet::{write_table, Column};
+    use legume_numeric::matrix::parquet::{write_table, Column};
     let dir = tempfile::tempdir().expect("tmp");
     let path = dir.path().join("nonames.parquet");
     let p = path.to_str().unwrap();

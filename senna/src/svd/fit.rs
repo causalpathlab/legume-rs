@@ -162,7 +162,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
         sort_dim: args.collapse.sort_dim,
         num_opt_iter: args.collapse.iter_opt,
         refine: args.collapse.pb_refine.to_params(),
-        output_calibration: matrix_param::traits::CalibrateTarget::All,
+        output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
         // See `topic::common::load_and_collapse` — greedy correction
         // against the carried reference when one is loaded.
         anchor_batches: args
@@ -177,7 +177,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     };
     let mut multilevel = if let Some(path) = args.collapse.cnv_clones.as_deref() {
         let cell_to_stratum = load_cnv_cell_strata(path, &data_vec)?;
-        data_beans_alg::collapse_data::collapse_columns_multilevel_with_strata(
+        data_beans::alg::collapse_data::collapse_columns_multilevel_with_strata(
             &mut data_vec,
             &proj_kn,
             &batch_membership,
@@ -185,7 +185,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
             &cell_to_stratum,
         )?
     } else {
-        data_beans_alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
+        data_beans::alg::collapse_data::collapse_columns_multilevel_with_hierarchy(
             &mut data_vec,
             &proj_kn,
             &batch_membership,
@@ -200,7 +200,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
     // 4. batch-adjusted data
     let batch_dp = collapse_out.mu_residual.as_ref();
 
-    if let Some(delta_dp) = batch_dp.map(matrix_param::traits::Inference::posterior_mean) {
+    if let Some(delta_dp) = batch_dp.map(legume_numeric::param::traits::Inference::posterior_mean) {
         info!("{} x {}", delta_dp.nrows(), delta_dp.ncols());
 
         if args.save_adjusted {
@@ -255,7 +255,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     let nystrom_out = do_nystrom_proj(
         x_dn.posterior_log_mean().clone(),
-        batch_dp.map(matrix_param::traits::Inference::posterior_mean),
+        batch_dp.map(legume_numeric::param::traits::Inference::posterior_mean),
         &data_vec,
         args.n_latent_topics,
         args.column_sum_norm,
@@ -292,7 +292,7 @@ pub fn fit_svd(args: &SvdArgs) -> anyhow::Result<()> {
 
     // Save selected feature list if feature selection was applied
     if let Some(sel) = &selected_features {
-        use matrix_util::common_io::write_lines;
+        use legume_numeric::matrix::common_io::write_lines;
         let feature_file = args.out.to_string() + ".selected_features.txt";
         write_lines(&sel.selected_names, &feature_file)?;
         info!(

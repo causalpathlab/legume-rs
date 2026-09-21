@@ -4,9 +4,9 @@ use crate::run_sim_one_type::sample_logits_each_row;
 use rustc_hash::FxHashMap as HashMap;
 
 use indicatif::ParallelProgressIterator;
-use matrix_util::common_io::{mkdir_parent, write_lines, write_types};
-use matrix_util::mtx_io;
-use matrix_util::traits::{IoOps, MatOps, SampleOps};
+use legume_numeric::matrix::common_io::{mkdir_parent, write_lines, write_types};
+use legume_numeric::matrix::mtx_io;
+use legume_numeric::matrix::traits::{IoOps, MatOps, SampleOps};
 use rand::SeedableRng;
 use rand_distr::{weighted::WeightedIndex, Distribution, Poisson, Uniform};
 use rayon::prelude::*;

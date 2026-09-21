@@ -669,7 +669,7 @@ impl GeneFeatureHistogram {
     }
 
     pub fn to_tsv(&self, file_path: &str) -> anyhow::Result<()> {
-        let mut writer = matrix_util::common_io::open_buf_writer(file_path)?;
+        let mut writer = legume_numeric::matrix::common_io::open_buf_writer(file_path)?;
         // Line 1 is unchanged: downstream scripts read the first three columns
         // positionally and select rows by `#feature`.
         writeln!(
@@ -740,7 +740,7 @@ fn write_dist_measures(
     models: &[TranscriptModel],
     scale: &ScaleFactors,
 ) -> anyhow::Result<()> {
-    let mut w = matrix_util::common_io::open_buf_writer(path)?;
+    let mut w = legume_numeric::matrix::common_io::open_buf_writer(path)?;
     writeln!(w, "{}", DIST_MEASURES_HEADER)?;
 
     for a in assignments.iter() {

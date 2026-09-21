@@ -52,9 +52,9 @@ use super::{
 use crate::cell_projection::SCORE_CLAMP;
 use crate::fit::config::TrackSpec;
 use crate::fit::projection::CellBatchFold;
-use candle_util::candle_core::{DType, Tensor};
+use legume_numeric::candle::candle_core::{DType, Tensor};
+use legume_numeric::matrix::traits::FusedTensorOps;
 use log::info;
-use matrix_util::traits::FusedTensorOps;
 
 ///////////////////////////////////
 // One track's frozen design     //

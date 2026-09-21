@@ -92,9 +92,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let default_filter = if cli.verbose {
-        matrix_util::common_io::VERBOSE_LOG_FILTER
+        legume_numeric::matrix::common_io::VERBOSE_LOG_FILTER
     } else {
-        matrix_util::common_io::QUIET_LOG_FILTER
+        legume_numeric::matrix::common_io::QUIET_LOG_FILTER
     };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
         .init();

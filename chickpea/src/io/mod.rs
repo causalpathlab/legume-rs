@@ -5,7 +5,7 @@ use clap::Args;
 use data_beans::sparse_io::SparseIo;
 use data_beans::sparse_io::SparseIoBackend;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::matrix::common_io::mkdir_parent;
 use rustc_hash::FxHashSet;
 
 #[derive(Args, Debug)]

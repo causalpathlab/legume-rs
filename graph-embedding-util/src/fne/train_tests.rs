@@ -2,8 +2,8 @@ use super::*;
 use crate::fne::batch::PaddedBatch;
 use crate::fne::graph::{NodeTypeTable, Relation, RelationTable, TypedEdgeList};
 use crate::fne::{FneConfig, LoraSpec, PresetMode, PresetRows};
-use candle_util::candle_core::{Device, Tensor};
-use matrix_util::traits::SampleOps;
+use legume_numeric::candle::candle_core::{Device, Tensor};
+use legume_numeric::matrix::traits::SampleOps;
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() <= tol
@@ -278,11 +278,15 @@ fn a_two_type_table_reproduces_simbas_seeded_init_exactly() {
     let ours = FneModel::new(&t, 6, 3, 42, &dev).unwrap();
     // SIMBA's own init: one seeded N(0, INIT_STDEV) table per name.
     let table = |name: &str, rows: usize| {
-        Tensor::rnorm_seeded(rows, 6, matrix_util::rand_util::name_seed(42, name))
-            .affine(crate::fne::INIT_STDEV, 0.0)
-            .unwrap()
-            .to_vec2::<f32>()
-            .unwrap()
+        Tensor::rnorm_seeded(
+            rows,
+            6,
+            legume_numeric::matrix::rand_util::name_seed(42, name),
+        )
+        .affine(crate::fne::INIT_STDEV, 0.0)
+        .unwrap()
+        .to_vec2::<f32>()
+        .unwrap()
     };
     let e = ours.e.as_tensor().to_vec2::<f32>().unwrap();
     assert_eq!(e.len(), 12);

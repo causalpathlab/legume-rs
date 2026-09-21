@@ -58,7 +58,7 @@
 use crate::lr_activity::fit::BATCH_LABEL_ALL;
 use crate::lr_activity::orientation::CommunityStrata;
 use crate::util::common::*;
-use matrix_util::utils::generate_minibatch_intervals;
+use legume_numeric::matrix::utils::generate_minibatch_intervals;
 use rayon::prelude::*;
 
 /// How one physical contact reads for one pair, by detection.
@@ -319,7 +319,7 @@ pub(crate) fn jeffreys_log_odds(n: usize, n11: usize, n_l: usize, n_r: usize) ->
 /// Write `{out}.lr_scores.parquet`, long format: one row per
 /// (batch, community, ligand, receptor).
 pub fn write_edge_scores(out_prefix: &str, rows: &[EdgeScoreRow]) -> anyhow::Result<()> {
-    use matrix_util::parquet::{write_named_table, Column};
+    use legume_numeric::matrix::parquet::{write_named_table, Column};
 
     let batch: Vec<Box<str>> = rows.iter().map(|r| r.batch.clone()).collect();
     let community: Vec<i32> = rows.iter().map(|r| r.community as i32).collect();

@@ -4,19 +4,19 @@
 //!   1. Read a cell × K latent matrix (typically `senna topic`'s
 //!      `.latent.parquet`).
 //!   2. Fit a `SimplePPT` principal tree over the cells in latent space
-//!      ([`matrix_util::principal_graph::fit_principal_graph`]).
+//!      ([`legume_numeric::matrix::principal_graph::fit_principal_graph`]).
 //!   3. Project each cell to its nearest point on the tree and compute
 //!      geodesic distance from a user-chosen root.
 
 use crate::mat_io::{axis_id_names, read_mat, Mat, MatWithNames};
 use clap::Args;
-use log::info;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::principal_graph::{
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::principal_graph::{
     closest_node_to_row, fit_principal_graph, project_cells_to_graph, pseudotime_from_root,
     CellProjection, PrincipalGraph, PrincipalGraphArgs,
 };
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
+use log::info;
 
 //////////////////////////
 // Pure pseudotime core //

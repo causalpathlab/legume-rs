@@ -50,7 +50,7 @@
 //!
 //! `λ_step Σ_{t≥1} [ (1/M) Σ_m ‖Δ^t_m‖² + (1/G) Σ_g ‖u^t_g · V^t‖² ]` (biases
 //! and a given `δ₀` free), exact on the FULL tables every step — the gene
-//! term in Gram form ([`candle_util::lora::PinnedLora::ridge`]), so no
+//! term in Gram form ([`legume_numeric::candle::lora::PinnedLora::ridge`]), so no
 //! `[G, H]` residual is formed. `λ_step` is the PER-STEP weight the caller
 //! passes (`HierConfig::offset_l2 / steps_per_epoch`, see
 //! [`super::train::per_step_offset_l2`]).
@@ -58,14 +58,14 @@
 use super::params::HierParams;
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
-use candle_util::candle_core::backprop::GradStore;
-use candle_util::candle_core::{DType, Result as CResult, Tensor, Var, D};
-use candle_util::candle_nn::ops::log_softmax;
-use candle_util::convert::{add_into, to_1d};
-use candle_util::fast_index::gather_rows;
-use candle_util::lora::PinnedLoraOpt;
-use candle_util::masking::additive_pad_mask;
-use candle_util::optim::RowAdagrad;
+use legume_numeric::candle::candle_core::backprop::GradStore;
+use legume_numeric::candle::candle_core::{DType, Result as CResult, Tensor, Var, D};
+use legume_numeric::candle::candle_nn::ops::log_softmax;
+use legume_numeric::candle::convert::{add_into, to_1d};
+use legume_numeric::candle::fast_index::gather_rows;
+use legume_numeric::candle::lora::PinnedLoraOpt;
+use legume_numeric::candle::masking::additive_pad_mask;
+use legume_numeric::candle::optim::RowAdagrad;
 
 /// Groups are batched together while the largest member count is at most this
 /// multiple of the smallest, so padding stays bounded.

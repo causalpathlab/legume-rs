@@ -12,7 +12,7 @@
 //!
 //! With the feature side frozen, the phase-2 gradient is `(μ − N)·Ẽ`. Its data
 //! half `N·Ẽ` is the count-weighted sum of the gene embeddings — exactly what
-//! [`candle_util::encoder::PooledGeneEncoder`] pools — so the encoder carries the
+//! [`legume_numeric::candle::encoder::PooledGeneEncoder`] pools — so the encoder carries the
 //! sufficient statistic of the data term and only the partition term needs the
 //! FC nonlinearity. The block SGD never converged on real fits (every block at
 //! its step cap), so the encoder is compared against an under-converged solve,
@@ -64,12 +64,12 @@ use super::block_sgd::{self, Phase2Input, Phase2Out};
 use super::{cell_edges, CellBatchFold, FrozenProjection};
 use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
-use candle_util::candle_core::{DType, Device, Tensor};
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use candle_util::encoder::{PooledGeneEncoder, PooledGeneEncoderArgs};
-use candle_util::feature_embedding::FeatureEmbedding;
+use legume_numeric::candle::candle_core::{DType, Device, Tensor};
+use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use legume_numeric::candle::encoder::{PooledGeneEncoder, PooledGeneEncoderArgs};
+use legume_numeric::candle::feature_embedding::FeatureEmbedding;
+use legume_numeric::matrix::rand_util::mix_seed;
 use log::info;
-use matrix_util::rand_util::mix_seed;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -337,9 +337,11 @@ pub(crate) fn split_holdout(n: usize, frac: f64, seed: u64) -> (Vec<usize>, Vec<
 /// Re-draw the trunk's linear weights and the query from `seed`; the
 /// batch-norm's affine and running statistics keep their defaults.
 fn seed_trunk(varmap: &VarMap, seed: u64) -> anyhow::Result<()> {
-    Ok(candle_util::nn::seed_uniform_vars(varmap, seed, |name| {
-        name.contains("bn_z")
-    })?)
+    Ok(legume_numeric::candle::nn::seed_uniform_vars(
+        varmap,
+        seed,
+        |name| name.contains("bn_z"),
+    )?)
 }
 
 /// A log-uniform subset size in `[1, n]`.
@@ -483,7 +485,7 @@ impl CellEncoder {
     }
 
     fn load_on_dict(dict: FrozenDict, path: &str, dev: &Device) -> anyhow::Result<Self> {
-        let mean_1d: Vec<f32> = candle_util::candle_core::safetensors::load(path, dev)?
+        let mean_1d: Vec<f32> = legume_numeric::candle::candle_core::safetensors::load(path, dev)?
             .remove(MEAN_TENSOR)
             .ok_or_else(|| anyhow::anyhow!("{path}: no `{MEAN_TENSOR}` tensor"))?
             .flatten_all()?
@@ -505,7 +507,7 @@ impl CellEncoder {
             .map(|(name, var)| (name.clone(), var.as_tensor().clone()))
             .collect();
         tensors.insert(MEAN_TENSOR.to_string(), self.mean_1d.flatten_all()?);
-        candle_util::candle_core::safetensors::save(&tensors, path)?;
+        legume_numeric::candle::candle_core::safetensors::save(&tensors, path)?;
         Ok(())
     }
 
@@ -713,7 +715,7 @@ pub(crate) fn distill(
             let y = Tensor::from_vec(y, (n, h), dev)?;
             let z = encoder.forward(&x, None, Some(mean_t), None, true)?;
             let loss = (z - y)?.sqr()?.mean_all()?;
-            candle_util::grad_clip::clipped_backward_step(&mut adam, &loss, GRAD_CLIP)?;
+            legume_numeric::candle::grad_clip::clipped_backward_step(&mut adam, &loss, GRAD_CLIP)?;
             loss_sum = (loss_sum + loss.detach())?;
             n_steps += 1;
         }
@@ -755,7 +757,9 @@ pub(crate) struct RefineStats {
 
 /// The multinomial NLL with the intercept profiled out, per row.
 fn multinomial_nll(x: &Tensor, s: &Tensor, totals: &Tensor) -> anyhow::Result<Tensor> {
-    Ok(candle_util::loss::multinomial_nll_profiled(x, s, totals)?)
+    Ok(legume_numeric::candle::loss::multinomial_nll_profiled(
+        x, s, totals,
+    )?)
 }
 
 /// Each listed track's dense block for the cells at `idx` (positions into the
@@ -909,7 +913,7 @@ pub(crate) fn refine(
             let nll = summed_nll(&theta, dicts, &xs, &totals, dev)?;
             let ridge = theta.sqr()?.sum(1)?.affine(half_lambda, 0.0)?;
             let loss = (nll + ridge)?.mean_all()?;
-            candle_util::grad_clip::clipped_backward_step(&mut adam, &loss, GRAD_CLIP)?;
+            legume_numeric::candle::grad_clip::clipped_backward_step(&mut adam, &loss, GRAD_CLIP)?;
             loss_sum = (loss_sum + loss.detach())?;
             n_steps += 1;
         }

@@ -14,8 +14,11 @@ pub enum ComputeDevice {
 }
 
 impl ComputeDevice {
-    pub fn to_device(&self, device_no: usize) -> anyhow::Result<candle_util::candle_core::Device> {
-        use candle_util::candle_core::Device;
+    pub fn to_device(
+        &self,
+        device_no: usize,
+    ) -> anyhow::Result<legume_numeric::candle::candle_core::Device> {
+        use legume_numeric::candle::candle_core::Device;
         Ok(match self {
             ComputeDevice::Cpu => Device::Cpu,
             ComputeDevice::Cuda => Device::new_cuda(device_no)?,

@@ -13,7 +13,7 @@
 //! A gene with a high `max` / `gini` and a low `entropy` scores a small,
 //! specific set of cells: SIMBA's marker-gene readout.
 
-use candle_util::candle_core::{Device, Result as CandleResult, Tensor};
+use legume_numeric::candle::candle_core::{Device, Result as CandleResult, Tensor};
 use rayon::prelude::*;
 
 /// Genes per dense `[block, N]` score slab.

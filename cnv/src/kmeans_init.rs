@@ -6,7 +6,7 @@
 //! under a Gaussian mixture assumption using each cluster's empirical mean
 //! and variance.
 
-use matrix_util::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
 use nalgebra::DMatrix;
 
 /// Kmeans-based 1D component fit at a fixed K.

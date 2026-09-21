@@ -1,5 +1,5 @@
 //! The accumulator's own behaviour. The correlations it calls are tested where
-//! they live, in `matrix_util::agreement`.
+//! they live, in `legume_numeric::matrix::agreement`.
 
 use super::*;
 

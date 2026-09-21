@@ -7,7 +7,7 @@
 //! snapshot's idempotence.
 
 use super::*;
-use candle_util::candle_core::Var;
+use legume_numeric::candle::candle_core::Var;
 
 fn dev() -> Device {
     Device::Cpu

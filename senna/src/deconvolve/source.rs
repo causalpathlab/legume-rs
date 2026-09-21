@@ -21,9 +21,9 @@
 //! Topic-family runs are rejected up front; see [`EmbeddingSource::load`].
 
 use anyhow::{Context, Result};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::{IoOps, MatWithNames};
 use log::info;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::{IoOps, MatWithNames};
 use senna::embed_common::Mat;
 use senna::run_manifest::{self, ArtifactScale, RunKind, RunManifest};
 use std::path::Path;

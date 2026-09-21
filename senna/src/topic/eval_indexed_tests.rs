@@ -384,10 +384,10 @@ mod windowed_aggregation {
     use super::super::{
         csc_to_indexed, seeded_holdout_mask, windowed_module_targets, PerGeneContext,
     };
-    use candle_util::candle_core::{DType, Device, Tensor};
-    use candle_util::decoder::coarsening_map::CoarseningMap;
-    use candle_util::fast_index::scatter_add_cols;
-    use candle_util::vae::masked_topic::DenseModuleTargets;
+    use legume_numeric::candle::candle_core::{DType, Device, Tensor};
+    use legume_numeric::candle::decoder::coarsening_map::CoarseningMap;
+    use legume_numeric::candle::fast_index::scatter_add_cols;
+    use legume_numeric::candle::vae::masked_topic::DenseModuleTargets;
 
     const D: usize = 8;
     const N: usize = 4;
