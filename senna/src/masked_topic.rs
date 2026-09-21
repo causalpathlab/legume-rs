@@ -59,7 +59,7 @@ pub enum MaskedLikelihoodArg {
 }
 
 impl MaskedLikelihoodArg {
-    /// Map to the candle-util training enum.
+    /// Map to the legume_numeric::candle training enum.
     pub fn to_lib(self) -> legume_numeric::candle::vae::masked_topic::MaskedLikelihood {
         use legume_numeric::candle::vae::masked_topic::MaskedLikelihood as L;
         match self {
@@ -595,7 +595,7 @@ pub struct MaskedTopicArgs {
                      It registers under its full form AND every split component.\n\
                      So `ENSG00000105329_TGFB1` matches edges naming either part.\n\
                      That is `ENSG00000105329` or `TGFB1`.\n\
-                     matrix-util's GeneIndexResolver points both aliases at one row.",
+                     The resolver points both aliases at one row.",
         hide = true
     )]
     feature_network_delim: Option<char>,

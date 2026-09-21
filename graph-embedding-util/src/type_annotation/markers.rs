@@ -137,7 +137,7 @@ pub fn parse_and_match_markers(
 }
 
 /// Coverage below which a panel is reported as degraded rather than merely noted. Shared with
-/// `auxiliary-data`'s gene-set reconciliation, which asks the same question of GAF/GMT term
+/// `data_beans::aux`'s gene-set reconciliation, which asks the same question of GAF/GMT term
 /// sets — a marker panel is just another term→genes map, and a thin overlap means the same
 /// thing in both.
 use data_beans::aux::gene_sets::COVERAGE_WARN_FRAC as WARN_COVERAGE;

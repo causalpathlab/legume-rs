@@ -877,7 +877,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         let data_cell_names = data_vec.column_names()?;
         // Align by cell name (handles row-order differences /
         // bails on cell-set mismatch). The aligned partition is
-        // returned finest-last; data-beans-alg expects finest-
+        // returned finest-last; data_beans::alg expects finest-
         // first, so reverse before the call.
         let aligned_finest_last =
             senna::run_manifest::InheritedFromManifest::align_cell_to_pb_to_cells(

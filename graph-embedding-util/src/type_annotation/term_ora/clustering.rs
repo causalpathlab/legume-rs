@@ -23,7 +23,7 @@ pub(super) fn cluster_sizes(community: &[usize], n_comm: usize) -> Vec<usize> {
 /// Leiden communities over a cosine cell kNN graph (cells L2-normalized for the
 /// graph; gem `e_cell` is already unit, so this matches the assignment geometry).
 ///
-/// The kNN graph is now **deterministic** (matrix-util's seeded instant-distance backend), so this
+/// The kNN graph is now **deterministic** (legume_numeric::matrix's seeded instant-distance backend), so this
 /// step reproduces run-to-run and `seed` pins Leiden on top of a fixed graph. Historically, under
 /// the old un-seedable `hnsw_rs` backend it was *not* reproducible: four identical invocations on
 /// 15,315 cord-blood cells at `--resolution 8` gave 990 / 132 / 137 / 138 communities, agreeing on
