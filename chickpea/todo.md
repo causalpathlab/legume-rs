@@ -9,8 +9,11 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
 
 * [x] study ABC model.. what is the generative model? it's just activity co-occurrence
 
-* [ ] practical algorithm (no rSVD; no GhostKnockoff / LOCO-TMLE / SuSiE surgery):
-    1. learn rough ABC map — pb co-occurrence between peaks and genes (multiome: both modalities; ATAC-only: mimic gene activity from ATAC)
+* [x] practical algorithm (no rSVD; no GhostKnockoff / LOCO-TMLE / SuSiE surgery):
+    1. link peaks to genes on pb profiles: `--link-score pearson` (log1p correlation, default)
+       or `abc` (Engreitz activity × contact with the 1 Mb pseudocount, ATAC only);
+       `--top-k-per-gene` cuts each gene's ranked list (ATAC-only: ArchR gene activity is
+       the RNA stand-in; circular under pearson, projection-only under abc)
     2. train peak + gene embeddings with **`graph-embedding-util`** (simba / bge-style; prefer pb-level; do not reimplement in chickpea)
     3. embed cells in that space → group into clusters (min-cell gate; prefer joint RNA+ATAC or RNA-led clusters) → **refine peak→gene within each cluster** (pb-per-cluster)
     4. emit **E2G-like parquet**:
@@ -18,11 +21,19 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
        - `clusters.parquet`: id, name  (← cell_types)
        - `peak_gene/chr*.parquet`: id, score, target_gene_id, target_gene_name, target_gene_tss, enhancer_gene_distance, model, chromosome, enhancer_id, cell_type_id (= cluster)  (← enhancer_gene_predictions)
 
+* [x] 2026-09-21, measured on the simulator and dropped (not in the tree):
+  a bge feature-embedding affinity as the link evidence, an fne contrast with
+  trans-permuted negatives, and an ABC-triplet logistic NCE against chance ABC.
+  None reached the log1p Pearson; the sim's causal signal is cross-pseudobulk
+  co-variation of RNA with the causal peaks, which Pearson measures directly and
+  ABC-shaped targets exclude by construction. What the sim does NOT contain is a
+  bystander that co-varies through shared cell state — the case Pearson is wrong
+  about; a simulator knob for that is the prerequisite for any further evidence term.
+
 * [ ] open question: how should we model multi-resolution Y (gene RNA/ATAC) ~ X (ATAC peaks, 1kb / 10kb / 100kb)?
 
-* not circular: unsupervised embedding on co-occurrence, then within-cluster refined linking
-
-* abandoned (unwired from the binary): rSVD ATAC embedding, SuSiE-RSS on embedding z/R, GhostKnockoff FDR, LOCO-TMLE — ditch that surgery; use ge-util + within-cluster refine instead
+* removed (e13492ab): rSVD ATAC embedding, SuSiE-RSS on embedding z/R, GhostKnockoff FDR,
+  LOCO-TMLE, and their derivations under `docs/`
 
 
 
