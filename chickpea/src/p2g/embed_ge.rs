@@ -2,9 +2,6 @@
 //!
 //! Thin wrapper: typed region+gene graph from [`crate::p2g::abc_map`] edges →
 //! `graph_embedding_util::fne::train`. No local NCE/PBG loop.
-//!
-//! Embedding I/O mirrors senna `bge`: [`graph_embedding_util::save_embedding`]
-//! writes `{out}.{peak,gene,cell}_embedding.parquet` with `h0…` columns.
 
 use crate::p2g::abc_map::PeakGeneEdge;
 use graph_embedding_util::fne::{
@@ -12,6 +9,7 @@ use graph_embedding_util::fne::{
 };
 use graph_embedding_util::save_embedding;
 use legume_numeric::candle::candle_core::{Device, Tensor};
+use legume_numeric::matrix::traits::ConvertMatOps;
 use log::info;
 use nalgebra::DMatrix;
 
@@ -85,7 +83,7 @@ pub fn train_peak_gene_embeds(
     };
 
     let out = train(edge_list, types, rels, cfg)?;
-    let table = out.embedding.to_vec2::<f32>()?;
+    let mut table = out.embedding.to_vec2::<f32>()?;
     anyhow::ensure!(
         table.len() == n_peaks + n_genes,
         "embedding rows {} != peaks+genes {}",
@@ -98,8 +96,8 @@ pub fn train_peak_gene_embeds(
         "embedding width mismatch"
     );
 
-    let peak = table[..n_peaks].to_vec();
-    let gene = table[n_peaks..].to_vec();
+    let gene = table.split_off(n_peaks);
+    let peak = table;
     Ok(PeakGeneEmbeds {
         peak,
         gene,
@@ -109,14 +107,12 @@ pub fn train_peak_gene_embeds(
     })
 }
 
-/// Write embedding parquets via [`save_embedding`] (same path as senna `bge`):
-/// - `{prefix}.peak_embedding.parquet` — region nodes, row axis `peak`
-/// - `{prefix}.gene_embedding.parquet` — gene nodes, row axis `gene`
-/// - `{prefix}.cell_embedding.parquet` — pb-sample embeds, row axis `cell`
+/// Write `{prefix}.{peak,gene,cell}_embedding.parquet` via [`save_embedding`].
 pub fn write_embedding_parquets(
     prefix: &str,
     embeds: &PeakGeneEmbeds,
     cell_emb: &DMatrix<f32>,
+    cell_names: &[Box<str>],
 ) -> anyhow::Result<()> {
     anyhow::ensure!(embeds.dim > 0, "empty embedding dim");
     anyhow::ensure!(
@@ -133,6 +129,12 @@ pub fn write_embedding_parquets(
         cell_emb.ncols(),
         embeds.dim
     );
+    anyhow::ensure!(
+        cell_emb.nrows() == cell_names.len(),
+        "cell rows {} != cell_names {}",
+        cell_emb.nrows(),
+        cell_names.len()
+    );
 
     let peak_path = format!("{prefix}.peak_embedding.parquet");
     save_embedding(
@@ -148,16 +150,11 @@ pub fn write_embedding_parquets(
         &embeds.gene_names,
         "gene",
     )?;
-
-    let n_cells = cell_emb.nrows();
-    let cell_names: Vec<Box<str>> = (0..n_cells)
-        .map(|i| format!("pb_{i}").into_boxed_str())
-        .collect();
     let cell_path = format!("{prefix}.cell_embedding.parquet");
     save_embedding(
         &cell_path,
-        &dmatrix_to_tensor(cell_emb)?,
-        &cell_names,
+        &cell_emb.to_tensor(&Device::Cpu)?,
+        cell_names,
         "cell",
     )?;
 
@@ -167,7 +164,7 @@ pub fn write_embedding_parquets(
         embeds.dim,
         embeds.gene.len(),
         embeds.dim,
-        n_cells,
+        cell_names.len(),
         embeds.dim
     );
     Ok(())
@@ -185,18 +182,6 @@ fn rows_to_tensor(rows: &[Vec<f32>], dim: usize) -> anyhow::Result<Tensor> {
         flat.extend_from_slice(row);
     }
     Ok(Tensor::from_vec(flat, (n, dim), &Device::Cpu)?)
-}
-
-fn dmatrix_to_tensor(m: &DMatrix<f32>) -> anyhow::Result<Tensor> {
-    let nrows = m.nrows();
-    let ncols = m.ncols();
-    let mut flat = Vec::with_capacity(nrows * ncols);
-    for i in 0..nrows {
-        for j in 0..ncols {
-            flat.push(m[(i, j)]);
-        }
-    }
-    Ok(Tensor::from_vec(flat, (nrows, ncols), &Device::Cpu)?)
 }
 
 #[cfg(test)]
