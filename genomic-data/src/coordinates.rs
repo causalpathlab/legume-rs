@@ -29,12 +29,16 @@ pub struct GeneTss {
     pub tss: i64,
 }
 
-/// Gene TSS position **with strand** parsed from GFF. Like [`GeneTss`]
-/// but retains the strand so callers (e.g. strand-resolved genomic
-/// pileups) can split forward (Watson) from backward (Crick) genes.
+/// Gene body + TSS **with strand** parsed from GFF. Like [`GeneTss`]
+/// but retains the strand and genomic interval so callers (e.g.
+/// ArchR-style gene scores, strand-resolved pileups) can use the body.
 #[derive(Debug, Clone)]
 pub struct GeneLoc {
     pub chr: Box<str>,
+    /// Genomic start of the gene feature (min coordinate).
+    pub start: i64,
+    /// Genomic end of the gene feature (max coordinate, inclusive-style stop).
+    pub end: i64,
     /// Transcription start site (start on `+`, stop on `-`).
     pub tss: i64,
     pub strand: Strand,
@@ -247,6 +251,8 @@ pub fn load_gene_loci_map(gff_file: &str) -> anyhow::Result<FxHashMap<Box<str>, 
             key,
             GeneLoc {
                 chr: rec.seqname.clone(),
+                start: rec.start,
+                end: rec.stop,
                 tss,
                 strand: rec.strand,
             },
@@ -349,11 +355,15 @@ chr1\tHAVANA\texon\t100\t150\t.\t+\t.\tgene_id \"ENSG001\"; gene_name \"AAA\"
         let aaa = loci[0].as_ref().expect("AAA present");
         assert!(matches!(aaa.strand, Strand::Forward));
         assert_eq!(aaa.tss, 100);
+        assert_eq!(aaa.start, 100);
+        assert_eq!(aaa.end, 200);
         assert_eq!(chr_stripped(&aaa.chr), "1");
 
         let bbb = loci[1].as_ref().expect("BBB present");
         assert!(matches!(bbb.strand, Strand::Backward));
         assert_eq!(bbb.tss, 600);
+        assert_eq!(bbb.start, 400);
+        assert_eq!(bbb.end, 600);
 
         assert!(loci[2].is_none());
     }

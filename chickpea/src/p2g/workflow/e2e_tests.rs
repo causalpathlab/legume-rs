@@ -106,4 +106,17 @@ fn e2e_writes_e2g_parquet_from_synthetic_pb() {
             .is_file(),
         "expected peak_gene/chr1.parquet under {out}"
     );
+    // Senna-style embedding parquets (prefix = out dir path).
+    assert!(
+        Path::new(&format!("{out}.feature_embedding.parquet")).is_file(),
+        "expected {out}.feature_embedding.parquet"
+    );
+    assert!(
+        Path::new(&format!("{out}.feature_types.parquet")).is_file(),
+        "expected {out}.feature_types.parquet"
+    );
+    assert!(
+        Path::new(&format!("{out}.cell_embedding.parquet")).is_file(),
+        "expected {out}.cell_embedding.parquet"
+    );
 }

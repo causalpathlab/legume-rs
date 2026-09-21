@@ -14,6 +14,7 @@ pub mod run;
 mod abc_map;
 mod cluster;
 mod embed_ge;
+mod gene_activity;
 mod input;
 mod parquet_out;
 mod refine;

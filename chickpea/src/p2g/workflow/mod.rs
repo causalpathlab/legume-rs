@@ -5,7 +5,7 @@
 use crate::common::*;
 use crate::p2g::abc_map::{rough_abc_map, AbcMapParams};
 use crate::p2g::cluster::cluster_cells;
-use crate::p2g::embed_ge::train_peak_gene_embeds;
+use crate::p2g::embed_ge::{train_peak_gene_embeds, write_embedding_parquets};
 use crate::p2g::parquet_out::{peaks_from_coords, write_e2g_tables, ClusterRow};
 use crate::p2g::refine::refine_within_clusters;
 use genomic_data::coordinates::{GeneTss, PeakCoord};
@@ -79,6 +79,7 @@ pub fn run_from_pseudobulk(
 
     info!("Embedding pb samples from gene embeddings...");
     let sample_mat = embed_pb_samples(rna_pb, &embeds.gene)?;
+    write_embedding_parquets(out_dir, &embeds, &sample_mat)?;
     info!(
         "Clustering {} pb samples (min_cluster_samples={})...",
         sample_mat.nrows(),

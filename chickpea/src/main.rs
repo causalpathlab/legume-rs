@@ -46,7 +46,9 @@ fn print_logo() {
                   write E2G-like parquet:\n\
                   peaks.parquet (id, chromosome, start, end, class),\n\
                   clusters.parquet (id, name),\n\
-                  peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).",
+                  peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).\n\
+                  Also senna-style `{out}.feature_embedding.parquet`,\n\
+                  `{out}.feature_types.parquet`, `{out}.cell_embedding.parquet`.",
     term_width = 80
 )]
 struct Cli {
@@ -73,7 +75,9 @@ enum Commands {
                       2. data-beans multilevel pb collapse (+ refine; optional --use-adjusted).\n\
                       3. Rough cis co-occurrence map; train peak/gene embeds with ge-util FNE.\n\
                       4. Embed pb samples → Leiden clusters → within-cluster refine.\n\
-                      5. Write E2G-like parquet (peaks, clusters, peak_gene/chr*).\n\
+                      5. Write senna-style embedding parquet\n\
+                         (`{out}.feature_embedding`, `.feature_types`, `.cell_embedding`)\n\
+                         and E2G-like tables (`{out}/peaks`, clusters, peak_gene/chr*).\n\
                       \n\
                       See chickpea/todo.md.",
         after_long_help = ENV_HELP,

@@ -1,14 +1,57 @@
 //! Input loading for peak-to-gene: paired RNA + ATAC matrices and gene TSS
-//! coordinates.
+//! coordinates. ATAC-only loads a single-layer stack.
 
 use crate::common::*;
 use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::aux::feature_names::FeatureNameKind;
-use genomic_data::coordinates::GeneTss;
+use genomic_data::coordinates::{GeneLoc, GeneTss};
+
+/// Gene names aligned with optional body/TSS annotations (ATAC-only universe).
+pub type GeneUniverse = (Vec<Box<str>>, Vec<Option<GeneLoc>>);
 
 pub(crate) struct PairedDataWithBatch {
     pub data_stack: SparseIoStack,
     pub batch_membership: Vec<Box<str>>,
+}
+
+/// Load ATAC-only data into a one-layer stack (index 0 = ATAC).
+pub fn load_atac_data(
+    atac_files: &[Box<str>],
+    batch_files: Option<&[Box<str>]>,
+) -> anyhow::Result<PairedDataWithBatch> {
+    let n_atac = atac_files.len();
+    if let Some(bf) = batch_files {
+        if bf.len() != n_atac {
+            anyhow::bail!(
+                "batch_files length {} != atac_files ({n_atac}) for ATAC-only input",
+                bf.len()
+            );
+        }
+    }
+
+    info!("Loading ATAC data ({} file(s), ATAC-only)...", n_atac);
+    let atac = read_data_on_shared_rows(ReadSharedRowsArgs {
+        data_files: atac_files.to_vec(),
+        batch_files: batch_files.map(|bf| bf.to_vec()),
+        preload: false,
+        feature_kind: Some(FeatureNameKind::Exact),
+        ..Default::default()
+    })?;
+
+    info!(
+        "Loaded ATAC: {} peaks x {} cells",
+        atac.data.num_rows(),
+        atac.data.num_columns(),
+    );
+
+    let mut data_stack = SparseIoStack::new();
+    let batch_membership = atac.batch;
+    data_stack.push(atac.data)?;
+
+    Ok(PairedDataWithBatch {
+        data_stack,
+        batch_membership,
+    })
 }
 
 /// Load paired RNA + ATAC data, validate shared cells, return SparseIoStack.
@@ -124,27 +167,7 @@ pub fn load_gene_coords_tsv(
     path: &str,
     gene_names: &[Box<str>],
 ) -> anyhow::Result<Vec<Option<GeneTss>>> {
-    use legume_numeric::matrix::common_io::open_buf_reader;
-    use std::io::BufRead;
-
-    let reader = open_buf_reader(path)?;
-    let mut tss_map: rustc_hash::FxHashMap<Box<str>, GeneTss> = Default::default();
-
-    for (i, line) in reader.lines().enumerate() {
-        let line = line?;
-        if i == 0 {
-            continue; // skip header
-        }
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 3 {
-            continue;
-        }
-        let gene: Box<str> = fields[0].into();
-        let chr: Box<str> = fields[1].into();
-        let tss: i64 = fields[2].parse()?;
-        tss_map.insert(gene, GeneTss { chr, tss });
-    }
-
+    let tss_map = read_gene_coords_map(path)?;
     info!(
         "Loaded {} gene positions from {}, matching against {} genes",
         tss_map.len(),
@@ -165,4 +188,62 @@ pub fn load_gene_coords_tsv(
     );
 
     Ok(result)
+}
+
+/// Full gene universe from a gene-coords TSV (ATAC-only; TSS-only body).
+pub fn load_all_gene_coords_tsv(path: &str) -> anyhow::Result<GeneUniverse> {
+    use crate::p2g::gene_activity::gene_loc_from_tss;
+    let tss_map = read_gene_coords_map(path)?;
+    let mut genes: Vec<(Box<str>, GeneTss)> = tss_map.into_iter().collect();
+    genes.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let gene_names: Vec<Box<str>> = genes.iter().map(|(g, _)| g.clone()).collect();
+    let gene_locs: Vec<Option<GeneLoc>> = genes
+        .into_iter()
+        .map(|(_, t)| Some(gene_loc_from_tss(&t)))
+        .collect();
+    info!(
+        "Loaded {} genes from {} (ATAC-only universe, TSS-only)",
+        gene_names.len(),
+        path
+    );
+    Ok((gene_names, gene_locs))
+}
+
+/// Full gene universe from a GFF/GTF with gene bodies (ATAC-only).
+pub fn load_all_gene_loci_from_gff(path: &str) -> anyhow::Result<GeneUniverse> {
+    let loc_map = genomic_data::coordinates::load_gene_loci_map(path)?;
+    let mut genes: Vec<(Box<str>, GeneLoc)> = loc_map.into_iter().collect();
+    genes.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let gene_names: Vec<Box<str>> = genes.iter().map(|(g, _)| g.clone()).collect();
+    let gene_locs: Vec<Option<GeneLoc>> = genes.into_iter().map(|(_, loc)| Some(loc)).collect();
+    info!(
+        "Loaded {} genes from GFF {} (ATAC-only universe)",
+        gene_names.len(),
+        path
+    );
+    Ok((gene_names, gene_locs))
+}
+
+fn read_gene_coords_map(path: &str) -> anyhow::Result<rustc_hash::FxHashMap<Box<str>, GeneTss>> {
+    use legume_numeric::matrix::common_io::open_buf_reader;
+    use std::io::BufRead;
+
+    let reader = open_buf_reader(path)?;
+    let mut tss_map: rustc_hash::FxHashMap<Box<str>, GeneTss> = Default::default();
+
+    for (i, line) in reader.lines().enumerate() {
+        let line = line?;
+        if i == 0 {
+            continue; // skip header
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 3 {
+            continue;
+        }
+        let gene: Box<str> = fields[0].into();
+        let chr: Box<str> = fields[1].into();
+        let tss: i64 = fields[2].parse()?;
+        tss_map.insert(gene, GeneTss { chr, tss });
+    }
+    Ok(tss_map)
 }
