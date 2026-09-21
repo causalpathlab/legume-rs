@@ -25,7 +25,7 @@
 use crate::bge::driver::FitArtifacts;
 use crate::gem::tracks::{contrast_channels, TrackPlan};
 use graph_embedding_util as ge;
-use matrix_util::parquet::{write_named_table, Column};
+use legume_numeric::matrix::parquet::{write_named_table, Column};
 use rustc_hash::FxHashMap;
 use senna::embed_common::*;
 

@@ -1,7 +1,7 @@
 //! `{prefix}.cells.parquet` burden loading.
 
 use cnv::clone_bayes::load_burden_from_cells_table;
-use matrix_util::parquet::{write_named_table, Column};
+use legume_numeric::matrix::parquet::{write_named_table, Column};
 
 #[test]
 fn missing_cells_take_the_fallback_burden() {

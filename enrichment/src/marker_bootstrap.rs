@@ -69,8 +69,8 @@ use crate::gene_strata::GeneStrata;
 use crate::q_matrix::build_q_matrix;
 use crate::Mat;
 use anyhow::Result;
-use matrix_util::hypothesis::benjamini_hochberg;
-use matrix_util::stop::par_replicates;
+use legume_numeric::matrix::hypothesis::benjamini_hochberg;
+use legume_numeric::matrix::stop::par_replicates;
 use rand::RngExt;
 
 #[cfg(test)]

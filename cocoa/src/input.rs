@@ -1,9 +1,9 @@
 use crate::common::*;
 use clap::ValueEnum;
-use matrix_util::common_io::*;
-use matrix_util::dmatrix_util::*;
-use matrix_util::parquet::*;
-use matrix_util::traits::*;
+use legume_numeric::matrix::common_io::*;
+use legume_numeric::matrix::dmatrix_util::*;
+use legume_numeric::matrix::parquet::*;
+use legume_numeric::matrix::traits::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::sync::Arc;
 

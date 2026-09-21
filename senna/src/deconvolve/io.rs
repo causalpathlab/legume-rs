@@ -2,10 +2,10 @@
 
 use super::result::DeconvResult;
 use anyhow::{Context, Result};
+use legume_numeric::matrix::common_io::write_lines;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::common_io::write_lines;
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::traits::IoOps;
 use senna::embed_common::{axis_id_names, Mat};
 use std::fs::File;
 use std::io::{BufWriter, Write};

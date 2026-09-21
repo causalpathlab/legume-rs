@@ -7,7 +7,7 @@
 //! continuous **factors** (cell × factor) and **loadings** (gene × factor), not
 //! topic proportions + a topic-gene dictionary.
 //!
-//! The dense [`candle_util::vae::topic::train_mixed`] loop is latent-agnostic
+//! The dense [`legume_numeric::candle::vae::topic::train_mixed`] loop is latent-agnostic
 //! when `topic_smoothing = 0` (the simplex smoothing becomes a no-op and the raw
 //! `z` flows straight to the decoder's own NB likelihood), so this path reuses it
 //! verbatim. The topic-specific machinery (anchor prior, NB-Fisher weighting,
@@ -21,8 +21,8 @@ use crate::topic::common::{
 use crate::topic::eval::{evaluate_latent_by_encoder, EvaluateLatentConfig};
 use senna::embed_common::*;
 
-use candle_util::decoder::GaussianNbDecoder;
-use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};
+use legume_numeric::candle::decoder::GaussianNbDecoder;
+use legume_numeric::candle::encoder::{GaussianEncoder, GaussianEncoderArgs};
 
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default = "senna::embed_common::clap_defaults")]
@@ -185,7 +185,7 @@ pub struct VaeArgs {
 
     #[command(flatten)]
     #[serde(flatten)]
-    pub(crate) coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
+    pub(crate) coarsening: data_beans::alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -424,12 +424,12 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         &level_coarsenings,
         finest_coarsening,
     )?;
-    let level_refs: Vec<candle_util::vae::topic::LevelData> = level_data
+    let level_refs: Vec<legume_numeric::candle::vae::topic::LevelData> = level_data
         .iter()
         .map(|(a, b, c)| (a, b.as_ref(), c))
         .collect();
 
-    let train_cfg = candle_util::vae::topic::TrainConfig {
+    let train_cfg = legume_numeric::candle::vae::topic::TrainConfig {
         parameters: &parameters,
         dev: &dev,
         epochs: args.epochs,
@@ -446,8 +446,12 @@ pub fn fit_vae_model(args: &VaeArgs) -> anyhow::Result<()> {
         stop: &stop,
         loss_hook: None,
     };
-    let scores =
-        candle_util::vae::topic::train_mixed(&level_refs, &mut encoder, &decoders, &train_cfg)?;
+    let scores = legume_numeric::candle::vae::topic::train_mixed(
+        &level_refs,
+        &mut encoder,
+        &decoders,
+        &train_cfg,
+    )?;
     TrainScores {
         llik: scores.llik,
         kl: scores.kl,

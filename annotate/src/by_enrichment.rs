@@ -9,9 +9,9 @@ use crate::outputs::{clean_outputs, AnnotationOutputs, ENRICHMENT_OUTPUT_SUFFIXE
 use enrichment::consensus::{Abstain, UNASSIGNED};
 use enrichment::marker_bootstrap::{ClusterBootstrap, EnrichmentBootstrapConfig};
 use enrichment::{annotate, AnnotateConfig, AnnotateOutputs, GroupInputs, SpecificityMode};
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::traits::IoOps;
 use rayon::prelude::*;
 
 /// What the argument surface decides before any data is read: where the outputs

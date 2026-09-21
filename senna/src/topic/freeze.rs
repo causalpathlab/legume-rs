@@ -17,12 +17,12 @@
 //!    matrix in the post-mask gene order (which equals the order
 //!    `data_vec.row_names()` returns after masking).
 
-use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::frozen_features::{
+use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::aux::frozen_features::{
     load_frozen_feature_host, FrozenFeatureHost, FrozenLoadArgs,
 };
-use matrix_util::parquet::peek_parquet_field_names;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::parquet::peek_parquet_field_names;
+use legume_numeric::matrix::traits::IoOps;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashSet;
 use std::cell::RefCell;

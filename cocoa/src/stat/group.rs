@@ -19,7 +19,7 @@
 //! median across genes.
 
 use super::*;
-use matrix_util::utils::median;
+use legume_numeric::matrix::utils::median;
 use special::Gamma as SpecialGamma;
 
 /// Fitted group model for one topic. `mu` and `gamma` are nuisance

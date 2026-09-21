@@ -23,7 +23,7 @@
 //!
 //! The retrieval itself (kNN over propensity rows, softmax distance
 //! weights, streamed weighted average of reference counts) lives in
-//! [`data_beans_alg::retrieval_impute`]. A cell with no pairs (cage) or
+//! [`data_beans::alg::retrieval_impute`]. A cell with no pairs (cage) or
 //! no counts on any model feature (profiles) has a zero propensity row and
 //! is skipped rather than matched arbitrarily.
 //!
@@ -35,12 +35,12 @@ use crate::predict::{predict_cage, PredictArgs};
 use crate::util::common::*;
 use crate::util::metadata::PintoMetadata;
 use clap::Args;
+use data_beans::alg::retrieval_impute::{retrieval_impute, RetrievalImputeConfig};
 use data_beans::sparse_data_visitors::VisitColumnsOps;
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::retrieval_impute::{retrieval_impute, RetrievalImputeConfig};
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::traits::IoOps;
 use std::path::Path;
 
 #[derive(Args, Debug)]
@@ -206,8 +206,8 @@ fn resolve_reference_data(
 /// cage path's name check compares like with like.
 fn open_backends(what: &str, files: &[Box<str>], preload: bool) -> anyhow::Result<SparseIoVec> {
     info!("Opening {what} data ({} file(s))", files.len());
-    let loaded = auxiliary_data::data_loading::read_data_on_shared_rows(
-        auxiliary_data::data_loading::ReadSharedRowsArgs {
+    let loaded = data_beans::aux::data_loading::read_data_on_shared_rows(
+        data_beans::aux::data_loading::ReadSharedRowsArgs {
             data_files: files.to_vec(),
             preload,
             ..Default::default()
@@ -396,7 +396,7 @@ fn project_profile_propensity(
     data: &SparseIoVec,
     profiles: &Mat,
     model_features: &[Box<str>],
-    feature_kind: &auxiliary_data::feature_names::FeatureNameKind,
+    feature_kind: &data_beans::aux::feature_names::FeatureNameKind,
     iters: usize,
     block_size: Option<usize>,
     what: &str,

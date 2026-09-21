@@ -1,12 +1,12 @@
 use crate::common::*;
 use crate::input::*;
 
-use auxiliary_data::cell_annotations::{CellAnnotations, CellTypeMembership};
 use clap::Parser;
-use data_beans_alg::gene_weighting::compute_nb_fisher_weights;
-use data_beans_alg::pseudobulk::collapse_pseudobulk_weighted;
-use matrix_param::io::ParamIo;
-use matrix_util::common_io::{mkdir_parent, write_lines};
+use data_beans::alg::gene_weighting::compute_nb_fisher_weights;
+use data_beans::alg::pseudobulk::collapse_pseudobulk_weighted;
+use data_beans::aux::cell_annotations::{CellAnnotations, CellTypeMembership};
+use legume_numeric::matrix::common_io::{mkdir_parent, write_lines};
+use legume_numeric::param::io::ParamIo;
 use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Parser, Debug, Clone)]

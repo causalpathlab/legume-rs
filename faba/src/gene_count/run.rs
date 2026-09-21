@@ -184,7 +184,7 @@ impl GeneCountArgs {
 /// emitting a `{batch}` (total), `{batch}_spliced` and `{batch}_unspliced`
 /// triple per BAM; the total was just the other two summed, nothing read the
 /// split halves, and a `{gene}/count/total` row is rejected downstream anyway
-/// (see `auxiliary_data::feature_rows::split_count_row`) precisely because it
+/// (see `data_beans::aux::feature_rows::split_count_row`) precisely because it
 /// double-counts the gene.
 pub fn run_gene_count(args: &GeneCountArgs) -> anyhow::Result<()> {
     if args.bam_files.is_empty() {

@@ -24,11 +24,11 @@ use crate::util::input::{
     KnnExprScope, ResolvedKnn, SRTData, SrtInputArgs,
 };
 use crate::util::knn_graph::KnnGraph;
-use auxiliary_data::feature_names::FeatureNameKind;
-use data_beans_alg::gene_weighting::fisher_weights_from_stats;
-use data_beans_alg::random_projection::RandProjOps;
-use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
-use matrix_util::knn_graph::{DistanceMerge, EdgeSource};
+use data_beans::alg::gene_weighting::fisher_weights_from_stats;
+use data_beans::alg::random_projection::RandProjOps;
+use data_beans::alg::sparse_streaming::streaming_sparse_running_stats;
+use data_beans::aux::feature_names::FeatureNameKind;
+use legume_numeric::matrix::knn_graph::{DistanceMerge, EdgeSource};
 
 ///////////////////////////
 // Config + result types //
@@ -96,7 +96,7 @@ pub struct SrtPreprocessed {
     /// The projection taken here, with the SAME batch argument `lc` and
     /// `cage` would have used, so they can reuse it instead of paying for a
     /// second full pass. `None` unless the config asked for one.
-    pub cell_proj: Option<data_beans_alg::random_projection::RandColProjOut>,
+    pub cell_proj: Option<data_beans::alg::random_projection::RandColProjOut>,
     /// The feature unit axis. `Some` iff the config asked for it. Identity (one
     /// feature per row) unless the rows carry splice channels.
     pub feature_axis: Option<FeatureAxis>,
@@ -106,7 +106,7 @@ pub struct SrtPreprocessed {
     /// The ROW-axis statistics [`Self::row_weights`] came from. Its `sum()` is
     /// the per-row count total, which spares a caller that needs one a second
     /// full pass over the data.
-    pub row_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
+    pub row_stats: Option<legume_numeric::matrix::sparse_stat::SparseRunningStatistics<f32>>,
     /// Per-FEATURE NB Fisher-info weights, `Some` iff both `fisher_weights` and
     /// `feature_axis` were asked for.
     ///
@@ -120,7 +120,7 @@ pub struct SrtPreprocessed {
     /// The feature-axis statistics [`Self::feature_weights`] came from. Carried out
     /// because the dictionary merge needs per-feature DETECTION counts, which is
     /// exactly the statistic a post-hoc fold gets wrong.
-    pub feature_stats: Option<matrix_util::sparse_stat::SparseRunningStatistics<f32>>,
+    pub feature_stats: Option<legume_numeric::matrix::sparse_stat::SparseRunningStatistics<f32>>,
     pub n_cells: usize,
     /// Matrix rows. Equal to the feature count only on a non-channelized axis.
     pub n_rows: usize,

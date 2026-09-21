@@ -1,7 +1,7 @@
 use crate::sam::Strand;
 
 use dashmap::DashMap as HashMap;
-use matrix_util::common_io::read_lines_of_words_delim;
+use legume_numeric::matrix::common_io::read_lines_of_words_delim;
 use rayon::prelude::*;
 
 /// Ignore ENSEMBL version: `ENSGXXXXXXXXXXX.X_X` to `ENSGXXXXXXXXXXX`

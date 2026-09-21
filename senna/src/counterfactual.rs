@@ -106,8 +106,8 @@ use crate::topic::eval::GeneRemap;
 use crate::topic::eval_indexed::{csc_to_indexed, PerGeneContext};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarMap;
-use candle_util::decoder::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use data_beans::sparse_io_vector::SparseIoVec;
+use legume_numeric::candle::decoder::{EmbeddedNbTopicDecoder, MaskedNbTarget};
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
@@ -143,7 +143,7 @@ fn rebuild_model(
     metadata: &crate::topic::model_metadata::TopicModelMetadata,
     dev: &Device,
 ) -> anyhow::Result<RebuiltModel> {
-    use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+    use legume_numeric::candle::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
 
     let embedding_dim = metadata
         .embedding_dim
@@ -180,23 +180,24 @@ fn rebuild_model(
         Some(_) => Some(crate::topic::model_metadata::load_feature_mean(model)?.1),
         None => None,
     };
-    let level_map =
-        |i: usize| -> anyhow::Result<candle_util::decoder::coarsening_map::CoarseningMap> {
-            let fc = levels
-                .as_ref()
-                .and_then(|l| l.get(i).and_then(Option::as_ref));
-            match (fc, feature_mean.as_deref()) {
-                (Some(fc), Some(mean)) => {
-                    Ok(crate::topic::train_masked::coarsening_map_for(Some(fc), mean, dev)?.0)
-                }
-                _ => Ok(
-                    candle_util::decoder::coarsening_map::CoarseningMap::identity(
-                        metadata.n_features_full,
-                        dev,
-                    )?,
-                ),
+    let level_map = |i: usize| -> anyhow::Result<
+        legume_numeric::candle::decoder::coarsening_map::CoarseningMap,
+    > {
+        let fc = levels
+            .as_ref()
+            .and_then(|l| l.get(i).and_then(Option::as_ref));
+        match (fc, feature_mean.as_deref()) {
+            (Some(fc), Some(mean)) => {
+                Ok(crate::topic::train_masked::coarsening_map_for(Some(fc), mean, dev)?.0)
             }
-        };
+            _ => Ok(
+                legume_numeric::candle::decoder::coarsening_map::CoarseningMap::identity(
+                    metadata.n_features_full,
+                    dev,
+                )?,
+            ),
+        }
+    };
     for i in 0..finest {
         EmbeddedNbTopicDecoder::new_with_coarsening(
             metadata.n_topics,

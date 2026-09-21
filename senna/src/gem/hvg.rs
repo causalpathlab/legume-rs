@@ -14,14 +14,14 @@
 //! `n_tracks > 1` (a masked clone of the feature axis), so this is the belt
 //! to that suspender, not a second, independent decision.
 
-use data_beans::utilities::name_matching::GeneIndex;
-use data_beans_alg::hvg::{
+use data_beans::alg::hvg::{
     load_must_train, select_hvg_by_stats, union_indices, HvgCliArgs, MustTrainFeatures,
 };
-use data_beans_alg::sparse_streaming::streaming_sparse_running_stats;
+use data_beans::alg::sparse_streaming::streaming_sparse_running_stats;
+use data_beans::utilities::name_matching::GeneIndex;
 use graph_embedding_util as ge;
+use legume_numeric::matrix::traits::RunningStatOps;
 use log::info;
-use matrix_util::traits::RunningStatOps;
 use rustc_hash::FxHashSet;
 
 use crate::gem::tracks::TrackPlan;

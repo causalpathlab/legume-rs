@@ -11,7 +11,7 @@ use crate::encoder::TokenVec;
 use crate::vocab::{Occurrence, Vocabulary};
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use matrix_util::utils::cosine;
+use legume_numeric::matrix::utils::cosine;
 use rustc_hash::FxHashMap;
 use std::io::Write;
 

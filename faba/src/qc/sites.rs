@@ -14,7 +14,7 @@ use arrow::array::{
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
-use auxiliary_data::feature_rows::{parse_feature_row, EDITED, METHYLATED};
+use data_beans::aux::feature_rows::{parse_feature_row, EDITED, METHYLATED};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -62,7 +62,7 @@ impl SiteTable {
 
     /// Whether this modality carries a control arm (m6A does, A-to-I does not).
     pub fn has_control(&self) -> bool {
-        &*self.modality == auxiliary_data::feature_rows::M6A
+        &*self.modality == data_beans::aux::feature_rows::M6A
     }
 
     /// The converted-read channel of this modality's `_site` rows.

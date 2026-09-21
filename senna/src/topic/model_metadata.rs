@@ -1,5 +1,5 @@
-use candle_util::candle_nn;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
+use legume_numeric::candle::candle_nn;
 use serde::{Deserialize, Serialize};
 
 /// Canonical `model_type` strings for `TopicModelMetadata`. Use these in place
@@ -26,13 +26,13 @@ pub const MODEL_TYPE_MASKED_SBP: &str = "masked_sbp";
 /// [`latent_to_theta`]. Inference is encoder-only.
 pub const MODEL_TYPE_MASKED_VAE: &str = "masked_vae";
 /// scVI-style Gaussian VAE (`senna vae`): a Gaussian (unconstrained continuous)
-/// latent `z` from a [`candle_util::encoder::GaussianEncoder`] paired with a
-/// [`candle_util::decoder::GaussianNbDecoder`] (`π = softmax_d(z·W) → μ =
+/// latent `z` from a [`legume_numeric::candle::encoder::GaussianEncoder`] paired with a
+/// [`legume_numeric::candle::decoder::GaussianNbDecoder`] (`π = softmax_d(z·W) → μ =
 /// library·π`, NB). The latent is continuous factors, not simplex topic
 /// proportions; the dictionary is gene × factor loadings.
 pub const MODEL_TYPE_VAE: &str = "vae";
 
-use candle_util::vae::masked_topic::LatentHead;
+use legume_numeric::candle::vae::masked_topic::LatentHead;
 
 /// Single source of truth for the masked-model head ↔ persisted `model_type`
 /// ↔ CLI label mapping. Every site (metadata write, `predict` dispatch, log
@@ -321,7 +321,7 @@ pub fn load_coarsening(prefix: &str) -> anyhow::Result<Option<FeatureCoarsening>
 
 /// Load dictionary parquet, returning gene names and the beta matrix [D × K].
 pub fn load_dictionary(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, nalgebra::DMatrix<f32>)> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let path = format!("{prefix}.dictionary.parquet");
     let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
     log::info!(
@@ -339,7 +339,10 @@ pub fn load_dictionary(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, nalgebra:
 /// `--init-from`; a map without factors is left alone. Every table written
 /// through the composed encoder must be written BEFORE this call.
 pub fn save_parameters(parameters: &candle_nn::VarMap, prefix: &str) -> anyhow::Result<()> {
-    candle_util::feature_embedding::fold_lora(parameters, crate::topic::gene_axis::ENCODER_PREFIX)?;
+    legume_numeric::candle::feature_embedding::fold_lora(
+        parameters,
+        crate::topic::gene_axis::ENCODER_PREFIX,
+    )?;
     let path = format!("{prefix}.safetensors");
     parameters.save(&path)?;
     log::info!("Saved model parameters to {path}");
@@ -359,7 +362,7 @@ pub fn save_feature_mean(
     gene_names: &[Box<str>],
     prefix: &str,
 ) -> anyhow::Result<()> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let path = format!("{prefix}.feature_mean.parquet");
     let mat = nalgebra::DMatrix::<f32>::from_column_slice(feature_mean.len(), 1, feature_mean);
     let cols: Vec<Box<str>> = vec!["mean".into()];
@@ -370,7 +373,7 @@ pub fn save_feature_mean(
 
 /// Load per-gene mean expression rate; returns (`gene_names`, `μ_d`).
 pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let path = format!("{prefix}.feature_mean.parquet");
     let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
     anyhow::ensure!(
@@ -388,7 +391,7 @@ pub fn load_feature_mean(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32
 /// windowed encoder read, and the encoder reads every gene now — so this exists
 /// to keep OLD models (`enc_context_size: Some(k)`) scoring exactly as they did.
 pub fn load_shortlist_weights(prefix: &str) -> anyhow::Result<(Vec<Box<str>>, Vec<f32>)> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let path = format!("{prefix}.shortlist_weights.parquet");
     let result = nalgebra::DMatrix::<f32>::from_parquet_with_row_names(&path, Some(0))?;
     anyhow::ensure!(
@@ -425,7 +428,7 @@ pub fn ensure_query_head_not_wired(query_rank: Option<usize>) -> anyhow::Result<
 /// Load per-gene NB dispersion φ from `{prefix}.dispersion.parquet`.
 /// Returns `None` if the file doesn't exist (e.g. multinomial-only training run).
 pub fn load_dispersion(prefix: &str) -> anyhow::Result<Option<Vec<f32>>> {
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::traits::IoOps;
     let path = format!("{prefix}.dispersion.parquet");
     if !std::path::Path::new(&path).exists() {
         return Ok(None);

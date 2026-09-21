@@ -12,7 +12,7 @@ use crate::cell_activity_graph_embedding::pair_projection::{
 };
 use crate::util::common::*;
 use crate::util::feature_axis::FeatureAxis;
-use candle_util::candle_core::Device;
+use legume_numeric::candle::candle_core::Device;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 

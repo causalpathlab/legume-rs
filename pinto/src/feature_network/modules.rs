@@ -4,7 +4,7 @@
 //!   1. Iterative degree trim ("k-core"): drop features with current-subgraph
 //!      degree below `min_degree`, re-count, repeat until stable.
 //!   2. Leiden on the surviving subgraph, via
-//!      [`matrix_util::knn_graph::run_leiden`].
+//!      [`legume_numeric::matrix::knn_graph::run_leiden`].
 //!
 //! Features dropped by the trim get `None` as their module label; surviving
 //! features get `Some(m)` with `m` contiguous starting at 0.
@@ -96,9 +96,9 @@ pub fn leiden_feature_modules(
         return vec![None; graph.n_features];
     }
 
-    // Build leiden::Network: node weights = subgraph degree, edge weights = 1.0.
+    // Build legume_numeric::leiden::Network: node weights = subgraph degree, edge weights = 1.0.
     let mut total_edge_weight = 0.0f64;
-    let mut network = leiden::Network::with_capacity(n_sub);
+    let mut network = legume_numeric::leiden::Network::with_capacity(n_sub);
     for g in 0..graph.n_features {
         if sub_of[g].is_some() {
             network.add_node(sub_degrees[g] as f32);
@@ -111,15 +111,21 @@ pub fn leiden_feature_modules(
         }
     }
 
-    let cpm_resolution =
-        matrix_util::knn_graph::modularity_to_cpm_resolution(resolution, total_edge_weight);
+    let cpm_resolution = legume_numeric::matrix::knn_graph::modularity_to_cpm_resolution(
+        resolution,
+        total_edge_weight,
+    );
 
-    let sub_labels =
-        matrix_util::knn_graph::run_leiden(&network, n_sub, cpm_resolution, Some(seed as usize));
+    let sub_labels = legume_numeric::matrix::knn_graph::run_leiden(
+        &network,
+        n_sub,
+        cpm_resolution,
+        Some(seed as usize),
+    );
 
     // Compact labels to 0..K.
     let mut compact = sub_labels.clone();
-    matrix_util::knn_graph::compact_labels(&mut compact);
+    legume_numeric::matrix::knn_graph::compact_labels(&mut compact);
     let n_modules = compact.iter().copied().max().map_or(0, |m| m + 1);
 
     let mut out = vec![None; graph.n_features];

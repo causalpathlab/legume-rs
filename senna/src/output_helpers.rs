@@ -7,7 +7,7 @@
 //! identical across topic / masked-topic / joint-topic / svd / joint-svd.
 
 use crate::embed_common::{axis_id_names, Mat};
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 
 /// Refuse to write a matrix that carries `NaN`/`Inf`.
 ///
@@ -104,4 +104,4 @@ pub fn save_pb_gene(out: &str, pb_gene_gp: &Mat, gene_names: &[Box<str>]) -> any
     Ok(())
 }
 
-pub use data_beans_alg::gene_weighting::save_fisher_weights;
+pub use data_beans::alg::gene_weighting::save_fisher_weights;

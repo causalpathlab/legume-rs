@@ -3,12 +3,12 @@
 use anyhow::{Context, Result};
 use log::info;
 
-use matrix_util::branching::Branching;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::principal_curve::PrincipalCurves;
-use matrix_util::traits::IoOps;
-use matrix_util::utils::median;
+use legume_numeric::matrix::branching::Branching;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::principal_curve::PrincipalCurves;
+use legume_numeric::matrix::traits::IoOps;
+use legume_numeric::matrix::utils::median;
 
 use super::layout::*;
 use crate::lineage::orient::{undirected, EdgeCall, EdgeDirection};

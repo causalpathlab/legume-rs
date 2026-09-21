@@ -16,9 +16,9 @@ fn forest_recovers_two_bridged_lineages() {
     use crate::lineage::orient::{
         candidate_edges, edge_directionality, EdgeCall, EdgeDirectionConfig,
     };
-    use matrix_util::branching::max_branching;
-    use matrix_util::principal_curve::PrincipalCurveArgs;
-    use matrix_util::principal_graph::{mst_from_sqdist, pairwise_sqdist_rows_to_rows};
+    use legume_numeric::matrix::branching::max_branching;
+    use legume_numeric::matrix::principal_curve::PrincipalCurveArgs;
+    use legume_numeric::matrix::principal_graph::{mst_from_sqdist, pairwise_sqdist_rows_to_rows};
     use nalgebra::DMatrix;
     use std::collections::HashMap;
 
@@ -125,8 +125,8 @@ fn forest_recovers_two_bridged_lineages() {
 #[test]
 fn end_to_end_run_writes_forest_outputs() {
     use clap::Parser;
-    use matrix_util::dmatrix_io::DMatrix;
-    use matrix_util::traits::IoOps;
+    use legume_numeric::matrix::dmatrix_io::DMatrix;
+    use legume_numeric::matrix::traits::IoOps;
 
     // Two well-separated chains (y=0 and y=100), four x-positions each as tight blobs,
     // with a uniform +x velocity — the y-bridge should be cut into two trees.

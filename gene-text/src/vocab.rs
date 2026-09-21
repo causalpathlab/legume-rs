@@ -292,7 +292,7 @@ impl Vocabulary {
 
     /// Reload a tuned vocabulary: only the rows marked kept.
     pub fn read_tsv(path: &str, n_docs: usize) -> Result<Self> {
-        let reader = matrix_util::common_io::open_buf_reader(path)
+        let reader = legume_numeric::matrix::common_io::open_buf_reader(path)
             .with_context(|| format!("opening vocabulary {path}"))?;
         let mut entries = Vec::new();
         for (i, line) in reader.lines().enumerate() {

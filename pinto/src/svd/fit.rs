@@ -7,13 +7,13 @@ use crate::util::graph_coarsen::*;
 use crate::util::srt_pipeline::{
     preprocess_srt, topology_graph, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
-use data_beans_alg::cell_pairs::CellPairs;
-use data_beans_alg::random_projection::*;
+use data_beans::alg::cell_pairs::CellPairs;
+use data_beans::alg::random_projection::*;
 
 use clap::Parser;
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::*;
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::traits::*;
 
 #[derive(Parser, Debug, Clone)]
 pub struct SrtDeltaSvdArgs {

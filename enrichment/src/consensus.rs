@@ -273,5 +273,8 @@ pub fn keyed_rng(seed: u64, draw: usize, item: u64) -> SmallRng {
     // `mix_seed(base, draw)` = `finalize(base ^ draw·GOLDEN)`, and XOR commutes,
     // so `base = seed ^ item·C2B2` reproduces the old `seed ^ draw·GOLDEN ^ item·C2B2`.
     let base = seed ^ item.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    SmallRng::seed_from_u64(matrix_util::rand_util::mix_seed(base, draw as u64))
+    SmallRng::seed_from_u64(legume_numeric::matrix::rand_util::mix_seed(
+        base,
+        draw as u64,
+    ))
 }

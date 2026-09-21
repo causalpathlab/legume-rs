@@ -17,7 +17,7 @@
 use crate::genome_order::{GenePosition, GenomeOrder};
 use crate::hmm::{fit_em, CnvHmmParams, EmConfig, HmmResult, SampleEmissionParams};
 use crate::kmeans_init::{select_kmeans_k, sort_components};
-use matrix_util::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 

@@ -144,7 +144,7 @@ pub fn ontology_module_score(
     let mut effect_kt = Mat::zeros(n_clusters, n_terms);
     for ti in 0..n_terms {
         let col: Vec<f32> = (0..n_clusters).map(|k| s[k][ti]).collect();
-        let med = matrix_util::utils::median(&col);
+        let med = legume_numeric::matrix::utils::median(&col);
         for k in 0..n_clusters {
             effect_kt[(k, ti)] = s[k][ti] - med;
         }

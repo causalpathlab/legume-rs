@@ -11,15 +11,15 @@ use log::info;
 use nalgebra::DMatrix;
 use rustc_hash::FxHashMap as HashMap;
 
-use auxiliary_data::cell_annotations::{CellAnnotations, CellTypeMembership};
 use cnv::genome_order::GenePosition;
 use cnv::per_sample::{call_per_sample_cnv, PerSampleCnv, PerSampleCnvConfig};
+use data_beans::alg::pseudobulk::collapse_pseudobulk;
+use data_beans::aux::cell_annotations::{CellAnnotations, CellTypeMembership};
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::pseudobulk::collapse_pseudobulk;
-use matrix_param::traits::Inference;
-use matrix_util::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::param::traits::Inference;
 
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 
 use senna::embed_common::*;
 

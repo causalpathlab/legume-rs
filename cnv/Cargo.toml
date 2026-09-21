@@ -18,16 +18,20 @@ path = "src/main.rs"
 
 [features]
 default = []
-cuda = ["matrix-util/cuda", "mcmc-util/cuda", "data-beans/cuda"]
-metal = ["matrix-util/metal", "mcmc-util/metal", "data-beans/metal"]
+cuda = [
+    "legume-numeric/cuda",
+    "data-beans/cuda",
+]
+metal = [
+    "legume-numeric/metal",
+    "data-beans/metal",
+]
 hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
-auxiliary-data = { workspace = true }
-data-beans = { workspace = true }
+data-beans = { workspace = true, features = ["aux"] }
 genomic-data = { workspace = true }
-matrix-util = { workspace = true }
-mcmc-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix", "param", "candle", "mcmc"] }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

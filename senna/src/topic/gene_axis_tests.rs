@@ -4,7 +4,7 @@
 
 use super::fill_rows_by_coarsening;
 use crate::topic::eval::GeneRemap;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
 use senna::embed_common::Mat;
 
 #[test]
@@ -74,7 +74,7 @@ fn an_unseen_gene_in_a_group_with_no_known_member_is_refused() {
 /// tensor that no longer exists.
 #[test]
 fn the_rho_tensor_name_tracks_the_one_the_feature_side_registers() {
-    assert!(super::RHO_TENSOR.ends_with(candle_util::feature_embedding::FREE_VAR_NAME));
+    assert!(super::RHO_TENSOR.ends_with(legume_numeric::candle::feature_embedding::FREE_VAR_NAME));
 }
 
 /// A run whose feature side IS a free per-gene table, but whose checkpoint
@@ -89,7 +89,7 @@ fn refining_a_free_feature_side_with_no_rho_is_an_error() {
         d_train: 1,
         n_mapped: 1,
     };
-    let empty = candle_util::candle_nn::VarMap::new();
+    let empty = legume_numeric::candle::candle_nn::VarMap::new();
     assert!(super::refine_rho_by_coarsening(&empty, &remap, &coarsening).is_err());
 }
 
@@ -99,7 +99,7 @@ fn refining_a_free_feature_side_with_no_rho_is_an_error() {
 mod for_init_from {
     use super::super::remap_for_init_from;
     use crate::topic::model_metadata::save_feature_mean;
-    use auxiliary_data::feature_names::FeatureNameKindArg;
+    use data_beans::aux::feature_names::FeatureNameKindArg;
 
     fn genes(names: &[&str]) -> Vec<Box<str>> {
         names.iter().map(|g| (*g).into()).collect()

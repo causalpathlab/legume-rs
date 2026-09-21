@@ -6,7 +6,7 @@
 use super::graph::{EdgeList, RelationTable};
 use super::{EpochStats, SimbaConfig};
 use crate::fne::{self, FneConfig, NodeTypeTable, Relation, TypedEdgeList};
-use candle_util::candle_core::Tensor;
+use legume_numeric::candle::candle_core::Tensor;
 
 /// The two cell/gene node types, in the order the engine lays them out.
 pub const CELL_TYPE: &str = "e_cell";

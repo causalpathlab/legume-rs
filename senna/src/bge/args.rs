@@ -6,7 +6,7 @@
 //! of it first. Nothing here computes; the translation to
 //! `graph_embedding_util::FitConfig` stays with the driver that performs it.
 
-use data_beans_alg::hvg::HvgCliArgs;
+use data_beans::alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
 use senna::embed_common::*;
 

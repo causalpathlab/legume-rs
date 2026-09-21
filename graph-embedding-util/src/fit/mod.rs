@@ -28,13 +28,13 @@ pub use resolve_embedding::{train_rest, RestConfig, RestTrainInputs, TrainedRest
 
 use crate::data::{Triplet, UnifiedData};
 use anyhow::Context;
-use candle_util::candle_core::Tensor;
-use candle_util::candle_nn::VarMap;
+use legume_numeric::candle::candle_core::Tensor;
+use legume_numeric::candle::candle_nn::VarMap;
+use legume_numeric::param::traits::Inference;
 use log::info;
-use matrix_param::traits::Inference;
 use nalgebra::DMatrix;
 
-use matrix_util::traits::ConvertMatOps;
+use legume_numeric::matrix::traits::ConvertMatOps;
 use projection::{project_cells_phase2, CellBatchFold, DistillLevel, DistillSpec, PHASE2_RIDGE};
 pub use projection::{
     FrozenProjection, FrozenProjectionArgs, FrozenProjector, PHASE2_RIDGE as PROJECTION_RIDGE_SGD,
@@ -340,7 +340,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
     // below `--phase1-cells-per-pb n_cells` most cells never train in phase 1,
     // so their `e_cell` rows are still randn init until phase 2 runs — skipping
     // it wrote a `cell_embedding.parquet` of pure noise, silently. A second
-    // Ctrl+C aborts the process outright (`matrix_util::stop`), which is the
+    // Ctrl+C aborts the process outright (`legume_numeric::matrix::stop`), which is the
     // escape hatch for a user who really does want out now.
     if stop.load(std::sync::atomic::Ordering::Relaxed) {
         log::warn!(

@@ -1,5 +1,5 @@
 use super::*;
-use matrix_util::dmatrix_io::DMatrix;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
 
 const H: usize = 8;
 

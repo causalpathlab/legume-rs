@@ -14,7 +14,7 @@
 //! ([`senna::carried_rows::CarriedRows`]), a gene under its lifted name.
 
 use crate::gem::tracks::TrackPlan;
-use auxiliary_data::feature_rows::{feature_row, parse_feature_row, COUNT, SPLICED};
+use data_beans::aux::feature_rows::{feature_row, parse_feature_row, COUNT, SPLICED};
 use graph_embedding_util as ge;
 use graph_embedding_util::PresetMode;
 use log::{info, warn};

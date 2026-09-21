@@ -6,7 +6,7 @@
 
 use super::batch_fold::BatchGeneFold;
 use crate::fit::config::TrackSpec;
-use candle_util::candle_core::Device;
+use legume_numeric::candle::candle_core::Device;
 
 mod block_sgd;
 mod cells;

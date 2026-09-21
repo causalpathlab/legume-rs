@@ -58,16 +58,16 @@
 
 use super::{PairDictionary, SCORE_CLAMP};
 use crate::util::common::*;
-use candle_util::candle_core::{DType, Device, Tensor};
-use candle_util::candle_nn::{
+use legume_numeric::candle::candle_core::{DType, Device, Tensor};
+use legume_numeric::candle::candle_nn::{
     layer_norm, linear, AdamW, LayerNorm, LayerNormConfig, Linear, Module, Optimizer, ParamsAdamW,
     VarBuilder, VarMap,
 };
-use candle_util::encoder::{SymmetricPairHead, SymmetricPairHeadArgs};
-use candle_util::nn::seed_uniform_vars;
-use candle_util::vae::{clip_and_step_dense, PhaseTimers};
-use matrix_util::rand_util::mix_seed;
-use matrix_util::utils::{cosine, quantiles};
+use legume_numeric::candle::encoder::{SymmetricPairHead, SymmetricPairHeadArgs};
+use legume_numeric::candle::nn::seed_uniform_vars;
+use legume_numeric::candle::vae::{clip_and_step_dense, PhaseTimers};
+use legume_numeric::matrix::rand_util::mix_seed;
+use legume_numeric::matrix::utils::{cosine, quantiles};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
@@ -557,7 +557,7 @@ impl PairEncoder {
     /// Rebuild a saved encoder on `dict`, with the widths and the ridge the
     /// file records.
     pub(crate) fn load(dict: &PairDictionary, path: &str, dev: &Device) -> anyhow::Result<Self> {
-        let tensors = candle_util::candle_core::safetensors::load(path, dev)?;
+        let tensors = legume_numeric::candle::candle_core::safetensors::load(path, dev)?;
         let side = |name: &str| -> anyhow::Result<Vec<f32>> {
             Ok(tensors
                 .get(name)
@@ -616,7 +616,7 @@ impl PairEncoder {
             HPARAMS_TENSOR.to_string(),
             Tensor::new(&hparams, self.dict.device())?,
         );
-        candle_util::candle_core::safetensors::save(&tensors, path)?;
+        legume_numeric::candle::candle_core::safetensors::save(&tensors, path)?;
         Ok(())
     }
 
@@ -721,7 +721,7 @@ impl PairEncoder {
     /// second moment come off the device, the `D × D` solves run here.
     fn decrement(&self, z: &Tensor, scores: &Tensor, stats: &Stats) -> anyhow::Result<Vec<f32>> {
         let d = self.dict.d;
-        let p = candle_util::candle_nn::ops::softmax(scores, 1)?; // [B, G]
+        let p = legume_numeric::candle::candle_nn::ops::softmax(scores, 1)?; // [B, G]
         let pbar: Vec<f32> = p.matmul(&self.dict.e_gd)?.flatten_all()?.to_vec1()?; // [B, D]
         let m2: Vec<f32> = p.matmul(&self.dict.ee_gdd)?.flatten_all()?.to_vec1()?; // [B, D²]
         let z: Vec<f32> = z.flatten_all()?.to_vec1()?;
@@ -940,9 +940,11 @@ impl PairEncoder {
         let mut cell_bias = vec![0f32; n_cells];
         let mut cell_gap = vec![0f32; n_cells];
         let bar = new_progress_bar(n_cells as u64).with_message("encoding cells");
-        for (lb, ub) in
-            matrix_util::utils::generate_minibatch_intervals(n_cells, 0, Some(cell_block))
-        {
+        for (lb, ub) in legume_numeric::matrix::utils::generate_minibatch_intervals(
+            n_cells,
+            0,
+            Some(cell_block),
+        ) {
             let ids = Tensor::from_vec((lb as u32..ub as u32).collect::<Vec<u32>>(), ub - lb, dev)?;
             let (sums, totals, offsets) = stats.gather(&ids)?;
             let own = Stats {
@@ -980,9 +982,11 @@ impl PairEncoder {
         let mut pair_bias = vec![0f32; n_pairs];
         let mut pair_gap = vec![0f32; n_pairs];
         let bar = new_progress_bar(n_pairs as u64).with_message("encoding pairs");
-        for (lb, ub) in
-            matrix_util::utils::generate_minibatch_intervals(n_pairs, 0, Some(pair_block))
-        {
+        for (lb, ub) in legume_numeric::matrix::utils::generate_minibatch_intervals(
+            n_pairs,
+            0,
+            Some(pair_block),
+        ) {
             let chunk = &edges[lb..ub];
             let b = chunk.len();
             let ids = |pick: fn(&(u32, u32)) -> u32| -> anyhow::Result<Tensor> {

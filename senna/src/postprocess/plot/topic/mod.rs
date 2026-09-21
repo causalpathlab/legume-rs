@@ -22,9 +22,9 @@
 //!     └── heatmap.pdf               # if n_genes > 100
 //! ```
 
-use auxiliary_data::feature_names::FeatureNameKind;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use data_beans::aux::feature_names::FeatureNameKind;
 use plot_utils::palette::{self, Palette, Rgb};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -461,7 +461,7 @@ fn load_batch_labels_by_count(
     resolved: &ResolvedInputs,
     n_cells: usize,
 ) -> anyhow::Result<Vec<Box<str>>> {
-    use matrix_util::common_io::read_lines;
+    use legume_numeric::matrix::common_io::read_lines;
 
     if !resolved.batch_files.is_empty() {
         let mut all = Vec::with_capacity(n_cells);

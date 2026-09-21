@@ -11,10 +11,10 @@ use super::{label_of, TermOraConfig};
 use crate::type_annotation::marker_bootstrap::{BootstrapResult, CoarseConsensus};
 use crate::type_annotation::UNASSIGNED;
 use anyhow::{Context, Result};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::parquet::{write_named_table, Column};
+use legume_numeric::matrix::traits::IoOps;
 use log::{info, warn};
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::parquet::{write_named_table, Column};
-use matrix_util::traits::IoOps;
 use std::io::Write;
 
 #[allow(clippy::too_many_arguments)]

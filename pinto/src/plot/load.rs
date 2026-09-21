@@ -9,8 +9,8 @@
 
 use crate::util::common::*;
 use data_beans::hdf5_io::strip_backend_suffix;
-use matrix_util::common_io::basename;
-use matrix_util::parquet::peek_parquet_field_names;
+use legume_numeric::matrix::common_io::basename;
+use legume_numeric::matrix::parquet::peek_parquet_field_names;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::{Row, RowAccessor};
 use std::fs::File;

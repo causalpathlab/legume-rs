@@ -143,7 +143,7 @@ pub struct ProbeArgs {
 
 impl ProbeArgs {
     /// The compute device this run asks for, resolved once.
-    fn resolve_device(&self) -> anyhow::Result<candle_util::candle_core::Device> {
+    fn resolve_device(&self) -> anyhow::Result<legume_numeric::candle::candle_core::Device> {
         self.device.to_device(self.device_no)
     }
 }
@@ -403,7 +403,7 @@ fn probe_fit_only(args: &ProbeArgs, kind: senna::run_manifest::RunKind) -> anyho
     use crate::topic::eval::QueryNameOpts;
     use crate::topic::model_metadata::TopicModelMetadata;
     use crate::topic::predict_common::LatentMode;
-    use candle_util::topic_refinement::TopicRefinementConfig;
+    use legume_numeric::candle::topic_refinement::TopicRefinementConfig;
     use senna::run_manifest::RunKind;
 
     let metadata = TopicModelMetadata::load(&args.model)?;

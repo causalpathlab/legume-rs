@@ -6,7 +6,7 @@
 use super::{materialize, BulkBackends};
 use data_beans::sparse_io::{create_sparse_from_triplets, open_sparse_matrix, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::{BulkTableOpts, HeaderArg, Mat, Orientation};
 use std::sync::Arc;
 

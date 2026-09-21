@@ -3,7 +3,7 @@
 use super::inherit_level_coarsenings;
 use crate::topic::eval::GeneRemap;
 use crate::topic::model_metadata::save_coarsening_levels;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
 use senna::embed_common::Mat;
 
 fn coarsening(fine_to_coarse: &[usize], num_coarse: usize) -> FeatureCoarsening {

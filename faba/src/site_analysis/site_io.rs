@@ -15,7 +15,7 @@ pub struct GenomicSite {
 
 /// Read sites from a parquet file, auto-detecting dart vs apa vs atoi format.
 pub fn read_sites(site_file: &str) -> anyhow::Result<Vec<GenomicSite>> {
-    let field_names = matrix_util::parquet::peek_parquet_field_names(site_file)?;
+    let field_names = legume_numeric::matrix::parquet::peek_parquet_field_names(site_file)?;
     let has_m6a_pos = field_names.iter().any(|f| f.as_ref() == "m6a_pos");
     let has_genomic_alpha = field_names.iter().any(|f| f.as_ref() == "genomic_alpha");
     let has_primary_pos = field_names.iter().any(|f| f.as_ref() == "primary_pos");

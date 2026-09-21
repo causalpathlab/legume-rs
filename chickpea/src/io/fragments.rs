@@ -1,5 +1,5 @@
 use log::info;
-use matrix_util::common_io::{open_buf_reader, open_buf_writer};
+use legume_numeric::matrix::common_io::{open_buf_reader, open_buf_writer};
 use rustc_hash::FxHashSet;
 use std::io::{BufRead, Write};
 

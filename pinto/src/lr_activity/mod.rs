@@ -8,7 +8,7 @@
 //!
 //! 1. **Pseudobulk samples** = `(batch × propensity-bin)`. The propensity
 //!    bin is the sign-LSH binary code of an SVD'd random projection of the
-//!    full expression matrix (`data_beans_alg::binary_sort_columns`); cells
+//!    full expression matrix (`data_beans::alg::binary_sort_columns`); cells
 //!    with similar broad expression land in the same bin.
 //! 2. **Soft community membership per role.** From `lc` edges, each cell
 //!    `i` gets `p_send[i, c]` (fraction of `i`'s incident edges in

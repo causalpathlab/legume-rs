@@ -22,11 +22,11 @@
 //! has no feature-modulated variant left. The per-edge NCE itself is geu's, and
 //! selectable — see [`NceObjective`] and `--nce-objective`.
 
-use candle_util::candle_core::{Device, Result as CResult, Tensor};
 use graph_embedding_util::loss::{
     gather_feature_rows, logistic_nce, softmax_nce, NceObjective, UnitChainBatch,
 };
 use graph_embedding_util::model::JointEmbedModel;
+use legume_numeric::candle::candle_core::{Device, Result as CResult, Tensor};
 
 pub struct CageLossOut {
     /// Per-(feature, level) NCE loss, `[G, L]`.
@@ -74,9 +74,13 @@ pub fn cage_nce_loss_per_feature_level(
         assert_eq!(cb.n_negatives, k, "cage loss: K mismatch");
     }
     if b == 0 {
-        let zero = Tensor::zeros((), candle_util::candle_core::DType::F32, dev)?;
+        let zero = Tensor::zeros((), legume_numeric::candle::candle_core::DType::F32, dev)?;
         return Ok(CageLossOut {
-            per_feature_level: Tensor::zeros((g, l), candle_util::candle_core::DType::F32, dev)?,
+            per_feature_level: Tensor::zeros(
+                (g, l),
+                legume_numeric::candle::candle_core::DType::F32,
+                dev,
+            )?,
             mean_abs_pair: zero,
         });
     }

@@ -7,11 +7,11 @@
 //! pipeline in `topic/cmd.rs` doesn't have to fan out per-decoder
 //! `match` arms when serializing trained models.
 
-use candle_util::decoder::NbMixtureTopicDecoder;
-use candle_util::decoder::{MultinomTopicDecoder, NbTopicDecoder};
-use candle_util::traits::*;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
-use matrix_util::traits::IoOps;
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
+use legume_numeric::candle::decoder::NbMixtureTopicDecoder;
+use legume_numeric::candle::decoder::{MultinomTopicDecoder, NbTopicDecoder};
+use legume_numeric::candle::traits::*;
+use legume_numeric::matrix::traits::IoOps;
 use senna::embed_common::*;
 
 /// Decoder-specific post-training output (dictionary writing, extra parameters).

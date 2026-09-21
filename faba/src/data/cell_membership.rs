@@ -1,5 +1,5 @@
 use genomic_data::sam::CellBarcode;
-use matrix_util::membership::Membership;
+use legume_numeric::matrix::membership::Membership;
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

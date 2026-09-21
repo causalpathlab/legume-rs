@@ -2,8 +2,8 @@
 //! gene-sets against a gene dictionary, and write a per-group top-N signature
 //! TSV from a (group × term) effect matrix.
 
-use auxiliary_data::gene_sets::{read_gaf, read_gmt, GafOpts};
-use auxiliary_data::ontology::Ontology;
+use data_beans::aux::gene_sets::{read_gaf, read_gmt, GafOpts};
+use data_beans::aux::ontology::Ontology;
 use data_beans::utilities::name_matching::GeneIndex;
 use log::info;
 use std::io::Write;

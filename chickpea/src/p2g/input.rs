@@ -2,8 +2,8 @@
 //! coordinates.
 
 use crate::common::*;
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
-use auxiliary_data::feature_names::FeatureNameKind;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
+use data_beans::aux::feature_names::FeatureNameKind;
 use genomic_data::coordinates::GeneTss;
 
 pub(crate) struct PairedDataWithBatch {
@@ -124,7 +124,7 @@ pub fn load_gene_coords_tsv(
     path: &str,
     gene_names: &[Box<str>],
 ) -> anyhow::Result<Vec<Option<GeneTss>>> {
-    use matrix_util::common_io::open_buf_reader;
+    use legume_numeric::matrix::common_io::open_buf_reader;
     use std::io::BufRead;
 
     let reader = open_buf_reader(path)?;

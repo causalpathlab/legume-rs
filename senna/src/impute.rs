@@ -16,7 +16,7 @@
 //! 6. Write `{out}.imputed.parquet` (`N_new` × `n_ref_features`).
 //!
 //! Steps 3–5 are model-agnostic and live in
-//! [`data_beans_alg::retrieval_impute`]; this module owns step 1–2's
+//! [`data_beans::alg::retrieval_impute`]; this module owns step 1–2's
 //! per-family latent semantics, encoded once in [`matching_plan`].
 //!
 //! Information-theoretic note (per the rag-augmentation memory): the
@@ -26,12 +26,12 @@
 //! deterministic β·θ readout.
 
 use crate::predict::{predict_model, PredictArgs};
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use clap::Args;
+use data_beans::alg::retrieval_impute::{retrieval_impute, RetrievalImputeConfig};
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::retrieval_impute::{retrieval_impute, RetrievalImputeConfig};
+use legume_numeric::matrix::traits::IoOps;
 use log::info;
-use matrix_util::traits::IoOps;
 use senna::embed_common::*;
 use senna::run_manifest::{self, RunKind};
 
@@ -589,8 +589,10 @@ fn write_model_imputed_genes(args: &ImputeArgs, new_cell_names: &[Box<str>]) -> 
     if !(std::path::Path::new(&al_path).exists() && std::path::Path::new(&rates_path).exists()) {
         return Ok(());
     }
-    let mut cols =
-        matrix_util::parquet::read_parquet_string_columns_by_name(&al_path, &["gene", "status"])?;
+    let mut cols = legume_numeric::matrix::parquet::read_parquet_string_columns_by_name(
+        &al_path,
+        &["gene", "status"],
+    )?;
     let al_status = cols.pop().expect("status column");
     let al_genes = cols.pop().expect("gene column");
     let rates = <Mat as IoOps>::from_parquet(&rates_path)?;

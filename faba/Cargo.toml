@@ -30,10 +30,9 @@ default = []
 hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
-auxiliary-data = { workspace = true }
-data-beans = { workspace = true }
+data-beans = { workspace = true, features = ["aux"] }
 genomic-data = { workspace = true }
-matrix-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix", "param", "candle"] }
 plot-utils = { workspace = true }
 
 anyhow = { workspace = true }

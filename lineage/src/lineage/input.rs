@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use log::{info, warn};
 use std::path::Path;
 
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 
 use super::args::*;
 use super::layout::l2_normalize_rows;

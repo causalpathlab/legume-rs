@@ -7,9 +7,9 @@
 
 use crate::plot::load::row_label;
 use crate::util::common::*;
-use matrix_util::common_io::{read_lines_of_words_delim, ReadLinesOut};
-use matrix_util::membership::detect_delimiter;
-use matrix_util::parquet::peek_parquet_field_names;
+use legume_numeric::matrix::common_io::{read_lines_of_words_delim, ReadLinesOut};
+use legume_numeric::matrix::membership::detect_delimiter;
+use legume_numeric::matrix::parquet::peek_parquet_field_names;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::RowAccessor;
 use std::fs::File;

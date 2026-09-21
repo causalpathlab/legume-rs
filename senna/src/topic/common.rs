@@ -164,13 +164,13 @@ pub(crate) fn expand_delta_for_block(
 pub fn coarsen_features_multilevel(
     sketch_ds: &Mat,
     level_targets: &[usize],
-    dc_poisson: data_beans_alg::dc_poisson::RefineParams,
+    dc_poisson: data_beans::alg::dc_poisson::RefineParams,
 ) -> anyhow::Result<Vec<FeatureCoarsening>> {
     let knn = FeatureKnnContext::from_sketch(sketch_ds, 16)?;
     let init = compute_multilevel_feature_coarsening(sketch_ds, level_targets, &knn)?;
     let params = MultilevelRefineParams {
-        dc_poisson: data_beans_alg::dc_poisson::RefineParams {
-            feature_weighting: data_beans_alg::dc_poisson::FeatureWeighting::None,
+        dc_poisson: data_beans::alg::dc_poisson::RefineParams {
+            feature_weighting: data_beans::alg::dc_poisson::FeatureWeighting::None,
             ..dc_poisson
         },
     };
@@ -189,7 +189,7 @@ pub(crate) fn resolve_level_coarsenings(
     finest_collapsed: &CollapsedOut,
     num_levels: usize,
     n_features_full: usize,
-    dc_params: data_beans_alg::dc_poisson::RefineParams,
+    dc_params: data_beans::alg::dc_poisson::RefineParams,
     gene_axis: Option<&crate::topic::eval::GeneRemap>,
 ) -> anyhow::Result<Vec<Option<FeatureCoarsening>>> {
     if let Some(parent) = init_from {
@@ -372,7 +372,7 @@ pub(crate) fn sample_collapsed_data(
 /// The transposes above are a strided copy of the whole matrix each, and a
 /// consumer that uploads the triple to a device does not need them: a
 /// column-major `[D, P]` buffer already IS the row-major `[P, D]` one (see
-/// `candle_util::data::masked_dense`). Callers that want host `[P, D]` matrices
+/// `legume_numeric::candle::data::masked_dense`). Callers that want host `[P, D]` matrices
 /// still get them from [`sample_collapsed_data`].
 pub(crate) fn sample_collapsed_data_dp(
     collapsed: &CollapsedOut,
@@ -465,7 +465,7 @@ pub struct PreparedData {
     /// The tree behind the finest partition, when the collapse grew one (see
     /// `LoadCollapseArgs::pb_tree`); the writer serialises it as
     /// `{out}.pb_tree.json`.
-    pub pb_tree: Option<data_beans_alg::collapse_data::PbTree>,
+    pub pb_tree: Option<data_beans::alg::collapse_data::PbTree>,
     /// Near-empty output keep-mask from cell QC (post-`mask_columns`
     /// column order). `None` when no QC ran. Applied at the per-cell
     /// output writers via `Mat::select_rows`.
@@ -543,7 +543,7 @@ pub struct LoadProjectArgs<'a> {
     /// resolve to the same row. Locus normalizes `chr1:1000-2000`,
     /// `1:1000-2000`, etc. `LocusOverlap` additionally merges overlapping
     /// intervals on the same chromosome into one cluster.
-    pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
+    pub feature_kind: Option<data_beans::aux::feature_names::FeatureNameKind>,
 }
 
 /// Callback that, given the loaded data's row names, returns a boolean
@@ -713,9 +713,9 @@ pub struct LoadCollapseArgs<'a> {
     /// Optional force-include list — see [`LoadProjectArgs::must_train_file`].
     pub must_train_file: Option<&'a str>,
     /// BBKNN + Poisson DC-SBM refinement of the multilevel partition.
-    pub refine: data_beans_alg::refine_multilevel::RefineParams,
+    pub refine: data_beans::alg::refine_multilevel::RefineParams,
     /// Grow the finest partition as a tree — see `MultilevelParams::pb_tree`.
-    pub pb_tree: Option<data_beans_alg::collapse_data::PbTreeParams>,
+    pub pb_tree: Option<data_beans::alg::collapse_data::PbTreeParams>,
     /// Treat all cells as a single batch — no per-batch δ estimation.
     pub ignore_batch: bool,
     /// Optional shared cell QC — see [`LoadProjectArgs::qc`].
@@ -742,7 +742,7 @@ pub struct LoadCollapseArgs<'a> {
     /// Column-alignment strategy — see [`LoadProjectArgs::column_alignment`].
     pub column_alignment: data_beans::sparse_io_vector::ColumnAlignment,
     /// Per-name canonicalization — see [`LoadProjectArgs::feature_kind`].
-    pub feature_kind: Option<auxiliary_data::feature_names::FeatureNameKind>,
+    pub feature_kind: Option<data_beans::aux::feature_names::FeatureNameKind>,
     /// Retain the per-level cell → pb membership hierarchy. When `true`,
     /// `load_and_collapse` routes through
     /// [`collapse_columns_multilevel_with_hierarchy`] and populates
@@ -826,7 +826,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
         sort_dim: args.sort_dim,
         num_opt_iter: args.iter_opt,
         refine: args.refine.clone(),
-        output_calibration: matrix_param::traits::CalibrateTarget::All,
+        output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
         // Greedy batch correction: with carried pseudobulks loaded, every
         // counterfactual is drawn from the reference frame — new batches are
         // corrected toward it, and the reference itself is never re-adjusted.
@@ -852,7 +852,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
     let (mut collapsed_levels, cell_to_pb_per_level, pb_tree): (
         Vec<CollapsedOut>,
         Option<Vec<Vec<usize>>>,
-        Option<data_beans_alg::collapse_data::PbTree>,
+        Option<data_beans::alg::collapse_data::PbTree>,
     ) = if args.cnv_clones.is_some() && args.prebuilt_partition.is_some() {
         anyhow::bail!(
             "--cnv-clones cannot be combined with an inherited `--from` cell→pb partition: \
@@ -895,7 +895,7 @@ pub fn load_and_collapse(args: &LoadCollapseArgs) -> anyhow::Result<PreparedData
             levels,
             mut cell_to_pb_per_level,
             pb_tree,
-        } = data_beans_alg::collapse_data::collapse_columns_multilevel_with_partition(
+        } = data_beans::alg::collapse_data::collapse_columns_multilevel_with_partition(
             &mut data_vec,
             &proj_kn,
             &batch_membership,
@@ -989,7 +989,7 @@ pub(crate) use graph_embedding_util::setup_stop_handler;
 // Feature-network setup (used by masked-topic) //
 //////////////////////////////////////////////////
 
-use matrix_util::pair_graph::FeaturePairGraph;
+use legume_numeric::matrix::pair_graph::FeaturePairGraph;
 
 /// QC pipeline + alias-matching options shared between the row-mask
 /// callback (data-axis restriction) and the post-load graph parse

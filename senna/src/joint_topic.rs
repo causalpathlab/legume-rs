@@ -5,9 +5,9 @@ use senna::senna_input::{
     read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
 };
 
-use candle_util::decoder::DeltaTopicDecoder;
-use candle_util::decoder::JointTopicDecoder;
-use candle_util::encoder::*;
+use legume_numeric::candle::decoder::DeltaTopicDecoder;
+use legume_numeric::candle::decoder::JointTopicDecoder;
+use legume_numeric::candle::encoder::*;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
 pub enum JointDecoderType {
@@ -154,7 +154,7 @@ pub struct JointTopicArgs {
     // `JointTopicArgs` is not serialized (this family is not continuable),
     // so no serde attribute here.
     #[command(flatten)]
-    pub(crate) coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
+    pub(crate) coarsening: data_beans::alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -258,7 +258,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
             sort_dim: args.collapse.sort_dim,
             num_opt_iter: args.collapse.iter_opt,
             refine: args.collapse.pb_refine.to_params(),
-            output_calibration: matrix_param::traits::CalibrateTarget::All,
+            output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: true,
@@ -287,7 +287,7 @@ pub fn fit_joint_topic_model(args: &JointTopicArgs) -> anyhow::Result<()> {
         let mut levels = crate::topic::common::coarsen_features_multilevel(
             sketch,
             &[cap.map_or(0, std::num::NonZeroUsize::get)],
-            data_beans_alg::dc_poisson::RefineParams::default(),
+            data_beans::alg::dc_poisson::RefineParams::default(),
         )?;
         Ok(levels.remove(0))
     };

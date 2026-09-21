@@ -70,16 +70,13 @@ use crate::util::srt_pipeline::{
     preprocess_srt, topology_graph, FeatureAxisMode, SrtPreprocessConfig, SrtPreprocessed,
 };
 
-use candle_util::candle_core::Tensor;
+use legume_numeric::candle::candle_core::Tensor;
 // `Optimizer` is what puts `AdamW::new` in scope; backward and the step run
 // separately (`loss.backward()` then `clip_and_step_dense`) so the phase timers
 // can attribute them apart.
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
-use candle_util::frozen_features::trainable_vars;
-use candle_util::vae::{clip_and_step_dense_all, PhaseTimers};
-use data_beans_alg::gene_weighting::save_fisher_weights;
-use data_beans_alg::hvg::select_hvg_streaming;
-use data_beans_alg::random_projection::RandProjOps;
+use data_beans::alg::gene_weighting::save_fisher_weights;
+use data_beans::alg::hvg::select_hvg_streaming;
+use data_beans::alg::random_projection::RandProjOps;
 use graph_embedding_util::embedding_col_names;
 use graph_embedding_util::loss::{
     build_per_batch_unit_samplers, draw_gene_keep_mask, embedding_ridge,
@@ -91,7 +88,10 @@ use graph_embedding_util::model::{
     E_FEAT_VAR_NAME,
 };
 use graph_embedding_util::stop::setup_stop_handler;
-use matrix_util::common_io::mkdir_parent;
+use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW, VarMap};
+use legume_numeric::candle::frozen_features::trainable_vars;
+use legume_numeric::candle::vae::{clip_and_step_dense_all, PhaseTimers};
+use legume_numeric::matrix::common_io::mkdir_parent;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::RngExt;
@@ -126,8 +126,8 @@ fn probe_forward(
     probe_rng: &mut SmallRng,
     model: &JointEmbedModel,
     objective: graph_embedding_util::loss::NceObjective,
-    dev: &candle_util::candle_core::Device,
-) -> candle_util::candle_core::Result<candle_util::candle_core::Tensor> {
+    dev: &legume_numeric::candle::candle_core::Device,
+) -> legume_numeric::candle::candle_core::Result<legume_numeric::candle::candle_core::Tensor> {
     let mut mini: Vec<(usize, graph_embedding_util::loss::UnitChainBatch)> =
         Vec::with_capacity(n_probe_features);
     let mut features_sampled = 0usize;
@@ -150,7 +150,7 @@ fn probe_forward(
         }
     }
     if mini.is_empty() {
-        return Err(candle_util::candle_core::Error::Msg(
+        return Err(legume_numeric::candle::candle_core::Error::Msg(
             "probe sampled nothing".into(),
         ));
     }
@@ -368,8 +368,10 @@ pub fn fit_cell_activity_graph_embedding(
     // feature axis, still trained. The selection shapes WHERE the pseudobulks
     // land rather than which features the model may use — matching `senna bge`
     // and `senna gem`.
-    let must_train =
-        data_beans_alg::hvg::load_must_train(args.hvg.must_train_features.as_deref(), hvg_enabled)?;
+    let must_train = data_beans::alg::hvg::load_must_train(
+        args.hvg.must_train_features.as_deref(),
+        hvg_enabled,
+    )?;
     let hvg_weights: Option<Vec<f32>> = if hvg_enabled {
         let hvg = select_hvg_streaming(
             &data_vec,
@@ -441,13 +443,13 @@ pub fn fit_cell_activity_graph_embedding(
             // Opt out with `--no-dc-poisson`; the context build reads the count
             // matrix once, then every level reuses it.
             dc_poisson: (!args.no_dc_poisson).then(|| DcPoissonConfig {
-                params: data_beans_alg::dc_poisson::RefineParams {
+                params: data_beans::alg::dc_poisson::RefineParams {
                     num_gibbs: 10,
                     num_greedy: 5,
-                    feature_weighting: data_beans_alg::dc_poisson::FeatureWeighting::FisherInfoNb,
+                    feature_weighting: data_beans::alg::dc_poisson::FeatureWeighting::FisherInfoNb,
                     seed: c.seed,
                     gibbs_stagnation: 0.005,
-                    profile_source: data_beans_alg::dc_poisson::ProfileSource::Raw,
+                    profile_source: data_beans::alg::dc_poisson::ProfileSource::Raw,
                     ..Default::default()
                 },
                 data: &data_vec,
@@ -913,8 +915,8 @@ pub fn fit_cell_activity_graph_embedding(
     };
     // One AdamW over the map, or two under LoRA: the shared factor `v` leaves
     // the main group for its own at the LoRA+ rate.
-    let lora_v_name = candle_util::lora::factor_names(E_FEAT_VAR_NAME).1;
-    let lora_plus = lora_spec.map(|l| candle_util::lora::LoraPlus {
+    let lora_v_name = legume_numeric::candle::lora::factor_names(E_FEAT_VAR_NAME).1;
+    let lora_plus = lora_spec.map(|l| legume_numeric::candle::lora::LoraPlus {
         v_var: &lora_v_name,
         lr_ratio: l.lr_ratio,
         ridge: l.ridge,
@@ -961,7 +963,7 @@ pub fn fit_cell_activity_graph_embedding(
         Some(explicit) => explicit,
         None => {
             let mut probe_rng = SmallRng::seed_from_u64(c.seed ^ 0x9e37_79b9);
-            candle_util::device::auto_chunk_size(
+            legume_numeric::candle::device::auto_chunk_size(
                 &dev,
                 FEATURE_BATCH_DEFAULT,
                 16.min(trainable_features.len().max(1)),
@@ -1393,13 +1395,13 @@ pub fn fit_cell_activity_graph_embedding(
         .iter()
         .map(|&p| p.to_string().into_boxed_str())
         .collect();
-    matrix_util::parquet::write_named_table(
+    legume_numeric::matrix::parquet::write_named_table(
         &(c.out.to_string() + ".cell_pb.parquet"),
         "cell",
         &cell_names,
         &[(
             Box::from("pb"),
-            matrix_util::parquet::Column::Str(&cell_pb_col),
+            legume_numeric::matrix::parquet::Column::Str(&cell_pb_col),
         )],
     )?;
 
@@ -1608,7 +1610,7 @@ pub fn fit_cell_activity_graph_embedding(
 /// Min / median / max of a fitted intercept vector, as one log line.
 fn log_intercept_spread(what: &str, values: Vec<f32>) {
     if !values.is_empty() {
-        let q = matrix_util::utils::quantiles(&values, &[0.0, 0.5, 1.0]);
+        let q = legume_numeric::matrix::utils::quantiles(&values, &[0.0, 0.5, 1.0]);
         info!(
             "{what}: min {:.3}, median {:.3}, max {:.3}",
             q[0], q[1], q[2]

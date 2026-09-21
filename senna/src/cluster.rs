@@ -5,11 +5,11 @@
 
 use crate::embed_common::*;
 use hsblock::{Hsblock, HsbmOptions};
-use leiden::clustering::SimpleClustering;
-use leiden::Clustering;
-use matrix_util::clustering::{Kmeans, KmeansArgs};
-use matrix_util::knn_graph::{KnnGraph, KnnGraphArgs};
-use matrix_util::traits::MatOps;
+use legume_numeric::leiden::clustering::SimpleClustering;
+use legume_numeric::leiden::Clustering;
+use legume_numeric::matrix::clustering::{Kmeans, KmeansArgs};
+use legume_numeric::matrix::knn_graph::{KnnGraph, KnnGraphArgs};
+use legume_numeric::matrix::traits::MatOps;
 
 /// Clustering method
 #[allow(dead_code)]
@@ -218,7 +218,7 @@ pub fn leiden_clustering_with_metric(
     // graph-embedding-util annotation coarsener); this is a thin wrapper
     // that maps the metric and packages a ClusterResult.
     let cosine = matches!(metric, LatentMetric::Cosine);
-    let compact = matrix_util::clustering::leiden_clustering(
+    let compact = legume_numeric::matrix::clustering::leiden_clustering(
         latent,
         knn,
         resolution,
@@ -303,7 +303,7 @@ pub fn hsblock_clustering(
         mean_degree
     );
 
-    // Step 2: Convert to leiden::Network (discard total edge weight; HSBM doesn't need it)
+    // Step 2: Convert to legume_numeric::leiden::Network (discard total edge weight; HSBM doesn't need it)
     let (network, _total_edge_weight) = graph.to_leiden_network();
 
     // Step 3: Run HSBM

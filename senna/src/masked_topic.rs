@@ -8,10 +8,10 @@ use crate::topic::train_masked::{
 };
 use senna::embed_common::*;
 
-use candle_util::decoder::masked_etm::{log_background_from_mean, pin_background};
-use candle_util::decoder::EmbeddedNbTopicDecoder;
-use candle_util::encoder::*;
-use candle_util::vae::masked_topic::LatentHead;
+use legume_numeric::candle::decoder::masked_etm::{log_background_from_mean, pin_background};
+use legume_numeric::candle::decoder::EmbeddedNbTopicDecoder;
+use legume_numeric::candle::encoder::*;
+use legume_numeric::candle::vae::masked_topic::LatentHead;
 use log::warn;
 
 /// Mask-rate schedule (CLI surface for `MaskSchedule`).
@@ -36,7 +36,7 @@ pub enum MaskScheduleArg {
 }
 
 /// Per-gene likelihood for the masked imputation loss (CLI surface for
-/// [`candle_util::vae::masked_topic::MaskedLikelihood`]).
+/// [`legume_numeric::candle::vae::masked_topic::MaskedLikelihood`]).
 #[derive(
     clap::ValueEnum,
     Clone,
@@ -60,8 +60,8 @@ pub enum MaskedLikelihoodArg {
 
 impl MaskedLikelihoodArg {
     /// Map to the candle-util training enum.
-    pub fn to_lib(self) -> candle_util::vae::masked_topic::MaskedLikelihood {
-        use candle_util::vae::masked_topic::MaskedLikelihood as L;
+    pub fn to_lib(self) -> legume_numeric::candle::vae::masked_topic::MaskedLikelihood {
+        use legume_numeric::candle::vae::masked_topic::MaskedLikelihood as L;
         match self {
             MaskedLikelihoodArg::Nb => L::Nb,
             MaskedLikelihoodArg::Multinomial => L::Multinomial,
@@ -516,7 +516,7 @@ pub struct MaskedTopicArgs {
 
     #[command(flatten)]
     #[serde(flatten)]
-    coarsening: data_beans_alg::feature_coarsening::FeatureCoarseningArgs,
+    coarsening: data_beans::alg::feature_coarsening::FeatureCoarseningArgs,
 
     #[arg(
         long,
@@ -688,7 +688,7 @@ pub struct MaskedTopicArgs {
     qc: QcArgs,
 }
 
-pub use auxiliary_data::feature_names::FeatureNameKindArg;
+pub use data_beans::aux::feature_names::FeatureNameKindArg;
 
 /// `senna masked-topic` — softmax simplex-`θ`, deterministic (no-KL) masked ETM.
 pub fn fit_masked_topic_model(args: &MaskedTopicArgs) -> anyhow::Result<()> {
@@ -1049,7 +1049,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             &host,
             &gene_names,
             &spec.name_kind,
-            auxiliary_data::feature_types::read_feature_types(&spec.source_prefix)?
+            data_beans::aux::feature_types::read_feature_types(&spec.source_prefix)?
                 .as_deref()
                 .unwrap_or(&[]),
             &spec.dictionary_path,
@@ -1067,7 +1067,7 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
             host.e_feat.nrows(),
             n_features_full
         );
-        candle_util::frozen_features::overwrite_var_2d(
+        legume_numeric::candle::frozen_features::overwrite_var_2d(
             &parameters,
             crate::topic::gene_axis::RHO_TENSOR,
             &host.e_feat,
@@ -1139,11 +1139,12 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
 
     let stop = setup_stop_handler();
 
-    let lora_v_name = candle_util::lora::factor_names(&candle_util::lora::join(
-        crate::topic::gene_axis::ENCODER_PREFIX,
-        candle_util::feature_embedding::LORA_PREFIX,
-    ))
-    .1;
+    let lora_v_name =
+        legume_numeric::candle::lora::factor_names(&legume_numeric::candle::lora::join(
+            crate::topic::gene_axis::ENCODER_PREFIX,
+            legume_numeric::candle::feature_embedding::LORA_PREFIX,
+        ))
+        .1;
     let train_config = IndexedTrainConfig {
         parameters: &parameters,
         dev: &dev,
@@ -1160,17 +1161,19 @@ pub(crate) fn fit_masked_model(args: &MaskedTopicArgs, head: LatentHead) -> anyh
         grad_clip: args.grad_clip,
         feature_embedding_l2: args.feature_embedding_l2,
         weight_decay: args.weight_decay,
-        feature_anchor: pinned_rho.then_some(candle_util::vae::masked_topic::FeatureAnchor {
-            base_var: crate::topic::gene_axis::RHO_TENSOR,
-            lora: lora.map(|l| candle_util::lora::LoraPlus {
-                v_var: &lora_v_name,
-                lr_ratio: l.lr_ratio,
-                ridge: l.ridge,
-            }),
-        }),
+        feature_anchor: pinned_rho.then_some(
+            legume_numeric::candle::vae::masked_topic::FeatureAnchor {
+                base_var: crate::topic::gene_axis::RHO_TENSOR,
+                lora: lora.map(|l| legume_numeric::candle::lora::LoraPlus {
+                    v_var: &lora_v_name,
+                    lr_ratio: l.lr_ratio,
+                    ridge: l.ridge,
+                }),
+            },
+        ),
     };
 
-    use candle_util::vae::masked_topic::{MaskSchedule, MaskedTrainOpts};
+    use legume_numeric::candle::vae::masked_topic::{MaskSchedule, MaskedTrainOpts};
     let masked_opts = MaskedTrainOpts {
         mask_schedule: match args.mask_schedule {
             MaskScheduleArg::Fixed => MaskSchedule::Fixed,
@@ -1618,7 +1621,7 @@ impl MaskedTopicArgs {
     ///
     /// The reason modules cannot compose is the encoder's to give, and it gives
     /// it in full at
-    /// [`candle_util::encoder::IndexedEmbeddingEncoder::forward_dense_masked`].
+    /// [`legume_numeric::candle::encoder::IndexedEmbeddingEncoder::forward_dense_masked`].
     /// What belongs here is only the early refusal, so a run that cannot work
     /// stops before it reads a single file.
     pub(crate) fn validate(&self) -> anyhow::Result<()> {

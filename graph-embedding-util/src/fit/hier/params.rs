@@ -4,15 +4,15 @@
 //! (a masked row's gradient is zero, so its Adagrad step is zero) and, for the
 //! output, kept verbatim so a pinned row owes nothing to the `μ + r` round
 //! trip. A LoRA residual on the gene rows, and every track's per-gene offset,
-//! is the shared [`candle_util::lora`] primitive, read through one gather per
+//! is the shared [`legume_numeric::candle::lora`] primitive, read through one gather per
 //! step.
 
 pub use crate::preset_mode::{LoraSpec, PresetMode, PresetOffsets};
-use candle_util::candle_core::{DType, Device, Result as CResult, Tensor, Var};
-use candle_util::convert::to_host;
-use candle_util::fast_index::gather_rows;
-use candle_util::lora::PinnedLora;
-use matrix_util::rand_util::{mix_seed, normal_f32_seeded};
+use legume_numeric::candle::candle_core::{DType, Device, Result as CResult, Tensor, Var};
+use legume_numeric::candle::convert::to_host;
+use legume_numeric::candle::fast_index::gather_rows;
+use legume_numeric::candle::lora::PinnedLora;
+use legume_numeric::matrix::rand_util::{mix_seed, normal_f32_seeded};
 use nalgebra::DMatrix;
 
 /// Spread of every random init.
@@ -23,7 +23,7 @@ const OFFSET_SALT: u64 = 0x4f46_4653;
 
 /// One non-base track's additive offsets from the base tables. The module
 /// offset `Δ` is a full `[M, H]` table; the gene offset is a LOW-RANK residual
-/// `δ_g = δ₀_g + u_g · V` ([`candle_util::lora`], every gene a row) on top of
+/// `δ_g = δ₀_g + u_g · V` ([`legume_numeric::candle::lora`], every gene a row) on top of
 /// an optional given base `δ₀` (see [`HierParams::preset_offsets`]). So a
 /// track's row of a gene is the gene's base row moved inside the
 /// `rank`-dimensional subspace `V` spans — one subspace per track, shared by
@@ -94,7 +94,7 @@ impl TrackOffset {
     }
 }
 
-/// Two residuals of one rank on the two pinned tables ([`candle_util::lora`]):
+/// Two residuals of one rank on the two pinned tables ([`legume_numeric::candle::lora`]):
 /// `μ_m = μ₀_m + a_m · V_M` moves a module's genes together, and
 /// `r_g = r₀_g + u_g · V_G` moves a gene on its own, so a pinned gene's row is
 /// `ρ₀_g + a_{m(g)} · V_M + u_g · V_G`. The module residual is on every module

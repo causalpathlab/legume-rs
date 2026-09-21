@@ -27,18 +27,20 @@ use crate::topic::predict_eval::{
 use senna::embed_common::*;
 
 use crate::logging::new_progress_bar;
-use auxiliary_data::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use candle_core::{Device, Tensor};
-use candle_util::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
-use candle_util::decoder::{MultinomTopicDecoder, NbMixtureTopicDecoder, NbTopicDecoder};
-use candle_util::encoder::{GaussianEncoder, GaussianEncoderArgs};
-use candle_util::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
-use candle_util::encoder::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
-use candle_util::topic_refinement::{refine_topic_proportions, TopicRefinementConfig};
-use candle_util::traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
+use data_beans::alg::feature_coarsening::FeatureCoarsening;
+use data_beans::aux::data_loading::{read_data_on_shared_rows, ReadSharedRowsArgs};
 use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::feature_coarsening::FeatureCoarsening;
 use indicatif::ParallelProgressIterator;
+use legume_numeric::candle::decoder::nb_mixture::DECODER_NAME as NBMIXTURE_NAME;
+use legume_numeric::candle::decoder::{
+    MultinomTopicDecoder, NbMixtureTopicDecoder, NbTopicDecoder,
+};
+use legume_numeric::candle::encoder::{GaussianEncoder, GaussianEncoderArgs};
+use legume_numeric::candle::encoder::{IndexedEmbeddingEncoder, IndexedEmbeddingEncoderArgs};
+use legume_numeric::candle::encoder::{LogSoftmaxEncoder, LogSoftmaxEncoderArgs};
+use legume_numeric::candle::topic_refinement::{refine_topic_proportions, TopicRefinementConfig};
+use legume_numeric::candle::traits::{DecoderModuleT, EncoderModuleT, NewDecoder};
 use log::info;
 use rayon::prelude::*;
 
@@ -420,7 +422,7 @@ impl PredictArgs {
             // same file by contract, so parsing them differently would hide a
             // different gene set than the one being scored.
             Some(path) => Some(std::sync::Arc::new(
-                matrix_util::common_io::read_name_list(path)
+                legume_numeric::matrix::common_io::read_name_list(path)
                     .map_err(|e| anyhow::anyhow!("reading --ablate-features {path}: {e}"))?
                     .into_iter()
                     .collect::<std::collections::HashSet<Box<str>>>(),
@@ -431,7 +433,7 @@ impl PredictArgs {
         // drift: unset is the legacy behaviour (loader auto-detects, the remap
         // matches exactly then falls back to the flexible matcher).
         let (loader_kind, kind) = match &self.feature_name_kind {
-            None => (None, auxiliary_data::feature_names::FeatureNameKind::Exact),
+            None => (None, data_beans::aux::feature_names::FeatureNameKind::Exact),
             Some(arg) => (arg.clone().into(), arg.resolve_or_gene()),
         };
         Ok(QueryNameOpts {
@@ -655,7 +657,7 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
 ///
 /// **What the columns mean here, because svd is not a count model.**
 /// `spearman` / `pearson_log1p` come from the same
-/// [`matrix_util::agreement::agreement_from_rate`] every other family is
+/// [`legume_numeric::matrix::agreement::agreement_from_rate`] every other family is
 /// graded by, on predicted COUNTS, so they are directly comparable across
 /// families — that is the axis to compare svd on. `llik` is a GAUSSIAN
 /// log-likelihood in `log1p` space, which is the loss svd actually minimises,
@@ -667,7 +669,7 @@ fn predict_bge(args: &PredictArgs, kind: senna::run_manifest::RunKind) -> anyhow
 /// `eval_llik_*` columns are deliberately absent rather than filled with a
 /// differently-scaled number: svd has no count likelihood to put there.
 fn predict_svd(args: &PredictArgs) -> anyhow::Result<()> {
-    use matrix_util::agreement::agreement_from_rate;
+    use legume_numeric::matrix::agreement::agreement_from_rate;
 
     anyhow::ensure!(
         !args.decoder_only && args.refine_steps == 0,
@@ -1236,7 +1238,7 @@ where
     // predictive llik uses the same loss as training. Older models
     // without saved coarse weights fall back to the unweighted form.
     if let Some((_, coarse_w)) =
-        data_beans_alg::gene_weighting::load_fisher_weights_coarse(model_prefix)?
+        data_beans::alg::gene_weighting::load_fisher_weights_coarse(model_prefix)?
     {
         if let Some(finest) = decoders.last_mut() {
             finest.attach_feature_weights(&coarse_w, dev)?;
@@ -1477,7 +1479,7 @@ fn remap_and_coarsen_dense(
 fn predict_masked(
     args: &PredictArgs,
     metadata: &TopicModelMetadata,
-    head: candle_util::vae::masked_topic::LatentHead,
+    head: legume_numeric::candle::vae::masked_topic::LatentHead,
 ) -> anyhow::Result<()> {
     use crate::topic::model_metadata::masked_head_label;
 
@@ -1561,7 +1563,7 @@ pub(crate) struct MaskedScoreArgs<'a> {
     pub minibatch_size: usize,
     pub query_name_opts: &'a QueryNameOpts,
     pub metadata: &'a TopicModelMetadata,
-    pub head: candle_util::vae::masked_topic::LatentHead,
+    pub head: legume_numeric::candle::vae::masked_topic::LatentHead,
     /// Compute the per-cell predictive log-likelihood. `false` skips it entirely,
     /// leaving `llik`/`total` empty — worth it for callers that want only the latent,
     /// since the score costs a second full pass over every column plus a dense
@@ -2071,7 +2073,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
     // reject if levels were missing. This path writes nothing.)
     let finest = metadata.num_levels.saturating_sub(1);
     let decoder = if a.need_llik {
-        Some(candle_util::decoder::GaussianNbDecoder::new(
+        Some(legume_numeric::candle::decoder::GaussianNbDecoder::new(
             *metadata
                 .level_decoder_dims
                 .last()
@@ -2179,7 +2181,7 @@ pub(crate) fn score_vae_backend(a: VaeScoreArgs<'_>) -> anyhow::Result<VaeScored
 }
 
 /// Dense `[rows × width]` f32 tensors the NB likelihood chain holds at peak —
-/// counted off `candle_util::loss::nb_log_likelihood_elem` (phi, mu, phi+mu,
+/// counted off `legume_numeric::candle::loss::nb_log_likelihood_elem` (phi, mu, phi+mu,
 /// three logs, two terms, x+phi, the lgammas) plus the decoder's logits,
 /// softmax and mu. Rounded up: under-counting is an OOM, over-counting is
 /// only slower.

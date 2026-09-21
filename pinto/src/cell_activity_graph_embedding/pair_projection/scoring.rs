@@ -7,7 +7,7 @@
 //! noise straight into the number being reported.
 
 use super::PairDictionary;
-use matrix_util::agreement::{agreement_from_log_rate, CellAgreement};
+use legume_numeric::matrix::agreement::{agreement_from_log_rate, CellAgreement};
 
 /// The feature axis a run scores over, resolved once.
 pub struct EvalAxis {
@@ -125,7 +125,7 @@ impl PairDictionary {
             // partition a starved feature could be charged roughly twice senna's
             // floor, and the cross-engine ranking column would punish the same
             // event differently per binary.
-            let floor = matrix_util::agreement::LOG_PROB_FLOOR;
+            let floor = legume_numeric::matrix::agreement::LOG_PROB_FLOOR;
             llik += f64::from(x) * f64::from(log_rate[feature] - z_model).max(floor);
             null_llik += f64::from(x) * f64::from(self.b[feature] - axis.z_null).max(floor);
         }

@@ -9,20 +9,20 @@
 //! from. Gene names go through the caller's canonicaliser; every other type
 //! is matched verbatim.
 
-use auxiliary_data::feature_names::FeatureNameKind;
-use auxiliary_data::gene_sets::{read_membership_pairs, GeneSets};
-use auxiliary_data::ontology::{Ontology, Rel};
+use data_beans::aux::feature_names::FeatureNameKind;
+use data_beans::aux::gene_sets::{read_membership_pairs, GeneSets};
+use data_beans::aux::ontology::{Ontology, Rel};
 use genomic_data::coordinates::{parse_region, tile_windows};
 use graph_embedding_util::fne::{
     NodeTypeTable, Relation, RelationPolarity, RelationTable, TypedEdgeList,
 };
+use legume_numeric::matrix::common_io::{file_stem, read_lines_of_words_delim};
+use legume_numeric::matrix::membership::detect_delimiter;
+use legume_numeric::matrix::pair_graph::FeaturePairGraph;
 use log::{info, warn};
-use matrix_util::common_io::{file_stem, read_lines_of_words_delim};
-use matrix_util::membership::detect_delimiter;
-use matrix_util::pair_graph::FeaturePairGraph;
 use rustc_hash::FxHashMap;
 
-pub(crate) use auxiliary_data::feature_types::{GENE_TYPE, REGION_TYPE, TERM_TYPE};
+pub(crate) use data_beans::aux::feature_types::{GENE_TYPE, REGION_TYPE, TERM_TYPE};
 
 /// A node's text: a display name and a description, either optional.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -313,7 +313,7 @@ impl TypedGraphBuilder {
         Ok((n_rows, touched))
     }
 
-    /// The QC pipeline of `matrix_util::pair_graph` on one pair relation
+    /// The QC pipeline of `legume_numeric::matrix::pair_graph` on one pair relation
     /// (in place), then its second-order and diffusion relations.
     fn refine_pair_relation(&mut self, r: usize, stem: &str, opts: &PpiOpts) {
         let t = self.type_index[GENE_TYPE];

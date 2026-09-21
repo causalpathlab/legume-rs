@@ -15,25 +15,17 @@ path = "src/main.rs"
 default = []
 cuda = [
     "data-beans/cuda",
-    "data-beans-alg/cuda",
-    "matrix-util/cuda",
-    "matrix-param/cuda",
+    "legume-numeric/cuda",
 ]
 metal = [
     "data-beans/metal",
-    "data-beans-alg/metal",
-    "matrix-util/metal",
-    "matrix-param/metal",
+    "legume-numeric/metal",
 ]
 hdf5 = ["data-beans/hdf5"]
 
 [dependencies]
-auxiliary-data = { workspace = true }
-data-beans = { workspace = true }
-data-beans-alg = { workspace = true }
-data-beans-sim = { workspace = true }
-matrix-util = { workspace = true }
-matrix-param = { workspace = true }
+data-beans = { workspace = true, features = ["aux", "alg", "sim"] }
+legume-numeric = { workspace = true, features = ["matrix", "param", "candle", "mcmc"] }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

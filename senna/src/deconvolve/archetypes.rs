@@ -18,9 +18,9 @@ use super::args::ArchetypeConfig;
 use super::reference::Reference;
 use super::source::EmbeddingSource;
 use anyhow::{Context, Result};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::{IoOps, MatWithNames};
 use log::{info, warn};
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::{IoOps, MatWithNames};
 use rustc_hash::{FxHashMap, FxHashSet};
 use senna::cluster::leiden_clustering;
 use senna::cluster_aggregation::accumulate_gene_sum_multi;
@@ -608,7 +608,7 @@ fn is_posterior(ann: &MatWithNames<Mat>) -> bool {
 fn read_cell_list(path: &str) -> Result<FxHashSet<Box<str>>> {
     // The shared reader handles gzip, comments, a header row and delimited
     // tables; a hand-rolled line split silently ingests a header as a barcode.
-    let set: FxHashSet<Box<str>> = matrix_util::common_io::read_name_list(path)
+    let set: FxHashSet<Box<str>> = legume_numeric::matrix::common_io::read_name_list(path)
         .with_context(|| format!("reading cell list {path}"))?
         .into_iter()
         .collect();

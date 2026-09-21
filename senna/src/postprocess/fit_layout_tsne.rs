@@ -68,7 +68,7 @@ pub fn fit_layout_tsne(args: &LayoutTsneArgs) -> anyhow::Result<()> {
             args.n_hvg,
             prep.pb_features.ncols()
         );
-        data_beans_alg::hvg::select_hvg(&prep.pb_features, args.n_hvg)
+        data_beans::alg::hvg::select_hvg(&prep.pb_features, args.n_hvg)
     } else {
         prep.pb_features.clone()
     };

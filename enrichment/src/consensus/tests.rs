@@ -1,7 +1,7 @@
 use super::*;
 
 /// Locks `keyed_rng` byte-identical to its former hand-inlined SplitMix64
-/// finalizer after the refactor to reuse `matrix_util::rand_util::mix_seed`.
+/// finalizer after the refactor to reuse `legume_numeric::matrix::rand_util::mix_seed`.
 /// A regression here would silently change every `--seed`-driven resample.
 #[test]
 fn keyed_rng_matches_legacy_formula() {

@@ -27,12 +27,12 @@
 //! a consumer that never pools.
 
 use crate::util::common::*;
-use auxiliary_data::feature_rows::{intern_count_rows, UnparsedRowPolicy};
-use data_beans::sparse_io_vector::SparseIoVec;
-use data_beans_alg::sparse_streaming::{
+use data_beans::alg::sparse_streaming::{
     streaming_sparse_running_stats, streaming_sparse_running_stats_folded,
 };
-use matrix_util::sparse_stat::SparseRunningStatistics;
+use data_beans::aux::feature_rows::{intern_count_rows, UnparsedRowPolicy};
+use data_beans::sparse_io_vector::SparseIoVec;
+use legume_numeric::matrix::sparse_stat::SparseRunningStatistics;
 
 /// The feature axis `cage` fits on: one entry per FEATURE, with a map back to the
 /// matrix rows that carry it.

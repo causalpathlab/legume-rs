@@ -9,9 +9,9 @@
 //! trend is supposed to see). It happened once in this feature's history;
 //! this test is why it cannot happen silently again.
 
-use data_beans_alg::collapse_data::CollapsedOut;
-use matrix_param::dmatrix_gamma::GammaMatrix;
-use matrix_param::traits::{Inference, TwoStatParam};
+use data_beans::alg::collapse_data::CollapsedOut;
+use legume_numeric::param::dmatrix_gamma::GammaMatrix;
+use legume_numeric::param::traits::{Inference, TwoStatParam};
 use nalgebra::DMatrix;
 use senna::pb_reference::fisher_weights_for_weighted_cohort;
 
@@ -66,7 +66,7 @@ fn the_trend_is_fitted_on_the_observed_posterior_not_the_adjusted_one() {
         .expect("well-formed inputs");
 
     let expect_from = |mu: &DMatrix<f32>| {
-        data_beans_alg::gene_weighting::fisher_weights_from_pseudobulk(mu, &[100.0f32; S], None)
+        data_beans::alg::gene_weighting::fisher_weights_from_pseudobulk(mu, &[100.0f32; S], None)
             .expect("estimator")
     };
     let from_observed = expect_from(collapsed.mu_observed.posterior_mean());

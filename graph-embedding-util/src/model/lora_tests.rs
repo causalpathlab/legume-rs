@@ -4,9 +4,9 @@
 //! the factors registered beside it under the shared LoRA names.
 
 use super::*;
-use candle_util::candle_core::Var;
-use candle_util::candle_nn::{AdamW, Optimizer, ParamsAdamW};
-use candle_util::lora::factor_names;
+use legume_numeric::candle::candle_core::Var;
+use legume_numeric::candle::candle_nn::{AdamW, Optimizer, ParamsAdamW};
+use legume_numeric::candle::lora::factor_names;
 
 fn dev() -> Device {
     Device::Cpu

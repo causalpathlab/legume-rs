@@ -1,5 +1,5 @@
 use data_beans::sparse_data_visitors::VisitColumnsOps;
-use matrix_util::dmatrix_util::concatenate_vertical;
+use legume_numeric::matrix::dmatrix_util::concatenate_vertical;
 use senna::embed_common::*;
 use senna::senna_input::{
     read_data_on_shared_columns, ReadSharedColumnsArgs, SparseStackWithBatch,
@@ -149,7 +149,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
             sort_dim: args.collapse.sort_dim,
             num_opt_iter: args.collapse.iter_opt,
             refine: args.collapse.pb_refine.to_params(),
-            output_calibration: matrix_param::traits::CalibrateTarget::All,
+            output_calibration: legume_numeric::param::traits::CalibrateTarget::All,
             anchor_batches: None,
             bulk_batches: None,
             observe_panels: true,
@@ -186,7 +186,7 @@ pub fn fit_joint_svd(args: &JointSvdArgs) -> anyhow::Result<()> {
         .map(|x| {
             x.mu_residual
                 .as_ref()
-                .map(matrix_param::traits::Inference::posterior_mean)
+                .map(legume_numeric::param::traits::Inference::posterior_mean)
         })
         .collect::<Vec<_>>();
 
@@ -284,7 +284,7 @@ fn do_nystrom_proj(
     // 1. construct a tall xx matrix and perform one svd
     let xx_vec = log_xx_dn_vec
         .into_iter()
-        .map(matrix_util::traits::MatOps::scale_columns)
+        .map(legume_numeric::matrix::traits::MatOps::scale_columns)
         .collect::<Vec<_>>();
 
     let (u_dk, _, vv) = concatenate_vertical(&xx_vec)?.rsvd(rank)?;

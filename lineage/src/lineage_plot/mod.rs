@@ -30,9 +30,9 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use log::{info, warn};
 
-use matrix_util::common_io::mkdir_parent;
-use matrix_util::dmatrix_io::DMatrix;
-use matrix_util::traits::IoOps;
+use legume_numeric::matrix::common_io::mkdir_parent;
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+use legume_numeric::matrix::traits::IoOps;
 
 use plot_utils::palette::Palette;
 use plot_utils::rasterize::{DataBounds, Extent};

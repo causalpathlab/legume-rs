@@ -11,15 +11,14 @@ description = "Cell-type annotation (projection, enrichment, ontology)"
 
 [features]
 default = []
-cuda = ["graph-embedding-util/cuda", "matrix-util/cuda"]
-metal = ["graph-embedding-util/metal", "matrix-util/metal"]
+cuda = ["graph-embedding-util/cuda", "legume-numeric/cuda"]
+metal = ["graph-embedding-util/metal", "legume-numeric/metal"]
 
 [dependencies]
-auxiliary-data = { workspace = true }
-data-beans = { workspace = true }
+data-beans = { workspace = true, features = ["aux"] }
 enrichment = { workspace = true }
 graph-embedding-util = { workspace = true }
-matrix-util = { workspace = true }
+legume-numeric = { workspace = true, features = ["matrix", "param", "candle"] }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

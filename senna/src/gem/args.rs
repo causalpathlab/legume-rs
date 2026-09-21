@@ -11,7 +11,7 @@
 //! `BgeArgs`, `GemArgs` does not implement `Updatable`; `senna update` does
 //! not (yet) continue a gem run.
 
-use data_beans_alg::hvg::HvgCliArgs;
+use data_beans::alg::hvg::HvgCliArgs;
 use graph_embedding_util as ge;
 use senna::embed_common::*;
 

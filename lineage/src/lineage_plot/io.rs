@@ -7,10 +7,10 @@
 //! and the curve layer itself.
 
 use anyhow::{Context, Result};
+use legume_numeric::matrix::dmatrix_io::DMatrix;
+pub(super) use legume_numeric::matrix::parquet::read_parquet_string_columns_by_name as read_str_columns;
+use legume_numeric::matrix::traits::IoOps;
 use log::warn;
-use matrix_util::dmatrix_io::DMatrix;
-pub(super) use matrix_util::parquet::read_parquet_string_columns_by_name as read_str_columns;
-use matrix_util::traits::IoOps;
 use plot_utils::rasterize::{DataBounds, Extent};
 use std::collections::HashMap;
 

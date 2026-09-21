@@ -6,8 +6,8 @@
 use crate::loss::modality::ModalityPools;
 use crate::loss::{logistic_nce, softmax_nce, NceObjective};
 use crate::model::JointEmbedModel;
-use candle_util::candle_core::{Device, Result, Tensor};
-use candle_util::fast_index::gather_rows;
+use legume_numeric::candle::candle_core::{Device, Result, Tensor};
+use legume_numeric::candle::fast_index::gather_rows;
 use rand_distr::weighted::WeightedIndex;
 
 pub struct EdgeBatch {
@@ -84,7 +84,7 @@ pub fn nce_loss_identity(
 ) -> Result<Tensor> {
     let b = batch.coarse_cells.len();
     if b == 0 {
-        return Tensor::zeros((), candle_util::candle_core::DType::F32, dev);
+        return Tensor::zeros((), legume_numeric::candle::candle_core::DType::F32, dev);
     }
     let cell_idx_t = Tensor::from_slice(&batch.coarse_cells, b, dev)?;
     let e_cell_pos = gather_rows(&model.e_cell, &cell_idx_t)?;

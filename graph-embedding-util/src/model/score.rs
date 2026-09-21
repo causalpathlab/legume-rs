@@ -4,8 +4,8 @@
 //! kernels (feature-cell and cell-cell, positives and negatives). Feature-side
 //! composition lives on [`super::ComposedFeat`].
 
-use candle_util::batched_dot::batched_matvec;
-use candle_util::candle_core::{Result, Tensor};
+use legume_numeric::candle::batched_dot::batched_matvec;
+use legume_numeric::candle::candle_core::{Result, Tensor};
 
 use super::JointEmbedModel;
 
@@ -34,7 +34,7 @@ impl JointEmbedModel {
     ) -> Result<Tensor> {
         let b = e_f_neg.dim(0)?;
         let k = e_f_neg.dim(1)?;
-        // Gemm, not broadcast-multiply-then-sum — see `candle_util::batched_dot`
+        // Gemm, not broadcast-multiply-then-sum — see `legume_numeric::candle::batched_dot`
         // for why. Measured in `pinto cage`, which had re-derived this same
         // expression: forward 18.1s → 7.4s, backward 39.4s → 16.3s over 5
         // epochs, taking the run from 122s to 86s.

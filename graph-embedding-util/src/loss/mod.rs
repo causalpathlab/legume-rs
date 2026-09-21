@@ -22,7 +22,7 @@
 //! Public items are re-exported here so callers continue using
 //! `graph_embedding_util::loss::Foo` paths unchanged.
 
-use candle_util::candle_core::{Result, Tensor};
+use legume_numeric::candle::candle_core::{Result, Tensor};
 
 // `pub(crate)`, with the public surface re-exported below. Every consumer in the
 // workspace already goes through those re-exports, and keeping the modules private
@@ -61,7 +61,7 @@ pub use modules::{
 /// The one canonical numerically-stable `log σ(x)` lives in `candle_util`;
 /// re-exported here so `feat` (bipartite NCE), `chain` (cell-cell chain NCE),
 /// and [`logistic_nce`] all share a single implementation.
-pub(super) use candle_util::loss::log_sigmoid;
+pub(super) use legume_numeric::candle::loss::log_sigmoid;
 
 /// Ridge penalty on an embedding table: `λ · mean_g ‖e_g‖²`.
 ///

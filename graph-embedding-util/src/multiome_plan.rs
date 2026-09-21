@@ -255,11 +255,11 @@ fn overlap_of_smaller(a: &FxHashSet<&str>, b: &FxHashSet<&str>) -> f64 {
 
 /// Split a path's basename into name tokens.
 ///
-/// The basename comes from `matrix_util::common_io::basename`, the same
+/// The basename comes from `legume_numeric::matrix::common_io::basename`, the same
 /// stem+extension rule the loaders use, so adding a backend there cannot leave
 /// the detector labelling groups after a file extension.
 fn file_tokens(path: &str) -> Vec<Box<str>> {
-    let base = matrix_util::common_io::basename(path).unwrap_or_else(|_| path.into());
+    let base = legume_numeric::matrix::common_io::basename(path).unwrap_or_else(|_| path.into());
     base.split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(Into::into)
@@ -340,8 +340,8 @@ where
 /// shared `connected_components` walks roots in ascending node order, which is
 /// exactly the input order the group and modality labels are keyed by.
 fn components(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
-    matrix_util::graph::connected_components(
-        &matrix_util::graph::AdjListGraph::from_unweighted_edges(n, edges),
+    legume_numeric::matrix::graph::connected_components(
+        &legume_numeric::matrix::graph::AdjListGraph::from_unweighted_edges(n, edges),
     )
 }
 

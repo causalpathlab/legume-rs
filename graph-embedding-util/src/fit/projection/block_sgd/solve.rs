@@ -6,8 +6,8 @@
 use super::pass::{adam_step_size, poisson_deviance, BlockArgs, BlockOut};
 use super::{BETA1, BETA2, CHECK_EVERY, EPS, TOL};
 use crate::cell_projection::SCORE_CLAMP;
-use candle_util::candle_core::{DType, Tensor};
-use matrix_util::traits::FusedTensorOps;
+use legume_numeric::candle::candle_core::{DType, Tensor};
+use legume_numeric::matrix::traits::FusedTensorOps;
 
 pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     let (h, dev) = (a.input.h, a.input.dev);
