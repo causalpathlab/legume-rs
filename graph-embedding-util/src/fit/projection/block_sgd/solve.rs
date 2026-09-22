@@ -54,45 +54,18 @@ pub(super) fn solve_block(a: BlockArgs) -> anyhow::Result<BlockOut> {
     // Null-model initialisation //
     ///////////////////////////////
 
-    // Θ at its warm start (zero without one) and the exact intercept given Θ:
-    //     c = ln(Σ_f n_cf) − ln(Σ_f exp(⟨e_f, θ_c⟩ + β_f) + dead_mass·1)
+    // Θ at zero and the exact intercept given Θ:
+    //     c = ln(Σ_f n_cf) − ln(Σ_f exp(β_f) + dead_mass·1)
     // so step 1 already sits at the right depth and the optimiser only has to
     // learn the deviation. (The Newton path starts from a randn `e_cell` and a
-    // zero intercept, which is why its first steps have to move so far.)
-    let init_block = a
-        .spec
-        .init_theta
-        .map(|t| Tensor::from_slice(&t[a.start * h..a.end * h], (bc, h), dev))
-        .transpose()?;
-    // Per-row sum of `exp(score)` over the live features, from a `[Bc, F]` score.
-    let row_log_norm = |s: Tensor| -> anyhow::Result<Vec<f64>> {
-        Ok(s.clamp(-SCORE_CLAMP, SCORE_CLAMP)?
-            .exp()?
-            .sum(1)?
-            .to_vec1::<f32>()?
-            .iter()
-            .map(|x| (f64::from(*x) + dict.dead_mass).max(f64::MIN_POSITIVE).ln())
-            .collect())
-    };
-    let log_norm: Vec<f64> = match &init_block {
-        // Warm start: the row's own `⟨e_f, θ_c⟩` on top of the frozen bias.
-        Some(t) => row_log_norm(
-            t.matmul(&e_aug.narrow(0, 0, h)?.contiguous()?)?
-                .broadcast_add(&dict.b_row)?,
-        )?,
-        // Θ = 0 ⇒ every row shares the same Σ_f exp(β_f), hoisted to the pass
-        // rather than re-summed over every live feature in every block.
-        None => vec![dict.null_log_norm; bc],
-    };
+    // zero intercept, which is why its first steps have to move so far.) At
+    // Θ = 0 every row shares the same normaliser, hoisted to the pass rather
+    // than re-summed over every live feature in every block.
+    let lz = dict.null_log_norm;
     // Θ̃ = [Θ | c] — the latent and its intercept in ONE `[Bc, H+1]` parameter, with
     // the intercept initialised at the conditional MLE given the latent.
     let mut theta = vec![0f32; bc * d];
-    if let Some(init) = a.spec.init_theta {
-        for (i, row) in init[a.start * h..a.end * h].chunks_exact(h).enumerate() {
-            theta[i * d..i * d + h].copy_from_slice(row);
-        }
-    }
-    for (i, (&n, &lz)) in n_tot.iter().zip(&log_norm).enumerate() {
+    for (i, &n) in n_tot.iter().enumerate() {
         theta[i * d + h] = if n > 0.0 {
             (n.ln() - lz).clamp(-SCORE_CLAMP, SCORE_CLAMP) as f32
         } else {

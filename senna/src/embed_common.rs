@@ -33,10 +33,6 @@ pub use legume_numeric::matrix::dmatrix_util::concatenate_horizontal;
 
 pub use data_beans::alg::collapse_data::*;
 pub use data_beans::alg::feature_coarsening::*;
-pub use data_beans::alg::feature_coarsening_multilevel::{
-    compute_multilevel_feature_coarsening, refine_multilevel_feature_coarsening, FeatureKnnContext,
-    MultilevelRefineParams,
-};
 pub use data_beans::alg::random_projection::*;
 
 /// Build `{prefix}0..{prefix}{k-1}` axis-id column names — the explicit

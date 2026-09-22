@@ -42,6 +42,7 @@ fn planted_programs_separate_units_and_genes() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
@@ -78,6 +79,7 @@ fn the_stop_flag_ends_training_early_with_finite_output() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(true);
     let out = train(&units, &[0, 0], 2, &cfg, None, &[], &stop).unwrap();
@@ -146,6 +148,7 @@ fn single_track_output_is_identical_through_both_constructors() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let labels = vec![0u32, 0, 1, 1];
     let stop = AtomicBool::new(false);
@@ -234,6 +237,7 @@ fn planted_two_track_programs() {
         offset_l2: 0.01,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
@@ -324,6 +328,7 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
@@ -385,6 +390,7 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
@@ -412,6 +418,7 @@ fn frozen_genes_must_be_in_range_and_match_h() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let bad_gene = PresetGenes {
@@ -453,6 +460,7 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let start = train(&units, &labels, h, &cfg0, Some(&preset), &[], &stop).unwrap();
     for g in 0..20 {
@@ -498,6 +506,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         offset_l2: 0.0,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let lora = preset(PresetMode::Lora(LoraSpec {
@@ -553,6 +562,7 @@ fn the_offset_rank_is_checked_against_h_on_a_tracked_axis() {
         offset_l2: 0.01,
         offset_rank: rank,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     for rank in [0usize, 5] {
@@ -609,6 +619,7 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         offset_l2: 0.01,
         offset_rank: 2,
         device: Device::Cpu,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &offsets, &stop).unwrap();
@@ -654,4 +665,187 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         }),
         "under lora the given offset moves on from δ₀"
     );
+}
+
+/// Two planted programs over a residual block (features 0..10) and a
+/// module-only block (10..30), each program in its own module per block.
+fn module_only_fixture() -> (UnitTable, Vec<u32>, Vec<bool>) {
+    let program = |f: u32| if f < 10 { f < 5 } else { f < 20 };
+    let mut trip = Vec::new();
+    for u in 0..20u32 {
+        let a = u < 10;
+        for f in 0..30u32 {
+            let c = if program(f) == a {
+                20.0 + (f % 3) as f32
+            } else {
+                1.0
+            };
+            trip.push(t(u, f, c));
+        }
+    }
+    let units = UnitTable::from_pseudobulks_and_cells(&[&trip], &[20], &[], None, 30);
+    let labels: Vec<u32> = (0..30u32)
+        .map(|f| match (f < 10, program(f)) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 3,
+        })
+        .collect();
+    let mo: Vec<bool> = (0..30).map(|f| f >= 10).collect();
+    (units, labels, mo)
+}
+
+fn module_only_cfg(mo: Vec<bool>) -> HierConfig {
+    HierConfig {
+        n_modules: 4,
+        epochs: 200,
+        units_per_step: 8,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 5,
+        offset_l2: 0.0,
+        offset_rank: 2,
+        device: Device::Cpu,
+        module_only: mo,
+    }
+}
+
+#[test]
+fn a_module_only_feature_is_its_module_row_plus_its_count_share() {
+    let (units, labels, mo) = module_only_fixture();
+    let stop = AtomicBool::new(false);
+    let out = train(&units, &labels, 4, &module_only_cfg(mo), None, &[], &stop).unwrap();
+    let row = |f: usize| out.rho.row(f).iter().copied().collect::<Vec<f32>>();
+    // Every module-only feature carries exactly its module's row.
+    for f in 11..20 {
+        assert_eq!(row(10), row(f), "feature {f}");
+    }
+    for f in 21..30 {
+        assert_eq!(row(20), row(f), "feature {f}");
+    }
+    assert_ne!(row(10), row(20));
+    // Within a module the bias differences are the log count ratios.
+    let total = |f: u32| -> f32 {
+        units.feats[..units.n_pb_units]
+            .iter()
+            .zip(&units.counts)
+            .flat_map(|(fs, cs)| fs.iter().zip(cs))
+            .filter(|(&g, _)| g == f)
+            .map(|(_, &c)| c)
+            .sum()
+    };
+    let got = out.b_feat[11] - out.b_feat[12];
+    let want = (total(11) / total(12)).ln();
+    assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+    // Residual features keep a residual of their own: not all rows alike.
+    assert_ne!(row(0), row(1));
+    assert_eq!(out.labels, labels, "the membership does not move");
+}
+
+/// Distinct given rows for `ids`, `h` columns each.
+fn given_rows(ids: &[u32], h: usize) -> Vec<f32> {
+    ids.iter()
+        .flat_map(|&g| (0..h).map(move |k| 0.1 * (g as f32 + 1.0) * (k as f32 - 1.5)))
+        .collect()
+}
+
+/// A pinning preset holds only the modules it has members in. The module-only
+/// modules here have none, and a module-only feature has no residual to absorb
+/// a held module vector, so they must train: their rows leave the random start.
+#[test]
+fn a_pinning_preset_leaves_modules_without_given_members_free_to_train() {
+    let (units, labels, mo) = module_only_fixture();
+    let h = 4;
+    let ids: Vec<u32> = (0..10).collect();
+    let rows = given_rows(&ids, h);
+    let preset = PresetGenes {
+        ids: ids.clone(),
+        rows: rows.clone(),
+        mode: PresetMode::Freeze,
+    };
+    let cfg = module_only_cfg(mo);
+    let stop = AtomicBool::new(false);
+    let out = train(&units, &labels, h, &cfg, Some(&preset), &[], &stop).unwrap();
+    for (i, &g) in ids.iter().enumerate() {
+        for k in 0..h {
+            assert_eq!(
+                out.rho[(g as usize, k)],
+                rows[i * h + k],
+                "given gene {g} moved"
+            );
+        }
+    }
+    let init = HierParams::new(units.n_units(), 4, 30, h, cfg.seed, &Device::Cpu).unwrap();
+    let mu0 = to_host(init.mu.as_tensor()).unwrap();
+    for (f, m) in [(10usize, 2usize), (20, 3)] {
+        let row: Vec<f32> = out.rho.row(f).iter().copied().collect();
+        assert!(
+            row.iter()
+                .zip(&mu0[m * h..(m + 1) * h])
+                .any(|(a, b)| (a - b).abs() > 1e-3),
+            "module {m} never left its random start: {row:?}"
+        );
+    }
+    assert_ne!(
+        out.rho.row(10).iter().copied().collect::<Vec<_>>(),
+        out.rho.row(20).iter().copied().collect::<Vec<_>>()
+    );
+}
+
+/// A module-only feature carries no residual, so a pinning preset cannot hold
+/// its own row: it holds its MODULE at the mean of the given rows, and the
+/// written row is that module row — the one training used — for every member.
+#[test]
+fn a_pinned_module_only_feature_is_written_as_its_modules_given_mean() {
+    let (units, labels, mo) = module_only_fixture();
+    let h = 4;
+    let ids: Vec<u32> = (0..30).collect();
+    let rows = given_rows(&ids, h);
+    let preset = PresetGenes {
+        ids: ids.clone(),
+        rows: rows.clone(),
+        mode: PresetMode::Freeze,
+    };
+    let stop = AtomicBool::new(false);
+    let out = train(
+        &units,
+        &labels,
+        h,
+        &module_only_cfg(mo),
+        Some(&preset),
+        &[],
+        &stop,
+    )
+    .unwrap();
+    for g in 0..10usize {
+        for k in 0..h {
+            assert_eq!(out.rho[(g, k)], rows[g * h + k], "residual gene {g} moved");
+        }
+    }
+    for members in [10..20usize, 20..30] {
+        let n = members.len() as f32;
+        for k in 0..h {
+            let mean: f32 = members.clone().map(|g| rows[g * h + k]).sum::<f32>() / n;
+            for g in members.clone() {
+                assert!(
+                    (out.rho[(g, k)] - mean).abs() < 1e-5,
+                    "module-only feature {g} column {k}: {} vs module mean {mean}",
+                    out.rho[(g, k)]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_module_mixing_module_only_and_residual_features_is_refused() {
+    let (units, mut labels, mo) = module_only_fixture();
+    labels[12] = 0; // a module-only feature in a residual module
+    let stop = AtomicBool::new(false);
+    let err = train(&units, &labels, 4, &module_only_cfg(mo), None, &[], &stop)
+        .err()
+        .expect("a mixed module must be refused");
+    assert!(err.to_string().contains("module-only"), "{err}");
 }
