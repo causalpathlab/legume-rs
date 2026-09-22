@@ -111,6 +111,17 @@ impl AxisState {
     }
 }
 
+/// Every feature's count summed over the units of one axis.
+fn feature_totals(axis: &crate::fit::hier::units::FeatureAxis) -> Vec<f32> {
+    let mut total = vec![0f32; axis.n_features];
+    for (feats, counts) in axis.feats.iter().zip(&axis.counts) {
+        for (&f, &c) in feats.iter().zip(counts) {
+            total[f as usize] += c;
+        }
+    }
+    total
+}
+
 #[derive(Clone)]
 pub struct HierConfig {
     pub n_modules: usize,
@@ -137,6 +148,10 @@ pub struct HierConfig {
     pub merge_every: usize,
     /// Cosine threshold on frozen pb feature profiles (whole-module merge-only).
     pub merge_cosine: f32,
+    /// Partitions (indices `1..`) whose features carry no residual: a feature's
+    /// row is its module's row and its bias the closed-form within-module
+    /// share. Ignored by the single-partition path.
+    pub module_only: Vec<usize>,
 }
 
 /// Per feature partition: composed feature rows, biases, and module table.
@@ -478,12 +493,24 @@ pub fn train_partitions(
         cfg.seed,
         &cfg.device,
     )?;
+    for &a in &cfg.module_only {
+        anyhow::ensure!(
+            (1..partitions.len()).contains(&a),
+            "module-only partition {a}: only partitions 1..{} can drop their residual",
+            partitions.len()
+        );
+    }
     for (a, part) in partitions.iter().enumerate().skip(1) {
         // Distinct init salt per extra axis so peaks ≠ genes.
+        let module_only = cfg
+            .module_only
+            .contains(&a)
+            .then(|| feature_totals(&units.axes[a]));
         params.push_extra_axis(
             part.n_modules(),
             units.axes[a].n_features,
             0x4158_4953 + a as u64,
+            module_only,
         )?;
     }
 

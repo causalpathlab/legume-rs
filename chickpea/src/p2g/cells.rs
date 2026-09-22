@@ -5,7 +5,7 @@
 use crate::common::Mat;
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::projection::{
-    project_cells_axes, stream_cell_groups, AxesProjector, AxisDict,
+    project_cells_axes, stream_cell_groups, AxesProjector, AxisDict, WarmStart,
 };
 use graph_embedding_util::fit::{majority_batch_per_pb, PROJECTION_RIDGE_SGD};
 use graph_embedding_util::save_embedding;
@@ -20,12 +20,21 @@ pub struct FrozenAxis<'a> {
     pub bias: &'a [f32],
 }
 
+/// Where every cell starts: the phase-1 row of its finest pseudobulk.
+pub struct PbWarmStart<'a> {
+    /// `[n_pb][H]` as the hier fit leaves them (not L2-normalised).
+    pub rows: &'a [Vec<f32>],
+    pub cell_to_pb: &'a [usize],
+}
+
 /// Project every column of `backends` (one per axis, in `axes` order) into
-/// `[n_cells × H]`, gauge-centred. The per-axis intercepts are solved but not
-/// kept: nothing downstream reads them.
+/// `[n_cells × H]`, gauge-centred, each cell solved from its pseudobulk's row.
+/// The per-axis intercepts are solved but not kept: nothing downstream reads
+/// them.
 pub fn embed_cells(
     axes: &[FrozenAxis],
     backends: &[&SparseIoVec],
+    warm: &PbWarmStart,
     dim: usize,
     device: &Device,
 ) -> anyhow::Result<Mat> {
@@ -67,7 +76,12 @@ pub fn embed_cells(
         projector.group_cells()
     );
     let groups = stream_cell_groups(backends, projector.group_cells())?;
-    let out = project_cells_axes(&projector, n_cells, groups)?;
+    let pb_rows: Vec<f32> = warm.rows.iter().flat_map(|r| r.iter().copied()).collect();
+    let start = WarmStart {
+        rows: &pb_rows,
+        cell_to_row: warm.cell_to_pb,
+    };
+    let out = project_cells_axes(&projector, n_cells, groups, Some(&start))?;
     Ok(Mat::from_row_slice(n_cells, dim, &out.theta))
 }
 

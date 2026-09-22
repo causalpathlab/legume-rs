@@ -434,8 +434,14 @@ pub fn step_loss_extra(
     let dev = &params.dev;
     let e_b = gather_rows(params.e_u.as_tensor(), &to_1d(&plan.units, dev)?)?;
     let loss_module = module_level_plain(axis, ctx, plan, &e_b)?;
-    let batches = build_gene_batches(ctx, plan, 0);
-    let loss_gene = score_gene_batches_plain(params, axis, &batches)?;
+    // A module-only partition has no within-module term.
+    let loss_gene = match axis.residual() {
+        Some((r, b_g)) => {
+            let batches = build_gene_batches(ctx, plan, 0);
+            score_gene_batches_plain(params, r, b_g, &batches)?
+        }
+        None => None,
+    };
     let zero = || Tensor::zeros((), DType::F32, dev);
     let parts: Vec<Tensor> = [Some(loss_module), loss_gene, None::<Tensor>]
         .into_iter()
@@ -499,7 +505,8 @@ fn module_level_plain(
 
 fn score_gene_batches_plain(
     params: &HierParams,
-    axis: &ExtraAxisParams,
+    r: &Var,
+    b_g: &Var,
     batches: &[GeneBatch],
 ) -> CResult<Option<Tensor>> {
     let dev = &params.dev;
@@ -513,8 +520,8 @@ fn score_gene_batches_plain(
         let u_ids = to_1d(&b.unit_ids, dev)?;
         let g_ids = to_1d(&b.gene_ids, dev)?;
         let e = gather_rows(params.e_u.as_tensor(), &u_ids)?.reshape((p_n, b.n_max, h))?;
-        let r = gather_rows(axis.r.as_tensor(), &g_ids)?.reshape((p_n, b.d_max, h))?;
-        let bias = gather_rows(axis.b_g.as_tensor(), &g_ids)?;
+        let r = gather_rows(r.as_tensor(), &g_ids)?.reshape((p_n, b.d_max, h))?;
+        let bias = gather_rows(b_g.as_tensor(), &g_ids)?;
         let pad = additive_pad_mask(&to_1d(&b.col_valid, dev)?.reshape((p_n, 1, b.d_max))?)?;
         let s = e
             .matmul(&r.transpose(1, 2)?)?
@@ -540,7 +547,9 @@ pub struct Optimizers {
     /// Under LoRA: the module residual's pair, then the gene residual's.
     pub lora: Option<[PinnedLoraOpt; 2]>,
     /// Extra partitions' `(μ, r)` row optimizers, in axis order.
-    pub extra: Vec<(RowAdagrad, RowAdagrad)>,
+    /// Per extra axis: the module optimizer and, unless module-only, the
+    /// residual one.
+    pub extra: Vec<(RowAdagrad, Option<RowAdagrad>)>,
 }
 
 impl Optimizers {
@@ -598,7 +607,10 @@ impl Optimizers {
                 .map(|ax| {
                     Ok((
                         RowAdagrad::new(ax.mu.dims()[0], lr, dev)?,
-                        RowAdagrad::new(ax.r.dims()[0], lr, dev)?,
+                        match ax.residual() {
+                            Some((r, _)) => Some(RowAdagrad::new(r.dims()[0], lr, dev)?),
+                            None => None,
+                        },
                     ))
                 })
                 .collect::<CResult<_>>()?,
@@ -677,7 +689,9 @@ pub fn apply(
     }
     for (ax, (opt_mu, opt_r)) in params.extra.iter().zip(&mut opt.extra) {
         pair(opt_mu, &ax.mu, &ax.b_m, None, decay)?;
-        pair(opt_r, &ax.r, &ax.b_g, None, decay)?;
+        if let (Some(opt_r), Some((r, b_g))) = (opt_r, ax.residual()) {
+            pair(opt_r, r, b_g, None, decay)?;
+        }
     }
     Ok(())
 }

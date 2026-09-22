@@ -79,7 +79,7 @@ fn two_axes_recover_theta_with_separate_intercepts() {
         ],
     };
     let bar = indicatif::ProgressBar::hidden();
-    let out = p.project_group(&group, &bar).unwrap();
+    let out = p.project_group(&group, None, &bar).unwrap();
     assert_eq!(out.intercepts.len(), 2);
     for (i, want) in PLANTED.iter().enumerate() {
         let c = cos(&out.theta[i * h..(i + 1) * h], want);
@@ -133,7 +133,7 @@ fn one_axis_matches_the_single_partition_solve() {
         axes: vec![per_cell.clone()],
     };
     let out = p
-        .project_group(&group, &indicatif::ProgressBar::hidden())
+        .project_group(&group, None, &indicatif::ProgressBar::hidden())
         .unwrap();
     for i in 0..3 {
         let c = cos(
@@ -175,7 +175,7 @@ fn a_cell_empty_on_one_axis_keeps_that_intercept_at_the_floor() {
         ],
     };
     let out = p
-        .project_group(&group, &indicatif::ProgressBar::hidden())
+        .project_group(&group, None, &indicatif::ProgressBar::hidden())
         .unwrap();
     assert!(cos(&out.theta[..h], t) > 0.97);
     assert_eq!(
@@ -206,4 +206,89 @@ fn an_axis_with_no_live_feature_is_refused() {
         .err()
         .expect("refused");
     assert!(err.to_string().contains("peaks"), "{err}");
+}
+
+/// Started at the planted latent, the solve reaches the same answer as the
+/// cold start in fewer steps, and each axis's intercept still lands on its depth.
+#[test]
+fn a_warm_start_reaches_the_cold_answer_in_fewer_steps() {
+    let h = 6;
+    let (e0, b0) = dictionary(220, h, 0.5, 0);
+    let (e1, b1) = dictionary(340, h, 0.5, 3);
+    let dicts = [
+        AxisDict {
+            label: "a0",
+            feat: &e0,
+            b_feat: &b0,
+        },
+        AxisDict {
+            label: "a1",
+            feat: &e1,
+            b_feat: &b1,
+        },
+    ];
+    let p = AxesProjector::new(&dicts, h, 1e-3, &Device::Cpu).unwrap();
+    let group = CellGroup {
+        cells: (0..3).collect(),
+        axes: vec![
+            PLANTED
+                .iter()
+                .zip(&DEPTHS)
+                .map(|(t, d)| rates(&e0, &b0, h, t, d[0]))
+                .collect(),
+            PLANTED
+                .iter()
+                .zip(&DEPTHS)
+                .map(|(t, d)| rates(&e1, &b1, h, t, d[1]))
+                .collect(),
+        ],
+    };
+    let bar = indicatif::ProgressBar::hidden();
+    let cold = p.project_group(&group, None, &bar).unwrap();
+    let init: Vec<f32> = PLANTED.iter().flatten().copied().collect();
+    let warm = p.project_group(&group, Some(&init), &bar).unwrap();
+    assert!(
+        warm.steps < cold.steps,
+        "warm {} steps, cold {} steps",
+        warm.steps,
+        cold.steps
+    );
+    for (i, depths) in DEPTHS.iter().enumerate() {
+        let c = cos(
+            &warm.theta[i * h..(i + 1) * h],
+            &cold.theta[i * h..(i + 1) * h],
+        );
+        assert!(c > 0.999, "cell {i}: warm vs cold cos {c}");
+        for (a, &planted) in depths.iter().enumerate() {
+            let got = warm.intercepts[a][i];
+            assert!(
+                (got - planted).abs() < 0.1,
+                "cell {i} axis {a} intercept {got:.3} vs planted {planted:.3}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_warm_start_of_the_wrong_size_is_refused() {
+    let h = 3;
+    let (e0, b0) = dictionary(40, h, 0.5, 0);
+    let dicts = [AxisDict {
+        label: "a0",
+        feat: &e0,
+        b_feat: &b0,
+    }];
+    let p = AxesProjector::new(&dicts, h, 1e-3, &Device::Cpu).unwrap();
+    let group = CellGroup {
+        cells: vec![0, 1],
+        axes: vec![vec![
+            rates(&e0, &b0, h, &PLANTED[0][..h], 0.2),
+            rates(&e0, &b0, h, &PLANTED[1][..h], 0.2),
+        ]],
+    };
+    let init = vec![0f32; h];
+    let err = p
+        .project_group(&group, Some(&init), &indicatif::ProgressBar::hidden())
+        .expect_err("refused");
+    assert!(err.to_string().contains("warm start"), "{err}");
 }

@@ -18,6 +18,10 @@ use nalgebra::DMatrix;
 /// Spread of every random init.
 pub const INIT_STDEV: f32 = 0.1;
 
+/// Floor on a count total before its log, so an unseen feature or an empty
+/// module gets a finite share instead of `ln 0`.
+const MODULE_SHARE_FLOOR: f32 = 1e-6;
+
 /// Seed salt of track `t`'s offset residual: `OFFSET_SALT + t`.
 const OFFSET_SALT: u64 = 0x4f46_4653;
 
@@ -153,23 +157,50 @@ pub struct HierParams {
     pub extra: Vec<ExtraAxisParams>,
 }
 
-/// One non-gene feature partition's tables (`μ`, residuals, biases). Shares the
-/// fit's unit embedding; no TrackSpec offsets.
+/// What a feature adds to its module's row on a non-gene partition.
+pub enum FeatureTerm {
+    /// A trained residual row `r_f` and bias `b_f` (the within-module softmax).
+    Residual { r: Var, b_g: Var },
+    /// Nothing: the row IS the module row, and the bias is the feature's
+    /// closed-form share of its module's counts, `ln(total_f / total_m)`.
+    /// No within-module term, no per-feature table.
+    ModuleOnly { total: Vec<f32> },
+}
+
+/// One non-gene feature partition's tables (`μ`, biases, and the per-feature
+/// term). Shares the fit's unit embedding; no TrackSpec offsets.
 pub struct ExtraAxisParams {
     pub mu: Var,
     pub b_m: Var,
-    pub r: Var,
-    pub b_g: Var,
+    pub features: FeatureTerm,
 }
 
 impl ExtraAxisParams {
+    /// `module_only`: the per-feature count totals when the features carry no
+    /// residual; `None` allocates a residual table.
     pub fn new(
         n_modules: usize,
         n_features: usize,
         h: usize,
         seed: u64,
+        module_only: Option<Vec<f32>>,
         dev: &Device,
     ) -> CResult<Self> {
+        let features = match module_only {
+            Some(total) => {
+                assert_eq!(total.len(), n_features, "one total per feature");
+                FeatureTerm::ModuleOnly { total }
+            }
+            None => FeatureTerm::Residual {
+                r: var2(
+                    randn(n_features * h, INIT_STDEV, mix_seed(seed, 0x5253)),
+                    n_features,
+                    h,
+                    dev,
+                )?,
+                b_g: Var::zeros(n_features, DType::F32, dev)?,
+            },
+        };
         Ok(Self {
             mu: var2(
                 randn(n_modules * h, INIT_STDEV, mix_seed(seed, 0x4d55)),
@@ -178,30 +209,53 @@ impl ExtraAxisParams {
                 dev,
             )?,
             b_m: Var::zeros(n_modules, DType::F32, dev)?,
-            r: var2(
-                randn(n_features * h, INIT_STDEV, mix_seed(seed, 0x5253)),
-                n_features,
-                h,
-                dev,
-            )?,
-            b_g: Var::zeros(n_features, DType::F32, dev)?,
+            features,
         })
     }
 
-    /// Composed rows `μ_{m(f)} + r_f` and biases `b_m + b_g` for every feature.
+    /// The residual tables, `None` on a module-only partition.
+    pub fn residual(&self) -> Option<(&Var, &Var)> {
+        match &self.features {
+            FeatureTerm::Residual { r, b_g } => Some((r, b_g)),
+            FeatureTerm::ModuleOnly { .. } => None,
+        }
+    }
+
+    /// Composed rows `μ_{m(f)} + r_f` and biases `b_m + b_g` for every feature;
+    /// on a module-only partition `μ_{m(f)}` and `b_m + ln(total_f / total_m)`.
     pub fn compose(&self, module_of: &[u32]) -> anyhow::Result<(DMatrix<f32>, Vec<f32>)> {
         let h = self.mu.dims()[1];
         let n_features = module_of.len();
         let mu = to_host(self.mu.as_tensor())?;
-        let r = to_host(self.r.as_tensor())?;
         let b_m = to_host(self.b_m.as_tensor())?;
-        let b_g = to_host(self.b_g.as_tensor())?;
+        let (r, b_g): (Option<Vec<f32>>, Vec<f32>) = match &self.features {
+            FeatureTerm::Residual { r, b_g } => {
+                (Some(to_host(r.as_tensor())?), to_host(b_g.as_tensor())?)
+            }
+            FeatureTerm::ModuleOnly { total } => {
+                anyhow::ensure!(
+                    total.len() == n_features,
+                    "{} feature totals for {n_features} features",
+                    total.len()
+                );
+                let mut module_total = vec![0f32; self.mu.dims()[0]];
+                for (f, &m) in module_of.iter().enumerate() {
+                    module_total[m as usize] += total[f];
+                }
+                let share = |f: usize| {
+                    (total[f].max(MODULE_SHARE_FLOOR)
+                        / module_total[module_of[f] as usize].max(MODULE_SHARE_FLOOR))
+                    .ln()
+                };
+                (None, (0..n_features).map(share).collect())
+            }
+        };
         let mut rho = DMatrix::<f32>::zeros(n_features, h);
         let mut b_feat = vec![0f32; n_features];
         for f in 0..n_features {
             let m = module_of[f] as usize;
             for k in 0..h {
-                rho[(f, k)] = mu[m * h + k] + r[f * h + k];
+                rho[(f, k)] = mu[m * h + k] + r.as_ref().map_or(0.0, |r| r[f * h + k]);
             }
             b_feat[f] = b_m[m] + b_g[f];
         }
@@ -315,12 +369,14 @@ impl HierParams {
         n_modules: usize,
         n_features: usize,
         axis_salt: u64,
+        module_only: Option<Vec<f32>>,
     ) -> CResult<()> {
         let ax = ExtraAxisParams::new(
             n_modules,
             n_features,
             self.h,
             mix_seed(self.seed, axis_salt),
+            module_only,
             &self.dev,
         )?;
         self.extra.push(ax);

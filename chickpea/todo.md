@@ -44,7 +44,8 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   that seeds it (AUROC ≈ 0.85 at 10 epochs, ≈ 0.89 at 100, vs 0.64–0.70 for Pearson).
   The link/refine stage is now the weak stage, not the embedding.
 
-* [ ] **fine-tune the links after the embed** (next up, 2026-09-22). Today the trained
+* [ ] **fine-tune the links after the embed** (superseded in part by the module-network
+  item below; the quadratic form is the same, read at module level). Today the trained
   gene / peak rows only reach the output as side parquets; the refine re-runs the same
   Pearson / ABC on each cluster's raw pb columns, and on both the sim and real data that
   score barely favors promoter-proximal peaks while the rows already rank causal peaks
@@ -88,11 +89,51 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   kept. Same lesson for senna bge: the encoder's placement is not a substitute for the
   per-cell solve there either, so the thing to delete is the encoder, not the polish.
 
-* [ ] **phase 2 speed for the cold solver at real peak counts.** The solver averaged five
-  cores and ran to the step cap on most blocks. Levers, cheapest first: warm-start each
-  cell at its finest pseudobulk's phase-1 embedding (cuts the cold budget to the polish
-  budget; the tables are already in memory), a per-axis convergence tolerance for the
-  clustering use, CUDA when available (metal is not fast enough on this class of GPU).
+* [x] **phase 2 warm start** (2026-09-22). Every cell starts at its finest pseudobulk's
+  phase-1 row, each axis intercept at its exact conditional MLE given that start, and
+  the block runs on the polish step budget. The budget, not the tolerance, is what a good
+  start saves: Adam's normalised step does not shrink because the start is close, so the
+  relative-step test fires on the learning-rate schedule either way. Real data: the
+  projection went from 12.5 min to about 3 min; agreement with the cold solve is
+  moderate at the cluster level, and the per-edge deviance is a little higher, both of
+  which are bounded by the dictionary (next item), not the solver.
+
+* [x] **the dictionary was module-level** (2026-09-22). A feature row is `μ_module +
+  r_feature`; at 10 epochs (50 SGD steps on 1.2k pseudobulk units) the residual sd per
+  coordinate sat exactly at the init scale on both axes, so every row was its module's
+  row plus noise, a third of each row's energy random. Finer partitions do not help
+  (the partition is k-means on the same pseudobulk profiles); more steps help slowly
+  (500 steps moved the peak residual to 0.14). Decision: **peaks carry no residual**
+  (`HierConfig::module_only`): the row is the module's row and the bias the peak's
+  closed-form share of the module's counts, `ln(total_p / total_m)`; the within-module
+  softmax over 144k peaks disappears, and a phase-1 step fell from 450 ms to 68 ms.
+  Genes keep module plus residual. Cost on the sim, until peaks get rows again: the
+  gene–peak cosine link falls from AUROC 0.85 to 0.75 (cell clustering unchanged, ARI 1).
+
+* [ ] **phase 1 fast and accurate, then phase 2** (next). Target: 1000 epochs on the
+  real set without thinking about it. Then inject cells as units the way bge does
+  (`--phase1-cells-per-pb 16`: at most 16 stratified cells per pseudobulk at every
+  level, union), because the pseudobulk table starves the residuals: a feature only
+  gets gradient from the few units that draw its module. bge measured an interior
+  optimum; every cell is worse than none.
+
+* [ ] **peak-level rows by refinement, after gene and cell rows are settled.** With the
+  unit rows (pseudobulk or cell) and gene rows frozen, a peak's row is a convex Poisson
+  regression of its counts onto the unit table, warm-started at its module row: the
+  per-axis projection engine with roles swapped (peaks as the cells, units as the
+  dictionary, unit depth `ln N_u` as the bias). A first cut ran but did not move off
+  the warm start on a planted test; parked until the inputs are settled.
+
+* [ ] **links read a module network, not pairs.** With module-level peaks the network is
+  `W[m_p, m_g]` between peak modules and gene modules (cosine of the module rows in the
+  shared unit space; per cluster, `μ_{m_g}ᵀ Σ_k μ_{m_p}`), and a peak–gene score is a
+  lookup of `W[m(p), m(g)]` inside the cis window with distance as the prior. Pair-level
+  scoring at cell resolution is too slow to keep. Open: tie a linked peak's module to its
+  gene module (one shared row) once `cos(μ_peak_m, μ_gene_m)` on the seeded pairs says so.
+
+* [x] 2026-09-22: senna bge multiome re-verified after the shared trainer changes
+  (module-only partitions, extra-axis residual made optional, warm-started per-axis
+  projection): the sim run completes and clusters the cells correctly; senna's tests pass.
 
 * [ ] **gene–peak co-embedding term.** Genes and peaks share a space only through the
   unit table; no loss term touches a gene and a peak directly, the cis links only seed

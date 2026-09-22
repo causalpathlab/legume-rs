@@ -3,7 +3,9 @@
 mod common;
 
 use chickpea::common::Mat;
-use chickpea::p2g::cells::{cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis};
+use chickpea::p2g::cells::{
+    cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis, PbWarmStart,
+};
 use common::{backend, barcodes, mat};
 use legume_numeric::candle::candle_core::Device;
 use std::path::Path;
@@ -32,6 +34,15 @@ fn counts(n_feat: usize, split: usize) -> Mat {
     })
 }
 
+/// Two pseudobulks, one per program, with rows along +e0 and +e1, and cells
+/// 0..6 in the first, 6..12 in the second.
+fn pb_table(dim: usize) -> (Vec<Vec<f32>>, Vec<usize>) {
+    let mut rows = vec![vec![0f32; dim]; 2];
+    rows[0][0] = 1.0;
+    rows[1][1] = 1.0;
+    (rows, (0..12).map(|c| usize::from(c >= 6)).collect())
+}
+
 #[test]
 fn cells_land_on_their_programs_side_and_the_parquet_has_one_row_per_barcode() {
     let dim = 4;
@@ -53,7 +64,12 @@ fn cells_land_on_their_programs_side_and_the_parquet_has_one_row_per_barcode() {
         },
     ];
     let (rb, ab) = (backend(&rna), backend(&atac));
-    let theta = embed_cells(&axes, &[&rb, &ab], dim, &Device::Cpu).unwrap();
+    let (rows, cell_to_pb) = pb_table(dim);
+    let warm = PbWarmStart {
+        rows: &rows,
+        cell_to_pb: &cell_to_pb,
+    };
+    let theta = embed_cells(&axes, &[&rb, &ab], &warm, dim, &Device::Cpu).unwrap();
     assert_eq!((theta.nrows(), theta.ncols()), (12, dim));
     for c in 0..12 {
         let (own, other) = if c < 6 { (0, 1) } else { (1, 0) };
@@ -77,7 +93,12 @@ fn a_single_axis_run_embeds_on_that_axis_alone() {
         bias: &pb,
     }];
     let ab = backend(&atac);
-    let theta = embed_cells(&axes, &[&ab], dim, &Device::Cpu).unwrap();
+    let (rows, cell_to_pb) = pb_table(dim);
+    let warm = PbWarmStart {
+        rows: &rows,
+        cell_to_pb: &cell_to_pb,
+    };
+    let theta = embed_cells(&axes, &[&ab], &warm, dim, &Device::Cpu).unwrap();
     for c in 0..12 {
         let (own, other) = if c < 6 { (0, 1) } else { (1, 0) };
         assert!(theta[(c, own)] > theta[(c, other)], "cell {c}");
@@ -96,8 +117,35 @@ fn a_dictionary_that_does_not_match_the_backend_is_refused() {
         bias: &pb,
     }];
     let ab = backend(&atac);
-    let err = embed_cells(&axes, &[&ab], dim, &Device::Cpu).expect_err("refused");
+    let (rows, cell_to_pb) = pb_table(dim);
+    let warm = PbWarmStart {
+        rows: &rows,
+        cell_to_pb: &cell_to_pb,
+    };
+    let err = embed_cells(&axes, &[&ab], &warm, dim, &Device::Cpu).expect_err("refused");
     assert!(err.to_string().contains("peak"), "{err}");
+}
+
+#[test]
+fn a_warm_start_that_does_not_cover_every_cell_is_refused() {
+    let dim = 4;
+    let atac = counts(6, 3);
+    let peak_rows = rows(6, 3, dim);
+    let pb = vec![0f32; 6];
+    let axes = [FrozenAxis {
+        label: "peak",
+        rows: &peak_rows,
+        bias: &pb,
+    }];
+    let ab = backend(&atac);
+    let (rows, _) = pb_table(dim);
+    let cell_to_pb = vec![0usize; 5];
+    let warm = PbWarmStart {
+        rows: &rows,
+        cell_to_pb: &cell_to_pb,
+    };
+    let err = embed_cells(&axes, &[&ab], &warm, dim, &Device::Cpu).expect_err("refused");
+    assert!(err.to_string().contains("warm start"), "{err}");
 }
 
 #[test]

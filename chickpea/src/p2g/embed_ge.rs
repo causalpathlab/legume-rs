@@ -223,6 +223,9 @@ pub fn train_peak_gene_embeds(
         device: cfg.device.clone(),
         merge_every: cfg.merge_every,
         merge_cosine: cfg.merge_cosine,
+        // Peaks are module-level: the row is the module's, the bias the peak's
+        // share of it. Peak-level rows come from a later refinement stage.
+        module_only: vec![1],
     };
     let out = train_partitions(&units, &partitions, cfg.dim, &hcfg, None, &[], &stop)?;
     info!(

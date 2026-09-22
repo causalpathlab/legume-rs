@@ -4,7 +4,9 @@
 //! rows → within-cluster refine → E2G parquet.
 
 use crate::common::*;
-use crate::p2g::cells::{cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis};
+use crate::p2g::cells::{
+    cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis, PbWarmStart,
+};
 use crate::p2g::cluster::cluster_cells;
 use crate::p2g::embed_ge::{
     train_peak_gene_embeds, write_embedding_parquets, HierEmbedConfig, PeakGeneEmbeds,
@@ -149,8 +151,8 @@ pub fn run_from_pseudobulk(
     Ok(())
 }
 
-/// Phase 2 and the cell clustering: project every cell onto the frozen axes,
-/// write the cell parquet, Leiden-cluster the L2-normalised rows, and label
+/// Phase 2 and the cell clustering: project every cell onto the frozen axes
+/// from its finest pseudobulk's row, write the cell parquet, Leiden-cluster the L2-normalised rows, and label
 /// each finest pb by the majority of its cells.
 fn cluster_cells_onto_pbs(
     c: &CellInputs<'_>,
@@ -177,7 +179,17 @@ fn cluster_cells_onto_pbs(
         info!("Cell embed: ATAC-only run, projecting on the peak axis alone");
         vec![peak_axis]
     };
-    let mut rows = embed_cells(&axes, &c.backends, params.embed.dim, &params.embed.device)?;
+    let warm = PbWarmStart {
+        rows: &embeds.pb[0],
+        cell_to_pb: c.cell_to_pb,
+    };
+    let mut rows = embed_cells(
+        &axes,
+        &c.backends,
+        &warm,
+        params.embed.dim,
+        &params.embed.device,
+    )?;
     write_cell_parquet(out_dir, &rows, &c.barcodes)?;
     l2_normalize_rows_inplace(&mut rows);
     info!(

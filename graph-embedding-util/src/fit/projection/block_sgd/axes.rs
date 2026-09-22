@@ -11,12 +11,19 @@
 //! The intercepts ride as extra columns of `Θ̃ = [Θ | c_0 … c_{A−1}]` against
 //! per-axis designs whose row `H + a` is ones; one Adam state. An axis a cell
 //! has no counts on is masked out of both gradients and its intercept stays at
-//! the score-clamp floor. See the module docs of [`super`] for why the
-//! gradient is closed-form and why `N` is dense per block.
+//! the score-clamp floor. `Θ` starts at zero or at a caller's warm start (a
+//! cell's pseudobulk row, say); either way each intercept starts at its exact
+//! conditional MLE given that `Θ`. A warm start runs on the polish budget
+//! ([`POLISH_STEPS`]) rather than the cold one: Adam's normalised step does
+//! not shrink just because the start is close, so the step cap, not the
+//! tolerance, is what a good start saves. See the module docs of [`super`] for
+//! why the gradient is closed-form and why `N` is dense per block.
 
 use super::edges::block_cells;
 use super::pass::{adam_step_size, poisson_deviance, BlockProgress, PassStats};
-use super::{BETA1, BETA2, CHECK_EVERY, EPS, GATE_FOLD_EPS, MAX_STEPS, TARGET_DELTA_S, TOL};
+use super::{
+    BETA1, BETA2, CHECK_EVERY, EPS, GATE_FOLD_EPS, MAX_STEPS, POLISH_STEPS, TARGET_DELTA_S, TOL,
+};
 use crate::cell_projection::SCORE_CLAMP;
 use legume_numeric::candle::candle_core::{DType, Device, Tensor};
 use legume_numeric::matrix::traits::FusedTensorOps;
@@ -38,11 +45,14 @@ pub struct CellGroup {
 }
 
 /// One group's result, indexed by position in [`CellGroup::cells`]; not gauged.
+#[derive(Debug)]
 pub struct GroupOut {
     /// `[n × H]` row-major.
     pub theta: Vec<f32>,
     /// `[A][n]`.
     pub intercepts: Vec<Vec<f32>>,
+    /// Adam steps summed over the group's blocks.
+    pub steps: usize,
 }
 
 /// One axis's frozen design, built once per projector.
@@ -61,9 +71,6 @@ struct AxisDesign {
     intercept_mask: Tensor,
     /// `Σ_dead exp(β_f)`; 0 at the default [`GATE_FOLD_EPS`].
     dead_mass: f64,
-    /// `ln(Σ_live exp(β_f) + dead_mass)`: the null partition at `Θ = 0`, so
-    /// the cold intercept init is one log per cell.
-    null_log_norm: f64,
 }
 
 fn build_axis(
@@ -82,12 +89,10 @@ fn build_axis(
     );
     let mut live: Vec<u32> = Vec::with_capacity(n_features);
     let mut dead_mass = 0f64;
-    let mut live_mass = 0f64;
     for f in 0..n_features {
         let e = &dict.feat[f * h..(f + 1) * h];
         if e.iter().map(|x| x * x).sum::<f32>().sqrt() > GATE_FOLD_EPS {
             live.push(f as u32);
-            live_mass += f64::from(dict.b_feat[f]).exp();
         } else {
             dead_mass += f64::from(dict.b_feat[f]).exp();
         }
@@ -129,7 +134,6 @@ fn build_axis(
         b_row,
         intercept_mask,
         dead_mass,
-        null_log_norm: (live_mass + dead_mass).max(f64::MIN_POSITIVE).ln(),
     })
 }
 
@@ -210,10 +214,13 @@ impl AxesProjector {
         self.block_cells * super::GROUP_BLOCKS
     }
 
-    /// Solve one group. `bar` advances by one tick per cell as the blocks step.
+    /// Solve one group, from `Θ = 0` on the cold step budget or from `warm`
+    /// (`[n × H]` row-major, by position in the group) on the polish budget.
+    /// `bar` advances by one tick per cell as the blocks step.
     pub fn project_group(
         &self,
         group: &CellGroup,
+        warm: Option<&[f32]>,
         bar: &indicatif::ProgressBar,
     ) -> anyhow::Result<GroupOut> {
         let (h, n) = (self.h, group.cells.len());
@@ -223,6 +230,13 @@ impl AxesProjector {
             group.axes.len(),
             self.axes.len()
         );
+        if let Some(w) = warm {
+            anyhow::ensure!(
+                w.len() == n * h,
+                "warm start has {} entries for {n} cells × {h}",
+                w.len()
+            );
+        }
         for (a, per_cell) in group.axes.iter().enumerate() {
             anyhow::ensure!(
                 per_cell.len() == n,
@@ -232,6 +246,16 @@ impl AxesProjector {
             );
         }
         let bc = self.block_cells;
+        let warm = if std::env::var("AXES_COLD").is_ok() {
+            None
+        } else {
+            warm
+        }; // TEMP
+        let max_steps = if warm.is_some() {
+            POLISH_STEPS
+        } else {
+            MAX_STEPS
+        };
         let mut theta = vec![0f32; n * h];
         let mut intercepts = vec![vec![-(SCORE_CLAMP as f32); n]; self.axes.len()];
         let mut stats = PassStats::default();
@@ -240,6 +264,7 @@ impl AxesProjector {
             let end = (start + bc).min(n);
             let out = self.solve_block(
                 &group.axes,
+                warm.map(|w| &w[start * h..end * h]),
                 start,
                 end,
                 &BlockProgress {
@@ -248,7 +273,7 @@ impl AxesProjector {
                     label: "axes",
                     block: b + 1,
                     n_blocks,
-                    max_steps: MAX_STEPS,
+                    max_steps,
                 },
             )?;
             theta[start * h..end * h].copy_from_slice(&out.latent);
@@ -264,7 +289,25 @@ impl AxesProjector {
                 out.loop_secs,
             );
         }
-        Ok(GroupOut { theta, intercepts })
+        info!(
+            "Projection [axes]: {n} cells in {n_blocks} block(s) of {bc}: mean {:.0} steps/block, \
+             {} at the {max_steps}-step cap, mean per-edge deviance {:.4}, {:.0}s ({:.1} ms/step){}",
+            stats.mean_steps(),
+            stats.at_cap,
+            stats.mean_deviance(),
+            stats.secs,
+            stats.ms_per_step(),
+            if stats.clamped > 0 {
+                format!(" [WARNING: score clamp bound on {} block(s)]", stats.clamped)
+            } else {
+                String::new()
+            },
+        );
+        Ok(GroupOut {
+            theta,
+            intercepts,
+            steps: stats.steps,
+        })
     }
 }
 
@@ -341,16 +384,20 @@ impl AxesProjector {
         })
     }
 
-    /// The Adam loop for one block against every axis's design, from the null
-    /// model: `Θ = 0`, `c_a = ln Σ_f n_f − null_log_norm_a` (the exact
-    /// conditional MLE at `Θ = 0`), floor for an absent axis.
+    /// The Adam loop for one block against every axis's design. `Θ` starts
+    /// at `init` (`[bc × H]`) or at zero, and each axis's intercept at the
+    /// exact conditional MLE given that start,
+    /// `c_a = ln Σ_f n_f − ln(Σ_f exp(⟨e_f, θ⟩ + β_f) + dead_mass_a)`,
+    /// floor for an absent axis.
     fn solve_block(
         &self,
         group_axes: &[Vec<(Vec<u32>, Vec<f32>)>],
+        init: Option<&[f32]>,
         start: usize,
         end: usize,
         progress: &BlockProgress<'_>,
     ) -> anyhow::Result<BlockOut> {
+        let max_steps = progress.max_steps;
         let (h, dev) = (self.h, &self.dev);
         let bc = end - start;
         let n_axes = self.axes.len();
@@ -365,10 +412,29 @@ impl AxesProjector {
         let n_edges: usize = blocks.iter().map(|b| b.n_edges).sum();
 
         let mut theta = vec![0f32; bc * d];
+        let init_block = match init {
+            Some(w) => {
+                for (i, row) in w.chunks_exact(h).enumerate() {
+                    theta[i * d..i * d + h].copy_from_slice(row);
+                }
+                Tensor::from_slice(w, (bc, h), dev)?
+            }
+            None => Tensor::zeros((bc, h), DType::F32, dev)?,
+        };
         for (a, (ax, blk)) in self.axes.iter().zip(&blocks).enumerate() {
-            for (i, &n) in blk.n_tot.iter().enumerate() {
+            let log_norm: Vec<f64> = init_block
+                .matmul(&ax.e_aug.narrow(0, 0, h)?.contiguous()?)?
+                .broadcast_add(&ax.b_row)?
+                .clamp(-SCORE_CLAMP, SCORE_CLAMP)?
+                .exp()?
+                .sum(1)?
+                .to_vec1::<f32>()?
+                .iter()
+                .map(|x| (f64::from(*x) + ax.dead_mass).max(f64::MIN_POSITIVE).ln())
+                .collect();
+            for (i, (&n, &lz)) in blk.n_tot.iter().zip(&log_norm).enumerate() {
                 theta[i * d + h + a] = if n > 0.0 {
-                    (n.ln() - ax.null_log_norm).clamp(-SCORE_CLAMP, SCORE_CLAMP) as f32
+                    (n.ln() - lz).clamp(-SCORE_CLAMP, SCORE_CLAMP) as f32
                 } else {
                     -SCORE_CLAMP as f32
                 };
@@ -399,7 +465,7 @@ impl AxesProjector {
         let mut converged = false;
         let mut emitted = 0usize;
         let loop_start = std::time::Instant::now();
-        for step in 0..MAX_STEPS {
+        for step in 0..max_steps {
             let mut g = theta.broadcast_mul(&lam_row)?;
             for (a, (ax, blk)) in self.axes.iter().zip(&blocks).enumerate() {
                 let mu = theta
@@ -427,7 +493,7 @@ impl AxesProjector {
             let g = (g - &ne)?;
             m = ((&m * BETA1)? + (&g * (1.0 - BETA1))?)?;
             v = ((&v * BETA2)? + (g.sqr()? * (1.0 - BETA2))?)?;
-            let step_size = adam_step_size(self.lr0, step, MAX_STEPS);
+            let step_size = adam_step_size(self.lr0, step, max_steps);
             theta = (&theta - (&m * step_size)?.broadcast_div(&(v.sqrt()? + EPS)?)?)?;
             steps = step + 1;
             if steps.is_multiple_of(CHECK_EVERY) {

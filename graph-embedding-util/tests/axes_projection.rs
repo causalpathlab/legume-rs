@@ -4,7 +4,7 @@
 use data_beans::sparse_io::{create_sparse_from_triplets, SparseIoBackend};
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::projection::{
-    project_cells_axes, stream_cell_groups, AxesProjector, AxisDict, CellGroup,
+    project_cells_axes, stream_cell_groups, AxesProjector, AxisDict, CellGroup, WarmStart,
 };
 use legume_numeric::candle::candle_core::Device;
 
@@ -125,7 +125,7 @@ fn the_gauge_mean_is_removed_across_groups_and_returned() {
     let f = fixture(h);
     let p = AxesProjector::new(&f.dicts(), h, 1e-3, &Device::Cpu).unwrap();
     let n = f.thetas.len();
-    let out = project_cells_axes(&p, n, f.groups(h, 5).into_iter().map(Ok)).unwrap();
+    let out = project_cells_axes(&p, n, f.groups(h, 5).into_iter().map(Ok), None).unwrap();
     assert_eq!(out.theta.len(), n * h);
     assert_eq!(out.intercepts.len(), 2);
     for k in 0..h {
@@ -145,8 +145,8 @@ fn group_size_does_not_change_the_answer() {
     let h = 4;
     let f = fixture(h);
     let p = AxesProjector::new(&f.dicts(), h, 1e-3, &Device::Cpu).unwrap();
-    let one = project_cells_axes(&p, 12, f.groups(h, 12).into_iter().map(Ok)).unwrap();
-    let many = project_cells_axes(&p, 12, f.groups(h, 5).into_iter().map(Ok)).unwrap();
+    let one = project_cells_axes(&p, 12, f.groups(h, 12).into_iter().map(Ok), None).unwrap();
+    let many = project_cells_axes(&p, 12, f.groups(h, 5).into_iter().map(Ok), None).unwrap();
     for (a, b) in one.theta.iter().zip(&many.theta) {
         assert!((a - b).abs() < 2e-2, "{a} vs {b}");
     }
@@ -157,7 +157,47 @@ fn a_group_with_a_cell_id_past_n_cells_is_refused() {
     let h = 4;
     let f = fixture(h);
     let p = AxesProjector::new(&f.dicts(), h, 1e-3, &Device::Cpu).unwrap();
-    assert!(project_cells_axes(&p, 6, f.groups(h, 12).into_iter().map(Ok)).is_err());
+    assert!(project_cells_axes(&p, 6, f.groups(h, 12).into_iter().map(Ok), None).is_err());
+}
+
+/// The warm-start table is read through the cell → row map: three program rows
+/// serve twelve cells, and the answer is the cold one.
+#[test]
+fn a_warm_start_table_is_read_through_the_cell_to_row_map() {
+    let h = 4;
+    let f = fixture(h);
+    let p = AxesProjector::new(&f.dicts(), h, 1e-3, &Device::Cpu).unwrap();
+    let cold = project_cells_axes(&p, 12, f.groups(h, 5).into_iter().map(Ok), None).unwrap();
+    let rows: Vec<f32> = f.thetas[..3].iter().flatten().copied().collect();
+    let cell_to_row: Vec<usize> = (0..12).map(|i| i % 3).collect();
+    let warm = WarmStart {
+        rows: &rows,
+        cell_to_row: &cell_to_row,
+    };
+    let out = project_cells_axes(&p, 12, f.groups(h, 5).into_iter().map(Ok), Some(&warm)).unwrap();
+    for i in 0..12 {
+        let c = cos(
+            &out.theta[i * h..(i + 1) * h],
+            &cold.theta[i * h..(i + 1) * h],
+        );
+        assert!(c > 0.999, "cell {i}: warm vs cold cos {c}");
+    }
+}
+
+#[test]
+fn a_warm_start_map_that_does_not_cover_every_cell_is_refused() {
+    let h = 4;
+    let f = fixture(h);
+    let p = AxesProjector::new(&f.dicts(), h, 1e-3, &Device::Cpu).unwrap();
+    let rows = vec![0f32; 3 * h];
+    let cell_to_row = vec![0usize; 5];
+    let warm = WarmStart {
+        rows: &rows,
+        cell_to_row: &cell_to_row,
+    };
+    let err = project_cells_axes(&p, 12, f.groups(h, 5).into_iter().map(Ok), Some(&warm))
+        .expect_err("refused");
+    assert!(err.to_string().contains("warm start"), "{err}");
 }
 
 /// A backend of `rows × cols` with `value(r, c)` where nonzero.

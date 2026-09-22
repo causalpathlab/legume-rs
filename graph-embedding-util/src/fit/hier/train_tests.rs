@@ -55,6 +55,7 @@ fn one_epoch_two_partitions_finite_rows_and_steps_per_epoch() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train_partitions(&units, &partitions, 4, &cfg, None, &[], &stop).unwrap();
@@ -109,6 +110,7 @@ fn planted_programs_separate_units_and_genes() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
@@ -147,6 +149,7 @@ fn the_stop_flag_ends_training_early_with_finite_output() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(true);
     let out = train(&units, &[0, 0], 2, &cfg, None, &[], &stop).unwrap();
@@ -217,6 +220,7 @@ fn single_track_output_is_identical_through_both_constructors() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let labels = vec![0u32, 0, 1, 1];
     let stop = AtomicBool::new(false);
@@ -307,6 +311,7 @@ fn planted_two_track_programs() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, 4, &cfg, None, &[], &stop).unwrap();
@@ -399,6 +404,7 @@ fn frozen_gene_rows_survive_training_verbatim_while_free_rows_and_biases_move() 
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
@@ -462,6 +468,7 @@ fn a_fully_frozen_dictionary_still_trains_the_unit_side() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &[], &stop).unwrap();
@@ -491,6 +498,7 @@ fn frozen_genes_must_be_in_range_and_match_h() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let bad_gene = PresetGenes {
@@ -534,6 +542,7 @@ fn unfrozen_preset_rows_start_where_given_and_then_train() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let start = train(&units, &labels, h, &cfg0, Some(&preset), &[], &stop).unwrap();
     for g in 0..20 {
@@ -581,6 +590,7 @@ fn lora_preset_rows_move_only_inside_a_shared_rank_r_residual() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let lora = preset(PresetMode::Lora(LoraSpec {
@@ -638,6 +648,7 @@ fn the_offset_rank_is_checked_against_h_on_a_tracked_axis() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     for rank in [0usize, 5] {
@@ -696,6 +707,7 @@ fn a_preset_on_a_two_track_axis_pins_the_base_rows_and_a_given_offset() {
         device: Device::Cpu,
         merge_every: 0,
         merge_cosine: 0.95,
+        module_only: Vec::new(),
     };
     let stop = AtomicBool::new(false);
     let out = train(&units, &labels, h, &cfg, Some(&frozen), &offsets, &stop).unwrap();
@@ -757,6 +769,7 @@ fn merge_cfg(merge_every: usize, merge_cosine: f32, n_modules: usize) -> HierCon
         device: Device::Cpu,
         merge_every,
         merge_cosine,
+        module_only: Vec::new(),
     }
 }
 
@@ -846,4 +859,105 @@ fn merging_during_training_coarsens_every_axis() {
     assert_eq!(out.axes[1].mu.nrows(), 2, "axis 1: 4 modules → 2");
     assert!(out.axes[1].rho.iter().all(|v| v.is_finite()));
     assert!(out.e_u.iter().all(|v| v.is_finite()));
+}
+
+/// A module-only partition: every feature's row is its module's row, its bias
+/// is the module bias plus its closed-form share of the module's counts, and
+/// the partition contributes no within-module term to the loss.
+#[test]
+fn a_module_only_partition_gives_every_feature_its_module_row_and_share() {
+    let rna = vec![
+        t(0, 0, 2.0),
+        t(0, 1, 1.0),
+        t(1, 1, 3.0),
+        t(1, 2, 1.0),
+        t(2, 0, 1.0),
+        t(2, 2, 4.0),
+        t(3, 1, 2.0),
+        t(3, 2, 2.0),
+    ];
+    // Four peaks: 0 and 2 in module 0 (totals 6 and 2), 1 and 3 in module 1 (4 and 12).
+    let atac = vec![
+        t(0, 0, 5.0),
+        t(1, 1, 3.0),
+        t(2, 0, 1.0),
+        t(2, 1, 1.0),
+        t(3, 2, 2.0),
+        t(0, 3, 4.0),
+        t(1, 3, 8.0),
+    ];
+    let units = UnitTable::from_pseudobulk_axes(&[&[&rna], &[&atac]], &[4], &[3, 4]);
+    let partitions = vec![
+        Partition::from_labels(&[0, 0, 1], 2),
+        Partition::from_labels(&[0, 1, 0, 1], 2),
+    ];
+    let cfg = HierConfig {
+        n_modules: 2,
+        epochs: 3,
+        units_per_step: 2,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 7,
+        offset_l2: 0.0,
+        offset_rank: 1,
+        device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
+        module_only: vec![1],
+    };
+    let stop = AtomicBool::new(false);
+    let out = train_partitions(&units, &partitions, 4, &cfg, None, &[], &stop).unwrap();
+    let peaks = &out.axes[1];
+    assert_eq!(peaks.rho.nrows(), 4);
+    for (f, &m) in [0u32, 1, 0, 1].iter().enumerate() {
+        let row: Vec<f32> = peaks.rho.row(f).iter().copied().collect();
+        let mu: Vec<f32> = peaks.mu.row(m as usize).iter().copied().collect();
+        assert_eq!(row, mu, "peak {f} row is not its module {m} row");
+    }
+    // Shares: ln(6/8), ln(4/16), ln(2/8), ln(12/16), on top of one module bias each.
+    let share = |f: usize, m: usize| peaks.b_feat[f] - peaks.b_feat[m];
+    assert!(
+        (share(2, 0) - (2f32 / 6.0).ln()).abs() < 1e-5,
+        "{}",
+        share(2, 0)
+    );
+    assert!(
+        (share(3, 1) - (12f32 / 4.0).ln()).abs() < 1e-5,
+        "{}",
+        share(3, 1)
+    );
+    assert!(out.axes[0].rho.iter().all(|v| v.is_finite()));
+    assert!(out.final_loss_per_unit.is_finite());
+}
+
+#[test]
+fn a_module_only_index_past_the_partitions_is_refused() {
+    let rna = vec![t(0, 0, 2.0), t(1, 1, 3.0)];
+    let atac = vec![t(0, 0, 5.0), t(1, 1, 3.0)];
+    let units = UnitTable::from_pseudobulk_axes(&[&[&rna], &[&atac]], &[2], &[2, 2]);
+    let partitions = vec![
+        Partition::from_labels(&[0, 1], 2),
+        Partition::from_labels(&[0, 1], 2),
+    ];
+    let cfg = HierConfig {
+        n_modules: 2,
+        epochs: 1,
+        units_per_step: 2,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 7,
+        offset_l2: 0.0,
+        offset_rank: 1,
+        device: Device::Cpu,
+        merge_every: 0,
+        merge_cosine: 0.95,
+        module_only: vec![2],
+    };
+    let stop = AtomicBool::new(false);
+    let err = train_partitions(&units, &partitions, 4, &cfg, None, &[], &stop)
+        .err()
+        .expect("refused");
+    assert!(err.to_string().contains("module-only"), "{err}");
 }

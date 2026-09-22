@@ -255,6 +255,7 @@ pub fn fit(unified: &mut UnifiedData, config: FitConfig) -> anyhow::Result<FitOu
             device: config.device.clone(),
             merge_every: 0,
             merge_cosine: 0.95,
+            module_only: Vec::new(),
         },
         config.preset_features.as_ref(),
         &config.preset_offsets,
