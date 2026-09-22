@@ -30,6 +30,10 @@ pub struct PeakGeneEmbeds {
     pub gene_names: Vec<Box<str>>,
     /// `⌈n_units / units_per_step⌉` from the hier trainer (for smoke checks).
     pub steps_per_epoch: usize,
+    /// Per-feature bias of the gene axis, for the per-cell projection.
+    pub gene_bias: Vec<f32>,
+    /// Per-feature bias of the peak axis.
+    pub peak_bias: Vec<f32>,
 }
 
 impl PeakGeneEmbeds {
@@ -179,6 +183,8 @@ fn hier_output_to_embeds(
         peak_names: peak_names.to_vec(),
         gene_names: gene_names.to_vec(),
         steps_per_epoch: out.steps_per_epoch,
+        gene_bias: out.axes[0].b_feat.clone(),
+        peak_bias: out.axes[1].b_feat.clone(),
     })
 }
 

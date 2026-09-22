@@ -41,13 +41,14 @@ fn print_logo() {
                   Pseudobulk via data-beans multilevel collapse (optional batch adjustment).\n\
                   Score cis links by log1p Pearson or Engreitz ABC,\n\
                   train peak/gene embeddings with graph-embedding-util,\n\
-                  embed pb samples, cluster, refine peak→gene within each cluster,\n\
+                  embed pb samples and cells, cluster, refine peak→gene within each cluster,\n\
                   write E2G-like parquet:\n\
                   peaks.parquet (id, chromosome, start, end, class),\n\
                   clusters.parquet (id, name),\n\
                   peak_gene/chr*.parquet (score, gene fields, enhancer_id, cell_type_id, …).\n\
                   Also `{out}.peak_embedding.parquet`, `{out}.gene_embedding.parquet`,\n\
-                  and `{out}.pb_embedding.parquet` (finest pseudobulks; no per-cell projection).",
+                  `{out}.pb_embedding.parquet` (finest pseudobulks),\n\
+                  and `{out}.cell_embedding.parquet` (one row per barcode).",
     term_width = 80
 )]
 struct Cli {
@@ -76,7 +77,8 @@ enum Commands {
                          train peak/gene embeds with ge-util hier.\n\
                       4. Embed pb samples → Leiden clusters → within-cluster refine.\n\
                       5. Write `{out}.peak_embedding.parquet`, `{out}.gene_embedding.parquet`,\n\
-                         `{out}.pb_embedding.parquet` (finest pbs), and E2G-like tables\n\
+                         `{out}.pb_embedding.parquet`, `{out}.cell_embedding.parquet`,\n\
+                         and E2G-like tables\n\
                          (`{out}/peaks`, clusters, peak_gene/chr*).\n\
                       \n\
                       See chickpea/todo.md.",

@@ -4,14 +4,28 @@
 //! rows → within-cluster refine → E2G parquet.
 
 use crate::common::*;
+use crate::p2g::cells::{cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis};
 use crate::p2g::cluster::cluster_cells;
-use crate::p2g::embed_ge::{train_peak_gene_embeds, write_embedding_parquets, HierEmbedConfig};
+use crate::p2g::embed_ge::{
+    train_peak_gene_embeds, write_embedding_parquets, HierEmbedConfig, PeakGeneEmbeds,
+};
 use crate::p2g::link_map::{link_peaks_to_genes, LinkParams};
 use crate::p2g::parquet_out::{peaks_from_coords, write_e2g_tables, ClusterRow};
 use crate::p2g::pb_levels::PbLevels;
 use crate::p2g::refine::refine_within_clusters;
+use data_beans::sparse_io_vector::SparseIoVec;
 use genomic_data::coordinates::{GeneTss, PeakCoord};
+use legume_numeric::matrix::dense_mat_io::l2_normalize_rows_inplace;
 use log::info;
+
+/// The per-cell inputs of phase 2: one backend per frozen axis, in the order
+/// the axes are handed to the embed (genes then peaks; ATAC-only: peaks only).
+pub struct CellInputs<'a> {
+    pub backends: Vec<&'a SparseIoVec>,
+    pub barcodes: Vec<Box<str>>,
+    /// Finest-level pb of every cell (column order of the backends).
+    pub cell_to_pb: &'a [usize],
+}
 
 /// Knobs for [`run_from_pseudobulk`].
 #[derive(Clone, Debug)]
@@ -34,9 +48,13 @@ pub struct PbMultiome<'a> {
     pub peak_names: &'a [Box<str>],
 }
 
-/// Run the ge-util peak-to-gene workflow from paired RNA/ATAC pseudobulk matrices.
+/// Run the ge-util peak-to-gene workflow from paired RNA/ATAC pseudobulk
+/// matrices. With `cells`, every cell is projected onto the frozen
+/// dictionaries and the clusters are cell clusters; without, the finest pb
+/// rows are clustered.
 pub fn run_from_pseudobulk(
     data: &PbMultiome<'_>,
+    cells: Option<&CellInputs<'_>>,
     out_dir: &str,
     params: &WorkflowParams,
 ) -> anyhow::Result<()> {
@@ -92,21 +110,30 @@ pub fn run_from_pseudobulk(
     )?;
 
     write_embedding_parquets(out_dir, &embeds)?;
-    let sample_mat = embeds.finest_unit_rows();
-    info!(
-        "Clustering {} pb samples (min_cluster_samples={})...",
-        sample_mat.nrows(),
-        params.min_cluster_samples
-    );
-    let clusters = cluster_cells(
-        &sample_mat,
-        params.target_clusters,
-        params.min_cluster_samples,
-    )?;
-    info!(
-        "Kept {} clusters (sizes={:?})",
-        clusters.n_clusters, clusters.sizes
-    );
+
+    // Sample labels for the refine: cell clusters mapped onto the finest pb
+    // columns when cells are given, else clusters of the finest pb rows.
+    let (sample_label, n_clusters) = match cells {
+        Some(c) => cluster_cells_onto_pbs(c, &embeds, levels, out_dir, params)?,
+        None => {
+            let sample_mat = embeds.finest_unit_rows();
+            info!(
+                "Clustering {} pb samples (min_cluster_samples={})...",
+                sample_mat.nrows(),
+                params.min_cluster_samples
+            );
+            let clusters = cluster_cells(
+                &sample_mat,
+                params.target_clusters,
+                params.min_cluster_samples,
+            )?;
+            info!(
+                "Kept {} clusters (sizes={:?})",
+                clusters.n_clusters, clusters.sizes
+            );
+            (clusters.label, clusters.n_clusters)
+        }
+    };
 
     info!("Refining peak→gene within clusters...");
     let links = refine_within_clusters(
@@ -114,7 +141,7 @@ pub fn run_from_pseudobulk(
         atac_pb,
         gene_tss,
         peak_coords,
-        &clusters.label,
+        &sample_label,
         params.min_cluster_samples,
         &params.abc,
     )?;
@@ -122,7 +149,7 @@ pub fn run_from_pseudobulk(
     info!("Refined links: {}", links.len());
 
     let peaks = peaks_from_coords(peak_coords);
-    let cluster_rows: Vec<ClusterRow> = (0..clusters.n_clusters)
+    let cluster_rows: Vec<ClusterRow> = (0..n_clusters)
         .map(|c| ClusterRow {
             id: c.to_string().into_boxed_str(),
             name: format!("cluster_{c}").into_boxed_str(),
@@ -140,4 +167,70 @@ pub fn run_from_pseudobulk(
         gene_names,
     )?;
     Ok(())
+}
+
+/// Phase 2 and the cell clustering: project every cell onto the frozen axes,
+/// write the cell parquet, Leiden-cluster the L2-normalised rows, and label
+/// each finest pb by the majority of its cells.
+fn cluster_cells_onto_pbs(
+    c: &CellInputs<'_>,
+    embeds: &PeakGeneEmbeds,
+    levels: &PbLevels,
+    out_dir: &str,
+    params: &WorkflowParams,
+) -> anyhow::Result<(Vec<Option<usize>>, usize)> {
+    let gene_axis = FrozenAxis {
+        label: "gene",
+        rows: &embeds.gene,
+        bias: &embeds.gene_bias,
+    };
+    let peak_axis = FrozenAxis {
+        label: "peak",
+        rows: &embeds.peak,
+        bias: &embeds.peak_bias,
+    };
+    // ATAC-only: the gene axis was trained on a pb-level surrogate with no
+    // per-cell counts, so the cells are projected on the peaks alone.
+    let axes: Vec<FrozenAxis> = if levels.rna.is_some() {
+        vec![gene_axis, peak_axis]
+    } else {
+        info!("Cell embed: ATAC-only run, projecting on the peak axis alone");
+        vec![peak_axis]
+    };
+    anyhow::ensure!(
+        axes.len() == c.backends.len(),
+        "{} frozen axes for {} cell backends",
+        axes.len(),
+        c.backends.len()
+    );
+    let cell_out = embed_cells(
+        &axes,
+        &c.backends,
+        c.barcodes.clone(),
+        params.embed.dim,
+        &params.embed.device,
+    )?;
+    write_cell_parquet(out_dir, &cell_out)?;
+    let mut rows = cell_out.theta;
+    l2_normalize_rows_inplace(&mut rows);
+    info!(
+        "Clustering {} cells (min_cluster_samples={})...",
+        rows.nrows(),
+        params.min_cluster_samples
+    );
+    let clusters = cluster_cells(&rows, params.target_clusters, params.min_cluster_samples)?;
+    info!(
+        "Kept {} cell clusters (sizes={:?})",
+        clusters.n_clusters, clusters.sizes
+    );
+    anyhow::ensure!(
+        c.cell_to_pb.len() == clusters.label.len(),
+        "cell_to_pb covers {} cells, embedding has {}",
+        c.cell_to_pb.len(),
+        clusters.label.len()
+    );
+    Ok((
+        cluster_labels_to_pb(&clusters.label, c.cell_to_pb, levels.n_pb(0)),
+        clusters.n_clusters,
+    ))
 }

@@ -19,9 +19,10 @@ use crate::p2g::input::{
 };
 use crate::p2g::link_map::{LinkParams, LinkScore};
 use crate::p2g::pb_levels::{parent_maps, PbLevels};
-use crate::p2g::workflow::{run_from_pseudobulk, PbMultiome, WorkflowParams};
+use crate::p2g::workflow::{run_from_pseudobulk, CellInputs, PbMultiome, WorkflowParams};
 use data_beans::alg::collapse_data::MultilevelParams;
 use data_beans::alg::refine_multilevel::RefineParams;
+use data_beans::sparse_io_vector::SparseIoVec;
 use genomic_data::coordinates::{load_gene_tss, parse_peak_coordinates, GeneTss};
 use log::info;
 
@@ -252,6 +253,12 @@ pub struct PeakToGeneArgs {
     )]
     num_clusters: Option<usize>,
 
+    #[arg(
+        long,
+        help = "Skip the per-cell embedding; cluster the finest pseudobulks instead"
+    )]
+    no_cell_embedding: bool,
+
     /* Output */
     #[arg(
         long,
@@ -259,7 +266,8 @@ pub struct PeakToGeneArgs {
         required = true,
         help = "Output prefix: E2G tables under `{out}/`;\n\
                 `{out}.peak_embedding.parquet`, `.gene_embedding.parquet`,\n\
-                `.pb_embedding.parquet` (finest pseudobulks);\n\
+                `.pb_embedding.parquet` (finest pseudobulks),\n\
+                `.cell_embedding.parquet` (one row per barcode);\n\
                 `.pb_tree_embedding.parquet` with more than one level"
     )]
     out: Box<str>,
@@ -306,7 +314,7 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     let gene_names = paired.data_stack.stack[0].row_names()?;
     let peak_names = paired.data_stack.stack[1].row_names()?;
 
-    let levels = collapse_pb_levels(&mut paired, args)?;
+    let (levels, cell_to_pb) = collapse_pb_levels(&mut paired, args)?;
     info!(
         "Pseudobulk: {} genes × {} peaks{}; levels {:?}",
         gene_names.len(),
@@ -322,6 +330,7 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
 
     let peak_coords = parse_peak_coordinates(&peak_names);
     let gene_tss = load_gene_tss_aligned(args, &gene_names)?;
+    let cells = cell_inputs(args, &paired, &cell_to_pb)?;
 
     finish_workflow(
         args,
@@ -333,7 +342,26 @@ fn run_multiome(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             gene_names: &gene_names,
             peak_names: &peak_names,
         },
+        cells.as_ref(),
     )
+}
+
+/// The phase-2 inputs: every backend of the stack in order (RNA then ATAC, or
+/// ATAC alone), the barcodes, and the finest pb of every cell.
+fn cell_inputs<'a>(
+    args: &PeakToGeneArgs,
+    paired: &'a crate::p2g::input::PairedDataWithBatch,
+    cell_to_pb: &'a [usize],
+) -> anyhow::Result<Option<CellInputs<'a>>> {
+    if args.no_cell_embedding {
+        return Ok(None);
+    }
+    let backends: Vec<&SparseIoVec> = paired.data_stack.stack.iter().collect();
+    Ok(Some(CellInputs {
+        backends,
+        barcodes: paired.data_stack.column_names()?,
+        cell_to_pb,
+    }))
 }
 
 fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
@@ -354,7 +382,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
     }
 
     let peak_names = paired.data_stack.stack[0].row_names()?;
-    let levels = collapse_pb_levels(&mut paired, args)?;
+    let (levels, cell_to_pb) = collapse_pb_levels(&mut paired, args)?;
     let atac_pb = &levels.atac[0];
     info!(
         "Pseudobulk (ATAC-only): {} peaks{}; levels {:?}",
@@ -412,6 +440,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             rna_pb[(new_g, j)] = activity[(old_g, j)];
         }
     }
+    let cells = cell_inputs(args, &paired, &cell_to_pb)?;
 
     finish_workflow(
         args,
@@ -423,6 +452,7 @@ fn run_atac_only(args: &PeakToGeneArgs) -> anyhow::Result<()> {
             gene_names: &gene_names,
             peak_names: &peak_names,
         },
+        cells.as_ref(),
     )
 }
 
@@ -432,7 +462,11 @@ fn warn_few_samples(n_pb: usize, args: &PeakToGeneArgs) {
     }
 }
 
-fn finish_workflow(args: &PeakToGeneArgs, pb: PbMultiome<'_>) -> anyhow::Result<()> {
+fn finish_workflow(
+    args: &PeakToGeneArgs,
+    pb: PbMultiome<'_>,
+    cells: Option<&CellInputs<'_>>,
+) -> anyhow::Result<()> {
     let params = WorkflowParams {
         abc: LinkParams {
             score: args.link_score,
@@ -460,7 +494,7 @@ fn finish_workflow(args: &PeakToGeneArgs, pb: PbMultiome<'_>) -> anyhow::Result<
         min_cluster_samples: args.min_cluster_samples,
         target_clusters: args.num_clusters,
     };
-    run_from_pseudobulk(&pb, &args.out, &params)
+    run_from_pseudobulk(&pb, cells, &args.out, &params)
 }
 
 fn load_gene_tss_aligned(
@@ -495,7 +529,7 @@ fn load_gene_universe(args: &PeakToGeneArgs) -> anyhow::Result<GeneUniverse> {
 fn collapse_pb_levels(
     paired: &mut crate::p2g::input::PairedDataWithBatch,
     args: &PeakToGeneArgs,
-) -> anyhow::Result<PbLevels> {
+) -> anyhow::Result<(PbLevels, Vec<usize>)> {
     use data_beans::alg::collapse_data::{
         collapse_columns_multilevel_with_hierarchy, collapse_columns_multilevel_with_partition,
     };
@@ -540,12 +574,17 @@ fn collapse_pb_levels(
         &driver_pb.iter().map(Mat::ncols).collect::<Vec<_>>(),
     )?;
 
+    // Finest-first, so level 0 is the pb the links and the cell clusters use.
+    let cell_to_pb = driver.cell_to_pb_per_level[0].clone();
     if paired.data_stack.num_types() == 1 {
-        return Ok(PbLevels {
-            rna: None,
-            atac: driver_pb,
-            parent,
-        });
+        return Ok((
+            PbLevels {
+                rna: None,
+                atac: driver_pb,
+                parent,
+            },
+            cell_to_pb,
+        ));
     }
     let follower = collapse_columns_multilevel_with_partition(
         &mut paired.data_stack.stack[1],
@@ -554,11 +593,14 @@ fn collapse_pb_levels(
         &params,
         &driver.cell_to_pb_per_level,
     )?;
-    Ok(PbLevels {
-        rna: Some(driver_pb),
-        atac: supported_means(&follower.levels, args.use_adjusted),
-        parent,
-    })
+    Ok((
+        PbLevels {
+            rna: Some(driver_pb),
+            atac: supported_means(&follower.levels, args.use_adjusted),
+            parent,
+        },
+        cell_to_pb,
+    ))
 }
 
 /// Posterior means per level, zeroed where the pb holds no data for the

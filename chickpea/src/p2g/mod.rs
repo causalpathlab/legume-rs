@@ -9,6 +9,7 @@
 
 pub mod run;
 
+pub mod cells;
 pub mod cluster;
 pub mod embed_ge;
 pub mod gene_activity;
