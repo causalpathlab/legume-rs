@@ -217,6 +217,14 @@ pub struct PeakToGeneArgs {
 
     #[arg(
         long,
+        default_value_t = 16,
+        help = "Cells trained as phase-1 units per pseudobulk at every level\n\
+                (union); 0 = pseudobulks alone"
+    )]
+    phase1_cells_per_pb: usize,
+
+    #[arg(
+        long,
         default_value_t = 0,
         help = "Re-collapse modules every N epochs from pb profiles; 0=off"
     )]
@@ -479,6 +487,7 @@ fn finish_workflow(
             modules_per_unit: args.modules_per_unit,
             merge_every: args.merge_every,
             merge_cosine: args.merge_cosine,
+            cells_per_pb: args.phase1_cells_per_pb,
             ..HierEmbedConfig::default()
         },
         min_cluster_samples: args.min_cluster_samples,

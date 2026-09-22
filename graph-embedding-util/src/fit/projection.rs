@@ -15,7 +15,7 @@ mod cells;
 mod encoder;
 
 pub use axes_driver::{project_cells_axes, AxesProjection, WarmStart};
-pub use axes_stream::stream_cell_groups;
+pub use axes_stream::{read_cell_group, stream_cell_groups};
 pub use block_sgd::{AxesProjector, AxisDict, CellGroup, GroupOut};
 pub(crate) use cells::project_cells_phase2;
 pub use encoder::{CellEncoder, CellEncoders, TrackEncoder};

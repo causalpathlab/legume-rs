@@ -5,7 +5,8 @@
 
 use crate::common::*;
 use crate::p2g::cells::{
-    cluster_labels_to_pb, embed_cells, write_cell_parquet, FrozenAxis, PbWarmStart,
+    cluster_labels_to_pb, embed_cells, phase1_cell_units, write_cell_parquet, FrozenAxis,
+    PbWarmStart,
 };
 use crate::p2g::cluster::cluster_cells;
 use crate::p2g::embed_ge::{
@@ -102,12 +103,20 @@ pub fn run_from_pseudobulk(
         levels.n_levels(),
         params.embed.units_per_step
     );
+    let phase1_cells = phase1_cell_units(
+        &cells.backends,
+        cells.cell_to_pb,
+        &levels.parent,
+        params.embed.cells_per_pb,
+        params.embed.seed,
+    )?;
     let embeds = train_peak_gene_embeds(
         &edges,
         levels,
         peak_names,
         gene_names,
         rna_pb,
+        &phase1_cells,
         &params.embed,
     )?;
 

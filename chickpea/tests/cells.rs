@@ -168,3 +168,44 @@ fn a_tie_goes_to_the_lowest_cluster_id() {
         vec![Some(1)]
     );
 }
+
+/// Phase-1 cell units: at most `k` cells per finest pb and per coarser pb,
+/// unioned, read from the backends in axis order; an ATAC-only run has an
+/// empty gene axis for every cell.
+#[test]
+fn phase1_cell_units_keep_k_per_pseudobulk_at_every_level() {
+    use chickpea::p2g::cells::phase1_cell_units;
+    let rna = counts(4, 2);
+    let atac = counts(6, 3);
+    let (rb, ab) = (backend(&rna), backend(&atac));
+    // 12 cells: finest pbs of 3 (4 pbs), one coarse level of 2 pbs.
+    let cell_to_pb: Vec<usize> = (0..12).map(|c| c / 3).collect();
+    let parent: Vec<Vec<usize>> = vec![vec![0, 0, 1, 1]];
+    let g = phase1_cell_units(&[&rb, &ab], &cell_to_pb, &parent, 1, 5).unwrap();
+    assert_eq!(g.axes.len(), 2);
+    assert!(
+        g.cells.len() >= 4 && g.cells.len() <= 6,
+        "{} cells",
+        g.cells.len()
+    );
+    for pb in 0..4 {
+        let n = g
+            .cells
+            .iter()
+            .filter(|&&c| cell_to_pb[c as usize] == pb)
+            .count();
+        assert!((1..=2).contains(&n), "pb {pb} keeps {n}");
+    }
+    for (i, &c) in g.cells.iter().enumerate() {
+        assert_eq!(g.axes[0][i].0.len(), 4, "cell {c} gene row");
+        assert_eq!(g.axes[1][i].0.len(), 6, "cell {c} peak row");
+    }
+    // ATAC-only: one backend, the gene axis is empty rows.
+    let g = phase1_cell_units(&[&ab], &cell_to_pb, &parent, 1, 5).unwrap();
+    assert_eq!(g.axes.len(), 2);
+    assert!(g.axes[0].iter().all(|(f, _)| f.is_empty()));
+    assert!(g.axes[1].iter().all(|(f, _)| f.len() == 6));
+    // k = 0: no cell units.
+    let g = phase1_cell_units(&[&rb, &ab], &cell_to_pb, &parent, 0, 5).unwrap();
+    assert!(g.cells.is_empty());
+}

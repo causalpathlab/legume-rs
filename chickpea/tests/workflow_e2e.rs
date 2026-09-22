@@ -86,6 +86,7 @@ fn params() -> WorkflowParams {
             lr: 0.1,
             merge_every: 0,
             merge_cosine: 0.95,
+            cells_per_pb: 2,
         },
         min_cluster_samples: 5,
         target_clusters: Some(2),

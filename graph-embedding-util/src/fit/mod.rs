@@ -13,6 +13,7 @@ pub mod pb_readout;
 pub mod projection;
 pub mod resolve_embedding;
 mod samplers;
+pub use samplers::keep_cells_per_pb;
 mod setup;
 
 pub use batch_fold::BatchGeneFold;

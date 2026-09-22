@@ -110,12 +110,29 @@ Chromatin Interactions Captured by Knitting Peaks with Expression Anchors
   Genes keep module plus residual. Cost on the sim, until peaks get rows again: the
   gene–peak cosine link falls from AUROC 0.85 to 0.75 (cell clustering unchanged, ARI 1).
 
-* [ ] **phase 1 fast and accurate, then phase 2** (next). Target: 1000 epochs on the
-  real set without thinking about it. Then inject cells as units the way bge does
-  (`--phase1-cells-per-pb 16`: at most 16 stratified cells per pseudobulk at every
-  level, union), because the pseudobulk table starves the residuals: a feature only
-  gets gradient from the few units that draw its module. bge measured an interior
-  optimum; every cell is worse than none.
+* [x] **cells as phase-1 units** (2026-09-22). `--phase1-cells-per-pb 16` (bge's rule
+  and default, not to be tuned): at most 16 cells per pseudobulk at every level, union,
+  read from the backends as one group over the gene and peak axes and appended to the
+  unit table as a level of their own. On the real set the finest pseudobulks hold about
+  a dozen cells, so this is nearly every cell; an ATAC-only run gives each cell an empty
+  gene row, which the axis weight masks. Motivation: 1000 pseudobulk-only epochs left
+  the loss flat while the gene residual kept creeping, i.e. the pseudobulk table starves
+  the residuals; a feature only gets gradient from the units that draw its module.
+
+* [x] **threaded phase-1 step** (2026-09-22). A step's units are split into slices, each
+  slice draws its modules, builds its loss and runs its own backward on a thread, and
+  the gradient stores are summed; exact, since the loss is a sum over units. About
+  2× on ten threads (the step was single-core: small GEMMs and `exp` over padded
+  within-module batches). Pseudobulk-only, 1000 epochs is now a few minutes.
+
+* [ ] **phase 1 with cell units is still too slow for 1000 epochs** (next). Ten times the
+  units means ten times the steps per epoch, and the threaded step has a serial floor
+  (dense full-table gradients per slice merged and applied every step, autograd
+  bookkeeping, rayon contention inside the slices). Two ways: a closed-form sparse
+  gradient for the plain two-level softmax (no autograd; accumulate into the touched
+  rows only; rayon over units), as the projection engine already does for its Poisson
+  objective, keeping the autograd step for tracks / offsets / LoRA; or fewer draws per
+  unit (`--modules-per-unit 4` halves the step at the same loss). Then phase 2.
 
 * [ ] **peak-level rows by refinement, after gene and cell rows are settled.** With the
   unit rows (pseudobulk or cell) and gene rows frozen, a peak's row is a convex Poisson

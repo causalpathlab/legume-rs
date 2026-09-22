@@ -9,14 +9,15 @@ use super::step::{apply, step_loss, step_loss_extra, Optimizers, StepCtx, StepPl
 use super::units::UnitTable;
 use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
-use legume_numeric::candle::candle_core::Device;
+use legume_numeric::candle::candle_core::backprop::GradStore;
+use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::candle::convert::to_host;
 use legume_numeric::matrix::rand_util::mix_seed;
 use log::info;
 use nalgebra::DMatrix;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_distr::weighted::WeightedIndex;
 use rand_distr::Distribution;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -258,6 +259,89 @@ pub(crate) fn draw_plan(
     }
 }
 
+/// Threads a step is split over: the machine's parallelism.
+fn step_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, usize::from)
+}
+
+/// Fewest units a thread's slice of a step should hold.
+const MIN_UNITS_PER_SLICE: usize = 4;
+
+/// One step's loss and gradient over `chunk`, as up to `n_threads` slices of
+/// disjoint units solved on their own threads: each slice draws its own
+/// modules from an rng seeded off the step's rng (seeds taken in slice
+/// order), builds its loss with `loss_of`, runs its own backward, and the
+/// slices' gradients are summed. Exact, since the loss is a sum over units.
+pub(crate) fn step_grads<F>(
+    chunk: &[u32],
+    n_threads: usize,
+    rng: &mut StdRng,
+    loss_of: &F,
+) -> anyhow::Result<(StepStats, GradStore)>
+where
+    F: Fn(&[u32], &mut StdRng) -> anyhow::Result<(StepStats, Tensor)> + Sync,
+{
+    let n_slices = (chunk.len() / MIN_UNITS_PER_SLICE).clamp(1, n_threads.max(1));
+    let per_slice = chunk.len().div_ceil(n_slices).max(1);
+    let slices: Vec<(&[u32], u64)> = chunk
+        .chunks(per_slice)
+        .map(|s| (s, rng.next_u64()))
+        .collect();
+    let results: Vec<anyhow::Result<(StepStats, GradStore)>> = if slices.len() == 1 {
+        let (slice, seed) = slices[0];
+        vec![slice_grads(slice, seed, loss_of)]
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = slices
+                .iter()
+                .map(|&(slice, seed)| scope.spawn(move || slice_grads(slice, seed, loss_of)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a step slice panicked"))
+                .collect()
+        })
+    };
+    let mut stats = StepStats::default();
+    let mut grads: Option<GradStore> = None;
+    for r in results {
+        let (s, g) = r?;
+        stats.loss_module += s.loss_module;
+        stats.loss_gene += s.loss_gene;
+        stats.loss_ridge += s.loss_ridge;
+        grads = Some(match grads {
+            None => g,
+            Some(mut acc) => {
+                merge_grads(&mut acc, &g)?;
+                acc
+            }
+        });
+    }
+    Ok((stats, grads.expect("at least one slice")))
+}
+
+fn slice_grads<F>(slice: &[u32], seed: u64, loss_of: &F) -> anyhow::Result<(StepStats, GradStore)>
+where
+    F: Fn(&[u32], &mut StdRng) -> anyhow::Result<(StepStats, Tensor)>,
+{
+    let mut rng = StdRng::seed_from_u64(seed);
+    let (stats, loss) = loss_of(slice, &mut rng)?;
+    Ok((stats, loss.backward()?))
+}
+
+/// `into += from`, id by id; an id only `from` has is copied over.
+fn merge_grads(into: &mut GradStore, from: &GradStore) -> anyhow::Result<()> {
+    for &id in from.get_ids() {
+        let g = from.get_id(id).expect("listed id");
+        let sum = match into.get_id(id) {
+            Some(a) => (a + g)?,
+            None => g.clone(),
+        };
+        into.insert_id(id, sum);
+    }
+    Ok(())
+}
+
 pub fn train(
     units: &UnitTable,
     labels: &[u32],
@@ -327,6 +411,7 @@ pub fn train(
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
+    let n_threads = step_threads();
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
     let lora_ridge_step = params
         .lora
@@ -335,7 +420,7 @@ pub fn train(
     info!(
         "Phase 1 (hier) — {n_u} units × {d} genes on {n_t} track(s) ({n_features} feature rows) \
          in {n_m} modules, H={h}: {} epochs × {steps_per_epoch} steps of {} units, K={} \
-         modules/unit, lr {}",
+         modules/unit, lr {}, {n_threads} thread(s) per step",
         cfg.epochs, cfg.units_per_step, cfg.modules_per_unit, cfg.lr
     );
     let bar = new_progress_bar(cfg.epochs as u64);
@@ -350,22 +435,24 @@ pub fn train(
                 info!("Phase 1 (hier) — stop requested at epoch {epoch}");
                 break 'epochs;
             }
-            let plan = draw_plan(
-                chunk,
-                &ax.pickers,
-                ax.n_modules(),
-                n_t,
-                cfg.modules_per_unit,
-                &mut rng,
-            );
-            let (stats, loss): (StepStats, _) = step_loss(
-                &params,
-                &ax.ctx(units),
-                &plan,
-                offset_l2_step,
-                lora_ridge_step,
-            )?;
-            let grads = loss.backward()?;
+            let loss_of = |slice: &[u32], rng: &mut StdRng| {
+                let plan = draw_plan(
+                    slice,
+                    &ax.pickers,
+                    ax.n_modules(),
+                    n_t,
+                    cfg.modules_per_unit,
+                    rng,
+                );
+                step_loss(
+                    &params,
+                    &ax.ctx(units),
+                    &plan,
+                    offset_l2_step,
+                    lora_ridge_step,
+                )
+            };
+            let (stats, grads) = step_grads(chunk, n_threads, &mut rng, &loss_of)?;
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             acc.loss_module += stats.loss_module;
             acc.loss_gene += stats.loss_gene;
@@ -518,6 +605,7 @@ pub fn train_partitions(
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let mut order: Vec<u32> = (0..n_u as u32).collect();
     let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
+    let n_threads = step_threads();
     let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
 
     let m_list: Vec<String> = axis_states
@@ -531,7 +619,8 @@ pub fn train_partitions(
         .collect();
     info!(
         "Phase 1 (hier) — {n_u} units; partitions M=[{}] F=[{}]; H={h}: {} epochs × \
-         {steps_per_epoch} steps of {} units, K={} modules/unit, lr {}",
+         {steps_per_epoch} steps of {} units, K={} modules/unit, lr {}, {n_threads} thread(s) \
+         per step",
         m_list.join(","),
         f_list.join(","),
         cfg.epochs,
@@ -552,29 +641,35 @@ pub fn train_partitions(
                 info!("Phase 1 (hier) — stop requested at epoch {epoch}");
                 break 'epochs;
             }
-            let mut loss_total = None;
-            for (a, ax) in axis_states.iter().enumerate() {
-                let plan = draw_plan(
-                    chunk,
-                    &ax.pickers,
-                    ax.n_modules(),
-                    ax.um.n_tracks,
-                    cfg.modules_per_unit,
-                    &mut rng,
-                );
-                let ctx = ax.ctx(units);
-                let (stats, loss) = if a == 0 {
-                    step_loss(&params, &ctx, &plan, offset_l2_step, 0.0)?
-                } else {
-                    step_loss_extra(&params, &params.extra[a - 1], &ctx, &plan)?
-                };
-                acc.loss_module += stats.loss_module;
-                acc.loss_gene += stats.loss_gene;
-                acc.loss_ridge += stats.loss_ridge;
-                legume_numeric::candle::convert::add_into(&mut loss_total, loss)?;
-            }
-            let loss = loss_total.expect("at least one partition");
-            let grads = loss.backward()?;
+            let loss_of = |slice: &[u32], rng: &mut StdRng| {
+                let mut stats = StepStats::default();
+                let mut loss_total = None;
+                for (a, ax) in axis_states.iter().enumerate() {
+                    let plan = draw_plan(
+                        slice,
+                        &ax.pickers,
+                        ax.n_modules(),
+                        ax.um.n_tracks,
+                        cfg.modules_per_unit,
+                        rng,
+                    );
+                    let ctx = ax.ctx(units);
+                    let (s, loss) = if a == 0 {
+                        step_loss(&params, &ctx, &plan, offset_l2_step, 0.0)?
+                    } else {
+                        step_loss_extra(&params, &params.extra[a - 1], &ctx, &plan)?
+                    };
+                    stats.loss_module += s.loss_module;
+                    stats.loss_gene += s.loss_gene;
+                    stats.loss_ridge += s.loss_ridge;
+                    legume_numeric::candle::convert::add_into(&mut loss_total, loss)?;
+                }
+                Ok((stats, loss_total.expect("at least one partition")))
+            };
+            let (stats, grads) = step_grads(chunk, n_threads, &mut rng, &loss_of)?;
+            acc.loss_module += stats.loss_module;
+            acc.loss_gene += stats.loss_gene;
+            acc.loss_ridge += stats.loss_ridge;
             apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
             n_units_seen += chunk.len();
         }

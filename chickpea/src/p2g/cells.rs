@@ -5,9 +5,10 @@
 use crate::common::Mat;
 use data_beans::sparse_io_vector::SparseIoVec;
 use graph_embedding_util::fit::projection::{
-    project_cells_axes, stream_cell_groups, AxesProjector, AxisDict, WarmStart,
+    project_cells_axes, read_cell_group, stream_cell_groups, AxesProjector, AxisDict, CellGroup,
+    WarmStart,
 };
-use graph_embedding_util::fit::{majority_batch_per_pb, PROJECTION_RIDGE_SGD};
+use graph_embedding_util::fit::{keep_cells_per_pb, majority_batch_per_pb, PROJECTION_RIDGE_SGD};
 use graph_embedding_util::save_embedding;
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::matrix::traits::ConvertMatOps;
@@ -83,6 +84,40 @@ pub fn embed_cells(
     };
     let out = project_cells_axes(&projector, n_cells, groups, Some(&start))?;
     Ok(Mat::from_row_slice(n_cells, dim, &out.theta))
+}
+
+/// The cells phase 1 trains on next to the pseudobulks, as one group over
+/// the gene and peak axes: at most `k` cells per pseudobulk at every level
+/// (finest membership `cell_to_pb`, coarser ones through `parent`), unioned,
+/// read from `backends` (one per axis in axis order; an ATAC-only run gives
+/// the peak backend alone and every cell's gene row is empty). `k = 0` gives
+/// no cell units.
+pub fn phase1_cell_units(
+    backends: &[&SparseIoVec],
+    cell_to_pb: &[usize],
+    parent: &[Vec<usize>],
+    k: usize,
+    seed: u64,
+) -> anyhow::Result<CellGroup> {
+    anyhow::ensure!(
+        (1..=2).contains(&backends.len()),
+        "{} backends for the gene and peak axes",
+        backends.len()
+    );
+    let mut memberships: Vec<Vec<usize>> = vec![cell_to_pb.to_vec()];
+    for map in parent {
+        let prev = memberships.last().expect("finest membership");
+        memberships.push(prev.iter().map(|&p| map[p]).collect());
+    }
+    let keep = keep_cells_per_pb(&memberships, k, seed);
+    let cells: Vec<usize> = (0..cell_to_pb.len()).filter(|&c| keep[c]).collect();
+    let mut group = read_cell_group(backends, &cells)?;
+    if backends.len() == 1 {
+        group
+            .axes
+            .insert(0, vec![(Vec::new(), Vec::new()); cells.len()]);
+    }
+    Ok(group)
 }
 
 /// `{prefix}.cell_embedding.parquet`: one row per barcode.

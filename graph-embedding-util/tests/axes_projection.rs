@@ -277,3 +277,27 @@ fn backends_with_different_column_counts_are_refused() {
     let b = backend(3, 5, |r, c| (r + c) as f32);
     assert!(stream_cell_groups(&[&a, &b], 2).is_err());
 }
+
+/// A group read for an arbitrary column set carries those ids and their
+/// nonzeros on every backend, in the order asked.
+#[test]
+fn a_cell_group_can_be_read_for_arbitrary_columns() {
+    use graph_embedding_util::fit::projection::read_cell_group;
+    let b0 = backend(5, 6, |r, c| {
+        if (r + c) % 3 == 0 {
+            (r + 1) as f32
+        } else {
+            0.0
+        }
+    });
+    let b1 = backend(4, 6, |r, c| if r == c % 4 { 2.0 } else { 0.0 });
+    let g = read_cell_group(&[&b0, &b1], &[4, 1]).unwrap();
+    assert_eq!(g.cells, vec![4, 1]);
+    assert_eq!(g.axes.len(), 2);
+    // column 4 on backend 0: rows with (r + 4) % 3 == 0 → r = 2, 5(out) → [2]
+    assert_eq!(g.axes[0][0], (vec![2], vec![3.0]));
+    // column 1 on backend 0: r = 2 → [2]; on backend 1: r == 1
+    assert_eq!(g.axes[0][1], (vec![2], vec![3.0]));
+    assert_eq!(g.axes[1][1], (vec![1], vec![2.0]));
+    assert_eq!(g.axes[1][0], (vec![0], vec![2.0]));
+}

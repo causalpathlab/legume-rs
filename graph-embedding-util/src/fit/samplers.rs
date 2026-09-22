@@ -22,15 +22,13 @@ use rand_distr::weighted::WeightedIndex;
 /// breaks strict nesting between adjacent levels. The finest level is batch-
 /// aware, so every non-empty batch keeps ≥1 cell; empty batches are dropped
 /// (the cell axis re-indexes at sample time and ignores the original batch id).
-pub(crate) fn subsample_cell_samplers_multilevel(
-    full: &[PerBatchStratifiedCellSampler],
-    cell_to_pb_per_level: &[Vec<usize>],
-    k: usize,
-    alpha_cell: f32,
-    seed: u64,
-) -> Vec<PerBatchStratifiedCellSampler> {
+/// Which cells phase 1 trains on when at most `k` per pseudobulk are wanted:
+/// at every level (`cell_to_pb_per_level`, each a cell → pb map), `k` cells
+/// of each pseudobulk drawn at random, unioned over the levels. Seeded per
+/// level so the draws differ across levels yet reproduce across runs. `k` at
+/// least a pseudobulk's size keeps that pseudobulk whole.
+pub fn keep_cells_per_pb(cell_to_pb_per_level: &[Vec<usize>], k: usize, seed: u64) -> Vec<bool> {
     let n_cells = cell_to_pb_per_level.first().map_or(0, std::vec::Vec::len);
-    // Global keep bitmap: ≤k cells per pb-sample, per level, unioned.
     let mut keep = vec![false; n_cells];
     for (level, c2pb) in cell_to_pb_per_level.iter().enumerate() {
         let n_pb = c2pb.iter().copied().max().map_or(0, |m| m + 1);
@@ -38,8 +36,6 @@ pub(crate) fn subsample_cell_samplers_multilevel(
         for (cell, &pb) in c2pb.iter().enumerate() {
             buckets[pb].push(cell as u32);
         }
-        // Per-level seed so the K kept cells differ across levels (more union
-        // diversity) yet stay reproducible across runs.
         let mut rng =
             StdRng::seed_from_u64(seed ^ (level as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
         for b in &mut buckets {
@@ -55,6 +51,17 @@ pub(crate) fn subsample_cell_samplers_multilevel(
             }
         }
     }
+    keep
+}
+
+pub(crate) fn subsample_cell_samplers_multilevel(
+    full: &[PerBatchStratifiedCellSampler],
+    cell_to_pb_per_level: &[Vec<usize>],
+    k: usize,
+    alpha_cell: f32,
+    seed: u64,
+) -> Vec<PerBatchStratifiedCellSampler> {
+    let keep = keep_cells_per_pb(cell_to_pb_per_level, k, seed);
 
     // Filter each batch sampler to the kept cells; rebuild `cell_picker`.
     full.iter()

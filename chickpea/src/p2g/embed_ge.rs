@@ -10,6 +10,7 @@ use graph_embedding_util::data::Triplet;
 use graph_embedding_util::fit::hier::{
     train_partitions, HierConfig, HierOutput, Partition, UnitTable,
 };
+use graph_embedding_util::fit::projection::CellGroup;
 use graph_embedding_util::save_embedding;
 use legume_numeric::candle::candle_core::{Device, Tensor};
 use legume_numeric::matrix::dense_mat_io::{axis_id_names, l2_normalize_rows_inplace};
@@ -60,6 +61,9 @@ pub struct HierEmbedConfig {
     pub lr: f32,
     pub merge_every: usize,
     pub merge_cosine: f32,
+    /// Cells trained as units next to the pseudobulks: at most this many per
+    /// pseudobulk at every level, unioned. `0` trains on pseudobulks alone.
+    pub cells_per_pb: usize,
 }
 
 impl Default for HierEmbedConfig {
@@ -76,6 +80,7 @@ impl Default for HierEmbedConfig {
             lr: 0.05,
             merge_every: 0,
             merge_cosine: 0.95,
+            cells_per_pb: 16,
         }
     }
 }
@@ -101,6 +106,7 @@ fn build_units_and_partitions(
     levels: &PbLevels,
     gene_finest: &Mat,
     edges: &[PeakGeneEdge],
+    cells: &CellGroup,
     cfg: &HierEmbedConfig,
 ) -> anyhow::Result<(UnitTable, Vec<Partition>)> {
     let n_pb = levels.n_pb_per_level();
@@ -132,7 +138,7 @@ fn build_units_and_partitions(
     let peak_blob_refs: Vec<&[Triplet]> = peak_blobs.iter().map(Vec::as_slice).collect();
     let axis_blobs = [&gene_blob_refs[..], &peak_blob_refs[..]];
     let n_features = [gene_finest.nrows(), levels.atac[0].nrows()];
-    let units = UnitTable::from_pseudobulk_axes(&axis_blobs, &n_pb, &n_features);
+    let units = UnitTable::from_pseudobulk_axes_and_cells(&axis_blobs, &n_pb, &n_features, cells);
     let (gene_part, peak_part) = init_gene_peak_partitions(
         levels,
         gene_finest,
@@ -174,7 +180,8 @@ fn hier_output_to_embeds(
         pb.push(level);
         off += n;
     }
-    anyhow::ensure!(off == out.e_u.nrows(), "unit row count vs pb levels");
+    // Cell units, when phase 1 had them, follow the pseudobulk levels.
+    anyhow::ensure!(off <= out.e_u.nrows(), "unit row count vs pb levels");
 
     Ok(PeakGeneEmbeds {
         peak,
@@ -196,13 +203,16 @@ pub fn train_peak_gene_embeds(
     peak_names: &[Box<str>],
     gene_names: &[Box<str>],
     gene_finest: &Mat,
+    cells: &CellGroup,
     cfg: &HierEmbedConfig,
 ) -> anyhow::Result<PeakGeneEmbeds> {
     anyhow::ensure!(!edges.is_empty(), "no peak–gene edges to embed");
-    let (units, partitions) = build_units_and_partitions(levels, gene_finest, edges, cfg)?;
+    let (units, partitions) = build_units_and_partitions(levels, gene_finest, edges, cells, cfg)?;
     let n_u = units.n_units();
     info!(
-        "Hier embed: {n_u} frozen pb units, {} genes, {} peaks, M=[{}, {}], H={}",
+        "Hier embed: {n_u} units ({} frozen pb + {} cells), {} genes, {} peaks, M=[{}, {}], H={}",
+        n_u - cells.cells.len(),
+        cells.cells.len(),
         gene_names.len(),
         peak_names.len(),
         partitions[0].n_modules(),

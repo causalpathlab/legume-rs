@@ -1,6 +1,6 @@
 use crate::data::Triplet;
 use crate::fit::config::TrackSpec;
-use crate::fit::projection::CellBatchFold;
+use crate::fit::projection::{CellBatchFold, CellGroup};
 
 /// One sparse feature-count axis (genes, peaks, …).
 ///
@@ -177,6 +177,43 @@ impl UnitTable {
         n_pb_per_level: &[usize],
         n_features: &[usize],
     ) -> Self {
+        Self::from_pseudobulk_axes_and_cells(
+            axis_blobs,
+            n_pb_per_level,
+            n_features,
+            &CellGroup {
+                cells: Vec::new(),
+                axes: vec![Vec::new(); axis_blobs.len()],
+            },
+        )
+    }
+
+    /// [`Self::from_pseudobulk_axes`] followed by `cells` as units of level
+    /// `n_levels`: `cells.axes[a][i]` is cell `cells.cells[i]`'s sparse row on
+    /// axis `a` (features ascending, counts > 0), an empty pair where the
+    /// cell has nothing on that axis. The source index is the cell id.
+    pub fn from_pseudobulk_axes_and_cells(
+        axis_blobs: &[&[&[Triplet]]],
+        n_pb_per_level: &[usize],
+        n_features: &[usize],
+        cells: &CellGroup,
+    ) -> Self {
+        assert_eq!(
+            cells.axes.len(),
+            axis_blobs.len(),
+            "cells carry {} axes, the pseudobulks {}",
+            cells.axes.len(),
+            axis_blobs.len()
+        );
+        for (a, rows) in cells.axes.iter().enumerate() {
+            assert_eq!(
+                rows.len(),
+                cells.cells.len(),
+                "axis {a}: {} cell rows for {} cells",
+                rows.len(),
+                cells.cells.len()
+            );
+        }
         assert!(
             !axis_blobs.is_empty(),
             "at least one feature axis is required"
@@ -227,6 +264,16 @@ impl UnitTable {
                 level.push(l as u8);
                 source_index.push(p as u32);
             }
+        }
+        let cell_level = n_pb_per_level.len() as u8;
+        for (i, &c) in cells.cells.iter().enumerate() {
+            for (a, rows) in cells.axes.iter().enumerate() {
+                let (f, n) = &rows[i];
+                per_axis_feats[a].push(f.clone());
+                per_axis_counts[a].push(n.clone());
+            }
+            level.push(cell_level);
+            source_index.push(c);
         }
 
         let axes: Vec<FeatureAxis> = (0..axis_blobs.len())

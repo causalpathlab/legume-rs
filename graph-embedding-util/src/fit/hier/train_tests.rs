@@ -961,3 +961,65 @@ fn a_module_only_index_past_the_partitions_is_refused() {
         .expect("refused");
     assert!(err.to_string().contains("module-only"), "{err}");
 }
+
+/// The threaded step is the serial step: slice seeds are drawn from the step
+/// rng in slice order, so running the slices one by one with those seeds
+/// gives the same losses and the same summed gradients.
+#[test]
+fn a_threaded_step_sums_the_slices_losses_and_gradients() {
+    use crate::fit::hier::step::{step_loss, StepStats};
+    use rand::Rng;
+    let (units, labels) = planted_units();
+    let part = Partition::from_labels(&labels, 2);
+    let ax = AxisState::new(&units, 0, part);
+    let params = HierParams::new_tracked(units.n_units(), 2, 20, 1, 4, 1, 5, &Device::Cpu).unwrap();
+    let chunk: Vec<u32> = (0..12).collect();
+    let loss_of = |slice: &[u32], rng: &mut StdRng| -> anyhow::Result<(StepStats, Tensor)> {
+        let plan = draw_plan(slice, &ax.pickers, ax.n_modules(), 1, 2, rng);
+        step_loss(&params, &ax.ctx(&units), &plan, 0.0, 0.0)
+    };
+    let mut rng = StdRng::seed_from_u64(11);
+    let (stats, grads) = step_grads(&chunk, 3, &mut rng, &loss_of).unwrap();
+    // Serial replay: the same three slices with the same seeds.
+    let mut rng = StdRng::seed_from_u64(11);
+    let seeds: Vec<u64> = (0..3).map(|_| rng.next_u64()).collect();
+    let mut want_module = 0.0;
+    let mut want_e_u: Option<Vec<f32>> = None;
+    for (slice, &seed) in chunk.chunks(4).zip(&seeds) {
+        let mut r = StdRng::seed_from_u64(seed);
+        let (s, loss) = loss_of(slice, &mut r).unwrap();
+        want_module += s.loss_module;
+        let g = loss.backward().unwrap();
+        let ge = to_host(g.get(&params.e_u).unwrap()).unwrap();
+        want_e_u = Some(match want_e_u {
+            None => ge,
+            Some(acc) => acc.iter().zip(&ge).map(|(a, b)| a + b).collect(),
+        });
+    }
+    assert!(
+        (stats.loss_module - want_module).abs() < 1e-4,
+        "{} vs {want_module}",
+        stats.loss_module
+    );
+    let got = to_host(grads.get(&params.e_u).unwrap()).unwrap();
+    for (a, b) in got.iter().zip(want_e_u.unwrap()) {
+        assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+    }
+}
+
+#[test]
+fn a_step_over_fewer_units_than_threads_runs_on_one_slice() {
+    use crate::fit::hier::step::{step_loss, StepStats};
+    let (units, labels) = planted_units();
+    let part = Partition::from_labels(&labels, 2);
+    let ax = AxisState::new(&units, 0, part);
+    let params = HierParams::new_tracked(units.n_units(), 2, 20, 1, 4, 1, 5, &Device::Cpu).unwrap();
+    let loss_of = |slice: &[u32], rng: &mut StdRng| -> anyhow::Result<(StepStats, Tensor)> {
+        let plan = draw_plan(slice, &ax.pickers, ax.n_modules(), 1, 2, rng);
+        step_loss(&params, &ax.ctx(&units), &plan, 0.0, 0.0)
+    };
+    let mut rng = StdRng::seed_from_u64(3);
+    let (stats, grads) = step_grads(&[0, 1], 8, &mut rng, &loss_of).unwrap();
+    assert!(stats.loss_module.is_finite());
+    assert!(grads.get(&params.e_u).is_some());
+}

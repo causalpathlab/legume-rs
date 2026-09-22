@@ -6,6 +6,7 @@ use chickpea::p2g::embed_ge::*;
 use chickpea::p2g::link_map::PeakGeneEdge;
 use chickpea::p2g::pb_levels::PbLevels;
 use common::mat;
+use graph_embedding_util::fit::projection::CellGroup;
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::matrix::dense_mat_io::axis_id_names as names;
 use legume_numeric::matrix::utils::cosine;
@@ -23,6 +24,7 @@ fn cfg(seed: u64, epochs: usize) -> HierEmbedConfig {
         lr: 0.1,
         merge_every: 0,
         merge_cosine: 0.95,
+        cells_per_pb: 0,
     }
 }
 
@@ -62,6 +64,14 @@ fn two_group_links() -> Vec<PeakGeneEdge> {
         .collect()
 }
 
+/// Phase 1 on the pseudobulks alone.
+fn no_cells() -> CellGroup {
+    CellGroup {
+        cells: Vec::new(),
+        axes: vec![Vec::new(), Vec::new()],
+    }
+}
+
 #[test]
 fn hier_returns_finite_rows_and_unit_scaled_steps() {
     let tree = two_group_tree();
@@ -73,6 +83,7 @@ fn hier_returns_finite_rows_and_unit_scaled_steps() {
         &names("chr1:", 6),
         &names("G", 4),
         &rna,
+        &no_cells(),
         &c,
     )
     .unwrap();
@@ -104,6 +115,7 @@ fn pb_rows_separate_by_program_and_parents_sit_with_their_children() {
         &names("chr1:", 6),
         &names("G", 4),
         &rna,
+        &no_cells(),
         &cfg(11, 30),
     )
     .unwrap();

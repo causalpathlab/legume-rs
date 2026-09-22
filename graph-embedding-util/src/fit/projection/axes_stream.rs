@@ -29,11 +29,18 @@ pub fn stream_cell_groups<'a>(
 
 /// One group's sparse rows on every axis, each cell's features ascending.
 fn read_group(backends: &[&SparseIoVec], start: usize, end: usize) -> anyhow::Result<CellGroup> {
-    let n = end - start;
+    let cells: Vec<usize> = (start..end).collect();
+    read_cell_group(backends, &cells)
+}
+
+/// The sparse rows of the given columns (global ids, any order) on every
+/// backend, as one group in that order.
+pub fn read_cell_group(backends: &[&SparseIoVec], cells: &[usize]) -> anyhow::Result<CellGroup> {
+    let n = cells.len();
     let mut axes: Vec<Vec<(Vec<u32>, Vec<f32>)>> = Vec::with_capacity(backends.len());
     for b in backends {
         let mut pairs: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
-        b.for_each_triplet(start..end, n, |row, local_col, v| {
+        b.for_each_triplet(cells.iter().copied(), n.max(1), |row, local_col, v| {
             if v > 0.0 {
                 pairs[local_col as usize].push((row as u32, v));
             }
@@ -49,7 +56,7 @@ fn read_group(backends: &[&SparseIoVec], start: usize, end: usize) -> anyhow::Re
         );
     }
     Ok(CellGroup {
-        cells: (start as u32..end as u32).collect(),
+        cells: cells.iter().map(|&c| c as u32).collect(),
         axes,
     })
 }

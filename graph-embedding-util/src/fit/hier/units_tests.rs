@@ -207,3 +207,42 @@ fn totals_and_weights_are_per_track() {
         assert!((mean - 1.0).abs() < 1e-6, "track {t} mean {mean}");
     }
 }
+
+/// Cells appended after the pseudobulk levels on every axis: level
+/// `n_levels`, source index the cell id, one sparse row per axis, and a cell
+/// with nothing on an axis is an empty row with zero weight there.
+#[test]
+fn cells_follow_the_pseudobulk_levels_on_every_axis() {
+    use crate::fit::projection::CellGroup;
+    let rna = vec![t(0, 0, 2.0), t(1, 1, 3.0)];
+    let atac = vec![t(0, 1, 5.0), t(1, 0, 1.0)];
+    let cells = CellGroup {
+        cells: vec![7, 9],
+        axes: vec![
+            vec![(vec![1], vec![4.0]), (vec![], vec![])],
+            vec![(vec![0, 1], vec![1.0, 2.0]), (vec![1], vec![6.0])],
+        ],
+    };
+    let u = UnitTable::from_pseudobulk_axes_and_cells(&[&[&rna], &[&atac]], &[2], &[2, 2], &cells);
+    assert_eq!(u.n_units(), 4);
+    assert_eq!(u.level, vec![0, 0, 1, 1]);
+    assert_eq!(u.source_index, vec![0, 1, 7, 9]);
+    assert_eq!(u.axes[0].feats[2], vec![1]);
+    assert!(u.axes[0].feats[3].is_empty());
+    assert_eq!(u.axes[0].weight[3], 0.0);
+    assert_eq!(u.axes[1].feats[2], vec![0, 1]);
+    assert_eq!(u.axes[1].counts[3], vec![6.0]);
+    assert_eq!(u.total, vec![2.0, 3.0, 4.0, 0.0]);
+}
+
+#[test]
+#[should_panic(expected = "cells carry")]
+fn a_cell_group_with_the_wrong_axis_count_is_refused() {
+    use crate::fit::projection::CellGroup;
+    let rna = vec![t(0, 0, 2.0)];
+    let cells = CellGroup {
+        cells: vec![0],
+        axes: vec![vec![(vec![], vec![])], vec![(vec![], vec![])]],
+    };
+    let _ = UnitTable::from_pseudobulk_axes_and_cells(&[&[&rna]], &[1], &[1], &cells);
+}
