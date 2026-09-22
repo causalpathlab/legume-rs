@@ -4,8 +4,9 @@
 
 use super::params::{HierParams, PresetGenes, PresetMode, PresetOffsets};
 use super::partition::{Partition, TrackSupport, UnitModules};
-use super::step::{apply, step_loss, Optimizers, StepCtx, StepPlan, StepStats};
+use super::step::{apply, step_loss, step_loss_extra, Optimizers, StepCtx, StepPlan, StepStats};
 use super::units::UnitTable;
+use crate::fit::config::TrackSpec;
 use crate::progress::new_progress_bar;
 use legume_numeric::candle::candle_core::Device;
 use legume_numeric::candle::convert::to_host;
@@ -44,16 +45,27 @@ pub struct HierConfig {
     pub device: Device,
 }
 
+/// Per feature partition: composed feature rows, biases, and module table.
+pub struct HierAxisOut {
+    pub rho: DMatrix<f32>,
+    pub b_feat: Vec<f32>,
+    pub mu: DMatrix<f32>,
+}
+
 pub struct HierOutput {
     pub e_u: DMatrix<f32>,
-    /// `[n_features × H]`, one row per FEATURE ROW: the composed dictionary of
-    /// that row's `(track, gene)`.
+    /// `[n_features × H]`, one row per FEATURE ROW on axis 0: the composed
+    /// dictionary of that row's `(track, gene)`. Mirrors `axes[0].rho`.
     pub rho: DMatrix<f32>,
-    /// `[n_features]`, likewise per feature row.
+    /// `[n_features]`, likewise per feature row on axis 0. Mirrors `axes[0].b_feat`.
     pub b_feat: Vec<f32>,
+    /// One entry per feature partition (gene-only: length 1).
+    pub axes: Vec<HierAxisOut>,
     /// Mean loss per unit over the last completed epoch; `NaN` when training
     /// stopped before any epoch completed (the tables are still finite).
     pub final_loss_per_unit: f64,
+    /// `⌈n_units / units_per_step⌉` for this fit.
+    pub steps_per_epoch: usize,
 }
 
 /// One module picker per `(unit, TRACK)`, indexed `u * T + t` — the layout
@@ -204,6 +216,7 @@ pub fn train(
         um: &um,
         part: &part,
         sup: &sup,
+        axis: 0,
     };
     let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
     let pickers = module_pickers(&um, n_m);
@@ -270,12 +283,254 @@ pub fn train(
     )?;
     let e_u_host = to_host(params.e_u.as_tensor())?;
     let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
+    let mu = params.mu_host()?;
     Ok(HierOutput {
         e_u,
-        rho,
-        b_feat,
+        rho: rho.clone(),
+        b_feat: b_feat.clone(),
+        axes: vec![HierAxisOut { rho, b_feat, mu }],
         final_loss_per_unit: last_per_unit,
+        steps_per_epoch,
     })
+}
+
+/// Hierarchical train over one or more feature partitions.
+///
+/// Shared unit embedding `e_u`; each partition has its own `μ` / feature `r`.
+/// Gene-only (`partitions.len() == 1`, `units.n_axes() == 1`) matches [`train`].
+/// Multiome loops L₁ + K-sampled L₂ per partition each step.
+pub fn train_partitions(
+    units: &UnitTable,
+    partitions: &[Partition],
+    h: usize,
+    cfg: &HierConfig,
+    preset: Option<&PresetGenes>,
+    preset_offsets: &[PresetOffsets],
+    stop: &AtomicBool,
+) -> anyhow::Result<HierOutput> {
+    anyhow::ensure!(!partitions.is_empty(), "at least one feature partition");
+    anyhow::ensure!(
+        partitions.len() == units.n_axes(),
+        "one partition per feature axis (got {} partitions for {} axes)",
+        partitions.len(),
+        units.n_axes()
+    );
+    anyhow::ensure!(
+        partitions[0].module_of.len() == units.tracks.n_genes(),
+        "axis-0 partition labels must cover every gene"
+    );
+    for (a, part) in partitions.iter().enumerate().skip(1) {
+        anyhow::ensure!(
+            part.module_of.len() == units.axes[a].n_features,
+            "partition {a} labels must cover every feature on that axis"
+        );
+    }
+    if partitions.len() == 1 {
+        return train(
+            units,
+            &partitions[0].module_of,
+            h,
+            &HierConfig {
+                n_modules: partitions[0].n_modules(),
+                ..cfg.clone_with_modules(partitions[0].n_modules())
+            },
+            preset,
+            preset_offsets,
+            stop,
+        );
+    }
+
+    // Multi-partition path: shared e_u, per-axis tables, no gene presets on extras.
+    anyhow::ensure!(
+        preset.is_none() && preset_offsets.is_empty(),
+        "presets / track offsets apply to the gene TrackSpec axis only; \
+         use train() for a single partition with presets"
+    );
+    if units.n_tracks() > 1 {
+        crate::fit::config::validate_offset_rank(cfg.offset_rank, h)?;
+    }
+
+    let n_u = units.n_units();
+    let n_t0 = units.n_tracks();
+    let part0 = &partitions[0];
+    let n_m0 = part0.n_modules();
+    let d0 = units.tracks.n_genes();
+
+    let ums: Vec<UnitModules> = partitions
+        .iter()
+        .enumerate()
+        .map(|(a, p)| UnitModules::from_axis(units, a, p))
+        .collect();
+    let track_specs: Vec<TrackSpec> = partitions
+        .iter()
+        .enumerate()
+        .map(|(a, _)| {
+            if a == 0 {
+                units.tracks.clone()
+            } else {
+                TrackSpec::base(units.axes[a].n_features)
+            }
+        })
+        .collect();
+    let supports: Vec<TrackSupport> = partitions
+        .iter()
+        .zip(&track_specs)
+        .map(|(p, ts)| TrackSupport::new(ts, p))
+        .collect();
+
+    let mut params = HierParams::new_tracked(
+        n_u,
+        n_m0,
+        d0,
+        n_t0,
+        h,
+        cfg.offset_rank,
+        cfg.seed,
+        &cfg.device,
+    )?;
+    for (a, part) in partitions.iter().enumerate().skip(1) {
+        // Distinct init salt per extra axis so peaks ≠ genes.
+        params.push_extra_axis(
+            part.n_modules(),
+            units.axes[a].n_features,
+            0x4158_4953 + a as u64,
+        )?;
+    }
+
+    let mut opt = Optimizers::new(&params, cfg.lr)?;
+    let pickers: Vec<Vec<Option<WeightedIndex<f64>>>> = ums
+        .iter()
+        .map(|um| module_pickers(um, um.n_modules))
+        .collect();
+    let mut rng = StdRng::seed_from_u64(mix_seed(cfg.seed, 0x4849_4552));
+    let mut order: Vec<u32> = (0..n_u as u32).collect();
+    let steps_per_epoch = n_u.div_ceil(cfg.units_per_step.max(1));
+    let offset_l2_step = per_step_offset_l2(cfg.offset_l2, steps_per_epoch);
+
+    let m_list: Vec<String> = partitions
+        .iter()
+        .map(|p| p.n_modules().to_string())
+        .collect();
+    let f_list: Vec<String> = units
+        .axes
+        .iter()
+        .map(|ax| ax.n_features.to_string())
+        .collect();
+    info!(
+        "Phase 1 (hier) — {n_u} units; partitions M=[{}] F=[{}]; H={h}: {} epochs × \
+         {steps_per_epoch} steps of {} units, K={} modules/unit, lr {}",
+        m_list.join(","),
+        f_list.join(","),
+        cfg.epochs,
+        cfg.units_per_step,
+        cfg.modules_per_unit,
+        cfg.lr
+    );
+
+    let bar = new_progress_bar(cfg.epochs as u64);
+    let mut last_per_unit = f64::NAN;
+    let t0 = std::time::Instant::now();
+    'epochs: for epoch in 0..cfg.epochs {
+        order.shuffle(&mut rng);
+        let mut acc = StepStats::default();
+        let mut n_units_seen = 0usize;
+        for chunk in order.chunks(cfg.units_per_step.max(1)) {
+            if stop.load(Ordering::Relaxed) {
+                info!("Phase 1 (hier) — stop requested at epoch {epoch}");
+                break 'epochs;
+            }
+            let mut loss_total = None;
+            for a in 0..partitions.len() {
+                let n_m = partitions[a].n_modules();
+                let n_t = ums[a].n_tracks;
+                let plan = draw_plan(chunk, &pickers[a], n_m, n_t, cfg.modules_per_unit, &mut rng);
+                let ctx = StepCtx {
+                    units,
+                    um: &ums[a],
+                    part: &partitions[a],
+                    sup: &supports[a],
+                    axis: a,
+                };
+                let (stats, loss) = if a == 0 {
+                    step_loss(&params, &ctx, &plan, offset_l2_step, 0.0)?
+                } else {
+                    step_loss_extra(&params, &params.extra[a - 1], &ctx, &plan)?
+                };
+                acc.loss_module += stats.loss_module;
+                acc.loss_gene += stats.loss_gene;
+                acc.loss_ridge += stats.loss_ridge;
+                legume_numeric::candle::convert::add_into(&mut loss_total, loss)?;
+            }
+            let loss = loss_total.expect("at least one partition");
+            let grads = loss.backward()?;
+            apply(&mut params, &mut opt, &grads, cfg.lr, cfg.weight_decay)?;
+            n_units_seen += chunk.len();
+        }
+        let per_unit = 1.0 / n_units_seen.max(1) as f64;
+        last_per_unit = (acc.loss_module + acc.loss_gene + acc.loss_ridge) * per_unit;
+        bar.inc(1);
+        if (epoch + 1).is_multiple_of(REPORT_EVERY) || epoch + 1 == cfg.epochs {
+            let ms = t0.elapsed().as_secs_f64() * 1e3 / ((epoch + 1) * steps_per_epoch) as f64;
+            info!(
+                "Phase 1 (hier) — epoch {}/{}: loss/unit {:.4} (module {:.4}, gene {:.4}, \
+                 ridge {:.4}), {:.1} ms/step",
+                epoch + 1,
+                cfg.epochs,
+                last_per_unit,
+                acc.loss_module * per_unit,
+                acc.loss_gene * per_unit,
+                acc.loss_ridge * per_unit,
+                ms
+            );
+        }
+    }
+    bar.finish_and_clear();
+
+    let (rho0, b0) = params.compose(
+        &units.tracks.track_of_row,
+        &units.tracks.gene_of_row,
+        &partitions[0].module_of,
+    )?;
+    let mut axes = vec![HierAxisOut {
+        rho: rho0.clone(),
+        b_feat: b0.clone(),
+        mu: params.mu_host()?,
+    }];
+    for (i, ax) in params.extra.iter().enumerate() {
+        let (rho, b_feat) = ax.compose(&partitions[i + 1].module_of)?;
+        axes.push(HierAxisOut {
+            rho,
+            b_feat,
+            mu: ax.mu_host()?,
+        });
+    }
+    let e_u_host = to_host(params.e_u.as_tensor())?;
+    let e_u = DMatrix::<f32>::from_row_slice(n_u, h, &e_u_host);
+    Ok(HierOutput {
+        e_u,
+        rho: rho0,
+        b_feat: b0,
+        axes,
+        final_loss_per_unit: last_per_unit,
+        steps_per_epoch,
+    })
+}
+
+impl HierConfig {
+    fn clone_with_modules(&self, n_modules: usize) -> Self {
+        Self {
+            n_modules,
+            epochs: self.epochs,
+            units_per_step: self.units_per_step,
+            modules_per_unit: self.modules_per_unit,
+            lr: self.lr,
+            weight_decay: self.weight_decay,
+            seed: self.seed,
+            offset_l2: self.offset_l2,
+            offset_rank: self.offset_rank,
+            device: self.device.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

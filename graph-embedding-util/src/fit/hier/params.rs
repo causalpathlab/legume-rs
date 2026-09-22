@@ -115,6 +115,9 @@ pub struct HierLora {
 /// Invariants: `e_u` is `[n_units, H]`, `mu` `[M, H]`, `r` `[G, H]`;
 /// `offsets` holds tracks `1..T` in order, so `offsets[t - 1]` is track `t`'s
 /// and the list is empty on a one-track axis.
+///
+/// Multi-partition fits keep one shared `e_u` here (axis 0 / gene tables) and
+/// hold further axes in [`Self::extra`] — never a second unit table.
 pub struct HierParams {
     pub h: usize,
     pub dev: Device,
@@ -145,6 +148,72 @@ pub struct HierParams {
     pub offset_lr_ratio: f32,
     /// The seed the tables were drawn from; the LoRA row factors draw from it too.
     pub seed: u64,
+    /// Extra feature partitions (axes `1..`), each with its own `μ`/`r`. Empty
+    /// on gene-only fits. Share [`Self::e_u`]; never duplicate the unit table.
+    pub extra: Vec<ExtraAxisParams>,
+}
+
+/// One non-gene feature partition's tables (`μ`, residuals, biases). Shares the
+/// fit's unit embedding; no TrackSpec offsets.
+pub struct ExtraAxisParams {
+    pub mu: Var,
+    pub b_m: Var,
+    pub r: Var,
+    pub b_g: Var,
+}
+
+impl ExtraAxisParams {
+    pub fn new(
+        n_modules: usize,
+        n_features: usize,
+        h: usize,
+        seed: u64,
+        dev: &Device,
+    ) -> CResult<Self> {
+        Ok(Self {
+            mu: var2(
+                randn(n_modules * h, INIT_STDEV, mix_seed(seed, 0x4d55)),
+                n_modules,
+                h,
+                dev,
+            )?,
+            b_m: Var::zeros(n_modules, DType::F32, dev)?,
+            r: var2(
+                randn(n_features * h, INIT_STDEV, mix_seed(seed, 0x5253)),
+                n_features,
+                h,
+                dev,
+            )?,
+            b_g: Var::zeros(n_features, DType::F32, dev)?,
+        })
+    }
+
+    /// Composed rows `μ_{m(f)} + r_f` and biases `b_m + b_g` for every feature.
+    pub fn compose(&self, module_of: &[u32]) -> anyhow::Result<(DMatrix<f32>, Vec<f32>)> {
+        let h = self.mu.dims()[1];
+        let n_features = module_of.len();
+        let mu = to_host(self.mu.as_tensor())?;
+        let r = to_host(self.r.as_tensor())?;
+        let b_m = to_host(self.b_m.as_tensor())?;
+        let b_g = to_host(self.b_g.as_tensor())?;
+        let mut rho = DMatrix::<f32>::zeros(n_features, h);
+        let mut b_feat = vec![0f32; n_features];
+        for f in 0..n_features {
+            let m = module_of[f] as usize;
+            for k in 0..h {
+                rho[(f, k)] = mu[m * h + k] + r[f * h + k];
+            }
+            b_feat[f] = b_m[m] + b_g[f];
+        }
+        Ok((rho, b_feat))
+    }
+
+    /// Host copy of `μ`, `[M × H]` row-major into a matrix.
+    pub fn mu_host(&self) -> CResult<DMatrix<f32>> {
+        let (n_m, h) = (self.mu.dims()[0], self.mu.dims()[1]);
+        let data = to_host(self.mu.as_tensor())?;
+        Ok(DMatrix::from_row_slice(n_m, h, &data))
+    }
 }
 
 pub use crate::preset_mode::PresetRows;
@@ -235,7 +304,34 @@ impl HierParams {
             offset_rank,
             offset_lr_ratio: LoraSpec::default().lr_ratio,
             seed,
+            extra: Vec::new(),
         })
+    }
+
+    /// Append one plain feature partition's tables (axes beyond the TrackSpec
+    /// gene axis). Shares [`Self::e_u`].
+    pub fn push_extra_axis(
+        &mut self,
+        n_modules: usize,
+        n_features: usize,
+        axis_salt: u64,
+    ) -> CResult<()> {
+        let ax = ExtraAxisParams::new(
+            n_modules,
+            n_features,
+            self.h,
+            mix_seed(self.seed, axis_salt),
+            &self.dev,
+        )?;
+        self.extra.push(ax);
+        Ok(())
+    }
+
+    /// Host copy of axis-0 `μ`, `[M × H]`.
+    pub fn mu_host(&self) -> CResult<DMatrix<f32>> {
+        let (n_m, h) = (self.mu.dims()[0], self.h);
+        let data = to_host(self.mu.as_tensor())?;
+        Ok(DMatrix::from_row_slice(n_m, h, &data))
     }
 
     /// Set the listed genes' composed rows `μ_{m(g)} + r_g` to `preset.rows`.

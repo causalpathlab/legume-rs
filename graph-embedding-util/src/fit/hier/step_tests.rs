@@ -302,6 +302,7 @@ fn total(
         um,
         part,
         sup,
+        axis: 0,
     };
     let (s, loss) = step_loss(p, &ctx, plan, l2, 0.0).unwrap();
     (s.loss_module + s.loss_gene + s.loss_ridge, loss)
@@ -369,6 +370,7 @@ fn the_step_loss_matches_the_f64_reference_with_tracks_and_ridge() {
             um: &um,
             part: &part,
             sup: &sup,
+            axis: 0,
         },
         &plan,
         OFFSET_L2,
@@ -449,6 +451,7 @@ fn pair_weight_scales_the_gene_level_term() {
             um: &um,
             part: &part,
             sup: &sup,
+            axis: 0,
         },
         &one,
         0.0,
@@ -462,6 +465,7 @@ fn pair_weight_scales_the_gene_level_term() {
             um: &um,
             part: &part,
             sup: &sup,
+            axis: 0,
         },
         &half,
         0.0,

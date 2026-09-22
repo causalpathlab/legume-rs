@@ -55,7 +55,7 @@
 //! passes (`HierConfig::offset_l2 / steps_per_epoch`, see
 //! [`super::train::per_step_offset_l2`]).
 
-use super::params::HierParams;
+use super::params::{ExtraAxisParams, HierParams};
 use super::partition::{Partition, TrackSupport, UnitModules};
 use super::units::UnitTable;
 use legume_numeric::candle::candle_core::backprop::GradStore;
@@ -98,11 +98,28 @@ pub struct StepStats {
 
 /// What every step reads and never writes: the unit table, the partition and
 /// the per-fit views built from them. Built once per fit; the plan is per step.
+///
+/// `axis` selects which [`UnitTable::axes`] entry supplies counts / weights
+/// (0 = TrackSpec gene axis; further axes are plain single-track features).
 pub struct StepCtx<'a> {
     pub units: &'a UnitTable,
     pub um: &'a UnitModules,
     pub part: &'a Partition,
     pub sup: &'a TrackSupport,
+    pub axis: usize,
+}
+
+impl StepCtx<'_> {
+    /// Unit `u`'s loss weight on track `t` for this axis.
+    #[inline]
+    pub fn weight_of(&self, u: usize, t: usize) -> f32 {
+        if self.axis == 0 {
+            self.units.weight_of(u, t)
+        } else {
+            debug_assert_eq!(t, 0, "plain axes are single-track");
+            self.units.axes[self.axis].weight[u]
+        }
+    }
 }
 
 /// `‖t‖²_F / n`: a table's mean row norm² over `n` rows.
@@ -121,7 +138,7 @@ fn module_level(
     mu_lora: Option<&Tensor>,
     t: usize,
 ) -> CResult<Tensor> {
-    let (units, um, sup) = (ctx.units, ctx.um, ctx.sup);
+    let (um, sup) = (ctx.um, ctx.sup);
     let dev = &params.dev;
     let n_m = um.n_modules;
     let all: Vec<u32>;
@@ -135,7 +152,7 @@ fn module_level(
     // w_u · q_um on the scored modules, host-built: [B, |M_t|].
     let mut wq = vec![0f32; b * mods.len()];
     for (i, &u) in plan.units.iter().enumerate() {
-        let w = units.weight_of(u as usize, t);
+        let w = ctx.weight_of(u as usize, t);
         let base = um.idx(u as usize, t, 0);
         for (j, &m) in mods.iter().enumerate() {
             wq[i * mods.len() + j] = w * um.q[base + m as usize];
@@ -227,7 +244,7 @@ fn bucket<'a, 'g>(groups: &'g [Group<'a>]) -> Vec<&'g [Group<'a>]> {
 
 /// One padded batch from a bucket of groups on track `t`.
 fn fill_batch(ctx: &StepCtx<'_>, chunk: &[Group<'_>], t: usize) -> GeneBatch {
-    let (units, um, sup) = (ctx.units, ctx.um, ctx.sup);
+    let (um, sup) = (ctx.um, ctx.sup);
     let d_max = chunk
         .iter()
         .map(|(g, _, _)| g.len())
@@ -259,7 +276,7 @@ fn fill_batch(ctx: &StepCtx<'_>, chunk: &[Group<'_>], t: usize) -> GeneBatch {
         let local = (!sup.is_full(t)).then(|| sup.local_of(t, *m));
         for (i, &(u, wt)) in pairs.iter().enumerate() {
             b.unit_ids[p * n_max + i] = u;
-            let scale = units.weight_of(u as usize, t) * wt;
+            let scale = ctx.weight_of(u as usize, t) * wt;
             let n_um = um.n_um[um.idx(u as usize, t, *m)];
             for &(slot, c) in um.counts_of(u as usize, t, *m) {
                 let col = local.map_or(slot as usize, |l| l[slot as usize] as usize);
@@ -401,6 +418,118 @@ pub fn step_loss(
     Ok((stats, total))
 }
 
+/// L₁ + K-sampled L₂ for one plain (non-TrackSpec) feature partition that
+/// shares `params.e_u`. Softmaxes stay over module members only.
+pub fn step_loss_extra(
+    params: &HierParams,
+    axis: &ExtraAxisParams,
+    ctx: &StepCtx<'_>,
+    plan: &StepPlan,
+) -> anyhow::Result<(StepStats, Tensor)> {
+    anyhow::ensure!(
+        ctx.axis > 0,
+        "extra-axis loss is for axes beyond the gene TrackSpec"
+    );
+    anyhow::ensure!(ctx.um.n_tracks == 1, "plain axes are single-track");
+    let dev = &params.dev;
+    let e_b = gather_rows(params.e_u.as_tensor(), &to_1d(&plan.units, dev)?)?;
+    let loss_module = module_level_plain(axis, ctx, plan, &e_b)?;
+    let batches = build_gene_batches(ctx, plan, 0);
+    let loss_gene = score_gene_batches_plain(params, axis, &batches)?;
+    let zero = || Tensor::zeros((), DType::F32, dev);
+    let parts: Vec<Tensor> = [Some(loss_module), loss_gene, None::<Tensor>]
+        .into_iter()
+        .map(|p| match p {
+            Some(x) => Ok(x),
+            None => zero(),
+        })
+        .collect::<CResult<_>>()?;
+    let vals = Tensor::stack(&parts, 0)?.to_vec1::<f32>()?;
+    let stats = StepStats {
+        loss_module: f64::from(vals[0]),
+        loss_gene: f64::from(vals[1]),
+        loss_ridge: 0.0,
+    };
+    let total = parts
+        .into_iter()
+        .reduce(|a, b| (a + b).expect("same shape"))
+        .expect("three parts");
+    Ok((stats, total))
+}
+
+fn module_level_plain(
+    axis: &ExtraAxisParams,
+    ctx: &StepCtx<'_>,
+    plan: &StepPlan,
+    e_b: &Tensor,
+) -> CResult<Tensor> {
+    let (um, sup) = (ctx.um, ctx.sup);
+    let dev = e_b.device();
+    let n_m = um.n_modules;
+    let all: Vec<u32>;
+    let mods: &[u32] = if sup.is_full(0) {
+        all = (0..n_m as u32).collect();
+        &all
+    } else {
+        sup.modules_of(0)
+    };
+    let b = plan.units.len();
+    let mut wq = vec![0f32; b * mods.len()];
+    for (i, &u) in plan.units.iter().enumerate() {
+        let w = ctx.weight_of(u as usize, 0);
+        let base = um.idx(u as usize, 0, 0);
+        for (j, &m) in mods.iter().enumerate() {
+            wq[i * mods.len() + j] = w * um.q[base + m as usize];
+        }
+    }
+    let wq = Tensor::from_vec(wq, (b, mods.len()), dev)?;
+    let mut mu_eff = axis.mu.as_tensor().clone();
+    let mut b_eff = axis.b_m.as_tensor().clone();
+    if !sup.is_full(0) {
+        let m_ids = to_1d(mods, dev)?;
+        mu_eff = gather_rows(&mu_eff, &m_ids)?;
+        b_eff = gather_rows(&b_eff, &m_ids)?;
+    }
+    let s = e_b
+        .matmul(&mu_eff.t()?)?
+        .broadcast_add(&b_eff.unsqueeze(0)?)?;
+    let logp = log_softmax(&s, D::Minus1)?;
+    (wq * logp)?.sum_all()?.neg()
+}
+
+fn score_gene_batches_plain(
+    params: &HierParams,
+    axis: &ExtraAxisParams,
+    batches: &[GeneBatch],
+) -> CResult<Option<Tensor>> {
+    let dev = &params.dev;
+    let h = params.h;
+    let mut total: Option<Tensor> = None;
+    for b in batches {
+        if b.target_pos.is_empty() {
+            continue;
+        }
+        let p_n = b.unit_ids.len() / b.n_max;
+        let u_ids = to_1d(&b.unit_ids, dev)?;
+        let g_ids = to_1d(&b.gene_ids, dev)?;
+        let e = gather_rows(params.e_u.as_tensor(), &u_ids)?.reshape((p_n, b.n_max, h))?;
+        let r = gather_rows(axis.r.as_tensor(), &g_ids)?.reshape((p_n, b.d_max, h))?;
+        let bias = gather_rows(axis.b_g.as_tensor(), &g_ids)?;
+        let pad = additive_pad_mask(&to_1d(&b.col_valid, dev)?.reshape((p_n, 1, b.d_max))?)?;
+        let s = e
+            .matmul(&r.transpose(1, 2)?)?
+            .broadcast_add(&bias.reshape((p_n, 1, b.d_max))?)?
+            .broadcast_add(&pad)?;
+        let logp = log_softmax(&s, D::Minus1)?.flatten_all()?;
+        let picked = gather_rows(&logp, &to_1d(&b.target_pos, dev)?)?;
+        add_into(
+            &mut total,
+            (picked * to_1d(&b.target_val, dev)?)?.sum_all()?.neg()?,
+        )?;
+    }
+    Ok(total)
+}
+
 pub struct Optimizers {
     pub e_u: RowAdagrad,
     pub mu: RowAdagrad,
@@ -410,6 +539,8 @@ pub struct Optimizers {
     pub offsets: Vec<(RowAdagrad, RowAdagrad, PinnedLoraOpt)>,
     /// Under LoRA: the module residual's pair, then the gene residual's.
     pub lora: Option<[PinnedLoraOpt; 2]>,
+    /// Extra partitions' `(μ, r)` row optimizers, in axis order.
+    pub extra: Vec<(RowAdagrad, RowAdagrad)>,
 }
 
 impl Optimizers {
@@ -443,6 +574,16 @@ impl Optimizers {
                 ]),
                 None => None,
             },
+            extra: params
+                .extra
+                .iter()
+                .map(|ax| {
+                    Ok((
+                        RowAdagrad::new(ax.mu.dims()[0], lr, dev)?,
+                        RowAdagrad::new(ax.r.dims()[0], lr, dev)?,
+                    ))
+                })
+                .collect::<CResult<_>>()?,
         })
     }
 }
@@ -515,6 +656,10 @@ pub fn apply(
     if let (Some(l), Some([opt_m, opt_g])) = (params.lora.as_ref(), opt.lora.as_mut()) {
         l.module.step(opt_m, grads)?;
         l.gene.step(opt_g, grads)?;
+    }
+    for (ax, (opt_mu, opt_r)) in params.extra.iter().zip(&mut opt.extra) {
+        pair(opt_mu, &ax.mu, &ax.b_m, None, decay)?;
+        pair(opt_r, &ax.r, &ax.b_g, None, decay)?;
     }
     Ok(())
 }

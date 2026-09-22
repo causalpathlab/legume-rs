@@ -173,15 +173,15 @@ impl TrackSupport {
 /// pairs in the module on that track.
 pub type UnitBuckets = Vec<((u32, u32), Vec<(u32, f32)>)>;
 
-/// Each unit's view through the gene partition, per TRACK.
+/// Each unit's view through one feature partition, per TRACK on that axis.
 ///
 /// Invariants: `q` and `n_um` are `[n_units × n_tracks × n_modules]`, indexed
 /// by [`UnitModules::idx`]; `q[idx(u, t, ·)]` sums to 1 when unit `u` has any
 /// counts on track `t` and is all-zero otherwise; `by_module[u]` is sorted by
 /// `(track, module)` and holds only the `(t, m)` pairs the unit has counts in.
 ///
-/// Built from `axes[0]` (the gene / TrackSpec axis). Additional feature axes
-/// are not folded here — Task 2 loops L1/L2 per partition.
+/// Axis 0 uses the unit table's [`TrackSpec`](crate::fit::config::TrackSpec).
+/// Further axes are a single unrestricted track over that axis's feature ids.
 pub struct UnitModules {
     pub n_tracks: usize,
     pub n_modules: usize,
@@ -213,43 +213,95 @@ impl UnitModules {
         }
     }
 
+    /// Axis 0 (TrackSpec gene axis). Equivalent to [`Self::from_axis`]`(…, 0, …)`.
     pub fn new(units: &UnitTable, part: &Partition) -> Self {
-        let axis0 = &units.axes[0];
+        Self::from_axis(units, 0, part)
+    }
+
+    /// Unit→module buckets for `units.axes[axis]` under `part`.
+    ///
+    /// Sparse `(slot, count)` buckets only — never a dense `[U × M × F]` table.
+    pub fn from_axis(units: &UnitTable, axis: usize, part: &Partition) -> Self {
+        assert!(
+            axis < units.n_axes(),
+            "axis {axis} out of range for {} axes",
+            units.n_axes()
+        );
+        let feat_axis = &units.axes[axis];
         let (n_u, m) = (units.n_units(), part.n_modules());
-        let n_t = units.n_tracks();
         let slot = part.slot_of();
+        if axis == 0 {
+            let n_t = units.n_tracks();
+            let mut n_um = vec![0f32; n_u * n_t * m];
+            let mut by_module: Vec<UnitBuckets> = Vec::with_capacity(n_u);
+            // One bucket per (track, module), indexed directly as `t*M + m`, so the
+            // kept entries come out sorted by `(track, module)`. Within a bucket,
+            // `feats` is ascending and a track's rows follow its genes' order, so
+            // the slots come out ascending too.
+            let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_t * m];
+            for u in 0..n_u {
+                for (&row, &c) in feat_axis.feats[u].iter().zip(&feat_axis.counts[u]) {
+                    let t = units.tracks.track_of_row[row as usize] as usize;
+                    let g = units.tracks.gene_of_row[row as usize] as usize;
+                    let mm = part.module_of[g] as usize;
+                    n_um[(u * n_t + t) * m + mm] += c;
+                    buckets[t * m + mm].push((slot[g], c));
+                }
+                by_module.push(
+                    buckets
+                        .iter_mut()
+                        .enumerate()
+                        .filter(|(_, v)| !v.is_empty())
+                        .map(|(k, v)| (((k / m) as u32, (k % m) as u32), std::mem::take(v)))
+                        .collect(),
+                );
+            }
+            let mut q = vec![0f32; n_u * n_t * m];
+            for u in 0..n_u {
+                for t in 0..n_t {
+                    let tot = units.total_of(u, t);
+                    for k in 0..m {
+                        let i = (u * n_t + t) * m + k;
+                        q[i] = if tot > 0.0 { n_um[i] / tot } else { 0.0 };
+                    }
+                }
+            }
+            return Self {
+                n_tracks: n_t,
+                n_modules: m,
+                q,
+                n_um,
+                by_module,
+            };
+        }
+        // Plain feature axis: one unrestricted track; feature id indexes the
+        // partition directly (no TrackSpec remapping).
+        let n_t = 1;
         let mut n_um = vec![0f32; n_u * n_t * m];
         let mut by_module: Vec<UnitBuckets> = Vec::with_capacity(n_u);
-        // One bucket per (track, module), indexed directly as `t*M + m`, so the
-        // kept entries come out sorted by `(track, module)`. Within a bucket,
-        // `feats` is ascending and a track's rows follow its genes' order, so
-        // the slots come out ascending too.
-        let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_t * m];
+        let mut buckets: Vec<Vec<(u32, f32)>> = vec![Vec::new(); m];
         for u in 0..n_u {
-            for (&row, &c) in axis0.feats[u].iter().zip(&axis0.counts[u]) {
-                let t = units.tracks.track_of_row[row as usize] as usize;
-                let g = units.tracks.gene_of_row[row as usize] as usize;
+            for (&f, &c) in feat_axis.feats[u].iter().zip(&feat_axis.counts[u]) {
+                let g = f as usize;
                 let mm = part.module_of[g] as usize;
-                n_um[(u * n_t + t) * m + mm] += c;
-                buckets[t * m + mm].push((slot[g], c));
+                n_um[u * m + mm] += c;
+                buckets[mm].push((slot[g], c));
             }
             by_module.push(
                 buckets
                     .iter_mut()
                     .enumerate()
                     .filter(|(_, v)| !v.is_empty())
-                    .map(|(k, v)| (((k / m) as u32, (k % m) as u32), std::mem::take(v)))
+                    .map(|(mm, v)| ((0u32, mm as u32), std::mem::take(v)))
                     .collect(),
             );
         }
-        let mut q = vec![0f32; n_u * n_t * m];
+        let mut q = vec![0f32; n_u * m];
         for u in 0..n_u {
-            for t in 0..n_t {
-                let tot = units.total_of(u, t);
-                for k in 0..m {
-                    let i = (u * n_t + t) * m + k;
-                    q[i] = if tot > 0.0 { n_um[i] / tot } else { 0.0 };
-                }
+            let tot = feat_axis.total[u];
+            for k in 0..m {
+                let i = u * m + k;
+                q[i] = if tot > 0.0 { n_um[i] / tot } else { 0.0 };
             }
         }
         Self {

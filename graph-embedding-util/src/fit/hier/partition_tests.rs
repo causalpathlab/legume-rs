@@ -136,3 +136,23 @@ fn a_track_a_unit_has_no_counts_on_gets_no_bucket_and_a_zero_composition() {
     assert!(um.by_module[1].iter().all(|&((t, _), _)| t == 1));
     assert_eq!(um.q[um.idx(1, 0, 0)], 0.0);
 }
+
+#[test]
+fn from_axis_builds_plain_peak_buckets_without_track_remap() {
+    let rna = vec![t(0, 0, 2.0), t(0, 1, 3.0)];
+    let atac = vec![t(0, 0, 5.0), t(0, 1, 1.0)];
+    let u = UnitTable::from_pseudobulk_axes(&[&[&rna], &[&atac]], &[1], &[2, 2]);
+    let peaks = Partition::from_labels(&[1, 0], 2);
+    let um = UnitModules::from_axis(&u, 1, &peaks);
+    assert_eq!(um.n_tracks, 1);
+    assert_eq!(um.n_modules, 2);
+    // peak 0 → module 1 (count 5); peak 1 → module 0 (count 1)
+    assert_eq!(um.n_um[um.idx(0, 0, 0)], 1.0);
+    assert_eq!(um.n_um[um.idx(0, 0, 1)], 5.0);
+    assert!((um.q[um.idx(0, 0, 0)] - 1.0 / 6.0).abs() < 1e-6);
+    assert!((um.q[um.idx(0, 0, 1)] - 5.0 / 6.0).abs() < 1e-6);
+    assert_eq!(um.by_module[0][0].0, (0, 0));
+    assert_eq!(um.by_module[0][0].1, vec![(0, 1.0)]); // peak 1 at slot 0 of module 0
+    assert_eq!(um.by_module[0][1].0, (0, 1));
+    assert_eq!(um.by_module[0][1].1, vec![(0, 5.0)]); // peak 0 at slot 0 of module 1
+}

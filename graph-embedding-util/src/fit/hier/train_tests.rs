@@ -1,6 +1,7 @@
 use super::*;
 use crate::data::Triplet;
 use crate::fit::config::{TrackInfo, TrackSpec};
+use crate::fit::hier::partition::Partition;
 use crate::fit::hier::units::UnitTable;
 use crate::{LoraSpec, PresetMode, PresetOffsets};
 use std::sync::atomic::AtomicBool;
@@ -11,6 +12,68 @@ fn t(cell: u32, feature: u32, count: f32) -> Triplet {
         feature,
         count,
     }
+}
+
+/// One epoch over two feature partitions: finite composed rows on both axes,
+/// and `steps_per_epoch = ⌈n_u / units_per_step⌉`.
+#[test]
+fn one_epoch_two_partitions_finite_rows_and_steps_per_epoch() {
+    // 4 units; axis 0: 3 genes; axis 1: 2 peaks. Sparse counts only.
+    let rna = vec![
+        t(0, 0, 2.0),
+        t(0, 1, 1.0),
+        t(1, 1, 3.0),
+        t(1, 2, 1.0),
+        t(2, 0, 1.0),
+        t(2, 2, 4.0),
+        t(3, 1, 2.0),
+        t(3, 2, 2.0),
+    ];
+    let atac = vec![
+        t(0, 0, 5.0),
+        t(1, 1, 3.0),
+        t(2, 0, 1.0),
+        t(2, 1, 2.0),
+        t(3, 1, 4.0),
+    ];
+    let units = UnitTable::from_pseudobulk_axes(&[&[&rna], &[&atac]], &[4], &[3, 2]);
+    let partitions = vec![
+        Partition::from_labels(&[0, 0, 1], 2),
+        Partition::from_labels(&[1, 0], 2),
+    ];
+    let units_per_step = 2;
+    let cfg = HierConfig {
+        n_modules: 2, // unused when partitions are given; kept for struct fill
+        epochs: 1,
+        units_per_step,
+        modules_per_unit: 2,
+        lr: 0.1,
+        weight_decay: 0.0,
+        seed: 7,
+        offset_l2: 0.0,
+        offset_rank: 1,
+        device: Device::Cpu,
+    };
+    let stop = AtomicBool::new(false);
+    let out = train_partitions(&units, &partitions, 4, &cfg, None, &[], &stop).unwrap();
+    let want_steps = units.n_units().div_ceil(units_per_step);
+    assert_eq!(want_steps, 2);
+    assert_eq!(out.steps_per_epoch, want_steps);
+    assert_eq!(out.e_u.nrows(), 4);
+    assert_eq!(out.axes.len(), 2);
+    assert_eq!(out.axes[0].rho.nrows(), 3);
+    assert_eq!(out.axes[1].rho.nrows(), 2);
+    assert_eq!(out.axes[0].mu.nrows(), 2);
+    assert_eq!(out.axes[1].mu.nrows(), 2);
+    assert!(out.e_u.iter().all(|v| v.is_finite()));
+    assert!(out.axes[0].rho.iter().all(|v| v.is_finite()));
+    assert!(out.axes[1].rho.iter().all(|v| v.is_finite()));
+    assert!(out.axes[0].b_feat.iter().all(|v| v.is_finite()));
+    assert!(out.axes[1].b_feat.iter().all(|v| v.is_finite()));
+    assert!(out.final_loss_per_unit.is_finite());
+    // Gene-only mirror fields still describe axis 0.
+    assert_eq!(out.rho.nrows(), 3);
+    assert_eq!(out.b_feat.len(), 3);
 }
 
 /// Two planted programs: units 0..10 count genes 0..10, units 10..20 count
